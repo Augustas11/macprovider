@@ -49,7 +49,7 @@ func TestProvisionalLoopbackHTTPEndpointRejectsUserinfoSSRF(t *testing.T) {
 	}
 }
 
-func TestWSIngressDelayedBusyAfterRestoreDoesNotZeroSeats(t *testing.T) {
+func TestWSIngressDelayedBusyHeldUntilReadyAndThermalBlocksRestore(t *testing.T) {
 	t.Parallel()
 	registry := pool.NewRegistry(nil)
 	var nowMu sync.Mutex
@@ -103,19 +103,32 @@ func TestWSIngressDelayedBusyAfterRestoreDoesNotZeroSeats(t *testing.T) {
 	}
 
 	nowMu.Lock()
-	now = now.Add(pool.OccupancySettleWindow + time.Second)
+	now = now.Add(10 * time.Second)
 	nowMu.Unlock()
 	server.handleHeartbeat(nil, "provider-a", "assigned-a", busy)
 	got, ok = registry.Resolve("provider-a", "assigned-a")
 	if !ok {
-		t.Fatal("provider missing after thermal heartbeat")
+		t.Fatal("provider missing after late busy heartbeat")
 	}
-	if got.SlotsFree != 0 || got.State != pool.StateBusy {
-		t.Fatalf("after thermal WS busy heartbeat = state %q slots_free %d, want busy/0", got.State, got.SlotsFree)
+	if got.SlotsFree != 4 || got.State != pool.StateReady {
+		t.Fatalf("after late WS busy heartbeat = state %q slots_free %d, want ready/4", got.State, got.SlotsFree)
+	}
+	thermal := []byte(`{"type":"state_update","state":"busy","reason":"thermal_throttled","metrics_snapshot":{"slots_free":0,"slots_total":4}}`)
+	server.handleStateUpdate("provider-a", "assigned-a", thermal)
+	registry.RestoreForwardedSlot("provider-a", "assigned-a")
+	got, _ = registry.Resolve("provider-a", "assigned-a")
+	if got.SlotsFree != 0 || got.RoutingEligible() {
+		t.Fatalf("thermal WS state_update reopened capacity: state %q slots_free %d", got.State, got.SlotsFree)
+	}
+	ready := []byte(`{"type":"state_update","state":"ready","reason":"request_capacity_available","metrics_snapshot":{"slots_free":4,"slots_total":4}}`)
+	server.handleStateUpdate("provider-a", "assigned-a", ready)
+	got, _ = registry.Resolve("provider-a", "assigned-a")
+	if got.SlotsFree != 4 || !got.RoutingEligible() {
+		t.Fatalf("ready WS state_update failed to reopen capacity: state %q slots_free %d", got.State, got.SlotsFree)
 	}
 }
 
-func TestWSIngressInFlightBusyAfterSettleWindowDoesNotZeroRestoredSeat(t *testing.T) {
+func TestWSIngressInFlightBusyDoesNotZeroRestoredSeat(t *testing.T) {
 	t.Parallel()
 	registry := pool.NewRegistry(nil)
 	var nowMu sync.Mutex
@@ -145,7 +158,7 @@ func TestWSIngressInFlightBusyAfterSettleWindowDoesNotZeroRestoredSeat(t *testin
 	}
 
 	nowMu.Lock()
-	now = now.Add(pool.OccupancySettleWindow + time.Second)
+	now = now.Add(10 * time.Second)
 	nowMu.Unlock()
 	busy := []byte(`{"type":"heartbeat","status":"busy","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":32768,"max_concurrency":8,"slots_free":0,"slots_total":8,"throughput_tps_estimate":19.8,"requests_served_since_last":0,"avg_latency_ms_since_last":0.0,"throughput_tps_since_last":0.0}`)
 	server.handleHeartbeat(nil, "provider-a", "assigned-a", busy)

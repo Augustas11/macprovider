@@ -148,13 +148,11 @@ type Provider struct {
 	// long generation is not closed for "missing" heartbeats it cannot send
 	// while its single inference slot is busy.
 	LastActivityAt time.Time `json:"last_activity_at"`
-	// lastCoordinatorSlotRestoreAt is when RestoreForwardedSlot last wrote
-	// occupancy. Provider occupancy frames received at or before that time,
-	// or within OccupancySettleWindow after it, are the previous wave's
-	// in-flight snapshot and must not zero restored seats. Production WS
-	// stamps At at receive time, so a delayed slots_free=0 handled after
-	// restore looks newer than the restore itself.
-	lastCoordinatorSlotRestoreAt time.Time
+	// WS frames are stamped at receipt, so a restored seat remains
+	// coordinator-owned until the Mac confirms ready with free seats.
+	awaitingReadyOccupancy bool
+	// Explicit thermal and queue-full signals block routing through restores.
+	capacitySafetyHold bool
 	// forwardedInFlight is ConsumeForwardedSlot minus RestoreForwardedSlot.
 	// While it is >0 the coordinator owns occupancy; a Mac slots_free=0 from
 	// the still-running wave must not wipe a seat that just opened.
@@ -575,7 +573,7 @@ func (p Provider) RoutingEligible() bool {
 	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale || p.AdmissionSandboxed {
 		return false
 	}
-	return p.State == StateReady && p.SlotsFree > 0
+	return (p.State == StateReady || p.State == StateBusy) && p.SlotsFree > 0 && !p.capacitySafetyHold
 }
 
 // ServingCapable reports whether an admitted provider is still part of the
@@ -608,6 +606,12 @@ func (p Provider) ServingCapable() bool {
 // that a currently busy provider is immediately RoutingEligible.
 func (p Provider) CapacityEligible() bool {
 	return p.ServingCapable()
+}
+
+// SlotQueueEligible reports a serving provider that may regain a seat while
+// buyers wait. A safety hold prevents routing, not waiting for recovery.
+func (p Provider) SlotQueueEligible() bool {
+	return p.ServingCapable() && p.SlotsTotal > 0 && (p.SlotsFree == 0 || p.capacitySafetyHold)
 }
 
 func (p Provider) IsWSTunneled() bool {
@@ -759,14 +763,6 @@ const maxLifetimeContribPerProvider = 128
 // ReceiptRotationGrace is the SPEC-015 overlap window during which buyers may
 // validate receipts signed by the previous provider receipt key.
 const ReceiptRotationGrace = 7 * 24 * time.Hour
-
-// OccupancySettleWindow is how long after RestoreForwardedSlot provider
-// occupancy frames are ignored once no forwarded chats remain. Production WS
-// stamps heartbeat/state_update At with coordinator receive time, so a
-// delayed slots_free=0 handled after restore would otherwise look newer
-// than the restore and zero the next wave. While forwardedInFlight > 0,
-// occupancy is ignored regardless of this window.
-const OccupancySettleWindow = 2 * time.Second
 
 type recoveryHold struct {
 	assignedID string
@@ -1576,7 +1572,7 @@ func (r *Registry) ConsumeForwardedSlot(providerID, assignedID string) bool {
 // and never republishes a route-time slots_free snapshot. If a later
 // heartbeat already raised occupancy to SlotsTotal, this is a no-op on
 // the count. Provider occupancy is ignored while forwarded chats are still
-// in flight, and for OccupancySettleWindow after the last restore.
+// in flight, and after the last restore until a ready/free Mac report.
 func (r *Registry) RestoreForwardedSlot(providerID, assignedID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1587,11 +1583,11 @@ func (r *Registry) RestoreForwardedSlot(providerID, assignedID string) bool {
 	if p.forwardedInFlight > 0 {
 		p.forwardedInFlight--
 	}
-	if p.SlotsFree < p.SlotsTotal {
+	if !p.capacitySafetyHold && p.SlotsFree < p.SlotsTotal {
 		p.SlotsFree++
 	}
-	p.lastCoordinatorSlotRestoreAt = time.Now().UTC()
-	if p.SlotsFree > 0 && p.ServingCapable() {
+	p.awaitingReadyOccupancy = true
+	if !p.capacitySafetyHold && p.SlotsFree > 0 && p.ServingCapable() {
 		r.setStateLocked(p, StateReady)
 	}
 	return true
@@ -1614,6 +1610,22 @@ func (r *Registry) DropForwardedInFlight(providerID, assignedID string) bool {
 	return true
 }
 
+// MarkForwardedSlotFull records a WS queue-full rejection atomically.
+func (r *Registry) MarkForwardedSlotFull(providerID, assignedID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	p.capacitySafetyHold = true
+	p.SlotsFree = 0
+	if p.State == StateReady || p.State == StateBusy {
+		r.setStateLocked(p, StateBusy)
+	}
+	return true
+}
+
 func (r *Registry) MarkForwardedSlotAvailable(providerID, assignedID string, slotsFreeHint int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1624,7 +1636,7 @@ func (r *Registry) MarkForwardedSlotAvailable(providerID, assignedID string, slo
 	// This is a coordinator-local compatibility hint after a completed
 	// reserved route, not a provider-origin state_update. Keep all serving
 	// trust gates intact and avoid receipt-publication side effects.
-	if !p.ServingCapable() || p.SlotsTotal <= 0 {
+	if !p.ServingCapable() || p.SlotsTotal <= 0 || p.capacitySafetyHold {
 		return false
 	}
 	slotsFree := p.SlotsFree
@@ -2612,24 +2624,18 @@ type HeartbeatResult struct {
 	PriorModelID   string
 }
 
-func (p *Provider) staleProviderCapacityAt(at time.Time) bool {
-	if p == nil || p.lastCoordinatorSlotRestoreAt.IsZero() {
-		return false
-	}
-	if at.IsZero() {
-		at = time.Now().UTC()
-	}
-	return !at.After(p.lastCoordinatorSlotRestoreAt.Add(OccupancySettleWindow))
-}
-
-func (p *Provider) ignoreProviderOccupancyAt(at time.Time) bool {
-	if p == nil {
-		return false
-	}
-	if p.forwardedInFlight > 0 {
+func (p *Provider) ignoreProviderOccupancy(state State, slotsFree int, thermal bool) bool {
+	if thermal {
+		p.capacitySafetyHold = true
+		p.SlotsFree = 0
 		return true
 	}
-	return p.staleProviderCapacityAt(at)
+	if p.forwardedInFlight == 0 && state == StateReady && slotsFree > 0 {
+		p.awaitingReadyOccupancy = false
+		p.capacitySafetyHold = false
+		return false
+	}
+	return p.forwardedInFlight > 0 || p.awaitingReadyOccupancy || p.capacitySafetyHold
 }
 
 func (r *Registry) ApplyHeartbeatDetailed(providerID, assignedID string, hb HeartbeatUpdate) HeartbeatResult {
@@ -2725,7 +2731,9 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.RAMGB = hb.RAMGB
 	p.MaxContextTokens = hb.MaxContextTokens
 	p.MaxConcurrency = hb.MaxConcurrency
-	if !p.ignoreProviderOccupancyAt(hb.At) {
+	thermal := hb.SafetyTelemetry != nil && hb.SafetyTelemetry.ThermallyThrottled
+	ignoreOccupancy := p.ignoreProviderOccupancy(hb.Status, hb.SlotsFree, thermal)
+	if !ignoreOccupancy {
 		p.SlotsFree = hb.SlotsFree
 	}
 	p.SlotsTotal = hb.SlotsTotal
@@ -2752,8 +2760,10 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	// carry supported_models, so p.SupportedModels (populated at
 	// registration) is the authoritative declared set.
 	r.recordSeenModelsUnionLocked(p.ProviderID, hb.ModelID, p.SupportedModels)
-	if hb.Status != "" && hb.Status != p.State {
-		staleBusy := p.ignoreProviderOccupancyAt(hb.At) && (hb.Status == StateReady || hb.Status == StateBusy)
+	if thermal && (p.State == StateReady || p.State == StateBusy) && r.canApplyProviderStateLocked(p, StateBusy) {
+		r.setStateLocked(p, StateBusy)
+	} else if hb.Status != "" && hb.Status != p.State {
+		staleBusy := ignoreOccupancy && (hb.Status == StateReady || hb.Status == StateBusy)
 		if !staleBusy && r.canApplyProviderStateLocked(p, hb.Status) {
 			r.setStateLocked(p, hb.Status)
 		}
@@ -2926,6 +2936,7 @@ func modelKnownMatch(stored, modelID, normalizedQuery string) bool {
 
 type StateUpdate struct {
 	State               State
+	Reason              string
 	SlotsFree           *int
 	SlotsTotal          *int
 	LastAutoupdateEvent json.RawMessage
@@ -2939,9 +2950,16 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 		r.mu.Unlock()
 		return nil, false
 	}
-	staleCapacity := p.ignoreProviderOccupancyAt(update.At)
+	slotsFree := 0
+	if update.SlotsFree != nil {
+		slotsFree = *update.SlotsFree
+	}
+	thermal := update.Reason == "thermal_throttled"
+	staleCapacity := p.ignoreProviderOccupancy(update.State, slotsFree, thermal)
 	if r.canApplyProviderStateLocked(p, update.State) {
-		if !(staleCapacity && (update.State == StateReady || update.State == StateBusy)) {
+		if thermal && (p.State == StateReady || p.State == StateBusy) {
+			r.setStateLocked(p, StateBusy)
+		} else if !(staleCapacity && (update.State == StateReady || update.State == StateBusy)) {
 			r.setStateLocked(p, update.State)
 		}
 	}

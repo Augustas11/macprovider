@@ -1018,10 +1018,10 @@ func TestM2_1D_RowSequence_WSNonStreamingQueueFullThroughAdvance(t *testing.T) {
 	if rr.Header().Get("X-MacProvider-Provider") != "p2" {
 		t.Fatalf("provider = %q, want p2 (after queue-full advance)", rr.Header().Get("X-MacProvider-Provider"))
 	}
-	// p1 must have been MarkState(Busy) before the advance — markBusy=true
-	// classifier flag drives pool.MarkState in the queue-full helper branch.
-	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateBusy {
-		t.Fatalf("p1 state = %v ok=%v, want StateBusy after queue-full", p1.State, ok)
+	// Queue-full closes capacity before failover, even when the rejected
+	// provider advertised free seats before this attempt.
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateBusy || p1.SlotsFree != 0 || p1.RoutingEligible() {
+		t.Fatalf("p1 after queue-full = %+v ok=%v, want busy/0 and not routable", p1, ok)
 	}
 	rows := queryAllRequestLogRows(t, dbPath)
 	if len(rows) != 2 {

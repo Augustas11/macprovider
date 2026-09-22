@@ -471,6 +471,39 @@ func TestSlotQueueWaitsForBusyProviderCapacity(t *testing.T) {
 	}
 }
 
+func TestSlotQueueWaitsThroughQueueFullSafetyHold(t *testing.T) {
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-queue-full")
+	provider.State = pool.StateBusy
+	provider.SlotsFree = 0
+	registry.Register(&provider, nil)
+	if !registry.MarkForwardedSlotFull(provider.ProviderID, provider.AssignedID) {
+		t.Fatal("failed to apply queue-full safety hold")
+	}
+	s.slotQueueDeadline = 100 * time.Millisecond
+	s.slotQueuePollInterval = time.Millisecond
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		one := 1
+		registry.ApplyStateUpdate(provider.ProviderID, provider.AssignedID, pool.StateUpdate{
+			State:     pool.StateReady,
+			Reason:    "request_capacity_available",
+			SlotsFree: &one,
+			At:        time.Now().UTC(),
+		})
+	}()
+
+	state := &forwardState{slotReservationsEnabled: true}
+	got, routeErr := s.selectProviderExcluding(context.Background(), "rid-queue-full", poolChatReq(""), http.Header{}, nil, "2026-09-15", state)
+	if routeErr != nil {
+		t.Fatalf("held queued selection rejected: %+v", routeErr)
+	}
+	if got.ProviderID != provider.ProviderID || state.queueWait <= 0 {
+		t.Fatalf("held provider did not wait and recover: provider=%q wait=%s", got.ProviderID, state.queueWait)
+	}
+}
+
 func TestReconcileForwardedSlotAvailablePublishesReadySlot(t *testing.T) {
 	s, registry, _ := poolIsolationServer(t)
 	provider := poolProvider("p-recovered")
@@ -684,7 +717,7 @@ func TestFourWideStaleBusyHeartbeatMustNotBlockNextWave(t *testing.T) {
 	}
 }
 
-func TestFourWideThermalBusyAfterSettleWindowBlocksNextWave(t *testing.T) {
+func TestFourWideThermalBusyBlocksNextWave(t *testing.T) {
 	s, registry, provider := fourSlotStudio(t)
 	states := make([]*forwardState, 4)
 	for i := 0; i < 4; i++ {
@@ -699,7 +732,15 @@ func TestFourWideThermalBusyAfterSettleWindowBlocksNextWave(t *testing.T) {
 	}
 	s.slotQueueDeadline = time.Millisecond
 	s.slotQueuePollInterval = time.Millisecond
-	macReportsSlotsAt(t, registry, provider, 0, time.Now().UTC().Add(pool.OccupancySettleWindow+time.Second))
+	zero := 0
+	if _, ok := registry.ApplyStateUpdate(provider.ProviderID, provider.AssignedID, pool.StateUpdate{
+		State:     pool.StateBusy,
+		Reason:    "thermal_throttled",
+		SlotsFree: &zero,
+		At:        time.Now().UTC(),
+	}); !ok {
+		t.Fatal("thermal state_update: provider missing")
+	}
 	admitted := 0
 	for i := 0; i < 4; i++ {
 		state := &forwardState{slotReservationsEnabled: true}
@@ -728,7 +769,7 @@ func eightSlotStudio(t *testing.T) (*Server, *pool.Registry, pool.Provider) {
 	return s, registry, provider
 }
 
-func TestEightWideInFlightBusyAfterSettleWindowKeepsRestoredSeat(t *testing.T) {
+func TestEightWideInFlightBusyKeepsRestoredSeat(t *testing.T) {
 	s, registry, provider := eightSlotStudio(t)
 	states := make([]*forwardState, 8)
 	for i := 0; i < 8; i++ {
@@ -741,7 +782,7 @@ func TestEightWideInFlightBusyAfterSettleWindowKeepsRestoredSeat(t *testing.T) {
 	s.reconcileForwardedSlotAvailable(states[0])
 	s.slotQueueDeadline = time.Millisecond
 	s.slotQueuePollInterval = time.Millisecond
-	macReportsSlotsAt(t, registry, provider, 0, time.Now().UTC().Add(pool.OccupancySettleWindow+time.Second))
+	macReportsSlots(t, registry, provider, 0)
 	state := &forwardState{slotReservationsEnabled: true}
 	if _, routeErr := s.selectProviderExcluding(context.Background(), "rid-8wide-next", poolChatReq(""), http.Header{}, nil, "2026-09-22", state); routeErr != nil {
 		t.Fatalf("restored seat rejected after in-flight busy snapshot: %+v", routeErr)

@@ -6403,6 +6403,7 @@ func (s *Server) handleStateUpdate(providerID, assignedID string, payload []byte
 	slotsTotal, slotsFree := s.clampStateUpdateSlots(providerID, update.MetricsSnapshot.SlotsTotal, update.MetricsSnapshot.SlotsFree)
 	entry, ok := s.pool.ApplyStateUpdate(providerID, assignedID, pool.StateUpdate{
 		State:               state,
+		Reason:              update.Reason,
 		SlotsFree:           slotsFree,
 		SlotsTotal:          slotsTotal,
 		LastAutoupdateEvent: update.LastAutoupdateEvent,
