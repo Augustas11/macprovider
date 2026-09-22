@@ -1162,6 +1162,8 @@ actor ModelRuntime: ModelRuntimeServing {
     private var maxBatch: Int
     private let continuousBatchingMode: ContinuousBatchingMode
     private let continuousBatchQueueLimit: Int?
+    /// SPEC-038 FR-CB10 operator-declared per-tuple acceptance coverage.
+    private let continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
     private var providerStatus: ProviderStatus?
@@ -1827,6 +1829,7 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch: Int = 1,
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
+        continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage = .empty,
         continuousBatchingDurableReplayAuthorityAvailable: Bool = false,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30,
@@ -1878,6 +1881,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
+        self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingDurableReplayAuthorityAvailable = false
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
@@ -2067,6 +2071,10 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch: Int = 1,
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
+        // Test-only init: mirrors `ContinuousBatchRuntimeReplayAuthority
+        // .inMemoryForTests` — coverage is unrestricted unless a test asserts
+        // on the FR-CB10 gate itself.
+        continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage = .unrestrictedForTests,
         continuousBatchingDurableReplayAuthorityAvailable: Bool = false,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
@@ -2180,6 +2188,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
+        self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingDurableReplayAuthorityAvailable = false
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
@@ -2808,7 +2817,8 @@ actor ModelRuntime: ModelRuntimeServing {
             schedulerBackendAvailable: schedulerBackendAvailable,
             durableReplayAuthorityAvailable: continuousBatchingDurableReplayAuthorityAvailable,
             pagedKVDecision: pagedKVAttachDecision,
-            requestedTuple: requestedTuple
+            requestedTuple: requestedTuple,
+            acceptanceCoverage: continuousBatchingAcceptanceCoverage
         )
     }
 

@@ -9,6 +9,7 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
     case pagedKVDisabled = "paged_kv_disabled"
     case pagedKVCapabilityUnavailable = "paged_kv_capability_unavailable"
     case tupleNotAdvertised = "requested_tuple_not_advertised"
+    case tupleAcceptanceCoverageUnavailable = "tuple_acceptance_coverage_unavailable"
     case kvBitsUnsupported = "kv_bits_unsupported"
     case draftSpecDecodeMutualExclusion = "draft_spec_decode_mutual_exclusion"
     case stickyCacheHandoffUnavailable = "sticky_cache_handoff_unavailable"
@@ -41,6 +42,8 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
             return "continuous_batching_moe_promotion_evidence_unavailable"
         case .requestStateUnrepresented:
             return "continuous_batching_request_state_unsupported"
+        case .tupleAcceptanceCoverageUnavailable:
+            return "continuous_batching_tuple_acceptance_coverage_unavailable"
         case .localCapabilityUnavailable, .pagedKVDisabled,
              .pagedKVCapabilityUnavailable, .tupleNotAdvertised:
             return "continuous_batching_local_capability_unavailable"
@@ -55,7 +58,8 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
              .stableRequestIDUnavailable,
              .moePromotionEvidenceUnavailable,
              .requestStateUnrepresented,
-             .tupleNotAdvertised:
+             .tupleNotAdvertised,
+             .tupleAcceptanceCoverageUnavailable:
             return 400
         case .localCapabilityUnavailable, .pagedKVDisabled,
              .pagedKVCapabilityUnavailable,
@@ -97,6 +101,53 @@ struct ContinuousBatchingRequestedTuple: Sendable, Equatable {
             parityLabel: parityLabel,
             poolEpoch: poolEpoch
         )
+    }
+}
+
+/// SPEC-038 FR-CB10: descriptor membership alone is not support. A tuple may
+/// only batch when the operator has recorded acceptance coverage for it — the
+/// real-hardware AC-14 / AC-23 evidence that this exact tuple was qualified.
+/// Compiling a global "evidence available" constant into the binary is not
+/// per-tuple coverage: every Mac taking that binary would inherit it.
+///
+/// Coverage deliberately keys on the stable identity of the *evidence*:
+/// hardware class, model id + SHA, cache class, KV dtype, and MoE requirement.
+/// `metallibSHA256`, `kernelIdentifier`, `parityLabel`, and `poolEpoch` stay
+/// the SPEC-039 descriptor's job (`isAdmitted(by:)`), which runs first — this
+/// is not a weakened match, it is the other half of the FR-CB10 conjunction.
+struct ContinuousBatchingAcceptanceCoverage: Sendable, Equatable {
+    let acceptedTuples: [ContinuousBatchingAcceptedTuple]
+    private let unrestricted: Bool
+
+    static let empty = ContinuousBatchingAcceptanceCoverage(acceptedTuples: [])
+
+    /// Test-only escape hatch, mirroring
+    /// `ContinuousBatchRuntimeReplayAuthority.inMemoryForTests`. Never
+    /// construct this from configuration or production code.
+    static let unrestrictedForTests = ContinuousBatchingAcceptanceCoverage(
+        acceptedTuples: [],
+        unrestricted: true
+    )
+
+    init(acceptedTuples: [ContinuousBatchingAcceptedTuple]) {
+        self.init(acceptedTuples: acceptedTuples, unrestricted: false)
+    }
+
+    private init(acceptedTuples: [ContinuousBatchingAcceptedTuple], unrestricted: Bool) {
+        self.acceptedTuples = acceptedTuples
+        self.unrestricted = unrestricted
+    }
+
+    func covers(_ tuple: ContinuousBatchingRequestedTuple) -> Bool {
+        if unrestricted { return true }
+        return acceptedTuples.contains { accepted in
+            accepted.modelID == tuple.modelID
+                && accepted.modelSHA256 == tuple.modelSHA256
+                && accepted.cacheClass == tuple.cacheClass
+                && accepted.kvDType == tuple.kvDType
+                && accepted.requiresMoE == tuple.requiresMoE
+                && accepted.hardwareClass == tuple.hardwareClass
+        }
     }
 }
 
@@ -166,7 +217,13 @@ enum ContinuousBatchingPolicy {
             descriptor: nil,
             tuple: nil,
             checkLocalCapability: false,
-            pagedKVDecision: .disabled
+            pagedKVDecision: .disabled,
+            // Inert on this path: `pagedKVDecision: .disabled` means the
+            // `.attached` branch that consults coverage is unreachable, and no
+            // tuple exists pre-model to evaluate it against. `.empty` keeps the
+            // production default fail-closed without fail-closing config
+            // validation.
+            acceptanceCoverage: .empty
         )
     }
 
@@ -182,6 +239,10 @@ enum ContinuousBatchingPolicy {
         durableReplayAuthorityAvailable: Bool = true,
         pagedKVDecision: PagedKVAttachDecision,
         requestedTuple: ContinuousBatchingRequestedTuple?,
+        // SPEC-038 FR-CB10. Deliberately undefaulted: a defaulted parameter
+        // would let a future call site silently skip the per-tuple acceptance
+        // gate, which is the exact failure mode this gate exists to close.
+        acceptanceCoverage: ContinuousBatchingAcceptanceCoverage,
         moePromotionEvidenceAvailable: Bool = productionMoEPromotionEvidenceAvailable
     ) -> ContinuousBatchingCapability {
         makeCapability(
@@ -198,6 +259,7 @@ enum ContinuousBatchingPolicy {
             durableReplayAuthorityAvailable: durableReplayAuthorityAvailable,
             checkLocalCapability: true,
             pagedKVDecision: pagedKVDecision,
+            acceptanceCoverage: acceptanceCoverage,
             moePromotionEvidenceAvailable: moePromotionEvidenceAvailable
         )
     }
@@ -216,6 +278,7 @@ enum ContinuousBatchingPolicy {
         durableReplayAuthorityAvailable: Bool = true,
         checkLocalCapability: Bool,
         pagedKVDecision: PagedKVAttachDecision,
+        acceptanceCoverage: ContinuousBatchingAcceptanceCoverage,
         moePromotionEvidenceAvailable: Bool = productionMoEPromotionEvidenceAvailable
     ) -> ContinuousBatchingCapability {
         let maxActiveRows = max(1, maxBatch)
@@ -251,6 +314,11 @@ enum ContinuousBatchingPolicy {
                 }
                 if !tuple.isAdmitted(by: advertised) {
                     reason = .tupleNotAdvertised
+                } else if !acceptanceCoverage.covers(tuple) {
+                    // FR-CB10: descriptor membership is only half of support.
+                    // The operator must also have recorded acceptance coverage
+                    // for this exact tuple on this hardware class.
+                    reason = .tupleAcceptanceCoverageUnavailable
                 } else if tuple.requiresMoE && !moePromotionEvidenceAvailable {
                     // AC-23: descriptor membership is not a promotion signal.
                     reason = .moePromotionEvidenceUnavailable
@@ -299,6 +367,8 @@ enum ContinuousBatchingPolicy {
             return "continuous batching requires the requested tuple to pass the local SPEC-039 capability gate"
         case .tupleNotAdvertised:
             return "continuous batching requested tuple is not advertised by the local SPEC-039 engine"
+        case .tupleAcceptanceCoverageUnavailable:
+            return "continuous batching requires recorded acceptance coverage for the requested tuple (SPEC-038 FR-CB10); add it to continuous_batching_accepted_tuples"
         case .kvBitsUnsupported:
             return "continuous batching does not support the requested kv_bits tuple"
         case .draftSpecDecodeMutualExclusion:

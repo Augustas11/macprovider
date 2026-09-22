@@ -6,6 +6,18 @@ phase4-coordinator/internal/requestlog/** @Augustas11
 phase5-gateway/internal/router/** @Augustas11
 phase5-gateway/internal/auth/** @Augustas11
 
+# SPEC-038/039 continuous-batching and paged-KV activation and safety gates.
+# These files decide whether a tuple may batch at all (FR-CB8/FR-CB10/FR-PKV11);
+# weakening one silently changes what real hardware is allowed to serve, and the
+# surface had no mandatory reviewer.
+phase3-binary/Sources/macprovider-cli/ContinuousBatching.swift @Augustas11
+phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift @Augustas11
+phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift @Augustas11
+phase3-binary/Sources/MacProviderCore/PagedKVEngine.swift @Augustas11
+phase3-binary/Sources/MacProviderCore/Config.swift @Augustas11
+phase3-binary/Sources/macprovider-cli/ModelRuntime.swift @Augustas11
+phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift @Augustas11
+
 # CI and agent-rule controls for the sensitive paths.
 .github/CODEOWNERS @Augustas11
 .github/workflows/ci.yml @Augustas11

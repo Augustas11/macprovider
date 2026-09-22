@@ -390,7 +390,7 @@ struct ServeCommand: AsyncParsableCommand {
     )
     var prefillStepSize: Int?
 
-    @Option(help: "Continuous batching mode: off, canary, or on. Default off. Strict on fails closed unless the requested tuple is advertised by the local paged-KV engine. Overrides MACPROVIDER_CONTINUOUS_BATCHING and config key continuous_batching.")
+    @Option(help: "Continuous batching mode: off, canary, or on. Default off. Strict on fails closed unless the requested tuple is both advertised by the local paged-KV engine and listed under config key continuous_batching_accepted_tuples; canary serial-routes with reason tuple_acceptance_coverage_unavailable instead. Overrides MACPROVIDER_CONTINUOUS_BATCHING and config key continuous_batching.")
     var continuousBatching: String?
 
     @Option(help: "Bounded continuous-batching waiting queue limit. Default 2 * active slots. Overrides MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT and config key continuous_batch_queue_limit.")
@@ -1871,6 +1871,9 @@ struct ServeCommand: AsyncParsableCommand {
                     maxBatch: resolved.maxConcurrencyOverride ?? 1,
                     continuousBatchingMode: resolved.continuousBatching,
                     continuousBatchQueueLimit: resolved.continuousBatchQueueLimit,
+                    continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage(
+                        acceptedTuples: resolved.continuousBatchingAcceptedTuples
+                    ),
                     warmSwapEnabled: resolved.enableWarmSwap,
                     swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
                     catalogModelIDAlias: catalogModelIDAlias,

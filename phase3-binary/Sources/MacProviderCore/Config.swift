@@ -22,6 +22,39 @@ public enum ContinuousBatchingMode: String, Sendable {
     case on
 }
 
+/// SPEC-038 FR-CB10: one operator-declared tuple that real-hardware acceptance
+/// (AC-14 / AC-23) actually qualified for continuous batching. Declared in the
+/// `continuous_batching_accepted_tuples` config key; an absent key covers
+/// nothing.
+///
+/// This lives in `MacProviderCore` next to `ContinuousBatchingMode` and
+/// `PagedKVDType` because configuration parsing owns it; the CLI's
+/// `ContinuousBatchingAcceptanceCoverage` matches requested tuples against it.
+public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
+    public let modelID: String
+    public let modelSHA256: String
+    public let cacheClass: String
+    public let kvDType: PagedKVDType
+    public let requiresMoE: Bool
+    public let hardwareClass: String
+
+    public init(
+        modelID: String,
+        modelSHA256: String,
+        cacheClass: String,
+        kvDType: PagedKVDType,
+        requiresMoE: Bool,
+        hardwareClass: String
+    ) {
+        self.modelID = modelID
+        self.modelSHA256 = modelSHA256
+        self.cacheClass = cacheClass
+        self.kvDType = kvDType
+        self.requiresMoE = requiresMoE
+        self.hardwareClass = hardwareClass
+    }
+}
+
 public enum ProviderCredentialStoreKind: String, Sendable {
     case keychain
     case protectedFile = "protected_file"
@@ -126,6 +159,12 @@ public struct AppConfig: Equatable, Sendable {
     public var continuousBatching: ContinuousBatchingMode
     public var continuousBatchQueueLimit: Int?
 
+    // SPEC-038 FR-CB10: per-tuple acceptance coverage. Descriptor membership
+    // alone is not support; a tuple may only batch when the operator has
+    // declared the real-hardware acceptance evidence for that exact tuple here.
+    // Default empty ⇒ fail-closed on every Mac that takes the binary.
+    public var continuousBatchingAcceptedTuples: [ContinuousBatchingAcceptedTuple]
+
     // SPEC-037 FR-KVP11: encrypted KV survival disk tier. Default-off; resolved
     // fail-closed (invalid value ⇒ tier disabled + `errors` populated, never a
     // process abort). See `KVDiskCacheConfig`.
@@ -197,6 +236,7 @@ public struct AppConfig: Equatable, Sendable {
             prefillStepSize: 512,
             continuousBatching: .off,
             continuousBatchQueueLimit: nil,
+            continuousBatchingAcceptedTuples: [],
             kvDiskCache: .defaults(),
             pagedKV: .defaults()
         )
@@ -531,7 +571,99 @@ public enum ConfigLoader {
             config.continuousBatching = mode
         }
         try assign(&config.continuousBatchQueueLimit, from: dict, key: "continuous_batch_queue_limit", expected: "integer >= 1")
+        if let rawTuples = dict["continuous_batching_accepted_tuples"] {
+            config.continuousBatchingAcceptedTuples = try parseContinuousBatchingAcceptedTuples(rawTuples)
+        }
         return config
+    }
+
+    /// SPEC-038 FR-CB10. A malformed entry is a hard configuration error, never
+    /// a silent skip: a dropped entry would either disable batching the
+    /// operator qualified, or — worse, if the shape were ever relaxed — admit a
+    /// tuple no acceptance run covered.
+    private static func parseContinuousBatchingAcceptedTuples(
+        _ raw: Any
+    ) throws -> [ContinuousBatchingAcceptedTuple] {
+        let key = "continuous_batching_accepted_tuples"
+        guard let entries = raw as? [Any] else {
+            throw ConfigError.invalidValue(
+                key: key,
+                value: String(describing: raw),
+                expected: "sequence of accepted-tuple maps"
+            )
+        }
+        return try entries.enumerated().map { index, entry in
+            let entryKey = "\(key)[\(index)]"
+            guard let fields = entry as? [String: Any] else {
+                throw ConfigError.invalidValue(
+                    key: entryKey,
+                    value: String(describing: entry),
+                    expected: "map with model_id, model_sha256, cache_class, kv_dtype, requires_moe, hardware_class"
+                )
+            }
+            // Coverage matching in `ContinuousBatchingAcceptanceCoverage.covers(_:)`
+            // is exact. A value that survives parsing but can never match is a
+            // silent false negative: the operator believes the tuple is
+            // qualified and the provider serial-routes instead. Reject the
+            // shapes that cannot match here, at load, where the error names the
+            // offending key.
+            func requiredString(_ field: String) throws -> String {
+                guard let value = fields[field] as? String,
+                      !value.isEmpty,
+                      value == value.trimmingCharacters(in: .whitespacesAndNewlines) else {
+                    throw ConfigError.invalidValue(
+                        key: "\(entryKey).\(field)",
+                        value: String(describing: fields[field]),
+                        expected: "non-empty string without leading or trailing whitespace"
+                    )
+                }
+                return value
+            }
+
+            // Runtime-measured model identity is canonical lowercase 64-hex, so
+            // an uppercase or truncated operator declaration never matches.
+            func requiredSHA256(_ field: String) throws -> String {
+                let value = try requiredString(field)
+                // ASCII bytes only. `Character.isHexDigit` is true for
+                // Unicode hex-likes such as fullwidth `ａ` and `１`, which are
+                // not uppercase either — a 64-character fullwidth digest would
+                // pass a Character-level test and then never equal the ASCII
+                // lowercase runtime hash.
+                let isCanonical = value.utf8.count == 64
+                    && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+                guard isCanonical else {
+                    throw ConfigError.invalidValue(
+                        key: "\(entryKey).\(field)",
+                        value: value,
+                        expected: "64-character lowercase hexadecimal SHA-256"
+                    )
+                }
+                return value
+            }
+            let rawDType = try requiredString("kv_dtype")
+            guard let kvDType = PagedKVDType(rawValue: rawDType.lowercased()) else {
+                throw ConfigError.invalidValue(
+                    key: "\(entryKey).kv_dtype",
+                    value: rawDType,
+                    expected: "fp16 or bf16"
+                )
+            }
+            guard let requiresMoE = fields["requires_moe"] as? Bool else {
+                throw ConfigError.invalidValue(
+                    key: "\(entryKey).requires_moe",
+                    value: String(describing: fields["requires_moe"]),
+                    expected: "boolean"
+                )
+            }
+            return ContinuousBatchingAcceptedTuple(
+                modelID: try requiredString("model_id"),
+                modelSHA256: try requiredSHA256("model_sha256"),
+                cacheClass: try requiredString("cache_class"),
+                kvDType: kvDType,
+                requiresMoE: requiresMoE,
+                hardwareClass: try requiredString("hardware_class")
+            )
+        }
     }
 
     private static func applyEnvironment(

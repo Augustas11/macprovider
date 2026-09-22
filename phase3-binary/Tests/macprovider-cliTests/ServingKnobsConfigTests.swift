@@ -550,7 +550,8 @@ final class ServingKnobsConfigTests: XCTestCase {
                 draftConfigured: draftConfigured,
                 schedulerBackendAvailable: false,
                 pagedKVDecision: .disabled,
-                requestedTuple: nil
+                requestedTuple: nil,
+                acceptanceCoverage: .unrestrictedForTests
             )
             XCTAssertThrowsError(
                 try ContinuousBatchingPolicy.validateStrictStartup(capability),
@@ -599,7 +600,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: true,
             schedulerBackendAvailable: false,
             pagedKVDecision: .disabled,
-            requestedTuple: nil
+            requestedTuple: nil,
+            acceptanceCoverage: .unrestrictedForTests
         )
         XCTAssertNil(capability.unsupportedReason)
         XCTAssertNoThrow(try ContinuousBatchingPolicy.validateStrictStartup(capability))
@@ -715,7 +717,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: false,
             schedulerBackendAvailable: true,
             pagedKVDecision: .attached(Self.pagedKVDescriptor()),
-            requestedTuple: Self.continuousBatchingTuple()
+            requestedTuple: Self.continuousBatchingTuple(),
+            acceptanceCoverage: .unrestrictedForTests
         )
         XCTAssertNil(canaryCapability.unsupportedReason)
         XCTAssertFalse(canaryCapability.shouldUseSerialPath)
@@ -729,7 +732,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: false,
             schedulerBackendAvailable: true,
             pagedKVDecision: .attached(Self.pagedKVDescriptor()),
-            requestedTuple: Self.continuousBatchingTuple()
+            requestedTuple: Self.continuousBatchingTuple(),
+            acceptanceCoverage: .unrestrictedForTests
         )
         XCTAssertNil(strictCapability.unsupportedReason)
         XCTAssertFalse(strictCapability.shouldUseSerialPath)
@@ -745,7 +749,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: false,
             schedulerBackendAvailable: false,
             pagedKVDecision: .disabled,
-            requestedTuple: nil
+            requestedTuple: nil,
+            acceptanceCoverage: .unrestrictedForTests
         )
         XCTAssertEqual(capability.queueLimit, 4)
         XCTAssertEqual(capability.unsupportedReason, .kvBitsUnsupported)
@@ -760,7 +765,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: true,
             schedulerBackendAvailable: false,
             pagedKVDecision: .disabled,
-            requestedTuple: nil
+            requestedTuple: nil,
+            acceptanceCoverage: .unrestrictedForTests
         )
         XCTAssertEqual(capability.queueLimit, 9)
         XCTAssertEqual(capability.unsupportedReason, .draftSpecDecodeMutualExclusion)
@@ -775,7 +781,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: true,
             schedulerBackendAvailable: false,
             pagedKVDecision: .disabled,
-            requestedTuple: nil
+            requestedTuple: nil,
+            acceptanceCoverage: .unrestrictedForTests
         )
 
         XCTAssertEqual(capability.unsupportedReason, .draftSpecDecodeMutualExclusion)
@@ -820,7 +827,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: false,
             schedulerBackendAvailable: true,
             pagedKVDecision: .attached(descriptor),
-            requestedTuple: exact
+            requestedTuple: exact,
+            acceptanceCoverage: Self.acceptanceCoverage(for: exact)
         )
         XCTAssertNil(supported.unsupportedReason)
         XCTAssertFalse(supported.shouldUseSerialPath)
@@ -847,7 +855,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: false,
             schedulerBackendAvailable: true,
             pagedKVDecision: .attached(descriptor),
-            requestedTuple: mismatch
+            requestedTuple: mismatch,
+            acceptanceCoverage: Self.acceptanceCoverage(for: exact)
         )
         XCTAssertEqual(rejected.unsupportedReason, .tupleNotAdvertised)
         XCTAssertTrue(rejected.shouldUseSerialPath)
@@ -890,7 +899,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: false,
             schedulerBackendAvailable: true,
             pagedKVDecision: .attached(descriptor),
-            requestedTuple: tuple
+            requestedTuple: tuple,
+            acceptanceCoverage: Self.acceptanceCoverage(for: tuple)
         )
         XCTAssertNil(supported.unsupportedReason)
         XCTAssertFalse(supported.shouldUseSerialPath)
@@ -903,7 +913,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: false,
             schedulerBackendAvailable: false,
             pagedKVDecision: .disabled,
-            requestedTuple: nil
+            requestedTuple: nil,
+            acceptanceCoverage: .unrestrictedForTests
         )
         XCTAssertEqual(capability.unsupportedReason, .pagedKVDisabled)
         XCTAssertTrue(capability.shouldUseSerialPath)
@@ -919,7 +930,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             requestStateRepresentable: false,
             schedulerBackendAvailable: true,
             pagedKVDecision: .disabled,
-            requestedTuple: nil
+            requestedTuple: nil,
+            acceptanceCoverage: .unrestrictedForTests
         )
         XCTAssertEqual(capability.unsupportedReason, .requestStateUnrepresented)
         XCTAssertTrue(capability.shouldUseSerialPath)
@@ -938,7 +950,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             requestStateRepresentable: false,
             schedulerBackendAvailable: true,
             pagedKVDecision: .disabled,
-            requestedTuple: nil
+            requestedTuple: nil,
+            acceptanceCoverage: .unrestrictedForTests
         )
         XCTAssertEqual(capability.unsupportedReason, .requestStateUnrepresented)
         XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(capability)) { error in
@@ -1038,7 +1051,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             requestStateRepresentable: true,
             schedulerBackendAvailable: false,
             pagedKVDecision: .disabled,
-            requestedTuple: nil
+            requestedTuple: nil,
+            acceptanceCoverage: .unrestrictedForTests
         )
         XCTAssertNotEqual(capability.unsupportedReason, .requestStateUnrepresented)
     }
@@ -1056,7 +1070,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             schedulerBackendAvailable: true,
             durableReplayAuthorityAvailable: true,
             pagedKVDecision: .attached(descriptor),
-            requestedTuple: tuple
+            requestedTuple: tuple,
+            acceptanceCoverage: Self.acceptanceCoverage(for: tuple)
         )
         XCTAssertEqual(canary.unsupportedReason, .stableRequestIDUnavailable)
         XCTAssertTrue(canary.shouldUseSerialPath)
@@ -1075,7 +1090,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             schedulerBackendAvailable: true,
             durableReplayAuthorityAvailable: true,
             pagedKVDecision: .attached(descriptor),
-            requestedTuple: tuple
+            requestedTuple: tuple,
+            acceptanceCoverage: Self.acceptanceCoverage(for: tuple)
         )
         XCTAssertEqual(strict.unsupportedReason, .stableRequestIDUnavailable)
         XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(strict)) { error in
@@ -1095,7 +1111,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             requestHasStableRequestID: false,
             schedulerBackendAvailable: false,
             pagedKVDecision: .disabled,
-            requestedTuple: nil
+            requestedTuple: nil,
+            acceptanceCoverage: .unrestrictedForTests
         )
         XCTAssertEqual(missingLocalCapability.unsupportedReason, .pagedKVDisabled)
     }
@@ -1139,6 +1156,7 @@ final class ServingKnobsConfigTests: XCTestCase {
             schedulerBackendAvailable: true,
             pagedKVDecision: .attached(descriptor),
             requestedTuple: tuple,
+            acceptanceCoverage: Self.acceptanceCoverage(for: tuple),
             moePromotionEvidenceAvailable: false
         )
         XCTAssertEqual(canary.unsupportedReason, .moePromotionEvidenceUnavailable)
@@ -1157,6 +1175,7 @@ final class ServingKnobsConfigTests: XCTestCase {
             schedulerBackendAvailable: true,
             pagedKVDecision: .attached(descriptor),
             requestedTuple: tuple,
+            acceptanceCoverage: Self.acceptanceCoverage(for: tuple),
             moePromotionEvidenceAvailable: false
         )
         XCTAssertEqual(strict.unsupportedReason, .moePromotionEvidenceUnavailable)
@@ -1209,7 +1228,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: false,
             schedulerBackendAvailable: true,
             pagedKVDecision: .attached(descriptor),
-            requestedTuple: tuple
+            requestedTuple: tuple,
+            acceptanceCoverage: Self.acceptanceCoverage(for: tuple)
         )
         XCTAssertNil(canary.unsupportedReason)
         XCTAssertFalse(canary.shouldUseSerialPath)
@@ -1222,7 +1242,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: false,
             schedulerBackendAvailable: true,
             pagedKVDecision: .attached(descriptor),
-            requestedTuple: tuple
+            requestedTuple: tuple,
+            acceptanceCoverage: Self.acceptanceCoverage(for: tuple)
         )
         XCTAssertNil(strict.unsupportedReason)
         XCTAssertNoThrow(try ContinuousBatchingPolicy.validateStrictStartup(strict))
@@ -1266,7 +1287,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: false,
             schedulerBackendAvailable: true,
             pagedKVDecision: .attached(descriptor),
-            requestedTuple: tuple
+            requestedTuple: tuple,
+            acceptanceCoverage: Self.acceptanceCoverage(for: tuple)
         )
         XCTAssertEqual(canary.unsupportedReason, .tupleNotAdvertised)
         XCTAssertTrue(canary.shouldUseSerialPath)
@@ -1281,7 +1303,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: false,
             schedulerBackendAvailable: false,
             pagedKVDecision: .disabled,
-            requestedTuple: nil
+            requestedTuple: nil,
+            acceptanceCoverage: .unrestrictedForTests
         )
         XCTAssertEqual(capability.unsupportedReason, .pagedKVDisabled)
         XCTAssertFalse(capability.shouldUseSerialPath)
@@ -1304,11 +1327,369 @@ final class ServingKnobsConfigTests: XCTestCase {
             draftConfigured: false,
             schedulerBackendAvailable: false,
             pagedKVDecision: .disabled,
-            requestedTuple: nil
+            requestedTuple: nil,
+            acceptanceCoverage: .unrestrictedForTests
         )
         XCTAssertEqual(capability.unsupportedReason, .pagedKVDisabled)
         XCTAssertFalse(capability.shouldUseSerialPath)
         XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(capability))
+    }
+
+    // MARK: - FR-CB10 per-tuple acceptance coverage
+
+    func testCoveredTupleWithEveryOtherGateGreenIsSupported() {
+        let descriptor = Self.pagedKVDescriptor()
+        let tuple = Self.continuousBatchingTuple()
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .on,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(descriptor),
+            requestedTuple: tuple,
+            acceptanceCoverage: Self.acceptanceCoverage(for: tuple)
+        )
+        XCTAssertNil(capability.unsupportedReason)
+        XCTAssertFalse(capability.shouldUseSerialPath)
+        XCTAssertNoThrow(try ContinuousBatchingPolicy.validateStrictStartup(capability))
+    }
+
+    func testDescriptorAdmittedTupleWithoutAcceptanceCoverageIsUnsupported() {
+        let descriptor = Self.pagedKVDescriptor()
+        let tuple = Self.continuousBatchingTuple()
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .on,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(descriptor),
+            requestedTuple: tuple,
+            acceptanceCoverage: .empty
+        )
+        XCTAssertEqual(capability.unsupportedReason, .tupleAcceptanceCoverageUnavailable)
+    }
+
+    // A coverage entry that differs in exactly one evidence field must not
+    // cover the request: acceptance evidence is tuple-bound, not approximate.
+    func testAcceptanceCoverageRequiresEveryEvidenceFieldToMatch() {
+        let descriptor = Self.pagedKVDescriptor()
+        let tuple = Self.continuousBatchingTuple()
+        let mutations: [(String, ContinuousBatchingAcceptedTuple)] = [
+            ("model_id", ContinuousBatchingAcceptedTuple(
+                modelID: "mlx-community/Other-Test",
+                modelSHA256: tuple.modelSHA256,
+                cacheClass: tuple.cacheClass,
+                kvDType: tuple.kvDType,
+                requiresMoE: tuple.requiresMoE,
+                hardwareClass: tuple.hardwareClass
+            )),
+            ("model_sha256", ContinuousBatchingAcceptedTuple(
+                modelID: tuple.modelID,
+                modelSHA256: String(repeating: "e", count: 64),
+                cacheClass: tuple.cacheClass,
+                kvDType: tuple.kvDType,
+                requiresMoE: tuple.requiresMoE,
+                hardwareClass: tuple.hardwareClass
+            )),
+            ("cache_class", ContinuousBatchingAcceptedTuple(
+                modelID: tuple.modelID,
+                modelSHA256: tuple.modelSHA256,
+                cacheClass: "KVCacheQuantized",
+                kvDType: tuple.kvDType,
+                requiresMoE: tuple.requiresMoE,
+                hardwareClass: tuple.hardwareClass
+            )),
+            ("kv_dtype", ContinuousBatchingAcceptedTuple(
+                modelID: tuple.modelID,
+                modelSHA256: tuple.modelSHA256,
+                cacheClass: tuple.cacheClass,
+                kvDType: .bf16,
+                requiresMoE: tuple.requiresMoE,
+                hardwareClass: tuple.hardwareClass
+            )),
+            ("requires_moe", ContinuousBatchingAcceptedTuple(
+                modelID: tuple.modelID,
+                modelSHA256: tuple.modelSHA256,
+                cacheClass: tuple.cacheClass,
+                kvDType: tuple.kvDType,
+                requiresMoE: !tuple.requiresMoE,
+                hardwareClass: tuple.hardwareClass
+            )),
+            ("hardware_class", ContinuousBatchingAcceptedTuple(
+                modelID: tuple.modelID,
+                modelSHA256: tuple.modelSHA256,
+                cacheClass: tuple.cacheClass,
+                kvDType: tuple.kvDType,
+                requiresMoE: tuple.requiresMoE,
+                hardwareClass: "apple-silicon-other"
+            ))
+        ]
+        for (field, accepted) in mutations {
+            let capability = ContinuousBatchingPolicy.capability(
+                mode: .on,
+                maxBatch: 2,
+                queueLimit: nil,
+                kvBits: nil,
+                draftConfigured: false,
+                schedulerBackendAvailable: true,
+                pagedKVDecision: .attached(descriptor),
+                requestedTuple: tuple,
+                acceptanceCoverage: ContinuousBatchingAcceptanceCoverage(acceptedTuples: [accepted])
+            )
+            XCTAssertEqual(
+                capability.unsupportedReason,
+                .tupleAcceptanceCoverageUnavailable,
+                "coverage differing in \(field) must not cover the requested tuple"
+            )
+        }
+    }
+
+    func testCanarySerialRoutesUncoveredTuple() {
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .canary,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(Self.pagedKVDescriptor()),
+            requestedTuple: Self.continuousBatchingTuple(),
+            acceptanceCoverage: .empty
+        )
+        XCTAssertEqual(capability.unsupportedReason, .tupleAcceptanceCoverageUnavailable)
+        XCTAssertTrue(capability.shouldUseSerialPath)
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.serialRouteTelemetryLine(capability),
+            "event=batching_unsupported action=serial_routed reason=tuple_acceptance_coverage_unavailable\n"
+        )
+    }
+
+    func testStrictOnFailsClosedOnUncoveredTuple() {
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .on,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(Self.pagedKVDescriptor()),
+            requestedTuple: Self.continuousBatchingTuple(),
+            acceptanceCoverage: .empty
+        )
+        XCTAssertEqual(capability.unsupportedReason, .tupleAcceptanceCoverageUnavailable)
+        XCTAssertFalse(capability.shouldUseSerialPath)
+        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(capability)) { error in
+            guard let apiError = error as? APIError else {
+                return XCTFail("expected APIError, got \(error)")
+            }
+            XCTAssertEqual(apiError.status, 400)
+            XCTAssertEqual(apiError.code, "continuous_batching_tuple_acceptance_coverage_unavailable")
+            XCTAssertFalse(apiError.inferenceRan)
+        }
+    }
+
+    // Gate ordering: the descriptor gate is evaluated first, so a tuple that is
+    // both unadvertised and uncovered reports the descriptor reason.
+    func testDescriptorGateIsReportedBeforeAcceptanceCoverage() {
+        let descriptor = Self.pagedKVDescriptor()
+        let base = Self.continuousBatchingTuple()
+        let unadvertised = ContinuousBatchingRequestedTuple(
+            modelID: base.modelID,
+            modelSHA256: String(repeating: "e", count: 64),
+            tokenizerSHA256: base.tokenizerSHA256,
+            chatTemplateSHA256: base.chatTemplateSHA256,
+            cacheClass: base.cacheClass,
+            kvDType: base.kvDType,
+            requiresMoE: base.requiresMoE,
+            hardwareClass: base.hardwareClass,
+            metallibSHA256: base.metallibSHA256,
+            kernelIdentifier: base.kernelIdentifier,
+            parityLabel: base.parityLabel,
+            poolEpoch: base.poolEpoch
+        )
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .canary,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(descriptor),
+            requestedTuple: unadvertised,
+            acceptanceCoverage: .empty
+        )
+        XCTAssertEqual(capability.unsupportedReason, .tupleNotAdvertised)
+    }
+
+    // The two gates are independent: FR-CB10 coverage does not substitute for
+    // the AC-23 MoE promotion decision.
+    func testCoveredMoETupleStillNeedsMoEPromotionEvidence() {
+        let descriptor = PagedKVDescriptor(
+            blockSizeTokens: 16,
+            maxPhysicalBlocks: 32,
+            modelID: "catalog/moe-model",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: String(repeating: "b", count: 64),
+            chatTemplateSHA256: String(repeating: "c", count: 64),
+            supportedModelFamilies: ["qwen3_moe"],
+            supportsMoEDispatch: true,
+            hardwareClass: "m4-max-128gb",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged-attention-v1",
+            parityLabel: "moe-greedy-parity"
+        )
+        let tuple = ContinuousBatchingRequestedTuple(
+            modelID: descriptor.modelID,
+            modelSHA256: descriptor.modelSHA256,
+            tokenizerSHA256: descriptor.tokenizerSHA256,
+            chatTemplateSHA256: descriptor.chatTemplateSHA256,
+            cacheClass: "KVCacheSimple",
+            kvDType: .fp16,
+            requiresMoE: true,
+            hardwareClass: "m4-max-128gb",
+            metallibSHA256: String(repeating: "d", count: 64),
+            kernelIdentifier: "paged-attention-v1",
+            parityLabel: "moe-greedy-parity",
+            poolEpoch: 1
+        )
+        let capability = ContinuousBatchingPolicy.capability(
+            mode: .canary,
+            maxBatch: 2,
+            queueLimit: nil,
+            kvBits: nil,
+            draftConfigured: false,
+            schedulerBackendAvailable: true,
+            pagedKVDecision: .attached(descriptor),
+            requestedTuple: tuple,
+            acceptanceCoverage: Self.acceptanceCoverage(for: tuple),
+            moePromotionEvidenceAvailable: false
+        )
+        XCTAssertEqual(capability.unsupportedReason, .moePromotionEvidenceUnavailable)
+    }
+
+    // MARK: - FR-CB10 configuration parsing
+
+    func testConfigLoaderReadsAcceptedTuplesFromYAML() throws {
+        let yaml = """
+        continuous_batching_accepted_tuples:
+          - model_id: mlx-community/Qwen-Test
+            model_sha256: \(String(repeating: "a", count: 64))
+            cache_class: KVCacheSimple
+            kv_dtype: fp16
+            requires_moe: false
+            hardware_class: apple-silicon-test
+        """
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in yaml })
+        XCTAssertEqual(config.continuousBatchingAcceptedTuples, [
+            ContinuousBatchingAcceptedTuple(
+                modelID: "mlx-community/Qwen-Test",
+                modelSHA256: String(repeating: "a", count: 64),
+                cacheClass: "KVCacheSimple",
+                kvDType: .fp16,
+                requiresMoE: false,
+                hardwareClass: "apple-silicon-test"
+            )
+        ])
+    }
+
+    func testConfigLoaderRejectsMalformedAcceptedTupleEntry() throws {
+        let yaml = """
+        continuous_batching_accepted_tuples:
+          - model_id: mlx-community/Qwen-Test
+            model_sha256: \(String(repeating: "a", count: 64))
+            cache_class: KVCacheSimple
+            kv_dtype: int4
+            requires_moe: false
+            hardware_class: apple-silicon-test
+        """
+        XCTAssertThrowsError(try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in yaml }))
+
+        let missingField = """
+        continuous_batching_accepted_tuples:
+          - model_id: mlx-community/Qwen-Test
+            model_sha256: \(String(repeating: "a", count: 64))
+            cache_class: KVCacheSimple
+            kv_dtype: fp16
+            requires_moe: false
+        """
+        XCTAssertThrowsError(try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in missingField }))
+    }
+
+    /// A declaration that parses but can never match the exact coverage
+    /// comparison is a silent false negative: the operator believes the tuple
+    /// is qualified and the provider serial-routes anyway. These shapes must
+    /// fail at load, not at first request.
+    func testConfigLoaderRejectsNonCanonicalAcceptedTupleSHA() throws {
+        func yaml(sha: String) -> String {
+            """
+            continuous_batching_accepted_tuples:
+              - model_id: mlx-community/Qwen-Test
+                model_sha256: \(sha)
+                cache_class: KVCacheSimple
+                kv_dtype: fp16
+                requires_moe: false
+                hardware_class: apple-silicon-test
+            """
+        }
+        for sha in [
+            String(repeating: "A", count: 64),
+            String(repeating: "a", count: 63),
+            String(repeating: "a", count: 65),
+            String(repeating: "z", count: 64),
+            // Unicode confusables: `Character.isHexDigit` is true for these and
+            // they are not uppercase, so a Character-level test would admit a
+            // digest that can never equal the ASCII runtime hash.
+            String(repeating: "\u{FF41}", count: 64),
+            String(repeating: "\u{FF11}", count: 64)
+        ] {
+            XCTAssertThrowsError(try ConfigLoader.load(
+                cli: CLIOverrides(),
+                environment: [:],
+                fileExists: { _ in true },
+                readFile: { _ in yaml(sha: sha) }), "expected rejection for sha \(sha.prefix(4))…\(sha.count)")
+        }
+    }
+
+    func testConfigLoaderRejectsPaddedAcceptedTupleIdentityFields() throws {
+        let yaml = """
+        continuous_batching_accepted_tuples:
+          - model_id: mlx-community/Qwen-Test
+            model_sha256: \(String(repeating: "a", count: 64))
+            cache_class: KVCacheSimple
+            kv_dtype: fp16
+            requires_moe: false
+            hardware_class: "apple-silicon-test "
+        """
+        XCTAssertThrowsError(try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in yaml }))
+    }
+
+    func testConfigLoaderDefaultsAcceptedTuplesToEmpty() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "port: 8080" })
+        XCTAssertTrue(config.continuousBatchingAcceptedTuples.isEmpty)
     }
 
     // MARK: - Runtime threading
@@ -1667,6 +2048,24 @@ final class ServingKnobsConfigTests: XCTestCase {
             kernelIdentifier: "macprovider_paged_kv_gather_v1",
             parityLabel: "sdpa-parity-v1"
         )
+    }
+
+    /// FR-CB10 coverage that exactly matches `tuple` on the six evidence
+    /// fields, so a gating test proves the descriptor gate rather than the
+    /// acceptance gate.
+    private static func acceptanceCoverage(
+        for tuple: ContinuousBatchingRequestedTuple
+    ) -> ContinuousBatchingAcceptanceCoverage {
+        ContinuousBatchingAcceptanceCoverage(acceptedTuples: [
+            ContinuousBatchingAcceptedTuple(
+                modelID: tuple.modelID,
+                modelSHA256: tuple.modelSHA256,
+                cacheClass: tuple.cacheClass,
+                kvDType: tuple.kvDType,
+                requiresMoE: tuple.requiresMoE,
+                hardwareClass: tuple.hardwareClass
+            )
+        ])
     }
 
     private static func continuousBatchingTuple() -> ContinuousBatchingRequestedTuple {
