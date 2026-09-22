@@ -2578,7 +2578,6 @@
       "spec_id": "SPEC-032",
       "state": "conformant",
       "implementation": [
-        "phase4-coordinator/internal/pool/provider.go:func (p Provider) RoutingEligible",
         "phase4-coordinator/internal/pool/provider.go:func (p Provider) ServingCapable",
         "phase4-coordinator/internal/pool/provider.go:func (r *Registry) SetAdmissionCeilingExcluded",
         "phase4-coordinator/internal/ws/server.go:func (s *Server) applyAdmissionCeilingRouteExclusion",
@@ -8250,7 +8249,7 @@
       "state": "conformant",
       "implementation": [
         "phase4-coordinator/internal/routing/filter.go:EligibleCandidates",
-        "phase4-coordinator/internal/buyer/server.go:handleModels",
+        "phase4-coordinator/internal/buyer/model_admission.go:func (s *Server) byomDefaultPaidRoutingEligible",
         "phase4-coordinator/internal/buyer/server.go:func (c *eligibilityCtx) ProviderBYOMSettlementEligible",
         "phase5-gateway/internal/router/chat_proxy.go:func (s *Server) passThroughNoProviderCoordinatorError"
       ],
