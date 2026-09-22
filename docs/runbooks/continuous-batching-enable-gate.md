@@ -98,18 +98,18 @@ only.
 | Hardware tuple | Mac model, chip, RAM, macOS build, power state, thermal state, swap state, and Entry 110 `max_concurrency_override`. |
 | Model tuple | served model id, model SHA-256, tokenizer/template identity when present, cache class, KV dtype, `kv_bits` absence, MoE requirement, metallib SHA-256, kernel identifier, parity label, and pool epoch. |
 | Local descriptor | SPEC-039 descriptor showing the exact tuple is admitted; unsupported tuples must show fail-closed or reason-coded serial routing. |
-| Production serving path | The batched path that will serve real traffic is identified and measured. If gather-feeds-SDPA is used only as parity scaffold, record the actual shared-forward path; if gather-every-step is used, prove it meets the SPEC-039 overhead ceiling. |
+| Production serving path | The batched path that will serve real traffic is identified and measured. If gather-feeds-SDPA is used only as parity scaffold, record the actual shared-forward path; if gather-every-step is used, prove it meets the SPEC-039 overhead ceiling. Also record the FR-PKV13 define-and-record obligations for this tuple: the sizing table apportioning the unified-memory envelope across model weights, per-request activation, and the paged block pool; the minimum model/context envelope the paged path serves that the stock contiguous path cannot (null or negligible is an acceptable honest value); and the overhead ceiling itself. A throughput number measured on a worktree build is scaffold evidence: the ceiling check that gates enable must be re-recorded on the packaged RC. |
 | Keyless scheduler 200 | A local loopback and relay-shaped keyless request with stable request ID enters the scheduler path and returns HTTP 200 / terminal success from batching, not serial fallback and not `continuous_batching_prefill_failed`. |
 | Keyed first-turn scheduler 200 | A Pearl-shaped request with a conversation key, stable request ID, and `cached_prompt_tokens = 0` enters the scheduler (no `serial_routed reason=conversation_key_rollout_unavailable`) and returns HTTP 200. Keyless loopback is not a substitute. |
 | Sticky/cross-turn scope | First-turn keyed traffic may batch. Any positive `cached_prompt_tokens` stays serial until AC-26 packaged proof, even with a retained FR-PKV10 handoff. |
 | Sticky retained-KV proof | Before sticky/cross-turn batching with positive `cached_prompt_tokens` can enter canary, drive a sticky/cross-turn request through the gateway/relay path, reattach or materialize same-conversation paged KV via FR-PKV10, prove mid-block LCP/trim correctness, and verify usage, billing, receipt, and settlement fields. |
-| Durable replay authority | Stable relay request identity is mapped into scheduler replay keys, settlement disposition is propagated through usage/receipt code, and duplicate inference or duplicate settlement is rejected after local terminal-result retention rolls. The in-process `ContinuousBatchRuntimeReplayAuthority` stub is not activation evidence. |
+| Durable replay authority | Stable relay request identity is mapped into scheduler replay keys, settlement disposition is propagated through usage/receipt code, and duplicate inference or duplicate settlement is rejected after local terminal-result retention rolls. `ContinuousBatchRuntimeReplayAuthority` is **already durable**: a file-backed claim store in a `0700` directory holding `request_id_sha256` + `fingerprint_sha256` records, wired to the inbound `X-Request-ID`, and #1500 closed that prerequisite. Only the `inMemoryForTests` variant is non-durable, and only it is disqualified as evidence. The outstanding gap is packaged proof that reconnect/replay after a terminal result carries the correct settlement disposition through usage/receipt code — not the existence of the authority. |
 | MSB-01..05 | Full harness output for MSB-01 single-stream baseline plus MSB-02, MSB-03, MSB-04, and MSB-05. Aggregate TG is total decoded tokens over common wall-clock, warm-up excluded; per-stream and aggregate TG stay separate. |
-| MoE promotion | Production `moePromotionEvidenceAvailable` is true after [`continuous-batching-moe-activation-2026-09-20.md`](continuous-batching-moe-activation-2026-09-20.md). Descriptor membership still does not promote a MoE tuple by itself. Studio 175 is `canary`; fleet CB stays off. Do not set `on`. |
+| MoE promotion | Production `moePromotionEvidenceAvailable` is true after [`continuous-batching-moe-activation-2026-09-20.md`](continuous-batching-moe-activation-2026-09-20.md). Descriptor membership still does not promote a MoE tuple by itself. Studio 176 is the live serving canary; fleet CB stays off. Do not set `on`. |
 | Usage/receipt attribution | Concurrent distinct requests prove correct `prompt_tokens`, `output_tokens`, `cached_prompt_tokens`, stop reason, cancellation state, request id, receipt model hash, and settlement inputs with zero cross-request attribution. |
 | Deterministic parity | Temperature-0 output for each tested request matches serial path both alone and as one row in a batch. |
 | Failure isolation | One-row cancellation, request-local block-extension failure, and whole-batch forward failure clean up rows/block tables without duplicate terminal output or stitched receipts. |
-| API lifecycle | Through the packaged HTTP/relay serving surface, prove queue-full backpressure with retry guidance, queue-timeout rejection, duplicate request ID before/after acceptance, reconnect/replay after terminal result, cancellation before/after first token, post-admission scheduler failure before/after side effects, and exactly one terminal event per request. |
+| API lifecycle | Through the packaged HTTP/relay serving surface, prove the whole of SPEC-038 AC-25: queue-full backpressure with retry guidance, queue-timeout rejection, **unsupported-tuple strict failure**, **permissive/canary serial-route telemetry**, duplicate request ID before/after acceptance, reconnect/replay after terminal result, cancellation before/after first buyer-visible output, post-admission scheduler failure before/after side effects, **successful usage finalization**, and warm-swap/operator-disable drain. Each case must show exactly one terminal outcome, the correct settling/non-settling disposition, and no duplicate receipt. In-process scheduler unit fixtures cover these cases today; they are not AC-25 evidence, which requires the HTTP surface. |
 | Warm swap | Active prompt rows, active decode rows, and accepted queued work drain, cancel, or fail under the old served snapshot before the model changes; no receipt is bound to the wrong model hash. |
 | Observability | Non-receipt telemetry records mode, reason-coded unsupported handling, active rows, waiting queue depth, batch fill, aggregate TG, per-stream TG, and local capability state without changing coordinator routing semantics. |
 
@@ -148,9 +148,11 @@ packaged release-candidate tuple whose local descriptor admits the
 requested path, whose runtime derives `schedulerBackendAvailable: true` from
 a **measured** identity (not an injected test tuple), and whose durable replay
 authority is wired to stable relay request identity plus usage/receipt
-settlement disposition. The in-process always-claim stub is not that
-authority. Until those proofs exist for the exact keyless tuple, strict `on`
-is rejected before provider readiness and `canary` serial-routes.
+settlement disposition. That wiring landed in #1500 — the runtime authority is
+file-backed and keyed on the inbound `X-Request-ID`, so the open item is
+packaged settlement disposition across reconnect/replay, not the existence of
+the authority. Until those packaged proofs exist for the exact tuple, strict
+`on` is rejected before provider readiness and `canary` serial-routes.
 
 2026-09-20 Studio 172 attempt: paged-KV attach and MoE isolation passed;
 keyless canary then 503'd `continuous_batching_prefill_failed` after scheduler
@@ -163,6 +165,23 @@ the serve-path prefill fix. Canary is on for that Studio tuple only. See
 Do not promote `canary` to `on`. Do not canary other Macs.
 Any other tuple must still prove scheduler-path HTTP 200 on a packaged
 candidate and green API lifecycle evidence before canary traffic.
+
+2026-09-21 Studio 176 is the current live serving canary and supersedes 175 as
+the binary of record for this tuple. Packaged-class evidence now held on 176:
+keyed first-turn 4-wide on live `8080` returned 4x HTTP 200 with
+`cached_prompt_tokens = 0`, no `conversation_key_rollout_unavailable`, and no
+`batching_prefill_failed` (overlap 3.073 s vs 11.703 s serial sum), and a long
+`max_tokens=256` stream returned 200 / `[DONE]` after the #1665 detokenizer and
+delivery-buffer fix. See
+[`cb-keyed-first-turn-canary-lab-e2e-2026-09-21.md`](cb-keyed-first-turn-canary-lab-e2e-2026-09-21.md);
+the 18084 lab table in that file is a worktree build and is lab evidence only,
+while the "Live 176 confirmation" section is the packaged proof. This closes the
+keyless and keyed-first-turn scheduler-200 rows for this tuple. It does **not**
+close API lifecycle, FR-PKV13 packaged re-record, sticky/AC-26, or Gate A5.
+`slots_total` stays **4**: the observation that prompt-heavy 8-wide did not win
+is **not recorded in any evidence bundle**, so it is not usable as the basis for
+a slot decision in either direction. Re-run and record that measurement before
+citing it; until then the validated Entry 110 value is the only authority.
 
 Use `canary` only when every required proof above is present for the exact
 tuple. Leave `continuous_batch_queue_limit` unset unless the evidence bundle
@@ -179,11 +198,26 @@ remains the validated Entry 110 value.
 Do not promote `canary` to production-default `on` until Gate A5 is also green:
 
 - `sku-econ` is green for the tier;
-- sustained provider upside is material;
+- sustained provider upside is material — throughput ratios versus the serial
+  path are necessary but not sufficient; A5 asks for provider economics, so the
+  bundle must convert measured aggregate TG into tier earnings terms;
 - tail latency and rejection rate are acceptable;
-- OPoI false-positive rate is below 5%;
+- OPoI false-positive rate is below 5%. **No implementation computes this
+  number today.** The OPoI v0 signal exists (coordinator canary probes plus
+  `phase4-coordinator/internal/pow/drift.go`), but nothing counts
+  CB-attributable false positives against a defined denominator, and the `< 5%`
+  figure entered the gate from a research prompt rather than from a measured
+  series. Before A5 can be claimed, define the numerator (canary/drift failures
+  attributable to batching on the enabled tuple), the denominator, and the
+  measurement window, then build the counter. Per SPEC-031/SPEC-032 the OPoI
+  signal stays observability-only: it may gate this promotion decision, and it
+  must never gate routing, tiering, sanctions, or payout;
 - the tuple still passes the same descriptor, usage, receipt, warm-swap, and
   rollback evidence after any package or model change.
+
+Gate A5 is normative (SPEC-038 FR-CB15, §8 G5). A checklist that tracks only
+the serving-path and lifecycle proofs is incomplete: A5 is a separate gate and
+must be carried as its own item, not folded into the evidence rows above.
 
 ## Rollback
 
@@ -216,6 +250,10 @@ Model tuple:
 Entry 110 slots_total:
 SPEC-039 descriptor hash / tuple admission:
 Production serving path and FR-PKV13 overhead ceiling:
+FR-PKV13 sizing table (weights / activation / block pool within envelope):
+FR-PKV13 minimum servable envelope delta vs stock contiguous (null allowed):
+Evidence class for each proof below (packaged RC / isolated lab worktree):
+Keyed first-turn scheduler HTTP 200 proof (packaged):
 #887 FR-PKV10 primitive status (landed #1476; not an enable signal):
 #1477 sticky/AC-19 consumer status (landed #1489; not an enable signal):
 #1500 production observation / durable replay status:
@@ -238,6 +276,12 @@ Duplicate request ID / reconnect replay proof:
 Warm-swap proof:
 Peak RSS / swap / thermal proof:
 Unsupported-mode telemetry proof:
+Unsupported-tuple strict-failure proof:
+Successful usage-finalization proof:
+Gate A5 `sku-econ` result:
+Gate A5 provider upside in tier earnings terms:
+Gate A5 tail latency / rejection rate:
+Gate A5 OPoI false-positive rate (numerator / denominator / window):
 Secrets redaction check:
 Decision: canary / keep off / rollback
 Follow-up:
