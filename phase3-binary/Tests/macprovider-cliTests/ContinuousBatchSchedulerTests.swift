@@ -1505,9 +1505,13 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 tokenSink: { _ in }
             )
             XCTFail("expected the still-live sink task to retain the global delivery slot")
-        } catch ContinuousBatchSchedulerError.backpressure {
+        } catch ContinuousBatchSchedulerError.deliveryBackpressure {
             // Scheduler state completed at the hard deadline, but the actual
             // live task remains counted until the cancellation-insensitive sink exits.
+            // Post-token, not pre-admission: this request was admitted and
+            // decoded, and the refusal came from the pump trying to hand its
+            // first token to a delivery with no task slot left. Inference ran
+            // and burned a slot, so it is not blind-retryable.
         }
         try await eventually { await scheduler.metrics().slotsFree == 1 }
         let freeBlocks = await allocator.freeBlockCount()
@@ -1583,7 +1587,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let duplicateResult = try await duplicate.value
         XCTAssertEqual(duplicateResult.outputTokens, [])
         XCTAssertEqual(duplicateResult.terminalStatus, .requestFailed)
-        XCTAssertEqual(duplicateResult.errorCode, "continuous_batching_stream_backpressure")
+        XCTAssertEqual(
+            duplicateResult.errorCode,
+            ContinuousBatchSchedulerError.deliveryBackpressureCode
+        )
         XCTAssertEqual(duplicateResult.settlementDisposition, .notEligible)
         do {
             _ = try await original.value
@@ -1826,6 +1833,36 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertNotEqual(
             ContinuousBatchSchedulerError.queueWaitTimedOut.asAPIError()?.code,
             ContinuousBatchSchedulerError.backpressure.asAPIError()?.code
+        )
+    }
+
+    // `.backpressure` covers only the pre-admission sites — the submit-time
+    // and enqueue-time queue/duplicate-waiter guards, none of which has
+    // offered its caller an event. The decode pump's post-token failure is
+    // `.deliveryBackpressure`: inference ran, partial output may already be
+    // with the buyer, so it is a distinct code and not retryable.
+    func testAC25DeliveryBackpressureIsAPostTokenNonRetryableOutcome() throws {
+        let apiError = try XCTUnwrap(ContinuousBatchSchedulerError.deliveryBackpressure.asAPIError())
+        XCTAssertEqual(apiError.status, 503)
+        XCTAssertEqual(apiError.code, "continuous_batching_stream_delivery_backpressure")
+        XCTAssertTrue(apiError.inferenceRan)
+        XCTAssertFalse(apiError.settlementRan)
+
+        let envelope = apiError.envelope["error"] as? [String: Any]
+        XCTAssertEqual(envelope?["retryable"] as? Bool, false)
+        XCTAssertEqual(envelope?["inference_ran"] as? Bool, true)
+        XCTAssertEqual(envelope?["settlement_ran"] as? Bool, false)
+
+        // Pinned false at the call site, so adding the code to
+        // `APIError.retryableByCode` later cannot silently flip it.
+        XCTAssertEqual(
+            APIError(
+                status: 503,
+                message: "m",
+                type: "server_error",
+                code: ContinuousBatchSchedulerError.deliveryBackpressureCode
+            ).envelope["error"].flatMap { ($0 as? [String: Any])?["retryable"] as? Bool },
+            false
         )
     }
 
@@ -2513,7 +2550,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         do {
             _ = try await slow.value
             XCTFail("expected bounded stream-delivery backpressure")
-        } catch ContinuousBatchSchedulerError.backpressure {
+        } catch ContinuousBatchSchedulerError.deliveryBackpressure {
             // Only this waiter/request fails; the scheduler actor never awaits
             // the consumer callback.
         }
@@ -2552,7 +2589,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         do {
             _ = try await blocked.value
             XCTFail("expected lockstep hop 2 to overflow a 16-token delivery buffer")
-        } catch ContinuousBatchSchedulerError.backpressure {
+        } catch ContinuousBatchSchedulerError.deliveryBackpressure {
             // Same fail-closed as live canary: first hop fills the buffer,
             // the waiter is still in sink work, hop 2 cannot offer.
         }

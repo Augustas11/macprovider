@@ -3799,7 +3799,7 @@ actor ModelRuntime: ModelRuntimeServing {
             try Task.checkCancellation()
             if shouldCancel() { throw CancellationError() }
             guard result.terminalStatus == .stop || result.terminalStatus == .length else {
-                throw Self.attachedPagedKVUnavailableError(code: result.errorCode ?? "continuous_batching_request_failed")
+                throw Self.terminalFailureError(code: result.errorCode ?? "continuous_batching_request_failed")
             }
             let completionEndedAt = Date()
             let completion = try await container.perform { context in
@@ -4026,7 +4026,7 @@ actor ModelRuntime: ModelRuntimeServing {
             try Task.checkCancellation()
             if shouldCancel() { throw CancellationError() }
             guard result.terminalStatus == .stop || result.terminalStatus == .length else {
-                throw Self.attachedPagedKVUnavailableError(code: result.errorCode ?? "continuous_batching_request_failed")
+                throw Self.terminalFailureError(code: result.errorCode ?? "continuous_batching_request_failed")
             }
             let completionEndedAt = Date()
             let completion = try await container.perform { context in
@@ -4127,6 +4127,20 @@ actor ModelRuntime: ModelRuntimeServing {
             }
             throw error
         }
+    }
+
+    /// SPEC-038 AC-25: a non-terminal scheduler *result*, as distinct from a
+    /// thrown scheduler error. Most carried codes are pre-inference, so they
+    /// take the `inferenceRan: false` shape. The one that is not is
+    /// post-token delivery backpressure — the row was decoding and the buyer
+    /// may already hold partial output — so it reuses the single
+    /// `.deliveryBackpressure` mapping rather than a second, divergent copy.
+    private nonisolated static func terminalFailureError(code: String) -> APIError {
+        if code == ContinuousBatchSchedulerError.deliveryBackpressureCode,
+           let mapped = ContinuousBatchSchedulerError.deliveryBackpressure.asAPIError() {
+            return mapped
+        }
+        return attachedPagedKVUnavailableError(code: code)
     }
 
     private nonisolated static func attachedPagedKVUnavailableError(code: String) -> APIError {

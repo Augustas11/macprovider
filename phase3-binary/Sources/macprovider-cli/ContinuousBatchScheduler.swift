@@ -816,7 +816,20 @@ private final class ContinuousBatchTokenDelivery: @unchecked Sendable {
 
 enum ContinuousBatchSchedulerError: Error, Equatable {
     case unsupported(String)
+    /// Pre-admission queue pressure: the request was refused before any
+    /// inference ran, so nothing is on the wire and re-sending it once the
+    /// queue drains is safe. Every throw site is in `submit()` / `enqueue()`
+    /// and fires before the waiter's delivery has been offered a single
+    /// event. Post-token delivery failure is `.deliveryBackpressure`, which
+    /// is a different buyer-visible outcome — do not merge the two.
     case backpressure
+    /// Post-token delivery backpressure: an *active decode row's* waiter
+    /// would not accept a token event, so the row is torn down mid-stream.
+    /// Inference ran and the buyer may already hold partial output, so this
+    /// is `inferenceRan: true`, not retryable, and carries no `Retry-After`:
+    /// telling the buyer to retry would invite a duplicate request for work
+    /// that partly happened.
+    case deliveryBackpressure
     /// Serve-path-unreachable today. `.drained` and `.drainTimedOut` are only
     /// thrown out of `ContinuousBatchScheduler.drain()`, whose sole caller in
     /// `Sources/` is `MSBThroughputCommand` — a benchmark harness, not the
@@ -837,6 +850,11 @@ enum ContinuousBatchSchedulerError: Error, Equatable {
 }
 
 extension ContinuousBatchSchedulerError {
+    /// Buyer-visible code for post-token delivery backpressure, named once so
+    /// the throw site, the terminal-result error code and the serve-path
+    /// mapper cannot drift apart.
+    static let deliveryBackpressureCode = "continuous_batching_stream_delivery_backpressure"
+
     /// SPEC-038 AC-25: the single scheduler-error → buyer-visible outcome map.
     /// Both the streaming and non-streaming serve paths call this so the two
     /// cannot drift. Returns `nil` only for the serve-unreachable cases
@@ -844,7 +862,8 @@ extension ContinuousBatchSchedulerError {
     ///
     /// Every mapped case is a pre-admission or pre-inference rejection, so all
     /// of them are `inferenceRan: false, settlementRan: false` — non-settling,
-    /// no receipt.
+    /// no receipt. The one exception is `.deliveryBackpressure`, which is
+    /// raised against an already-decoding row: see its case below.
     func asAPIError() -> APIError? {
         switch self {
         case .backpressure:
@@ -854,6 +873,23 @@ extension ContinuousBatchSchedulerError {
                 type: "server_error",
                 code: "continuous_batching_stream_backpressure",
                 inferenceRan: false,
+                settlementRan: false
+            )
+        case .deliveryBackpressure:
+            // Not `continuous_batching_stream_backpressure`: that code is
+            // marked retryable and carries a `Retry-After` bound, which is
+            // correct for a pre-admission refusal and wrong here. This row
+            // was decoding, tokens may already have reached the buyer, and a
+            // retry would re-run work that partly happened. `retryable` is
+            // pinned false at the call site so a later entry in
+            // `APIError.retryableByCode` cannot silently flip it.
+            return APIError(
+                status: 503,
+                message: "Inference engine unavailable",
+                type: "server_error",
+                code: Self.deliveryBackpressureCode,
+                retryable: false,
+                inferenceRan: true,
                 settlementRan: false
             )
         case .queueWaitTimedOut:
@@ -1364,6 +1400,10 @@ actor ContinuousBatchScheduler {
             return
         }
         if var pending = pendingTerminalDeliveries[request.id] {
+            // Pre-admission for *this* caller: a duplicate that could not be
+            // attached to the in-flight terminal delivery. Its own delivery
+            // has never been offered an event, so nothing reached this buyer
+            // and re-sending the same id is safe — it attaches or replays.
             guard pending.waiters.count < configuration.duplicateWaiterLimit else {
                 record(.backpressureRejected)
                 delivery.finish()
@@ -1386,6 +1426,10 @@ actor ContinuousBatchScheduler {
                     replayTokens: pending.result.outputTokens,
                     snapshot: snapshot
                 )
+                // Still pre-admission for this caller: `delivery` is the
+                // new waiter's, freshly built in `submit()`, and this replay
+                // is the first event ever offered to it. A refusal here means
+                // the caller has seen nothing.
                 guard delivery.offer(replay) else {
                     record(.backpressureRejected)
                     delivery.finish()
@@ -1420,6 +1464,8 @@ actor ContinuousBatchScheduler {
             return
         }
         if knownRequests[request.id] != nil {
+            // Same shape as the `pendingTerminalDeliveries` guard above:
+            // the duplicate never attached and never received an event.
             let deferredWaiterCount = deferredTerminalCompletions[request.id]?.waiters.count ?? 0
             guard requestWaiters[request.id, default: []].count + deferredWaiterCount
                     < configuration.duplicateWaiterLimit else {
@@ -1443,6 +1489,10 @@ actor ContinuousBatchScheduler {
                     replayTokens: row.outputTokens,
                     snapshot: row.snapshot
                 )
+                // First offer to this waiter's own fresh delivery, as
+                // above: the attach is rolled back and the caller has seen
+                // no output, so this stays the pre-admission classification
+                // even though the request it tried to join is decoding.
                 if !delivery.offer(replay) {
                     var retained = requestWaiters[request.id] ?? []
                     retained.removeAll { $0.id == waiterID }
@@ -2069,11 +2119,16 @@ actor ContinuousBatchScheduler {
         ) {
             activeDecode.removeValue(forKey: row.request.id)
             let released = await release(row.handle)
+            // Post-token, like the `.deliveryBackpressure` thrown at the
+            // waiter above: this row was decoding when its last consumer
+            // refused an event. The terminal result is replayable to a later
+            // duplicate of the same request id, so it must not carry the
+            // pre-admission code — that one is retryable and this is not.
             finish(
                 row,
                 status: .requestFailed,
                 errorCode: released
-                    ? "continuous_batching_stream_backpressure"
+                    ? ContinuousBatchSchedulerError.deliveryBackpressureCode
                     : "continuous_batching_cleanup_failed"
             )
             return
@@ -2113,7 +2168,7 @@ actor ContinuousBatchScheduler {
                     beginStoppingActiveWaiter(
                         requestID: row.request.id,
                         waiter: waiter,
-                        error: ContinuousBatchSchedulerError.backpressure
+                        error: ContinuousBatchSchedulerError.deliveryBackpressure
                     )
                 }
             }

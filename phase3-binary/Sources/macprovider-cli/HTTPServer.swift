@@ -1027,7 +1027,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 await idlePrewarmer?.cancelInflightPrewarm()
                 try await modelRuntime.preflight(request, with: handle)
 
-                writer.startSSE(extraHeaders: Self.streamingSettlementHeadHeaders(settlementMetadata: settlementMetadata) + [
+                writer.startSSE(extraHeaders: Self.streamingTrailerHeadHeaders(settlementMetadata: settlementMetadata) + [
                     ("X-MacProvider-Provider-Unix-Ms", "\(Int64(Date().timeIntervalSince1970 * 1000))"),
                     ("X-Provider-Id", providerID ?? ""),
                 ])
@@ -1163,12 +1163,15 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                 }
                 if sseStarted {
-                    // SPEC-038 `:614` "or equivalent": the SSE head is
-                    // already on the wire when the scheduler rejects, so the
-                    // bound rides the trailer channel the receipt header
-                    // already uses rather than a response header that can no
-                    // longer be written.
-                    writer.writeSSEJSON(error.envelope)
+                    // SPEC-038 `:614` "or equivalent": the SSE head is long
+                    // committed when the scheduler rejects, so the bound
+                    // cannot be a response header. It goes in the terminal
+                    // error payload itself — see `sseErrorEnvelope` — and
+                    // also rides the trailer channel for raw readers.
+                    writer.writeSSEJSON(RouterHandler.sseErrorEnvelope(
+                        error,
+                        retryAfterSeconds: writer.retryAfterSeconds
+                    ))
                     writer.writeSSEDone(trailers: RouterHandler.retryGuidanceHeaders(
                         code: error.code,
                         seconds: writer.retryAfterSeconds
@@ -1246,6 +1249,32 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         // non-positive means the scheduler default, not "unbounded".
         let resolved = milliseconds.flatMap { $0 > 0 ? $0 : nil } ?? defaultMS
         return max(1, resolved / 1_000 + (resolved % 1_000 == 0 ? 0 : 1))
+    }
+
+    /// SPEC-038 `:614`: the bound as a *streaming* buyer can actually read
+    /// it.
+    ///
+    /// On a stream the only header channel left after the head is a trailer,
+    /// and a trailer does not reach the buyer: many SSE/EventSource clients
+    /// never expose trailers at all, the coordinator reads provider trailers
+    /// only for receipt and timestamp metadata, and the gateway strips
+    /// upstream `Trailer` / `Retry-After` on the way out. A `retryable: true`
+    /// with no readable bound is what makes a saturated provider hot-loop,
+    /// so the bound is written into the terminal error payload every client
+    /// already has to parse. Additive, and only on the two queue-pressure
+    /// codes — every other error envelope is byte-identical to before.
+    ///
+    /// Provider side only. Relaying this through the coordinator and gateway
+    /// needs Go changes in their forwarding gates and is out of scope here.
+    static func sseErrorEnvelope(_ error: APIError, retryAfterSeconds: Int) -> [String: Any] {
+        var envelope = error.envelope
+        guard queueWaitRetryGuidanceCodes.contains(error.code),
+              var body = envelope["error"] as? [String: Any] else {
+            return envelope
+        }
+        body["retry_after"] = retryAfterSeconds
+        envelope["error"] = body
+        return envelope
     }
 
     /// `Retry-After` for a queue-pressure rejection, empty for anything else.
@@ -1344,19 +1373,25 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         return headers
     }
 
-    private static func streamingSettlementHeadHeaders(settlementMetadata: SettlementReceiptMetadata?) -> [(String, String)] {
-        guard settlementMetadata != nil else {
-            return []
-        }
-        return [(
-            "Trailer",
-            [
+    /// SPEC-038 `:614`: trailer names declared on the SSE head.
+    ///
+    /// `Retry-After` is declared on *every* stream, settlement metadata or
+    /// not: any stream can end in a queue-pressure error, the head is long
+    /// committed by then, and a trailer that was never declared is one a
+    /// conforming reader is free to drop. Declaring it does not oblige the
+    /// response to send it.
+    private static func streamingTrailerHeadHeaders(settlementMetadata: SettlementReceiptMetadata?) -> [(String, String)] {
+        var names: [String] = []
+        if settlementMetadata != nil {
+            names.append(contentsOf: [
                 Self.receiptHeaderName,
                 Self.receiptTerminalStateTSHeaderName,
                 Self.receiptPendingDeadlineHeaderName,
                 Self.lateReceiptSettlementHeaderName,
-            ].joined(separator: ", ")
-        )]
+            ])
+        }
+        names.append("Retry-After")
+        return [("Trailer", names.joined(separator: ", "))]
     }
 
     enum ReceiptHeaderResult: Equatable {

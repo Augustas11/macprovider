@@ -179,10 +179,15 @@ final class HTTPServerClientDisconnectTests: XCTestCase {
     }
 
     /// On a streaming request the scheduler rejects after the SSE head is
-    /// already committed, so the bound cannot ride a response header. It goes
-    /// out as a trailer instead — SPEC-038 `:614`'s "or equivalent", on the
-    /// same channel the receipt header already uses.
-    func testStreamingQueuePressureErrorCarriesRetryAfterAsATrailer() async throws {
+    /// already committed, so the bound cannot ride a response header.
+    ///
+    /// A trailer alone is not enough: many SSE/EventSource clients never
+    /// expose trailers, the coordinator reads provider trailers only for
+    /// receipt metadata, and the gateway strips upstream `Trailer` /
+    /// `Retry-After`. So the assertion that matters is on the **SSE error
+    /// payload a normal client parses**. The trailer and its `Trailer:`
+    /// declaration are asserted too, for raw readers.
+    func testStreamingQueuePressureErrorCarriesRetryAfterInTheSSEErrorBody() async throws {
         let probe = DisconnectProbe()
         let runtime = DisconnectProbeRuntime(mode: .schedulerBackpressure, probe: probe)
 
@@ -194,11 +199,82 @@ final class HTTPServerClientDisconnectTests: XCTestCase {
         }
 
         XCTAssertEqual(response.statusCode, 200, response.body)
-        XCTAssertTrue(
-            response.body.contains("continuous_batching_stream_backpressure"),
-            response.body
-        )
+        let frames = sseDataPayloads(response.body)
+        let errorFrames = frames.filter { $0.contains("continuous_batching_stream_backpressure") }
+        XCTAssertEqual(errorFrames.count, 1, response.body)
+        let error = try errorObject(fromJSONBody: try XCTUnwrap(errorFrames.first))
+        XCTAssertEqual(error["code"] as? String, "continuous_batching_stream_backpressure")
+        XCTAssertEqual(error["retryable"] as? Bool, true)
+        // 4500 ms of admission wait rounds up to a 5 second bound, and it is
+        // readable without touching a trailer.
+        XCTAssertEqual((error["retry_after"] as? NSNumber)?.intValue, 5, response.body)
+
+        // Belt and braces for raw readers: declared on the head, sent at the end.
+        XCTAssertEqual(response.headers["trailer"], "Retry-After", response.headers.description)
         XCTAssertTrue(response.body.contains("Retry-After: 5"), response.body)
+    }
+
+    /// The post-token half of `.backpressure` must not advertise retry.
+    /// Inference ran, the buyer already holds partial output, and a retry
+    /// would re-request work that partly happened — so: a distinct code,
+    /// `inference_ran: true`, `retryable: false`, and no bound in either the
+    /// body or a trailer.
+    func testStreamingDeliveryBackpressureIsPostTokenAndAdvertisesNoRetry() async throws {
+        let probe = DisconnectProbe()
+        let runtime = DisconnectProbeRuntime(mode: .schedulerDeliveryBackpressure(2), probe: probe)
+
+        let response = try await withDisconnectHTTPServer(
+            runtime: runtime,
+            continuousBatchQueueWaitTimeoutMS: 4_500
+        ) { port in
+            try sendChatCompletionAndRead(port: port, stream: true)
+        }
+
+        let frames = sseDataPayloads(response.body)
+        // Tokens really did reach the buyer before the failure.
+        XCTAssertEqual(frames.compactMap { contentDelta(in: $0) }.filter { !$0.isEmpty }, ["t0", "t1"], response.body)
+
+        let errorFrames = frames.filter { $0.contains("continuous_batching_stream_delivery_backpressure") }
+        XCTAssertEqual(errorFrames.count, 1, response.body)
+        let error = try errorObject(fromJSONBody: try XCTUnwrap(errorFrames.first))
+        XCTAssertEqual(error["code"] as? String, "continuous_batching_stream_delivery_backpressure")
+        XCTAssertEqual(error["inference_ran"] as? Bool, true)
+        XCTAssertEqual(error["settlement_ran"] as? Bool, false)
+        XCTAssertEqual(error["retryable"] as? Bool, false)
+        XCTAssertNil(error["retry_after"], response.body)
+        XCTAssertFalse(response.body.contains("Retry-After:"), response.body)
+    }
+
+    /// The pre-admission and post-token classifications are two different
+    /// buyer-visible outcomes and must never collapse back into one.
+    func testAC25BackpressureClassificationsAreDistinct() throws {
+        let preAdmission = try XCTUnwrap(ContinuousBatchSchedulerError.backpressure.asAPIError())
+        let postToken = try XCTUnwrap(ContinuousBatchSchedulerError.deliveryBackpressure.asAPIError())
+
+        XCTAssertNotEqual(preAdmission.code, postToken.code)
+        XCTAssertEqual(preAdmission.code, "continuous_batching_stream_backpressure")
+        XCTAssertEqual(postToken.code, ContinuousBatchSchedulerError.deliveryBackpressureCode)
+
+        XCTAssertFalse(preAdmission.inferenceRan)
+        XCTAssertTrue(postToken.inferenceRan)
+        XCTAssertFalse(preAdmission.settlementRan)
+        XCTAssertFalse(postToken.settlementRan)
+
+        let preEnvelope = preAdmission.envelope["error"] as? [String: Any]
+        let postEnvelope = postToken.envelope["error"] as? [String: Any]
+        XCTAssertEqual(preEnvelope?["retryable"] as? Bool, true)
+        XCTAssertEqual(postEnvelope?["retryable"] as? Bool, false)
+
+        // Only the pre-admission code gets a bound, in either channel.
+        XCTAssertEqual(
+            RouterHandler.retryGuidanceHeaders(code: preAdmission.code, seconds: 5).map(\.0),
+            ["Retry-After"]
+        )
+        XCTAssertTrue(RouterHandler.retryGuidanceHeaders(code: postToken.code, seconds: 5).isEmpty)
+        let postBody = RouterHandler.sseErrorEnvelope(postToken, retryAfterSeconds: 5)["error"] as? [String: Any]
+        XCTAssertNil(postBody?["retry_after"])
+        let preBody = RouterHandler.sseErrorEnvelope(preAdmission, retryAfterSeconds: 5)["error"] as? [String: Any]
+        XCTAssertEqual((preBody?["retry_after"] as? NSNumber)?.intValue, 5)
     }
 
     /// Only the queue-pressure codes get the header: a 409 duplicate is not
@@ -304,6 +380,10 @@ private enum DisconnectProbeMode: Sendable {
     /// Rejects the way a saturated scheduler does, through the shared AC-25
     /// error map, so the response the buyer sees is the real one.
     case schedulerBackpressure
+    /// Emits N buyer-visible tokens and *then* fails the way an active row
+    /// does when its delivery buffer refuses an event — the post-token half
+    /// of `.backpressure`, which is a different outcome.
+    case schedulerDeliveryBackpressure(Int)
     case schedulerDuplicateMismatch
 }
 
@@ -346,6 +426,8 @@ private actor DisconnectProbeRuntime: ModelRuntimeServing {
             try await waitForCancel(shouldCancel)
         case .schedulerBackpressure:
             throw try XCTUnwrap(ContinuousBatchSchedulerError.backpressure.asAPIError())
+        case .schedulerDeliveryBackpressure:
+            throw try XCTUnwrap(ContinuousBatchSchedulerError.deliveryBackpressure.asAPIError())
         case .schedulerDuplicateMismatch:
             throw try XCTUnwrap(ContinuousBatchSchedulerError.duplicateRequestMismatch.asAPIError())
         case .cancelInPreflight, .cancelBeforeFirstToken, .cancelAfterTokens:
@@ -369,6 +451,11 @@ private actor DisconnectProbeRuntime: ModelRuntimeServing {
             throw CancellationError()
         case .schedulerBackpressure:
             throw try XCTUnwrap(ContinuousBatchSchedulerError.backpressure.asAPIError())
+        case .schedulerDeliveryBackpressure(let count):
+            for index in 0..<count {
+                onChunk(.content("t\(index)"))
+            }
+            throw try XCTUnwrap(ContinuousBatchSchedulerError.deliveryBackpressure.asAPIError())
         case .schedulerDuplicateMismatch:
             throw try XCTUnwrap(ContinuousBatchSchedulerError.duplicateRequestMismatch.asAPIError())
         case .cancelInPreflight, .cancelBeforeFirstToken:
