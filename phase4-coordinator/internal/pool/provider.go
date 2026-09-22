@@ -155,14 +155,18 @@ type Provider struct {
 	// stamps At at receive time, so a delayed slots_free=0 handled after
 	// restore looks newer than the restore itself.
 	lastCoordinatorSlotRestoreAt time.Time
-	ConnectedAt                  time.Time  `json:"connected_at"`
-	BinaryVersion                string     `json:"binary_version"`
-	ModelHash                    string     `json:"model_hash,omitempty"`
-	ModelHashAlgorithm           string     `json:"model_hash_algorithm,omitempty"`
-	WeightsManifestSHA256        string     `json:"weights_manifest_sha256,omitempty"`
-	WeightsHashAlgorithm         string     `json:"weights_manifest_algorithm,omitempty"`
-	ExpectedModelHash            string     `json:"-"`
-	HashStatus                   HashStatus `json:"hash_status,omitempty"`
+	// forwardedInFlight is ConsumeForwardedSlot minus RestoreForwardedSlot.
+	// While it is >0 the coordinator owns occupancy; a Mac slots_free=0 from
+	// the still-running wave must not wipe a seat that just opened.
+	forwardedInFlight     int
+	ConnectedAt           time.Time  `json:"connected_at"`
+	BinaryVersion         string     `json:"binary_version"`
+	ModelHash             string     `json:"model_hash,omitempty"`
+	ModelHashAlgorithm    string     `json:"model_hash_algorithm,omitempty"`
+	WeightsManifestSHA256 string     `json:"weights_manifest_sha256,omitempty"`
+	WeightsHashAlgorithm  string     `json:"weights_manifest_algorithm,omitempty"`
+	ExpectedModelHash     string     `json:"-"`
+	HashStatus            HashStatus `json:"hash_status,omitempty"`
 	// ArtifactIdentity is set only when the provider's named pair resolved
 	// through the release-bound SPEC-023 §3.7 artifact feed (SPEC-010 v1.7
 	// R007); it carries the matched member and the feed provenance the route
@@ -757,9 +761,11 @@ const maxLifetimeContribPerProvider = 128
 const ReceiptRotationGrace = 7 * 24 * time.Hour
 
 // OccupancySettleWindow is how long after RestoreForwardedSlot provider
-// occupancy frames are ignored. Production WS stamps heartbeat/state_update
-// At with coordinator receive time, so a delayed slots_free=0 handled after
-// restore would otherwise look newer than the restore and zero the next wave.
+// occupancy frames are ignored once no forwarded chats remain. Production WS
+// stamps heartbeat/state_update At with coordinator receive time, so a
+// delayed slots_free=0 handled after restore would otherwise look newer
+// than the restore and zero the next wave. While forwardedInFlight > 0,
+// occupancy is ignored regardless of this window.
 const OccupancySettleWindow = 2 * time.Second
 
 type recoveryHold struct {
@@ -1555,6 +1561,7 @@ func (r *Registry) ConsumeForwardedSlot(providerID, assignedID string) bool {
 	if p == nil || p.AssignedID != assignedID {
 		return false
 	}
+	p.forwardedInFlight++
 	if p.SlotsFree > 0 {
 		p.SlotsFree--
 	}
@@ -1568,14 +1575,17 @@ func (r *Registry) ConsumeForwardedSlot(providerID, assignedID string) bool {
 // ends (success, cancel, disconnect, or failover). It increments by one
 // and never republishes a route-time slots_free snapshot. If a later
 // heartbeat already raised occupancy to SlotsTotal, this is a no-op on
-// the count. Provider occupancy frames received within OccupancySettleWindow
-// after this write are treated as the previous wave's delayed snapshot.
+// the count. Provider occupancy is ignored while forwarded chats are still
+// in flight, and for OccupancySettleWindow after the last restore.
 func (r *Registry) RestoreForwardedSlot(providerID, assignedID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
 	if p == nil || p.AssignedID != assignedID || p.SlotsTotal <= 0 {
 		return false
+	}
+	if p.forwardedInFlight > 0 {
+		p.forwardedInFlight--
 	}
 	if p.SlotsFree < p.SlotsTotal {
 		p.SlotsFree++
@@ -2595,6 +2605,16 @@ func (p *Provider) staleProviderCapacityAt(at time.Time) bool {
 	return !at.After(p.lastCoordinatorSlotRestoreAt.Add(OccupancySettleWindow))
 }
 
+func (p *Provider) ignoreProviderOccupancyAt(at time.Time) bool {
+	if p == nil {
+		return false
+	}
+	if p.forwardedInFlight > 0 {
+		return true
+	}
+	return p.staleProviderCapacityAt(at)
+}
+
 func (r *Registry) ApplyHeartbeatDetailed(providerID, assignedID string, hb HeartbeatUpdate) HeartbeatResult {
 	cp, gap, ok, modelIDChanged, priorModelID, swap, hasSwap := r.applyHeartbeatLocked(providerID, assignedID, hb)
 	// M2-2 / ARCH-2: emit AFTER releasing r.mu. The audit SQLite write
@@ -2688,7 +2708,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.RAMGB = hb.RAMGB
 	p.MaxContextTokens = hb.MaxContextTokens
 	p.MaxConcurrency = hb.MaxConcurrency
-	if !p.staleProviderCapacityAt(hb.At) {
+	if !p.ignoreProviderOccupancyAt(hb.At) {
 		p.SlotsFree = hb.SlotsFree
 	}
 	p.SlotsTotal = hb.SlotsTotal
@@ -2716,7 +2736,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	// registration) is the authoritative declared set.
 	r.recordSeenModelsUnionLocked(p.ProviderID, hb.ModelID, p.SupportedModels)
 	if hb.Status != "" && hb.Status != p.State {
-		staleBusy := p.staleProviderCapacityAt(hb.At) && (hb.Status == StateReady || hb.Status == StateBusy)
+		staleBusy := p.ignoreProviderOccupancyAt(hb.At) && (hb.Status == StateReady || hb.Status == StateBusy)
 		if !staleBusy && r.canApplyProviderStateLocked(p, hb.Status) {
 			r.setStateLocked(p, hb.Status)
 		}
@@ -2902,7 +2922,7 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 		r.mu.Unlock()
 		return nil, false
 	}
-	staleCapacity := p.staleProviderCapacityAt(update.At) && update.SlotsFree != nil
+	staleCapacity := p.ignoreProviderOccupancyAt(update.At) && update.SlotsFree != nil
 	if r.canApplyProviderStateLocked(p, update.State) {
 		if !(staleCapacity && (update.State == StateReady || update.State == StateBusy)) {
 			r.setStateLocked(p, update.State)

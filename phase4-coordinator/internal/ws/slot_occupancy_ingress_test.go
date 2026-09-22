@@ -75,3 +75,46 @@ func TestWSIngressDelayedBusyAfterRestoreDoesNotZeroSeats(t *testing.T) {
 		t.Fatalf("after thermal WS busy heartbeat = state %q slots_free %d, want busy/0", got.State, got.SlotsFree)
 	}
 }
+
+func TestWSIngressInFlightBusyAfterSettleWindowDoesNotZeroRestoredSeat(t *testing.T) {
+	t.Parallel()
+	registry := pool.NewRegistry(nil)
+	var nowMu sync.Mutex
+	now := time.Now().UTC()
+	server := NewServer(capacityTestConfig(8), registry, zerolog.Nop(),
+		WithNow(func() time.Time {
+			nowMu.Lock()
+			defer nowMu.Unlock()
+			return now
+		}))
+	registerCapacityTestProvider(t, server, registry, 8)
+
+	for i := 0; i < 8; i++ {
+		if !registry.ConsumeForwardedSlot("provider-a", "assigned-a") {
+			t.Fatal("ConsumeForwardedSlot returned false")
+		}
+	}
+	if !registry.RestoreForwardedSlot("provider-a", "assigned-a") {
+		t.Fatal("RestoreForwardedSlot returned false")
+	}
+	got, ok := registry.Resolve("provider-a", "assigned-a")
+	if !ok {
+		t.Fatal("provider missing after restore")
+	}
+	if got.SlotsFree != 1 {
+		t.Fatalf("after one restore slots_free=%d, want 1", got.SlotsFree)
+	}
+
+	nowMu.Lock()
+	now = now.Add(pool.OccupancySettleWindow + time.Second)
+	nowMu.Unlock()
+	busy := []byte(`{"type":"heartbeat","status":"busy","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":32768,"max_concurrency":8,"slots_free":0,"slots_total":8,"throughput_tps_estimate":19.8,"requests_served_since_last":0,"avg_latency_ms_since_last":0.0,"throughput_tps_since_last":0.0}`)
+	server.handleHeartbeat(nil, "provider-a", "assigned-a", busy)
+	got, ok = registry.Resolve("provider-a", "assigned-a")
+	if !ok {
+		t.Fatal("provider missing after in-flight busy heartbeat")
+	}
+	if got.SlotsFree != 1 || got.State != pool.StateReady {
+		t.Fatalf("after in-flight WS busy heartbeat = state %q slots_free %d, want ready/1", got.State, got.SlotsFree)
+	}
+}

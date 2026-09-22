@@ -185,6 +185,51 @@ func TestThermalBusyAfterSettleWindowZerosSeats(t *testing.T) {
 	}
 }
 
+func TestInFlightBusyHeartbeatAfterSettleWindowDoesNotZeroRestoredSeat(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		State:            StateReady,
+		SlotsTotal:       8,
+		SlotsFree:        8,
+		MaxConcurrency:   8,
+		MaxContextTokens: 8192,
+	}
+	registry.Register(provider, nil)
+	for i := 0; i < 8; i++ {
+		if !registry.ConsumeForwardedSlot("p1", "s1") {
+			t.Fatal("ConsumeForwardedSlot returned false")
+		}
+	}
+	if !registry.RestoreForwardedSlot("p1", "s1") {
+		t.Fatal("RestoreForwardedSlot returned false")
+	}
+	got, ok := registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after restore")
+	}
+	if got.SlotsFree != 1 {
+		t.Fatalf("after one restore slots_free=%d, want 1", got.SlotsFree)
+	}
+	registry.ApplyHeartbeat("p1", "s1", HeartbeatUpdate{
+		Status:           StateBusy,
+		ModelID:          "model-a",
+		MaxContextTokens: 8192,
+		MaxConcurrency:   8,
+		SlotsFree:        0,
+		SlotsTotal:       8,
+		At:               time.Now().UTC().Add(OccupancySettleWindow + time.Second),
+	})
+	got, ok = registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after delayed in-flight busy heartbeat")
+	}
+	if got.SlotsFree != 1 || got.State != StateReady {
+		t.Fatalf("after in-flight busy heartbeat = state %q slots_free %d, want ready/1", got.State, got.SlotsFree)
+	}
+}
+
 func TestMarkForwardedSlotAvailableRefusesNonRoutableStates(t *testing.T) {
 	for _, state := range []State{StateDraining, StateDegraded, StateUnavailable} {
 		t.Run(string(state), func(t *testing.T) {
