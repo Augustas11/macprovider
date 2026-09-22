@@ -401,6 +401,16 @@ func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header
 		ProviderID:   provider.ProviderID,
 	}
 	if header == "" {
+		// #1578: a leg the coordinator deliberately never settled — a 503
+		// provider queue-full / no-capacity attempt — has no billing row and
+		// no settlement_attempt_outputs row, so a missing-receipt verdict can
+		// only ever fail with "settlement attempt output missing". Skip it:
+		// there is no receipt to be missing when nothing was served and
+		// nothing is owed. A BILLABLE leg still takes the path below, so a
+		// genuinely absent attempt output on a served request stays loud.
+		if !b.lastRecordedSettlementSubject {
+			return billing.SettlementReceiptState{}, false, nil
+		}
 		state, err := store.RecordMissingSettlementReceipt(ctx, billing.SettlementReceiptMissingInput{
 			SettlementReceiptIdentity: identity,
 		})

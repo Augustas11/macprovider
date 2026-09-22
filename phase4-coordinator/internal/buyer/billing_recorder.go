@@ -126,6 +126,20 @@ type billingRecorder struct {
 	settlementPolicyMode    string
 	settlementPolicyVersion string
 	relayBlind              *relayBlindAuditFields
+	// lastRecordedSettlementSubject latches whether the MOST RECENTLY recorded
+	// row was a leg the coordinator settles at all. It is the single expression
+	// that recordRow's two billing branches gate on: a settlement attempt
+	// output is attempted only for a provider-bound row with a billable status,
+	// never for a 503 (provider queue-full / no-capacity) leg, which served
+	// zero bytes and is owed nothing. ingestSettlementReceipt reads it so that
+	// asking for a *missing* receipt on an unsettled leg is a silent no-op
+	// instead of a guaranteed "settlement attempt output missing" error.
+	//
+	// It deliberately means "this leg was a settlement subject", NOT "the
+	// attempt-output write succeeded": a billable leg whose attempt output
+	// failed to persist must stay loud, because that is a real evidence gap
+	// that makes the request non-payable under SPEC-022. Issue #1578.
+	lastRecordedSettlementSubject bool
 }
 
 type relayBlindAuditFields struct {
@@ -305,6 +319,9 @@ func (b *billingRecorder) recordRow(
 	settlementOutput *billing.SettlementOutput,
 ) error {
 	s := b.server
+	// Reset before any early return so a stale latch from a previous attempt
+	// can never be read by this attempt's ingestSettlementReceipt (#1578).
+	b.lastRecordedSettlementSubject = false
 	if s.reqLog == nil {
 		return nil
 	}
@@ -387,7 +404,14 @@ func (b *billingRecorder) recordRow(
 		}
 	}
 	billingStore, billingCfg, billingSnapshotID := s.billingState()
-	if billingStore != nil && s.reqLogStore != nil && providerAssignedID != "" && status != http.StatusServiceUnavailable {
+	// The one expression both billing branches gate on: this is exactly when a
+	// settlement attempt output is attempted, and therefore exactly when a
+	// settlement receipt has something to bind to. The hot path below
+	// additionally requires s.reqLogStore; the fallback branch at the bottom of
+	// this function takes over otherwise. See the field comment (#1578).
+	settlementSubject := billingStore != nil && providerAssignedID != "" && status != http.StatusServiceUnavailable
+	b.lastRecordedSettlementSubject = settlementSubject
+	if settlementSubject && s.reqLogStore != nil {
 		stableProviderID := providerID
 		if stableProviderID == "" {
 			for _, p := range s.pool.Snapshot() {
@@ -487,7 +511,7 @@ func (b *billingRecorder) recordRow(
 		s.log.Warn().Err(err).Str("request_id", b.requestID).Msg("request_log insert failed")
 		return err
 	}
-	if billingStore != nil && providerAssignedID != "" && status != http.StatusServiceUnavailable {
+	if settlementSubject {
 		// Same ledger-exact credit signal as the hot-path branch: a
 		// provider-bound billable row has persisted (reqLog.Insert above
 		// succeeded) and settlement is being recorded now.
