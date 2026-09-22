@@ -241,6 +241,9 @@ expected_history = {
     # Superseded by published-2026-09-19-openrouter-priced-v1; retained by the
     # append-only ledger (was the current release before the OpenRouter priced cut).
     "published-2026-09-19-openrouter-listed-v1",
+    # Superseded by the current qwen3.6-27b hash-fix cut; retained by the
+    # append-only ledger (was the current release before the hash correction).
+    "published-2026-09-19-openrouter-priced-v1",
     release_id,
 }
 if set(ledger["releases"]) != expected_history:

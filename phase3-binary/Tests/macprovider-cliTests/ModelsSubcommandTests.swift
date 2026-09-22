@@ -372,7 +372,7 @@ final class ModelsSubcommandTests: XCTestCase {
                 }
             },
             trustedPublicKeys: fixture.trustedPublicKeys,
-            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
+            now: { Self.currentStaticFixtureDate() }
         )
         let roots = try makeLaneAStagingRoots()
         // A canonical Hugging Face snapshot that does not match the signed
@@ -442,7 +442,7 @@ final class ModelsSubcommandTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
             trustedPublicKeys: fixture.trustedPublicKeys,
-            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
+            now: { Self.currentStaticFixtureDate() }
         )
         let roots = try makeLaneAStagingRoots()
         let resolver = CachedModelArtifactResolver(
@@ -494,7 +494,7 @@ final class ModelsSubcommandTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
             trustedPublicKeys: fixture.trustedPublicKeys,
-            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
+            now: { Self.currentStaticFixtureDate() }
         )
         let roots = try makeLaneAStagingRoots()
         let resolver = CachedModelArtifactResolver(
@@ -544,7 +544,7 @@ final class ModelsSubcommandTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
             trustedPublicKeys: fixture.trustedPublicKeys,
-            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
+            now: { Self.currentStaticFixtureDate() }
         )
         let roots = try makeLaneAStagingRoots()
         let resolver = CachedModelArtifactResolver(
@@ -611,7 +611,7 @@ final class ModelsSubcommandTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
             trustedPublicKeys: fixture.trustedPublicKeys,
-            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
+            now: { Self.currentStaticFixtureDate() }
         )
         let missingConfig = FileManager.default.temporaryDirectory
             .appendingPathComponent("macprovider-lane-a-missing-\(UUID().uuidString).yaml")
@@ -641,7 +641,7 @@ final class ModelsSubcommandTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
             trustedPublicKeys: fixture.trustedPublicKeys,
-            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
+            now: { Self.currentStaticFixtureDate() }
         )
         let roots = try makeLaneAStagingRoots()
         let resolver = CachedModelArtifactResolver(
@@ -687,7 +687,7 @@ final class ModelsSubcommandTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
             trustedPublicKeys: fixture.trustedPublicKeys,
-            now: { Self.prepareDate("2026-09-19T01:00:00Z") }
+            now: { Self.currentStaticFixtureDate() }
         )
         let capture = try await withPrepareStaticInputs(inputs) {
             let command = try ModelsPrepareCommand.parse([
@@ -1917,6 +1917,10 @@ final class ModelsSubcommandTests: XCTestCase {
 
     private static func prepareDate(_ raw: String) -> Date {
         ISO8601DateFormatter.autotuneInternet.date(from: raw)!
+    }
+
+    private static func currentStaticFixtureDate() -> Date {
+        prepareDate("2026-09-22T10:18:09Z")
     }
 
     private func mutateRecommendationFixture(
