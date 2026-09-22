@@ -104,7 +104,7 @@ proved 2026-09-22). Do not set `on`. Do not promote the fleet.
 | Stop serial Qwen tool turns after the first complete valid call (omitted/`false` `parallel_tool_calls`; leftover markup must not hang) | merged | #1662 |
 | Keep CB canary streams alive past the first lockstep hop | merged | #1665 |
 | Pearl keyed first-turn chats enter Studio CB canary (positive cache hits stay serial until AC-26) | merged | #1666 |
-| Ultra ≥256 GB default max batch is 8; coordinator drops slot reservation on accept; wholesale queue waits 10s | in progress | #1669 |
+| Ultra ≥256 GB default max batch is 8; coordinator drops slot reservation on accept; wholesale queue waits 10s | in progress | #1670 |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
