@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -355,6 +356,64 @@ func TestSeamH4_CreditedWhileBuyerToldFailedIsAConflict(t *testing.T) {
 	// arbiter. Suppressing it would erase a real provider credit.
 	if !observed.Rows()[0].Conflicted {
 		t.Fatal("conflicting row not marked Conflicted")
+	}
+}
+
+// TestSeamH4_SettlementOutputDeadlineAfterCreditKeepsBuyerSuccess is issue
+// #1675. A SQLite deadline after the credit row commits must not tell the
+// buyer the request failed. That 500 is what the gateway settles as
+// prompt-only while the ledger keeps the completion credit.
+func TestSeamH4_SettlementOutputDeadlineAfterCreditKeepsBuyerSuccess(t *testing.T) {
+	prev := settlementOutputWriteContextForTest
+	settlementOutputWriteContextForTest = func(context.Context) context.Context {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+	t.Cleanup(func() { settlementOutputWriteContextForTest = prev })
+
+	reqLog, dbPath := h4OpenRequestLog(t)
+	var observed *requestTerminal
+	s := h4Server(t, reqLog, h4RelaySuccess(), &observed)
+
+	rr := h4PostChat(t, s, []byte(h4ChatBody))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("buyer status = %d, want 200; body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "request_log_failed") {
+		t.Fatalf("buyer body = %s, want the served completion", rr.Body.String())
+	}
+	if statuses := h4RequestLogStatuses(t, dbPath); len(statuses) != 1 || statuses[0] != http.StatusOK {
+		t.Fatalf("request_log statuses = %v, want exactly [200]", statuses)
+	}
+	if observed == nil {
+		t.Fatal("terminal arbiter was never evaluated")
+	}
+	claim, ok := observed.claimedBuyer()
+	if !ok || claim.Status != http.StatusOK {
+		t.Fatalf("claimed buyer terminal = %+v (ok=%v), want status 200", claim, ok)
+	}
+	if got := observed.Conflicts(); got != 0 {
+		t.Fatalf("conflicts = %d, want 0 — the buyer was given the served completion", got)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var credits int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_request_credits WHERE status = 200 AND provider_credits > 0`).Scan(&credits); err != nil {
+		t.Fatalf("count credits: %v", err)
+	}
+	if credits != 1 {
+		t.Fatalf("credited rows = %d, want 1", credits)
+	}
+	var outputs int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM settlement_attempt_outputs`).Scan(&outputs); err != nil {
+		t.Fatalf("count settlement outputs: %v", err)
+	}
+	if outputs != 0 {
+		t.Fatalf("settlement outputs = %d, want 0 — the deadline dropped the evidence row", outputs)
 	}
 }
 

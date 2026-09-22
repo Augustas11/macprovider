@@ -2,14 +2,21 @@ package buyer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 )
+
+// settlementOutputWriteContextForTest, when set, replaces the detached
+// context used for the post-credit settlement-output write. Tests use it
+// to force a deadline without waiting on SQLite. Production leaves it nil.
+var settlementOutputWriteContextForTest func(context.Context) context.Context
 
 // billingRecorder is the typed extraction of the previously-inline
 // logRowWithBilling closure from handleChatCompletions. M3-10
@@ -139,7 +146,14 @@ type billingRecorder struct {
 	// attempt-output write succeeded": a billable leg whose attempt output
 	// failed to persist must stay loud, because that is a real evidence gap
 	// that makes the request non-payable under SPEC-022. Issue #1578.
-	lastRecordedSettlementSubject bool
+	//
+	// settlementOutputMissingAfterCredit is the one exception. The credit
+	// row is already committed. A SQLite deadline or lock on the output
+	// write must not turn the buyer response into a 500: the gateway then
+	// settles prompt-only while the ledger keeps the completion credit
+	// (issue #1675). Hard failures (missing table, constraint) still return.
+	lastRecordedSettlementSubject      bool
+	settlementOutputMissingAfterCredit bool
 }
 
 type relayBlindAuditFields struct {
@@ -493,10 +507,9 @@ func (b *billingRecorder) recordRow(
 		// #766 observe-only: publish the credited row to the request arbiter
 		// so the buyer terminal / ledger agreement is checkable. Placed with
 		// providerCredited (i.e. BEFORE the settlement-output bookkeeping) so
-		// the arbiter sees exactly what the ledger credited, including when a
-		// settlement-persist failure later turns the buyer terminal into a 500.
+		// the arbiter sees exactly what the ledger credited.
 		b.noteBillableRow(status, attemptN, faultFlag)
-		if err := b.recordSettlementAttemptOutput(ctx, billingStore, billingInput, settlementOutput); err != nil {
+		if err := b.persistSettlementAttemptOutput(billingStore, billingInput, settlementOutput); err != nil {
 			return err
 		}
 		return nil
@@ -544,11 +557,49 @@ func (b *billingRecorder) recordRow(
 			PositiveVerificationExcluded: row.PositiveVerificationExcluded,
 			RewardsExcluded:              row.RewardsExcluded,
 		}
-		if err := b.recordSettlementAttemptOutput(ctx, billingStore, billingInput, settlementOutput); err != nil {
+		if err := b.persistSettlementAttemptOutput(billingStore, billingInput, settlementOutput); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// persistSettlementAttemptOutput writes the settlement evidence after the
+// credit row has committed. It uses its own timeout so a slow credit insert
+// cannot eat the budget for this write. A deadline or lock after the credit
+// is logged and does not fail the buyer. Any other error still fails the
+// request.
+func (b *billingRecorder) persistSettlementAttemptOutput(store *billing.Store, in billing.HotPathInput, output *billing.SettlementOutput) error {
+	outputCtx, outputCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	defer outputCancel()
+	if settlementOutputWriteContextForTest != nil {
+		outputCtx = settlementOutputWriteContextForTest(outputCtx)
+	}
+	err := b.recordSettlementAttemptOutput(outputCtx, store, in, output)
+	if err == nil || !settlementOutputPersistFailedAfterCredit(err) {
+		return err
+	}
+	b.settlementOutputMissingAfterCredit = true
+	b.server.log.Warn().
+		Err(err).
+		Str("request_id", b.requestID).
+		Str("event", "settlement_output_persist_failed_after_credit").
+		Msg("settlement attempt output missing after provider credit; buyer response kept")
+	return nil
+}
+
+func settlementOutputPersistFailedAfterCredit(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, billing.ErrRouteSnapshotStorePressure) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "SQLITE_BUSY") ||
+		strings.Contains(msg, "SQLITE_LOCKED") ||
+		strings.Contains(msg, "database is locked")
 }
 
 func boundedTokenPointer(value *int64, limit int64) *int64 {

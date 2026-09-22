@@ -392,6 +392,16 @@ func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header
 	if store == nil {
 		return billing.SettlementReceiptState{}, false, nil
 	}
+	if b.settlementOutputMissingAfterCredit {
+		// The credit is already durable. Failing the buyer here is what turns
+		// a served completion into gateway prompt-only settlement (#1675).
+		b.server.log.Warn().
+			Str("request_id", b.requestID).
+			Str("provider_id", provider.ProviderID).
+			Str("event", "settlement_output_persist_failed_after_credit").
+			Msg("skipping settlement receipt ingest after settlement output persist failure")
+		return billing.SettlementReceiptState{}, false, nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer cancel()
 	identity := billing.SettlementReceiptIdentity{
