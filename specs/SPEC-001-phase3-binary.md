@@ -4074,15 +4074,12 @@ The request slot is freed (verifiable via `/v1/health`).
 **Run by:** `phase3-binary/scripts/test-ws-cancellation.sh`
 
 **AC-14. WS advertised-capacity admission and overflow rejection (reconciled v1.9.19).**
-A mock coordinator runs two relay-capacity cases. With the default advertised
-capacity of 1, it sends a second `inference_request` on a WebSocket while the
-first is still in flight; the relay accepts the first and rejects the second
-with `inference_response_end status: "error_queue_full"` (FR-25/FR-27), and the
-first completes normally with correct `request_id` correlation. With
-`max_concurrency_override: 8` advertised, it sends eight concurrent
-`inference_request` frames on the same WebSocket and all eight are admitted; a
-ninth concurrent request is rejected with `error_queue_full`, and none of the
-eight admitted requests is incorrectly rejected.
+Required behavior: with default advertised capacity 1, a second WebSocket
+`inference_request` while the first is in flight receives
+`inference_response_end status: "error_queue_full"` (FR-25/FR-27). With
+`max_concurrency_override: 8` advertised, eight concurrent requests on the
+same WebSocket are admitted, a ninth is rejected with `error_queue_full`, and
+the eight admitted requests complete with correct `request_id` correlation.
 
 **Unit coverage:** focused relay admission tests in
 `phase3-binary/Tests/macprovider-cliTests/InferenceRelayTests.swift`:
@@ -4090,9 +4087,9 @@ eight admitted requests is incorrectly rejected.
 `testEightAdvertisedSeatsSetRelayAdmissionLimit`,
 `testRelayAdmissionExpandsAfterProviderStatusCapacityWarmSwap`,
 `testRelayAdmissionContractsAfterProviderStatusCapacityWarmSwap`, and
-`testCoordinatorRelayAdmissionFollowsConfiguredSeats`. The eight-concurrent-
-request and ninth-overflow case remains pending signed live Tier-2 WS relay E2E.
-The legacy
+`testCoordinatorRelayAdmissionFollowsConfiguredSeats`. These tests do not
+claim the eight-concurrent-request, ninth-overflow, or normal-completion E2E
+result; that evidence remains pending on signed live Tier-2 WS hardware. The legacy
 `phase3-binary/scripts/test-ws-multiplexing.sh` harness is not current
 acceptance evidence for this AC until it is updated for the Tier-2
 `auth_request` handshake. The signed E2E must also prove full
