@@ -2125,7 +2125,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		if pillarAActive && !p.RoutingEligible() {
 			continue
 		}
-		if !pillarAActive && (p.State != pool.StateReady || !p.CapacityEligible()) {
+		if !pillarAActive && (!p.CapacityEligible() || (p.State == pool.StateBusy && !p.RoutingEligible())) {
 			continue
 		}
 		if !s.byomDefaultPaidRoutingEligible(p) {
@@ -8053,14 +8053,11 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		if !provider.CapacityEligible() || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
-		if provider.State != pool.StateReady {
-			if provider.State == pool.StateBusy && provider.SlotsFree <= 0 {
+		if !provider.RoutingEligible() {
+			if provider.SlotQueueEligible() {
 				return pool.Provider{}, queuedProviderWait
 			}
 			return pool.Provider{}, queuedProviderTerminal
-		}
-		if provider.SlotsFree <= 0 {
-			return pool.Provider{}, queuedProviderWait
 		}
 		admissionCtx, admissionCancel := newRouteSnapshotDispatchContext(ctx)
 		byomEligibility := s.byomDefaultPaidRoutingEligibilityWithContext(admissionCtx, provider)
@@ -8209,10 +8206,7 @@ func (s *Server) splitQueuedCandidates(candidates []pool.Provider, queueReservat
 }
 
 func (s *Server) providerSlotQueueEligible(provider pool.Provider) bool {
-	return provider.CapacityEligible() &&
-		(provider.State == pool.StateReady || provider.State == pool.StateBusy) &&
-		provider.SlotsTotal > 0 &&
-		provider.SlotsFree == 0
+	return provider.SlotQueueEligible()
 }
 
 func (s *Server) providerSlotQueueOverflowEligible(provider pool.Provider) bool {
@@ -8357,7 +8351,7 @@ func hasAvailableSlot(p pool.Provider) bool {
 	if !p.CapacityEligible() {
 		return false
 	}
-	return p.State == pool.StateReady && p.SlotsFree > 0
+	return (p.State == pool.StateReady || p.State == pool.StateBusy) && p.SlotsFree > 0
 }
 
 func (s *Server) tier2ProviderExcluded(p pool.Provider) bool {

@@ -1,7 +1,15 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.1 (2026-09-10, SPEC-041 reservation and opaque-dispatch composition)
+**Version:** 1.6.2 (2026-09-22, WS occupancy and free-seat routing)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.6.2 (2026-09-22, issue #1679):** A `busy` label with
+`slots_free > 0` is stale occupancy and remains routable after all other
+eligibility gates. Coordinator-restored seats are held against late WS
+`busy`/zero reports until the Mac reports `ready` with free seats; a timer
+cannot establish freshness. Explicit thermal throttling and WS queue-full
+close capacity immediately and remain closed across restores until a clean
+ready/free report. Degraded, draining, and unavailable remain ineligible.
 
 **Change log v1.6.1 (2026-09-10, SPEC-041 composition):** The coordinator is authoritative for durable relay-blind key/revocation and `reserved -> consumed_predispatch -> dispatched -> terminal` state. It accepts reservation/consume only from authenticated gateway context, atomically burns single-use material before quota/dispatch, arms one exact live-session WS dispatch, rejects HTTP/failover/plaintext conversion, persists bounded relay facts in `request_log`, and never retries unknown postdispatch work. This is a default-off interface reservation; SPEC-041 remains draft and pending.
 
@@ -1045,8 +1053,8 @@ pool entry, and adjusts routing eligibility:
 
 | State | Routing eligible | Behavior |
 |---|---|---|
-| `ready` | Yes | Normal operation |
-| `busy` | No | All slots occupied; in-flight continues |
+| `ready` | With free seats | Normal operation |
+| `busy` | With free seats and no safety hold | Zero seats means full; a positive free-seat count means the label is stale |
 | `degraded` | No | Warm-up or partial failure; in-flight continues |
 | `draining` | No | Provider shutting down; will close WS |
 | `unavailable` | No | Fatal error; MAY close WS after 60s timeout |
@@ -1952,7 +1960,8 @@ resolves session ID to the current pool entry; if the session has ended,
 returns 503 with `code: "session_ended"`.
 
 If `X-MacProvider-Provider` is sent and the named provider is in the
-pool in `ready` state with `slots_free > 0`, the coordinator routes to
+pool in `ready` or `busy` state with `slots_free > 0` and no capacity
+safety hold, the coordinator routes to
 it directly (bypassing the selection algorithm). If the pinned provider
 is unavailable, the coordinator returns 503 (does NOT fall back — the
 buyer explicitly requested this one).
@@ -1961,10 +1970,10 @@ If both headers are sent, `X-MacProvider-Session` takes precedence (more
 specific). `/poolz` shows both `provider_id` and `assigned_id` for each
 entry.
 
-**FR-R4. Pool filtering: only ready providers with free slots.**
+**FR-R4. Pool filtering: serving providers with free slots.**
 Before running the selection algorithm, the coordinator filters the pool
 to only include providers where:
-- `state` is `ready`
+- `state` is `ready` or `busy`, with no explicit thermal or queue-full hold
 - `slots_free > 0`
 - `model_id` matches the request's `model` field
 
@@ -2194,7 +2203,7 @@ function route(request, pool, headers) -> provider | error:
         if provider is nil:
             return error(503, "Pinned provider not in pool")
     if provider is set:
-        if provider.state != "ready" or provider.slots_free <= 0:
+        if provider.state not in ("ready", "busy") or provider.slots_free <= 0 or provider.capacity_safety_hold:
             return error(503, "Pinned provider not available")
         if not model_id_equal(provider.model_id, model):
             return error(404, "Pinned provider serves different model")
@@ -2209,9 +2218,9 @@ function route(request, pool, headers) -> provider | error:
     for p in pool:
         if not model_id_equal(p.model_id, model):
             continue
-        if p.state != "ready":
+        if p.state not in ("ready", "busy"):
             continue
-        if p.slots_free <= 0:
+        if p.slots_free <= 0 or p.capacity_safety_hold:
             if p.slots_total > 0 and p.max_context_tokens >= estimated_tokens:
                 queue_candidates.append(p)
             continue
@@ -2303,9 +2312,9 @@ function route(request, pool, headers) -> provider | error:
    identifier (e.g., `mlx-community/Qwen2.5-7B-Instruct-4bit`).
 
 3. **State + capacity filter** removes any provider that cannot serve
-   the request right now. Only `ready` providers with `slots_free > 0`
-   and sufficient `max_context_tokens` are immediate candidates. For
-   non-pinned requests, a `ready` provider with `slots_free == 0`,
+   the request right now. `ready` or `busy` providers with `slots_free > 0`,
+   no explicit capacity safety hold, and sufficient `max_context_tokens` are
+   immediate candidates. For non-pinned requests, a serving provider with `slots_free == 0`,
    `slots_total > 0`, and sufficient `max_context_tokens` MAY enter the
    bounded coordinator-side slot queue described below.
 
@@ -4752,7 +4761,8 @@ connected providers with live capacity data.
 
 **Step 4. State machine for provider states.**
 Implement state transitions from `state_update` messages. Implement
-routing eligibility rules (only `ready` + `slots_free > 0`).
+routing eligibility rules (`ready` or `busy` with `slots_free > 0`
+and no explicit capacity safety hold).
 Implement wake detection (heartbeat gap > 120s -> warm_up). Implement
 disconnect detection + grace period. Deliverable: provider state
 transitions logged and reflected in pool.

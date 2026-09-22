@@ -1,7 +1,7 @@
 # SPEC-004 — Smart Router
 
-**Version:** 0.3.4 (2026-09-03, #1354 FR-P8a fail-open observe-only reconciliation)
-**Extends:** SPEC-002 v1.6.0 § 5 (routing algorithm)
+**Version:** 0.3.5 (2026-09-22, issue #1679 free-seat routing)
+**Extends:** SPEC-002 v1.6.2 § 5 (routing algorithm)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked), SPEC-003 v0.7, SPEC-006 v0.9.8 (Pillar A gated on SPEC-006 v0.8; the v0.3.2 FR-SR-2 provider-visibility carve-out is coordinated with SPEC-006 v0.9.8 / SPEC-008 v0.4.1)
 
 SPEC-004 is additive. With every new `routing.*` key at its default value,
@@ -10,6 +10,13 @@ deterministic equal-metric tie-breaking, one-shot F-4 failover only, exact
 model ID routing, and no sticky affinity.
 
 ## Changelog
+
+### v0.3.5 (2026-09-22)
+
+- A `busy` provider with free seats is eligible after the normal trust,
+  context, and recovery gates. Zero-seat or safety-held serving providers may
+  enter the bounded queue, but thermal and WS queue-full holds block dispatch
+  until a ready/free capacity report clears them.
 
 ### v0.3.4 (2026-09-03)
 
@@ -195,8 +202,8 @@ Ordered pipeline:
    selected objective, promote it to position 0 as a soft preference. If not,
    continue with normal selection and log `sticky_miss`.
 5. Build candidates from the pool using SPEC-002 filters:
-   - FR-P5 state must be `ready` (this excludes wake-from-sleep `warm_up`
-     degraded providers, FR-P8).
+   - FR-P5 state must be `ready` or `busy` with no explicit capacity safety
+     hold (this excludes wake-from-sleep `warm_up` degraded providers, FR-P8).
    - `slots_free > 0`.
    - The FR-P8a admission warm-up probe is observe-only (SPEC-002 v1.6.0) and
      is NOT a candidate filter — a provider is routable regardless of its
@@ -282,7 +289,7 @@ independently from SPEC-004 v0.2.
 A sticky entry points to a stable `provider_id`, not an `assigned_id`. The
 coordinator MAY route to the provider's current active session after reconnect,
 but only if the provider passes the full SPEC-002 eligibility filter. If the
-sticky provider is absent, `busy`, `degraded` (including wake-from-sleep
+sticky provider is absent, full or safety-held, `degraded` (including wake-from-sleep
 `warm_up`), `draining`, `unavailable`, breaker-held, quota-blocked,
 context-too-small, or serving a model
 outside the requested class, the coordinator MUST ignore the sticky entry for
@@ -848,7 +855,7 @@ balanced formula and assert the selected provider and logged component scores.
 
 **AC-SR-6. Empty class returns clean 503.**
 Configure a class whose concrete providers are all absent, `degraded`
-(including wake-from-sleep `warm_up`), breaker-held, busy, or
+(including wake-from-sleep `warm_up`), breaker-held, full or safety-held, or
 context-too-small. A class request returns HTTP 503 with
 OpenAI-compatible `no_provider_available` shape and logs the class resolution
 plus filter counts.
@@ -927,8 +934,9 @@ attempted provider.
 - **F-4 is not weakened.** Hard-pinned requests still do not fail over.
   Streaming requests still cannot fail over or retry after bytes are
   committed. Buyers still receive one coherent response or one clean error.
-- **FR-P5 is not weakened.** Only `ready` providers with free slots are
-  routable. Sticky and class aliases never override state eligibility.
+- **FR-P5 is not weakened.** Only serving providers with free slots and no
+  explicit capacity safety hold are routable. Sticky and class aliases never
+  override state eligibility.
 - **FR-P8a is observe-only (SPEC-002 v1.6.0), not weakened.** The admission
   warm-up probe never gated SPEC-004 routing and now formally does not: a
   provider is buyer-routable for sticky hits, class requests, retry attempts,

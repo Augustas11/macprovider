@@ -39,7 +39,7 @@ import (
 const buyerTestHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 const buyerOtherHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 
-func TestModelsAggregatesUniqueReadyProviderModels(t *testing.T) {
+func TestModelsAggregatesUniqueRoutableProviderModels(t *testing.T) {
 	registry := pool.NewRegistry([]config.ProviderConfig{
 		{ProviderID: "p1", EndpointURL: "https://p1.example"},
 		{ProviderID: "p2", EndpointURL: "https://p2.example"},
@@ -79,8 +79,8 @@ func TestModelsAggregatesUniqueReadyProviderModels(t *testing.T) {
 	if got.Object != "list" {
 		t.Fatalf("object = %q", got.Object)
 	}
-	if len(got.Data) != 2 {
-		t.Fatalf("models = %d, want 2: %#v", len(got.Data), got.Data)
+	if len(got.Data) != 3 {
+		t.Fatalf("models = %d, want 3: %#v", len(got.Data), got.Data)
 	}
 	if got.Data[0].ID != "model-a" || got.Data[0].ProviderCount != 2 || got.Data[0].MaxContextTokens != 50000 || got.Data[0].TotalSlots != 2 {
 		t.Fatalf("model-a aggregation wrong: %#v", got.Data[0])
@@ -90,6 +90,9 @@ func TestModelsAggregatesUniqueReadyProviderModels(t *testing.T) {
 	}
 	if got.Data[1].ID != "model-b" || got.Data[1].ProviderCount != 1 || got.Data[1].MaxContextTokens != 120000 || got.Data[1].TotalSlots != 1 {
 		t.Fatalf("model-b aggregation wrong: %#v", got.Data[1])
+	}
+	if got.Data[2].ID != "model-c" || got.Data[2].ProviderCount != 1 || got.Data[2].MaxContextTokens != 200000 || got.Data[2].TotalSlots != 1 {
+		t.Fatalf("model-c aggregation wrong: %#v", got.Data[2])
 	}
 }
 
@@ -969,6 +972,8 @@ func TestModelsReturnsEmptyListWhenNoReadyProviders(t *testing.T) {
 		{ProviderID: "p1", EndpointURL: "https://p1.example"},
 	})
 	register(registry, "p1", "session-1", "model-a", pool.StateBusy, 20000, 1)
+	zero := 0
+	registry.ApplyStateUpdate("p1", "session-1", pool.StateUpdate{State: pool.StateBusy, SlotsFree: &zero, At: time.Now().UTC()})
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	rr := httptest.NewRecorder()
@@ -6777,6 +6782,8 @@ func TestProviderHTTP530MarksUnavailable(t *testing.T) {
 func TestChatCompletionsSplitsUnknownModelAndUnavailableProvider(t *testing.T) {
 	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "http://p1.example"}})
 	registerWithEndpoint(registry, "p1", "session-1", "model-a", pool.StateBusy, 20000, 1, "http://p1.example", 20)
+	zero := 0
+	registry.ApplyStateUpdate("p1", "session-1", pool.StateUpdate{State: pool.StateBusy, SlotsFree: &zero, At: time.Now().UTC()})
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
 
 	unknown := postChat(t, server, []byte(`{"model":"missing","messages":[{"role":"user","content":"hello"}]}`), nil)

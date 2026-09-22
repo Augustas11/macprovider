@@ -182,7 +182,7 @@ func (s *Server) forwardWithFailover(
 		excluded[state.provider.SortKey()] = struct{}{}
 		state.faultedRoutes[state.provider.SortKey()] = struct{}{}
 		if tr.markBusy {
-			s.pool.MarkState(state.provider.ProviderID, state.provider.AssignedID, pool.StateBusy)
+			s.pool.MarkForwardedSlotFull(state.provider.ProviderID, state.provider.AssignedID)
 			// Queue-full / still-busy terminals keep the consumed occupancy.
 			// Restoring here would republish a free slot while the Mac is full.
 			// Drop the in-flight ignore counter so later ready/thermal reports apply.

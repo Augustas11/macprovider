@@ -40,6 +40,46 @@ func TestMarkForwardedSlotAvailablePromotesOnlyServingBusySession(t *testing.T) 
 	}
 }
 
+func TestBusyWithFreeSeatsRoutesAndFullProviderQueues(t *testing.T) {
+	provider := Provider{State: StateBusy, SlotsFree: 4, SlotsTotal: 8}
+	if !provider.RoutingEligible() || provider.SlotQueueEligible() {
+		t.Fatal("busy provider with four free seats must route immediately")
+	}
+	provider.SlotsFree = 0
+	if provider.RoutingEligible() || !provider.SlotQueueEligible() {
+		t.Fatal("busy provider with zero free seats must enter the slot queue")
+	}
+	provider.State = StateDegraded
+	provider.SlotsFree = 4
+	if provider.RoutingEligible() || provider.SlotQueueEligible() {
+		t.Fatal("degraded provider must stay closed despite free seats")
+	}
+}
+
+func TestQueueFullBlocksRestoresUntilReadyFreeReport(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsFree: 4, SlotsTotal: 4}
+	registry.Register(provider, nil)
+	if !registry.ConsumeForwardedSlot("p1", "s1") || !registry.MarkForwardedSlotFull("p1", "s1") || !registry.DropForwardedInFlight("p1", "s1") {
+		t.Fatal("failed to record WS queue-full result")
+	}
+	got, _ := registry.Resolve("p1", "s1")
+	if got.SlotsFree != 0 || got.RoutingEligible() || !got.SlotQueueEligible() {
+		t.Fatalf("queue-full must wait without routing: state=%q slots_free=%d", got.State, got.SlotsFree)
+	}
+	registry.RestoreForwardedSlot("p1", "s1")
+	got, _ = registry.Resolve("p1", "s1")
+	if got.SlotsFree != 0 || got.RoutingEligible() {
+		t.Fatal("restore reopened explicitly rejected capacity")
+	}
+	free := 4
+	registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &free})
+	got, _ = registry.Resolve("p1", "s1")
+	if got.SlotsFree != 4 || !got.RoutingEligible() {
+		t.Fatal("ready/free report did not reopen queue-full capacity")
+	}
+}
+
 func TestConsumeForwardedSlotDecrementsAndMarksBusy(t *testing.T) {
 	registry := NewRegistry(nil)
 	provider := &Provider{
@@ -145,7 +185,7 @@ func TestDelayedReceiveTimeBusyHeartbeatDoesNotZeroRestoredSeats(t *testing.T) {
 	}
 }
 
-func TestThermalBusyAfterSettleWindowZerosSeats(t *testing.T) {
+func TestThermalHeartbeatZerosSeatsImmediatelyAndSurvivesRestore(t *testing.T) {
 	registry := NewRegistry(nil)
 	provider := &Provider{
 		ProviderID:       "p1",
@@ -174,7 +214,8 @@ func TestThermalBusyAfterSettleWindowZerosSeats(t *testing.T) {
 		MaxConcurrency:   4,
 		SlotsFree:        0,
 		SlotsTotal:       4,
-		At:               time.Now().UTC().Add(OccupancySettleWindow + time.Second),
+		SafetyTelemetry:  &ProviderSafetyTelemetry{ThermallyThrottled: true},
+		At:               time.Now().UTC(),
 	})
 	got, ok = registry.Resolve("p1", "s1")
 	if !ok {
@@ -182,6 +223,68 @@ func TestThermalBusyAfterSettleWindowZerosSeats(t *testing.T) {
 	}
 	if got.SlotsFree != 0 || got.State != StateBusy {
 		t.Fatalf("after thermal heartbeat = state %q slots_free %d, want busy/0", got.State, got.SlotsFree)
+	}
+	if !registry.RestoreForwardedSlot("p1", "s1") {
+		t.Fatal("restore during thermal hold returned false")
+	}
+	got, ok = registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after thermal restore")
+	}
+	if got.SlotsFree != 0 || got.State != StateBusy {
+		t.Fatalf("after thermal restore = state %q slots_free %d, want busy/0", got.State, got.SlotsFree)
+	}
+	registry.ApplyHeartbeat("p1", "s1", HeartbeatUpdate{
+		Status:           StateReady,
+		ModelID:          "model-a",
+		MaxContextTokens: 8192,
+		MaxConcurrency:   4,
+		SlotsFree:        4,
+		SlotsTotal:       4,
+		At:               time.Now().UTC(),
+	})
+	got, ok = registry.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing after thermal recovery heartbeat")
+	}
+	if got.SlotsFree != 4 || got.State != StateReady {
+		t.Fatalf("after thermal recovery = state %q slots_free %d, want ready/4", got.State, got.SlotsFree)
+	}
+}
+
+func TestThermalReportPreservesNonServingState(t *testing.T) {
+	for _, state := range []State{StateDegraded, StateDraining, StateUnavailable} {
+		for _, ingress := range []string{"heartbeat", "state_update"} {
+			t.Run(string(state)+"/"+ingress, func(t *testing.T) {
+				registry := NewRegistry(nil)
+				registry.Register(&Provider{ProviderID: "p1", AssignedID: "s1", State: StateReady, SlotsTotal: 4, SlotsFree: 4}, nil)
+				if ingress == "heartbeat" {
+					registry.ApplyHeartbeat("p1", "s1", HeartbeatUpdate{
+						Status: state, SlotsTotal: 4, SlotsFree: 0,
+						SafetyTelemetry: &ProviderSafetyTelemetry{ThermallyThrottled: true},
+						At:              time.Now().UTC(),
+					})
+				} else {
+					zero := 0
+					four := 4
+					registry.ApplyStateUpdate("p1", "s1", StateUpdate{
+						State: state, Reason: "thermal_throttled", SlotsTotal: &four, SlotsFree: &zero,
+					})
+				}
+				got, ok := registry.Resolve("p1", "s1")
+				if !ok || got.State != state || got.SlotsFree != 0 || got.RoutingEligible() || got.SlotQueueEligible() {
+					t.Fatalf("thermal %s report: state=%q slots_free=%d found=%v, want %s/0 and closed", ingress, got.State, got.SlotsFree, ok, state)
+				}
+				if state == StateUnavailable {
+					four := 4
+					registry.ApplyStateUpdate("p1", "s1", StateUpdate{State: StateReady, SlotsFree: &four})
+					got, _ = registry.Resolve("p1", "s1")
+					if got.State != StateUnavailable || got.RoutingEligible() || got.SlotQueueEligible() {
+						t.Fatalf("ready/free revived unavailable session after thermal %s report: state=%q", ingress, got.State)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -219,7 +322,7 @@ func TestInFlightBusyHeartbeatAfterSettleWindowDoesNotZeroRestoredSeat(t *testin
 		MaxConcurrency:   8,
 		SlotsFree:        0,
 		SlotsTotal:       8,
-		At:               time.Now().UTC().Add(OccupancySettleWindow + time.Second),
+		At:               time.Now().UTC(),
 	})
 	got, ok = registry.Resolve("p1", "s1")
 	if !ok {
@@ -263,7 +366,7 @@ func TestDropForwardedInFlightLetsLaterReadyHeartbeatApply(t *testing.T) {
 		MaxConcurrency:   8,
 		SlotsFree:        8,
 		SlotsTotal:       8,
-		At:               time.Now().UTC().Add(OccupancySettleWindow + time.Second),
+		At:               time.Now().UTC(),
 	})
 	got, ok = registry.Resolve("p1", "s1")
 	if !ok {

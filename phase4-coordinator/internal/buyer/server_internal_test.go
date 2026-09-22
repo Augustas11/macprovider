@@ -19,6 +19,17 @@ import (
 	"github.com/rs/zerolog"
 )
 
+func TestHasAvailableSlotCountsBusyFreeForHashMetadata(t *testing.T) {
+	provider := pool.Provider{State: pool.StateBusy, SlotsFree: 1, SlotsTotal: 2}
+	if !hasAvailableSlot(provider) {
+		t.Fatal("busy provider with a free seat was omitted from hash metadata")
+	}
+	provider.SlotsFree = 0
+	if hasAvailableSlot(provider) {
+		t.Fatal("full busy provider was counted in hash metadata")
+	}
+}
+
 func TestValidatePinnedProviderAcceptsCatalogKeyAlias(t *testing.T) {
 	const hfID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
 	const catalogKey = "openai/gpt-oss-20b"
