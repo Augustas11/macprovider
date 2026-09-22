@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.18",
+      "version": "1.9.19",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -7767,7 +7767,7 @@
     {
       "requirement_id": "SPEC-046-R001",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:struct ModelsCommand",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMDiscoveryWire",
@@ -7798,7 +7798,12 @@
           "expires_at": "2026-10-18"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "The SPEC-001 version lock changed after the 2026-09-18 signed BYOM discovery journey, so its mapped BYOMContractLockTests selector is no longer pinned by that evidence. Implementation and local tests remain mapped, and historical evidence is retained without redating or replacement; restore conformant only after a fresh independently trusted signed JOURNEY-PROVIDER-BYOM-DISCOVERY promotion."
+      }
     },
     {
       "requirement_id": "SPEC-046-R002",
@@ -8020,7 +8025,7 @@
     {
       "requirement_id": "SPEC-046-R008",
       "spec_id": "SPEC-046",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMDiscoveryRunner",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMEvaluationRunner",
@@ -8052,7 +8057,12 @@
           "expires_at": "2026-10-18"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1240",
+        "rationale": "The SPEC-001 version lock changed after the 2026-09-18 signed BYOM discovery journey, so its mapped BYOMContractLockTests selector is no longer pinned by that evidence. Implementation and local tests remain mapped, and historical evidence is retained without redating or replacement; restore conformant only after a fresh independently trusted signed JOURNEY-PROVIDER-BYOM-DISCOVERY promotion."
+      }
     },
     {
       "requirement_id": "SPEC-047-R001",
