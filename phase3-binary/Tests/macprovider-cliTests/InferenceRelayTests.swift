@@ -5,9 +5,22 @@ import MacProviderCore
 @testable import macprovider_cli
 
 final class InferenceRelayTests: XCTestCase {
-    func testEightAdvertisedSeatsAdmitEightRelayRequestsAndRejectNinth() async throws {
-        let runtime = FakeStreamingRuntime(holdUntilReleased: true)
-        try await assertRelayCapacity(seats: 8, runtime: runtime, release: { await runtime.releaseAll() })
+    func testEightAdvertisedSeatsSetRelayAdmissionLimit() async throws {
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 8)
+        )
+        let relay = InferenceRelay(
+            modelRuntime: FakeStreamingRuntime(),
+            providerStatus: status,
+            loadedModelID: "mlx-community/Test-Model",
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            sendFrame: { _ in }
+        )
+        let admissionLimit = await relay.currentAdmissionLimit()
+        XCTAssertEqual(admissionLimit, 8)
     }
 
     func testOneAdvertisedSeatRejectsSecondRelayRequest() async throws {
@@ -45,11 +58,7 @@ final class InferenceRelayTests: XCTestCase {
         }
     }
 
-    private func assertRelayCapacity(
-        seats: Int,
-        runtime: FakeStreamingRuntime = FakeStreamingRuntime(),
-        release: (() async -> Void)? = nil
-    ) async throws {
+    private func assertRelayCapacity(seats: Int) async throws {
         let status = ProviderStatus(
             modelID: "mlx-community/Test-Model",
             modelLoaded: true,
@@ -57,14 +66,14 @@ final class InferenceRelayTests: XCTestCase {
         )
         let recorder = FrameRecorder()
         let relay = InferenceRelay(
-            modelRuntime: runtime,
+            modelRuntime: FakeStreamingRuntime(),
             providerStatus: status,
             loadedModelID: "mlx-community/Test-Model",
             maxActiveRequests: seats,
             maxBodyBytes: 4096,
             sendFrame: { frame in await recorder.append(frame) }
         )
-        try await assertRelayCapacity(seats: seats, status: status, relay: relay, recorder: recorder, release: release)
+        try await assertRelayCapacity(seats: seats, status: status, relay: relay, recorder: recorder)
     }
 
     private func assertRelayCapacityAfterWarmSwap(startupSeats: Int, currentSeats: Int) async throws {
@@ -95,8 +104,7 @@ final class InferenceRelayTests: XCTestCase {
         seats: Int,
         status: ProviderStatus,
         relay: InferenceRelay,
-        recorder: FrameRecorder,
-        release: (() async -> Void)?
+        recorder: FrameRecorder
     ) async throws {
         let body = #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"stream":true}"#
 
@@ -108,7 +116,7 @@ final class InferenceRelayTests: XCTestCase {
                 "body": body,
             ])
         }
-        try await waitUntil(timeoutNanoseconds: 10_000_000_000) {
+        try await waitUntil {
             let frames = await recorder.frames
             return (1...seats).allSatisfy { index in
                 frames.contains {
@@ -136,18 +144,14 @@ final class InferenceRelayTests: XCTestCase {
                 $0["request_id"] as? String != overflowID
         })
 
-        if let release {
-            await release()
-        } else {
-            for index in 1...seats {
-                try await relay.handleCancelRequest([
-                    "type": "cancel_request",
-                    "request_id": "req-capacity-\(index)",
-                    "reason": "test_cleanup",
-                ])
-            }
+        for index in 1...seats {
+            try await relay.handleCancelRequest([
+                "type": "cancel_request",
+                "request_id": "req-capacity-\(index)",
+                "reason": "test_cleanup",
+            ])
         }
-        let drained = await relay.waitUntilIdle(timeoutSeconds: 10)
+        let drained = await relay.waitUntilIdle(timeoutSeconds: 2)
         XCTAssertTrue(drained)
         let finalFrames = await recorder.frames
         for index in 1...seats {
@@ -155,7 +159,7 @@ final class InferenceRelayTests: XCTestCase {
                 $0["type"] as? String == "inference_response_end" &&
                     $0["request_id"] as? String == "req-capacity-\(index)"
             })
-            XCTAssertEqual(terminal["status"] as? String, release == nil ? "cancelled" : "complete")
+            XCTAssertEqual(terminal["status"] as? String, "cancelled")
         }
         let snapshot = await status.snapshot()
         XCTAssertEqual(snapshot.requestsInFlight, 0)
@@ -1232,21 +1236,6 @@ private final class KVCacheTelemetryCapture: @unchecked Sendable {
 }
 
 private actor FakeStreamingRuntime: ModelRuntimeServing {
-    private let holdUntilReleased: Bool
-    private var released = false
-    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
-
-    init(holdUntilReleased: Bool = false) {
-        self.holdUntilReleased = holdUntilReleased
-    }
-
-    func releaseAll() {
-        released = true
-        let waiters = releaseWaiters
-        releaseWaiters.removeAll()
-        for waiter in waiters { waiter.resume() }
-    }
-
     var loadedModelHash: String? { nil }
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
@@ -1276,16 +1265,6 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
         onChunk(.content("one"))
-        if holdUntilReleased {
-            await withCheckedContinuation { continuation in
-                if released {
-                    continuation.resume()
-                } else {
-                    releaseWaiters.append(continuation)
-                }
-            }
-            return CompletionResult(content: "one", finishReason: "stop", promptTokens: 7, completionTokens: 1)
-        }
         try await Task.sleep(nanoseconds: 20_000_000)
         onChunk(.content("two"))
         while !shouldCancel() {

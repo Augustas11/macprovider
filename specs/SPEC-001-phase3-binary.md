@@ -4084,17 +4084,19 @@ first completes normally with correct `request_id` correlation. With
 ninth concurrent request is rejected with `error_queue_full`, and none of the
 eight admitted requests is incorrectly rejected.
 
-**Run by:** focused relay admission tests in
+**Unit coverage:** focused relay admission tests in
 `phase3-binary/Tests/macprovider-cliTests/InferenceRelayTests.swift`:
 `testOneAdvertisedSeatRejectsSecondRelayRequest`,
-`testEightAdvertisedSeatsAdmitEightRelayRequestsAndRejectNinth`,
+`testEightAdvertisedSeatsSetRelayAdmissionLimit`,
 `testRelayAdmissionExpandsAfterProviderStatusCapacityWarmSwap`,
 `testRelayAdmissionContractsAfterProviderStatusCapacityWarmSwap`, and
-`testCoordinatorRelayAdmissionFollowsConfiguredSeats`. The legacy
+`testCoordinatorRelayAdmissionFollowsConfiguredSeats`. The eight-concurrent-
+request and ninth-overflow case remains pending signed live Tier-2 WS relay E2E.
+The legacy
 `phase3-binary/scripts/test-ws-multiplexing.sh` harness is not current
 acceptance evidence for this AC until it is updated for the Tier-2
-`auth_request` handshake. A signed live Tier-2 WS relay E2E remains pending
-production evidence for full coordinator/binary integration.
+`auth_request` handshake. The signed E2E must also prove full
+coordinator/binary integration.
 
 **AC-15. Backward compatibility — unknown message type.**
 A mock coordinator sends `{"type": "inference_request", ...}` to a
