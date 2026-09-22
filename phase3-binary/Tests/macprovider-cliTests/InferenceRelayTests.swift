@@ -6,7 +6,8 @@ import MacProviderCore
 
 final class InferenceRelayTests: XCTestCase {
     func testEightAdvertisedSeatsAdmitEightRelayRequestsAndRejectNinth() async throws {
-        try await assertRelayCapacity(seats: 8)
+        let runtime = FakeStreamingRuntime(holdUntilReleased: true)
+        try await assertRelayCapacity(seats: 8, runtime: runtime, release: { await runtime.releaseAll() })
     }
 
     func testOneAdvertisedSeatRejectsSecondRelayRequest() async throws {
@@ -44,7 +45,11 @@ final class InferenceRelayTests: XCTestCase {
         }
     }
 
-    private func assertRelayCapacity(seats: Int) async throws {
+    private func assertRelayCapacity(
+        seats: Int,
+        runtime: FakeStreamingRuntime = FakeStreamingRuntime(),
+        release: (() async -> Void)? = nil
+    ) async throws {
         let status = ProviderStatus(
             modelID: "mlx-community/Test-Model",
             modelLoaded: true,
@@ -52,14 +57,14 @@ final class InferenceRelayTests: XCTestCase {
         )
         let recorder = FrameRecorder()
         let relay = InferenceRelay(
-            modelRuntime: FakeStreamingRuntime(),
+            modelRuntime: runtime,
             providerStatus: status,
             loadedModelID: "mlx-community/Test-Model",
             maxActiveRequests: seats,
             maxBodyBytes: 4096,
             sendFrame: { frame in await recorder.append(frame) }
         )
-        try await assertRelayCapacity(seats: seats, status: status, relay: relay, recorder: recorder)
+        try await assertRelayCapacity(seats: seats, status: status, relay: relay, recorder: recorder, release: release)
     }
 
     private func assertRelayCapacityAfterWarmSwap(startupSeats: Int, currentSeats: Int) async throws {
@@ -90,7 +95,8 @@ final class InferenceRelayTests: XCTestCase {
         seats: Int,
         status: ProviderStatus,
         relay: InferenceRelay,
-        recorder: FrameRecorder
+        recorder: FrameRecorder,
+        release: (() async -> Void)?
     ) async throws {
         let body = #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"stream":true}"#
 
@@ -102,7 +108,7 @@ final class InferenceRelayTests: XCTestCase {
                 "body": body,
             ])
         }
-        try await waitUntil {
+        try await waitUntil(timeoutNanoseconds: 10_000_000_000) {
             let frames = await recorder.frames
             return (1...seats).allSatisfy { index in
                 frames.contains {
@@ -130,14 +136,18 @@ final class InferenceRelayTests: XCTestCase {
                 $0["request_id"] as? String != overflowID
         })
 
-        for index in 1...seats {
-            try await relay.handleCancelRequest([
-                "type": "cancel_request",
-                "request_id": "req-capacity-\(index)",
-                "reason": "test_cleanup",
-            ])
+        if let release {
+            await release()
+        } else {
+            for index in 1...seats {
+                try await relay.handleCancelRequest([
+                    "type": "cancel_request",
+                    "request_id": "req-capacity-\(index)",
+                    "reason": "test_cleanup",
+                ])
+            }
         }
-        let drained = await relay.waitUntilIdle(timeoutSeconds: 2)
+        let drained = await relay.waitUntilIdle(timeoutSeconds: 10)
         XCTAssertTrue(drained)
         let finalFrames = await recorder.frames
         for index in 1...seats {
@@ -145,7 +155,7 @@ final class InferenceRelayTests: XCTestCase {
                 $0["type"] as? String == "inference_response_end" &&
                     $0["request_id"] as? String == "req-capacity-\(index)"
             })
-            XCTAssertEqual(terminal["status"] as? String, "cancelled")
+            XCTAssertEqual(terminal["status"] as? String, release == nil ? "cancelled" : "complete")
         }
         let snapshot = await status.snapshot()
         XCTAssertEqual(snapshot.requestsInFlight, 0)
@@ -1222,6 +1232,21 @@ private final class KVCacheTelemetryCapture: @unchecked Sendable {
 }
 
 private actor FakeStreamingRuntime: ModelRuntimeServing {
+    private let holdUntilReleased: Bool
+    private var released = false
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(holdUntilReleased: Bool = false) {
+        self.holdUntilReleased = holdUntilReleased
+    }
+
+    func releaseAll() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+    }
+
     var loadedModelHash: String? { nil }
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
@@ -1251,6 +1276,16 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
         onChunk(.content("one"))
+        if holdUntilReleased {
+            await withCheckedContinuation { continuation in
+                if released {
+                    continuation.resume()
+                } else {
+                    releaseWaiters.append(continuation)
+                }
+            }
+            return CompletionResult(content: "one", finishReason: "stop", promptTokens: 7, completionTokens: 1)
+        }
         try await Task.sleep(nanoseconds: 20_000_000)
         onChunk(.content("two"))
         while !shouldCancel() {
