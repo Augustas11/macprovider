@@ -28,6 +28,7 @@ enum ContinuousBatchSchedulerDiagnostic: String, Sendable, Equatable {
     case poolCapacityRejected = "pool_capacity_rejected"
     case prefillFailed = "prefill_failed"
     case promptHeadroomReserved = "prompt_headroom_reserved"
+    case queueWaitTimedOut = "queue_wait_timed_out"
     case stickyCacheUnsupported = "sticky_cache_unsupported"
     case stopped
 }
@@ -55,6 +56,10 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     let tokenDeliveryBufferLimit: Int
     let tokenDeliveryTaskLimit: Int
     let tokenDeliveryTimeoutNanoseconds: UInt64
+    /// Bounded admission wait. A request that has not reached a slot within
+    /// this window is rejected pre-admission with `.queueWaitTimedOut` rather
+    /// than waiting forever behind a saturated batch. `0` disables the bound.
+    let queueWaitTimeoutNanoseconds: UInt64
     let diagnosticLimit: Int
     let vocabularySize: Int
     let maxRequestIDBytes: Int
@@ -87,6 +92,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         tokenDeliveryBufferLimit: Int = 16,
         tokenDeliveryTaskLimit: Int? = nil,
         tokenDeliveryTimeoutNanoseconds: UInt64 = 5_000_000_000,
+        queueWaitTimeoutNanoseconds: UInt64 = ContinuousBatchSchedulerConfiguration.defaultQueueWaitTimeoutNanoseconds,
         diagnosticLimit: Int = 512,
         vocabularySize: Int = Int.max,
         maxRequestIDBytes: Int = 256,
@@ -131,6 +137,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
             min(64, tokenDeliveryTaskLimit ?? (deliveryLimitOverflow ? 64 : scaledDeliveryLimit))
         )
         self.tokenDeliveryTimeoutNanoseconds = tokenDeliveryTimeoutNanoseconds
+        self.queueWaitTimeoutNanoseconds = queueWaitTimeoutNanoseconds
         self.diagnosticLimit = max(1, diagnosticLimit)
         self.vocabularySize = max(1, vocabularySize)
         self.maxRequestIDBytes = max(1, maxRequestIDBytes)
@@ -153,6 +160,11 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// more than one window. Tests that want fail-closed backpressure keep the
     /// initializer default of 16.
     static let productionTokenDeliveryBufferLimit = 8_192
+
+    /// SPEC-038 AC-25 bounded admission wait. An unbounded queue wait has no
+    /// API-visible terminal outcome at all, so the serve path defaults to 30s
+    /// unless the operator sets `continuous_batch_queue_wait_timeout_ms`.
+    static let defaultQueueWaitTimeoutNanoseconds: UInt64 = 30_000_000_000
 }
 
 struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
@@ -797,12 +809,131 @@ private final class ContinuousBatchTokenDelivery: @unchecked Sendable {
 enum ContinuousBatchSchedulerError: Error, Equatable {
     case unsupported(String)
     case backpressure
+    /// Serve-path-unreachable today. `.drained` and `.drainTimedOut` are only
+    /// thrown out of `ContinuousBatchScheduler.drain()`, whose sole caller in
+    /// `Sources/` is `MSBThroughputCommand` — a benchmark harness, not the
+    /// HTTP serve path. They are deliberately absent from `asAPIError()`:
+    /// mapping them would ship buyer-visible code no request can reach. Wire
+    /// `drain()` into the warm-swap path before adding a mapping here.
     case drained
+    /// See `.drained`: harness-only, deliberately unmapped.
     case drainTimedOut
     case requestFailed(String)
     case duplicateRequestMismatch
     case idempotencyWindowExpired
     case idempotencyAuthorityUnavailable
+    /// Admission wait exceeded `queueWaitTimeoutNanoseconds`. Distinct from
+    /// `.backpressure`, which rejects at submit because the queue was already
+    /// full; this request was queued and never reached a slot in time.
+    case queueWaitTimedOut
+}
+
+extension ContinuousBatchSchedulerError {
+    /// SPEC-038 AC-25: the single scheduler-error → buyer-visible outcome map.
+    /// Both the streaming and non-streaming serve paths call this so the two
+    /// cannot drift. Returns `nil` only for the serve-unreachable cases
+    /// (`.drained` / `.drainTimedOut`); the caller then rethrows unchanged.
+    ///
+    /// Every mapped case is a pre-admission or pre-inference rejection, so all
+    /// of them are `inferenceRan: false, settlementRan: false` — non-settling,
+    /// no receipt.
+    func asAPIError() -> APIError? {
+        switch self {
+        case .backpressure:
+            return APIError(
+                status: 503,
+                message: "Inference engine unavailable",
+                type: "server_error",
+                code: "continuous_batching_stream_backpressure",
+                inferenceRan: false,
+                settlementRan: false
+            )
+        case .queueWaitTimedOut:
+            return APIError(
+                status: 503,
+                message: "Inference engine unavailable",
+                type: "server_error",
+                code: "continuous_batching_queue_wait_timeout",
+                inferenceRan: false,
+                settlementRan: false
+            )
+        case .duplicateRequestMismatch:
+            return APIError(
+                status: 409,
+                message: "Request id was already used for a different request body",
+                type: "invalid_request_error",
+                code: "continuous_batching_duplicate_request_mismatch",
+                inferenceRan: false,
+                settlementRan: false
+            )
+        case .idempotencyWindowExpired:
+            return APIError(
+                status: 409,
+                message: "Request id is outside the idempotency retention window",
+                type: "invalid_request_error",
+                code: "continuous_batching_idempotency_window_expired",
+                inferenceRan: false,
+                settlementRan: false
+            )
+        case .idempotencyAuthorityUnavailable:
+            return APIError(
+                status: 503,
+                message: "Idempotency authority unavailable",
+                type: "server_error",
+                code: "continuous_batching_idempotency_authority_unavailable",
+                inferenceRan: false,
+                settlementRan: false
+            )
+        case .unsupported(let code), .requestFailed(let code):
+            // Both cases already carry a well-formed API code string, so the
+            // carried string IS the buyer-visible code; only the status has to
+            // be decided. Every one of these that can escape `submit()` is
+            // raised before the request is enqueued or before it reaches a
+            // slot, so none of them can be thrown after inference ran — the
+            // decode/prefill-structure `.requestFailed` codes never propagate
+            // to a caller, the pump converts them into a terminal
+            // `ContinuousBatchSchedulerResult` instead.
+            let status = Self.carriedCodeStatus(code)
+            return APIError(
+                status: status,
+                message: status == 400
+                    ? "Continuous batching rejected the request before admission"
+                    : "Continuous batching is unavailable for this request",
+                type: status == 400 ? "invalid_request_error" : "server_error",
+                code: code,
+                inferenceRan: false,
+                settlementRan: false
+            )
+        case .drained, .drainTimedOut:
+            return nil
+        }
+    }
+
+    /// Status for a code carried by `.unsupported` / `.requestFailed`.
+    ///
+    /// A code that `ContinuousBatchingUnsupportedReason` already publishes
+    /// takes that reason's status, so the preflight surface and the runtime
+    /// surface cannot disagree about the same string. The rest follow the same
+    /// convention by shape: 400 when the rejection is a property of the
+    /// request, 503 when it is a property of the provider's capability or
+    /// availability. Unknown codes fail to 503 — an unrecognised scheduler
+    /// rejection is a provider-side condition, not buyer error.
+    private static func carriedCodeStatus(_ code: String) -> Int {
+        switch code {
+        case ContinuousBatchingUnsupportedReason.stickyCacheHandoffUnavailable.apiCode,
+             // Mirrors `.tupleNotAdvertised` / `.moePromotionEvidenceUnavailable`,
+             // which `localCapabilityReason` reports without the API prefix.
+             "local_paged_kv_descriptor_mismatch",
+             "moe_promotion_evidence_unavailable",
+             "continuous_batching_cached_tokens_require_conversation_key",
+             "continuous_batching_invalid_cached_prompt_tokens",
+             "continuous_batching_invalid_request",
+             "continuous_batching_request_fingerprint_failed":
+            return 400
+        default:
+            return 503
+        }
+    }
 }
 
 actor ContinuousBatchScheduler {
@@ -871,6 +1002,11 @@ actor ContinuousBatchScheduler {
     private let tokenDeliveryCapacity: ContinuousBatchTokenDeliveryCapacity
 
     private var waiting: [ContinuousBatchSchedulerRequest] = []
+    /// Absolute uptime deadline per queued request, set once when the request
+    /// enters `waiting` so a re-queued admission attempt keeps the original
+    /// clock instead of restarting it.
+    private var queueWaitDeadlines: [String: UInt64] = [:]
+    private var queueWaitTimeoutTasks: [String: Task<Void, Never>] = [:]
     private var pendingBindingChecks = 0
     private var pendingBindingTokenCount = 0
     private var nextAdmissionSequence: UInt64 = 0
@@ -1338,7 +1474,64 @@ actor ContinuousBatchScheduler {
             delivery: delivery
         ))
         waiting.append(request)
+        beginQueueWait(requestID: request.id)
         ensurePump()
+    }
+
+    /// Starts the bounded admission clock for a request that just entered the
+    /// waiting queue.
+    private func beginQueueWait(requestID: String) {
+        let timeout = configuration.queueWaitTimeoutNanoseconds
+        guard timeout > 0 else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let (candidate, overflow) = now.addingReportingOverflow(timeout)
+        queueWaitDeadlines[requestID] = overflow ? UInt64.max : candidate
+        armQueueWaitTimeout(requestID: requestID)
+    }
+
+    private func armQueueWaitTimeout(requestID: String) {
+        guard let deadline = queueWaitDeadlines[requestID] else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let remaining = deadline > now ? deadline - now : 0
+        queueWaitTimeoutTasks.removeValue(forKey: requestID)?.cancel()
+        queueWaitTimeoutTasks[requestID] = Task { [weak self] in
+            if remaining > 0 {
+                try? await Task.sleep(nanoseconds: remaining)
+            }
+            guard !Task.isCancelled else { return }
+            await self?.expireQueueWait(requestID: requestID)
+        }
+    }
+
+    /// Stops the timer while the request is out of `waiting` for an admission
+    /// attempt. The deadline is retained so a re-queue resumes the same clock.
+    private func suspendQueueWaitTimeout(requestID: String) {
+        queueWaitTimeoutTasks.removeValue(forKey: requestID)?.cancel()
+    }
+
+    private func endQueueWait(requestID: String) {
+        queueWaitTimeoutTasks.removeValue(forKey: requestID)?.cancel()
+        queueWaitDeadlines.removeValue(forKey: requestID)
+    }
+
+    /// Bounded admission wait expiry. The request never reached a slot, so it
+    /// owns no row, no block-table handle and no terminal result: the only
+    /// state it leaves behind is the non-receipt diagnostic. It can never be
+    /// settlement-eligible because no result is produced for it at all.
+    private func expireQueueWait(requestID: String) async {
+        endQueueWait(requestID: requestID)
+        guard let index = waiting.firstIndex(where: { $0.id == requestID }) else { return }
+        let request = waiting.remove(at: index)
+        record(.queueWaitTimedOut)
+        knownRequests.removeValue(forKey: requestID)
+        requestAdmissionSequences.removeValue(forKey: requestID)
+        cancelledIDs.remove(requestID)
+        let waiters = requestWaiters.removeValue(forKey: requestID) ?? []
+        await discardUnacceptedRetainedCache(for: request)
+        for waiter in waiters {
+            waiter.delivery.finish()
+            waiter.continuation.resume(throwing: ContinuousBatchSchedulerError.queueWaitTimedOut)
+        }
     }
 
     private func cancelWaiter(requestID: String, waiterID: UUID) async {
@@ -1907,6 +2100,7 @@ actor ContinuousBatchScheduler {
               !waiting.isEmpty {
             attempts += 1
             let request = waiting.removeFirst()
+            suspendQueueWaitTimeout(requestID: request.id)
             madeProgress = true
             if cancelledIDs.remove(request.id) != nil {
                 await finishQueued(request, status: .cancelled, errorCode: "request_cancelled")
@@ -1986,6 +2180,7 @@ actor ContinuousBatchScheduler {
                     snapshot: configuration.snapshot
                 )
                 promptOrder.append(request.id)
+                endQueueWait(requestID: request.id)
             } catch PagedKVAllocatorError.capacityExceeded {
                 admittingRequests.removeValue(forKey: request.id)
                 if draining {
@@ -1999,6 +2194,7 @@ actor ContinuousBatchScheduler {
                     )
                 } else {
                     waiting.insert(request, at: 0)
+                    armQueueWaitTimeout(requestID: request.id)
                     return madeProgress
                 }
             } catch PagedKVAllocatorError.conversationMismatch {
@@ -2274,6 +2470,7 @@ actor ContinuousBatchScheduler {
     }
 
     private func complete(requestID: String, result: ContinuousBatchSchedulerResult) {
+        endQueueWait(requestID: requestID)
         guard terminalResults[requestID] == nil, pendingTerminalDeliveries[requestID] == nil else { return }
         requestAdmissionSequences.removeValue(forKey: requestID)
         let waiters = requestWaiters.removeValue(forKey: requestID) ?? []

@@ -1174,6 +1174,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private var maxBatch: Int
     private let continuousBatchingMode: ContinuousBatchingMode
     private let continuousBatchQueueLimit: Int?
+    /// SPEC-038 AC-25 bounded admission wait, in milliseconds. Nil ⇒ the
+    /// scheduler configuration default.
+    private let continuousBatchQueueWaitTimeoutMS: Int?
     /// SPEC-038 FR-CB10 operator-declared per-tuple acceptance coverage.
     private let continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage
     private let warmSwapEnabled: Bool
@@ -1845,6 +1848,7 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch: Int = 1,
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
+        continuousBatchQueueWaitTimeoutMS: Int? = nil,
         continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage = .empty,
         continuousBatchingDurableReplayAuthorityAvailable: Bool = false,
         warmSwapEnabled: Bool = false,
@@ -1897,6 +1901,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
+        self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingDurableReplayAuthorityAvailable = false
         self.warmSwapEnabled = warmSwapEnabled
@@ -2016,6 +2021,7 @@ actor ModelRuntime: ModelRuntimeServing {
             backendOverride: self.testContinuousBatchingBackend,
             maxBatch: self.maxBatch,
             queueLimit: self.continuousBatchQueueLimit,
+            queueWaitTimeoutMS: self.continuousBatchQueueWaitTimeoutMS,
             maxContextTokens: self.maxContextTokens,
             modelID: modelID,
             modelSHA256: self.currentModelHash,
@@ -2093,6 +2099,7 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch: Int = 1,
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
+        continuousBatchQueueWaitTimeoutMS: Int? = nil,
         // Test-only init: mirrors `ContinuousBatchRuntimeReplayAuthority
         // .inMemoryForTests` — coverage is unrestricted unless a test asserts
         // on the FR-CB10 gate itself.
@@ -2215,6 +2222,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
+        self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingDurableReplayAuthorityAvailable = false
         self.warmSwapEnabled = warmSwapEnabled
@@ -2231,6 +2239,7 @@ actor ModelRuntime: ModelRuntimeServing {
             backend: continuousBatchingBackend,
             maxBatch: boundedMaxBatch,
             queueLimit: continuousBatchQueueLimit,
+            queueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
             maxContextTokens: self.maxContextTokens,
             modelID: modelID,
             modelSHA256: modelHash,
@@ -2902,12 +2911,24 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    /// Milliseconds → nanoseconds for the bounded admission wait. Absent or
+    /// non-positive falls back to the scheduler default rather than disabling
+    /// the bound: an unbounded serve-path queue wait is the defect AC-25 names.
+    private nonisolated static func queueWaitTimeoutNanoseconds(_ milliseconds: Int?) -> UInt64 {
+        guard let milliseconds, milliseconds > 0 else {
+            return ContinuousBatchSchedulerConfiguration.defaultQueueWaitTimeoutNanoseconds
+        }
+        let (nanoseconds, overflow) = UInt64(milliseconds).multipliedReportingOverflow(by: 1_000_000)
+        return overflow ? UInt64.max : nanoseconds
+    }
+
     private nonisolated static func makeContinuousBatchScheduler(
         decision: PagedKVAttachDecision,
         tuple: ContinuousBatchingRequestedTuple?,
         backend: (any ContinuousBatchSchedulerBackend)?,
         maxBatch: Int,
         queueLimit: Int?,
+        queueWaitTimeoutMS: Int?,
         maxContextTokens: Int,
         modelID: String?,
         modelSHA256: String?,
@@ -2942,6 +2963,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 decodeHeadroomTokens: 1,
                 maxPromptChunkTokens: max(1, prefillStepSize),
                 tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
+                queueWaitTimeoutNanoseconds: Self.queueWaitTimeoutNanoseconds(queueWaitTimeoutMS),
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: modelID,
                     modelSHA256: modelSHA256,
@@ -2963,6 +2985,7 @@ actor ModelRuntime: ModelRuntimeServing {
         backendOverride: (any ContinuousBatchSchedulerBackend)?,
         maxBatch: Int,
         queueLimit: Int?,
+        queueWaitTimeoutMS: Int?,
         maxContextTokens: Int,
         modelID: String?,
         modelSHA256: String?,
@@ -2978,6 +3001,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 backend: backendOverride,
                 maxBatch: maxBatch,
                 queueLimit: queueLimit,
+                queueWaitTimeoutMS: queueWaitTimeoutMS,
                 maxContextTokens: maxContextTokens,
                 modelID: modelID,
                 modelSHA256: modelSHA256,
@@ -3010,6 +3034,7 @@ actor ModelRuntime: ModelRuntimeServing {
             ),
             maxBatch: maxBatch,
             queueLimit: queueLimit,
+            queueWaitTimeoutMS: queueWaitTimeoutMS,
             maxContextTokens: maxContextTokens,
             modelID: modelID,
             modelSHA256: modelSHA256,
@@ -3048,6 +3073,7 @@ actor ModelRuntime: ModelRuntimeServing {
             backendOverride: testContinuousBatchingBackend,
             maxBatch: maxBatch,
             queueLimit: continuousBatchQueueLimit,
+            queueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
             maxContextTokens: maxContextTokens,
             modelID: currentModelID,
             modelSHA256: currentModelHash,
@@ -3740,7 +3766,9 @@ actor ModelRuntime: ModelRuntimeServing {
             if let lease {
                 await conversationCache.abort(lease)
             }
-            throw error
+            // SPEC-038 AC-25: one shared scheduler-error map, so the
+            // non-streaming and streaming paths cannot drift.
+            throw (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error
         }
         do {
             try drainCancelled.check()
@@ -3958,22 +3986,13 @@ actor ModelRuntime: ModelRuntimeServing {
                     onChunk(.content(delta))
                 })
             }
-        } catch ContinuousBatchSchedulerError.backpressure {
-            if let lease {
-                await conversationCache.abort(lease)
-            }
-            throw APIError(
-                status: 503,
-                message: "Inference engine unavailable",
-                type: "server_error",
-                code: "continuous_batching_stream_backpressure",
-                inferenceRan: true
-            )
         } catch {
             if let lease {
                 await conversationCache.abort(lease)
             }
-            throw error
+            // SPEC-038 AC-25: one shared scheduler-error map, so the
+            // streaming and non-streaming paths cannot drift.
+            throw (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error
         }
         do {
             if let error = streamState.error() {

@@ -545,6 +545,15 @@ public struct APIError: Error, Sendable {
         "duplicate_tool_call_id": false,
         "tool_call_result_out_of_order": false,
         "unsupported_modelID_for_multi_turn": false,
+        // SPEC-038 AC-25 (`:614`): a queue-pressure rejection MUST carry
+        // bounded retry guidance. Both codes reject pre-admission with no
+        // work done, so the same request is safe to re-send once the batch
+        // drains; declaring them non-retryable contradicts that clause and
+        // suppresses the gateway's `Retry-After`
+        // (`phase5-gateway/internal/router/server.go` `setGatewayRetryAfter`
+        // returns early when the resolved value is false).
+        "continuous_batching_stream_backpressure": true,
+        "continuous_batching_queue_wait_timeout": true,
     ]
 
     public let status: Int

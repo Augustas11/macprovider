@@ -158,6 +158,10 @@ public struct AppConfig: Equatable, Sendable {
     public var prefillStepSize: Int
     public var continuousBatching: ContinuousBatchingMode
     public var continuousBatchQueueLimit: Int?
+    // SPEC-038 AC-25: bounded continuous-batching admission wait, in
+    // milliseconds. Unset ⇒ the scheduler's 30s default. A request still
+    // queued when it expires is rejected pre-admission, non-settling.
+    public var continuousBatchQueueWaitTimeoutMS: Int?
 
     // SPEC-038 FR-CB10: per-tuple acceptance coverage. Descriptor membership
     // alone is not support; a tuple may only batch when the operator has
@@ -236,6 +240,7 @@ public struct AppConfig: Equatable, Sendable {
             prefillStepSize: 512,
             continuousBatching: .off,
             continuousBatchQueueLimit: nil,
+            continuousBatchQueueWaitTimeoutMS: nil,
             continuousBatchingAcceptedTuples: [],
             kvDiskCache: .defaults(),
             pagedKV: .defaults()
@@ -286,6 +291,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var prefillStepSize: Int?
     public var continuousBatching: String?
     public var continuousBatchQueueLimit: Int?
+    public var continuousBatchQueueWaitTimeoutMS: Int?
     // SPEC-037 FR-KVP11: KV disk-tier CLI flags (`--kv-disk-cache-*`).
     public var kvDiskCache: KVDiskCacheCLIOverrides
     // SPEC-039 FR-PKV14: paged KV CLI flags (`--paged-kv-*`).
@@ -332,6 +338,7 @@ public struct CLIOverrides: Equatable, Sendable {
         kvDiskCache: KVDiskCacheCLIOverrides = KVDiskCacheCLIOverrides(),
         continuousBatching: String? = nil,
         continuousBatchQueueLimit: Int? = nil,
+        continuousBatchQueueWaitTimeoutMS: Int? = nil,
         pagedKV: PagedKVCLIOverrides = PagedKVCLIOverrides()
     ) {
         self.port = port
@@ -373,6 +380,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.prefillStepSize = prefillStepSize
         self.continuousBatching = continuousBatching
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
+        self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
         self.kvDiskCache = kvDiskCache
         self.pagedKV = pagedKV
     }
@@ -571,6 +579,12 @@ public enum ConfigLoader {
             config.continuousBatching = mode
         }
         try assign(&config.continuousBatchQueueLimit, from: dict, key: "continuous_batch_queue_limit", expected: "integer >= 1")
+        try assign(
+            &config.continuousBatchQueueWaitTimeoutMS,
+            from: dict,
+            key: "continuous_batch_queue_wait_timeout_ms",
+            expected: "integer >= 1"
+        )
         if let rawTuples = dict["continuous_batching_accepted_tuples"] {
             config.continuousBatchingAcceptedTuples = try parseContinuousBatchingAcceptedTuples(rawTuples)
         }
@@ -729,6 +743,12 @@ public enum ConfigLoader {
         try assign(&config.prefillStepSize, from: environment, env: "MACPROVIDER_PREFILL_STEP_SIZE", expected: "integer >= 1")
         try assign(&config.continuousBatching, from: environment, env: "MACPROVIDER_CONTINUOUS_BATCHING", expected: "off, canary, or on")
         try assign(&config.continuousBatchQueueLimit, from: environment, env: "MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT", expected: "integer >= 1")
+        try assign(
+            &config.continuousBatchQueueWaitTimeoutMS,
+            from: environment,
+            env: "MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS",
+            expected: "integer >= 1"
+        )
         return config
     }
 
@@ -903,6 +923,9 @@ public enum ConfigLoader {
         }
         if let continuousBatchQueueLimit = cli.continuousBatchQueueLimit {
             config.continuousBatchQueueLimit = continuousBatchQueueLimit
+        }
+        if let continuousBatchQueueWaitTimeoutMS = cli.continuousBatchQueueWaitTimeoutMS {
+            config.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
         }
         return config
     }

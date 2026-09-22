@@ -396,6 +396,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Bounded continuous-batching waiting queue limit. Default 2 * active slots. Overrides MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT and config key continuous_batch_queue_limit.")
     var continuousBatchQueueLimit: Int?
 
+    @Option(help: "Bounded continuous-batching admission wait in milliseconds. Default 30000. A request still queued when it expires is rejected pre-admission and never settles. Overrides MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS and config key continuous_batch_queue_wait_timeout_ms.")
+    var continuousBatchQueueWaitTimeoutMS: Int?
+
     // SPEC-037 FR-KVP11 — encrypted KV survival disk-tier CLI flags (MEDIUM-5). Each is
     // an Optional so absence defers to the environment / YAML / default; the resolver
     // (KVDiskCacheConfigResolver) applies CLI-wins precedence and fails closed on any
@@ -664,6 +667,12 @@ struct ServeCommand: AsyncParsableCommand {
                queueLimit > maximumContinuousBatchQueueLimit {
                 FileHandle.standardError.write(Data((
                     "--continuous-batch-queue-limit \(queueLimit) must be <= \(maximumContinuousBatchQueueLimit) for the configured max batch\n"
+                ).utf8))
+                throw ExitCode(2)
+            }
+            if let queueWaitTimeoutMS = resolved.continuousBatchQueueWaitTimeoutMS, queueWaitTimeoutMS < 1 {
+                FileHandle.standardError.write(Data((
+                    "--continuous-batch-queue-wait-timeout-ms \(queueWaitTimeoutMS) must be >= 1\n"
                 ).utf8))
                 throw ExitCode(2)
             }
@@ -1571,6 +1580,7 @@ struct ServeCommand: AsyncParsableCommand {
                 kvDiskCache: kvDiskCacheCLIOverrides,
                 continuousBatching: continuousBatching,
                 continuousBatchQueueLimit: continuousBatchQueueLimit,
+                continuousBatchQueueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
                 pagedKV: pagedKVCLIOverrides
             )
         )
@@ -1968,6 +1978,7 @@ struct ServeCommand: AsyncParsableCommand {
                     maxBatch: resolved.maxConcurrencyOverride ?? 1,
                     continuousBatchingMode: resolved.continuousBatching,
                     continuousBatchQueueLimit: resolved.continuousBatchQueueLimit,
+                    continuousBatchQueueWaitTimeoutMS: resolved.continuousBatchQueueWaitTimeoutMS,
                     continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage(
                         acceptedTuples: resolved.continuousBatchingAcceptedTuples
                     ),
@@ -3515,6 +3526,7 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  max_batch: \(config.maxConcurrencyOverride.map(String.init) ?? "1")")
     print("  continuous_batching: \(config.continuousBatching.rawValue)")
     print("  continuous_batch_queue_limit: \(config.continuousBatchQueueLimit.map(String.init) ?? "<unset, 2 * max_batch>")")
+    print("  continuous_batch_queue_wait_timeout_ms: \(config.continuousBatchQueueWaitTimeoutMS.map(String.init) ?? "<unset, 30000>")")
     print("  enable_receipts: \(config.enableReceipts)")
     print("  relay_blind_enabled: \(config.relayBlindEnabled)")
     print("  idle_prewarm.enabled: \(config.idlePrewarmEnabled)")

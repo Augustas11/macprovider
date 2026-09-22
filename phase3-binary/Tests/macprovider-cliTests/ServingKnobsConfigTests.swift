@@ -278,6 +278,49 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(config.continuousBatchQueueLimit, 4)
     }
 
+    // SPEC-038 AC-25 bounded admission wait. Same triple source as the queue
+    // limit: CLI over env over YAML, absent ⇒ the scheduler's 30s default.
+    func testContinuousBatchQueueWaitTimeoutCLIOverridesEnvironmentOverridesYAML() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(continuousBatchQueueWaitTimeoutMS: 9_000),
+            environment: ["MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS": "5000"],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batch_queue_wait_timeout_ms: 3000\n" }
+        )
+        XCTAssertEqual(config.continuousBatchQueueWaitTimeoutMS, 9_000)
+    }
+
+    func testContinuousBatchQueueWaitTimeoutEnvironmentOverridesYAML() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS": "5000"],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batch_queue_wait_timeout_ms: 3000\n" }
+        )
+        XCTAssertEqual(config.continuousBatchQueueWaitTimeoutMS, 5_000)
+    }
+
+    func testContinuousBatchQueueWaitTimeoutYAMLAppliedAndDefaultsToUnset() throws {
+        let yaml = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batch_queue_wait_timeout_ms: 3000\n" }
+        )
+        XCTAssertEqual(yaml.continuousBatchQueueWaitTimeoutMS, 3_000)
+        XCTAssertNil(AppConfig.defaults().continuousBatchQueueWaitTimeoutMS)
+    }
+
+    func testContinuousBatchQueueWaitTimeoutPreflightRejectsZero() throws {
+        var config = AppConfig.defaults()
+        config.continuousBatching = .canary
+        config.continuousBatchQueueWaitTimeoutMS = 0
+        XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
+
+        config.continuousBatching = .off
+        XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config))
+    }
+
     func testContinuousBatchingPlainYAMLOnAndOffPreserveRawThreeStateMode() throws {
         for (raw, expected) in [("on", ContinuousBatchingMode.on), ("off", .off)] {
             let config = try ConfigLoader.load(

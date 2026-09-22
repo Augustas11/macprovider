@@ -208,6 +208,30 @@ struct HTTPServer: Sendable {
     }
 }
 
+/// SPEC-038 AC-25 (`:620-621`): direct-HTTP client-disconnect signal.
+///
+/// Mirrors `InferenceRelay`'s `RelayRequestState` cancellation shape — an
+/// `NSLock`-guarded flag a detached inference task can poll through
+/// `shouldCancel` — rather than introducing a second mechanism. The state
+/// holds no reference to the channel or the handler, so wiring it in cannot
+/// create a retain cycle; the handler holds it, not the other way round.
+final class ClientDisconnectState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var disconnected = false
+
+    var isDisconnected: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return disconnected
+    }
+
+    func markDisconnected() {
+        lock.lock()
+        disconnected = true
+        lock.unlock()
+    }
+}
+
 final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
@@ -309,6 +333,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer: ByteBuffer?
     private var bodyTooLarge = false
+    // SPEC-038 AC-25: disconnect flag for the inference currently running on
+    // this channel. Written and read only on the channel's event loop
+    // (`channelRead` / `channelInactive`); the inference task reads the flag
+    // it captured, not this property.
+    private var inflightDisconnect: ClientDisconnectState?
 
     init(
         modelID: String?,
@@ -354,6 +383,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             requestHead = head
             bodyBuffer = context.channel.allocator.buffer(capacity: 0)
             bodyTooLarge = false
+            inflightDisconnect = nil
         case .body(var chunk):
             guard !bodyTooLarge else { return }
             let currentBytes = bodyBuffer?.readableBytes ?? 0
@@ -369,6 +399,21 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             bodyBuffer = nil
             bodyTooLarge = false
         }
+    }
+
+    // SPEC-038 AC-25 (`:620-621`): the only disconnect signal this pipeline
+    // has. Every response path writes `connection: close` and closes the
+    // channel itself, so a channel carries exactly one request and channel
+    // inactivity means "this buyer can no longer be answered". The bootstrap
+    // does not set `allowRemoteHalfClosure`, so a client FIN closes the
+    // channel too — a half-closing client could not receive the response
+    // either way, so treating it as a disconnect is not a false positive.
+    // Inactivity after the response has been written is harmless: the
+    // inference task has already stopped reading the flag.
+    func channelInactive(context: ChannelHandlerContext) {
+        inflightDisconnect?.markDisconnected()
+        inflightDisconnect = nil
+        context.fireChannelInactive()
     }
 
     private func handleRequest(context: ChannelHandlerContext) {
@@ -565,6 +610,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 try request.validateModelMatches(modelID, aliases: modelIDAliasList(catalogModelIDAlias))
             }
 
+            // SPEC-038 AC-25: arm the disconnect flag before either inference
+            // path starts, so a close that races the handoff is still seen.
+            let disconnect = ClientDisconnectState()
+            inflightDisconnect = disconnect
+
             if request.stream {
                 if settlementMetadata == nil {
                     ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .streamingRequest)
@@ -572,6 +622,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 handleStreamingChatCompletions(
                     request: request,
                     writer: writer,
+                    disconnect: disconnect,
                     modelRuntime: modelRuntime,
                     warmSwapEnabled: warmSwapEnabled,
                     receiptBuilder: receiptBuilder,
@@ -585,7 +636,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
             let providerStatus = providerStatus
             let idlePrewarmer = idlePrewarmer
-            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, settlementMetadata, idlePrewarmer, requestAcceptedAt] in
+            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID, settlementMetadata, idlePrewarmer, requestAcceptedAt, disconnect] in
                 var startedAt = requestAcceptedAt
                 var providerRequestStarted = false
                 // SPEC-015 §M.2.2 atomic-read invariant — capture
@@ -621,7 +672,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     startedAt = admittedAt
                     providerRequestStarted = true
                     await idlePrewarmer?.cancelInflightPrewarm()
-                    let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, with: handle, shouldCancel: { false })
+                    let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, with: handle, shouldCancel: { disconnect.isDisconnected })
                     let modelHashSource = Self.resolveModelHashSource(
                         warmSwapEnabled: warmSwapEnabled,
                         snapshot: servedSnapshot,
@@ -680,6 +731,21 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
                         writer.writeJSON(status: .ok, body: response)
                     }
+	                } catch is CancellationError {
+	                    // SPEC-038 AC-25 (`:620`): the buyer closed the
+	                    // connection. A non-streaming request has emitted
+	                    // nothing buyer-visible yet, so this is always the
+	                    // before-first-token case: one terminal outcome,
+	                    // non-settling, no receipt. The scheduler slot and any
+	                    // block-table reservation are already released —
+	                    // `shouldCancel` unwinds `submit()` through its
+	                    // `withTaskCancellationHandler`, which runs
+	                    // `cancelWaiter`.
+	                    if providerRequestStarted {
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+	                    }
+	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .preTokenCancel)
+	                    writer.writeAPIError(Self.buyerCancelledError())
 	                } catch is DrainCancelledError {
 	                    if providerRequestStarted {
 	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
@@ -900,6 +966,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private func handleStreamingChatCompletions(
         request: ChatCompletionRequest,
         writer: ResponseWriter,
+        disconnect: ClientDisconnectState,
         modelRuntime: any ModelRuntimeServing,
         warmSwapEnabled: Bool,
         receiptBuilder: ReceiptBuilder?,
@@ -912,10 +979,13 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let id = "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
         let providerStatus = providerStatus
-        Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, settlementMetadata, idlePrewarmer] in
+        Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, requestID, settlementMetadata, idlePrewarmer, disconnect] in
             var startedAt = Date()
             var providerRequestStarted = false
             var sseStarted = false
+            // SPEC-038 AC-25 (`:621`): the before/after boundary is the first
+            // buyer-visible token, not the SSE head.
+            let emittedBuyerToken = StreamedFlag()
             do {
                 let handle = try await modelRuntime.acquireRequestHandle(request)
                 defer {
@@ -952,7 +1022,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
                 let toolCallOpenEmitted = StreamedFlag()
                 let streamedToolArgs = StreamedToolCallArgs()
-                let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { false }) { chunk in
+                let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { disconnect.isDisconnected }) { chunk in
+                    emittedBuyerToken.set()
                     switch chunk {
                     case .content(let text):
                         writer.writeSSEJSON(
@@ -1075,6 +1146,24 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 } else {
                     writer.writeAPIError(error)
                 }
+            } catch is CancellationError {
+                // SPEC-038 AC-25 (`:620-621`): the buyer closed the
+                // connection. `stream` has already returned, so no further
+                // token can be emitted; this branch writes exactly one
+                // terminal outcome and nothing after it. Non-settling either
+                // side of the first-token boundary — no receipt is built and
+                // no trailer is written.
+                if providerRequestStarted {
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                }
+                let cancelError = Self.buyerCancelledError(inferenceRan: emittedBuyerToken.get())
+                if sseStarted {
+                    writer.writeSSEJSON(cancelError.envelope)
+                    writer.writeSSEDone()
+                } else {
+                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .preTokenCancel)
+                    writer.writeAPIError(cancelError)
+                }
             } catch is DrainCancelledError {
                 if providerRequestStarted {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
@@ -1105,6 +1194,21 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
     static func modelIDForValidation(warmSwapEnabled: Bool, bootModelID: String?, runtimeSnapshot: RuntimeSnapshot) -> String? {
         warmSwapEnabled ? runtimeSnapshot.modelID : bootModelID
+    }
+
+    /// SPEC-038 AC-25 (`:620-621`) terminal outcome for a direct-HTTP client
+    /// disconnect. Reuses the `buyer_cancelled` / 499 code already understood
+    /// by `errorReceiptHeaderResult`, which omits the receipt as
+    /// `pre_token_cancel` rather than issuing one — the request never settles.
+    static func buyerCancelledError(inferenceRan: Bool = false) -> APIError {
+        APIError(
+            status: 499,
+            message: "Buyer closed the connection before the response completed",
+            type: "server_error",
+            code: "buyer_cancelled",
+            inferenceRan: inferenceRan,
+            settlementRan: false
+        )
     }
 
     static func swapDrainTimeoutEnvelope() -> [String: Any] {
