@@ -88,8 +88,8 @@ func TestJourneyBuyerEnforceIsolatedCandidate(t *testing.T) {
 	if usage.Outcome != "spec022_verified" || usage.TokenSource != "coordinator_observed" {
 		t.Fatalf("usage outcome/source=%s/%s want spec022_verified/coordinator_observed", usage.Outcome, usage.TokenSource)
 	}
-	if reservation.Status != "settled" || reservation.SettledTokens != 20 || reservation.SettlementHold != 1 {
-		t.Fatalf("reservation=%+v want settled 20-token held reservation", reservation)
+	if reservation.Status != "settled" || reservation.SettledTokens != 20 || reservation.SettlementHold != 0 {
+		t.Fatalf("reservation=%+v want settled 20-token reservation with hold cleared", reservation)
 	}
 	verdicts := waitForSettlementVerdicts(t, s, 1)
 	if len(verdicts) != 1 {

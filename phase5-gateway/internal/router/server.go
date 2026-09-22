@@ -72,8 +72,14 @@ type Server struct {
 	// real one — so the money path can call it unguarded.
 	journal SettlementJournal
 	// journalAttempts bounds conflicted re-drives before quarantine.
-	journalAttempts *settlementJournalAttempts
-	publicFeedCache map[string]publicFeedCacheEntry
+	journalAttempts                       *settlementJournalAttempts
+	publicFeedCache                       map[string]publicFeedCacheEntry
+	settlementReconcileNudgeMu            sync.Mutex
+	settlementReconcileNudgePending       []storage.ActiveReservation
+	settlementReconcileNudgeKeys          map[string]struct{}
+	settlementReconcileNudgeActiveWorkers int
+	settlementReconcileCatchupPending     bool
+	settlementReconcileCatchupRunning     bool
 }
 
 // readStore returns the read-only view of the database. M2-4: this

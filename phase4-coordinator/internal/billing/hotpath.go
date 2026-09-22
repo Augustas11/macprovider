@@ -38,6 +38,7 @@ type HotPathInput struct {
 	SettlementAccountScopeHash   string
 	SettlementPolicyMode         string
 	SettlementPolicyVersion      string
+	SettlementEvidenceGapReason  string
 	RoutingDecisionLog           func(CacheBillingRoutingDecision)
 	RequestedPrivacyMode         string
 	EffectivePrivacyOutcome      string
@@ -221,7 +222,7 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 			}
 			return nil
 		}
-		requestCreditID, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, false, "")
+		requestCreditID, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, false, in.SettlementEvidenceGapReason)
 		if err != nil {
 			return err
 		}

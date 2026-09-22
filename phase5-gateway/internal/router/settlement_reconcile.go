@@ -18,6 +18,10 @@ import (
 
 const defaultSettlementReconcileLimit = 100
 const maxSettlementReconcileLimit = 500
+const settlementReconcileNudgeDelay = 50 * time.Millisecond
+const maxSettlementReconcileNudgeQueue = 1024
+const maxSettlementReconcileNudgeWorkers = 4
+const maxSettlementReconcileOverflowCatchupPasses = maxSettlementReconcileNudgeQueue/maxSettlementReconcileLimit + 2
 
 type coordinatorRequestSettlementFinality struct {
 	RequestID                 string `json:"request_id"`
@@ -112,29 +116,232 @@ func (s *Server) ReconcileSettlementHolds(ctx context.Context, limit int) (Settl
 			}
 			continue
 		}
-		switch result {
-		case "verified":
-			summary.Verified++
-		case "observed":
-			summary.Observed++
-		case "refunded":
-			summary.Refunded++
-		case "held":
-			summary.Held++
-		case "coordinator_404_expired":
-			summary.Coordinator404++
-			summary.StaleHeld++
-		case "coordinator_404":
-			summary.Coordinator404++
-			summary.Skipped++
-		case "coordinator_404_held":
-			summary.Coordinator404++
-			summary.Held++
-		default:
-			summary.Skipped++
-		}
+		summary.applyResult(result)
 	}
 	return summary, nil
+}
+
+func (s *Server) CatchUpSettlementHolds(ctx context.Context, limit int) (SettlementReconcileSummary, error) {
+	if limit <= 0 {
+		limit = defaultSettlementReconcileLimit
+	}
+	if limit > maxSettlementReconcileLimit {
+		limit = maxSettlementReconcileLimit
+	}
+	reservations, err := s.store.ListSettlementHeldReservations(ctx, limit)
+	if err != nil {
+		return SettlementReconcileSummary{}, err
+	}
+	summary := SettlementReconcileSummary{Scanned: len(reservations)}
+	timeout := time.Duration(s.cfg.Settlement.ReconcileRequestTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	for _, reservation := range reservations {
+		select {
+		case <-ctx.Done():
+			return summary, ctx.Err()
+		default:
+		}
+		reservationCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		result, err := s.reconcileSettlementReservation(reservationCtx, reservation)
+		cancel()
+		if err != nil {
+			summary.Errors++
+			slog.Warn("SPEC-022 settlement reconciler catch-up reservation failed",
+				"request_id", reservation.RequestID,
+				"account_id", reservation.AccountID,
+				"error", err,
+			)
+			continue
+		}
+		summary.applyResult(result)
+	}
+	return summary, nil
+}
+
+func (s *SettlementReconcileSummary) applyResult(result string) {
+	switch result {
+	case "verified":
+		s.Verified++
+	case "observed":
+		s.Observed++
+	case "refunded":
+		s.Refunded++
+	case "expired":
+		s.Expired++
+	case "stale_held":
+		s.StaleHeld++
+	case "held":
+		s.Held++
+	case "coordinator_404_expired":
+		s.Coordinator404++
+		s.StaleHeld++
+	case "coordinator_404":
+		s.Coordinator404++
+		s.Skipped++
+	case "coordinator_404_held":
+		s.Coordinator404++
+		s.Held++
+	default:
+		s.Skipped++
+	}
+}
+
+func (s *Server) nudgeSettlementReconciler(reservation storage.ActiveReservation) {
+	if !s.cfg.Settlement.ReconcileEnabled || reservation.AccountID == "" || reservation.RequestID == "" || reservation.CreatedAt.IsZero() {
+		return
+	}
+	key := settlementReconcileNudgeKey(reservation)
+	s.settlementReconcileNudgeMu.Lock()
+	if s.settlementReconcileNudgeKeys == nil {
+		s.settlementReconcileNudgeKeys = make(map[string]struct{})
+	}
+	if _, exists := s.settlementReconcileNudgeKeys[key]; exists {
+		s.settlementReconcileNudgeMu.Unlock()
+		return
+	}
+	if len(s.settlementReconcileNudgePending) >= maxSettlementReconcileNudgeQueue {
+		s.requestSettlementReconcileCatchupLocked()
+		s.settlementReconcileNudgeMu.Unlock()
+		slog.Warn("SPEC-022 settlement reconciler nudge queue full; requested catch-up pass",
+			"request_id", reservation.RequestID,
+			"account_id", reservation.AccountID,
+			"queue_limit", maxSettlementReconcileNudgeQueue,
+		)
+		return
+	}
+	s.settlementReconcileNudgePending = append(s.settlementReconcileNudgePending, reservation)
+	s.settlementReconcileNudgeKeys[key] = struct{}{}
+	if s.settlementReconcileNudgeActiveWorkers < maxSettlementReconcileNudgeWorkers {
+		s.settlementReconcileNudgeActiveWorkers++
+		go s.drainSettlementReconcileNudges()
+	}
+	s.settlementReconcileNudgeMu.Unlock()
+}
+
+func settlementReconcileNudgeKey(reservation storage.ActiveReservation) string {
+	return reservation.AccountID + "\x00" + reservation.RequestID + "\x00" + reservation.CreatedAt.UTC().Format(time.RFC3339Nano)
+}
+
+func (s *Server) requestSettlementReconcileCatchupLocked() {
+	s.settlementReconcileCatchupPending = true
+	if s.settlementReconcileCatchupRunning {
+		return
+	}
+	s.settlementReconcileCatchupRunning = true
+	go s.drainSettlementReconcileCatchups()
+}
+
+func (s *Server) drainSettlementReconcileNudges() {
+	timeout := time.Duration(s.cfg.Settlement.ReconcileRequestTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	for {
+		s.settlementReconcileNudgeMu.Lock()
+		if len(s.settlementReconcileNudgePending) == 0 {
+			s.settlementReconcileNudgeActiveWorkers--
+			s.settlementReconcileNudgeMu.Unlock()
+			return
+		}
+		reservation := s.settlementReconcileNudgePending[0]
+		copy(s.settlementReconcileNudgePending, s.settlementReconcileNudgePending[1:])
+		s.settlementReconcileNudgePending = s.settlementReconcileNudgePending[:len(s.settlementReconcileNudgePending)-1]
+		s.settlementReconcileNudgeMu.Unlock()
+
+		timer := time.NewTimer(settlementReconcileNudgeDelay)
+		<-timer.C
+		timer.Stop()
+
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		result, err := s.reconcileSettlementReservation(ctx, reservation)
+		cancel()
+		key := settlementReconcileNudgeKey(reservation)
+		s.settlementReconcileNudgeMu.Lock()
+		delete(s.settlementReconcileNudgeKeys, key)
+		s.settlementReconcileNudgeMu.Unlock()
+		if err != nil {
+			slog.Warn("SPEC-022 settlement reconciler nudge failed",
+				"request_id", reservation.RequestID,
+				"account_id", reservation.AccountID,
+				"error", err,
+			)
+			continue
+		}
+		slog.Info("SPEC-022 settlement reconciler nudge completed",
+			"request_id", reservation.RequestID,
+			"account_id", reservation.AccountID,
+			"result", result,
+		)
+	}
+}
+
+func (s *Server) drainSettlementReconcileCatchups() {
+	for {
+		s.settlementReconcileNudgeMu.Lock()
+		if !s.settlementReconcileCatchupPending {
+			s.settlementReconcileCatchupRunning = false
+			s.settlementReconcileNudgeMu.Unlock()
+			return
+		}
+		s.settlementReconcileCatchupPending = false
+		s.settlementReconcileNudgeMu.Unlock()
+
+		timer := time.NewTimer(settlementReconcileNudgeDelay)
+		<-timer.C
+		timer.Stop()
+
+		s.runSettlementReconcileCatchup()
+	}
+}
+
+func (s *Server) runSettlementReconcileCatchup() {
+	timeout := time.Duration(s.cfg.Settlement.ReconcileRequestTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 10 * time.Second
+	}
+	for pass := 0; pass < maxSettlementReconcileOverflowCatchupPasses; pass++ {
+		listCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		reservations, err := s.store.ListSettlementHeldReservations(listCtx, maxSettlementReconcileLimit)
+		cancel()
+		if err != nil {
+			slog.Warn("SPEC-022 settlement reconciler catch-up load failed", "error", err, "pass", pass+1)
+			return
+		}
+		if len(reservations) == 0 {
+			return
+		}
+		summary := SettlementReconcileSummary{Scanned: len(reservations)}
+		for _, reservation := range reservations {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			result, err := s.reconcileSettlementReservation(ctx, reservation)
+			cancel()
+			if err != nil {
+				summary.Errors++
+				slog.Warn("SPEC-022 settlement reconciler catch-up reservation failed",
+					"request_id", reservation.RequestID,
+					"account_id", reservation.AccountID,
+					"error", err,
+				)
+				continue
+			}
+			summary.applyResult(result)
+		}
+		slog.Info("SPEC-022 settlement reconciler catch-up completed",
+			"pass", pass+1,
+			"scanned", summary.Scanned,
+			"verified", summary.Verified,
+			"refunded", summary.Refunded,
+			"held", summary.Held,
+			"skipped", summary.Skipped,
+			"errors", summary.Errors,
+			"coordinator_404", summary.Coordinator404,
+		)
+		if len(reservations) < maxSettlementReconcileLimit {
+			return
+		}
+	}
 }
 
 func parseSettlementReconcileLimit(raw string) (int, error) {

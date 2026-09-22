@@ -30,6 +30,9 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	b.routeSnapshotAttemptN++
 	b.settlementAttemptN = 0
 	b.hasSettlementAttemptN = false
+	b.routeSnapshotStorePressure = false
+	b.settlementPolicyMode = ""
+	b.settlementPolicyVersion = ""
 
 	reportedHash := strings.TrimSpace(provider.ModelHash)
 	expectedHash := strings.TrimSpace(provider.ExpectedModelHash)
@@ -185,6 +188,9 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	}); err != nil {
 		err = wrapRouteSnapshotGuardPressure(err)
 		if routeSnapshotCanSkipStorePressure(routeMode, err, insertStorePressure) {
+			b.routeSnapshotStorePressure = true
+			b.settlementPolicyMode = routeMode
+			b.settlementPolicyVersion = billing.RouteSnapshotPolicyVersion
 			b.server.log.Warn().
 				Err(err).
 				Str("request_id", b.requestID).

@@ -286,8 +286,8 @@ func TestSpec022V04StreamingSettlementReconcilerE2E(t *testing.T) {
 		t.Fatalf("usage tokens prompt/completion/total=%d/%d/%d want 8/12/20",
 			usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
 	}
-	if reservation.Status != "settled" || reservation.SettledTokens != 20 || reservation.SettlementHold != 1 {
-		t.Fatalf("reservation=%+v want settled 20-token held reservation", reservation)
+	if reservation.Status != "settled" || reservation.SettledTokens != 20 || reservation.SettlementHold != 0 {
+		t.Fatalf("reservation=%+v want settled 20-token reservation with hold cleared", reservation)
 	}
 }
 

@@ -1486,7 +1486,7 @@ func (s *Store) SettleReservation(ctx context.Context, settlement storage.Reserv
 	metadataArgs := relayBlindArgs(resolved)
 	_, err = tx.ExecContext(ctx, `
 		UPDATE quota_reservations
-		SET status = 'settled', settled_tokens = ?, settled_at = ?, effective_privacy_outcome = ?, settlement_hold = CASE WHEN requested_privacy_mode = 'relay_blind_required' THEN 0 ELSE settlement_hold END
+		SET status = 'settled', settled_tokens = ?, settled_at = ?, effective_privacy_outcome = ?, settlement_hold = 0
 		WHERE account_id = ? AND request_id = ?`,
 		settlement.TotalTokens, encodeTime(settlement.SettledAt), metadataArgs[1], settlement.AccountID, settlement.RequestID)
 	if err != nil {
@@ -1552,7 +1552,7 @@ func (s *Store) SettleDemoReservation(ctx context.Context, settlement storage.Re
 	metadataArgs := relayBlindArgs(resolved)
 	_, err = tx.ExecContext(ctx, `
 		UPDATE quota_reservations
-		SET status = 'settled', settled_tokens = ?, settled_at = ?, effective_privacy_outcome = ?, settlement_hold = CASE WHEN requested_privacy_mode = 'relay_blind_required' THEN 0 ELSE settlement_hold END
+		SET status = 'settled', settled_tokens = ?, settled_at = ?, effective_privacy_outcome = ?, settlement_hold = 0
 		WHERE account_id = ? AND request_id = ?`,
 		settlement.TotalTokens, encodeTime(settlement.SettledAt), metadataArgs[1], settlement.AccountID, settlement.RequestID)
 	if err != nil {
@@ -1597,7 +1597,7 @@ func (s *Store) RefundReservation(ctx context.Context, accountID, requestID stri
 	when := time.Unix(refundedAt, 0).UTC()
 	res, err := tx.ExecContext(ctx, `
 		UPDATE quota_reservations
-		SET status = 'refunded', settled_tokens = 0, settled_at = ?, settlement_hold = CASE WHEN requested_privacy_mode = 'relay_blind_required' THEN 0 ELSE settlement_hold END
+		SET status = 'refunded', settled_tokens = 0, settled_at = ?, settlement_hold = 0
 		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
 		encodeTime(when), accountID, requestID)
 	if err != nil {
@@ -2704,7 +2704,7 @@ func (s *Store) FinalizeWalletSessionReservation(ctx context.Context, settlement
 	when := encodeTime(settlement.SettledAt.UTC())
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE quota_reservations
-		SET status = 'settled', settled_tokens = ?, settled_at = ?, effective_privacy_outcome = ?, settlement_hold = CASE WHEN requested_privacy_mode = 'relay_blind_required' THEN 0 ELSE settlement_hold END
+		SET status = 'settled', settled_tokens = ?, settled_at = ?, effective_privacy_outcome = ?, settlement_hold = 0
 		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
 		accountSettlement.TotalTokens, when, metadataArgs[1], settlement.AccountID, settlement.RequestID); err != nil {
 		return err
