@@ -572,7 +572,7 @@ enum ModelSwitchingWireCodec {
     }
 
     static func printJSON<T: Encodable>(_ value: T) throws {
-        print(try encode(value))
+        FileHandle.standardOutput.write(Data((try encode(value) + "\n").utf8))
     }
 
     static func safeID(_ value: String) -> Bool {

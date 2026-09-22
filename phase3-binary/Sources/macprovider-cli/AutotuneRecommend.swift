@@ -1598,6 +1598,13 @@ struct AutotuneStaticInputs {
     static let transitionMissingProvenanceCandidateRelease = "published-2026-07-10-catalog-recovery-v1"
     static let transitionMissingProvenanceCandidateSHA256 = "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
     static let transitionDemandRankSHA256 = "27cdfc12a43b78db32710926ee16699aadce0c4ddd9d8282baca2532f780c5e2"
+    static let staticFeedFetchTimeoutSeconds: TimeInterval = 4
+    private static let staticFeedSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = staticFeedFetchTimeoutSeconds
+        configuration.timeoutIntervalForResource = staticFeedFetchTimeoutSeconds
+        return URLSession(configuration: configuration)
+    }()
 
     var fetch: (URL) async throws -> Data
     var trustedPublicKeys: [String: String]
@@ -1606,7 +1613,7 @@ struct AutotuneStaticInputs {
 
     init(
         fetch: @escaping (URL) async throws -> Data = { url in
-            let (data, response) = try await URLSession.shared.data(from: url)
+            let (data, response) = try await Self.staticFeedSession.data(from: url)
             if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
                 throw AutotuneRecommendError.invalidStaticJSON("HTTP \(http.statusCode)")
             }

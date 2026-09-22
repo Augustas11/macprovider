@@ -1415,7 +1415,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             try emitEvent("progress", phase: "planning")
 
             let staticInputs = AutotuneStaticInputs()
-            let inputs = await staticInputs.loadRecommendationInputs()
+            let inputs = await staticInputs.loadRecommendationInputs(includeArtifactFeed: false)
             let demand = inputs.demand
             let catalog = inputs.candidate
             let rateCard = inputs.rateCard

@@ -638,6 +638,15 @@ final class AutotuneRecommendTests: XCTestCase {
         ]))
     }
 
+    func testStaticFeedFetchTimeoutIsBoundedForCheckOnlyUX() {
+        XCTAssertGreaterThan(AutotuneStaticInputs.staticFeedFetchTimeoutSeconds, 0)
+        XCTAssertLessThanOrEqual(
+            AutotuneStaticInputs.staticFeedFetchTimeoutSeconds,
+            5,
+            "check-only recommendation progress must not disappear behind default URLSession timeouts"
+        )
+    }
+
     func testInstalledOnlyDisclosureDoesNotClaimMeasuredPerformance() throws {
         let request = try makeRequest()
         let result = AutotuneRecommendEngine().recommend(request)

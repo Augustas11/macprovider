@@ -1,7 +1,57 @@
+import Darwin
 import XCTest
 @testable import macprovider_cli
 
 final class ModelSwitchingWireTests: XCTestCase {
+    func testPrintJSONWritesLineTerminatedFrameDirectlyToStdout() throws {
+        let pipeFDs = UnsafeMutablePointer<Int32>.allocate(capacity: 2)
+        defer { pipeFDs.deallocate() }
+        XCTAssertEqual(pipe(pipeFDs), 0)
+        let readFD = pipeFDs[0]
+        let writeFD = pipeFDs[1]
+        let originalStdout = dup(STDOUT_FILENO)
+        XCTAssertGreaterThanOrEqual(originalStdout, 0)
+        var writeFDOpen = true
+        defer {
+            close(readFD)
+            if writeFDOpen {
+                close(writeFD)
+            }
+            close(originalStdout)
+        }
+
+        XCTAssertEqual(dup2(writeFD, STDOUT_FILENO), STDOUT_FILENO)
+        defer {
+            _ = dup2(originalStdout, STDOUT_FILENO)
+        }
+
+        try ModelSwitchingWireCodec.printJSON(ModelRecommendationCheckEventWire(
+            type: "accepted",
+            checkID: "check-1",
+            candidateModelID: nil,
+            isolatedCacheRoot: nil,
+            stagingOwner: "cli",
+            phase: nil,
+            elapsedMS: 0,
+            cancellable: false,
+            downloadBytesWritten: nil,
+            downloadBytesTotal: nil,
+            reason: nil,
+            stagingDiscarded: nil,
+            installedOnly: true
+        ))
+
+        XCTAssertEqual(dup2(originalStdout, STDOUT_FILENO), STDOUT_FILENO)
+        close(writeFD)
+        writeFDOpen = false
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        let count = read(readFD, &buffer, buffer.count)
+        XCTAssertGreaterThan(count, 0)
+        let output = String(decoding: buffer.prefix(Int(count)), as: UTF8.self)
+        XCTAssertTrue(output.hasSuffix("\n"), output)
+        XCTAssertTrue(output.contains(#""schema_version":"model_recommendation_check_event.v1""#), output)
+    }
+
     func testActionIDsUseTheSupportedModelLengthAndControlCharacterBoundary() {
         XCTAssertTrue(ModelSwitchingWireCodec.safeID(String(repeating: "a", count: 256)))
         XCTAssertFalse(ModelSwitchingWireCodec.safeID(String(repeating: "a", count: 257)))
