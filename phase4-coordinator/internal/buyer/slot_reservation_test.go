@@ -568,3 +568,120 @@ func TestForwardWithFailoverCommittedStreamPublishesReadySlot(t *testing.T) {
 		t.Fatalf("provider capacity after committed stream = state %q slots_free %d, want ready/1", got.State, got.SlotsFree)
 	}
 }
+
+func fourSlotStudio(t *testing.T) (*Server, *pool.Registry, pool.Provider) {
+	t.Helper()
+	s, registry, _ := poolIsolationServer(t)
+	provider := poolProvider("p-studio")
+	provider.MaxConcurrency = 4
+	provider.SlotsTotal = 4
+	provider.SlotsFree = 4
+	registry.Register(&provider, nil)
+	return s, registry, provider
+}
+
+func macReportsSlots(t *testing.T, registry *pool.Registry, provider pool.Provider, slotsFree int) {
+	t.Helper()
+	macReportsSlotsAt(t, registry, provider, slotsFree, time.Now().UTC())
+}
+
+func macReportsSlotsAt(t *testing.T, registry *pool.Registry, provider pool.Provider, slotsFree int, at time.Time) {
+	t.Helper()
+	free := slotsFree
+	state := pool.StateReady
+	if free <= 0 {
+		state = pool.StateBusy
+	}
+	if _, ok := registry.ApplyStateUpdate(provider.ProviderID, provider.AssignedID, pool.StateUpdate{
+		State:     state,
+		SlotsFree: &free,
+		At:        at,
+	}); !ok {
+		t.Fatal("macReportsSlots: provider missing")
+	}
+}
+
+func TestFourWideAdmitThenMacHeartbeatFillsAllSeats(t *testing.T) {
+	s, registry, provider := fourSlotStudio(t)
+	inFlight := 0
+	states := make([]*forwardState, 4)
+	for i := 0; i < 4; i++ {
+		states[i] = &forwardState{slotReservationsEnabled: true}
+		if _, routeErr := s.selectProviderExcluding(context.Background(), "rid-wave1-"+string(rune('a'+i)), poolChatReq(""), http.Header{}, nil, "2026-09-22", states[i]); routeErr != nil {
+			t.Fatalf("wave1 seat %d rejected: %+v", i+1, routeErr)
+		}
+		s.noteProviderAcceptedRequest(states[i])
+		inFlight++
+		macReportsSlots(t, registry, provider, 4-inFlight)
+	}
+	got, ok := registry.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("provider missing after wave1 accept")
+	}
+	if got.SlotsFree != 0 {
+		t.Fatalf("after 4 accepts occupancy slots_free=%d, want 0", got.SlotsFree)
+	}
+	for i := range states {
+		s.reconcileForwardedSlotAvailable(states[i])
+		inFlight--
+		macReportsSlots(t, registry, provider, 4-inFlight)
+	}
+	got, ok = registry.Resolve(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		t.Fatal("provider missing after wave1 restore")
+	}
+	if got.SlotsFree != 4 || got.State != pool.StateReady {
+		t.Fatalf("after wave1 complete occupancy = state %q slots_free %d, want ready/4", got.State, got.SlotsFree)
+	}
+	admitted := 0
+	for i := 0; i < 4; i++ {
+		state := &forwardState{slotReservationsEnabled: true}
+		if _, routeErr := s.selectProviderExcluding(context.Background(), "rid-wave2-"+string(rune('a'+i)), poolChatReq(""), http.Header{}, nil, "2026-09-22", state); routeErr != nil {
+			t.Fatalf("wave2 seat %d rejected: %+v", i+1, routeErr)
+		}
+		admitted++
+		s.noteProviderAcceptedRequest(state)
+		s.reconcileForwardedSlotAvailable(state)
+	}
+	if admitted != 4 {
+		t.Fatalf("wave2 admitted %d, want 4", admitted)
+	}
+}
+
+func TestFourWideStaleBusyHeartbeatMustNotBlockNextWave(t *testing.T) {
+	s, registry, provider := fourSlotStudio(t)
+	states := make([]*forwardState, 4)
+	for i := 0; i < 4; i++ {
+		states[i] = &forwardState{slotReservationsEnabled: true}
+		if _, routeErr := s.selectProviderExcluding(context.Background(), "rid-stale-"+string(rune('a'+i)), poolChatReq(""), http.Header{}, nil, "2026-09-22", states[i]); routeErr != nil {
+			t.Fatalf("seat %d rejected: %+v", i+1, routeErr)
+		}
+		s.noteProviderAcceptedRequest(states[i])
+		macReportsSlots(t, registry, provider, 3-i)
+	}
+	busyAt := time.Now().UTC()
+	macReportsSlotsAt(t, registry, provider, 0, busyAt)
+	for i := range states {
+		s.reconcileForwardedSlotAvailable(states[i])
+	}
+	s.slotQueueDeadline = time.Millisecond
+	s.slotQueuePollInterval = time.Millisecond
+	// Late copy of the in-wave busy snapshot. Stamp it with the wave time so
+	// it cannot beat the restore write.
+	macReportsSlotsAt(t, registry, provider, 0, busyAt)
+	admitted := 0
+	for i := 0; i < 4; i++ {
+		state := &forwardState{slotReservationsEnabled: true}
+		if _, routeErr := s.selectProviderExcluding(context.Background(), "rid-next-"+string(rune('a'+i)), poolChatReq(""), http.Header{}, nil, "2026-09-22", state); routeErr != nil {
+			continue
+		}
+		admitted++
+		s.releaseQueuedSlotReservation(state)
+		if state.slotConsumedOnAccept {
+			s.restoreConsumedForwardedSlot(state)
+		}
+	}
+	if admitted != 4 {
+		t.Fatalf("next wave after stale busy heartbeat admitted %d, want 4", admitted)
+	}
+}

@@ -147,15 +147,19 @@ type Provider struct {
 	// uses this — not LastHeartbeatAt — so a provider actively streaming a
 	// long generation is not closed for "missing" heartbeats it cannot send
 	// while its single inference slot is busy.
-	LastActivityAt        time.Time  `json:"last_activity_at"`
-	ConnectedAt           time.Time  `json:"connected_at"`
-	BinaryVersion         string     `json:"binary_version"`
-	ModelHash             string     `json:"model_hash,omitempty"`
-	ModelHashAlgorithm    string     `json:"model_hash_algorithm,omitempty"`
-	WeightsManifestSHA256 string     `json:"weights_manifest_sha256,omitempty"`
-	WeightsHashAlgorithm  string     `json:"weights_manifest_algorithm,omitempty"`
-	ExpectedModelHash     string     `json:"-"`
-	HashStatus            HashStatus `json:"hash_status,omitempty"`
+	LastActivityAt time.Time `json:"last_activity_at"`
+	// lastCoordinatorSlotRestoreAt is when RestoreForwardedSlot last wrote
+	// occupancy. Provider heartbeats stamped at or before that time are the
+	// previous wave's in-flight snapshot and must not zero restored seats.
+	lastCoordinatorSlotRestoreAt time.Time
+	ConnectedAt                  time.Time  `json:"connected_at"`
+	BinaryVersion                string     `json:"binary_version"`
+	ModelHash                    string     `json:"model_hash,omitempty"`
+	ModelHashAlgorithm           string     `json:"model_hash_algorithm,omitempty"`
+	WeightsManifestSHA256        string     `json:"weights_manifest_sha256,omitempty"`
+	WeightsHashAlgorithm         string     `json:"weights_manifest_algorithm,omitempty"`
+	ExpectedModelHash            string     `json:"-"`
+	HashStatus                   HashStatus `json:"hash_status,omitempty"`
 	// ArtifactIdentity is set only when the provider's named pair resolved
 	// through the release-bound SPEC-023 §3.7 artifact feed (SPEC-010 v1.7
 	// R007); it carries the matched member and the feed provenance the route
@@ -1566,6 +1570,7 @@ func (r *Registry) RestoreForwardedSlot(providerID, assignedID string) bool {
 	if p.SlotsFree < p.SlotsTotal {
 		p.SlotsFree++
 	}
+	p.lastCoordinatorSlotRestoreAt = time.Now().UTC()
 	if p.SlotsFree > 0 && p.ServingCapable() {
 		r.setStateLocked(p, StateReady)
 	}
@@ -2570,6 +2575,13 @@ type HeartbeatResult struct {
 	PriorModelID   string
 }
 
+func (p *Provider) staleProviderCapacityAt(at time.Time) bool {
+	return p != nil &&
+		!at.IsZero() &&
+		!p.lastCoordinatorSlotRestoreAt.IsZero() &&
+		!at.After(p.lastCoordinatorSlotRestoreAt)
+}
+
 func (r *Registry) ApplyHeartbeatDetailed(providerID, assignedID string, hb HeartbeatUpdate) HeartbeatResult {
 	cp, gap, ok, modelIDChanged, priorModelID, swap, hasSwap := r.applyHeartbeatLocked(providerID, assignedID, hb)
 	// M2-2 / ARCH-2: emit AFTER releasing r.mu. The audit SQLite write
@@ -2663,7 +2675,9 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.RAMGB = hb.RAMGB
 	p.MaxContextTokens = hb.MaxContextTokens
 	p.MaxConcurrency = hb.MaxConcurrency
-	p.SlotsFree = hb.SlotsFree
+	if !p.staleProviderCapacityAt(hb.At) {
+		p.SlotsFree = hb.SlotsFree
+	}
 	p.SlotsTotal = hb.SlotsTotal
 	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
 	p.RequestsServedSinceLast = hb.RequestsServedSinceLast
@@ -2689,7 +2703,8 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	// registration) is the authoritative declared set.
 	r.recordSeenModelsUnionLocked(p.ProviderID, hb.ModelID, p.SupportedModels)
 	if hb.Status != "" && hb.Status != p.State {
-		if r.canApplyProviderStateLocked(p, hb.Status) {
+		staleBusy := p.staleProviderCapacityAt(hb.At) && (hb.Status == StateReady || hb.Status == StateBusy)
+		if !staleBusy && r.canApplyProviderStateLocked(p, hb.Status) {
 			r.setStateLocked(p, hb.Status)
 		}
 	}
@@ -2874,10 +2889,13 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 		r.mu.Unlock()
 		return nil, false
 	}
+	staleCapacity := p.staleProviderCapacityAt(update.At) && update.SlotsFree != nil
 	if r.canApplyProviderStateLocked(p, update.State) {
-		r.setStateLocked(p, update.State)
+		if !(staleCapacity && (update.State == StateReady || update.State == StateBusy)) {
+			r.setStateLocked(p, update.State)
+		}
 	}
-	if update.SlotsFree != nil {
+	if update.SlotsFree != nil && !staleCapacity {
 		p.SlotsFree = *update.SlotsFree
 	}
 	if update.SlotsTotal != nil {
