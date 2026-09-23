@@ -64,6 +64,30 @@ final class ModelRuntimePromptContextTests: XCTestCase {
         XCTAssertTrue(ModelRuntime.chatTemplateSupportsThinkingToggle(in: artifact))
     }
 
+    func testWarmSwapTargetCapabilitiesArePrecomputedFromExactArtifact() throws {
+        let thinkingArtifact = try artifactDirectory(
+            chatTemplate: #"{% if enable_thinking %}<think>{% endif %}"#
+        )
+        let nonThinkingArtifact = try artifactDirectory(
+            chatTemplate: #"{{ messages | tojson }}"#
+        )
+        let capabilities = ModelRuntime.thinkingToggleCapabilities(for: [
+            "mlx-community/GLM-4.5-Air-4bit": ModelRuntimeTargetAuthority(
+                modelArgument: thinkingArtifact.path,
+                artifactSHA256: String(repeating: "a", count: 64),
+                catalogRevision: "thinking-revision"
+            ),
+            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit": ModelRuntimeTargetAuthority(
+                modelArgument: nonThinkingArtifact.path,
+                artifactSHA256: String(repeating: "b", count: 64),
+                catalogRevision: "non-thinking-revision"
+            ),
+        ])
+
+        XCTAssertEqual(capabilities["mlx-community/GLM-4.5-Air-4bit"], true)
+        XCTAssertEqual(capabilities["mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"], false)
+    }
+
     private func artifactDirectory(
         chatTemplate: String? = nil,
         tokenizerConfig: String? = nil

@@ -1848,7 +1848,7 @@
       "spec_id": "SPEC-010",
       "state": "conformant",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:targetAuthority",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:beginSwap",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:catalogRuntimeMatches"
       ],
       "tests": [

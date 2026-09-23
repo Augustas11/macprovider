@@ -1105,7 +1105,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// skips persistence (rather than deriving a fake hash from the model hash).
     private var currentTokenizerConfigSHA256: String?
     private var currentChatTemplateSHA256: String?
-    private var currentTemplateSupportsThinkingToggle = false
+    private var configuredTemplateSupportsThinkingToggle = false
     private let verifiedCatalogArtifactSHA256: String?
     /// SPEC-037 FR-KVP4 (MEDIUM-5) — the model's CATALOG REVISION, distinct from the
     /// artifact SHA. FR-KVP4 requires model_sha256 AND catalog revision as SEPARATE
@@ -1114,6 +1114,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// and neither promotes nor persists (never falls back to the artifact SHA).
     private let verifiedModelCatalogRevision: String?
     private let targetAuthorities: [String: ModelRuntimeTargetAuthority]
+    private let targetTemplateSupportsThinkingToggle: [String: Bool]
     private let authorizedSwitchModelIDs: [String]
     private var preparedAdoptions: [String: ModelRuntimePreparedAdoption] = [:]
     private var preparedAdoptionReservationID: String?
@@ -1889,6 +1890,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.verifiedCatalogArtifactSHA256 = verifiedModelArtifactSHA256
         self.verifiedModelCatalogRevision = verifiedModelCatalogRevision
         self.targetAuthorities = targetAuthorities
+        self.targetTemplateSupportsThinkingToggle = Self.thinkingToggleCapabilities(for: targetAuthorities)
         self.authorizedSwitchModelIDs = authorizedSwitchModelIDs
         self.loader = { targetModelID in
             let (container, directory) = try await Self.loadLocalContainer(from: targetModelID)
@@ -1941,7 +1943,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let tokenizerHashes = Self.tokenizerIdentityHashes(in: directory)
         self.currentTokenizerConfigSHA256 = tokenizerHashes.config
         self.currentChatTemplateSHA256 = tokenizerHashes.template
-        self.currentTemplateSupportsThinkingToggle = Self.chatTemplateSupportsThinkingToggle(in: directory)
+        self.configuredTemplateSupportsThinkingToggle = Self.chatTemplateSupportsThinkingToggle(in: directory)
         let runtimeCacheClass = self.pagedKVConfig.effectiveEnabled
             ? await Self.pagedKVRuntimeCacheClass(
                 container: container,
@@ -2046,7 +2048,6 @@ actor ModelRuntime: ModelRuntimeServing {
                 target: container,
                 draft: draftContainer,
                 targetModelID: modelID,
-                templateSupportsThinkingToggle: self.currentTemplateSupportsThinkingToggle,
                 numDraftTokens: numDraftTokens,
                 maxContextTokens: self.maxContextTokens,
                 kvBitsOverride: self.kvBitsOverride,
@@ -2123,6 +2124,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.verifiedCatalogArtifactSHA256 = nil
         self.verifiedModelCatalogRevision = nil
         self.targetAuthorities = targetAuthorities
+        self.targetTemplateSupportsThinkingToggle = Self.thinkingToggleCapabilities(for: targetAuthorities)
         self.authorizedSwitchModelIDs = authorizedSwitchModelIDs
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
@@ -2325,7 +2327,6 @@ actor ModelRuntime: ModelRuntimeServing {
                 let weightsManifestSHA256: String?
                 let tokenizerConfigSHA256: String?
                 let chatTemplateSHA256: String?
-                let templateSupportsThinkingToggle: Bool
                 let modelCapabilities: PagedKVRuntimeModelCapabilities
                 let draftModelID: String?
                 let draftContainer: ModelContainer?
@@ -2339,7 +2340,6 @@ actor ModelRuntime: ModelRuntimeServing {
                     weightsManifestSHA256 = nil
                     tokenizerConfigSHA256 = nil
                     chatTemplateSHA256 = nil
-                    templateSupportsThinkingToggle = false
                     modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
                     if let configuredDraftModelID {
                         do {
@@ -2374,7 +2374,6 @@ actor ModelRuntime: ModelRuntimeServing {
                     let swapTokenizerHashes = Self.tokenizerIdentityHashes(in: loaded.1)
                     tokenizerConfigSHA256 = swapTokenizerHashes.config
                     chatTemplateSHA256 = swapTokenizerHashes.template
-                    templateSupportsThinkingToggle = Self.chatTemplateSupportsThinkingToggle(in: loaded.1)
                     modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: loaded.1)
                     if let configuredDraftModelID {
                         do {
@@ -2398,7 +2397,6 @@ actor ModelRuntime: ModelRuntimeServing {
                                 target: loaded.0,
                                 draft: draftLoaded.0,
                                 targetModelID: modelID,
-                                templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                                 numDraftTokens: numDraftTokens,
                                 maxContextTokens: maxContextTokens,
                                 kvBitsOverride: kvBitsOverride,
@@ -2436,7 +2434,6 @@ actor ModelRuntime: ModelRuntimeServing {
                     weightsManifestSHA256: weightsManifestSHA256,
                     tokenizerConfigSHA256: tokenizerConfigSHA256,
                     chatTemplateSHA256: chatTemplateSHA256,
-                    templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                     draftModelID: draftModelID,
                     draftContainer: draftContainer,
                     draftFailureReason: draftFailureReason,
@@ -3191,7 +3188,6 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsManifestSHA256: nil,
             tokenizerConfigSHA256: nil,
             chatTemplateSHA256: nil,
-            templateSupportsThinkingToggle: false,
             draftModelID: nil,
             draftContainer: nil,
             draftFailureReason: nil,
@@ -3208,7 +3204,6 @@ actor ModelRuntime: ModelRuntimeServing {
         weightsManifestSHA256: String?,
         tokenizerConfigSHA256: String?,
         chatTemplateSHA256: String?,
-        templateSupportsThinkingToggle: Bool,
         draftModelID: String?,
         draftContainer: ModelContainer?,
         draftFailureReason: String?,
@@ -3229,7 +3224,6 @@ actor ModelRuntime: ModelRuntimeServing {
         currentWeightsManifestSHA256 = weightsManifestSHA256
         currentTokenizerConfigSHA256 = tokenizerConfigSHA256
         currentChatTemplateSHA256 = chatTemplateSHA256
-        currentTemplateSupportsThinkingToggle = templateSupportsThinkingToggle
         let runtimeCacheClass = pagedKVConfig.effectiveEnabled
             ? await Self.pagedKVRuntimeCacheClass(
                 container: container,
@@ -3342,6 +3336,16 @@ actor ModelRuntime: ModelRuntimeServing {
 
     private func isConfiguredCatalogModel(_ targetModelID: String) -> Bool {
         targetModelID == modelID || targetModelID == catalogModelIDAlias
+    }
+
+    private func templateSupportsThinkingToggle(for servedModelID: String?) -> Bool {
+        guard let servedModelID else { return false }
+        if let supported = targetTemplateSupportsThinkingToggle[servedModelID]
+            ?? targetTemplateSupportsThinkingToggle[servedModelID.lowercased(with: nil)] {
+            return supported
+        }
+        guard isConfiguredCatalogModel(servedModelID) else { return false }
+        return configuredTemplateSupportsThinkingToggle
     }
 
     private func targetAuthority(for targetModelID: String) -> ModelRuntimeTargetAuthority? {
@@ -3482,7 +3486,7 @@ actor ModelRuntime: ModelRuntimeServing {
         }
 
         let maxContextTokens = maxContextTokens
-        let templateSupportsThinkingToggle = currentTemplateSupportsThinkingToggle
+        let templateSupportsThinkingToggle = templateSupportsThinkingToggle(for: handle.snapshot.modelID)
         try await inferenceGate.withPermit {
             try handle.drainCancelled.check()
             return try await container.perform { context in
@@ -3508,7 +3512,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
             }
             let maxContextTokens = maxContextTokens
-            let templateSupportsThinkingToggle = currentTemplateSupportsThinkingToggle
+            let templateSupportsThinkingToggle = templateSupportsThinkingToggle(for: handle.snapshot.modelID)
             let inputTokens = try await inferenceGate.withPermit {
                 try handle.drainCancelled.check()
                 return try await container.perform { context in
@@ -3655,7 +3659,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let maxContextTokens = maxContextTokens
         let stopTokenFilter = stopTokenFilter
-        let templateSupportsThinkingToggle = currentTemplateSupportsThinkingToggle
+        let templateSupportsThinkingToggle = templateSupportsThinkingToggle(for: snapshot.modelID)
         let prepared = try await container.perform { context -> ContinuousBatchPreparedRequest in
             try drainCancelled.check()
             try Task.checkCancellation()
@@ -3854,7 +3858,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let maxContextTokens = maxContextTokens
         let stopTokenFilter = stopTokenFilter
-        let templateSupportsThinkingToggle = currentTemplateSupportsThinkingToggle
+        let templateSupportsThinkingToggle = templateSupportsThinkingToggle(for: snapshot.modelID)
         let requestStops = request.stop
         let (prepared, detokenizer) = try await container.perform { context -> (ContinuousBatchPreparedRequest, StreamingDetokenizer) in
             try drainCancelled.check()
@@ -4285,7 +4289,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = stopTokenFilter
-        let templateSupportsThinkingToggle = currentTemplateSupportsThinkingToggle
+        let templateSupportsThinkingToggle = templateSupportsThinkingToggle(for: snapshot.modelID)
         let completion = try await Self.withDrainCancellation(drainCancelled) {
             try await inferenceGate.withPermit {
                 try drainCancelled.check()
@@ -4786,7 +4790,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = stopTokenFilter
-        let templateSupportsThinkingToggle = currentTemplateSupportsThinkingToggle
+        let templateSupportsThinkingToggle = templateSupportsThinkingToggle(for: snapshot.modelID)
         return try await Self.withDrainCancellation(drainCancelled) {
             try await Self.withStructuredStreamingIdleTimeout(
                 idleState: idleState,
@@ -5517,7 +5521,6 @@ actor ModelRuntime: ModelRuntimeServing {
         target: ModelContainer,
         draft: ModelContainer,
         targetModelID: String,
-        templateSupportsThinkingToggle: Bool,
         numDraftTokens: Int,
         maxContextTokens: Int,
         kvBitsOverride: Int?,
@@ -5526,10 +5529,7 @@ actor ModelRuntime: ModelRuntimeServing {
     ) async throws {
         let request = try spec028EquivalenceRequest(targetModelID: targetModelID)
         let tokenPair = try await target.perform { targetContext in
-            let input = try userInput(
-                for: request,
-                templateSupportsThinkingToggle: templateSupportsThinkingToggle
-            )
+            let input = try userInput(for: request)
             let lmInput = try await targetContext.processor.prepare(input: input)
             try validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             let parameters = GenerateParameters(
@@ -5801,6 +5801,26 @@ actor ModelRuntime: ModelRuntimeServing {
             }
         }
         return false
+    }
+
+    static func thinkingToggleCapabilities(
+        for authorities: [String: ModelRuntimeTargetAuthority]
+    ) -> [String: Bool] {
+        var byModelArgument: [String: Bool] = [:]
+        var capabilities: [String: Bool] = [:]
+        capabilities.reserveCapacity(authorities.count)
+
+        for (modelID, authority) in authorities {
+            let supported = byModelArgument[authority.modelArgument] ?? {
+                let value = chatTemplateSupportsThinkingToggle(
+                    in: URL(fileURLWithPath: authority.modelArgument, isDirectory: true)
+                )
+                byModelArgument[authority.modelArgument] = value
+                return value
+            }()
+            capabilities[modelID] = supported
+        }
+        return capabilities
     }
 
     /// SPEC-037 HIGH-8 — hash the loaded model's LIVE tokenizer configuration and
