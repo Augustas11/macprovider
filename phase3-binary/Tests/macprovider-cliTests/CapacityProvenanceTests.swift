@@ -196,6 +196,18 @@ final class CapacityProvenanceTests: XCTestCase {
         XCTAssertTrue(output.contains("Catalog trust:   live_verified"), output)
     }
 
+    func testAdvancedStatusLabelsCatalogMaterialMissingHold() {
+        var payload = status()
+        payload["network_state"] = "not_buyer_serving"
+        payload["buyer_serving_hold"] = "catalog_material_missing"
+
+        let output = LocalStatusFormatter.format(payload, advanced: true)
+
+        XCTAssertTrue(output.contains(
+            "Network:         not_buyer_serving (hold: catalog_material_missing — catalog material missing for this model — buyers cannot be routed until the network catalog includes it)"
+        ), output)
+    }
+
     func testAdvancedStatusShowsUnloadedModelAndDisconnectedCoordinator() {
         var payload = status()
         payload["status"] = "unavailable"

@@ -3214,7 +3214,16 @@ struct LocalStatusFormatter {
         }
         var networkLine = string(status["network_state"])
         if let hold = status["buyer_serving_hold"] as? String {
-            networkLine += " (hold: \(hold))"
+            networkLine += " (hold: \(hold)"
+            switch CoordinatorReadinessClient.BuyerServingHold(rawValue: hold) {
+            case .modelAdmissionPending:
+                networkLine += " — model admission pending; buyers are routed once the network settles this model"
+            case .catalogMaterialMissing:
+                networkLine += " — catalog material missing for this model — buyers cannot be routed until the network catalog includes it"
+            case nil:
+                break
+            }
+            networkLine += ")"
         }
         let catalog = status["catalog"] as? [String: Any] ?? [:]
         return """

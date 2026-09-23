@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.20",
+      "version": "1.9.21",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -625,7 +625,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.1.8",
+      "version": "v0.1.9",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -654,7 +654,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-022-R001/R002/R003/R010 restored to conformant from signed observe-mode JOURNEY-BUYER-PAID-PATH envelope 20260918T034532Z (#1022, expires 2026-10-18). R004 remains conformant on later in-date paid-path evidence. R005/R006 remain pending on still-in-date paid-path evidence until a selector-fresh consume. Isolated JOURNEY-BUYER-ENFORCE (#1044) is the candidate harness for R007/R008/R009/R011; R007/R009 signed evidence expired 2026-09-17 and those rows remain pending. Observe-mode paid-path must not promote R007/R008. No production Pearl / enforce activation."
+        "rationale": "SPEC-022-R001/R003/R010 restored to conformant from signed observe-mode JOURNEY-BUYER-PAID-PATH envelope 20260918T034532Z (#1022, expires 2026-10-18). R002 returns to pending in v0.1.9: R-2.7 (#1689) expands it, and that envelope predates R-2.7; it needs a signed enforce-mode journey covering AC-022-65. R004 remains conformant on later in-date paid-path evidence. R005/R006 remain pending on still-in-date paid-path evidence until a selector-fresh consume. Isolated JOURNEY-BUYER-ENFORCE (#1044) is the candidate harness for R007/R008/R009/R011; R007/R009 signed evidence expired 2026-09-17 and those rows remain pending. Observe-mode paid-path must not promote R007/R008. No production Pearl / enforce activation."
       }
     },
     {
@@ -5426,12 +5426,31 @@
     {
       "requirement_id": "SPEC-022-R002",
       "spec_id": "SPEC-022",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
-        "phase4-coordinator/internal/buyer/server.go:selectProvider"
+        "phase4-coordinator/internal/buyer/server.go:selectProvider",
+        "phase4-coordinator/internal/buyer/route_snapshot.go:routeSnapshotCatalogMaterial",
+        "phase4-coordinator/internal/buyer/route_snapshot.go:catalogMaterialMissing",
+        "phase4-coordinator/internal/buyer/route_snapshot.go:catalogMaterialMissingUnderEnforce",
+        "phase4-coordinator/internal/buyer/server.go:routeSnapshotUnsatisfiable",
+        "phase4-coordinator/internal/buyer/server.go:routeSnapshotRejection",
+        "phase4-coordinator/internal/buyer/server.go:providerBuyerServingVerdict",
+        "phase4-coordinator/internal/buyer/route_snapshot.go:CatalogMaterialMissingUnderEnforce",
+        "phase4-coordinator/internal/ws/server.go:publicRoutingEligible"
       ],
       "tests": [
-        "phase4-coordinator/internal/buyer/server_test.go:TestChatCompletionsRoutesNonStreamingRequest"
+        "phase4-coordinator/internal/buyer/server_test.go:TestChatCompletionsRoutesNonStreamingRequest",
+        "phase4-coordinator/internal/buyer/catalog_material_gate_test.go:TestCatalogMaterialGate_EnforceExcludesSessionWithoutMaterial",
+        "phase4-coordinator/internal/buyer/catalog_material_gate_test.go:TestCatalogMaterialGate_ReceiptKeyMissingKeepsItsOwnReason",
+        "phase4-coordinator/internal/buyer/catalog_material_gate_test.go:TestCatalogMaterialGate_PressureProbeDoesNotReattributeAnotherProvidersReason",
+        "phase4-coordinator/internal/buyer/catalog_material_gate_test.go:TestCatalogMaterialGate_PoolEnvelopeUnchanged",
+        "phase4-coordinator/internal/buyer/catalog_material_gate_test.go:TestCatalogMaterialGate_ObserveModeUnchanged",
+        "phase4-coordinator/internal/buyer/catalog_material_gate_test.go:TestCatalogMaterialGate_EnforceRoutesSessionWithMaterial",
+        "phase4-coordinator/internal/buyer/catalog_material_gate_test.go:TestCatalogMaterialGate_BYOMBoundSessionUsesItsOwnGate",
+        "phase4-coordinator/internal/buyer/catalog_material_gate_test.go:TestPoolCheckCatalogMaterialHold",
+        "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestRouteSnapshotEnforceExcludesSessionWithoutCatalogMaterial",
+        "phase4-coordinator/internal/buyer/poolz_catalog_material_gate_test.go:TestPoolzRoutingEligibleAgreesWithCatalogMaterialGate",
+        "phase4-coordinator/internal/ws/poolz_routing_gate_test.go:TestPublicRoutingEligibleAppliesCatalogMaterialGate"
       ],
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
@@ -5450,7 +5469,12 @@
           "expires_at": "2026-10-18"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1689",
+        "rationale": "SPEC-022 v0.1.9 R-2.7 expands R002: under enforce, a non-BYOM session without Tier-2 route-snapshot material is excluded on every selection path, and /v1/pool/check readiness names catalog_material_missing to CLIs that advertise catalog_material_hold_v1. The shared predicate and its unit tests are mapped here. The retained 2026-09-18 evidence is an observe-mode paid-path journey that predates R-2.7 and cannot exercise it. Re-attestation needs a current signed enforce-mode journey covering AC-022-65."
+      }
     },
     {
       "requirement_id": "SPEC-022-R003",

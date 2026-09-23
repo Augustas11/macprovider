@@ -1,6 +1,19 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.20 (2026-09-23, local capacity provenance)
+**Version:** 1.9.21 (2026-09-23, catalog-material readiness hold)
+
+**Change log v1.9.21 (2026-09-23, catalog-material readiness hold):** Names
+the closed `buyer_serving_hold` set the CLI holds its accepted session through
+on an authoritative `buyer_serving=false`: `model_admission_pending`
+(SPEC-047-R003(iv)) and the new `catalog_material_missing` (SPEC-022-R002
+R-2.7, #1689). The CLI advertises the additive
+`tier2_capabilities.catalog_material_hold_v1: true` in `auth_request`; the
+coordinator names `catalog_material_missing` only to a session that advertised
+it and keeps the pre-R-2.7 readiness verdict for any other session, so older
+CLIs never see a hold they would treat as a reconnect. `status --advanced`
+labels both holds. The `/v1/status` `buyer_serving_hold` field (gated by
+`buyer_serving_hold_v1`) carries the value only while `network_state` is
+`not_buyer_serving`.
 
 **Change log v1.9.20 (2026-09-23, local capacity provenance):** Adds the
 additive `capacity_provenance_v1` local-status capability (#1689). Under it,
@@ -1263,6 +1276,32 @@ supported version. An absent envelope is the legacy-reader path.
 `buyer_serving_unknown` only when the verdict is indeterminate **and** this
 process has never confirmed `true`. After a confirmed `true`, an indeterminate
 refresh MUST keep `buyer_serving` until an authoritative `false`.
+
+**Buyer-serving holds (v1.9.21).** An authoritative `buyer_serving=false` MAY
+carry `buyer_serving_hold`, a closed coordinator reason the CLI MUST hold its
+accepted websocket session through instead of reconnecting, re-reading
+readiness on its poll cadence and promoting to `serving_buyers` once the
+coordinator confirms `true`. The closed set is:
+
+- `model_admission_pending` — the session is bound to a BYOM candidate whose
+  admission is pending (SPEC-047-R003(iv)); dropping the session would clear
+  the binding settlement needs (SPEC-047-R006).
+- `catalog_material_missing` — verified-model settlement is in `enforce` and
+  the network Tier-2 catalog has no route-snapshot material for the served
+  model, so the coordinator cannot route buyers to it (SPEC-022-R002 R-2.7).
+  Only a network catalog update clears it; a reconnect cannot.
+
+A value outside the closed set MUST be treated as no hold (fail closed to the
+reconnect path), and a `false` without a known hold keeps the existing
+reconnect contract. A build that holds through `catalog_material_missing` MUST
+advertise `tier2_capabilities.catalog_material_hold_v1: true` in its
+`auth_request` (additive; a coordinator that does not know the key ignores
+it). The coordinator names `catalog_material_missing` only to such a session
+and otherwise keeps its pre-R-2.7 verdict (SPEC-022 v0.1.9). The local
+`/v1/status` `buyer_serving_hold` (capability `buyer_serving_hold_v1`) is the
+coordinator's value, reported only while `network_state` is
+`not_buyer_serving` and `null` otherwise; it is advisory diagnostics with no
+buyer-serving authority and is never synthesised locally.
 
 The capability names enumerated in this paragraph are only the subset owned by
 this section; a build also advertises other local-status and command capability

@@ -91,6 +91,7 @@ func TestSPEC022D8AcceptanceCoverageMapIncludesAllACs(t *testing.T) {
 		"AC-022-62":  "Blocked",
 		"AC-022-63":  "Covered",
 		"AC-022-64":  "Covered",
+		"AC-022-65":  "Covered",
 	}
 
 	rows := parseSPEC022CoverageRows(t, text)

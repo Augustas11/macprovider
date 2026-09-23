@@ -304,7 +304,43 @@ func TestProviderAuthV2RegistersEncryptedSession(t *testing.T) {
 			provider.Tier2Session.InBandAEADRekeyV1 &&
 			provider.Tier2Session.KeyID == challenge.KeyID &&
 			len(provider.Tier2Session.C2PKey) == 32 &&
-			provider.InferencePath == pool.InferencePathWSTunneled
+			provider.InferencePath == pool.InferencePathWSTunneled &&
+			// validAuthInitial does not advertise catalog_material_hold_v1:
+			// the session keeps the legacy readiness verdict.
+			!provider.CatalogMaterialHoldV1
+	})
+}
+
+// SPEC-001 v1.9.21 / SPEC-022-R002 R-2.7: a CLI that advertises
+// tier2_capabilities.catalog_material_hold_v1 is recorded on its session, so
+// /v1/pool/check may name buyer_serving_hold=catalog_material_missing to it.
+func TestProviderAuthV2RecordsCatalogMaterialHoldCapability(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["tier2_capabilities"].(map[string]any)["catalog_material_hold_v1"] = true
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	if response := readAuthResponse(t, conn); response.Status != "accepted" {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
+		return ok && provider.CatalogMaterialHoldV1
 	})
 }
 

@@ -1,11 +1,29 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.1.8
+Version: v0.1.9
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016
 
 ## Change log
+
+### v0.1.9
+
+Issue #1689: adds R-2.7. Under `enforce`, a session that is not bound to a
+BYOM candidate and whose served model has no Tier-2 route-snapshot material in
+the network catalog is excluded from covered paid routing (every candidate,
+pinned, and slot-queue path), because the pre-dispatch route snapshot must fail
+for it; buyers get a retryable `no_provider_available` (or
+`pool_settlement_mode_unsatisfied` for a pool that requires enforce) instead of
+`route_snapshot_failed`; routing telemetry counts these exclusions as
+`catalog_material_missing`; `/poolz.routing_eligible` applies the same
+verdict. `/v1/pool/check` readiness names the closed hold
+`buyer_serving_hold: catalog_material_missing` only to a session whose CLI
+advertised `tier2_capabilities.catalog_material_hold_v1` (SPEC-001 v1.9.21), and
+keeps the pre-R-2.7 verdict for any other session until the fleet floor
+advertises the capability. SPEC-022-R002 returns to `pending` until a signed
+enforce-mode journey covers AC-022-65. `off`/`observe` behavior,
+the route-snapshot tuple, and settlement are unchanged.
 
 ### v0.1.8
 
@@ -433,6 +451,47 @@ R-2.6. "Eligible" in SPEC-022 means "passes the SPEC-022 verified-model
 predicate." Ordinary routing filters still apply, including provider readiness,
 auth state, slots, model support, context limits, breaker state, quota policy,
 and sticky-affinity rules.
+
+R-2.7. Under `mode: enforce`, a provider session that is not bound to a BYOM
+admission candidate (SPEC-047) and whose served model has no Tier-2
+route-snapshot material in the active signed network catalog MUST be excluded
+from covered paid routing on every selection path (candidate filter, hard pin,
+and slot queue), because the route-time snapshot of R-3.1 cannot be created
+for it. Routing and the pre-dispatch snapshot guard MUST derive "material
+present" from the same lookup (served model plus admitted row digest), so the
+two cannot disagree; the pre-dispatch guard remains the fail-closed backstop.
+A BYOM-bound session keeps its own SPEC-047 fail-closed rule. Under `off` or
+`observe`, and when the settlement store is unavailable, R-2.7 does not apply.
+Routing-decision telemetry counts an R-2.7 exclusion as
+`catalog_material_missing`, separate from `receipt_key_missing` (R-2.4/R-2.5),
+attributing each provider by the reason the route-snapshot gate rejected that
+provider for, never from another provider's evaluation in the same pass; the
+buyer response and eligibility are the same for both.
+
+Operator and public routability projections that claim a session is
+buyer-routable, such as the provider server's `GET /poolz` `routing_eligible`,
+MUST apply the same R-2.7 verdict routing applies, taken from the buyer
+router's predicate rather than re-derived. The FR-CAN22 last-provider canary
+floor does not consult R-2.7, so the gate never changes canary degradation.
+
+The coordinator's `GET /v1/pool/check?details=readiness` verdict applies R-2.7
+as follows. When R-2.7 is the only reason the session is not buyer-serving, and
+the session's CLI advertised `tier2_capabilities.catalog_material_hold_v1` in
+its `auth_request` (SPEC-001 v1.9.21), the response MUST carry
+`buyer_serving: false` with `buyer_serving_hold: catalog_material_missing`.
+For a session that did not advertise the capability, the response MUST keep the
+verdict it would have had without R-2.7: deployed CLIs drop an unknown hold and
+treat an authoritative `false` without a known hold as a websocket reconnect,
+which cannot clear missing catalog material and would only churn the session.
+This compatibility exception affects the readiness report only; routing still
+excludes the session. `details=deployment` (operator evidence) reports the
+honest R-2.7 verdict. The exception is transitional. It is retired, by a
+SPEC-022 revision that removes this paragraph, once the SPEC-020 fleet floor
+(the oldest provider binary the coordinator still accepts for buyer serving)
+is a version that advertises `catalog_material_hold_v1`, so no session the
+coordinator can route is still owed the legacy verdict. Fleet adoption of the
+capability, the share of connected sessions whose `auth_request` advertised
+it, is the tracking signal.
 
 ### R-3. Route-time verification snapshot (SPEC-022-R003)
 
@@ -984,12 +1043,20 @@ NOT synthesize missing route snapshots after the fact.
 - **AC-022-64:** Provider-facing onboarding or operating docs state that receipts
   arriving after `pending_deadline_seconds` are non-settling and non-recoverable
   unless a future operator-review spec defines an exception.
+- **AC-022-65:** With enforce mode enabled, a non-BYOM provider session whose
+  served model has no Tier-2 route-snapshot material is never selected for a
+  buyer request (candidate, pinned, or slot-queue path): the buyer receives a
+  retryable 503 instead of `route_snapshot_failed`, no route snapshot or ledger
+  credit is written, and `/v1/pool/check?details=readiness` reports
+  `buyer_serving: false` with `buyer_serving_hold: catalog_material_missing` to a
+  `catalog_material_hold_v1` session while keeping the legacy verdict for any
+  other session. Observe mode is unchanged.
 
 ## Implementation sequencing
 
 1. Receipt-profile spec: lock SPEC-015 v0.4 or successor with the
    settlement-capable profile for non-streaming and streaming requests.
-2. Gap audit: map current code against AC-022-1 through AC-022-64.
+2. Gap audit: map current code against AC-022-1 through AC-022-65.
 3. Policy surface: implement authoritative `verified_model_settlement` policy
    and service propagation.
 4. Route snapshots: persist route-time verification snapshots for covered

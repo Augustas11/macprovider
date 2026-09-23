@@ -1125,6 +1125,7 @@ func main() {
 		logger.Info().Msg("trusted pools disabled; coordinator will not advertise pool support")
 	}
 	buyerServer := buyer.NewServer(registry, logger, startedAt, buyerOpts...)
+	wsServer.SetCatalogMaterialRoutingGate(buyerServer.CatalogMaterialMissingUnderEnforce)
 	providerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
 	buyerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
 	providerMux := http.NewServeMux()

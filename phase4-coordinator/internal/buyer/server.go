@@ -1523,7 +1523,8 @@ type poolCheckResponse struct {
 	CatalogEvidenceSource  string     `json:"catalog_evidence_source,omitempty"`
 	// BuyerServingHold is set only with buyer_serving=false on the readiness
 	// path: a closed reason the provider must hold its session through
-	// (`model_admission_pending`, see byomBuyerServingHold).
+	// (`model_admission_pending`, see byomBuyerServingHold, or
+	// `catalog_material_missing`, see providerBuyerServingVerdict).
 	BuyerServingHold string `json:"buyer_serving_hold,omitempty"`
 }
 
@@ -1591,12 +1592,26 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 		State:      state,
 	}
 	if includeDeploymentEvidence || includeReadinessEvidence {
-		buyerServing := s.providerBuyerServing(p)
+		buyerServing, catalogMaterialOnly := s.providerBuyerServingVerdict(p)
+		if catalogMaterialOnly && includeReadinessEvidence && !p.CatalogMaterialHoldV1 {
+			// SPEC-022-R002 R-2.7 compatibility exception: a CLI that did not
+			// advertise catalog_material_hold_v1 drops an unknown hold and
+			// treats a bare false as a websocket reconnect, so it would
+			// reconnect on every poll without ever becoming routable. It keeps
+			// the pre-R-2.7 verdict; routing still excludes the session.
+			// Retire this branch (with the SPEC-022 R-2.7 paragraph) once the
+			// SPEC-020 fleet floor advertises catalog_material_hold_v1.
+			buyerServing = true
+		}
 		response.BuyerServing = &buyerServing
 		if !buyerServing && includeReadinessEvidence {
-			holdCtx, cancel := context.WithTimeout(r.Context(), requestLogWriteTimeout)
-			response.BuyerServingHold = s.byomBuyerServingHold(holdCtx, p)
-			cancel()
+			if catalogMaterialOnly {
+				response.BuyerServingHold = buyerServingHoldCatalogMaterialMissing
+			} else {
+				holdCtx, cancel := context.WithTimeout(r.Context(), requestLogWriteTimeout)
+				response.BuyerServingHold = s.byomBuyerServingHold(holdCtx, p)
+				cancel()
+			}
 		}
 		response.CatalogAdmissionMode = p.CatalogAdmissionMode
 		response.CatalogReleaseID = p.CatalogReleaseID
@@ -1615,7 +1630,12 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) providerBuyerServing(p pool.Provider) bool {
+// providerBuyerServingVerdict is the /v1/pool/check buyer_serving verdict.
+// catalogMaterialOnly is true when SPEC-022-R002 R-2.7 (enforce mode, no
+// Tier-2 route-snapshot material for the served model) is the ONLY reason the
+// session is not buyer-serving; the caller names that hold, or keeps the
+// legacy verdict for a CLI that cannot hold through it.
+func (s *Server) providerBuyerServingVerdict(p pool.Provider) (serving bool, catalogMaterialOnly bool) {
 	// The BYOM settlement gate must apply here too: readiness/deployment
 	// surfaces (/v1/pool/check) publish buyer_serving from this helper, and the
 	// provider CLI turns that into a "buyer_serving" network-state claim. Without
@@ -1628,7 +1648,11 @@ func (s *Server) providerBuyerServing(p pool.Provider) bool {
 	// treats authoritative buyer_serving=false (no model_admission_pending
 	// hold) as a websocket reconnect; Pearl 2026-09-18 showed a 10.0 floor
 	// flapping every 3B Mac under 10 TPS about every 35s.
-	return p.ServingCapable() && !s.tier2ProviderExcluded(p) && s.checkQuota(p) && s.byomDefaultPaidRoutingEligible(p)
+	serving = p.ServingCapable() && !s.tier2ProviderExcluded(p) && s.checkQuota(p) && s.byomDefaultPaidRoutingEligible(p)
+	if serving && s.catalogMaterialMissingUnderEnforce(p) {
+		return false, true
+	}
+	return serving, false
 }
 
 func (s *Server) handleReceiptKeys(w http.ResponseWriter, r *http.Request) {
@@ -6891,7 +6915,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		checker.poolModelAllowlist = poolModelAllowlist
 		checker.settlementEnforce = checker.settlementEnforce || poolRequiresSettlementEnforce
 	}
-	result := routing.EligibleCandidates(providers, exSet, pool.Provider.SortKey, checker)
+	result := s.eligibleCandidates(providers, exSet, checker)
 	candidates := result.Eligible
 	queuedCandidates := []pool.Provider(nil)
 	queueEligible := !hasPinnedRoute(headers)
@@ -6940,7 +6964,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			providerID := result.HashMismatches[0].Provider.ProviderID
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_hash_mismatch", message: "Provider `" + providerID + "` hash verification failed; excluded from pool.", typ: "server_error"}
 		}
-		if poolActive && result.Counts[routing.ReasonReceiptKeyMissing] > 0 {
+		if poolActive && (result.Counts[routing.ReasonReceiptKeyMissing] > 0 || result.Counts[routing.ReasonCatalogMaterialMissing] > 0) {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_settlement_mode_unsatisfied", message: "No pool member satisfies the required settlement mode"}
 		}
 		if result.Counts[routing.ReasonTier2EncryptedLeg] > 0 {
@@ -7587,6 +7611,8 @@ func routeKeyedFilterCounts(counts map[routing.RejectionReason]int) map[string]i
 			key = "quota_blocked"
 		case routing.ReasonReceiptKeyMissing:
 			key = "receipt_key_missing"
+		case routing.ReasonCatalogMaterialMissing:
+			key = "catalog_material_missing" // SPEC-022-R002 R-2.7, distinct from a missing receipt key
 		case routing.ReasonPoolNotMember:
 			key = "pool_not_member" // SPEC-042 R005: distinct so pool-isolation drops are observable, not "other"
 		case routing.ReasonPoolProviderCapability:
@@ -7851,8 +7877,8 @@ func (s *Server) validatePinnedProviderForRequestWithState(p pool.Provider, mode
 	// routes to a provider whose route snapshot is guaranteed to fail
 	// pre-dispatch (500 route_snapshot_failed) instead of a clean 503.
 	// Observe mode / nil store => settlementEnforceMode()==false => no-op.
-	if s.settlementEnforceMode() && len(p.ReceiptPubkey) == 0 {
-		s.logReceiptKeyExcluded(p)
+	// SPEC-022-R002 R-2.7 (#1689) rides the same gate: no Tier-2 material.
+	if s.settlementEnforceMode() && s.routeSnapshotUnsatisfiable(p) != 0 {
 		if poolRequiresSettlementEnforce {
 			return pool.Provider{}, poolSettlementModeUnsatisfiedRouteError()
 		}
@@ -8097,9 +8123,9 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		// poll time. Like the #768 floor above, the waiter stores only
 		// providerID, so a same-ID reconnect that lost its active receipt key
 		// must not be served off the queue (its route snapshot would fail
-		// pre-dispatch). Observe / nil store => no-op.
-		if s.settlementEnforceMode() && len(provider.ReceiptPubkey) == 0 {
-			s.logReceiptKeyExcluded(provider)
+		// pre-dispatch). Observe / nil store => no-op. SPEC-022-R002 R-2.7
+		// (#1689) rides the same gate: no Tier-2 route-snapshot material.
+		if s.settlementEnforceMode() && s.routeSnapshotUnsatisfiable(provider) != 0 {
 			if state != nil && state.poolRequiresSettlementEnforce {
 				return pool.Provider{}, queuedProviderPoolSettlementUnsatisfied
 			}
@@ -8452,6 +8478,12 @@ type eligibilityCtx struct {
 	poolModelAllowlist []string
 
 	legacyModelAdmissionRouteGenerations map[string]uint64
+
+	// routeSnapshotRejections is non-nil only during one eligibleCandidates
+	// pass. It holds the exact reason the ProviderHasSettlementReceiptKey
+	// gate rejected each provider for, keyed by SortKey, so that pass can
+	// report each provider under its own reason.
+	routeSnapshotRejections map[string]routing.RejectionReason
 }
 
 // ProviderMatchesRequest combines the model/class match and the
@@ -8481,7 +8513,7 @@ func (c *eligibilityCtx) ProviderBYOMSettlementEligible(p pool.Provider) bool {
 }
 
 func (c *eligibilityCtx) pressuredProviderWouldDispatch(p pool.Provider) bool {
-	if !c.ProviderMeetsModelVersionFloor(p) || !c.ProviderMeetsRoutingQuality(p) || !c.ProviderHasSettlementReceiptKey(p) || !c.ProviderContextSufficient(p) {
+	if !c.ProviderMeetsModelVersionFloor(p) || !c.ProviderMeetsRoutingQuality(p) || c.RouteSnapshotRejection(p) != 0 || !c.ProviderContextSufficient(p) {
 		return false
 	}
 	if reason, _ := c.Tier2Decision(p); reason != 0 {
@@ -8688,15 +8720,94 @@ func poolSettlementModeUnsatisfiedRouteError() *routeError {
 // the settlement store/config is unavailable, captured as
 // settlementEnforce == false — it returns true for every provider so
 // observe / default selection stays byte-identical to pre-fix.
+//
+// SPEC-022-R002 R-2.7 (#1689) is the same kind of precondition: a session
+// whose served model has no Tier-2 route-snapshot material fails the same
+// pre-dispatch guard, so it is dropped here too (RouteSnapshotRejection).
+// It is the routing filter's gate: only during an eligibleCandidates pass does
+// it record the provider's exact rejection reason.
 func (c *eligibilityCtx) ProviderHasSettlementReceiptKey(p pool.Provider) bool {
-	if !c.settlementEnforce {
+	reason := c.RouteSnapshotRejection(p)
+	if reason == 0 {
 		return true
 	}
-	if len(p.ReceiptPubkey) > 0 {
-		return true
+	c.s.logRouteSnapshotExcluded(p, reason)
+	if c.routeSnapshotRejections != nil {
+		c.routeSnapshotRejections[p.SortKey()] = reason
 	}
-	c.s.logReceiptKeyExcluded(p)
 	return false
+}
+
+// RouteSnapshotRejection is the pure typed verdict of the route-snapshot
+// gate for p under this request's settlement mode: 0 when a route snapshot
+// can be recorded. It records and logs nothing, so probes (the store-pressure
+// check) can ask it without touching a pass's telemetry.
+func (c *eligibilityCtx) RouteSnapshotRejection(p pool.Provider) routing.RejectionReason {
+	if !c.settlementEnforce {
+		return 0
+	}
+	return routeSnapshotRejection(p)
+}
+
+// eligibleCandidates runs routing.EligibleCandidates and reports each
+// route-snapshot rejection under the exact reason the gate recorded for that
+// provider: the filter counts every ProviderHasSettlementReceiptKey rejection
+// as ReasonReceiptKeyMissing, and those the gate recorded as R-2.7 move to
+// ReasonCatalogMaterialMissing. Eligibility is untouched.
+func (s *Server) eligibleCandidates(providers []pool.Provider, excluded routing.Excluded, checker *eligibilityCtx) routing.FilterResult {
+	checker.routeSnapshotRejections = map[string]routing.RejectionReason{}
+	result := routing.EligibleCandidates(providers, excluded, pool.Provider.SortKey, checker)
+	rejections := checker.routeSnapshotRejections
+	checker.routeSnapshotRejections = nil
+	for _, reason := range rejections {
+		if reason != routing.ReasonCatalogMaterialMissing || result.Counts[routing.ReasonReceiptKeyMissing] == 0 {
+			continue
+		}
+		result.Counts[routing.ReasonReceiptKeyMissing]--
+		if result.Counts[routing.ReasonReceiptKeyMissing] == 0 {
+			delete(result.Counts, routing.ReasonReceiptKeyMissing)
+		}
+		result.Counts[routing.ReasonCatalogMaterialMissing]++
+	}
+	return result
+}
+
+// routeSnapshotRejection is the one pure evaluator of the route-snapshot
+// preconditions recordRouteSnapshot enforces: ReasonReceiptKeyMissing (no
+// active receipt key, SPEC-022 R-2.4/R-2.5) or ReasonCatalogMaterialMissing
+// (no Tier-2 route-snapshot material for the served model, R-2.7,
+// catalogMaterialMissing — the predicate dispatch shares); 0 when both hold.
+// Callers gate it on enforce mode.
+func routeSnapshotRejection(p pool.Provider) routing.RejectionReason {
+	if len(p.ReceiptPubkey) == 0 {
+		return routing.ReasonReceiptKeyMissing
+	}
+	if catalogMaterialMissing(p) {
+		return routing.ReasonCatalogMaterialMissing
+	}
+	return 0
+}
+
+// routeSnapshotUnsatisfiable is routeSnapshotRejection plus the operator log
+// line, for the single-provider paths (pinned route, slot-queue poll).
+func (s *Server) routeSnapshotUnsatisfiable(p pool.Provider) routing.RejectionReason {
+	reason := routeSnapshotRejection(p)
+	s.logRouteSnapshotExcluded(p, reason)
+	return reason
+}
+
+func (s *Server) logRouteSnapshotExcluded(p pool.Provider, reason routing.RejectionReason) {
+	switch reason {
+	case routing.ReasonReceiptKeyMissing:
+		s.logReceiptKeyExcluded(p)
+	case routing.ReasonCatalogMaterialMissing:
+		s.log.Debug().
+			Str("event", "catalog_material_missing_excluded").
+			Str("provider_id", p.ProviderID).
+			Str("assigned_id", p.AssignedID).
+			Str("model_id", p.ModelID).
+			Msg("provider excluded from covered paid routing: no Tier-2 route-snapshot material for the served model")
+	}
 }
 
 // logReceiptKeyExcluded is the operator-visible signal that supply exists

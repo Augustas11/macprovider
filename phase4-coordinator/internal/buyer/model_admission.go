@@ -66,6 +66,14 @@ func byomAdmissionCandidate(p pool.Provider) bool {
 // the session).
 const buyerServingHoldModelAdmissionPending = "model_admission_pending"
 
+// buyerServingHoldCatalogMaterialMissing is the closed `buyer_serving_hold`
+// value for a session that is buyer-serving in every respect except
+// SPEC-022-R002 R-2.7: enforce mode is on and the network Tier-2 catalog has
+// no route-snapshot material for the served model. Reconnecting cannot fix
+// that (only a catalog update can), so a CLI that advertised
+// catalog_material_hold_v1 holds its session and keeps polling.
+const buyerServingHoldCatalogMaterialMissing = "catalog_material_missing"
+
 // byomBuyerServingHold names the readiness hold for a session that must stay
 // up through a pending BYOM admission. SPEC-047-R003(iv) grants
 // settlement_capable only while THIS live session is bound; SPEC-047-R006
@@ -125,7 +133,7 @@ func (s *Server) byomDefaultPaidRoutingEligibilityWithContext(ctx context.Contex
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	material, ok := tier2.SnapshotMaterial(p.ModelID, byomMaterialHash(p))
+	material, ok := routeSnapshotCatalogMaterial(p)
 	if !ok {
 		return s.byomLegacyRoutingEligible(ctx, p)
 	}

@@ -321,11 +321,11 @@ class BYOMContractLockTests(unittest.TestCase):
         readme = read_text("specs/README.md")
         conformance = json.loads(read_text("specs/CONFORMANCE.json"))
 
-        self.assertIn("**Version:** 1.9.20", spec001)
+        self.assertIn("**Version:** 1.9.21", spec001)
         self.assertIn("**Version:** 0.2.10", spec044)
         self.assertIn('"version": "0.2.10"', spec044)
         self.assertIn("SPEC-044 v0.2.10", spec001)
-        self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.20 |", readme)
+        self.assertIn("| SPEC-001 | Phase 3 Binary: Mac Provider Inference CLI | 1.9.21 |", readme)
         self.assertIn("| SPEC-044 | Malibu Model Catalog Economics | 0.2.10 |", readme)
         current_spec044 = spec044.split("## 8. Changelog and history", 1)[0]
         self.assertNotIn("v0.2.7", current_spec044)
@@ -335,7 +335,7 @@ class BYOMContractLockTests(unittest.TestCase):
         spec001_record = next(
             record for record in conformance["specs"] if record["spec_id"] == "SPEC-001"
         )
-        self.assertEqual(spec001_record["version"], "1.9.20")
+        self.assertEqual(spec001_record["version"], "1.9.21")
         spec_record = next(
             record for record in conformance["specs"] if record["spec_id"] == "SPEC-044"
         )

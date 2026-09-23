@@ -812,6 +812,25 @@ func TestParseAuthInitialAcceptsTrustedPoolCapability(t *testing.T) {
 	}
 }
 
+func TestParseAuthInitialAcceptsCatalogMaterialHoldCapability(t *testing.T) {
+	payload := validAuthRequestInitial()
+	req, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload))
+	if err != nil {
+		t.Fatalf("ParseAuthRequest field=%q err=%v", field, err)
+	}
+	if req.Tier2Capabilities.CatalogMaterialHoldV1 {
+		t.Fatal("catalog_material_hold_v1 must default off when absent")
+	}
+	payload["tier2_capabilities"].(map[string]any)["catalog_material_hold_v1"] = true
+	req, _, field, err = ParseAuthRequest(mustAuthJSON(t, payload))
+	if err != nil {
+		t.Fatalf("ParseAuthRequest field=%q err=%v", field, err)
+	}
+	if !req.Tier2Capabilities.CatalogMaterialHoldV1 {
+		t.Fatal("catalog_material_hold_v1 capability was not parsed")
+	}
+}
+
 func TestHandshakeParsersRejectUnknownModelHashAlgorithm(t *testing.T) {
 	const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	authPayload := validAuthRequestInitial()
