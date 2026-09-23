@@ -404,6 +404,12 @@ type AutotuneFeedsConfig struct {
 	EnforceProviderAdmission        bool              `yaml:"enforce_provider_admission"`
 	ProviderAdmissionBridgeDeadline string            `yaml:"provider_admission_bridge_deadline"`
 	PublicKeys                      map[string]string `yaml:"public_keys"`
+	// PreviousTargetPath is never read from YAML. Empty keeps the deployed
+	// layout: `<root>/.previous-target`, root being two levels above the
+	// candidate feed. The offline release validator sets it to point the
+	// retained-release window (and restamp scan) at an explicit file whose
+	// directory is the release root; os.DevNull means no retained releases.
+	PreviousTargetPath string `yaml:"-"`
 }
 
 const maxProviderAdmissionBridgeDuration = 24 * time.Hour

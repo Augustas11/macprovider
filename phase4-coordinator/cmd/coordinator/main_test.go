@@ -2131,6 +2131,11 @@ type reloadCatalogFile struct {
 
 func signedReloadCatalogFixture(t *testing.T, expiresAt time.Time, sha string) ([]byte, string) {
 	t.Helper()
+	return signedReloadCatalogFixtureFor(t, expiresAt, "model-a", sha)
+}
+
+func signedReloadCatalogFixtureFor(t *testing.T, expiresAt time.Time, modelID, sha string) ([]byte, string) {
+	t.Helper()
 	seed := bytes.Repeat([]byte{7}, ed25519.SeedSize)
 	privateKey := ed25519.NewKeyFromSeed(seed)
 	publicKey := privateKey.Public().(ed25519.PublicKey)
@@ -2145,7 +2150,7 @@ func signedReloadCatalogFixture(t *testing.T, expiresAt time.Time, sha string) (
 		Models: []tier2.ModelEntry{{
 			ArtifactKind: "mlx_weight_file",
 			HashScope:    "primary_weight_file",
-			ModelID:      "model-a",
+			ModelID:      modelID,
 			SHA256:       sha,
 			Source:       "operator-curated",
 		}},

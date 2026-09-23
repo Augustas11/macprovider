@@ -230,11 +230,11 @@ func PreviousAutotuneReleaseTarget(cfg config.AutotuneFeedsConfig) (dir string, 
 // most MaxCompatiblePreviousReleases lines; a fourth is fail-closed, not a
 // silent trim. Permanently rejected IDs are omitted. Duplicates are skipped.
 func PreviousAutotuneReleaseTargets(cfg config.AutotuneFeedsConfig) ([]string, error) {
-	if cfg.AutotuneCandidatesPath == "" {
+	root, previousTarget := AutotuneReleaseRoot(cfg)
+	if root == "" {
 		return nil, nil
 	}
-	root := filepath.Dir(filepath.Dir(cfg.AutotuneCandidatesPath))
-	targetBytes, err := os.ReadFile(filepath.Join(root, ".previous-target"))
+	targetBytes, err := os.ReadFile(previousTarget)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -273,6 +273,23 @@ func PreviousAutotuneReleaseTargets(cfg config.AutotuneFeedsConfig) ([]string, e
 		out = append(out, dir)
 	}
 	return out, nil
+}
+
+// AutotuneReleaseRoot returns the release root that previous-target lines and
+// restamp leftovers (`<root>/releases/...`) resolve against, plus the
+// previous-target file itself. root is "" when there is no retained window.
+func AutotuneReleaseRoot(cfg config.AutotuneFeedsConfig) (root, previousTarget string) {
+	if cfg.PreviousTargetPath != "" {
+		if cfg.PreviousTargetPath == os.DevNull {
+			return "", ""
+		}
+		return filepath.Dir(cfg.PreviousTargetPath), cfg.PreviousTargetPath
+	}
+	if cfg.AutotuneCandidatesPath == "" {
+		return "", ""
+	}
+	root = filepath.Dir(filepath.Dir(cfg.AutotuneCandidatesPath))
+	return root, filepath.Join(root, ".previous-target")
 }
 
 func parsePreviousTargetLine(target string) (string, error) {

@@ -1,0 +1,149 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/augstar/macprovider-coordinator/internal/buyer"
+	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	"github.com/rs/zerolog"
+)
+
+// autotuneReleaseValidation is the one-line JSON verdict printed by
+// --validate-autotune-release. Slices are always non-nil so consumers see [].
+type autotuneReleaseValidation struct {
+	OK               bool                 `json:"ok"`
+	ReleaseID        string               `json:"release_id"`
+	CandidatesSHA256 string               `json:"candidates_sha256"`
+	Tier2CatalogID   string               `json:"tier2_catalog_id"`
+	Tier2SHA256      string               `json:"tier2_sha256"`
+	PreviousLoaded   []autotuneReleaseRef `json:"previous_loaded"`
+	Errors           []string             `json:"errors"`
+	Notes            []string             `json:"notes"`
+}
+
+type autotuneReleaseRef struct {
+	ReleaseID        string `json:"release_id"`
+	CandidatesSHA256 string `json:"candidates_sha256"`
+}
+
+// validateAutotuneReleaseBoundaryNote names the SIGHUP reload steps the
+// offline validator deliberately does not run: each needs the running
+// process's state or a database, which the validator must never touch.
+const validateAutotuneReleaseBoundaryNote = "not checked (needs the live process or a database): tier2 startup-only field drift vs the running process, proof_of_weights telemetry-drift/hello-gate evidence store, trusted_pools creator admin credentials, billing config snapshot write"
+
+func runValidateAutotuneRelease(out io.Writer, configPath, configOverlay, dir, previousTarget string) int {
+	result := validateAutotuneRelease(configPath, configOverlay, dir, previousTarget, zerolog.New(os.Stderr))
+	raw, err := json.Marshal(result)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "validate-autotune-release: encode result: %v\n", err)
+		return 1
+	}
+	fmt.Fprintln(out, string(raw))
+	if !result.OK {
+		return 1
+	}
+	return 0
+}
+
+// validateAutotuneRelease loads the config as a SIGHUP reload does, redirects
+// every configured feed path and the Tier-2 catalog path into dir, and runs
+// the reload's own load/verify functions against it. It starts no server,
+// opens no database, and never publishes into the tier2 singleton.
+func validateAutotuneRelease(configPath, configOverlay, dir, previousTarget string, logger zerolog.Logger) autotuneReleaseValidation {
+	r := autotuneReleaseValidation{PreviousLoaded: []autotuneReleaseRef{}, Errors: []string{}, Notes: []string{}}
+	fail := func(format string, args ...any) { r.Errors = append(r.Errors, fmt.Sprintf(format, args...)) }
+
+	cfg, err := config.LoadForSIGHUPReloadWithOverlay(configPath, configOverlay)
+	if err != nil {
+		fail("config: %v", err)
+		return r
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		fail("release dir %q is not a readable directory", dir)
+		return r
+	}
+	if strings.TrimSpace(cfg.AutotuneFeeds.AutotuneCandidatesPath) == "" {
+		fail("config has no autotune.autotune_candidates_path; a SIGHUP reload would keep the live catalog")
+		return r
+	}
+	if strings.TrimSpace(cfg.Tier2.CatalogPath) == "" {
+		fail("config has no tier2.catalog_path; the release's Tier-2 catalog would not be loaded")
+	}
+	redirectAutotuneReleasePaths(&cfg, dir)
+	if strings.TrimSpace(cfg.AutotuneFeeds.CatalogArtifactsPath) == "" {
+		if _, err := os.Stat(filepath.Join(dir, "autotune-artifacts.json")); err == nil {
+			r.Notes = append(r.Notes, "release dir has autotune-artifacts.json but config sets no autotune.catalog_artifacts_path; a SIGHUP reload serves this release rate-card-bound")
+		}
+	}
+	if previousTarget == "" {
+		cfg.AutotuneFeeds.PreviousTargetPath = os.DevNull
+		r.Notes = append(r.Notes, "no --previous-target: validated with no retained previous releases and no restamp scan")
+	} else {
+		cfg.AutotuneFeeds.PreviousTargetPath = previousTarget
+		r.Notes = append(r.Notes, fmt.Sprintf("retained releases resolved from %s relative to %s", previousTarget, filepath.Dir(previousTarget)))
+	}
+
+	feeds, catalog, compatible, err := loadAutotuneCatalogForReload(cfg.AutotuneFeeds)
+	if err != nil {
+		fail("autotune feed reload: %v", err)
+		return r
+	}
+	r.ReleaseID = catalog.Version
+	r.CandidatesSHA256 = catalog.SHA256
+	for _, previous := range compatible {
+		r.PreviousLoaded = append(r.PreviousLoaded, autotuneReleaseRef{ReleaseID: previous.Version, CandidatesSHA256: previous.SHA256})
+	}
+	// The release-published observer degrades (warns) on these at SIGHUP;
+	// before activation every retained entry must load, so they fail here.
+	previousFeeds, err := buyer.LoadPreviousAutotuneFeeds(cfg.AutotuneFeeds)
+	if err != nil {
+		fail("retained previous release feeds: %v", err)
+	}
+	if _, errs := buyer.BuildArtifactIdentitySets(feeds, previousFeeds); len(errs) > 0 {
+		for _, err := range errs {
+			fail("artifact identity set: %v", err)
+		}
+	}
+	if err := validateAutotuneRuntimeEconomics(feeds, cfg); err != nil {
+		fail("autotune runtime economics: %v", err)
+	}
+	next, err := tier2.BuildStrict(cfg.Tier2, logger, activeReleaseBindingGuard(catalog))
+	if err != nil {
+		fail("tier2: %v", err)
+	} else {
+		r.Tier2CatalogID, r.Tier2SHA256 = tier2CatalogIdentity(next)
+		if r.Tier2CatalogID == "" {
+			fail("tier2: no active catalog loaded (unset, expired, or failed to load)")
+		}
+	}
+	r.Notes = append(r.Notes, validateAutotuneReleaseBoundaryNote)
+	r.OK = len(r.Errors) == 0
+	return r
+}
+
+// redirectAutotuneReleasePaths points every configured feed path, and the
+// Tier-2 catalog path, at the same file name inside dir. Unconfigured paths
+// stay unset so the feed set shape is exactly what the live config reloads.
+func redirectAutotuneReleasePaths(cfg *config.Config, dir string) {
+	redirect := func(p *string) {
+		if strings.TrimSpace(*p) != "" {
+			*p = filepath.Join(dir, filepath.Base(*p))
+		}
+	}
+	feeds := &cfg.AutotuneFeeds
+	for _, p := range []*string{
+		&feeds.RateCardPath, &feeds.RateCardSigPath,
+		&feeds.DemandRankPath, &feeds.DemandRankSigPath,
+		&feeds.AutotuneCandidatesPath, &feeds.AutotuneCandidatesSigPath,
+		&feeds.CatalogArtifactsPath, &feeds.CatalogArtifactsSigPath,
+		&cfg.Tier2.CatalogPath,
+	} {
+		redirect(p)
+	}
+}
