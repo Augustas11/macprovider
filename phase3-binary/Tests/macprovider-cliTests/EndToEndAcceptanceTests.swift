@@ -127,7 +127,7 @@ final class EndToEndAcceptanceTests: XCTestCase {
                 while await !probe.canFinish {
                     try await Task.sleep(nanoseconds: 5_000_000)
                 }
-                return CompletionResult(content: snapshot.modelID ?? "<nil>", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                return CompletionResult(content: snapshot.modelID ?? "<nil>", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
         let socketPath = try makeSocketPath()

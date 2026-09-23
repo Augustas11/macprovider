@@ -24,7 +24,7 @@ func streamingRuntimeReturning(_ content: String) -> ModelRuntime {
         warmSwapEnabled: false,
         loader: { _ in throw StreamingRuntimeTestError.unexpectedLoad },
         testCompletion: { _, _ in
-            CompletionResult(content: content, finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            CompletionResult(content: content, finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
         }
     )
 }

@@ -69,7 +69,7 @@ final class StreamingIdleTimeoutValidatesBufferTests: XCTestCase {
                     XCTAssertNil(accumulator.append(#"{"age":38}"#))
                     idleState.noteContent()
                 }
-                return CompletionResult(content: "late", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                return CompletionResult(content: "late", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
 
@@ -98,7 +98,7 @@ final class StreamingIdleTimeoutValidatesBufferTests: XCTestCase {
                 },
                 operation: { _ in
                     try await Task.sleep(nanoseconds: 1_000_000_000)
-                    return CompletionResult(content: "late", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                    return CompletionResult(content: "late", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
                 }
             ),
             status: 504,

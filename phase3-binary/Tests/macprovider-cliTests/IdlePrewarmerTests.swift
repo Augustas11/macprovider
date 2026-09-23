@@ -364,7 +364,7 @@ private actor WarmupProbe {
             cancelledCount += 1
             throw CancellationError()
         }
-        return CompletionResult(content: "ok", finishReason: "stop", promptTokens: 1, completionTokens: 1, ttftMilliseconds: 1)
+        return CompletionResult(content: "ok", finishReason: "stop", promptTokens: 1, completionTokens: 1, ttftMilliseconds: 1, settlementDisposition: .eligibleOwner)
     }
 }
 

@@ -274,7 +274,8 @@ final class ConversationCacheTests: XCTestCase {
             promptTokens: 10,
             cachedPromptTokens: 11,
             kvCacheBytesReused: 123,
-            completionTokens: 1
+            completionTokens: 1,
+            settlementDisposition: .eligibleOwner
         )
         XCTAssertEqual(completion.cachedPromptTokens, 10)
         XCTAssertEqual(completion.kvCacheReuseRatio, 1.0)
@@ -288,7 +289,8 @@ final class ConversationCacheTests: XCTestCase {
             promptTokens: 0,
             cachedPromptTokens: 4,
             kvCacheBytesReused: 123,
-            completionTokens: 1
+            completionTokens: 1,
+            settlementDisposition: .eligibleOwner
         )
         XCTAssertEqual(completion.cachedPromptTokens, 0)
         XCTAssertEqual(completion.kvCacheReuseRatio, 0)

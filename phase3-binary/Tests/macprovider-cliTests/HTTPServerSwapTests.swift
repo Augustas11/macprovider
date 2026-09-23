@@ -12,7 +12,7 @@ final class HTTPServerSwapTests: XCTestCase {
             loader: { _ in throw HTTPServerSwapTestError.unexpectedContainerLoader },
             testLoader: { target in (target, "hash") },
             testCompletion: { _, _ in
-                CompletionResult(content: "ready", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                CompletionResult(content: "ready", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
         let snapshot = await runtime.currentSnapshot()
@@ -42,7 +42,7 @@ final class HTTPServerSwapTests: XCTestCase {
             testLoader: { target in (target, "hash-b") },
             testCompletion: { snapshot, _ in
                 await probe.record(modelID: snapshot.modelID)
-                return CompletionResult(content: snapshot.modelID ?? "<nil>", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                return CompletionResult(content: snapshot.modelID ?? "<nil>", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
 
@@ -128,7 +128,7 @@ final class HTTPServerSwapTests: XCTestCase {
                 while await !probe.canFinish {
                     try await Task.sleep(nanoseconds: 5_000_000)
                 }
-                return CompletionResult(content: snapshot.modelID ?? "<nil>", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                return CompletionResult(content: snapshot.modelID ?? "<nil>", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
         let request = try makeRequest(model: "old-model")
@@ -184,7 +184,7 @@ final class HTTPServerSwapTests: XCTestCase {
             loader: { _ in throw HTTPServerSwapTestError.unexpectedContainerLoader },
             testLoader: { target in (target, "hash-a") },
             testCompletion: { _, _ in
-                CompletionResult(content: "ok", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                CompletionResult(content: "ok", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
         let request = try makeRequest(model: "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit")
@@ -202,7 +202,7 @@ final class HTTPServerSwapTests: XCTestCase {
             loader: { _ in throw HTTPServerSwapTestError.unexpectedContainerLoader },
             testLoader: { target in (target, "hash-a") },
             testCompletion: { _, _ in
-                CompletionResult(content: "ok", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                CompletionResult(content: "ok", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
         let request = try makeRequest(model: "qwen3-coder-30b-a3b-instruct")

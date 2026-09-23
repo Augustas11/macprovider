@@ -662,6 +662,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         modelHashSource: modelHashSource,
                         requestID: auditRequestID,
                         settlementMetadata: settlementMetadata,
+                        runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
                         settlementDisposition: completion.settlementDisposition,
                         terminalStateTSUnixMS: terminalStateTSUnixMS
                     )
@@ -696,7 +697,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                             request: request,
                             error: apiErr,
                             startedAt: startedAt,
-                            modelHashSource: fallbackHashSource
+                            modelHashSource: fallbackHashSource,
+                            runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible
                         )
                         switch receipt {
                         case .issued(let header, let ttftMs, let unixTs):
@@ -733,7 +735,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                             request: request,
                             error: apiError,
                             startedAt: startedAt,
-                            modelHashSource: fallbackHashSource
+                            modelHashSource: fallbackHashSource,
+                            runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible
                         )
                         switch receipt {
                         case .issued(let header, let ttftMs, let unixTs):
@@ -785,7 +788,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         request: request,
                         error: parseError,
                         startedAt: requestAcceptedAt,
-                        modelHashSource: .warmSwapDisabled
+                        modelHashSource: .warmSwapDisabled,
+                        runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible
                     )
                     switch receipt {
                     case .issued(let header, let ttftMs, let unixTs):
@@ -1048,6 +1052,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         modelHashSource: modelHashSource,
                         requestID: requestID,
                         settlementMetadata: settlementMetadata,
+                        runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
                         settlementDisposition: completion.settlementDisposition,
                         terminalStateTSUnixMS: terminalStateTSUnixMS
                     )
@@ -1214,7 +1219,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         ttftMs: Int64,
         tokensOut: Int64,
         unixTsSeconds: Int64,
-        modelHashSource: ReceiptModelHashSource
+        modelHashSource: ReceiptModelHashSource,
+        runtimeSettlementEligible: Bool,
+        settlementDisposition: ContinuousBatchSettlementDisposition
     ) throws -> String? {
         switch try receiptHeaderResult(
             providerID: providerID,
@@ -1230,6 +1237,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             modelHashSource: modelHashSource,
             requestID: nil,
             settlementMetadata: nil,
+            runtimeSettlementEligible: runtimeSettlementEligible,
+            settlementDisposition: settlementDisposition,
             terminalStateTSUnixMS: nil
         ) {
         case .issued(let header):
@@ -1291,7 +1300,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         modelHashSource: ReceiptModelHashSource,
         requestID: String? = nil,
         settlementMetadata: SettlementReceiptMetadata? = nil,
-        settlementDisposition: ContinuousBatchSettlementDisposition = .eligibleOwner,
+        runtimeSettlementEligible: Bool,
+        settlementDisposition: ContinuousBatchSettlementDisposition,
         terminalState: String = "normal_done",
         terminalStateTSUnixMS: Int64? = nil
     ) throws -> ReceiptHeaderResult {
@@ -1300,6 +1310,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         guard let receiptBuilder else {
             return .omitted(.preV16Binary)
+        }
+        // #1695: eligibility is explicit. A runtime that is not settlement
+        // eligible (loopback, fixture) never signs, whatever its completions say.
+        guard runtimeSettlementEligible else {
+            return .omitted(.runtimeNotSettlementEligible)
         }
         guard settlementDisposition == .eligibleOwner else {
             return .omitted(.nonSettlingReplay)
@@ -1379,9 +1394,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         request: ChatCompletionRequest,
         error: APIError,
         startedAt: Date,
-        modelHashSource: ReceiptModelHashSource
+        modelHashSource: ReceiptModelHashSource,
+        runtimeSettlementEligible: Bool
     ) throws -> String? {
-        switch try errorReceiptHeaderResult(providerID: providerID, receiptBuilder: receiptBuilder, request: request, error: error, startedAt: startedAt, modelHashSource: modelHashSource) {
+        switch try errorReceiptHeaderResult(providerID: providerID, receiptBuilder: receiptBuilder, request: request, error: error, startedAt: startedAt, modelHashSource: modelHashSource, runtimeSettlementEligible: runtimeSettlementEligible) {
         case .issued(let header, _, _):
             return header
         case .omitted, .notReceiptEligible:
@@ -1395,7 +1411,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         request: ChatCompletionRequest,
         error: APIError,
         startedAt: Date,
-        modelHashSource: ReceiptModelHashSource
+        modelHashSource: ReceiptModelHashSource,
+        runtimeSettlementEligible: Bool
     ) throws -> ErrorReceiptHeaderResult {
         guard error.code == "model_not_loaded" else {
             if error.code == "swap_drain_timeout" {
@@ -1424,7 +1441,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             ttftMs: ttftMs,
             tokensOut: 0,
             unixTsSeconds: unixTs,
-            modelHashSource: modelHashSource
+            modelHashSource: modelHashSource,
+            runtimeSettlementEligible: runtimeSettlementEligible,
+            // Error receipts carry no completion; the owner request is the
+            // only candidate, so the runtime flag above is the whole gate.
+            settlementDisposition: .eligibleOwner
         ) {
         case .issued(let header):
             return .issued(header, ttftMs: ttftMs, unixTs: unixTs)

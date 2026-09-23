@@ -36,7 +36,9 @@ final class ReceiptPerfTests: XCTestCase {
                 ttftMs: 12,
                 tokensOut: 1_024,
                 unixTsSeconds: 1_800_000_000,
-                modelHashSource: .warmSwapDisabled
+                modelHashSource: .warmSwapDisabled,
+                runtimeSettlementEligible: true,
+                settlementDisposition: .eligibleOwner
             )
             _ = try builder.build(providerId: "provider-a", input: input)
         }
@@ -53,7 +55,9 @@ final class ReceiptPerfTests: XCTestCase {
                     ttftMs: 12,
                     tokensOut: 1_024,
                     unixTsSeconds: 1_800_000_000,
-                    modelHashSource: .warmSwapDisabled
+                    modelHashSource: .warmSwapDisabled,
+                    runtimeSettlementEligible: true,
+                    settlementDisposition: .eligibleOwner
                 )
             }
             let enabledP95 = try measureP95(iterations: 1_000) {
@@ -67,7 +71,9 @@ final class ReceiptPerfTests: XCTestCase {
                     ttftMs: 12,
                     tokensOut: 1_024,
                     unixTsSeconds: 1_800_000_000,
-                    modelHashSource: .warmSwapDisabled
+                    modelHashSource: .warmSwapDisabled,
+                    runtimeSettlementEligible: true,
+                    settlementDisposition: .eligibleOwner
                 )
             }
             return (max(0, enabledP95 - disabledP95), enabledP95, disabledP95)

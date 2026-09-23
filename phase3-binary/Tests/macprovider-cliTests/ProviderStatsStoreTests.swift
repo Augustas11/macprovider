@@ -64,7 +64,7 @@ final class ProviderStatsPersistenceTests: XCTestCase {
         let startedAt = await first.beginRequest(requestID: "r-1")
         await first.finishRequest(
             startedAt: startedAt,
-            completion: CompletionResult(content: "ok", finishReason: "stop", promptTokens: 1, completionTokens: 2),
+            completion: CompletionResult(content: "ok", finishReason: "stop", promptTokens: 1, completionTokens: 2, settlementDisposition: .eligibleOwner),
             failed: false,
             requestID: "r-1"
         )

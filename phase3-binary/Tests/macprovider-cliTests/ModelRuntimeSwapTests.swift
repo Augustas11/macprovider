@@ -472,7 +472,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             while await !probe.canFinish {
                 try await Task.sleep(nanoseconds: 5_000_000)
             }
-            return CompletionResult(content: snapshot.modelID ?? "<nil>", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            return CompletionResult(content: snapshot.modelID ?? "<nil>", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
         })
         await runtime.setProviderStatus(providerStatus)
 
@@ -512,7 +512,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
                 while await !probe.canFinish {
                     try await Task.sleep(nanoseconds: 5_000_000)
                 }
-                return CompletionResult(content: "\(snapshot.modelID ?? "<nil>"):\(snapshot.draftModelID ?? "<nil>")", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                return CompletionResult(content: "\(snapshot.modelID ?? "<nil>"):\(snapshot.draftModelID ?? "<nil>")", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
 
@@ -763,7 +763,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             completion: { snapshot, _ in
                 await probe.markStarted(modelID: snapshot.modelID)
                 try await Task.sleep(nanoseconds: 15_000_000_000)
-                return CompletionResult(content: "too-late", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                return CompletionResult(content: "too-late", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
         await runtime.setProviderStatus(providerStatus)
@@ -811,7 +811,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             completion: { snapshot, _ in
                 await probe.markStarted(modelID: snapshot.modelID)
                 try await Task.sleep(nanoseconds: 2_000_000_000)
-                return CompletionResult(content: snapshot.modelID ?? "<nil>", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                return CompletionResult(content: snapshot.modelID ?? "<nil>", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
         await runtime.setProviderStatus(providerStatus)
@@ -854,7 +854,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             },
             completion: { snapshot, _ in
                 await probe.markStarted(modelID: snapshot.modelID)
-                return CompletionResult(content: snapshot.modelID ?? "<nil>", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                return CompletionResult(content: snapshot.modelID ?? "<nil>", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
         let request = try makeRequest(model: "old-model")
@@ -894,11 +894,11 @@ final class ModelRuntimeSwapTests: XCTestCase {
             },
             testCompletion: { snapshot, _ in
                 fallbackCalls.increment()
-                return CompletionResult(content: "\(snapshot.modelID ?? "<nil>"):\(snapshot.draftModelID ?? "<nil>")", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                return CompletionResult(content: "\(snapshot.modelID ?? "<nil>"):\(snapshot.draftModelID ?? "<nil>")", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             },
             testSpeculativeCompletion: { _, _ in
                 speculativeCalls.increment()
-                return CompletionResult(content: "speculative", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                return CompletionResult(content: "speculative", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
         let swapTask = try await runtime.beginSwap(targetModelID: "new-model")
@@ -988,7 +988,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             completion: { snapshot, _ in
                 await probe.markStarted(modelID: snapshot.modelID)
                 try await Task.sleep(nanoseconds: 15_000_000_000)
-                return CompletionResult(content: "too-late", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                return CompletionResult(content: "too-late", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
         await runtime.setProviderStatus(providerStatus)

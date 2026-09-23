@@ -10,7 +10,8 @@ final class KVCacheTelemetryTests: XCTestCase {
             promptTokens: 10,
             cachedPromptTokens: 4,
             kvCacheBytesReused: 128,
-            completionTokens: 2
+            completionTokens: 2,
+            settlementDisposition: .eligibleOwner
         )
 
         let payload = try KVCacheTelemetry.requestCompletedPayload(
@@ -41,7 +42,8 @@ final class KVCacheTelemetryTests: XCTestCase {
             promptTokens: 8,
             cachedPromptTokens: 2,
             kvCacheBytesReused: 64,
-            completionTokens: 1
+            completionTokens: 1,
+            settlementDisposition: .eligibleOwner
         )
         let capture = KVCacheTelemetryCapture()
 

@@ -3789,6 +3789,7 @@ final class CoordinatorClientTests: XCTestCase {
                 finishReason: "stop",
                 promptTokens: 2,
                 completionTokens: 1,
+                settlementDisposition: .eligibleOwner,
                 specDecodeDraftedTokens: 12,
                 specDecodeAcceptedTokens: 9,
                 specDecodeGeneration: generation
@@ -3828,6 +3829,7 @@ final class CoordinatorClientTests: XCTestCase {
                 finishReason: "stop",
                 promptTokens: 2,
                 completionTokens: 1,
+                settlementDisposition: .eligibleOwner,
                 specDecodeDraftedTokens: 12,
                 specDecodeAcceptedTokens: 9,
                 specDecodeGeneration: generation

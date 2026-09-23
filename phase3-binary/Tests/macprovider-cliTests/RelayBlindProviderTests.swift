@@ -802,6 +802,7 @@ private actor RelayBlindTestRuntime: ModelRuntimeServing {
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
+    nonisolated var isSettlementReceiptEligible: Bool { true }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func currentSnapshot() -> RuntimeSnapshot {
         RuntimeSnapshot(state: .ready, container: nil, modelID: model, modelHash: nil)
@@ -811,7 +812,7 @@ private actor RelayBlindTestRuntime: ModelRuntimeServing {
     }
     func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult {
         completions += 1
-        return CompletionResult(content: "fixture result", finishReason: "stop", promptTokens: inputTokens, completionTokens: 2)
+        return CompletionResult(content: "fixture result", finishReason: "stop", promptTokens: inputTokens, completionTokens: 2, settlementDisposition: .eligibleOwner)
     }
     func completeWithServedSnapshot(
         _ request: ChatCompletionRequest,
@@ -837,7 +838,7 @@ private actor RelayBlindTestRuntime: ModelRuntimeServing {
     ) async throws -> CompletionResult {
         completions += 1
         onChunk(.content("fixture result"))
-        return CompletionResult(content: "fixture result", finishReason: "stop", promptTokens: inputTokens, completionTokens: 2)
+        return CompletionResult(content: "fixture result", finishReason: "stop", promptTokens: inputTokens, completionTokens: 2, settlementDisposition: .eligibleOwner)
     }
     func unregisterInFlight(_ id: Int) {}
 }

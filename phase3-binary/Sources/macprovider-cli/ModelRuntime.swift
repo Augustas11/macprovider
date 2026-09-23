@@ -40,6 +40,12 @@ protocol ModelRuntimeServing: Actor {
     var loadedWeightsManifestSHA256: String? { get async }
     var isLoaded: Bool { get async }
     func setProviderStatus(_ providerStatus: ProviderStatus) async
+    /// Issue #1695: whether completions from this runtime may carry a signed
+    /// SPEC-015 receipt at all. Every conformer declares it explicitly (no
+    /// protocol-extension default) so a new loopback or fixture runtime cannot
+    /// inherit receipt eligibility by omission. This is a CLI accident guard,
+    /// not a security boundary: the coordinator settlement gate is the control.
+    nonisolated var isSettlementReceiptEligible: Bool { get }
 }
 
 struct RelayBlindPreparedRequest: @unchecked Sendable {
@@ -1201,6 +1207,10 @@ actor ModelRuntime: ModelRuntimeServing {
     var isLoaded: Bool {
         currentContainer != nil || (testCompletion != nil && currentModelID != nil)
     }
+
+    /// Native MLX catalog serving settles through SPEC-015 receipts; it has no
+    /// SPEC-047 admission rows, so eligibility is never gated on admission.
+    nonisolated var isSettlementReceiptEligible: Bool { true }
 
     private nonisolated static func makeServeGenerateParameters(
         maxTokens: Int?,
@@ -4499,7 +4509,8 @@ actor ModelRuntime: ModelRuntimeServing {
                             generatedCompletionTokens: parsed.generatedCompletionTokens,
                             ttftMilliseconds: firstToken.elapsedMilliseconds(since: completionStartedAt),
                             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
-                            modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
+                            modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
+                            settlementDisposition: .eligibleOwner
                         ), request: request)
                         if let lease {
                             await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
@@ -4581,6 +4592,7 @@ actor ModelRuntime: ModelRuntimeServing {
             ttftMilliseconds: generated.firstToken.elapsedMilliseconds(since: completionStartedAt),
             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
             modelHashObserved: validObservedModelHash(modelHash),
+            settlementDisposition: .eligibleOwner,
             specDecodeDraftedTokens: generated.draftedTokens,
             specDecodeAcceptedTokens: generated.acceptedTokens,
             specDecodeGeneration: specDecodeGeneration
@@ -4934,6 +4946,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             generationMilliseconds: generationMS,
                             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
+                            settlementDisposition: .eligibleOwner,
                             specDecodeDraftedTokens: generated.draftedTokens,
                             specDecodeAcceptedTokens: generated.acceptedTokens,
                             specDecodeGeneration: snapshot.specDecodeGeneration
@@ -5203,7 +5216,8 @@ actor ModelRuntime: ModelRuntimeServing {
                             generatedCompletionTokens: parsed.generatedCompletionTokens,
                             generationMilliseconds: generationMS,
                             toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
-                            modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
+                            modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
+                            settlementDisposition: .eligibleOwner
                         )
                         let validated = try Self.validateStructuredStreamingCompletion(
                             completion,
@@ -6361,6 +6375,7 @@ actor ModelRuntime: ModelRuntimeServing {
             generationMilliseconds: completion.generationMilliseconds,
             toolCalls: completion.toolCalls,
             modelHashObserved: completion.modelHashObserved,
+            settlementDisposition: completion.settlementDisposition,
             specDecodeDraftedTokens: completion.specDecodeDraftedTokens,
             specDecodeAcceptedTokens: completion.specDecodeAcceptedTokens,
             specDecodeGeneration: completion.specDecodeGeneration
@@ -6381,7 +6396,8 @@ actor ModelRuntime: ModelRuntimeServing {
             completionTokens: 0,
             ttftMilliseconds: 0,
             toolCalls: nil,
-            modelHashObserved: validObservedModelHash(modelHash)
+            modelHashObserved: validObservedModelHash(modelHash),
+            settlementDisposition: .eligibleOwner
         )
         do {
             return try validateStructuredStreamingCompletion(
@@ -7027,7 +7043,7 @@ struct CompletionResult: Sendable {
         generationMilliseconds: Int64? = nil,
         toolCalls: [ToolCall]? = nil,
         modelHashObserved: String? = nil,
-        settlementDisposition: ContinuousBatchSettlementDisposition = .eligibleOwner,
+        settlementDisposition: ContinuousBatchSettlementDisposition,
         specDecodeDraftedTokens: Int = 0,
         specDecodeAcceptedTokens: Int = 0,
         specDecodeGeneration: Int? = nil

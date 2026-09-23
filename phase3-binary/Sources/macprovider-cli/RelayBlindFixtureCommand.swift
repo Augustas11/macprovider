@@ -104,7 +104,7 @@ private actor RelayBlindFixtureWriter {
     }
 }
 
-private actor RelayBlindFixtureRuntime: ModelRuntimeServing {
+actor RelayBlindFixtureRuntime: ModelRuntimeServing {
     private let model: String
     private let promptTokens = 5
     private let streamDelayNanoseconds: UInt64
@@ -118,6 +118,7 @@ private actor RelayBlindFixtureRuntime: ModelRuntimeServing {
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
+    nonisolated var isSettlementReceiptEligible: Bool { false }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func currentSnapshot() -> RuntimeSnapshot {
@@ -137,7 +138,8 @@ private actor RelayBlindFixtureRuntime: ModelRuntimeServing {
             content: "relay-blind fixture response",
             finishReason: "stop",
             promptTokens: promptTokens,
-            completionTokens: 4
+            completionTokens: 4,
+            settlementDisposition: .notEligible
         )
     }
 
@@ -168,7 +170,8 @@ private actor RelayBlindFixtureRuntime: ModelRuntimeServing {
             content: "relay-blind fixture response",
             finishReason: "stop",
             promptTokens: promptTokens,
-            completionTokens: 4
+            completionTokens: 4,
+            settlementDisposition: .notEligible
         )
     }
 
