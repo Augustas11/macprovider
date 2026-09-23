@@ -8067,7 +8067,7 @@
     {
       "requirement_id": "SPEC-047-R001",
       "spec_id": "SPEC-047",
-      "state": "conformant",
+      "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/ws/model_admission.go:type ModelAdmissionStore",
         "phase4-coordinator/internal/ws/model_admission.go:func (s *memoryModelAdmissionStore) AppendModelAdmissionOffer",
@@ -8097,6 +8097,7 @@
         "phase4-coordinator/internal/ws/model_admission_operator_test.go:TestModelAdmissionOperatorDecisionPath",
         "phase4-coordinator/internal/ws/model_admission_decision_store_test.go:TestModelAdmissionDecisionStoreCASAndPending",
         "phase4-coordinator/internal/ws/model_admission_binding_test.go:TestModelAdmissionOfferTimeMatchOrdering",
+        "phase4-coordinator/internal/ws/model_admission_r008_test.go:TestModelAdmissionRouteCompareAndInsertUsesRouteReadStore",
         "phase4-coordinator/internal/ws/artifact_identity_test.go:TestReleaseStagingPublishesCatalogAndIdentitySetsAsOneGeneration",
         "phase4-coordinator/internal/ws/model_admission_intake_test.go::TestModelAdmissionIntakeAggregate",
         "phase4-coordinator/internal/ws/model_admission_intake_test.go::TestBuildModelAdmissionIntakeRowsCountsDistinctPairs"
@@ -8118,7 +8119,12 @@
           "expires_at": "2026-10-16"
         }
       ],
-      "gap": null
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1680",
+        "rationale": "The route-snapshot admission guard changed after the 2026-09-16 signed network model-admission journey to move its pre/post comparison reads off the contended writer-backed store. The implementation and local regression tests are mapped, while the historical signed journey is retained without redating or replacement; restore conformant only after reviewed deployment and a fresh independently trusted signed JOURNEY-NETWORK-MODEL-ADMISSION promotion."
+      }
     },
     {
       "requirement_id": "SPEC-047-R002",
