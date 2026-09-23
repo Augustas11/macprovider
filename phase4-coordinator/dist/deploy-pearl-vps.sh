@@ -4075,13 +4075,14 @@ if [ "$CATALOG_VERDICT" = "equivalent" ]; then
     }
     rm -f /opt/macprovider/tier2-catalog.json
     rm -rf $DEPLOY_TMP
-  "
+  " || { echo "aborting deploy: live catalog changed since compare-live or could not be pinned" >&2; exit 1; }
   # Post-restart smokes and the canary prove the LIVE release, not the tag's.
   [ -n "$PINNED_DEPLOY_INPUT_DIR" ] || { echo "aborting deploy: no pinned input dir for the live catalog snapshot" >&2; exit 1; }
   CATALOG_LIVE_SNAPSHOT="$PINNED_DEPLOY_INPUT_DIR/live-catalog"
   mkdir -m 0700 "$CATALOG_LIVE_SNAPSHOT"
   # shellcheck disable=SC2086 # fixed release file names
-  $SSH "tar -C /opt/macprovider/autotune/$CATALOG_LIVE_TARGET -cf - $CATALOG_RELEASE_FILES" | tar -xf - -C "$CATALOG_LIVE_SNAPSHOT"
+  $SSH "tar -C /opt/macprovider/autotune/$CATALOG_LIVE_TARGET -cf - $CATALOG_RELEASE_FILES" | tar -xf - -C "$CATALOG_LIVE_SNAPSHOT" ||
+    { echo "aborting deploy: could not snapshot the live catalog release" >&2; exit 1; }
   STATIC_DEMAND_JSON="$CATALOG_LIVE_SNAPSHOT/demand-rank.json"
   STATIC_DEMAND_SIG="$CATALOG_LIVE_SNAPSHOT/demand-rank.json.sig"
   STATIC_AUTOTUNE_JSON="$CATALOG_LIVE_SNAPSHOT/autotune-candidates.json"
@@ -4137,7 +4138,7 @@ $SSH "set -e
   mv -Tf \"\$_catalog_root/current.next\" \"\$_catalog_root/current\"
   rm -f /opt/macprovider/tier2-catalog.json
   rm -rf $DEPLOY_TMP
-"
+" || { echo "aborting deploy: catalog activation failed or autotune/current moved since compare-live" >&2; exit 1; }
 fi
 log "step 7/9: enable + start coordinator service"
 $SSH 'set -e
