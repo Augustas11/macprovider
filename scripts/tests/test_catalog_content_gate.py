@@ -141,7 +141,9 @@ class ContentGateTests(unittest.TestCase):
         self.assertIn("trusted-keys.json bytes changed vs live", result["reasons"])
         self.assertTrue(result["changed"]["trusted_keys_changed"])
 
-    def test_rate_card_row_change_is_pricing(self) -> None:
+    def test_rate_card_row_change_is_an_eligible_pricing_correction(self) -> None:
+        # #1693: a rows-only credit change rides the catalog-content lane with a
+        # `pricing` object (scope and refusals: test_catalog_pricing_lane).
         correct_hash(self.release)
 
         def reprice(o: dict) -> None:
@@ -150,8 +152,9 @@ class ContentGateTests(unittest.TestCase):
 
         edit_json(self.release / "rate-card.json", reprice)
         result = self.gate()
-        self.assertLane(result, "pricing")
-        self.assertTrue(any("#1693" in r for r in result["reasons"]), result)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["lane"], "catalog-content")
+        self.assertEqual([entry["row"] for entry in result["pricing"]["changed"]], [MODEL_KEY])
 
     def test_rate_card_restamp_alone_is_not_pricing(self) -> None:
         correct_hash(self.release)
