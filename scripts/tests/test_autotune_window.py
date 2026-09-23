@@ -322,6 +322,16 @@ class AdmittedJsonCoverageTests(unittest.TestCase):
             rc = aw.main(["coverage", "--admitted-json", str(self.verdict), "--poolz-json", str(self.poolz), *extra])
         return rc, (json.loads(out.getvalue()) if out.getvalue() else None), err.getvalue()
 
+    def test_row_continuity_source_is_admitted(self) -> None:
+        self.write(admitted=[
+            {"release_id": "v3", "candidates_sha256": self.SHA_A, "source": "current"},
+            {"release_id": "v1", "candidates_sha256": self.SHA_B, "source": "row_continuity"},
+        ])
+        self.pool(("v1", self.SHA_B))
+        rc, got, err = self.cov()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(got["uncovered"], [])
+
     def test_admitted_list_is_the_admissible_set(self) -> None:
         self.write()
         self.pool(("v3", self.SHA_A), ("v2", self.SHA_B.upper()), ("v3", self.SHA_C))

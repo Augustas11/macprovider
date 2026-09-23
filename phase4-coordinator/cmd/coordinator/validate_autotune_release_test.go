@@ -336,7 +336,8 @@ func TestReloadAutotuneFeedSIGHUPLogsTier2Identity(t *testing.T) {
 }
 
 // #1688: admitted is exactly what the reload's ws admission map lets a hello
-// match: the release, loaded retained entries, and same-version restamps;
+// match: the release, loaded retained entries, same-version restamps, and
+// row-continuity evidence (#1705);
 // tombstoned window entries and wrong-signer restamps are not admitted.
 func TestValidateAutotuneReleaseReportsAdmittedCatalogs(t *testing.T) {
 	defer tier2.ResetForTest()
@@ -352,6 +353,12 @@ func TestValidateAutotuneReleaseReportsAdmittedCatalogs(t *testing.T) {
 	previousTarget := filepath.Join(previousRoot, ".previous-target")
 	// The tombstoned bridge release has no directory: the reload skips it.
 	if err := os.WriteFile(previousTarget, []byte("# retained\nreleases/published-2026-07-07-p2-qwen3-8b\nreleases/release-prev\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// #1705: a .row-continuity-target entry is admitted as row_continuity.
+	bakedRaw := validatorCandidateFeed("release-baked", reloadTestHash)
+	writeValidatorSigned(t, filepath.Join(previousRoot, "releases", "release-baked", "autotune-candidates.json"), bakedRaw)
+	if err := os.WriteFile(filepath.Join(previousRoot, ".row-continuity-target"), []byte("releases/release-baked\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -371,6 +378,7 @@ func TestValidateAutotuneReleaseReportsAdmittedCatalogs(t *testing.T) {
 		{"release_id": "release-next", "candidates_sha256": sha256Hex(candidates), "source": "current"},
 		{"release_id": "release-prev", "candidates_sha256": sha256Hex(previousRaw), "source": "retained"},
 		{"release_id": "release-next", "candidates_sha256": sha256Hex(restampRaw), "source": "restamp"},
+		{"release_id": "release-baked", "candidates_sha256": sha256Hex(bakedRaw), "source": "row_continuity"},
 	}
 	if fmt.Sprint(admitted) != fmt.Sprint(want) {
 		t.Fatalf("admitted=%v\nwant     %v", admitted, want)

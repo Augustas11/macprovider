@@ -316,7 +316,7 @@ def advertised_catalogs(poolz: object) -> tuple[dict[tuple[str, str], dict], int
     return advertised, total
 
 
-ADMITTED_SOURCES = ("current", "retained", "restamp")
+ADMITTED_SOURCES = ("current", "retained", "restamp", "row_continuity")
 ADMITTED_KEYS = {"release_id", "candidates_sha256", "source"}
 RELEASE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,191}")
 LOWER_SHA_RE = re.compile(r"[0-9a-f]{64}")
