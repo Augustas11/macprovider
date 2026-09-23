@@ -4,6 +4,15 @@ This file is the canonical instruction surface for every coding agent in this
 repository. Keep it short, concrete, and current. Put long incident writeups in
 docs or runbooks and link them from here.
 
+## HARDEST RULE — no options, always implement the goal
+
+Never present the operator with two or more options, an either/or menu, or a
+"proceed vs hold" question. Do not stop to ask which path to take. Pick the
+single best path toward the stated goal and implement it directly. If a
+prerequisite is genuinely blocking (missing access, a hard permission denial),
+do everything possible around it, then surface the one specific unblock needed —
+never as a menu. Analysis and status are fine; decision-shaped menus are not.
+
 ## Project Overview
 
 MacProvider turns Apple Silicon Macs into remote-addressable MLX inference
