@@ -244,6 +244,9 @@ expected_history = {
     # Superseded by the current qwen3.6-27b hash-fix cut; retained by the
     # append-only ledger (was the current release before the hash correction).
     "published-2026-09-19-openrouter-priced-v1",
+    # Superseded by the Tier-2 buyer-serving closure cut; retained by the
+    # append-only ledger even though the candidate rows are unchanged.
+    "published-2026-09-22-qwen36-27b-hash-fix-v1",
     release_id,
 }
 if set(ledger["releases"]) != expected_history:
@@ -430,7 +433,7 @@ with tempfile.TemporaryDirectory() as directory:
         if "disabled" not in str(exc):
             raise SystemExit(f"derive-tier2 disable message missing: {exc}")
     else:
-        raise SystemExit("derive-tier2 must remain disabled until snapshot-manifest scope exists")
+        raise SystemExit("derive-tier2 must remain disabled until Tier-2 authoring is reviewed")
 
     conflicted = json.loads(candidate)
     for bridge_row in conflicted["rows"].values():
@@ -691,6 +694,22 @@ agreeing_tier2 = real_signed_tier2("test-catalog-agree", qwen_row["model_sha256"
 tier2_obj = module.validate_tier2_catalog(agreeing_tier2)
 if tier2_obj["catalog_id"] != "test-catalog-agree":
     raise SystemExit("validate_tier2_catalog did not round-trip catalog_id")
+
+snapshot_scope_body = unsigned_body(
+    "test-catalog-snapshot-scope",
+    qwen_row["model_sha256"],
+    models=[{
+        "artifact_kind": "mlx_weight_file",
+        "hash_scope": module.SNAPSHOT_MANIFEST_ALG,
+        "model_id": qwen_row["model_id"],
+        "sha256": qwen_row["model_sha256"],
+        "source": "operator-curated",
+    }],
+)
+snapshot_scope_tier2 = sign_with(trusted_priv, snapshot_scope_body)
+snapshot_scope_obj = module.validate_tier2_catalog(snapshot_scope_tier2)
+if snapshot_scope_obj["models"][0]["hash_scope"] != module.SNAPSHOT_MANIFEST_ALG:
+    raise SystemExit("snapshot-manifest Tier-2 hash_scope did not round-trip")
 
 trusted_key_fingerprint = module.tier2_trusted_key_fingerprint(trusted_pub.read_text().strip())
 

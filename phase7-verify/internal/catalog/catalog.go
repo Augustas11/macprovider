@@ -132,7 +132,7 @@ func Parse(data []byte) (*Catalog, error) {
 			return nil, fmt.Errorf("catalog: model %q artifact_kind must be mlx_weight_file", m.ModelID)
 		}
 		switch m.HashScope {
-		case "primary_weight_file", "artifact_manifest", "coordinator_endorsed_incremental":
+		case "primary_weight_file", "artifact_manifest", "macprovider.snapshot-manifest.v1", "coordinator_endorsed_incremental":
 		default:
 			return nil, fmt.Errorf("catalog: model %q hash_scope is unsupported", m.ModelID)
 		}

@@ -278,6 +278,19 @@ func TestParseCatalogRejectsUnknownFieldsDuplicateModelsAndBadSemantics(t *testi
 		}
 	})
 
+	t.Run("snapshot manifest hash scope", func(t *testing.T) {
+		model := validModelEntry("model-a", testHash)
+		model.HashScope = modelidentity.SnapshotManifestV1
+		raw, publicKey := signedCatalogFixtureWithModels(t, time.Now().UTC().Add(time.Hour), []ModelEntry{model})
+		parsed, err := ParseCatalog(raw, publicKey)
+		if err != nil {
+			t.Fatalf("ParseCatalog: %v", err)
+		}
+		if got := parsed.Models["model-a"].HashScope; got != modelidentity.SnapshotManifestV1 {
+			t.Fatalf("HashScope=%q want %q", got, modelidentity.SnapshotManifestV1)
+		}
+	})
+
 	t.Run("non-positive min ram", func(t *testing.T) {
 		zero := 0
 		model := validModelEntry("model-a", testHash)

@@ -1085,6 +1085,12 @@ Allowed `hash_scope` values in v0.2:
 - `primary_weight_file`: SHA-256 of the primary weight file.
 - `artifact_manifest`: SHA-256 of a deterministic manifest listing all weight
   shard names, sizes, and SHA-256 values.
+- `macprovider.snapshot-manifest.v1`: SHA-256 of the canonical snapshot
+  manifest bytes defined by SPEC-023 §3.2 and used by SPEC-010 as the
+  candidate row's `model_sha256`. Tier-2 catalogs use this scope when the
+  signed entry is intentionally binding the same canonical model artifact
+  identity that providers report as `model_hash_algorithm =
+  "macprovider.snapshot-manifest.v1"`.
 - `coordinator_endorsed_incremental`: coordinator-endorsed hash for large
   artifacts where the operator precomputes an incremental digest.
 
