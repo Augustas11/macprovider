@@ -628,10 +628,22 @@ SELECT account_scope, request_id, attempt_n, provider_id,
 }
 
 func (s *Store) insertPersistedRouteSnapshot(ctx context.Context, row persistedRouteSnapshotRow) error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return fmt.Errorf("billing store is closed")
 	}
-	_, err := s.db.ExecContext(ctx, `
+	db := s.routeSnapshotHandle()
+	if db == nil {
+		return fmt.Errorf("billing store is closed")
+	}
+	existingDigest, found, err := loadPersistedRouteSnapshotDigest(ctx, db, row)
+	if err != nil {
+		return wrapRouteSnapshotStorePressure(err)
+	}
+	if found {
+		return verifyPersistedRouteSnapshotDigest(row, existingDigest)
+	}
+
+	_, err = db.ExecContext(ctx, `
 INSERT OR IGNORE INTO settlement_route_snapshots (
     account_scope, request_id, attempt_n, provider_id,
     provider_session_id, provider_generation_id, pool_id, paid_entrypoint,
@@ -673,16 +685,31 @@ INSERT OR IGNORE INTO settlement_route_snapshots (
 	if err != nil {
 		return wrapRouteSnapshotStorePressure(err)
 	}
-	var existingDigest string
-	err = s.db.QueryRowContext(ctx, `
+	existingDigest, found, err = loadPersistedRouteSnapshotDigest(ctx, db, row)
+	if err != nil {
+		return wrapRouteSnapshotStorePressure(err)
+	}
+	if !found {
+		return fmt.Errorf("route snapshot mirror row missing after insert for request %s attempt %d provider %s", row.RequestID, row.AttemptN, row.ProviderID)
+	}
+	return verifyPersistedRouteSnapshotDigest(row, existingDigest)
+}
+
+func loadPersistedRouteSnapshotDigest(ctx context.Context, db *sql.DB, row persistedRouteSnapshotRow) (string, bool, error) {
+	var digest string
+	err := db.QueryRowContext(ctx, `
 SELECT route_snapshot_digest
   FROM settlement_route_snapshots
  WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
 		row.AccountScope, row.RequestID, row.AttemptN, row.ProviderID,
-	).Scan(&existingDigest)
-	if err != nil {
-		return wrapRouteSnapshotStorePressure(err)
+	).Scan(&digest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
 	}
+	return digest, err == nil, err
+}
+
+func verifyPersistedRouteSnapshotDigest(row persistedRouteSnapshotRow, existingDigest string) error {
 	if existingDigest != row.RouteSnapshotDigest {
 		return fmt.Errorf("route snapshot mirror digest mismatch for request %s attempt %d provider %s", row.RequestID, row.AttemptN, row.ProviderID)
 	}
