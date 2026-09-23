@@ -1105,6 +1105,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// skips persistence (rather than deriving a fake hash from the model hash).
     private var currentTokenizerConfigSHA256: String?
     private var currentChatTemplateSHA256: String?
+    private var currentTemplateSupportsThinkingToggle = false
     private let verifiedCatalogArtifactSHA256: String?
     /// SPEC-037 FR-KVP4 (MEDIUM-5) — the model's CATALOG REVISION, distinct from the
     /// artifact SHA. FR-KVP4 requires model_sha256 AND catalog revision as SEPARATE
@@ -1940,6 +1941,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let tokenizerHashes = Self.tokenizerIdentityHashes(in: directory)
         self.currentTokenizerConfigSHA256 = tokenizerHashes.config
         self.currentChatTemplateSHA256 = tokenizerHashes.template
+        self.currentTemplateSupportsThinkingToggle = Self.chatTemplateSupportsThinkingToggle(in: directory)
         let runtimeCacheClass = self.pagedKVConfig.effectiveEnabled
             ? await Self.pagedKVRuntimeCacheClass(
                 container: container,
@@ -2044,6 +2046,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 target: container,
                 draft: draftContainer,
                 targetModelID: modelID,
+                templateSupportsThinkingToggle: self.currentTemplateSupportsThinkingToggle,
                 numDraftTokens: numDraftTokens,
                 maxContextTokens: self.maxContextTokens,
                 kvBitsOverride: self.kvBitsOverride,
@@ -2322,6 +2325,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 let weightsManifestSHA256: String?
                 let tokenizerConfigSHA256: String?
                 let chatTemplateSHA256: String?
+                let templateSupportsThinkingToggle: Bool
                 let modelCapabilities: PagedKVRuntimeModelCapabilities
                 let draftModelID: String?
                 let draftContainer: ModelContainer?
@@ -2335,6 +2339,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     weightsManifestSHA256 = nil
                     tokenizerConfigSHA256 = nil
                     chatTemplateSHA256 = nil
+                    templateSupportsThinkingToggle = false
                     modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
                     if let configuredDraftModelID {
                         do {
@@ -2369,6 +2374,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     let swapTokenizerHashes = Self.tokenizerIdentityHashes(in: loaded.1)
                     tokenizerConfigSHA256 = swapTokenizerHashes.config
                     chatTemplateSHA256 = swapTokenizerHashes.template
+                    templateSupportsThinkingToggle = Self.chatTemplateSupportsThinkingToggle(in: loaded.1)
                     modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: loaded.1)
                     if let configuredDraftModelID {
                         do {
@@ -2392,6 +2398,7 @@ actor ModelRuntime: ModelRuntimeServing {
                                 target: loaded.0,
                                 draft: draftLoaded.0,
                                 targetModelID: modelID,
+                                templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                                 numDraftTokens: numDraftTokens,
                                 maxContextTokens: maxContextTokens,
                                 kvBitsOverride: kvBitsOverride,
@@ -2429,6 +2436,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     weightsManifestSHA256: weightsManifestSHA256,
                     tokenizerConfigSHA256: tokenizerConfigSHA256,
                     chatTemplateSHA256: chatTemplateSHA256,
+                    templateSupportsThinkingToggle: templateSupportsThinkingToggle,
                     draftModelID: draftModelID,
                     draftContainer: draftContainer,
                     draftFailureReason: draftFailureReason,
@@ -3183,6 +3191,7 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsManifestSHA256: nil,
             tokenizerConfigSHA256: nil,
             chatTemplateSHA256: nil,
+            templateSupportsThinkingToggle: false,
             draftModelID: nil,
             draftContainer: nil,
             draftFailureReason: nil,
@@ -3199,6 +3208,7 @@ actor ModelRuntime: ModelRuntimeServing {
         weightsManifestSHA256: String?,
         tokenizerConfigSHA256: String?,
         chatTemplateSHA256: String?,
+        templateSupportsThinkingToggle: Bool,
         draftModelID: String?,
         draftContainer: ModelContainer?,
         draftFailureReason: String?,
@@ -3219,6 +3229,7 @@ actor ModelRuntime: ModelRuntimeServing {
         currentWeightsManifestSHA256 = weightsManifestSHA256
         currentTokenizerConfigSHA256 = tokenizerConfigSHA256
         currentChatTemplateSHA256 = chatTemplateSHA256
+        currentTemplateSupportsThinkingToggle = templateSupportsThinkingToggle
         let runtimeCacheClass = pagedKVConfig.effectiveEnabled
             ? await Self.pagedKVRuntimeCacheClass(
                 container: container,
@@ -3471,11 +3482,15 @@ actor ModelRuntime: ModelRuntimeServing {
         }
 
         let maxContextTokens = maxContextTokens
+        let templateSupportsThinkingToggle = currentTemplateSupportsThinkingToggle
         try await inferenceGate.withPermit {
             try handle.drainCancelled.check()
             return try await container.perform { context in
                 try handle.drainCancelled.check()
-                let input = try Self.userInput(for: request)
+                let input = try Self.userInput(
+                    for: request,
+                    templateSupportsThinkingToggle: templateSupportsThinkingToggle
+                )
                 let lmInput = try await context.processor.prepare(input: input)
                 try handle.drainCancelled.check()
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
@@ -3493,11 +3508,15 @@ actor ModelRuntime: ModelRuntimeServing {
                 throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
             }
             let maxContextTokens = maxContextTokens
+            let templateSupportsThinkingToggle = currentTemplateSupportsThinkingToggle
             let inputTokens = try await inferenceGate.withPermit {
                 try handle.drainCancelled.check()
                 return try await container.perform { context in
                     try handle.drainCancelled.check()
-                    let input = try Self.userInput(for: request)
+                    let input = try Self.userInput(
+                        for: request,
+                        templateSupportsThinkingToggle: templateSupportsThinkingToggle
+                    )
                     let prepared = try await context.processor.prepare(input: input)
                     let count = prepared.text.tokens.size
                     try Self.validatePromptTokenCount(count, maxContextTokens: maxContextTokens)
@@ -3636,10 +3655,14 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let maxContextTokens = maxContextTokens
         let stopTokenFilter = stopTokenFilter
+        let templateSupportsThinkingToggle = currentTemplateSupportsThinkingToggle
         let prepared = try await container.perform { context -> ContinuousBatchPreparedRequest in
             try drainCancelled.check()
             try Task.checkCancellation()
-            let input = try Self.userInput(for: request)
+            let input = try Self.userInput(
+                for: request,
+                templateSupportsThinkingToggle: templateSupportsThinkingToggle
+            )
             let lmInput = try await context.processor.prepare(input: input)
             let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
             try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
@@ -3831,11 +3854,15 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let maxContextTokens = maxContextTokens
         let stopTokenFilter = stopTokenFilter
+        let templateSupportsThinkingToggle = currentTemplateSupportsThinkingToggle
         let requestStops = request.stop
         let (prepared, detokenizer) = try await container.perform { context -> (ContinuousBatchPreparedRequest, StreamingDetokenizer) in
             try drainCancelled.check()
             try Task.checkCancellation()
-            let input = try Self.userInput(for: request)
+            let input = try Self.userInput(
+                for: request,
+                templateSupportsThinkingToggle: templateSupportsThinkingToggle
+            )
             let lmInput = try await context.processor.prepare(input: input)
             let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
             try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
@@ -4258,6 +4285,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = stopTokenFilter
+        let templateSupportsThinkingToggle = currentTemplateSupportsThinkingToggle
         let completion = try await Self.withDrainCancellation(drainCancelled) {
             try await inferenceGate.withPermit {
                 try drainCancelled.check()
@@ -4265,7 +4293,10 @@ actor ModelRuntime: ModelRuntimeServing {
                 return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
-                    let input = try Self.userInput(for: request)
+                    let input = try Self.userInput(
+                        for: request,
+                        templateSupportsThinkingToggle: templateSupportsThinkingToggle
+                    )
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = Self.makeServeGenerateParameters(
@@ -4755,6 +4786,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let inferenceGate = inferenceGate
         let blockingInferenceExecutor = blockingInferenceExecutor
         let stopTokenFilter = stopTokenFilter
+        let templateSupportsThinkingToggle = currentTemplateSupportsThinkingToggle
         return try await Self.withDrainCancellation(drainCancelled) {
             try await Self.withStructuredStreamingIdleTimeout(
                 idleState: idleState,
@@ -4772,7 +4804,10 @@ actor ModelRuntime: ModelRuntimeServing {
                 return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
-                    let input = try Self.userInput(for: request)
+                    let input = try Self.userInput(
+                        for: request,
+                        templateSupportsThinkingToggle: templateSupportsThinkingToggle
+                    )
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = Self.makeServeGenerateParameters(
@@ -5482,6 +5517,7 @@ actor ModelRuntime: ModelRuntimeServing {
         target: ModelContainer,
         draft: ModelContainer,
         targetModelID: String,
+        templateSupportsThinkingToggle: Bool,
         numDraftTokens: Int,
         maxContextTokens: Int,
         kvBitsOverride: Int?,
@@ -5490,7 +5526,10 @@ actor ModelRuntime: ModelRuntimeServing {
     ) async throws {
         let request = try spec028EquivalenceRequest(targetModelID: targetModelID)
         let tokenPair = try await target.perform { targetContext in
-            let input = try userInput(for: request)
+            let input = try userInput(
+                for: request,
+                templateSupportsThinkingToggle: templateSupportsThinkingToggle
+            )
             let lmInput = try await targetContext.processor.prepare(input: input)
             try validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             let parameters = GenerateParameters(
@@ -5740,6 +5779,28 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         return snapshot
+    }
+
+    /// Some Qwen templates are hybrid thinking/non-thinking templates while
+    /// other Qwen releases (including Qwen3-Coder and Instruct-2507) are
+    /// non-thinking-only. Detect the template capability from the exact loaded
+    /// artifact instead of inferring it from a model-family name.
+    static func chatTemplateSupportsThinkingToggle(in directory: URL) -> Bool {
+        let fileManager = FileManager.default
+        let marker = Data("enable_thinking".utf8)
+
+        for name in ["chat_template.jinja", "chat_template.json", "chat_template.txt", "tokenizer_config.json"] {
+            let url = directory.appendingPathComponent(name)
+            guard fileManager.fileExists(atPath: url.path),
+                  let data = try? Data(contentsOf: url, options: [.mappedIfSafe])
+            else {
+                continue
+            }
+            if data.range(of: marker) != nil {
+                return true
+            }
+        }
+        return false
     }
 
     /// SPEC-037 HIGH-8 — hash the loaded model's LIVE tokenizer configuration and
@@ -6155,7 +6216,15 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
-    private static func userInput(for request: ChatCompletionRequest) throws -> UserInput {
+    static func templateAdditionalContext(supportsThinkingToggle: Bool) -> [String: any Sendable]? {
+        guard supportsThinkingToggle else { return nil }
+        return ["enable_thinking": false]
+    }
+
+    static func userInput(
+        for request: ChatCompletionRequest,
+        templateSupportsThinkingToggle: Bool = false
+    ) throws -> UserInput {
         let structuredMessages = try StructuredOutputRenderer.prependResponseFormatInstruction(
             to: request.messages,
             responseFormat: request.responseFormat,
@@ -6163,7 +6232,10 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         return UserInput(
             chat: try ToolPromptRenderer.renderMessages(structuredMessages, modelID: request.model),
-            tools: Self.mlxToolsForTemplate(from: request.promptSource.tools)
+            tools: Self.mlxToolsForTemplate(from: request.promptSource.tools),
+            additionalContext: Self.templateAdditionalContext(
+                supportsThinkingToggle: templateSupportsThinkingToggle
+            )
         )
     }
 
