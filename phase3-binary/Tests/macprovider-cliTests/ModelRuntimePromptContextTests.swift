@@ -3,27 +3,33 @@ import MacProviderCore
 @testable import macprovider_cli
 
 final class ModelRuntimePromptContextTests: XCTestCase {
-    func testThinkingCapableTemplateFlowsDisableFlagThroughUserInput() throws {
+    func testThinkingCapableTemplatesDisableFlagRegardlessOfModelFamily() throws {
         let artifact = try artifactDirectory(
             chatTemplate: #"{% if enable_thinking is defined and enable_thinking is false %}<think></think>{% else %}<think>{% endif %}"#
         )
         XCTAssertTrue(ModelRuntime.chatTemplateSupportsThinkingToggle(in: artifact))
 
-        let request = try ChatCompletionRequest.parse(data: Data(#"""
-        {
-            "model": "qwen/qwen3.6-27b",
-            "messages": [{"role": "user", "content": "Reply exactly PONG"}],
-            "max_tokens": 16,
-            "temperature": 0
-        }
-        """#.utf8))
+        for model in [
+            "qwen/qwen3.6-27b",
+            "mlx-community/GLM-4.5-Air-4bit",
+            "mlx-community/NVIDIA-Nemotron-3-Nano-30B-A3B-4bit",
+        ] {
+            let request = try ChatCompletionRequest.parse(data: Data(#"""
+            {
+                "model": "\#(model)",
+                "messages": [{"role": "user", "content": "Reply exactly PONG"}],
+                "max_tokens": 16,
+                "temperature": 0
+            }
+            """#.utf8))
 
-        let input = try ModelRuntime.userInput(
-            for: request,
-            templateSupportsThinkingToggle: ModelRuntime.chatTemplateSupportsThinkingToggle(in: artifact)
-        )
-        let context = try XCTUnwrap(input.additionalContext)
-        XCTAssertEqual(context["enable_thinking"] as? Bool, false)
+            let input = try ModelRuntime.userInput(
+                for: request,
+                templateSupportsThinkingToggle: ModelRuntime.chatTemplateSupportsThinkingToggle(in: artifact)
+            )
+            let context = try XCTUnwrap(input.additionalContext, model)
+            XCTAssertEqual(context["enable_thinking"] as? Bool, false, model)
+        }
     }
 
     func testNonThinkingTemplatesKeepDefaultContextRegardlessOfModelFamilyName() throws {
