@@ -320,6 +320,19 @@ rejected(
         {"releases": {release_id: changed_enriched_feed}, "tombstones": {}},
     ),
 )
+# #1688 B2: a freshness renewal cannot keep the live release_id. A restamp
+# changes generated_at and the candidate bytes, so the same id would be bound
+# to two feed digest sets (SPEC-023 §3.7.8: permanently rejected).
+same_id_restamp = json.loads(json.dumps(record))
+same_id_restamp["generated_at"] = "2099-01-01T00:00:00Z"
+same_id_restamp["feeds"]["autotune-candidates.json"]["sha256"] = "e" * 64
+rejected(
+    "freshness restamp that keeps the published release_id",
+    lambda: module.require_ledger_evolution(
+        {"releases": {release_id: record}, "tombstones": {}},
+        {"releases": {release_id: same_id_restamp}, "tombstones": {}},
+    ),
+)
 rebound_manifest = json.loads((canonical / "release.json").read_bytes())
 rebound_manifest["release_id"] = rebound_id
 rejected(
@@ -1169,5 +1182,30 @@ print("verify-directory requires tier2-catalog.json to be a declared AND authent
 
 module.COORDINATOR_YAML_PATH = original_coordinator_yaml_path
 PY
+
+# #1688 C2/C3: offline catalog-content lane self-check over the committed release.
+# The committed release vs itself carries no content change, so the gate must
+# refuse it as freshness-or-noop (exit 3), never pass it as a content release.
+stage_release
+set +e
+python3 "$VERIFY" content-gate --release "$TMP/release" --live "$TMP/release" \
+  >"$TMP/content-gate.out" 2>"$TMP/content-gate.err"
+gate_rc=$?
+set -e
+[ "$gate_rc" -eq 3 ] || fail "content-gate on the committed release vs itself exited $gate_rc, want 3: $(cat "$TMP/content-gate.err")"
+python3 - "$TMP/content-gate.out" <<'PY'
+import json, sys
+lines = open(sys.argv[1]).read().splitlines()
+if len(lines) != 1:
+    raise SystemExit(f"content-gate stdout must be exactly one JSON verdict, got {lines!r}")
+verdict = json.loads(lines[0])
+if verdict["ok"] is not False or verdict["lane"] != "freshness-or-noop":
+    raise SystemExit(f"committed release vs itself must be freshness-or-noop, got {verdict!r}")
+PY
+python3 "$VERIFY" check-tier2-binding --require-serving \
+  --candidate "$STATIC/autotune-candidates.json" \
+  --rate-card "$STATIC/rate-card.json" \
+  --tier2 "$CANONICAL/tier2-catalog.json" \
+  --exclusions "$CANONICAL/not-buyer-serving.json"
 
 echo "PASS: catalog release generation and trust failures are locked"

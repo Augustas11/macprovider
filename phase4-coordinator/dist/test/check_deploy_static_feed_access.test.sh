@@ -63,9 +63,21 @@ grep -q 'ROOT = "/opt/macprovider"' "$DEPLOY_SH" &&
 grep -q 'unsafe transient autotune/current.next exists before deploy activation' "$DEPLOY_SH" &&
   grep -q 'unsafe autotune/.previous-target contents before Tier-2 migration' "$DEPLOY_SH" ||
   fail "Tier-2 migration gate must reject unsafe current.next and .previous-target state"
-grep -q 'os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW' "$DEPLOY_SH" &&
-  grep -q "os.rename(tmp_name, '.previous-target', src_dir_fd=autotune_fd, dst_dir_fd=autotune_fd)" "$DEPLOY_SH" ||
-  fail "deploy must publish .previous-target via no-follow temp and atomic rename"
+# #1688: scripts/autotune_window.py is the single .previous-target writer
+# (no-follow O_EXCL temp + atomic rename live there); deploy logs the plan and
+# applies it against the target it just read, before the current swap.
+window_plan='python3 -I $DEPLOY_TMP/scripts/autotune_window.py plan --root \"\$_catalog_root\" --incoming releases/$AUTOTUNE_RELEASE_DIR_NAME'
+window_apply='python3 -I $DEPLOY_TMP/scripts/autotune_window.py apply --root \"\$_catalog_root\" --incoming releases/$AUTOTUNE_RELEASE_DIR_NAME --expect-current \"\$_previous\"'
+plan_line=$(grep -nF "$window_plan" "$DEPLOY_SH" | cut -d: -f1)
+apply_line=$(grep -nF "$window_apply" "$DEPLOY_SH" | cut -d: -f1)
+swap_line=$(grep -nF 'mv -Tf \"\$_catalog_root/current.next\" \"\$_catalog_root/current\"' "$DEPLOY_SH" | cut -d: -f1)
+deploy_tmp_rm_line=$(grep -nF -x '  rm -rf $DEPLOY_TMP' "$DEPLOY_SH" | cut -d: -f1)
+[ -n "$plan_line" ] && [ -n "$apply_line" ] && [ -n "$swap_line" ] && [ -n "$deploy_tmp_rm_line" ] &&
+  [ "$plan_line" -lt "$apply_line" ] && [ "$apply_line" -lt "$swap_line" ] && [ "$swap_line" -lt "$deploy_tmp_rm_line" ] ||
+  fail "deploy must log then apply the autotune_window.py window before the current swap, keeping DEPLOY_TMP until after it"
+if grep -Eq "os\.rename\(tmp_name, '\.previous-target'|\.previous-target\.tmp\.|> *[^ ]*\.previous-target" "$DEPLOY_SH"; then
+  fail "deploy keeps an inline .previous-target writer; use scripts/autotune_window.py"
+fi
 
 grep -q 'sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-candidates.json' "$DEPLOY_SH" ||
   fail "deploy smoke must verify macprovider can read autotune feeds"
@@ -265,7 +277,11 @@ token_loader_tmp="$(mktemp)"
 canary_operator_guard_tmp="$(mktemp)"
 security_mock_dir="$(mktemp -d)"
 trap 'rm -f "$token_validator_tmp" "$token_loader_tmp" "$canary_operator_guard_tmp"; rm -rf "$security_mock_dir"' EXIT
-awk '/^_validate_catalog_canary_auth_token\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$token_validator_tmp"
+# #1688: deploy sources the canary token helpers from the shared lib.
+TOKEN_LIB="$SCRIPT_DIR/../../../scripts/lib/catalog-canary-token.sh"
+grep -qF '. "$_PEARL_TLS_SCRIPT_DIR/../../scripts/lib/catalog-canary-token.sh"' "$DEPLOY_SH" ||
+  fail "deploy must source the shared catalog canary token lib"
+awk '/^_validate_catalog_canary_auth_token\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$TOKEN_LIB" > "$token_validator_tmp"
 grep -qF '_validate_catalog_canary_auth_token()' "$token_validator_tmp" ||
   fail "deploy must keep an extractable portable canary token validator"
 awk '
@@ -273,7 +289,7 @@ awk '
   f { print }
   /^_load_catalog_canary_auth_token\(\) \{/ { loader=1 }
   f && loader && /^\}$/ { exit }
-' "$DEPLOY_SH" > "$token_loader_tmp"
+' "$TOKEN_LIB" > "$token_loader_tmp"
 grep -qF '_load_catalog_canary_auth_token()' "$token_loader_tmp" ||
   fail "deploy must keep an extractable catalog canary token loader"
 awk '
@@ -281,7 +297,7 @@ awk '
   f { print }
   /^_catalog_canary_auth_token_matches_operator_key\(\) \{/ { matcher=1 }
   f && matcher && /^\}$/ { exit }
-' "$DEPLOY_SH" > "$canary_operator_guard_tmp"
+' "$TOKEN_LIB" > "$canary_operator_guard_tmp"
 grep -qF '_catalog_canary_auth_token_matches_operator_key()' "$canary_operator_guard_tmp" ||
   fail "deploy must keep an extractable canary operator-key proof guard"
 grep -qF 'CATALOG_CANARY_AUTH_TOKEN must be the coordinator operator key' "$DEPLOY_SH" ||
@@ -290,8 +306,8 @@ grep -qF '/v1/pool/check?details=deployment is operator-only' "$DEPLOY_SH" ||
   fail "deploy must document that service tokens cannot satisfy deployment evidence"
 grep -qF 'CATALOG_CANARY_AUTH_TOKEN_FILE' "$DEPLOY_SH" &&
   grep -qF 'macOS Keychain service=' "$DEPLOY_SH" &&
-  grep -qF '/usr/bin/security find-generic-password -w' "$DEPLOY_SH" &&
-  ! grep -qF 'command -v security' "$DEPLOY_SH" ||
+  grep -qF '/usr/bin/security find-generic-password -w' "$TOKEN_LIB" &&
+  ! grep -qF 'command -v security' "$DEPLOY_SH" "$TOKEN_LIB" ||
   fail "deploy must support stable file/keychain catalog-canary token sources"
 # BSD grep rejects interval upper bounds greater than 255. Length checks belong
 # in Bash so the production deploy remains portable on the operator Mac.

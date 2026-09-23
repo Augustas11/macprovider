@@ -136,4 +136,23 @@ if run_gate >/dev/null 2>&1; then
   fail "planted .previous-target symlink must abort before mutation"
 fi
 
+# #1688: the retained window is up to 3 releases/<id> lines (autotune_window.py).
+seed_window() {
+  reset_root
+  printf catalog-v1 >"$ROOT/autotune/releases/current-release/tier2-catalog.json"
+  ln -sfn releases/current-release "$ROOT/autotune/current"
+  printf catalog-v1 >"$ROOT/tier2-catalog.json"
+  printf "$1" >"$ROOT/autotune/.previous-target"
+}
+seed_window 'releases/a\n# note\n\nreleases/b\nreleases/c\n'
+run_gate || fail "a valid 3-line .previous-target window must pass"
+seed_window 'releases/a\nreleases/b\nreleases/c\nreleases/d\n'
+if run_gate >/dev/null 2>&1; then
+  fail "a 4-release .previous-target window must abort before mutation"
+fi
+seed_window 'releases/a\nreleases/../escape\n'
+if run_gate >/dev/null 2>&1; then
+  fail "an unsafe .previous-target line must abort before mutation"
+fi
+
 echo "PASS: Tier-2 migration gate rejects unsafe or mismatched legacy bridge state"

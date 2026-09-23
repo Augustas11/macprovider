@@ -6,6 +6,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 workflow="$root/.github/workflows/renew-autotune-static-feed-signed.yml"
 script="$root/scripts/renew-autotune-static-feed.sh"
 helper="$root/scripts/pearl_autotune_deploy_lock.py"
+lib="$root/scripts/lib/autotune-activate.sh"
 runbook="$root/docs/runbooks/autotune-feed-renewal.md"
 [[ -f "$workflow" ]] || {
   printf '[test-renew-autotune-static-feed-signed] ERROR: missing signed renewal workflow\n' >&2
@@ -23,14 +24,61 @@ runbook="$root/docs/runbooks/autotune-feed-renewal.md"
   printf '[test-renew-autotune-static-feed-signed] ERROR: missing renewal runbook\n' >&2
   exit 1
 }
+[[ -f "$lib" ]] || {
+  printf '[test-renew-autotune-static-feed-signed] ERROR: missing shared activation lib\n' >&2
+  exit 1
+}
 
-python3 - "$workflow" "$script" "$runbook" <<'PY'
+# #1688 C1: renew publishes through scripts/lib/autotune-activate.sh. Render the
+# exact remote publish/rollback scripts renew sends (flock locks, warn coverage,
+# continuity gate) so the pins below read the bytes that reach Pearl.
+render_dir="$(mktemp -d)"
+trap 'rm -rf "$render_dir"' EXIT
+bash -c '
+set -euo pipefail
+log() { :; }
+fatal() { printf "%s\n" "$*" >&2; exit 1; }
+. "$1"
+AA_GATE_SNIPPET="$AA_GATE_CONTINUITY_CHECK"
+AA_COVERAGE_POLICY=warn
+AA_LOCK_MODE=flock
+aa_render_publish_script > "$2/publish.sh"
+aa_render_rollback_script flock > "$2/rollback.sh"
+' _ "$lib" "$render_dir"
+
+python3 - "$workflow" "$script" "$runbook" "$lib" "$render_dir/publish.sh" "$render_dir/rollback.sh" \
+  "$root/scripts/tests/fixtures/renew-remote-publish.golden.sh" "$root/scripts/tests/fixtures/renew-remote-rollback.golden.sh" <<'PY'
 import pathlib
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
-script = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
+renew = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8")
 runbook = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+lib = pathlib.Path(sys.argv[4]).read_text(encoding="utf-8")
+remote = pathlib.Path(sys.argv[5]).read_text(encoding="utf-8")
+rendered_rollback = pathlib.Path(sys.argv[6]).read_text(encoding="utf-8")
+# The remote bytes renew sends are frozen: moving them into the shared lib must
+# not change one byte of what Pearl executes.
+if pathlib.Path(sys.argv[5]).read_bytes() != pathlib.Path(sys.argv[7]).read_bytes():
+    raise SystemExit("renew's rendered remote publish script drifted from the golden bytes")
+if pathlib.Path(sys.argv[6]).read_bytes() != pathlib.Path(sys.argv[8]).read_bytes():
+    raise SystemExit("renew's rendered remote rollback script drifted from the golden bytes")
+for requirement in (
+    '. "$SCRIPT_DIR/lib/autotune-activate.sh"',
+    'AA_GATE_SNIPPET="$AA_GATE_CONTINUITY_CHECK"',
+    "AA_COVERAGE_POLICY=warn",
+    "AA_LOCK_MODE=flock",
+    "aa_install_helpers",
+    'aa_upload_release "$RELEASE_STAGE"',
+    "aa_publish",
+    "aa_post_activation_evidence renew_served_feed_evidence",
+):
+    if requirement not in renew:
+        raise SystemExit(f"renew script omits: {requirement}")
+if renew.find("aa_install_helpers") > renew.find("\naa_publish"):
+    raise SystemExit("renew must ship and verify helpers before the remote publish")
+# Renew-owned text plus the shared lib it sources.
+script = renew + "\n" + lib
 SEALED_OUTPUT = 'OPENSSL_BIN: ${{ steps.protected_openssl.outputs.bin }}'
 SEALED_RUNNER = "    runs-on: macos-15-intel"
 
@@ -188,8 +236,8 @@ for requirement in (
     "--generated-at",
     # The freshness-only guard must cover the artifact feed once a release is
     # artifact-bound: a model-set change confined to autotune-artifacts.json
-    # must not ride the scheduled restamp. The pre-deploy check delegates to the
-    # unit-tested generator rules; the under-lock recheck mirrors them inline.
+    # must not ride the scheduled restamp. Both the pre-deploy check and the
+    # under-lock recheck run the unit-tested generator rules.
     "catalog-release.py continuity-check",
     'live-current',
     # Post-activation, generate needs the previous signed release; the cron
@@ -223,7 +271,9 @@ if script.find('[ "$DEPLOY" = 1 ] ||') < 0 or script.find('[ "$DEPLOY" = 1 ] ||'
     raise SystemExit("the previous-release fetch must be gated on --deploy so dry-run stays no-contact")
 if 'rm -rf "$PREVIOUS_RELEASE_DIR"' not in script.split("cleanup() {", 1)[1].split("\n}", 1)[0]:
     raise SystemExit("the fetched previous release must be removed on exit")
-rollback = script.split("rollback() {", 1)[1].split("\n}", 1)[0]
+rollback = rendered_rollback
+if "aa_rollback() {" not in lib or 'aa_render_rollback_script "$rb_mode"' not in lib:
+    raise SystemExit("rollback must run the rendered remote rollback script")
 if "flock -n 8" not in rollback or "flock -n 9" not in rollback:
     raise SystemExit("rollback must take Pearl deploy locks before mutating current")
 if 'readlink "$root/current"' not in rollback:
@@ -232,8 +282,8 @@ if "not $expected" not in rollback:
     raise SystemExit("rollback must skip unless current still points at this renewal")
 if "restored .previous-target only" not in rollback:
     raise SystemExit("rollback must restore .previous-target when current never swapped")
-if 'elif [ "$publish_rc" -eq 1 ]; then' in script:
-    after = script.split('elif [ "$publish_rc" -eq 1 ]; then', 1)[1]
+if 'elif [ "$publish_rc" -eq 1 ]; then' in lib:
+    after = lib.split('elif [ "$publish_rc" -eq 1 ]; then', 1)[1]
     else_branch = after.split("else", 1)[1].split("fi", 1)[0]
     if "rollback" in else_branch:
         raise SystemExit("pre-mutation publish failure must not rollback")
@@ -241,23 +291,108 @@ if "/tmp/macprovider-autotune-lock-validate." in script:
     raise SystemExit("lock helper must not use a predictable /tmp/$$ path")
 if "/etc/macprovider/keys" in script:
     raise SystemExit("renew script must not place the feed key on Pearl")
-remote = script.split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
-if remote.find("mutated=1") > remote.find("previous-target window"):
+apply_call = 'python3 -I "$window" apply --root "$root" --incoming "releases/$final" --expect-current "$prev"'
+if remote.count(apply_call) != 1:
+    raise SystemExit("catalog publish must write the window via autotune_window.py apply")
+if remote.find("mutated=1") > remote.find(apply_call):
     raise SystemExit("mutated=1 must be set before writing .previous-target")
-if "len(out) == 3" not in remote:
-    raise SystemExit("catalog publish must keep a 3-deep previous-target window")
-under_lock = remote.split("Re-check dates-only continuity under the lock", 1)[1].split("\nPY", 1)[0]
-for requirement in (
-    'artifact = "autotune-artifacts.json"',
-    "(presence)",
-    # The inline mirror of RENEWAL_ARTIFACT_RELEASE_FIELDS on Pearl (no
-    # checkout there) must carry the FULL tuple, not a subset.
-    '("version", "release_id", "generated_at", "candidate_catalog_sha256")',
-):
-    if requirement not in under_lock:
-        raise SystemExit(f"under-lock continuity recheck omits the artifact feed rule: {requirement}")
-if remote.find("(presence)") > remote.find('mv "$incoming" "$final"'):
-    raise SystemExit("artifact-feed continuity must be rechecked before the release directory is installed")
+if remote.find(apply_call) > remote.find('mv -Tf "$root/.current.next" "$root/current"'):
+    raise SystemExit("the previous-target window must be written before the current swap")
+restore_call = 'python3 -I "$window" restore --root "$root" --from-file "$prior_window" --expect-current "$cur"'
+if rollback.count(restore_call) != 2:
+    raise SystemExit("rollback must restore the exact prior window via autotune_window.py restore")
+if '< "$SCRIPT_DIR/autotune_window.py"' not in script or 'sha256sum \'$WINDOW_HELPER\'' not in script:
+    raise SystemExit("renew must ship autotune_window.py to Pearl and verify its sha256")
+# #1688: autotune_window.py is the single .previous-target writer.
+for forbidden in ('> "$root/.previous-target"', 'rm -f "$root/.previous-target"', "path.write_text(", "len(out) == 3"):
+    if forbidden in script:
+        raise SystemExit(f"renew keeps an inline .previous-target writer: {forbidden}")
+# #1688 B1: the under-lock recheck runs the shipped, sha-verified
+# catalog-release.py continuity-check (Tier-2 content + keyring bytes included),
+# never an inline mirror that can drift out of step with feed_continuity_drift.
+under_lock = remote.split("Re-check dates-only continuity under the lock", 1)[1].split('mv "$incoming" "$final"', 1)[0]
+continuity_call = 'python3 -I "$verifier" continuity-check --incoming "$incoming_path" --live "$root/current"'
+if under_lock.count(continuity_call) != 1:
+    raise SystemExit("under-lock continuity recheck must run the shipped catalog-release.py continuity-check")
+if 'abort_pre_mutation "content drift under lock; not mutating"' not in under_lock:
+    raise SystemExit("under-lock continuity drift must abort before mutation (exit 2, no rollback)")
+for position in (remote.find("flock -n 8"), remote.find("flock -n 9"), remote.find("current moved under lock")):
+    if position < 0 or position > remote.find(continuity_call):
+        raise SystemExit("continuity-check must run under both Pearl locks after the current re-read")
+if remote.find(continuity_call) > remote.find("mutated=1"):
+    raise SystemExit("continuity-check must run before any mutation")
+for forbidden in ("<<'PY'", "def norm(", "norm_artifact", "(presence)", 'artifact = "autotune-artifacts.json"'):
+    if forbidden in remote:
+        raise SystemExit(f"renew keeps an inline continuity mirror on Pearl: {forbidden}")
+if 'done < "$SCRIPT_DIR/catalog-verifier-bundle.txt"' not in script:
+    raise SystemExit("renew must ship the catalog verifier bundle to Pearl")
+bundle_loop = script.split("installing Pearl catalog continuity verifier bundle", 1)[1].split('done < "$SCRIPT_DIR/catalog-verifier-bundle.txt"', 1)[0]
+if "sha256sum '$remote_bundle_file'" not in bundle_loop or "does not match the reviewed copy" not in bundle_loop:
+    raise SystemExit("every shipped verifier bundle file must be sha256-verified against the reviewed copy")
+install_fn = lib.split("aa_install_helpers() {", 1)[1].split("\n}", 1)[0]
+if "installing Pearl catalog continuity verifier bundle" not in install_fn:
+    raise SystemExit("the verifier bundle must be shipped and verified before the remote publish")
+publish_fn = lib.split("aa_publish() {", 1)[1].split("\n}", 1)[0]
+if '"$WINDOW_HELPER" "$CONTINUITY_VERIFIER")' not in publish_fn or 'verifier="$8"' not in remote:
+    raise SystemExit("the remote publish must receive the shipped continuity verifier path")
+if 'rate-card.json tier2-catalog.json trusted-keys.json; do' not in script:
+    raise SystemExit("pre-lock live snapshot must include tier2-catalog.json and trusted-keys.json")
+# #1688 B2: renewals keep minting a new release_id, so coverage loss is
+# reported loudly and NEVER blocks or rolls back the renewal.
+import json
+import subprocess
+coverage_call = 'python3 -I "$window" coverage --admitted-json "$check/admitted.json" --poolz-json "$poolz"'
+if remote.count(coverage_call) != 1:
+    raise SystemExit("renewal must compute window coverage with the shipped autotune_window.py")
+cov_fn = remote.split("renewal_coverage() {", 1)[1].split("\n}", 1)[0]
+# Coverage is the LIVE coordinator's admitted set for the final release with
+# the planned window (restamps via the live releases/), never the Python mirror.
+validator_call = '/opt/macprovider/coordinator --config /opt/macprovider/coordinator.yaml $overlay --validate-autotune-release "$root/releases/$final"'
+if cov_fn.count(validator_call) != 1 or '--previous-target "$check/.previous-target"' not in cov_fn:
+    raise SystemExit("renewal coverage must dry-load the final release with the planned window in the live coordinator binary")
+if 'ln -s "$root/releases" "$check/releases"' not in cov_fn or not (cov_fn.find(validator_call) < cov_fn.find(coverage_call)):
+    raise SystemExit("renewal coverage must judge /poolz against the validator's admitted set (live releases/ for restamps)")
+if "coverage --root" in remote or "--incoming \"releases/$final\" --poolz-json" in remote:
+    raise SystemExit("renewal coverage must not use the legacy Python admission mode")
+if not (remote.find('mv "$incoming" "$final"') < remote.find(coverage_call) < remote.find(apply_call)):
+    raise SystemExit("coverage must run on the final release dir before the window is applied")
+if "abort_pre_mutation" in cov_fn or "exit" in cov_fn:
+    raise SystemExit("renewal coverage must never abort the publish")
+if 'cov_json="$(renewal_coverage)" || cov_rc=$?' not in remote:
+    raise SystemExit("renewal coverage failure must be captured, not trip errexit")
+if '/proc/$pid/environ' not in cov_fn or "curl --config -" not in cov_fn or "http://127.0.0.1:8444/poolz" not in cov_fn:
+    raise SystemExit("renewal coverage must read /poolz on loopback with the running coordinator's key via curl --config stdin")
+for leak in ('echo "$key"', "printf '%s' \"$key\"", '-H "Authorization', '"$key" >'):
+    if leak in cov_fn:
+        raise SystemExit(f"operator key must never be echoed, argv-passed, or written: {leak}")
+tail = renew.split('log "previous release retained as .previous-target', 1)[1]
+for requirement in ("::warning title=Autotune renewal coverage loss::", "::warning title=Autotune renewal coverage unknown::",
+                    '"kind": "renewal_coverage_loss"', "/var/lib/macprovider/catalog-window-overrides.jsonl",
+                    "os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600"):
+    if requirement not in tail:
+        raise SystemExit(f"renewal coverage report omits: {requirement}")
+for forbidden in ("fatal", "rollback", "exit 1"):
+    if forbidden in tail:
+        raise SystemExit(f"renewal coverage report must never fail the renewal: {forbidden}")
+classifier = tail.split('RENEW_COVERAGE_RECORDS="$(python3 - "$RENEW_COVERAGE_RC" "$RENEW_COVERAGE_JSON" <<\'PY\'\n', 1)[1].split("\nPY\n", 1)[0]
+def classify(rc, report):
+    raw = report if isinstance(report, str) else json.dumps(report)
+    run = subprocess.run([sys.executable, "-c", classifier, rc, raw], capture_output=True, text=True)
+    return run.returncode, run.stdout.strip()
+lost = {"release_id": "published-2026-09-02-x", "sha": "ab" * 32, "providers": 2, "routing_eligible": 1}
+got = classify("4", {"covered": [], "uncovered": [lost], "advertised_total": 3})
+if got != (0, json.dumps([lost], sort_keys=True, separators=(",", ":"))):
+    raise SystemExit(f"coverage loss must yield the uncovered records, got {got}")
+if classify("0", {"covered": [], "uncovered": [], "advertised_total": 3}) != (0, ""):
+    raise SystemExit("full coverage must yield no records")
+for rc, report in (("10", ""), ("1", ""), ("", ""), ("4", {"covered": [], "uncovered": [], "advertised_total": 0}),
+                   ("0", {"covered": [], "uncovered": [lost], "advertised_total": 1}),
+                   ("4", {"covered": [], "uncovered": [dict(lost, release_id="a'b")], "advertised_total": 1}),
+                   ("4", {"covered": [], "uncovered": [dict(lost, sha="AB" * 32)], "advertised_total": 1}),
+                   ("4", {"covered": [], "uncovered": [dict(lost, providers=True)], "advertised_total": 1}),
+                   ("0", "not json")):
+    if classify(rc, report)[0] != 3:
+        raise SystemExit(f"coverage report must be 'unknown' for rc={rc!r} report={report!r}")
 if "rsync" in script and ".private.base64" in script.split("rsync", 1)[1][:800]:
     raise SystemExit("renew script must not rsync the private key to Pearl")
 if 'ln -sfn "$(cat .previous-target)"' in runbook:
@@ -282,6 +417,7 @@ PY
 
 python3 -m py_compile "$helper"
 bash -n "$script"
+bash -n "$lib"
 
 # EXECUTABLE renewal-flow regression: restamp -> generate -> sign -> generate ->
 # verify, in both the pre-activation four-feed state and the post-activation

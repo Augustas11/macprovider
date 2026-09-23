@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import datetime as _dt
 import hashlib
 import importlib.util
@@ -2585,7 +2586,7 @@ def validate_tier2_identity_binding(data: bytes, candidate: bytes, candidate_obj
     return value
 
 
-def validate_tier2_catalog(data: bytes) -> dict:
+def validate_tier2_catalog(data: bytes, allow_expired: bool = False) -> dict:
     """Structural validation of a signed Tier-2 catalog (scripts/sign-catalog.go shape).
 
     This locks the JSON shape (fields, hash format, signature envelope) so
@@ -2608,7 +2609,7 @@ def validate_tier2_catalog(data: bytes) -> dict:
     expires = datetime.fromisoformat(value["expires_at"].replace("Z", "+00:00"))
     if issued >= expires:
         fail("tier2-catalog: issued_at must be before expires_at")
-    if datetime.now(timezone.utc) >= expires:
+    if not allow_expired and datetime.now(timezone.utc) >= expires:
         fail("tier2-catalog: expires_at must be in the future (catalog has expired)")
     version = value["version"]
     if not isinstance(version, int) or isinstance(version, bool) or version != 1:
@@ -2748,6 +2749,7 @@ def require_trusted_regular_input(path: pathlib.Path, label: str, max_bytes: int
 def load_tier2_trusted_public_key(
     public_key_path: pathlib.Path | None = None,
     coordinator_config_path: pathlib.Path | None = None,
+    coordinator_overlay_path: pathlib.Path | None = None,
 ) -> str:
     """Resolve the trusted Tier-2 Ed25519 public key used to authenticate a
     signed `tier2-catalog.json` before it can be trusted as a release feed
@@ -2765,6 +2767,22 @@ def load_tier2_trusted_public_key(
     """
     if public_key_path is not None and coordinator_config_path is not None:
         fail("tier2-catalog: specify only one explicit Tier-2 trust-root source")
+    if coordinator_overlay_path is not None:
+        if coordinator_config_path is None:
+            fail("tier2-catalog: --tier2-coordinator-overlay requires --tier2-coordinator-config")
+        # The coordinator merges its overlay over the base config (overlay keys
+        # override), so an overlay tier2.catalog_public_key is the live key.
+        require_trusted_regular_input(
+            coordinator_overlay_path,
+            f"tier2-catalog: trusted Tier-2 public key overlay {coordinator_overlay_path}",
+            1024 * 1024,
+        )
+        overlay_key = (_yaml_block_value(coordinator_overlay_path.read_text(), "tier2", "catalog_public_key") or "").strip()
+        if overlay_key:
+            canonical_urlsafe_b64_decode(
+                overlay_key, 32, f"tier2-catalog: trusted public key in {coordinator_overlay_path}"
+            )
+            return overlay_key
     explicit_path = public_key_path or coordinator_config_path
     if explicit_path is not None:
         source = str(explicit_path)
@@ -2887,6 +2905,8 @@ def verify_tier2_signature(
     raw: bytes,
     public_key_path: pathlib.Path | None = None,
     coordinator_config_path: pathlib.Path | None = None,
+    coordinator_overlay_path: pathlib.Path | None = None,
+    allow_expired: bool = False,
 ) -> str:
     """Authenticate a Tier-2 catalog's Ed25519 signature before any caller
     may trust it as "signed" (#608 Partial: ledger feed membership).
@@ -2900,7 +2920,7 @@ def verify_tier2_signature(
     """
     go_bin = go_executable()
     require_trusted_verifier_source(SIGN_CATALOG_GO_PATH)
-    public_key = load_tier2_trusted_public_key(public_key_path, coordinator_config_path)
+    public_key = load_tier2_trusted_public_key(public_key_path, coordinator_config_path, coordinator_overlay_path)
     with tempfile.TemporaryDirectory(prefix="macprovider-tier2-verify-") as tmp:
         tmpdir = pathlib.Path(tmp)
         catalog_path = tmpdir / "tier2-catalog.json"
@@ -2909,7 +2929,9 @@ def verify_tier2_signature(
         pubkey_path.write_text(public_key + "\n")
         try:
             result = subprocess.run(
-                [go_bin, "run", str(SIGN_CATALOG_GO_PATH), "verify", "-public-key", str(pubkey_path), str(catalog_path)],
+                [go_bin, "run", str(SIGN_CATALOG_GO_PATH), "verify", "-public-key", str(pubkey_path)]
+                + (["-allow-expired"] if allow_expired else [])
+                + [str(catalog_path)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -4641,6 +4663,8 @@ def verify_directory(
     directory: pathlib.Path,
     tier2_public_key_file: pathlib.Path | None = None,
     tier2_coordinator_config: pathlib.Path | None = None,
+    tier2_coordinator_overlay: pathlib.Path | None = None,
+    allow_expired_tier2: bool = False,
 ) -> None:
     candidate_path = directory / "autotune-candidates.json"
     demand_path = directory / "demand-rank.json"
@@ -4661,8 +4685,10 @@ def verify_directory(
     if not tier2_path.exists():
         fail("release directory is missing required tier2-catalog.json feed")
     tier2 = tier2_path.read_bytes()
-    tier2_obj = validate_tier2_catalog(tier2)
-    tier2_signer_key_id = verify_tier2_signature(tier2, tier2_public_key_file, tier2_coordinator_config)
+    tier2_obj = validate_tier2_catalog(tier2, allow_expired=allow_expired_tier2)
+    tier2_signer_key_id = verify_tier2_signature(
+        tier2, tier2_public_key_file, tier2_coordinator_config, tier2_coordinator_overlay, allow_expired_tier2
+    )
     check_tier2_binding(candidate, tier2)
     artifact_path = directory / ARTIFACT_FEED_NAME
     artifacts = artifact_obj = None
@@ -4755,8 +4781,11 @@ def feed_continuity_drift(incoming: pathlib.Path, live: pathlib.Path) -> list[st
     is compared by presence AND content: a renewal may neither add, drop, nor
     rewrite it — the first artifact-bound release and every model change are
     deliberate catalog release cuts (`docs/runbooks/catalog-artifact-feed-release.md`),
-    never the scheduled freshness path. The under-lock recheck on Pearl mirrors
-    these rules inline (it has no checkout); keep the two in step.
+    never the scheduled freshness path. Tier-2 is compared with only its
+    signing envelope stripped (`_TIER2_ENVELOPE_FIELDS`), so an expiry re-sign
+    stays freshness-only while any model change is drift; `trusted-keys.json`
+    must be byte-equal. The under-lock recheck on Pearl runs this same function
+    from the shipped verifier bundle (`catalog-verifier-bundle.txt`).
     """
     drift: list[str] = []
 
@@ -4777,6 +4806,10 @@ def feed_continuity_drift(incoming: pathlib.Path, live: pathlib.Path) -> list[st
         live_feed, RENEWAL_ARTIFACT_RELEASE_FIELDS
     ):
         drift.append(ARTIFACT_FEED_NAME)
+    if _tier2_content(incoming)[0] != _tier2_content(live)[0]:
+        drift.append(TIER2_CATALOG_FEED_NAME)
+    if (incoming / "trusted-keys.json").read_bytes() != (live / "trusted-keys.json").read_bytes():
+        drift.append("trusted-keys.json")
     return drift
 
 
@@ -4785,9 +4818,619 @@ def cmd_continuity_check(incoming: pathlib.Path, live: pathlib.Path) -> None:
     if drift:
         fail(
             "content drift vs live feed in " + ", ".join(drift)
-            + " — renewal is freshness-only; a content change needs a reviewed catalog release"
+            + " — renewal is freshness-only; this is a content release — use the catalog-content lane,"
+            " not freshness renewal"
         )
     print("continuity-check: dates-only delta confirmed")
+
+
+# #1688 A2: `compare-live` decides whether a runtime deploy may touch the live
+# catalog. Weekly renewals mint a release_id + generated_at on Pearl that are
+# never committed, so identity is decided by CONTENT, never by ledger IDs alone.
+COMPARE_LIVE_EXIT_REGRESSION = 3
+# Per-feed release.json fields that are functions of the restamped bytes: a
+# renewal rewrites candidates/demand `version`+`generated_at` and the rate card
+# `generated_at`, so their `sha256`/`bytes` move, and candidates/demand
+# `version` IS the release id. The rate card `version` is a rows-projection hash
+# (content) and is kept. Tier-2 and artifact entries are fully derived from
+# envelopes compared on their own, so all three are stripped for them.
+_RELEASE_FEED_DERIVED_FIELDS = {
+    "autotune-candidates.json": ("version", "sha256", "bytes"),
+    "demand-rank.json": ("version", "sha256", "bytes"),
+    RATE_CARD_FEED_NAME: ("sha256", "bytes"),
+    TIER2_CATALOG_FEED_NAME: ("version", "sha256", "bytes"),
+    ARTIFACT_FEED_NAME: ("version", "sha256", "bytes"),
+}
+# Tier-2 envelope fields that carry signing time/identity, not model content.
+_TIER2_ENVELOPE_FIELDS = ("issued_at", "expires_at", "signature", "catalog_id", "version")
+
+
+def _load_release_manifest(directory: pathlib.Path) -> dict:
+    manifest = strict_json((directory / "release.json").read_bytes(), f"{directory}/release.json")
+    if not isinstance(manifest.get("release_id"), str) or not isinstance(manifest.get("feeds"), dict):
+        fail(f"{directory}/release.json: release_id and feeds are required")
+    for name, entry in manifest["feeds"].items():
+        if name not in _RELEASE_FEED_DERIVED_FIELDS or not isinstance(entry, dict):
+            fail(f"{directory}/release.json: unexpected feed entry {name!r}")
+    for name in RENEWAL_CONTINUITY_FEEDS + (TIER2_CATALOG_FEED_NAME,):
+        if name not in manifest["feeds"]:
+            fail(f"{directory}/release.json: feed {name} is required")
+    return manifest
+
+
+def _stripped_release_manifest(manifest: dict) -> str:
+    obj = json.loads(json.dumps(manifest))
+    obj.pop("release_id", None)
+    obj.pop("generated_at", None)
+    for name, entry in obj["feeds"].items():
+        for field in _RELEASE_FEED_DERIVED_FIELDS[name]:
+            entry.pop(field, None)
+    return json.dumps(obj, sort_keys=True)
+
+
+def tier2_stripped_sha256(raw: bytes, label: str) -> str:
+    """sha256 of the Tier-2 catalog with its renewal envelope (R016,
+    `_TIER2_ENVELOPE_FIELDS`) removed, as canonical sorted-key JSON: the
+    identity a freshness re-sign preserves."""
+    obj = strict_json(raw, label)
+    if not isinstance(obj.get("models"), list):
+        fail(f"{label}: models must be a list")
+    for field in _TIER2_ENVELOPE_FIELDS:
+        obj.pop(field, None)
+    return sha256(canonical_sorted_bytes(obj))
+
+
+TIER2_CATALOG_REPO_PATH = "phase3-binary/catalog/autotune/tier2-catalog.json"
+
+
+def load_tier2_content_index(data: bytes, label: str) -> dict[str, str]:
+    """{raw Tier-2 sha256: tier2_stripped_sha256} built by `tier2-content-index`."""
+    obj = strict_json(data, label)
+    if not isinstance(obj, dict):
+        fail(f"{label}: must be a JSON object")
+    for raw_sha, stripped in obj.items():
+        if not HEX64.fullmatch(raw_sha) or not isinstance(stripped, str) or not HEX64.fullmatch(stripped):
+            fail(f"{label}: entries must map a lowercase sha256 to a lowercase sha256")
+    return dict(obj)
+
+
+def build_tier2_content_index(repo: pathlib.Path, rev: str, ledger: dict) -> dict[str, str]:
+    """Walk `rev`'s history of the committed Tier-2 catalog and map every
+    ledger row's Tier-2 sha256 to its stripped-content digest. Rows whose
+    Tier-2 bytes appear in no commit are omitted (compare-live then falls back
+    to the incoming-bytes rule for them)."""
+    wanted = {
+        row["feeds"][TIER2_CATALOG_FEED_NAME]["sha256"]
+        for row in ledger["releases"].values()
+        if TIER2_CATALOG_FEED_NAME in row["feeds"]
+    }
+    log = subprocess.run(
+        ["git", "-C", str(repo), "log", "--format=%H", rev, "--", TIER2_CATALOG_REPO_PATH],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, text=True,
+    )
+    if log.returncode != 0:
+        fail(f"tier2-content-index: git log {rev} failed: {log.stderr.strip()}")
+    index: dict[str, str] = {}
+    for commit in log.stdout.split():
+        if not wanted - index.keys():
+            break
+        raw = _git_show(repo, commit, TIER2_CATALOG_REPO_PATH)
+        if raw is None:
+            continue  # the commit deleted the file
+        digest = sha256(raw)
+        if digest in wanted and digest not in index:
+            index[digest] = tier2_stripped_sha256(raw, f"{commit}:{TIER2_CATALOG_REPO_PATH}")
+    return dict(sorted(index.items()))
+
+
+def cmd_tier2_content_index(repo: pathlib.Path, rev: str, ledger_path: pathlib.Path) -> None:
+    ledger = validate_release_ledger(ledger_path.read_bytes(), str(ledger_path))
+    print(json.dumps(build_tier2_content_index(repo, rev, ledger), sort_keys=True))
+
+
+def _tier2_content(directory: pathlib.Path) -> tuple[str, datetime]:
+    label = f"{directory}/{TIER2_CATALOG_FEED_NAME}"
+    obj = strict_json((directory / TIER2_CATALOG_FEED_NAME).read_bytes(), label)
+    if not isinstance(obj.get("models"), list):
+        fail(f"{label}: models must be a list")
+    expires_at = parse_timestamp(obj.get("expires_at"), f"{label} expires_at")
+    for field in _TIER2_ENVELOPE_FIELDS:
+        obj.pop(field, None)
+    return json.dumps(obj, sort_keys=True), expires_at
+
+
+def live_equivalence_reasons(incoming: pathlib.Path, live: pathlib.Path) -> list[str]:
+    """Why the live release is NOT content-equivalent to the incoming one ([] = equivalent).
+
+    Detached `.sig` sidecars are not compared: each signs its JSON's exact
+    (restamped) bytes, the JSON content and `signer_key_id` are compared, and
+    both sides were verified by verify-directory before they could be live or
+    staged.
+    """
+    reasons: list[str] = []
+    incoming_manifest = _load_release_manifest(incoming)
+    live_manifest = _load_release_manifest(live)
+    if set(incoming_manifest["feeds"]) != set(live_manifest["feeds"]):
+        reasons.append("release feed sets differ (artifact-bound vs unbound)")
+    # Same semantics as the freshness-renewal guard, artifact feed included.
+    reasons.extend(
+        "trusted-keys.json differs" if name == "trusted-keys.json" else f"{name} content differs"
+        for name in feed_continuity_drift(incoming, live)
+    )
+    if not reasons and _stripped_release_manifest(incoming_manifest) != _stripped_release_manifest(live_manifest):
+        reasons.append("release.json differs beyond release-derived fields")
+    incoming_expires = _tier2_content(incoming)[1]
+    live_expires = _tier2_content(live)[1]
+    if live_expires < incoming_expires:
+        reasons.append(f"{TIER2_CATALOG_FEED_NAME}: incoming carries a fresher Tier-2 (later expires_at)")
+    return reasons
+
+
+def _live_matches_ledger_row(
+    incoming: pathlib.Path, live: pathlib.Path, live_manifest: dict, release_id: str, row: dict,
+    tier2_index: dict[str, str] | None = None,
+) -> bool:
+    """True when live's feeds, re-stamped to the row's recorded identity, hash to the row.
+
+    The ledger records only whole-file sha256/bytes/version per feed, never the
+    bytes, so content equality is decided by REVERSING a renewal: a renewal
+    changes only candidates/demand `version`+`generated_at`, the rate card
+    `generated_at`, and the artifact feed's release fields. Writing the row's
+    values back reproduces the committed bytes exactly iff the content is the
+    committed release's content.
+
+    Tier-2 is the exception: a freshness re-sign rewrites its whole envelope
+    (`_TIER2_ENVELOPE_FIELDS`, signature included), which cannot be reversed
+    from a digest. Live Tier-2 therefore matches the row when its raw bytes
+    hash to the row, OR when the INCOMING Tier-2 bytes hash to the row (so they
+    are the bytes the row names) and live equals them modulo the envelope — the
+    same stripped comparison `live_equivalence_reasons` uses, OR when
+    `tier2_index` (built from git history by `tier2-content-index`) maps the
+    row's Tier-2 sha256 to live's stripped-content digest. A row proven by
+    none of these does not match (fail closed: a regression verdict,
+    overridable by the operator).
+    """
+    feeds = row["feeds"]
+    if set(feeds) != set(live_manifest["feeds"]):
+        return False
+    for name, recorded in feeds.items():
+        raw = (live / name).read_bytes()
+        if name in RENEWAL_CONTINUITY_FEEDS:
+            obj = strict_json(raw, f"{live}/{name}")
+            if name != RATE_CARD_FEED_NAME:
+                obj["version"] = recorded["version"]
+            obj["generated_at"] = row["generated_at"]
+            raw = canonical_bytes(obj)
+        elif name == ARTIFACT_FEED_NAME:
+            obj = strict_json(raw, f"{live}/{name}")
+            obj["version"] = recorded["version"]
+            obj["release_id"] = release_id
+            obj["generated_at"] = row["generated_at"]
+            obj["candidate_catalog_sha256"] = feeds["autotune-candidates.json"]["sha256"]
+            raw = canonical_sorted_bytes(obj)
+        elif name == TIER2_CATALOG_FEED_NAME and (sha256(raw), len(raw)) != (recorded["sha256"], recorded["bytes"]):
+            if tier2_index is not None and tier2_index.get(recorded["sha256"]) == tier2_stripped_sha256(raw, f"{live}/{name}"):
+                continue
+            incoming_raw = (incoming / name).read_bytes()
+            if (sha256(incoming_raw), len(incoming_raw)) != (recorded["sha256"], recorded["bytes"]):
+                return False
+            if _tier2_content(live)[0] != _tier2_content(incoming)[0]:
+                return False
+            continue
+        if sha256(raw) != recorded["sha256"] or len(raw) != recorded["bytes"]:
+            return False
+    return True
+
+
+def compare_live(
+    incoming: pathlib.Path, live: pathlib.Path, ledger_path: pathlib.Path,
+    tier2_index_path: pathlib.Path | None = None,
+) -> dict:
+    """Classify live vs incoming: equivalent, descends (live is in the incoming ledger), or regression."""
+    ledger = validate_release_ledger(ledger_path.read_bytes(), str(ledger_path))
+    tier2_index = (
+        None if tier2_index_path is None
+        else load_tier2_content_index(tier2_index_path.read_bytes(), str(tier2_index_path))
+    )
+    incoming_manifest = _load_release_manifest(incoming)
+    live_manifest = _load_release_manifest(live)
+    ids = {"incoming_release_id": incoming_manifest["release_id"], "live_release_id": live_manifest["release_id"]}
+    reasons = live_equivalence_reasons(incoming, live)
+    if not reasons:
+        return {"verdict": "equivalent", "reasons": [], **ids}
+    for release_id, row in ledger["releases"].items():
+        if _live_matches_ledger_row(incoming, live, live_manifest, release_id, row, tier2_index):
+            return {"verdict": "descends", "reasons": reasons, "matched_ledger_release": release_id, **ids}
+    reasons.append("live content matches no release in the incoming release-ledger.json")
+    return {"verdict": "regression", "reasons": reasons, **ids}
+
+
+def cmd_compare_live(
+    incoming: pathlib.Path, live: pathlib.Path, ledger_path: pathlib.Path,
+    tier2_index_path: pathlib.Path | None = None,
+) -> int:
+    try:
+        result = compare_live(incoming, live, ledger_path, tier2_index_path)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        fail(f"compare-live: malformed release input: {exc!r}")
+    print(json.dumps(result, sort_keys=True))
+    return COMPARE_LIVE_EXIT_REGRESSION if result["verdict"] == "regression" else 0
+
+
+# #1688 C3: serving closure, deny-by-default. A recommendable candidate row that
+# also carries a rate-card row is something buyers can be routed to and billed
+# for, so its served model MUST be pinned by Tier-2 to the same hash unless it
+# is listed, with a reviewed reason, in `not-buyer-serving.json`.
+NOT_BUYER_SERVING_PATH = CATALOG_DIR / "not-buyer-serving.json"
+NOT_BUYER_SERVING_SCHEMA = "macprovider.not-buyer-serving.v1"
+
+
+def load_serving_exclusions(data: bytes, label: str) -> set[str]:
+    obj = strict_json(data, label)
+    exact_keys(obj, {"schema_version", "models"}, {"schema_version", "models"}, label)
+    if obj["schema_version"] != NOT_BUYER_SERVING_SCHEMA:
+        fail(f"{label}: schema_version must be {NOT_BUYER_SERVING_SCHEMA}")
+    if not isinstance(obj["models"], list):
+        fail(f"{label}: models must be a list")
+    out: set[str] = set()
+    for idx, entry in enumerate(obj["models"]):
+        entry_label = f"{label}: models[{idx}]"
+        if not isinstance(entry, dict):
+            fail(f"{entry_label} must be an object")
+        exact_keys(entry, {"model_id", "reason"}, {"model_id", "reason"}, entry_label)
+        model_id, reason = entry["model_id"], entry["reason"]
+        if not isinstance(model_id, str) or not MODEL_ID.fullmatch(model_id):
+            fail(f"{entry_label}: model_id must be an org/name model id")
+        if not isinstance(reason, str) or not reason.strip():
+            fail(f"{entry_label}: reason required")
+        normalized = model_id.lower().strip()
+        if normalized in out:
+            fail(f"{entry_label}: duplicate model_id {model_id!r}")
+        out.add(normalized)
+    return out
+
+
+def _served_rows(candidate_obj: dict, rate_card_obj: dict, tier2_models: dict[str, str]):
+    """(model_id, normalized, auto_hash, pinned) for every recommendable, rate-carded row."""
+    for key, row in candidate_obj["rows"].items():
+        if row["runtime_status"] != "recommendable" or resolved_rate_row(rate_card_obj["rows"], key) is None:
+            continue
+        normalized = row["model_id"].lower().strip()
+        auto_hash = row.get("model_sha256")
+        pinned = isinstance(auto_hash, str) and tier2_models.get(normalized) == auto_hash
+        yield row["model_id"], normalized, auto_hash, pinned
+
+
+def serving_closure_failures(
+    candidate_obj: dict, rate_card_obj: dict, tier2_data: bytes, excluded: set[str]
+) -> list[str]:
+    """Served model ids (recommendable + rate row) lacking a matching Tier-2 hash, not excluded."""
+    tier2_models = load_tier2_models(tier2_data)
+    return sorted({
+        model_id
+        for model_id, normalized, _, pinned in _served_rows(candidate_obj, rate_card_obj, tier2_models)
+        if not pinned and normalized not in excluded
+    })
+
+
+def stale_serving_exclusions(
+    candidate_obj: dict, rate_card_obj: dict, tier2_data: bytes, excluded: set[str]
+) -> list[str]:
+    """Excluded model ids that the release pins anyway (Tier-2 model_id+sha256 match).
+
+    An exclusion only excuses a missing pin; it adds no routing predicate
+    (SPEC-008), so a pinned model is buyer-serving whatever the file says, and
+    keeping its exclusion would hide it from evidence (e)."""
+    tier2_models = load_tier2_models(tier2_data)
+    return sorted({
+        model_id
+        for model_id, normalized, _, pinned in _served_rows(candidate_obj, rate_card_obj, tier2_models)
+        if pinned and normalized in excluded
+    })
+
+
+def _fail_stale_exclusions(stale: list[str]) -> None:
+    if stale:
+        fail("; ".join(f"remove the exclusion: {model} is structurally buyer-serving" for model in stale))
+
+
+def check_serving_closure(
+    candidate_data: bytes, rate_card_data: bytes, tier2_data: bytes, excluded: set[str]
+) -> None:
+    check_tier2_binding(candidate_data, tier2_data)
+    candidate_obj, rate_card_obj = validate_candidate(candidate_data), validate_rate_card(rate_card_data)
+    _fail_stale_exclusions(stale_serving_exclusions(candidate_obj, rate_card_obj, tier2_data, excluded))
+    failures = serving_closure_failures(candidate_obj, rate_card_obj, tier2_data, excluded)
+    if failures:
+        fail(
+            f"serving closure: {len(failures)} recommendable rate-carded model(s) have no matching "
+            "Tier-2 model_id+sha256 and are not listed in not-buyer-serving.json: " + ", ".join(failures)
+        )
+
+
+def buyer_serving_set(release: pathlib.Path) -> dict[str, dict]:
+    """The models `release` lets buyers be routed to and billed for (#1688 R017 evidence (e)).
+
+    Structural, like the runtime: recommendable, rate-carded, AND pinned by
+    Tier-2 to the same model_id+sha256. Exclusions are NOT subtracted: they
+    excuse a missing pin and add no routing predicate, so they cannot make a
+    pinned model non-serving. Keyed by normalized model_id.
+    """
+    candidate_obj = validate_candidate((release / "autotune-candidates.json").read_bytes())
+    rate_card_obj = validate_rate_card((release / RATE_CARD_FEED_NAME).read_bytes())
+    tier2_models = load_tier2_models((release / TIER2_CATALOG_FEED_NAME).read_bytes())
+    return {
+        normalized: {"model_id": model_id, "sha256": auto_hash}
+        for model_id, normalized, auto_hash, pinned in _served_rows(candidate_obj, rate_card_obj, tier2_models)
+        if pinned
+    }
+
+
+def check_release_exclusions(release: pathlib.Path, excluded: set[str]) -> None:
+    """Refuse an exclusion file that lists a model `release` pins (a stale exclusion)."""
+    _fail_stale_exclusions(stale_serving_exclusions(
+        validate_candidate((release / "autotune-candidates.json").read_bytes()),
+        validate_rate_card((release / RATE_CARD_FEED_NAME).read_bytes()),
+        (release / TIER2_CATALOG_FEED_NAME).read_bytes(),
+        excluded,
+    ))
+
+
+def buyer_serving_diff(incoming: dict[str, dict], live: dict[str, dict]) -> dict:
+    """added/removed by model_id; changed = same model_id served at a different sha256."""
+    return {
+        "added": [incoming[k] for k in sorted(incoming.keys() - live.keys())],
+        "removed": [live[k] for k in sorted(live.keys() - incoming.keys())],
+        "changed": [
+            {"model_id": incoming[k]["model_id"], "live_sha256": live[k]["sha256"], "sha256": incoming[k]["sha256"]}
+            for k in sorted(incoming.keys() & live.keys())
+            if incoming[k]["sha256"] != live[k]["sha256"]
+        ],
+    }
+
+
+def cmd_buyer_serving_set(
+    release: pathlib.Path,
+    exclusions_path: pathlib.Path | None,
+    live: pathlib.Path | None,
+    live_exclusions_path: pathlib.Path | None,
+) -> None:
+    def load(path: pathlib.Path | None) -> set[str]:
+        return set() if path is None else load_serving_exclusions(path.read_bytes(), str(path))
+
+    try:
+        # The incoming exclusions must not list a model the release pins; the
+        # live ones are schema-checked only (live is history, judged as served).
+        check_release_exclusions(release, load(exclusions_path))
+        incoming_set = buyer_serving_set(release)
+        if live is None:
+            if live_exclusions_path is not None:
+                fail("buyer-serving-set: --live-exclusions requires --diff-live")
+            result: dict = {"models": [incoming_set[k] for k in sorted(incoming_set)]}
+        else:
+            # An exclusion dropped by the incoming release makes a model newly
+            # buyer-serving; reusing one file for both sides would hide that.
+            if (exclusions_path is None) != (live_exclusions_path is None):
+                fail("buyer-serving-set: --diff-live needs both --exclusions and --live-exclusions, or neither")
+            load(live_exclusions_path)
+            result = buyer_serving_diff(incoming_set, buyer_serving_set(live))
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        fail(f"buyer-serving-set: malformed release input: {exc!r}")
+    print(json.dumps(result, sort_keys=True))
+
+
+# #1688 C2: `content-gate` decides, offline, whether a committed release may go
+# live through the catalog-content lane (no runtime release). Deny-by-default:
+# `ok` only when every rule holds; otherwise `lane` names where the change must go.
+CONTENT_GATE_EXIT_NOT_ELIGIBLE = 3
+CONTENT_GATE_MAX_AGE = _dt.timedelta(days=30)
+CONTENT_GATE_MAX_FUTURE = _dt.timedelta(minutes=10)
+# Most-restrictive lane first: a release that is both a keyring change and a
+# pricing change is a full provider-app release, not a pricing correction.
+CONTENT_GATE_LANE_ORDER = (
+    "invalid-release", "full-provider-app", "pricing", "unknown-predecessor",
+    "unverified-commit", "stale-or-future", "freshness-or-noop",
+)
+# Committed location of every release-directory file (repo-relative).
+_CONTENT_GATE_STATIC_FILES = tuple(
+    name + suffix
+    for name in ("autotune-candidates.json", "demand-rank.json", RATE_CARD_FEED_NAME, ARTIFACT_FEED_NAME)
+    for suffix in ("", ".sig")
+)
+_CONTENT_GATE_CATALOG_FILES = ("release.json", "trusted-keys.json", TIER2_CATALOG_FEED_NAME)
+
+
+def _content_gate_committed_path(name: str) -> str:
+    if name in _CONTENT_GATE_STATIC_FILES:
+        return f"phase3-binary/dist/static/{name}"
+    return f"phase3-binary/catalog/autotune/{name}"
+
+
+def _git_show(repo: pathlib.Path, commit: str, path: str) -> bytes | None:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "show", f"{commit}:{path}"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
+    )
+    return result.stdout if result.returncode == 0 else None
+
+
+def content_gate_commit_reasons(release: pathlib.Path, commit: str, repo: pathlib.Path = ROOT) -> list[str]:
+    if not HEX40.fullmatch(commit):
+        return [f"--commit must be a full 40-hex commit sha, got {commit!r}"]
+    ancestor = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", commit, "origin/main"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+    )
+    if ancestor.returncode != 0:
+        return [f"commit {commit} is not an ancestor of origin/main"]
+    reasons = []
+    for name in _CONTENT_GATE_STATIC_FILES + _CONTENT_GATE_CATALOG_FILES:
+        local = release / name
+        committed = _git_show(repo, commit, _content_gate_committed_path(name))
+        if not local.exists() and committed is None:
+            continue
+        if not local.exists() or committed is None or local.read_bytes() != committed:
+            reasons.append(f"{name} bytes differ from {_content_gate_committed_path(name)} at {commit}")
+    return reasons
+
+
+def _content_gate_invariants(directory: pathlib.Path) -> dict:
+    """Fields a catalog-content release may never change (they need a provider-app release)."""
+    manifest_obj = _load_release_manifest(directory)
+    tier2_obj = strict_json((directory / TIER2_CATALOG_FEED_NAME).read_bytes(), f"{directory}/{TIER2_CATALOG_FEED_NAME}")
+    feed_fields = {}
+    for name in RENEWAL_CONTINUITY_FEEDS + ((ARTIFACT_FEED_NAME,) if (directory / ARTIFACT_FEED_NAME).exists() else ()):
+        obj = strict_json((directory / name).read_bytes(), f"{directory}/{name}")
+        feed_fields[name] = {k: obj.get(k) for k in ("schema_version", "policy_version", "source")}
+    return {
+        "policy_version": manifest_obj.get("policy_version"),
+        "schema_version": {
+            "release.json": manifest_obj.get("schema_version"),
+            TIER2_CATALOG_FEED_NAME: tier2_obj.get("version"),
+            **{name: fields["schema_version"] for name, fields in feed_fields.items()},
+        },
+        "feed_policy_versions": {name: fields["policy_version"] for name, fields in feed_fields.items()},
+        "feed_sources": {name: fields["source"] for name, fields in feed_fields.items()},
+        "signer_key_id": {
+            **{name: entry.get("signer_key_id") for name, entry in manifest_obj["feeds"].items()},
+            "tier2-catalog.json#signature.key_id": (tier2_obj.get("signature") or {}).get("key_id")
+            if isinstance(tier2_obj.get("signature"), dict) else None,
+        },
+        "artifact_bound": ARTIFACT_FEED_NAME in manifest_obj["feeds"],
+    }
+
+
+def _rate_card_rows_content(directory: pathlib.Path) -> str:
+    obj = strict_json((directory / RATE_CARD_FEED_NAME).read_bytes(), f"{directory}/{RATE_CARD_FEED_NAME}")
+    # generated_at is restamped; version is the rows-projection hash (moves with
+    # rows); policy_version is judged by the full-provider-app rule.
+    for field in ("generated_at", "version", "policy_version"):
+        obj.pop(field, None)
+    return json.dumps(obj, sort_keys=True)
+
+
+def content_gate(
+    release: pathlib.Path,
+    live: pathlib.Path,
+    ledger_path: pathlib.Path,
+    *,
+    commit: str | None = None,
+    now: datetime | None = None,
+    exclusions_data: bytes | None = None,
+    repo: pathlib.Path = ROOT,
+    tier2_index_path: pathlib.Path | None = None,
+) -> dict:
+    now = now or datetime.now(timezone.utc)
+    by_lane: dict[str, list[str]] = {lane: [] for lane in CONTENT_GATE_LANE_ORDER}
+    try:
+        # stdout carries exactly one JSON verdict; verify-directory's progress lines go to stderr.
+        with contextlib.redirect_stdout(sys.stderr):
+            verify_directory(release)
+    except CatalogError as exc:
+        by_lane["invalid-release"].append(f"verify-directory: {exc}")
+    manifest_obj = _load_release_manifest(release)
+    live_manifest = _load_release_manifest(live)
+
+    incoming_inv, live_inv = _content_gate_invariants(release), _content_gate_invariants(live)
+    for field in ("policy_version", "schema_version", "feed_policy_versions", "feed_sources", "signer_key_id", "artifact_bound"):
+        if incoming_inv[field] != live_inv[field]:
+            by_lane["full-provider-app"].append(
+                f"{field} changed vs live: {json.dumps(live_inv[field], sort_keys=True)} -> "
+                f"{json.dumps(incoming_inv[field], sort_keys=True)}"
+            )
+    keyring_changed = (release / "trusted-keys.json").read_bytes() != (live / "trusted-keys.json").read_bytes()
+    if keyring_changed:
+        by_lane["full-provider-app"].append("trusted-keys.json bytes changed vs live")
+
+    rate_card_changed = _rate_card_rows_content(release) != _rate_card_rows_content(live)
+    if rate_card_changed:
+        by_lane["pricing"].append(
+            "rate-card.json rows changed vs live; pricing corrections go through #1693 / runtime lane"
+        )
+
+    candidate_obj = strict_json((release / "autotune-candidates.json").read_bytes(), f"{release}/autotune-candidates.json")
+    generated_at = parse_timestamp(candidate_obj.get("generated_at"), "autotune-candidates.json generated_at")
+    if generated_at < now - CONTENT_GATE_MAX_AGE:
+        by_lane["stale-or-future"].append(f"autotune-candidates.json generated_at {candidate_obj['generated_at']} is older than 30 days")
+    if generated_at > now + CONTENT_GATE_MAX_FUTURE:
+        by_lane["stale-or-future"].append(
+            f"autotune-candidates.json generated_at {candidate_obj['generated_at']} is more than 10 minutes in the future"
+        )
+
+    committed_ledger: tempfile._TemporaryFileWrapper | None = None
+    if commit is not None:
+        commit_reasons = content_gate_commit_reasons(release, commit, repo)
+        by_lane["unverified-commit"].extend(commit_reasons)
+        if not commit_reasons:
+            # The reviewed commit, not the operator's working tree, decides the
+            # predecessor ledger and the serving exclusions (#1688).
+            ledger_bytes = _git_show(repo, commit, str(LEDGER_PATH.relative_to(ROOT)))
+            exclusions_data = _git_show(repo, commit, str(NOT_BUYER_SERVING_PATH.relative_to(ROOT)))
+            if ledger_bytes is None or exclusions_data is None:
+                by_lane["unverified-commit"].append(
+                    f"commit {commit} lacks {LEDGER_PATH.relative_to(ROOT)} or {NOT_BUYER_SERVING_PATH.relative_to(ROOT)}"
+                )
+            else:
+                committed_ledger = tempfile.NamedTemporaryFile(prefix="content-gate-ledger-", suffix=".json")
+                committed_ledger.write(ledger_bytes)
+                committed_ledger.flush()
+                ledger_path = pathlib.Path(committed_ledger.name)
+
+    try:
+        if compare_live(release, live, ledger_path, tier2_index_path)["verdict"] == "regression":
+            by_lane["unknown-predecessor"].append("live content matches no release in the release ledger (modulo renewal restamp)")
+    finally:
+        if committed_ledger is not None:
+            committed_ledger.close()
+
+    if exclusions_data is None:
+        exclusions_data = NOT_BUYER_SERVING_PATH.read_bytes()
+    try:
+        check_serving_closure(
+            (release / "autotune-candidates.json").read_bytes(),
+            (release / RATE_CARD_FEED_NAME).read_bytes(),
+            (release / TIER2_CATALOG_FEED_NAME).read_bytes(),
+            load_serving_exclusions(exclusions_data, "not-buyer-serving.json"),
+        )
+    except CatalogError as exc:
+        by_lane["invalid-release"].append(str(exc))
+
+    feeds_changed = feed_continuity_drift(release, live)
+    manifest_changed = _stripped_release_manifest(manifest_obj) != _stripped_release_manifest(live_manifest)
+    if not feeds_changed and not manifest_changed:
+        by_lane["freshness-or-noop"].append("release content equals live content; nothing to ship through the content lane")
+
+    reasons = [reason for lane in CONTENT_GATE_LANE_ORDER for reason in by_lane[lane]]
+    lane = next((name for name in CONTENT_GATE_LANE_ORDER if by_lane[name]), "catalog-content")
+    return {
+        "ok": not reasons,
+        "lane": lane,
+        "reasons": reasons,
+        "release_id": manifest_obj["release_id"],
+        "live_release_id": live_manifest["release_id"],
+        "changed": {
+            "feeds": feeds_changed,
+            "tier2_models_changed": TIER2_CATALOG_FEED_NAME in feeds_changed,
+            "rate_card_rows_changed": rate_card_changed,
+            "trusted_keys_changed": keyring_changed,
+            "release_manifest_changed": manifest_changed,
+        },
+    }
+
+
+def cmd_content_gate(
+    release: pathlib.Path, live: pathlib.Path, ledger: pathlib.Path | None, commit: str | None, now_raw: str | None,
+    tier2_index_path: pathlib.Path | None = None,
+) -> int:
+    try:
+        now = parse_timestamp(now_raw, "--now") if now_raw is not None else None
+        if ledger is None:
+            ledger = release / "release-ledger.json" if (release / "release-ledger.json").exists() else LEDGER_PATH
+        result = content_gate(release, live, ledger, commit=commit, now=now, tier2_index_path=tier2_index_path)
+    except (KeyError, TypeError, ValueError, AttributeError, OSError) as exc:
+        fail(f"content-gate: malformed release input: {exc!r}")
+    print(json.dumps(result, sort_keys=True))
+    return 0 if result["ok"] else CONTENT_GATE_EXIT_NOT_ELIGIBLE
 
 
 def cmd_status() -> None:
@@ -4853,9 +5496,30 @@ def cmd_status() -> None:
         )
 
 
-def cmd_check_tier2_binding(candidate_path: pathlib.Path, tier2_path: pathlib.Path) -> None:
-    check_tier2_binding(candidate_path.read_bytes(), tier2_path.read_bytes())
-    print(f"tier2 binding ok: {tier2_path} agrees with {candidate_path}")
+def cmd_check_tier2_binding(
+    candidate_path: pathlib.Path,
+    tier2_path: pathlib.Path,
+    require_serving: bool = False,
+    rate_card_path: pathlib.Path | None = None,
+    exclusions_path: pathlib.Path | None = None,
+) -> None:
+    if not require_serving:
+        if rate_card_path is not None or exclusions_path is not None:
+            fail("check-tier2-binding: --rate-card/--exclusions require --require-serving")
+        check_tier2_binding(candidate_path.read_bytes(), tier2_path.read_bytes())
+        print(f"tier2 binding ok: {tier2_path} agrees with {candidate_path}")
+        return
+    rate_card_path = rate_card_path or CATALOG_DIR / RATE_CARD_FEED_NAME
+    excluded = (
+        load_serving_exclusions(exclusions_path.read_bytes(), str(exclusions_path))
+        if exclusions_path is not None
+        else set()
+    )
+    check_serving_closure(candidate_path.read_bytes(), rate_card_path.read_bytes(), tier2_path.read_bytes(), excluded)
+    print(
+        f"tier2 serving closure ok: every recommendable rate-carded model in {candidate_path} is pinned by "
+        f"{tier2_path} ({len(excluded)} excluded)"
+    )
 
 
 def cmd_derive_tier2(
@@ -4996,6 +5660,33 @@ def main() -> int:
     )
     continuity_parser.add_argument("--incoming", type=pathlib.Path, required=True)
     continuity_parser.add_argument("--live", type=pathlib.Path, required=True)
+    compare_parser = sub.add_parser(
+        "compare-live",
+        help=(
+            "runtime-deploy catalog guard (#1688 A2): print one JSON verdict comparing the staged "
+            "release with the live one by CONTENT. Exit 0 = equivalent (skip activation) or "
+            "descends (live equals a release in --ledger; activate); exit 3 = regression; "
+            "exit 1 = malformed or unreadable input (fail closed)"
+        ),
+    )
+    compare_parser.add_argument("--incoming", type=pathlib.Path, required=True)
+    compare_parser.add_argument("--live", type=pathlib.Path, required=True)
+    compare_parser.add_argument("--ledger", type=pathlib.Path, required=True, help="the incoming tag's release-ledger.json")
+    compare_parser.add_argument(
+        "--tier2-content-index",
+        type=pathlib.Path,
+        help="tier2-content-index output: proves a Tier-2 freshness re-sign of any ledger row from git history",
+    )
+    t2_index_parser = sub.add_parser(
+        "tier2-content-index",
+        help=(
+            "print {ledger row Tier-2 sha256: stripped-content sha256} from the git history of "
+            f"{TIER2_CATALOG_REPO_PATH} (rows found in no commit are omitted)"
+        ),
+    )
+    t2_index_parser.add_argument("--repo", type=pathlib.Path, required=True)
+    t2_index_parser.add_argument("--ledger", type=pathlib.Path, required=True)
+    t2_index_parser.add_argument("--rev", default="HEAD", help="history to walk (default HEAD)")
     coordinator_parser = sub.add_parser(
         "emit-coordinator-rate-card",
         help="print the rewards.rate_card: block the published rate card requires",
@@ -5023,6 +5714,19 @@ def main() -> int:
     directory_parser.add_argument("--directory", required=True, type=pathlib.Path)
     directory_parser.add_argument("--tier2-public-key-file", type=pathlib.Path)
     directory_parser.add_argument("--tier2-coordinator-config", type=pathlib.Path)
+    directory_parser.add_argument(
+        "--tier2-coordinator-overlay",
+        type=pathlib.Path,
+        help="coordinator overlay merged over --tier2-coordinator-config; its tier2.catalog_public_key wins when set",
+    )
+    directory_parser.add_argument(
+        "--allow-expired-tier2",
+        action="store_true",
+        help=(
+            "accept a Tier-2 catalog past expires_at (its signature and every other check still apply). "
+            "Only for judging an ALREADY-LIVE release, never an incoming one"
+        ),
+    )
     check_parser = sub.add_parser("check-tier2-binding")
     check_parser.add_argument(
         "--candidate",
@@ -5031,6 +5735,63 @@ def main() -> int:
         help="autotune-candidates.json path",
     )
     check_parser.add_argument("--tier2", required=True, type=pathlib.Path, help="signed or unsigned tier2-catalog.json")
+    check_parser.add_argument(
+        "--require-serving",
+        action="store_true",
+        help=(
+            "deny-by-default serving closure (#1688 C3): every recommendable candidate row with a "
+            "rate-card row must have a Tier-2 entry with the same model_id and sha256, unless "
+            "listed in --exclusions"
+        ),
+    )
+    check_parser.add_argument(
+        "--rate-card",
+        type=pathlib.Path,
+        help=f"rate-card.json path for --require-serving (default {CATALOG_DIR / RATE_CARD_FEED_NAME})",
+    )
+    check_parser.add_argument(
+        "--exclusions",
+        type=pathlib.Path,
+        help=f"not-buyer-serving.json for --require-serving (e.g. {NOT_BUYER_SERVING_PATH}); default: none",
+    )
+    serving_parser = sub.add_parser(
+        "buyer-serving-set",
+        help=(
+            "print JSON {models:[{model_id,sha256}]}: every recommendable, rate-carded, non-excluded "
+            "candidate row pinned by Tier-2 to the same model_id+sha256 (what buyers can be routed to). "
+            "With --diff-live DIR print {added,removed,changed} of --release vs the live release"
+        ),
+    )
+    serving_parser.add_argument("--release", required=True, type=pathlib.Path)
+    serving_parser.add_argument("--exclusions", type=pathlib.Path, help="not-buyer-serving.json for --release (default: none)")
+    serving_parser.add_argument("--diff-live", type=pathlib.Path, help="live release directory to diff against")
+    serving_parser.add_argument(
+        "--live-exclusions",
+        type=pathlib.Path,
+        help="not-buyer-serving.json in force for the live release; required with --diff-live when --exclusions is given",
+    )
+    gate_parser = sub.add_parser(
+        "content-gate",
+        help=(
+            "catalog-content lane gate (#1688 C2): print one JSON verdict on whether --release may go "
+            "live without a runtime release. Exit 0 = eligible; exit 3 = not eligible (see lane); "
+            "exit 1 = malformed input"
+        ),
+    )
+    gate_parser.add_argument("--release", required=True, type=pathlib.Path, help="assembled release directory")
+    gate_parser.add_argument("--live", required=True, type=pathlib.Path, help="live release directory")
+    gate_parser.add_argument(
+        "--ledger",
+        type=pathlib.Path,
+        help="release-ledger.json (default: RELEASE/release-ledger.json, else the repository ledger)",
+    )
+    gate_parser.add_argument("--commit", help="full sha the release was cut from; must be an ancestor of origin/main")
+    gate_parser.add_argument("--now", help="RFC3339 evaluation time (default: now, UTC)")
+    gate_parser.add_argument(
+        "--tier2-content-index",
+        type=pathlib.Path,
+        help="tier2-content-index output for the predecessor check (as compare-live)",
+    )
     derive_parser = sub.add_parser("derive-tier2")
     derive_parser.add_argument(
         "--candidate",
@@ -5081,12 +5842,26 @@ def main() -> int:
             cmd_status()
         elif args.command == "continuity-check":
             cmd_continuity_check(args.incoming, args.live)
+        elif args.command == "compare-live":
+            return cmd_compare_live(args.incoming, args.live, args.ledger, args.tier2_content_index)
+        elif args.command == "tier2-content-index":
+            cmd_tier2_content_index(args.repo, args.rev, args.ledger)
         elif args.command == "emit-coordinator-rate-card":
             cmd_emit_coordinator_rate_card(args.output, from_source=args.from_source)
         elif args.command == "verify-directory":
-            verify_directory(args.directory, args.tier2_public_key_file, args.tier2_coordinator_config)
+            verify_directory(
+                args.directory,
+                args.tier2_public_key_file,
+                args.tier2_coordinator_config,
+                args.tier2_coordinator_overlay,
+                args.allow_expired_tier2,
+            )
         elif args.command == "check-tier2-binding":
-            cmd_check_tier2_binding(args.candidate, args.tier2)
+            cmd_check_tier2_binding(args.candidate, args.tier2, args.require_serving, args.rate_card, args.exclusions)
+        elif args.command == "buyer-serving-set":
+            cmd_buyer_serving_set(args.release, args.exclusions, args.diff_live, args.live_exclusions)
+        elif args.command == "content-gate":
+            return cmd_content_gate(args.release, args.live, args.ledger, args.commit, args.now, args.tier2_content_index)
         elif args.command == "derive-tier2":
             cmd_derive_tier2(
                 args.candidate,

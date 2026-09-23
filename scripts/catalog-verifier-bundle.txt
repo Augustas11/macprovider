@@ -1,0 +1,7 @@
+# Files every shipped copy of scripts/catalog-release.py needs beside it
+# (#1688). deploy-pearl-vps.sh and ops/pearl-updater/install-pearl-updater.sh
+# ship exactly this list; one repo-relative scripts/<name> path per line.
+scripts/catalog-release.py
+scripts/openrouter_pricing_engine.py
+scripts/sign-catalog.go
+scripts/autotune_window.py

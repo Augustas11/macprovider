@@ -174,7 +174,8 @@ seed_transaction() {
   printf '# acl fixture\n' >"$ROLLBACK/request-log-db.acl"
   touch "$ROLLBACK/had-request-log-db-acl"
   printf releases/old >"$ROLLBACK/catalog-current-target"
-  printf releases/older >"$ROLLBACK/catalog-previous-target"
+  # #1688: autotune_window.py writes a multi-line window; recovery must restore it byte-exact.
+  printf 'releases/older\nreleases/oldest\n' >"$ROLLBACK/catalog-previous-target"
   touch "$ROLLBACK/had-previous-target" "$ROLLBACK/release-was-absent"
   printf new >"$ROLLBACK/release-id"
   touch "$ROLLBACK/restart-attempted" "$ROLLBACK/service-was-active"
@@ -244,7 +245,7 @@ grep -qx -- "--restore=$ROLLBACK/request-log-db.acl" "$SETFACL_LOG" || fail "req
 [ "$(cat "$ROOT/tier2-catalog.json")" = old-tier2-catalog ] &&
   [ "$(readlink "$ROOT/autotune/current")" = releases/old ] ||
   fail "legacy Tier-2 bridge and current pointer were not restored together"
-[ "$(cat "$ROOT/autotune/.previous-target")" = releases/older ] || fail "catalog previous target was not restored"
+[ "$(cat "$ROOT/autotune/.previous-target")" = "$(printf 'releases/older\nreleases/oldest')" ] || fail "catalog previous target was not restored"
 [ ! -d "$ROOT/autotune/releases/new" ] || fail "new release was not removed"
 [ ! -e "$ROLLBACK" ] || fail "successful recovery did not remove its snapshot"
 grep -qx 'daemon-reload' "$SYSTEMCTL_LOG" || fail "recovery did not reload systemd"

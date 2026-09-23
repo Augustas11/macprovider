@@ -141,6 +141,11 @@ test-dist:
 	bash scripts/test-install-sh-consumer-health-alarm.sh
 	bash scripts/test-renew-autotune-static-feed-signed.sh
 	bash -n scripts/renew-autotune-static-feed.sh
+	bash scripts/test-autotune-activate.sh
+	bash -n scripts/lib/autotune-activate.sh
+	bash scripts/test-catalog-content-release.sh
+	bash -n scripts/catalog-content-release.sh
+	bash -n scripts/lib/catalog-canary-token.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_feed_freshness
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pearl_autotune_deploy_lock
 	bash scripts/test-tier2-provider-artifact.sh
@@ -183,6 +188,12 @@ test-dist:
 	bash phase4-coordinator/dist/test/coord_deploy_config_mode_test.sh
 	bash phase4-coordinator/dist/test/coordinator_release_tag_guard.test.sh
 	bash phase4-coordinator/dist/test/check_deploy_static_feed_access.test.sh
+	bash phase4-coordinator/dist/test/deploy_catalog_verifier_closure.test.sh
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_window
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_compare_live
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_content_gate
+	bash phase4-coordinator/dist/test/deploy_catalog_compare_live.test.sh
+	bash phase4-coordinator/dist/test/deploy_catalog_window_coverage.test.sh
 	bash phase4-coordinator/dist/test/coordinator_deploy_recovery.test.sh
 	bash phase4-coordinator/dist/test/coordinator_archive_rotate.test.sh
 	bash phase4-coordinator/dist/test/coordinator_sqlite_relief.test.sh

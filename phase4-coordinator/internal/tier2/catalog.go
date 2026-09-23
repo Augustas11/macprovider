@@ -239,6 +239,25 @@ func setDefaultForTest(c *Catalog) {
 // Returns the newly-installed *Catalog on success for callers that want a
 // handle to it (e.g. for an immediate Active() / Configured() probe).
 func ConfigureDefaultStrict(cfg config.Tier2Config, logger zerolog.Logger, guards ...func(*Catalog) error) (*Catalog, error) {
+	next, err := BuildStrict(cfg, logger, guards...)
+	if err != nil {
+		return nil, err
+	}
+	if box := releasePublisher.Load(); box != nil && box.p != nil {
+		stagedCatalog.Store(next)
+		box.p.StageTier2(next)
+		return next, nil
+	}
+	setDefault(next)
+	return next, nil
+}
+
+// BuildStrict is ConfigureDefaultStrict without the publish: it builds a fresh
+// *Catalog, loads it strictly, enforces the require_hash_verified
+// post-condition and runs every guard, but never stages or swaps the package
+// singleton. The offline release validator uses it so it proves exactly what
+// a SIGHUP reload would accept without touching live state.
+func BuildStrict(cfg config.Tier2Config, logger zerolog.Logger, guards ...func(*Catalog) error) (*Catalog, error) {
 	if len(guards) == 0 {
 		return nil, fmt.Errorf("tier2 config reload rejected: at least one post-load guard is required (#608 binding)")
 	}
@@ -260,12 +279,6 @@ func ConfigureDefaultStrict(cfg config.Tier2Config, logger zerolog.Logger, guard
 			return nil, err
 		}
 	}
-	if box := releasePublisher.Load(); box != nil && box.p != nil {
-		stagedCatalog.Store(next)
-		box.p.StageTier2(next)
-		return next, nil
-	}
-	setDefault(next)
 	return next, nil
 }
 

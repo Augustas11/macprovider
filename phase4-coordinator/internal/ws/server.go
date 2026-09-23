@@ -565,6 +565,13 @@ func buildCompatibleCatalogSet(catalog *autotune.Catalog, compatible []*autotune
 	return next
 }
 
+// CompatibleCatalogSet is the admission map SetAutotuneCatalog installs for
+// current + compatible; exported so the offline release validator reports
+// exactly what a reload would admit.
+func CompatibleCatalogSet(catalog *autotune.Catalog, compatible []*autotune.Catalog) map[string]*autotune.Catalog {
+	return buildCompatibleCatalogSet(catalog, compatible)
+}
+
 func compatibleCatalogBySHA(compatible map[string]*autotune.Catalog, sha string) *autotune.Catalog {
 	if compatible == nil {
 		return nil

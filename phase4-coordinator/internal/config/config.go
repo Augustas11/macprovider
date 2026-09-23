@@ -404,6 +404,12 @@ type AutotuneFeedsConfig struct {
 	EnforceProviderAdmission        bool              `yaml:"enforce_provider_admission"`
 	ProviderAdmissionBridgeDeadline string            `yaml:"provider_admission_bridge_deadline"`
 	PublicKeys                      map[string]string `yaml:"public_keys"`
+	// PreviousTargetPath is never read from YAML. Empty keeps the deployed
+	// layout: `<root>/.previous-target`, root being two levels above the
+	// candidate feed. The offline release validator sets it to point the
+	// retained-release window (and restamp scan) at an explicit file whose
+	// directory is the release root; os.DevNull means no retained releases.
+	PreviousTargetPath string `yaml:"-"`
 }
 
 const maxProviderAdmissionBridgeDuration = 24 * time.Hour
@@ -1764,19 +1770,38 @@ func Load(path string) (Config, error) {
 // non-empty (overlay keys override). Used for OPoI v0 staging overlays without
 // editing production coordinator.yaml.
 func LoadWithOverlay(basePath, overlayPath string) (Config, error) {
+	cfg, _, err := LoadWithOverlayDigests(basePath, overlayPath)
+	return cfg, err
+}
+
+// SourceDigests identifies the exact bytes a loader read and applied:
+// lowercase hex sha256 of the base document and of the overlay document.
+// OverlaySHA256 is "" when no overlay path was given. The digests are taken
+// from the same read the config was decoded from, so they name the applied
+// content even if the file changes on disk afterwards.
+type SourceDigests struct {
+	ConfigSHA256  string
+	OverlaySHA256 string
+}
+
+// LoadWithOverlayDigests is LoadWithOverlay plus the SourceDigests of the
+// bytes it decoded.
+func LoadWithOverlayDigests(basePath, overlayPath string) (Config, SourceDigests, error) {
 	cfg := Default()
-	if err := unmarshalYAMLFile(basePath, &cfg); err != nil {
-		return Config{}, fmt.Errorf("base config %s: %w", basePath, err)
+	var digests SourceDigests
+	var err error
+	if digests.ConfigSHA256, err = unmarshalYAMLFile(basePath, &cfg); err != nil {
+		return Config{}, SourceDigests{}, fmt.Errorf("base config %s: %w", basePath, err)
 	}
 	if strings.TrimSpace(overlayPath) != "" {
-		if err := unmarshalYAMLFile(overlayPath, &cfg); err != nil {
-			return Config{}, fmt.Errorf("overlay config %s: %w", overlayPath, err)
+		if digests.OverlaySHA256, err = unmarshalYAMLFile(overlayPath, &cfg); err != nil {
+			return Config{}, SourceDigests{}, fmt.Errorf("overlay config %s: %w", overlayPath, err)
 		}
 	}
 	if err := finalizeLoadedConfig(&cfg); err != nil {
-		return Config{}, err
+		return Config{}, SourceDigests{}, err
 	}
-	return cfg, nil
+	return cfg, digests, nil
 }
 
 // payoutTuningOnlyWrapper is a minimal YAML envelope that surfaces
@@ -1892,24 +1917,35 @@ func LoadForSIGHUPReload(path string) (Config, error) {
 }
 
 func LoadForSIGHUPReloadWithOverlay(basePath, overlayPath string) (Config, error) {
-	doc, err := readConfigDocumentWithoutPayout(basePath, "base")
+	cfg, _, err := LoadForSIGHUPReloadWithOverlayDigests(basePath, overlayPath)
+	return cfg, err
+}
+
+// LoadForSIGHUPReloadWithOverlayDigests is LoadForSIGHUPReloadWithOverlay
+// plus the SourceDigests of the bytes it decoded (digested before the payout
+// subtree is stripped, i.e. the on-disk file content).
+func LoadForSIGHUPReloadWithOverlayDigests(basePath, overlayPath string) (Config, SourceDigests, error) {
+	var digests SourceDigests
+	doc, baseDigest, err := readConfigDocumentWithoutPayout(basePath, "base")
 	if err != nil {
-		return Config{}, err
+		return Config{}, SourceDigests{}, err
 	}
+	digests.ConfigSHA256 = baseDigest
 	cfg := Default()
 	if len(doc.Content) > 0 {
 		if err := doc.Decode(&cfg); err != nil {
-			return Config{}, fmt.Errorf("base config %s: %w", basePath, err)
+			return Config{}, SourceDigests{}, fmt.Errorf("base config %s: %w", basePath, err)
 		}
 	}
 	if strings.TrimSpace(overlayPath) != "" {
-		overlayDoc, err := readConfigDocumentWithoutPayout(overlayPath, "overlay")
+		overlayDoc, overlayDigest, err := readConfigDocumentWithoutPayout(overlayPath, "overlay")
 		if err != nil {
-			return Config{}, err
+			return Config{}, SourceDigests{}, err
 		}
+		digests.OverlaySHA256 = overlayDigest
 		if len(overlayDoc.Content) > 0 {
 			if err := overlayDoc.Decode(&cfg); err != nil {
-				return Config{}, fmt.Errorf("overlay config %s: %w", overlayPath, err)
+				return Config{}, SourceDigests{}, fmt.Errorf("overlay config %s: %w", overlayPath, err)
 			}
 		}
 	}
@@ -1917,16 +1953,17 @@ func LoadForSIGHUPReloadWithOverlay(basePath, overlayPath string) (Config, error
 	// of what either document contained.
 	cfg.Payout = Default().Payout
 	if err := finalizeLoadedConfig(&cfg); err != nil {
-		return Config{}, err
+		return Config{}, SourceDigests{}, err
 	}
-	return cfg, nil
+	return cfg, digests, nil
 }
 
-func readConfigDocumentWithoutPayout(path, label string) (yaml.Node, error) {
+func readConfigDocumentWithoutPayout(path, label string) (yaml.Node, string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return yaml.Node{}, fmt.Errorf("%s config %s: %w", label, path, err)
+		return yaml.Node{}, "", fmt.Errorf("%s config %s: %w", label, path, err)
 	}
+	digest := sha256Hex(b)
 	// Merge-audit r2 (convergent code+architect HIGH): strip the payout
 	// subtree BEFORE typed decode. Resetting cfg.Payout after a typed
 	// unmarshal is not enough — a type-malformed payout.* scalar (e.g. a
@@ -1943,7 +1980,7 @@ func readConfigDocumentWithoutPayout(path, label string) (yaml.Node, error) {
 	// other scalar byte-identical to what Load would see.
 	var doc yaml.Node
 	if err := yaml.Unmarshal(b, &doc); err != nil {
-		return yaml.Node{}, fmt.Errorf("%s config %s: %w", label, path, err)
+		return yaml.Node{}, "", fmt.Errorf("%s config %s: %w", label, path, err)
 	}
 	if len(doc.Content) > 0 && doc.Content[0].Kind == yaml.MappingNode {
 		m := doc.Content[0]
@@ -1959,15 +1996,22 @@ func readConfigDocumentWithoutPayout(path, label string) (yaml.Node, error) {
 		}
 		m.Content = kept
 	}
-	return doc, nil
+	return doc, digest, nil
 }
 
-func unmarshalYAMLFile(path string, cfg *Config) error {
+// unmarshalYAMLFile decodes path into cfg and returns the sha256 of the
+// bytes it decoded.
+func unmarshalYAMLFile(path string, cfg *Config) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return yaml.Unmarshal(b, cfg)
+	return sha256Hex(b), yaml.Unmarshal(b, cfg)
+}
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 func finalizeLoadedConfig(cfg *Config) error {

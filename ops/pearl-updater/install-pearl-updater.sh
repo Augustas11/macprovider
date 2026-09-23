@@ -66,8 +66,31 @@ install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0755 "$HERE/macprovider-
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0755 "$HERE/macprovider-pearl-update-gate" "$INSTALL_PREFIX/usr/local/sbin/macprovider-pearl-update-gate"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0755 "$HERE/macprovider-pearl-updater-alert" "$INSTALL_PREFIX/usr/local/sbin/macprovider-pearl-updater-alert"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/release-signing-public.pem" "$INSTALL_PREFIX/usr/local/share/macprovider/release-signing-public.pem"
-install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/../../scripts/catalog-release.py" "$INSTALL_PREFIX/usr/local/share/macprovider/scripts/catalog-release.py"
-install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/../../scripts/sign-catalog.go" "$INSTALL_PREFIX/usr/local/share/macprovider/scripts/sign-catalog.go"
+# #1688: ship exactly the catalog verifier bundle deploy-pearl-vps.sh ships.
+bundle_seen=" "
+while IFS= read -r bundle_path || [ -n "$bundle_path" ]; do
+  case "$bundle_path" in '#'*) continue ;; esac
+  if ! printf '%s\n' "$bundle_path" | grep -Eq '^scripts/[A-Za-z0-9._-]+$' ||
+    [ "$bundle_path" = "scripts/." ] || [ "$bundle_path" = "scripts/.." ]; then
+    echo "invalid catalog verifier bundle entry: '$bundle_path'" >&2
+    exit 1
+  fi
+  case "$bundle_seen" in
+    *" $bundle_path "*)
+      echo "duplicate catalog verifier bundle entry: $bundle_path" >&2
+      exit 1
+      ;;
+  esac
+  bundle_seen="$bundle_seen$bundle_path "
+  install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/../../$bundle_path" "$INSTALL_PREFIX/usr/local/share/macprovider/$bundle_path"
+done < "$HERE/../../scripts/catalog-verifier-bundle.txt"
+case "$bundle_seen" in
+  *" scripts/catalog-release.py "*) ;;
+  *)
+    echo "catalog verifier bundle must list scripts/catalog-release.py" >&2
+    exit 1
+    ;;
+esac
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/catalog-canary-proof.py" "$INSTALL_PREFIX/usr/local/share/macprovider/catalog-canary-proof.py"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/macprovider-pearl-updater.service" "$INSTALL_PREFIX/etc/systemd/system/macprovider-pearl-updater.service"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/macprovider-pearl-updater.timer" "$INSTALL_PREFIX/etc/systemd/system/macprovider-pearl-updater.timer"

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -117,6 +118,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "coordinator: unknown subcommand %q\n", arg1)
 			fmt.Fprintln(os.Stderr, "usage:")
 			fmt.Fprintln(os.Stderr, "  coordinator --config <path> [--config-overlay <path>] [--validate-config]")
+			fmt.Fprintln(os.Stderr, "  coordinator --config <path> [--config-overlay <path>] --validate-autotune-release <dir> [--previous-target <file>]")
 			fmt.Fprintln(os.Stderr, "  coordinator --version           (print build version)")
 			fmt.Fprintln(os.Stderr, "  coordinator partner-keys <issue|revoke|list> [flags]")
 			fmt.Fprintln(os.Stderr, "  coordinator visibility revert --id <pid> --reason TEXT")
@@ -131,17 +133,29 @@ func main() {
 	configOverlay := flag.String("config-overlay", "", "optional YAML overlay merged after --config (overlay keys override)")
 	validateConfig := flag.Bool("validate-config", false, "load config (with overlay if set), validate, and exit")
 	showVersion := flag.Bool("version", false, "print build version and exit")
+	validateAutotuneRelease := flag.String("validate-autotune-release", "", "offline: prove the SIGHUP reload would accept the candidate release in DIR against --config, print one JSON line, and exit")
+	previousTarget := flag.String("previous-target", "", "with --validate-autotune-release: retained-release pointer file (lines releases/<id>, relative to its directory); unset means no retained releases")
+	appliedConfigState := flag.String("applied-config-state", defaultAppliedConfigStatePath, "state file recording the sha256 of the config + overlay bytes the running process last applied (boot or successful SIGHUP)")
 	flag.Parse()
+	appliedConfigStatePath = *appliedConfigState
 	if *showVersion {
 		fmt.Println(version)
 		return
 	}
+	if *previousTarget != "" && *validateAutotuneRelease == "" {
+		fmt.Fprintln(os.Stderr, "--previous-target requires --validate-autotune-release")
+		os.Exit(2)
+	}
+	if *validateAutotuneRelease != "" {
+		os.Exit(runValidateAutotuneRelease(os.Stdout, *configPath, *configOverlay, *validateAutotuneRelease, *previousTarget))
+	}
 
-	cfg, err := config.LoadWithOverlay(*configPath, *configOverlay)
+	cfg, bootConfigDigests, err := config.LoadWithOverlayDigests(*configPath, *configOverlay)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
 	}
+	bootConfigLoadedAt := time.Now()
 	if *validateConfig {
 		fmt.Println("config: ok")
 		return
@@ -671,10 +685,13 @@ func main() {
 			providerws.WithAutotuneCatalog(autotuneCatalog, autotuneCompatibleCatalogs...),
 			providerws.WithAutotuneCatalogEnforcement(cfg.AutotuneFeeds.EnforceProviderAdmission, bridgeDeadline),
 		)
+		tier2CatalogID, tier2SHA256 := tier2CatalogIdentity(tier2.Default())
 		catalogLog := logger.Info().
 			Str("autotune_catalog_version", autotuneCatalog.Version).
 			Int("autotune_compatible_previous_releases", len(autotuneCompatibleCatalogs)).
 			Str("autotune_catalog_signer_key_id", autotuneCatalog.SignerKeyID).
+			Str("tier2_catalog_id", tier2CatalogID).
+			Str("tier2_sha256", tier2SHA256).
 			Bool("autotune_provider_admission_enforced", cfg.AutotuneFeeds.EnforceProviderAdmission)
 		if !cfg.AutotuneFeeds.EnforceProviderAdmission {
 			catalogLog = catalogLog.
@@ -1463,6 +1480,19 @@ func main() {
 		errs <- buyerHTTP.ListenAndServe()
 	}()
 
+	// Boot init succeeded: record the content identity of the config this
+	// process applied before SIGHUP handling starts.
+	logger.Info().
+		Str("config_path", *configPath).
+		Str("config_sha256", bootConfigDigests.ConfigSHA256).
+		Str("overlay_path", *configOverlay).
+		Str("overlay_sha256", bootConfigDigests.OverlaySHA256).
+		Str("source", "boot").
+		Str("version", version).
+		Str("event", "coordinator_config_applied").
+		Msg("coordinator config applied")
+	recordAppliedConfig(logger, "boot", *configPath, *configOverlay, bootConfigDigests, bootConfigLoadedAt)
+
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	for {
@@ -1592,10 +1622,11 @@ var maxSameVersionRestampCatalogs = 16
 // stale stamps cannot force an unbounded scan. Same-version leftovers must
 // also keep the active catalog's signer; another trusted key is not a restamp.
 func loadSameVersionRestampCatalogs(cfg config.AutotuneFeedsConfig, current *autotune.Catalog) []*autotune.Catalog {
-	if current == nil || strings.TrimSpace(current.Version) == "" || cfg.AutotuneCandidatesPath == "" {
+	root, _ := buyer.AutotuneReleaseRoot(cfg)
+	if current == nil || strings.TrimSpace(current.Version) == "" || cfg.AutotuneCandidatesPath == "" || root == "" {
 		return nil
 	}
-	releases := filepath.Join(filepath.Dir(filepath.Dir(cfg.AutotuneCandidatesPath)), "releases")
+	releases := filepath.Join(root, "releases")
 	entries, err := os.ReadDir(releases)
 	if err != nil {
 		return nil
@@ -3506,6 +3537,29 @@ func walletMutationGuardHandler() http.Handler {
 
 var configureDefaultStrict = tier2.ConfigureDefaultStrict
 
+// activeReleaseBindingGuard is the #608 post-load Tier-2 guard shared by the
+// SIGHUP reload and --validate-autotune-release.
+func activeReleaseBindingGuard(autotuneCatalog *autotune.Catalog) func(*tier2.Catalog) error {
+	return func(next *tier2.Catalog) error {
+		return catalogbind.RequireActiveReleaseBinding(autotuneCatalog, next)
+	}
+}
+
+// tier2CatalogIdentity names the Tier-2 catalog actually loaded: its signed
+// catalog_id and the SHA-256 of the exact signed bytes accepted. Both are ""
+// when no active catalog is loaded.
+func tier2CatalogIdentity(c *tier2.Catalog) (catalogID, sha string) {
+	if c == nil {
+		return "", ""
+	}
+	id, raw, ok := c.CatalogSnapshot()
+	if !ok {
+		return "", ""
+	}
+	sum := sha256.Sum256(raw)
+	return id, hex.EncodeToString(sum[:])
+}
+
 func validateAutotuneRuntimeEconomics(feeds buyer.AutotuneFeeds, cfg config.Config) error {
 	return buyer.ValidateRuntimeRateCardParity(feeds, cfg.Rewards, cfg.Stats.Rollup.UsdPerMillionCredits)
 }
@@ -3530,11 +3584,12 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	// edited on disk must not reject a tier2/billing reload. Payout
 	// tuning has its own dedicated SIGHUP listener
 	// (startPayoutSIGHUPListener); this path never applies payout fields.
-	cfg, err := config.LoadForSIGHUPReloadWithOverlay(configPath, configOverlay)
+	cfg, configDigests, err := config.LoadForSIGHUPReloadWithOverlayDigests(configPath, configOverlay)
 	if err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
 	}
+	configLoadedAt := time.Now()
 	// #1268 SIGHUP autotune feed reload: re-parse + verify the signed feed set so
 	// an operator can re-stamp/refresh the rate-card/candidate/demand-rank feeds
 	// (e.g. a freshness renewal) without a coordinator restart. Baseline is the
@@ -3610,9 +3665,8 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	// #608 Partial: the optional guard rejects a reload that would install
 	// Tier-2 rows conflicting with the in-memory autotune admission catalog
 	// before the package singleton is swapped.
-	if _, err := configureDefaultStrict(cfg.Tier2, logger, func(next *tier2.Catalog) error {
-		return catalogbind.RequireActiveReleaseBinding(effectiveAutotuneCatalog, next)
-	}); err != nil {
+	reloadedTier2, err := configureDefaultStrict(cfg.Tier2, logger, activeReleaseBindingGuard(effectiveAutotuneCatalog))
+	if err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
 	}
@@ -3664,10 +3718,13 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		// together.
 		wsServer.SetAutotuneCatalog(reloadedAutotuneCatalog, reloadedAutotuneCompatible...)
 		buyerServer.SetAutotuneFeeds(reloadedAutotuneFeeds)
+		tier2CatalogID, tier2SHA256 := tier2CatalogIdentity(reloadedTier2)
 		logger.Info().
 			Str("autotune_catalog_version", reloadedAutotuneCatalog.Version).
 			Int("autotune_compatible_previous_releases", len(reloadedAutotuneCompatible)).
 			Str("autotune_catalog_signer_key_id", reloadedAutotuneCatalog.SignerKeyID).
+			Str("tier2_catalog_id", tier2CatalogID).
+			Str("tier2_sha256", tier2SHA256).
 			Str("event", "autotune_feed_sighup_reload").
 			Msg("autotune signed feed reloaded without restart")
 	}
@@ -3688,6 +3745,8 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		Int("proof_of_weights_still_evidence_stale", proofReload.StillEvidenceStale).
 		Int("proof_of_weights_cleared_gate_exclusions", proofReload.ClearedGateExclusions).
 		Int("benchmark_quarantines_cleared", benchmarkQuarantinesCleared).
+		Str("config_sha256", configDigests.ConfigSHA256).
+		Str("overlay_sha256", configDigests.OverlaySHA256).
 		Msg("tier2/proof_of_weights config reloaded")
 	// Issue #266 T1 — wire SPEC-004 FR-SR-5 paragraph 2 ("invalidate
 	// on class reconfig"): swap the buyer-server's routing.model_classes
@@ -3721,6 +3780,9 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			Int("trusted_pools_creator_buyer_allowlist_creators", len(cfg.TrustedPools.CreatorAdminBuyerAccountIDs)).
 			Msg("trusted pools creator admin config reloaded")
 	}
+	// Every fallible step above returned early on rejection, so reaching here
+	// means this reload's config is the applied one.
+	recordAppliedConfig(logger, "sighup", configPath, configOverlay, configDigests, configLoadedAt)
 }
 
 func telemetryDriftEvaluatorForReload(cfg config.Config, autotuneCatalog *autotune.Catalog, autotuneEvidenceStore autotune.EvidenceStore) (*pow.Evaluator, error) {

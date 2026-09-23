@@ -1,13 +1,36 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.14.3
+version: v0.15.0
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-09-22
+last-locked: 2026-09-23
 lockstep: SPEC-005 v0.6.7 (SPEC-005-R011 money-table owner). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
 
+- **v0.15.0 (2026-09-23)** — Catalog activation, retention, and the
+  catalog-content release lane (#1688). New §3.7.9 registers five requirements
+  for how a signed catalog release goes live on the coordinator host, separately
+  from how it is generated (§3.7.8): `SPEC-023-R013` one retained-window
+  (`.previous-target`) retention/rollback rule with a single hardened writer,
+  explicitly NOT a serving-compatibility guarantee (`SPEC-023-R010` stays the
+  long-term primitive and is unchanged); `SPEC-023-R014` runtime-only deploys
+  classify the pinned catalog against live content (equivalent / descends /
+  regression) and never churn or silently regress it; `SPEC-023-R015` activation
+  coverage over advertised `(catalog_release_id, catalog_candidate_sha256)` pairs
+  (refuse-unless-logged-override for activations; publish-and-alert for freshness
+  renewal, which cannot keep its release id under §3.7.8); `SPEC-023-R016`
+  freshness-renewal continuity extended to Tier-2 content and `trusted-keys.json`
+  bytes; `SPEC-023-R017` the operator catalog-content lane (content-gate
+  eligibility, live-binary dry-load, shared lease, live evidence (a)–(e), and
+  rollback). Pricing (rate-card row) changes are excluded from the lane and
+  tracked in #1693. The lane never re-signs and signing keys never reside on the
+  coordinator host. AC-CAT-23..AC-CAT-27 pin the behavior. Serving-closure and
+  Tier-2 reload observability live in SPEC-008 v0.7.0 (`SPEC-008-R002`..`R004`).
+  `SPEC-023-R012` is not used here because open PR #1677 claims it.
+  Evidence (d) counts only post-SIGHUP `catalog_incompatible` rejections of
+  keys the pre-activation validation admitted; rejections of keys that were
+  already inadmissible are chronic diagnostics, not release failures.
 - **v0.14.3 (2026-09-23)** — Identity is not settlement for loopback
   runtimes (#1694). §3.7.4 and AC-CAT-7(iii) now state that a `gguf`
   artifact stays a full SPEC-010-R007 identity member (matching, intake,
@@ -992,6 +1015,207 @@ AC-CAT-19 asserts this concrete representation — field set, types, ordering, u
 
 Stage A is a weaker binding than Stage B **for the compatibility-set manifest only**. It is not weaker for the feed itself: §3.7.2 signature verification, §3.7.4 release binding, §3.7.5 primary-artifact consistency, and the §3.7.6 failure classes all apply in full at Stage A, and every artifact-derived capability still fails closed on any of them.
 
+#### 3.7.9 Catalog activation, retention, and the catalog-content lane (v0.15.0)
+
+§3.7.8 governs how a release is generated, bound, and recorded. This subsection
+governs how an already-signed, already-committed release becomes the live
+catalog on the coordinator host (`/opt/macprovider/autotune/current`), how the
+host retains older releases, and which operator lane may do it. Every writer
+named here (the coordinator deploy, the weekly freshness renewal, the host
+updater, and the catalog-content lane) is bound by the same rules. None of
+these rules signs anything: every lane activates bytes that were signed off-host,
+signing keys MUST NOT be present on the coordinator host, and no activation path
+MAY re-sign, restamp, or edit a feed on the host.
+
+**SPEC-023-R013 — Retained-window retention and rollback rule.** The
+coordinator host's `.previous-target` file is a retention and rollback window
+of exact signed release directories. It is NOT a serving-compatibility
+guarantee: whether an older release a provider advertises stays admissible
+across document rollover is `SPEC-023-R010`'s row-continuity rule, which this
+requirement neither implements nor replaces. The window MUST obey one rule:
+
+1. **Bound.** The window holds at most three entries in addition to the active
+   `current` target. Each entry is `releases/<single path segment>`.
+2. **Prepend outgoing.** When activation replaces `current` (the outgoing
+   release) with a different incoming release, the new window is the outgoing
+   release followed by the existing entries, in order, truncated to three.
+3. **No-op on same target.** When the incoming release equals the outgoing
+   release, the window is left byte-for-byte unchanged (a redeploy of the same
+   release consumes no slot).
+4. **Incoming never retained.** The incoming release never appears in its own
+   window; an existing entry equal to it is dropped.
+5. **Dedupe.** An entry appears at most once; the first occurrence wins.
+6. **Hardened atomic write with compare-and-swap.** The write opens the
+   directory without following symlinks and requires every ancestor to be
+   root-owned and not group/other-writable, refuses a non-regular or wrongly
+   owned existing file, writes an exclusive temp file with fixed owner, group,
+   and mode, fsyncs it, renames it atomically, and fsyncs the directory. The
+   write MUST refuse unless the live `current` target equals the value the
+   caller computed the window from (compare-and-swap on `current`). An empty
+   window removes the file.
+7. **One implementation.** Every writer (deploy, freshness renewal, the host
+   updater, the catalog-content lane) MUST compute and write the window with the
+   one shared implementation (`scripts/autotune_window.py`, shipped
+   sha-verified with each consumer); an inline writer is non-conforming.
+   Rollback restores the exact prior window bytes captured before the change.
+8. **Multi-line readers.** Every reader of `.previous-target` (the coordinator
+   loader, the host updater's snapshot reader, and the deploy's Tier-2
+   migration reader) MUST accept a multi-line window.
+
+Entries whose release id is tombstoned are skipped by the coordinator loader;
+the writer does not filter them, so the tombstone list keeps one authority.
+
+**SPEC-023-R014 — Runtime-only deploys do not churn or regress the catalog.**
+A coordinator runtime deploy carries a catalog release pinned by its tag. Before
+any host mutation the deploy MUST classify that pinned release against the live
+`current` release by content:
+
+- **equivalent** — every release file is equal once only renewal restamp fields
+  are stripped, and the live Tier-2 catalog does not expire earlier than the
+  tag's. The deploy MUST NOT activate the pinned release (no `current` swap, no
+  window change) and MUST verify the live release after the restart.
+- **descends** — the content differs, and the live content reconstructs a
+  release row of the tag's release ledger modulo renewal restamp fields
+  (including an uncommitted renewal id). The deploy reports the content change
+  and activates under `SPEC-023-R013` and `SPEC-023-R015`.
+- **regression** — the live content matches no row of the tag's ledger. The
+  deploy MUST abort before any mutation unless the operator supplies an explicit
+  override reason, which MUST be validated and appended as an audit record to
+  the host's catalog-window override log before activation proceeds.
+
+Activation MUST also refuse if `current` moved between the classification and
+the swap. A malformed classifier input or output fails the deploy closed.
+
+**SPEC-023-R015 — Activation coverage of advertised releases.** Before
+activating a release that changes `current`, the activating lane MUST compute
+the admissible set that would result (the incoming release, the
+`SPEC-023-R013` window it would write, and the same-version restamps the
+coordinator loader admits) and compare it with the
+`(catalog_release_id, catalog_candidate_sha256)` pairs that connected providers
+currently advertise in the coordinator's operator pool view (`/poolz`, read on
+host loopback with the operator credential, which never appears in argv). A pair
+not in the resulting admissible set is **uncovered**.
+
+- A catalog activation (deploy `descends`/`regression`, or the catalog-content
+  lane) MUST refuse before mutation when any pair is uncovered, or when coverage
+  cannot be computed, unless the operator supplies an explicit override reason
+  that is logged as for `SPEC-023-R014`. An unreachable or malformed `/poolz` is
+  a refusal, never a pass.
+- A freshness renewal MUST publish anyway, and MUST raise an operator-visible
+  alert and append a coverage-loss audit record when a pair becomes uncovered or
+  coverage is unknown. A renewal cannot keep its release id: the id is the
+  candidate feed `version`, and §3.7.8 permanently rejects a `release_id`
+  rebound to different bytes, so every renewal consumes a window slot. Blocking
+  the renewal would instead risk the fleet-wide 30-day feed expiry.
+
+Coverage is a point-in-time check over connected providers. A provider that is
+offline during activation and returns later on an older release is an accepted
+gap of this requirement; `SPEC-023-R010` is the durable fix.
+
+**SPEC-023-R016 — Freshness renewal stays freshness-only.** A freshness
+renewal (the scheduled restamp that re-signs dates) MUST refuse, before any
+host mutation, when the renewed release differs from the live release in
+content. Content is compared per file after stripping only the fields a
+renewal legitimately changes: for the candidate, demand, and rate-card feeds,
+`version` and `generated_at`; for the artifact feed, its release-binding fields
+and presence; for `tier2-catalog.json`, only `issued_at`, `expires_at`,
+`signature`, `catalog_id`, and `version` (so every Tier-2 model entry must be
+equal); and `trusted-keys.json` MUST be byte-equal. The check MUST run both
+before and under the host lock, using the same shipped, sha-verified
+implementation on both sides. Drift names the file and directs the operator to
+the catalog-content lane (`SPEC-023-R017`) or a full release.
+
+**SPEC-023-R017 — Catalog-content release lane.** A committed catalog release
+whose change is catalog content only MAY go live without a runtime or provider
+app release, through the operator-local catalog-content lane
+(`scripts/catalog-content-release.sh`), only when every rule below holds.
+
+1. **Eligibility (content gate).** An offline gate classifies the release
+   against live into exactly one lane and the lane proceeds only on
+   `catalog-content`. Any other verdict names the more restrictive lane the
+   change needs, most restrictive first:
+   - `invalid-release` — the release fails `verify-directory` or the serving
+     closure (`SPEC-008-R002`).
+   - `full-provider-app` — any change to release or feed `policy_version`,
+     schema versions, feed `source`, signer key ids (including the Tier-2
+     signature key), `trusted-keys.json` bytes, or whether the release is
+     artifact-bound.
+   - `pricing` — any rate-card row change (after stripping restamp fields).
+     Pricing corrections are out of scope for this lane and are tracked in
+     #1693; until then they use the runtime lane.
+   - `unknown-predecessor` — the live content is not reconstructible, modulo
+     renewal restamp, from a row of the release ledger.
+   - `unverified-commit` — the release is not byte-equal to the files at a full
+     40-hex commit that is an ancestor of `origin/main`, or that commit lacks
+     the release ledger or the serving-exclusion list. The predecessor ledger
+     and the exclusion list MUST be read from that reviewed commit, not from
+     the operator's working tree. Review of `phase3-binary/catalog/**` and
+     `phase3-binary/dist/static/**` is anchored by CODEOWNERS and branch
+     protection.
+   - `stale-or-future` — the candidate feed `generated_at` is older than 30
+     days or more than 10 minutes in the future.
+   - `freshness-or-noop` — no content change against live (use renewal, or do
+     nothing).
+2. **Live-binary dry-load.** Before activation the lane MUST prove the release
+   loads in the running coordinator binary, using that binary's offline
+   validator (`SPEC-008-R004`) with the host's live configuration and the
+   window the activation would write. Every retained entry MUST load. A
+   validator that is absent from the running binary makes the lane NO_GO until
+   a runtime release ships it.
+3. **Preflight.** `--preflight` MUST print exactly one GO or NO_GO verdict that
+   covers the content gate, the dry-load, `SPEC-023-R015` coverage, and a diff
+   of the live coordinator configuration against the last applied
+   configuration, and MUST mutate nothing. `--deploy` MUST re-run the same
+   checks under the lease before mutating.
+4. **Shared lease.** From activation through the evidence verdict and any
+   rollback, the lane MUST hold the same host lock set the coordinator deploy
+   and the host updater take (the updater lock and the coordinator-deploy lock),
+   so a renewal, deploy, or updater run is refused while it is held. The lease
+   has a maximum duration enforced by a watchdog, and the host-side lease
+   holder stops any still-running command at its hard deadline. Every
+   mutation and rollback runs inside the lock-holding process. Losing the
+   lease leaves state unknown: the lane MUST NOT roll back from another
+   session and MUST stop, naming the lease-lost runbook procedure. Every restore is a compare-and-swap on the expected live state.
+   Activation reuses the renewal's shared activation implementation
+   (`scripts/lib/autotune-activate.sh`), not a copy.
+5. **Required live evidence.** After the `current` swap and SIGHUP, the lane
+   MUST collect all of the following, and any failure triggers rollback:
+   - (a) the coordinator (not a CDN or cache) serves the release's feed bytes
+     and detached signatures exactly (four feeds, five when artifact-bound)
+     and reports the incoming release id;
+   - (b) a positive `autotune_feed_sighup_reload` success event carrying the
+     expected release version and the expected `tier2_catalog_id` and
+     `tier2_sha256` (`SPEC-008-R003`); any Tier-2, billing, or autotune
+     "reload rejected" event after the SIGHUP is a failure;
+   - (c) a canary provider is drained and restarted and passes the existing
+     deploy custody checks (except the installed-byte comparison), reporting
+     catalog source `coordinator` and the new
+     `(catalog_release_id, catalog_candidate_sha256)`; when the canary's
+     selected row hash changed, the canary applies the new row before restart;
+   - (d) no new `catalog_incompatible` rejection, after the SIGHUP, of a
+     `(catalog_release_id, catalog_candidate_sha256)` key that was in the
+     admitted set validated for this release and window before activation,
+     and no increase in catalog-unavailable providers over a 10-minute
+     observation window (raw routing-eligible counts are not the measure).
+     Rejections of keys already inadmissible before activation are logged as
+     chronic diagnostics and do not fail (d): the release did not cause them,
+     and failing on them would block every release while any stale provider
+     remains connected;
+   - (e) when the release makes a model newly buyer-serving, a strict-pinned
+     buyer request to that model succeeds and produces its settlement row.
+6. **Rollback.** Rollback restores `current` and the exact prior window with
+   compare-and-swap, still under the lease; restarts the canary onto the prior
+   release; and re-sends SIGHUP. If that reload is rejected the lane alerts and
+   performs a controlled coordinator restart; if that fails it stops and names
+   the runbook procedure. The failed release MAY be retained in the window only
+   when it passed integrity and evidence (a) and (b), the failure was not (d) or
+   (e), and `/poolz` shows live providers already advertising it. Rollback MUST
+   NOT evict a window entry that live providers advertise to make room.
+
+Every override, refusal, and rollback MUST leave an audit record naming the
+release ids and the reason. Nothing in this requirement relaxes §3.7.8
+release-id binding, `SPEC-023-R004` artifact rules, or `SPEC-023-R010`.
+
 ## 4. Formula (updated v0.12.0)
 
 **Score-A (shipped CLI, through v0.10.3):** unchanged:
@@ -1696,6 +1920,53 @@ more specific already-defined hard-close reason, and does not fall back to
 buyer-routable admission. A CLI baked-catalog hello for A is accepted by the same
 positive rule when row-continuity evidence proves equivalence and is reported as
 baked fallback / refresh recommended, not as hostile unknown catalog state.
+
+AC-CAT-23 (`SPEC-023-R013`, retained-window rule): With `current` = X and window
+`[A, B, C]`, activating Y writes `[X, A, B]`; activating X again leaves the file
+byte-for-byte unchanged; activating A writes `[X, B, C]` (incoming dropped,
+order kept); a duplicate entry is written once. A write whose expected `current`
+differs from the live one, a symlinked file, root, or ancestor, a group-writable
+ancestor, a wrongly owned file, a four-entry existing window, or a malformed
+entry is refused with no change. Output of the shared writer is accepted by the
+coordinator's previous-release loader. The host updater writes through the same
+rule and its rollback restores the exact prior multi-line window. No other
+`.previous-target` writer exists in deploy, renewal, or updater code.
+
+AC-CAT-24 (`SPEC-023-R014`, runtime-only deploy): A tag whose release equals
+live modulo renewal restamp is `equivalent` and the deploy leaves `current` and
+the window untouched; a tag whose Tier-2 expires later than live's is not
+`equivalent`; a live release whose content reconstructs a tag ledger row,
+including a renewed id not in the ledger, is `descends`; a live release outside
+the tag ledger, or a renewed live release with changed content, is `regression`
+and aborts before mutation unless an override reason is supplied and logged.
+Malformed inputs fail closed.
+
+AC-CAT-25 (`SPEC-023-R015`, activation coverage): A provider advertising a
+release that stays `current`, in the window, or a same-version restamp is
+covered; a provider on a release the activation drops, or on a known release id
+with a different candidate sha, is uncovered. An uncovered pair, a missing or
+malformed `/poolz`, or an unloadable window entry refuses a catalog activation
+unless an override is logged. A freshness renewal with the same uncovered pair
+publishes, raises a warning, and appends a `renewal_coverage_loss` record; a
+provider parked on one release is uncovered on the fourth weekly renewal.
+
+AC-CAT-26 (`SPEC-023-R016`, renewal continuity): A renewal whose only
+differences are the stripped restamp fields passes. A renewal that changes any
+Tier-2 model entry, or any byte of `trusted-keys.json`, is refused before
+mutation and names the file; the under-lock recheck on the host runs the same
+shipped implementation.
+
+AC-CAT-27 (`SPEC-023-R017`, catalog-content lane): A non-pricing content change
+committed on `origin/main` whose live predecessor is in the ledger is
+`catalog-content`. Each of: an unsigned change, a policy, signer, or keyring
+change, a rate-card row change, a stale or future candidate feed, an unknown
+predecessor, a serving-closure failure, a commit off `origin/main`, bytes
+differing from the commit, an extra uncommitted file, or a commit lacking the
+ledger or exclusion list yields its named lane and no activation. A release the
+running binary's validator rejects, including an unloadable retained entry, is
+NO_GO. A renewal or deploy attempted while the lane holds the lease is refused.
+Each evidence failure (a)–(e) and a rejected post-rollback SIGHUP drive the
+rollback path, and a failed release is retained only under rule 6.
 
 
 ## 12. oMLX-seeded provisional catalog gates
