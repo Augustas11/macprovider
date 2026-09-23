@@ -132,8 +132,14 @@ nothing for a provider admitted against another candidate-catalog digest. The
 heartbeat/hello verifier keeps the v1.6 primary-row path unchanged; a pair
 that is not the row's own is verified only by EXACT member equality for the
 session's admitted key, and the session then carries the member and the feed
-provenance. A verified member settles: the BYOM admission predicate, the
-route snapshot, and settlement carry the SPEC-047-R003 six values
+provenance. A verified member served by `mlx_cache` (a secondary
+`mlx_safetensors` quantization) settles. A GGUF member does not: every GGUF
+source is a loopback runtime, and SPEC-047-R003(iv) v0.1.10 / SPEC-023
+v0.14.3 bar loopback from `settlement_capable` until a later SPEC-047-R003
+amendment names a coordinator-recorded trust binding and a trusted usage
+source (#1694). A GGUF member reaches at most `catalog_priced`. For a member
+that settles, the BYOM admission predicate, the route snapshot, and
+settlement carry the SPEC-047-R003 six values
 (`artifact_feed_sha256`, `artifact_id`, `artifact_hash`,
 `artifact_hash_algorithm`, `artifact_feed_signer_key_id`,
 `artifact_candidate_catalog_sha256`) — all six or none, bound into the
@@ -324,11 +330,14 @@ endpoint supplies no bytes to hash.
    `source_ref.digest` MUST equal `"sha256:" + hash` exactly — same case, same
    digest. A mismatch binds two identities to one artifact and fails closed.
 
-4. A GGUF artifact is **never** a settlement identity in v0.10.x. It reaches at
-   most `catalog_matched`, `sandbox_probe_only`, and `network_visible_unpriced`.
-   Only the model key's `primary_artifact_id` (an `mlx_safetensors` entry whose
-   `hash` is the candidate row's `model_sha256`) may be priced or settled
-   (§3.7.4, §13 Q14).
+4. A GGUF artifact is an identity member (SPEC-010-R007) but **never** reaches
+   `settlement_capable` while the SPEC-047-R003(iv) v0.1.10 loopback
+   settlement bar holds: every GGUF source is a loopback runtime (SPEC-023
+   v0.14.3 §3.7.4, #1694). It reaches at most `catalog_priced`. Only
+   `mlx_safetensors` artifacts served by `mlx_cache` (the primary, or a
+   verified secondary) may settle. A catalog release that adds a `gguf` row
+   is safe to ship only because of this bar; do not ship one on a build
+   without it.
 
 ### Never rebind an `artifact_id`
 
