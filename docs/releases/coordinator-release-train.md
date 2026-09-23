@@ -61,7 +61,7 @@ Full decision tree: `docs/runbooks/catalog-release-decision-tree.md`.
 |---|---|
 | Coordinator/gateway code, config template, units, nginx, deploy scripts | **This train** (coordinator release) |
 | Catalog content only: model hash/row/Tier-2 correction, same policy/keys/signers | Catalog-content lane (`scripts/catalog-content-release.sh`), no coordinator release |
-| Rate-card rows (pricing) | This train, until #1693 lands |
+| Rate-card rows (pricing) | This train, until #1693 lands (in progress: after its enabling coordinator release, rows-only corrections move to the catalog-content lane; `usd_per_million_credits` / share / multiplier stay on this train) |
 | Weekly feed freshness | Automatic renewal (Wednesday); never a coordinator release |
 | `policy_version`, keyring, CLI payload | Full provider-app release (CLI train) |
 
@@ -115,6 +115,7 @@ the freshness lane.
 | Preserve served buyer success through transient receipt persistence pressure: bounded in-memory receipt retry, explicit pending coordinator authority, durable deadline closure, and gateway rechecks for held settlement. Requires a signed coordinator/gateway release and fresh Studio buyer soak before acceptance. | in progress | #1715 (#1680) |
 | Node operator status, safe context changes, model diagnostics | in progress | #1713 (#1689) |
 | Build 1 Lane A orchestrated PR | in progress | #1658 (#1642) |
+| Pricing corrections through the catalog-content lane (SPEC-005-R013, SPEC-023-R018, SPEC-006-R008 amended). Coordinator: request billing table and served signed rate card switch under one economics lock (release lock → economics lock → feed lock), prices resolved once before the billing write context; `--validate-autotune-release` gains `--expect-base-equivalent` and `--resolve-model-names` plus `rate_table_sha256` / `signed_rate_card_sha256` verdict fields; applied-config record gains `rate_table_sha256`, `signed_rate_card_sha256`, `autotune_release_id`, `billing_snapshot_id`. **Wholesale statements change**: each request is priced at the generation it was recorded under (uncapped aggregate math), so a model-month above 10M tokens is no longer zeroed — affected partner statements go **up**; a period with no billing snapshot now fails closed. Lane tooling that deploy ships: `scripts/catalog-release.py` (splice / extract / effective-price diff / gate), new `acknowledged-pricing-moves.json`; still to land in the same PR: journal + pre-start recovery + post-start closer units, the one-writer guard on every live-config writer, lane preflight/evidence/rollback. **Needs a full deploy** (new units, recovery helper, verifier bundle), not a binary swap; this is the one enabling release — afterwards rows-only pricing needs no coordinator release. Plan (approved 0C/0H/0M): [#1693 comment](https://github.com/Augustas11/macprovider/issues/1693#issuecomment-5800624020) | in progress (branch `feat/1693-pricing-content-lane`, PR not yet open) | #1693 |
 
 ## Open Pearl actions (not new code)
 
