@@ -1,5 +1,10 @@
 # macprovider-verify v1.1.0
 
+**Deprecated.** Do not use this release to verify current buyer receipts.
+
+- Every live v0.3 receipt (`model_hash` string or null) fails before the signature check: `input format error: tuple field has wrong type: json: unknown field "model_hash"`, exit 65. `--pubkey` does not avoid it. Upgrade to `verify-v1.1.1`.
+- The compiled-in key-lookup host is `coordinator.streamvc.live`, which is not Malibu infrastructure. Until you upgrade, do not use default `--provider-id` lookup. Pass `--pubkey`, or `--coordinator https://coordinator.malibu.tech`. The same host warning applies to `verify-v1.0.0`. v1.0.x still correctly rejects v0.3 receipts as forward-incompatible.
+
 **SPEC-015 v0.3.3 model-hash binding** — catalog-based verification of the loaded MLX container against an operator-signed catalog.
 
 ## What's new
@@ -90,12 +95,13 @@ Per-step transcripts at `specs/SPEC-015-v0-3-IMPL-STEP_{1..6}-audit.md`; bundle 
 
 | macprovider-verify | SPEC-015 receipt versions verified |
 |---|---|
-| 1.0.x | 0.2.0 through 0.2.4 |
-| 1.1.x | 0.2.0 through 0.3.3 (catalog-based model-hash binding per §M) |
+| 1.0.x | 0.2.0 through 0.2.4. Default key host is `coordinator.streamvc.live`. |
+| 1.1.0 | Rejects v0.3 tuples that contain `model_hash`. Default key host is `coordinator.streamvc.live`. |
+| 1.1.1 | 0.2.0 through 0.3.3. Default key host is `coordinator.malibu.tech`. |
 
 ## Operator rollout ordering
 
-Per §M.1.2 forward-incompat: **release v1.1.0 to buyers BEFORE rolling out v0.3-emitting providers.** Existing v1.0.x verifiers report v0.3 receipts as `invalid`. Operator runbook at `audits/2026-06-24/SPEC_015_V03_OPERATOR_RUNBOOK.md`.
+v1.1.0 was supposed to ship before v0.3-emitting providers. It does not verify those receipts. Buyers need v1.1.1. v1.0.x still reports v0.3 receipts as `invalid` per §M.1.2. Operator runbook at `audits/2026-06-24/SPEC_015_V03_OPERATOR_RUNBOOK.md`.
 
 ## Install
 

@@ -569,6 +569,12 @@ func openTempCache(t *testing.T) *cache.Cache {
 	return c
 }
 
+func TestDefaultCoordinatorHostIsMalibu(t *testing.T) {
+	if defaultCoordinatorHost != "coordinator.malibu.tech" {
+		t.Fatalf("defaultCoordinatorHost = %q, want coordinator.malibu.tech", defaultCoordinatorHost)
+	}
+}
+
 func writeCacheEntry(t *testing.T, c *cache.Cache, coordinatorHost string, key []byte, fetchedAt time.Time) {
 	t.Helper()
 	line := map[string]any{
@@ -781,12 +787,12 @@ func writeFakeCAPEM(t *testing.T) string {
 		t.Fatal(err)
 	}
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "test.macprovider.local"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		IsCA:         true,
-		KeyUsage:     x509.KeyUsageCertSign,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test.macprovider.local"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
 		BasicConstraintsValid: true,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)

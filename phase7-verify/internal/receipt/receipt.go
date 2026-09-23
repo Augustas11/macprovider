@@ -31,6 +31,13 @@ type Tuple struct {
 	// value identifies forward-compat unknown version.
 	ReceiptVersion string `json:"receipt_version,omitempty"`
 
+	// ReceiptVersionPresent is true when the object contained a
+	// receipt_version key, including the empty string. Legacy
+	// v0.1/v0.2 receipts leave it false. json:"-" because an empty
+	// string would otherwise be indistinguishable from absence, and
+	// §M.1.1 says only absence is legacy.
+	ReceiptVersionPresent bool `json:"-"`
+
 	// ModelHash is the §M.0 raw 64-char lowercase hex string when
 	// the v0.3 provider opted in to warm-swap hash reporting, OR
 	// the empty string when the receipt carries `model_hash: null`
@@ -216,15 +223,24 @@ func parseTuple(raw []byte) (Tuple, error) {
 	//     key set would otherwise be rejected as
 	//     `extra_field`/`missing_field`).
 	versionRaw, hasReceiptVersion := fields["receipt_version"]
-	var unknownReceiptVersion string
 	if hasReceiptVersion {
-		var rv string
-		if err := json.Unmarshal(versionRaw, &rv); err == nil && rv != "" && rv != "3" {
-			unknownReceiptVersion = rv
+		// §M.0: receipt_version is a JSON string. null unmarshals
+		// into a Go string as "" with no error, which §M.1.1 would
+		// then treat as a legacy receipt and skip the catalog check.
+		trimmed := bytes.TrimSpace(versionRaw)
+		if len(trimmed) == 0 || trimmed[0] != '"' {
+			return Tuple{}, fmt.Errorf("%w: receipt_version", ErrTupleWrongType)
 		}
-	}
-	if unknownReceiptVersion != "" {
-		return Tuple{ReceiptVersion: unknownReceiptVersion}, nil
+		var rv string
+		if err := json.Unmarshal(trimmed, &rv); err != nil {
+			return Tuple{}, fmt.Errorf("%w: receipt_version: %v", ErrTupleWrongType, err)
+		}
+		// §M.1.4: present and not exactly "3", including "", is an
+		// unknown version. Return before shape checks and before
+		// signature verification. Do not classify it as legacy.
+		if rv != "3" {
+			return Tuple{ReceiptVersion: rv, ReceiptVersionPresent: true}, nil
+		}
 	}
 	var requiredKeys []string
 	if hasReceiptVersion {
@@ -249,8 +265,22 @@ func parseTuple(raw []byte) (Tuple, error) {
 		}
 	}
 
+	// model_hash is a JSON string or null (§M.0). Tuple.ModelHash is
+	// json:"-" so the raw field map below can tell null from a string.
+	// Struct decode must not see that key: DisallowUnknownFields
+	// rejects it, and every live v0.3 receipt fails before the
+	// signature check (issue #1696). This copy is only for field
+	// typing. TupleRaw stays the signed header bytes.
+	decodeRaw := raw
+	if hasReceiptVersion {
+		var stripErr error
+		decodeRaw, stripErr = jsonObjectWithoutKey(fields, "model_hash")
+		if stripErr != nil {
+			return Tuple{}, fmt.Errorf("%w: %v", ErrTupleJSON, stripErr)
+		}
+	}
 	var tuple Tuple
-	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder := json.NewDecoder(bytes.NewReader(decodeRaw))
 	decoder.DisallowUnknownFields()
 	decoder.UseNumber()
 	if err := decoder.Decode(&tuple); err != nil {
@@ -261,6 +291,7 @@ func parseTuple(raw []byte) (Tuple, error) {
 		return Tuple{}, ErrTupleJSON
 	}
 	if hasReceiptVersion {
+		tuple.ReceiptVersionPresent = true
 		// SPEC-015 §M.0 — model_hash MUST be string (64 hex) OR
 		// JSON null literal. Detect at raw-field level so we
 		// distinguish `null` from `""`.
@@ -285,6 +316,19 @@ func parseTuple(raw []byte) (Tuple, error) {
 		return Tuple{}, err
 	}
 	return tuple, nil
+}
+
+// jsonObjectWithoutKey rebuilds a JSON object from already-parsed
+// raw field tokens, dropping key. Tokens are not re-encoded.
+func jsonObjectWithoutKey(fields map[string]json.RawMessage, key string) ([]byte, error) {
+	kept := make(map[string]json.RawMessage, len(fields))
+	for k, v := range fields {
+		if k == key {
+			continue
+		}
+		kept[k] = append(json.RawMessage(nil), v...)
+	}
+	return json.Marshal(kept)
 }
 
 func decodeTopLevelObject(raw []byte) (map[string]json.RawMessage, error) {

@@ -39,11 +39,11 @@ func TestConstants(t *testing.T) {
 // AND the constants in version.go together when cutting a new release;
 // the pin guards against accidental version drift during a release PR.
 //
-// Current pin: v1.1.0 / SPEC-015 v0.3.3 (Entry 85 ship). v1.0.0 was
-// the previous floor (Step 10 final acceptance, SPEC v0.2.4).
+// Current pin: v1.1.1 / SPEC-015 v0.3.3. v1.1.0 rejected live v0.3
+// tuples that contain model_hash. v1.0.0 was the v0.2.4 floor.
 func TestReleaseConstants(t *testing.T) {
-	if BinaryVersion != "1.1.0" {
-		t.Fatalf("BinaryVersion = %q, want %q (v0.3 IMPL ship pin)", BinaryVersion, "1.1.0")
+	if BinaryVersion != "1.1.1" {
+		t.Fatalf("BinaryVersion = %q, want %q (v0.3 model_hash parse fix)", BinaryVersion, "1.1.1")
 	}
 	if MaxSPECVersion != "0.3.3" {
 		t.Fatalf("MaxSPECVersion = %q, want %q (matches LOCKED SPEC-015 v0.3.3)", MaxSPECVersion, "0.3.3")

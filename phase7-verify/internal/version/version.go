@@ -1,13 +1,14 @@
 // Package version centralizes the verifier binary and SPEC compatibility versions.
 //
-// Updated to BinaryVersion 1.1.0 per SPEC-015 v0.3 IMPL bundle ship
-// (see beta/DECISION_CRITERIA.md Entry 85). v1.1.x ADDS v0.3.3 receipt
-// verification on top of the v1.0.x v0.1/v0.2 compatibility floor —
-// the §M.1.2 forward-incompat guarantee still holds (locked v0.2.4
-// verifiers report v0.3 receipts as `invalid`).
+// BinaryVersion 1.1.1 accepts live SPEC-015 v0.3 receipts whose
+// model_hash is a string or JSON null. 1.1.0 rejected those tuples
+// before signature verification. MaxSPECVersion stays 0.3.3: a
+// receipt_version other than "3", including settlement "4", stays
+// inconclusive (unknown_receipt_version). The compiled-in key-lookup
+// host is coordinator.malibu.tech.
 package version
 
 const (
-	BinaryVersion  = "1.1.0"
+	BinaryVersion  = "1.1.1"
 	MaxSPECVersion = "0.3.3"
 )

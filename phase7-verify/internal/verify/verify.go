@@ -140,16 +140,16 @@ type Details struct {
 	// reason-specific details contract. Empty strings are omitted
 	// by the CLI JSON renderer to avoid emitting noise on
 	// non-v0.3 reasons.
-	Expected       string `json:"expected,omitempty"`         // model_hash_mismatch
-	Actual         string `json:"actual,omitempty"`           // model_hash_mismatch
-	PolicyFlag     string `json:"policy_flag,omitempty"`      // model_hash_required
-	ModelID        string `json:"model_id,omitempty"`         // model_id_not_in_catalog
-	CatalogID      string `json:"catalog_id,omitempty"`       // catalog_expired
-	ExpiresAt      string `json:"expires_at,omitempty"`       // catalog_expired (RFC3339)
-	ReceiptVersion string `json:"receipt_version,omitempty"`  // unknown_receipt_version
-	Cause          string `json:"cause,omitempty"`            // catalog_format_invalid / catalog_signature_invalid
-	URL            string `json:"url,omitempty"`              // catalog_unreachable
-	Alg            string `json:"alg,omitempty"`              // catalog_signature_invalid (observed alg)
+	Expected       string `json:"expected,omitempty"`        // model_hash_mismatch
+	Actual         string `json:"actual,omitempty"`          // model_hash_mismatch
+	PolicyFlag     string `json:"policy_flag,omitempty"`     // model_hash_required
+	ModelID        string `json:"model_id,omitempty"`        // model_id_not_in_catalog
+	CatalogID      string `json:"catalog_id,omitempty"`      // catalog_expired
+	ExpiresAt      string `json:"expires_at,omitempty"`      // catalog_expired (RFC3339)
+	ReceiptVersion string `json:"receipt_version,omitempty"` // unknown_receipt_version
+	Cause          string `json:"cause,omitempty"`           // catalog_format_invalid / catalog_signature_invalid
+	URL            string `json:"url,omitempty"`             // catalog_unreachable
+	Alg            string `json:"alg,omitempty"`             // catalog_signature_invalid (observed alg)
 }
 
 // Warning re-exports resolver.Warning shape for symmetry; verify adds
@@ -253,7 +253,10 @@ func Verify(input VerifyInput, opts VerifyOpts) (Result, error) {
 	// unknown receipt_version MUST NOT canonicalize / signature-check.
 	// Report inconclusive: unknown_receipt_version, exit code 2,
 	// `details.receipt_version` populated.
-	if rv := parsed.Tuple.ReceiptVersion; rv != "" && rv != "3" {
+	// Presence matters: receipt_version:"" is not a legacy receipt.
+	// Only an absent field is v0.1/v0.2 (§M.1.1). Any other present
+	// value, including "", is unknown (§M.1.4).
+	if rv := parsed.Tuple.ReceiptVersion; rv != "3" && (parsed.Tuple.ReceiptVersionPresent || rv != "") {
 		f := (*bool)(nil)
 		return Result{
 			Result:            resultInconclusive,

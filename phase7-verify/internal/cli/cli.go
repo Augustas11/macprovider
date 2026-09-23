@@ -55,11 +55,11 @@ type options struct {
 	coordinator string
 	explain     bool
 	// SPEC-015 v0.3 §M.3.1 catalog flags.
-	catalog           string // path to local signed catalog
-	catalogURL        string // remote catalog URL
-	catalogPubkey     string // base64.RawURLEncoding catalog pubkey
-	catalogPubkeyURL  string // remote pubkey URL
-	requireModelHash  bool   // §M.3.1.2 fail-closed on null model_hash
+	catalog          string // path to local signed catalog
+	catalogURL       string // remote catalog URL
+	catalogPubkey    string // base64.RawURLEncoding catalog pubkey
+	catalogPubkeyURL string // remote pubkey URL
+	requireModelHash bool   // §M.3.1.2 fail-closed on null model_hash
 }
 
 type runConfig struct {
@@ -240,12 +240,24 @@ func optionsToVerifyArgs(opts options, stdin io.Reader, getenv func(string) stri
 		return verify.VerifyInput{}, verify.VerifyOpts{}, &cliUsageError{err: err}
 	}
 	coordinatorHost := opts.coordinator
-	resolvedProviderID, resolutionErr, err := resolveProviderID(opts.providerID, bundleProviderID, input.Header, coordinatorHost, c)
-	if err != nil {
-		return verify.VerifyInput{}, verify.VerifyOpts{}, err
-	}
-	if resolvedProviderID == "" && len(pubkey) == 0 {
-		return verify.VerifyInput{}, verify.VerifyOpts{}, &cliUsageError{err: missingProviderIDError(resolutionErr)}
+	// Unknown receipt_version is a stub with an empty provider_pubkey.
+	// Inferring a provider id from that stub exits 65 before §M.1.4
+	// can return inconclusive. Known receipts still use the cache
+	// single-match path, including when --pubkey is set and
+	// --provider-id is not.
+	headerParsed, headerErr := receipt.Parse(input.Header)
+	unknownVersion := headerErr == nil && headerParsed.Tuple.ReceiptVersionPresent && headerParsed.Tuple.ReceiptVersion != "3"
+	var resolvedProviderID string
+	var resolutionErr error
+	if !unknownVersion {
+		var resolveErr error
+		resolvedProviderID, resolutionErr, resolveErr = resolveProviderID(opts.providerID, bundleProviderID, input.Header, coordinatorHost, c)
+		if resolveErr != nil {
+			return verify.VerifyInput{}, verify.VerifyOpts{}, resolveErr
+		}
+		if resolvedProviderID == "" && len(pubkey) == 0 {
+			return verify.VerifyInput{}, verify.VerifyOpts{}, &cliUsageError{err: missingProviderIDError(resolutionErr)}
+		}
 	}
 	input.ProviderID = resolvedProviderID
 
