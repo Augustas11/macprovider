@@ -691,6 +691,7 @@ actor InferenceRelay {
                     modelHashSource: modelHashSource,
                     settlementMetadata: settlementMetadata,
                     runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
+                    relayBlindSuppressed: relayBlindClaim != nil,
                     terminalState: "buyer_cancel",
                     terminalStateTSUnixMS: terminalStateTSUnixMS
                 )
@@ -735,6 +736,7 @@ actor InferenceRelay {
             modelHashSource: modelHashSource,
             settlementMetadata: settlementMetadata,
             runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
+            relayBlindSuppressed: relayBlindClaim != nil,
             terminalStateTSUnixMS: terminalStateTSUnixMS
         )
         if state.markTerminalSent() {
@@ -772,10 +774,23 @@ actor InferenceRelay {
         modelHashSource: ReceiptModelHashSource,
         settlementMetadata: SettlementReceiptMetadata? = nil,
         runtimeSettlementEligible: Bool,
+        relayBlindSuppressed: Bool,
         terminalState: String = "normal_done",
         terminalStateTSUnixMS: Int64? = nil
     ) -> String? {
-        guard let receiptBuilder, let providerID, !providerID.isEmpty else {
+        // SPEC-015 v0.4.7: relay-blind execution evidence is not a SPEC-015
+        // receipt, so there is no receipt omission to audit.
+        if relayBlindSuppressed {
+            return nil
+        }
+        // Mirror RouterHandler.receiptHeaderResult so every relay request
+        // that yields no receipt leaves exactly one receipt_omitted row.
+        guard let providerID, !providerID.isEmpty else {
+            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .noKeypair)
+            return nil
+        }
+        guard let receiptBuilder else {
+            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .preV16Binary)
             return nil
         }
         // #1695: eligibility is explicit. A runtime that is not settlement
@@ -842,6 +857,9 @@ actor InferenceRelay {
                     modelHash: resolvedModelHash
                 )
             )
+        } catch ReceiptBuilder.Error.missingCurrentReceiptKey {
+            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .noKeypair)
+            return nil
         } catch {
             ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .constructionFailed)
             return nil
@@ -1024,6 +1042,7 @@ actor InferenceRelay {
                         modelHashSource: modelHashSource,
                         settlementMetadata: settlementMetadata,
                         runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
+                        relayBlindSuppressed: relayBlindClaim != nil,
                         terminalState: "buyer_cancel",
                         terminalStateTSUnixMS: terminalStateTSUnixMS
                     )
@@ -1112,6 +1131,7 @@ actor InferenceRelay {
                     modelHashSource: modelHashSource,
                     settlementMetadata: settlementMetadata,
                     runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
+                    relayBlindSuppressed: relayBlindClaim != nil,
                     terminalStateTSUnixMS: terminalStateTSUnixMS
                 )
                 if let receiptHeader {

@@ -9,7 +9,8 @@
   that declares itself not settlement eligible (e.g. the SPEC-046
   `ollama_loopback` runtime, test fixtures) MUST NOT sign any receipt:
   success, streaming trailer, or null-usage error. This holds whatever
-  settlement metadata the coordinator attaches (§6.4 case 7).
+  settlement metadata the coordinator attaches (§6.4 case 7, AC-12a). §7.6,
+  the §12 failure table and AC-12 are qualified to match.
 - `receipt_omitted` gains `runtime_not_settlement_eligible`. This version
   also records the reasons the provider already emitted but the spec never
   listed: `construction_failed`, `write_failed`, `non_settling_replay` (§11).
@@ -1854,7 +1855,8 @@ When the provider returns a SPEC-001 null-usage error
   observationally useful for the buyer).
 - `unix_ts` is set normally.
 
-The receipt is emitted. This is deliberate: the buyer paying zero
+The receipt is emitted, provided the serving runtime is settlement
+eligible (v0.4.8, §6.4 case 7). This is deliberate: the buyer paying zero
 under SPEC-005 X-1 still gets a signed acknowledgement that the
 provider was reached and produced an error response. This closes a
 SPEC-006 v0.8.2 ambiguity: the v0.8.2 X-1 row debited the buyer
@@ -4474,7 +4476,8 @@ All historical rows below describe **non-streaming**
 | Normal non-streaming completion | yes (header) | populated | `stop` \| `length` \| `tool_calls` \| `content_filter` | reported |
 | Streaming request (any outcome) | no (v0.1.x out of scope; v0.2+ design pending) | absent | n/a | n/a |
 | Buyer HTTP disconnect mid-response on non-streaming | no | absent | n/a | n/a (provider has no full response to commit to and no buyer to deliver a receipt to) |
-| Provider returns SPEC-001 null-usage error | yes | populated | `error` | `0` |
+| Provider returns SPEC-001 null-usage error | yes, when the serving runtime is settlement eligible (v0.4.8 §6.4 case 7) | populated | `error` | `0` |
+| Serving runtime not settlement eligible (v0.4.8, any outcome) | no | absent | n/a | n/a |
 | Pre-v1.6 binary | no | absent | n/a | n/a |
 | Model swap drain violation (defensive) | no, 500 returned | absent | n/a | n/a |
 | Gateway/coordinator internal failure (provider never reached) | no | absent | n/a | n/a |
@@ -4603,11 +4606,22 @@ signing a receipt with the old key up to ~60 s before the
 reconnect-based rotation was accepted by the coordinator).
 
 **AC-12.** A SPEC-001 null-usage error response (e.g.
-`error_model_not_loaded`) on a v1.6 provider carries an
+`error_model_not_loaded`) on a v1.6 provider whose serving runtime is
+settlement eligible carries an
 `X-MacProvider-Receipt` header with `tokens_out: 0`,
 `output_hash` equal to the sha256 of the canonical output object
 `{"content":"","tool_calls":null,"finish_reason":"error"}`, and
 verifies cleanly against the provider pubkey.
+
+**AC-12a (v0.4.8, #1695).** When the serving runtime does not declare
+settlement eligibility, the provider signs no receipt on any path: HTTP
+success header, HTTP streaming trailer, HTTP null-usage error, or relay
+`inference_response_end` (complete, stream, or buyer cancel). This holds
+even when the request carries matching v0.4 settlement metadata. Each such
+request emits exactly one `receipt_omitted` row with reason
+`runtime_not_settlement_eligible`, which takes precedence over
+`non_settling_replay`. Rebuilding a completion MUST preserve its settlement
+disposition. Native catalog serving remains receipt eligible.
 
 **AC-13.** A request that the gateway rejects before reaching any
 provider (auth failure, quota exhausted, kill switch on) does NOT
