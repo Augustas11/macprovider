@@ -400,6 +400,7 @@ private actor DisconnectProbeRuntime: ModelRuntimeServing {
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
+    nonisolated var isSettlementReceiptEligible: Bool { true }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func unregisterInFlight(_ id: Int) {}
 
@@ -477,7 +478,7 @@ private actor DisconnectProbeRuntime: ModelRuntimeServing {
             }
             try await Task.sleep(nanoseconds: 5_000_000)
         }
-        return CompletionResult(content: "never", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+        return CompletionResult(content: "never", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
     }
 }
 
