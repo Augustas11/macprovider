@@ -31,6 +31,9 @@
 # Every lease-mode Pearl mutation runs through the lease runner (the fake ssh
 # rewrites the scripts the runner decodes, like any other remote command).
 set -euo pipefail
+# GNU mv has -T (no-target-directory); BSD/macOS mv lacks it, where -h
+# (do not follow a symlinked target) is the equivalent for the swap.
+if mv --version >/dev/null 2>&1; then export AA_MV_TF="mv -Tf"; else export AA_MV_TF="mv -hf"; fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 T="$(mktemp -d)"
@@ -102,7 +105,7 @@ exec sed -E \
       -e "s#127\\.0\\.0\\.1:8444#127.0.0.1:$PROVIDER_PORT#g" \
       -e "s#\"\\\$window\" (plan|apply|restore|coverage) #\"\$window\" \\1 --required-uid $CCR_UID --group $CCR_GID #g" \
       -e "s#chown (-R )?root:[a-z]+#:#g" \
-      -e "s#mv -Tf#mv -hf#g" \
+      -e "s#mv -Tf#$AA_MV_TF#g" \
       -e "s#/tmp/macprovider-activation-lease\\.#$CCR_FAKE/tmp/macprovider-activation-lease.#g" \
       -e "s#base64 -d >\"\\\$work/cmd\"#base64 -d | pearl-rw >\"\\\$work/cmd\"#g" \
       -e "s#\\| base64 -d\\)\"; fi#| base64 -d | pearl-rw)\"; fi#g" \
@@ -731,7 +734,7 @@ run deploy
 OVERRIDE_LOG="$CCR_FAKE/var/lib/macprovider/catalog-window-overrides.jsonl"
 [ -f "$OVERRIDE_LOG" ] || fail "deploy with override must append to catalog-window-overrides.jsonl"
 [ "$(wc -l <"$OVERRIDE_LOG" | tr -d ' ')" = 1 ] || fail "override log must be exactly one line: $(cat "$OVERRIDE_LOG")"
-override_mode="$(stat -f '%Lp' "$OVERRIDE_LOG" 2>/dev/null || stat -c '%a' "$OVERRIDE_LOG")"
+override_mode="$(stat -c '%a' "$OVERRIDE_LOG" 2>/dev/null || stat -f '%Lp' "$OVERRIDE_LOG")"
 [ "$override_mode" = 600 ] || fail "override log must be 0600, got $override_mode"
 python3 - "$OVERRIDE_LOG" <<'PY' || fail "override record shape: $(cat "$OVERRIDE_LOG")"
 import json, sys

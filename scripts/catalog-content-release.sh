@@ -124,7 +124,7 @@ SSH_OPTS=(-o ConnectTimeout=15 -o BatchMode=yes)
 if [ -n "${PEARL_SSH_IDENTITY:-}" ]; then
   case "$PEARL_SSH_IDENTITY" in *[!A-Za-z0-9._/+=@-]*) fatal "unsafe PEARL_SSH_IDENTITY path" ;; esac
   [ -f "$PEARL_SSH_IDENTITY" ] || fatal "PEARL_SSH_IDENTITY is not a file"
-  identity_mode="$(stat -f '%A' "$PEARL_SSH_IDENTITY" 2>/dev/null || stat -c '%a' "$PEARL_SSH_IDENTITY" 2>/dev/null || echo '')"
+  identity_mode="$(stat -c '%a' "$PEARL_SSH_IDENTITY" 2>/dev/null || stat -f '%A' "$PEARL_SSH_IDENTITY" 2>/dev/null || echo '')"
   case "$identity_mode" in 600|400) ;; *) fatal "PEARL_SSH_IDENTITY has permissions $identity_mode; expected 0600 or 0400" ;; esac
   PEARL_SSH_KNOWN_HOSTS="${PEARL_SSH_KNOWN_HOSTS:-$SCRIPT_DIR/dist/malibu-download-known_hosts}"
   case "$PEARL_SSH_KNOWN_HOSTS" in ""|*[!A-Za-z0-9._/+=@-]*) fatal "unsafe PEARL_SSH_KNOWN_HOSTS path" ;; esac

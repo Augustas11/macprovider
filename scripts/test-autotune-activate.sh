@@ -64,7 +64,7 @@ exec sed -e "s#/opt/macprovider/#$AA_FAKE_ROOT/opt/macprovider/#g" \
     -e "s#base64 -d >\"\\\$work/cmd\"#base64 -d | pearl-rw >\"\\\$work/cmd\"#g" \
     -e "s#| base64 -d)\"; fi#| base64 -d | pearl-rw)\"; fi#g" \
     -e "s#/var/lib/macprovider-pearl-updater/#$AA_FAKE_ROOT/var/lib/macprovider-pearl-updater/#g" \
-    -e "s#mv -Tf#mv -hf#g" \
+    -e "s#mv -Tf#$AA_MV_TF#g" \
     -e "s#st_uid != 0#st_uid != $AA_FAKE_UID#g" \
     -e "s#st_gid != 0#st_gid != $AA_FAKE_GID#g"
 RW
@@ -99,6 +99,9 @@ printf 'import sys\nsys.exit(1)\n' >"$T/verifier-fails.py"
 
 export PATH="$T/bin:$PATH"
 export AA_FAKE_ROOT="$T/fake"
+# GNU mv has -T (no-target-directory); BSD/macOS mv lacks it, where -h
+# (do not follow a symlinked target) is the equivalent for the swap.
+if mv --version >/dev/null 2>&1; then export AA_MV_TF="mv -Tf"; else export AA_MV_TF="mv -hf"; fi
 export AA_FAKE_UID; AA_FAKE_UID="$(id -u)"
 export AA_FAKE_GID; AA_FAKE_GID="$(python3 -c 'import os,sys;print(os.stat(sys.argv[1]).st_gid)' "$T/fake")"
 
