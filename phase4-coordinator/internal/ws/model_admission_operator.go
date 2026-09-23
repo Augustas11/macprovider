@@ -974,7 +974,8 @@ var ErrModelAdmissionRouteDrift = errors.New("model admission route snapshot exp
 // nothing is dispatched or settled under it. Appends stay serialized by the
 // provider section, which the route path never takes.
 func (s *Server) CompareAndInsertModelAdmissionRouteSnapshot(ctx context.Context, expect ModelAdmissionRouteExpectation, insert func() error) error {
-	if s.modelAdmissions == nil || s.pool == nil {
+	routeReads := s.modelAdmissionRouteReadStore()
+	if routeReads == nil || s.pool == nil {
 		return ErrModelAdmissionRouteStale
 	}
 	if strings.TrimSpace(expect.CandidateID) == "" {
@@ -992,7 +993,7 @@ func (s *Server) CompareAndInsertModelAdmissionRouteSnapshot(ctx context.Context
 		return ErrModelAdmissionRouteStale
 	}
 	headOK := func() (bool, error) {
-		head, found, err := s.modelAdmissions.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
+		head, found, err := routeReads.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
 		if err != nil {
 			return false, err
 		}
@@ -1040,8 +1041,19 @@ func (s *Server) CompareAndInsertModelAdmissionRouteSnapshot(ctx context.Context
 	return nil
 }
 
+func (s *Server) modelAdmissionRouteReadStore() ModelAdmissionStore {
+	if s == nil {
+		return nil
+	}
+	if s.modelAdmissionRouteReads != nil {
+		return s.modelAdmissionRouteReads
+	}
+	return s.modelAdmissions
+}
+
 func (s *Server) compareAndInsertLegacyModelAdmissionRouteSnapshot(ctx context.Context, expect ModelAdmissionRouteExpectation, insert func() error) error {
-	generationStore, ok := s.modelAdmissions.(interface {
+	routeReads := s.modelAdmissionRouteReadStore()
+	generationStore, ok := routeReads.(interface {
 		ModelAdmissionProviderRouteGeneration(context.Context, string) (uint64, error)
 	})
 	if !ok {

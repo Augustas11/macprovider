@@ -189,6 +189,7 @@ type Server struct {
 	capacityOverClaimMetrics       CapacityOverClaimMetrics
 	connectionEvents               ConnectionEventStore
 	modelAdmissions                ModelAdmissionStore
+	modelAdmissionRouteReads       ModelAdmissionStore
 	modelAdmissionIntakeState
 	modelAdmissionSubmitDisabled bool
 	modelAdmissionAttemptMu      sync.Mutex
@@ -1006,6 +1007,14 @@ func WithModelAdmissionStore(store ModelAdmissionStore) Option {
 	return func(s *Server) {
 		if store != nil {
 			s.modelAdmissions = store
+		}
+	}
+}
+
+func WithModelAdmissionRouteReadStore(store ModelAdmissionStore) Option {
+	return func(s *Server) {
+		if store != nil {
+			s.modelAdmissionRouteReads = store
 		}
 	}
 }
