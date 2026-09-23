@@ -1,0 +1,343 @@
+#!/usr/bin/env python3
+"""Hermetic tests for `catalog-release.py content-gate` and `check-tier2-binding
+--require-serving` (#1688 C2/C3).
+
+Fixtures start from the committed release (phase3-binary/catalog/autotune plus
+phase3-binary/dist/static) and mutate copies. A mutated release no longer carries
+valid signatures, so rule tests replace `verify_directory` with a pass-through;
+the real verify-directory path is exercised by the identical-release and
+invalid-release tests.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timedelta
+from pathlib import Path
+from unittest import mock
+
+from scripts.tests.test_catalog_compare_live import (
+    CANONICAL,
+    LEDGER,
+    SCRIPT,
+    STATIC,
+    STATIC_FILES,
+    assemble,
+    change_content,
+    cr,
+    edit_json,
+)
+
+MODEL_KEY = "qwen3-8b"
+NEW_HASH = "ab" * 32
+GENERATED_AT = datetime.fromisoformat(
+    json.loads((CANONICAL / "autotune-candidates.json").read_bytes())["generated_at"].replace("Z", "+00:00")
+)
+NOW = GENERATED_AT + timedelta(days=1)
+NO_EXCLUSIONS = json.dumps({"schema_version": cr.NOT_BUYER_SERVING_SCHEMA, "models": []}).encode()
+
+
+def model_id(directory: Path, key: str = MODEL_KEY) -> str:
+    return json.loads((directory / "autotune-candidates.json").read_bytes())["rows"][key]["model_id"]
+
+
+def correct_hash(directory: Path, key: str = MODEL_KEY, tier2_hash: str = NEW_HASH) -> None:
+    """Non-pricing content correction: a candidate model hash plus its matching Tier-2 pin."""
+    served = model_id(directory, key)
+    edit_json(directory / "autotune-candidates.json", lambda o: o["rows"][key].update(model_sha256=NEW_HASH))
+
+    def tier2(o: dict) -> None:
+        for entry in o["models"]:
+            if entry["model_id"].lower() == served.lower():
+                entry["sha256"] = tier2_hash
+
+    edit_json(directory / "tier2-catalog.json", tier2, compact=False)
+
+
+def git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+class ContentGateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.release = assemble(self.tmp / "release")
+        self.live = assemble(self.tmp / "live")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp)
+
+    def gate(self, *, verify: bool = False, **kwargs) -> dict:
+        kwargs.setdefault("now", NOW)
+        kwargs.setdefault("exclusions_data", NO_EXCLUSIONS)
+        if verify:
+            return cr.content_gate(self.release, self.live, LEDGER, **kwargs)
+        with mock.patch.object(cr, "verify_directory", lambda _directory: None):
+            return cr.content_gate(self.release, self.live, LEDGER, **kwargs)
+
+    def assertLane(self, result: dict, lane: str) -> None:
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["lane"], lane, result)
+
+    def test_non_pricing_hash_correction_is_eligible(self) -> None:
+        correct_hash(self.release)
+        result = self.gate()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["lane"], "catalog-content")
+        self.assertEqual(result["reasons"], [])
+        self.assertTrue(result["changed"]["tier2_models_changed"])
+        self.assertIn("autotune-candidates.json", result["changed"]["feeds"])
+        self.assertFalse(result["changed"]["rate_card_rows_changed"])
+
+    def test_identical_release_is_freshness_or_noop_with_real_verify_directory(self) -> None:
+        result = self.gate(verify=True)
+        self.assertLane(result, "freshness-or-noop")
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "content-gate", "--release", str(self.release), "--live", str(self.live)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertEqual(len(proc.stdout.splitlines()), 1, proc.stdout)
+        self.assertEqual(json.loads(proc.stdout)["lane"], "freshness-or-noop")
+
+    def test_unsigned_content_change_is_invalid_release(self) -> None:
+        correct_hash(self.release)
+        result = self.gate(verify=True)
+        self.assertLane(result, "invalid-release")
+        self.assertTrue(result["reasons"][0].startswith("verify-directory:"), result)
+
+    def test_policy_version_change_needs_full_provider_app(self) -> None:
+        correct_hash(self.release)
+        edit_json(self.release / "release.json", lambda o: o.update(policy_version="autotune-policy-v2"), compact=False)
+        result = self.gate()
+        self.assertLane(result, "full-provider-app")
+        self.assertTrue(any(r.startswith("policy_version changed") for r in result["reasons"]), result)
+
+    def test_signer_change_needs_full_provider_app(self) -> None:
+        correct_hash(self.release)
+        edit_json(
+            self.release / "release.json",
+            lambda o: o["feeds"]["demand-rank.json"].update(signer_key_id="streamvc-autotune-static-v5"),
+            compact=False,
+        )
+        self.assertLane(self.gate(), "full-provider-app")
+
+    def test_keyring_change_needs_full_provider_app(self) -> None:
+        correct_hash(self.release)
+        path = self.release / "trusted-keys.json"
+        path.write_bytes(path.read_bytes() + b"\n")
+        result = self.gate()
+        self.assertLane(result, "full-provider-app")
+        self.assertIn("trusted-keys.json bytes changed vs live", result["reasons"])
+        self.assertTrue(result["changed"]["trusted_keys_changed"])
+
+    def test_rate_card_row_change_is_pricing(self) -> None:
+        correct_hash(self.release)
+
+        def reprice(o: dict) -> None:
+            o["rows"][MODEL_KEY]["completion_rate_per_mtok"] += 1
+            o["version"] = cr.rate_card_projection_hash(o)
+
+        edit_json(self.release / "rate-card.json", reprice)
+        result = self.gate()
+        self.assertLane(result, "pricing")
+        self.assertTrue(any("#1693" in r for r in result["reasons"]), result)
+
+    def test_rate_card_restamp_alone_is_not_pricing(self) -> None:
+        correct_hash(self.release)
+        edit_json(self.release / "rate-card.json", lambda o: o.update(generated_at="2026-10-01T00:00:00Z"))
+        self.assertTrue(self.gate()["ok"])
+
+    def test_stale_candidates_are_not_eligible(self) -> None:
+        correct_hash(self.release)
+        result = self.gate(now=GENERATED_AT + timedelta(days=31))
+        self.assertLane(result, "stale-or-future")
+        self.assertTrue(any("older than 30 days" in r for r in result["reasons"]), result)
+
+    def test_future_candidates_are_not_eligible(self) -> None:
+        correct_hash(self.release)
+        result = self.gate(now=GENERATED_AT - timedelta(minutes=11))
+        self.assertLane(result, "stale-or-future")
+        self.assertTrue(self.gate(now=GENERATED_AT - timedelta(minutes=9))["ok"])
+
+    def test_unknown_predecessor_is_not_eligible(self) -> None:
+        correct_hash(self.release)
+        change_content(self.live)
+        result = self.gate()
+        self.assertLane(result, "unknown-predecessor")
+
+    def test_serving_closure_failure_is_not_eligible(self) -> None:
+        correct_hash(self.release, tier2_hash="cd" * 32)
+        result = self.gate()
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["lane"], "invalid-release", result)
+
+    def test_cli_rejects_malformed_input(self) -> None:
+        (self.release / "release.json").write_text("{not json")
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "content-gate", "--release", str(self.release), "--live", str(self.live)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+
+
+class ContentGateCommitTests(unittest.TestCase):
+    """--commit checks run against a throwaway repo with an origin/main ref."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        static = self.repo / "phase3-binary" / "dist" / "static"
+        catalog = self.repo / "phase3-binary" / "catalog" / "autotune"
+        static.mkdir(parents=True)
+        catalog.mkdir(parents=True)
+        for name in STATIC_FILES:
+            shutil.copyfile(STATIC / name, static / name)
+        for name in ("release.json", "trusted-keys.json", "tier2-catalog.json"):
+            shutil.copyfile(CANONICAL / name, catalog / name)
+        git(self.repo.parent, "init", "-q", str(self.repo))
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "release")
+        self.sha = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", self.sha)
+        self.release = assemble(self.tmp / "release")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp)
+
+    def test_committed_bytes_match(self) -> None:
+        self.assertEqual(cr.content_gate_commit_reasons(self.release, self.sha, self.repo), [])
+
+    def test_byte_mismatch_is_rejected(self) -> None:
+        change_content(self.release)
+        reasons = cr.content_gate_commit_reasons(self.release, self.sha, self.repo)
+        self.assertTrue(any(r.startswith("demand-rank.json bytes differ") for r in reasons), reasons)
+
+    def test_extra_uncommitted_file_is_rejected(self) -> None:
+        (self.release / cr.ARTIFACT_FEED_NAME).write_bytes(b"{}")
+        reasons = cr.content_gate_commit_reasons(self.release, self.sha, self.repo)
+        self.assertTrue(any(r.startswith(cr.ARTIFACT_FEED_NAME) for r in reasons), reasons)
+
+    def test_commit_off_origin_main_is_rejected(self) -> None:
+        (self.repo / "side.txt").write_text("x")
+        git(self.repo, "add", "side.txt")
+        git(self.repo, "commit", "-q", "-m", "side")
+        side = git(self.repo, "rev-parse", "HEAD")
+        reasons = cr.content_gate_commit_reasons(self.release, side, self.repo)
+        self.assertEqual(reasons, [f"commit {side} is not an ancestor of origin/main"])
+
+    def test_gate_reports_commit_mismatch_lane(self) -> None:
+        live = assemble(self.tmp / "live")
+        correct_hash(self.release)
+        with mock.patch.object(cr, "verify_directory", lambda _directory: None):
+            result = cr.content_gate(
+                self.release, live, LEDGER, commit=self.sha, now=NOW,
+                exclusions_data=NO_EXCLUSIONS, repo=self.repo,
+            )
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["lane"], "unverified-commit", result)
+
+    def test_commit_without_ledger_or_exclusions_is_unverified(self) -> None:
+        live = assemble(self.tmp / "live")
+        with mock.patch.object(cr, "verify_directory", lambda _directory: None):
+            result = cr.content_gate(self.release, live, LEDGER, commit=self.sha, now=NOW, repo=self.repo)
+        self.assertEqual(result["lane"], "unverified-commit", result)
+        self.assertTrue(any("lacks" in r for r in result["reasons"]), result)
+
+    def test_commit_supplies_ledger_and_exclusions(self) -> None:
+        catalog = self.repo / "phase3-binary" / "catalog" / "autotune"
+        shutil.copyfile(LEDGER, catalog / "release-ledger.json")
+        (catalog / "not-buyer-serving.json").write_bytes(NO_EXCLUSIONS)
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "ledger")
+        sha = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", sha)
+        live = assemble(self.tmp / "live")
+        # A bogus working-tree ledger must not be consulted when --commit is given.
+        bogus = self.tmp / "bogus-ledger.json"
+        bogus.write_text("{not json")
+        with mock.patch.object(cr, "verify_directory", lambda _directory: None):
+            result = cr.content_gate(self.release, live, bogus, commit=sha, now=NOW, repo=self.repo)
+        self.assertNotIn("unverified-commit", {result["lane"]}, result)
+        self.assertEqual(result["lane"], "freshness-or-noop", result)
+
+
+class ServingClosureTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.candidate = (CANONICAL / "autotune-candidates.json").read_bytes()
+        self.rate_card = (CANONICAL / "rate-card.json").read_bytes()
+        self.tier2_obj = json.loads((CANONICAL / "tier2-catalog.json").read_bytes())
+        self.served = json.loads(self.candidate)["rows"][MODEL_KEY]["model_id"]
+
+    def tier2(self) -> bytes:
+        return json.dumps(self.tier2_obj).encode()
+
+    def check(self, excluded: set[str] = frozenset()) -> None:
+        cr.check_serving_closure(self.candidate, self.rate_card, self.tier2(), set(excluded))
+
+    def test_committed_release_is_closed(self) -> None:
+        self.check()
+
+    def test_missing_tier2_for_serving_model_fails(self) -> None:
+        self.tier2_obj["models"] = [m for m in self.tier2_obj["models"] if m["model_id"].lower() != self.served.lower()]
+        with self.assertRaisesRegex(cr.CatalogError, "serving closure: 1 "):
+            self.check()
+
+    def test_excluded_serving_model_passes(self) -> None:
+        self.tier2_obj["models"] = [m for m in self.tier2_obj["models"] if m["model_id"].lower() != self.served.lower()]
+        self.check({self.served.lower()})
+
+    def test_hash_mismatch_fails(self) -> None:
+        for entry in self.tier2_obj["models"]:
+            if entry["model_id"].lower() == self.served.lower():
+                entry["sha256"] = "cd" * 32
+        with self.assertRaises(cr.CatalogError):
+            self.check({self.served.lower()})  # binding conflict is never excusable
+
+    def test_committed_exclusions_file_is_valid(self) -> None:
+        cr.load_serving_exclusions(cr.NOT_BUYER_SERVING_PATH.read_bytes(), "not-buyer-serving.json")
+
+    def test_exclusions_schema_is_closed(self) -> None:
+        for bad in (
+            {"schema_version": "x", "models": []},
+            {"schema_version": cr.NOT_BUYER_SERVING_SCHEMA, "models": [{"model_id": self.served}]},
+            {"schema_version": cr.NOT_BUYER_SERVING_SCHEMA, "models": [], "extra": 1},
+        ):
+            with self.assertRaises(cr.CatalogError):
+                cr.load_serving_exclusions(json.dumps(bad).encode(), "t")
+
+    def test_cli_require_serving_with_exclusions_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tier2_path = Path(tmp) / "tier2.json"
+            excl_path = Path(tmp) / "excl.json"
+            self.tier2_obj["models"] = [m for m in self.tier2_obj["models"] if m["model_id"].lower() != self.served.lower()]
+            tier2_path.write_bytes(self.tier2())
+            base = [sys.executable, str(SCRIPT), "check-tier2-binding", "--require-serving",
+                    "--candidate", str(CANONICAL / "autotune-candidates.json"),
+                    "--rate-card", str(CANONICAL / "rate-card.json"), "--tier2", str(tier2_path)]
+            proc = subprocess.run(base, capture_output=True, text=True, check=False)
+            self.assertEqual(proc.returncode, 1, proc.stdout)
+            self.assertIn(self.served, proc.stderr)
+            excl_path.write_text(json.dumps({"schema_version": cr.NOT_BUYER_SERVING_SCHEMA,
+                                             "models": [{"model_id": self.served, "reason": "test"}]}))
+            proc = subprocess.run(base + ["--exclusions", str(excl_path)], capture_output=True, text=True, check=False)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            # Without --require-serving the legacy overlap-only check still passes.
+            legacy = subprocess.run(
+                [sys.executable, str(SCRIPT), "check-tier2-binding",
+                 "--candidate", str(CANONICAL / "autotune-candidates.json"), "--tier2", str(tier2_path)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(legacy.returncode, 0, legacy.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

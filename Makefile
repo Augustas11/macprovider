@@ -186,6 +186,7 @@ test-dist:
 	bash phase4-coordinator/dist/test/deploy_catalog_verifier_closure.test.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_window
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_compare_live
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_content_gate
 	bash phase4-coordinator/dist/test/deploy_catalog_compare_live.test.sh
 	bash phase4-coordinator/dist/test/deploy_catalog_window_coverage.test.sh
 	bash phase4-coordinator/dist/test/coordinator_deploy_recovery.test.sh

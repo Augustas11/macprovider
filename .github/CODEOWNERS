@@ -18,6 +18,12 @@ phase3-binary/Sources/MacProviderCore/Config.swift @Augustas11
 phase3-binary/Sources/macprovider-cli/ModelRuntime.swift @Augustas11
 phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift @Augustas11
 
+# #1688 catalog-content lane: a merged change here can go live without a
+# runtime release (content-gate requires the commit to be on origin/main), so
+# branch protection with owner review is the lane's review anchor.
+phase3-binary/catalog/** @Augustas11
+phase3-binary/dist/static/** @Augustas11
+
 # CI and agent-rule controls for the sensitive paths.
 .github/CODEOWNERS @Augustas11
 .github/workflows/ci.yml @Augustas11
