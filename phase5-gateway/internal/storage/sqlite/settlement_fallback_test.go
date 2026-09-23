@@ -119,6 +119,32 @@ func TestSettlementFallbackCandidateWithoutCurrentInternalRequestRemainsHeld(t *
 	}
 }
 
+func TestLookupSettlementHeldReservationUsesExactAccountAndRequest(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	candidate := fallbackTestCandidate(t, store)
+	if err := store.SaveSettlementFallbackCandidate(ctx, candidate); err != nil {
+		t.Fatal(err)
+	}
+
+	reservation, err := store.LookupSettlementHeldReservation(ctx, candidate.AccountID, candidate.RequestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reservation.AccountID != candidate.AccountID || reservation.RequestID != candidate.RequestID ||
+		!reservation.CreatedAt.Equal(candidate.ReservationCreatedAt) || reservation.ReservedTokens != candidate.MaxTotalTokens {
+		t.Fatalf("reservation=%+v candidate=%+v", reservation, candidate)
+	}
+	for _, target := range [][2]string{
+		{"other-account", candidate.RequestID},
+		{candidate.AccountID, "other-request"},
+	} {
+		if _, err := store.LookupSettlementHeldReservation(ctx, target[0], target[1]); !errors.Is(err, storage.ErrReservationNotFound) {
+			t.Fatalf("target=%v err=%v want ErrReservationNotFound", target, err)
+		}
+	}
+}
+
 func TestSettlementFallbackCandidateSaveRollbackAndReusedID(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

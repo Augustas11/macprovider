@@ -75,7 +75,7 @@ type Server struct {
 	journalAttempts                       *settlementJournalAttempts
 	publicFeedCache                       map[string]publicFeedCacheEntry
 	settlementReconcileNudgeMu            sync.Mutex
-	settlementReconcileNudgePending       []storage.ActiveReservation
+	settlementReconcileNudgePending       []settlementReconcileNudge
 	settlementReconcileNudgeKeys          map[string]struct{}
 	settlementReconcileNudgeActiveWorkers int
 	settlementReconcileCatchupPending     bool
@@ -1337,7 +1337,7 @@ var gatewayPermanentCodes = map[string]bool{
 	"duplicate_request_id": true, "invalid_conversation_tag": true,
 	"invalid_feedback_source": true, "invalid_feedback": true, "invalid_rating": true,
 	"comment_too_long": true, "invalid_request_id": true, "invalid_feedback_scope": true,
-	"invalid_limit": true, "invalid_cursor": true, "api_key_lookup_failed": true,
+	"invalid_limit": true, "invalid_cursor": true, "invalid_settlement_target": true, "api_key_lookup_failed": true,
 	"ambiguous_credentials":                    true,
 	"request_content_encoding_unsupported":     true,
 	"unsupported_content_shape":                true,
@@ -1426,7 +1426,7 @@ var gatewayPermanentCodes = map[string]bool{
 	"receipt_forbidden":                true,
 	"usage_load_failed":                true, "keys_load_failed": true,
 	"coordinator_sticky_error": true, "feedback_limit_check_failed": true,
-	"feedback_store_failed": true, "settlement_reconcile_load_failed": true,
+	"feedback_store_failed": true, "settlement_hold_not_found": true, "settlement_reconcile_load_failed": true,
 	"nonce_unavailable": true, "docs_missing": true, "docs_render_failed": true,
 	"privacy_missing": true, "privacy_render_failed": true,
 	"quota_reservation_failed": true, "concurrency_reservation_failed": true,
