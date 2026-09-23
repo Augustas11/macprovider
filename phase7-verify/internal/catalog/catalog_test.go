@@ -41,6 +41,31 @@ func TestParseAndVerifyHappyPath(t *testing.T) {
 	}
 }
 
+func TestParseAndVerifyAcceptsSnapshotManifestHashScope(t *testing.T) {
+	raw, pub := signFixture(t, "snapshot-manifest-catalog", time.Now().Add(time.Hour), []ModelEntry{{
+		ArtifactKind: "mlx_weight_file",
+		HashScope:    "macprovider.snapshot-manifest.v1",
+		ModelID:      "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
+		MinRAMGB:     intPtr(28),
+		SHA256:       validHash,
+		Source:       "operator-curated",
+	}})
+	c, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse signed snapshot-manifest catalog: %v", err)
+	}
+	if err := Verify(c, pub, time.Now()); err != nil {
+		t.Fatalf("Verify signed snapshot-manifest catalog: %v", err)
+	}
+	entry, ok := Lookup(c, "mlx-community/qwen3-30b-a3b-instruct-2507-4bit")
+	if !ok {
+		t.Fatal("Lookup snapshot-manifest model = miss")
+	}
+	if entry.HashScope != "macprovider.snapshot-manifest.v1" {
+		t.Fatalf("HashScope = %q", entry.HashScope)
+	}
+}
+
 // SPEC-015 §M.3.2 step 6 — canonical Lookup uses lowercase + trim.
 func TestLookupCaseFoldedAndTrimmed(t *testing.T) {
 	raw, _ := signFixture(t, "tc", time.Now().Add(time.Hour), []ModelEntry{{

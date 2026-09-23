@@ -107,7 +107,12 @@ ARTIFACT_IDENTITY_MATRIX = {
 ARTIFACT_VERIFICATION_STATUSES = frozenset({"declared", "verified", "blocked"})
 # SPEC-005 §5.5 NormalizeModelKey parity (phase4-coordinator/internal/billing/formula.go).
 KNOWN_MODEL_NAMESPACES = frozenset({"mlx-community", "openai", "google", "meta-llama", "nvidia", "qwen"})
-TIER2_HASH_SCOPES = {"primary_weight_file", "artifact_manifest", "coordinator_endorsed_incremental"}
+TIER2_HASH_SCOPES = {
+    "primary_weight_file",
+    "artifact_manifest",
+    SNAPSHOT_MANIFEST_ALG,
+    "coordinator_endorsed_incremental",
+}
 TIER2_SIG_PATTERN = re.compile(r"^[A-Za-z0-9_-]{86}$")
 MODEL_KEY = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}$")
 MODEL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -3061,22 +3066,17 @@ def derive_tier2_unsigned_body(
     issued_at: str,
     expires_at: str,
 ) -> bytes:
-    """Disabled until Tier-2 gains an explicit snapshot-manifest hash_scope.
+    """Keep Tier-2 authoring under operator review, even with the typed scope.
 
-    Autotune `model_sha256` is `macprovider.snapshot-manifest.v1`. Existing
-    Tier-2 `hash_scope` enums (`primary_weight_file`, `artifact_manifest`,
-    `coordinator_endorsed_incremental`) mean different byte algorithms
-    (SPEC-008). Emitting a signable body under any of those scopes would
-    mislabel identity (#608 audit HIGH). Use `tier2-identity-binding.json`
-    from `generate` plus `check-tier2-binding` against an operator-reviewed
-    signed catalog until the schema follow-up lands.
+    A candidate row supplies model identity and hash but not every reviewed
+    Tier-2 metadata field or the decision to grant Tier-2 coverage. Use the
+    derived identity binding plus an operator-reviewed body before signing.
     """
     del candidate_obj, catalog_id, issued_at, expires_at
     fail(
-        "derive-tier2 is disabled until Tier-2 supports an explicit "
-        "macprovider.snapshot-manifest.v1 hash_scope (#608 follow-up). "
-        "Use tier2-identity-binding.json from `generate` and "
-        "`check-tier2-binding` against an operator-reviewed signed Tier-2 catalog."
+        "derive-tier2 remains disabled: candidate rows do not authorize Tier-2 "
+        "metadata or coverage. Use tier2-identity-binding.json from `generate` "
+        "and `check-tier2-binding` against an operator-reviewed signed Tier-2 catalog."
     )
 
 

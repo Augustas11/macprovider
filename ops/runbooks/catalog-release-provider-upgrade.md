@@ -78,9 +78,10 @@ Until then the interim rule is **derived-only mutate**:
 1. `scripts/catalog-release.py generate` writes
    `phase3-binary/catalog/autotune/tier2-identity-binding.json` from the
    current autotune rows (HighestClaimedTier semantics) for operator tooling.
-2. `scripts/catalog-release.py derive-tier2` is **disabled** until Tier-2 gains
-   an explicit `macprovider.snapshot-manifest.v1` hash_scope (emitting under
-   existing SPEC-008 scopes would mislabel the digest). Operators continue to
+2. `scripts/catalog-release.py derive-tier2` remains **disabled** even though
+   Tier-2 now accepts an explicit `macprovider.snapshot-manifest.v1` hash_scope:
+   a candidate row does not authorize Tier-2 coverage or its other metadata.
+   Operators continue to
    author/sign Tier-2 with `scripts/sign-catalog.go` after review, using
    `tier2-identity-binding.json` + `check-tier2-binding` as the drift gate.
    Signing alone does **not** authorize a live catalog.

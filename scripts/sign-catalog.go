@@ -265,7 +265,7 @@ func validateCatalogBody(catalog signedCatalog) error {
 			return fmt.Errorf("catalog artifact_kind for %q must be mlx_weight_file", model.ModelID)
 		}
 		switch model.HashScope {
-		case "primary_weight_file", "artifact_manifest", "coordinator_endorsed_incremental":
+		case "primary_weight_file", "artifact_manifest", "macprovider.snapshot-manifest.v1", "coordinator_endorsed_incremental":
 		default:
 			return fmt.Errorf("catalog hash_scope for %q is unsupported", model.ModelID)
 		}
