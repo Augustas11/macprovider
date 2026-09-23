@@ -485,16 +485,8 @@ def main():
         sys.exit(0 if ok else 3)
     sys.exit(0)
 
-# autotune_window.py imports this file as its feed verifier (coverage): expose
-# the real script's functions then, with no side effects.
 if __name__ == "__main__":
     main()
-else:
-    globals().update({k: v for k, v in runpy.run_path(os.environ["CCR_REAL_CR"]).items() if not k.startswith("__")})
-    # The fixtures' feeds are re-stamped (unsigned); coverage signature checks
-    # are covered by scripts/tests/test_autotune_window.py.
-    def verify_ed25519(*_args, **_kwargs):
-        return None
 CR
 cp "$root/phase3-binary/catalog/autotune/"{release.json,trusted-keys.json,tier2-catalog.json,release-ledger.json,not-buyer-serving.json} "$R/phase3-binary/catalog/autotune/"
 cp "$root/phase3-binary/dist/static/"*.json "$root/phase3-binary/dist/static/"*.sig "$R/phase3-binary/dist/static/"

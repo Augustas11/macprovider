@@ -2643,12 +2643,12 @@
       "spec_id": "SPEC-023",
       "state": "pending",
       "implementation": [
-        "scripts/autotune_window.py:def admissible_releases",
+        "scripts/autotune_window.py:def admitted_from_validator",
         "scripts/autotune_window.py:def advertised_catalogs",
         "scripts/autotune_window.py:def _coverage"
       ],
       "tests": [
-        "scripts/tests/test_autotune_window.py::CoverageTests"
+        "scripts/tests/test_autotune_window.py::AdmittedJsonCoverageTests"
       ],
       "journeys": [],
       "evidence": [],

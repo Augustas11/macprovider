@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import argparse
 import grp
-import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -290,213 +288,8 @@ def _plan(args: argparse.Namespace) -> dict:
     }
 
 
-# Mirrors cmd/coordinator/main.go loadSameVersionRestampCatalogs: dirs named
-# <current version>-<16 lowercase hex>, at most 16 examined in name order.
-MAX_RESTAMP_EXAMINED = 16
-RESTAMP_SUFFIX_RE = re.compile(r"-[0-9a-f]{16}")
 SHA_RE = re.compile(r"[0-9a-fA-F]{64}")
-MAX_FEED_BYTES = 16 * 1024 * 1024
-MAX_GO_FEED_BYTES = 4 * 1024 * 1024  # buyer.maxAutotuneFeedBytes
 MAX_POOLZ_BYTES = 16 * 1024 * 1024
-CANDIDATES = "autotune-candidates.json"
-
-
-def _read_bounded_at(dir_fd: int, name: str, limit: int) -> bytes:
-    fd = os.open(name, os.O_RDONLY | NOFOLLOW, dir_fd=dir_fd)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise WindowError(f"{name} is not a regular file")
-        chunks, total = [], 0
-        while True:
-            chunk = os.read(fd, 1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > limit:
-                raise WindowError(f"{name} is too large")
-            chunks.append(chunk)
-        return b"".join(chunks)
-    finally:
-        os.close(fd)
-
-
-MAX_SIDECAR_BYTES = 16 * 1024  # buyer.maxAutotuneSidecarBytes
-MAX_KEYRING_BYTES = 1024 * 1024
-_catalog_release_module = None
-
-
-def _catalog_release():
-    """scripts/catalog-release.py, the repo's Ed25519 feed verifier.
-
-    Loaded lazily (only coverage verifies signatures) from beside this file,
-    or from scripts/ beside it (the renew/activation helper-dir layout)."""
-    global _catalog_release_module
-    if _catalog_release_module is None:
-        here = os.path.dirname(os.path.abspath(__file__))
-        for path in (os.path.join(here, "catalog-release.py"), os.path.join(here, "scripts", "catalog-release.py")):
-            if os.path.isfile(path):
-                break
-        else:
-            raise WindowError("catalog-release.py (feed signature verifier) is not shipped beside autotune_window.py")
-        name = "macprovider_catalog_release_verifier"
-        spec = importlib.util.spec_from_file_location(name, path)
-        if spec is None or spec.loader is None:
-            raise WindowError(f"cannot load feed signature verifier {path}")
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
-        try:
-            spec.loader.exec_module(module)
-        except BaseException as exc:
-            sys.modules.pop(name, None)
-            raise WindowError(f"cannot load feed signature verifier {path}: {exc}") from exc
-        _catalog_release_module = module
-    return _catalog_release_module
-
-
-class _Bytes:
-    """Hands already-read bytes to catalog-release.keyring(), which reads a path."""
-
-    def __init__(self, data: bytes) -> None:
-        self._data = data
-
-    def read_bytes(self) -> bytes:
-        return self._data
-
-
-def _decode_keyring(data: bytes, label: str) -> dict[str, bytes]:
-    cr = _catalog_release()
-    try:
-        return cr.keyring(_Bytes(data))
-    except cr.CatalogError as exc:
-        raise WindowError(f"{label}: {exc}") from exc
-
-
-def load_release(releases_fd: int, name: str) -> dict:
-    """Return the admission identity of releases/<name>.
-
-    release_id/sha are what the coordinator matches a provider hello against:
-    autotune-candidates.json "version" and sha256 of its exact bytes. The
-    candidate sidecar, the release's trusted-keys.json, and the raw bytes are
-    kept so verify_release() can check the signature like the coordinator.
-    """
-    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=releases_fd)
-    try:
-        raw = _read_bounded_at(fd, CANDIDATES, MAX_FEED_BYTES)
-        sidecar = keys = None
-        try:
-            sidecar = _read_bounded_at(fd, CANDIDATES + ".sig", MAX_SIDECAR_BYTES)
-        except (OSError, WindowError):
-            pass
-        try:
-            keys = _read_bounded_at(fd, "trusted-keys.json", MAX_KEYRING_BYTES)
-        except (OSError, WindowError):
-            pass
-    finally:
-        os.close(fd)
-    sha = hashlib.sha256(raw).hexdigest()
-    try:
-        version = json.loads(raw).get("version")
-    except (ValueError, AttributeError) as exc:
-        raise WindowError(f"releases/{name}/{CANDIDATES} is not a JSON object") from exc
-    if not isinstance(version, str) or not version.strip():
-        raise WindowError(f"releases/{name}/{CANDIDATES} has no version")
-    return {"dir": f"releases/{name}", "release_id": version, "sha": sha, "signer": None,
-            "_raw": raw, "_sidecar": sidecar, "_keys": keys}
-
-
-def verify_release(release: dict, trusted: dict[str, bytes]) -> str:
-    """Verify the candidate feed's detached signature as the coordinator does
-    (buyer.loadAutotuneFeedPair): strict sidecar, key_id in the trusted
-    keyring, Ed25519 over the exact bytes. Conservative extra: the key must
-    also be a non-retired key, with the same bytes, in the release's own
-    trusted-keys.json. Returns the signer key_id; WindowError if unverifiable."""
-    label = f"{release['dir']}/{CANDIDATES}.sig"
-    if len(release["_raw"]) > MAX_GO_FEED_BYTES:
-        raise WindowError(f"{release['dir']}/{CANDIDATES} exceeds the coordinator feed limit")
-    if release["_sidecar"] is None:
-        raise WindowError(f"{label} is missing")
-    if release["_keys"] is None:
-        raise WindowError(f"{release['dir']}/trusted-keys.json is missing")
-    cr = _catalog_release()
-    try:
-        release["_raw"].decode("utf-8")
-        key_id, signature = cr.parse_sidecar(release["_sidecar"], label)
-        if not key_id or key_id.strip() != key_id:
-            raise WindowError(f"{label}: key_id must be a non-empty trimmed string")
-        own = _decode_keyring(release["_keys"], f"{release['dir']}/trusted-keys.json")
-        public_key = trusted.get(key_id)
-        if public_key is None or own.get(key_id) != public_key:
-            raise WindowError(f"{label}: signer {key_id!r} is not a trusted key")
-        cr.verify_ed25519(public_key, signature, release["_raw"], label)
-    except UnicodeDecodeError as exc:
-        raise WindowError(f"{release['dir']}/{CANDIDATES} is not UTF-8") from exc
-    except cr.CatalogError as exc:
-        raise WindowError(str(exc)) from exc
-    release["signer"] = key_id
-    return key_id
-
-
-def _public(release: dict) -> dict:
-    return {k: v for k, v in release.items() if not k.startswith("_")}
-
-
-def admissible_releases(root_fd: int, incoming: str, *, required_uid: int = 0) -> list[dict]:
-    """Every release a provider may be admitted on after incoming becomes current.
-
-    A release counts only if its candidate signature verifies (verify_release)
-    under the incoming release's keyring, the stand-in for the coordinator's
-    autotune.public_keys. An unverifiable restamp is simply not admissible; an
-    unverifiable incoming release or window entry is a refusal (the coordinator
-    fails the reload on either).
-
-    Legacy mirror of the Go loader. New callers pass --admitted-json (the
-    coordinator's own --validate-autotune-release verdict) instead.
-    """
-    current = read_current(root_fd)
-    window = compute_window(read_window(root_fd, required_uid=required_uid), current or None, incoming)
-    releases_fd = os.open("releases", os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=root_fd)
-    try:
-        active = load_release(releases_fd, incoming[len("releases/"):])
-        if active["_keys"] is None:
-            raise WindowError(f"{incoming}/trusted-keys.json is missing")
-        trusted = _decode_keyring(active["_keys"], f"{incoming}/trusted-keys.json")
-        verify_release(active, trusted)
-        out = [active]
-        # previous-target is fail-closed in the coordinator: an unloadable
-        # entry blocks boot, so it is a refusal here too.
-        for entry in window:
-            prev = load_release(releases_fd, entry[len("releases/"):])
-            verify_release(prev, trusted)
-            # ws/server.go: a same-version previous catalog must keep the
-            # active signer.
-            if prev["release_id"] == active["release_id"] and prev["signer"] != active["signer"]:
-                continue
-            out.append(prev)
-        prefix = active["release_id"] + "-"
-        examined = 0
-        for entry in sorted(os.scandir(releases_fd), key=lambda e: e.name):
-            if not entry.is_dir(follow_symlinks=False) or not entry.name.startswith(prefix):
-                continue
-            if RESTAMP_SUFFIX_RE.fullmatch(entry.name[len(prefix) - 1:]) is None:
-                continue
-            if examined >= MAX_RESTAMP_EXAMINED:
-                break
-            examined += 1
-            try:
-                restamp = load_release(releases_fd, entry.name)
-                verify_release(restamp, trusted)
-            except (OSError, WindowError):
-                continue
-            if (
-                restamp["release_id"] != active["release_id"]
-                or restamp["sha"] == active["sha"]
-                or restamp["signer"] != active["signer"]
-            ):
-                continue
-            out.append(restamp)
-    finally:
-        os.close(releases_fd)
-    return [_public(r) for r in out]
 
 
 def advertised_catalogs(poolz: object) -> tuple[dict[tuple[str, str], dict], int]:
@@ -563,36 +356,23 @@ def admitted_from_validator(data: bytes) -> list[dict]:
 
 
 def _coverage(args: argparse.Namespace) -> dict:
-    if args.admitted_json is None:
-        if args.root is None or args.incoming is None:
-            raise WindowError("coverage needs --admitted-json (or the legacy --root and --incoming)")
-        validate_entry(args.incoming)
     with open(args.poolz_json, "rb") as fh:
         data = fh.read(MAX_POOLZ_BYTES + 1)
     if len(data) > MAX_POOLZ_BYTES:
         raise WindowError("poolz JSON is too large")
     advertised, total = advertised_catalogs(json.loads(data))
-    if args.admitted_json is not None:
-        with open(args.admitted_json, "rb") as fh:
-            verdict = fh.read(MAX_POOLZ_BYTES + 1)
-        if len(verdict) > MAX_POOLZ_BYTES:
-            raise WindowError("admitted JSON is too large")
-        admissible = admitted_from_validator(verdict)
-        covered = [dict(r) for r in admissible]
-    else:
-        root_fd = open_root(args.root, required_uid=args.required_uid)
-        try:
-            admissible = admissible_releases(root_fd, args.incoming, required_uid=args.required_uid)
-        finally:
-            os.close(root_fd)
-        covered = [{"dir": r["dir"], "release_id": r["release_id"], "sha": r["sha"]} for r in admissible]
+    with open(args.admitted_json, "rb") as fh:
+        verdict = fh.read(MAX_POOLZ_BYTES + 1)
+    if len(verdict) > MAX_POOLZ_BYTES:
+        raise WindowError("admitted JSON is too large")
+    admissible = admitted_from_validator(verdict)
     keys = {(r["release_id"], r["sha"]) for r in admissible}
     uncovered = [
         {"release_id": rid, "sha": sha, **counts}
         for (rid, sha), counts in sorted(advertised.items())
         if (rid, sha) not in keys
     ]
-    return {"covered": covered, "uncovered": uncovered, "advertised_total": total}
+    return {"covered": [dict(r) for r in admissible], "uncovered": uncovered, "advertised_total": total}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -617,11 +397,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--from-file", required=True)
     p.add_argument("--expect-current", required=True)
     p = sub.add_parser("coverage", help="exit 4 if a connected provider's catalog would stop being admissible")
-    p.add_argument("--admitted-json", help="coordinator --validate-autotune-release verdict; its admitted list is the admissible set")
-    p.add_argument("--root", help="legacy (no --admitted-json): autotune catalog root")
+    p.add_argument("--admitted-json", required=True,
+                   help="coordinator --validate-autotune-release verdict; its admitted list is the admissible set")
+    # Accepted (unused) so callers can pass the same hidden flags to every subcommand.
     p.add_argument("--required-uid", type=int, default=0, help=argparse.SUPPRESS)
     p.add_argument("--group", default="macprovider", help=argparse.SUPPRESS)
-    p.add_argument("--incoming", help="legacy (no --admitted-json): releases/<id> about to become current")
     p.add_argument("--poolz-json", required=True, help="coordinator /poolz response body")
 
     args = parser.parse_args(argv)

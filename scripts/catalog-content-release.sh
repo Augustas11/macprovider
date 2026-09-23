@@ -613,8 +613,9 @@ pf_dry_load() {
   mkdir -p "$WORK/upload/incoming" "$WORK/upload/tools/scripts"
   cp "$REL"/* "$WORK/upload/incoming/"
   cp "$SCRIPT_DIR/autotune_window.py" "$WORK/upload/tools/autotune_window.py"
-  # The whole catalog-verifier bundle beside the window helper (coverage
-  # signature-verifies restamps with the shipped catalog-release.py).
+  # The whole catalog-verifier bundle beside the window helper, reported by
+  # the reviewed-copy sha check (coverage itself reads only the validator's
+  # admitted list).
   : >"$WORK/tools.expected"
   printf '%s %s\n' "$(sha256_file "$SCRIPT_DIR/autotune_window.py")" autotune_window.py >>"$WORK/tools.expected"
   for entry in $(grep -v '^#' "$SCRIPT_DIR/catalog-verifier-bundle.txt" | grep -v '^$'); do
