@@ -34,6 +34,38 @@ func rowContinuityInternalCatalogFor(t *testing.T, version, minRAM string, rowCo
 	return catalog
 }
 
+// A drain that lands while the catalog re-check is pending is never undone by
+// the release that follows the re-check.
+func TestCatalogRecheckReleaseKeepsConcurrentDrain(t *testing.T) {
+	serverConn, providerConn := net.Pipe()
+	defer providerConn.Close()
+	defer serverConn.Close()
+
+	current := rowContinuityInternalCatalogFor(t, "published-current", "4", false)
+	baked := rowContinuityInternalCatalogFor(t, "published-baked-v1", "4", true)
+	s := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(), WithAutotuneCatalog(current, baked))
+	key, _, _ := baked.HighestClaimedTier("mlx-community/Llama-3.2-3B-Instruct-4bit")
+	rowIdentity, _ := baked.RowIdentity(key)
+	entry := &pool.Provider{
+		ProviderID: "p1", AssignedID: "s1", ModelID: "mlx-community/Llama-3.2-3B-Instruct-4bit",
+		Tier: pool.TierProvisional, InferencePath: pool.InferencePathWSTunneled, State: pool.StateReady,
+		SlotsFree: 1, SlotsTotal: 1, MaxConcurrency: 1,
+		CatalogAdmissionMode: "row_continuity", CatalogReleaseID: baked.Version,
+		CandidateCatalogSHA256: baked.SHA256, CandidateRowIdentity: rowIdentity,
+	}
+	s.catalogRecheckPendingHook = func() {
+		// An operator drain (blacklist / reject / DrainAll) in the window.
+		s.pool.MarkState("p1", "s1", pool.StateDraining)
+	}
+	if session, refusal := s.registerProviderSession(serverConn, entry); session == nil {
+		t.Fatalf("registration refused: %q", refusal)
+	}
+	registered, ok := s.pool.Resolve("p1", "s1")
+	if !ok || registered.State != pool.StateDraining || registered.RoutingEligible() {
+		t.Fatalf("concurrent drain was undone: ok=%v state %q routable %v", ok, registered.State, registered.RoutingEligible())
+	}
+}
+
 // A hello classified against the pre-publication snapshot can register after
 // the publication sweep ran; registration re-checks against the active release
 // and fences a diverged session at once (SPEC-023-R010).
@@ -101,7 +133,7 @@ func TestRegisterFencesSessionWhoseCatalogRowDivergedBeforeRegistration(t *testi
 				t.Fatal("catalog re-check hook did not run")
 			}
 			if !tc.wantFenced && (registered.State != pool.StateReady || !registered.RoutingEligible()) {
-				t.Fatalf("equivalent session must be promoted to ready: state %q routable %v", registered.State, registered.RoutingEligible())
+				t.Fatalf("equivalent session must be released to routing: state %q routable %v", registered.State, registered.RoutingEligible())
 			}
 		})
 	}

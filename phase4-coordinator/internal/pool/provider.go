@@ -293,6 +293,11 @@ type Provider struct {
 	// counts as buyer-serving capacity until proof-of-weights re-gating clears
 	// this flag from verified evidence.
 	AdmissionSandboxed bool `json:"admission_sandboxed,omitempty"`
+	// CatalogRecheckPending holds a just-registered catalog-bound session out
+	// of routing until the coordinator re-checks its catalog row against the
+	// active release (SPEC-023-R010). It never touches State, so drain,
+	// blacklist, and trust fences keep their own semantics.
+	CatalogRecheckPending bool `json:"-"`
 	// AdmissionSandboxCredentialBypassed is set only for sessions that entered
 	// as sandbox-only and therefore did not receive newly minted durable
 	// provider credentials. Gate-disable reloads must not auto-promote these
@@ -570,7 +575,7 @@ func (p Provider) RoutingEligible() bool {
 	if p.BenchmarkQuarantined {
 		return false
 	}
-	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale || p.AdmissionSandboxed {
+	if p.AdmissionCeilingExcluded || p.AdmissionEvidenceStale || p.AdmissionSandboxed || p.CatalogRecheckPending {
 		return false
 	}
 	return (p.State == StateReady || p.State == StateBusy) && p.SlotsFree > 0 && !p.capacitySafetyHold
@@ -2232,6 +2237,19 @@ func (r *Registry) SetAdmissionCeilingExcluded(providerID, assignedID string, ex
 		return false
 	}
 	p.AdmissionCeilingExcluded = excluded
+	return true
+}
+
+// ClearCatalogRecheckPending releases a registered session into routing after
+// its catalog re-check passed. Returns true only when the flag changed.
+func (r *Registry) ClearCatalogRecheckPending(providerID, assignedID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID || !p.CatalogRecheckPending {
+		return false
+	}
+	p.CatalogRecheckPending = false
 	return true
 }
 

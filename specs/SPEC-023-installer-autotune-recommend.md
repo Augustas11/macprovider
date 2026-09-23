@@ -839,7 +839,8 @@ than the new active one is closed `catalog_incompatible` once its selected row
 identity or `PolicyEquivalent` policy no longer equals the new active row. This
 applies to `previous` and `row_continuity` sessions alike. The session is made
 unroutable before its close is queued, and a catalog-bound session is registered
-unroutable and promoted to its admitted state only after it is re-checked
+held out of routing (a registry flag, independent of its state, so a concurrent
+drain or blacklist is never undone) and released only after it is re-checked
 against the active release, so neither a pending close nor a publication racing
 admission leaves a diverged session routable. A
 `row_continuity` session whose evidence document no longer loads after a

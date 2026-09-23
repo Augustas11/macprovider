@@ -2567,6 +2567,8 @@
         "phase4-coordinator/internal/ws/server.go:catalogAdmissionWithCatalog",
         "phase4-coordinator/internal/ws/server.go:admittedCandidateCatalogSHA256",
         "phase4-coordinator/internal/ws/server.go:closeCatalogDivergedSessions",
+        "phase4-coordinator/internal/ws/server.go:fenceCatalogDivergedSession",
+        "phase4-coordinator/internal/ws/server.go:registerProviderSession",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:refreshCatalogEnvelopeIfDue",
         "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:refreshCatalogEnvelope"
       ],
@@ -2575,6 +2577,7 @@
         "phase4-coordinator/internal/ws/catalog_row_continuity_test.go::TestCatalogRowContinuityFailsClosed",
         "phase4-coordinator/internal/ws/catalog_row_continuity_test.go::TestCatalogRowContinuitySessionsAreRecheckedOnPublication",
         "phase4-coordinator/internal/ws/catalog_row_continuity_internal_test.go::TestRegisterFencesSessionWhoseCatalogRowDivergedBeforeRegistration",
+        "phase4-coordinator/internal/ws/catalog_row_continuity_internal_test.go::TestCatalogRecheckReleaseKeepsConcurrentDrain",
         "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCompatibilitySetRejectionDoesNotRefreshCatalog",
         "phase4-coordinator/internal/ws/artifact_identity_test.go::TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease",
         "phase4-coordinator/cmd/coordinator/autotune_row_continuity_test.go::TestLoadCompatibleAutotuneCatalogsLoadsSignedRowContinuityRelease",

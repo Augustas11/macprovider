@@ -3999,15 +3999,12 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*
 		session *providerSession
 		refusal pool.RegisterRefusal
 	)
-	// A catalog-bound session is published unroutable (draining) and promoted
-	// to its admitted state only after the catalog re-check below, so no
-	// buyer route can observe it between registration and that check.
-	admittedState := entry.State
-	catalogPending := catalogEnvelopeAdmissionMode(entry.CatalogAdmissionMode) &&
-		(admittedState == pool.StateReady || admittedState == pool.StateBusy)
-	if catalogPending {
-		entry.State = pool.StateDraining
-	}
+	// A catalog-bound session is published held out of routing and released
+	// only after the catalog re-check below, so no buyer route can observe it
+	// between registration and that check. The hold is a registry flag, not a
+	// State, so a drain or blacklist landing meanwhile is never undone.
+	catalogPending := catalogEnvelopeAdmissionMode(entry.CatalogAdmissionMode)
+	entry.CatalogRecheckPending = catalogPending
 	// SPEC-047-R001/R006: the session replacement, the (a)/(d) evaluation
 	// against the candidate the replaced session's binding named, and the
 	// new binding are one linearization point under the provider's section
@@ -4015,7 +4012,7 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*
 	// was evaluated.
 	s.withProviderSection(entry.ProviderID, func(section *providerSection) {
 		prior, hadPrior := s.pool.Resolve(entry.ProviderID, "")
-		session, refusal = s.registerProviderSessionLocked(conn, entry, admittedState)
+		session, refusal = s.registerProviderSessionLocked(conn, entry)
 		if session != nil {
 			s.helloSessionBindingLocked(entry.ProviderID, prior, hadPrior, section)
 		}
@@ -4032,19 +4029,16 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*
 		if registered, ok := s.pool.Resolve(entry.ProviderID, entry.AssignedID); ok {
 			current, compatible := s.autotuneCatalogSnapshot()
 			if !s.fenceCatalogDivergedSession(registered, current, compatible) {
-				s.pool.MarkState(entry.ProviderID, entry.AssignedID, admittedState)
+				s.pool.ClearCatalogRecheckPending(entry.ProviderID, entry.AssignedID)
 			}
 		}
-	} else if session == nil && catalogPending {
-		entry.State = admittedState
+	} else if session == nil {
+		entry.CatalogRecheckPending = false
 	}
 	return session, refusal
 }
 
-// admittedState is the state the session is admitted into; the registry may
-// hold it briefly as draining while a catalog re-check is pending, and the
-// operator-visible admission snapshot records the admitted state.
-func (s *Server) registerProviderSessionLocked(conn net.Conn, entry *pool.Provider, admittedState pool.State) (*providerSession, pool.RegisterRefusal) {
+func (s *Server) registerProviderSessionLocked(conn net.Conn, entry *pool.Provider) (*providerSession, pool.RegisterRefusal) {
 	s.autotuneCatalogBridgeMu.Lock()
 	defer s.autotuneCatalogBridgeMu.Unlock()
 	if entry.CatalogAdmissionMode == "legacy_bridge" && !s.autotuneCatalogBridgeActive() {
@@ -4068,9 +4062,7 @@ func (s *Server) registerProviderSessionLocked(conn net.Conn, entry *pool.Provid
 	session.onWriteFailure = s.handleProviderWriteFailure
 	s.sessions.Store(sessionKey(entry.ProviderID, entry.AssignedID), session)
 	_ = s.takeCloseEvent(conn) // successful admission: drop pre-auth close metadata
-	snapshot := *entry
-	snapshot.State = admittedState
-	s.rememberProviderSnapshot(snapshot)
+	s.rememberProviderSnapshot(*entry)
 	s.recordConnectionEvent(providerevents.Event{
 		ProviderID:    entry.ProviderID,
 		SessionID:     entry.AssignedID,
