@@ -36,6 +36,12 @@ pool:
   # a provider busy with a long single-slot generation that cannot heartbeat
   # mid-inference; its response chunks count as activity. See SPEC-002.
   heartbeat_miss_threshold_s: 90
+  # #764 / #1678: cap provider-reported max_concurrency. Code default is 8,
+  # the top honest Mac tier (64GB+). Pearl live carried an explicit 4 until
+  # the 2026-09-22 hotfix. Pin 8 so an explicit live 4 is unclassified drift
+  # and reconcile exits non-zero. preserve-live deploys do not install this
+  # file. SIGHUP does not reload this cap; a coordinator restart is required.
+  max_concurrency_ceiling: 8
   wake_gap_threshold_s: 120
   degraded_backoff_s: 30
   degraded_max_retries: 3

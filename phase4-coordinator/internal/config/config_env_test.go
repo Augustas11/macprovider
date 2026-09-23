@@ -246,6 +246,9 @@ func TestDeployCoordinatorYAMLLoadsWithStatsEnv(t *testing.T) {
 	if cfg.Routing.MinProviderThroughputTPS != 1.0 {
 		t.Fatalf("MinProviderThroughputTPS=%v want 1.0 (Pearl live OpenRouter dispatch floor; dist must not revert to 0)", cfg.Routing.MinProviderThroughputTPS)
 	}
+	if cfg.Pool.MaxConcurrencyCeiling != 8 {
+		t.Fatalf("MaxConcurrencyCeiling=%d want 8 (Pearl template must pin the code default; #1678)", cfg.Pool.MaxConcurrencyCeiling)
+	}
 	nemotron, ok := cfg.Rewards.RateCard["nemotron-3-nano-30b-a3b"]
 	if !ok {
 		t.Fatal("nemotron rate-card row missing")
