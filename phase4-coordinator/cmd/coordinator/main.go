@@ -1754,7 +1754,12 @@ const (
 	moneySQLiteCheckpointMinTimeout     = 15 * time.Second
 	moneySQLiteCheckpointMaxTimeout     = 5 * time.Minute
 	moneySQLiteCheckpointBytesPerSecond = 32 << 20
-	routeSnapshotSQLiteMaxOpenConns     = 4
+	// A checkpoint may spend longer copying a large WAL, but it must never
+	// wait on SQLite locks longer than a buyer money-path write can tolerate.
+	// TRUNCATE returns a busy result and retries on a later idle poll instead
+	// of holding the writer lock through the six-second buyer write budget.
+	moneySQLiteCheckpointBusyTimeout = 100 * time.Millisecond
+	routeSnapshotSQLiteMaxOpenConns  = 4
 	// SQLite has one writer. Keep the pre-dispatch journal on one connection so
 	// concurrent buyer requests queue in database/sql instead of competing for
 	// the writer lock until their route-snapshot deadlines expire. The primary
@@ -1788,6 +1793,7 @@ type moneySQLiteWALCheckpointerConfig struct {
 	IdleInterval   time.Duration
 	MinTimeout     time.Duration
 	MaxTimeout     time.Duration
+	BusyTimeout    time.Duration
 	BytesPerSecond int64
 	DBPath         string
 }
@@ -1798,6 +1804,7 @@ func defaultMoneySQLiteWALCheckpointerConfig(dbPath string) moneySQLiteWALCheckp
 		IdleInterval:   moneySQLiteCheckpointIdleInterval,
 		MinTimeout:     moneySQLiteCheckpointMinTimeout,
 		MaxTimeout:     moneySQLiteCheckpointMaxTimeout,
+		BusyTimeout:    moneySQLiteCheckpointBusyTimeout,
 		BytesPerSecond: moneySQLiteCheckpointBytesPerSecond,
 		DBPath:         dbPath,
 	}
@@ -1805,6 +1812,7 @@ func defaultMoneySQLiteWALCheckpointerConfig(dbPath string) moneySQLiteWALCheckp
 
 type moneySQLiteActivity struct {
 	lastUnixNano atomic.Int64
+	inFlight     atomic.Int64
 }
 
 func newMoneySQLiteActivity(now time.Time) *moneySQLiteActivity {
@@ -1820,8 +1828,27 @@ func (a *moneySQLiteActivity) Mark(now time.Time) {
 	a.lastUnixNano.Store(now.UnixNano())
 }
 
+func (a *moneySQLiteActivity) Begin(now time.Time) {
+	if a == nil {
+		return
+	}
+	a.inFlight.Add(1)
+	a.Mark(now)
+}
+
+func (a *moneySQLiteActivity) End(now time.Time) {
+	if a == nil {
+		return
+	}
+	a.Mark(now)
+	a.inFlight.Add(-1)
+}
+
 func (a *moneySQLiteActivity) IdleFor(now time.Time) time.Duration {
 	if a == nil {
+		return 0
+	}
+	if a.inFlight.Load() > 0 {
 		return 0
 	}
 	last := a.lastUnixNano.Load()
@@ -1898,7 +1925,8 @@ func withMoneySQLiteActivity(next http.Handler, activity *moneySQLiteActivity) h
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		activity.Mark(time.Now())
+		activity.Begin(time.Now())
+		defer func() { activity.End(time.Now()) }()
 		next.ServeHTTP(w, r)
 	})
 }
@@ -1915,7 +1943,7 @@ func startMoneySQLiteWALCheckpointerWithConfig(ctx context.Context, db *sql.DB, 
 	if db == nil {
 		return
 	}
-	if cfg.PollInterval <= 0 || cfg.IdleInterval <= 0 || cfg.MinTimeout <= 0 || cfg.MaxTimeout <= 0 || cfg.BytesPerSecond <= 0 {
+	if cfg.PollInterval <= 0 || cfg.IdleInterval <= 0 || cfg.MinTimeout <= 0 || cfg.MaxTimeout <= 0 || cfg.BusyTimeout <= 0 || cfg.BytesPerSecond <= 0 {
 		return
 	}
 	go func() {
@@ -1967,16 +1995,6 @@ func moneySQLiteCheckpointDecision(idle, idleInterval time.Duration, walBytes in
 	return mode, moneySQLiteCheckpointTimeout(walBytes, cfg)
 }
 
-// moneySQLiteShouldFollowUpTruncate is the #1374 live-soak shrink path:
-// PASSIVE copies frames without waiting; busy==0 means that copy finished.
-// A timeout-bounded TRUNCATE then shrinks the sidecar file. RESTART is never
-// used. The remaining deadline is the only wait bound if a reader still holds
-// the WAL. Idle tracking stays the existing buyer-HTTP activity signal from
-// #1211; expanding it is out of this slice.
-func moneySQLiteShouldFollowUpTruncate(mode sqliteutil.WALCheckpointMode, busy int64, remaining time.Duration) bool {
-	return mode == sqliteutil.WALCheckpointPassive && busy == 0 && remaining > 0
-}
-
 func runMoneySQLiteWALCheckpoint(ctx context.Context, db *sql.DB, observer sqliteutil.WALObserver, logger zerolog.Logger, idle moneySQLiteIdleTracker, cfg moneySQLiteWALCheckpointerConfig) {
 	idleFor := time.Duration(0)
 	if idle != nil {
@@ -1987,23 +2005,31 @@ func runMoneySQLiteWALCheckpoint(ctx context.Context, db *sql.DB, observer sqlit
 	if timeout <= 0 {
 		return
 	}
-	if err := sqliteutil.SetBusyTimeout(ctx, db, timeout); err != nil {
+	if err := sqliteutil.SetBusyTimeout(ctx, db, cfg.BusyTimeout); err != nil {
 		logger.Warn().Err(err).Int64("wal_bytes", walBytes).Msg("money sqlite WAL busy_timeout failed")
+		return
 	}
 	deadline := time.Now().Add(timeout)
 	checkpointCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
-	result, err := sqliteutil.RunWALCheckpointMode(checkpointCtx, db, "wal_checkpoint", observer, mode)
+	result, err := sqliteutil.RunWALCheckpointMode(checkpointCtx, db, "wal_checkpoint", observer, sqliteutil.WALCheckpointPassive)
 	if err != nil {
-		logger.Warn().Err(err).Str("mode", string(mode)).Int64("wal_bytes", walBytes).Msg("money sqlite WAL checkpoint failed")
+		logger.Warn().Err(err).Str("mode", string(sqliteutil.WALCheckpointPassive)).Int64("wal_bytes", walBytes).Msg("money sqlite WAL checkpoint failed")
+		return
+	}
+	// PASSIVE performs the potentially large copy without excluding buyer
+	// writers. TRUNCATE is only an idle, zero-copy cleanup after PASSIVE has
+	// copied every frame. Recheck activity after PASSIVE so a buyer that arrived
+	// during the copy wins over WAL file shrinking.
+	if mode != sqliteutil.WALCheckpointTruncate || result.Busy != 0 || result.LogPages != result.CheckpointedPages {
+		return
+	}
+	if idle != nil && idle.IdleFor(time.Now()) < cfg.IdleInterval {
 		return
 	}
 	remaining := time.Until(deadline)
-	if !moneySQLiteShouldFollowUpTruncate(mode, result.Busy, remaining) {
+	if remaining <= 0 {
 		return
-	}
-	if err := sqliteutil.SetBusyTimeout(ctx, db, remaining); err != nil {
-		logger.Warn().Err(err).Int64("wal_bytes", walBytes).Msg("money sqlite WAL busy_timeout failed")
 	}
 	truncateCtx, truncateCancel := context.WithTimeout(ctx, remaining)
 	defer truncateCancel()

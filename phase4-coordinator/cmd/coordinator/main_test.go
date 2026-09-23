@@ -249,6 +249,7 @@ func TestMoneySQLiteWALCheckpointerRunsWhileBusy(t *testing.T) {
 		IdleInterval:   time.Hour,
 		MinTimeout:     time.Second,
 		MaxTimeout:     time.Second,
+		BusyTimeout:    10 * time.Millisecond,
 		BytesPerSecond: moneySQLiteCheckpointBytesPerSecond,
 		DBPath:         dbPath,
 	})
@@ -278,11 +279,93 @@ func TestMoneySQLiteWALCheckpointerRunsAfterIdle(t *testing.T) {
 		IdleInterval:   10 * time.Millisecond,
 		MinTimeout:     time.Second,
 		MaxTimeout:     time.Second,
+		BusyTimeout:    10 * time.Millisecond,
 		BytesPerSecond: moneySQLiteCheckpointBytesPerSecond,
 		DBPath:         dbPath,
 	})
 
 	assertWALCheckpointObservations(t, observer)
+}
+
+func TestMoneySQLiteActiveCheckpointDoesNotEscalateToTruncate(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "active-checkpoint.db")
+	db, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO t (v) VALUES ('active')`); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if size := sqliteutil.WALFileSize(dbPath); size == 0 {
+		t.Fatal("WAL size before active checkpoint = 0, want frames to checkpoint")
+	}
+
+	runMoneySQLiteWALCheckpoint(context.Background(), db, nil, zerolog.Nop(), fixedIdleTracker{idleFor: 0}, moneySQLiteWALCheckpointerConfig{
+		IdleInterval:   time.Second,
+		MinTimeout:     time.Second,
+		MaxTimeout:     time.Second,
+		BusyTimeout:    50 * time.Millisecond,
+		BytesPerSecond: moneySQLiteCheckpointBytesPerSecond,
+		DBPath:         dbPath,
+	})
+	if size := sqliteutil.WALFileSize(dbPath); size == 0 {
+		t.Fatal("active PASSIVE checkpoint truncated WAL; want truncation deferred until idle")
+	}
+}
+
+func TestMoneySQLiteBuyerArrivalAfterPassivePreventsTruncate(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "buyer-arrival-checkpoint.db")
+	checkpointDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatalf("open checkpoint db: %v", err)
+	}
+	t.Cleanup(func() { _ = checkpointDB.Close() })
+	checkpointDB.SetMaxOpenConns(1)
+	if _, err := checkpointDB.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := checkpointDB.Exec(`INSERT INTO t (v) VALUES ('seed')`); err != nil {
+		t.Fatalf("seed table: %v", err)
+	}
+	writerDB, err := sql.Open("sqlite", sqliteutil.WithPragmas(dbPath))
+	if err != nil {
+		t.Fatalf("open writer db: %v", err)
+	}
+	t.Cleanup(func() { _ = writerDB.Close() })
+
+	activity := newMoneySQLiteActivity(time.Now().Add(-time.Hour))
+	observer := &blockingWALObserver{passiveDone: make(chan struct{}), release: make(chan struct{})}
+	checkpointDone := make(chan struct{})
+	go func() {
+		runMoneySQLiteWALCheckpoint(context.Background(), checkpointDB, observer, zerolog.Nop(), activity, moneySQLiteWALCheckpointerConfig{
+			IdleInterval:   time.Second,
+			MinTimeout:     time.Second,
+			MaxTimeout:     time.Second,
+			BusyTimeout:    50 * time.Millisecond,
+			BytesPerSecond: moneySQLiteCheckpointBytesPerSecond,
+			DBPath:         dbPath,
+		})
+		close(checkpointDone)
+	}()
+	<-observer.passiveDone
+
+	activity.Begin(time.Now())
+	writeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, writeErr := writerDB.ExecContext(writeCtx, `INSERT INTO t (v) VALUES ('buyer')`)
+	close(observer.release)
+	<-checkpointDone
+	activity.End(time.Now())
+	if writeErr != nil {
+		t.Fatalf("buyer writer while checkpoint yields after PASSIVE: %v", writeErr)
+	}
+	if size := sqliteutil.WALFileSize(dbPath); size == 0 {
+		t.Fatal("buyer arrival after PASSIVE was followed by TRUNCATE; want WAL shrink deferred")
+	}
 }
 
 func TestMoneySQLiteCheckpointTimeoutScalesWithWALSize(t *testing.T) {
@@ -322,24 +405,6 @@ func TestMoneySQLiteCheckpointDecision(t *testing.T) {
 	}
 }
 
-func TestMoneySQLiteShouldFollowUpTruncate(t *testing.T) {
-	if !moneySQLiteShouldFollowUpTruncate(sqliteutil.WALCheckpointPassive, 0, time.Second) {
-		t.Fatal("PASSIVE busy=0 with remaining budget should follow up TRUNCATE")
-	}
-	if moneySQLiteShouldFollowUpTruncate(sqliteutil.WALCheckpointPassive, 1, time.Second) {
-		t.Fatal("PASSIVE busy!=0 must not follow up TRUNCATE")
-	}
-	if moneySQLiteShouldFollowUpTruncate(sqliteutil.WALCheckpointPassive, 0, 0) {
-		t.Fatal("PASSIVE with no remaining budget must not follow up TRUNCATE")
-	}
-	if moneySQLiteShouldFollowUpTruncate(sqliteutil.WALCheckpointTruncate, 0, time.Second) {
-		t.Fatal("idle TRUNCATE must not follow up with another TRUNCATE")
-	}
-	if moneySQLiteShouldFollowUpTruncate(sqliteutil.WALCheckpointMode("RESTART"), 0, time.Second) {
-		t.Fatal("unsupported RESTART must not follow up")
-	}
-}
-
 func assertWALCheckpointObservations(t *testing.T, observer *walObserverStub) {
 	t.Helper()
 	seen := map[string]bool{}
@@ -371,6 +436,90 @@ func TestMoneySQLiteActivityMiddlewareMarksRequests(t *testing.T) {
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 	if idle := activity.IdleFor(time.Now().Add(100 * time.Millisecond)); idle > time.Second {
 		t.Fatalf("activity idle=%s, want recent request mark", idle)
+	}
+}
+
+func TestMoneySQLiteActivityMiddlewareKeepsLongRequestBusy(t *testing.T) {
+	activity := newMoneySQLiteActivity(time.Unix(100, 0))
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	handler := withMoneySQLiteActivity(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(entered)
+		<-release
+	}), activity)
+
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil))
+		close(done)
+	}()
+	<-entered
+	if idle := activity.IdleFor(time.Now().Add(time.Hour)); idle != 0 {
+		t.Fatalf("activity idle=%s during in-flight buyer request, want 0", idle)
+	}
+	close(release)
+	<-done
+	if idle := activity.IdleFor(time.Now().Add(100 * time.Millisecond)); idle > time.Second {
+		t.Fatalf("activity idle=%s after buyer completion, want recent completion mark", idle)
+	}
+}
+
+func TestMoneySQLiteIdleTruncateDoesNotHoldWriterPastBusyCap(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "checkpoint-writer.db")
+	checkpointDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatalf("open checkpoint db: %v", err)
+	}
+	t.Cleanup(func() { _ = checkpointDB.Close() })
+	checkpointDB.SetMaxOpenConns(1)
+	if _, err := checkpointDB.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	if _, err := checkpointDB.Exec(`INSERT INTO t (v) VALUES ('seed')`); err != nil {
+		t.Fatalf("seed table: %v", err)
+	}
+
+	readerDB, err := sql.Open("sqlite", sqliteutil.WithPragmas(dbPath))
+	if err != nil {
+		t.Fatalf("open reader db: %v", err)
+	}
+	t.Cleanup(func() { _ = readerDB.Close() })
+	readerTx, err := readerDB.Begin()
+	if err != nil {
+		t.Fatalf("begin reader: %v", err)
+	}
+	t.Cleanup(func() { _ = readerTx.Rollback() })
+	rows, err := readerTx.Query(`SELECT v FROM t`)
+	if err != nil {
+		t.Fatalf("hold reader: %v", err)
+	}
+	t.Cleanup(func() { _ = rows.Close() })
+	if !rows.Next() {
+		t.Fatal("held reader returned no row")
+	}
+
+	started := time.Now()
+	runMoneySQLiteWALCheckpoint(context.Background(), checkpointDB, nil, zerolog.Nop(), fixedIdleTracker{idleFor: time.Hour}, moneySQLiteWALCheckpointerConfig{
+		IdleInterval:   time.Second,
+		MinTimeout:     time.Second,
+		MaxTimeout:     time.Second,
+		BusyTimeout:    50 * time.Millisecond,
+		BytesPerSecond: moneySQLiteCheckpointBytesPerSecond,
+		DBPath:         dbPath,
+	})
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("idle TRUNCATE waited %s, want bounded lock wait", elapsed)
+	}
+
+	writerDB, err := sql.Open("sqlite", sqliteutil.WithPragmas(dbPath))
+	if err != nil {
+		t.Fatalf("open writer db: %v", err)
+	}
+	t.Cleanup(func() { _ = writerDB.Close() })
+	writeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := writerDB.ExecContext(writeCtx, `INSERT INTO t (v) VALUES ('buyer')`); err != nil {
+		t.Fatalf("buyer writer after bounded checkpoint: %v", err)
 	}
 }
 
@@ -609,6 +758,21 @@ func (s *retentionPrunerStub) PruneBefore(_ context.Context, cutoff time.Time) (
 type walObserverStub struct {
 	called    chan string
 	durations chan struct{}
+}
+
+type blockingWALObserver struct {
+	passiveDone chan struct{}
+	release     chan struct{}
+	blocked     atomic.Bool
+}
+
+func (o *blockingWALObserver) ObserveSQLiteWALCheckpoint(string, string, string, int64) {}
+
+func (o *blockingWALObserver) ObserveSQLiteWALCheckpointDuration(_ string, _ string, _ time.Duration) {
+	if o.blocked.CompareAndSwap(false, true) {
+		close(o.passiveDone)
+		<-o.release
+	}
 }
 
 func (s *walObserverStub) ObserveSQLiteWALCheckpoint(component, pageClass, outcome string, _ int64) {
