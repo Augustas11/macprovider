@@ -3054,7 +3054,15 @@ actor ModelRuntime: ModelRuntimeServing {
                 descriptor: descriptor,
                 layerCount: layerCount,
                 contiguousCacheBridge: contiguousCacheBridge,
-                compiledDecode: true
+                // Off on the serve path. A replayed `MLX.compile` step never
+                // re-runs `KVCacheSimple.update`'s Swift offset/grow logic, so
+                // every step after the trace writes the same KV slot at the
+                // same RoPE position: greedy rows loop on the prompt within a
+                // few tokens and fail `continuous_batching_invalid_cache_layout`
+                // once the traced buffer (seed + 256) is full. Measured on
+                // Studio 2026-09-24: signed 176, 181 and main all degenerate
+                // with this on and are coherent with it off.
+                compiledDecode: false
             ),
             maxBatch: maxBatch,
             queueLimit: queueLimit,
@@ -3614,6 +3622,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private struct ContinuousBatchPreparedRequest: Sendable {
         let promptTokens: [Int]
         let stopTokenSequences: [[Int]]
+        let modelStopTokenIDs: Set<Int>
     }
 
     /// Tokenizer decode for CB streaming. Must not take `ModelContainer`:
@@ -3741,12 +3750,16 @@ actor ModelRuntime: ModelRuntimeServing {
             let lmInput = try await context.processor.prepare(input: input)
             let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
             try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
-            let stopTokenSequences = request.stop.map {
-                context.tokenizer.encode(text: $0, addSpecialTokens: false)
-            }.filter { !$0.isEmpty }
+            let stopTokenSequences = Self.continuousBatchStopTokenSequences(
+                requestStops: request.stop,
+                context: context
+            )
             return ContinuousBatchPreparedRequest(
                 promptTokens: promptTokens,
-                stopTokenSequences: stopTokenSequences
+                stopTokenSequences: stopTokenSequences,
+                modelStopTokenIDs: Self.generationStopTokenIDs(
+                    for: Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
+                )
             )
         }
 
@@ -3802,6 +3815,17 @@ actor ModelRuntime: ModelRuntimeServing {
                 throw Self.terminalFailureError(code: result.errorCode ?? "continuous_batching_request_failed")
             }
             let completionEndedAt = Date()
+            // The serial path discards the model's end-of-generation token
+            // before counting it; bill and cache the batched row the same way.
+            // Harmony `<|return|>`/`<|call|>` are excluded from this set, as
+            // they are from the serial stop set: the parser reads and counts them.
+            let generatedTokens = Self.droppingTrailingModelStop(
+                result.generatedTokens,
+                terminalStatus: result.terminalStatus,
+                modelStopTokenIDs: prepared.modelStopTokenIDs
+            )
+            let completionTokenCount = result.completionTokens
+                - (result.generatedTokens.count - generatedTokens.count)
             let completion = try await container.perform { context in
                 let decoded = context.tokenizer.decode(tokenIds: result.outputTokens)
                 guard decoded.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
@@ -3824,11 +3848,11 @@ actor ModelRuntime: ModelRuntimeServing {
                     : (filtered.hitStop ? "request_stop" : "stop")
                 let parsed = try Self.parseGeneratedOutput(
                     filteredText: filtered.text,
-                    generatedTokenIDs: result.generatedTokens,
+                    generatedTokenIDs: generatedTokens,
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     request: request,
                     mode: .complete(finishReason: parserFinishReason),
-                    defaultCompletionTokens: result.completionTokens,
+                    defaultCompletionTokens: completionTokenCount,
                     stopTokenFilter: stopTokenFilter,
                     requestStops: request.stop,
                     globalHitStop: filtered.hitStop
@@ -3871,7 +3895,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             await scheduler.discardRetainedCache(retained, conversationKey: key)
                         }
                     ),
-                    fullTokens: preparedPromptTokenIDs + result.generatedTokens.map(Int32.init)
+                    fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
                 await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
             } else if let retainedCache = result.retainedCache {
@@ -3943,14 +3967,18 @@ actor ModelRuntime: ModelRuntimeServing {
             let lmInput = try await context.processor.prepare(input: input)
             let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
             try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
-            let stopTokenSequences = requestStops.map {
-                context.tokenizer.encode(text: $0, addSpecialTokens: false)
-            }.filter { !$0.isEmpty }
+            let stopTokenSequences = Self.continuousBatchStopTokenSequences(
+                requestStops: requestStops,
+                context: context
+            )
             let tokenizer = context.tokenizer
             return (
                 ContinuousBatchPreparedRequest(
                     promptTokens: promptTokens,
-                    stopTokenSequences: stopTokenSequences
+                    stopTokenSequences: stopTokenSequences,
+                    modelStopTokenIDs: Self.generationStopTokenIDs(
+                    for: Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
+                )
                 ),
                 StreamingDetokenizer { tokenizer.decode(tokenIds: $0) }
             )
@@ -4029,6 +4057,17 @@ actor ModelRuntime: ModelRuntimeServing {
                 throw Self.terminalFailureError(code: result.errorCode ?? "continuous_batching_request_failed")
             }
             let completionEndedAt = Date()
+            // The serial path discards the model's end-of-generation token
+            // before counting it; bill and cache the batched row the same way.
+            // Harmony `<|return|>`/`<|call|>` are excluded from this set, as
+            // they are from the serial stop set: the parser reads and counts them.
+            let generatedTokens = Self.droppingTrailingModelStop(
+                result.generatedTokens,
+                terminalStatus: result.terminalStatus,
+                modelStopTokenIDs: prepared.modelStopTokenIDs
+            )
+            let completionTokenCount = result.completionTokens
+                - (result.generatedTokens.count - generatedTokens.count)
             let completion = try await container.perform { context in
                 let decoded = context.tokenizer.decode(tokenIds: result.outputTokens)
                 guard decoded.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
@@ -4051,11 +4090,11 @@ actor ModelRuntime: ModelRuntimeServing {
                     : (filtered.hitStop ? "request_stop" : "stop")
                 let parsed = try Self.parseGeneratedOutput(
                     filteredText: filtered.text,
-                    generatedTokenIDs: result.generatedTokens,
+                    generatedTokenIDs: generatedTokens,
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     request: request,
                     mode: .complete(finishReason: parserFinishReason),
-                    defaultCompletionTokens: result.completionTokens,
+                    defaultCompletionTokens: completionTokenCount,
                     stopTokenFilter: stopTokenFilter,
                     requestStops: requestStops,
                     globalHitStop: filtered.hitStop
@@ -4103,7 +4142,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             await scheduler.discardRetainedCache(retained, conversationKey: key)
                         }
                     ),
-                    fullTokens: preparedPromptTokenIDs + result.generatedTokens.map(Int32.init)
+                    fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
                 await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
             } else if let retainedCache = result.retainedCache {
@@ -4752,6 +4791,35 @@ actor ModelRuntime: ModelRuntimeServing {
         } catch {
             throw SpeculativeGenerationFailure(reason: "generation_threw")
         }
+    }
+
+    /// Stop sequences for a batched row: the model's end-of-generation
+    /// tokens plus the buyer's `stop` strings. The scheduler stops a row only
+    /// on these, so omitting the model EOS set made every batched row run to
+    /// `max_tokens` and emit text past the end of the answer, where the serial
+    /// path stops on `generationStopTokenIDs`.
+    static func continuousBatchStopTokenSequences(
+        requestStops: [String],
+        context: ModelContext
+    ) -> [[Int]] {
+        let modelStops = generationStopTokenIDs(for: context).sorted().map { [$0] }
+        let buyerStops = requestStops.map {
+            context.tokenizer.encode(text: $0, addSpecialTokens: false)
+        }.filter { !$0.isEmpty }
+        return modelStops + buyerStops
+    }
+
+    static func droppingTrailingModelStop(
+        _ generatedTokens: [Int],
+        terminalStatus: ContinuousBatchSchedulerTerminalStatus,
+        modelStopTokenIDs: Set<Int>
+    ) -> [Int] {
+        guard terminalStatus == .stop,
+              let last = generatedTokens.last,
+              modelStopTokenIDs.contains(last) else {
+            return generatedTokens
+        }
+        return Array(generatedTokens.dropLast())
     }
 
     private static func generationStopTokenIDs(for context: ModelContext) -> Set<Int> {
