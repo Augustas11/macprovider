@@ -843,6 +843,28 @@ if ! printf '%s' "$AUTOTUNE_RELEASE_ID" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0
   exit 1
 fi
 AUTOTUNE_RELEASE_DIR_NAME="$AUTOTUNE_RELEASE_ID-$(printf '%s' "$AUTOTUNE_RELEASE_CONTENT_SHA256" | cut -c1-16)"
+# #1688 A2: the tag's release ledger rides the pinned deploy inputs so Pearl's
+# compare-live can tell a live release this tag descends from (activate) from
+# a catalog regression (refuse). The staged release dir never carries it.
+AUTOTUNE_RELEASE_LEDGER="$PINNED_AUTOTUNE_DIR/release-ledger.json"
+[ -f "$AUTOTUNE_RELEASE_LEDGER" ] || { echo "missing required file: $AUTOTUNE_RELEASE_LEDGER" >&2; exit 1; }
+# Operator override for a compare-live regression verdict. Printable ASCII,
+# 1-200 chars, one line; it reaches Pearl only as base64.
+CATALOG_REGRESSION_OVERRIDE_REASON="${CATALOG_REGRESSION_OVERRIDE_REASON:-}"
+CATALOG_REGRESSION_OVERRIDE_B64=""
+if [ -n "$CATALOG_REGRESSION_OVERRIDE_REASON" ]; then
+  case "$CATALOG_REGRESSION_OVERRIDE_REASON" in
+    *$'\n'*|*$'\r'*)
+      echo "aborting deploy: CATALOG_REGRESSION_OVERRIDE_REASON must be a single line" >&2
+      exit 1
+      ;;
+  esac
+  if ! printf '%s' "$CATALOG_REGRESSION_OVERRIDE_REASON" | LC_ALL=C grep -Eq '^[ -~]{1,200}$'; then
+    echo "aborting deploy: CATALOG_REGRESSION_OVERRIDE_REASON must be 1-200 printable ASCII characters" >&2
+    exit 1
+  fi
+  CATALOG_REGRESSION_OVERRIDE_B64="$(printf '%s' "$CATALOG_REGRESSION_OVERRIDE_REASON" | base64 | tr -d '\n')"
+fi
 
 # coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
 # FR-C9.4 strict-reject path still requires `coordinator-cli
@@ -3260,6 +3282,7 @@ for _deploy_input in \
   "$STATIC_RATE_CARD_JSON=rate-card.json" \
   "$STATIC_RATE_CARD_SIG=rate-card.json.sig" \
   "$AUTOTUNE_RELEASE_MANIFEST=release.json" \
+  "$AUTOTUNE_RELEASE_LEDGER=release-ledger.json" \
   "$AUTOTUNE_TRUSTED_KEYS=trusted-keys.json"; do
   _append_deploy_input_digest "${_deploy_input%%=*}" "${_deploy_input#*=}"
 done
@@ -3335,6 +3358,7 @@ if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
 fi
 $SCP "$AUTOTUNE_RELEASE_MANIFEST" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release.json"
 $SCP "$AUTOTUNE_TRUSTED_KEYS"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/trusted-keys.json"
+$SCP "$AUTOTUNE_RELEASE_LEDGER"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release-ledger.json"
 $SCP "$AUTOTUNE_TIER2_JSON"       "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
 for _bundle_path in $CATALOG_VERIFIER_BUNDLE; do
   $SCP "$PINNED_SCRIPTS_DIR/${_bundle_path#scripts/}" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/$_bundle_path"
@@ -3376,6 +3400,111 @@ if ! $SSH "set -e
   echo "aborting deploy: staged catalog release failed remote verify-directory preflight on the VPS (before config backup or release staging)" >&2
   exit 1
 fi
+
+# #1688 A2: runtime-only stays runtime-only. Compare the staged release with
+# live autotune/current by CONTENT (weekly renewals re-id the live release on
+# Pearl without a commit) before the config backup, release staging, or any
+# current swap. Line 1 is the live target (empty = bootstrap), line 2 the
+# compare-live verdict JSON; compare-live exits 3 for a regression.
+log "  comparing staged catalog release with live autotune/current (compare-live)"
+CATALOG_COMPARE_RC=0
+CATALOG_COMPARE_OUT="$($SSH "set -e
+  _live=\$(readlink /opt/macprovider/autotune/current 2>/dev/null || true)
+  case \"\$_live\" in
+    '') printf '\\n'; exit 0 ;;
+    releases/[A-Za-z0-9]*) ;;
+    *) echo \"invalid existing autotune current target: \$_live\" >&2; exit 1 ;;
+  esac
+  case \"\$_live\" in
+    *[!A-Za-z0-9._/-]*|*/*/*) echo \"unsafe existing autotune current target: \$_live\" >&2; exit 1 ;;
+  esac
+  _compare=$DEPLOY_TMP/catalog-compare
+  rm -rf \$_compare
+  install -d -m 0700 \$_compare
+  for _f in $CATALOG_RELEASE_FILES; do cp $DEPLOY_TMP/\$_f \$_compare/\$_f; done
+  printf '%s\\n' \"\$_live\"
+  _rc=0
+  python3 -I $DEPLOY_TMP/scripts/catalog-release.py compare-live --incoming \$_compare --live /opt/macprovider/autotune/\$_live --ledger $DEPLOY_TMP/release-ledger.json || _rc=\$?
+  rm -rf \$_compare
+  exit \$_rc")" || CATALOG_COMPARE_RC=$?
+CATALOG_LIVE_TARGET="${CATALOG_COMPARE_OUT%%$'\n'*}"
+CATALOG_COMPARE_JSON=""
+case "$CATALOG_COMPARE_OUT" in *$'\n'*) CATALOG_COMPARE_JSON="${CATALOG_COMPARE_OUT#*$'\n'}" ;; esac
+if [ "$CATALOG_COMPARE_RC" != "0" ] && [ "$CATALOG_COMPARE_RC" != "3" ]; then
+  echo "aborting deploy: compare-live failed on the VPS (rc=$CATALOG_COMPARE_RC); refusing to touch the live catalog" >&2
+  exit 1
+fi
+CATALOG_LIVE_RELEASE_ID=""
+if [ -z "$CATALOG_LIVE_TARGET" ]; then
+  [ "$CATALOG_COMPARE_RC" = "0" ] && [ -z "$CATALOG_COMPARE_JSON" ] || {
+    echo "aborting deploy: compare-live bootstrap answer is malformed" >&2
+    exit 1
+  }
+  CATALOG_VERDICT=bootstrap
+else
+  if ! printf '%s' "$CATALOG_LIVE_TARGET" | grep -Eq '^releases/[A-Za-z0-9][A-Za-z0-9._-]{0,191}$'; then
+    echo "aborting deploy: compare-live reported an unsafe live target" >&2
+    exit 1
+  fi
+  CATALOG_COMPARE_FIELDS="$(python3 - "$CATALOG_COMPARE_RC" "$CATALOG_COMPARE_JSON" <<'PY'
+import json, re, sys
+rc, raw = sys.argv[1], sys.argv[2]
+value = json.loads(raw)
+verdict = value.get("verdict")
+if (rc, verdict) not in {("0", "equivalent"), ("0", "descends"), ("3", "regression")}:
+    raise SystemExit(f"compare-live exit {rc} does not match verdict {verdict!r}")
+live_id = value.get("live_release_id")
+if not isinstance(live_id, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", live_id) is None:
+    raise SystemExit("compare-live live_release_id is unsafe")
+print(verdict, live_id)
+for reason in value.get("reasons", []):
+    print("    compare-live: " + re.sub(r"[^ -~]", "?", str(reason))[:300], file=sys.stderr)
+PY
+)" || { echo "aborting deploy: compare-live output is malformed" >&2; exit 1; }
+  read -r CATALOG_VERDICT CATALOG_LIVE_RELEASE_ID <<< "$CATALOG_COMPARE_FIELDS"
+fi
+case "$CATALOG_VERDICT" in
+  bootstrap) log "  no live autotune/current: bootstrap activates $AUTOTUNE_RELEASE_ID" ;;
+  equivalent) log "  catalog unchanged; runtime-only deploy keeps live release $CATALOG_LIVE_RELEASE_ID" ;;
+  descends) log "  live release $CATALOG_LIVE_RELEASE_ID is in this tag's ledger: activating $AUTOTUNE_RELEASE_ID" ;;
+  regression)
+    if [ -z "$CATALOG_REGRESSION_OVERRIDE_B64" ]; then
+      echo "aborting deploy: catalog regression — live release $CATALOG_LIVE_RELEASE_ID is neither equivalent to $AUTOTUNE_RELEASE_ID nor in this tag's release ledger" >&2
+      echo "  A runtime deploy from this tag would roll the live catalog back. Deploy a tag that carries the live catalog," >&2
+      echo "  or set CATALOG_REGRESSION_OVERRIDE_REASON='<why>' to activate anyway (logged on Pearl)." >&2
+      exit 1
+    fi
+    log "  CATALOG REGRESSION OVERRIDE: activating $AUTOTUNE_RELEASE_ID over live $CATALOG_LIVE_RELEASE_ID"
+    $SSH "set -e
+      install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider
+      python3 -I - '$CATALOG_REGRESSION_OVERRIDE_B64' '$AUTOTUNE_RELEASE_DIR_NAME' '$CATALOG_LIVE_TARGET' '$CATALOG_LIVE_RELEASE_ID' '$COORDINATOR_RELEASE_VERSION' '$COORDINATOR_RELEASE_COMMIT' <<'PY'
+import base64, datetime, json, os, stat, sys
+reason_b64, incoming, live_target, live_id, tag, commit = sys.argv[1:]
+record = {
+    'ts': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    'reason': base64.b64decode(reason_b64, validate=True).decode('ascii'),
+    'incoming': incoming,
+    'live': {'target': live_target, 'release_id': live_id},
+    'tag': tag,
+    'commit': commit,
+}
+path = '/var/lib/macprovider/catalog-window-overrides.jsonl'
+fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise SystemExit(path + ' is not a regular file')
+    os.fchown(fd, 0, 0)
+    os.fchmod(fd, 0o600)
+    os.write(fd, (json.dumps(record, sort_keys=True) + '\\n').encode('ascii'))
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+      logger -t macprovider-deploy 'catalog regression override used for $AUTOTUNE_RELEASE_DIR_NAME'"
+    log "  AUDIT TRAIL: override appended to /var/lib/macprovider/catalog-window-overrides.jsonl"
+    ;;
+  *) echo "aborting deploy: unknown compare-live verdict" >&2; exit 1 ;;
+esac
 
 if [ "$CONFIG_MODE" = "apply-tracked" ] || [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ] || [ "${RATE_CARD_CONFIG_MIGRATION_ACTIVE:-0}" = "1" ] || [ "${RATE_CARD_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" ]; then
   # M1-6 / DEVE-5 Part D: dated backup of the remote coordinator.yaml on Pearl
@@ -3844,12 +3973,60 @@ EOF
 fi
 log "  ok: $CONNECTED_COUNT connected providers (or FORCE_RESTART=1 set)"
 
+if [ "$CATALOG_VERDICT" = "equivalent" ]; then
+  # #1688 A2: content-equivalent live catalog. No current swap, no window
+  # apply; the immutable release staged above stays for forensics/rollback.
+  log "  catalog unchanged; runtime-only deploy keeps live release $CATALOG_LIVE_RELEASE_ID"
+  $SSH "set -e
+    exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
+    flock -s 8
+    _current=\$(readlink /opt/macprovider/autotune/current 2>/dev/null || true)
+    [ \"\$_current\" = '$CATALOG_LIVE_TARGET' ] || {
+      echo \"autotune/current moved since compare-live (\$_current); re-run the deploy\" >&2
+      exit 1
+    }
+    rm -f /opt/macprovider/tier2-catalog.json
+    rm -rf $DEPLOY_TMP
+  "
+  # Post-restart smokes and the canary prove the LIVE release, not the tag's.
+  [ -n "$PINNED_DEPLOY_INPUT_DIR" ] || { echo "aborting deploy: no pinned input dir for the live catalog snapshot" >&2; exit 1; }
+  CATALOG_LIVE_SNAPSHOT="$PINNED_DEPLOY_INPUT_DIR/live-catalog"
+  mkdir -m 0700 "$CATALOG_LIVE_SNAPSHOT"
+  # shellcheck disable=SC2086 # fixed release file names
+  $SSH "tar -C /opt/macprovider/autotune/$CATALOG_LIVE_TARGET -cf - $CATALOG_RELEASE_FILES" | tar -xf - -C "$CATALOG_LIVE_SNAPSHOT"
+  STATIC_DEMAND_JSON="$CATALOG_LIVE_SNAPSHOT/demand-rank.json"
+  STATIC_DEMAND_SIG="$CATALOG_LIVE_SNAPSHOT/demand-rank.json.sig"
+  STATIC_AUTOTUNE_JSON="$CATALOG_LIVE_SNAPSHOT/autotune-candidates.json"
+  STATIC_AUTOTUNE_SIG="$CATALOG_LIVE_SNAPSHOT/autotune-candidates.json.sig"
+  STATIC_RATE_CARD_JSON="$CATALOG_LIVE_SNAPSHOT/rate-card.json"
+  STATIC_RATE_CARD_SIG="$CATALOG_LIVE_SNAPSHOT/rate-card.json.sig"
+  AUTOTUNE_RELEASE_MANIFEST="$CATALOG_LIVE_SNAPSHOT/release.json"
+  AUTOTUNE_TRUSTED_KEYS="$CATALOG_LIVE_SNAPSHOT/trusted-keys.json"
+  AUTOTUNE_TIER2_JSON="$CATALOG_LIVE_SNAPSHOT/tier2-catalog.json"
+  CATALOG_LIVE_IDENTITY="$(python3 - "$AUTOTUNE_RELEASE_MANIFEST" "$CATALOG_LIVE_RELEASE_ID" <<'PY'
+import json, pathlib, sys
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+if manifest.get("release_id") != sys.argv[2]:
+    raise SystemExit("live catalog snapshot release_id differs from the compare-live verdict")
+feed = manifest["feeds"]["autotune-candidates.json"]
+print(manifest["release_id"], manifest["policy_version"], feed["sha256"], feed["signer_key_id"])
+PY
+)" || { echo "aborting deploy: live catalog snapshot does not match compare-live" >&2; exit 1; }
+  read -r AUTOTUNE_RELEASE_ID AUTOTUNE_POLICY_VERSION AUTOTUNE_CANDIDATE_SHA256 AUTOTUNE_CANDIDATE_SIGNER_KEY_ID <<< "$CATALOG_LIVE_IDENTITY"
+else
 log "  activating verified autotune release $AUTOTUNE_RELEASE_ID"
 $SSH "set -e
   exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
   flock -s 8
   _catalog_root=/opt/macprovider/autotune
   _previous=\$(readlink \"\$_catalog_root/current\" 2>/dev/null || true)
+  # #1688 A2: activate only over the current compare-live judged (staging may
+  # have bootstrapped current to this release when none existed).
+  case \"\$_previous\" in
+    '$CATALOG_LIVE_TARGET') ;;
+    releases/$AUTOTUNE_RELEASE_DIR_NAME) [ '$CATALOG_VERDICT' = bootstrap ] || { echo 'autotune/current moved since compare-live; re-run the deploy' >&2; exit 1; } ;;
+    *) echo \"autotune/current moved since compare-live (\$_previous); re-run the deploy\" >&2; exit 1 ;;
+  esac
   case \"\$_previous\" in
     ''|releases/[A-Za-z0-9]*) ;;
     *) echo \"invalid existing autotune current target: \$_previous\" >&2; exit 1 ;;
@@ -3873,6 +4050,7 @@ $SSH "set -e
   rm -f /opt/macprovider/tier2-catalog.json
   rm -rf $DEPLOY_TMP
 "
+fi
 log "step 7/9: enable + start coordinator service"
 $SSH 'set -e
   exec 8>/opt/macprovider/.coordinator-deploy-operation.lock

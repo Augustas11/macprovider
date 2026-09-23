@@ -4790,6 +4790,147 @@ def cmd_continuity_check(incoming: pathlib.Path, live: pathlib.Path) -> None:
     print("continuity-check: dates-only delta confirmed")
 
 
+# #1688 A2: `compare-live` decides whether a runtime deploy may touch the live
+# catalog. Weekly renewals mint a release_id + generated_at on Pearl that are
+# never committed, so identity is decided by CONTENT, never by ledger IDs alone.
+COMPARE_LIVE_EXIT_REGRESSION = 3
+# Per-feed release.json fields that are functions of the restamped bytes: a
+# renewal rewrites candidates/demand `version`+`generated_at` and the rate card
+# `generated_at`, so their `sha256`/`bytes` move, and candidates/demand
+# `version` IS the release id. The rate card `version` is a rows-projection hash
+# (content) and is kept. Tier-2 and artifact entries are fully derived from
+# envelopes compared on their own, so all three are stripped for them.
+_RELEASE_FEED_DERIVED_FIELDS = {
+    "autotune-candidates.json": ("version", "sha256", "bytes"),
+    "demand-rank.json": ("version", "sha256", "bytes"),
+    RATE_CARD_FEED_NAME: ("sha256", "bytes"),
+    TIER2_CATALOG_FEED_NAME: ("version", "sha256", "bytes"),
+    ARTIFACT_FEED_NAME: ("version", "sha256", "bytes"),
+}
+# Tier-2 envelope fields that carry signing time/identity, not model content.
+_TIER2_ENVELOPE_FIELDS = ("issued_at", "expires_at", "signature", "catalog_id", "version")
+
+
+def _load_release_manifest(directory: pathlib.Path) -> dict:
+    manifest = strict_json((directory / "release.json").read_bytes(), f"{directory}/release.json")
+    if not isinstance(manifest.get("release_id"), str) or not isinstance(manifest.get("feeds"), dict):
+        fail(f"{directory}/release.json: release_id and feeds are required")
+    for name, entry in manifest["feeds"].items():
+        if name not in _RELEASE_FEED_DERIVED_FIELDS or not isinstance(entry, dict):
+            fail(f"{directory}/release.json: unexpected feed entry {name!r}")
+    for name in RENEWAL_CONTINUITY_FEEDS + (TIER2_CATALOG_FEED_NAME,):
+        if name not in manifest["feeds"]:
+            fail(f"{directory}/release.json: feed {name} is required")
+    return manifest
+
+
+def _stripped_release_manifest(manifest: dict) -> str:
+    obj = json.loads(json.dumps(manifest))
+    obj.pop("release_id", None)
+    obj.pop("generated_at", None)
+    for name, entry in obj["feeds"].items():
+        for field in _RELEASE_FEED_DERIVED_FIELDS[name]:
+            entry.pop(field, None)
+    return json.dumps(obj, sort_keys=True)
+
+
+def _tier2_content(directory: pathlib.Path) -> tuple[str, datetime]:
+    label = f"{directory}/{TIER2_CATALOG_FEED_NAME}"
+    obj = strict_json((directory / TIER2_CATALOG_FEED_NAME).read_bytes(), label)
+    if not isinstance(obj.get("models"), list):
+        fail(f"{label}: models must be a list")
+    expires_at = parse_timestamp(obj.get("expires_at"), f"{label} expires_at")
+    for field in _TIER2_ENVELOPE_FIELDS:
+        obj.pop(field, None)
+    return json.dumps(obj, sort_keys=True), expires_at
+
+
+def live_equivalence_reasons(incoming: pathlib.Path, live: pathlib.Path) -> list[str]:
+    """Why the live release is NOT content-equivalent to the incoming one ([] = equivalent).
+
+    Detached `.sig` sidecars are not compared: each signs its JSON's exact
+    (restamped) bytes, the JSON content and `signer_key_id` are compared, and
+    both sides were verified by verify-directory before they could be live or
+    staged.
+    """
+    reasons: list[str] = []
+    incoming_manifest = _load_release_manifest(incoming)
+    live_manifest = _load_release_manifest(live)
+    if set(incoming_manifest["feeds"]) != set(live_manifest["feeds"]):
+        reasons.append("release feed sets differ (artifact-bound vs unbound)")
+    # Same semantics as the freshness-renewal guard, artifact feed included.
+    reasons.extend(f"{name} content differs" for name in feed_continuity_drift(incoming, live))
+    if not reasons and _stripped_release_manifest(incoming_manifest) != _stripped_release_manifest(live_manifest):
+        reasons.append("release.json differs beyond release-derived fields")
+    incoming_tier2, incoming_expires = _tier2_content(incoming)
+    live_tier2, live_expires = _tier2_content(live)
+    if incoming_tier2 != live_tier2:
+        reasons.append(f"{TIER2_CATALOG_FEED_NAME} content differs")
+    if live_expires < incoming_expires:
+        reasons.append(f"{TIER2_CATALOG_FEED_NAME}: incoming carries a fresher Tier-2 (later expires_at)")
+    if (incoming / "trusted-keys.json").read_bytes() != (live / "trusted-keys.json").read_bytes():
+        reasons.append("trusted-keys.json differs")
+    return reasons
+
+
+def _live_matches_ledger_row(live: pathlib.Path, live_manifest: dict, release_id: str, row: dict) -> bool:
+    """True when live's feeds, re-stamped to the row's recorded identity, hash to the row.
+
+    The ledger records only whole-file sha256/bytes/version per feed, never the
+    bytes, so content equality is decided by REVERSING a renewal: a renewal
+    changes only candidates/demand `version`+`generated_at`, the rate card
+    `generated_at`, and the artifact feed's release fields; Tier-2 bytes are
+    carried unchanged. Writing the row's values back reproduces the committed
+    bytes exactly iff the content is the committed release's content.
+    """
+    feeds = row["feeds"]
+    if set(feeds) != set(live_manifest["feeds"]):
+        return False
+    for name, recorded in feeds.items():
+        raw = (live / name).read_bytes()
+        if name in RENEWAL_CONTINUITY_FEEDS:
+            obj = strict_json(raw, f"{live}/{name}")
+            if name != RATE_CARD_FEED_NAME:
+                obj["version"] = recorded["version"]
+            obj["generated_at"] = row["generated_at"]
+            raw = canonical_bytes(obj)
+        elif name == ARTIFACT_FEED_NAME:
+            obj = strict_json(raw, f"{live}/{name}")
+            obj["version"] = recorded["version"]
+            obj["release_id"] = release_id
+            obj["generated_at"] = row["generated_at"]
+            obj["candidate_catalog_sha256"] = feeds["autotune-candidates.json"]["sha256"]
+            raw = canonical_sorted_bytes(obj)
+        if sha256(raw) != recorded["sha256"] or len(raw) != recorded["bytes"]:
+            return False
+    return True
+
+
+def compare_live(incoming: pathlib.Path, live: pathlib.Path, ledger_path: pathlib.Path) -> dict:
+    """Classify live vs incoming: equivalent, descends (live is in the incoming ledger), or regression."""
+    ledger = validate_release_ledger(ledger_path.read_bytes(), str(ledger_path))
+    incoming_manifest = _load_release_manifest(incoming)
+    live_manifest = _load_release_manifest(live)
+    ids = {"incoming_release_id": incoming_manifest["release_id"], "live_release_id": live_manifest["release_id"]}
+    reasons = live_equivalence_reasons(incoming, live)
+    if not reasons:
+        return {"verdict": "equivalent", "reasons": [], **ids}
+    for release_id, row in ledger["releases"].items():
+        if _live_matches_ledger_row(live, live_manifest, release_id, row):
+            return {"verdict": "descends", "reasons": reasons, "matched_ledger_release": release_id, **ids}
+    reasons.append("live content matches no release in the incoming release-ledger.json")
+    return {"verdict": "regression", "reasons": reasons, **ids}
+
+
+def cmd_compare_live(incoming: pathlib.Path, live: pathlib.Path, ledger_path: pathlib.Path) -> int:
+    try:
+        result = compare_live(incoming, live, ledger_path)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        fail(f"compare-live: malformed release input: {exc!r}")
+    print(json.dumps(result, sort_keys=True))
+    return COMPARE_LIVE_EXIT_REGRESSION if result["verdict"] == "regression" else 0
+
+
 def cmd_status() -> None:
     """Print the artifact-feed activation state and its outstanding prerequisites.
 
@@ -4996,6 +5137,18 @@ def main() -> int:
     )
     continuity_parser.add_argument("--incoming", type=pathlib.Path, required=True)
     continuity_parser.add_argument("--live", type=pathlib.Path, required=True)
+    compare_parser = sub.add_parser(
+        "compare-live",
+        help=(
+            "runtime-deploy catalog guard (#1688 A2): print one JSON verdict comparing the staged "
+            "release with the live one by CONTENT. Exit 0 = equivalent (skip activation) or "
+            "descends (live equals a release in --ledger; activate); exit 3 = regression; "
+            "exit 1 = malformed or unreadable input (fail closed)"
+        ),
+    )
+    compare_parser.add_argument("--incoming", type=pathlib.Path, required=True)
+    compare_parser.add_argument("--live", type=pathlib.Path, required=True)
+    compare_parser.add_argument("--ledger", type=pathlib.Path, required=True, help="the incoming tag's release-ledger.json")
     coordinator_parser = sub.add_parser(
         "emit-coordinator-rate-card",
         help="print the rewards.rate_card: block the published rate card requires",
@@ -5081,6 +5234,8 @@ def main() -> int:
             cmd_status()
         elif args.command == "continuity-check":
             cmd_continuity_check(args.incoming, args.live)
+        elif args.command == "compare-live":
+            return cmd_compare_live(args.incoming, args.live, args.ledger)
         elif args.command == "emit-coordinator-rate-card":
             cmd_emit_coordinator_rate_card(args.output, from_source=args.from_source)
         elif args.command == "verify-directory":
