@@ -80,6 +80,13 @@ func TestRegisterFencesSessionWhoseCatalogRowDivergedBeforeRegistration(t *testi
 				CandidateCatalogSHA256: baked.SHA256,
 				CandidateRowIdentity:   rowIdentity,
 			}
+			pendingChecked := false
+			s.catalogRecheckPendingHook = func() {
+				pendingChecked = true
+				if pending, ok := s.pool.Resolve("p1", "s1"); !ok || pending.RoutingEligible() {
+					t.Errorf("catalog-bound session routable before its re-check: ok=%v %+v", ok, pending.State)
+				}
+			}
 			if session, refusal := s.registerProviderSession(serverConn, entry); session == nil {
 				t.Fatalf("registration refused: %q", refusal)
 			}
@@ -89,6 +96,12 @@ func TestRegisterFencesSessionWhoseCatalogRowDivergedBeforeRegistration(t *testi
 			}
 			if fenced := registered.State == pool.StateUnavailable && !registered.RoutingEligible(); fenced != tc.wantFenced {
 				t.Fatalf("fenced=%v (state %q, routable %v), want %v", fenced, registered.State, registered.RoutingEligible(), tc.wantFenced)
+			}
+			if !pendingChecked {
+				t.Fatal("catalog re-check hook did not run")
+			}
+			if !tc.wantFenced && (registered.State != pool.StateReady || !registered.RoutingEligible()) {
+				t.Fatalf("equivalent session must be promoted to ready: state %q routable %v", registered.State, registered.RoutingEligible())
 			}
 		})
 	}

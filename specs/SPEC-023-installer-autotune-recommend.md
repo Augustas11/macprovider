@@ -838,9 +838,10 @@ at hello: after a catalog swap, a live session admitted from a document other
 than the new active one is closed `catalog_incompatible` once its selected row
 identity or `PolicyEquivalent` policy no longer equals the new active row. This
 applies to `previous` and `row_continuity` sessions alike. The session is made
-unroutable before its close is queued, and a session whose hello was classified
-against the prior release is re-checked when it registers, so neither a pending
-close nor a publication racing admission leaves a diverged session routable. A
+unroutable before its close is queued, and a catalog-bound session is registered
+unroutable and promoted to its admitted state only after it is re-checked
+against the active release, so neither a pending close nor a publication racing
+admission leaves a diverged session routable. A
 `row_continuity` session whose evidence document no longer loads after a
 publication is unverifiable and is closed the same way. Every pre-activation
 validation root (deploy, renewal, and the catalog-content lane) carries the
