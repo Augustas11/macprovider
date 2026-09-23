@@ -1,12 +1,30 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.15.0
+version: v0.15.1
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-09-23
 lockstep: SPEC-005 v0.6.7 (SPEC-005-R011 money-table owner). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.15.1 (2026-09-23)** — `SPEC-023-R010` implementation contract (#1705).
+  The 2026-09-23 content cut rotated the fleet's CLI-baked document
+  (`published-2026-09-02-gpt-oss-120b-v1`) out of the 3-deep `.previous-target`
+  window and closed idle providers `4001 catalog_incompatible` until a restart,
+  although their selected row was unchanged. §3.6.1 now names the concrete
+  A-side source: `<autotune-root>/.row-continuity-target`, an operator-retained
+  list of at most 8 `releases/<id>` lines that deploy and renewal never rotate.
+  Each listed release is signature-verified against the configured keyring,
+  tombstoned IDs are dropped, a failed entry admits nobody, and the coordinator
+  never walks `releases/`. A provider admitted from it records admission mode
+  `row_continuity`, never contributes an artifact identity set, and still
+  receives the active catalog in its hello ack. The provider CLI SHOULD refetch
+  the signed live catalog on `catalog_incompatible` and after an ack advertises
+  a different current document, and adopt it only when the served row's
+  `catalog_row_identity` (which binds the model hash and structured policy) is
+  unchanged. Malibu does not present a catalog document rollover as a
+  software update.
 
 - **v0.15.0 (2026-09-23)** — Catalog activation, retention, and the
   catalog-content release lane (#1688). New §3.7.9 registers five requirements
@@ -799,6 +817,35 @@ hostile merely because it is not the newest document; it is admitted only throug
 the same row-continuity rule, and diagnostics SHOULD report it as
 `baked_fallback` / refresh-recommended provenance rather than as
 `catalog_incompatible` when the selected row is still current-equivalent.
+
+**Row-continuity evidence source (v0.15.1).** The coordinator's
+operator-retained A-side source is `<autotune-root>/.row-continuity-target`:
+comment and blank lines are ignored, every other line is `releases/<id>` with
+the same charset as `.previous-target`, and more than 8 lines or a malformed
+line fails load closed (boot aborts; SIGHUP keeps the prior release). Deploy,
+renewal, and rollback tooling MUST NOT rewrite it. Each listed release is
+loaded through the same keyring-verified candidate-feed loader as
+`.previous-target`; a release that is missing, unsigned, signed by an untrusted
+key, tombstoned, or equal in version to the active release or to a release
+already retained by another source is skipped and admits nobody. A provider
+admitted from this source records `catalog_admission_mode = "row_continuity"`
+with its hello `catalog_release_id` and `catalog_candidate_sha256` preserved, and
+the coordinator logs `catalog_refresh_recommended`. Its document never
+contributes an artifact identity set, so artifact-derived identity fails closed
+and only the primary row binds (item 4). A release listed in both files is
+admitted as `previous`.
+
+**Provider refresh (v0.15.1).** When the coordinator closes a hello with
+`catalog_incompatible`, or an accepted hello ack advertises a
+`catalog_candidate_sha256` other than the provider's own, the provider CLI
+SHOULD refetch the signed live candidate catalog (rate-limited), verify it
+exactly as at `serve` start, and adopt its envelope for the next hello only when
+the row for the model it is serving has the same `catalog_row_identity` as the
+envelope it already advertises (row identity binds `model_sha256`, the gate
+fields, and the structured policy digest). It MUST NOT adopt unsigned data or a
+changed row; a changed row still needs a restart.
+Malibu MUST NOT label plain `catalog_incompatible` as a required software
+update.
 
 **SPEC-023-R011 — Ultra ≥256 GB default max batch is 8.** For chips whose
 normalized name contains `ultra` and `memoryGB >= 256`,

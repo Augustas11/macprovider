@@ -660,7 +660,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.15.0",
+      "version": "v0.15.1",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2561,15 +2561,35 @@
       "requirement_id": "SPEC-023-R010",
       "spec_id": "SPEC-023",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/buyer/autotune_feeds.go:RowContinuityAutotuneReleaseTargets",
+        "phase4-coordinator/cmd/coordinator/main.go:loadRowContinuityAutotuneCatalogs",
+        "phase4-coordinator/internal/ws/server.go:catalogAdmissionWithCatalog",
+        "phase4-coordinator/internal/ws/server.go:admittedCandidateCatalogSHA256",
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:refreshCatalogEnvelopeIfDue",
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:refreshCatalogEnvelope"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/ws/catalog_row_continuity_test.go::TestCatalogRowContinuityAdmitsOlderDocumentWithUnchangedRow",
+        "phase4-coordinator/internal/ws/catalog_row_continuity_test.go::TestCatalogRowContinuityFailsClosed",
+        "phase4-coordinator/cmd/coordinator/autotune_row_continuity_test.go::TestLoadCompatibleAutotuneCatalogsLoadsSignedRowContinuityRelease",
+        "phase4-coordinator/cmd/coordinator/autotune_row_continuity_test.go::TestLoadRowContinuityAutotuneCatalogsSkipsUnsignedAndUntrusted",
+        "phase4-coordinator/cmd/coordinator/autotune_row_continuity_test.go::TestLoadRowContinuityAutotuneCatalogsNeverWalksReleases",
+        "phase4-coordinator/cmd/coordinator/autotune_row_continuity_test.go::TestLoadRowContinuityAutotuneCatalogsOmitsTombstonedAndDuplicateVersions",
+        "phase4-coordinator/cmd/coordinator/autotune_row_continuity_test.go::TestLoadRowContinuityAutotuneCatalogsRejectsOverCapAndBadLines",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCatalogIncompatibleRefreshAdoptsSameRowEnvelopeForNextHello",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCatalogIncompatibleRefreshKeepsEnvelopeWhenRowChangedOrUnverified",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCatalogIncompatibleRefreshIsRateLimited",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testHelloAckOnOlderCatalogRefreshesForNextHelloWithoutDroppingSession",
+        "phase3-binary/Tests/macprovider-cliTests/ServeCommandTests.swift::testCatalogEnvelopeRefreshRejectsChangedRowUnsignedOrBakedCatalog"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1615",
-        "rationale": "SPEC-023 v0.14.1 defines row-continuity admission for content-only catalog document rollover: an older provider hello catalog document may remain admissible without restart only when authenticated A-side evidence proves the older selected row and current C-side catalog row share the same row identity plus PolicyEquivalent structured policy, while tombstoned releases, untrusted signer/key lineage, arbitrary releases/ walks, changed rows/policy, and missing artifact evidence remain fail-closed. Implementation remains pending: coordinator admission currently admits only exact current or bounded previous releases loaded from .previous-target, and no signed row-continuity record/ledger or compatibility-report gate exists yet. AC-CAT-22 is the required implementation/test matrix."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1705",
+        "rationale": "SPEC-023 v0.15.1 names the A-side row-continuity source (`.row-continuity-target`, <=8 keyring-verified releases, tombstones dropped, no releases/ walk) and the CLI refresh contract. Implemented under #1705: coordinator admits such a release only as `row_continuity` with equal row identity plus PolicyEquivalent (artifact-derived identity fails closed), the hello ack advertises current, and the CLI refetches the signed live catalog on catalog_incompatible / newer-ack and adopts it only when the served row identity is unchanged. AC-CAT-22 matrix is covered by the listed tests. Stays pending until live evidence: Pearl must list the fleet's baked release (published-2026-09-02-gpt-oss-120b-v1) in `.row-continuity-target` after this coordinator deploys, and a content cut must be observed not kicking unchanged-row providers."
       }
     },
     {
@@ -4859,7 +4879,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1636",
-        "rationale": "Auto-prefix ConversationCache hits reported positive cached_prompt_tokens on a non-sticky route and SPEC-005 §5.3.1 gate 4 whole-row-zeroed payable credits. Carve-out re-prices cached=0 without quarantine. Not promoted; no signed journey."
+        "rationale": "Auto-prefix ConversationCache hits reported positive cached_prompt_tokens on a non-sticky route and SPEC-005 \u00a75.3.1 gate 4 whole-row-zeroed payable credits. Carve-out re-prices cached=0 without quarantine. Not promoted; no signed journey."
       }
     },
     {
