@@ -168,8 +168,7 @@ func TestModelAdmissionRouteCompareAndInsertUsesRouteReadStore(t *testing.T) {
 	offer := f.offer(t, "p-route-read", "rr", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
 	settled := f.decide(t, f.decide(t, offer, "catalog_priced"), "settlement_capable")
 	routeReads := s.modelAdmissions
-	s.modelAdmissions = failingRouteReadModelAdmissionStore{ModelAdmissionStore: routeReads}
-	s.modelAdmissionRouteReads = routeReads
+	s.modelAdmissions = splitModelAdmissionRouteReads(failingRouteReadModelAdmissionStore{ModelAdmissionStore: routeReads}, routeReads)
 	p, _ := s.pool.Resolve("p-route-read", "")
 	expect := ModelAdmissionRouteExpectation{
 		ProviderID:              p.ProviderID,
