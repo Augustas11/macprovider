@@ -1,7 +1,8 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.9
-**Status:** v1.9 row-continuity admission clarification (#1615,
+**Version:** 1.10
+**Status:** v1.10 operator artifact diagnostics (#1689 part 4, 2026-09-23)
+over v1.9 row-continuity admission clarification (#1615,
 2026-09-20) over v1.8 R004 composite-proof clarification (BYOM v0.2 epic #1453,
 slice 4, 2026-09-10) over the v1.7 multi-artifact identity amendment (slice 3,
 2026-09-10) over the v1.6 canonical model-identity amendment proposed by issue #609
@@ -40,6 +41,24 @@ SPEC-023 owns candidate-catalog `bench_gate` provenance, including
   artifact-derived identity across a scheduled catalog re-stamp by resolving
   in its own release's set (slice-4 implementation). Bounded
   `model-catalog-identity` amendment.
+
+**Change log v1.10 (issue #1689 part 4 — operator artifact diagnostics):**
+- Adds §3.8 and **SPEC-010-R008 — Operator artifact diagnostics**: the
+  provider CLI's `models verify-artifact` compares local bytes against the
+  R001 identity of the signed row resolved through the serve trust path, and
+  names one likely source for a mismatch (`revision_pin`, `local_download`, or
+  `catalog_row`) with a redacted report. `models prepare --profile catalog`
+  (implied by `--repair-cache`) prepares that snapshot with the existing
+  serve/autotune downloader and ends in one of three final states;
+  `--repair-cache` removes only that model's interrupted-download leftovers.
+  An existing configured or durable copy is decisive exactly as in serve: a
+  failing durable copy is reported, never masked by valid fallback bytes.
+  A snapshot that verifies only in the Hugging Face cache is adopted into the
+  durable store before `prepare` reports it ready, and a partial
+  `--repair-cache` could not remove stays a warning after the artifact
+  verifies.
+- Diagnostics only: no wire, admission, settlement, pricing, or R001–R007
+  semantics change.
 
 **Change log v1.9 (issue #1615 — row-continuity admission):**
 - R004 now distinguishes the signed catalog document a provider selected at
@@ -1186,6 +1205,72 @@ algorithm.
   SPEC-047-R003(iv) v0.1.10 keeps every loopback `runtime_source` out of
   `settlement_capable` until a trusted usage source exists, and implementing
   the runtime path does not change that.
+
+### 3.8 Operator artifact diagnostics (v1.10 amendment)
+
+- **SPEC-010-R008 — Operator artifact diagnostics.** `models verify-artifact
+  <catalog-key-or-model-id>` MUST resolve the expected identity only from a
+  signed candidate-catalog row selected by the same loader and trust-blocking
+  warnings the serve catalog preflight uses (a live feed that fails signature,
+  schema, or policy checks is never compared against), and MUST compute the
+  local digest with the R001 `macprovider.snapshot-manifest.v1` algorithm over
+  the bytes serve would load, resolved in serve's order: a configured artifact
+  path bound to the same catalog key, when it exists as a directory, is the
+  only location checked, because serve loads it and never falls back to
+  another copy; otherwise the durable-store copy of the pinned snapshot, which
+  is likewise the only location checked when it exists because serve loads it
+  and fails on its hash rather than fall back, then (only when it does not
+  exist) the pinned Hugging Face snapshot and the isolated prefetch snapshot
+  that `prepare` adopts into the durable store. Valid fallback bytes MUST NOT
+  turn a failing existing configured or durable copy into a match. A digest
+  that differs MUST be reported with
+  exactly one likely source: `local_download` when the bytes carry local
+  evidence of incompleteness (download markers, a safetensors index shard that
+  is absent, a safetensors file shorter than its header declares, no weight
+  file, no `config.json`, or total bytes well below a bound artifact-feed
+  `size_bytes`), or when they are the durable-store copy (stored under the
+  signed hash it verified on adoption, so different bytes drifted locally);
+  otherwise `revision_pin` when the bytes are not at the row's
+  pinned revision; otherwise `catalog_row`. When no location exists, it
+  reports `local_download` if interrupted-download leftovers exist,
+  `revision_pin` if only other revisions are held, else `not_downloaded`. The
+  report block it prints for filing MUST carry the row, revision, hash, and
+  catalog-release fields and MUST NOT carry a home-directory or cache-root
+  path, a provider id, or a credential; the human and `--json` outputs apply
+  the same redaction to local paths and evidence (a path outside the known
+  roots is shown as `<external>/<name>`). A config that fails to load (an
+  explicit `--config` or `MACPROVIDER_CONFIG` that is malformed or unreadable)
+  refuses both commands with exit 2 before any diagnosis, deletion, or
+  download, never falling back to the default roots. `models prepare --profile catalog`
+  (implied by `--repair-cache`) MUST acquire bytes only through the existing
+  serve/autotune downloader and durable-store adoption, MUST NOT download
+  when a bound size exceeds free space, MUST NOT delete or replace an
+  existing pinned snapshot or durable copy that fails verification unless
+  `--repair-cache` is given (without it a failing durable copy ends
+  `incomplete`; with it the durable copy is replaced from verified bytes
+  through durable-store adoption and verified again), and
+  under `--repair-cache` MUST remove only that model's interrupted-download
+  leftovers (its cache repo's `.download-*` staging directories and
+  `*.incomplete` blobs, and its durable `.tmp-<uuid>` copy staging) — never
+  another model's files, a verified snapshot, or a parked `.tmp-replaced-*`
+  copy. A leftover it could not remove is reported, even when the artifact
+  then verifies: the final state stays `ready (verified)` with exit 0, the
+  human output adds a `warning:` line naming each leftover, and `--json`
+  carries them in `cleanup_failed` (redacted like every other path); the hint
+  to pass `--repair-cache` is printed only when it was not passed. It ends in exactly one final state: `ready (verified)` only after an
+  R001 match at the location serve loads (a configured artifact path that
+  exists, else the durable-store copy; a match found only in the Hugging Face
+  cache or prefetch snapshot is first adopted into the durable store through
+  the same resolver, without a download, and verified there again), `downloaded but hash mismatch (see verify-artifact)` when the
+  source is `catalog_row`, else `incomplete (retry: <command>)`, where every
+  argument of `<command>` that is not a plain word is POSIX single-quoted so
+  it can be pasted into a shell. The catalog
+  profile refuses (exit 2) options that apply only to the `build1-lane-a`
+  profile (`--yes`, `--coordinator-url`, `--timeout-seconds`). A dedicated
+  `models prepare-catalog` command is the intended future home of this
+  behavior; the `--profile catalog` form MUST NOT accrue further
+  profile-specific behavior. Neither
+  command changes config, the active model, admission, or settlement.
 
 ---
 

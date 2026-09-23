@@ -258,7 +258,7 @@
     {
       "spec_id": "SPEC-010",
       "title": "Provider Model Catalog",
-      "version": "1.9",
+      "version": "1.10",
       "path": "specs/SPEC-010-model-catalog.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1975,6 +1975,48 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
         "rationale": "SPEC-010 v1.7 specifies artifact-feed identity: `macprovider.gguf-file.v1` as a canonical wire pair computed by the CLI over the local GGUF bytes, a release-bound `verified` artifact-feed entry as an expected identity resolving by the globally unique (hash_algorithm, hash) pair to one (model_key, artifact_id), and six-value route-time evidence with fail-closed settlement re-verification for a non-primary member. Owner is the BYOM v0.2 epic (issue #1453), slice 3."
+      }
+    },
+    {
+      "requirement_id": "SPEC-010-R008",
+      "spec_id": "SPEC-010",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelArtifactDiagnostics.swift:enum ModelArtifactSignedRowResolver",
+        "phase3-binary/Sources/macprovider-cli/ModelArtifactDiagnostics.swift:static func diagnose(",
+        "phase3-binary/Sources/macprovider-cli/ModelArtifactDiagnostics.swift:static func findPartials(",
+        "phase3-binary/Sources/macprovider-cli/ModelArtifactDiagnostics.swift:static func reportBlock(",
+        "phase3-binary/Sources/macprovider-cli/ModelArtifactDiagnostics.swift:enum ModelCatalogPreparation",
+        "phase3-binary/Sources/macprovider-cli/ModelArtifactDiagnostics.swift:static func candidateLocations(",
+        "phase3-binary/Sources/macprovider-cli/ModelArtifactDiagnostics.swift:func loadDiagnosticsConfig(",
+        "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:static func pinnedArtifactLoadCandidate("
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testCatalogRowSuspectWhenCompleteBytesAtPinnedRevisionHashDifferently",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testRevisionMismatchWhenOnlyAnotherRevisionIsCached",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testPartialDownloadWhenIndexedShardIsMissing",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testRedactedReportCarriesRowFieldsWithoutLocalPathsOrProviderIdentity",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testRepairCacheRemovesOnlyTargetModelPartials",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testPrepareWithoutRepairNeverReplacesAnIncompleteDurableSnapshot",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testCorruptDurableCopyIsWhatVerifyReportsEvenWhenTheHFSnapshotVerifies",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testPrepareWithoutRepairReportsACorruptDurableCopyIncompleteAndLeavesIt",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testPrepareWithRepairReplacesACorruptDurableCopyFromVerifiedBytes",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testSignedRowResolverRejectsUnknownKeyAndUnsignedFeed",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testConfiguredPathIsWhatIsVerifiedEvenWhenTheDurableCopyVerifies",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testVerifyArtifactRefusesAMalformedExplicitConfig",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testCatalogPrepareRefusesAMalformedExplicitConfigBeforeAnyWork",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testHumanOutputRedactsLocalPathsAndEvidence",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testCatalogProfileRejectsLaneAOnlyOptions",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testRepairCacheCleanupFailureStaysVisibleWhenTheArtifactVerifies",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactDiagnosticsTests.swift:testPrepareAdoptsAVerifiedHFSnapshotIntoTheDurableStoreServeLoads"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1689",
+        "rationale": "SPEC-010 v1.10 operator artifact diagnostics (models verify-artifact, models prepare --profile catalog) are implemented and unit-tested; no physical run against a real mismatching catalog row or interrupted download has been captured yet."
       }
     },
     {

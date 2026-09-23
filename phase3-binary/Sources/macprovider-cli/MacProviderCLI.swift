@@ -933,13 +933,56 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
+    /// Where serve looks for a pinned artifact, in order: an existing
+    /// configured directory, with no fallback when it fails to verify; else
+    /// the durable-store copy of the pinned snapshot. `models verify-artifact`
+    /// (SPEC-010-R008) resolves through this so it checks the bytes serve loads.
+    enum PinnedArtifactLoadCandidate {
+        case configured(String)
+        case durable(String)
+        case missingPin
+        case invalidDurablePath(Error)
+    }
+
+    static func pinnedArtifactLoadCandidate(
+        configuredPath: String,
+        modelID: String?,
+        revision: String?,
+        expectedSHA256: String,
+        artifactResolver: CachedModelArtifactResolver
+    ) -> PinnedArtifactLoadCandidate {
+        if isExistingDirectory(configuredPath) {
+            return .configured(configuredPath)
+        }
+        guard let modelID, !modelID.isEmpty, let revision, !revision.isEmpty else {
+            return .missingPin
+        }
+        do {
+            return .durable(try artifactResolver.durableStore.artifactURL(
+                modelID: modelID,
+                revision: revision,
+                sha256: expectedSHA256
+            ).standardizedFileURL.path)
+        } catch {
+            return .invalidDurablePath(error)
+        }
+    }
+
     private static func resolveVerifiedLoadPath(
         configuredPath: String,
         expectedSHA256: String,
         resolved: AppConfig,
         artifactResolver: CachedModelArtifactResolver
     ) throws -> (path: String, persistFrom: String?) {
-        if isExistingDirectory(configuredPath) {
+        let durablePath: String
+        switch pinnedArtifactLoadCandidate(
+            configuredPath: configuredPath,
+            modelID: resolved.modelCatalogModelID,
+            revision: resolved.modelCatalogRevision,
+            expectedSHA256: expectedSHA256,
+            artifactResolver: artifactResolver
+        ) {
+        case .configured:
             try requireContainedDurablePathIfOwned(configuredPath, artifactResolver: artifactResolver)
             let actual = try ModelArtifactVerifier.canonicalArtifactHash(
                 directory: URL(fileURLWithPath: configuredPath)
@@ -949,25 +992,16 @@ struct ServeCommand: AsyncParsableCommand {
                 throw ExitCode(2)
             }
             return (configuredPath, nil)
-        }
-        guard let modelID = resolved.modelCatalogModelID, !modelID.isEmpty,
-              let revision = resolved.modelCatalogRevision, !revision.isEmpty
-        else {
+        case .missingPin:
             FileHandle.standardError.write(
                 Data("model artifact verification failed for \(configuredPath): missing pinned snapshot\n".utf8)
             )
             throw ExitCode(2)
-        }
-        let durablePath: String
-        do {
-            durablePath = try artifactResolver.durableStore.artifactURL(
-                modelID: modelID,
-                revision: revision,
-                sha256: expectedSHA256
-            ).standardizedFileURL.path
-        } catch {
+        case .invalidDurablePath(let error):
             FileHandle.standardError.write(Data("model durable artifact path is invalid: \(error)\n".utf8))
             throw ExitCode(2)
+        case .durable(let path):
+            durablePath = path
         }
         guard isExistingDirectory(durablePath) else {
             FileHandle.standardError.write(
