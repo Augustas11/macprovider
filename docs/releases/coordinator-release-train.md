@@ -112,6 +112,7 @@ the freshness lane.
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
 | Keep unchanged catalog rows admitted across catalog publishes (SPEC-023 v0.15.1 R010: `.row-continuity-target` evidence, `row_continuity` admission, re-check on every publication). Also changes `dist/deploy-pearl-vps.sh`, `scripts/lib/autotune-activate.sh`, `scripts/catalog-content-release.sh` and `scripts/autotune_window.py`, so **needs a full deploy**, not a binary swap. Post-apply step: Open Pearl action 4 | merged `3abf42a8` | #1714 (#1705) |
+| Preserve served buyer success through transient receipt persistence pressure: bounded in-memory receipt retry, explicit pending coordinator authority, durable deadline closure, and gateway rechecks for held settlement. Requires a signed coordinator/gateway release and fresh Studio buyer soak before acceptance. | in progress | #1715 (#1680) |
 | Node operator status, safe context changes, model diagnostics | in progress | #1713 (#1689) |
 | Build 1 Lane A orchestrated PR | in progress | #1658 (#1642) |
 
