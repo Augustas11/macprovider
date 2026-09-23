@@ -243,10 +243,12 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 	})
 }
 
+// hotPathRateEntry is the rate the caller resolved before the write started
+// (buyer economicsSnapshotForModel, or recovery's generation lookup). The hot
+// path never re-resolves a model against a table: a table swap between the
+// caller's resolution and this write must not change the price
+// (SPEC-005-R013 I2).
 func hotPathRateEntry(in HotPathInput) RateCardEntry {
-	if in.RateCard != nil {
-		return RateFor(in.RateCard, in.Model)
-	}
 	return in.RateEntry
 }
 

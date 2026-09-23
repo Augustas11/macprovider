@@ -162,7 +162,7 @@ func TestValidateAutotuneReleaseAcceptsValidReleaseWithRetainedWindow(t *testing
 	configPath := writeReloadConfig(t, validatorConfig(filepath.Join(base, "live"), tier2Pub))
 
 	var out bytes.Buffer
-	if code := runValidateAutotuneRelease(&out, configPath, "", dir, previousTarget); code != 0 {
+	if code := runValidateAutotuneRelease(&out, configPath, "", dir, previousTarget, autotuneReleaseValidationOptions{}); code != 0 {
 		t.Fatalf("exit=%d want 0 output=%s", code, out.String())
 	}
 	if strings.Count(out.String(), "\n") != 1 {
@@ -262,7 +262,7 @@ func TestValidateAutotuneReleaseRejectsUnloadableRetainedEntry(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	code := runValidateAutotuneRelease(&out, writeReloadConfig(t, validatorConfig(filepath.Join(base, "live"), tier2Pub)), "", dir, previousTarget)
+	code := runValidateAutotuneRelease(&out, writeReloadConfig(t, validatorConfig(filepath.Join(base, "live"), tier2Pub)), "", dir, previousTarget, autotuneReleaseValidationOptions{})
 	if code == 0 {
 		t.Fatalf("exit=0 for unloadable retained entry: %s", out.String())
 	}
@@ -363,7 +363,7 @@ func TestValidateAutotuneReleaseReportsAdmittedCatalogs(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if code := runValidateAutotuneRelease(&out, writeReloadConfig(t, validatorConfig(filepath.Join(base, "live"), tier2Pub)), "", dir, previousTarget); code != 0 {
+	if code := runValidateAutotuneRelease(&out, writeReloadConfig(t, validatorConfig(filepath.Join(base, "live"), tier2Pub)), "", dir, previousTarget, autotuneReleaseValidationOptions{}); code != 0 {
 		t.Fatalf("exit=%d want 0 output=%s", code, out.String())
 	}
 	var raw map[string]json.RawMessage
@@ -411,7 +411,7 @@ func TestValidateAutotuneReleaseAdmitsNothingWhenRetainedEntryInvalid(t *testing
 				t.Fatal(err)
 			}
 			var out bytes.Buffer
-			if code := runValidateAutotuneRelease(&out, writeReloadConfig(t, validatorConfig(filepath.Join(base, "live"), tier2Pub)), "", dir, previousTarget); code == 0 {
+			if code := runValidateAutotuneRelease(&out, writeReloadConfig(t, validatorConfig(filepath.Join(base, "live"), tier2Pub)), "", dir, previousTarget, autotuneReleaseValidationOptions{}); code == 0 {
 				t.Fatalf("exit=0 for an invalid retained entry: %s", out.String())
 			}
 			if !strings.Contains(out.String(), `"ok":false`) || !strings.Contains(out.String(), `"admitted":[]`) {

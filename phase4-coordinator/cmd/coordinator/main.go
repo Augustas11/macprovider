@@ -118,7 +118,7 @@ func main() {
 			fmt.Fprintf(os.Stderr, "coordinator: unknown subcommand %q\n", arg1)
 			fmt.Fprintln(os.Stderr, "usage:")
 			fmt.Fprintln(os.Stderr, "  coordinator --config <path> [--config-overlay <path>] [--validate-config]")
-			fmt.Fprintln(os.Stderr, "  coordinator --config <path> [--config-overlay <path>] --validate-autotune-release <dir> [--previous-target <file>]")
+			fmt.Fprintln(os.Stderr, "  coordinator --config <path> [--config-overlay <path>] --validate-autotune-release <dir> [--previous-target <file>] [--expect-base-equivalent <live-base> [--resolve-model-names <json>]]")
 			fmt.Fprintln(os.Stderr, "  coordinator --version           (print build version)")
 			fmt.Fprintln(os.Stderr, "  coordinator partner-keys <issue|revoke|list> [flags]")
 			fmt.Fprintln(os.Stderr, "  coordinator visibility revert --id <pid> --reason TEXT")
@@ -135,6 +135,8 @@ func main() {
 	showVersion := flag.Bool("version", false, "print build version and exit")
 	validateAutotuneRelease := flag.String("validate-autotune-release", "", "offline: prove the SIGHUP reload would accept the candidate release in DIR against --config, print one JSON line, and exit")
 	previousTarget := flag.String("previous-target", "", "with --validate-autotune-release: retained-release pointer file (lines releases/<id>, relative to its directory); unset means no retained releases")
+	expectBaseEquivalent := flag.String("expect-base-equivalent", "", "with --validate-autotune-release: live base config; --config must equal it as a YAML node tree except the value of rewards.rate_card, and its own rewards.rate_card must be the release's signed rows")
+	resolveModelNames := flag.String("resolve-model-names", "", "with --validate-autotune-release and --expect-base-equivalent: JSON array of model names; the verdict's model_resolutions reports the rate-card row each resolves to in the live table (--expect-base-equivalent + --config-overlay) and in the candidate")
 	appliedConfigState := flag.String("applied-config-state", defaultAppliedConfigStatePath, "state file recording the sha256 of the config + overlay bytes the running process last applied (boot or successful SIGHUP)")
 	flag.Parse()
 	appliedConfigStatePath = *appliedConfigState
@@ -146,8 +148,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, "--previous-target requires --validate-autotune-release")
 		os.Exit(2)
 	}
+	if (*expectBaseEquivalent != "" || *resolveModelNames != "") && *validateAutotuneRelease == "" {
+		fmt.Fprintln(os.Stderr, "--expect-base-equivalent and --resolve-model-names require --validate-autotune-release")
+		os.Exit(2)
+	}
+	if *resolveModelNames != "" && *expectBaseEquivalent == "" {
+		fmt.Fprintln(os.Stderr, "--resolve-model-names requires --expect-base-equivalent")
+		os.Exit(2)
+	}
 	if *validateAutotuneRelease != "" {
-		os.Exit(runValidateAutotuneRelease(os.Stdout, *configPath, *configOverlay, *validateAutotuneRelease, *previousTarget))
+		os.Exit(runValidateAutotuneRelease(os.Stdout, *configPath, *configOverlay, *validateAutotuneRelease, *previousTarget, autotuneReleaseValidationOptions{
+			ExpectBaseEquivalent: *expectBaseEquivalent,
+			ResolveModelNames:    *resolveModelNames,
+		}))
 	}
 
 	cfg, bootConfigDigests, err := config.LoadWithOverlayDigests(*configPath, *configOverlay)
@@ -362,7 +375,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "billing config snapshot: %v\n", err)
 		os.Exit(1)
 	}
-	billingStore.SetWholesalePricing(cfg.Rewards, cfg.Stats.Rollup.UsdPerMillionCredits)
+	billingStore.SetWholesalePricing(cfg.Stats.Rollup.UsdPerMillionCredits)
 	// SPEC-017 v0.1.8 Step 1 — Postgres pools for the Network
 	// Stats API. Fail-closed per BUILD §C.3: any missing required
 	// runtime DSN or any failed startup smoke aborts coordinator
@@ -1491,7 +1504,7 @@ func main() {
 		Str("version", version).
 		Str("event", "coordinator_config_applied").
 		Msg("coordinator config applied")
-	recordAppliedConfig(logger, "boot", *configPath, *configOverlay, bootConfigDigests, bootConfigLoadedAt)
+	recordAppliedConfig(logger, "boot", *configPath, *configOverlay, bootConfigDigests, bootConfigLoadedAt, buyerServer.AppliedEconomics())
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
@@ -3756,6 +3769,8 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	}
 	wsServer.SetTier2Config(cfg.Tier2)
 	buyerServer.SetTier2Config(cfg.Tier2)
+	billingSnapshotCommitted := false
+	var billingSnapshotID int64
 	if len(billingStores) > 0 && billingStores[0] != nil {
 		// R3 fix (ARCH-H1): snapshot + flag-change audit + in-memory
 		// publish are now ONE atomic operation in
@@ -3777,7 +3792,10 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			logger.Error().Err(err).Msg("billing config reload rejected (snapshot + flag audit atomic)")
 			return
 		}
-		buyerServer.SetBillingConfig(cfg.Rewards, snapshotID, cfg.Stats.Rollup.UsdPerMillionCredits)
+		// SPEC-005-R013 I2: the committed table is published below together
+		// with this reload's served feeds (PublishEconomics), never ahead of
+		// them.
+		billingSnapshotCommitted, billingSnapshotID = true, snapshotID
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
 		logger.Info().
 			Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
@@ -3801,7 +3819,11 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		// rows. The WS admission catalog and the buyer-served feed bytes swap
 		// together.
 		wsServer.SetAutotuneCatalog(reloadedAutotuneCatalog, reloadedAutotuneCompatible...)
-		buyerServer.SetAutotuneFeeds(reloadedAutotuneFeeds)
+		if billingSnapshotCommitted {
+			buyerServer.PublishEconomics(cfg.Rewards, billingSnapshotID, cfg.Stats.Rollup.UsdPerMillionCredits, &reloadedAutotuneFeeds)
+		} else {
+			buyerServer.SetAutotuneFeeds(reloadedAutotuneFeeds)
+		}
 		tier2CatalogID, tier2SHA256 := tier2CatalogIdentity(reloadedTier2)
 		logger.Info().
 			Str("autotune_catalog_version", reloadedAutotuneCatalog.Version).
@@ -3811,6 +3833,8 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			Str("tier2_sha256", tier2SHA256).
 			Str("event", "autotune_feed_sighup_reload").
 			Msg("autotune signed feed reloaded without restart")
+	} else if billingSnapshotCommitted {
+		buyerServer.PublishEconomics(cfg.Rewards, billingSnapshotID, cfg.Stats.Rollup.UsdPerMillionCredits, nil)
 	}
 	proofReload := wsServer.SetProofOfWeightsConfig(cfg.ProofOfWeights)
 	wsServer.SetTelemetryDriftEvaluator(telemetryDrift)
@@ -3866,7 +3890,7 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	}
 	// Every fallible step above returned early on rejection, so reaching here
 	// means this reload's config is the applied one.
-	recordAppliedConfig(logger, "sighup", configPath, configOverlay, configDigests, configLoadedAt)
+	recordAppliedConfig(logger, "sighup", configPath, configOverlay, configDigests, configLoadedAt, buyerServer.AppliedEconomics())
 }
 
 func telemetryDriftEvaluatorForReload(cfg config.Config, autotuneCatalog *autotune.Catalog, autotuneEvidenceStore autotune.EvidenceStore) (*pow.Evaluator, error) {

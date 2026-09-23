@@ -87,12 +87,7 @@ UPDATE ledger_request_credits
           -- non-NULL; fall back to the v0.3.1 id-ASC derivation for
           -- legacy NULL rows during the rollout window. Both paths
           -- compute identical ordinals.
-          AND COALESCE(rl.attempt_n, (
-              SELECT COUNT(*) - 1 FROM request_log prior
-               WHERE prior.account_id IS rl.account_id
-                 AND prior.request_id = rl.request_id
-                 AND prior.id <= rl.id
-          ), 0) = ledger_request_credits.attempt_n
+          AND `+requestLogAttemptOrdinalSQL("rl")+` = ledger_request_credits.attempt_n
    )`, now, sqliteTimeText(in.ScanFrom), sqliteTimeText(in.ScanTo))
 	if err != nil {
 		return err
@@ -108,12 +103,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
        -- persisted rl.attempt_n when non-NULL; fall back to the
        -- v0.3.1 id-ASC derivation for legacy NULL rows during the
        -- rollout window. Both paths compute identical ordinals.
-       COALESCE(rl.attempt_n, (
-         SELECT COUNT(*) - 1 FROM request_log prior
-          WHERE prior.account_id IS rl.account_id
-            AND prior.request_id = rl.request_id
-            AND prior.id <= rl.id
-       ), 0) AS attempt_n
+       `+requestLogAttemptOrdinalSQL("rl")+` AS attempt_n
   FROM request_log rl
  WHERE `+sqliteTimeRange("rl.ts_utc")+`
    AND rl.provider_assigned_id IS NOT NULL

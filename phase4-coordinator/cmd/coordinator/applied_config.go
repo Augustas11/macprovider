@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/rs/zerolog"
 )
@@ -36,21 +37,35 @@ type appliedConfigRecord struct {
 	LoadedAt      string `json:"loaded_at"`
 	Source        string `json:"source"`
 	Version       string `json:"version"`
+	// SPEC-005-R013 / SPEC-023-R018 (additive to v1): the pricing state in
+	// force after this boot or reload. RateTableSHA256 is
+	// billing.RateTableDigest of the request table (the snapshot's
+	// rate_card_json); SignedRateCardSHA256 is the sha256 of the
+	// /v1/rate-card body actually served ("" when none); BillingSnapshotID
+	// is the ledger_config_snapshots id that committed the table.
+	RateTableSHA256      string `json:"rate_table_sha256"`
+	SignedRateCardSHA256 string `json:"signed_rate_card_sha256"`
+	AutotuneReleaseID    string `json:"autotune_release_id"`
+	BillingSnapshotID    int64  `json:"billing_snapshot_id"`
 }
 
 // recordAppliedConfig writes the applied-config state file. A write failure
 // never fails boot or reload: the config is already applied, so it is only
 // logged.
-func recordAppliedConfig(logger zerolog.Logger, source, configPath, overlayPath string, digests config.SourceDigests, loadedAt time.Time) {
+func recordAppliedConfig(logger zerolog.Logger, source, configPath, overlayPath string, digests config.SourceDigests, loadedAt time.Time, economics buyer.AppliedEconomics) {
 	rec := appliedConfigRecord{
-		Schema:        appliedConfigSchema,
-		ConfigPath:    configPath,
-		ConfigSHA256:  digests.ConfigSHA256,
-		OverlayPath:   overlayPath,
-		OverlaySHA256: digests.OverlaySHA256,
-		LoadedAt:      loadedAt.UTC().Format(time.RFC3339Nano),
-		Source:        source,
-		Version:       version,
+		Schema:               appliedConfigSchema,
+		ConfigPath:           configPath,
+		ConfigSHA256:         digests.ConfigSHA256,
+		OverlayPath:          overlayPath,
+		OverlaySHA256:        digests.OverlaySHA256,
+		LoadedAt:             loadedAt.UTC().Format(time.RFC3339Nano),
+		Source:               source,
+		Version:              version,
+		RateTableSHA256:      economics.RateTableSHA256,
+		SignedRateCardSHA256: economics.SignedRateCardSHA256,
+		AutotuneReleaseID:    economics.AutotuneReleaseID,
+		BillingSnapshotID:    economics.BillingSnapshotID,
 	}
 	if err := writeAppliedConfigRecord(appliedConfigStatePath, rec); err != nil {
 		logger.Warn().Err(err).

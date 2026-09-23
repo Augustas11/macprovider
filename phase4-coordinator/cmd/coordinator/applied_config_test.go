@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	"github.com/rs/zerolog"
@@ -78,7 +79,7 @@ func TestBootConfigLoadRecordsAppliedConfig(t *testing.T) {
 		t.Fatalf("load: %v", err)
 	}
 	loadedAt := time.Date(2026, 9, 23, 1, 2, 3, 0, time.UTC)
-	recordAppliedConfig(zerolog.Nop(), "boot", configPath, overlayPath, digests, loadedAt)
+	recordAppliedConfig(zerolog.Nop(), "boot", configPath, overlayPath, digests, loadedAt, buyer.AppliedEconomics{})
 
 	rec := readAppliedConfigRecord(t, statePath)
 	want := appliedConfigRecord{

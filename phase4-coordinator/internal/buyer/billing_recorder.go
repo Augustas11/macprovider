@@ -410,6 +410,10 @@ func (b *billingRecorder) recordRow(
 		row.PositiveVerificationExcluded = true
 		row.RewardsExcluded = true
 	}
+	// SPEC-005-R013 I2: resolve the price before the write deadline starts, so
+	// a wait on an in-flight economics publication never shortens it. The
+	// write bills this resolution as-is.
+	economics := s.economicsSnapshotForModel(row.Model)
 	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer cancel()
 	// FR-CAN23 observed-serving residual: stamp successful buyer relays whenever
@@ -428,7 +432,7 @@ func (b *billingRecorder) recordRow(
 			s.pool.NoteBuyerSuccess(stampID, time.Now().UTC())
 		}
 	}
-	billingStore, billingCfg, billingSnapshotID := s.billingState()
+	billingStore, _, _ := s.billingState()
 	// The one expression both billing branches gate on: this is exactly when a
 	// settlement attempt output is attempted, and therefore exactly when a
 	// settlement receipt has something to bind to. The hot path below
@@ -475,11 +479,10 @@ func (b *billingRecorder) recordRow(
 			StickyResult:                 b.state.stickyResult,
 			StickyMissReason:             b.state.stickyMissReason,
 			ConversationCacheOnly:        b.state.conversationCacheOnly,
-			ConfigSnapshotID:             billingSnapshotID,
-			RateEntry:                    billing.RateFor(billingCfg.RateCard, row.Model),
-			RateCard:                     billingCfg.RateCard,
-			MultiplierPPM:                billing.ParseMultiplierPPM(billingCfg.GlobalMultiplier),
-			ProviderShareBps:             billing.ParseShareBps(billingCfg.ProviderShare),
+			ConfigSnapshotID:             economics.snapshotID,
+			RateEntry:                    economics.rateEntry,
+			MultiplierPPM:                economics.multiplierPPM,
+			ProviderShareBps:             economics.providerShareBps,
 			SettlementAccountScopeHash:   billing.SettlementAccountScopeHash(accountScope),
 			SettlementPolicyMode:         settlementMode,
 			SettlementPolicyVersion:      settlementVersion,
