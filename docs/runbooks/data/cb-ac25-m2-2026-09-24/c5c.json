@@ -1,0 +1,37 @@
+{
+ "case": "c5c",
+ "run": "6bb27723",
+ "result": [
+  {
+   "rid": "ac25-6bb27723-c5c",
+   "status": 200,
+   "stream": false,
+   "elapsed_s": 0.918,
+   "headers_present": [],
+   "retry_after_header": null,
+   "finish_reason": "length",
+   "content_len": 64,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 64
+   },
+   "response_id": "chatcmpl-29cd9b677ad04221b9c044553835958d"
+  },
+  {
+   "rid": "ac25-6bb27723-c5c",
+   "status": 200,
+   "stream": false,
+   "elapsed_s": 0.001,
+   "headers_present": [],
+   "retry_after_header": null,
+   "finish_reason": "length",
+   "content_len": 64,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 64
+   },
+   "response_id": "chatcmpl-266471745cfb4e4e8a83420924539a49",
+   "replay_elapsed_s": 0.001
+  }
+ ]
+}
