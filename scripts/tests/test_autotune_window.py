@@ -342,6 +342,29 @@ class CoverageTests(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertIn("releases/v3-0123456789abcdef", [c["dir"] for c in got["covered"]])
 
+    def test_weekly_renewals_drop_a_parked_provider_on_the_fourth(self) -> None:
+        # #1688 B2: every freshness renewal mints a new release_id, so a provider
+        # parked on week 1 stays admissible for three more renewals and is
+        # uncovered by the fourth. renew-autotune-static-feed.sh reports that
+        # loss (warning + renewal_coverage_loss record) and still publishes.
+        weeks = [f"published-2026-09-{d:02d}-x" for d in (2, 9, 16, 23, 30)]
+        for week in weeks:
+            self.release(week, week)
+        self.current(weeks[0])
+        self.pool(self.provider(weeks[0], weeks[0]))
+        window: list[str] = []
+        for n, incoming in enumerate(weeks[1:], start=1):
+            rc, got, err = self.cov(f"releases/{incoming}")
+            self.assertEqual(rc, 4 if n == 4 else 0, (n, err))
+            if n == 4:
+                self.assertEqual(got["uncovered"], [
+                    {"release_id": weeks[0], "sha": self.shas[weeks[0]], "providers": 1, "routing_eligible": 1}])
+            outgoing = os.readlink(self.root / "current")
+            window = aw.compute_window(window, outgoing, f"releases/{incoming}")
+            (self.root / aw.FILE_NAME).write_text("".join(f"{e}\n" for e in window))
+            os.unlink(self.root / "current")
+            self.current(incoming)
+
     def test_restamp_rules_mirror_go(self) -> None:
         self.release("cur", "v2")
         self.release("new", "v3")

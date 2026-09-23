@@ -286,6 +286,53 @@ if '"$CONTINUITY_VERIFIER" <<\'REMOTE\'' not in script or 'verifier="$8"' not in
     raise SystemExit("the remote publish must receive the shipped continuity verifier path")
 if 'rate-card.json tier2-catalog.json trusted-keys.json; do' not in script:
     raise SystemExit("pre-lock live snapshot must include tier2-catalog.json and trusted-keys.json")
+# #1688 B2: renewals keep minting a new release_id, so coverage loss is
+# reported loudly and NEVER blocks or rolls back the renewal.
+import json
+import subprocess
+coverage_call = 'python3 -I "$window" coverage --root "$root" --incoming "releases/$final" --poolz-json "$poolz"'
+if remote.count(coverage_call) != 1:
+    raise SystemExit("renewal must compute window coverage with the shipped autotune_window.py")
+cov_fn = remote.split("renewal_coverage() {", 1)[1].split("\n}", 1)[0]
+if not (remote.find('mv "$incoming" "$final"') < remote.find(coverage_call) < remote.find(apply_call)):
+    raise SystemExit("coverage must run on the final release dir before the window is applied")
+if "abort_pre_mutation" in cov_fn or "exit" in cov_fn:
+    raise SystemExit("renewal coverage must never abort the publish")
+if 'cov_json="$(renewal_coverage)" || cov_rc=$?' not in remote:
+    raise SystemExit("renewal coverage failure must be captured, not trip errexit")
+if '/proc/$pid/environ' not in cov_fn or "curl --config -" not in cov_fn or "http://127.0.0.1:8444/poolz" not in cov_fn:
+    raise SystemExit("renewal coverage must read /poolz on loopback with the running coordinator's key via curl --config stdin")
+for leak in ('echo "$key"', "printf '%s' \"$key\"", '-H "Authorization', '"$key" >'):
+    if leak in cov_fn:
+        raise SystemExit(f"operator key must never be echoed, argv-passed, or written: {leak}")
+tail = script.split('log "previous release retained as .previous-target', 1)[1]
+for requirement in ("::warning title=Autotune renewal coverage loss::", "::warning title=Autotune renewal coverage unknown::",
+                    '"kind": "renewal_coverage_loss"', "/var/lib/macprovider/catalog-window-overrides.jsonl",
+                    "os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600"):
+    if requirement not in tail:
+        raise SystemExit(f"renewal coverage report omits: {requirement}")
+for forbidden in ("fatal", "rollback", "exit 1"):
+    if forbidden in tail:
+        raise SystemExit(f"renewal coverage report must never fail the renewal: {forbidden}")
+classifier = tail.split('RENEW_COVERAGE_RECORDS="$(python3 - "$RENEW_COVERAGE_RC" "$RENEW_COVERAGE_JSON" <<\'PY\'\n', 1)[1].split("\nPY\n", 1)[0]
+def classify(rc, report):
+    raw = report if isinstance(report, str) else json.dumps(report)
+    run = subprocess.run([sys.executable, "-c", classifier, rc, raw], capture_output=True, text=True)
+    return run.returncode, run.stdout.strip()
+lost = {"release_id": "published-2026-09-02-x", "sha": "ab" * 32, "providers": 2, "routing_eligible": 1}
+got = classify("4", {"covered": [], "uncovered": [lost], "advertised_total": 3})
+if got != (0, json.dumps([lost], sort_keys=True, separators=(",", ":"))):
+    raise SystemExit(f"coverage loss must yield the uncovered records, got {got}")
+if classify("0", {"covered": [], "uncovered": [], "advertised_total": 3}) != (0, ""):
+    raise SystemExit("full coverage must yield no records")
+for rc, report in (("10", ""), ("1", ""), ("", ""), ("4", {"covered": [], "uncovered": [], "advertised_total": 0}),
+                   ("0", {"covered": [], "uncovered": [lost], "advertised_total": 1}),
+                   ("4", {"covered": [], "uncovered": [dict(lost, release_id="a'b")], "advertised_total": 1}),
+                   ("4", {"covered": [], "uncovered": [dict(lost, sha="AB" * 32)], "advertised_total": 1}),
+                   ("4", {"covered": [], "uncovered": [dict(lost, providers=True)], "advertised_total": 1}),
+                   ("0", "not json")):
+    if classify(rc, report)[0] != 3:
+        raise SystemExit(f"coverage report must be 'unknown' for rc={rc!r} report={report!r}")
 if "rsync" in script and ".private.base64" in script.split("rsync", 1)[1][:800]:
     raise SystemExit("renew script must not rsync the private key to Pearl")
 if 'ln -sfn "$(cat .previous-target)"' in runbook:

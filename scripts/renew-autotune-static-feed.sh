@@ -502,8 +502,10 @@ rsync -e "$RSYNC_RSH" -a --delete \
 # Hold deploy-pearl-vps.sh locks for the swap window so a coordinator deploy
 # cannot clobber `current`. Validate existing lock files; do not create them
 # (a 0644 create would fail the coordinator deploy's 0600 root:root check).
+# Remote stdout is captured for the RENEW_COVERAGE_* report lines (#1688 B2).
+PUBLISH_OUT_FILE="$STAGING/publish.out"
 set +e
-SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$REMOTE_TMP" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$COORDINATOR_UNIT" "$LOCK_HELPER" "$WINDOW_HELPER" "$CONTINUITY_VERIFIER" <<'REMOTE'
+SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$REMOTE_TMP" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$COORDINATOR_UNIT" "$LOCK_HELPER" "$WINDOW_HELPER" "$CONTINUITY_VERIFIER" <<'REMOTE' >"$PUBLISH_OUT_FILE"
 set -euo pipefail
 root="$1"; incoming="$2"; final="$3"; prev="$4"; unit="$5"; helper="$6"; window="$7"; verifier="$8"
 incoming_path="$root/releases/$incoming"
@@ -534,6 +536,32 @@ cd "$root/releases"
 chown -R root:macprovider "$incoming"
 chmod 0750 "$incoming"; chmod 0640 "$incoming"/*
 mv "$incoming" "$final"
+# #1688 B2: a freshness renewal mints a NEW release_id (SPEC-023 §3.7.8: a
+# release_id bound to two feed digest sets is permanently rejected, so a restamp
+# cannot keep the live id), and each one takes a retained-window slot. Report
+# which advertised releases fall out of the window; never block the renewal.
+# The operator key is read from the running coordinator's own environment and
+# rides curl --config stdin; it is never echoed, written, or put in argv.
+renewal_coverage() {
+  local key_env key status poolz rc=0
+  umask 077
+  key_env="$(sed -n 's/^[[:space:]]\{1,\}operator_key:[[:space:]]*env:\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*\(#.*\)\{0,1\}$/\1/p' /opt/macprovider/coordinator.yaml | head -n 1)"
+  [ -n "$key_env" ] || { echo "renewal coverage: auth.operator_key is not an env: reference" >&2; return 10; }
+  key="$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n "s/^${key_env}=//p" | head -n 1)"
+  [ -n "$key" ] || { echo "renewal coverage: the coordinator process has no $key_env" >&2; return 10; }
+  poolz="$(mktemp /tmp/macprovider-renew-poolz.XXXXXXXX)" || return 10
+  status="$(printf 'header = "Authorization: Bearer %s"\n' "$key" | curl --config - -sS --noproxy '*' --max-time 10 --max-filesize 16777216 -o "$poolz" -w '%{http_code}' http://127.0.0.1:8444/poolz)" \
+    || { key=""; rm -f "$poolz"; echo "renewal coverage: coordinator /poolz is unreachable on Pearl loopback" >&2; return 10; }
+  key=""
+  [ "$status" = 200 ] || { rm -f "$poolz"; echo "renewal coverage: coordinator /poolz answered HTTP $status" >&2; return 10; }
+  python3 -I "$window" coverage --root "$root" --incoming "releases/$final" --poolz-json "$poolz" || rc=$?
+  rm -f "$poolz"
+  return "$rc"
+}
+cov_rc=0
+cov_json="$(renewal_coverage)" || cov_rc=$?
+echo "RENEW_COVERAGE_RC=$cov_rc"
+echo "RENEW_COVERAGE_JSON=$cov_json"
 # Persistent autotune metadata starts here. Set mutated before the first write so
 # a failure after .previous-target (and before current swap) still rollbacks.
 mutated=1
@@ -552,6 +580,8 @@ echo "sent SIGHUP to $unit (pid $pid)"
 REMOTE
 publish_rc=$?
 set -e
+PUBLISH_OUT="$(cat "$PUBLISH_OUT_FILE" 2>/dev/null || true)"
+printf '%s\n' "$PUBLISH_OUT" | grep -v '^RENEW_COVERAGE_' || true
 if [ "$publish_rc" -eq 0 ]; then
   :
 elif [ "$publish_rc" -eq 1 ]; then
@@ -594,3 +624,93 @@ fi
 
 log "SUCCESS: coordinator now serving the renewed feed ${RELEASE_DIRNAME} (no restart, fleet undisturbed)."
 log "previous release retained as .previous-target -> $CURRENT_TARGET"
+
+# ---------------------------------------------------------------------------
+# 5. #1688 B2: coverage report. The renewal is already live and is NEVER undone
+#    for coverage: an expired feed strands every provider, a dropped window
+#    slot strands only providers that skipped three renewals without a restart.
+#    A loss is a loud success: a GitHub Actions ::warning:: plus a
+#    renewal_coverage_loss record in Pearl's catalog-window-overrides.jsonl.
+# ---------------------------------------------------------------------------
+RENEW_COVERAGE_RC="$(printf '%s\n' "$PUBLISH_OUT" | sed -n 's/^RENEW_COVERAGE_RC=//p' | tail -n 1)"
+RENEW_COVERAGE_JSON="$(printf '%s\n' "$PUBLISH_OUT" | sed -n 's/^RENEW_COVERAGE_JSON=//p' | tail -n 1)"
+# stdout: the uncovered records as a compact JSON list (empty when covered).
+# exit 3: coverage unknown (not computed, or a malformed report).
+RENEW_COVERAGE_STATE=known
+RENEW_COVERAGE_RECORDS="$(python3 - "$RENEW_COVERAGE_RC" "$RENEW_COVERAGE_JSON" <<'PY'
+import json, re, sys
+rc, raw = sys.argv[1], sys.argv[2]
+try:
+    if rc not in ("0", "4"):
+        raise ValueError(f"coverage exit {rc or '<missing>'}")
+    value = json.loads(raw)
+    covered, uncovered, total = value["covered"], value["uncovered"], value["advertised_total"]
+    if (not isinstance(total, int) or isinstance(total, bool) or total < 0
+            or not isinstance(covered, list) or not isinstance(uncovered, list)):
+        raise ValueError("coverage report has the wrong shape")
+    if (rc == "4") != bool(uncovered):
+        raise ValueError(f"coverage exit {rc} does not match its report")
+    records = []
+    for entry in uncovered:
+        rid, sha = entry["release_id"], entry["sha"]
+        if not isinstance(rid, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,191}", rid) is None:
+            raise ValueError("coverage report carries an unsafe release id")
+        if not isinstance(sha, str) or re.fullmatch(r"[0-9a-f]{64}", sha) is None:
+            raise ValueError("coverage report carries a malformed sha")
+        counts = {k: entry[k] for k in ("providers", "routing_eligible")}
+        if any(not isinstance(v, int) or isinstance(v, bool) or v < 0 for v in counts.values()):
+            raise ValueError("coverage report carries a bad count")
+        records.append({"release_id": rid, "sha": sha, **counts})
+except (ValueError, KeyError, TypeError) as exc:
+    print(f"renewal coverage unknown: {exc}", file=sys.stderr)
+    sys.exit(3)
+print(f"window coverage: {len(covered)} admissible release(s), {total} catalog-advertising "
+      f"provider(s), {len(records)} uncovered", file=sys.stderr)
+for r in records:
+    print(f"  UNCOVERED {r['release_id']} sha={r['sha'][:16]} providers={r['providers']} "
+          f"routing_eligible={r['routing_eligible']}", file=sys.stderr)
+if records:
+    print(json.dumps(records, sort_keys=True, separators=(",", ":")))
+PY
+)" || RENEW_COVERAGE_STATE=unknown
+if [ "$RENEW_COVERAGE_STATE" = unknown ]; then
+  printf '::warning title=Autotune renewal coverage unknown::renewal %s published, but connected-provider catalog coverage could not be computed; check /poolz for providers about to fail catalog_incompatible\n' "$RELEASE_DIRNAME"
+elif [ -n "$RENEW_COVERAGE_RECORDS" ]; then
+  printf '::warning title=Autotune renewal coverage loss::renewal %s published; connected providers advertise catalog release(s) that left the retained window and will be rejected catalog_incompatible on their next hello: %s\n' "$RELEASE_DIRNAME" "$RENEW_COVERAGE_RECORDS"
+  COVERAGE_RECORD_B64="$(python3 - "$RENEW_COVERAGE_RECORDS" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "${GITHUB_RUN_ID:-}" <<'PY'
+import base64, json, sys
+uncovered, incoming, live_target, run_id = sys.argv[1:]
+record = {"kind": "renewal_coverage_loss", "uncovered": json.loads(uncovered),
+          "incoming": "releases/" + incoming, "live": {"target": live_target}, "run_id": run_id}
+print(base64.b64encode(json.dumps(record, sort_keys=True).encode("ascii")).decode("ascii"))
+PY
+)" || COVERAGE_RECORD_B64=""
+  case "$COVERAGE_RECORD_B64" in *[!A-Za-z0-9+/=]*) COVERAGE_RECORD_B64="" ;; esac
+  # Same append contract as deploy-pearl-vps.sh _append_catalog_window_override:
+  # root-only 0600, O_APPEND|O_NOFOLLOW, regular file only, fsync.
+  if [ -n "$COVERAGE_RECORD_B64" ] && SSH "install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider && python3 -I - '$COVERAGE_RECORD_B64' && logger -t macprovider-renew 'autotune renewal coverage loss for $RELEASE_DIRNAME'" <<'PY'
+import base64, datetime, json, os, stat, sys
+record = json.loads(base64.b64decode(sys.argv[1], validate=True).decode("ascii"))
+if not isinstance(record, dict) or "ts" in record:
+    raise SystemExit("renewal coverage record must be a JSON object without ts")
+record["ts"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+path = "/var/lib/macprovider/catalog-window-overrides.jsonl"
+fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise SystemExit(path + " is not a regular file")
+    os.fchown(fd, 0, 0)
+    os.fchmod(fd, 0o600)
+    os.write(fd, (json.dumps(record, sort_keys=True) + "\n").encode("ascii"))
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+  then
+    log "AUDIT TRAIL: renewal_coverage_loss appended to /var/lib/macprovider/catalog-window-overrides.jsonl"
+  else
+    printf '::warning title=Autotune renewal coverage record failed::could not append renewal_coverage_loss for %s to /var/lib/macprovider/catalog-window-overrides.jsonl\n' "$RELEASE_DIRNAME"
+  fi
+else
+  log "window coverage: every connected provider's catalog release stays admissible"
+fi

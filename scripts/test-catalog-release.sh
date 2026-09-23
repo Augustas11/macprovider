@@ -320,6 +320,19 @@ rejected(
         {"releases": {release_id: changed_enriched_feed}, "tombstones": {}},
     ),
 )
+# #1688 B2: a freshness renewal cannot keep the live release_id. A restamp
+# changes generated_at and the candidate bytes, so the same id would be bound
+# to two feed digest sets (SPEC-023 §3.7.8: permanently rejected).
+same_id_restamp = json.loads(json.dumps(record))
+same_id_restamp["generated_at"] = "2099-01-01T00:00:00Z"
+same_id_restamp["feeds"]["autotune-candidates.json"]["sha256"] = "e" * 64
+rejected(
+    "freshness restamp that keeps the published release_id",
+    lambda: module.require_ledger_evolution(
+        {"releases": {release_id: record}, "tombstones": {}},
+        {"releases": {release_id: same_id_restamp}, "tombstones": {}},
+    ),
+)
 rebound_manifest = json.loads((canonical / "release.json").read_bytes())
 rebound_manifest["release_id"] = rebound_id
 rejected(
