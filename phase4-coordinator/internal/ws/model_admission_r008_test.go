@@ -388,8 +388,8 @@ func TestModelAdmissionSettlementRequiresSessionReleaseRowTuple(t *testing.T) {
 }
 
 // R008: feed freshness gates the feed path at match and decision time, and a
-// GGUF (loopback) member never binds for settlement until the runtime path
-// reports the source.
+// GGUF (loopback) member never binds for settlement (R003(iv) v0.1.10: not
+// until a trusted usage source exists for the loopback path).
 func TestModelAdmissionStaleFeedAndRuntimeSourceAtDecisionTime(t *testing.T) {
 	f := newBindingFixture(t)
 	s := f.server
@@ -400,7 +400,7 @@ func TestModelAdmissionStaleFeedAndRuntimeSourceAtDecisionTime(t *testing.T) {
 	}
 	priced := f.decide(t, feedOffer, "catalog_priced")
 	// A GGUF-pinned session presents a loopback source the coordinator cannot
-	// verify: never bound for settlement (R003(iv) until R007(e)).
+	// verify: never bound for settlement (R003(iv) v0.1.10).
 	entry := &pool.Provider{ProviderID: "p1", AssignedID: "s1b", ModelID: "model-a", State: pool.StateReady,
 		ModelHash: f.gguf, ModelHashAlgorithm: modelidentity.GGUFFileV1, ExpectedModelHash: bindingRowHash, HashStatus: pool.HashStatusVerified,
 		ArtifactIdentity:       &artifactidentity.Binding{Member: artifactidentity.Member{ModelKey: "small", ModelID: "model-a", ArtifactID: "gguf-q4", HashAlgorithm: modelidentity.GGUFFileV1, Hash: f.gguf, RuntimeStatus: "recommendable", AllowedRuntimeSources: "llamacpp_loopback,ollama_loopback"}},
@@ -419,7 +419,7 @@ func TestModelAdmissionStaleFeedAndRuntimeSourceAtDecisionTime(t *testing.T) {
 	s.withReleaseRead(func() {
 		cur, comp := s.autotuneCatalogSnapshot()
 		if _, _, ok := s.settlementSessionMemberLocked(priced, provider, cur, comp); ok {
-			t.Fatal("a loopback-sourced GGUF member must not bind for settlement before the runtime path exists")
+			t.Fatal("a loopback-sourced GGUF member must not bind for settlement without a trusted usage source")
 		}
 	})
 	// The feed goes stale (15 days): the feed path resolves nothing at match
@@ -499,5 +499,36 @@ func TestModelAdmissionEpochOnModelIDChangeAndFeedCommitOrder(t *testing.T) {
 	})
 	if !committed {
 		t.Fatal("commit must run")
+	}
+}
+
+// SPEC-047-R003(iv) v0.1.10 (#1694): the session's hello-time runtime_source
+// is checked as well as the recorded one. An `mlx_cache`-recorded candidate
+// whose live session says it serves through a loopback runtime never binds
+// for settlement, while the same session over `mlx_cache` (or a legacy hello
+// with no source) does.
+func TestModelAdmissionLoopbackSessionNeverBindsForSettlement(t *testing.T) {
+	for _, tc := range []struct {
+		source string
+		binds  bool
+	}{{"", true}, {"mlx_cache", true}, {"ollama_loopback", false}, {"llamacpp_loopback", false}, {"lmstudio_loopback", false}, {"openai_compatible_loopback", false}} {
+		t.Run("source="+tc.source, func(t *testing.T) {
+			f := newBindingFixture(t)
+			s := f.server
+			f.registerSession(t, "p1", "s1", "model-a", true)
+			offer := f.offer(t, "p1", "m", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
+			priced := f.decide(t, offer, "catalog_priced")
+			provider, ok := s.pool.Resolve("p1", "")
+			if !ok || provider.ModelAdmissionCandidateID != priced.CandidateID {
+				t.Fatalf("session must be bound to the candidate: %+v", provider)
+			}
+			provider.RuntimeSource = tc.source
+			s.withReleaseRead(func() {
+				cur, comp := s.autotuneCatalogSnapshot()
+				if _, _, got := s.settlementSessionMemberLocked(priced, provider, cur, comp); got != tc.binds {
+					t.Fatalf("runtime_source=%q binds=%v want %v", tc.source, got, tc.binds)
+				}
+			})
+		})
 	}
 }

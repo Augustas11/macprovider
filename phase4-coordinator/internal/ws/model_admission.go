@@ -2734,6 +2734,14 @@ func validModelAdmissionRuntimeSource(value string) bool {
 // admits them as non-earning route-excluded sandbox sessions. `mlx_cache` (catalog
 // MLX) is deliberately excluded and stays fully gated.
 func isBYOMLoopbackRuntimeSource(value string) bool {
+	return IsBYOMLoopbackRuntimeSource(value)
+}
+
+// IsBYOMLoopbackRuntimeSource is isBYOMLoopbackRuntimeSource for the buyer
+// route and settlement boundary. A loopback runtime is an operator-controlled
+// external process, so its reported usage is provider-only (SPEC-015 §N.6)
+// and SPEC-047-R003(iv) v0.1.10 keeps it out of settlement.
+func IsBYOMLoopbackRuntimeSource(value string) bool {
 	switch value {
 	case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback":
 		return true

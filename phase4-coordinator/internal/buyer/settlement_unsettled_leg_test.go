@@ -129,7 +129,7 @@ func TestUnsettledQueueFullLegSkipsMissingReceiptRecord(t *testing.T) {
 	insertSettlementLegRouteSnapshot(t, s, rec, provider)
 
 	output := settlementOutputForContent("", nil, nil, billing.TerminalStateProviderError)
-	if err := rec.recordRow(provider.AssignedID, provider.ProviderID, http.StatusServiceUnavailable, nil, nil, nil, "Provider queue full", "error_queue_full", 0, nil, billing.FaultNone, output); err != nil {
+	if err := rec.recordRow(provider.AssignedID, provider.ProviderID, provider.RuntimeSource, http.StatusServiceUnavailable, nil, nil, nil, "Provider queue full", "error_queue_full", 0, nil, billing.FaultNone, output); err != nil {
 		t.Fatalf("recordRow(503): %v", err)
 	}
 	if rec.lastRecordedSettlementSubject {
@@ -157,7 +157,7 @@ func TestBillableLegRecordsMissingReceiptVerdict(t *testing.T) {
 
 	prompt, completion := int64(2), int64(1)
 	output := settlementOutputForContent("ok", nil, nil, billing.TerminalStateNormalDone)
-	if err := rec.recordRow(provider.AssignedID, provider.ProviderID, http.StatusOK, &prompt, nil, &completion, "", "", 0, nil, billing.FaultNone, output); err != nil {
+	if err := rec.recordRow(provider.AssignedID, provider.ProviderID, provider.RuntimeSource, http.StatusOK, &prompt, nil, &completion, "", "", 0, nil, billing.FaultNone, output); err != nil {
 		t.Fatalf("recordRow(200): %v", err)
 	}
 	if !rec.lastRecordedSettlementSubject {
@@ -189,5 +189,37 @@ func TestBillableLegWithAbsentAttemptOutputStaysLoud(t *testing.T) {
 		t.Fatal("a billable leg with no settlement attempt output was silently accepted; this evidence gap must stay loud")
 	} else if !strings.Contains(err.Error(), "settlement attempt output missing") {
 		t.Fatalf("err = %v, want it to carry \"settlement attempt output missing\"", err)
+	}
+}
+
+// SPEC-047-R003(iv) v0.1.10 (#1694): recordRow carries the serving session's
+// hello-time runtime_source into the settlement attempt output, so a leg
+// served through a loopback runtime is never coordinator_observed even when
+// the provider reported token counts. The native leg above keeps the label.
+func TestLoopbackLegIsRecordedByteEstimatedThroughRecordRow(t *testing.T) {
+	for source, want := range map[string]string{
+		"":                billing.UsageSourceCoordinatorObserved,
+		"ollama_loopback": billing.UsageSourceByteEstimated,
+	} {
+		t.Run("source="+source, func(t *testing.T) {
+			s := settlementLegServer(t)
+			rec := settlementLegRecorder(s, "req-loopback-leg")
+			provider := settlementLegProvider()
+			provider.RuntimeSource = source
+			insertSettlementLegRouteSnapshot(t, s, rec, provider)
+
+			prompt, completion := int64(2), int64(1)
+			output := settlementOutputForContent("ok", nil, nil, billing.TerminalStateNormalDone)
+			if err := rec.recordRow(provider.AssignedID, provider.ProviderID, provider.RuntimeSource, http.StatusOK, &prompt, nil, &completion, "", "", 0, nil, billing.FaultNone, output); err != nil {
+				t.Fatalf("recordRow(200): %v", err)
+			}
+			var got string
+			if err := s.reqLogStore.DB().QueryRow(`SELECT usage_source FROM settlement_attempt_outputs WHERE request_id = ?`, "req-loopback-leg").Scan(&got); err != nil {
+				t.Fatalf("query attempt output: %v", err)
+			}
+			if got != want {
+				t.Fatalf("usage_source=%q want %q", got, want)
+			}
+		})
 	}
 }

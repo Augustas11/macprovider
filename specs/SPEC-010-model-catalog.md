@@ -1181,6 +1181,11 @@ algorithm.
   requirement rather than restating it. Serving a non-MLX artifact requires a
   SPEC-046-conformant loopback runtime path; this requirement defines the
   identity that path reports, not the path.
+  *Compatibility note 2026-09-23 (no version bump; citation only, #1694):*
+  the identity lift is not a settlement lift for loopback runtimes.
+  SPEC-047-R003(iv) v0.1.10 keeps every loopback `runtime_source` out of
+  `settlement_capable` until a trusted usage source exists, and implementing
+  the runtime path does not change that.
 
 ---
 

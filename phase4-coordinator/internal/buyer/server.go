@@ -2493,7 +2493,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if attempt.SettlementOutput == nil {
 			attempt.SettlementOutput = settlementOutputForContent("", nil, nil, terminalStateFromAttempt(status, attempt.Error, attempt.ErrorCode))
 		}
-		if err := rec.recordRow(provider.AssignedID, provider.ProviderID, status, attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens, attempt.Error, attempt.ErrorCode, retried, attempt.EstimatedCompTokens, attempt.FaultFlag, attempt.SettlementOutput); err != nil {
+		if err := rec.recordRow(provider.AssignedID, provider.ProviderID, provider.RuntimeSource, status, attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens, attempt.Error, attempt.ErrorCode, retried, attempt.EstimatedCompTokens, attempt.FaultFlag, attempt.SettlementOutput); err != nil {
 			return billing.SettlementReceiptState{}, false, err
 		}
 		return rec.ingestSettlementReceipt(provider, attempt.SettlementReceipt)
@@ -3129,7 +3129,7 @@ func (s *Server) forwardHTTPSequence(
 					}
 					s.handleProviderFailure(state.provider, http.StatusBadGateway)
 					output := settlementOutputUnavailableFor(billing.TerminalStateProviderError)
-					if err := rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, http.StatusBadGateway, nil, nil, nil, "Provider returned invalid Tier2 output encoding", blockReason, state.explicitRetries, nil, billing.FaultBreakerQualifying, output); err != nil {
+					if err := rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, state.provider.RuntimeSource, http.StatusBadGateway, nil, nil, nil, "Provider returned invalid Tier2 output encoding", blockReason, state.explicitRetries, nil, billing.FaultBreakerQualifying, output); err != nil {
 						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 						return dispatchedAttempt{}, false
 					}
@@ -3235,7 +3235,7 @@ func (s *Server) forwardHTTPSequence(
 						cancelAttempt()
 						return cancelled, true
 					}
-					if err := rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, status, nil, nil, nil, http.StatusText(status), attempt.ErrorCode, state.explicitRetries, nil, billing.FaultBreakerQualifying, attempt.SettlementOutput); err != nil {
+					if err := rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, state.provider.RuntimeSource, status, nil, nil, nil, http.StatusText(status), attempt.ErrorCode, state.explicitRetries, nil, billing.FaultBreakerQualifying, attempt.SettlementOutput); err != nil {
 						cancelAttempt()
 						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 						return dispatchedAttempt{}, false
@@ -3276,7 +3276,7 @@ func (s *Server) forwardHTTPSequence(
 							cancelAttempt()
 							return cancelled, true
 						}
-						if err := rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, status, nil, nil, nil, http.StatusText(status), attempt.ErrorCode, state.explicitRetries, nil, billing.FaultNone, attempt.SettlementOutput); err != nil {
+						if err := rec.recordRow(state.provider.AssignedID, state.provider.ProviderID, state.provider.RuntimeSource, status, nil, nil, nil, http.StatusText(status), attempt.ErrorCode, state.explicitRetries, nil, billing.FaultNone, attempt.SettlementOutput); err != nil {
 							cancelAttempt()
 							writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 							return dispatchedAttempt{}, false
