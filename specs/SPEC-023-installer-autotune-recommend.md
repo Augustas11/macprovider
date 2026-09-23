@@ -1,13 +1,35 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.15.1
+version: v0.16.0
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-09-23
-lockstep: SPEC-005 v0.6.7 (SPEC-005-R011 money-table owner). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
+last-locked: 2026-09-24
+lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
 
+- **v0.16.0 (2026-09-24)** — Pricing corrections through the catalog-content
+  lane (#1693). New §3.7.10 registers `SPEC-023-R018`: a committed release
+  whose rate-card change is limited to the three credit fields of `rows`
+  entries, row additions, and row removals (never `default`) goes live without
+  a runtime release, as one journaled, reversible host transaction that
+  replaces the base-yaml `rewards.rate_card` block with the reviewed commit's
+  block, activates the signed release, and applies both with one SIGHUP.
+  The money semantics are SPEC-005-R013 (SPEC-005 v0.6.9); this requirement
+  owns the host procedure: pricing scope, the effective-price diff over served
+  models with the reviewed acknowledged-moves file, commit-bound verbatim block,
+  one-writer rule, on-host splice with a yaml base-equivalence proof, operator
+  diff acknowledgement, journal phases with recovery, pre-start recovery and a
+  post-start closer, live evidence (gateway convergence alert-only), and
+  rollback. `SPEC-023-R017` amended: rows-only pricing is eligible under R018
+  (`catalog-content` plus a `pricing` object) instead of the `pricing` refusal
+  lane; `usd_per_million_credits`, per-row `provider_share_bps` /
+  `global_multiplier_ppm` changes are refused as `pricing-globals` (runtime
+  lane); removing `default` is `invalid-release`; `policy_version` and schema
+  changes stay `full-provider-app`. `SPEC-023-R016` amended to direct rows-only
+  pricing drift to R018; renewal continuity, `SPEC-023-R013` retention, and
+  `SPEC-023-R015` coverage are unchanged. §3.3.1 rule 9 cross-references R018.
+  AC-CAT-27 is amended and AC-CAT-28 pins R018.
 - **v0.15.1 (2026-09-23)** — `SPEC-023-R010` implementation contract (#1705).
   The 2026-09-23 content cut rotated the fleet's CLI-baked document
   (`published-2026-09-02-gpt-oss-120b-v1`) out of the 3-deep `.previous-target`
@@ -615,7 +637,7 @@ Pricing is expressed by **model class**, market-pegged per the `RESEARCH_224` ex
 6. **Lookup order is unchanged; the money-table owner is SPEC-005-R011.** Because the published rate card still contains one concrete row per model key, SPEC-005 §5.5 resolution **order** — exact key, then `NormalizeModelKey`, then the `default` row — is unchanged. `rate_class` is never sent on the wire, never stored on a ledger row, and never read by `RateFor`. MoneyTable-A/B (SPEC-005 §5.6) name the **source** of that map. The v0.10.0 sentence "this revision does not amend SPEC-005" is historical.
 7. **Invariant: a `recommendable` row MUST resolve to a rate row.** For every candidate-catalog row with `runtime_status == "recommendable"`, the published rate card MUST contain a row reachable by exact key or by `NormalizeModelKey` for that model key. Reaching only the `default` row does not satisfy this invariant at authoring time, even though §3.3 and AC-15 keep the `default` fallback available at runtime for fresh-install recovery. A release that violates this invariant MUST fail closed at generation.
 8. **No silent class-expansion repricing.** The first catalog release that introduces class expansion as an **authoring refactor only** MUST publish a `rate-card.json` whose `rows` map is byte-identical to the immediately preceding release's `rows` map. A v0.12.0 **market-pegged** cut is a separate, explicitly reviewed **repricing** release and is exempt from that byte-identical invariant. On a market-pegged cut, `classes` MUST be `{}` or the generator MUST fail closed if any `recommendable` published row was materialised from a class rather than from the engine proposal. Retaining the previous rate-card row because a key is absent from the proposal is forbidden.
-9. **Generated-feed / billing-config parity is a release gate, scoped by MoneyTable belt.** MoneyTable-A: before signing, the published `rate-card.json` `rows` map and coordinator `rewards.rate_card` MUST agree row-for-row under the rule-4 mapping (same key set, same three credit values), including extra/missing keys. MoneyTable-B: yaml MAY contain only `default`; extra per-model yaml keys fail config load; parity is signed feed vs the in-memory card `RateFor` uses. Either belt: `provider_share_bps` / `global_multiplier_ppm` MUST equal yaml globals after unit conversion.
+9. **Generated-feed / billing-config parity is a release gate, scoped by MoneyTable belt.** MoneyTable-A: before signing, the published `rate-card.json` `rows` map and coordinator `rewards.rate_card` MUST agree row-for-row under the rule-4 mapping (same key set, same three credit values), including extra/missing keys. MoneyTable-B: yaml MAY contain only `default`; extra per-model yaml keys fail config load; parity is signed feed vs the in-memory card `RateFor` uses. Either belt: `provider_share_bps` / `global_multiplier_ppm` MUST equal yaml globals after unit conversion. Under MoneyTable-A a committed release that changes only rate-card rows MAY go live without a runtime release only through `SPEC-023-R018` (§3.7.10), which installs the commit's yaml block verbatim and applies it with the signed card in one SIGHUP (SPEC-005-R013); a change to the globals stays a runtime release.
 
 The intended v0.10.0 class assignment for the current signed catalog is recorded here as an illustrative operator mapping, not as normative catalog content: `class-3b` — `meta-llama/llama-3.2-3b-instruct`; `class-8b` — `meta-llama/llama-3.1-8b-instruct`, `qwen3-8b`; `class-20b-moe` — `openai/gpt-oss-20b`; `class-30b-moe` — `google-gemma-4-26b-a4b-it`, `qwen3-coder-30b-a3b-instruct`, `nvidia/nemotron-3-nano-30b-a3b`; `class-32b` — `qwen3-32b`, `qwen2.5-coder-32b-instruct`; `class-120b-moe` — `openai/gpt-oss-120b`; `class-70b` is reserved. **v0.12.0:** those class credit tables MUST NOT price a market-pegged recommendable row.
 
@@ -1186,7 +1208,12 @@ and presence; for `tier2-catalog.json`, only `issued_at`, `expires_at`,
 equal); and `trusted-keys.json` MUST be byte-equal. The check MUST run both
 before and under the host lock, using the same shipped, sha-verified
 implementation on both sides. Drift names the file and directs the operator to
-the catalog-content lane (`SPEC-023-R017`) or a full release.
+the catalog-content lane (`SPEC-023-R017`) — its pricing path (`SPEC-023-R018`)
+when the rate-card drift is limited to `rows` credit fields, row additions, and
+non-`default` row removals — or to a runtime or full release (a
+`usd_per_million_credits`, `provider_share_bps`, or `global_multiplier_ppm`
+change). A renewal never carries a price change; the continuity rule above is
+unchanged by v0.16.0.
 
 **SPEC-023-R017 — Catalog-content release lane.** A committed catalog release
 whose change is catalog content only MAY go live without a runtime or provider
@@ -1198,14 +1225,18 @@ app release, through the operator-local catalog-content lane
    `catalog-content`. Any other verdict names the more restrictive lane the
    change needs, most restrictive first:
    - `invalid-release` — the release fails `verify-directory` or the serving
-     closure (`SPEC-008-R002`).
+     closure (`SPEC-008-R002`), or removes the rate-card `default` row.
    - `full-provider-app` — any change to release or feed `policy_version`,
      schema versions, feed `source`, signer key ids (including the Tier-2
      signature key), `trusted-keys.json` bytes, or whether the release is
      artifact-bound.
-   - `pricing` — any rate-card row change (after stripping restamp fields).
-     Pricing corrections are out of scope for this lane and are tracked in
-     #1693; until then they use the runtime lane.
+   - `pricing` (v0.15.0 only; retired by v0.16.0) — v0.15.0 refused every
+     rate-card row change here. From v0.16.0 a rate-card diff limited to the
+     three credit fields of `rows` entries, row additions, and non-`default`
+     row removals is eligible: the gate yields `catalog-content` together with
+     a `pricing` object `{changed, added, removed}` and the release proceeds
+     only under `SPEC-023-R018`. Pricing MAY ride with non-pricing content in
+     one release.
    - `unknown-predecessor` — the live content is not reconstructible, modulo
      renewal restamp, from a row of the release ledger.
    - `unverified-commit` — the release is not byte-equal to the files at a full
@@ -1217,6 +1248,13 @@ app release, through the operator-local catalog-content lane
      protection.
    - `stale-or-future` — the candidate feed `generated_at` is older than 30
      days or more than 10 minutes in the future.
+   - `pricing-globals` (v0.16.0) — the rate-card diff changes
+     `usd_per_million_credits` or any row's `provider_share_bps` or
+     `global_multiplier_ppm`. These are coordinator globals (§3.3.1 rule 4,
+     SPEC-005-R013 rule 5) and need a runtime release.
+   - `pricing-unacked-move` (v0.16.0) — the effective-price diff
+     (`SPEC-023-R018` rule 2) moves a served model onto `default` or onto a
+     different rate row without a reviewed acknowledgement.
    - `freshness-or-noop` — no content change against live (use renewal, or do
      nothing).
 2. **Live-binary dry-load.** Before activation the lane MUST prove the release
@@ -1278,6 +1316,192 @@ app release, through the operator-local catalog-content lane
 Every override, refusal, and rollback MUST leave an audit record naming the
 release ids and the reason. Nothing in this requirement relaxes §3.7.8
 release-id binding, `SPEC-023-R004` artifact rules, or `SPEC-023-R010`.
+
+#### 3.7.10 Pricing corrections through the catalog-content lane (v0.16.0)
+
+Under MoneyTable-A (SPEC-005 §5.6) the coordinator bills from the base-yaml
+`rewards.rate_card` rows and refuses any load whose rows differ from the
+verified signed `rate-card.json` (SPEC-005-R011). A price correction therefore
+changes two host artifacts that MUST move together. SPEC-005-R013 owns the
+money invariants (I1–I5); this subsection owns the host procedure.
+
+**SPEC-023-R018 — Rows-only pricing is one journaled, reversible host
+transaction.** A committed catalog release whose rate-card change is eligible
+under rule 1 MAY go live through the catalog-content lane
+(`SPEC-023-R017`) without a runtime release only when every rule below holds.
+`SPEC-023-R013` retention, `SPEC-023-R015` coverage, `SPEC-023-R016` renewal
+continuity, and every `SPEC-023-R017` rule not amended here apply unchanged.
+
+1. **Pricing scope.** Eligible: a `rate-card.json` diff limited to the three
+   credit fields of `rows` entries, row additions, and row removals, plus
+   renewal restamp fields; `verify-directory` and the §3.3.1 invariants still
+   apply. Removing the `default` row is `invalid-release`. A change to
+   `usd_per_million_credits` or to any row's `provider_share_bps` or
+   `global_multiplier_ppm` is `pricing-globals` (runtime lane). A
+   `policy_version` or schema change stays `full-provider-app`. The refusal
+   lanes `pricing-globals` and `pricing-unacked-move` rank after
+   `stale-or-future`, so `unverified-commit` and `stale-or-future` remain the
+   reported lane when they also apply. Consumers of the gate verdict keep
+   requiring `ok` with lane `catalog-content`.
+2. **Effective-price diff over served models.** The operator acknowledges
+   the effect on served models, not a row diff. The model set M is every
+   catalog key and served `model_id` of the candidate, current, and
+   retained-window releases, every row key of the live and candidate tables,
+   and the distinct `request_log.model` values of the last 30 days. M is
+   pinned at preflight (name set and digest ship with the verdict). For each m
+   in M, old and new are the `RateFor` resolution (SPEC-005 §5.5) against the
+   live and candidate tables, including the resolved row key; names outside
+   the normalizer's key grammar are resolved by the coordinator binary's
+   validator, never by a second normalizer. The diff lists every m whose
+   resolved row key or any of whose three credits changes. A release in which
+   some m moves onto `default` or onto a different row (a removal, or an added
+   row that captures a normalized key) MUST be refused as
+   `pricing-unacked-move` unless m is listed in
+   `phase3-binary/catalog/autotune/acknowledged-pricing-moves.json`, read from
+   the reviewed commit (CODEOWNERS-covered) and included in the shipped byte
+   manifest. Under the lease the diff is recomputed over the pinned set plus
+   newly seen names; only a new name with an unacknowledged move refuses, and
+   a name leaving the 30-day window never invalidates the acknowledgement.
+   `request_log.model` is buyer-controlled: control characters (C0, C1, DEL)
+   MUST be rendered escaped (`\xNN`) in the diff and on the terminal, and the
+   diff digest is computed over the escaped canonical JSON.
+3. **Commit-bound verbatim block.** The only yaml bytes the lane installs are
+   the `rewards.rate_card` block of `phase4-coordinator/dist/coordinator.yaml`
+   at the release's reviewed commit, extracted by the rule-5 boundary. Its
+   rows MUST equal the release's signed `rows` under the §3.3.1 rule-4 mapping;
+   its sha256 is bound into the verdict and the shipped byte manifest and is
+   re-verified under the lease. Price provenance comments live only inside
+   that block. The tracked file is CODEOWNERS-covered.
+4. **One writer.** While a pricing journal (`.pricing-txn`, rule 7) exists on
+   the coordinator host, every writer of the live base `coordinator.yaml` or
+   its overlay (the coordinator deploy, the host updater, the Tier-2
+   activation and enforcement scripts and watchdog, deploy recovery, the
+   freshness renewal, the content lane, and any manual SIGHUP procedure) MUST
+   refuse, and each takes the lane's host lock set (updater lock, then deploy
+   lock) for its read-modify-write and SIGHUP. The rule is one shared guard,
+   and a static check fails any writer that lacks it. Preflight refuses unless
+   the installed host copies of those writers hash to a guard-bearing version
+   listed in the lane manifest. A SIGHUP from any source during the
+   transaction can only apply the on-disk pair (prior, candidate, or a
+   parity-rejected mixed pair), so it cannot violate SPEC-005-R013 I1.
+5. **On-host splice and base-equivalence proof.** The candidate base yaml is
+   built on the coordinator host; live yaml bytes MUST NOT leave the host
+   (only digests and the rule-2 diff return). The splice replaces exactly the
+   `rate_card:` child of the one column-0 `rewards:` mapping: the block runs
+   from that line to the line before the first following line (comment or
+   not) whose indent is at most the child's, or EOF; blank lines directly
+   before the boundary stay outside. It refuses tabs, CRLF, BOM, multiple
+   documents, anchors, aliases, tags, flow style inside `rewards`, and
+   duplicate keys, and it asserts byte identity of everything outside the
+   block. The authoritative proof is the running coordinator binary's
+   validator: it parses the live base and the candidate with the
+   coordinator's yaml parser, removes the `rewards.rate_card` value from both,
+   and MUST find the remaining trees equal node by node (kind, tag, value,
+   style, and mapping key order significant; comments and positions ignored),
+   and MUST find the candidate's rate-card rows equal to the release rows
+   under the rule-4 mapping. The same dry-load MUST pass runtime rate-card
+   parity (SPEC-005-R013 I1) with the live overlay unchanged and report the
+   candidate config digest, the expected billing-table digest, and the
+   expected served-card digest. A parity mismatch is NO_GO with nothing
+   mutated.
+6. **Preflight and operator acknowledgement.** Preflight is read-only and
+   additionally refuses when: foreign recovery state exists (deploy-recovery
+   markers, an updater transaction, Tier-2 enforcement or watchdog
+   transactions, or a pricing journal or journal temp directory whose owning
+   process is live); the overlay carries any `rewards.rate_card`,
+   `provider_share`, `global_multiplier`, or `usd_per_million_credits` key;
+   the installed recovery helper, recovery units, coordinator guard drop-in,
+   and their unit dependencies are missing or of unknown hash; the
+   coordinator-served card, the on-disk `current` card, and the applied-config
+   record's served-card digest disagree (prior state not settled); or the live
+   base digest differs from the applied-config record. `--deploy` MUST carry
+   the preflight's effective-diff digest, which the operator acknowledges after
+   reviewing the shown price table; under the lease the lane re-runs every
+   preflight check and refuses if any digest moved. A coordinator binary
+   whose applied-config record lacks the billing-table, served-card, release,
+   and billing-snapshot fields is NO_GO (pricing needs the enabling runtime
+   release).
+7. **Journal.** Before the first mutation, under the lease, the lane writes a
+   durable root-only journal (`/opt/macprovider/.pricing-txn`, built in a
+   same-directory temp directory, fsynced, renamed, parent fsynced) holding
+   the exact prior and candidate yaml bytes with owner and mode, the exact
+   prior window bytes or `absent`, and a manifest of every digest needed to
+   recognize the prior and candidate states: yaml, overlay presence and
+   digest, `current` target, window, and the full file-digest set of both
+   releases. State S is (base digest, overlay presence and digest, `current`
+   target, window bytes, digest set of the `current` release). Phases are
+   written durably before each step: `prepared` → `mutating` → `hup-intent`
+   → `verifying` → `verified`, or `rolling-back` → `rolled-back`, plus
+   `restored-unverified` (rule 8). Every yaml install (forward, rollback,
+   recovery) is a same-directory temp file with explicit owner, group, and
+   mode taken from the journal, fsynced, renamed, parent fsynced; release
+   directories and every `current` or window rename are fsynced. Restore
+   order is always yaml, then `current`, then window. Stale journal temp
+   directories whose owning process is gone are removed under the lock set.
+   Recovery (`--recover-pricing-txn`, same locks, journal-only state):
+   `verified` or `rolled-back` requires S to equal the candidate or prior
+   respectively (release re-hashed and verified) and then finalizes without a
+   SIGHUP; any other phase restores each item by compare-and-swap (candidate
+   → prior; prior → skip; anything else stops with the journal kept and an
+   alert), then, if the coordinator runs, always sends one SIGHUP and
+   finalizes only on positive live evidence — an applied-config record loaded
+   after that SIGHUP whose config, billing-table, and served-card digests equal
+   the prior values, and coordinator-served card bytes equal to the prior
+   bytes. The journal is removed only after a terminal finalize.
+8. **Pre-start recovery and closer.** The coordinator's pre-start recovery
+   unit runs pricing recovery before deploy recovery. With a pricing journal
+   present and the lock set free, a non-terminal phase is restored to the
+   prior pair by the rule-7 compare-and-swap rules without a SIGHUP and the
+   phase becomes `restored-unverified`; a repeated start re-runs the restore
+   idempotently; `verified` or `rolled-back` is verified by bytes only
+   against the journal digest sets (so an expired Tier-2 catalog never blocks
+   boot) and finalized. A held lock set means a live holder: pre-start skips,
+   and a boot on a mixed pair fails parity closed. Deploy pre-start recovery is
+   a no-op while only a pricing journal exists, and fails when it holds its own
+   marker alongside a pricing journal (a conflict named in the runbook). A
+   compare-and-swap failure blocks start with a named runbook step.
+   `restored-unverified` terminalizes by one rule, shared by operator
+   recovery and a post-start closer unit: a `source=boot` record, or a record
+   from recovery's own SIGHUP, loaded after the restore (bound to the boot id
+   and a restore nonce, ordered by monotonic process start, never by wall
+   clock alone), with config, billing-table, and served-card digests equal to
+   the prior values and served card bytes equal to the prior bytes. The closer
+   waits a bounded time for the boot record, serializes with operator
+   recovery on the lock set, and alerts on failure.
+9. **Publish.** Under the lease, after the `SPEC-023-R017` compare-and-swap on
+   `current` and the gate re-check: phase `mutating` → yaml compare-and-swap
+   (live equals prior) → durable candidate install → window write and
+   `current` swap → final pre-signal compare-and-swap (S equals candidate) →
+   phase `hup-intent` → one SIGHUP → phase `verifying`.
+10. **Evidence.** `SPEC-023-R017` evidence (a)–(e) applies; (a) includes
+    `/v1/rate-card` and `.sig`. Evidence (b) additionally requires an
+    applied-config record with `source=sighup`, loaded at or after the
+    SIGHUP, whose config digest equals the candidate, overlay unchanged,
+    billing-table and served-card digests equal the expected values, and
+    billing snapshot id greater than the prior; `autotune runtime economics
+    reload rejected` is a rejection event. Before `verified`, still under the
+    lease, S is re-read without following symlinks and MUST equal the
+    candidate. Any failure rolls back. Gateway convergence (public card equals
+    the release bytes within 660 s, SPEC-006-R008) is alert-only: it never
+    rolls back a correct price (SPEC-005-R013 I3).
+11. **Rollback.** On a post-mutation failure, or an interrupt or deadline while
+    the lease is demonstrably held: phase `rolling-back` → yaml
+    compare-and-swap restore (candidate → prior; prior → skip; anything else
+    stops, alerts, and exits) → `current` compare-and-swap → exact prior
+    window restore → final pre-signal compare-and-swap (S equals prior) → one
+    SIGHUP → an applied-config record loaded at or after it with digests equal
+    to the prior values and an advanced billing snapshot id, and served card
+    equal to the prior bytes → phase `rolled-back` → finalize. A rejected
+    SIGHUP falls back to the `SPEC-023-R017` controlled restart and requires a
+    `source=boot` record equal to the prior; failing that, the lane stops with
+    the journal kept and names the runbook procedure. Confirmed lease loss
+    never rolls back: the lane stops, keeps the journal, and recovery runs after
+    the lock set is reacquired. Rollback is proven by automated and harness
+    tests; it is not drilled against production pricing.
+
+Every refusal, override, recovery, and rollback MUST leave an audit record
+naming the release ids, the effective-diff digest, and the reason. Nothing in
+this requirement lets the lane sign, re-sign, or edit a feed on the host.
 
 ## 4. Formula (updated v0.12.0)
 
@@ -2022,7 +2246,8 @@ shipped implementation.
 AC-CAT-27 (`SPEC-023-R017`, catalog-content lane): A non-pricing content change
 committed on `origin/main` whose live predecessor is in the ledger is
 `catalog-content`. Each of: an unsigned change, a policy, signer, or keyring
-change, a rate-card row change, a stale or future candidate feed, an unknown
+change, a rate-card globals change or `default` removal (v0.16.0; a rows-only
+rate-card change is AC-CAT-28), a stale or future candidate feed, an unknown
 predecessor, a serving-closure failure, a commit off `origin/main`, bytes
 differing from the commit, an extra uncommitted file, or a commit lacking the
 ledger or exclusion list yields its named lane and no activation. A release the
@@ -2030,6 +2255,29 @@ running binary's validator rejects, including an unloadable retained entry, is
 NO_GO. A renewal or deploy attempted while the lane holds the lease is refused.
 Each evidence failure (a)–(e) and a rejected post-rollback SIGHUP drive the
 rollback path, and a failed release is retained only under rule 6.
+
+AC-CAT-28 (`SPEC-023-R018`, pricing through the content lane): A committed
+release changing only row credits, adding a row, or removing a non-`default`
+row is `catalog-content` with a `pricing` object; removing `default` is
+`invalid-release`; a `usd_per_million_credits`, `provider_share_bps`, or
+`global_multiplier_ppm` change is `pricing-globals`; a `policy_version` or
+schema change is `full-provider-app`; a removal that moves a served model onto
+`default`, or an added row that captures a served model, is
+`pricing-unacked-move` unless acknowledged in the reviewed file; a commit
+block whose rows differ from the signed rows is refused. The splice refuses
+every rule-5 malformation and preserves bytes outside the block; the
+base-equivalence proof rejects any non-rate-card node, tag, style, or order
+change and accepts comment-only differences. Parity mismatch, a missing or
+mismatched acknowledgement digest, foreign recovery state, an unknown
+installed-writer hash, or yaml or overlay moved under the lock refuses with
+no bytes changed. A rejected SIGHUP, a half-applied reload, an evidence
+(a)–(d) failure, and an interrupt in each phase restore yaml, `current`, and
+window together with a record equal to the prior; a gateway that has not
+converged only alerts; lease loss keeps the journal and recovery restores it;
+a crash or reboot at every journal write, fsync, rename, or signal ends with
+either no journal and nothing mutated or the exact prior state restored, and
+`restored-unverified` finalizes only on a matching boot record. Every writer
+refuses while a journal exists.
 
 
 ## 12. oMLX-seeded provisional catalog gates

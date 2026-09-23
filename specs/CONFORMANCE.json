@@ -119,7 +119,7 @@
     {
       "spec_id": "SPEC-005",
       "title": "Billing, Settlement, and Provider Rewards",
-      "version": "0.6.8",
+      "version": "0.6.9",
       "path": "specs/SPEC-005-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -145,13 +145,13 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "SPEC-005-R001/R002 restored to conformant from signed observe-mode JOURNEY-BUYER-PAID-PATH envelope 20260918T034532Z (#1022, expires 2026-10-18). SPEC-005-R003 signed JOURNEY-BUYER-CRASH-RECOVERY evidence expired 2026-09-17; that row remains pending until a fresh protected crash-recovery envelope is consumed (#1043/#1057). R004\u2013R009 remain pending evidencable units (D8/settlement/attempt/endpoint/account-scope/quarantine). R010 is the D1a wholesale statement unit (#1023). R011 (#1484) is a new pending unit for the signed rate-card money table; do not promote from this close. requirement_id_migration is complete after #1023. Do not promote R004\u2013R011 from this close. No enforce claim."
+        "rationale": "SPEC-005-R001/R002 restored to conformant from signed observe-mode JOURNEY-BUYER-PAID-PATH envelope 20260918T034532Z (#1022, expires 2026-10-18). SPEC-005-R003 signed JOURNEY-BUYER-CRASH-RECOVERY evidence expired 2026-09-17; that row remains pending until a fresh protected crash-recovery envelope is consumed (#1043/#1057). R004\u2013R009 remain pending evidencable units (D8/settlement/attempt/endpoint/account-scope/quarantine). R010 is the D1a wholesale statement unit (#1023). R011 (#1484) is a new pending unit for the signed rate-card money table; do not promote from this close. R012 (#1636) is the auto-prefix cache carve-out. R013 (#1693, v0.6.9) is the MoneyTable-A price-change invariant unit (I1\u2013I5); pending until live evidence. requirement_id_migration is complete after #1023. Do not promote R004\u2013R013 from this close. No enforce claim."
       }
     },
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.33",
+      "version": "0.9.34",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -660,7 +660,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.15.1",
+      "version": "v0.16.0",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2705,7 +2705,7 @@
         "verdict": "CODE_BUG",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1688",
-        "rationale": "SPEC-023 v0.15.0 \u00a73.7.9: freshness renewal continuity covers Tier-2 model content (only issued_at/expires_at/signature/catalog_id/version may change) and trusted-keys.json bytes, pre-lock and under the Pearl lock with the same shipped implementation. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+        "rationale": "SPEC-023 v0.15.0 \u00a73.7.9: freshness renewal continuity covers Tier-2 model content (only issued_at/expires_at/signature/catalog_id/version may change) and trusted-keys.json bytes, pre-lock and under the Pearl lock with the same shipped implementation. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed. v0.16.0 (#1693): drift messages direct rows-only rate-card drift to the SPEC-023-R018 pricing path and globals drift to a runtime release; renewal continuity itself is unchanged."
       }
     },
     {
@@ -2742,7 +2742,30 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1688",
-        "rationale": "SPEC-023 v0.15.0 \u00a73.7.9 catalog-content release lane: content-gate eligibility (catalog-content vs invalid-release/full-provider-app/pricing/unknown-predecessor/unverified-commit/stale-or-future/freshness-or-noop), live-binary dry-load, lease shared with deploy and the updater, live evidence (a)-(e), rollback and failed-release retention rules. Pricing is out of scope (#1693). The operator lane script scripts/catalog-content-release.sh (preflight GO/NO_GO, evidence, rollback), the offline gate, the dry-load validator and the shared activation/lease library are mapped above. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+        "rationale": "SPEC-023 v0.15.0 \u00a73.7.9 catalog-content release lane: content-gate eligibility (catalog-content vs invalid-release/full-provider-app/pricing/unknown-predecessor/unverified-commit/stale-or-future/freshness-or-noop), live-binary dry-load, lease shared with deploy and the updater, live evidence (a)-(e), rollback and failed-release retention rules. Pricing is out of scope (#1693). The operator lane script scripts/catalog-content-release.sh (preflight GO/NO_GO, evidence, rollback), the offline gate, the dry-load validator and the shared activation/lease library are mapped above. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed. v0.16.0 (#1693) amends the content gate: rows-only pricing is eligible (catalog-content plus a pricing object) under SPEC-023-R018; the pricing refusal lane is retired; new refusal lanes pricing-globals and pricing-unacked-move rank after stale-or-future; default removal is invalid-release. The mapped gate still implements the v0.15.0 pricing refusal until the #1693 gate slice lands."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R018",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "scripts/catalog-release.py:def content_gate",
+        "scripts/catalog-content-release.sh:run_preflight() {",
+        "phase4-coordinator/cmd/coordinator/validate_autotune_release.go:func validateAutotuneRelease(",
+        "scripts/lib/autotune-activate.sh:aa_rollback"
+      ],
+      "tests": [
+        "scripts/tests/test_catalog_content_gate.py::ContentGateTests",
+        "scripts/test-catalog-content-release.sh:ok: preflight, deploy, evidence rollback (a-d), HUP-rejected restart, interrupt/lease-lost, lease refusal"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1693",
+        "rationale": "SPEC-023 v0.16.0 \u00a73.7.10 rows-only pricing through the catalog-content lane: pricing scope (default removal invalid-release; usd_per_million_credits/provider_share_bps/global_multiplier_ppm \u2192 pricing-globals; policy/schema stay full-provider-app), effective-price diff over served models with the reviewed acknowledged-pricing-moves.json and a pinned name set, commit-bound verbatim rate_card block, one-writer guard and journal refusal, on-host splice with the coordinator yaml base-equivalence proof, operator diff-digest acknowledgement, durable journal phases with recovery, pre-start recovery and post-start closer, evidence (b) record digests (gateway convergence alert-only), and rollback. CODE_BUG: today the content gate refuses every rate-card row change as lane=pricing. Mapped selectors are the existing gate, lane, dry-load, and rollback surfaces the slices extend. Planned tests (plan v20 Tests): effective-price diff (removal to default refused unless acknowledged, shadowing addition refused unless acknowledged, retained-window coverage, diff determinism, escaped control characters); splice boundary/refusal matrix, byte identity, comments; gate scope; commit-block mismatch refused; writer-guard static inventory and provenance-comment check; --expect-base-equivalent accepts rate-card-only (incl. comments) and rejects other node/tag/style/order changes; shell harness for parity refusal pre-mutation, missing/mismatched ack, foreign recovery state, installed-writer hash mismatch, yaml/overlay moved under lock, HUP rejected and half-applied reload rollback, evidence (a)/(c)/(d) rollback, gateway non-convergence alert-only, interrupt per phase, lease loss keeps journal, crash/reboot at every journal write/fsync/rename/signal, restored-unverified finalized only on matching boot record, every writer refuses with an abandoned journal. Pending, not conformant: specified on branch feat/1693-pricing-content-lane (S0); implementation lands in later slices of the same PR, no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
       }
     },
     {
@@ -4892,6 +4915,31 @@
       }
     },
     {
+      "requirement_id": "SPEC-005-R013",
+      "spec_id": "SPEC-005",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/runtime_rate_card_parity.go:func ValidateRuntimeRateCardParity(",
+        "phase4-coordinator/internal/billing/snapshot.go:func (s *Store) InsertConfigSnapshot(",
+        "phase4-coordinator/internal/billing/snapshot.go:func (s *Store) ReloadBillingConfigV05(",
+        "phase4-coordinator/internal/billing/wholesale.go:func (s *Store) GenerateWholesaleStatement("
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/runtime_rate_card_parity_test.go::TestRuntimeRateCardParityRejectsRowKeyDrift",
+        "phase4-coordinator/internal/buyer/runtime_rate_card_parity_test.go::TestRuntimeRateCardParityRejectsRateDrift",
+        "phase4-coordinator/internal/buyer/runtime_rate_card_parity_test.go::TestRuntimeRateCardParityRejectsGlobalEconomicsDrift",
+        "phase4-coordinator/internal/billing/wholesale_test.go::TestGenerateWholesaleStatementPaidVersusFreeSKU"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1693",
+        "rationale": "SPEC-005 v0.6.9 \u00a75.6/\u00a711.7/\u00a713.2 MoneyTable-A price-change invariants: I1 billing integrity (parity \u2192 snapshot commit \u2192 publish; every request row linked to a published snapshot), I2 one economics critical section switching request table + snapshot id and the served signed card, I3 path-scoped propagation (\u2264600 s gateway + one client cache; informational), I4 disk pair with two bounded mixed intervals, I5 history never re-priced. CODE_BUG: wholesale statements currently price a whole period at the current in-memory table and zero a model-month above 10M tokens (\u00a711.7 now normative per-generation, uncapped arbitrary-precision gross, overflow fails closed); the economics publication lock does not exist yet. Mapped selectors are the existing parity, snapshot, and wholesale surfaces the slices extend. Planned tests (plan v20 Tests): billing.RateTableDigest equality across snapshot insert/validator/record; applied-config record fields on boot and SIGHUP, unchanged on reject; reload transition table (0/1 snapshot rows, nothing published on reject); every provider-bound request row links to a published id; economics-lock barrier, phase-2 new/new vs old/old, release-reader lock order, -race; W1 old\u2192forward\u2192rolled-back generations, multiplier split, unrelated-HUP invariance, legacy NULL-attempt linkage, conflicting identities fail closed, free alias $0, single-generation \u226410M byte-identical regression, WholesaleGross == ComputeCredits property, >10M groupings never zero, int64 overflow fails closed. Live evidence journey: forward activation of a reviewed correction with billing_snapshot_id rate_card_json digest == expected and a strict-pin request whose ledger rates and identity link match. Pending, not conformant: specified on branch feat/1693-pricing-content-lane (S0); implementation lands in later slices of the same PR, no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+      }
+    },
+    {
       "requirement_id": "SPEC-006-R001",
       "spec_id": "SPEC-006",
       "state": "conformant",
@@ -5084,7 +5132,8 @@
       ],
       "tests": [
         "phase5-gateway/internal/router/public_feeds_test.go:TestPublicFeedsUnauthenticatedExactBytes",
-        "phase5-gateway/internal/router/public_feeds_test.go:TestPublicFeedsDoNotExposePartnerStatsRoutes"
+        "phase5-gateway/internal/router/public_feeds_test.go:TestPublicFeedsDoNotExposePartnerStatsRoutes",
+        "phase5-gateway/internal/router/public_feeds_test.go:TestPublicFeedsRateCardAndSigCacheTogether"
       ],
       "journeys": [],
       "evidence": [],
@@ -5092,7 +5141,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Unauthenticated public rate-card and stats overview on the buyer host (\u00a72.2, \u00a74.2). Mapped to existing public-feeds tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Unauthenticated public rate-card and stats overview on the buyer host (\u00a72.2, \u00a74.2). Mapped to existing public-feeds tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234). v0.9.33 (#1693) pins the public rate-card staleness bound: gateway rate-card/.sig pair cache at most 300 s, refreshed as one unit, coordinator Cache-Control public, max-age=300 forwarded (gateway half of SPEC-005-R013 I3). TestPublicFeedsRateCardAndSigCacheTogether covers the paired cache; a gateway test asserting the 300 s TTL expiry and the forwarded max-age=300 is planned in the #1693 PR."
       }
     },
     {
