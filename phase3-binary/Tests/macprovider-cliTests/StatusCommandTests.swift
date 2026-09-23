@@ -237,6 +237,34 @@ final class StatusCommandTests: XCTestCase {
         )
     }
 
+    // #1705: a plain catalog_incompatible close is a catalog document rollover;
+    // status must point at restart, not a software update.
+    func testPlainCatalogIncompatibleSuggestsRestartNotUpdate() {
+        var rollover = status(providerID: "provider-a")
+        rollover["network_state"] = "live_verified"
+        rollover["status"] = "ready"
+        rollover["model_loaded"] = true
+        rollover["coordinator"] = ["connected": false]
+        rollover["lifecycle"] = [
+            "state": "catalog_incompatible",
+            "reason_code": "catalog_incompatible",
+        ]
+
+        let output = LocalStatusFormatter.format(rollover)
+        XCTAssertTrue(output.contains("Catalog refresh needed"), output)
+        XCTAssertTrue(output.contains("restart the provider"), output)
+        XCTAssertFalse(output.contains("malibu-cli update"), output)
+
+        var versionFloor = rollover
+        versionFloor["lifecycle"] = [
+            "state": "catalog_incompatible",
+            "reason_code": "binary_version_unsupported",
+        ]
+        let floorOutput = LocalStatusFormatter.format(versionFloor)
+        XCTAssertTrue(floorOutput.contains("This Mac is not currently eligible"), floorOutput)
+        XCTAssertTrue(floorOutput.contains("malibu-cli update"), floorOutput)
+    }
+
     func testRoutineCLIHelpUsesCanonicalPublicLanguage() {
         let policy = try! publicLanguagePolicy()
         let helpMessages = [

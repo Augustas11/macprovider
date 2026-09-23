@@ -1220,6 +1220,76 @@ final class ServeCommandTests: XCTestCase {
         }
     }
 
+    // #1705 SPEC-023-R010: the in-process refresh re-runs the signed live
+    // fetch and rebuilds the envelope only for the row already being served.
+    func testCatalogEnvelopeRefreshReturnsLiveEnvelopeForServedRow() async throws {
+        let fixture = try await makeCatalogBoundFixture()
+        let served = try XCTUnwrap(fixture.config.modelArtifactSHA256)
+        let envelope = await ServeCommand.refreshCatalogEnvelope(
+            config: fixture.config,
+            servedModelSHA256: served,
+            staticInputs: fixture.staticInputs
+        )
+        let refreshed = try XCTUnwrap(envelope)
+        XCTAssertEqual(refreshed.releaseID, "test-catalog")
+        XCTAssertEqual(refreshed.candidateSHA256, fixture.config.modelCatalogHash)
+        XCTAssertEqual(refreshed.policyVersion, "autotune-policy-v1")
+        XCTAssertEqual(refreshed.signerKeyID, "streamvc-autotune-static-v4")
+        XCTAssertEqual(refreshed.modelSHA256, served)
+        XCTAssertFalse(refreshed.rowIdentity.isEmpty)
+
+        var donor = fixture.config
+        donor.donorMode = true
+        let donorEnvelope = await ServeCommand.refreshCatalogEnvelope(
+            config: donor,
+            servedModelSHA256: served,
+            staticInputs: fixture.staticInputs
+        )
+        XCTAssertEqual(donorEnvelope, refreshed)
+    }
+
+    func testCatalogEnvelopeRefreshRejectsChangedRowUnsignedOrBakedCatalog() async throws {
+        let fixture = try await makeCatalogBoundFixture()
+        let served = try XCTUnwrap(fixture.config.modelArtifactSHA256)
+
+        let changedRow = await ServeCommand.refreshCatalogEnvelope(
+            config: fixture.config,
+            servedModelSHA256: String(repeating: "f", count: 64),
+            staticInputs: fixture.staticInputs
+        )
+        XCTAssertNil(changedRow, "a row that no longer pins the loaded weights needs a restart")
+
+        var absentRow = fixture.config
+        absentRow.modelCatalogKey = "missing-model"
+        absentRow.model = "missing-model"
+        let absent = await ServeCommand.refreshCatalogEnvelope(
+            config: absentRow,
+            servedModelSHA256: served,
+            staticInputs: fixture.staticInputs
+        )
+        XCTAssertNil(absent)
+
+        var unsigned = fixture.staticInputs
+        unsigned.verifySignature = { _, _ in false }
+        let badSignature = await ServeCommand.refreshCatalogEnvelope(
+            config: fixture.config,
+            servedModelSHA256: served,
+            staticInputs: unsigned
+        )
+        XCTAssertNil(badSignature, "an unverified document must never become a new envelope")
+
+        var offline = fixture.staticInputs
+        offline.fetch = { _ in throw URLError(.notConnectedToInternet) }
+        var offlineDonor = fixture.config
+        offlineDonor.donorMode = true
+        let baked = await ServeCommand.refreshCatalogEnvelope(
+            config: offlineDonor,
+            servedModelSHA256: served,
+            staticInputs: offline
+        )
+        XCTAssertNil(baked, "baked catalog bytes are a startup fallback only")
+    }
+
     func testCoordinatorJoinMigratesCacheBackedSnapshotToDurableStore() async throws {
         let fixture = try await makeCatalogBoundFixture()
         var config = fixture.config

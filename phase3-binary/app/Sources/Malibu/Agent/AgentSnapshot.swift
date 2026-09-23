@@ -1578,7 +1578,7 @@ enum AgentSnapshotPresenter {
 
     private static func authoritativeLifecycleLabel(_ s: AgentSnapshot) -> String? {
         guard s.isLocalStatusObservationCurrent(), let state = s.lifecycleState else { return nil }
-        return lifecycleStateLabel(state)
+        return lifecycleStateLabel(state, reason: s.lifecycleReason)
     }
 
     private static func primaryDiagnosticFinding(_ s: AgentSnapshot) -> ProviderDiagnosticFinding? {
@@ -1634,7 +1634,9 @@ enum AgentSnapshotPresenter {
         }
 
         if isHardwareEvidenceRejected(s) || isUncataloguedModel(s)
-            || (isSoftwareUpdateRequired(s) && !isNetworkReady(s)) || isIneligibleForCustomerWork(s) {
+            || (isSoftwareUpdateRequired(s) && !isNetworkReady(s))
+            || (isCatalogRefreshNeeded(s) && !isNetworkReady(s))
+            || isIneligibleForCustomerWork(s) {
             return ConsolidatedStatus(
                 phase: .needsAttention,
                 tone: .attention,
@@ -1870,6 +1872,13 @@ enum AgentSnapshotPresenter {
                 executableAction: updateAvailable(s) ? .updateProviderSoftware : nil
             )
         }
+        if isCatalogRefreshNeeded(s) {
+            return PublicStatus(
+                title: "Catalog refresh needed",
+                detail: "The network published a new model catalog. Malibu refreshes the catalog automatically.",
+                safeNextAction: "If this persists, restart the provider."
+            )
+        }
         if isTemporarilyNotBuyerServing(s) {
             return PublicStatus(
                 title: "Customer availability is temporarily interrupted",
@@ -2009,8 +2018,24 @@ enum AgentSnapshotPresenter {
         if s.networkState == "catalog_update_required" || compatibilityRepairAvailable(s) {
             return true
         }
+        if isCatalogRefreshNeeded(s) {
+            return false
+        }
         return s.lifecycleState == "catalog_incompatible" && s.isLocalStatusObservationCurrent()
     }
+
+    /// #1705: a plain `catalog_incompatible` close is a catalog document
+    /// rollover, not a software problem — the provider re-fetches the signed
+    /// catalog in-process, and a restart re-runs the full serve-start fetch.
+    private static func isCatalogRefreshNeeded(_ s: AgentSnapshot) -> Bool {
+        guard s.isLocalStatusObservationCurrent() else { return false }
+        return s.lifecycleState == "catalog_incompatible"
+            && s.lifecycleReason == catalogRefreshReason
+            && s.networkState != "catalog_update_required"
+            && !compatibilityRepairAvailable(s)
+    }
+
+    private static let catalogRefreshReason = "catalog_incompatible"
 
     private static func isPendingHardwareVerification(_ s: AgentSnapshot) -> Bool {
         guard s.isLocalStatusObservationCurrent() else { return false }
@@ -2435,12 +2460,12 @@ enum AgentSnapshotPresenter {
             return outcome
         }
         guard let state = s.lifecycleState else { return nil }
-        let label = lifecycleStateLabel(state)
+        let label = lifecycleStateLabel(state, reason: s.lifecycleReason)
         var parts = [label]
         if let reason = s.lifecycleReason {
             parts.append(publicReason(reason))
         }
-        if let guidance = lifecycleGuidance(state) {
+        if let guidance = lifecycleGuidance(state, reason: s.lifecycleReason) {
             parts.append(guidance)
         }
         return parts.joined(separator: " · ")
@@ -2464,7 +2489,7 @@ enum AgentSnapshotPresenter {
 
     static func lifecycleEventLine(_ event: ProviderLifecycleEventSnapshot) -> String {
         var parts = [publicReason(event.reason)]
-        parts.append(lifecycleStateLabel(event.state))
+        parts.append(lifecycleStateLabel(event.state, reason: event.reason))
         return parts.joined(separator: " · ")
     }
 
@@ -2492,7 +2517,10 @@ enum AgentSnapshotPresenter {
         }
     }
 
-    private static func lifecycleStateLabel(_ state: String) -> String {
+    private static func lifecycleStateLabel(_ state: String, reason: String? = nil) -> String {
+        if state == "catalog_incompatible", reason == catalogRefreshReason {
+            return "Catalog refresh needed"
+        }
         switch state {
         case "installing": return "Installing provider"
         case "importing_credentials": return "Importing credentials"
@@ -2519,7 +2547,10 @@ enum AgentSnapshotPresenter {
         }
     }
 
-    private static func lifecycleGuidance(_ state: String) -> String? {
+    private static func lifecycleGuidance(_ state: String, reason: String? = nil) -> String? {
+        if state == "catalog_incompatible", reason == catalogRefreshReason {
+            return "Malibu refreshes the catalog automatically; if this persists, restart the provider"
+        }
         switch state {
         case "authentication_required":
             return "Use Repair credential"

@@ -6169,6 +6169,155 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(auth["binary_version"] as? String, CoordinatorClient.binaryVersion)
     }
 
+    // MARK: - #1705 SPEC-023-R010 in-process catalog envelope refresh
+
+    private static func refreshedCatalogEnvelope(
+        releaseID: String = "release-b",
+        modelSHA256: String = "model-hash"
+    ) -> CoordinatorClient.CatalogEnvelope {
+        CoordinatorClient.CatalogEnvelope(
+            releaseID: releaseID,
+            policyVersion: "policy-a",
+            candidateSHA256: String(repeating: "c", count: 64),
+            signerKeyID: "operator-2026-01",
+            rowIdentity: String(repeating: "d", count: 64),
+            modelSHA256: modelSHA256
+        )
+    }
+
+    private func makeCatalogRefreshClient(
+        refreshCalls: ReconnectAttemptRecorder,
+        refreshed: CoordinatorClient.CatalogEnvelope?,
+        connectAndRunOverride: (@Sendable () async throws -> Void)? = nil
+    ) async throws -> CoordinatorClient {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        return try await makeClient(
+            status: status,
+            recorder: CoordinatorFrameRecorder(),
+            reconnectInitialBackoffNanoseconds: 1_000_000,
+            connectAndRunOverride: connectAndRunOverride,
+            catalogReleaseID: "release-a",
+            catalogPolicyVersion: "policy-a",
+            catalogCandidateSHA256: String(repeating: "a", count: 64),
+            catalogSignerKeyID: "operator-2026-01",
+            catalogRowIdentity: String(repeating: "b", count: 64),
+            catalogModelSHA256: "model-hash",
+            catalogEnvelopeRefresher: {
+                _ = await refreshCalls.recordAttempt()
+                return refreshed
+            }
+        )
+    }
+
+    /// Drives the reconnect loop through `rejections` catalog_incompatible
+    /// closes, then stops it with a cancellation.
+    private func runCatalogIncompatibleRejections(
+        _ rejections: Int,
+        refreshed: CoordinatorClient.CatalogEnvelope?
+    ) async throws -> (client: CoordinatorClient, refreshCalls: Int) {
+        let attempts = ReconnectAttemptRecorder()
+        let refreshCalls = ReconnectAttemptRecorder()
+        let client = try await makeCatalogRefreshClient(
+            refreshCalls: refreshCalls,
+            refreshed: refreshed,
+            connectAndRunOverride: {
+                if await attempts.recordAttempt() <= rejections {
+                    throw CoordinatorAuthError.rejected(
+                        code: "catalog_incompatible",
+                        message: "catalog_incompatible"
+                    )
+                }
+                throw CancellationError()
+            }
+        )
+        await client.suppressSignedRecoveryDiscoveryForTest()
+        await client.start()
+        try await Self.waitUntil(timeoutNanoseconds: 2_000_000_000) {
+            await attempts.currentCount() > rejections
+        }
+        await client.stop()
+        return (client, await refreshCalls.currentCount())
+    }
+
+    func testCatalogIncompatibleRefreshAdoptsSameRowEnvelopeForNextHello() async throws {
+        let run = try await runCatalogIncompatibleRejections(1, refreshed: Self.refreshedCatalogEnvelope())
+        XCTAssertEqual(run.refreshCalls, 1)
+
+        let hello = await run.client.helloMessage()
+        XCTAssertEqual(hello["catalog_release_id"] as? String, "release-b")
+        XCTAssertEqual(hello["catalog_candidate_sha256"] as? String, String(repeating: "c", count: 64))
+        XCTAssertEqual(hello["catalog_row_identity"] as? String, String(repeating: "d", count: 64))
+        XCTAssertEqual(hello["catalog_policy_version"] as? String, "policy-a")
+        XCTAssertEqual(hello["catalog_signer_key_id"] as? String, "operator-2026-01")
+    }
+
+    func testCatalogIncompatibleRefreshKeepsEnvelopeWhenRowChangedOrUnverified() async throws {
+        for refreshed in [Self.refreshedCatalogEnvelope(modelSHA256: "different-model-hash"), nil] {
+            let run = try await runCatalogIncompatibleRejections(1, refreshed: refreshed)
+            XCTAssertEqual(run.refreshCalls, 1)
+            let hello = await run.client.helloMessage()
+            XCTAssertEqual(hello["catalog_release_id"] as? String, "release-a")
+            XCTAssertEqual(hello["catalog_candidate_sha256"] as? String, String(repeating: "a", count: 64))
+            XCTAssertEqual(hello["catalog_row_identity"] as? String, String(repeating: "b", count: 64))
+        }
+    }
+
+    func testCatalogIncompatibleRefreshIsRateLimited() async throws {
+        let run = try await runCatalogIncompatibleRejections(3, refreshed: nil)
+        XCTAssertEqual(run.refreshCalls, 1, "repeated catalog_incompatible closes must not re-fetch inside the interval")
+    }
+
+    func testHelloAckOnOlderCatalogRefreshesForNextHelloWithoutDroppingSession() async throws {
+        let refreshCalls = ReconnectAttemptRecorder()
+        let client = try await makeCatalogRefreshClient(
+            refreshCalls: refreshCalls,
+            refreshed: Self.refreshedCatalogEnvelope()
+        )
+        defer { Task { await client.stop() } }
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+            "catalog_release_id": "release-b",
+            "catalog_candidate_sha256": String(repeating: "c", count: 64),
+        ])
+        try await Self.waitUntil { await refreshCalls.currentCount() == 1 }
+
+        let hello = await client.helloMessage()
+        XCTAssertEqual(hello["catalog_release_id"] as? String, "release-b")
+        XCTAssertEqual(hello["catalog_candidate_sha256"] as? String, String(repeating: "c", count: 64))
+    }
+
+    func testHelloAckOnCurrentCatalogDoesNotRefresh() async throws {
+        let refreshCalls = ReconnectAttemptRecorder()
+        let client = try await makeCatalogRefreshClient(
+            refreshCalls: refreshCalls,
+            refreshed: Self.refreshedCatalogEnvelope()
+        )
+        defer { Task { await client.stop() } }
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+            "catalog_release_id": "release-a",
+            "catalog_candidate_sha256": String(repeating: "a", count: 64),
+        ])
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let refreshCount = await refreshCalls.currentCount()
+        XCTAssertEqual(refreshCount, 0)
+        let hello = await client.helloMessage()
+        XCTAssertEqual(hello["catalog_release_id"] as? String, "release-a")
+    }
+
     func testCatalogProviderRejectsCoordinatorWithoutAdmissionAcknowledgement() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
@@ -7481,6 +7630,8 @@ final class CoordinatorClientTests: XCTestCase {
         installedCompatibilityManifest: CoordinatorClient.InstalledCompatibilityManifest? = nil,
         catalogModelSHA256: String? = nil,
         catalogArtifactIdentity: CoordinatorClient.CatalogArtifactIdentity? = nil,
+        catalogEnvelopeRefresher: CoordinatorClient.CatalogEnvelopeRefresher? = nil,
+        catalogEnvelopeRefreshMinimumInterval: TimeInterval = 300,
         coordinatorReadiness: CoordinatorClient.CoordinatorReadiness? = nil,
         coordinatorReadinessAttempts: Int = 1,
         admissionPendingReadinessPollNanoseconds: UInt64 = 15_000_000_000,
@@ -7552,6 +7703,8 @@ final class CoordinatorClientTests: XCTestCase {
             installedCompatibilityManifest: installedCompatibilityManifest ?? { _, _ in nil },
             catalogModelSHA256: catalogModelSHA256,
             catalogArtifactIdentity: catalogArtifactIdentity,
+            catalogEnvelopeRefresher: catalogEnvelopeRefresher,
+            catalogEnvelopeRefreshMinimumInterval: catalogEnvelopeRefreshMinimumInterval,
             coordinatorReadiness: coordinatorReadiness,
             coordinatorReadinessAttempts: coordinatorReadinessAttempts,
             coordinatorReadinessRetryNanoseconds: 0,

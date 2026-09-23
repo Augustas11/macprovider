@@ -1071,6 +1071,36 @@ final class AgentSnapshotPresenterTests: XCTestCase {
         )
     }
 
+    // #1705: a plain catalog_incompatible close is a catalog document
+    // rollover; Malibu must not send the operator to a software update.
+    func testPlainCatalogIncompatibleSaysCatalogRefreshNotSoftwareUpdate() {
+        var snapshot = AgentSnapshot.empty
+        snapshot.state = .error
+        snapshot.localStatusCapabilities = ["status_observation_v1"]
+        snapshot.statusObservationID = "observation-a"
+        snapshot.statusObservedAt = Date()
+        snapshot.statusObservationValidForMS = 5_000
+        snapshot.statusObservationFresh = true
+        snapshot.lifecycleState = "catalog_incompatible"
+        snapshot.lifecycleReason = "catalog_incompatible"
+
+        XCTAssertEqual(
+            AgentSnapshotPresenter.lifecycleLine(snapshot),
+            "Catalog refresh needed · catalog incompatible · Malibu refreshes the catalog automatically; if this persists, restart the provider"
+        )
+        let status = AgentSnapshotPresenter.publicStatus(snapshot)
+        XCTAssertEqual(status.title, "Catalog refresh needed")
+        XCTAssertEqual(status.safeNextAction, "If this persists, restart the provider.")
+        XCTAssertNotEqual(status.executableAction, .updateProviderSoftware)
+
+        snapshot.lifecycleReason = "binary_version_unsupported"
+        XCTAssertEqual(
+            AgentSnapshotPresenter.lifecycleLine(snapshot),
+            "Provider software update required · binary version unsupported · Install latest provider software, then retry"
+        )
+        XCTAssertEqual(AgentSnapshotPresenter.publicStatus(snapshot).safeNextAction, "Install latest provider software.")
+    }
+
     func testSignificantLifecycleReasonAndAdvertisedCapacityAreOperatorReadable() {
         var snapshot = AgentSnapshot.empty
         snapshot.networkState = "buyer_serving"
