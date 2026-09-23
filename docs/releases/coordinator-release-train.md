@@ -107,12 +107,22 @@ Probed 2026-09-24 (`/healthz` and read-only host checks).
 Renew the Tier-2 catalog before 2026-12-23. An expiry-only re-sign stays in
 the freshness lane.
 
+The scheduled feed renewal on 2026-09-23 **failed closed**, with no mutation. The
+renewal shipped only `catalog-release.py` to Pearl, so the under-lock
+continuity-check could not import `openrouter_pricing_engine.py`. It is fixed on
+`main` in `314d3fbc` (see the table below). The live feed still dates from the
+v1.8.182 release on 2026-09-23, so the 30-day provider freshness limit falls
+around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
+16:00 UTC), or earlier with a manual dispatch of
+`renew-autotune-static-feed-signed.yml`.
+
 ## Next coordinator release — net changes vs v1.8.188
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
 | Keep unchanged catalog rows admitted across catalog publishes (SPEC-023 v0.15.1 R010: `.row-continuity-target` evidence, `row_continuity` admission, re-check on every publication). Also changes `dist/deploy-pearl-vps.sh`, `scripts/lib/autotune-activate.sh`, `scripts/catalog-content-release.sh` and `scripts/autotune_window.py`, so **needs a full deploy**, not a binary swap. Post-apply step: Open Pearl action 4 | merged `3abf42a8` | #1714 (#1705) |
 | Preserve served buyer success through transient receipt persistence pressure: bounded in-memory receipt retry, explicit pending coordinator authority, durable deadline closure, and gateway rechecks for held settlement. Requires a signed coordinator/gateway release and fresh Studio buyer soak before acceptance. Cut owner: Studio settlement recovery; next unused shared tag reserved as `v1.8.189`. | merged `8056224f` | #1715 (#1680) |
+| Feed renewal ships the whole catalog verifier bundle to Pearl. It was fixed because the 2026-09-23 renewal aborted when ssh swallowed the bundle manifest in `aa_install_helpers`. This is renewal tooling that runs from `main`: it needs **no coordinator release** and takes effect at the next renewal. It is not in `v1.8.189`, whose tag predates it. Regression test: `scripts/test-autotune-install-helpers.sh` | merged `314d3fbc` | #1688 follow-up |
 | Node operator status, safe context changes, model diagnostics | in progress | #1713 (#1689) |
 | Build 1 Lane A orchestrated PR | in progress | #1658 (#1642) |
 | Pricing corrections through the catalog-content lane (SPEC-005-R013, SPEC-023-R018, SPEC-006-R008 amended). Coordinator: request billing table and served signed rate card switch under one economics lock (release lock → economics lock → feed lock), prices resolved once before the billing write context; `--validate-autotune-release` gains `--expect-base-equivalent` and `--resolve-model-names` plus `rate_table_sha256` / `signed_rate_card_sha256` verdict fields; applied-config record gains `rate_table_sha256`, `signed_rate_card_sha256`, `autotune_release_id`, `billing_snapshot_id`. **Wholesale statements change**: each request is priced at the generation it was recorded under (uncapped aggregate math), so a model-month above 10M tokens is no longer zeroed — affected partner statements go **up**; a period with no billing snapshot now fails closed. Lane tooling that deploy ships: `scripts/catalog-release.py` (splice / extract / effective-price diff / gate), new `acknowledged-pricing-moves.json`; still to land in the same PR: journal + pre-start recovery + post-start closer units, the one-writer guard on every live-config writer, lane preflight/evidence/rollback. **Needs a full deploy** (new units, recovery helper, verifier bundle), not a binary swap; this is the one enabling release — afterwards rows-only pricing needs no coordinator release. Plan (approved 0C/0H/0M): [#1693 comment](https://github.com/Augustas11/macprovider/issues/1693#issuecomment-5800624020) | in progress (branch `feat/1693-pricing-content-lane`, PR not yet open) | #1693 |
