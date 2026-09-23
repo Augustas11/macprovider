@@ -12,19 +12,24 @@
 # the real script; its real content-gate is covered by
 # scripts/tests/test_catalog_content_gate.py.
 #
-# Cases: preflight GO; NO_GO for wrong lane, closure miss, dry-load failure,
+# Cases: preflight GO; NO_GO for wrong lane, closure miss (content-gate), dry-load failure,
 # coverage loss (and GO with a logged override), config content drift (bytes,
 # mtime-preserved bytes, missing applied-config record), working tree vs commit
 # mismatch, evidence (e) buyer-serving set (new Tier-2 pin, listed ->
-# recommendable, exclusion removed, serving hash changed; live release with no
+# recommendable, serving hash changed; a dropped exclusion of a pinned model is
+# GO; live release with no
 # reviewed commit), missing canary evidence; deploy happy path (row hash changed
 # -> autotune --apply first); refusal under the lease when the live-binary
 # dry-load flips to failure or the staged bytes differ from the commit;
 # rollback on evidence (a), (b) (+ no applied-config record from this HUP), (c)
-# (+ retention of an adopted release), (d) (+ more rejections for an already
-# failing key; a chronically failing key at the same rate passes); rollback
-# re-HUP rejected -> controlled restart; restart failure -> runbook exit 5; a
-# held renewal/deploy lock -> refusal.
+# (+ retention of an adopted release), (d) (a rejection of a catalog admissible
+# before the HUP fails even at an unchanged rate; a chronically inadmissible
+# catalog passes); rollback re-HUP rejected -> controlled restart; restart
+# failure -> runbook exit 5; an interrupt while the publish is in flight still
+# rolls back (state read through the lease); a lease runner lost after
+# activation -> exit 6, no rollback; a held renewal/deploy lock -> refusal.
+# Every lease-mode Pearl mutation runs through the lease runner (the fake ssh
+# rewrites the scripts the runner decodes, like any other remote command).
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -69,8 +74,19 @@ if [ "$host" = canary.test ]; then
   esac
   exit $?
 fi
-rw() {
-  sed -E \
+cmd="$(printf '%s\n' "$cmd" | pearl-rw)"
+case "$cmd" in
+  "bash -s"*) pearl-rw | bash -c "$cmd" ;;
+  # The lock validator's Pearl paths live in its body (not sha-pinned).
+  "cat >"*pearl_autotune_deploy_lock.py*) pearl-rw | bash -c "$cmd" ;;
+  *) exec bash -c "$cmd" ;;
+esac
+SSH
+# Pearl paths -> the temp root, for commands, scripts, and (via the lease
+# runner's decode steps) every script and argument sent through the lease.
+cat >"$T/bin/pearl-rw" <<'RW'
+#!/usr/bin/env bash
+exec sed -E \
       -e "s#/opt/macprovider/#$CCR_FAKE/opt/macprovider/#g" \
       -e "s#/etc/macprovider/#$CCR_FAKE/etc/macprovider/#g" \
       -e "s#\"/opt\"#\"$CCR_FAKE/opt\"#g" \
@@ -87,17 +103,12 @@ rw() {
       -e "s#\"\\\$window\" (plan|apply|restore|coverage) #\"\$window\" \\1 --required-uid $CCR_UID --group $CCR_GID #g" \
       -e "s#chown (-R )?root:[a-z]+#:#g" \
       -e "s#mv -Tf#mv -hf#g" \
+      -e "s#/tmp/macprovider-activation-lease\\.#$CCR_FAKE/tmp/macprovider-activation-lease.#g" \
+      -e "s#base64 -d >\"\\\$work/cmd\"#base64 -d | pearl-rw >\"\\\$work/cmd\"#g" \
+      -e "s#\\| base64 -d\\)\"; fi#| base64 -d | pearl-rw)\"; fi#g" \
       -e "s#st_uid != 0#st_uid != $CCR_UID#g" \
       -e "s#st_gid != 0#st_gid != $CCR_GID#g"
-}
-cmd="$(printf '%s\n' "$cmd" | rw)"
-case "$cmd" in
-  "bash -s"*) rw | bash -c "$cmd" ;;
-  # The lock validator's Pearl paths live in its body (not sha-pinned).
-  "cat >"*pearl_autotune_deploy_lock.py*) rw | bash -c "$cmd" ;;
-  *) exec bash -c "$cmd" ;;
-esac
-SSH
+RW
 cat >"$T/bin/rsync" <<'RSYNC'
 #!/usr/bin/env bash
 set -eu
@@ -118,7 +129,9 @@ if [ "${1:-}" = "+%s" ] && [ -e "${CCR_TEST_CTL:-/nonexistent}/journal-before-hu
   exec python3 - <<'PY'
 import json, os, time
 t = int(time.time())
-line = {"level": "warn", "catalog_release_id": "chronic-release", "catalog_candidate_sha256": "cd" * 32,
+ctl = os.environ["CCR_TEST_CTL"]
+rid, sha = open(os.path.join(ctl, "incompat-key")).read().split() if os.path.exists(os.path.join(ctl, "incompat-key")) else ("chronic-release", "cd" * 32)
+line = {"level": "warn", "catalog_release_id": rid, "catalog_candidate_sha256": sha,
         "message": "provider catalog release is incompatible with coordinator"}
 with open(os.path.join(os.environ["CCR_FAKE"], "journal.log"), "a") as fh:
     fh.write("%.6f pearl coordinator[1]: %s\n" % (t - 0.5, json.dumps(line, sort_keys=True)))
@@ -152,7 +165,12 @@ printf '#!/bin/sh\nexit 0\n' >"$T/bin/logger"
 cat >"$T/bin/systemctl" <<'SYSTEMCTL'
 #!/usr/bin/env bash
 case "$*" in
-  *"-p MainPID"*) cat "$CCR_FAKE/coordinator.pid" ;;
+  *"-p MainPID"*)
+    # The publish is the only caller with a staged .incoming-* release.
+    if [ -e "$CCR_TEST_CTL/publish-slow" ] && ls -d "$CCR_FAKE"/opt/macprovider/autotune/releases/.incoming-* >/dev/null 2>&1; then
+      rm -f "$CCR_TEST_CTL/publish-slow"; touch "$CCR_TEST_CTL/publish-started"; sleep 3
+    fi
+    cat "$CCR_FAKE/coordinator.pid" ;;
   *ExecMainStartTimestamp*) printf '@%s\n' "$(cat "$CCR_FAKE/start")" ;;
   restart*)
     [ ! -e "$CCR_TEST_CTL/restart-fails" ] || exit 1
@@ -285,13 +303,12 @@ def on_hup(*_):
     journal({"level": "info", "event": "autotune_feed_sighup_reload", "autotune_catalog_version": state["version"],
              "tier2_catalog_id": state["t2id"], "tier2_sha256": t2sha,
              "message": "autotune signed feed reloaded without restart"})
-    if c("incompatible-after-hup") and state["hups"] == 1:
-        journal({"level": "warn", "catalog_release_id": "stale-release", "catalog_candidate_sha256": "cd" * 32,
-                 "message": "provider catalog release is incompatible with coordinator"})
+    rid, sha = open(os.path.join(ctl, "incompat-key")).read().split() if c("incompat-key") else ("chronic-release", "cd" * 32)
     if c("incompat-after-count") and state["hups"] == 1:
         for _ in range(int(open(os.path.join(ctl, "incompat-after-count")).read())):
-            journal({"level": "warn", "catalog_release_id": "chronic-release", "catalog_candidate_sha256": "cd" * 32,
+            journal({"level": "warn", "catalog_release_id": rid, "catalog_candidate_sha256": sha,
                      "message": "provider catalog release is incompatible with coordinator"})
+            journal({"level": "warn", "provider_id": "p", "message": "closing provider connection: catalog_incompatible"})
     if not c("applied-record-stale"):
         applied("sighup")
     journal({"level": "info", "message": "tier2/proof_of_weights config reloaded"})
@@ -461,8 +478,9 @@ def main():
         with open(ctl / "gate-calls.log", "a") as fh:
             fh.write(stage + " ok\n")
         lane = (ctl / "lane").read_text().strip() if (ctl / "lane").exists() else "catalog-content"
-        ok = lane == "catalog-content"
-        print(json.dumps({"ok": ok, "lane": lane, "reasons": [] if ok else ["stub: lane " + lane],
+        ok = lane == "catalog-content" and not (ctl / "closure-fail").exists()
+        reasons = [] if ok else ["stub: lane " + lane] if lane != "catalog-content" else ["serving closure: 1 recommendable rate-carded model(s) have no matching Tier-2 pin"]
+        print(json.dumps({"ok": ok, "lane": lane, "reasons": reasons,
                           "release_id": rel["release_id"], "live_release_id": live["release_id"], "changed": {}}))
         sys.exit(0 if ok else 3)
     sys.exit(0)
@@ -546,7 +564,7 @@ setup_env() {
   local E="$T/env"
   rm -rf "$E"; mkdir -p "$E"
   export CCR_FAKE="$E/fake" CCR_TEST_CTL="$E/ctl" CCR_RTMP="$E/rtmp" CCR_CANARY_HOME="$E/canary"
-  mkdir -p "$CCR_FAKE/run/lock" "$CCR_FAKE/var/lib" "$CCR_FAKE/etc/macprovider" "$CCR_TEST_CTL" "$CCR_RTMP"
+  mkdir -p "$CCR_FAKE/run/lock" "$CCR_FAKE/var/lib" "$CCR_FAKE/etc/macprovider" "$CCR_FAKE/tmp" "$CCR_TEST_CTL" "$CCR_RTMP"
   chmod 0755 "$CCR_RTMP"
   export CCR_GID; CCR_GID="$(python3 -c 'import os,sys;print(os.stat(sys.argv[1]).st_gid)' "$CCR_FAKE")"
   local A="$CCR_FAKE/opt/macprovider/autotune" rel
@@ -584,10 +602,21 @@ def sha(p):
     return hashlib.sha256(open(p, "rb").read()).hexdigest()
 config_sha = sha(args[args.index("--config") + 1])
 overlay_sha = sha(args[args.index("--config-overlay") + 1]) if "--config-overlay" in args else ""
+# admitted: current + every retained entry, as the ws admission map keeps them.
+sroot = os.path.dirname(args[args.index("--previous-target") + 1])
+def ident(rel_dir):
+    r = json.load(open(os.path.join(rel_dir, "release.json")))
+    return r["release_id"], r["feeds"]["autotune-candidates.json"]["sha256"].lower()
+admitted = [dict(zip(("release_id", "candidates_sha256"), ident(d)), source="current")]
+for p in prev:
+    rid, sha = ident(os.path.join(sroot, p))
+    if all(a["candidates_sha256"] != sha for a in admitted):
+        admitted.append({"release_id": rid, "candidates_sha256": sha, "source": "retained"})
 print(json.dumps({"ok": not bad, "release_id": m["release_id"], "candidates_sha256": m["feeds"]["autotune-candidates.json"]["sha256"],
                   "tier2_catalog_id": json.loads(t2)["catalog_id"], "tier2_sha256": hashlib.sha256(t2).hexdigest(),
                   "config_sha256": config_sha, "overlay_sha256": overlay_sha,
-                  "previous_loaded": [{"release_id": p} for p in prev], "errors": ["tier2: stub reject"] if bad else [], "notes": []}))
+                  "previous_loaded": [{"release_id": p} for p in prev], "admitted": [] if bad else admitted,
+                  "errors": ["tier2: stub reject"] if bad else [], "notes": []}))
 sys.exit(1 if bad else 0)
 COORD
   chmod 0755 "$CCR_FAKE/opt/macprovider/coordinator"
@@ -656,17 +685,19 @@ import json, sys
 v = json.loads(open(sys.argv[1]).read())
 names = [c["name"] for c in v["checks"]]
 want = {"commit", "tooling_matches_commit", "release_assembled", "canary_config", "pearl_reachable", "pearl_locks_free",
-        "rollback_preconditions", "content_gate", "serving_closure", "buyer_serving_e2e", "coordinator_dry_load",
+        "rollback_preconditions", "content_gate", "buyer_serving_e2e", "coordinator_dry_load",
         "window_coverage", "config_applied", "canary_token_operator_key", "canary_reachable"}
 assert v["go"] is True and want <= set(names), (v["go"], sorted(want - set(names)))
 assert all(c["ok"] for c in v["checks"])
+assert "serving_closure" not in names  # content-gate owns the closure check
 PY
 grep -qF "$OPKEY" "$T/out" "$T/err" && fail "preflight printed the operator bearer"
 [ -z "$(ls "$CCR_RTMP")" ] || fail "preflight left its Pearl scratch dir"
 note "ok: preflight GO"
 
 setup_env; printf 'pricing\n' >"$CCR_TEST_CTL/lane"; expect_no_go "wrong lane" content_gate
-setup_env; touch "$CCR_TEST_CTL/closure-fail"; expect_no_go "closure miss" serving_closure
+setup_env; touch "$CCR_TEST_CTL/closure-fail"; expect_no_go "closure miss" content_gate
+grep -q 'serving closure' "$T/out" || fail "a closure miss must be reported by content_gate: $(cat "$T/out")"
 setup_env; touch "$CCR_TEST_CTL/dryload-fail"; expect_no_go "dry-load failure" coordinator_dry_load
 setup_env
 printf '[{"provider_id":"p9","catalog_release_id":"ghost-release","catalog_candidate_sha256":"%s","hash_status":"hash_verified"}]\n' \
@@ -765,8 +796,13 @@ import json, sys
 print(json.dumps({"schema_version": "macprovider.not-buyer-serving.v1", "models": [{"model_id": sys.argv[1], "reason": "test"}]}))
 PY
 recommit_live_exclusions "$T/live-exclusions.json"
-expect_no_go "exclusion removed (e)" buyer_serving_e2e
-grep -q "$SERVING_MODEL (added)" "$T/out" || fail "a dropped exclusion must name the newly serving model: $(cat "$T/out")"
+# Exclusions add no routing predicate (catalog-release.py buyer_serving_set):
+# a model the live release pins was serving despite its exclusion, so dropping
+# the exclusion makes nothing newly buyer-serving.
+run preflight
+[ "$RC" -eq 0 ] && [ "$(verdict_check buyer_serving_e2e)" = true ] ||
+  fail "a dropped exclusion of a pinned model must not count as newly buyer-serving (rc=$RC): $(cat "$T/out")"
+note "ok: GO when a live exclusion of a pinned model is dropped (e)"
 git -C "$R" update-ref refs/remotes/origin/main "$COMMIT"
 setup_env; touch "$CCR_TEST_CTL/compare-regression"; expect_no_go "live release matches no reviewed commit (e)" buyer_serving_e2e
 
@@ -794,8 +830,9 @@ grep -qF "$OPKEY" "$T/out" "$T/err" && fail "deploy printed the operator bearer"
 grep -q '^\[catalog-content\] DONE' "$T/out" || fail "deploy did not report DONE"
 [ "$(sort -u "$CCR_TEST_CTL/gate-calls.log" | tr '\n' ' ')" = "preflight ok under-lock ok " ] ||
   fail "content-gate must be called (and validated) in preflight and under the lock: $(cat "$CCR_TEST_CTL/gate-calls.log" 2>/dev/null)"
-[ "$(wc -l <"$CCR_TEST_CTL/dryload-calls" | tr -d ' ')" = 2 ] || fail "the live-binary dry-load must run in preflight AND under the lease"
-[ ! -e "$CCR_FAKE/opt/macprovider/.activation-lease" ] || fail "the lease record must be removed when the lease is released"
+[ "$(wc -l <"$CCR_TEST_CTL/dryload-calls" | tr -d ' ')" = 3 ] ||
+  fail "the live-binary validator must run in preflight, under the lease, and in the publish's under-lock coverage: $(wc -l <"$CCR_TEST_CTL/dryload-calls")"
+[ -z "$(ls "$CCR_FAKE/tmp")" ] || fail "the lease runner must remove its work dir when the lease is released"
 [ ! -e "$CCR_FAKE/run/lock/macprovider-pearl-updater.lock" ] || python3 - "$CCR_FAKE/run/lock/macprovider-pearl-updater.lock" <<'PY' || fail "deploy did not release the lease"
 import fcntl, os, sys
 fd = os.open(sys.argv[1], os.O_RDONLY)
@@ -849,21 +886,32 @@ window_is "canary rollback retains the adopted release" "releases/$retained rele
 grep -q 'keeping releases/test-new-v1' "$T/out" || fail "canary: adopted release not retained"
 grep -q '"release_id": "test-live-v1"' "$CCR_TEST_CTL/canary-state.json" || fail "canary not restarted onto the prior release"
 note "ok: rollback on evidence (c) retains the adopted release and restarts the canary onto the prior release"
-rollback_case "new catalog_incompatible" incompatible-after-hup d
-# An already failing key: more rejections after the HUP than in the equally
-# long window before it fail; the same rate passes.
+# (d): a catalog that was admissible before the HUP (the live release, in the
+# validated admitted set) rejected after it fails, even at the same rate as
+# before; a chronically inadmissible catalog is logged and passes.
+live_key() { python3 -c 'import json,sys;m=json.load(open(sys.argv[1]));print(m["release_id"], m["feeds"]["autotune-candidates.json"]["sha256"])' "$A_ROOT/releases/test-live-v1-0000000000000000/release.json"; }
 setup_env
-touch "$CCR_TEST_CTL/journal-before-hup"; printf '2\n' >"$CCR_TEST_CTL/incompat-after-count"
+live_key >"$CCR_TEST_CTL/incompat-key"; printf '1\n' >"$CCR_TEST_CTL/incompat-after-count"
 run deploy
-[ "$RC" -eq 4 ] && grep -q "EVIDENCE (d) FAILED" "$T/out" && grep -q 'catalog_incompatible increased for chronic-release' "$T/out" ||
-  fail "more rejections for an already failing key must fail (d) (rc=$RC): $(tail -n 20 "$T/out")"
-live_unchanged "same key more rejections"
-note "ok: rollback on evidence (d) for more rejections of an already failing key"
+[ "$RC" -eq 4 ] && grep -q "EVIDENCE (d) FAILED" "$T/out" && grep -q 'catalog_incompatible after the HUP for catalog(s) admissible before it: test-live-v1/' "$T/out" ||
+  fail "a rejection of an admissible catalog must fail (d) (rc=$RC): $(tail -n 20 "$T/out")"
+live_unchanged "admissible key rejected"
+window_is "admissible key rejected" "releases/test-prev-v1-0000000000000000"
+note "ok: rollback on evidence (d) for a rejection of a catalog admissible before the HUP"
+setup_env
+live_key >"$CCR_TEST_CTL/incompat-key"; touch "$CCR_TEST_CTL/journal-before-hup"; printf '1\n' >"$CCR_TEST_CTL/incompat-after-count"
+run deploy
+[ "$RC" -eq 4 ] && grep -q "EVIDENCE (d) FAILED" "$T/out" && grep -q 'admissible before it: test-live-v1/' "$T/out" ||
+  fail "one rejection of an admissible catalog before and one after the HUP must fail (d) (rc=$RC): $(tail -n 20 "$T/out")"
+live_unchanged "admissible key same rate"
+note "ok: rollback on evidence (d) for an admissible catalog rejected at an unchanged rate"
 setup_env
 touch "$CCR_TEST_CTL/journal-before-hup"; printf '1\n' >"$CCR_TEST_CTL/incompat-after-count"
 run deploy
-[ "$RC" -eq 0 ] || fail "a chronically failing key at the same rate must not fail (d) (rc=$RC): $(tail -n 20 "$T/out")"
-note "ok: a chronically failing key at the same rate passes (d)"
+[ "$RC" -eq 0 ] || fail "a chronically inadmissible catalog must not fail (d) (rc=$RC): $(tail -n 20 "$T/out")"
+grep -q 'diagnostic only, not a failure: catalog_incompatible chronic (already inadmissible before the HUP): chronic-release/' "$T/out" ||
+  fail "a chronic rejection must be logged for diagnostics: $(tail -n 20 "$T/out")"
+note "ok: a chronically inadmissible catalog passes (d) and is logged"
 rollback_case "catalog-unavailable increase" poolz-unavailable-after-hup d
 
 # Rollback re-HUP rejected -> alert + controlled restart.
@@ -883,6 +931,40 @@ run deploy
 grep -qF 'catalog-release-decision-tree.md §rollback-failed' "$T/out" || fail "restart failure must name the runbook procedure"
 note "ok: failed controlled restart -> exit 5 with the named runbook procedure"
 
+# Interrupted (TERM) while the publish is in flight on Pearl, i.e. before the
+# controller marks the release activated: the state is read through the lease
+# once the publish finishes, and the activation is rolled back.
+setup_env
+touch "$CCR_TEST_CTL/publish-slow"
+(cd "$R" && exec bash scripts/catalog-content-release.sh --deploy --commit "$COMMIT") >"$T/out" 2>"$T/err" &
+deploy_pid=$!
+for _ in $(seq 1 300); do [ -e "$CCR_TEST_CTL/publish-started" ] && break; kill -0 "$deploy_pid" 2>/dev/null || break; sleep 0.1; done
+[ -e "$CCR_TEST_CTL/publish-started" ] || fail "interrupt: the publish never started: $(tail -n 20 "$T/out") $(tail -n 5 "$T/err")"
+kill -TERM "$deploy_pid"
+RC=0; wait "$deploy_pid" || RC=$?
+[ "$RC" -eq 71 ] || fail "interrupt during the publish must exit 71 after rolling back (rc=$RC): $(tail -n 30 "$T/out") $(tail -n 5 "$T/err")"
+grep -q 'reading Pearl state through the lease' "$T/out" || fail "interrupt: Pearl state was not read through the lease: $(tail -n 20 "$T/out")"
+grep -q 'rolled back to releases/test-live-v1-0000000000000000' "$T/out" || fail "interrupt: the in-flight activation was not rolled back: $(tail -n 20 "$T/out")"
+live_unchanged "interrupt during publish"
+window_is "interrupt during publish" "releases/test-prev-v1-0000000000000000"
+note "ok: an interrupt while the publish is in flight reads Pearl state through the lease and rolls back"
+
+# The lease runner dies after activation (during evidence (c)): state unknown;
+# no rollback from a separate session; exit 6 naming the runbook procedure.
+setup_env
+touch "$CCR_TEST_CTL/canary-stuck"
+(cd "$R" && exec bash scripts/catalog-content-release.sh --deploy --commit "$COMMIT") >"$T/out" 2>"$T/err" &
+deploy_pid=$!
+for _ in $(seq 1 300); do [ -e "$CCR_TEST_CTL/canary-restarts.log" ] && break; kill -0 "$deploy_pid" 2>/dev/null || break; sleep 0.1; done
+[ -e "$CCR_TEST_CTL/canary-restarts.log" ] || fail "lease-lost: evidence (c) never started: $(tail -n 20 "$T/out")"
+pkill -9 -f "$CCR_FAKE/tmp/macprovider-activation-lease" || fail "lease-lost: no lease runner to kill"
+RC=0; wait "$deploy_pid" || RC=$?
+[ "$RC" -eq 6 ] || fail "a lost lease after activation must exit 6 (rc=$RC): $(tail -n 30 "$T/out") $(tail -n 5 "$T/err")"
+grep -qF 'catalog-release-decision-tree.md §lease-lost' "$T/out" || fail "lease-lost must name the runbook procedure: $(tail -n 10 "$T/out")"
+grep -q 'ROLLBACK' "$T/out" && fail "lease-lost must not roll back from a separate session: $(tail -n 20 "$T/out")"
+case "$(readlink "$A_ROOT/current")" in releases/test-new-v1-*) ;; *) fail "lease-lost: current must be left as found: $(readlink "$A_ROOT/current")" ;; esac
+note "ok: lease lost after activation -> exit 6 with the runbook procedure, no rollback"
+
 # A renewal (or coordinator deploy / Pearl update) holding the Pearl lock.
 setup_env
 flock "$CCR_FAKE/run/lock/macprovider-pearl-updater.lock" sleep 30 &
@@ -894,4 +976,4 @@ live_unchanged "held lock"
 kill "$LOCK_PID" 2>/dev/null || true; wait "$LOCK_PID" 2>/dev/null || true; LOCK_PID=""
 note "ok: deploy refused while a renewal/deploy holds the Pearl lock"
 
-printf '[test-catalog-content-release] ok: preflight, deploy, evidence rollback (a-d), HUP-rejected restart, lease refusal\n'
+printf '[test-catalog-content-release] ok: preflight, deploy, evidence rollback (a-d), HUP-rejected restart, interrupt/lease-lost, lease refusal\n'

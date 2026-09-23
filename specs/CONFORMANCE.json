@@ -2705,7 +2705,7 @@
         "scripts/tests/test_catalog_content_gate.py::ContentGateTests",
         "scripts/tests/test_catalog_content_gate.py::ContentGateCommitTests",
         "phase4-coordinator/cmd/coordinator/validate_autotune_release_test.go::TestValidateAutotuneReleaseRejectsUnloadableRetainedEntry",
-        "scripts/test-catalog-content-release.sh:ok: preflight, deploy, evidence rollback (a-d), HUP-rejected restart, lease refusal"
+        "scripts/test-catalog-content-release.sh:ok: preflight, deploy, evidence rollback (a-d), HUP-rejected restart, interrupt/lease-lost, lease refusal"
       ],
       "journeys": [],
       "evidence": [],

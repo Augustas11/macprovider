@@ -27,7 +27,10 @@
 #   3   preflight NO_GO (nothing was mutated)
 #   4   deploy activated, evidence failed, rolled back to the prior release
 #   5   rollback incomplete: follow docs/runbooks/catalog-release-decision-tree.md §rollback-failed
-#   71  interrupted or lease lost (rolled back first when already activated)
+#   6   Pearl lease lost after activation may have started: state unknown, NOT
+#       rolled back; follow docs/runbooks/catalog-release-decision-tree.md §lease-lost
+#   71  interrupted, or lease lost before activation (rolled back first,
+#       through the lease, when already activated)
 #
 # Env:
 #   PEARL_SSH, PEARL_SSH_IDENTITY, PEARL_SSH_KNOWN_HOSTS   as renew-autotune-static-feed.sh
@@ -53,6 +56,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 RUNBOOK_ROLLBACK_FAILED="docs/runbooks/catalog-release-decision-tree.md §rollback-failed"
+RUNBOOK_LEASE_LOST="docs/runbooks/catalog-release-decision-tree.md §lease-lost"
 
 usage() { sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
@@ -149,6 +153,7 @@ LIVE="$WORK/live"
 CHECKS="$WORK/checks.tsv"
 : >"$CHECKS"
 REMOTE_SCRATCH=""
+# 0 = nothing sent; maybe = the publish was (possibly) sent; 1 = activated.
 CCR_ACTIVATED=0
 CCR_DONE=0
 CCR_ROLLED_BACK=0
@@ -166,15 +171,33 @@ CONFIG_DISK_SHA=""
 OVERLAY_DISK_SHA=""
 
 ccr_cleanup() {
-  local rc=$?
+  local rc=$? probe
   trap - EXIT
+  # Signals (the lease-loss watcher, the watchdog, the operator) must not cut
+  # the rollback short; channel loss is detected by aa_lease_run itself.
+  trap '' HUP INT TERM
   set +e
-  if [ "$CCR_ACTIVATED" = 1 ] && [ "$CCR_DONE" = 0 ] && [ "$CCR_ROLLED_BACK" = 0 ]; then
-    log "run ended (rc=$rc) after activation without an evidence verdict; rolling back"
-    CCR_FAILED_STEP="${CCR_FAILED_STEP:-interrupted}"
-    T_RB="$(remote_now 2>/dev/null || echo "$T_HUP")"
-    aa_rollback
-    if [ "$CCR_FATAL_RC" = 5 ]; then rc=5; fi
+  if [ "$CCR_ACTIVATED" != 0 ] && [ "$CCR_DONE" = 0 ] && [ "$CCR_ROLLED_BACK" = 0 ] && ! aa_lease_lost; then
+    probe=0
+    if [ "$CCR_ACTIVATED" = maybe ]; then
+      # Interrupted while the publish may be running on Pearl: ask the lease
+      # runner (it answers after the publish finishes) what actually changed.
+      log "run ended (rc=$rc) while the publish may have started; reading Pearl state through the lease"
+      aa_lease_probe_activation
+      probe=$?
+      [ "$probe" != 1 ] || log "the publish did not change current or .previous-target; nothing to roll back"
+    fi
+    if [ "$probe" != 1 ] && ! aa_lease_lost; then
+      log "run ended (rc=$rc) after activation without an evidence verdict; rolling back"
+      CCR_FAILED_STEP="${CCR_FAILED_STEP:-interrupted}"
+      T_RB="$(remote_now 2>/dev/null || echo "$T_HUP")"
+      aa_rollback
+      if [ "$CCR_FATAL_RC" = 5 ]; then rc=5; fi
+    fi
+  fi
+  if [ "$CCR_ACTIVATED" != 0 ] && [ "$CCR_DONE" = 0 ] && [ "$AA_LEASE_LOST" = 1 ]; then
+    log "LEASE LOST: the Pearl lease ended while activation may have started; Pearl state is UNKNOWN and was NOT rolled back from a separate session. Follow $RUNBOOK_LEASE_LOST"
+    rc=6
   fi
   aa_lease_release
   if [ -n "$REMOTE_SCRATCH" ]; then SSH "rm -rf '$REMOTE_SCRATCH'" >/dev/null 2>&1 || true; fi
@@ -272,9 +295,6 @@ coord_get() {
 
 journal_since() { # <epoch> <out>: coordinator journal messages since epoch
   SSH "journalctl -u '$COORDINATOR_UNIT' --since '@$1' -o cat --no-pager" >"$2" 2>/dev/null
-}
-journal_between() { # <from-epoch> <until-epoch> <out>
-  SSH "journalctl -u '$COORDINATOR_UNIT' --since '@$1' --until '@$2' -o cat --no-pager" >"$3" 2>/dev/null
 }
 
 remote_now() { SSH 'date +%s'; }
@@ -461,15 +481,6 @@ pf_content_gate() {
   record content_gate 1 "lane catalog-content vs live $LIVE_ID"
 }
 
-pf_closure() {
-  if ! python3 -I "$SCRIPT_DIR/catalog-release.py" check-tier2-binding --candidate "$REL/autotune-candidates.json" \
-    --tier2 "$REL/tier2-catalog.json" --require-serving --rate-card "$REL/rate-card.json" \
-    --exclusions "$WORK/gate/not-buyer-serving.json" >"$WORK/closure.out" 2>&1; then
-    record serving_closure 0 "$(tail -n 2 "$WORK/closure.out")"; return 1
-  fi
-  record serving_closure 1 "every served model has a matching Tier-2 pin or a reviewed exclusion"
-}
-
 # (e) A model that is newly buyer-serving vs live (added) or served at a new
 # hash (changed) needs a strict-pin buyer request + settlement row. No
 # reusable noninteractive production harness exists, so such releases are
@@ -568,9 +579,15 @@ if [ -n "$prev" ]; then printf '%s\n' "$prev" > "$sroot/.previous-target"; fi
 chown -R root:macprovider "$scratch"
 chmod -R g+rX,g-w,o-rwx "$scratch"
 python3 -I "$window" plan --root "$sroot" --incoming "releases/$name" > "$scratch/plan.json"
-python3 -c 'import json,sys; w=json.load(open(sys.argv[1]))["window_after"]; open(sys.argv[2],"w").write("".join(e+"\n" for e in w))' "$scratch/plan.json" "$sroot/.previous-target.after"
-chown root:macprovider "$sroot/.previous-target.after"
-chmod 0640 "$sroot/.previous-target.after"
+# The validator resolves the planned window, and scans same-version restamps,
+# under <dir of --previous-target>/releases: the LIVE releases/ (as deploy's
+# coverage check does), so its admitted set includes restamps.
+mkdir "$scratch/check"
+python3 -c 'import json,sys; w=json.load(open(sys.argv[1]))["window_after"]; open(sys.argv[2],"w").write("".join(e+"\n" for e in w))' "$scratch/plan.json" "$scratch/check/.previous-target"
+ln -s "$root/releases" "$scratch/check/releases"
+chown -R root:macprovider "$scratch/check"
+chmod 0750 "$scratch/check"
+chmod 0640 "$scratch/check/.previous-target"
 echo "PLAN_JSON=$(cat "$scratch/plan.json")"
 overlay_args=""
 if [ -e "$overlay" ]; then overlay_args="--config-overlay $overlay"; fi
@@ -578,7 +595,7 @@ rc=0
 # shellcheck disable=SC2086
 systemd-run --quiet --wait --pipe --collect -p "EnvironmentFile=-$env_file" -p User=macprovider -p Group=macprovider \
   "$bin" --config "$config" $overlay_args --validate-autotune-release "$sroot/releases/$name" \
-  --previous-target "$sroot/.previous-target.after" </dev/null >"$scratch/dryload.json" 2>"$scratch/dryload.err" || rc=$?
+  --previous-target "$scratch/check/.previous-target" </dev/null >"$scratch/dryload.json" 2>"$scratch/dryload.err" || rc=$?
 echo "DRYLOAD_RC=$rc"
 echo "DRYLOAD_JSON=$(tail -n 1 "$scratch/dryload.json" | head -c 65536)"
 STAGE
@@ -652,13 +669,20 @@ PY
   record coordinator_dry_load 1 "$verdict"
 }
 
+# Coverage judges /poolz against EXACTLY the catalogs the live coordinator
+# binary admits after this reload: the `admitted` set of the dry-load verdict
+# pf_dry_load just validated (current + retained window + restamps).
 pf_coverage() {
   local rc=0 detail
+  if ! python3 -c 'import json,sys; v=json.load(open(sys.argv[1])); a=v.get("admitted"); sys.exit(0 if v.get("ok") is True and isinstance(a, list) and a else 1)' "$WORK/dryload.json" 2>/dev/null; then
+    record window_coverage 0 "the coordinator validator did not report ok with an admitted set (coverage unknown)"; return 1
+  fi
   if ! fetch_poolz "$WORK/poolz-preflight.json"; then
     record window_coverage 0 "coordinator /poolz unreachable or refused the operator bearer (coverage unknown)"; return 1
   fi
   SSH "cat > '$REMOTE_SCRATCH/poolz.json'" <"$WORK/poolz-preflight.json" || { record window_coverage 0 "cannot stage /poolz on Pearl"; return 1; }
-  SSH "window='$REMOTE_SCRATCH/tools/autotune_window.py'; python3 -I \"\$window\" coverage --root '$REMOTE_SCRATCH/root' --incoming 'releases/$RELEASE_DIRNAME' --poolz-json '$REMOTE_SCRATCH/poolz.json'" \
+  SSH "cat > '$REMOTE_SCRATCH/admitted.json'" <"$WORK/dryload.json" || { record window_coverage 0 "cannot stage the validator verdict on Pearl"; return 1; }
+  SSH "window='$REMOTE_SCRATCH/tools/autotune_window.py'; python3 -I \"\$window\" coverage --admitted-json '$REMOTE_SCRATCH/admitted.json' --poolz-json '$REMOTE_SCRATCH/poolz.json'" \
     >"$WORK/coverage.json" 2>"$WORK/coverage.err" || rc=$?
   detail="$(python3 -c 'import json,sys;v=json.load(open(sys.argv[1]));print("uncovered=%s advertised=%s" % (json.dumps(v["uncovered"],sort_keys=True), v["advertised_total"]))' "$WORK/coverage.json" 2>/dev/null || tail -n 1 "$WORK/coverage.err")"
   if [ "$rc" -eq 0 ]; then
@@ -756,7 +780,6 @@ run_preflight() {
       pf_config_applied || true
       if pf_live; then
         pf_content_gate || true
-        pf_closure || true
         pf_buyer_serving_e2e || true
         pf_dry_load && check_ok canary_config && pf_coverage || true
       fi
@@ -769,7 +792,7 @@ run_preflight() {
   # Every named check must have run and passed.
   local name
   for name in commit tooling_matches_commit release_assembled canary_config pearl_reachable pearl_locks_free \
-      rollback_preconditions content_gate serving_closure buyer_serving_e2e coordinator_dry_load \
+      rollback_preconditions content_gate buyer_serving_e2e coordinator_dry_load \
       window_coverage config_applied canary_token_operator_key canary_reachable; do
     grep -q "^$name	" "$CHECKS" || record "$name" 0 "not run: an earlier check failed"
   done
@@ -962,45 +985,42 @@ print(json.dumps(counts, sort_keys=True))
 PY
 }
 
-# (d) watch: per (release, sha) key, the catalog_incompatible event COUNT since
-# the HUP must not exceed the count in the equally long window just before it
-# (a new key, or more rejections for an already failing key, fails); no
-# catalog-unavailable increase.
+# (d) watch: any catalog_incompatible rejection since the HUP of a catalog the
+# coordinator admitted before activation (the validated `admitted` set this
+# reload was proven to keep, plus the live release) fails. Rejections of
+# catalogs that were already inadmissible are chronic: logged, not failed.
+# No catalog-unavailable increase either.
 ev_d_watch() {
-  local end=$((SECONDS + WATCH_SECONDS)) verdict now span
+  local end=$((SECONDS + WATCH_SECONDS)) verdict chronic=""
   log "evidence (d): watching for ${WATCH_SECONDS}s (poll ${POLL_SECONDS}s)"
   while :; do
-    now="$(remote_now)" || { ev_fail d "cannot read Pearl time"; return 1; }
-    case "$now" in ""|*[!0-9]*) ev_fail d "cannot read Pearl time"; return 1 ;; esac
-    span=$((now - T_HUP)); [ "$span" -ge 1 ] || span=1
-    journal_between "$((T_HUP - span))" "$T_HUP" "$WORK/journal-baseline.txt" || { ev_fail d "cannot read the coordinator journal"; return 1; }
-    journal_between "$T_HUP" "$((T_HUP + span))" "$WORK/journal-watch.txt" || { ev_fail d "cannot read the coordinator journal"; return 1; }
-    verdict="$(python3 - "$WORK/journal-baseline.txt" "$WORK/journal-watch.txt" <<'PY'
+    journal_since "$T_HUP" "$WORK/journal-watch.txt" || { ev_fail d "cannot read the coordinator journal"; return 1; }
+    verdict="$(python3 - "$WORK/admitted-prehup.json" "$WORK/journal-watch.txt" "$LIVE_ID" "$LIVE_CAND_SHA" <<'PY'
 import json, sys
-def events(path):
-    out = []
-    for line in open(path, encoding="utf-8", errors="replace"):
-        if "catalog_incompatible" not in line and "provider catalog release is incompatible" not in line:
-            continue
-        try:
-            e = json.loads(line)
-        except ValueError:
-            e = {}
-        out.append(e if isinstance(e, dict) else {})
-    return out
-def key(e):
-    return (str(e.get("catalog_release_id", "")), str(e.get("catalog_candidate_sha256", "")).lower())
-def counts(path):
-    c = {}
-    for e in events(path):
-        c[key(e)] = c.get(key(e), 0) + 1
-    return c
-before, after = counts(sys.argv[1]), counts(sys.argv[2])
-up = sorted(k for k, n in after.items() if n > before.get(k, 0))
-if up:
-    print("catalog_incompatible increased for " + ", ".join("%s/%s (%d->%d)" % (k[0], k[1], before.get(k, 0), after[k]) for k in up)); raise SystemExit(1)
+verdict, journal, live_id, live_sha = sys.argv[1:]
+admitted = {(r["release_id"], str(r["candidates_sha256"]).lower()) for r in json.load(open(verdict))["admitted"]}
+admitted.add((live_id, live_sha.lower()))
+bad, chronic = {}, {}
+for line in open(journal, encoding="utf-8", errors="replace"):
+    if "catalog_incompatible" not in line and "provider catalog release is incompatible" not in line:
+        continue
+    try:
+        e = json.loads(line)
+    except ValueError:
+        continue
+    if not isinstance(e, dict) or not (e.get("catalog_release_id") or e.get("catalog_candidate_sha256")):
+        continue  # the paired close line; the keyed warn carries the catalog
+    k = (str(e.get("catalog_release_id", "")), str(e.get("catalog_candidate_sha256", "")).lower())
+    target = bad if k in admitted else chronic
+    target[k] = target.get(k, 0) + 1
+fmt = lambda d: ", ".join("%s/%s (%d)" % (k[0], k[1], n) for k, n in sorted(d.items()))
+if bad:
+    print("catalog_incompatible after the HUP for catalog(s) admissible before it: " + fmt(bad)); raise SystemExit(1)
+if chronic:
+    print("chronic (already inadmissible before the HUP): " + fmt(chronic))
 PY
 )" || { ev_fail d "$verdict"; return 1; }
+    [ -z "$verdict" ] || chronic="$verdict"
     fetch_poolz "$WORK/poolz-watch.json" || { ev_fail d "coordinator /poolz unreachable during the watch"; return 1; }
     unavailable_counts "$WORK/poolz-watch.json" >"$WORK/unavailable-now.json"
     verdict="$(python3 - "$WORK/unavailable-before.json" "$WORK/unavailable-now.json" <<'PY'
@@ -1014,7 +1034,8 @@ PY
     [ "$SECONDS" -lt "$end" ] || break
     sleep "$POLL_SECONDS"
   done
-  log "evidence (d): no new catalog_incompatible and no catalog-unavailable increase for ${WATCH_SECONDS}s"
+  [ -z "$chronic" ] || log "evidence (d): diagnostic only, not a failure: catalog_incompatible $chronic"
+  log "evidence (d): no catalog_incompatible for an admissible catalog and no catalog-unavailable increase for ${WATCH_SECONDS}s"
 }
 
 # C6: keep the failed release retained ONLY if it passed integrity + (a)/(b),
@@ -1077,7 +1098,7 @@ ccr_after_rollback() {
   esac
   if [ "$CCR_FATAL_RC" = 4 ] && ! rollback_hup_verified; then
     log "ALERT: the rollback re-HUP was rejected or not observed; restarting $COORDINATOR_UNIT (controlled)"
-    if SSH "systemctl restart '$COORDINATOR_UNIT' && systemctl is-active --quiet '$COORDINATOR_UNIT'" && rollback_served_verified; then
+    if aa_lease_sh "systemctl restart '$COORDINATOR_UNIT' && systemctl is-active --quiet '$COORDINATOR_UNIT'" && rollback_served_verified; then
       log "coordinator restarted onto $LIVE_ID"
     else
       log "ALERT: controlled coordinator restart did not restore $LIVE_ID"
@@ -1176,6 +1197,9 @@ aa_refuse_existing_release
 pf_config_applied || fatal "config identity under the lease: $(cut -f3 "$CHECKS")"
 pf_dry_load || fatal "coordinator dry-load under the lease refused: $(cut -f3 "$CHECKS" | tail -n 1)"
 pf_coverage || fatal "window coverage under the lease: $(cut -f3 "$CHECKS" | tail -n 1)"
+# The validated verdict of THIS release + window: evidence (d) judges
+# post-HUP rejections against its admitted set.
+cp "$WORK/dryload.json" "$WORK/admitted-prehup.json"
 SSH "rm -rf '$REMOTE_SCRATCH'" >/dev/null 2>&1 || true
 REMOTE_SCRATCH=""
 
@@ -1273,7 +1297,7 @@ PY
 )" || fatal "could not build the window coverage override record"
   AA_COVERAGE_EXPECT="$(printf '%s\n' "$_override_out" | sed -n 1p)"
   CONTENT_OVERRIDE_RECORD_B64="$(printf '%s\n' "$_override_out" | sed -n 2p)"
-  SSH "$(cwo_override_remote_command "$CONTENT_OVERRIDE_RECORD_B64" "catalog-content window coverage override for $RELEASE_DIRNAME" macprovider-catalog-content)" ||
+  aa_lease_sh "$(cwo_override_remote_command "$CONTENT_OVERRIDE_RECORD_B64" "catalog-content window coverage override for $RELEASE_DIRNAME" macprovider-catalog-content)" ||
     fatal "could not append the window coverage override record"
   log "AUDIT TRAIL: override appended to /var/lib/macprovider/catalog-window-overrides.jsonl"
 fi
@@ -1281,6 +1305,9 @@ T_HUP="$(remote_now)"
 case "$T_HUP" in ""|*[!0-9]*) fatal "cannot read Pearl time" ;; esac
 T_RB="$T_HUP"
 log "activating releases/$RELEASE_DIRNAME ($REL_ID) over $CURRENT_TARGET"
+# Before the publish is sent: an interrupt from here on reads the actual Pearl
+# state through the lease (ccr_cleanup) instead of assuming nothing changed.
+CCR_ACTIVATED=maybe
 aa_publish
 CCR_ACTIVATED=1
 # The rollback's own HUP is judged from the moment rollback begins.

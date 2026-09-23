@@ -341,10 +341,19 @@ if 'rate-card.json tier2-catalog.json trusted-keys.json; do' not in script:
 # reported loudly and NEVER blocks or rolls back the renewal.
 import json
 import subprocess
-coverage_call = 'python3 -I "$window" coverage --root "$root" --incoming "releases/$final" --poolz-json "$poolz"'
+coverage_call = 'python3 -I "$window" coverage --admitted-json "$check/admitted.json" --poolz-json "$poolz"'
 if remote.count(coverage_call) != 1:
     raise SystemExit("renewal must compute window coverage with the shipped autotune_window.py")
 cov_fn = remote.split("renewal_coverage() {", 1)[1].split("\n}", 1)[0]
+# Coverage is the LIVE coordinator's admitted set for the final release with
+# the planned window (restamps via the live releases/), never the Python mirror.
+validator_call = '/opt/macprovider/coordinator --config /opt/macprovider/coordinator.yaml $overlay --validate-autotune-release "$root/releases/$final"'
+if cov_fn.count(validator_call) != 1 or '--previous-target "$check/.previous-target"' not in cov_fn:
+    raise SystemExit("renewal coverage must dry-load the final release with the planned window in the live coordinator binary")
+if 'ln -s "$root/releases" "$check/releases"' not in cov_fn or not (cov_fn.find(validator_call) < cov_fn.find(coverage_call)):
+    raise SystemExit("renewal coverage must judge /poolz against the validator's admitted set (live releases/ for restamps)")
+if "coverage --root" in remote or "--incoming \"releases/$final\" --poolz-json" in remote:
+    raise SystemExit("renewal coverage must not use the legacy Python admission mode")
 if not (remote.find('mv "$incoming" "$final"') < remote.find(coverage_call) < remote.find(apply_call)):
     raise SystemExit("coverage must run on the final release dir before the window is applied")
 if "abort_pre_mutation" in cov_fn or "exit" in cov_fn:

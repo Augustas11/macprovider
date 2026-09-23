@@ -35,7 +35,7 @@ mv "$incoming" "$final"
 # The operator key is read from the running coordinator's own environment and
 # rides curl --config stdin; it is never echoed, written, or put in argv.
 renewal_coverage() {
-  local key_env key status poolz rc=0
+  local key_env key status poolz check overlay rc=0
   umask 077
   key_env="$(sed -n 's/^[[:space:]]\{1,\}operator_key:[[:space:]]*env:\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*\(#.*\)\{0,1\}$/\1/p' /opt/macprovider/coordinator.yaml | head -n 1)"
   [ -n "$key_env" ] || { echo "renewal coverage: auth.operator_key is not an env: reference" >&2; return 10; }
@@ -46,8 +46,23 @@ renewal_coverage() {
     || { key=""; rm -f "$poolz"; echo "renewal coverage: coordinator /poolz is unreachable on Pearl loopback" >&2; return 10; }
   key=""
   [ "$status" = 200 ] || { rm -f "$poolz"; echo "renewal coverage: coordinator /poolz answered HTTP $status" >&2; return 10; }
-  python3 -I "$window" coverage --root "$root" --incoming "releases/$final" --poolz-json "$poolz" || rc=$?
-  rm -f "$poolz"
+  # Coverage judges /poolz against exactly what the LIVE coordinator binary
+  # admits after this reload: its --validate-autotune-release verdict for the
+  # final release with the planned window (retained + restamps via releases/).
+  check="$(mktemp -d /tmp/macprovider-renew-window-check.XXXXXXXX)" || { rm -f "$poolz"; return 10; }
+  python3 -I "$window" plan --root "$root" --incoming "releases/$final" > "$check/plan.json" \
+    && python3 -I -c 'import json, sys; w = json.load(open(sys.argv[1]))["window_after"]; open(sys.argv[2], "w").write("".join(e + "\n" for e in w))' "$check/plan.json" "$check/.previous-target" \
+    && ln -s "$root/releases" "$check/releases" \
+    && chown -R root:macprovider "$check" && chmod 0750 "$check" && chmod 0640 "$check/.previous-target" \
+    || { rm -rf "$check"; rm -f "$poolz"; echo "renewal coverage: cannot stage the planned window" >&2; return 10; }
+  overlay=""; [ ! -e /etc/macprovider/coordinator.pearl-overlays.yaml ] || overlay="--config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml"
+  # shellcheck disable=SC2086
+  systemd-run --quiet --wait --pipe --collect -p EnvironmentFile=-/etc/macprovider/coordinator.env -p User=macprovider -p Group=macprovider \
+    /opt/macprovider/coordinator --config /opt/macprovider/coordinator.yaml $overlay --validate-autotune-release "$root/releases/$final" \
+    --previous-target "$check/.previous-target" </dev/null >"$check/admitted.json" 2>"$check/validate.err" \
+    || { tail -n 1 "$check/admitted.json" | head -c 4096 >&2; rm -rf "$check"; rm -f "$poolz"; echo "renewal coverage: live coordinator --validate-autotune-release rejected the release (coverage unknown)" >&2; return 11; }
+  python3 -I "$window" coverage --admitted-json "$check/admitted.json" --poolz-json "$poolz" || rc=$?
+  rm -rf "$check"; rm -f "$poolz"
   return "$rc"
 }
 cov_rc=0

@@ -23,13 +23,13 @@
 #                       uncovered or unknown coverage unless AA_COVERAGE_OVERRIDE=1.
 #   AA_LOCK_MODE        flock  (renew): the remote publish/rollback take
 #                       `flock -n` on the updater + coordinator-deploy locks.
-#                       lease  (content lane): aa_lease_acquire already holds
-#                       those SAME locks for the whole run (flock is per open
-#                       file description), so the remote scripts must prove
-#                       the holder is THIS run's: they present the lease token
-#                       the holder wrote to a root-only record, and the record's
-#                       holder PIDs must still be alive (same start time), the
-#                       locks busy and, where /proc/locks exists, owned by them.
+#                       lease  (content lane): aa_lease_acquire holds those
+#                       SAME locks for the whole run in a remote runner, and
+#                       every lease-mode Pearl mutation (publish, rollback,
+#                       aa_lease_sh) is executed BY that runner as its child,
+#                       inheriting the locked descriptors (see aa_lease_run).
+#                       Losing the channel is losing the lease: the state is
+#                       unknown and nothing is rolled back from another session.
 #   evidence hook       aa_post_activation_evidence <fn>; fn returns non-zero
 #                       and sets AA_EVIDENCE_FAILURE to roll back.
 #   AA_ROLLBACK_WINDOW  optional: the .previous-target a rollback restores
@@ -43,9 +43,10 @@
 #                       record describes; the publish aborts pre-mutation when
 #                       its own under-lock coverage differs.
 #
-# Interface globals written here: CURRENT_TARGET, ORIG_PREVIOUS_TARGET,
-# ORIG_PREVIOUS_TARGET_B64 (the exact .previous-target bytes), LOCK_HELPER_DIR, LOCK_HELPER, WINDOW_HELPER, CONTINUITY_VERIFIER, REMOTE_TMP,
-# PUBLISH_OUT_FILE, PUBLISH_OUT, AA_LEASE_*.
+# Interface globals written here: CURRENT_TARGET, ORIG_PREVIOUS_TARGET (the
+# window's entries), ORIG_PREVIOUS_TARGET_B64 (the exact .previous-target
+# bytes), LOCK_HELPER_DIR, LOCK_HELPER, WINDOW_HELPER, CONTINUITY_VERIFIER,
+# REMOTE_TMP, PUBLISH_OUT_FILE, PUBLISH_OUT, AA_LEASE_*.
 
 AA_GATE_SNIPPET="${AA_GATE_SNIPPET:-}"
 AA_COVERAGE_POLICY="${AA_COVERAGE_POLICY:-warn}"
@@ -56,7 +57,9 @@ AA_LEASE_HELD=0
 AA_LEASE_PID=""
 AA_LEASE_WATCHDOG_PID=""
 AA_LEASE_DIR=""
-AA_LEASE_TOKEN=""
+AA_LEASE_HOLDER_PID=""
+AA_LEASE_SEQ=0
+AA_LEASE_LOST=0
 AA_COVERAGE_EXPECT=""
 AA_EVIDENCE_FAILURE=""
 AA_ROLLBACK_WINDOW="${AA_ROLLBACK_WINDOW:-}"
@@ -142,22 +145,38 @@ finally:
         os.close(root_fd)
     os.close(opt_fd)
 ' || exit $?
-# The holder records a random lease token plus its own lock-owning PIDs and
-# their start times in a root-only file; lease-mode mutations must present the
-# token and see those PIDs alive (see _aa_lease_owned_fn).
-flock -n /run/lock/macprovider-pearl-updater.lock flock -n /opt/macprovider/.coordinator-deploy.lock sh -c '
-set -e
-rec=/opt/macprovider/.activation-lease
-b=$PPID
-a=$(ps -o ppid= -p "$b" | tr -d " ")
-st() { ps -o lstart= -p "$1" | tr -s " " "_"; }
-tok=$(od -An -N16 -tx1 /dev/urandom | tr -d " \n")
-tmp=$(mktemp "$rec.XXXXXXXX")
-printf "%s %s %s %s %s\n" "$tok" "$a" "$(st "$a")" "$b" "$(st "$b")" > "$tmp"
-mv -f "$tmp" "$rec"
-trap "rm -f $rec" EXIT
-printf "LOCKED %s\n" "$tok"
-cat >/dev/null'
+# The runner takes both locks on its OWN descriptors 8 (updater lock) and 9
+# (coordinator-deploy lock) and executes every lease-mode command as its child,
+# so each command inherits the locked descriptors. A flock(2) lock belongs to
+# the open file description and stays held while ANY process holding it lives:
+# the locks outlive a dead runner until its last running command exits, so no
+# deploy, renewal or update can take them while a mutation is in flight.
+# Frames on stdin, one per line: RUN <seq> <b64 script> <b64 arg, or - for "">...
+# Replies on stdout: RESULT <seq> <rc> <b64 stdout or -> <b64 stderr or -> END.
+# A started command runs to completion even if the controller disconnects
+# (HUP ignored); EOF on stdin ends the runner and releases the locks.
+exec 8</run/lock/macprovider-pearl-updater.lock || exit 1
+flock -n 8 || { echo 'Pearl updater lock held' >&2; exit 1; }
+exec 9</opt/macprovider/.coordinator-deploy.lock || exit 1
+flock -n 9 || { echo 'coordinator deploy lock held' >&2; exit 1; }
+work="$(mktemp -d /tmp/macprovider-activation-lease.XXXXXXXX)" || exit 1
+trap 'rm -rf "$work"' EXIT
+trap '' HUP
+set -f
+enc() { if [ -s "$1" ]; then base64 < "$1" | tr -d '\n'; else printf -; fi; }
+printf 'LOCKED %s\n' "$$"
+while IFS=' ' read -r verb seq script args; do
+  case "$verb" in RUN) ;; *) echo "malformed lease frame" >&2; exit 1 ;; esac
+  case "$seq" in ""|*[!0-9]*) echo "malformed lease frame" >&2; exit 1 ;; esac
+  set --
+  for a in $args; do
+    if [ "$a" = - ]; then set -- "$@" ""; else set -- "$@" "$(printf '%s' "$a" | base64 -d)"; fi
+  done
+  printf '%s' "$script" | base64 -d >"$work/cmd"
+  rc=0
+  bash "$work/cmd" "$@" </dev/null >"$work/out" 2>"$work/err" || rc=$?
+  printf 'RESULT %s %s %s %s END\n' "$seq" "$rc" "$(enc "$work/out")" "$(enc "$work/err")"
+done
 LEASE
 AA_LEASE_REMOTE_COMMAND="${AA_LEASE_REMOTE_COMMAND%$'\n'}"
 
@@ -191,7 +210,7 @@ aa_lease_acquire() {
     holder_rc=$?
     # Lost after acquisition: stop the controller. A failed acquisition is
     # reported by the wait loop below instead.
-    if [ ! -f "$sentinel" ] && grep -Eqx 'LOCKED [0-9a-f]{32}' "$status" 2>/dev/null; then
+    if [ ! -f "$sentinel" ] && grep -Eqx 'LOCKED [0-9]+' "$status" 2>/dev/null; then
       kill -TERM "$controller" 2>/dev/null || true
     fi
     exit "$holder_rc"
@@ -199,7 +218,7 @@ aa_lease_acquire() {
   AA_LEASE_PID=$!
   exec 7>"$fifo"
   AA_LEASE_HELD=1
-  while ! grep -Eqx 'LOCKED [0-9a-f]{32}' "$status" 2>/dev/null; do
+  while ! grep -Eqx 'LOCKED [0-9]+' "$status" 2>/dev/null; do
     if ! kill -0 "$AA_LEASE_PID" 2>/dev/null; then
       cat "$status" >&2 || true
       fatal "another coordinator deploy, renewal or Pearl update holds the Pearl lock"
@@ -208,8 +227,7 @@ aa_lease_acquire() {
     [ "$lease_wait" -lt 100 ] || fatal "timed out acquiring the Pearl deploy lock"
     sleep 0.1
   done
-  AA_LEASE_TOKEN="$(sed -n 's/^LOCKED \([0-9a-f]\{32\}\)$/\1/p' "$status" | head -n 1)"
-  [ -n "$AA_LEASE_TOKEN" ] || fatal "the Pearl lease holder returned no lease token"
+  AA_LEASE_HOLDER_PID="$(sed -n 's/^LOCKED \([0-9][0-9]*\)$/\1/p' "$status" | head -n 1)"
   aa_lease_assert_held || fatal "Pearl deploy lock was lost after acquisition"
   if SSH 'test -e /var/lib/macprovider-pearl-updater/tier2-enforcement-transaction.json'; then
     fatal "a Tier-2 enforcement transaction is active"
@@ -231,8 +249,99 @@ aa_lease_acquire() {
 }
 
 aa_lease_assert_held() {
-  [ "$AA_LEASE_HELD" = 1 ] && [ -n "$AA_LEASE_PID" ] && kill -0 "$AA_LEASE_PID" 2>/dev/null &&
-    grep -Eqx 'LOCKED [0-9a-f]{32}' "$AA_LEASE_DIR/status" 2>/dev/null
+  [ "$AA_LEASE_HELD" = 1 ] && [ "$AA_LEASE_LOST" = 0 ] && [ -n "$AA_LEASE_PID" ] && kill -0 "$AA_LEASE_PID" 2>/dev/null &&
+    grep -Eqx 'LOCKED [0-9]+' "$AA_LEASE_DIR/status" 2>/dev/null
+}
+
+# True (and latched in AA_LEASE_LOST) once this run's acquired lease runner is
+# gone: Pearl state is then unknown to this controller.
+aa_lease_lost() {
+  [ "$AA_LOCK_MODE" = lease ] || return 1
+  [ "$AA_LEASE_LOST" = 1 ] && return 0
+  if [ "$AA_LEASE_HELD" = 1 ] && ! aa_lease_assert_held; then
+    AA_LEASE_LOST=1
+    return 0
+  fi
+  return 1
+}
+
+_aa_lease_result() { # <seq>: that command's complete RESULT frame, if any
+  grep -E "^RESULT $1 [0-9]+ [A-Za-z0-9+/=-]+ [A-Za-z0-9+/=-]+ END\$" "$AA_LEASE_DIR/status" 2>/dev/null | head -n 1
+}
+
+# aa_lease_run <script> <stdout-file> <stderr-file> [args...]: execute the
+# script on Pearl as a child of the lease runner (inheriting the locked
+# descriptors) and return its exit status. If the channel is lost before the
+# result arrives, AA_LEASE_LOST=1 and it returns 1: whether the command ran,
+# and how far, is unknown.
+aa_lease_run() {
+  local script="$1" out="$2" err="$3" frame a seq result
+  shift 3
+  : >"$out"
+  : >"$err"
+  if ! aa_lease_assert_held; then
+    AA_LEASE_LOST=1
+    echo "activation lease lost; command not sent" >"$err"
+    return 1
+  fi
+  AA_LEASE_SEQ=$((AA_LEASE_SEQ + 1))
+  seq="$AA_LEASE_SEQ"
+  frame="RUN $seq $(base64 <"$script" | tr -d '\n')"
+  for a in "$@"; do
+    if [ -z "$a" ]; then frame="$frame -"; else frame="$frame $(printf '%s' "$a" | base64 | tr -d '\n')"; fi
+  done
+  # A subshell: a closed channel's SIGPIPE must not kill the controller.
+  if ! ( printf '%s\n' "$frame" >&7 ) 2>/dev/null; then
+    AA_LEASE_LOST=1
+    echo "activation lease channel closed; command $seq not delivered" >"$err"
+    return 1
+  fi
+  while :; do
+    result="$(_aa_lease_result "$seq")"
+    [ -z "$result" ] || break
+    if ! kill -0 "$AA_LEASE_PID" 2>/dev/null; then
+      result="$(_aa_lease_result "$seq")"
+      [ -z "$result" ] || break
+      AA_LEASE_LOST=1
+      echo "activation lease lost before command $seq returned; Pearl state unknown" >"$err"
+      return 1
+    fi
+    sleep 0.1
+  done
+  # shellcheck disable=SC2086
+  set -- $result
+  python3 -c 'import base64, sys
+for value, path in ((sys.argv[1], sys.argv[2]), (sys.argv[3], sys.argv[4])):
+    open(path, "wb").write(b"" if value == "-" else base64.b64decode(value, validate=True))' "$4" "$out" "$5" "$err" \
+    || { echo "malformed lease result for command $seq" >"$err"; return 1; }
+  return "$3"
+}
+
+# aa_lease_sh <shell text>: run one Pearl shell command through the lease;
+# its stdout/stderr are replayed locally.
+aa_lease_sh() {
+  local rc=0 base="$AA_WORK_DIR/lease-sh.$((AA_LEASE_SEQ + 1))"
+  printf '%s\n' "$1" >"$base.sh"
+  aa_lease_run "$base.sh" "$base.out" "$base.err" || rc=$?
+  cat "$base.out"
+  cat "$base.err" >&2
+  return "$rc"
+}
+
+# Lease mode, after an interrupted publish: read through the lease (queued
+# behind any in-flight command, so it sees the publish's final effect) whether
+# this run mutated current or .previous-target.
+# 0 = mutated (roll back), 1 = untouched, 2 = unknown.
+aa_lease_probe_activation() {
+  local probe="$AA_WORK_DIR/probe.remote.sh" cur win
+  # shellcheck disable=SC2016
+  printf '%s\n' 'set -eu' 'readlink "$1/current"' \
+    'if [ -e "$1/.previous-target" ]; then base64 < "$1/.previous-target" | tr -d "\n"; fi' 'echo' >"$probe"
+  aa_lease_run "$probe" "$AA_WORK_DIR/probe.out" "$AA_WORK_DIR/probe.err" "$REMOTE_AUTOTUNE_DIR" || return 2
+  cur="$(sed -n 1p "$AA_WORK_DIR/probe.out")"
+  win="$(sed -n 2p "$AA_WORK_DIR/probe.out")"
+  [ "${cur#./}" = "$CURRENT_TARGET" ] && [ "$win" = "${ORIG_PREVIOUS_TARGET_B64:-}" ] && return 1
+  return 0
 }
 
 aa_lease_release() {
@@ -242,7 +351,7 @@ aa_lease_release() {
   exec 7>&-
   wait "$AA_LEASE_PID" 2>/dev/null || true
   AA_LEASE_HELD=0
-  AA_LEASE_TOKEN=""
+  AA_LEASE_HOLDER_PID=""
   rm -rf "$AA_LEASE_DIR"
 }
 
@@ -271,6 +380,8 @@ validate_release_ref() {
     ""|*[!A-Za-z0-9._-]*) fatal "unsafe $label (single safe segment required): $value" ;;
   esac
 }
+# Same line rules as scripts/autotune_window.py parse_entries: surrounding
+# whitespace stripped, blank and '#' lines skipped, at most 3 entries.
 validate_previous_target_window() {
   local value="$1"
   [ -z "$value" ] && return 0
@@ -278,7 +389,7 @@ validate_previous_target_window() {
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line#"${line%%[![:space:]]*}"}"
     line="${line%"${line##*[![:space:]]}"}"
-    [ -z "$line" ] && continue
+    case "$line" in ""|'#'*) continue ;; esac
     n=$((n + 1))
     if [ "$n" -gt 3 ]; then
       fatal "previous-target has more than 3 releases"
@@ -304,6 +415,8 @@ aa_read_live_targets() {
   ORIG_PREVIOUS_TARGET="${ORIG_PREVIOUS_TARGET%"${ORIG_PREVIOUS_TARGET##*[![:space:]]}"}"
   validate_release_ref "$CURRENT_TARGET" "current target" "no_empty"
   validate_previous_target_window "$ORIG_PREVIOUS_TARGET"
+  # Entries only (blank/# lines dropped); the exact bytes stay in _B64.
+  ORIG_PREVIOUS_TARGET="$(printf '%s\n' "$ORIG_PREVIOUS_TARGET" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^#/d' -e '/^$/d')"
 }
 
 # Refuse to publish a release id that already exists (idempotency / no clobber).
@@ -383,35 +496,25 @@ aa_upload_release() {
     || fatal "rsync failed"
 }
 
-# Lease-mode ownership proof, rendered into the publish and rollback scripts.
-# Busy locks alone only prove SOMEONE holds them; this proves the holder is the
-# one that issued $lease_token and is still alive and owning both flocks.
-IFS= read -r -d '' _AA_LEASE_OWNED_FN <<'OWNED' || true
-lease_owned() {
-  local rec=/opt/macprovider/.activation-lease tok a a_start b b_start spec ino
-  [ -n "$lease_token" ] || { echo "no lease token presented"; return 1; }
-  [ -f "$rec" ] && [ ! -L "$rec" ] || { echo "lease record missing"; return 1; }
-  read -r tok a a_start b b_start < "$rec" || { echo "lease record unreadable"; return 1; }
-  [ "$tok" = "$lease_token" ] || { echo "lease record belongs to another session"; return 1; }
-  for spec in "$a:$a_start" "$b:$b_start"; do
-    case "${spec%%:*}" in ""|*[!0-9]*) echo "lease record is malformed"; return 1 ;; esac
-    [ "$(ps -o lstart= -p "${spec%%:*}" 2>/dev/null | tr -s ' ' '_')" = "${spec#*:}" ] \
-      || { echo "lease holder ${spec%%:*} is gone"; return 1; }
+# Lease-mode lock proof, rendered into the publish and rollback scripts. They
+# run as children of the lease runner and must hold ITS locked descriptors 8
+# and 9 (inherited, never reopened): where /proc exists each must be the lock
+# file and carry the flock; flock -n on the inherited descriptor fails when it
+# is not open, i.e. when the script was not started by the runner.
+IFS= read -r -d '' _AA_LEASE_FDS_FN <<'FDS' || true
+lease_fds_held() {
+  local spec fd path
+  for spec in "8:/run/lock/macprovider-pearl-updater.lock" "9:/opt/macprovider/.coordinator-deploy.lock"; do
+    fd="${spec%%:*}"; path="${spec#*:}"
+    if [ -e "/proc/$$/fdinfo/$fd" ]; then
+      [ "$(readlink "/proc/$$/fd/$fd")" = "$path" ] || { echo "descriptor $fd is not $path"; return 1; }
+      grep -Eq '^lock:.*FLOCK +ADVISORY +WRITE' "/proc/$$/fdinfo/$fd" || { echo "descriptor $fd holds no flock on $path"; return 1; }
+    fi
+    flock -n "$fd" 2>/dev/null || { echo "descriptor $fd is not an inherited lease lock on $path"; return 1; }
   done
-  exec 8</run/lock/macprovider-pearl-updater.lock || { echo "cannot open the updater lock"; return 1; }
-  if flock -n 8; then echo "updater lock free"; return 1; fi
-  exec 9</opt/macprovider/.coordinator-deploy.lock || { echo "cannot open the coordinator deploy lock"; return 1; }
-  if flock -n 9; then echo "coordinator deploy lock free"; return 1; fi
-  if [ -r /proc/locks ]; then
-    for spec in "/run/lock/macprovider-pearl-updater.lock:$a" "/opt/macprovider/.coordinator-deploy.lock:$b"; do
-      ino="$(stat -c %i "${spec%:*}")" || { echo "cannot stat ${spec%:*}"; return 1; }
-      awk -v pid="${spec##*:}" -v ino="$ino" '$2 == "FLOCK" && $4 == "WRITE" && $5 == pid { n = split($6, f, ":"); if (f[n] == ino) found = 1 } END { exit found ? 0 : 1 }' /proc/locks \
-        || { echo "${spec%:*} is not flocked by lease holder ${spec##*:}"; return 1; }
-    done
-  fi
 }
-OWNED
-_AA_LEASE_OWNED_FN="${_AA_LEASE_OWNED_FN%$'\n'}"
+FDS
+_AA_LEASE_FDS_FN="${_AA_LEASE_FDS_FN%$'\n'}"
 
 # ---------------------------------------------------------------------------
 # Remote scripts. Rendered from fixed pieces; the flock/warn rendering is the
@@ -430,13 +533,12 @@ LOCK
   else
     cat <<'LOCK'
 python3 "$helper" validate || abort_pre_mutation "Pearl deploy lock files failed validation; not mutating"
-# Lease mode: the operator's lease holder owns both locks for this whole
-# activation. This session must prove it is THIS run's holder ($10 = token).
-lease_token="${10:-}"
+# Lease mode: this script runs as a child of the lease runner, which holds both
+# locks for the whole activation; it must hold the runner's descriptors.
 LOCK
-    printf '%s\n' "$_AA_LEASE_OWNED_FN"
+    printf '%s\n' "$_AA_LEASE_FDS_FN"
     cat <<'LOCK'
-lease_why="$(lease_owned)" || abort_pre_mutation "activation lease not held by this session ($lease_why); not mutating"
+lease_why="$(lease_fds_held)" || abort_pre_mutation "activation lease locks not inherited ($lease_why); not mutating"
 LOCK
   fi
 }
@@ -476,7 +578,7 @@ mv "$incoming" "$final"
 # The operator key is read from the running coordinator's own environment and
 # rides curl --config stdin; it is never echoed, written, or put in argv.
 renewal_coverage() {
-  local key_env key status poolz rc=0
+  local key_env key status poolz check overlay rc=0
   umask 077
   key_env="$(sed -n 's/^[[:space:]]\{1,\}operator_key:[[:space:]]*env:\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*\(#.*\)\{0,1\}$/\1/p' /opt/macprovider/coordinator.yaml | head -n 1)"
   [ -n "$key_env" ] || { echo "renewal coverage: auth.operator_key is not an env: reference" >&2; return 10; }
@@ -487,8 +589,23 @@ renewal_coverage() {
     || { key=""; rm -f "$poolz"; echo "renewal coverage: coordinator /poolz is unreachable on Pearl loopback" >&2; return 10; }
   key=""
   [ "$status" = 200 ] || { rm -f "$poolz"; echo "renewal coverage: coordinator /poolz answered HTTP $status" >&2; return 10; }
-  python3 -I "$window" coverage --root "$root" --incoming "releases/$final" --poolz-json "$poolz" || rc=$?
-  rm -f "$poolz"
+  # Coverage judges /poolz against exactly what the LIVE coordinator binary
+  # admits after this reload: its --validate-autotune-release verdict for the
+  # final release with the planned window (retained + restamps via releases/).
+  check="$(mktemp -d /tmp/macprovider-renew-window-check.XXXXXXXX)" || { rm -f "$poolz"; return 10; }
+  python3 -I "$window" plan --root "$root" --incoming "releases/$final" > "$check/plan.json" \
+    && python3 -I -c 'import json, sys; w = json.load(open(sys.argv[1]))["window_after"]; open(sys.argv[2], "w").write("".join(e + "\n" for e in w))' "$check/plan.json" "$check/.previous-target" \
+    && ln -s "$root/releases" "$check/releases" \
+    && chown -R root:macprovider "$check" && chmod 0750 "$check" && chmod 0640 "$check/.previous-target" \
+    || { rm -rf "$check"; rm -f "$poolz"; echo "renewal coverage: cannot stage the planned window" >&2; return 10; }
+  overlay=""; [ ! -e /etc/macprovider/coordinator.pearl-overlays.yaml ] || overlay="--config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml"
+  # shellcheck disable=SC2086
+  systemd-run --quiet --wait --pipe --collect -p EnvironmentFile=-/etc/macprovider/coordinator.env -p User=macprovider -p Group=macprovider \
+    /opt/macprovider/coordinator --config /opt/macprovider/coordinator.yaml $overlay --validate-autotune-release "$root/releases/$final" \
+    --previous-target "$check/.previous-target" </dev/null >"$check/admitted.json" 2>"$check/validate.err" \
+    || { tail -n 1 "$check/admitted.json" | head -c 4096 >&2; rm -rf "$check"; rm -f "$poolz"; echo "renewal coverage: live coordinator --validate-autotune-release rejected the release (coverage unknown)" >&2; return 11; }
+  python3 -I "$window" coverage --admitted-json "$check/admitted.json" --poolz-json "$poolz" || rc=$?
+  rm -rf "$check"; rm -f "$poolz"
   return "$rc"
 }
 cov_rc=0
@@ -505,11 +622,11 @@ if [ "$cov_rc" -ne 0 ] && [ "${9:-0}" != 1 ]; then
   rm -rf "$root/releases/$final" >/dev/null 2>&1 || true
   abort_pre_mutation "window coverage rc=$cov_rc (uncovered or unknown) without a logged override; not mutating"
 fi
-# An override is bound to the coverage it logged (${11}: sha256 of the canonical
+# An override is bound to the coverage it logged (${10}: sha256 of the canonical
 # uncovered list); coverage that moved since the record was written aborts.
-if [ "$cov_rc" -ne 0 ] && [ -n "${11:-}" ]; then
+if [ "$cov_rc" -ne 0 ] && [ -n "${10:-}" ]; then
   cov_digest="$(printf '%s' "$cov_json" | python3 -c 'import hashlib,json,sys; u=json.load(sys.stdin)["uncovered"]; print(hashlib.sha256(json.dumps(sorted(u, key=lambda x: json.dumps(x, sort_keys=True)), sort_keys=True).encode()).hexdigest())')" || cov_digest=unknown
-  if [ "$cov_digest" != "${11}" ]; then
+  if [ "$cov_digest" != "${10}" ]; then
     rm -rf "$root/releases/$final" >/dev/null 2>&1 || true
     abort_pre_mutation "under-lock window coverage differs from the logged override record; not mutating"
   fi
@@ -556,12 +673,11 @@ LOCK
   else
     cat <<'LOCK'
 python3 "$helper" validate || { echo "rollback: lock validation failed; not mutating" >&2; exit 1; }
-# Lease mode: prove the lease holder is THIS run's ($8 = token).
-lease_token="${8:-}"
+# Lease mode: run by the lease runner; hold its inherited lock descriptors.
 LOCK
-    printf '%s\n' "$_AA_LEASE_OWNED_FN"
+    printf '%s\n' "$_AA_LEASE_FDS_FN"
     cat <<'LOCK'
-lease_why="$(lease_owned)" || { echo "rollback: activation lease not held by this session ($lease_why); not mutating" >&2; exit 1; }
+lease_why="$(lease_fds_held)" || { echo "rollback: activation lease locks not inherited ($lease_why); not mutating" >&2; exit 1; }
 LOCK
   fi
   cat <<'TAIL'
@@ -589,10 +705,11 @@ TAIL
 # Rollback restores the EXACT prior state — current AND .previous-target — then
 # re-HUPs. Only call this after this run has swapped `current` (remote exit 1).
 # Pre-mutation failures (remote exit 2) must not rollback: that would be the
-# first mutation and can clobber an in-flight coordinator deploy. Rollback
-# itself takes the same Pearl deploy locks; if they are held, skip mutation.
-# Lease mode rolls back under the still-held lease; if the lease was lost it
-# falls back to taking the locks itself, like renew.
+# first mutation and can clobber an in-flight coordinator deploy. Flock mode
+# takes the same Pearl deploy locks; if they are held, skip mutation. Lease
+# mode rolls back THROUGH the lease runner; with the lease lost it refuses
+# (returns 1, AA_LEASE_LOST=1): the state is unknown and another deploy may
+# hold the locks, so no rollback is attempted from a separate session.
 aa_rollback() {
   local window="$ORIG_PREVIOUS_TARGET"
   [ -n "$AA_ROLLBACK_WINDOW" ] && window="$AA_ROLLBACK_WINDOW"
@@ -607,16 +724,30 @@ aa_rollback() {
   elif [ -n "$window" ]; then
     prev_arg="$(printf '%s\n' "$window" | base64 | tr -d '\n')"
   fi
-  if [ "$AA_LOCK_MODE" = lease ] && aa_lease_assert_held; then
+  if [ "$AA_LOCK_MODE" = lease ]; then
+    if ! aa_lease_assert_held; then
+      AA_LEASE_LOST=1
+      log "ROLLBACK REFUSED: the activation lease is lost; Pearl state is unknown and is not rolled back from a separate session"
+      return 1
+    fi
     rb_mode=lease
   fi
   rb_args=("$REMOTE_AUTOTUNE_DIR" "$CURRENT_TARGET" "$prev_arg" "$COORDINATOR_UNIT" "$LOCK_HELPER" "releases/$RELEASE_DIRNAME" "$WINDOW_HELPER")
-  [ "$rb_mode" = flock ] || rb_args+=("$AA_LEASE_TOKEN")
   AA_ROLLBACK_RC=0
   AA_ROLLBACK_OUT=""
   if aa_render_rollback_script "$rb_mode" > "$rb_script"; then
-    AA_ROLLBACK_OUT="$(SSH bash -s -- "${rb_args[@]}" < "$rb_script" 2>&1)" || AA_ROLLBACK_RC=$?
-    [ -z "$AA_ROLLBACK_OUT" ] || printf '%s\n' "$AA_ROLLBACK_OUT"
+    if [ "$rb_mode" = lease ]; then
+      aa_lease_run "$rb_script" "$AA_WORK_DIR/rollback.out" "$AA_WORK_DIR/rollback.err" "${rb_args[@]}" || AA_ROLLBACK_RC=$?
+      AA_ROLLBACK_OUT="$(cat "$AA_WORK_DIR/rollback.out" "$AA_WORK_DIR/rollback.err" 2>/dev/null)"
+      [ -z "$AA_ROLLBACK_OUT" ] || printf '%s\n' "$AA_ROLLBACK_OUT"
+      if [ "$AA_LEASE_LOST" = 1 ]; then
+        log "ROLLBACK OUTCOME UNKNOWN: the activation lease was lost during the rollback"
+        return 1
+      fi
+    else
+      AA_ROLLBACK_OUT="$(SSH bash -s -- "${rb_args[@]}" < "$rb_script" 2>&1)" || AA_ROLLBACK_RC=$?
+      [ -z "$AA_ROLLBACK_OUT" ] || printf '%s\n' "$AA_ROLLBACK_OUT"
+    fi
   else
     AA_ROLLBACK_RC=1
     log "rollback: cannot render the remote rollback"
@@ -642,23 +773,30 @@ aa_publish() {
   local publish_args=("$REMOTE_AUTOTUNE_DIR" "$REMOTE_TMP" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$COORDINATOR_UNIT" "$LOCK_HELPER" "$WINDOW_HELPER" "$CONTINUITY_VERIFIER")
   if [ "$AA_LOCK_MODE" = lease ]; then
     aa_lease_assert_held || fatal "activation lease is not held; not publishing"
-    # $9 override flag, $10 lease token, $11 expected-coverage digest.
-    publish_args+=("$AA_COVERAGE_OVERRIDE" "$AA_LEASE_TOKEN" "$AA_COVERAGE_EXPECT")
+    # $9 override flag, $10 expected-coverage digest.
+    publish_args+=("$AA_COVERAGE_OVERRIDE" "$AA_COVERAGE_EXPECT")
   elif [ "$AA_COVERAGE_POLICY" = refuse ]; then
     publish_args+=("$AA_COVERAGE_OVERRIDE")
   fi
   aa_render_publish_script > "$publish_script" || fatal "cannot render the remote publish"
   PUBLISH_OUT_FILE="$AA_WORK_DIR/publish.out"
-  set +e
-  SSH bash -s -- "${publish_args[@]}" < "$publish_script" >"$PUBLISH_OUT_FILE"
-  publish_rc=$?
-  set -e
+  if [ "$AA_LOCK_MODE" = lease ]; then
+    publish_rc=0
+    aa_lease_run "$publish_script" "$PUBLISH_OUT_FILE" "$AA_WORK_DIR/publish.err" "${publish_args[@]}" || publish_rc=$?
+    cat "$AA_WORK_DIR/publish.err" >&2
+    [ "$AA_LEASE_LOST" = 0 ] || fatal "activation lease lost while publishing; Pearl state unknown"
+  else
+    set +e
+    SSH bash -s -- "${publish_args[@]}" < "$publish_script" >"$PUBLISH_OUT_FILE"
+    publish_rc=$?
+    set -e
+  fi
   PUBLISH_OUT="$(cat "$PUBLISH_OUT_FILE" 2>/dev/null || true)"
   printf '%s\n' "$PUBLISH_OUT" | grep -v '^RENEW_COVERAGE_' || true
   if [ "$publish_rc" -eq 0 ]; then
     :
   elif [ "$publish_rc" -eq 1 ]; then
-    aa_rollback
+    aa_rollback || true
     fatal "remote publish failed after mutating current"
   else
     fatal "remote publish aborted before mutating current (rc=$publish_rc)"
@@ -671,7 +809,7 @@ aa_post_activation_evidence() {
   local hook="$1"
   AA_EVIDENCE_FAILURE=""
   if ! "$hook"; then
-    aa_rollback
+    aa_rollback || true
     fatal "${AA_EVIDENCE_FAILURE:-post-activation evidence failed}"
   fi
 }

@@ -7,10 +7,14 @@
 #   A. Executed bytes: renew's aa_publish / aa_rollback send exactly the golden
 #      remote scripts and argv renew sent before the lib existed.
 #   B. Lease: aa_lease_acquire holds deploy's lock set; while held, renew's
-#      remote publish and rollback refuse before mutating, a second lease is
-#      refused, and lease-mode scripts proceed only with THIS lease's token.
-#      After release the reverse holds. A lease whose holder died while a
-#      competing holder took the locks refuses lease-mode mutation.
+#      remote publish and rollback refuse before mutating and a second lease is
+#      refused; lease-mode publish and rollback run THROUGH the lease runner
+#      (inheriting its locked descriptors) and refuse when started any other
+#      way. After release the reverse holds.
+#   D. Channel loss: a runner killed after a successful command makes the next
+#      command (and a rollback) refuse with the lease latched lost; a runner
+#      killed while its child mutates cannot free the locks for a competing
+#      holder until that child exits.
 #   C. Lease watchdog: past AA_LEASE_MAX_SECONDS the controller is TERMed and
 #      its EXIT trap releases the locks.
 set -euo pipefail
@@ -22,7 +26,7 @@ golden_rollback="$root/scripts/tests/fixtures/renew-remote-rollback.golden.sh"
 
 T="$(mktemp -d)"
 T="$(cd "$T" && pwd -P)"
-trap 'pkill -f "$T/" >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
+trap 'kill "$(cat "$T/coordinator.pid" 2>/dev/null)" 2>/dev/null; pkill -f "$T/" >/dev/null 2>&1 || true; rm -rf "$T"' EXIT
 fail() { printf '[test-autotune-activate] FAIL: %s\n' "$*" >&2; exit 1; }
 
 mkdir -p "$T/bin" "$T/fake/run/lock" "$T/fake/var/lib" "$T/rbwin"
@@ -40,20 +44,27 @@ if [ "${AA_FAKE_SSH_MODE:-}" = record ]; then
   cat >"$AA_FAKE_ROOT/record.stdin.$n"
   exit 0
 fi
-rw() {
-  sed -e "s#/opt/macprovider/#$AA_FAKE_ROOT/opt/macprovider/#g" \
-      -e "s#\"/opt\"#\"$AA_FAKE_ROOT/opt\"#g" \
-      -e "s#/run/lock/#$AA_FAKE_ROOT/run/lock/#g" \
-      -e "s#/var/lib/macprovider-pearl-updater/#$AA_FAKE_ROOT/var/lib/macprovider-pearl-updater/#g" \
-      -e "s#st_uid != 0#st_uid != $AA_FAKE_UID#g" \
-      -e "s#st_gid != 0#st_gid != $AA_FAKE_GID#g"
-}
-cmd="$(printf '%s\n' "$cmd" | rw)"
+cmd="$(printf '%s\n' "$cmd" | pearl-rw)"
 case "$cmd" in
-  "bash -s"*) rw | bash -c "$cmd" ;;
+  "bash -s"*) pearl-rw | bash -c "$cmd" ;;
   *) exec bash -c "$cmd" ;;
 esac
 SSH
+# Pearl paths -> the temp root, for commands, scripts and (via the lease
+# runner's decode step) every script sent through the lease channel.
+cat >"$T/bin/pearl-rw" <<'RW'
+#!/usr/bin/env bash
+exec sed -e "s#/opt/macprovider/#$AA_FAKE_ROOT/opt/macprovider/#g" \
+    -e "s#\"/opt\"#\"$AA_FAKE_ROOT/opt\"#g" \
+    -e "s#/run/lock/#$AA_FAKE_ROOT/run/lock/#g" \
+    -e "s#/tmp/macprovider-activation-lease\.#$AA_FAKE_ROOT/tmp/macprovider-activation-lease.#g" \
+    -e "s#base64 -d >\"\\\$work/cmd\"#base64 -d | pearl-rw >\"\\\$work/cmd\"#g" \
+    -e "s#| base64 -d)\"; fi#| base64 -d | pearl-rw)\"; fi#g" \
+    -e "s#/var/lib/macprovider-pearl-updater/#$AA_FAKE_ROOT/var/lib/macprovider-pearl-updater/#g" \
+    -e "s#mv -Tf#mv -hf#g" \
+    -e "s#st_uid != 0#st_uid != $AA_FAKE_UID#g" \
+    -e "s#st_gid != 0#st_gid != $AA_FAKE_GID#g"
+RW
 cat >"$T/bin/flock" <<'FLOCK'
 #!/usr/bin/env python3
 import fcntl, os, subprocess, sys
@@ -73,9 +84,14 @@ except BlockingIOError:
     sys.exit(1)
 sys.exit(subprocess.call(cmd) if cmd else 0)
 FLOCK
-printf '#!/bin/sh\necho 4242\n' >"$T/bin/systemctl"
-chmod 0755 "$T/bin/ssh" "$T/bin/flock" "$T/bin/systemctl"
+# The "coordinator": a process that ignores the SIGHUPs publish/rollback send.
+(python3 -c 'import signal, time; signal.signal(signal.SIGHUP, signal.SIG_IGN); time.sleep(600)' </dev/null >/dev/null 2>&1 &
+  echo "$!" >"$T/coordinator.pid")
+printf '#!/bin/sh\ncat "%s"\n' "$T/coordinator.pid" >"$T/bin/systemctl"
+chmod 0755 "$T/bin/ssh" "$T/bin/pearl-rw" "$T/bin/flock" "$T/bin/systemctl"
+mkdir -p "$T/fake/tmp"
 printf 'import sys\nsys.exit(0)\n' >"$T/lock-validate-ok.py"
+printf 'import sys\nsys.exit(0)\n' >"$T/rbwin/autotune_window.py"
 printf 'import sys\nsys.exit(1)\n' >"$T/verifier-fails.py"
 
 export PATH="$T/bin:$PATH"
@@ -142,10 +158,12 @@ import sys
 s = open(sys.argv[1]).read()
 refuse = s.index('if [ "$cov_rc" -ne 0 ] && [ "${9:-0}" != 1 ]; then')
 assert refuse < s.index("mutated=1") < s.index('"$window" apply')
-assert "flock -n 8 ||" not in s and "flock -n 9 ||" not in s
-assert s.index('lease_why="$(lease_owned)" || abort_pre_mutation') < s.index("continuity-check")
-assert s.index('lease_token="${10:-}"') < s.index("lease_owned()")
-assert s.index('if [ "$cov_rc" -ne 0 ] && [ -n "${11:-}" ]; then') < s.index("mutated=1")
+# Lease mode never (re)opens or takes the locks: it holds the runner's.
+assert "exec 8<" not in s and "exec 9<" not in s and "flock -n 8 ||" not in s
+assert s.index('lease_why="$(lease_fds_held)" || abort_pre_mutation') < s.index("continuity-check")
+# Coverage is the live coordinator's admitted set, never the Python mirror.
+assert 'coverage --admitted-json "$check/admitted.json" --poolz-json "$poolz"' in s and "coverage --root" not in s
+assert s.index('if [ "$cov_rc" -ne 0 ] && [ -n "${10:-}" ]; then') < s.index("mutated=1")
 PY
 
 # ---------------------------------------------------------------------------
@@ -156,10 +174,10 @@ mkdir -p "$A/releases/old" "$A/releases/.incoming-new.1"
 ln -s releases/old "$A/current"
 # Remote paths are the real Pearl paths; the fake ssh maps them into $T/fake.
 publish_args=(/opt/macprovider/autotune .incoming-new.1 new releases/old macprovider-coordinator "$T/lock-validate-ok.py" /nonexistent-window "$T/verifier-fails.py")
-run_publish() { # $1 lock mode [$2 lease token]; remote rc + stderr in $T/pub.err
+run_publish() { # $1 lock mode, sent as a plain SSH session; remote rc + stderr in $T/pub.err
   mkdir -p "$A/releases/.incoming-new.1"
   local extra=()
-  [ "$1" = flock ] || extra=(0 "${2:-}" "")
+  [ "$1" = flock ] || extra=(0 "" "")
   bash -c "$(preamble)"'
 AA_GATE_SNIPPET="$AA_GATE_CONTINUITY_CHECK"
 AA_COVERAGE_POLICY=warn
@@ -173,25 +191,49 @@ run_rollback() {
 aa_render_rollback_script flock | SSH bash -s -- "$1" releases/old __EMPTY__ macprovider-coordinator "$2" releases/new "$3"
 ' _ /opt/macprovider/autotune "$T/lock-validate-ok.py" "$T/rbwin/autotune_window.py" >/dev/null 2>"$T/rb.err"
 }
+free_locks() { # both Pearl locks acquirable right now
+  flock -n "$T/fake/run/lock/macprovider-pearl-updater.lock" true &&
+    flock -n "$T/fake/opt/macprovider/.coordinator-deploy.lock" true
+}
 
-mkfifo "$T/lease.ctl"
+# The lease controller: acquire, then publish and roll back THROUGH the lease
+# runner, then hold the lease until told to release it.
+mkdir -p "$T/lw" "$A/releases/new"
 bash -c "$(preamble)"'
 trap "exit 71" HUP INT TERM
 trap aa_lease_release EXIT
+AA_WORK_DIR="$1"
 aa_lease_acquire
-echo "$AA_LEASE_TOKEN" >"$1"
-read -r _ <"$2"
-' _ "$T/lease.state" "$T/lease.ctl" 2>"$T/lease.err" &
+AA_GATE_SNIPPET="$AA_GATE_CONTINUITY_CHECK"; AA_COVERAGE_POLICY=warn; AA_LOCK_MODE=lease
+aa_render_publish_script >"$AA_WORK_DIR/publish.sh"
+rc=0
+aa_lease_run "$AA_WORK_DIR/publish.sh" "$AA_WORK_DIR/publish.out" "$AA_WORK_DIR/publish.err" \
+  /opt/macprovider/autotune .incoming-new.1 new releases/old macprovider-coordinator "$2" /nonexistent-window "$3" 0 "" "" || rc=$?
+echo "$rc" >"$AA_WORK_DIR/publish.rc"
+ln -sfn releases/new "$5/current"
+aa_render_rollback_script lease >"$AA_WORK_DIR/rollback.sh"
+rc=0
+aa_lease_run "$AA_WORK_DIR/rollback.sh" "$AA_WORK_DIR/rollback.out" "$AA_WORK_DIR/rollback.err" \
+  /opt/macprovider/autotune releases/old __EMPTY__ macprovider-coordinator "$2" releases/new "$6" || rc=$?
+echo "$rc" >"$AA_WORK_DIR/rollback.rc"
+echo ready >"$AA_WORK_DIR/state"
+until [ -e "$4" ]; do sleep 0.1; done
+' _ "$T/lw" "$T/lock-validate-ok.py" "$T/verifier-fails.py" "$T/lease.ctl" "$A" "$T/rbwin/autotune_window.py" 2>"$T/lease.err" &
 lease_pid=$!
-for _ in $(seq 1 100); do [ -s "$T/lease.state" ] && break; kill -0 "$lease_pid" 2>/dev/null || break; sleep 0.1; done
-[ -s "$T/lease.state" ] || { cat "$T/lease.err" >&2; fail "aa_lease_acquire did not take deploy's lock set"; }
+for _ in $(seq 1 150); do [ -s "$T/lw/state" ] && break; kill -0 "$lease_pid" 2>/dev/null || break; sleep 0.1; done
+[ -s "$T/lw/state" ] || { cat "$T/lease.err" "$T/lw/"*.err >&2 2>/dev/null; fail "the lease controller did not take deploy's lock set and run its commands"; }
+[ "$(cat "$T/lw/publish.rc")" = 2 ] && grep -q "content drift under lock" "$T/lw/publish.err" \
+  || fail "lease-mode publish through the runner must pass the lock proof and reach the gate (rc=$(cat "$T/lw/publish.rc")): $(cat "$T/lw/publish.err")"
+[ "$(cat "$T/lw/rollback.rc")" = 0 ] && grep -q "rolled back to releases/old" "$T/lw/rollback.out" \
+  || fail "lease-mode rollback through the runner must roll back (rc=$(cat "$T/lw/rollback.rc")): $(cat "$T/lw/rollback.out" "$T/lw/rollback.err")"
+[ "$(readlink "$A/current")" = releases/old ] || fail "lease-mode rollback did not restore current"
 
 rc=0; run_publish flock || rc=$?
 [ "$rc" -eq 2 ] || fail "renewal publish while the lease is held must abort pre-mutation (rc=$rc)"
 grep -q "Pearl updater lock held; not mutating" "$T/pub.err" || fail "renewal did not refuse on the held lease: $(cat "$T/pub.err")"
 [ "$(readlink "$A/current")" = releases/old ] || fail "renewal mutated current while the lease was held"
 [ ! -e "$A/releases/.incoming-new.1" ] || fail "refused renewal left its incoming dir"
-[ ! -e "$A/releases/new" ] || fail "refused renewal staged a release"
+[ ! -e "$A/releases/new/release.json" ] || fail "refused renewal staged a release"
 
 rc=0; run_rollback || rc=$?
 [ "$rc" -eq 1 ] && grep -q "rollback: Pearl updater lock held; not mutating" "$T/rb.err" \
@@ -200,73 +242,99 @@ rc=0; run_rollback || rc=$?
 rc=0; bash -c "$(preamble)"$'\n''aa_lease_acquire' 2>"$T/lease2.err" || rc=$?
 [ "$rc" -ne 0 ] && grep -q "holds the Pearl lock" "$T/lease2.err" || fail "a second lease must be refused (rc=$rc): $(cat "$T/lease2.err")"
 
-lease_token="$(cat "$T/lease.state")"
-case "$lease_token" in *[!0-9a-f]*|"") fail "lease token is not hex: $lease_token" ;; esac
-[ "${#lease_token}" -eq 32 ] || fail "lease token must be 32 hex characters"
-rc=0; run_publish lease "$lease_token" || rc=$?
-[ "$rc" -eq 2 ] && grep -q "content drift under lock" "$T/pub.err" \
-  || fail "lease-mode publish must pass the lock check under the lease and reach the gate (rc=$rc): $(cat "$T/pub.err")"
-rc=0; run_publish lease 0123456789abcdef0123456789abcdef || rc=$?
-[ "$rc" -eq 2 ] && grep -q "activation lease not held by this session (lease record belongs to another session)" "$T/pub.err" \
-  || fail "lease-mode publish with another session's token must refuse (rc=$rc): $(cat "$T/pub.err")"
-rc=0; run_publish lease "" || rc=$?
-[ "$rc" -eq 2 ] && grep -q "activation lease not held by this session (no lease token presented)" "$T/pub.err" \
-  || fail "lease-mode publish without a token must refuse (rc=$rc): $(cat "$T/pub.err")"
+# A lease-mode script started any other way than by the runner holds no lock.
+rc=0; run_publish lease || rc=$?
+[ "$rc" -eq 2 ] && grep -q "activation lease locks not inherited" "$T/pub.err" \
+  || fail "lease-mode publish outside the lease runner must refuse (rc=$rc): $(cat "$T/pub.err")"
 rc=0
 bash -c "$(preamble)"'
-aa_render_rollback_script lease | SSH bash -s -- "$1" releases/old __EMPTY__ macprovider-coordinator "$2" releases/new "$3" 0123456789abcdef0123456789abcdef
+aa_render_rollback_script lease | SSH bash -s -- "$1" releases/old __EMPTY__ macprovider-coordinator "$2" releases/new "$3"
 ' _ /opt/macprovider/autotune "$T/lock-validate-ok.py" "$T/rbwin/autotune_window.py" >/dev/null 2>"$T/rb.err" || rc=$?
-[ "$rc" -eq 1 ] && grep -q "rollback: activation lease not held by this session (lease record belongs to another session)" "$T/rb.err" \
-  || fail "lease-mode rollback with another session's token must refuse (rc=$rc): $(cat "$T/rb.err")"
-[ "$(readlink "$A/current")" = releases/old ] || fail "refused lease-mode rollback mutated current"
+[ "$rc" -eq 1 ] && grep -q "rollback: activation lease locks not inherited" "$T/rb.err" \
+  || fail "lease-mode rollback outside the lease runner must refuse (rc=$rc): $(cat "$T/rb.err")"
 
-printf 'release\n' >"$T/lease.ctl"
+kill -0 "$lease_pid" 2>/dev/null || fail "the lease controller died while holding the lease: $(cat "$T/lease.err")"
+touch "$T/lease.ctl"
 wait "$lease_pid" || fail "lease controller failed: $(cat "$T/lease.err")"
 
 rc=0; run_publish flock || rc=$?
 [ "$rc" -eq 2 ] && grep -q "content drift under lock" "$T/pub.err" \
   || fail "after release, renewal must take the locks and reach its gate (rc=$rc): $(cat "$T/pub.err")"
-rc=0; run_publish lease "$lease_token" || rc=$?
-[ "$rc" -eq 2 ] && grep -q "activation lease not held by this session (lease record missing)" "$T/pub.err" \
+rc=0; run_publish lease || rc=$?
+[ "$rc" -eq 2 ] && grep -q "activation lease locks not inherited" "$T/pub.err" \
   || fail "lease-mode publish after the lease was released must refuse (rc=$rc): $(cat "$T/pub.err")"
 
-# Holder loss: this run's lease holder dies (SIGKILL: its record survives) and a
-# competing deploy takes both locks. The locks are busy, the token matches the
-# stale record, but the recorded holder PIDs are gone: lease-mode must refuse.
-bash -c "$(preamble)"'
-trap "exit 71" HUP INT TERM
-trap aa_lease_release EXIT
-aa_lease_acquire
-echo "$AA_LEASE_TOKEN" >"$1"
-sleep 30
-' _ "$T/lease2.state" 2>"$T/lease3.err" &
-lease2_pid=$!
-for _ in $(seq 1 100); do [ -s "$T/lease2.state" ] && break; kill -0 "$lease2_pid" 2>/dev/null || break; sleep 0.1; done
-[ -s "$T/lease2.state" ] || { cat "$T/lease3.err" >&2; fail "second lease did not start"; }
-lease2_token="$(cat "$T/lease2.state")"
-cp -p "$T/fake/opt/macprovider/.activation-lease" "$T/stale-lease-record"
-pkill -9 -f "flock -n $T/fake/run/lock/macprovider-pearl-updater.lock" || true
-pkill -9 -f "flock -n $T/fake/opt/macprovider/.coordinator-deploy.lock" || true
-wait "$lease2_pid" 2>/dev/null || true
-flock -n "$T/fake/run/lock/macprovider-pearl-updater.lock" flock -n "$T/fake/opt/macprovider/.coordinator-deploy.lock" sleep 30 &
-competitor_pid=$!
-sleep 0.5
-cp -p "$T/stale-lease-record" "$T/fake/opt/macprovider/.activation-lease"
-rc=0; run_publish lease "$lease2_token" || rc=$?
-[ "$rc" -eq 2 ] && grep -Eq "activation lease not held by this session \(lease holder [0-9]+ is gone\)" "$T/pub.err" \
-  || fail "a dead lease holder with a competing lock owner must refuse lease-mode publish (rc=$rc): $(cat "$T/pub.err")"
-[ "$(readlink "$A/current")" = releases/old ] || fail "dead-holder refusal mutated current"
+# ---------------------------------------------------------------------------
+# D. Channel loss.
+# ---------------------------------------------------------------------------
+# D1: the runner dies after a successful command and before the next one.
+mkdir -p "$T/d1"
 rc=0
 bash -c "$(preamble)"'
-aa_render_rollback_script lease | SSH bash -s -- "$1" releases/old __EMPTY__ macprovider-coordinator "$2" releases/new "$3" "$4"
-' _ /opt/macprovider/autotune "$T/lock-validate-ok.py" "$T/rbwin/autotune_window.py" "$lease2_token" >/dev/null 2>"$T/rb.err" || rc=$?
-[ "$rc" -eq 1 ] && grep -Eq "rollback: activation lease not held by this session \(lease holder [0-9]+ is gone\)" "$T/rb.err" \
-  || fail "a dead lease holder must refuse lease-mode rollback (rc=$rc): $(cat "$T/rb.err")"
-kill "$competitor_pid" 2>/dev/null || true
-{ wait "$competitor_pid"; } 2>/dev/null || true
-pkill -f "flock -n $T/fake/" 2>/dev/null || true
-rm -f "$T/fake/opt/macprovider/.activation-lease"
-sleep 0.3
+trap "" TERM
+trap aa_lease_release EXIT
+AA_WORK_DIR="$1"; AA_LOCK_MODE=lease
+REMOTE_AUTOTUNE_DIR=/opt/macprovider/autotune COORDINATOR_UNIT=macprovider-coordinator RELEASE_DIRNAME=new
+CURRENT_TARGET=releases/old ORIG_PREVIOUS_TARGET="" LOCK_HELPER="$5" WINDOW_HELPER="$6"
+aa_lease_acquire
+printf "touch %q\n" "$2" >"$AA_WORK_DIR/c1.sh"
+printf "touch %q\n" "$3" >"$AA_WORK_DIR/c2.sh"
+c1=0; aa_lease_run "$AA_WORK_DIR/c1.sh" "$AA_WORK_DIR/o1" "$AA_WORK_DIR/e1" || c1=$?
+echo "$c1 $AA_LEASE_HOLDER_PID" >"$AA_WORK_DIR/c1"
+until [ -e "$4" ]; do sleep 0.1; done
+c2=0; aa_lease_run "$AA_WORK_DIR/c2.sh" "$AA_WORK_DIR/o2" "$AA_WORK_DIR/e2" || c2=$?
+echo "$c2 $AA_LEASE_LOST" >"$AA_WORK_DIR/c2"
+rb=0; aa_rollback || rb=$?
+echo "$rb" >"$AA_WORK_DIR/rb"
+if aa_lease_lost; then exit 6; fi
+exit 0
+' _ "$T/d1" "$T/d1.marker1" "$T/d1.marker2" "$T/d1.ctl" "$T/lock-validate-ok.py" "$T/rbwin/autotune_window.py" 2>"$T/d1.err" &
+d1_pid=$!
+for _ in $(seq 1 100); do [ -s "$T/d1/c1" ] && break; kill -0 "$d1_pid" 2>/dev/null || break; sleep 0.1; done
+[ -s "$T/d1/c1" ] || { cat "$T/d1.err" >&2; fail "D1: first command did not return"; }
+read -r d1_rc d1_holder <"$T/d1/c1"
+[ "$d1_rc" = 0 ] && [ -e "$T/d1.marker1" ] || fail "D1: the first command must run through the lease (rc=$d1_rc)"
+kill -9 "$d1_holder"
+for _ in $(seq 1 50); do free_locks && break; sleep 0.1; done
+kill -0 "$d1_pid" 2>/dev/null || fail "D1: the controller died early: $(cat "$T/d1.err")"
+touch "$T/d1.ctl"
+rc=0; wait "$d1_pid" || rc=$?
+[ "$rc" -eq 6 ] || fail "D1: the controller must end lease-lost (rc=$rc): $(cat "$T/d1.err")"
+[ "$(cat "$T/d1/c2")" = "1 1" ] || fail "D1: the command after holder loss must refuse with the lease lost: $(cat "$T/d1/c2")"
+[ ! -e "$T/d1.marker2" ] || fail "D1: a command ran after the lease runner died"
+[ "$(cat "$T/d1/rb")" = 1 ] && grep -q "ROLLBACK REFUSED: the activation lease is lost" "$T/d1.err" \
+  || fail "D1: a lease-mode rollback after holder loss must refuse, not roll back from another session: $(cat "$T/d1.err")"
+free_locks || fail "D1: the locks must be free once the runner is gone"
+
+# D2: the runner dies while its child is mid-mutation; the child's inherited
+# descriptors keep both locks until it exits.
+mkdir -p "$T/d2"
+bash -c "$(preamble)"'
+trap "" TERM
+trap aa_lease_release EXIT
+AA_WORK_DIR="$1"; AA_LOCK_MODE=lease
+aa_lease_acquire
+printf "touch %q; sleep 3; touch %q\n" "$2" "$3" >"$AA_WORK_DIR/c.sh"
+echo "$AA_LEASE_HOLDER_PID" >"$AA_WORK_DIR/holder"
+c=0; aa_lease_run "$AA_WORK_DIR/c.sh" "$AA_WORK_DIR/o" "$AA_WORK_DIR/e" || c=$?
+echo "$c $AA_LEASE_LOST" >"$AA_WORK_DIR/result"
+' _ "$T/d2" "$T/d2.started" "$T/d2.finished" 2>"$T/d2.err" &
+d2_pid=$!
+for _ in $(seq 1 100); do [ -e "$T/d2.started" ] && break; kill -0 "$d2_pid" 2>/dev/null || break; sleep 0.1; done
+[ -e "$T/d2.started" ] && [ -s "$T/d2/holder" ] || { cat "$T/d2.err" >&2; fail "D2: the mutation did not start"; }
+kill -9 "$(cat "$T/d2/holder")"
+sleep 0.5
+[ ! -e "$T/d2.finished" ] || fail "D2: the mutation finished too early for the test"
+! flock -n "$T/fake/run/lock/macprovider-pearl-updater.lock" true \
+  || fail "D2: a competing holder took the updater lock while the runner's child was mutating"
+! flock -n "$T/fake/opt/macprovider/.coordinator-deploy.lock" true \
+  || fail "D2: a competing holder took the coordinator deploy lock while the runner's child was mutating"
+wait "$d2_pid" || fail "D2: controller failed: $(cat "$T/d2.err")"
+[ "$(cat "$T/d2/result")" = "1 1" ] || fail "D2: losing the runner mid-command must report the lease lost: $(cat "$T/d2/result")"
+for _ in $(seq 1 50); do [ -e "$T/d2.finished" ] && free_locks && break; sleep 0.1; done
+[ -e "$T/d2.finished" ] || fail "D2: the started mutation must run to completion"
+free_locks || fail "D2: the locks must be free once the mutating child exits"
+rm -rf "$T/fake/tmp/"macprovider-activation-lease.*
 
 # ---------------------------------------------------------------------------
 # C. Lease watchdog.
@@ -284,4 +352,4 @@ exit 0
 rc=0; run_publish flock || rc=$?
 grep -q "content drift under lock" "$T/pub.err" || fail "watchdog exit must release the lease: $(cat "$T/pub.err")"
 
-printf '[test-autotune-activate] ok: shared activation keeps renew bytes and honours the deploy lease\n'
+printf '[test-autotune-activate] ok: shared activation keeps renew bytes, mutates only through the lease runner, and treats channel loss as lease loss\n'
