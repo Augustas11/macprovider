@@ -1,8 +1,10 @@
 # SPEC-008 — Tier-2 Trust Layer
 
-**Version:** 0.6.2 (2026-09-10, SPEC-041 protected opaque-context composition)
+**Version:** 0.7.0 (2026-09-23, catalog serving closure and Tier-2 reload observability)
 **Depends on:** SPEC-001 v1.8, SPEC-002 v1.3.3, SPEC-004 v0.3.2,
                SPEC-006 v0.9.8
+
+**Change log v0.7.0 (2026-09-23, #1688 catalog-content lane):** New §5.10 registers `SPEC-008-R002` (deny-by-default serving closure: every recommendable, rate-carded catalog model must be pinned by a matching Tier-2 entry unless listed in the reviewed `not-buyer-serving.json`), `SPEC-008-R003` (`tier2_catalog_id` and `tier2_sha256` on the `autotune_feed_sighup_reload` success event and the boot compatibility log), and `SPEC-008-R004` (offline `--validate-autotune-release` dry-load using a strict Tier-2 build that publishes no global state), with AC-A-7..AC-A-9. No routing predicate, wire field, trust tier, or attestation label changes. Consumed by SPEC-023 v0.15.0 `SPEC-023-R017`.
 
 **Change log v0.6.2 (SPEC-041 composition):** SPEC-008 remains coordinator-to-provider-only and does not imply relay blindness. When its wrapping carries SPEC-041 work, `body_encoding`, execution-auth digest, assigned session, provider validation evidence, and terminal evidence are authenticated inside the protected payload. SPEC-041 identities/keys remain distinct from SPEC-008 ECDH material. No Tier-2 tier or production claim changes.
 
@@ -1274,6 +1276,70 @@ when no verified provider remains.
 Given one verified and one uncatalogued routable provider for the same model,
 `hash_verified` is `false`, `hash_verification.verified_provider_count` is 1,
 and `tier1_disclosure` indicates partial model-hash enforcement.
+
+### 5.10 Catalog-release serving closure and Tier-2 reload observability (v0.7.0)
+
+The Tier-2 catalog ships inside the signed autotune catalog release (SPEC-023
+§3.7.8, §3.7.9). These requirements keep what buyers can be routed to aligned
+with what Tier-2 pins, and make the Tier-2 catalog a coordinator actually loaded
+observable without reading its files.
+
+**SPEC-008-R002 — Serving closure is deny-by-default.** For every candidate
+catalog row whose `runtime_status` is `recommendable` and which resolves to a
+rate-card row (so buyers can be routed to and billed for it), the release's
+`tier2-catalog.json` MUST carry a model entry whose normalized `model_id` equals
+the row's and whose `sha256` equals the row's `model_sha256`, unless that
+`model_id` is listed in the reviewed exclusion list
+`phase3-binary/catalog/autotune/not-buyer-serving.json`. The exclusion list is a
+closed document `{schema_version: "macprovider.not-buyer-serving.v1", models}`
+whose entries are the closed object `{model_id, reason}` with a non-empty
+reason and no duplicate normalized `model_id`; any other shape fails closed.
+The list is committed and changed only through reviewed pull requests; a lane
+that judges a committed release MUST read the list from that reviewed commit.
+The check (`catalog-release.py check-tier2-binding --require-serving`) MUST
+pass over the committed release in the catalog release test suite and in the
+catalog-content gate (`SPEC-023-R017`); a failure names every unclosed model and
+the release MUST NOT go live. Wiring the check into release generation is not
+required by this revision.
+This requirement adds no wire field and changes no routing predicate in §5.6;
+it constrains which releases may be published.
+
+**SPEC-008-R003 — Tier-2 reload observability.** The coordinator's boot
+catalog-compatibility log and its `autotune_feed_sighup_reload` success event
+MUST carry `tier2_catalog_id` (the loaded catalog's signed `catalog_id`) and
+`tier2_sha256` (lowercase hex SHA-256 of the exact signed catalog bytes
+accepted). Both are empty when no active Tier-2 catalog is loaded. Operators use
+these fields as positive evidence that a SIGHUP loaded the expected Tier-2
+catalog; the absence of a rejection log is not evidence.
+
+**SPEC-008-R004 — Offline dry-load uses the strict reload build without
+publishing.** The coordinator binary MUST offer an offline validator
+(`coordinator --validate-autotune-release DIR [--previous-target FILE]`) that
+loads the live configuration exactly as a SIGHUP reload does, redirects the
+feed, signature, and Tier-2 catalog paths to `DIR`, and runs the reload's own
+checks: signature and compatible-window loading, runtime rate-card parity, and
+the strict Tier-2 build (§5.2 rules, `require_hash_verified` post-condition,
+and the active-release binding guard). The strict Tier-2 build MUST be a
+separate step from staging, so the validator never publishes the Tier-2
+singleton, never starts listeners, and opens no database. Every retained window
+entry MUST load (stricter than the SIGHUP path's warning). It prints one JSON
+verdict including `tier2_catalog_id` and `tier2_sha256`. Startup and SIGHUP
+reload behavior is unchanged by the separation.
+
+**AC-A-7. Serving closure.** A release with a recommendable, rate-carded row
+whose model has no Tier-2 entry, or a Tier-2 entry with a different hash, fails
+unless the model is in the exclusion list; the committed release passes with an
+empty list; an exclusion document with an unknown key, a missing reason, or a
+duplicate `model_id` fails closed.
+
+**AC-A-8. Reload identity.** After a successful SIGHUP the
+`autotune_feed_sighup_reload` event carries the loaded Tier-2 `catalog_id` and
+the SHA-256 of its signed bytes.
+
+**AC-A-9. Dry-load.** The validator accepts a valid release with a retained
+window; rejects a rate-card parity mismatch, a Tier-2 catalog not bound to the
+release, and an unloadable retained entry; and leaves the live paths and the
+Tier-2 singleton untouched.
 
 ---
 

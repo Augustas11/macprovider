@@ -205,7 +205,7 @@
     {
       "spec_id": "SPEC-008",
       "title": "Tier-2 Trust Layer",
-      "version": "0.6.2",
+      "version": "0.7.0",
       "path": "specs/SPEC-008-tier2.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -660,7 +660,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.14.3",
+      "version": "v0.15.0",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1616,6 +1616,72 @@
       }
     },
     {
+      "requirement_id": "SPEC-008-R002",
+      "spec_id": "SPEC-008",
+      "state": "pending",
+      "implementation": [
+        "scripts/catalog-release.py:def serving_closure_failures",
+        "scripts/catalog-release.py:def check_serving_closure",
+        "scripts/catalog-release.py:def load_serving_exclusions"
+      ],
+      "tests": [
+        "scripts/tests/test_catalog_content_gate.py::ServingClosureTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1688",
+        "rationale": "SPEC-008 v0.7.0 \u00a75.10 deny-by-default serving closure with the reviewed phase3-binary/catalog/autotune/not-buyer-serving.json exclusion list (empty today; all current recommendable rate-carded models close). Deviates from the prior owner note not to require every candidate in Tier-2 by default because of the #1680 fail-open; needs explicit owner acknowledgement in the PR. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+      }
+    },
+    {
+      "requirement_id": "SPEC-008-R003",
+      "spec_id": "SPEC-008",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/cmd/coordinator/main.go:func tier2CatalogIdentity(",
+        "phase4-coordinator/cmd/coordinator/main.go:func reloadCoordinatorConfig("
+      ],
+      "tests": [
+        "phase4-coordinator/cmd/coordinator/validate_autotune_release_test.go::TestReloadAutotuneFeedSIGHUPLogsTier2Identity"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1688",
+        "rationale": "SPEC-008 v0.7.0 \u00a75.10: tier2_catalog_id and tier2_sha256 on the autotune_feed_sighup_reload success event and the boot compatibility log. Requires a coordinator runtime release before it is observable live. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+      }
+    },
+    {
+      "requirement_id": "SPEC-008-R004",
+      "spec_id": "SPEC-008",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/tier2/catalog.go:func BuildStrict(",
+        "phase4-coordinator/cmd/coordinator/validate_autotune_release.go:func validateAutotuneRelease(",
+        "phase4-coordinator/cmd/coordinator/validate_autotune_release.go:func redirectAutotuneReleasePaths("
+      ],
+      "tests": [
+        "phase4-coordinator/cmd/coordinator/validate_autotune_release_test.go::TestValidateAutotuneReleaseAcceptsValidReleaseWithRetainedWindow",
+        "phase4-coordinator/cmd/coordinator/validate_autotune_release_test.go::TestValidateAutotuneReleaseRejectsRateCardParityMismatch",
+        "phase4-coordinator/cmd/coordinator/validate_autotune_release_test.go::TestValidateAutotuneReleaseRejectsTier2NotBoundToRelease",
+        "phase4-coordinator/cmd/coordinator/validate_autotune_release_test.go::TestValidateAutotuneReleaseRejectsUnloadableRetainedEntry",
+        "phase4-coordinator/cmd/coordinator/validate_autotune_release_test.go::TestValidateAutotuneReleaseDoesNotTouchLivePath"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1688",
+        "rationale": "SPEC-008 v0.7.0 \u00a75.10: coordinator --validate-autotune-release dry-loads a release through the reload's own checks with a strict Tier-2 build (tier2.BuildStrict) that never publishes the singleton. Requires a coordinator runtime release before operators can run it against the live binary. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+      }
+    },
+    {
       "requirement_id": "SPEC-017-R001",
       "spec_id": "SPEC-017",
       "state": "pending",
@@ -2523,6 +2589,123 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1669",
         "rationale": "Ultra >=256 GB default recommendedMaxBatch is 8 after Studio M3 Ultra 256 GB proved keyed 8-wide Coder-30B. 128-255 GB Ultra stays 4. Hard cap remains 8. Not a fleet promote and not continuous_batching on."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R013",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "scripts/autotune_window.py:def compute_window",
+        "scripts/autotune_window.py:def write_window",
+        "scripts/autotune_window.py:def parse_entries",
+        "scripts/autotune_window.py:def read_window",
+        "scripts/autotune_window.py:def open_root"
+      ],
+      "tests": [
+        "scripts/tests/test_autotune_window.py::ComputeWindowTests",
+        "scripts/tests/test_autotune_window.py::FileTests",
+        "phase4-coordinator/internal/buyer/autotune_window_compat_test.go::TestAutotuneWindowWriterFixtureAcceptedByPreviousAutotuneReleaseTargets",
+        "ops/pearl-updater/test_pearl_updater.py::PearlUpdaterTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1688",
+        "rationale": "SPEC-023 v0.15.0 \u00a73.7.9 retained-window (.previous-target) retention/rollback rule: active + at most 3 previous, prepend outgoing, same-target no-op, incoming never retained, dedupe, hardened atomic write with compare-and-swap on current, one shared writer (scripts/autotune_window.py) for deploy, renewal, and the Pearl updater, multi-line readers. Explicitly not a serving-compatibility guarantee; SPEC-023-R010 is untouched. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R014",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "scripts/catalog-release.py:def compare_live",
+        "scripts/catalog-release.py:def cmd_compare_live",
+        "scripts/catalog-release.py:def live_equivalence_reasons"
+      ],
+      "tests": [
+        "scripts/tests/test_catalog_compare_live.py::CompareLiveTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1688",
+        "rationale": "SPEC-023 v0.15.0 \u00a73.7.9: runtime deploys classify the tag-pinned catalog against live (equivalent/descends/regression); equivalent skips activation, regression aborts before mutation unless a logged override is supplied. Wired into phase4-coordinator/dist/deploy-pearl-vps.sh. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R015",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "scripts/autotune_window.py:def admissible_releases",
+        "scripts/autotune_window.py:def advertised_catalogs",
+        "scripts/autotune_window.py:def _coverage"
+      ],
+      "tests": [
+        "scripts/tests/test_autotune_window.py::CoverageTests"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1688",
+        "rationale": "SPEC-023 v0.15.0 \u00a73.7.9 activation coverage over advertised (catalog_release_id, catalog_candidate_sha256) pairs from /poolz: catalog activations refuse unless a logged override; freshness renewal publishes and alerts because a renewal cannot keep its release id (\u00a73.7.8). Offline-provider gap is accepted; SPEC-023-R010 is the durable fix. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R016",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "scripts/catalog-release.py:def feed_continuity_drift",
+        "scripts/catalog-release.py:def cmd_continuity_check"
+      ],
+      "tests": [
+        "scripts/tests/test_catalog_artifact_feed.py::RenewalFlowTest"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1688",
+        "rationale": "SPEC-023 v0.15.0 \u00a73.7.9: freshness renewal continuity covers Tier-2 model content (only issued_at/expires_at/signature/catalog_id/version may change) and trusted-keys.json bytes, pre-lock and under the Pearl lock with the same shipped implementation. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R017",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "scripts/catalog-release.py:def content_gate",
+        "scripts/catalog-release.py:def content_gate_commit_reasons",
+        "scripts/catalog-release.py:def _content_gate_invariants",
+        "scripts/catalog-release.py:def cmd_content_gate",
+        "scripts/lib/autotune-activate.sh:aa_lease_acquire",
+        "scripts/lib/autotune-activate.sh:aa_publish",
+        "scripts/lib/autotune-activate.sh:aa_rollback",
+        "scripts/lib/autotune-activate.sh:aa_post_activation_evidence",
+        "phase4-coordinator/cmd/coordinator/validate_autotune_release.go:func validateAutotuneRelease("
+      ],
+      "tests": [
+        "scripts/tests/test_catalog_content_gate.py::ContentGateTests",
+        "scripts/tests/test_catalog_content_gate.py::ContentGateCommitTests",
+        "phase4-coordinator/cmd/coordinator/validate_autotune_release_test.go::TestValidateAutotuneReleaseRejectsUnloadableRetainedEntry"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1688",
+        "rationale": "SPEC-023 v0.15.0 \u00a73.7.9 catalog-content release lane: content-gate eligibility (catalog-content vs invalid-release/full-provider-app/pricing/unknown-predecessor/unverified-commit/stale-or-future/freshness-or-noop), live-binary dry-load, lease shared with deploy and the updater, live evidence (a)-(e), rollback and failed-release retention rules. Pricing is out of scope (#1693). The operator lane script scripts/catalog-content-release.sh (preflight GO/NO_GO, evidence, rollback) is not yet mapped; the offline gate, dry-load validator, and shared activation/lease library exist on the branch. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
       }
     },
     {
