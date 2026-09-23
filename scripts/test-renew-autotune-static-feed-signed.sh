@@ -188,8 +188,8 @@ for requirement in (
     "--generated-at",
     # The freshness-only guard must cover the artifact feed once a release is
     # artifact-bound: a model-set change confined to autotune-artifacts.json
-    # must not ride the scheduled restamp. The pre-deploy check delegates to the
-    # unit-tested generator rules; the under-lock recheck mirrors them inline.
+    # must not ride the scheduled restamp. Both the pre-deploy check and the
+    # under-lock recheck run the unit-tested generator rules.
     "catalog-release.py continuity-check",
     'live-current',
     # Post-activation, generate needs the previous signed release; the cron
@@ -258,18 +258,34 @@ if '< "$SCRIPT_DIR/autotune_window.py"' not in script or 'sha256sum \'$WINDOW_HE
 for forbidden in ('> "$root/.previous-target"', 'rm -f "$root/.previous-target"', "path.write_text(", "len(out) == 3"):
     if forbidden in script:
         raise SystemExit(f"renew keeps an inline .previous-target writer: {forbidden}")
-under_lock = remote.split("Re-check dates-only continuity under the lock", 1)[1].split("\nPY", 1)[0]
-for requirement in (
-    'artifact = "autotune-artifacts.json"',
-    "(presence)",
-    # The inline mirror of RENEWAL_ARTIFACT_RELEASE_FIELDS on Pearl (no
-    # checkout there) must carry the FULL tuple, not a subset.
-    '("version", "release_id", "generated_at", "candidate_catalog_sha256")',
-):
-    if requirement not in under_lock:
-        raise SystemExit(f"under-lock continuity recheck omits the artifact feed rule: {requirement}")
-if remote.find("(presence)") > remote.find('mv "$incoming" "$final"'):
-    raise SystemExit("artifact-feed continuity must be rechecked before the release directory is installed")
+# #1688 B1: the under-lock recheck runs the shipped, sha-verified
+# catalog-release.py continuity-check (Tier-2 content + keyring bytes included),
+# never an inline mirror that can drift out of step with feed_continuity_drift.
+under_lock = remote.split("Re-check dates-only continuity under the lock", 1)[1].split('mv "$incoming" "$final"', 1)[0]
+continuity_call = 'python3 -I "$verifier" continuity-check --incoming "$incoming_path" --live "$root/current"'
+if under_lock.count(continuity_call) != 1:
+    raise SystemExit("under-lock continuity recheck must run the shipped catalog-release.py continuity-check")
+if 'abort_pre_mutation "content drift under lock; not mutating"' not in under_lock:
+    raise SystemExit("under-lock continuity drift must abort before mutation (exit 2, no rollback)")
+for position in (remote.find("flock -n 8"), remote.find("flock -n 9"), remote.find("current moved under lock")):
+    if position < 0 or position > remote.find(continuity_call):
+        raise SystemExit("continuity-check must run under both Pearl locks after the current re-read")
+if remote.find(continuity_call) > remote.find("mutated=1"):
+    raise SystemExit("continuity-check must run before any mutation")
+for forbidden in ("<<'PY'", "def norm(", "norm_artifact", "(presence)", 'artifact = "autotune-artifacts.json"'):
+    if forbidden in remote:
+        raise SystemExit(f"renew keeps an inline continuity mirror on Pearl: {forbidden}")
+if 'done < "$SCRIPT_DIR/catalog-verifier-bundle.txt"' not in script:
+    raise SystemExit("renew must ship the catalog verifier bundle to Pearl")
+bundle_loop = script.split("installing Pearl catalog continuity verifier bundle", 1)[1].split('done < "$SCRIPT_DIR/catalog-verifier-bundle.txt"', 1)[0]
+if "sha256sum '$remote_bundle_file'" not in bundle_loop or "does not match the reviewed copy" not in bundle_loop:
+    raise SystemExit("every shipped verifier bundle file must be sha256-verified against the reviewed copy")
+if script.find("installing Pearl catalog continuity verifier bundle") > script.find("<<'REMOTE'"):
+    raise SystemExit("the verifier bundle must be shipped and verified before the remote publish")
+if '"$CONTINUITY_VERIFIER" <<\'REMOTE\'' not in script or 'verifier="$8"' not in remote:
+    raise SystemExit("the remote publish must receive the shipped continuity verifier path")
+if 'rate-card.json tier2-catalog.json trusted-keys.json; do' not in script:
+    raise SystemExit("pre-lock live snapshot must include tier2-catalog.json and trusted-keys.json")
 if "rsync" in script and ".private.base64" in script.split("rsync", 1)[1][:800]:
     raise SystemExit("renew script must not rsync the private key to Pearl")
 if 'ln -sfn "$(cat .previous-target)"' in runbook:

@@ -371,10 +371,15 @@ fi
 # generated_at stripped, and the artifact feed compared by PRESENCE and by
 # content with its release-derived fields stripped. A renewal that would add,
 # drop, or rewrite the artifact feed is a catalog release, not a restamp.
+# tier2-catalog.json must match once its signing envelope is stripped (an
+# expiry re-sign is freshness; a model change is a content release) and
+# trusted-keys.json must be byte-equal: this job copies both from main, so a
+# Tier-2 or keyring change merged there must go through the catalog-content
+# lane, never this unattended cron.
 log "checking content continuity against the live release (freshness-only guard)"
 LIVE_SNAPSHOT="$STAGING/live-current"
 mkdir -p "$LIVE_SNAPSHOT"
-for name in autotune-candidates.json demand-rank.json rate-card.json; do
+for name in autotune-candidates.json demand-rank.json rate-card.json tier2-catalog.json trusted-keys.json; do
   SSH "cat '$REMOTE_AUTOTUNE_DIR/current/$name'" > "$LIVE_SNAPSHOT/$name" || fatal "cannot read live $name"
 done
 live_artifact_state="$(SSH "if test -f '$REMOTE_AUTOTUNE_DIR/current/autotune-artifacts.json'; then echo present; else echo absent; fi")" \
@@ -387,7 +392,7 @@ case "$live_artifact_state" in
   *) fatal "unexpected live artifact-feed state: $live_artifact_state" ;;
 esac
 ( cd "$WORKTREE" && python3 scripts/catalog-release.py continuity-check --incoming "$RELEASE_STAGE" --live "$LIVE_SNAPSHOT" ) \
-  || fatal "content drift vs live feed — renewal is freshness-only; a content change needs a reviewed catalog release, not this cron"
+  || fatal "content drift vs live feed — renewal is freshness-only; this is a content release — use the catalog-content lane, not freshness renewal"
 log "content continuity confirmed (dates-only delta)"
 
 # Rollback restores the EXACT prior state — current AND .previous-target — then
@@ -459,6 +464,30 @@ WINDOW_HELPER_SHA="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sy
 REMOTE_WINDOW_HELPER_SHA="$(SSH "sha256sum '$WINDOW_HELPER'")" || fatal "cannot hash autotune_window.py on $PEARL_SSH"
 [ "${REMOTE_WINDOW_HELPER_SHA%% *}" = "$WINDOW_HELPER_SHA" ] \
   || fatal "autotune_window.py on $PEARL_SSH does not match the reviewed copy"
+# #1688: the under-lock continuity recheck runs the SAME catalog-release.py
+# continuity-check as the pre-lock guard, from the dependency-closed verifier
+# bundle, so there is no inline mirror on Pearl to drift out of step.
+log "installing Pearl catalog continuity verifier bundle"
+SSH "mkdir -m 0700 '$LOCK_HELPER_DIR/scripts'" || fatal "cannot create remote verifier bundle directory"
+while IFS= read -r bundle_path || [ -n "$bundle_path" ]; do
+  case "$bundle_path" in '#'*|'') continue ;; esac
+  case "$bundle_path" in
+    scripts/.|scripts/..) fatal "invalid catalog verifier bundle entry: $bundle_path" ;;
+    scripts/*) ;;
+    *) fatal "invalid catalog verifier bundle entry: $bundle_path" ;;
+  esac
+  case "${bundle_path#scripts/}" in ""|*[!A-Za-z0-9._-]*) fatal "invalid catalog verifier bundle entry: $bundle_path" ;; esac
+  remote_bundle_file="$LOCK_HELPER_DIR/$bundle_path"
+  SSH "cat >'$remote_bundle_file' && chown root:root '$remote_bundle_file' && chmod 0600 '$remote_bundle_file'" \
+    < "$REPO_ROOT/$bundle_path" \
+    || fatal "cannot install $bundle_path on $PEARL_SSH"
+  bundle_sha="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$REPO_ROOT/$bundle_path")"
+  remote_bundle_sha="$(SSH "sha256sum '$remote_bundle_file'")" || fatal "cannot hash $bundle_path on $PEARL_SSH"
+  [ "${remote_bundle_sha%% *}" = "$bundle_sha" ] \
+    || fatal "$bundle_path on $PEARL_SSH does not match the reviewed copy"
+done < "$SCRIPT_DIR/catalog-verifier-bundle.txt"
+CONTINUITY_VERIFIER="$LOCK_HELPER_DIR/scripts/catalog-release.py"
+SSH "test -f '$CONTINUITY_VERIFIER'" || fatal "catalog verifier bundle must list scripts/catalog-release.py"
 
 log "uploading signed release bytes"
 rsync -e "$RSYNC_RSH" -a --delete \
@@ -474,9 +503,9 @@ rsync -e "$RSYNC_RSH" -a --delete \
 # cannot clobber `current`. Validate existing lock files; do not create them
 # (a 0644 create would fail the coordinator deploy's 0600 root:root check).
 set +e
-SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$REMOTE_TMP" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$COORDINATOR_UNIT" "$LOCK_HELPER" "$WINDOW_HELPER" <<'REMOTE'
+SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$REMOTE_TMP" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$COORDINATOR_UNIT" "$LOCK_HELPER" "$WINDOW_HELPER" "$CONTINUITY_VERIFIER" <<'REMOTE'
 set -euo pipefail
-root="$1"; incoming="$2"; final="$3"; prev="$4"; unit="$5"; helper="$6"; window="$7"
+root="$1"; incoming="$2"; final="$3"; prev="$4"; unit="$5"; helper="$6"; window="$7"; verifier="$8"
 incoming_path="$root/releases/$incoming"
 mutated=0
 abort_pre_mutation() {
@@ -498,32 +527,9 @@ live_current="${live_current#./}"
 [ "$live_current" = "$prev" ] || abort_pre_mutation "current moved under lock ($live_current != $prev); not mutating"
 # Re-check dates-only continuity under the lock so a coordinator catalog deploy
 # that landed after the pre-lock read cannot be overwritten by this restamp.
-python3 - "$incoming_path" "$root/current" <<'PY'
-import json, pathlib, sys
-incoming, current = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-def norm(path):
-    obj = json.loads(path.read_text())
-    obj.pop("version", None)
-    obj.pop("generated_at", None)
-    return json.dumps(obj, sort_keys=True)
-for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json"):
-    if norm(incoming / name) != norm(current / name):
-        raise SystemExit(f"content drift under lock in {name}")
-# Mirrors catalog-release.py feed_continuity_drift (Pearl has no checkout): the
-# artifact feed must agree by PRESENCE and, once release-derived fields are
-# stripped, by content. Keep in step with RENEWAL_ARTIFACT_RELEASE_FIELDS.
-artifact = "autotune-artifacts.json"
-if (incoming / artifact).exists() != (current / artifact).exists():
-    raise SystemExit(f"content drift under lock in {artifact} (presence)")
-if (incoming / artifact).exists():
-    def norm_artifact(path):
-        obj = json.loads(path.read_text())
-        for field in ("version", "release_id", "generated_at", "candidate_catalog_sha256"):
-            obj.pop(field, None)
-        return json.dumps(obj, sort_keys=True)
-    if norm_artifact(incoming / artifact) != norm_artifact(current / artifact):
-        raise SystemExit(f"content drift under lock in {artifact}")
-PY
+# Same rules as the pre-lock guard: the shipped, sha-verified continuity-check.
+python3 -I "$verifier" continuity-check --incoming "$incoming_path" --live "$root/current" \
+  || abort_pre_mutation "content drift under lock; not mutating"
 cd "$root/releases"
 chown -R root:macprovider "$incoming"
 chmod 0750 "$incoming"; chmod 0640 "$incoming"/*

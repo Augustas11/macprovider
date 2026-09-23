@@ -4755,8 +4755,11 @@ def feed_continuity_drift(incoming: pathlib.Path, live: pathlib.Path) -> list[st
     is compared by presence AND content: a renewal may neither add, drop, nor
     rewrite it — the first artifact-bound release and every model change are
     deliberate catalog release cuts (`docs/runbooks/catalog-artifact-feed-release.md`),
-    never the scheduled freshness path. The under-lock recheck on Pearl mirrors
-    these rules inline (it has no checkout); keep the two in step.
+    never the scheduled freshness path. Tier-2 is compared with only its
+    signing envelope stripped (`_TIER2_ENVELOPE_FIELDS`), so an expiry re-sign
+    stays freshness-only while any model change is drift; `trusted-keys.json`
+    must be byte-equal. The under-lock recheck on Pearl runs this same function
+    from the shipped verifier bundle (`catalog-verifier-bundle.txt`).
     """
     drift: list[str] = []
 
@@ -4777,6 +4780,10 @@ def feed_continuity_drift(incoming: pathlib.Path, live: pathlib.Path) -> list[st
         live_feed, RENEWAL_ARTIFACT_RELEASE_FIELDS
     ):
         drift.append(ARTIFACT_FEED_NAME)
+    if _tier2_content(incoming)[0] != _tier2_content(live)[0]:
+        drift.append(TIER2_CATALOG_FEED_NAME)
+    if (incoming / "trusted-keys.json").read_bytes() != (live / "trusted-keys.json").read_bytes():
+        drift.append("trusted-keys.json")
     return drift
 
 
@@ -4785,7 +4792,8 @@ def cmd_continuity_check(incoming: pathlib.Path, live: pathlib.Path) -> None:
     if drift:
         fail(
             "content drift vs live feed in " + ", ".join(drift)
-            + " — renewal is freshness-only; a content change needs a reviewed catalog release"
+            + " — renewal is freshness-only; this is a content release — use the catalog-content lane,"
+            " not freshness renewal"
         )
     print("continuity-check: dates-only delta confirmed")
 
@@ -4859,17 +4867,16 @@ def live_equivalence_reasons(incoming: pathlib.Path, live: pathlib.Path) -> list
     if set(incoming_manifest["feeds"]) != set(live_manifest["feeds"]):
         reasons.append("release feed sets differ (artifact-bound vs unbound)")
     # Same semantics as the freshness-renewal guard, artifact feed included.
-    reasons.extend(f"{name} content differs" for name in feed_continuity_drift(incoming, live))
+    reasons.extend(
+        "trusted-keys.json differs" if name == "trusted-keys.json" else f"{name} content differs"
+        for name in feed_continuity_drift(incoming, live)
+    )
     if not reasons and _stripped_release_manifest(incoming_manifest) != _stripped_release_manifest(live_manifest):
         reasons.append("release.json differs beyond release-derived fields")
-    incoming_tier2, incoming_expires = _tier2_content(incoming)
-    live_tier2, live_expires = _tier2_content(live)
-    if incoming_tier2 != live_tier2:
-        reasons.append(f"{TIER2_CATALOG_FEED_NAME} content differs")
+    incoming_expires = _tier2_content(incoming)[1]
+    live_expires = _tier2_content(live)[1]
     if live_expires < incoming_expires:
         reasons.append(f"{TIER2_CATALOG_FEED_NAME}: incoming carries a fresher Tier-2 (later expires_at)")
-    if (incoming / "trusted-keys.json").read_bytes() != (live / "trusted-keys.json").read_bytes():
-        reasons.append("trusted-keys.json differs")
     return reasons
 
 

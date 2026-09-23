@@ -3149,6 +3149,52 @@ class RenewalFlowTest(unittest.TestCase):
             rewrite("autotune-candidates.json", policy_version="autotune-policy-v999")
             self.assertEqual(catalog_release.feed_continuity_drift(incoming, live), ["autotune-candidates.json"])
 
+    def test_continuity_check_covers_tier2_content_and_the_keyring_bytes(self):
+        """#1688 B1: the renewal copies tier2-catalog.json and trusted-keys.json
+        from main, so a Tier-2 model change or any keyring byte change is a
+        content release and must not ride the unattended freshness renewal. A
+        Tier-2 re-sign that moves only its signing envelope stays freshness."""
+        with self.harness() as harness:
+            harness.measure_sizes()
+            live = harness.stage(harness.root / "live")
+            incoming = harness.stage(harness.root / "incoming")
+            self.assertEqual(catalog_release.feed_continuity_drift(incoming, live), [])
+            tier2_path = incoming / "tier2-catalog.json"
+            original_tier2 = tier2_path.read_bytes()
+            tier2 = json.loads(original_tier2)
+            self.assertTrue(tier2["models"], "fixture must carry Tier-2 models")
+
+            resigned = dict(tier2)
+            resigned.update(
+                issued_at="2099-01-01T00:00:00Z", expires_at="2099-02-01T00:00:00Z",
+                signature="c2lnbmF0dXJl", catalog_id="tier2-resigned", version="tier2-resigned",
+            )
+            tier2_path.write_text(json.dumps(resigned))
+            self.assertEqual(catalog_release.feed_continuity_drift(incoming, live), [])
+            catalog_release.cmd_continuity_check(incoming, live)
+
+            changed = json.loads(original_tier2)
+            first = changed["models"][0]
+            first["sha256"] = ("1" if first["sha256"][0] != "1" else "2") + first["sha256"][1:]
+            tier2_path.write_text(json.dumps(changed))
+            self.assertEqual(catalog_release.feed_continuity_drift(incoming, live), ["tier2-catalog.json"])
+            with self.assertRaises(catalog_release.CatalogError) as caught:
+                catalog_release.cmd_continuity_check(incoming, live)
+            self.assertIn("tier2-catalog.json", str(caught.exception))
+            self.assertIn(
+                "content release — use the catalog-content lane, not freshness renewal", str(caught.exception)
+            )
+            tier2_path.write_bytes(original_tier2)
+
+            keys_path = incoming / "trusted-keys.json"
+            # Same JSON content, different bytes: the keyring is byte-compared.
+            keys_path.write_text(json.dumps(json.loads(keys_path.read_text()), sort_keys=True))
+            self.assertEqual(catalog_release.feed_continuity_drift(incoming, live), ["trusted-keys.json"])
+            with self.assertRaises(catalog_release.CatalogError) as caught:
+                catalog_release.cmd_continuity_check(incoming, live)
+            self.assertIn("trusted-keys.json", str(caught.exception))
+            self.assertIn("catalog-content lane", str(caught.exception))
+
     def test_restamping_the_generated_rate_card_instead_of_its_source_aborts(self):
         """The regression this replaced. `rate-card.json` is MATERIALISED from
         `rate-card-source.json`, so re-dating the generated file is reverted by the
