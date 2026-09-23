@@ -271,6 +271,8 @@ final class StatusCommandTests: XCTestCase {
             MacProviderCLI.helpMessage(),
             ServeCommand.helpMessage(),
             StatusCommand.helpMessage(),
+            ProviderCommand.helpMessage(),
+            ProviderVerifyCommand.helpMessage(),
             ModelsSwitchCommand.helpMessage(),
             AutotuneCommand.helpMessage(),
             Spec028CanaryCommand.helpMessage(),

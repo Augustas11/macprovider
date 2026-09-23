@@ -40,7 +40,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "malibu-cli",
         abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, MSBThroughputCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self, RelayBlindFixtureCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, MSBThroughputCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self, RelayBlindFixtureCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }

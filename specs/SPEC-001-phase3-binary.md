@@ -1,6 +1,17 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.21 (2026-09-23, catalog-material readiness hold)
+**Version:** 1.9.22 (2026-09-23, post-change provider verify)
+
+**Change log v1.9.22 (2026-09-23, post-change provider verify):** Adds
+FR-20a, the read-only `malibu-cli provider verify` command (#1689 part 2). It
+polls, with a bounded `--timeout` (default 180 s) and backoff, the local
+`/v1/models` and `/v1/status`, the coordinator view `/v1/status` reports
+(`coordinator.connected`, `network_state`, `buyer_serving_hold`), and the
+public routability feed `GET /v1/stats/routability` on the configured
+coordinator host, until they agree on model, context, and slots. It reports
+each layer, names the stale or disagreeing surface, prints one proof line, and
+exits with a distinct code per failing layer. `--json` emits
+`provider_verify.v1`. No wire, config, or status field changes.
 
 **Change log v1.9.21 (2026-09-23, catalog-material readiness hold):** Names
 the closed `buyer_serving_hold` set the CLI holds its accepted session through
@@ -1461,6 +1472,50 @@ report 0 with `throughput_source: none`.
 The standalone `self-test` command loads the model, runs the same probe with
 at most 4 tokens, prints `self-test passed: throughput_tps=<n>`, and exits
 nonzero when the model does not load or the probe produces no tokens.
+
+**FR-20a. Post-change verification (`provider verify`, v1.9.22).**
+`malibu-cli provider verify [--config <path>] [--port <n>] [--timeout <s>] [--json]`
+MUST be read-only: it never writes config, state, or processes. It polls until
+every layer passes, a terminal failure occurs, or `--timeout` (default 180 s,
+0…3600) expires, sleeping with exponential backoff (2 s doubling to 15 s,
+never past the deadline). Each poll evaluates three layers:
+
+1. **Local** passes when `GET 127.0.0.1:<port>/v1/status` reports
+   `model_loaded=true` with `status` `ready` or `busy`, and `GET /v1/models`
+   lists that `model`.
+2. **Network** passes when `/v1/status` reports `coordinator.connected=true`
+   and `network_state=buyer_serving`. A `buyer_serving_hold` of
+   `catalog_material_missing` is a distinct, terminal failure reported with its
+   label, because only a network catalog update clears it. Any other state,
+   including `model_admission_pending`, keeps polling.
+3. **Public feed** reads `GET /v1/stats/routability` (SPEC-017) on the host
+   of the configured `coordinator_url` (`wss`/`https` map to `https`; `ws`/`http`
+   only for a loopback host). The served model matches a feed `model_id` equal to
+   the local `model`, `catalog.model_id`, or `catalog.catalog_key`. The feed passes
+   when it lists the model with `max_context_tokens` at least the local
+   `capacity.max_context_tokens` and lists a `serving_capable` provider entry for
+   the model whose `slots_total` equals the local `capacity.max_concurrency`. A
+   lower feed context, a missing model, or no entry with the local slot count is
+   a disagreement. A 503 stale response, an unreachable feed, or a snapshot whose
+   `generated_at` predates the local `service_instance.started_at` is stale and
+   keeps polling. A 404 means the coordinator does not publish the feed and is
+   terminal. The feed anonymizes provider refs and publishes context only as a
+   per-model maximum, so the provider ID and this Mac's own context are reported
+   as unverifiable, never as agreement.
+
+Human output prints one `✓`/`✗`/`…` line per layer with its reason, then
+either the proof line `Verified: provider <id> · model <model> (artifact
+<first 12 hex of catalog.artifact_sha256, else model_hash>) · context <n> ·
+slots <n> · catalog release <release_id> · public feed <generated_at> (lag
+<s>s)` or `Not verified: <first non-passing layer> — <reason>`. Default human
+output follows the public-language policy. `--json` emits
+`schema_version: provider_verify.v1` with `outcome`, `exit_code`, `layers[]`
+(`layer`, `state` ∈ {`pass`,`fail`,`pending`,`unverifiable`}, `reason`),
+`proof`, and `unverifiable_fields`. Exit codes: `0` all agree, `2` local not
+ready, `3` network not serving, `4` public feed disagrees, `5` timed out on a
+stale or unreachable feed, `6` `catalog_material_missing`, `7` feed not
+published. The first failing layer in the order local, network, feed decides
+the code.
 
 ---
 
