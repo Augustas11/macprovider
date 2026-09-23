@@ -1,9 +1,9 @@
 set -euo pipefail
 root="$1"; cur="$2"; prev_b64="$3"; unit="$4"; helper="$5"; expected="$6"; window="$7"
-if [ "$prev_b64" = "__EMPTY__" ]; then prev=""; else prev="$(printf '%s' "$prev_b64" | base64 -d)"; fi
-# The exact prior window; an empty file makes restore remove .previous-target.
+# The exact prior .previous-target bytes (base64); restore writes them
+# unchanged, and an empty file makes it remove .previous-target.
 prior_window="$(dirname "$window")/prior-window"
-if [ -n "$prev" ]; then printf '%s\n' "$prev" > "$prior_window"; else : > "$prior_window"; fi
+if [ "$prev_b64" = "__EMPTY__" ]; then : > "$prior_window"; else printf '%s' "$prev_b64" | base64 -d > "$prior_window"; fi
 python3 "$helper" validate || { echo "rollback: lock validation failed; not mutating" >&2; exit 1; }
 exec 8</run/lock/macprovider-pearl-updater.lock || { echo "rollback: cannot open updater lock; not mutating" >&2; exit 1; }
 flock -n 8 || { echo "rollback: Pearl updater lock held; not mutating" >&2; exit 1; }

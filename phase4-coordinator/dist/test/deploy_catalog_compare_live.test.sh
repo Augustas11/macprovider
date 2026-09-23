@@ -174,6 +174,7 @@ fake_ssh() {
 import sys
 s, root, var = sys.argv[1:]
 s = s.replace("/opt/macprovider", root).replace("/var/lib/macprovider", var)
+s = s.replace("/etc/macprovider", root + "/../../etc/macprovider")
 s = s.replace("install -d -o macprovider -g macprovider -m 0750", "mkdir -p")
 s = s.replace("flock -s 8", ":").replace("logger -t", ": logger")
 s = s.replace("os.fchown(fd, 0, 0)", "pass")
@@ -185,8 +186,8 @@ PY
 }
 
 reset() {
-  rm -rf "${TMP:?}/opt" "${TMP:?}/var" "$DEPLOY_TMP" "${TMP:?}/pinned"
-  mkdir -p "$ROOT/autotune/releases" "$DEPLOY_TMP/scripts" "$TMP/pinned"
+  rm -rf "${TMP:?}/opt" "${TMP:?}/var" "${TMP:?}/etc" "$DEPLOY_TMP" "${TMP:?}/pinned"
+  mkdir -p "$ROOT/autotune/releases" "$DEPLOY_TMP/scripts" "$TMP/pinned" "$TMP/etc/macprovider"
   assemble "$DEPLOY_TMP"
   cp "$REPO_ROOT/phase3-binary/catalog/autotune/release-ledger.json" "$DEPLOY_TMP/release-ledger.json"
   if [ "$BOUND" = 1 ]; then
@@ -202,6 +203,8 @@ reset() {
   awk '/^tier2:/{on=1; next} on&&/^[^[:space:]#]/{on=0} on&&$1=="catalog_public_key:"{print $2}' \
     "$REPO_ROOT/phase4-coordinator/dist/coordinator.yaml" > "$DEPLOY_TMP/tier2-catalog.pub"
   [ -s "$DEPLOY_TMP/tier2-catalog.pub" ] || fail "could not derive tier2.catalog_public_key from coordinator.yaml"
+  # The LIVE coordinator's configured Tier-2 key (what the live side is judged by).
+  printf 'tier2:\n  catalog_public_key: %s\n' "$(cat "$DEPLOY_TMP/tier2-catalog.pub")" > "$ROOT/coordinator.yaml"
   # Record every verify-directory. VERIFY_MODE=stub accepts the re-stamped
   # (hence unsigned) fixtures; VERIFY_MODE=real runs the shipped verifier.
   mv "$DEPLOY_TMP/scripts/catalog-release.py" "$DEPLOY_TMP/scripts/catalog-release-real.py"
@@ -363,8 +366,17 @@ reset
 live_release renewed-live
 restamp "$ROOT/autotune/releases/renewed-live" published-2026-10-01-renewal-v1
 run_deploy_slice "" || { cat "$TMP/out" >&2; fail "stubbed live verify must proceed"; }
-grep -qF "verify-directory --directory $ROOT/autotune/releases/renewed-live --tier2-public-key-file $DEPLOY_TMP/tier2-catalog.pub" \
-  "$TMP/verify-calls" || fail "the live release must be verified with the uploaded Tier-2 trust root"
+grep -qF "verify-directory --directory $ROOT/autotune/releases/renewed-live --tier2-coordinator-config $ROOT/coordinator.yaml --allow-expired-tier2" \
+  "$TMP/verify-calls" || fail "the live release must be verified with the LIVE coordinator's Tier-2 key, tolerating expiry"
+grep -F -- "--directory $ROOT/autotune/releases/renewed-live" "$TMP/verify-calls" | grep -qF tier2-public-key-file &&
+  fail "the live release must not be judged by the incoming Tier-2 trust root"
+reset
+live_release renewed-live
+restamp "$ROOT/autotune/releases/renewed-live" published-2026-10-01-renewal-v1
+printf 'tier2:\n  catalog_public_key: overlay\n' > "$TMP/etc/macprovider/coordinator.pearl-overlays.yaml"
+run_deploy_slice "" || { cat "$TMP/out" >&2; fail "stubbed live verify with an overlay must proceed"; }
+grep -qF -- "--tier2-coordinator-config $ROOT/coordinator.yaml --tier2-coordinator-overlay $ROOT/../../etc/macprovider/coordinator.pearl-overlays.yaml --allow-expired-tier2" \
+  "$TMP/verify-calls" || fail "the live verify must pass the coordinator overlay when Pearl has one"
 
 # Real verifier: pristine committed live verifies (control), a corrupt live
 # sidecar or keyring aborts before any staging, swap, window, or override.
@@ -394,7 +406,64 @@ keys[v4]["public_key_base64"] = keys[v5]["public_key_base64"]
 p.write_text(json.dumps(k, indent=2))
 PY
   }
-  for corrupt in corrupt_sidecar corrupt_keyring; do
+  # Re-sign the live Tier-2 with a fresh key the LIVE coordinator is configured
+  # with (the incoming trust root stays the committed key): a key rotation.
+  # $1 = seconds until the live Tier-2 expires.
+  resign_live_tier2() {
+    local d="$ROOT/autotune/releases/committed-live"
+    [ -s "$TMP/t2.pub" ] || go run "$REPO_ROOT/scripts/sign-catalog.go" keygen -public-out "$TMP/t2.pub" -private-out "$TMP/t2.priv" >/dev/null 2>&1 ||
+      fail "cannot generate a Tier-2 test key"
+    python3 - "$d/tier2-catalog.json" "$TMP/t2-unsigned.json" "$1" <<'PY'
+import datetime, json, sys
+o = json.load(open(sys.argv[1]))
+o.pop("signature", None)
+now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
+o["issued_at"] = (now - datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+o["expires_at"] = (now + datetime.timedelta(seconds=int(sys.argv[3]))).strftime("%Y-%m-%dT%H:%M:%SZ")
+open(sys.argv[2], "w").write(json.dumps(o, indent=2))
+PY
+    go run "$REPO_ROOT/scripts/sign-catalog.go" sign -key "$TMP/t2.priv" -key-id rotated-test -out "$d/tier2-catalog.json" "$TMP/t2-unsigned.json" >/dev/null 2>&1 ||
+      fail "cannot sign the live Tier-2 test catalog"
+    python3 - "$CR_PY" "$d" "$(cat "$TMP/t2.pub")" <<'PY'
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("cr", sys.argv[1]); cr = importlib.util.module_from_spec(spec); spec.loader.exec_module(cr)
+d, pub = pathlib.Path(sys.argv[2]), sys.argv[3].strip()
+raw = (d / "tier2-catalog.json").read_bytes()
+m = json.loads((d / "release.json").read_bytes())
+m["feeds"]["tier2-catalog.json"].update(sha256=cr.sha256(raw), bytes=len(raw), signer_key_id=cr.tier2_trusted_key_fingerprint(pub))
+# The exact serialization manifest() emits, so release.json still binds the feeds.
+(d / "release.json").write_bytes(json.dumps(m, indent=2, sort_keys=True).encode("utf-8") + b"\n")
+PY
+    printf 'tier2:\n  catalog_public_key: %s\n' "$(cat "$TMP/t2.pub")" > "$ROOT/coordinator.yaml"
+  }
+  # Rotated live key: the live Tier-2 verifies against the LIVE coordinator's
+  # key although the incoming trust root differs; the deploy reaches classification.
+  reset
+  live_release committed-live
+  resign_live_tier2 3600
+  run_deploy_slice "" || true
+  grep -q 'LIVE catalog release autotune/current failed verify-directory' "$TMP/out" &&
+    { cat "$TMP/out" >&2; fail "a live Tier-2 signed by the rotated live key must pass the live verify"; }
+  grep -qE '^VERDICT=|catalog regression' "$TMP/out" || { cat "$TMP/out" >&2; fail "rotated live Tier-2 key: deploy must reach classification"; }
+  # Expired live Tier-2: still signature-verified, not refused for expiry.
+  reset
+  live_release committed-live
+  resign_live_tier2 2
+  sleep 3
+  run_deploy_slice "" || true
+  grep -q 'LIVE catalog release autotune/current failed verify-directory' "$TMP/out" &&
+    { cat "$TMP/out" >&2; fail "an EXPIRED live Tier-2 must not abort the live verify"; }
+  grep -qE '^VERDICT=|catalog regression' "$TMP/out" || { cat "$TMP/out" >&2; fail "expired live Tier-2: deploy must reach classification"; }
+  corrupt_tier2_sig() {
+    python3 - "$ROOT/autotune/releases/committed-live/tier2-catalog.json" <<'PY'
+import json, sys
+o = json.load(open(sys.argv[1]))
+sig = o["signature"]["sig"]
+o["signature"]["sig"] = ("B" if sig[0] != "B" else "C") + sig[1:]
+open(sys.argv[1], "w").write(json.dumps(o, indent=2) + "\n")
+PY
+  }
+  for corrupt in corrupt_sidecar corrupt_keyring corrupt_tier2_sig; do
     reset
     live_release committed-live
     "$corrupt"

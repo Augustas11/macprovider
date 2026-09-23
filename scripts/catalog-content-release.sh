@@ -88,6 +88,10 @@ COORD_BIN=/opt/macprovider/coordinator
 COORD_CONFIG=/opt/macprovider/coordinator.yaml
 COORD_OVERLAY=/etc/macprovider/coordinator.pearl-overlays.yaml
 COORD_ENV_FILE=/etc/macprovider/coordinator.env
+# Written by the coordinator after every successful boot/SIGHUP config apply
+# (phase4-coordinator/cmd/coordinator/applied_config.go).
+APPLIED_CONFIG_RECORD=/run/macprovider/coordinator-applied-config.json
+APPLIED_CONFIG_SCHEMA=macprovider.coordinator-applied-config.v1
 BUYER_URL=http://127.0.0.1:8443
 PROVIDER_URL=http://127.0.0.1:8444
 
@@ -95,7 +99,6 @@ WATCH_SECONDS="${CATALOG_EVIDENCE_WATCH_SECONDS:-600}"
 POLL_SECONDS="${CATALOG_EVIDENCE_POLL_SECONDS:-30}"
 CANARY_RECOVERY_SECONDS="${CATALOG_CANARY_RECOVERY_SECONDS:-180}"
 SETTLE_SECONDS="${CATALOG_EVIDENCE_SETTLE_SECONDS:-30}"
-INCOMPATIBLE_BASELINE_SECONDS=3600
 for _n in "$WATCH_SECONDS" "$POLL_SECONDS" "$CANARY_RECOVERY_SECONDS" "$SETTLE_SECONDS"; do
   case "$_n" in ""|*[!0-9]*) fatal "CATALOG_EVIDENCE_*/CATALOG_CANARY_RECOVERY_SECONDS must be whole seconds" ;; esac
 done
@@ -157,6 +160,10 @@ T_RB=""
 CANARY_CATALOG_KEY=""
 GATE_LANE=""
 RELEASE_DIRNAME=""
+# sha256 of the on-disk coordinator.yaml / overlay ("" = no overlay), proved
+# equal to the coordinator's applied-config record by pf_config_applied.
+CONFIG_DISK_SHA=""
+OVERLAY_DISK_SHA=""
 
 ccr_cleanup() {
   local rc=$?
@@ -404,11 +411,12 @@ pf_override() {
 # Pearl reachable; live targets well-formed; no deploy/renew/update lock held.
 pf_pearl() {
   local out
-  if ! out="$( (aa_read_live_targets && printf '%s\n' "$CURRENT_TARGET" && printf '%s' "$ORIG_PREVIOUS_TARGET") 2>&1)"; then
+  if ! out="$( (aa_read_live_targets && printf '%s\n' "$ORIG_PREVIOUS_TARGET_B64" "$CURRENT_TARGET" && printf '%s' "$ORIG_PREVIOUS_TARGET") 2>&1)"; then
     record pearl_reachable 0 "cannot read live autotune targets on $PEARL_SSH: $out"; return 1
   fi
-  CURRENT_TARGET="$(printf '%s\n' "$out" | sed -n 1p)"
-  ORIG_PREVIOUS_TARGET="$(printf '%s\n' "$out" | sed -n '2,$p')"
+  ORIG_PREVIOUS_TARGET_B64="$(printf '%s\n' "$out" | sed -n 1p)"
+  CURRENT_TARGET="$(printf '%s\n' "$out" | sed -n 2p)"
+  ORIG_PREVIOUS_TARGET="$(printf '%s\n' "$out" | sed -n '3,$p')"
   record pearl_reachable 1 "current=$CURRENT_TARGET window=$(printf '%s' "$ORIG_PREVIOUS_TARGET" | tr '\n' ' ')"
   if SSH "test -e /var/lib/macprovider-pearl-updater/tier2-enforcement-transaction.json"; then
     record pearl_locks_free 0 "a Tier-2 enforcement transaction is active"; return 1
@@ -462,29 +470,80 @@ pf_closure() {
   record serving_closure 1 "every served model has a matching Tier-2 pin or a reviewed exclusion"
 }
 
-# (e) A Tier-2 pin new vs live that makes a recommendable model buyer-serving
-# needs a strict-pin buyer request + settlement row. No reusable
-# noninteractive production harness exists, so such releases are NO_GO here.
-pf_buyer_serving_e2e() {
-  local new
-  new="$(python3 - "$REL" "$LIVE" "$WORK/gate/not-buyer-serving.json" <<'PY'
-import json, pathlib, sys
-rel, live = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
-excluded = {m["model_id"].lower().strip() for m in json.load(open(sys.argv[3]))["models"]}
-def pins(d):
-    return {(m["model_id"].lower().strip(), m["sha256"].lower()) for m in json.loads((d / "tier2-catalog.json").read_bytes())["models"]}
-rows = json.loads((rel / "autotune-candidates.json").read_bytes())["rows"]
-serving = {(r["model_id"].lower().strip(), str(r.get("model_sha256", "")).lower())
-           for r in rows.values() if r.get("runtime_status") == "recommendable"}
-new = sorted(m for m, s in (pins(rel) - pins(live)) if (m, s) in serving and m not in excluded)
-print(" ".join(new))
+# (e) A model that is newly buyer-serving vs live (added) or served at a new
+# hash (changed) needs a strict-pin buyer request + settlement row. No
+# reusable noninteractive production harness exists, so such releases are
+# NO_GO here. The live side is judged with the not-buyer-serving.json that was
+# in force for it: the one committed with the reviewed release the live
+# release is (compare-live) or descends from, found on origin/main history.
+live_exclusions() { # <out>: that exclusion list, or fail
+  local key
+  key="$(python3 -c '
+import json, re, sys
+v = json.load(open(sys.argv[1]))
+if v.get("verdict") == "descends":
+    key = v.get("matched_ledger_release")
+elif v.get("verdict") == "equivalent":
+    key = v.get("live_release_id")
+else:
+    raise SystemExit(1)
+if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,191}", key):
+    raise SystemExit(1)
+print(key)' "$WORK/compare-live.json" 2>/dev/null)" || return 1
+  python3 - "$REPO_ROOT" "$key" "$1" <<'PY'
+import json, subprocess, sys
+repo, key, out = sys.argv[1:]
+REL = "phase3-binary/catalog/autotune/release.json"
+EXCL = "phase3-binary/catalog/autotune/not-buyer-serving.json"
+def show(commit, path):
+    r = subprocess.run(["git", "-C", repo, "show", "%s:%s" % (commit, path)], capture_output=True)
+    return r.stdout if r.returncode == 0 else None
+commits = subprocess.run(["git", "-C", repo, "log", "--format=%H", "origin/main", "--", REL],
+                         capture_output=True, text=True, check=True).stdout.split()
+for commit in commits:  # newest first
+    raw = show(commit, REL)
+    try:
+        rid = json.loads(raw)["release_id"] if raw else None
+    except (ValueError, KeyError, TypeError):
+        rid = None
+    if rid != key:
+        continue
+    excl = show(commit, EXCL)
+    # Before #1688 there was no exclusion list: that release served exactly
+    # its pinned rows, so an empty list is its historically exact set.
+    open(out, "wb").write(excl if excl is not None else
+                          b'{"models": [], "schema_version": "macprovider.not-buyer-serving.v1"}\n')
+    print(commit)
+    raise SystemExit(0)
+raise SystemExit(2)
 PY
-)" || { record buyer_serving_e2e 0 "cannot compare Tier-2 pins with live"; return 1; }
-  if [ -n "$new" ]; then
-    record buyer_serving_e2e 0 "new buyer-serving Tier-2 pin(s) vs live: $new; a strict-pin buyer request + settlement row is required and no noninteractive harness exists (ship via the runtime lane with its E2E)"
-    return 1
+}
+
+pf_buyer_serving_e2e() {
+  local rc=0 commit verdict
+  python3 -I "$SCRIPT_DIR/catalog-release.py" compare-live --incoming "$REL" --live "$LIVE" \
+    --ledger "$WORK/gate/release-ledger.json" >"$WORK/compare-live.json" 2>"$WORK/compare-live.err" || rc=$?
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
+    record buyer_serving_e2e 0 "compare-live failed (rc=$rc): $(tail -n 2 "$WORK/compare-live.err")"; return 1
   fi
-  record buyer_serving_e2e 1 "no new buyer-serving Tier-2 pin vs live"
+  if ! commit="$(live_exclusions "$WORK/live-not-buyer-serving.json")"; then
+    record buyer_serving_e2e 0 "cannot establish the live release's buyer-serving exclusions (live content matches no reviewed release on origin/main)"; return 1
+  fi
+  if ! python3 -I "$SCRIPT_DIR/catalog-release.py" buyer-serving-set --release "$REL" \
+      --exclusions "$WORK/gate/not-buyer-serving.json" --diff-live "$LIVE" \
+      --live-exclusions "$WORK/live-not-buyer-serving.json" >"$WORK/buyer-serving.json" 2>"$WORK/buyer-serving.err"; then
+    record buyer_serving_e2e 0 "buyer-serving-set failed: $(tail -n 2 "$WORK/buyer-serving.err")"; return 1
+  fi
+  verdict="$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1]))
+new = ["%s (added)" % m["model_id"] for m in d["added"]] + ["%s (sha changed)" % m["model_id"] for m in d["changed"]]
+print(", ".join(new))
+raise SystemExit(1 if new else 0)' "$WORK/buyer-serving.json")" || {
+    record buyer_serving_e2e 0 "new buyer-serving model(s) vs live: $verdict; a strict-pin buyer request + settlement row is required and no noninteractive harness exists (ship via the runtime lane with its E2E)"
+    return 1
+  }
+  record buyer_serving_e2e 1 "buyer-serving set adds or re-hashes nothing vs live (live exclusions from ${commit:0:12})"
 }
 
 # Stage the candidate in a private scratch mirror of the live root on Pearl
@@ -497,7 +556,9 @@ scratch="$1"; root="$2"; cur="$3"; prev_b64="$4"; name="$5"; env_file="$6"; bin=
 window="$scratch/tools/autotune_window.py"
 sroot="$scratch/root"
 if [ "$prev_b64" = __EMPTY__ ]; then prev=""; else prev="$(printf '%s' "$prev_b64" | base64 -d)"; fi
-echo "WINDOW_HELPER_SHA=$(sha256sum "$window" | cut -d' ' -f1)"
+# Every shipped tool (the window helper + the catalog-verifier bundle under
+# tools/scripts/) is reported for the reviewed-copy sha check.
+(cd "$scratch/tools" && find . -type f | LC_ALL=C sort | while IFS= read -r f; do echo "TOOL_SHA=$(sha256sum "$f" | cut -d' ' -f1) ${f#./}"; done)
 mkdir -p "$sroot/releases"
 cp -a "$root/$cur" "$sroot/$cur"
 for entry in $prev; do cp -a "$root/$entry" "$sroot/$entry"; done
@@ -523,7 +584,7 @@ echo "DRYLOAD_JSON=$(tail -n 1 "$scratch/dryload.json" | head -c 65536)"
 STAGE
 
 pf_dry_load() {
-  local prev_arg="__EMPTY__" out want_sha
+  local prev_arg="__EMPTY__" out entry
   REMOTE_SCRATCH="$(SSH 'umask 077 && mktemp -d /tmp/macprovider-content-preflight.XXXXXXXX')" || { record coordinator_dry_load 0 "cannot create a Pearl scratch dir"; return 1; }
   REMOTE_SCRATCH="${REMOTE_SCRATCH//$'\n'/}"
   case "$REMOTE_SCRATCH" in
@@ -531,9 +592,20 @@ pf_dry_load() {
     *) local bad="$REMOTE_SCRATCH"; REMOTE_SCRATCH=""; record coordinator_dry_load 0 "unsafe scratch dir: $bad"; return 1 ;;
   esac
   case "$REMOTE_SCRATCH" in *[!A-Za-z0-9._/-]*) REMOTE_SCRATCH=""; record coordinator_dry_load 0 "unsafe scratch dir"; return 1 ;; esac
-  mkdir -p "$WORK/upload/incoming" "$WORK/upload/tools"
+  rm -rf "$WORK/upload"
+  mkdir -p "$WORK/upload/incoming" "$WORK/upload/tools/scripts"
   cp "$REL"/* "$WORK/upload/incoming/"
   cp "$SCRIPT_DIR/autotune_window.py" "$WORK/upload/tools/autotune_window.py"
+  # The whole catalog-verifier bundle beside the window helper (coverage
+  # signature-verifies restamps with the shipped catalog-release.py).
+  : >"$WORK/tools.expected"
+  printf '%s %s\n' "$(sha256_file "$SCRIPT_DIR/autotune_window.py")" autotune_window.py >>"$WORK/tools.expected"
+  for entry in $(grep -v '^#' "$SCRIPT_DIR/catalog-verifier-bundle.txt" | grep -v '^$'); do
+    case "$entry" in scripts/*) ;; *) record coordinator_dry_load 0 "invalid catalog verifier bundle entry: $entry"; return 1 ;; esac
+    case "${entry#scripts/}" in ""|*[!A-Za-z0-9._-]*) record coordinator_dry_load 0 "invalid catalog verifier bundle entry: $entry"; return 1 ;; esac
+    cp "$REPO_ROOT/$entry" "$WORK/upload/tools/$entry"
+    printf '%s %s\n' "$(sha256_file "$REPO_ROOT/$entry")" "$entry" >>"$WORK/tools.expected"
+  done
   if ! tar -C "$WORK/upload" -cf - incoming tools | SSH "tar -xf - -C '$REMOTE_SCRATCH'"; then
     record coordinator_dry_load 0 "cannot upload the candidate to the Pearl scratch dir"; return 1
   fi
@@ -543,16 +615,16 @@ pf_dry_load() {
       "$COORD_ENV_FILE" "$COORD_BIN" "$COORD_CONFIG" "$COORD_OVERLAY" <"$WORK/stage.remote.sh" 2>&1)"; then
     record coordinator_dry_load 0 "staging on Pearl failed: $(printf '%s' "$out" | tail -n 3)"; return 1
   fi
-  want_sha="$(sha256_file "$SCRIPT_DIR/autotune_window.py")"
-  [ "$(printf '%s\n' "$out" | sed -n 's/^WINDOW_HELPER_SHA=//p')" = "$want_sha" ] ||
-    { record coordinator_dry_load 0 "autotune_window.py on Pearl does not match the reviewed copy"; return 1; }
+  if [ "$(printf '%s\n' "$out" | sed -n 's/^TOOL_SHA=//p')" != "$(LC_ALL=C sort -k2 "$WORK/tools.expected")" ]; then
+    record coordinator_dry_load 0 "the window helper / verifier bundle on Pearl does not match the reviewed copies"; return 1
+  fi
   printf '%s\n' "$out" | sed -n 's/^PLAN_JSON=//p' >"$WORK/plan.json"
   printf '%s\n' "$out" | sed -n 's/^DRYLOAD_JSON=//p' >"$WORK/dryload.json"
   local verdict
   verdict="$(python3 - "$WORK/dryload.json" "$(printf '%s\n' "$out" | sed -n 's/^DRYLOAD_RC=//p')" \
-    "$REL_ID" "$REL_CAND_SHA" "$REL_TIER2_ID" "$REL_TIER2_SHA" "$WORK/plan.json" <<'PY'
+    "$REL_ID" "$REL_CAND_SHA" "$REL_TIER2_ID" "$REL_TIER2_SHA" "$WORK/plan.json" "$CONFIG_DISK_SHA" "$OVERLAY_DISK_SHA" <<'PY'
 import json, sys
-path, rc, rid, sha, t2id, t2sha, plan = sys.argv[1:]
+path, rc, rid, sha, t2id, t2sha, plan, cfg_sha, ov_sha = sys.argv[1:]
 try:
     v = json.loads(open(path).read())
 except ValueError:
@@ -567,7 +639,13 @@ if v.get("tier2_catalog_id") != t2id or v.get("tier2_sha256") != t2sha:
     problems.append("dry-load Tier-2 %s/%s, expected %s/%s" % (v.get("tier2_catalog_id"), v.get("tier2_sha256"), t2id, t2sha))
 if len(v.get("previous_loaded") or []) != want:
     problems.append("dry-load retained %d of %d window releases" % (len(v.get("previous_loaded") or []), want))
-print("; ".join(problems) if problems else "live binary accepts %s with the proposed window (%d retained)" % (rid, want))
+# The config the validator decoded must be the config the coordinator applied.
+if not cfg_sha:
+    problems.append("applied identity unknown (config_applied did not prove the on-disk config)")
+elif v.get("config_sha256") != cfg_sha or v.get("overlay_sha256") != ov_sha:
+    problems.append("dry-load decoded config %s/overlay %s, applied/on-disk is %s/%s" % (
+        v.get("config_sha256"), v.get("overlay_sha256") or "-", cfg_sha, ov_sha or "-"))
+print("; ".join(problems) if problems else "live binary accepts %s with the proposed window (%d retained) over the applied config" % (rid, want))
 raise SystemExit(1 if problems else 0)
 PY
 )" || { record coordinator_dry_load 0 "$verdict"; return 1; }
@@ -593,41 +671,56 @@ pf_coverage() {
 }
 
 # Every SIGHUP applies whatever coordinator.yaml/overlay says NOW (and writes a
-# billing snapshot). Refuse if either file changed after the coordinator last
-# applied config: the process start or its last fully successful reload
-# ("tier2/proof_of_weights config reloaded" closes reloadCoordinatorConfig).
+# billing snapshot). Refuse unless the on-disk bytes are exactly the bytes the
+# coordinator last applied: the sha256 of coordinator.yaml and the overlay must
+# equal the digests in its applied-config record (written after every
+# successful boot/SIGHUP). A missing or unparseable record is "applied identity
+# unknown" and fails closed.
 pf_config_applied() {
   local out verdict
+  CONFIG_DISK_SHA=""
+  OVERLAY_DISK_SHA=""
   if ! out="$(SSH "set -e
-start=\$(systemctl show --timestamp=unix -p ExecMainStartTimestamp --value '$COORDINATOR_UNIT')
-echo START=\$start
-echo RELOAD=\$(journalctl -u '$COORDINATOR_UNIT' --since \"\$start\" -o short-unix --no-pager | grep -F 'tier2/proof_of_weights config reloaded' | tail -n 1 | cut -d' ' -f1)
-python3 -c 'import os,sys
-for p in sys.argv[1:]:
-    if os.path.exists(p): print(\"MTIME=%s %r\" % (p, os.stat(p).st_mtime))' '$COORD_CONFIG' '$COORD_OVERLAY'" 2>&1)"; then
-    record config_applied 0 "cannot read coordinator start/reload/config times: $(printf '%s' "$out" | tail -n 2)"; return 1
+for spec in 'config=$COORD_CONFIG' 'overlay=$COORD_OVERLAY'; do
+  p=\"\${spec#*=}\"
+  if [ -e \"\$p\" ]; then echo \"SHA=\${spec%%=*} \$(sha256sum \"\$p\" | cut -d' ' -f1)\"; else echo \"SHA=\${spec%%=*} ABSENT\"; fi
+done
+if [ -f '$APPLIED_CONFIG_RECORD' ]; then echo \"RECORD=\$(head -c 65536 '$APPLIED_CONFIG_RECORD' | head -n 1)\"; else echo RECORD=; fi" 2>&1)"; then
+    record config_applied 0 "cannot read coordinator config digests / applied-config record: $(printf '%s' "$out" | tail -n 2)"; return 1
   fi
   verdict="$(printf '%s\n' "$out" | python3 -c '
-import sys
-start = reload = None; mtimes = []
+import json, re, sys
+config, overlay, schema = sys.argv[1:]
+disk, record = {}, None
 for line in sys.stdin:
-    line = line.strip()
-    if line.startswith("START="): start = line[6:].lstrip("@")
-    elif line.startswith("RELOAD="): reload = line[7:]
-    elif line.startswith("MTIME="):
-        path, value = line[6:].rsplit(" ", 1); mtimes.append((path, float(value)))
-try:
-    applied = max(float(start), float(reload) if reload else 0.0)
-except (TypeError, ValueError):
-    print("coordinator start time is unknown"); raise SystemExit(1)
-late = [p for p, m in mtimes if m > applied]
-if not mtimes:
+    line = line.rstrip("\n")
+    if line.startswith("SHA="):
+        path, value = line[4:].rsplit(" ", 1)
+        disk[path] = value
+    elif line.startswith("RECORD="):
+        try:
+            record = json.loads(line[7:])
+        except ValueError:
+            record = None
+hexre = re.compile(r"[0-9a-f]{64}")
+cfg, ov = disk.get("config"), disk.get("overlay")
+if not cfg or not hexre.fullmatch(cfg):
     print("coordinator.yaml not found"); raise SystemExit(1)
-if late:
-    print("pending config edits not yet applied (a SIGHUP would apply them): " + ", ".join(late)); raise SystemExit(1)
-print("live yaml equals the last-applied config (no edit since %.0f)" % applied)
-')" || { record config_applied 0 "$verdict"; return 1; }
-  record config_applied 1 "$verdict"
+ov = "" if ov == "ABSENT" else ov
+if ov and not hexre.fullmatch(ov):
+    print("cannot hash the coordinator overlay"); raise SystemExit(1)
+if not isinstance(record, dict) or record.get("schema") != schema:
+    print("applied identity unknown: no parseable %s record" % schema); raise SystemExit(1)
+if record.get("config_path") != config or record.get("config_sha256") != cfg:
+    print("pending config edits not yet applied (a SIGHUP would apply them): coordinator.yaml sha %s != applied %s" % (cfg, record.get("config_sha256"))); raise SystemExit(1)
+if (record.get("overlay_sha256") or "") != ov or (ov and record.get("overlay_path") != overlay):
+    print("pending overlay edits not yet applied (a SIGHUP would apply them): overlay sha %s != applied %s" % (ov or "-", record.get("overlay_sha256") or "-")); raise SystemExit(1)
+print("OK %s %s" % (cfg, ov or "-"))
+' "$COORD_CONFIG" "$COORD_OVERLAY" "$APPLIED_CONFIG_SCHEMA")" || { record config_applied 0 "$verdict"; return 1; }
+  CONFIG_DISK_SHA="$(printf '%s' "$verdict" | cut -d' ' -f2)"
+  OVERLAY_DISK_SHA="$(printf '%s' "$verdict" | cut -d' ' -f3)"
+  [ "$OVERLAY_DISK_SHA" != - ] || OVERLAY_DISK_SHA=""
+  record config_applied 1 "on-disk coordinator.yaml/overlay equal the coordinator's applied-config record ($CONFIG_DISK_SHA/${OVERLAY_DISK_SHA:--})"
 }
 
 # The canary bearer must be the coordinator operator key (digest compare only).
@@ -660,13 +753,13 @@ run_preflight() {
   pf_override || true
   if check_ok release_assembled; then
     if pf_pearl; then
+      pf_config_applied || true
       if pf_live; then
         pf_content_gate || true
         pf_closure || true
         pf_buyer_serving_e2e || true
         pf_dry_load && check_ok canary_config && pf_coverage || true
       fi
-      pf_config_applied || true
       if check_ok canary_config; then
         pf_operator_key || true
         check_ok rollback_preconditions && pf_canary || true
@@ -739,12 +832,43 @@ for line in open(path, encoding="utf-8", errors="replace"):
 print("OK" if ok else "MISSING")
 raise SystemExit(0 if ok else 1)
 PY
-)" && break
-    case "$verdict" in REJECT*) ev_fail b "coordinator logged '${verdict#REJECT }' after the HUP"; return 1 ;; esac
-    [ "$SECONDS" -lt "$deadline" ] || { ev_fail b "no autotune_feed_sighup_reload for $REL_ID with tier2 $REL_TIER2_ID/$REL_TIER2_SHA"; return 1; }
+)" && applied_after_hup && break
+    case "$verdict" in
+      REJECT*) ev_fail b "coordinator logged '${verdict#REJECT }' after the HUP"; return 1 ;;
+      OK) verdict="APPLIED $APPLIED_AFTER_HUP" ;;
+    esac
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      case "$verdict" in
+        APPLIED*) ev_fail b "${verdict#APPLIED }" ;;
+        *) ev_fail b "no autotune_feed_sighup_reload for $REL_ID with tier2 $REL_TIER2_ID/$REL_TIER2_SHA" ;;
+      esac
+      return 1
+    fi
     sleep 2
   done
-  log "evidence (b): autotune_feed_sighup_reload $REL_ID tier2 $REL_TIER2_ID sha $REL_TIER2_SHA; no reload rejection"
+  log "evidence (b): autotune_feed_sighup_reload $REL_ID tier2 $REL_TIER2_ID sha $REL_TIER2_SHA; applied-config record source=sighup with the pre-HUP digests; no reload rejection"
+}
+
+# The coordinator's applied-config record must show THIS HUP applied exactly
+# the config the lease proved (source=sighup, loaded_at >= T_HUP, same digests).
+APPLIED_AFTER_HUP=""
+applied_after_hup() {
+  local raw
+  raw="$(SSH "head -c 65536 '$APPLIED_CONFIG_RECORD' 2>/dev/null | head -n 1")" || raw=""
+  APPLIED_AFTER_HUP="$(printf '%s' "$raw" | python3 -c '
+import calendar, json, re, sys, time
+schema, t_hup, cfg, ov = sys.argv[1:]
+try:
+    r = json.loads(sys.stdin.read())
+except ValueError:
+    print("applied identity unknown after the HUP: no parseable applied-config record"); raise SystemExit(1)
+m = re.fullmatch(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z", str(r.get("loaded_at", "")))
+loaded = calendar.timegm(time.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S")) + float(m.group(2) or 0) if m else None
+if r.get("schema") != schema or r.get("source") != "sighup" or loaded is None or loaded < float(t_hup):
+    print("no applied-config record from this SIGHUP (source=%s loaded_at=%s)" % (r.get("source"), r.get("loaded_at"))); raise SystemExit(1)
+if r.get("config_sha256") != cfg or (r.get("overlay_sha256") or "") != ov:
+    print("the SIGHUP applied config %s/overlay %s, expected %s/%s" % (r.get("config_sha256"), r.get("overlay_sha256") or "-", cfg, ov or "-")); raise SystemExit(1)
+' "$APPLIED_CONFIG_SCHEMA" "$T_HUP" "$CONFIG_DISK_SHA" "$OVERLAY_DISK_SHA")"
 }
 
 # Candidate row hash for the canary's catalog key in a release dir.
@@ -838,14 +962,19 @@ print(json.dumps(counts, sort_keys=True))
 PY
 }
 
-# (d) watch: no catalog_incompatible event for a (release, sha) that was not
-# already incompatible before the HUP; no catalog-unavailable increase.
+# (d) watch: per (release, sha) key, the catalog_incompatible event COUNT since
+# the HUP must not exceed the count in the equally long window just before it
+# (a new key, or more rejections for an already failing key, fails); no
+# catalog-unavailable increase.
 ev_d_watch() {
-  local end=$((SECONDS + WATCH_SECONDS)) verdict
-  journal_between "$((T_HUP - INCOMPATIBLE_BASELINE_SECONDS))" "$T_HUP" "$WORK/journal-baseline.txt" || { ev_fail d "cannot read the coordinator journal"; return 1; }
+  local end=$((SECONDS + WATCH_SECONDS)) verdict now span
   log "evidence (d): watching for ${WATCH_SECONDS}s (poll ${POLL_SECONDS}s)"
   while :; do
-    journal_since "$T_HUP" "$WORK/journal-watch.txt" || { ev_fail d "cannot read the coordinator journal"; return 1; }
+    now="$(remote_now)" || { ev_fail d "cannot read Pearl time"; return 1; }
+    case "$now" in ""|*[!0-9]*) ev_fail d "cannot read Pearl time"; return 1 ;; esac
+    span=$((now - T_HUP)); [ "$span" -ge 1 ] || span=1
+    journal_between "$((T_HUP - span))" "$T_HUP" "$WORK/journal-baseline.txt" || { ev_fail d "cannot read the coordinator journal"; return 1; }
+    journal_between "$T_HUP" "$((T_HUP + span))" "$WORK/journal-watch.txt" || { ev_fail d "cannot read the coordinator journal"; return 1; }
     verdict="$(python3 - "$WORK/journal-baseline.txt" "$WORK/journal-watch.txt" <<'PY'
 import json, sys
 def events(path):
@@ -861,12 +990,15 @@ def events(path):
     return out
 def key(e):
     return (str(e.get("catalog_release_id", "")), str(e.get("catalog_candidate_sha256", "")).lower())
-# Only (release, sha) keys that were not already incompatible in the hour
-# before the HUP count as new.
-baseline = {key(e) for e in events(sys.argv[1])}
-new = sorted({key(e) for e in events(sys.argv[2])} - baseline)
-if new:
-    print("new catalog_incompatible for " + ", ".join("%s/%s" % k for k in new)); raise SystemExit(1)
+def counts(path):
+    c = {}
+    for e in events(path):
+        c[key(e)] = c.get(key(e), 0) + 1
+    return c
+before, after = counts(sys.argv[1]), counts(sys.argv[2])
+up = sorted(k for k, n in after.items() if n > before.get(k, 0))
+if up:
+    print("catalog_incompatible increased for " + ", ".join("%s/%s (%d->%d)" % (k[0], k[1], before.get(k, 0), after[k]) for k in up)); raise SystemExit(1)
 PY
 )" || { ev_fail d "$verdict"; return 1; }
     fetch_poolz "$WORK/poolz-watch.json" || { ev_fail d "coordinator /poolz unreachable during the watch"; return 1; }
@@ -1027,25 +1159,72 @@ if ! run_preflight; then
   exit 3
 fi
 PREFLIGHT_CURRENT="$CURRENT_TARGET"
-PREFLIGHT_WINDOW="$ORIG_PREVIOUS_TARGET"
+PREFLIGHT_WINDOW_B64="$ORIG_PREVIOUS_TARGET_B64"
 SSH "rm -rf '$REMOTE_SCRATCH'" >/dev/null 2>&1 || true
 REMOTE_SCRATCH=""
 
 trap 'exit 71' HUP INT TERM
 aa_lease_acquire
 aa_read_live_targets
-[ "$CURRENT_TARGET" = "$PREFLIGHT_CURRENT" ] && [ "$ORIG_PREVIOUS_TARGET" = "$PREFLIGHT_WINDOW" ] ||
+[ "$CURRENT_TARGET" = "$PREFLIGHT_CURRENT" ] && [ "$ORIG_PREVIOUS_TARGET_B64" = "$PREFLIGHT_WINDOW_B64" ] ||
   fatal "live targets moved between preflight and the lease; re-run"
-: >"$CHECKS"
-pf_config_applied || fatal "config drift appeared under the lease: $(cut -f3 "$CHECKS")"
 aa_refuse_existing_release
+# Re-run, under the lease and against the then-current live state, the checks
+# a SIGHUP depends on: applied-config identity, the LIVE binary's dry-load of
+# this release with the proposed window over that same config, and coverage.
+: >"$CHECKS"
+pf_config_applied || fatal "config identity under the lease: $(cut -f3 "$CHECKS")"
+pf_dry_load || fatal "coordinator dry-load under the lease refused: $(cut -f3 "$CHECKS" | tail -n 1)"
+pf_coverage || fatal "window coverage under the lease: $(cut -f3 "$CHECKS" | tail -n 1)"
+SSH "rm -rf '$REMOTE_SCRATCH'" >/dev/null 2>&1 || true
+REMOTE_SCRATCH=""
 
-AA_GATE_SNIPPET='# Content lane: re-run content-gate against the then-current live release
-# with the reviewed commit'"'"'s ledger and exclusions shipped beside the verifier.
+# Reviewed-commit byte proof: a sha256 manifest of every release file, built
+# from `git show <commit>:<path>` (never the staged copy), shipped + sha-checked
+# beside the verifier; the under-lock gate checks every staged byte against it.
+python3 - "$REPO_ROOT" "$COMMIT" "$REL" "$WORK/release-bytes.sha256" <<'PY' || fatal "cannot build the reviewed-commit byte manifest"
+import hashlib, os, subprocess, sys
+repo, commit, rel, out = sys.argv[1:]
+lines = []
+for name in sorted(os.listdir(rel)):
+    base = "phase3-binary/catalog/autotune" if name in ("release.json", "trusted-keys.json", "tier2-catalog.json") else "phase3-binary/dist/static"
+    raw = subprocess.run(["git", "-C", repo, "show", "%s:%s/%s" % (commit, base, name)], capture_output=True, check=True).stdout
+    sha = hashlib.sha256(raw).hexdigest()
+    if hashlib.sha256(open(os.path.join(rel, name), "rb").read()).hexdigest() != sha:
+        raise SystemExit("assembled %s differs from %s" % (name, commit))
+    lines.append("%s %s\n" % (sha, name))
+open(out, "w").write("".join(lines))
+PY
+
+IFS= read -r -d '' AA_GATE_SNIPPET <<'GATE' || true
+# Content lane: every staged byte must be the reviewed commit's (manifest built
+# from git show <commit>:<path>, shipped beside the verifier).
+python3 -I -c 'import hashlib, os, sys
+d, m = sys.argv[1], sys.argv[2]
+want = {l.split()[1]: l.split()[0] for l in open(m) if l.strip()}
+got = {n: hashlib.sha256(open(os.path.join(d, n), "rb").read()).hexdigest() for n in os.listdir(d)}
+sys.exit(0 if want and got == want else 1)' "$incoming_path" "$(dirname "$verifier")/../release-bytes.sha256" \
+  || abort_pre_mutation "staged release bytes differ from the reviewed commit; not mutating"
+# The SIGHUP must apply exactly the config the lease dry-load decoded and the
+# coordinator already applied.
+cfg_sha="$(sha256sum /opt/macprovider/coordinator.yaml | cut -d' ' -f1)"
+ov_sha=""
+if [ -e /etc/macprovider/coordinator.pearl-overlays.yaml ]; then ov_sha="$(sha256sum /etc/macprovider/coordinator.pearl-overlays.yaml | cut -d' ' -f1)"; fi
+[ "$cfg_sha" = "@CONFIG_SHA@" ] && [ "$ov_sha" = "@OVERLAY_SHA@" ] \
+  || abort_pre_mutation "coordinator config changed since the lease dry-load; not mutating"
+python3 -c 'import json, sys; r = json.load(open(sys.argv[1])); sys.exit(0 if r.get("config_sha256") == sys.argv[2] and (r.get("overlay_sha256") or "") == sys.argv[3] else 1)' \
+  /run/macprovider/coordinator-applied-config.json "$cfg_sha" "$ov_sha" \
+  || abort_pre_mutation "the coordinator's applied config differs from the on-disk config; not mutating"
+# Re-run content-gate against the then-current live release with the reviewed
+# commit's ledger and exclusions shipped beside the verifier.
 gate_out="$(python3 -I "$verifier" content-gate --release "$incoming_path" --live "$root/current" --ledger "$(dirname "$verifier")/../phase3-binary/catalog/autotune/release-ledger.json")" \
   || abort_pre_mutation "content-gate under lock refused: $gate_out"
 printf "%s" "$gate_out" | python3 -c "import json,sys; v=json.load(sys.stdin); sys.exit(0 if v.get(\"ok\") is True and v.get(\"lane\") == \"catalog-content\" else 1)" \
-  || abort_pre_mutation "content-gate under lock is not lane catalog-content: $gate_out"'
+  || abort_pre_mutation "content-gate under lock is not lane catalog-content: $gate_out"
+GATE
+AA_GATE_SNIPPET="${AA_GATE_SNIPPET%$'\n'}"
+AA_GATE_SNIPPET="${AA_GATE_SNIPPET//@CONFIG_SHA@/$CONFIG_DISK_SHA}"
+AA_GATE_SNIPPET="${AA_GATE_SNIPPET//@OVERLAY_SHA@/$OVERLAY_DISK_SHA}"
 AA_COVERAGE_POLICY=refuse
 AA_COVERAGE_OVERRIDE=0
 [ -z "$CATALOG_WINDOW_OVERRIDE_REASON" ] || AA_COVERAGE_OVERRIDE=1
@@ -1053,11 +1232,12 @@ AA_LOCK_MODE=lease
 AA_ROLLBACK_POST_HOOK=ccr_after_rollback
 
 aa_install_helpers
-log "installing the commit's release ledger and serving exclusions beside the verifier"
-for _gate_file in release-ledger.json not-buyer-serving.json; do
-  SSH "mkdir -p -m 0700 '$LOCK_HELPER_DIR/phase3-binary/catalog/autotune' && cat >'$LOCK_HELPER_DIR/phase3-binary/catalog/autotune/$_gate_file'" <"$WORK/gate/$_gate_file" ||
+log "installing the commit's release ledger, serving exclusions and byte manifest beside the verifier"
+for _gate_file in phase3-binary/catalog/autotune/release-ledger.json phase3-binary/catalog/autotune/not-buyer-serving.json release-bytes.sha256; do
+  case "$_gate_file" in release-bytes.sha256) _gate_src="$WORK/release-bytes.sha256" ;; *) _gate_src="$WORK/gate/${_gate_file##*/}" ;; esac
+  SSH "mkdir -p -m 0700 '$LOCK_HELPER_DIR/phase3-binary/catalog/autotune' && cat >'$LOCK_HELPER_DIR/$_gate_file'" <"$_gate_src" ||
     fatal "cannot install $_gate_file on $PEARL_SSH"
-  [ "$(SSH "sha256sum '$LOCK_HELPER_DIR/phase3-binary/catalog/autotune/$_gate_file'" | cut -d' ' -f1)" = "$(sha256_file "$WORK/gate/$_gate_file")" ] ||
+  [ "$(SSH "sha256sum '$LOCK_HELPER_DIR/$_gate_file'" | cut -d' ' -f1)" = "$(sha256_file "$_gate_src")" ] ||
     fatal "$_gate_file on $PEARL_SSH does not match the commit"
 done
 aa_upload_release "$REL"
@@ -1069,23 +1249,30 @@ if [ "$AA_COVERAGE_OVERRIDE" = 1 ]; then
   # Same durable audit trail as deploy-pearl-vps.sh's regression/window
   # overrides: one JSON line appended to Pearl's
   # /var/lib/macprovider/catalog-window-overrides.jsonl via the shared
-  # scripts/lib/catalog-window-override.sh primitive.
-  CONTENT_OVERRIDE_RECORD_B64="$(python3 - "$CATALOG_WINDOW_OVERRIDE_REASON" "$WORK/coverage.json" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$LIVE_ID" "$COMMIT" <<'PY'
-import base64, json, sys
+  # scripts/lib/catalog-window-override.sh primitive. It describes the
+  # coverage computed UNDER the lease, and the publish refuses (pre-mutation)
+  # if its own under-lock coverage differs (AA_COVERAGE_EXPECT).
+  _override_out="$(python3 - "$CATALOG_WINDOW_OVERRIDE_REASON" "$WORK/coverage.json" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$LIVE_ID" "$COMMIT" <<'PY'
+import base64, hashlib, json, sys
 reason, coverage_path, incoming, live_target, live_id, commit = sys.argv[1:]
 with open(coverage_path) as f:
     coverage = json.load(f)
+uncovered = coverage["uncovered"]
 record = {
     "kind": "content_lane_window_coverage",
     "reason": reason,
-    "uncovered": coverage.get("uncovered", []),
+    "uncovered": uncovered,
     "incoming": "releases/" + incoming,
     "live": {"target": live_target, "release_id": live_id},
     "commit": commit,
 }
+canonical = json.dumps(sorted(uncovered, key=lambda x: json.dumps(x, sort_keys=True)), sort_keys=True)
+print(hashlib.sha256(canonical.encode()).hexdigest())
 print(base64.b64encode(json.dumps(record, sort_keys=True).encode("ascii")).decode("ascii"))
 PY
 )" || fatal "could not build the window coverage override record"
+  AA_COVERAGE_EXPECT="$(printf '%s\n' "$_override_out" | sed -n 1p)"
+  CONTENT_OVERRIDE_RECORD_B64="$(printf '%s\n' "$_override_out" | sed -n 2p)"
   SSH "$(cwo_override_remote_command "$CONTENT_OVERRIDE_RECORD_B64" "catalog-content window coverage override for $RELEASE_DIRNAME" macprovider-catalog-content)" ||
     fatal "could not append the window coverage override record"
   log "AUDIT TRAIL: override appended to /var/lib/macprovider/catalog-window-overrides.jsonl"
@@ -1104,5 +1291,5 @@ ccr_evidence_hook() {
 }
 aa_post_activation_evidence ccr_evidence_hook
 CCR_DONE=1
-log "DONE: $REL_ID live via the catalog-content lane; evidence (a)-(d) passed; (e) not required (no new buyer-serving Tier-2 pin)"
+log "DONE: $REL_ID live via the catalog-content lane; evidence (a)-(d) passed; (e) not required (buyer-serving set adds or re-hashes nothing)"
 exit 0

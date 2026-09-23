@@ -429,5 +429,58 @@ class BuyerServingSetTests(unittest.TestCase):
         self.assertEqual(proc.stdout, "")
 
 
+
+class LiveTier2TrustTests(unittest.TestCase):
+    """verify-directory's live-side Tier-2 inputs (#1688): the LIVE coordinator's
+    configured key (overlay wins) and --allow-expired-tier2."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp)
+
+    def key(self) -> str:
+        import base64
+        import os
+
+        return base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
+
+    def yaml(self, name: str, body: str) -> Path:
+        path = self.tmp / name
+        path.write_text(body)
+        return path.resolve()
+
+    def test_overlay_key_wins_over_base_config(self) -> None:
+        base, over = self.key(), self.key()
+        config = self.yaml("coordinator.yaml", f"tier2:\n  catalog_public_key: {base}\n")
+        overlay = self.yaml("overlay.yaml", f"tier2:\n  catalog_public_key: {over}\n")
+        self.assertEqual(cr.load_tier2_trusted_public_key(None, config, overlay), over)
+
+    def test_overlay_without_tier2_key_keeps_base_key(self) -> None:
+        base = self.key()
+        config = self.yaml("coordinator.yaml", f"tier2:\n  catalog_public_key: {base}\n")
+        overlay = self.yaml("overlay.yaml", "billing:\n  enabled: true\n")
+        self.assertEqual(cr.load_tier2_trusted_public_key(None, config, overlay), base)
+
+    def test_overlay_requires_base_config(self) -> None:
+        overlay = self.yaml("overlay.yaml", f"tier2:\n  catalog_public_key: {self.key()}\n")
+        with self.assertRaises(cr.CatalogError):
+            cr.load_tier2_trusted_public_key(None, None, overlay)
+
+    def test_expired_tier2_needs_the_explicit_flag(self) -> None:
+        tier2 = json.loads((CANONICAL / "tier2-catalog.json").read_bytes())
+        tier2["issued_at"], tier2["expires_at"] = "2020-01-01T00:00:00Z", "2020-02-01T00:00:00Z"
+        raw = json.dumps(tier2).encode()
+        with self.assertRaisesRegex(cr.CatalogError, "expired"):
+            cr.validate_tier2_catalog(raw)
+        self.assertEqual(cr.validate_tier2_catalog(raw, allow_expired=True)["catalog_id"], tier2["catalog_id"])
+
+    def test_cli_exposes_live_side_flags(self) -> None:
+        proc = subprocess.run([sys.executable, str(SCRIPT), "verify-directory", "--help"], capture_output=True, text=True, check=True)
+        self.assertIn("--allow-expired-tier2", proc.stdout)
+        self.assertIn("--tier2-coordinator-overlay", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

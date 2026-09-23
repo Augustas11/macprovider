@@ -3353,8 +3353,12 @@ fi
 # current swap. Line 1 is the live target (empty = bootstrap), line 2 the
 # compare-live verdict JSON; compare-live exits 3 for a regression.
 # compare-live ignores detached signatures, so the live release is first put
-# through the same verify-directory as the incoming preflight; a live release
-# that fails it exits 4 and aborts the deploy instead of being classified.
+# through verify-directory; a live release that fails it exits 4 and aborts the
+# deploy instead of being classified. The live side is judged against the
+# Tier-2 key the LIVE coordinator is configured with (coordinator.yaml, overlay
+# wins), not the incoming trust root, and an expired live Tier-2 is accepted
+# (--allow-expired-tier2; every signature check still runs): a deploy must stay
+# possible while the live Tier-2 has lapsed or the Tier-2 key is being rotated.
 log "  comparing staged catalog release with live autotune/current (compare-live)"
 CATALOG_COMPARE_RC=0
 CATALOG_COMPARE_OUT="$($SSH "set -e
@@ -3367,7 +3371,9 @@ CATALOG_COMPARE_OUT="$($SSH "set -e
   case \"\$_live\" in
     *[!A-Za-z0-9._/-]*|*/*/*) echo \"unsafe existing autotune current target: \$_live\" >&2; exit 1 ;;
   esac
-  python3 -I $DEPLOY_TMP/scripts/catalog-release.py verify-directory --directory /opt/macprovider/autotune/\$_live --tier2-public-key-file $DEPLOY_TMP/tier2-catalog.pub >&2 || exit 4
+  _live_t2_overlay=''
+  if [ -e /etc/macprovider/coordinator.pearl-overlays.yaml ]; then _live_t2_overlay='--tier2-coordinator-overlay /etc/macprovider/coordinator.pearl-overlays.yaml'; fi
+  python3 -I $DEPLOY_TMP/scripts/catalog-release.py verify-directory --directory /opt/macprovider/autotune/\$_live --tier2-coordinator-config /opt/macprovider/coordinator.yaml \$_live_t2_overlay --allow-expired-tier2 >&2 || exit 4
   _compare=$DEPLOY_TMP/catalog-compare
   rm -rf \$_compare
   install -d -m 0700 \$_compare

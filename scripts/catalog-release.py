@@ -2586,7 +2586,7 @@ def validate_tier2_identity_binding(data: bytes, candidate: bytes, candidate_obj
     return value
 
 
-def validate_tier2_catalog(data: bytes) -> dict:
+def validate_tier2_catalog(data: bytes, allow_expired: bool = False) -> dict:
     """Structural validation of a signed Tier-2 catalog (scripts/sign-catalog.go shape).
 
     This locks the JSON shape (fields, hash format, signature envelope) so
@@ -2609,7 +2609,7 @@ def validate_tier2_catalog(data: bytes) -> dict:
     expires = datetime.fromisoformat(value["expires_at"].replace("Z", "+00:00"))
     if issued >= expires:
         fail("tier2-catalog: issued_at must be before expires_at")
-    if datetime.now(timezone.utc) >= expires:
+    if not allow_expired and datetime.now(timezone.utc) >= expires:
         fail("tier2-catalog: expires_at must be in the future (catalog has expired)")
     version = value["version"]
     if not isinstance(version, int) or isinstance(version, bool) or version != 1:
@@ -2749,6 +2749,7 @@ def require_trusted_regular_input(path: pathlib.Path, label: str, max_bytes: int
 def load_tier2_trusted_public_key(
     public_key_path: pathlib.Path | None = None,
     coordinator_config_path: pathlib.Path | None = None,
+    coordinator_overlay_path: pathlib.Path | None = None,
 ) -> str:
     """Resolve the trusted Tier-2 Ed25519 public key used to authenticate a
     signed `tier2-catalog.json` before it can be trusted as a release feed
@@ -2766,6 +2767,22 @@ def load_tier2_trusted_public_key(
     """
     if public_key_path is not None and coordinator_config_path is not None:
         fail("tier2-catalog: specify only one explicit Tier-2 trust-root source")
+    if coordinator_overlay_path is not None:
+        if coordinator_config_path is None:
+            fail("tier2-catalog: --tier2-coordinator-overlay requires --tier2-coordinator-config")
+        # The coordinator merges its overlay over the base config (overlay keys
+        # override), so an overlay tier2.catalog_public_key is the live key.
+        require_trusted_regular_input(
+            coordinator_overlay_path,
+            f"tier2-catalog: trusted Tier-2 public key overlay {coordinator_overlay_path}",
+            1024 * 1024,
+        )
+        overlay_key = (_yaml_block_value(coordinator_overlay_path.read_text(), "tier2", "catalog_public_key") or "").strip()
+        if overlay_key:
+            canonical_urlsafe_b64_decode(
+                overlay_key, 32, f"tier2-catalog: trusted public key in {coordinator_overlay_path}"
+            )
+            return overlay_key
     explicit_path = public_key_path or coordinator_config_path
     if explicit_path is not None:
         source = str(explicit_path)
@@ -2888,6 +2905,8 @@ def verify_tier2_signature(
     raw: bytes,
     public_key_path: pathlib.Path | None = None,
     coordinator_config_path: pathlib.Path | None = None,
+    coordinator_overlay_path: pathlib.Path | None = None,
+    allow_expired: bool = False,
 ) -> str:
     """Authenticate a Tier-2 catalog's Ed25519 signature before any caller
     may trust it as "signed" (#608 Partial: ledger feed membership).
@@ -2901,7 +2920,7 @@ def verify_tier2_signature(
     """
     go_bin = go_executable()
     require_trusted_verifier_source(SIGN_CATALOG_GO_PATH)
-    public_key = load_tier2_trusted_public_key(public_key_path, coordinator_config_path)
+    public_key = load_tier2_trusted_public_key(public_key_path, coordinator_config_path, coordinator_overlay_path)
     with tempfile.TemporaryDirectory(prefix="macprovider-tier2-verify-") as tmp:
         tmpdir = pathlib.Path(tmp)
         catalog_path = tmpdir / "tier2-catalog.json"
@@ -2910,7 +2929,9 @@ def verify_tier2_signature(
         pubkey_path.write_text(public_key + "\n")
         try:
             result = subprocess.run(
-                [go_bin, "run", str(SIGN_CATALOG_GO_PATH), "verify", "-public-key", str(pubkey_path), str(catalog_path)],
+                [go_bin, "run", str(SIGN_CATALOG_GO_PATH), "verify", "-public-key", str(pubkey_path)]
+                + (["-allow-expired"] if allow_expired else [])
+                + [str(catalog_path)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -4642,6 +4663,8 @@ def verify_directory(
     directory: pathlib.Path,
     tier2_public_key_file: pathlib.Path | None = None,
     tier2_coordinator_config: pathlib.Path | None = None,
+    tier2_coordinator_overlay: pathlib.Path | None = None,
+    allow_expired_tier2: bool = False,
 ) -> None:
     candidate_path = directory / "autotune-candidates.json"
     demand_path = directory / "demand-rank.json"
@@ -4662,8 +4685,10 @@ def verify_directory(
     if not tier2_path.exists():
         fail("release directory is missing required tier2-catalog.json feed")
     tier2 = tier2_path.read_bytes()
-    tier2_obj = validate_tier2_catalog(tier2)
-    tier2_signer_key_id = verify_tier2_signature(tier2, tier2_public_key_file, tier2_coordinator_config)
+    tier2_obj = validate_tier2_catalog(tier2, allow_expired=allow_expired_tier2)
+    tier2_signer_key_id = verify_tier2_signature(
+        tier2, tier2_public_key_file, tier2_coordinator_config, tier2_coordinator_overlay, allow_expired_tier2
+    )
     check_tier2_binding(candidate, tier2)
     artifact_path = directory / ARTIFACT_FEED_NAME
     artifacts = artifact_obj = None
@@ -5563,6 +5588,19 @@ def main() -> int:
     directory_parser.add_argument("--directory", required=True, type=pathlib.Path)
     directory_parser.add_argument("--tier2-public-key-file", type=pathlib.Path)
     directory_parser.add_argument("--tier2-coordinator-config", type=pathlib.Path)
+    directory_parser.add_argument(
+        "--tier2-coordinator-overlay",
+        type=pathlib.Path,
+        help="coordinator overlay merged over --tier2-coordinator-config; its tier2.catalog_public_key wins when set",
+    )
+    directory_parser.add_argument(
+        "--allow-expired-tier2",
+        action="store_true",
+        help=(
+            "accept a Tier-2 catalog past expires_at (its signature and every other check still apply). "
+            "Only for judging an ALREADY-LIVE release, never an incoming one"
+        ),
+    )
     check_parser = sub.add_parser("check-tier2-binding")
     check_parser.add_argument(
         "--candidate",
@@ -5678,7 +5716,13 @@ def main() -> int:
         elif args.command == "emit-coordinator-rate-card":
             cmd_emit_coordinator_rate_card(args.output, from_source=args.from_source)
         elif args.command == "verify-directory":
-            verify_directory(args.directory, args.tier2_public_key_file, args.tier2_coordinator_config)
+            verify_directory(
+                args.directory,
+                args.tier2_public_key_file,
+                args.tier2_coordinator_config,
+                args.tier2_coordinator_overlay,
+                args.allow_expired_tier2,
+            )
         elif args.command == "check-tier2-binding":
             cmd_check_tier2_binding(args.candidate, args.tier2, args.require_serving, args.rate_card, args.exclusions)
         elif args.command == "buyer-serving-set":

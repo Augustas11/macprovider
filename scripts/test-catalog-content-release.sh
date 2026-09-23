@@ -7,16 +7,24 @@
 # Python coordinator stub serves the loopback buyer/provider/canary-status HTTP
 # surfaces, reloads on SIGHUP and writes a fake journal; fake journalctl,
 # systemctl, systemd-run, launchctl and lsof close the loop. catalog-release.py
-# is a stub here (signed fixtures cannot be mutated); its real content-gate is
-# covered by scripts/tests/test_catalog_content_gate.py.
+# is a stub here (signed fixtures cannot be mutated) that asserts every
+# argument/path the lane hands content-gate and delegates buyer-serving-set to
+# the real script; its real content-gate is covered by
+# scripts/tests/test_catalog_content_gate.py.
 #
 # Cases: preflight GO; NO_GO for wrong lane, closure miss, dry-load failure,
-# coverage loss (and GO with a logged override), yaml drift, working tree vs
-# commit mismatch, new buyer-serving Tier-2 pin (e), missing canary evidence;
-# deploy happy path (row hash changed -> autotune --apply first); rollback on
-# evidence (a), (b), (c) (+ retention of an adopted release), (d); rollback
-# re-HUP rejected -> controlled restart; restart failure -> runbook exit 5;
-# a held renewal/deploy lock -> refusal.
+# coverage loss (and GO with a logged override), config content drift (bytes,
+# mtime-preserved bytes, missing applied-config record), working tree vs commit
+# mismatch, evidence (e) buyer-serving set (new Tier-2 pin, listed ->
+# recommendable, exclusion removed, serving hash changed; live release with no
+# reviewed commit), missing canary evidence; deploy happy path (row hash changed
+# -> autotune --apply first); refusal under the lease when the live-binary
+# dry-load flips to failure or the staged bytes differ from the commit;
+# rollback on evidence (a), (b) (+ no applied-config record from this HUP), (c)
+# (+ retention of an adopted release), (d) (+ more rejections for an already
+# failing key; a chronically failing key at the same rate passes); rollback
+# re-HUP rejected -> controlled restart; restart failure -> runbook exit 5; a
+# held renewal/deploy lock -> refusal.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -70,6 +78,7 @@ rw() {
       -e "s#/var/lib/macprovider-pearl-updater/#$CCR_FAKE/var/lib/macprovider-pearl-updater/#g" \
       -e "s#install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider#mkdir -p $CCR_FAKE/var/lib/macprovider#g" \
       -e "s#/var/lib/macprovider/#$CCR_FAKE/var/lib/macprovider/#g" \
+      -e "s#/run/macprovider/#$CCR_FAKE/run/macprovider/#g" \
       -e "s#os\\.fchown\\(fd, 0, 0\\)#pass#g" \
       -e "s#/tmp/macprovider-content-#$CCR_RTMP/macprovider-content-#g" \
       -e "s#/proc/\\\$pid/environ#$CCR_FAKE/proc-environ#g" \
@@ -96,7 +105,28 @@ args=("$@"); n=${#args[@]}
 src="${args[$((n-2))]}"; dst="${args[$((n-1))]}"; dst="${dst#*:}"
 dst="$(printf '%s' "$dst" | sed "s#/opt/macprovider/#$CCR_FAKE/opt/macprovider/#")"
 mkdir -p "$dst"; cp -R "$src"/. "$dst"
+# Simulate the staged bytes changing after preflight (not the reviewed commit's).
+if [ -e "$CCR_TEST_CTL/tamper-upload" ]; then printf ' ' >>"$dst/demand-rank.json"; fi
 RSYNC
+# `date +%s` is how the lane reads Pearl's clock (T_HUP is its first call):
+# journal-before-hup plants one catalog_incompatible event just before it.
+cat >"$T/bin/date" <<'DATE'
+#!/usr/bin/env bash
+if [ "${1:-}" = "+%s" ] && [ -e "${CCR_TEST_CTL:-/nonexistent}/journal-before-hup" ]; then
+  rm -f "$CCR_TEST_CTL/journal-before-hup"
+  # Answer the clock read ourselves so the planted event is provably before T_HUP.
+  exec python3 - <<'PY'
+import json, os, time
+t = int(time.time())
+line = {"level": "warn", "catalog_release_id": "chronic-release", "catalog_candidate_sha256": "cd" * 32,
+        "message": "provider catalog release is incompatible with coordinator"}
+with open(os.path.join(os.environ["CCR_FAKE"], "journal.log"), "a") as fh:
+    fh.write("%.6f pearl coordinator[1]: %s\n" % (t - 0.5, json.dumps(line, sort_keys=True)))
+print(t)
+PY
+fi
+exec /bin/date "$@"
+DATE
 cat >"$T/bin/flock" <<'FLOCK'
 #!/usr/bin/env python3
 import fcntl, os, subprocess, sys
@@ -210,6 +240,21 @@ def journal(obj):
     with open(os.path.join(fake, "journal.log"), "a") as fh:
         fh.write("%.6f pearl coordinator[%d]: %s\n" % (time.time(), os.getpid(), json.dumps(obj, sort_keys=True)))
 
+def sha(path):
+    return hashlib.sha256(open(path, "rb").read()).hexdigest() if os.path.exists(path) else ""
+
+def applied(source):  # the coordinator's applied-config record (applied_config.go)
+    config = os.path.join(fake, "opt/macprovider/coordinator.yaml")
+    overlay = os.path.join(fake, "etc/macprovider/coordinator.pearl-overlays.yaml")
+    rec = {"schema": "macprovider.coordinator-applied-config.v1", "config_path": "/opt/macprovider/coordinator.yaml",
+           "config_sha256": sha(config), "overlay_path": "/etc/macprovider/coordinator.pearl-overlays.yaml",
+           "overlay_sha256": sha(overlay), "loaded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f000Z"),
+           "source": source, "version": "stub"}
+    os.makedirs(os.path.join(fake, "run/macprovider"), exist_ok=True)
+    tmp = os.path.join(fake, "run/macprovider/.applied.tmp")
+    open(tmp, "w").write(json.dumps(rec) + "\n")
+    os.replace(tmp, os.path.join(fake, "run/macprovider/coordinator-applied-config.json"))
+
 def load(keep_rate_card=False):  # keeps the prior candidate bytes (stale serve)
     m = json.load(open(os.path.join(current, "release.json")))
     files = {}
@@ -243,10 +288,17 @@ def on_hup(*_):
     if c("incompatible-after-hup") and state["hups"] == 1:
         journal({"level": "warn", "catalog_release_id": "stale-release", "catalog_candidate_sha256": "cd" * 32,
                  "message": "provider catalog release is incompatible with coordinator"})
+    if c("incompat-after-count") and state["hups"] == 1:
+        for _ in range(int(open(os.path.join(ctl, "incompat-after-count")).read())):
+            journal({"level": "warn", "catalog_release_id": "chronic-release", "catalog_candidate_sha256": "cd" * 32,
+                     "message": "provider catalog release is incompatible with coordinator"})
+    if not c("applied-record-stale"):
+        applied("sighup")
     journal({"level": "info", "message": "tier2/proof_of_weights config reloaded"})
 
 def on_restart(*_):
     load()
+    applied("boot")
     journal({"level": "info", "message": "coordinator started"})
 
 def canary():
@@ -313,6 +365,7 @@ class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 load()
+applied("boot")
 for p in (os.environ["BUYER_PORT"], os.environ["PROVIDER_PORT"], os.environ["CANARY_PORT"]):
     threading.Thread(target=S(("127.0.0.1", int(p)), H).serve_forever, daemon=True).start()
 signal.signal(signal.SIGHUP, on_hup)
@@ -335,28 +388,95 @@ cp "$root/scripts/lib/autotune-activate.sh" "$root/scripts/lib/catalog-canary-to
 cp "$root/ops/pearl-updater/catalog-canary-proof.py" "$R/ops/pearl-updater/"
 cat >"$R/scripts/catalog-release.py" <<'CR'
 #!/usr/bin/env python3
-"""Test stub for catalog-release.py: verdicts are driven by $CCR_TEST_CTL files."""
-import json, os, pathlib, sys
-ctl = pathlib.Path(os.environ["CCR_TEST_CTL"])
-cmd, args = sys.argv[1], sys.argv[2:]
-def arg(name):
-    return args[args.index(name) + 1]
-if cmd == "verify-directory":
-    sys.exit(1 if (ctl / "verify-fail").exists() else 0)
-if cmd == "check-tier2-binding":
-    if (ctl / "closure-fail").exists():
-        print("catalog-release: ERROR: serving closure: 1 recommendable rate-carded model(s) have no matching Tier-2", file=sys.stderr)
+"""Test stub for catalog-release.py: verdicts are driven by $CCR_TEST_CTL files.
+
+content-gate asserts every argument/path the lane passes (the preflight call
+and the under-lock call) and logs which one it validated; buyer-serving-set is
+the real script's."""
+import hashlib, json, os, pathlib, runpy, sys
+
+def main():
+    ctl = pathlib.Path(os.environ["CCR_TEST_CTL"])
+    cmd, args = sys.argv[1], sys.argv[2:]
+    def arg(name):
+        return args[args.index(name) + 1] if name in args else None
+    def refuse(why):
+        print("stub content-gate: " + why, file=sys.stderr)
         sys.exit(1)
+    def sha(path):
+        return hashlib.sha256(open(path, "rb").read()).hexdigest()
+    if cmd == "verify-directory":
+        sys.exit(1 if (ctl / "verify-fail").exists() else 0)
+    if cmd == "check-tier2-binding":
+        if (ctl / "closure-fail").exists():
+            print("catalog-release: ERROR: serving closure: 1 recommendable rate-carded model(s) have no matching Tier-2", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(0)
+    if cmd == "buyer-serving-set":
+        sys.argv[0] = os.environ["CCR_REAL_CR"]
+        runpy.run_path(os.environ["CCR_REAL_CR"], run_name="__main__")
+    if cmd == "compare-live":
+        live = json.loads((pathlib.Path(arg("--live")) / "release.json").read_text())
+        rel = json.loads((pathlib.Path(arg("--incoming")) / "release.json").read_text())
+        if (ctl / "compare-regression").exists():
+            print(json.dumps({"verdict": "regression", "reasons": ["stub"], "live_release_id": live["release_id"],
+                              "incoming_release_id": rel["release_id"]}))
+            sys.exit(3)
+        print(json.dumps({"verdict": "descends", "reasons": ["stub"], "matched_ledger_release": live["release_id"],
+                          "live_release_id": live["release_id"], "incoming_release_id": rel["release_id"]}))
+        sys.exit(0)
+    if cmd == "content-gate":
+        release, live_dir, ledger, commit = arg("--release"), arg("--live"), arg("--ledger"), arg("--commit")
+        if not release or not live_dir:
+            refuse("--release and --live are required")
+        rel = json.loads((pathlib.Path(release) / "release.json").read_text())
+        live = json.loads((pathlib.Path(live_dir) / "release.json").read_text())
+        if rel["release_id"] != os.environ["CCR_EXPECT_REL_ID"]:
+            refuse("--release is %s, not the reviewed release" % rel["release_id"])
+        if live["release_id"] != os.environ["CCR_EXPECT_LIVE_ID"]:
+            refuse("--live is %s, not the live release" % live["release_id"])
+        if commit is not None:
+            if ledger is not None or commit != os.environ["CCR_EXPECT_COMMIT"]:
+                refuse("preflight call must pass exactly the reviewed --commit")
+            if os.path.basename(release) != "release" or os.path.basename(live_dir) != "live":
+                refuse("preflight call must judge the assembled release against the fetched live release")
+            stage = "preflight"
+        else:
+            here = os.path.dirname(os.path.abspath(__file__))
+            catalog = os.path.normpath(os.path.join(here, "..", "phase3-binary", "catalog", "autotune"))
+            want_live = os.path.join(os.environ["CCR_FAKE"], "opt/macprovider/autotune/current")
+            releases = os.path.join(os.environ["CCR_FAKE"], "opt/macprovider/autotune/releases")
+            if ledger is None or os.path.normpath(ledger) != os.path.join(catalog, "release-ledger.json"):
+                refuse("under-lock --ledger must be the shipped commit ledger, got %r" % ledger)
+            if sha(ledger) != os.environ["CCR_EXPECT_LEDGER_SHA"]:
+                refuse("under-lock ledger bytes are not the commit's")
+            exclusions = os.path.join(catalog, "not-buyer-serving.json")
+            if not os.path.isfile(exclusions) or sha(exclusions) != os.environ["CCR_EXPECT_EXCL_SHA"]:
+                refuse("under-lock exclusions beside the verifier are not the commit's")
+            if live_dir != want_live:
+                refuse("under-lock --live must be the live current, got %r" % live_dir)
+            if os.path.dirname(release) != releases or not os.path.basename(release).startswith(".incoming-"):
+                refuse("under-lock --release must be the staged incoming dir, got %r" % release)
+            stage = "under-lock"
+        with open(ctl / "gate-calls.log", "a") as fh:
+            fh.write(stage + " ok\n")
+        lane = (ctl / "lane").read_text().strip() if (ctl / "lane").exists() else "catalog-content"
+        ok = lane == "catalog-content"
+        print(json.dumps({"ok": ok, "lane": lane, "reasons": [] if ok else ["stub: lane " + lane],
+                          "release_id": rel["release_id"], "live_release_id": live["release_id"], "changed": {}}))
+        sys.exit(0 if ok else 3)
     sys.exit(0)
-if cmd == "content-gate":
-    lane = (ctl / "lane").read_text().strip() if (ctl / "lane").exists() else "catalog-content"
-    rel = json.loads((pathlib.Path(arg("--release")) / "release.json").read_text())
-    live = json.loads((pathlib.Path(arg("--live")) / "release.json").read_text())
-    ok = lane == "catalog-content"
-    print(json.dumps({"ok": ok, "lane": lane, "reasons": [] if ok else ["stub: lane " + lane],
-                      "release_id": rel["release_id"], "live_release_id": live["release_id"], "changed": {}}))
-    sys.exit(0 if ok else 3)
-sys.exit(0)
+
+# autotune_window.py imports this file as its feed verifier (coverage): expose
+# the real script's functions then, with no side effects.
+if __name__ == "__main__":
+    main()
+else:
+    globals().update({k: v for k, v in runpy.run_path(os.environ["CCR_REAL_CR"]).items() if not k.startswith("__")})
+    # The fixtures' feeds are re-stamped (unsigned); coverage signature checks
+    # are covered by scripts/tests/test_autotune_window.py.
+    def verify_ed25519(*_args, **_kwargs):
+        return None
 CR
 cp "$root/phase3-binary/catalog/autotune/"{release.json,trusted-keys.json,tier2-catalog.json,release-ledger.json,not-buyer-serving.json} "$R/phase3-binary/catalog/autotune/"
 cp "$root/phase3-binary/dist/static/"*.json "$root/phase3-binary/dist/static/"*.sig "$R/phase3-binary/dist/static/"
@@ -384,12 +504,38 @@ m["feeds"]["autotune-candidates.json"]["sha256"] = hashlib.sha256(raw).hexdigest
 (d / "release.json").write_text(json.dumps(m, indent=2, sort_keys=True) + "\n")
 PY
 }
-retarget "$R/phase3-binary/catalog/autotune" test-new-v1 row-hash
+# History: the reviewed commit that produced the LIVE release (its
+# not-buyer-serving.json is what evidence (e) judges live with), then the new one.
+export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
+retarget "$R/phase3-binary/catalog/autotune" test-live-v1 none
 git -C "$R" init -q
 git -C "$R" add -A
-git -C "$R" -c user.name=t -c user.email=t@example.invalid commit -qm "reviewed catalog content"
+git -C "$R" commit -qm "live catalog content"
+LIVE_COMMIT="$(git -C "$R" rev-parse HEAD)"
+retarget "$R/phase3-binary/catalog/autotune" test-new-v1 row-hash
+git -C "$R" add -A
+git -C "$R" commit -qm "reviewed catalog content"
 COMMIT="$(git -C "$R" rev-parse HEAD)"
 git -C "$R" update-ref refs/remotes/origin/main "$COMMIT"
+export CCR_REAL_CR="$root/scripts/catalog-release.py" CCR_EXPECT_COMMIT="$COMMIT" \
+  CCR_EXPECT_REL_ID=test-new-v1 CCR_EXPECT_LIVE_ID=test-live-v1
+CCR_EXPECT_LEDGER_SHA="$(shasum -a 256 "$R/phase3-binary/catalog/autotune/release-ledger.json" | cut -d' ' -f1)"
+CCR_EXPECT_EXCL_SHA="$(shasum -a 256 "$R/phase3-binary/catalog/autotune/not-buyer-serving.json" | cut -d' ' -f1)"
+export CCR_EXPECT_LEDGER_SHA CCR_EXPECT_EXCL_SHA
+# A later origin/main commit that re-commits the live release with the given
+# not-buyer-serving.json (the newest such commit is what (e) must use).
+recommit_live_exclusions() { # <not-buyer-serving.json>
+  local idx="$T/live-index" blob_rel blob_ex tree c
+  rm -f "$idx"
+  GIT_INDEX_FILE="$idx" git -C "$R" read-tree refs/remotes/origin/main
+  blob_rel="$(git -C "$R" show "$LIVE_COMMIT:phase3-binary/catalog/autotune/release.json" | git -C "$R" hash-object -w --stdin)"
+  blob_ex="$(git -C "$R" hash-object -w "$1")"
+  GIT_INDEX_FILE="$idx" git -C "$R" update-index --cacheinfo "100644,$blob_rel,phase3-binary/catalog/autotune/release.json"
+  GIT_INDEX_FILE="$idx" git -C "$R" update-index --cacheinfo "100644,$blob_ex,phase3-binary/catalog/autotune/not-buyer-serving.json"
+  tree="$(GIT_INDEX_FILE="$idx" git -C "$R" write-tree)"
+  c="$(git -C "$R" commit-tree "$tree" -p refs/remotes/origin/main -m "live catalog re-committed")"
+  git -C "$R" update-ref refs/remotes/origin/main "$c"
+}
 NEW_CAND="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["feeds"]["autotune-candidates.json"]["sha256"])' "$R/phase3-binary/catalog/autotune/release.json")"
 
 # ---------------------------------------------------------------------------
@@ -428,9 +574,19 @@ d = args[args.index("--validate-autotune-release") + 1]
 prev = open(args[args.index("--previous-target") + 1]).read().split()
 m = json.load(open(os.path.join(d, "release.json")))
 t2 = open(os.path.join(d, "tier2-catalog.json"), "rb").read()
-bad = os.path.exists(os.path.join(os.environ["CCR_TEST_CTL"], "dryload-fail"))
+ctl = os.environ["CCR_TEST_CTL"]
+with open(os.path.join(ctl, "dryload-calls"), "a") as fh:
+    fh.write("call\n")
+calls = len(open(os.path.join(ctl, "dryload-calls")).read().split())
+fail_from = os.path.join(ctl, "dryload-fail-from")
+bad = os.path.exists(os.path.join(ctl, "dryload-fail")) or (os.path.exists(fail_from) and calls >= int(open(fail_from).read()))
+def sha(p):
+    return hashlib.sha256(open(p, "rb").read()).hexdigest()
+config_sha = sha(args[args.index("--config") + 1])
+overlay_sha = sha(args[args.index("--config-overlay") + 1]) if "--config-overlay" in args else ""
 print(json.dumps({"ok": not bad, "release_id": m["release_id"], "candidates_sha256": m["feeds"]["autotune-candidates.json"]["sha256"],
                   "tier2_catalog_id": json.loads(t2)["catalog_id"], "tier2_sha256": hashlib.sha256(t2).hexdigest(),
+                  "config_sha256": config_sha, "overlay_sha256": overlay_sha,
                   "previous_loaded": [{"release_id": p} for p in prev], "errors": ["tier2: stub reject"] if bad else [], "notes": []}))
 sys.exit(1 if bad else 0)
 COORD
@@ -545,7 +701,14 @@ assert rec["commit"], rec
 PY
 note "ok: deploy with override appends catalog-window-overrides.jsonl"
 
-setup_env; touch "$CCR_FAKE/opt/macprovider/coordinator.yaml"; expect_no_go "yaml drift" config_applied
+setup_env; printf '# pending edit\n' >>"$CCR_FAKE/opt/macprovider/coordinator.yaml"; expect_no_go "yaml content drift" config_applied
+setup_env
+printf '# pending edit, old mtime kept\n' >>"$CCR_FAKE/opt/macprovider/coordinator.yaml"
+touch -t 202001010000 "$CCR_FAKE/opt/macprovider/coordinator.yaml"
+expect_no_go "yaml drift with a preserved mtime" config_applied
+setup_env; printf 'tier2: {}\n' >"$CCR_FAKE/etc/macprovider/coordinator.pearl-overlays.yaml"; expect_no_go "overlay appeared after the last apply" config_applied
+setup_env; rm -f "$CCR_FAKE/run/macprovider/coordinator-applied-config.json"; expect_no_go "applied-config record missing" config_applied
+grep -q 'applied identity unknown' "$T/out" || fail "a missing applied-config record must say the applied identity is unknown"
 setup_env
 printf '# local edit\n' >>"$R/scripts/lib/catalog-canary-token.sh"
 expect_no_go "working tree vs commit" tooling_matches_commit
@@ -561,6 +724,51 @@ t2["models"].remove(drop)
 json.dump(t2, open(sys.argv[1], "w"), indent=2)
 PY
 expect_no_go "new buyer-serving Tier-2 pin (e)" buyer_serving_e2e
+# A serving model other than the canary's row (the canary row's hash changes).
+read -r SERVING_KEY SERVING_MODEL <<EOF_SERVING
+$(python3 - "$R/phase3-binary/dist/static/autotune-candidates.json" "$R/phase3-binary/catalog/autotune/tier2-catalog.json" "$CANARY_KEY" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1]))["rows"]
+pins = {m["model_id"].lower(): m["sha256"] for m in json.load(open(sys.argv[2]))["models"]}
+k = next(k for k, v in sorted(rows.items()) if k != sys.argv[3] and v["runtime_status"] == "recommendable"
+         and pins.get(v["model_id"].lower()) == v.get("model_sha256"))
+print(k, rows[k]["model_id"])
+PY
+)
+EOF_SERVING
+LIVE_REL_DIR() { printf '%s' "$A_ROOT/releases/test-live-v1-0000000000000000"; }
+setup_env
+python3 - "$(LIVE_REL_DIR)/autotune-candidates.json" "$SERVING_KEY" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c["rows"][sys.argv[2]]["runtime_status"] = "listed"
+open(sys.argv[1], "w").write(json.dumps(c, indent=2, sort_keys=True) + "\n")
+PY
+expect_no_go "listed -> recommendable (e)" buyer_serving_e2e
+grep -q "$SERVING_MODEL (added)" "$T/out" || fail "listed -> recommendable must name the added model: $(cat "$T/out")"
+setup_env
+python3 - "$(LIVE_REL_DIR)" "$SERVING_KEY" "$SERVING_MODEL" <<'PY'
+import json, sys
+d, key, model = sys.argv[1:]
+c = json.load(open(d + "/autotune-candidates.json")); c["rows"][key]["model_sha256"] = "aa" * 32
+open(d + "/autotune-candidates.json", "w").write(json.dumps(c, indent=2, sort_keys=True) + "\n")
+t2 = json.load(open(d + "/tier2-catalog.json"))
+for m in t2["models"]:
+    if m["model_id"].lower() == model.lower():
+        m["sha256"] = "aa" * 32
+json.dump(t2, open(d + "/tier2-catalog.json", "w"), indent=2)
+PY
+expect_no_go "serving model hash changed (e)" buyer_serving_e2e
+grep -q "$SERVING_MODEL (sha changed)" "$T/out" || fail "a re-hashed serving model must be named: $(cat "$T/out")"
+setup_env
+python3 - "$SERVING_MODEL" >"$T/live-exclusions.json" <<'PY'
+import json, sys
+print(json.dumps({"schema_version": "macprovider.not-buyer-serving.v1", "models": [{"model_id": sys.argv[1], "reason": "test"}]}))
+PY
+recommit_live_exclusions "$T/live-exclusions.json"
+expect_no_go "exclusion removed (e)" buyer_serving_e2e
+grep -q "$SERVING_MODEL (added)" "$T/out" || fail "a dropped exclusion must name the newly serving model: $(cat "$T/out")"
+git -C "$R" update-ref refs/remotes/origin/main "$COMMIT"
+setup_env; touch "$CCR_TEST_CTL/compare-regression"; expect_no_go "live release matches no reviewed commit (e)" buyer_serving_e2e
 
 # ---------------------------------------------------------------------------
 # Deploy.
@@ -584,6 +792,10 @@ grep -q 'autotune --recommend --apply --drain' "$CCR_TEST_CTL/canary-cli.log" ||
 grep -q "\"release_id\": \"test-new-v1\"" "$CCR_TEST_CTL/canary-state.json" || fail "canary not restarted onto test-new-v1"
 grep -qF "$OPKEY" "$T/out" "$T/err" && fail "deploy printed the operator bearer"
 grep -q '^\[catalog-content\] DONE' "$T/out" || fail "deploy did not report DONE"
+[ "$(sort -u "$CCR_TEST_CTL/gate-calls.log" | tr '\n' ' ')" = "preflight ok under-lock ok " ] ||
+  fail "content-gate must be called (and validated) in preflight and under the lock: $(cat "$CCR_TEST_CTL/gate-calls.log" 2>/dev/null)"
+[ "$(wc -l <"$CCR_TEST_CTL/dryload-calls" | tr -d ' ')" = 2 ] || fail "the live-binary dry-load must run in preflight AND under the lease"
+[ ! -e "$CCR_FAKE/opt/macprovider/.activation-lease" ] || fail "the lease record must be removed when the lease is released"
 [ ! -e "$CCR_FAKE/run/lock/macprovider-pearl-updater.lock" ] || python3 - "$CCR_FAKE/run/lock/macprovider-pearl-updater.lock" <<'PY' || fail "deploy did not release the lease"
 import fcntl, os, sys
 fd = os.open(sys.argv[1], os.O_RDONLY)
@@ -602,8 +814,28 @@ rollback_case() { # <label> <ctl file> <expected step> [<expected window>]
   grep -q '"autotune_catalog_version": "test-live-v1"' "$CCR_FAKE/journal.log" || fail "$1: rollback re-HUP did not reload the live release"
   note "ok: rollback on evidence ($3) $1"
 }
+# Under the lease, before any mutation: a dry-load that flips to failure, and
+# staged bytes that are not the reviewed commit's, both refuse.
+setup_env
+printf '2\n' >"$CCR_TEST_CTL/dryload-fail-from"
+run deploy
+[ "$RC" -eq 1 ] || fail "dry-load failing under the lease must refuse (rc=$RC): $(tail -n 20 "$T/out") $(tail -n 5 "$T/err")"
+grep -q 'coordinator dry-load under the lease refused' "$T/err" || fail "under-lease dry-load refusal must say why: $(tail -n 5 "$T/err")"
+live_unchanged "under-lease dry-load failure"
+[ -z "$(ls -a "$A_ROOT/releases" | grep -e "$NEW_DIR_GLOB" -e '^\.incoming-' || true)" ] || fail "under-lease dry-load refusal staged a release"
+note "ok: deploy refuses when the live-binary dry-load fails under the lease"
+setup_env
+touch "$CCR_TEST_CTL/tamper-upload"
+run deploy
+[ "$RC" -eq 1 ] || fail "staged bytes differing from the commit must refuse (rc=$RC): $(tail -n 20 "$T/out")"
+grep -q 'staged release bytes differ from the reviewed commit' "$T/err" || fail "byte-proof refusal must say why: $(tail -n 5 "$T/err")"
+live_unchanged "tampered upload"
+[ -z "$(ls "$A_ROOT/releases" | grep "$NEW_DIR_GLOB" || true)" ] || fail "tampered upload was published"
+note "ok: deploy refuses staged bytes that are not the reviewed commit's"
+
 rollback_case "served bytes stale" serve-stale a
 rollback_case "tier2 digest mismatch in journal" tier2-wrong b
+rollback_case "no applied-config record from this HUP" applied-record-stale b
 # (c) canary failure: the canary itself adopted the release, so the failed
 # release stays retained; the canary is restarted onto the prior release.
 setup_env
@@ -618,6 +850,20 @@ grep -q 'keeping releases/test-new-v1' "$T/out" || fail "canary: adopted release
 grep -q '"release_id": "test-live-v1"' "$CCR_TEST_CTL/canary-state.json" || fail "canary not restarted onto the prior release"
 note "ok: rollback on evidence (c) retains the adopted release and restarts the canary onto the prior release"
 rollback_case "new catalog_incompatible" incompatible-after-hup d
+# An already failing key: more rejections after the HUP than in the equally
+# long window before it fail; the same rate passes.
+setup_env
+touch "$CCR_TEST_CTL/journal-before-hup"; printf '2\n' >"$CCR_TEST_CTL/incompat-after-count"
+run deploy
+[ "$RC" -eq 4 ] && grep -q "EVIDENCE (d) FAILED" "$T/out" && grep -q 'catalog_incompatible increased for chronic-release' "$T/out" ||
+  fail "more rejections for an already failing key must fail (d) (rc=$RC): $(tail -n 20 "$T/out")"
+live_unchanged "same key more rejections"
+note "ok: rollback on evidence (d) for more rejections of an already failing key"
+setup_env
+touch "$CCR_TEST_CTL/journal-before-hup"; printf '1\n' >"$CCR_TEST_CTL/incompat-after-count"
+run deploy
+[ "$RC" -eq 0 ] || fail "a chronically failing key at the same rate must not fail (d) (rc=$RC): $(tail -n 20 "$T/out")"
+note "ok: a chronically failing key at the same rate passes (d)"
 rollback_case "catalog-unavailable increase" poolz-unavailable-after-hup d
 
 # Rollback re-HUP rejected -> alert + controlled restart.

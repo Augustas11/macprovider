@@ -165,8 +165,9 @@ func runSign(args []string) {
 func runVerify(args []string) {
 	fs := flag.NewFlagSet("verify", flag.ExitOnError)
 	publicKeyPath := fs.String("public-key", "catalog-signing-key.pub", "base64url-unpadded Ed25519 public key path")
+	allowExpired := fs.Bool("allow-expired", false, "accept a catalog past expires_at (signature and every other check still apply); for judging an already-live catalog only")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: go run scripts/sign-catalog.go verify [-public-key PATH] SIGNED_CATALOG_JSON\n")
+		fmt.Fprintf(fs.Output(), "usage: go run scripts/sign-catalog.go verify [-public-key PATH] [-allow-expired] SIGNED_CATALOG_JSON\n")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -189,7 +190,7 @@ func runVerify(args []string) {
 	if err != nil {
 		exitf("%v", err)
 	}
-	if err := validateCatalogBody(catalog); err != nil {
+	if err := validateCatalogBodyExpiry(catalog, *allowExpired); err != nil {
 		exitf("%v", err)
 	}
 	signatureBytes, err := validateCatalogSignature(catalog.Signature)
@@ -230,6 +231,10 @@ func decodeCatalog(raw []byte) (signedCatalog, error) {
 }
 
 func validateCatalogBody(catalog signedCatalog) error {
+	return validateCatalogBodyExpiry(catalog, false)
+}
+
+func validateCatalogBodyExpiry(catalog signedCatalog, allowExpired bool) error {
 	if strings.TrimSpace(catalog.IssuedAt) == "" {
 		return fmt.Errorf("issued_at must not be empty")
 	}
@@ -247,7 +252,7 @@ func validateCatalogBody(catalog signedCatalog) error {
 	if !issuedAt.Before(expiresAt) {
 		return fmt.Errorf("issued_at must be before expires_at")
 	}
-	if !time.Now().UTC().Before(expiresAt) {
+	if !allowExpired && !time.Now().UTC().Before(expiresAt) {
 		return fmt.Errorf("catalog expired")
 	}
 
