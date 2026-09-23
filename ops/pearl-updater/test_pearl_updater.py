@@ -6919,8 +6919,14 @@ class PearlUpdaterTests(unittest.TestCase):
                 / "etc/systemd/system/macprovider-tier2-enforcement-reconcile.service"
             ).is_file()
         )
-        self.assertTrue((prefix / "usr/local/share/macprovider/scripts/catalog-release.py").is_file())
-        self.assertTrue((prefix / "usr/local/share/macprovider/scripts/sign-catalog.go").is_file())
+        bundle = [
+            line
+            for line in (REPO_ROOT / "scripts/catalog-verifier-bundle.txt").read_text(encoding="utf-8").splitlines()
+            if not line.startswith("#")
+        ]
+        self.assertIn("scripts/catalog-release.py", bundle)
+        for bundle_path in bundle:
+            self.assertTrue((prefix / "usr/local/share/macprovider" / bundle_path).is_file(), bundle_path)
         self.assertTrue((prefix / "usr/local/share/macprovider/catalog-canary-proof.py").is_file())
         installer = SCRIPT.with_name("install-pearl-updater.sh").read_text(encoding="utf-8")
         self.assertIn("useradd --system --gid macprovider-updater-validate", installer)

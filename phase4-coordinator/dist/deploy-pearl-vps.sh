@@ -568,6 +568,36 @@ if [ "$DRY_RUN_LOCAL" != "1" ]; then
     --remote "origin"
 fi
 
+# #1688: scripts/catalog-verifier-bundle.txt is the one list of files every
+# shipped copy of catalog-release.py needs beside it. Entries become archive
+# paths and remote file names, so reject anything but plain scripts/<name>.
+_parse_catalog_verifier_bundle() {
+  _bundle_seen=" "
+  while IFS= read -r _bundle_line || [ -n "$_bundle_line" ]; do
+    case "$_bundle_line" in '#'*) continue ;; esac
+    if ! printf '%s\n' "$_bundle_line" | grep -Eq '^scripts/[A-Za-z0-9._-]+$' ||
+      [ "$_bundle_line" = "scripts/." ] || [ "$_bundle_line" = "scripts/.." ]; then
+      echo "aborting deploy: invalid catalog verifier bundle entry: '$_bundle_line'" >&2
+      return 1
+    fi
+    case "$_bundle_seen" in
+      *" $_bundle_line "*)
+        echo "aborting deploy: duplicate catalog verifier bundle entry: $_bundle_line" >&2
+        return 1
+        ;;
+    esac
+    _bundle_seen="$_bundle_seen$_bundle_line "
+    printf '%s\n' "$_bundle_line"
+  done
+  case "$_bundle_seen" in
+    *" scripts/catalog-release.py "*) ;;
+    *)
+      echo "aborting deploy: catalog verifier bundle must list scripts/catalog-release.py" >&2
+      return 1
+      ;;
+  esac
+}
+
 PINNED_DEPLOY_INPUT_DIR=""
 PINNED_DIST_DIR="$DIST_DIR"
 PINNED_STATIC_FEEDS_DIR="$DIST_DIR/../../phase3-binary/dist/static"
@@ -579,17 +609,25 @@ if [ "$DRY_RUN_LOCAL" != "1" ]; then
     exit 2
   }
   trap 'rm -rf "${PINNED_DEPLOY_INPUT_DIR:-}"' EXIT HUP INT TERM
+  CATALOG_VERIFIER_BUNDLE_TEXT="$(git -C "$REPO_ROOT" show "$COORDINATOR_RELEASE_COMMIT:scripts/catalog-verifier-bundle.txt")" || {
+    echo "aborting deploy: $COORDINATOR_RELEASE_COMMIT lacks scripts/catalog-verifier-bundle.txt" >&2
+    exit 2
+  }
+  CATALOG_VERIFIER_BUNDLE="$(printf '%s\n' "$CATALOG_VERIFIER_BUNDLE_TEXT" | _parse_catalog_verifier_bundle)" || exit 2
+  # shellcheck disable=SC2086 # validated scripts/<name> entries, no IFS/glob chars
   git -C "$REPO_ROOT" archive --format=tar "$COORDINATOR_RELEASE_COMMIT" -- \
     phase4-coordinator/dist \
     phase3-binary/dist/static \
     phase3-binary/catalog/autotune \
-    scripts/catalog-release.py \
-    scripts/sign-catalog.go \
+    scripts/catalog-verifier-bundle.txt \
+    $CATALOG_VERIFIER_BUNDLE \
     | tar -xf - -C "$PINNED_DEPLOY_INPUT_DIR"
   PINNED_DIST_DIR="$PINNED_DEPLOY_INPUT_DIR/phase4-coordinator/dist"
   PINNED_STATIC_FEEDS_DIR="$PINNED_DEPLOY_INPUT_DIR/phase3-binary/dist/static"
   PINNED_AUTOTUNE_DIR="$PINNED_DEPLOY_INPUT_DIR/phase3-binary/catalog/autotune"
   PINNED_SCRIPTS_DIR="$PINNED_DEPLOY_INPUT_DIR/scripts"
+else
+  CATALOG_VERIFIER_BUNDLE="$(_parse_catalog_verifier_bundle < "$PINNED_SCRIPTS_DIR/catalog-verifier-bundle.txt")" || exit 2
 fi
 
 # Email validator — RFC-conformant pre-validation is overkill; we just
@@ -3214,10 +3252,11 @@ for _deploy_input in \
   "$STATIC_RATE_CARD_JSON=rate-card.json" \
   "$STATIC_RATE_CARD_SIG=rate-card.json.sig" \
   "$AUTOTUNE_RELEASE_MANIFEST=release.json" \
-  "$AUTOTUNE_TRUSTED_KEYS=trusted-keys.json" \
-  "$AUTOTUNE_RELEASE_VERIFY=scripts/catalog-release.py" \
-  "$AUTOTUNE_TIER2_VERIFIER=scripts/sign-catalog.go"; do
+  "$AUTOTUNE_TRUSTED_KEYS=trusted-keys.json"; do
   _append_deploy_input_digest "${_deploy_input%%=*}" "${_deploy_input#*=}"
+done
+for _bundle_path in $CATALOG_VERIFIER_BUNDLE; do
+  _append_deploy_input_digest "$PINNED_SCRIPTS_DIR/${_bundle_path#scripts/}" "$_bundle_path"
 done
 if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
   _append_deploy_input_digest "$STATIC_ARTIFACTS_JSON" "autotune-artifacts.json"
@@ -3289,8 +3328,9 @@ fi
 $SCP "$AUTOTUNE_RELEASE_MANIFEST" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release.json"
 $SCP "$AUTOTUNE_TRUSTED_KEYS"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/trusted-keys.json"
 $SCP "$AUTOTUNE_TIER2_JSON"       "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
-$SCP "$AUTOTUNE_RELEASE_VERIFY"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/scripts/catalog-release.py"
-$SCP "$AUTOTUNE_TIER2_VERIFIER"  "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/scripts/sign-catalog.go"
+for _bundle_path in $CATALOG_VERIFIER_BUNDLE; do
+  $SCP "$PINNED_SCRIPTS_DIR/${_bundle_path#scripts/}" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/$_bundle_path"
+done
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   if [ -z "${TMP_CATALOG_PINNED:-}" ] || [ ! -f "$TMP_CATALOG_PINNED" ]; then
     echo "aborting deploy: pinned Tier-2 catalog snapshot missing before upload" >&2
@@ -3307,6 +3347,27 @@ fi
 $SCP "$DEPLOY_INPUT_MANIFEST_TMP" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/deploy-inputs.sha256"
 $SSH "cd $DEPLOY_TMP && shasum -a 256 -c deploy-inputs.sha256 >/dev/null"
 echo "  staged deploy input digests OK"
+# #1688: run the exact verify-directory the staging block below runs, over the
+# same file set, before the config backup and any live config/release
+# mutation, so a verifier bundle that cannot verify on Pearl aborts early.
+# CATALOG_RELEASE_FILES must name exactly the files staged into
+# \$_autotune_stage below (deploy_catalog_verifier_closure.test.sh pins this).
+CATALOG_RELEASE_FILES="demand-rank.json demand-rank.json.sig autotune-candidates.json autotune-candidates.json.sig rate-card.json rate-card.json.sig tier2-catalog.json release.json trusted-keys.json"
+if [ "$AUTOTUNE_ARTIFACT_BOUND" = "bound" ]; then
+  CATALOG_RELEASE_FILES="$CATALOG_RELEASE_FILES autotune-artifacts.json autotune-artifacts.json.sig"
+fi
+if ! $SSH "set -e
+  _preflight=$DEPLOY_TMP/catalog-preflight
+  rm -rf \$_preflight
+  install -d -m 0700 \$_preflight
+  for _f in $CATALOG_RELEASE_FILES; do cp $DEPLOY_TMP/\$_f \$_preflight/\$_f; done
+  _rc=0
+  python3 -I $DEPLOY_TMP/scripts/catalog-release.py verify-directory --directory \$_preflight --tier2-public-key-file $DEPLOY_TMP/tier2-catalog.pub || _rc=\$?
+  rm -rf \$_preflight
+  exit \$_rc"; then
+  echo "aborting deploy: staged catalog release failed remote verify-directory preflight on the VPS (before config backup or release staging)" >&2
+  exit 1
+fi
 
 if [ "$CONFIG_MODE" = "apply-tracked" ] || [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ] || [ "${RATE_CARD_CONFIG_MIGRATION_ACTIVE:-0}" = "1" ] || [ "${RATE_CARD_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" ]; then
   # M1-6 / DEVE-5 Part D: dated backup of the remote coordinator.yaml on Pearl

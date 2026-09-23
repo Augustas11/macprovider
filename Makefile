@@ -183,6 +183,7 @@ test-dist:
 	bash phase4-coordinator/dist/test/coord_deploy_config_mode_test.sh
 	bash phase4-coordinator/dist/test/coordinator_release_tag_guard.test.sh
 	bash phase4-coordinator/dist/test/check_deploy_static_feed_access.test.sh
+	bash phase4-coordinator/dist/test/deploy_catalog_verifier_closure.test.sh
 	bash phase4-coordinator/dist/test/coordinator_deploy_recovery.test.sh
 	bash phase4-coordinator/dist/test/coordinator_archive_rotate.test.sh
 	bash phase4-coordinator/dist/test/coordinator_sqlite_relief.test.sh
