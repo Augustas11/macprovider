@@ -66,6 +66,7 @@ STAGING=""
 LOCK_HELD=""
 LOCK_HELPER=""
 LOCK_HELPER_DIR=""
+WINDOW_HELPER=""
 
 log()   { printf '[renew-autotune] %s\n' "$*"; }
 fatal() { printf '[renew-autotune] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -400,10 +401,13 @@ rollback() {
   if [ -n "$ORIG_PREVIOUS_TARGET" ]; then
     PREV_ARG="$(printf '%s' "$ORIG_PREVIOUS_TARGET" | base64 | tr -d '\n')"
   fi
-  SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$CURRENT_TARGET" "$PREV_ARG" "$COORDINATOR_UNIT" "$LOCK_HELPER" "releases/$RELEASE_DIRNAME" <<'RB' || true
+  SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$CURRENT_TARGET" "$PREV_ARG" "$COORDINATOR_UNIT" "$LOCK_HELPER" "releases/$RELEASE_DIRNAME" "$WINDOW_HELPER" <<'RB' || true
 set -euo pipefail
-root="$1"; cur="$2"; prev_b64="$3"; unit="$4"; helper="$5"; expected="$6"
+root="$1"; cur="$2"; prev_b64="$3"; unit="$4"; helper="$5"; expected="$6"; window="$7"
 if [ "$prev_b64" = "__EMPTY__" ]; then prev=""; else prev="$(printf '%s' "$prev_b64" | base64 -d)"; fi
+# The exact prior window; an empty file makes restore remove .previous-target.
+prior_window="$(dirname "$window")/prior-window"
+if [ -n "$prev" ]; then printf '%s\n' "$prev" > "$prior_window"; else : > "$prior_window"; fi
 python3 "$helper" validate || { echo "rollback: lock validation failed; not mutating" >&2; exit 1; }
 exec 8</run/lock/macprovider-pearl-updater.lock || { echo "rollback: cannot open updater lock; not mutating" >&2; exit 1; }
 flock -n 8 || { echo "rollback: Pearl updater lock held; not mutating" >&2; exit 1; }
@@ -414,12 +418,14 @@ live="${live#./}"
 if [ "$live" = "$expected" ]; then
   ln -sfn "$cur" "$root/.current.rollback"
   mv -Tf "$root/.current.rollback" "$root/current"
-  if [ -n "$prev" ]; then printf '%s\n' "$prev" > "$root/.previous-target"; else rm -f "$root/.previous-target"; fi
+  window_rc=0
+  python3 -I "$window" restore --root "$root" --from-file "$prior_window" --expect-current "$cur" || window_rc=$?
   pid="$(systemctl show -p MainPID --value "$unit")"
   [ -n "$pid" ] && [ "$pid" != "0" ] && kill -HUP "$pid" || true
+  [ "$window_rc" -eq 0 ] || { echo "rollback: rolled back current to $cur but .previous-target restore failed" >&2; exit 1; }
   echo "rolled back to $cur"
 elif [ "$live" = "$cur" ]; then
-  if [ -n "$prev" ]; then printf '%s\n' "$prev" > "$root/.previous-target"; else rm -f "$root/.previous-target"; fi
+  python3 -I "$window" restore --root "$root" --from-file "$prior_window" --expect-current "$cur"
   echo "rollback: restored .previous-target only (current still $cur)"
 else
   echo "rollback: current is $live, not $expected; not mutating"
@@ -443,6 +449,16 @@ log "installing Pearl lock validator"
 SSH "cat >'$LOCK_HELPER' && chown root:root '$LOCK_HELPER' && chmod 0700 '$LOCK_HELPER'" \
   < "$SCRIPT_DIR/pearl_autotune_deploy_lock.py" \
   || fatal "cannot install pearl_autotune_deploy_lock.py on $PEARL_SSH"
+# #1688: scripts/autotune_window.py is the single .previous-target writer.
+WINDOW_HELPER="$LOCK_HELPER_DIR/autotune_window.py"
+log "installing Pearl previous-target window writer"
+SSH "cat >'$WINDOW_HELPER' && chown root:root '$WINDOW_HELPER' && chmod 0700 '$WINDOW_HELPER'" \
+  < "$SCRIPT_DIR/autotune_window.py" \
+  || fatal "cannot install autotune_window.py on $PEARL_SSH"
+WINDOW_HELPER_SHA="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$SCRIPT_DIR/autotune_window.py")"
+REMOTE_WINDOW_HELPER_SHA="$(SSH "sha256sum '$WINDOW_HELPER'")" || fatal "cannot hash autotune_window.py on $PEARL_SSH"
+[ "${REMOTE_WINDOW_HELPER_SHA%% *}" = "$WINDOW_HELPER_SHA" ] \
+  || fatal "autotune_window.py on $PEARL_SSH does not match the reviewed copy"
 
 log "uploading signed release bytes"
 rsync -e "$RSYNC_RSH" -a --delete \
@@ -452,15 +468,15 @@ rsync -e "$RSYNC_RSH" -a --delete \
 # Remote publish. Exit 2 = aborted before swapping current (do not rollback).
 # Exit 1 = swapped current then failed (rollback under locks).
 # The coordinator PID is resolved FIRST so a missing daemon aborts BEFORE any
-# mutation (HIGH-2). .previous-target is written verbatim — CURRENT_TARGET
-# already carries the `releases/<id>` prefix, so it must NOT be re-prefixed (HIGH-1).
+# mutation (HIGH-2). CURRENT_TARGET already carries the `releases/<id>` prefix,
+# so it must NOT be re-prefixed (HIGH-1).
 # Hold deploy-pearl-vps.sh locks for the swap window so a coordinator deploy
 # cannot clobber `current`. Validate existing lock files; do not create them
 # (a 0644 create would fail the coordinator deploy's 0600 root:root check).
 set +e
-SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$REMOTE_TMP" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$COORDINATOR_UNIT" "$LOCK_HELPER" <<'REMOTE'
+SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$REMOTE_TMP" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$COORDINATOR_UNIT" "$LOCK_HELPER" "$WINDOW_HELPER" <<'REMOTE'
 set -euo pipefail
-root="$1"; incoming="$2"; final="$3"; prev="$4"; unit="$5"; helper="$6"
+root="$1"; incoming="$2"; final="$3"; prev="$4"; unit="$5"; helper="$6"; window="$7"
 incoming_path="$root/releases/$incoming"
 mutated=0
 abort_pre_mutation() {
@@ -518,27 +534,8 @@ mutated=1
 # Prepend the outgoing current onto the retained window (max 3 unique
 # releases/). A single-hop overwrite kicks every serve process still
 # advertising the hop before last. See docs/reports/2026-09-19-catalog-one-hop-admission-outage.md
-python3 - "$root/.previous-target" "$prev" <<'PY'
-import pathlib, sys
-path = pathlib.Path(sys.argv[1])
-outgoing = sys.argv[2].strip()
-if not outgoing.startswith("releases/") or "/" in outgoing[len("releases/"):]:
-    raise SystemExit(f"invalid outgoing previous {outgoing!r}")
-old = []
-if path.is_file() and not path.is_symlink():
-    old = [ln.strip() for ln in path.read_text().splitlines() if ln.strip() and not ln.strip().startswith("#")]
-seen = set()
-out = []
-for item in [outgoing, *old]:
-    if item in seen:
-        continue
-    seen.add(item)
-    out.append(item)
-    if len(out) == 3:
-        break
-path.write_text("".join(x + "\n" for x in out))
-print("previous-target window " + ",".join(out))
-PY
+python3 -I "$window" plan --root "$root" --incoming "releases/$final"
+python3 -I "$window" apply --root "$root" --incoming "releases/$final" --expect-current "$prev"
 # Atomic symlink swap: create the new link beside `current`, then rename over.
 ln -sfn "releases/$final" "$root/.current.next"
 mv -Tf "$root/.current.next" "$root/current"

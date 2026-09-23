@@ -4,3 +4,4 @@
 scripts/catalog-release.py
 scripts/openrouter_pricing_engine.py
 scripts/sign-catalog.go
+scripts/autotune_window.py

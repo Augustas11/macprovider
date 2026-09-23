@@ -3,7 +3,9 @@
 # shipped copy of scripts/catalog-release.py needs beside it. Pin that
 # deploy-pearl-vps.sh and the Pearl updater installer ship exactly that list,
 # that deploy proves the real remote verify-directory before mutating Pearl,
-# and that the listed set is both sufficient and minimal for verify-directory.
+# and that the listed set is sufficient for verify-directory, with every
+# catalog-release.py ROOT/"scripts" dependency load-bearing. Other entries
+# (scripts/autotune_window.py) ride the same shipped copy for deploy callers.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -93,7 +95,8 @@ listed: $(echo $listed)
 staged: $(echo $staged)"
 
 # Functional: an isolated copy of exactly the manifest verifies the release
-# the way Pearl will, and every manifest entry is load-bearing.
+# the way Pearl will, and catalog-release.py plus each of its ROOT/"scripts"
+# dependencies is load-bearing.
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 for entry in $bundle; do
@@ -122,7 +125,7 @@ run_verify() {
     --directory "$tmp/release" --tier2-public-key-file "$tmp/tier2-catalog.pub" > "$tmp/out" 2>&1
 }
 if run_verify; then
-  for entry in $bundle; do
+  for entry in scripts/catalog-release.py $(printf 'scripts/%s\n' $deps); do
     mv "$tmp/$entry" "$tmp/held"
     if run_verify; then
       fail "verify-directory passed without $entry; drop it from catalog-verifier-bundle.txt or fix this test"

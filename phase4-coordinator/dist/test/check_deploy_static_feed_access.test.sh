@@ -63,9 +63,21 @@ grep -q 'ROOT = "/opt/macprovider"' "$DEPLOY_SH" &&
 grep -q 'unsafe transient autotune/current.next exists before deploy activation' "$DEPLOY_SH" &&
   grep -q 'unsafe autotune/.previous-target contents before Tier-2 migration' "$DEPLOY_SH" ||
   fail "Tier-2 migration gate must reject unsafe current.next and .previous-target state"
-grep -q 'os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW' "$DEPLOY_SH" &&
-  grep -q "os.rename(tmp_name, '.previous-target', src_dir_fd=autotune_fd, dst_dir_fd=autotune_fd)" "$DEPLOY_SH" ||
-  fail "deploy must publish .previous-target via no-follow temp and atomic rename"
+# #1688: scripts/autotune_window.py is the single .previous-target writer
+# (no-follow O_EXCL temp + atomic rename live there); deploy logs the plan and
+# applies it against the target it just read, before the current swap.
+window_plan='python3 -I $DEPLOY_TMP/scripts/autotune_window.py plan --root \"\$_catalog_root\" --incoming releases/$AUTOTUNE_RELEASE_DIR_NAME'
+window_apply='python3 -I $DEPLOY_TMP/scripts/autotune_window.py apply --root \"\$_catalog_root\" --incoming releases/$AUTOTUNE_RELEASE_DIR_NAME --expect-current \"\$_previous\"'
+plan_line=$(grep -nF "$window_plan" "$DEPLOY_SH" | cut -d: -f1)
+apply_line=$(grep -nF "$window_apply" "$DEPLOY_SH" | cut -d: -f1)
+swap_line=$(grep -nF 'mv -Tf \"\$_catalog_root/current.next\" \"\$_catalog_root/current\"' "$DEPLOY_SH" | cut -d: -f1)
+deploy_tmp_rm_line=$(grep -nF -x '  rm -rf $DEPLOY_TMP' "$DEPLOY_SH" | cut -d: -f1)
+[ -n "$plan_line" ] && [ -n "$apply_line" ] && [ -n "$swap_line" ] && [ -n "$deploy_tmp_rm_line" ] &&
+  [ "$plan_line" -lt "$apply_line" ] && [ "$apply_line" -lt "$swap_line" ] && [ "$swap_line" -lt "$deploy_tmp_rm_line" ] ||
+  fail "deploy must log then apply the autotune_window.py window before the current swap, keeping DEPLOY_TMP until after it"
+if grep -Eq "os\.rename\(tmp_name, '\.previous-target'|\.previous-target\.tmp\.|> *[^ ]*\.previous-target" "$DEPLOY_SH"; then
+  fail "deploy keeps an inline .previous-target writer; use scripts/autotune_window.py"
+fi
 
 grep -q 'sudo -u macprovider test -r /opt/macprovider/autotune/current/autotune-candidates.json' "$DEPLOY_SH" ||
   fail "deploy smoke must verify macprovider can read autotune feeds"

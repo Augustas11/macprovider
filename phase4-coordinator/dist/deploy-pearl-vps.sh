@@ -519,7 +519,15 @@ else:
 
 previous_target = read_small_file_at(autotune_fd, ".previous-target", f"{ROOT}/autotune/.previous-target")
 if previous_target is not None:
-    if previous_target not in ("",) and SAFE_RELEASE_TARGET.fullmatch(previous_target) is None:
+    # Same rules as scripts/autotune_window.py parse_entries (#1688): one
+    # releases/<id> per line, blank and # lines skipped, at most 3 entries.
+    previous_entries = [
+        line.strip() for line in previous_target.split("\n")
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    if len(previous_entries) > 3 or any(
+        SAFE_RELEASE_TARGET.fullmatch(entry) is None for entry in previous_entries
+    ):
         die("unsafe autotune/.previous-target contents before Tier-2 migration")
 
 try:
@@ -3747,13 +3755,13 @@ for d in ${DOMAINS_FULL_TLS[@]+"${DOMAINS_FULL_TLS[@]}"}; do
   "
 done
 
-# Clean up the per-deploy staging dir + the stale .full backup file
-# from the broken-v1 deploy if present. validate + reload exactly once
-# so a single bad file aborts the batch atomically.
+# Clean up the stale .full backup file from the broken-v1 deploy if
+# present. validate + reload exactly once so a single bad file aborts the
+# batch atomically. The per-deploy staging dir survives until autotune
+# activation, which runs scripts/autotune_window.py from it (#1688).
 $SSH "set -e
   exec 8>/opt/macprovider/.coordinator-deploy-operation.lock
   flock -s 8
-  rm -rf $DEPLOY_TMP
   rm -f /etc/nginx/sites-available/$DOMAIN.full
   nginx -t
   systemctl reload nginx
@@ -3853,60 +3861,17 @@ $SSH "set -e
     echo 'unsafe transient autotune/current.next exists before activation' >&2
     exit 1
   }
-  python3 - \"\$_previous\" <<'PY'
-import grp
-import os
-import re
-import stat
-import sys
-
-ROOT = '/opt/macprovider'
-NOFOLLOW = getattr(os, 'O_NOFOLLOW', 0)
-previous = sys.argv[1]
-if previous and re.fullmatch(r'releases/[A-Za-z0-9][A-Za-z0-9._-]{0,191}', previous) is None:
-    raise SystemExit('invalid previous autotune current target')
-
-def validate_dir(fd, label):
-    info = os.fstat(fd)
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or info.st_uid != 0
-        or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-    ):
-        raise SystemExit(f'unsafe directory for previous-target publish: {label}')
-
-slash_fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
-validate_dir(slash_fd, '/')
-opt_fd = os.open('opt', os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=slash_fd)
-validate_dir(opt_fd, '/opt')
-root_fd = os.open('macprovider', os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=opt_fd)
-validate_dir(root_fd, ROOT)
-autotune_fd = os.open('autotune', os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=root_fd)
-validate_dir(autotune_fd, f'{ROOT}/autotune')
-
-gid = grp.getgrnam('macprovider').gr_gid
-tmp_name = f'.previous-target.tmp.{os.getpid()}'
-fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW, 0o640, dir_fd=autotune_fd)
-try:
-    os.fchown(fd, 0, gid)
-    info = os.fstat(fd)
-    if (
-        not stat.S_ISREG(info.st_mode)
-        or info.st_uid != 0
-        or info.st_gid != gid
-        or stat.S_IMODE(info.st_mode) != 0o640
-        or info.st_nlink != 1
-    ):
-        raise SystemExit('unsafe previous-target temp file')
-    os.write(fd, previous.encode('ascii'))
-    os.fsync(fd)
-finally:
-    os.close(fd)
-os.rename(tmp_name, '.previous-target', src_dir_fd=autotune_fd, dst_dir_fd=autotune_fd)
-PY
+  # #1688: scripts/autotune_window.py is the single .previous-target writer.
+  # Log the window it will publish, then apply it before the current swap.
+  # A root with no current yet has no outgoing release to retain.
+  if [ -n \"\$_previous\" ]; then
+    python3 -I $DEPLOY_TMP/scripts/autotune_window.py plan --root \"\$_catalog_root\" --incoming releases/$AUTOTUNE_RELEASE_DIR_NAME
+    python3 -I $DEPLOY_TMP/scripts/autotune_window.py apply --root \"\$_catalog_root\" --incoming releases/$AUTOTUNE_RELEASE_DIR_NAME --expect-current \"\$_previous\"
+  fi
   ln -sfn releases/$AUTOTUNE_RELEASE_DIR_NAME \"\$_catalog_root/current.next\"
   mv -Tf \"\$_catalog_root/current.next\" \"\$_catalog_root/current\"
   rm -f /opt/macprovider/tier2-catalog.json
+  rm -rf $DEPLOY_TMP
 "
 log "step 7/9: enable + start coordinator service"
 $SSH 'set -e

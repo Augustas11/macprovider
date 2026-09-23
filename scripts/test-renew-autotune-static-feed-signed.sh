@@ -242,10 +242,22 @@ if "/tmp/macprovider-autotune-lock-validate." in script:
 if "/etc/macprovider/keys" in script:
     raise SystemExit("renew script must not place the feed key on Pearl")
 remote = script.split("<<'REMOTE'", 1)[1].split("\nREMOTE", 1)[0]
-if remote.find("mutated=1") > remote.find("previous-target window"):
+apply_call = 'python3 -I "$window" apply --root "$root" --incoming "releases/$final" --expect-current "$prev"'
+if remote.count(apply_call) != 1:
+    raise SystemExit("catalog publish must write the window via autotune_window.py apply")
+if remote.find("mutated=1") > remote.find(apply_call):
     raise SystemExit("mutated=1 must be set before writing .previous-target")
-if "len(out) == 3" not in remote:
-    raise SystemExit("catalog publish must keep a 3-deep previous-target window")
+if remote.find(apply_call) > remote.find('mv -Tf "$root/.current.next" "$root/current"'):
+    raise SystemExit("the previous-target window must be written before the current swap")
+restore_call = 'python3 -I "$window" restore --root "$root" --from-file "$prior_window" --expect-current "$cur"'
+if rollback.count(restore_call) != 2:
+    raise SystemExit("rollback must restore the exact prior window via autotune_window.py restore")
+if '< "$SCRIPT_DIR/autotune_window.py"' not in script or 'sha256sum \'$WINDOW_HELPER\'' not in script:
+    raise SystemExit("renew must ship autotune_window.py to Pearl and verify its sha256")
+# #1688: autotune_window.py is the single .previous-target writer.
+for forbidden in ('> "$root/.previous-target"', 'rm -f "$root/.previous-target"', "path.write_text(", "len(out) == 3"):
+    if forbidden in script:
+        raise SystemExit(f"renew keeps an inline .previous-target writer: {forbidden}")
 under_lock = remote.split("Re-check dates-only continuity under the lock", 1)[1].split("\nPY", 1)[0]
 for requirement in (
     'artifact = "autotune-artifacts.json"',

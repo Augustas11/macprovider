@@ -76,22 +76,52 @@ def _check_owned(info: os.stat_result, required_uid: int, label: str) -> None:
 
 
 def open_root(root: str, *, required_uid: int = 0) -> int:
-    """Open root as a directory without following a symlink at any level we control."""
+    """Open root by walking from / with no-follow opens.
+
+    Every directory on the path must be owned by root (or required_uid) and not
+    group/other-writable, so no less-privileged user can swap a path component
+    between validation and the write. A root-owned sticky ancestor (e.g. /tmp)
+    is allowed: others cannot rename entries they do not own there. The root
+    itself is never allowed to be writable by group/other.
+    """
+    if not os.path.isabs(root):
+        raise WindowError(f"autotune root {root} must be absolute")
+    fd = None
+    label = "/"
     try:
-        if stat.S_ISLNK(os.lstat(root).st_mode):
-            raise WindowError(f"autotune root {root} is a symlink")
-        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
-    except OSError as exc:
-        raise WindowError(f"cannot open autotune root {root}: {exc}") from exc
-    info = os.fstat(fd)
-    try:
-        if not stat.S_ISDIR(info.st_mode) or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
-            raise WindowError(f"unsafe autotune root {root}")
+        fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW)
+        for part in [p for p in root.split("/") if p]:
+            _check_trusted_dir(os.fstat(fd), label, required_uid, allow_sticky=True)
+            label = os.path.join(label, part)
+            try:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=fd)
+            except OSError as exc:
+                raise WindowError(f"cannot open {label} without following symlinks: {exc}") from exc
+            os.close(fd)
+            fd = child
+        info = os.fstat(fd)
+        _check_trusted_dir(info, label, required_uid, allow_sticky=False)
         _check_owned(info, required_uid, f"autotune root {root}")
+    except OSError as exc:
+        if fd is not None:
+            os.close(fd)
+        raise WindowError(f"cannot open autotune root {root}: {exc}") from exc
     except WindowError:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
         raise
     return fd
+
+
+def _check_trusted_dir(info: os.stat_result, label: str, required_uid: int, *, allow_sticky: bool) -> None:
+    writable = info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+    sticky_ok = allow_sticky and info.st_uid == 0 and info.st_mode & stat.S_ISVTX
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid not in (0, required_uid)
+        or (writable and not sticky_ok)
+    ):
+        raise WindowError(f"unsafe directory on autotune root path: {label}")
 
 
 def read_current(root_fd: int) -> str | None:

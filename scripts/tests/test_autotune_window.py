@@ -67,7 +67,9 @@ class ComputeWindowTests(unittest.TestCase):
 class FileTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self._tmp.name) / "autotune"
+        # realpath: open_root walks from / without following symlinks
+        # (macOS /var -> private/var).
+        self.root = Path(os.path.realpath(self._tmp.name)) / "autotune"
         self.root.mkdir(mode=0o755)
         os.chmod(self.root, 0o755)
         (self.root / "releases").mkdir()
@@ -139,6 +141,34 @@ class FileTests(unittest.TestCase):
         with self.assertRaises(aw.WindowError):
             aw.write_window(str(link), ["releases/a"], group=GID, required_uid=UID)
         self.assertFalse(self.pt.exists())
+
+    def test_symlinked_ancestor_refused(self) -> None:
+        link = Path(os.path.realpath(self._tmp.name)) / "link-parent"
+        os.symlink(self.root.parent, link)
+        with self.assertRaises(aw.WindowError):
+            aw.write_window(str(link / "autotune"), ["releases/a"], group=GID, required_uid=UID)
+        self.assertFalse(self.pt.exists())
+
+    def test_group_writable_ancestor_refused(self) -> None:
+        parent = self.root.parent
+        mode = parent.stat().st_mode & 0o7777
+        os.chmod(parent, mode | 0o020)
+        try:
+            with self.assertRaises(aw.WindowError):
+                self.write(["releases/a"])
+        finally:
+            os.chmod(parent, mode)
+        self.assertFalse(self.pt.exists())
+
+    def test_group_writable_root_refused(self) -> None:
+        os.chmod(self.root, 0o775)
+        with self.assertRaises(aw.WindowError):
+            self.write(["releases/a"])
+        self.assertFalse(self.pt.exists())
+
+    def test_relative_root_refused(self) -> None:
+        with self.assertRaises(aw.WindowError):
+            aw.write_window("autotune", ["releases/a"], group=GID, required_uid=UID)
 
     def test_wrong_owner_refused(self) -> None:
         with self.assertRaises(aw.WindowError):
