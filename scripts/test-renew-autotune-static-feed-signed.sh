@@ -352,6 +352,8 @@ if cov_fn.count(validator_call) != 1 or '--previous-target "$check/.previous-tar
     raise SystemExit("renewal coverage must dry-load the final release with the planned window in the live coordinator binary")
 if 'ln -s "$root/releases" "$check/releases"' not in cov_fn or not (cov_fn.find(validator_call) < cov_fn.find(coverage_call)):
     raise SystemExit("renewal coverage must judge /poolz against the validator's admitted set (live releases/ for restamps)")
+if 'install -m 0640 "$root/.row-continuity-target" "$check/.row-continuity-target"' not in cov_fn:
+    raise SystemExit("renewal coverage must carry the live .row-continuity-target into the validation root (#1705)")
 if "coverage --root" in remote or "--incoming \"releases/$final\" --poolz-json" in remote:
     raise SystemExit("renewal coverage must not use the legacy Python admission mode")
 if not (remote.find('mv "$incoming" "$final"') < remote.find(coverage_call) < remote.find(apply_call)):

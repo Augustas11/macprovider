@@ -39,6 +39,15 @@ const (
 	// signed releases is the cap; it is not a directory walk.
 	MaxCompatiblePreviousReleases = 3
 
+	// MaxRowContinuityReleases bounds `<autotune-root>/.row-continuity-target`,
+	// the operator-retained SPEC-023-R010 evidence list. Deploy and renewal
+	// never rotate it, so a document a running fleet still advertises (for
+	// example a CLI's baked catalog) stays authenticatable after the
+	// previous-target window moves past it. Admission from it is row
+	// continuity only: same selected row identity and PolicyEquivalent policy
+	// as the active catalog. It is not a directory walk.
+	MaxRowContinuityReleases = 8
+
 	staticV4SignerKeyID                         = "streamvc-autotune-static-v4"
 	transitionMissingProvenanceCandidateRelease = "published-2026-07-10-catalog-recovery-v1"
 	transitionMissingProvenanceCandidateSHA256  = "776182f6230eff098345b188322dba0c7fce47a6da46447432991ffdc37eabda"
@@ -231,15 +240,32 @@ func PreviousAutotuneReleaseTarget(cfg config.AutotuneFeedsConfig) (dir string, 
 // silent trim. Permanently rejected IDs are omitted. Duplicates are skipped.
 func PreviousAutotuneReleaseTargets(cfg config.AutotuneFeedsConfig) ([]string, error) {
 	root, previousTarget := AutotuneReleaseRoot(cfg)
+	return autotuneReleaseTargets(root, previousTarget, MaxCompatiblePreviousReleases)
+}
+
+// RowContinuityAutotuneReleaseTargets resolves `<root>/.row-continuity-target`
+// with the same line grammar, tombstone filter, and fail-closed cap
+// (MaxRowContinuityReleases) as the previous-target window. It shares the
+// previous-target release root, so disabling that window disables this too.
+func RowContinuityAutotuneReleaseTargets(cfg config.AutotuneFeedsConfig) ([]string, error) {
+	root, _ := AutotuneReleaseRoot(cfg)
 	if root == "" {
 		return nil, nil
 	}
-	targetBytes, err := os.ReadFile(previousTarget)
+	return autotuneReleaseTargets(root, filepath.Join(root, ".row-continuity-target"), MaxRowContinuityReleases)
+}
+
+func autotuneReleaseTargets(root, targetFile string, max int) ([]string, error) {
+	if root == "" {
+		return nil, nil
+	}
+	label := strings.TrimPrefix(filepath.Base(targetFile), ".")
+	targetBytes, err := os.ReadFile(targetFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("read previous-target: %w", err)
+		return nil, fmt.Errorf("read %s: %w", label, err)
 	}
 	var lines []string
 	for _, raw := range strings.Split(string(targetBytes), "\n") {
@@ -252,13 +278,13 @@ func PreviousAutotuneReleaseTargets(cfg config.AutotuneFeedsConfig) ([]string, e
 	if len(lines) == 0 {
 		return nil, nil
 	}
-	if len(lines) > MaxCompatiblePreviousReleases {
-		return nil, fmt.Errorf("previous-target has %d releases; max %d", len(lines), MaxCompatiblePreviousReleases)
+	if len(lines) > max {
+		return nil, fmt.Errorf("%s has %d releases; max %d", label, len(lines), max)
 	}
 	seen := make(map[string]struct{}, len(lines))
 	out := make([]string, 0, len(lines))
 	for _, target := range lines {
-		releaseID, err := parsePreviousTargetLine(target)
+		releaseID, err := parseReleaseTargetLine(label, target)
 		if err != nil {
 			return nil, err
 		}
@@ -292,14 +318,14 @@ func AutotuneReleaseRoot(cfg config.AutotuneFeedsConfig) (root, previousTarget s
 	return root, filepath.Join(root, ".previous-target")
 }
 
-func parsePreviousTargetLine(target string) (string, error) {
+func parseReleaseTargetLine(label, target string) (string, error) {
 	releaseID := strings.TrimPrefix(target, "releases/")
-	if releaseID == target || releaseID == "" || strings.Contains(releaseID, "/") {
-		return "", fmt.Errorf("invalid previous-target %q", target)
+	if releaseID == target || releaseID == "" || releaseID == "." || releaseID == ".." || strings.Contains(releaseID, "/") {
+		return "", fmt.Errorf("invalid %s %q", label, target)
 	}
 	for _, r := range releaseID {
 		if !(r >= 'A' && r <= 'Z') && !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && !strings.ContainsRune("._-", r) {
-			return "", fmt.Errorf("invalid previous-target %q", target)
+			return "", fmt.Errorf("invalid %s %q", label, target)
 		}
 	}
 	return releaseID, nil

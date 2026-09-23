@@ -135,8 +135,9 @@ the fleet's known live/baked provider catalog distribution. For every current
 buyer-serving model key the report must classify one of:
 
 - `row_continuity_ok`: row identity is unchanged and `PolicyEquivalent` to the
-  intended current row. These providers must survive without restart under
-  SPEC-023-R010 once the row-continuity implementation is active.
+  intended current row. These providers survive without restart under
+  SPEC-023-R010 when their document is in `.previous-target` or
+  `.row-continuity-target`.
 - `intentional_policy_change`: row identity or admission-authoritative policy
   changed. The release notes must name the operational effect and the expected
   provider restart/update path.
@@ -148,11 +149,50 @@ catalog fallback. Baked fallback is a provenance/refresh diagnostic, not a
 hostile-catalog verdict, when the selected row is still row-continuity-ok.
 
 Do not use a broad `releases/` directory scan as an admission substitute. If a
-row needs compatibility beyond the bounded `.previous-target` window, publish or
-serve explicit row-continuity evidence with the fields named in SPEC-023-R010.
-Until that implementation is live, a content publish that would evict
-buyer-serving unchanged rows outside the retained window must be delayed or
-paired with a controlled provider restart/upgrade plan.
+row needs compatibility beyond the bounded `.previous-target` window, list the
+older signed release in `.row-continuity-target` (below).
+
+### Row-continuity evidence: `.row-continuity-target` (SPEC-023 v0.15.1, #1705)
+
+`<autotune-root>/.row-continuity-target` holds at most **8** `releases/<id>`
+lines (`#` comments allowed). The coordinator loads each one with the same
+keyring signature check as `.previous-target` and admits a provider still
+advertising that document **only** when its selected row identity and
+`PolicyEquivalent` policy equal the current release's row. Such sessions show
+`catalog_admission_mode = row_continuity` in `/admin` and journal
+`provider admitted by catalog row continuity`. Deploy, renewal, and rollback
+never write this file. A missing or unverifiable entry admits nobody and does
+not block boot; a ninth line or a malformed line does.
+
+Keep in it every signed document a shipped CLI bakes and that providers still
+run: at minimum the baked catalog of each CLI version at or above the fleet
+floor. After adding or removing a line, `SIGHUP` the coordinator. Remove a line
+once no connected provider advertises that release.
+
+One-time Pearl step for the 2026-09-23 recurrence. The v1.8.123 CLI bakes
+`published-2026-09-02-gpt-oss-120b-v1`:
+
+```bash
+ssh pearl
+root=/opt/macprovider/autotune
+ls -d "$root"/releases/published-2026-09-02-gpt-oss-120b-v1*
+# verify the dir has autotune-candidates.json + .sig, then:
+printf '%s\n' '# CLI baked catalogs still in the fleet (SPEC-023-R010)' \
+  "releases/$(basename "$(ls -d "$root"/releases/published-2026-09-02-gpt-oss-120b-v1* | head -1)")" \
+  | sudo tee "$root/.row-continuity-target"
+sudo systemctl kill -s HUP macprovider-coordinator
+journalctl -u macprovider-coordinator --since -5m | grep -E 'row-continuity|row continuity'
+```
+
+If that release directory was pruned, restore its signed bytes from the
+catalog release artifacts first. Never hand-edit a candidate JSON; the signature
+must verify.
+
+A content publish that would evict buyer-serving unchanged rows whose document
+is in neither file must still be delayed or paired with a controlled provider
+restart/upgrade plan. CLIs built after #1705 also refetch the signed live
+catalog on `catalog_incompatible` and adopt it when their served row is
+unchanged, so they recover without a restart.
 
 ## Weekly schedule
 

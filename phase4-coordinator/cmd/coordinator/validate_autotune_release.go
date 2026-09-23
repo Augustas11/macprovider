@@ -159,7 +159,9 @@ func validateAutotuneRelease(configPath, configOverlay, dir, previousTarget stri
 // admittedAutotuneCatalogs lists current plus every compatible catalog the ws
 // admission map (ws.CompatibleCatalogSet, the map a reload installs) reaches
 // by candidate sha, the key a provider hello must match. compatible[:retained]
-// came from .previous-target; the rest are same-version restamps.
+// came from .previous-target; RowContinuityOnly entries came from
+// .row-continuity-target and admit only an unchanged selected row
+// (SPEC-023-R010); the rest are same-version restamps.
 func admittedAutotuneCatalogs(current *autotune.Catalog, compatible []*autotune.Catalog, retained int) []autotuneAdmittedRef {
 	currentSHA := strings.ToLower(strings.TrimSpace(current.SHA256))
 	out := []autotuneAdmittedRef{{ReleaseID: current.Version, CandidatesSHA256: currentSHA, Source: "current"}}
@@ -177,6 +179,8 @@ func admittedAutotuneCatalogs(current *autotune.Catalog, compatible []*autotune.
 		source := "restamp"
 		if i < retained {
 			source = "retained"
+		} else if c.RowContinuityOnly {
+			source = "row_continuity"
 		}
 		out = append(out, autotuneAdmittedRef{ReleaseID: set[sha].Version, CandidatesSHA256: sha, Source: source})
 	}

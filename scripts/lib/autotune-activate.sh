@@ -661,6 +661,7 @@ renewal_coverage() {
   python3 -I "$window" plan --root "$root" --incoming "releases/$final" > "$check/plan.json" \
     && python3 -I -c 'import json, sys; w = json.load(open(sys.argv[1]))["window_after"]; open(sys.argv[2], "w").write("".join(e + "\n" for e in w))' "$check/plan.json" "$check/.previous-target" \
     && ln -s "$root/releases" "$check/releases" \
+    && { [ ! -e "$root/.row-continuity-target" ] || install -m 0640 "$root/.row-continuity-target" "$check/.row-continuity-target"; } \
     && chown -R root:macprovider "$check" && chmod 0750 "$check" && chmod 0640 "$check/.previous-target" \
     || { rm -rf "$check"; rm -f "$poolz"; echo "renewal coverage: cannot stage the planned window" >&2; return 10; }
   overlay=""; [ ! -e /etc/macprovider/coordinator.pearl-overlays.yaml ] || overlay="--config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml"

@@ -3971,6 +3971,9 @@ case "$CATALOG_VERDICT" in
       python3 -I $DEPLOY_TMP/scripts/autotune_window.py plan --root /opt/macprovider/autotune --incoming releases/$AUTOTUNE_RELEASE_DIR_NAME > \$_check/plan.json
       python3 -I -c 'import json, sys; w = json.load(open(sys.argv[1]))[\"window_after\"]; open(sys.argv[2], \"w\").write(\"\".join(e + \"\\n\" for e in w))' \$_check/plan.json \$_check/.previous-target
       ln -s /opt/macprovider/autotune/releases \$_check/releases
+      # #1705: row-continuity evidence is never rewritten by an activation;
+      # the verdict must see the live list or those providers read uncovered.
+      [ ! -e /opt/macprovider/autotune/.row-continuity-target ] || install -m 0640 /opt/macprovider/autotune/.row-continuity-target \$_check/.row-continuity-target
       install -m 0755 $DEPLOY_TMP/coordinator-linux-amd64 \$_check/coordinator
       chown -R root:macprovider \$_check
       chmod 0750 \$_check

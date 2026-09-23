@@ -48,6 +48,10 @@ cleanup() {
 }
 trap cleanup EXIT
 fail() { printf '[test-catalog-content-release] FAIL: %s\n' "$*" >&2; exit 1; }
+
+# #1705: the dry-load validation root carries the live row-continuity list.
+grep -qF 'install -m 0640 "$root/.row-continuity-target" "$scratch/check/.row-continuity-target"' "$(dirname "$0")/catalog-content-release.sh" ||
+  fail "dry-load must carry the live .row-continuity-target into the validation root"
 note() { printf '[test-catalog-content-release] %s\n' "$*"; }
 
 export CCR_UID; CCR_UID="$(id -u)"

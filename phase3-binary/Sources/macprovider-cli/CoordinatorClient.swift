@@ -151,6 +151,19 @@ actor CoordinatorClient {
         CoordinatorReadinessClient.ExpectedCatalogEnvelope
     ) async -> CoordinatorReadinessClient.Readiness
     typealias CatalogArtifactIdentity = @Sendable (String?) async -> String?
+    /// SPEC-023-R010 / AC-CAT-22 (#1705): re-runs the serve-start signed catalog
+    /// fetch and returns a hello envelope for the row this process already
+    /// serves, or nil when no live verified same-row document is available.
+    typealias CatalogEnvelopeRefresher = @Sendable () async -> CatalogEnvelope?
+
+    struct CatalogEnvelope: Sendable, Equatable {
+        let releaseID: String
+        let policyVersion: String
+        let candidateSHA256: String
+        let signerKeyID: String
+        let rowIdentity: String
+        let modelSHA256: String
+    }
     typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
     typealias ReloadHelperFence = @Sendable () throws -> Void
 
@@ -392,11 +405,16 @@ actor CoordinatorClient {
     private let receiptIdentitySigningKeys: [Curve25519.Signing.PrivateKey]
     private let persistReceiptIdentitySigningKey: (@Sendable (Curve25519.Signing.PrivateKey) throws -> Void)?
 
-    private let catalogReleaseID: String?
-    private let catalogPolicyVersion: String?
-    private let catalogCandidateSHA256: String?
-    private let catalogSignerKeyID: String?
-    private let catalogRowIdentity: String?
+    // Replaceable only through adoptPendingCatalogEnvelope() (#1705).
+    private var catalogReleaseID: String?
+    private var catalogPolicyVersion: String?
+    private var catalogCandidateSHA256: String?
+    private var catalogSignerKeyID: String?
+    private var catalogRowIdentity: String?
+    private let catalogEnvelopeRefresher: CatalogEnvelopeRefresher?
+    private let catalogEnvelopeRefreshMinimumInterval: TimeInterval
+    private var lastCatalogEnvelopeRefreshAt: Date?
+    private var pendingCatalogEnvelope: CatalogEnvelope?
     private let compatibilitySetID: String?
     private let installedCompatibilityManifest: InstalledCompatibilityManifest
     private let catalogModelSHA256: String?
@@ -466,6 +484,8 @@ actor CoordinatorClient {
         installedCompatibilityManifest: InstalledCompatibilityManifest? = nil,
         catalogModelSHA256: String? = nil,
         catalogArtifactIdentity: CatalogArtifactIdentity? = nil,
+        catalogEnvelopeRefresher: CatalogEnvelopeRefresher? = nil,
+        catalogEnvelopeRefreshMinimumInterval: TimeInterval = 300,
         coordinatorReadiness: CoordinatorReadiness? = nil,
         coordinatorReadinessAttempts: Int = 15,
         coordinatorReadinessRetryNanoseconds: UInt64 = 2_000_000_000,
@@ -641,6 +661,8 @@ actor CoordinatorClient {
             compatibilityManifestLoader($0, Self.binaryVersion)?.compatibilitySetID
         }
         self.catalogModelSHA256 = catalogModelSHA256
+        self.catalogEnvelopeRefresher = catalogEnvelopeRefresher
+        self.catalogEnvelopeRefreshMinimumInterval = catalogEnvelopeRefreshMinimumInterval
         self.catalogArtifactIdentity = catalogArtifactIdentity ?? { modelID in
             guard let modelID,
                   let directory = ModelRuntime.localHuggingFaceSnapshot(for: modelID)
@@ -1040,6 +1062,17 @@ actor CoordinatorClient {
                     state: classification.state,
                     reasonCode: classification.reasonCode
                 )
+                // #1705: a rejected hello never sees the current catalog on the
+                // wire, so re-fetch it here instead of replaying the stale
+                // envelope on long backoff until the operator restarts serve.
+                if classification.reasonCode == "catalog_incompatible",
+                   await refreshCatalogEnvelopeIfDue(trigger: "catalog_incompatible") {
+                    try? await Task.sleep(nanoseconds: reconnectInitialBackoffNanoseconds)
+                    backoffNanoseconds = reconnectInitialBackoffNanoseconds
+                    failedAttempts = 0
+                    consecutiveAuthProtocolFailures = 0
+                    continue
+                }
                 failedAttempts += 1
                 if Self.isFatalAuthProtocolFailure(error) {
                     consecutiveAuthProtocolFailures += 1
@@ -1303,6 +1336,15 @@ actor CoordinatorClient {
                 return ConnectionLifecycleClassification(
                     state: .catalogIncompatible,
                     reasonCode: "binary_version_unsupported"
+                )
+            }
+            // #1705: a compatibility-set rejection needs different provider
+            // software; keep it apart from a catalog document rollover, which
+            // the client refreshes in process.
+            if normalized.hasPrefix("compatibility_set") {
+                return ConnectionLifecycleClassification(
+                    state: .catalogIncompatible,
+                    reasonCode: "compatibility_update_required"
                 )
             }
             if normalized.contains("catalog") || normalized.contains("compatibility") {
@@ -3108,6 +3150,14 @@ actor CoordinatorClient {
         }
         if catalogReleaseID != nil, payload["catalog_compatible"] as? Bool != true {
             throw CoordinatorAuthError.invalidMessage("coordinator did not accept provider catalog release")
+        }
+        if catalogReleaseID != nil,
+           let currentCandidateSHA256 = payload["catalog_candidate_sha256"] as? String,
+           !currentCandidateSHA256.isEmpty,
+           currentCandidateSHA256 != catalogCandidateSHA256 {
+            // #1705: admitted on an older document. Refresh off the session
+            // path; an adopted envelope rides the next hello only.
+            Task { await self.refreshCatalogEnvelopeIfDue(trigger: "hello_ack") }
         }
         try await reconcileAdmissionIdentityIfNeeded(payload)
         // SPEC-003 v0.8.2 FR-C9.3 — single hook for both v1 (hello_ack)
@@ -6119,6 +6169,7 @@ actor CoordinatorClient {
     }
 
     private func appendCatalogAdmissionMetadata(to message: inout [String: Any], wireModelID: String) {
+        adoptPendingCatalogEnvelope()
         let catalogWireModelID = catalogModelIDForCoordinator ?? loadedModelID ?? ""
         guard !catalogWarmSwapInvalidated, wireModelID == catalogWireModelID else { return }
         if let catalogReleaseID { message["catalog_release_id"] = catalogReleaseID }
@@ -6191,6 +6242,70 @@ actor CoordinatorClient {
             message["runtime_source"] = runtimeSource
         }
         return message
+    }
+
+    /// Runs the injected refresher at most once per minimum interval and stages
+    /// a new envelope for the next hello only when it is complete, differs from
+    /// the advertised document, still names the loaded artifact, and keeps the
+    /// advertised row identity. Row identity binds the gate fields and the
+    /// structured policy digest, so a policy change on the same weights still
+    /// needs a restart (SPEC-023-R010). Returns whether an envelope was staged.
+    @discardableResult
+    private func refreshCatalogEnvelopeIfDue(trigger: String) async -> Bool {
+        guard let catalogEnvelopeRefresher,
+              let previousReleaseID = catalogReleaseID,
+              !catalogWarmSwapInvalidated
+        else {
+            return false
+        }
+        let now = Date()
+        if let lastCatalogEnvelopeRefreshAt,
+           now.timeIntervalSince(lastCatalogEnvelopeRefreshAt) < catalogEnvelopeRefreshMinimumInterval {
+            return false
+        }
+        lastCatalogEnvelopeRefreshAt = now
+        let refreshed = await catalogEnvelopeRefresher()
+        let outcome: String
+        if let refreshed {
+            let fields = [
+                refreshed.releaseID,
+                refreshed.policyVersion,
+                refreshed.candidateSHA256,
+                refreshed.signerKeyID,
+                refreshed.rowIdentity,
+            ]
+            let loadedModelSHA256 = catalogModelSHA256?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if fields.contains(where: \.isEmpty) {
+                outcome = "incomplete_envelope"
+            } else if loadedModelSHA256 == nil
+                || refreshed.modelSHA256.lowercased() != loadedModelSHA256
+                || refreshed.rowIdentity.lowercased() != catalogRowIdentity?.lowercased() {
+                outcome = "row_changed_restart_required"
+            } else if refreshed.candidateSHA256 == (pendingCatalogEnvelope?.candidateSHA256 ?? catalogCandidateSHA256),
+                      refreshed.signerKeyID == (pendingCatalogEnvelope?.signerKeyID ?? catalogSignerKeyID) {
+                outcome = "unchanged"
+            } else {
+                pendingCatalogEnvelope = refreshed
+                outcome = "adopted_next_hello"
+            }
+        } else {
+            outcome = "no_verified_same_row_catalog"
+        }
+        print("coordinator catalog refresh trigger=\(trigger) outcome=\(outcome) old_release_id=\(Self.sanitizedDiagnosticText(previousReleaseID, maxLength: 120)) new_release_id=\(Self.sanitizedDiagnosticText(refreshed?.releaseID ?? "none", maxLength: 120))")
+        return outcome == "adopted_next_hello"
+    }
+
+    private func adoptPendingCatalogEnvelope() {
+        guard let pending = pendingCatalogEnvelope else { return }
+        pendingCatalogEnvelope = nil
+        guard catalogReleaseID != nil, !catalogWarmSwapInvalidated else { return }
+        catalogReleaseID = pending.releaseID
+        catalogPolicyVersion = pending.policyVersion
+        catalogCandidateSHA256 = pending.candidateSHA256
+        catalogSignerKeyID = pending.signerKeyID
+        catalogRowIdentity = pending.rowIdentity
     }
 
     private func catalogRuntimeMatches(_ snapshot: RuntimeSnapshot) async -> Bool {

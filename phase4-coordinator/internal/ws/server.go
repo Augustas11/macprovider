@@ -73,6 +73,9 @@ type admissionCeilingEventRateState struct {
 }
 
 type Server struct {
+	// catalogRecheckPendingHook, when set by an internal test, runs after a
+	// catalog-bound session is registered and before its catalog re-check.
+	catalogRecheckPendingHook func()
 	cfg                       config.Config
 	minProviderThroughputBits atomic.Uint64
 	proofOfWeightsAdmissionMu sync.RWMutex
@@ -765,7 +768,7 @@ func (s *Server) resolveProviderCatalog(provider pool.Provider) (resolved, curre
 // resolves the session's EXACT release (by release id, never by the stored
 // admission mode, which goes stale after a re-stamp).
 func resolveProviderCatalogIn(provider pool.Provider, cur *autotune.Catalog, compatible map[string]*autotune.Catalog) (resolved, current *autotune.Catalog, isCurrent, ok bool) {
-	if provider.CatalogAdmissionMode != "current" && provider.CatalogAdmissionMode != "previous" {
+	if !catalogEnvelopeAdmissionMode(provider.CatalogAdmissionMode) {
 		return nil, nil, false, false
 	}
 	if sha := strings.ToLower(strings.TrimSpace(provider.CandidateCatalogSHA256)); sha != "" {
@@ -1648,8 +1651,12 @@ func providerIdentityRequest(p pool.Provider) pool.ModelIdentityRequest {
 // admittedCandidateCatalogSHA256 is the release a session may bind artifact
 // identity to: only a catalog envelope the coordinator validated ("current"
 // or a compatible "previous"). A bridge or legacy session presented no
-// validated envelope, so its digest never reaches the index. Applied inside
-// resolveArtifactIdentity, so no caller can forget it.
+// validated envelope, so its digest never reaches the index. A
+// "row_continuity" session is excluded too: its older document was
+// authenticated as candidate-catalog evidence only, without an artifact feed,
+// so artifact-derived identity fails closed and only the primary row binds
+// (SPEC-023-R010 item 4). Applied inside resolveArtifactIdentity, so no
+// caller can forget it.
 func admittedCandidateCatalogSHA256(catalogAdmissionMode, candidateCatalogSHA256 string) string {
 	if catalogAdmissionMode != "current" && catalogAdmissionMode != "previous" {
 		return ""
@@ -1674,6 +1681,9 @@ func (s *Server) RefreshTier2HashStatuses() int {
 // session whose identity facts changed. Lock order: registry → release
 // read; no provider section is held.
 func (s *Server) refreshSessionIdentities() int {
+	// Every release publication re-verifies sessions here, so the
+	// SPEC-023-R010 row-continuity invariant is re-checked on the same edge.
+	s.closeCatalogDivergedSessions()
 	cfg := s.tier2Config()
 	if !tier2.ModelHashActive(cfg) {
 		return s.pool.UpdateHashStatuses(func(pool.Provider) pool.HashStatus {
@@ -3209,6 +3219,15 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 		}
 	} else if firstHopOnly {
 		catalogAdmissionMode = "update_bridge"
+	} else if catalogAdmissionMode == catalogAdmissionRowContinuity {
+		s.log.Info().
+			Str("provider_id", hello.ProviderID).
+			Str("catalog_release_id", hello.CatalogReleaseID).
+			Str("catalog_candidate_sha256", hello.CandidateCatalogSHA256).
+			Str("catalog_signer_key_id", hello.CatalogSignerKeyID).
+			Str("current_catalog_release_id", admissionCurrent.Version).
+			Bool("catalog_refresh_recommended", true).
+			Msg("provider admitted by catalog row continuity")
 	}
 	now := s.now()
 	expectedModelHash := s.expectedAdmissionModelHashWithCatalog(hello, catalogAdmissionMode, admissionCurrent, admissionCompatible)
@@ -3429,7 +3448,7 @@ func (s *Server) expectedAdmissionModelHash(hello Hello, admissionMode string) s
 // (#1268 MED-2).
 func (s *Server) expectedAdmissionModelHashWithCatalog(hello Hello, admissionMode string, current *autotune.Catalog, compatible map[string]*autotune.Catalog) string {
 	catalog := resolveAdmissionCatalog(hello, admissionMode, current, compatible)
-	if catalog == nil || (admissionMode != "current" && admissionMode != "previous") {
+	if catalog == nil || !catalogEnvelopeAdmissionMode(admissionMode) {
 		return ""
 	}
 	_, row, ok := catalog.HighestClaimedTier(hello.ModelID)
@@ -3440,7 +3459,7 @@ func (s *Server) expectedAdmissionModelHashWithCatalog(hello Hello, admissionMod
 }
 
 func resolveAdmissionCatalog(hello Hello, admissionMode string, current *autotune.Catalog, compatible map[string]*autotune.Catalog) *autotune.Catalog {
-	if admissionMode == "previous" {
+	if admissionMode == "previous" || admissionMode == catalogAdmissionRowContinuity {
 		catalog := compatibleCatalogBySHA(compatible, hello.CandidateCatalogSHA256)
 		if catalog == nil {
 			catalog = compatible[hello.CatalogReleaseID]
@@ -3650,6 +3669,9 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 		if providerCatalog == nil {
 			providerCatalog = compatible[hello.CatalogReleaseID]
 		}
+		if providerCatalog != nil && providerCatalog.RowContinuityOnly {
+			admissionMode = catalogAdmissionRowContinuity
+		}
 	}
 	if providerCatalog == nil ||
 		hello.CatalogReleaseID != providerCatalog.Version ||
@@ -3658,7 +3680,7 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 		!strings.EqualFold(hello.CandidateCatalogSHA256, providerCatalog.SHA256) {
 		return "", false
 	}
-	if admissionMode == "previous" && providerCatalog.Version == catalog.Version && providerCatalog.SignerKeyID != catalog.SignerKeyID {
+	if admissionMode != "current" && providerCatalog.Version == catalog.Version && providerCatalog.SignerKeyID != catalog.SignerKeyID {
 		return "", false
 	}
 	key, _, ok := providerCatalog.HighestClaimedTier(hello.ModelID)
@@ -3669,11 +3691,12 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 	if !ok || !strings.EqualFold(hello.CandidateRowIdentity, providerRowIdentity) {
 		return "", false
 	}
-	// A recognized previous release is compatible only while the selected
-	// model row identity and policy-bearing structured fields are semantically
-	// equivalent to the active release. This permits unrelated catalog updates
-	// without admitting stale model artifacts, gates, speculative decoding, or
-	// workload policy.
+	// A recognized previous release — from the previous-target window or the
+	// row-continuity evidence list (SPEC-023-R010) — is compatible only while
+	// the selected model row identity and policy-bearing structured fields are
+	// semantically equivalent to the active release. This permits unrelated
+	// catalog updates without admitting stale model artifacts, gates,
+	// speculative decoding, or workload policy.
 	activeKey, _, ok := catalog.HighestClaimedTier(hello.ModelID)
 	if !ok {
 		return "", false
@@ -3682,10 +3705,103 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 	if !ok || !strings.EqualFold(providerRowIdentity, activeRowIdentity) {
 		return "", false
 	}
-	if admissionMode == "previous" && !providerCatalog.PolicyEquivalent(key, catalog, activeKey) {
+	if admissionMode != "current" && !providerCatalog.PolicyEquivalent(key, catalog, activeKey) {
 		return "", false
 	}
 	return admissionMode, true
+}
+
+// closeCatalogDivergedSessions keeps SPEC-023-R010 a release-generation
+// invariant rather than a hello-time check: after a publication, a session
+// whose advertised document is no longer the active one stays connected only
+// while its selected row identity and PolicyEquivalent policy still equal the
+// new active row. A diverged session is closed catalog_incompatible so it
+// re-hellos (and a current CLI refreshes its envelope). A session whose
+// document no longer resolves keeps the existing catalog-unavailable handling.
+func (s *Server) closeCatalogDivergedSessions() int {
+	if s.pool == nil {
+		return 0
+	}
+	current, compatible := s.autotuneCatalogSnapshot()
+	if current == nil {
+		return 0
+	}
+	closed := 0
+	for _, provider := range s.pool.Snapshot() {
+		if s.fenceCatalogDivergedSession(provider, current, compatible) {
+			closed++
+		}
+	}
+	return closed
+}
+
+// fenceCatalogDivergedSession makes one diverged session unroutable at once,
+// then closes it catalog_incompatible; closeSession's delayed teardown must
+// not leave a routable window. It reports whether the session was fenced.
+func (s *Server) fenceCatalogDivergedSession(provider pool.Provider, current *autotune.Catalog, compatible map[string]*autotune.Catalog) bool {
+	if current == nil || !catalogEnvelopeAdmissionMode(provider.CatalogAdmissionMode) {
+		return false
+	}
+	resolved, _, isCurrent, ok := resolveProviderCatalogIn(provider, current, compatible)
+	if !ok || resolved == nil {
+		// Row continuity was authorized only by its A-side evidence; once that
+		// document no longer resolves it is unverifiable and fails closed
+		// (R010 item 4). Other modes keep the catalog-unavailable handling so
+		// a window rotation does not mass-close the fleet.
+		if provider.CatalogAdmissionMode != catalogAdmissionRowContinuity {
+			return false
+		}
+	} else if isCurrent || catalogRowStillEquivalent(provider, resolved, current) {
+		return false
+	}
+	s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable)
+	s.log.Warn().
+		Str("provider_id", provider.ProviderID).
+		Str("assigned_id", provider.AssignedID).
+		Str("catalog_admission_mode", provider.CatalogAdmissionMode).
+		Str("catalog_release_id", provider.CatalogReleaseID).
+		Str("current_catalog_release_id", current.Version).
+		Msg("provider catalog row diverged from the published release; closing session")
+	if session, found := s.storedSessionFor(provider.ProviderID, provider.AssignedID); found {
+		s.closeSession(session, CloseInvalidHello, "catalog_incompatible")
+	}
+	return true
+}
+
+// catalogRowStillEquivalent is the hello-time row-continuity rule applied to a
+// live session: its advertised row identity is the resolved document's row,
+// which equals the active row with PolicyEquivalent structured policy.
+func catalogRowStillEquivalent(provider pool.Provider, resolved, current *autotune.Catalog) bool {
+	key, _, ok := resolved.HighestClaimedTier(provider.ModelID)
+	if !ok {
+		return false
+	}
+	rowIdentity, ok := resolved.RowIdentity(key)
+	if !ok || (provider.CandidateRowIdentity != "" && !strings.EqualFold(provider.CandidateRowIdentity, rowIdentity)) {
+		return false
+	}
+	activeKey, _, ok := current.HighestClaimedTier(provider.ModelID)
+	if !ok {
+		return false
+	}
+	activeRowIdentity, ok := current.RowIdentity(activeKey)
+	if !ok || !strings.EqualFold(rowIdentity, activeRowIdentity) {
+		return false
+	}
+	return resolved.PolicyEquivalent(key, current, activeKey)
+}
+
+// catalogAdmissionRowContinuity is the admission mode of a provider whose
+// hello names an older signed document authenticated only through the
+// `.row-continuity-target` evidence list (SPEC-023-R010, AC-CAT-22). The hello
+// ack still advertises the active catalog so the provider can refresh.
+const catalogAdmissionRowContinuity = "row_continuity"
+
+// catalogEnvelopeAdmissionMode reports whether a session presented a catalog
+// envelope the coordinator validated against a loaded signed document, so its
+// catalog-bound checks (model hash, ceiling, route) resolve that document.
+func catalogEnvelopeAdmissionMode(mode string) bool {
+	return mode == "current" || mode == "previous" || mode == catalogAdmissionRowContinuity
 }
 
 func (s *Server) populateCatalogHelloAck(ack *HelloAck) {
@@ -3883,6 +3999,12 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*
 		session *providerSession
 		refusal pool.RegisterRefusal
 	)
+	// A catalog-bound session is published held out of routing and released
+	// only after the catalog re-check below, so no buyer route can observe it
+	// between registration and that check. The hold is a registry flag, not a
+	// State, so a drain or blacklist landing meanwhile is never undone.
+	catalogPending := catalogEnvelopeAdmissionMode(entry.CatalogAdmissionMode)
+	entry.CatalogRecheckPending = catalogPending
 	// SPEC-047-R001/R006: the session replacement, the (a)/(d) evaluation
 	// against the candidate the replaced session's binding named, and the
 	// new binding are one linearization point under the provider's section
@@ -3895,6 +4017,24 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*
 			s.helloSessionBindingLocked(entry.ProviderID, prior, hadPrior, section)
 		}
 	})
+	if session != nil && catalogPending {
+		if s.catalogRecheckPendingHook != nil {
+			s.catalogRecheckPendingHook()
+		}
+		// The hello classified its catalog against the snapshot pinned at
+		// admission; a publication between that and this registration was
+		// swept before the session existed. Re-check against the active
+		// release now that it is registered (SPEC-023-R010, evict-not-refuse
+		// like the trust revalidation sweep above), then promote.
+		if registered, ok := s.pool.Resolve(entry.ProviderID, entry.AssignedID); ok {
+			current, compatible := s.autotuneCatalogSnapshot()
+			if !s.fenceCatalogDivergedSession(registered, current, compatible) {
+				s.pool.ClearCatalogRecheckPending(entry.ProviderID, entry.AssignedID)
+			}
+		}
+	} else if session == nil {
+		entry.CatalogRecheckPending = false
+	}
 	return session, refusal
 }
 

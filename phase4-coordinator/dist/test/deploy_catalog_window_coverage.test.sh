@@ -193,6 +193,10 @@ if os.environ.get("FAKE_VALIDATOR") == "reject":
     sys.exit(1)
 admitted = [ref(rel, "current")] + [ref(os.path.join(os.path.dirname(prev), l.strip()), "retained")
                                    for l in open(prev) if l.strip()]
+rct = os.path.join(os.path.dirname(prev), ".row-continuity-target")
+if os.path.exists(rct):
+    admitted += [ref(os.path.join(os.path.dirname(prev), l.strip()), "row_continuity")
+                 for l in open(rct) if l.strip() and not l.startswith("#")]
 print(json.dumps({"ok": True, "admitted": admitted, "errors": [], "notes": []}))
 FAKE
   chmod 0755 "$DEPLOY_TMP/coordinator-linux-amd64"
@@ -242,6 +246,14 @@ window() { tr '\n' ' ' < "$ROOT/autotune/.previous-target"; }
 no_token_in_argv() {
   ! grep -qF "$TOKEN" "$TMP/ssh-log" "$TMP/curl-calls" "$TMP/out" 2>/dev/null || fail "the operator key leaked into argv or the log"
 }
+
+# #1705: a provider whose release leaves the window but is listed in the live
+# .row-continuity-target stays covered (the check dir carries that list).
+reset
+printf '# baked\nreleases/p3\n' > "$ROOT/autotune/.row-continuity-target"
+pool "$(provider live-v live)" "$(provider p3-v p3 false)"
+run_slice descends "" || { cat "$TMP/out" >&2; fail "row-continuity-covered pool must activate"; }
+grep -qF '0 uncovered' "$TMP/out" || { cat "$TMP/out" >&2; fail "a row-continuity provider must be covered"; }
 
 # covered: providers on live and a retained release -> activation proceeds.
 reset

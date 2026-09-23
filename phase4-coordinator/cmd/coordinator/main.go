@@ -1602,15 +1602,73 @@ func loadPreviousAutotuneCatalog(cfg config.AutotuneFeedsConfig) ([]*autotune.Ca
 }
 
 // loadCompatibleAutotuneCatalogs is the previous-target window (up to three
-// deployer-recorded releases) plus leftover same-id freshness restamps that
-// still sit under releases/. Previous-target stays fail-closed. Restamp
-// leftovers skip unverified dirs so a stale stamp cannot block boot.
+// deployer-recorded releases), leftover same-id freshness restamps that still
+// sit under releases/, and the operator-retained row-continuity evidence list.
+// Previous-target stays fail-closed. Restamp leftovers and row-continuity
+// releases skip unverified dirs so a stale entry cannot block boot; a skipped
+// release simply admits nobody.
 func loadCompatibleAutotuneCatalogs(cfg config.AutotuneFeedsConfig, current *autotune.Catalog) ([]*autotune.Catalog, error) {
 	previous, err := loadPreviousAutotuneCatalog(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return append(previous, loadSameVersionRestampCatalogs(cfg, current)...), nil
+	compatible := append(previous, loadSameVersionRestampCatalogs(cfg, current)...)
+	rowContinuity, err := loadRowContinuityAutotuneCatalogs(cfg, current, compatible)
+	if err != nil {
+		return nil, err
+	}
+	return append(compatible, rowContinuity...), nil
+}
+
+// loadRowContinuityAutotuneCatalogs loads `.row-continuity-target`
+// (SPEC-023-R010 A-side evidence): each listed release is signature-verified
+// against the configured keyring through the same loader as previous-target,
+// tombstoned IDs are dropped by the target reader, and the result is marked
+// RowContinuityOnly so admission applies the row identity + PolicyEquivalent
+// rule and records "row_continuity". A release whose version is already the
+// active one or already retained by another source is skipped, so this list
+// never changes how an existing window entry is admitted.
+func loadRowContinuityAutotuneCatalogs(cfg config.AutotuneFeedsConfig, current *autotune.Catalog, retained []*autotune.Catalog) ([]*autotune.Catalog, error) {
+	dirs, err := buyer.RowContinuityAutotuneReleaseTargets(cfg)
+	if err != nil || len(dirs) == 0 {
+		return nil, err
+	}
+	known := make(map[string]struct{}, len(retained)+1)
+	if current != nil {
+		known[current.Version] = struct{}{}
+	}
+	for _, catalog := range retained {
+		if catalog != nil {
+			known[catalog.Version] = struct{}{}
+		}
+	}
+	out := make([]*autotune.Catalog, 0, len(dirs))
+	for _, dir := range dirs {
+		target := filepath.Join("releases", filepath.Base(dir))
+		releaseCfg := cfg
+		releaseCfg.DemandRankPath = ""
+		releaseCfg.DemandRankSigPath = ""
+		releaseCfg.AutotuneCandidatesPath = filepath.Join(dir, "autotune-candidates.json")
+		releaseCfg.AutotuneCandidatesSigPath = releaseCfg.AutotuneCandidatesPath + ".sig"
+		feeds, err := buyer.LoadPreviousAutotuneCandidateFeed(releaseCfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "autotune row-continuity catalog %s: %v\n", target, err)
+			continue
+		}
+		catalog, err := autotune.ParseCatalog(feeds.AutotuneCandidatesJSON)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "autotune row-continuity catalog %s: %v\n", target, err)
+			continue
+		}
+		if _, dup := known[catalog.Version]; dup || autotune.IsPermanentlyRejectedReleaseID(catalog.Version) {
+			continue
+		}
+		known[catalog.Version] = struct{}{}
+		catalog.SignerKeyID = feeds.AutotuneCandidatesVerification.KeyID
+		catalog.RowContinuityOnly = true
+		out = append(out, catalog)
+	}
+	return out, nil
 }
 
 var maxSameVersionRestampCatalogs = 16

@@ -3015,6 +3015,13 @@ struct LocalStatusFormatter {
         {
             title = "Not eligible: admission evidence failed"
             nextStep = "Run `malibu-cli autotune --recommend --recover-hardware-admission` while online."
+        } else if lifecycleState == "catalog_incompatible",
+                  lifecycleReason == "catalog_incompatible",
+                  !["catalog_update_required", "compatibility_update_required"].contains(networkState) {
+            // #1705: a catalog document rollover, not a software problem. The
+            // provider re-fetches the signed catalog in-process.
+            title = "Catalog refresh needed"
+            nextStep = "The provider refreshes the catalog automatically; if this persists, restart the provider."
         } else if lifecycleState == "catalog_incompatible"
             || lifecycleReason == "autotune_model_uncatalogued"
             || ["catalog_update_required", "compatibility_update_required"].contains(networkState) {

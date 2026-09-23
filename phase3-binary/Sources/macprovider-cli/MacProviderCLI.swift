@@ -1214,6 +1214,66 @@ struct ServeCommand: AsyncParsableCommand {
         )
     }
 
+    /// SPEC-023-R010 / AC-CAT-22 (#1705): the in-process counterpart of the
+    /// serve-start catalog preflight. Re-runs the same signed live fetch and
+    /// row admission for the model key this process already serves, and
+    /// returns a hello envelope only when a live, signature-verified document
+    /// still pins that key to the loaded model id, revision, and model_sha256.
+    /// Baked bytes are a startup fallback only and never become a new envelope;
+    /// a changed or absent row returns nil because new weights need a restart.
+    static func refreshCatalogEnvelope(
+        config: AppConfig,
+        servedModelSHA256: String,
+        staticInputs: AutotuneStaticInputs = AutotuneStaticInputs()
+    ) async -> CoordinatorClient.CatalogEnvelope? {
+        guard let key = config.modelCatalogKey, !key.isEmpty,
+              let modelID = config.modelCatalogModelID, !modelID.isEmpty,
+              let revision = config.modelCatalogRevision, !revision.isEmpty,
+              !servedModelSHA256.isEmpty
+        else {
+            return nil
+        }
+        let requireRecommendable = !config.donorMode
+        let catalog: AutotuneStaticSelection<CandidateCatalog>
+        if requireRecommendable {
+            let inputs = await staticInputs.loadRecommendationInputs(includeArtifactFeed: false)
+            let rateCard = inputs.rateCard
+            guard rateCard.warnings.isDisjoint(with: [.rateCardIntegrityFailure, .rateCardUpdateRequired]),
+                  let match = rateCard.value.rowForRecommendation(modelKey: key),
+                  config.model == rateCard.value.servedModelKey(modelKey: key, rateCardKey: match.key)
+            else {
+                return nil
+            }
+            catalog = inputs.candidate
+        } else {
+            catalog = await staticInputs.loadCandidateCatalog()
+        }
+        guard !catalog.usedFallback,
+              catalog.warnings.isDisjoint(with: [.candidateCatalogIntegrityFailure, .candidateCatalogUpdateRequired]),
+              let signerKeyID = catalog.signerKeyID,
+              !catalog.value.policyVersion.isEmpty,
+              let rowIdentity = catalog.value.rowIdentity(for: key),
+              let row = catalog.value.rows[key],
+              requireRecommendable
+                ? row.runtimeStatus == "recommendable"
+                : ["candidate", "listed", "recommendable"].contains(row.runtimeStatus),
+              row.modelID == modelID,
+              row.modelRevision == revision,
+              let rowModelSHA256 = row.modelSHA256,
+              rowModelSHA256 == servedModelSHA256
+        else {
+            return nil
+        }
+        return CoordinatorClient.CatalogEnvelope(
+            releaseID: catalog.value.version,
+            policyVersion: catalog.value.policyVersion,
+            candidateSHA256: AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes),
+            signerKeyID: signerKeyID,
+            rowIdentity: rowIdentity,
+            modelSHA256: rowModelSHA256
+        )
+    }
+
     static func persistMigratedArtifactPath(configPath: String, from oldPath: String, to newPath: String) throws {
         let expanded: String
         if configPath.hasPrefix("~/") {
@@ -2283,6 +2343,15 @@ struct ServeCommand: AsyncParsableCommand {
                 catalogSignerKeyID: startupPreflight.catalogTrust?.signerKeyID,
                 catalogRowIdentity: startupPreflight.catalogTrust?.rowIdentity,
                 catalogModelSHA256: startupPreflight.catalogTrust?.modelSHA256,
+                catalogEnvelopeRefresher: startupPreflight.catalogTrust?.modelSHA256.map { servedModelSHA256 in
+                    let refreshConfig = resolved
+                    return {
+                        await Self.refreshCatalogEnvelope(
+                            config: refreshConfig,
+                            servedModelSHA256: servedModelSHA256
+                        )
+                    }
+                },
                 receiptIdentitySigningKeyCandidates: admissionIdentitySigningKeyCandidates,
                 persistReceiptIdentitySigningKey: persistAdmissionIdentitySigningKey,
                 providerCredentialStore: credentialStore,
