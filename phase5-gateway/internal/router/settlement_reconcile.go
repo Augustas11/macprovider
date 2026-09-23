@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -19,9 +20,25 @@ import (
 const defaultSettlementReconcileLimit = 100
 const maxSettlementReconcileLimit = 500
 const settlementReconcileNudgeDelay = 50 * time.Millisecond
+const settlementReconcileNudgeRetryBaseDelay = 250 * time.Millisecond
 const maxSettlementReconcileNudgeQueue = 1024
 const maxSettlementReconcileNudgeWorkers = 4
+const maxSettlementReconcileNudgeAttempts = 4
 const maxSettlementReconcileOverflowCatchupPasses = maxSettlementReconcileNudgeQueue/maxSettlementReconcileLimit + 2
+
+type settlementReconcileNudge struct {
+	reservation storage.ActiveReservation
+	attempt     int
+	notBefore   time.Time
+}
+
+type coordinatorFinalityStatusError struct {
+	statusCode int
+}
+
+func (e coordinatorFinalityStatusError) Error() string {
+	return fmt.Sprintf("coordinator finality status=%d", e.statusCode)
+}
 
 type coordinatorRequestSettlementFinality struct {
 	RequestID                 string `json:"request_id"`
@@ -67,7 +84,18 @@ func (s *Server) handleSettlementReconcile(w http.ResponseWriter, r *http.Reques
 	if !s.operatorAuthorized(w, r) {
 		return
 	}
-	limit, err := parseSettlementReconcileLimit(r.URL.Query().Get("limit"))
+	query := r.URL.Query()
+	accountID := strings.TrimSpace(query.Get("account_id"))
+	requestID := strings.TrimSpace(query.Get("request_id"))
+	if (accountID == "") != (requestID == "") {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_settlement_target", "account_id and request_id must be provided together")
+		return
+	}
+	if accountID != "" && strings.TrimSpace(query.Get("limit")) != "" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_settlement_target", "limit cannot be combined with account_id and request_id")
+		return
+	}
+	limit, err := parseSettlementReconcileLimit(query.Get("limit"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_limit", err.Error())
 		return
@@ -78,12 +106,36 @@ func (s *Server) handleSettlementReconcile(w http.ResponseWriter, r *http.Reques
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
-	summary, err := s.ReconcileSettlementHolds(ctx, limit)
+	var summary SettlementReconcileSummary
+	if accountID != "" {
+		summary, err = s.ReconcileSettlementHold(ctx, accountID, requestID)
+		if errors.Is(err, storage.ErrReservationNotFound) {
+			writeError(w, http.StatusNotFound, "invalid_request_error", "settlement_hold_not_found", "Settlement hold not found")
+			return
+		}
+	} else {
+		summary, err = s.ReconcileSettlementHolds(ctx, limit)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "settlement_reconcile_load_failed", "Could not load active reservations")
 		return
 	}
 	writeJSON(w, http.StatusOK, summary)
+}
+
+func (s *Server) ReconcileSettlementHold(ctx context.Context, accountID, requestID string) (SettlementReconcileSummary, error) {
+	reservation, err := s.store.LookupSettlementHeldReservation(ctx, accountID, requestID)
+	if err != nil {
+		return SettlementReconcileSummary{}, err
+	}
+	summary := SettlementReconcileSummary{Scanned: 1}
+	result, err := s.reconcileSettlementReservation(ctx, reservation)
+	if err != nil {
+		summary.Errors = 1
+		return summary, err
+	}
+	summary.applyResult(result)
+	return summary, nil
 }
 
 func (s *Server) ReconcileSettlementHolds(ctx context.Context, limit int) (SettlementReconcileSummary, error) {
@@ -211,7 +263,10 @@ func (s *Server) nudgeSettlementReconciler(reservation storage.ActiveReservation
 		)
 		return
 	}
-	s.settlementReconcileNudgePending = append(s.settlementReconcileNudgePending, reservation)
+	s.settlementReconcileNudgePending = append(s.settlementReconcileNudgePending, settlementReconcileNudge{
+		reservation: reservation,
+		attempt:     1,
+	})
 	s.settlementReconcileNudgeKeys[key] = struct{}{}
 	if s.settlementReconcileNudgeActiveWorkers < maxSettlementReconcileNudgeWorkers {
 		s.settlementReconcileNudgeActiveWorkers++
@@ -245,36 +300,80 @@ func (s *Server) drainSettlementReconcileNudges() {
 			s.settlementReconcileNudgeMu.Unlock()
 			return
 		}
-		reservation := s.settlementReconcileNudgePending[0]
+		nudge := s.settlementReconcileNudgePending[0]
 		copy(s.settlementReconcileNudgePending, s.settlementReconcileNudgePending[1:])
 		s.settlementReconcileNudgePending = s.settlementReconcileNudgePending[:len(s.settlementReconcileNudgePending)-1]
 		s.settlementReconcileNudgeMu.Unlock()
 
-		timer := time.NewTimer(settlementReconcileNudgeDelay)
+		delay := settlementReconcileNudgeDelay
+		if until := time.Until(nudge.notBefore); until > delay {
+			delay = until
+		}
+		timer := time.NewTimer(delay)
 		<-timer.C
 		timer.Stop()
 
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		result, err := s.reconcileSettlementReservation(ctx, reservation)
+		result, err := s.reconcileSettlementReservation(ctx, nudge.reservation)
 		cancel()
-		key := settlementReconcileNudgeKey(reservation)
+		key := settlementReconcileNudgeKey(nudge.reservation)
+		if err != nil && retryableSettlementReconcileNudgeError(err) && nudge.attempt < maxSettlementReconcileNudgeAttempts {
+			nudge.attempt++
+			nudge.notBefore = time.Now().Add(settlementReconcileNudgeRetryDelay(nudge.attempt))
+			s.settlementReconcileNudgeMu.Lock()
+			s.settlementReconcileNudgePending = append(s.settlementReconcileNudgePending, nudge)
+			s.settlementReconcileNudgeMu.Unlock()
+			slog.Warn("SPEC-022 settlement reconciler nudge retry scheduled",
+				"request_id", nudge.reservation.RequestID,
+				"account_id", nudge.reservation.AccountID,
+				"attempt", nudge.attempt,
+				"max_attempts", maxSettlementReconcileNudgeAttempts,
+				"error", err,
+			)
+			continue
+		}
 		s.settlementReconcileNudgeMu.Lock()
 		delete(s.settlementReconcileNudgeKeys, key)
 		s.settlementReconcileNudgeMu.Unlock()
 		if err != nil {
 			slog.Warn("SPEC-022 settlement reconciler nudge failed",
-				"request_id", reservation.RequestID,
-				"account_id", reservation.AccountID,
+				"request_id", nudge.reservation.RequestID,
+				"account_id", nudge.reservation.AccountID,
+				"attempts", nudge.attempt,
 				"error", err,
 			)
 			continue
 		}
 		slog.Info("SPEC-022 settlement reconciler nudge completed",
-			"request_id", reservation.RequestID,
-			"account_id", reservation.AccountID,
+			"request_id", nudge.reservation.RequestID,
+			"account_id", nudge.reservation.AccountID,
+			"attempts", nudge.attempt,
 			"result", result,
 		)
 	}
+}
+
+func settlementReconcileNudgeRetryDelay(attempt int) time.Duration {
+	if attempt <= 2 {
+		return settlementReconcileNudgeRetryBaseDelay
+	}
+	delay := settlementReconcileNudgeRetryBaseDelay
+	for i := 2; i < attempt; i++ {
+		delay *= 4
+	}
+	return delay
+}
+
+func retryableSettlementReconcileNudgeError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		return true
+	}
+	var statusError coordinatorFinalityStatusError
+	return errors.As(err, &statusError) && (statusError.statusCode == http.StatusRequestTimeout || statusError.statusCode == http.StatusTooEarly || statusError.statusCode == http.StatusTooManyRequests || statusError.statusCode >= 500)
 }
 
 func (s *Server) drainSettlementReconcileCatchups() {
@@ -576,7 +675,7 @@ func (s *Server) fetchCoordinatorRequestSettlementFinality(ctx context.Context, 
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return coordinatorRequestSettlementFinality{}, false, fmt.Errorf("coordinator finality status=%d", resp.StatusCode)
+		return coordinatorRequestSettlementFinality{}, false, coordinatorFinalityStatusError{statusCode: resp.StatusCode}
 	}
 	var finality coordinatorRequestSettlementFinality
 	if err := json.NewDecoder(resp.Body).Decode(&finality); err != nil {

@@ -813,6 +813,158 @@ func TestSettlementReconcileNudgeCoalescesConcurrentRequests(t *testing.T) {
 	}
 }
 
+func TestSettlementReconcileNudgeRetriesTransientCoordinatorFailure(t *testing.T) {
+	const (
+		accountID         = "acct_nudge_retry"
+		requestID         = "req_nudge_retry"
+		internalRequestID = "internal_nudge_retry"
+	)
+	createdAt := fixedNow()
+	var calls atomic.Int32
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		if r.URL.Path != "/internal/settlement/finality" || r.Header.Get("Authorization") != "Bearer service-token" ||
+			r.URL.Query().Get("account_id") != accountID || r.URL.Query().Get("request_id") != requestID ||
+			r.URL.Query().Get("required_internal_request_id") != internalRequestID ||
+			r.URL.Query().Get("reservation_created_at_unix_ms") != strconv.FormatInt(createdAt.UnixMilli(), 10) {
+			t.Errorf("finality lookup missing authenticated current-attempt scope: %s", r.URL.RawQuery)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if call == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(coordinatorRequestSettlementFinality{
+			RequestID:                 requestID,
+			RequiredInternalRequestID: internalRequestID,
+			Mode:                      "enforce",
+			ModeScopeComplete:         true,
+			PolicyVersion:             settlementPolicyVersion,
+			Outcome:                   "verified",
+			ReceiptResult:             "valid",
+			Reason:                    "verified_settlement",
+			Closed:                    true,
+			PromptTokens:              7,
+			CompletionTokens:          5,
+			TotalTokens:               12,
+			TokenSource:               "coordinator_observed",
+			VerifiedAttempts:          1,
+		})
+	}))
+	defer coordinator.Close()
+
+	cfg := config.Default()
+	cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+	cfg.Auth.Demo.SigningSecret = "test-demo-secret"
+	cfg.Coordinator.OperatorURL = coordinator.URL
+	cfg.Coordinator.ServiceToken = "service-token"
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
+	cfg.Settlement.ReconcileEnabled = true
+	cfg.Settlement.ReconcileRequestTimeoutSeconds = 1
+	store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       accountID,
+		RequestID:       requestID,
+		WindowDate:      createdAt.UTC().Format("2006-01-02"),
+		RequestedTokens: 32,
+		DailyQuota:      cfg.Quotas.AccountDailyTokens,
+		CreatedAt:       createdAt,
+		ExpiresAt:       createdAt.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.MarkReservationSettlementHold(context.Background(), accountID, requestID); err != nil {
+		t.Fatalf("MarkReservationSettlementHold: %v", err)
+	}
+	seedBoundSettlementCandidate(t, store, accountID, requestID, internalRequestID, createdAt, 32, "")
+	server := New(cfg, store, fakeOAuth{}, WithHTTPClient(coordinator.Client()), WithNow(func() time.Time { return createdAt }))
+	server.nudgeSettlementReconciler(storage.ActiveReservation{
+		AccountID:      accountID,
+		RequestID:      requestID,
+		WindowDate:     createdAt.UTC().Format("2006-01-02"),
+		ReservedTokens: 32,
+		CreatedAt:      createdAt,
+	})
+
+	deadline := time.After(3 * time.Second)
+	for {
+		state := gatewaySettlementSnapshot(t, cfg.Storage.DBPath, accountID)
+		if state.usageRows == 1 && state.settledRows == 1 && state.activeRows == 0 && state.heldRows == 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("transient nudge failure did not recover; state=%+v calls=%d", state, calls.Load())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("coordinator calls=%d want one failure and one retry", got)
+	}
+}
+
+func TestSettlementReconcileNudgeDoesNotRetryPermanentCoordinatorFailure(t *testing.T) {
+	const (
+		accountID         = "acct_nudge_permanent"
+		requestID         = "req_nudge_permanent"
+		internalRequestID = "internal_nudge_permanent"
+	)
+	createdAt := fixedNow()
+	var calls atomic.Int32
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer coordinator.Close()
+
+	cfg := config.Default()
+	cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+	cfg.Auth.Demo.SigningSecret = "test-demo-secret"
+	cfg.Coordinator.OperatorURL = coordinator.URL
+	cfg.Coordinator.ServiceToken = "service-token"
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
+	cfg.Settlement.ReconcileEnabled = true
+	cfg.Settlement.ReconcileRequestTimeoutSeconds = 1
+	store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       accountID,
+		RequestID:       requestID,
+		WindowDate:      createdAt.UTC().Format("2006-01-02"),
+		RequestedTokens: 32,
+		DailyQuota:      cfg.Quotas.AccountDailyTokens,
+		CreatedAt:       createdAt,
+		ExpiresAt:       createdAt.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.MarkReservationSettlementHold(context.Background(), accountID, requestID); err != nil {
+		t.Fatalf("MarkReservationSettlementHold: %v", err)
+	}
+	seedBoundSettlementCandidate(t, store, accountID, requestID, internalRequestID, createdAt, 32, "")
+	server := New(cfg, store, fakeOAuth{}, WithHTTPClient(coordinator.Client()), WithNow(func() time.Time { return createdAt }))
+	server.nudgeSettlementReconciler(storage.ActiveReservation{
+		AccountID: accountID, RequestID: requestID, WindowDate: createdAt.UTC().Format("2006-01-02"), ReservedTokens: 32, CreatedAt: createdAt,
+	})
+
+	time.Sleep(750 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("permanent coordinator failure calls=%d want 1", got)
+	}
+	state := gatewaySettlementSnapshot(t, cfg.Storage.DBPath, accountID)
+	if state.usageRows != 0 || state.settledRows != 0 || state.activeRows != 1 || state.heldRows != 1 {
+		t.Fatalf("permanent failure state=%+v, want held reservation without debit", state)
+	}
+}
+
 func quotaReservationSettlementHold(t *testing.T, dbPath, accountID, requestID string) int64 {
 	t.Helper()
 	db, err := sql.Open("sqlite", dbPath)
@@ -895,10 +1047,10 @@ func TestSettlementReconcileNudgeOverflowRequestsCatchup(t *testing.T) {
 	seedBoundSettlementCandidate(t, store, accountID, requestID, internalRequestID, createdAt, 32, "")
 	server := New(cfg, store, fakeOAuth{}, WithHTTPClient(coordinator.Client()), WithNow(func() time.Time { return createdAt }))
 	server.settlementReconcileNudgeKeys = make(map[string]struct{}, maxSettlementReconcileNudgeQueue)
-	server.settlementReconcileNudgePending = make([]storage.ActiveReservation, maxSettlementReconcileNudgeQueue)
+	server.settlementReconcileNudgePending = make([]settlementReconcileNudge, maxSettlementReconcileNudgeQueue)
 	for i := 0; i < maxSettlementReconcileNudgeQueue; i++ {
 		dummy := storage.ActiveReservation{AccountID: "acct_full", RequestID: "req_full_" + strconv.Itoa(i), CreatedAt: createdAt.Add(time.Duration(i) * time.Nanosecond)}
-		server.settlementReconcileNudgePending[i] = dummy
+		server.settlementReconcileNudgePending[i] = settlementReconcileNudge{reservation: dummy, attempt: 1}
 		server.settlementReconcileNudgeKeys[settlementReconcileNudgeKey(dummy)] = struct{}{}
 	}
 
@@ -1025,10 +1177,10 @@ func TestSettlementReconcileOverflowCatchupUsesPerReservationTimeout(t *testing.
 	}
 	server := New(cfg, store, fakeOAuth{}, WithHTTPClient(coordinator.Client()), WithNow(func() time.Time { return createdAt }))
 	server.settlementReconcileNudgeKeys = make(map[string]struct{}, maxSettlementReconcileNudgeQueue)
-	server.settlementReconcileNudgePending = make([]storage.ActiveReservation, maxSettlementReconcileNudgeQueue)
+	server.settlementReconcileNudgePending = make([]settlementReconcileNudge, maxSettlementReconcileNudgeQueue)
 	for i := 0; i < maxSettlementReconcileNudgeQueue; i++ {
 		dummy := storage.ActiveReservation{AccountID: "acct_full_slow", RequestID: "req_full_slow_" + strconv.Itoa(i), CreatedAt: createdAt.Add(time.Duration(i) * time.Nanosecond)}
-		server.settlementReconcileNudgePending[i] = dummy
+		server.settlementReconcileNudgePending[i] = settlementReconcileNudge{reservation: dummy, attempt: 1}
 		server.settlementReconcileNudgeKeys[settlementReconcileNudgeKey(dummy)] = struct{}{}
 	}
 

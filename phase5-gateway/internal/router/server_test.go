@@ -2543,6 +2543,8 @@ func TestSPEC022GatewaySettlementReconcileFinalizesHeldReservation(t *testing.T)
 	accountID := "acct_spec022_reconcile_verified"
 	requestID := "req_spec022_reconcile_verified"
 	internalRequestID := "internal_spec022_reconcile_verified"
+	backlogAccountID := "acct_spec022_reconcile_backlog"
+	backlogRequestID := "req_spec022_reconcile_backlog"
 	var captured http.Header
 	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		captured = r.Header.Clone()
@@ -2583,6 +2585,22 @@ func TestSPEC022GatewaySettlementReconcileFinalizesHeldReservation(t *testing.T)
 		cfg.Coordinator.OperatorKey = "operator-key"
 		cfg.Coordinator.ServiceToken = "service-token"
 	}, WithHTTPClient(coordinator.Client()))
+	backlogCreatedAt := fixedNow().Add(-time.Hour)
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       backlogAccountID,
+		RequestID:       backlogRequestID,
+		WindowDate:      backlogCreatedAt.UTC().Format("2006-01-02"),
+		RequestedTokens: 20,
+		DailyQuota:      cfg.Quotas.AccountDailyTokens,
+		CreatedAt:       backlogCreatedAt,
+		ExpiresAt:       backlogCreatedAt.Add(5 * time.Minute),
+	}); err != nil {
+		t.Fatalf("ReserveQuota backlog: %v", err)
+	}
+	if err := store.MarkReservationSettlementHold(context.Background(), backlogAccountID, backlogRequestID); err != nil {
+		t.Fatalf("MarkReservationSettlementHold backlog: %v", err)
+	}
+	seedBoundSettlementCandidate(t, store, backlogAccountID, backlogRequestID, "internal_spec022_reconcile_backlog", backlogCreatedAt, 20, "")
 	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
 		AccountID:       accountID,
 		RequestID:       requestID,
@@ -2599,7 +2617,7 @@ func TestSPEC022GatewaySettlementReconcileFinalizesHeldReservation(t *testing.T)
 	}
 	seedBoundSettlementCandidate(t, store, accountID, requestID, internalRequestID, fixedNow(), 20, "")
 
-	req := httptest.NewRequest(http.MethodPost, "/admin/settlement/reconcile?limit=10", nil)
+	req := httptest.NewRequest(http.MethodPost, "/admin/settlement/reconcile?account_id="+accountID+"&request_id="+requestID, nil)
 	req.Header.Set("Authorization", "Bearer operator-key")
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -2620,9 +2638,32 @@ func TestSPEC022GatewaySettlementReconcileFinalizesHeldReservation(t *testing.T)
 	if got.usageRows != 1 || got.settledRows != 1 || got.refundedRows != 0 || got.activeRows != 0 {
 		t.Fatalf("settlement snapshot=%+v, want verified debit and settled reservation", got)
 	}
+	backlog := gatewaySettlementSnapshot(t, dbPath, backlogAccountID)
+	if backlog.usageRows != 0 || backlog.settledRows != 0 || backlog.activeRows != 1 || backlog.heldRows != 1 {
+		t.Fatalf("backlog snapshot=%+v, want exact-target reconcile to leave unrelated older hold untouched", backlog)
+	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
 	if outcome != "spec022_verified" || source != "coordinator_observed" {
 		t.Fatalf("usage outcome/source=%s/%s, want spec022_verified/coordinator_observed", outcome, source)
+	}
+}
+
+func TestSPEC022GatewaySettlementReconcileRequiresCompleteExactTarget(t *testing.T) {
+	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorKey = "operator-key"
+	})
+	for _, path := range []string{
+		"/admin/settlement/reconcile?account_id=acct_only",
+		"/admin/settlement/reconcile?request_id=req_only",
+		"/admin/settlement/reconcile?account_id=acct&request_id=req&limit=1",
+	} {
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("Authorization", "Bearer operator-key")
+		resp := httptest.NewRecorder()
+		h.ServeHTTP(resp, req)
+		if resp.Code != http.StatusBadRequest {
+			t.Fatalf("path=%s status=%d body=%s", path, resp.Code, resp.Body.String())
+		}
 	}
 }
 
@@ -7215,7 +7256,7 @@ var gatewayEmittedErrorCodes = []string{
 	"invalid_api_key", "invalid_capacity_signal", "invalid_conversation_tag",
 	"invalid_demo_token", "invalid_feedback", "invalid_feedback_scope",
 	"invalid_feedback_source", "invalid_handoff", "invalid_kill_switch",
-	"invalid_kill_switch_version", "invalid_limit", "invalid_operator_token",
+	"invalid_kill_switch_version", "invalid_limit", "invalid_operator_token", "invalid_settlement_target",
 	"invalid_provider_response", "invalid_provider_usage", "invalid_rating", "invalid_request",
 	"invalid_request_body", "invalid_request_id", "invalid_window",
 	"invalid_provider_usage", "invalid_rating", "invalid_request",
@@ -7235,7 +7276,7 @@ var gatewayEmittedErrorCodes = []string{
 	"relay_blind_route_reservation_invalid",
 	"quota_reservation_failed", "receipt_forbidden", "request_content_encoding_unsupported", "request_too_large",
 	"session_generation_failed", "session_id_untyped", "settlement_failed",
-	"settlement_reconcile_load_failed", "signup_event_failed", "signup_limit_check_failed",
+	"settlement_hold_not_found", "settlement_reconcile_load_failed", "signup_event_failed", "signup_limit_check_failed",
 	"signup_rate_limited", "state_generation_failed", "stream_malformed",
 	"stream_output_exceeded", "stream_truncated", "tier2_metadata_unavailable",
 	"token_limit_overflow", "upstream_provider_error", "usage_load_failed",

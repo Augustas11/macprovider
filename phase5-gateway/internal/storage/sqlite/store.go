@@ -1761,23 +1761,54 @@ func (s *Store) ListSettlementHeldReservations(ctx context.Context, limit int) (
 	defer rows.Close()
 	out := make([]storage.ActiveReservation, 0, limit)
 	for rows.Next() {
-		var reservation storage.ActiveReservation
-		var expiresAt, createdAt string
-		var requested, effective, envelope, keyRecord, kid, providerBinding string
-		var inputCap, outputCap int64
-		if err := rows.Scan(
-			&reservation.AccountID, &reservation.RequestID, &reservation.WalletSessionID,
-			&reservation.WindowDate, &reservation.ReservedTokens, &expiresAt, &createdAt,
-			&requested, &effective, &envelope, &keyRecord, &kid, &providerBinding, &inputCap, &outputCap,
-		); err != nil {
+		reservation, err := scanSettlementHeldReservation(rows)
+		if err != nil {
 			return nil, err
 		}
-		reservation.ExpiresAt = decodeTime(expiresAt)
-		reservation.CreatedAt = decodeTime(createdAt)
-		reservation.RelayBlind = relayBlindFromValues(requested, effective, envelope, keyRecord, kid, providerBinding, inputCap, outputCap)
 		out = append(out, reservation)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) LookupSettlementHeldReservation(ctx context.Context, accountID, requestID string) (storage.ActiveReservation, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT qr.account_id, qr.request_id, COALESCE(wrm.session_id, ''), qr.window_date,
+			qr.reserved_tokens, qr.expires_at, qr.created_at,
+			qr.requested_privacy_mode, qr.effective_privacy_outcome, qr.relay_blind_envelope_digest,
+			qr.relay_blind_key_record_digest, qr.relay_blind_kid, qr.relay_blind_provider_binding_digest,
+			qr.input_token_upper_bound, qr.max_output_tokens
+		FROM quota_reservations qr
+		LEFT JOIN wallet_session_request_map wrm
+			ON wrm.account_id = qr.account_id AND wrm.request_id = qr.request_id
+		WHERE qr.account_id = ? AND qr.request_id = ?
+			AND qr.status = 'active' AND qr.settlement_hold = 1`, accountID, requestID)
+	reservation, err := scanSettlementHeldReservation(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storage.ActiveReservation{}, storage.ErrReservationNotFound
+	}
+	return reservation, err
+}
+
+type settlementHeldReservationScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanSettlementHeldReservation(row settlementHeldReservationScanner) (storage.ActiveReservation, error) {
+	var reservation storage.ActiveReservation
+	var expiresAt, createdAt string
+	var requested, effective, envelope, keyRecord, kid, providerBinding string
+	var inputCap, outputCap int64
+	if err := row.Scan(
+		&reservation.AccountID, &reservation.RequestID, &reservation.WalletSessionID,
+		&reservation.WindowDate, &reservation.ReservedTokens, &expiresAt, &createdAt,
+		&requested, &effective, &envelope, &keyRecord, &kid, &providerBinding, &inputCap, &outputCap,
+	); err != nil {
+		return storage.ActiveReservation{}, err
+	}
+	reservation.ExpiresAt = decodeTime(expiresAt)
+	reservation.CreatedAt = decodeTime(createdAt)
+	reservation.RelayBlind = relayBlindFromValues(requested, effective, envelope, keyRecord, kid, providerBinding, inputCap, outputCap)
+	return reservation, nil
 }
 
 func (s *Store) AcquireConcurrency(ctx context.Context, req storage.ConcurrencyRequest) (storage.ConcurrencyDecision, error) {

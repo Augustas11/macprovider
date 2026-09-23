@@ -74,6 +74,7 @@ type UsageStore interface {
 	MarkReservationSettlementHold(ctx context.Context, accountID, requestID string) error
 	ClampReservationExpiry(ctx context.Context, accountID, requestID string, expiresAt time.Time) error
 	ListSettlementHeldReservations(ctx context.Context, limit int) ([]ActiveReservation, error)
+	LookupSettlementHeldReservation(ctx context.Context, accountID, requestID string) (ActiveReservation, error)
 	MarkSettlementReconcileAttempt(ctx context.Context, reservation ActiveReservation) error
 	SaveSettlementFallbackCandidate(ctx context.Context, candidate SettlementFallbackCandidate) error
 	LookupSettlementFallbackCandidate(ctx context.Context, reservation ActiveReservation) (SettlementFallbackCandidate, error)
