@@ -31,6 +31,7 @@ Use this skill for two jobs only:
 - Never pipe a network fetch into a shell. Fetch scripts to a mode-0600 file,
   preview and syntax-check them, dry-run when supported, then run the same
   local bytes only after approval.
+- Do not inspect `d-inference` source. It is outside the clean-room boundary.
 - Use public `malibu.tech` URLs. Do not introduce legacy internal hosts.
 
 ## Provider Decision Tree
@@ -333,6 +334,20 @@ curl -fsS https://api.malibu.tech/v1/messages \
   -H "Content-Type: application/json" \
   -d '{"model":"<live-model-id>","max_tokens":8,"messages":[{"role":"user","content":"Reply with ok."}]}'
 ```
+
+## Authoritative Repository References
+
+When the repository is available, use these sources for policy and operational
+detail instead of expanding this distribution artifact:
+
+- `README.md`
+- `docs/using-macprovider-with-openai-sdk.md`
+- `docs/runbooks/provider-cli-release-verification.md`
+- `ops/runbooks/entry-610-first-hop-recovery.md`
+- `specs/SPEC-003-open-onboarding.md`
+- `specs/SPEC-006-buyer-api.md`
+- `specs/SPEC-020-provider-autoupdate.md`
+- `specs/SPEC-035-provider-connection-diagnostics.md`
 
 Local smoke is complete only when no secret was printed, the provider is
 admitted and routable or the API probe returns a normal chat response, and no

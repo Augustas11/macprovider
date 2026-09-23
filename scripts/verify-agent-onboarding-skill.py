@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the hosted MacProvider agent onboarding skill source."""
+"""Validate the hosted Malibu provider and API onboarding skill source."""
 
 from __future__ import annotations
 
@@ -58,7 +58,8 @@ REQUIRED_GUARDRAILS = [
     "explicit operator approval",
     "do not run destructive commands",
     "do not inspect `d-inference` source",
-    "do not introduce legacy `streamvc.live` urls",
+    "never pipe a network fetch into a shell",
+    "do not introduce legacy internal hosts",
 ]
 
 FORBIDDEN_LITERAL_SNIPPETS = [
@@ -81,9 +82,16 @@ ALLOWED_URLS = {
     "https://get.malibu.tech/.well-known/skills/index.v1",
     "https://get.malibu.tech/install.sh",
     "https://get.malibu.tech/uninstall.sh",
+    "https://malibu.tech/host",
+    "https://api.malibu.tech",
     "https://api.malibu.tech/v1",
+    "https://api.malibu.tech/v1/chat/completions",
+    "https://api.malibu.tech/v1/messages",
+    "https://api.malibu.tech/v1/stats/models",
+    "https://api.malibu.tech/v1/status",
     "https://api.malibu.tech/auth/github/start",
 }
+ALLOWED_FRAGMENT_URLS = {"https://malibu.tech/j#/PLACEHOLDER"}
 URI_RE = re.compile(r"(?:\b[A-Za-z][A-Za-z0-9+.-]*:[^\s`<>\")]+|//[^\s`<>\")]+)")
 SUPPRESS_FAILURE_OUTPUT = False
 
@@ -131,6 +139,8 @@ def validate_urls(text: str) -> None:
         except ValueError:
             fail(f"URL has an invalid port: {raw}")
         require(port is None, f"URL must not contain an explicit port: {raw}")
+        if raw in ALLOWED_FRAGMENT_URLS:
+            continue
         require(not parsed.params and not parsed.query and not parsed.fragment, f"URL must be canonical without params/query/fragment: {raw}")
         require(not (host == "streamvc.live" or host.endswith(".streamvc.live")), f"legacy host forbidden: {raw}")
         normalized = f"{parsed.scheme.lower()}://{host}{parsed.path}"
@@ -161,16 +171,18 @@ def validate_frontmatter(skill: str) -> None:
 
     name = metadata.get("name", "")
     description = metadata.get("description", "")
-    require(name == "macprovider-agent-onboarding", "front matter name drifted")
+    require(name == "malibu-provider-api-onboarding", "front matter name drifted")
     require(
         re.fullmatch(r"[a-z0-9-]{1,64}", name) is not None,
         "front matter name must be lowercase letters, digits, and hyphens",
     )
     require(description, "front matter description missing")
-    require("MacProvider" in description, "front matter description must mention MacProvider")
+    require("Malibu" in description, "front matter description must mention Malibu")
     require(
-        "install" in description.lower() and "OpenAI-compatible SDKs" in description,
-        "front matter description must cover provider install and buyer SDK use cases",
+        "install" in description.lower()
+        and "OpenAI-compatible" in description
+        and "Anthropic-compatible" in description,
+        "front matter description must cover provider install and API compatibility",
     )
 
 
@@ -219,9 +231,9 @@ def validate_files(
     require(isinstance(skills, list) and len(skills) == 1, "index must contain exactly one skill")
     entry = skills[0]
     require(isinstance(entry, dict), "index skill entry must be an object")
-    require(entry.get("id") == "macprovider-agent-onboarding", "index skill id drifted")
+    require(entry.get("id") == "malibu-provider-api-onboarding", "index skill id drifted")
     require(entry.get("url") == CANONICAL_SKILL_URL, "index skill URL drifted")
-    require(entry.get("source_path") == "docs/agent-onboarding/SKILL.md", "index source path drifted")
+    require("source_path" not in entry, "public index must not expose a repository source path")
     require(
         entry.get("content_type") == "text/markdown; charset=utf-8",
         "index content_type drifted",

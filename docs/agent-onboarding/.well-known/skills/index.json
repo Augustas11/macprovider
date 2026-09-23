@@ -8,7 +8,7 @@
       "description": "Agent-readable Malibu provider onboarding, recovery, uninstall, and coding-agent API compatibility guidance.",
       "url": "https://get.malibu.tech/skill.md",
       "content_type": "text/markdown; charset=utf-8",
-      "sha256": "ab83fbfe2b89739473d487de71e9c31d26eca64658b962c35167861009ab4ef6"
+      "sha256": "2f88254e917b66129e2f3520408407ee562ebe6d307e5e22ad4637db9943c49e"
     }
   ]
 }
