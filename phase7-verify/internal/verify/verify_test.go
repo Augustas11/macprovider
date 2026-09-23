@@ -614,6 +614,12 @@ func openTempCache(t *testing.T) *cache.Cache {
 	return c
 }
 
+func TestDefaultCoordinatorHostIsMalibu(t *testing.T) {
+	if defaultCoordinatorHost != "coordinator.malibu.tech" {
+		t.Fatalf("defaultCoordinatorHost = %q, want coordinator.malibu.tech", defaultCoordinatorHost)
+	}
+}
+
 func writeCacheEntry(t *testing.T, c *cache.Cache, coordinatorHost, providerID string, pubkey []byte, fetchedAt time.Time, prev *previousResponse) {
 	t.Helper()
 	line := map[string]any{

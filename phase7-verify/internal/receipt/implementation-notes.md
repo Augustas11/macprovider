@@ -40,11 +40,13 @@ with a verifier-derived byte string and could either reject valid historical
 receipts or hide byte-level canonicalization drift.
 
 Parse-time tuple checks are intentionally limited to envelope validity, JSON
-well-formedness, exact seven-key shape, field types, non-negative integer
-fields, hash/base64 field formats, duplicate top-level key rejection, and
-leading/trailing whitespace rejection. Key-order canonicality is not
-re-derived; the signature check enforces byte fidelity for syntactically valid
-but noncanonical ordering.
+well-formedness, the exact key set (seven keys for v0.1/v0.2, nine keys for
+v0.3), field types, non-negative integer fields, hash/base64 field formats,
+duplicate top-level key rejection, and leading/trailing whitespace rejection.
+`model_hash` is omitted from the struct decode because it is a string or JSON
+null; the raw field map records which. The signed bytes are not rewritten.
+Key-order canonicality is not re-derived; the signature check enforces byte
+fidelity for syntactically valid but noncanonical ordering.
 
 ## Error Taxonomy Mapping
 

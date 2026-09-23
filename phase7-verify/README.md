@@ -6,12 +6,12 @@ Buyer-side verification for SPEC-015 signed inference receipts.
 
 ## Install
 
-Release artifacts are published on tags named `verify-v<version>`, for example `verify-v1.1.0`.
+Release artifacts are published on tags named `verify-v<version>`, for example `verify-v1.1.1`. `verify-v1.1.0` and `verify-v1.0.0` are deprecated: both default `--provider-id` key lookup to `coordinator.streamvc.live`, which is not Malibu infrastructure. Pass `--pubkey` or `--coordinator https://coordinator.malibu.tech` on those binaries. `verify-v1.1.0` also rejects current v0.3 buyer receipts (`model_hash` present); no flag works around that. Upgrade to `verify-v1.1.1`.
 
 ### macOS Apple Silicon
 
 ```sh
-VERSION=1.1.0
+VERSION=1.1.1
 gh release download "verify-v${VERSION}" --repo Augustas11/macprovider \
   --pattern "macprovider-verify-${VERSION}-darwin-arm64" \
   --pattern "macprovider-verify-${VERSION}-darwin-arm64.sha256"
@@ -23,7 +23,7 @@ sudo install -m 0755 "macprovider-verify-${VERSION}-darwin-arm64" /usr/local/bin
 ### macOS Intel
 
 ```sh
-VERSION=1.1.0
+VERSION=1.1.1
 gh release download "verify-v${VERSION}" --repo Augustas11/macprovider \
   --pattern "macprovider-verify-${VERSION}-darwin-amd64" \
   --pattern "macprovider-verify-${VERSION}-darwin-amd64.sha256"
@@ -35,7 +35,7 @@ sudo install -m 0755 "macprovider-verify-${VERSION}-darwin-amd64" /usr/local/bin
 ### Linux amd64
 
 ```sh
-VERSION=1.1.0
+VERSION=1.1.1
 gh release download "verify-v${VERSION}" --repo Augustas11/macprovider \
   --pattern "macprovider-verify-${VERSION}-linux-amd64" \
   --pattern "macprovider-verify-${VERSION}-linux-amd64.sha256"
@@ -117,10 +117,13 @@ JSON mode emits one line conforming to the shipped Draft-07 schema:
 
 | macprovider-verify | SPEC-015 receipt versions verified |
 |---|---|
-| 1.0.x | 0.2.0 through 0.2.4 |
-| 1.1.x | 0.2.0 through 0.3.3 (catalog-based model-hash binding per §M) |
+| 1.0.x | 0.2.0 through 0.2.4. Deprecated. Default key host is `coordinator.streamvc.live`. |
+| 1.1.0 | Deprecated. Rejects v0.3 tuples that contain `model_hash` (exit 65, `unknown field "model_hash"`) and defaults key lookup to `coordinator.streamvc.live`. |
+| 1.1.1 | 0.2.0 through 0.3.3 (catalog-based model-hash binding per §M). Default key host is `coordinator.malibu.tech`. |
 
-**§M.1.2 forward-incompat note.** Locked v1.0.x verifiers report v0.3 receipts as `invalid` per SPEC-015 §M.1.2. Operators rolling out v0.3-emitting providers MUST release v1.1.x to buyers BEFORE that provider rollout reaches them. See `audits/2026-06-24/SPEC_015_V03_OPERATOR_RUNBOOK.md`.
+A `receipt_version` other than `"3"`, including a SPEC-015 v0.4 settlement receipt (`"4"`), returns `inconclusive` / `unknown_receipt_version`. This binary does not verify settlement receipts.
+
+**§M.1.2 forward-incompat note.** Locked v1.0.x verifiers report v0.3 receipts as `invalid` per SPEC-015 §M.1.2. `verify-v1.1.0` was intended to verify v0.3 and does not. Buyers verifying current receipts need `verify-v1.1.1`.
 
 ## Trust Boundary
 

@@ -14,22 +14,24 @@ import (
 )
 
 type jsonResult struct {
-	Result          string        `json:"result"`
-	Reason          string        `json:"reason"`
-	ProviderID      *string       `json:"provider_id"`
-	ModelID         *string       `json:"model_id"`
-	SignedAt        *int64        `json:"signed_at"`
-	TrustSource     string        `json:"trust_source"`
-	CoordinatorHost *string       `json:"coordinator_host"`
+	Result          string  `json:"result"`
+	Reason          string  `json:"reason"`
+	ProviderID      *string `json:"provider_id"`
+	ModelID         *string `json:"model_id"`
+	SignedAt        *int64  `json:"signed_at"`
+	TrustSource     string  `json:"trust_source"`
+	CoordinatorHost *string `json:"coordinator_host"`
 	// SPEC-015 v0.3 §M.3.2.1 — REQUIRED tri-state. true / false /
 	// null. Always present in v0.3 verifier output (even for
 	// legacy v0.1/v0.2 receipts, where the value is null).
 	ModelHashVerified *bool `json:"model_hash_verified"`
 	// SPEC-015 v0.3 §M.0 — receipt_version diagnostic; "1" for
 	// legacy receipts, "3" for v0.3 receipts.
-	ReceiptVersion  string        `json:"receipt_version,omitempty"`
-	Details         *jsonDetails  `json:"details,omitempty"`
-	Warnings        []jsonWarning `json:"warnings,omitempty"`
+	// Pointer so an unknown receipt_version of "" is still emitted.
+	// omitempty on a string would drop that §M.1.4 diagnostic.
+	ReceiptVersion *string       `json:"receipt_version,omitempty"`
+	Details        *jsonDetails  `json:"details,omitempty"`
+	Warnings       []jsonWarning `json:"warnings,omitempty"`
 }
 
 type jsonDetails struct {
@@ -38,16 +40,16 @@ type jsonDetails struct {
 	Receipt  string         `json:"receipt,omitempty"`
 	Extra    map[string]any `json:"extra,omitempty"`
 	// SPEC-015 v0.3 §M.3.2.1 — named top-level details fields.
-	Expected       string `json:"expected,omitempty"`
-	Actual         string `json:"actual,omitempty"`
-	PolicyFlag     string `json:"policy_flag,omitempty"`
-	ModelID        string `json:"model_id,omitempty"`
-	CatalogID      string `json:"catalog_id,omitempty"`
-	ExpiresAt      string `json:"expires_at,omitempty"`
-	ReceiptVersion string `json:"receipt_version,omitempty"`
-	Cause          string `json:"cause,omitempty"`
-	URL            string `json:"url,omitempty"`
-	Alg            string `json:"alg,omitempty"`
+	Expected       string  `json:"expected,omitempty"`
+	Actual         string  `json:"actual,omitempty"`
+	PolicyFlag     string  `json:"policy_flag,omitempty"`
+	ModelID        string  `json:"model_id,omitempty"`
+	CatalogID      string  `json:"catalog_id,omitempty"`
+	ExpiresAt      string  `json:"expires_at,omitempty"`
+	ReceiptVersion *string `json:"receipt_version,omitempty"`
+	Cause          string  `json:"cause,omitempty"`
+	URL            string  `json:"url,omitempty"`
+	Alg            string  `json:"alg,omitempty"`
 }
 
 type jsonWarning struct {
@@ -65,7 +67,7 @@ func renderJSON(result verify.Result) ([]byte, error) {
 		TrustSource:       result.TrustSource,
 		CoordinatorHost:   coordinatorHostOrNull(result),
 		ModelHashVerified: result.ModelHashVerified,
-		ReceiptVersion:    result.ReceiptVersion,
+		ReceiptVersion:    versionForJSON(result.ReceiptVersion, result.Reason == "unknown_receipt_version"),
 	}
 	// SPEC-015 v0.3 §M.3.2.1 — Details required for v0.3-named
 	// inconclusive cases (model_id_not_in_catalog, catalog_expired,
@@ -89,6 +91,16 @@ func renderJSON(result verify.Result) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
+// versionForJSON returns a pointer when the version must appear in
+// JSON. force is set for unknown receipt_version, including "".
+func versionForJSON(version string, force bool) *string {
+	if version == "" && !force {
+		return nil
+	}
+	v := version
+	return &v
+}
+
 func renderJSONDetails(details *verify.Details) *jsonDetails {
 	out := &jsonDetails{
 		Field:          details.Field,
@@ -100,7 +112,7 @@ func renderJSONDetails(details *verify.Details) *jsonDetails {
 		ModelID:        details.ModelID,
 		CatalogID:      details.CatalogID,
 		ExpiresAt:      details.ExpiresAt,
-		ReceiptVersion: details.ReceiptVersion,
+		ReceiptVersion: versionForJSON(details.ReceiptVersion, details.Field == "receipt_version"),
 		Cause:          details.Cause,
 		URL:            details.URL,
 		Alg:            details.Alg,

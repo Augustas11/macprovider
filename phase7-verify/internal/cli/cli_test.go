@@ -796,6 +796,28 @@ func openTempCache(t *testing.T) *cache.Cache {
 	return c
 }
 
+func TestExplicitPubkeyStillUsesSingleMatchCache(t *testing.T) {
+	fixture := newCLIFixture(t, makeKey(61), cliNow.Unix())
+	pubkey := base64.StdEncoding.EncodeToString(fixture.pub)
+	stdout, stderr, c := buffersAndCache(t)
+	if err := c.Put(normalizedCoordinatorHost("https://example.test"), testProviderID, cache.ResolverResponse{ProviderID: testProviderID, ReceiptPubkey: fixture.pub}); err != nil {
+		t.Fatal(err)
+	}
+	code := run(headerArgs("https://example.test", fixture, "--pubkey", pubkey, "--offline", "--json"), nil, stdout, stderr, getenvNone, runConfig{cache: c, now: func() time.Time { return cliNow }})
+	if code != exitValid {
+		t.Fatalf("exit=%d want=%d stdout=%q stderr=%q", code, exitValid, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"provider_id":"`+testProviderID+`"`) {
+		t.Fatalf("stdout=%q", stdout.String())
+	}
+}
+
+func TestDefaultCoordinatorIsMalibu(t *testing.T) {
+	if defaultCoordinator != "coordinator.malibu.tech" {
+		t.Fatalf("defaultCoordinator = %q, want coordinator.malibu.tech", defaultCoordinator)
+	}
+}
+
 func getenvNone(string) string { return "" }
 
 func ioDiscard() *bytes.Buffer { return &bytes.Buffer{} }
