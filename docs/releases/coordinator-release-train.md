@@ -111,7 +111,7 @@ the freshness lane.
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
-| Keep unchanged catalog rows admitted across catalog publishes | merged | #1714 (#1705) |
+| Keep unchanged catalog rows admitted across catalog publishes (SPEC-023 v0.15.1 R010: `.row-continuity-target` evidence, `row_continuity` admission, re-check on every publication). Also changes `dist/deploy-pearl-vps.sh`, `scripts/lib/autotune-activate.sh`, `scripts/catalog-content-release.sh` and `scripts/autotune_window.py`, so **needs a full deploy**, not a binary swap. Post-apply step: Open Pearl action 4 | merged `3abf42a8` | #1714 (#1705) |
 | Node operator status, safe context changes, model diagnostics | in progress | #1713 (#1689) |
 | Build 1 Lane A orchestrated PR | in progress | #1658 (#1642) |
 
@@ -132,6 +132,25 @@ while the binary is dated 2026-09-23.
    timer is disabled, so this is not urgent.
 3. After (1), run `scripts/catalog-content-release.sh --preflight --commit
    <main sha>` once to confirm the lane reaches GO on a real content change.
+4. **After the coordinator carrying #1714 is live (≥ `3abf42a8`)**, list the
+   fleet's CLI-baked catalog as row-continuity evidence. Until then, idle
+   1.8.123 providers on the baked `published-2026-09-02-gpt-oss-120b-v1` are
+   kicked (`4001 catalog_incompatible`) by every content cut until Malibu
+   restarts. The 2026-09-23 recurrence was #1705.
+   - Confirm `/opt/macprovider/autotune/releases/published-2026-09-02-gpt-oss-120b-v1*`
+     still has `autotune-candidates.json` + `.sig`.
+   - Write that `releases/<dir>` line to
+     `/opt/macprovider/autotune/.row-continuity-target` (at most 8 lines;
+     deploy, renewal and rollback never rewrite it), then SIGHUP the coordinator.
+   - Verify: the journal shows no `autotune row-continuity catalog … ` load
+     error, and `/admin` shows those providers with
+     `catalog_admission_mode = row_continuity`.
+   - Exact commands: `docs/runbooks/autotune-feed-renewal.md` → "Row-continuity
+     evidence".
+   - Add a line for each future CLI whose baked catalog the fleet still runs.
+     Remove a line once no provider advertises that release.
+   - SPEC-023-R010 stays `pending` in CONFORMANCE until a content cut is
+     observed that does not kick unchanged-row providers.
 
 ## Apply checklist (per coordinator release)
 
