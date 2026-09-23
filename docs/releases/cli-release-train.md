@@ -109,6 +109,7 @@ candidate from that current-main lineage. Fleet recommendation stays at
 | Provider WebSocket relay admission follows advertised seats and warm swaps | merged | #1687 |
 | Refresh embedded Tier-2 identity/catalog bindings for the current model set | merged | #1692 |
 | Disable optional template thinking for final-answer mode by loaded-artifact capability | merged | #1700 |
+| Running provider refreshes its signed catalog envelope on `catalog_incompatible` or a newer hello ack and adopts it only for the same served row identity (no Malibu restart after a content cut). Compatibility-set rejections keep their own reason. Malibu/CLI status says "Catalog refresh needed", not "software update required" | merged `3abf42a8` | #1714 (#1705) |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
@@ -172,7 +173,7 @@ and silently never matching.
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
 | Status | **Do not promote.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 181 remains the serving canary until a reviewed, signed successor passes the hardware campaign. |
 | Next candidate | **v1.8.186, not cut.** #1699, #1704, and #1700 are on `main`; cut from the current tip. Candidate identity must not bump `binaryVersion`; it stays 1.8.123. |
-| Merged on `main`, not in serving 181 | #1692 (Tier-2 identity/catalog bindings; included in staged 182), #1700 (template-capability-driven no-thinking final answers). |
+| Merged on `main`, not in serving 181 | #1692 (Tier-2 identity/catalog bindings; included in staged 182), #1700 (template-capability-driven no-thinking final answers), #1714 (in-process catalog envelope refresh + "Catalog refresh needed" status, #1705). |
 | Why the next cut | Combine #1687, #1692, #1699, #1704, and #1700 so the same signed Studio candidate can prove answer quality, eight-seat buyer routing, and complete settlement. |
 
 ## E2E tracks (independent gates)
