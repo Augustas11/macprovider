@@ -307,8 +307,13 @@ type Server struct {
 	// package counters in terminal_arbiter.go. Tests set it directly to
 	// assert per-request claim/row ordering, which is not otherwise
 	// reachable because the arbiter is owned by a request-scoped recorder.
-	terminalObserver func(*requestTerminal)
-	relayBlind       *relayBlindService
+	terminalObserver                 func(*requestTerminal)
+	relayBlind                       *relayBlindService
+	settlementReceiptRecoveryMu      sync.Mutex
+	settlementReceiptRecoveryPending []settlementReceiptRecoveryItem
+	settlementReceiptRecoveryKeys    map[string]struct{}
+	settlementReceiptRecoveryWorkers int
+	settlementReceiptPersist         settlementReceiptPersistFunc
 }
 
 type receiptKeysBucket struct {
@@ -361,6 +366,11 @@ const (
 	maxRequestLogUsageTokens     = int64(10000000)
 	maxUpstreamResponseBodyBytes = int64(16 << 20)
 	requestLogWriteTimeout       = 6 * time.Second
+	// Receipt verification is recoverable after provider credit and attempt
+	// output are durable. Keep its synchronous budget short so transient money
+	// DB pressure cannot hold an already-complete buyer response for the full
+	// request-log write budget; bounded background recovery gets fresh 6s tries.
+	settlementReceiptSynchronousTimeout = time.Second
 	// Keep pre-dispatch route snapshot pressure bounded with enough headroom for
 	// the gateway to return OpenRouter-facing capacity sheds inside the TTFT SLO.
 	routeSnapshotDispatchTimeout = 1400 * time.Millisecond
@@ -830,10 +840,12 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		// loopback behavior (X-Real-IP / X-Forwarded-For honored only
 		// when r.RemoteAddr is 127.0.0.0/8 or ::1). WithTrustedProxies
 		// replaces this set. Issue #125.
-		trustedProxies:  []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},
-		rateCardUSDPerM: 1.0,
-		now:             func() time.Time { return time.Now().UTC() },
-		version:         "dev",
+		trustedProxies:                []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},
+		rateCardUSDPerM:               1.0,
+		now:                           func() time.Time { return time.Now().UTC() },
+		version:                       "dev",
+		settlementReceiptRecoveryKeys: make(map[string]struct{}),
+		settlementReceiptPersist:      persistSettlementReceiptDirect,
 	}
 	for _, opt := range opts {
 		opt(s)

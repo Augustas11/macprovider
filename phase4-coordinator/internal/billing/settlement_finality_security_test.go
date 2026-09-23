@@ -158,6 +158,42 @@ func TestRequestSettlementFinalitySnapshotWithoutVerdictIsIncomplete(t *testing.
 	}
 }
 
+func TestRequestSettlementFinalityRecoversDurableAttemptWithoutVerdict(t *testing.T) {
+	fixtures := loadSettlementVerifierFixtures(t)
+	pubkey := decodeSettlementVerifierPubkey(t, fixtures.ProviderReceiptPubkeyB64)
+	tuple := firstSettlementTupleWithTerminal(t, fixtures, "normal_done")
+	input := settlementVerifierInputFromFixture(t, fixtures, tuple, pubkey)
+	input.RouteSnapshot.RouteSnapshotMode = RouteSnapshotModeEnforce
+	_, store := newRequestAndBillingStores(t)
+	seedSettlementReceiptEvidence(t, store, input)
+	deadline := input.TerminalStateTSUnixMS + input.RouteSnapshot.PendingDeadlineSeconds*1000
+
+	pending, found, err := store.RequestSettlementFinality(context.Background(), input.AccountScope, input.RequestID, deadline-1)
+	if err != nil || !found {
+		t.Fatalf("pending finality found=%v err=%v", found, err)
+	}
+	if !pending.ModeScopeComplete || pending.Mode != RouteSnapshotModeEnforce || pending.Outcome != SettlementOutcomePending ||
+		pending.ReceiptResult != SettlementReceiptResultInconclusive || pending.Reason != "receipt_verdict_pending" || pending.Closed ||
+		pending.PendingDeadlineUnixMS != deadline || pending.PendingAttempts != 1 {
+		t.Fatalf("pending finality=%+v", pending)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts`); got != 0 {
+		t.Fatalf("pre-deadline lookup persisted receipt verdicts=%d want 0", got)
+	}
+
+	terminal, found, err := store.RequestSettlementFinality(context.Background(), input.AccountScope, input.RequestID, deadline+1)
+	if err != nil || !found {
+		t.Fatalf("terminal finality found=%v err=%v", found, err)
+	}
+	if !terminal.ModeScopeComplete || terminal.Outcome != SettlementOutcomeQuarantined || terminal.ReceiptResult != SettlementReceiptResultInvalid ||
+		terminal.Reason != "missing_receipt_deadline_elapsed" || !terminal.Closed || terminal.QuarantinedAttempts != 1 {
+		t.Fatalf("terminal finality=%+v", terminal)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_receipt_verdicts WHERE closed=1 AND reason='missing_receipt_deadline_elapsed'`); got != 1 {
+		t.Fatalf("terminal missing-receipt verdicts=%d want 1", got)
+	}
+}
+
 func TestAggregateExternalRequestFinalityScopeRequiresEveryChild(t *testing.T) {
 	first := RequestSettlementFinality{
 		PolicyVersion: RouteSnapshotPolicyVersion, Mode: RouteSnapshotModeObserve,
