@@ -1,0 +1,10 @@
+## Raw output
+
+```text
+- **HIGH — `phase4-coordinator/internal/ws/server.go:3738`**: Diverged sessions remain buyer-routable until asynchronous disconnect cleanup. `closeCatalogDivergedSessions` queues a close frame, but `closeSession` delays connection closure by 100 ms (`server.go:4165`), without immediately closing the session or marking the provider unavailable. Buyer selection can therefore still accept the provider through `RoutingEligible()` (`internal/pool/provider.go:560`). Concrete scenario: publication changes the selected row’s minimum RAM, runtime status, or policy digest while retaining the same model hash. A concurrent request can select and dispatch to the stale session after publication but before the sweep reaches it; ordinary row-bound settlement does not re-check the release generation. Suggested fix: synchronously quarantine the exact provider session before queuing the close—such as marking it unavailable/draining—or add a route-time row-equivalence/release-generation fence. Extend `TestCatalogRowContinuitySessionsAreRecheckedOnPublication` to assert immediate routing ineligibility, not merely receipt of a close frame.
+
+- **LOW — `phase4-coordinator/internal/ws/server.go:547`**: `buildCompatibleCatalogSet` stores release IDs and catalog SHA-256 values in one untyped key namespace. An operator-controlled signed release ID equal to another retained catalog’s lowercase SHA can overwrite that lookup. Subsequent envelope checks fail closed, so the consequence is false `catalog_incompatible` rejection rather than widened admission. Suggested fix: maintain separate release-ID and SHA indexes or prefix keys with their type.
+
+The targeted coordinator and Swift test commands all passed. The R2 compatibility-reason classification, signer comparison, artifact-identity exclusion, and CLI signed-refresh protections were otherwise verified. During review, `origin/main` advanced from the stated R3 base `afbee248` to `2b352720` (#1706); this branch now requires composition/rebase validation against that new base.
+
+VERDICT: C=0 H=1 M=0 L=1
