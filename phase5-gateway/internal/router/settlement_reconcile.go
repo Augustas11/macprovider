@@ -317,7 +317,8 @@ func (s *Server) drainSettlementReconcileNudges() {
 		result, err := s.reconcileSettlementReservation(ctx, nudge.reservation)
 		cancel()
 		key := settlementReconcileNudgeKey(nudge.reservation)
-		if err != nil && retryableSettlementReconcileNudgeError(err) && nudge.attempt < maxSettlementReconcileNudgeAttempts {
+		retryableResult := err == nil && retryableSettlementReconcileNudgeResult(result)
+		if ((err != nil && retryableSettlementReconcileNudgeError(err)) || retryableResult) && nudge.attempt < maxSettlementReconcileNudgeAttempts {
 			nudge.attempt++
 			nudge.notBefore = time.Now().Add(settlementReconcileNudgeRetryDelay(nudge.attempt))
 			s.settlementReconcileNudgeMu.Lock()
@@ -328,6 +329,7 @@ func (s *Server) drainSettlementReconcileNudges() {
 				"account_id", nudge.reservation.AccountID,
 				"attempt", nudge.attempt,
 				"max_attempts", maxSettlementReconcileNudgeAttempts,
+				"result", result,
 				"error", err,
 			)
 			continue
@@ -351,6 +353,10 @@ func (s *Server) drainSettlementReconcileNudges() {
 			"result", result,
 		)
 	}
+}
+
+func retryableSettlementReconcileNudgeResult(result string) bool {
+	return result == "held" || result == "coordinator_404_held"
 }
 
 func settlementReconcileNudgeRetryDelay(attempt int) time.Duration {

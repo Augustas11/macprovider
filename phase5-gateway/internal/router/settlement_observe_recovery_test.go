@@ -908,6 +908,93 @@ func TestSettlementReconcileNudgeRetriesTransientCoordinatorFailure(t *testing.T
 	}
 }
 
+func TestSettlementReconcileNudgeRetriesPendingCoordinatorFinality(t *testing.T) {
+	const (
+		accountID         = "acct_nudge_pending"
+		requestID         = "req_nudge_pending"
+		internalRequestID = "internal_nudge_pending"
+	)
+	createdAt := fixedNow()
+	var calls atomic.Int32
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := calls.Add(1)
+		finality := coordinatorRequestSettlementFinality{
+			RequestID:                 requestID,
+			RequiredInternalRequestID: internalRequestID,
+			Mode:                      "enforce",
+			ModeScopeComplete:         true,
+			PolicyVersion:             settlementPolicyVersion,
+		}
+		if call == 1 {
+			finality.Outcome = "pending"
+			finality.ReceiptResult = "inconclusive"
+			finality.Reason = "receipt_verdict_pending"
+			finality.PendingAttempts = 1
+		} else {
+			finality.Outcome = "verified"
+			finality.ReceiptResult = "valid"
+			finality.Reason = "verified_settlement"
+			finality.Closed = true
+			finality.PromptTokens = 7
+			finality.CompletionTokens = 5
+			finality.TotalTokens = 12
+			finality.TokenSource = "coordinator_observed"
+			finality.VerifiedAttempts = 1
+		}
+		_ = json.NewEncoder(w).Encode(finality)
+	}))
+	defer coordinator.Close()
+
+	cfg := config.Default()
+	cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+	cfg.Auth.Demo.SigningSecret = "test-demo-secret"
+	cfg.Coordinator.OperatorURL = coordinator.URL
+	cfg.Coordinator.ServiceToken = "service-token"
+	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
+	cfg.Settlement.ReconcileEnabled = true
+	cfg.Settlement.ReconcileRequestTimeoutSeconds = 1
+	store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       accountID,
+		RequestID:       requestID,
+		WindowDate:      createdAt.UTC().Format("2006-01-02"),
+		RequestedTokens: 32,
+		DailyQuota:      cfg.Quotas.AccountDailyTokens,
+		CreatedAt:       createdAt,
+		ExpiresAt:       createdAt.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.MarkReservationSettlementHold(context.Background(), accountID, requestID); err != nil {
+		t.Fatalf("MarkReservationSettlementHold: %v", err)
+	}
+	seedBoundSettlementCandidate(t, store, accountID, requestID, internalRequestID, createdAt, 32, "")
+	server := New(cfg, store, fakeOAuth{}, WithHTTPClient(coordinator.Client()), WithNow(func() time.Time { return createdAt }))
+	server.nudgeSettlementReconciler(storage.ActiveReservation{
+		AccountID: accountID, RequestID: requestID, WindowDate: createdAt.UTC().Format("2006-01-02"), ReservedTokens: 32, CreatedAt: createdAt,
+	})
+
+	deadline := time.After(3 * time.Second)
+	for {
+		state := gatewaySettlementSnapshot(t, cfg.Storage.DBPath, accountID)
+		if state.usageRows == 1 && state.settledRows == 1 && state.activeRows == 0 && state.heldRows == 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("pending nudge finality did not recover; state=%+v calls=%d", state, calls.Load())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("coordinator calls=%d want one pending lookup and one final retry", got)
+	}
+}
+
 func TestSettlementReconcileNudgeDoesNotRetryPermanentCoordinatorFailure(t *testing.T) {
 	const (
 		accountID         = "acct_nudge_permanent"

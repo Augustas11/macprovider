@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -142,10 +143,33 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 		nowUnixMS = s.nowUTC().UnixMilli()
 	}
 	rows, err := s.requestSettlementVerdicts(ctx, accountScope, requestID)
-	if err != nil || len(rows) == 0 {
-		return RequestSettlementFinality{}, len(rows) > 0, err
+	if err != nil {
+		return RequestSettlementFinality{}, false, err
+	}
+	missing, err := s.requestSettlementAttemptsWithoutVerdict(ctx, accountScope, requestID, rows)
+	if err != nil {
+		return RequestSettlementFinality{}, false, err
 	}
 	changed := false
+	pending := make([]requestSettlementVerdictRow, 0, len(missing))
+	for _, row := range missing {
+		if row.pendingDeadlineUnixMS <= 0 || nowUnixMS < row.pendingDeadlineUnixMS {
+			pending = append(pending, row)
+			continue
+		}
+		if _, err := s.RecordMissingSettlementReceipt(ctx, SettlementReceiptMissingInput{
+			SettlementReceiptIdentity: SettlementReceiptIdentity{
+				AccountScope: accountScope,
+				RequestID:    requestID,
+				AttemptN:     row.attemptN,
+				ProviderID:   row.providerID,
+			},
+			NowUnixMS: nowUnixMS,
+		}); err != nil {
+			return RequestSettlementFinality{}, false, err
+		}
+		changed = true
+	}
 	for _, row := range rows {
 		if row.settlementOutcome == SettlementOutcomePending && !row.closed && row.pendingDeadlineUnixMS > 0 && nowUnixMS >= row.pendingDeadlineUnixMS {
 			_, err := s.RecordMissingSettlementReceipt(ctx, SettlementReceiptMissingInput{
@@ -165,10 +189,20 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 	}
 	if changed {
 		rows, err = s.requestSettlementVerdicts(ctx, accountScope, requestID)
-		if err != nil || len(rows) == 0 {
-			return RequestSettlementFinality{}, len(rows) > 0, err
+		if err != nil {
+			return RequestSettlementFinality{}, false, err
 		}
 	}
+	rows = append(rows, pending...)
+	if len(rows) == 0 {
+		return RequestSettlementFinality{}, false, nil
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].attemptN != rows[j].attemptN {
+			return rows[i].attemptN < rows[j].attemptN
+		}
+		return rows[i].providerID < rows[j].providerID
+	})
 	finality := RequestSettlementFinality{
 		RequestID:     requestID,
 		PolicyVersion: rows[0].policyVersion,
@@ -325,6 +359,53 @@ SELECT attempt_n, provider_id, receipt_result, settlement_outcome, reason, close
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+// requestSettlementAttemptsWithoutVerdict recovers the finality boundary from
+// immutable route snapshots plus durable attempt outputs. Receipt bytes are
+// deliberately absent: before the deadline the gateway must hold, and after
+// the deadline RecordMissingSettlementReceipt produces an explicit terminal
+// classification instead of leaving the reservation unresolved forever.
+func (s *Store) requestSettlementAttemptsWithoutVerdict(ctx context.Context, accountScope, requestID string, verdicts []requestSettlementVerdictRow) ([]requestSettlementVerdictRow, error) {
+	type attemptKey struct {
+		attemptN   int64
+		providerID string
+	}
+	covered := make(map[attemptKey]struct{}, len(verdicts))
+	for _, verdict := range verdicts {
+		covered[attemptKey{attemptN: verdict.attemptN, providerID: verdict.providerID}] = struct{}{}
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT rs.attempt_n, rs.provider_id,
+       sao.terminal_state_ts_unix_ms + (rs.pending_deadline_seconds * 1000),
+       rs.route_snapshot_policy_version, rs.route_snapshot_mode
+  FROM settlement_route_snapshots rs
+  JOIN settlement_attempt_outputs sao
+    ON sao.account_scope = rs.account_scope
+   AND sao.request_id = rs.request_id
+   AND sao.attempt_n = rs.attempt_n
+   AND sao.provider_id = rs.provider_id
+ WHERE rs.account_scope = ? AND rs.request_id = ?
+ ORDER BY rs.attempt_n ASC, rs.provider_id ASC`, accountScope, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var missing []requestSettlementVerdictRow
+	for rows.Next() {
+		var row requestSettlementVerdictRow
+		if err := rows.Scan(&row.attemptN, &row.providerID, &row.pendingDeadlineUnixMS, &row.policyVersion, &row.mode); err != nil {
+			return nil, err
+		}
+		if _, ok := covered[attemptKey{attemptN: row.attemptN, providerID: row.providerID}]; ok {
+			continue
+		}
+		row.receiptResult = SettlementReceiptResultInconclusive
+		row.settlementOutcome = SettlementOutcomePending
+		row.reason = "receipt_verdict_pending"
+		missing = append(missing, row)
+	}
+	return missing, rows.Err()
 }
 
 // Snapshots exist before pending verdicts do. Looking only at verdict rows can

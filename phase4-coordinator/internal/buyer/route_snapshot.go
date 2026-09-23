@@ -408,13 +408,18 @@ func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header
 			Msg("skipping settlement receipt ingest after settlement output persist failure")
 		return billing.SettlementReceiptState{}, false, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), settlementReceiptSynchronousTimeout)
 	defer cancel()
 	identity := billing.SettlementReceiptIdentity{
 		AccountScope: accountScopeForSettlement(b.accountID),
 		RequestID:    b.requestID,
 		AttemptN:     int64(b.settlementAttemptN),
 		ProviderID:   provider.ProviderID,
+	}
+	input := settlementReceiptRecoveryInput{
+		identity:              identity,
+		header:                header,
+		providerReceiptPubkey: append([]byte(nil), provider.ReceiptPubkey...),
 	}
 	if header == "" {
 		// #1578: a leg the coordinator deliberately never settled — a 503
@@ -427,20 +432,30 @@ func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header
 		if !b.lastRecordedSettlementSubject {
 			return billing.SettlementReceiptState{}, false, nil
 		}
-		state, err := store.RecordMissingSettlementReceipt(ctx, billing.SettlementReceiptMissingInput{
-			SettlementReceiptIdentity: identity,
-		})
+		state, err := b.server.persistSettlementReceipt(ctx, store, input)
 		if err != nil {
+			if settlementOutputPersistFailedAfterCredit(err) {
+				if b.server.deferSettlementReceiptRecovery(input) {
+					b.server.log.Warn().Err(err).Str("request_id", b.requestID).Str("provider_id", provider.ProviderID).Msg("missing settlement receipt recording deferred")
+					return b.deferredSettlementReceiptState(input), true, nil
+				}
+				b.server.log.Error().Err(err).Str("request_id", b.requestID).Str("provider_id", provider.ProviderID).Msg("missing settlement receipt recovery queue unavailable")
+				return billing.SettlementReceiptState{}, false, err
+			}
 			b.server.log.Warn().Err(err).Str("request_id", b.requestID).Str("provider_id", provider.ProviderID).Msg("missing settlement receipt recording failed")
 		}
 		return state, err == nil, err
 	}
-	state, err := store.IngestSettlementReceipt(ctx, billing.SettlementReceiptIngestionInput{
-		SettlementReceiptIdentity: identity,
-		Header:                    header,
-		ProviderReceiptPubkey:     provider.ReceiptPubkey,
-	})
+	state, err := b.server.persistSettlementReceipt(ctx, store, input)
 	if err != nil {
+		if settlementOutputPersistFailedAfterCredit(err) {
+			if b.server.deferSettlementReceiptRecovery(input) {
+				b.server.log.Warn().Err(err).Str("request_id", b.requestID).Str("provider_id", provider.ProviderID).Msg("settlement receipt ingestion deferred")
+				return b.deferredSettlementReceiptState(input), true, nil
+			}
+			b.server.log.Error().Err(err).Str("request_id", b.requestID).Str("provider_id", provider.ProviderID).Msg("settlement receipt recovery queue unavailable")
+			return billing.SettlementReceiptState{}, false, err
+		}
 		b.server.log.Warn().Err(err).Str("request_id", b.requestID).Str("provider_id", provider.ProviderID).Msg("settlement receipt ingestion failed")
 	}
 	return state, err == nil, err
