@@ -148,6 +148,7 @@ class PearlUpdaterTests(unittest.TestCase):
             candidate_gid=os.getegid(),
             backend_gid=os.getegid(),
             catalog_verifier=REPO_ROOT / "scripts/catalog-release.py",
+            autotune_window_module=REPO_ROOT / "scripts/autotune_window.py",
             tier2_coordinator_config=REPO_ROOT / "phase4-coordinator/dist/coordinator.yaml",
             catalog_canary_proof=SCRIPT.with_name("catalog-canary-proof.py"),
             canary_rollback_authorization=self.root / "canary-runtime" / "legacy-rollback.json",
@@ -662,7 +663,7 @@ class PearlUpdaterTests(unittest.TestCase):
             os.readlink(install / "autotune" / "current"),
             f"releases/{catalog_directory_name}",
         )
-        self.assertEqual(previous.read_text().strip(), "releases/old-catalog")
+        self.assertEqual(previous.read_text(), "releases/old-catalog\nreleases/older-catalog\n")
         for name in updater_module.CATALOG_ASSETS:
             self.assertEqual(
                 updater_module.sha256_file(releases / catalog_directory_name / name),
@@ -704,6 +705,112 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(legacy_tier2.stat().st_uid, legacy_stat.st_uid)
         self.assertEqual(legacy_tier2.stat().st_gid, legacy_stat.st_gid)
         self.assertEqual(stat.S_IMODE(legacy_tier2.stat().st_mode), 0o600)
+
+    def _catalog_install_fixture(self, current_target: str, window: str):
+        install = self.updater.install_root
+        releases = install / "autotune" / "releases"
+        releases.mkdir(parents=True, mode=0o750)
+        (install / "autotune").chmod(0o750)
+        releases.chmod(0o750)
+        (install / "autotune" / "current").symlink_to(current_target)
+        previous = install / "autotune" / ".previous-target"
+        previous.write_text(window)
+        previous.chmod(0o600)
+        return previous
+
+    def test_catalog_install_prepends_outgoing_and_truncates_window(self):
+        release = self.stage(self.verify())
+        previous = self._catalog_install_fixture(
+            "releases/r4",
+            "releases/r3\nreleases/r2\nreleases/r1\n",
+        )
+
+        self.updater.install_catalog(release)
+
+        self.assertEqual(previous.read_text(), "releases/r4\nreleases/r3\nreleases/r2\n")
+        self.assertEqual(previous.stat().st_gid, self.updater.catalog_gid)
+        self.assertEqual(stat.S_IMODE(previous.stat().st_mode), 0o640)
+
+    def test_catalog_install_same_target_leaves_window_untouched(self):
+        release = self.stage(self.verify())
+        directory_name = self.updater._catalog_release_directory_name(release)
+        window = "# kept\nreleases/r2\nreleases/r1\n"
+        previous = self._catalog_install_fixture(f"releases/{directory_name}", window)
+        before = previous.stat()
+
+        self.updater.install_catalog(release)
+
+        self.assertEqual(previous.read_text(), window)
+        self.assertEqual(previous.stat().st_ino, before.st_ino)
+        self.assertEqual(stat.S_IMODE(previous.stat().st_mode), 0o600)
+
+    def test_catalog_rollback_restores_exact_multi_line_window(self):
+        release = self.stage(self.verify())
+        catalog_directory_name = self.updater._catalog_release_directory_name(release)
+        prior_window = "# retained\nreleases/r3\n\nreleases/r2\nreleases/r1\n"
+        previous = self._catalog_install_fixture("releases/r4", prior_window)
+
+        self.updater.install_catalog(release)
+        self.assertEqual(previous.read_text(), "releases/r4\nreleases/r3\nreleases/r2\n")
+
+        tx = self.root / "catalog-rollback-window"
+        tx.mkdir(mode=0o700)
+        (tx / "catalog-manifest.json").write_text(
+            json.dumps(
+                {
+                    "current_target": "releases/r4",
+                    "previous_target": "releases/r3",
+                    "previous_window": prior_window,
+                    "candidate_existed": False,
+                    "candidate_release_id": catalog_directory_name,
+                    "legacy_tier2": {"existed": False},
+                }
+            )
+            + "\n"
+        )
+        (tx / "catalog-manifest.json").chmod(0o600)
+        self.updater._restore_catalog(tx)
+
+        self.assertEqual(os.readlink(self.updater.install_root / "autotune" / "current"), "releases/r4")
+        self.assertEqual(previous.read_bytes(), prior_window.encode("ascii"))
+        self.assertEqual(previous.stat().st_gid, self.updater.catalog_gid)
+        self.assertEqual(stat.S_IMODE(previous.stat().st_mode), 0o640)
+
+    def test_catalog_snapshot_accepts_multi_line_window(self):
+        install = self.updater.install_root
+        install.mkdir(parents=True)
+        for name in ("coordinator", "gateway"):
+            (install / name).write_bytes(fake_elf("installed-" + name))
+            (install / name).chmod(0o750)
+        (install / "gateway.yaml").write_text("gateway: {}\n")
+        (install / "gateway.yaml").chmod(0o600)
+        base = install / "coordinator.yaml"
+        base.write_text(
+            'coordinator_advertised_version:\n  latest_binary_version: "1.8.26"\n'
+            "tier2:\n"
+            f"  catalog_path: {install}/autotune/current/tier2-catalog.json\n"
+            "  require_hash_verified: false\n"
+        )
+        base.chmod(0o600)
+        window = "releases/catalog-a\nreleases/catalog-z\n"
+        self._catalog_install_fixture("releases/catalog-b", window)
+        self.updater.coordinator_runtime = mock.Mock(
+            return_value=updater_module.CoordinatorRuntime(base, None, {})
+        )
+        self.updater.previous_versions = {
+            "coordinator": "1.8.26",
+            "gateway": "1.8.26",
+        }
+        release = self.stage(self.verify())
+        self.updater.prepare_config_update(release)
+
+        tx = self.updater.snapshot(release)
+
+        manifest = json.loads((tx / "catalog-manifest.json").read_text())
+        self.assertTrue(manifest["owns_catalog"])
+        self.assertEqual(manifest["current_target"], "releases/catalog-b")
+        self.assertEqual(manifest["previous_target"], "releases/catalog-a")
+        self.assertEqual(manifest["previous_window"], window)
 
     def test_catalog_rollback_removes_legacy_when_previously_absent(self):
         release = self.stage(self.verify())
@@ -837,7 +944,10 @@ class PearlUpdaterTests(unittest.TestCase):
         for directory in (install / "autotune", releases, destination):
             self.assertEqual(directory.stat().st_gid, service_gid)
             self.assertEqual(stat.S_IMODE(directory.stat().st_mode), 0o750)
-        self.assertGreaterEqual(fchown.call_count, len(updater_module.CATALOG_ASSETS) + 1)
+        # A first install has no outgoing target, so the retained window stays empty
+        # and no .previous-target is written.
+        self.assertGreaterEqual(fchown.call_count, len(updater_module.CATALOG_ASSETS))
+        self.assertFalse((install / "autotune" / ".previous-target").exists())
         for call in fchown.call_args_list:
             self.assertEqual(call.args[2], service_gid)
         for name in updater_module.CATALOG_ASSETS:

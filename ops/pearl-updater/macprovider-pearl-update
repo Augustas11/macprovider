@@ -16,6 +16,7 @@ import fcntl
 import grp
 import hashlib
 import http.client
+import importlib.util
 import json
 import os
 import pwd
@@ -42,6 +43,7 @@ from typing import Any, Callable
 PINNED_REPOSITORY = "Augustas11/macprovider"
 PINNED_PUBLIC_KEY = Path("/usr/local/share/macprovider/release-signing-public.pem")
 CATALOG_RELEASE_VERIFIER = Path("/usr/local/share/macprovider/scripts/catalog-release.py")
+AUTOTUNE_WINDOW_MODULE = Path("/usr/local/share/macprovider/scripts/autotune_window.py")
 TIER2_COORDINATOR_CONFIG = Path("/opt/macprovider/coordinator.yaml")
 CATALOG_CANARY_PROOF = Path("/usr/local/share/macprovider/catalog-canary-proof.py")
 CONFIG_PATH = Path("/etc/macprovider/pearl-updater.conf")
@@ -833,6 +835,7 @@ class Updater:
         independent_alert_gid: int | None = None,
         isolate_candidate_network: bool = False,
         catalog_verifier: Path = CATALOG_RELEASE_VERIFIER,
+        autotune_window_module: Path = AUTOTUNE_WINDOW_MODULE,
         tier2_coordinator_config: Path = TIER2_COORDINATOR_CONFIG,
         catalog_canary_proof: Path = CATALOG_CANARY_PROOF,
         canary_rollback_authorization: Path = CANARY_ROLLBACK_AUTHORIZATION,
@@ -858,6 +861,8 @@ class Updater:
         )
         self.isolate_candidate_network = isolate_candidate_network
         self.catalog_verifier = catalog_verifier
+        self.autotune_window_module = autotune_window_module
+        self._autotune_window: Any = None
         self.tier2_coordinator_config = tier2_coordinator_config
         self.catalog_canary_proof = catalog_canary_proof
         self.canary_rollback_authorization = canary_rollback_authorization
@@ -3980,14 +3985,15 @@ class Updater:
                 current_target = os.readlink(current)
                 self._validate_catalog_target(current_target)
             previous_target: str | None = None
+            previous_window: str | None = None
             if _path_entry_exists(previous):
-                previous_target = _read_trusted_text(
+                previous_window = _read_trusted_text(
                     previous,
                     "catalog previous pointer",
                     trusted_uid=self.trusted_uid,
-                ).strip()
-                if previous_target:
-                    self._validate_catalog_target(previous_target)
+                )
+                previous_entries = self._parse_catalog_window(previous_window)
+                previous_target = previous_entries[0] if previous_entries else ""
             candidate_directory_name = self._catalog_release_directory_name(release)
             candidate_path = catalog_root / "releases" / candidate_directory_name
             legacy_tier2 = self.install_root / "tier2-catalog.json"
@@ -4007,6 +4013,7 @@ class Updater:
                 "owns_catalog": True,
                 "current_target": current_target,
                 "previous_target": previous_target,
+                "previous_window": previous_window,
                 "candidate_existed": _path_entry_exists(candidate_path),
                 "candidate_release_id": candidate_directory_name,
                 "legacy_tier2": legacy_tier2_manifest,
@@ -4098,6 +4105,31 @@ class Updater:
     def _validate_catalog_target(target: str) -> None:
         if not re.fullmatch(r"releases/[A-Za-z0-9][A-Za-z0-9._-]{0,191}", target):
             raise UpdateError(f"unsafe catalog pointer target: {target!r}")
+
+    def _window_rules(self) -> Any:
+        # The shared retained-window rules (scripts/autotune_window.py) are the
+        # single definition of the .previous-target format; the updater keeps its
+        # own trusted_uid/catalog_gid write primitive.
+        if self._autotune_window is None:
+            self._trusted_regular_file(self.autotune_window_module, "autotune window rules")
+            spec = importlib.util.spec_from_file_location(
+                "macprovider_autotune_window", self.autotune_window_module
+            )
+            if spec is None or spec.loader is None:
+                raise UpdateError(f"cannot load autotune window rules: {self.autotune_window_module}")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self._autotune_window = module
+        return self._autotune_window
+
+    def _parse_catalog_window(self, text: str) -> list[str]:
+        if not text.isascii():
+            raise UpdateError("catalog previous pointer window is not ascii")
+        rules = self._window_rules()
+        try:
+            return rules.parse_entries(text)
+        except (rules.WindowError, ValueError) as exc:
+            raise UpdateError(f"catalog previous pointer window is invalid: {exc}") from exc
 
     @staticmethod
     def _catalog_release_content_digest(release: Release) -> str:
@@ -4249,14 +4281,24 @@ class Updater:
             old_target = os.readlink(current)
             self._validate_catalog_target(old_target)
         previous = catalog_root / ".previous-target"
-        previous_payload = ((old_target or "") + "\n").encode("utf-8")
-        _secure_atomic_write(
-            previous,
-            previous_payload,
-            mode=0o640,
-            uid=self.trusted_uid,
-            gid=self.catalog_gid,
-        )
+        incoming = f"releases/{directory_name}"
+        existing: list[str] = []
+        if _path_entry_exists(previous):
+            existing = self._parse_catalog_window(
+                _read_trusted_text(previous, "catalog previous pointer", trusted_uid=self.trusted_uid)
+            )
+        window = self._window_rules().compute_window(existing, old_target, incoming)
+        if window and window != existing:
+            _secure_atomic_write(
+                previous,
+                "".join(entry + "\n" for entry in window).encode("ascii"),
+                mode=0o640,
+                uid=self.trusted_uid,
+                gid=self.catalog_gid,
+            )
+        elif not window and existing:
+            previous.unlink()
+            _fsync_directory(catalog_root)
         self._replace_catalog_pointer("current", f"releases/{directory_name}")
         self._remove_legacy_tier2_catalog()
         self.audit(
@@ -5426,6 +5468,8 @@ class Updater:
             }
             if "owns_catalog" in catalog_keys:
                 owned_keys.add("owns_catalog")
+            if "previous_window" in catalog_keys:
+                owned_keys.add("previous_window")
             if catalog_keys != owned_keys:
                 raise UpdateError("rollback catalog manifest is invalid")
         if not owns_catalog:
@@ -5438,6 +5482,11 @@ class Updater:
                         raise UpdateError("rollback catalog pointer is invalid")
                     if value:
                         self._validate_catalog_target(value)
+            previous_window = catalog_manifest.get("previous_window")
+            if previous_window is not None:
+                if not isinstance(previous_window, str):
+                    raise UpdateError("rollback catalog previous window is invalid")
+                self._parse_catalog_window(previous_window)
             if type(catalog_manifest["candidate_existed"]) is not bool or not re.fullmatch(
                 r"[A-Za-z0-9][A-Za-z0-9._-]{0,191}", str(catalog_manifest["candidate_release_id"])
             ):
@@ -5612,14 +5661,20 @@ class Updater:
             legacy_tier2.unlink(missing_ok=True)
             _fsync_directory(legacy_tier2.parent)
         previous = catalog_root / ".previous-target"
-        previous_target = manifest["previous_target"]
-        if previous_target is None:
+        if "previous_window" in manifest:
+            # Exact prior window bytes, captured at snapshot time.
+            previous_window = manifest["previous_window"]
+            previous_payload = None if previous_window is None else previous_window.encode("ascii")
+        else:
+            previous_target = manifest["previous_target"]
+            previous_payload = None if previous_target is None else (previous_target + "\n").encode("utf-8")
+        if previous_payload is None:
             previous.unlink(missing_ok=True)
             _fsync_directory(catalog_root)
         else:
             _secure_atomic_write(
                 previous,
-                (previous_target + "\n").encode("utf-8"),
+                previous_payload,
                 mode=0o640,
                 uid=self.trusted_uid,
                 gid=self.catalog_gid,
