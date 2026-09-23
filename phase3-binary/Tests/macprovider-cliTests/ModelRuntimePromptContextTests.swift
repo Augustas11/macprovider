@@ -64,28 +64,65 @@ final class ModelRuntimePromptContextTests: XCTestCase {
         XCTAssertTrue(ModelRuntime.chatTemplateSupportsThinkingToggle(in: artifact))
     }
 
-    func testWarmSwapTargetCapabilitiesArePrecomputedFromExactArtifact() throws {
+    func testSameModelIDDifferentArtifactsResolveCapabilityFromSnapshotHash() async throws {
         let thinkingArtifact = try artifactDirectory(
             chatTemplate: #"{% if enable_thinking %}<think>{% endif %}"#
         )
         let nonThinkingArtifact = try artifactDirectory(
             chatTemplate: #"{{ messages | tojson }}"#
         )
+        let thinkingHash = String(repeating: "a", count: 64)
+        let nonThinkingHash = String(repeating: "b", count: 64)
         let capabilities = ModelRuntime.thinkingToggleCapabilities(for: [
-            "mlx-community/GLM-4.5-Air-4bit": ModelRuntimeTargetAuthority(
+            "shared-model-thinking-artifact": ModelRuntimeTargetAuthority(
                 modelArgument: thinkingArtifact.path,
-                artifactSHA256: String(repeating: "a", count: 64),
+                artifactSHA256: thinkingHash,
                 catalogRevision: "thinking-revision"
             ),
-            "mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit": ModelRuntimeTargetAuthority(
+            "shared-model-non-thinking-artifact": ModelRuntimeTargetAuthority(
                 modelArgument: nonThinkingArtifact.path,
-                artifactSHA256: String(repeating: "b", count: 64),
+                artifactSHA256: nonThinkingHash,
                 catalogRevision: "non-thinking-revision"
             ),
         ])
 
-        XCTAssertEqual(capabilities["mlx-community/GLM-4.5-Air-4bit"], true)
-        XCTAssertEqual(capabilities["mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit"], false)
+        XCTAssertEqual(capabilities[thinkingHash], true)
+        XCTAssertEqual(capabilities[nonThinkingHash], false)
+
+        let modelID = "mlx-community/shared-model-id"
+        let runtime = ModelRuntime(
+            modelID: modelID,
+            modelHash: thinkingHash,
+            templateSupportsThinkingToggle: true,
+            warmSwapEnabled: true,
+            targetAuthorities: [
+                modelID: ModelRuntimeTargetAuthority(
+                    modelArgument: nonThinkingArtifact.path,
+                    artifactSHA256: nonThinkingHash,
+                    catalogRevision: "non-thinking-revision"
+                )
+            ],
+            loader: { _ in throw URLError(.unsupportedURL) },
+            testLoader: { _ in (modelID, nonThinkingHash) }
+        )
+
+        let thinkingSnapshot = await runtime.currentSnapshot()
+        let task = try await runtime.beginSwap(targetModelID: modelID)
+        try await task.value
+        let nonThinkingSnapshot = await runtime.currentSnapshot()
+
+        XCTAssertEqual(thinkingSnapshot.modelID, modelID)
+        XCTAssertEqual(nonThinkingSnapshot.modelID, modelID)
+        XCTAssertEqual(thinkingSnapshot.modelHash, thinkingHash)
+        XCTAssertEqual(nonThinkingSnapshot.modelHash, nonThinkingHash)
+        XCTAssertTrue(thinkingSnapshot.templateSupportsThinkingToggle)
+        XCTAssertFalse(nonThinkingSnapshot.templateSupportsThinkingToggle)
+        XCTAssertFalse(ModelRuntime.resolvedTemplateSupportsThinkingToggle(
+            artifactSHA256: String(repeating: "c", count: 64),
+            configuredArtifactSHA256: thinkingHash,
+            configuredSupportsThinkingToggle: true,
+            targetCapabilitiesByArtifactSHA256: capabilities
+        ))
     }
 
     private func artifactDirectory(
