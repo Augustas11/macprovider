@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the hosted MacProvider agent onboarding skill source."""
+"""Validate the hosted Malibu agent onboarding skill source."""
 
 from __future__ import annotations
 
@@ -20,28 +20,28 @@ INDEX_PATH = ROOT / "docs" / "agent-onboarding" / ".well-known" / "skills" / "in
 CANONICAL_SKILL_URL = "https://get.malibu.tech/skill.md"
 CANONICAL_INDEX_URL = "https://get.malibu.tech/.well-known/skills/index.json"
 
-REQUIRED_REFERENCES = [
-    "README.md",
-    "docs/using-macprovider-with-openai-sdk.md",
-    "docs/runbooks/provider-cli-release-verification.md",
-    "ops/runbooks/entry-610-first-hop-recovery.md",
-    "specs/SPEC-003-open-onboarding.md",
-    "specs/SPEC-006-buyer-api.md",
-    "specs/SPEC-020-provider-autoupdate.md",
-    "specs/SPEC-035-provider-connection-diagnostics.md",
-]
+REQUIRED_REFERENCES: list[str] = []
 
 REQUIRED_SKILL_SNIPPETS = [
     CANONICAL_SKILL_URL,
     CANONICAL_INDEX_URL,
+    "https://malibu.tech/host",
+    "https://malibu.tech/j#/PLACEHOLDER",
     "https://get.malibu.tech/install.sh",
     "https://get.malibu.tech/uninstall.sh",
     "https://api.malibu.tech/v1",
+    "https://api.malibu.tech",
     'tmp_install="$(mktemp "${TMPDIR:-/tmp}/macprovider-install.XXXXXX")',
     "--remove-on-error https://get.malibu.tech/install.sh",
+    'bash "$tmp_install" --dry-run',
+    "shasum -a 256 -c -",
     'bash "$tmp_install"',
     "malibu-cli status --json",
     "malibu-cli status --advanced",
+    "malibu-cli doctor --offline",
+    "malibu-cli models discover --json",
+    "malibu-cli models admission status <candidate-id> --json",
+    "malibu-cli autotune --recommend --check-only --no-submit-hardware-evidence --json",
     "malibu-cli update --check",
     "--remove-on-error https://get.malibu.tech/uninstall.sh",
     'uninstall_sha="$(shasum -a 256 "$tmp_uninstall"',
@@ -50,6 +50,16 @@ REQUIRED_SKILL_SNIPPETS = [
     'bash "$tmp_uninstall"',
     "base_url=\"https://api.malibu.tech/v1\"",
     "baseURL: \"https://api.malibu.tech/v1\"",
+    "ANTHROPIC_BASE_URL=https://api.malibu.tech",
+    "Codex CLI",
+    "Cursor",
+    "Cline",
+    "Continue",
+    "Aider",
+    "OpenCode",
+    "Pi",
+    "Zed",
+    "Goose",
 ]
 
 REQUIRED_GUARDRAILS = [
@@ -57,14 +67,14 @@ REQUIRED_GUARDRAILS = [
     "non-production local smoke",
     "explicit operator approval",
     "do not run destructive commands",
-    "do not inspect `d-inference` source",
-    "do not introduce legacy `streamvc.live` urls",
+    "never pipe a network fetch into a shell",
+    "do not introduce legacy internal hosts",
 ]
 
 FORBIDDEN_LITERAL_SNIPPETS = [
     "sk-",
     "ghp_",
-    "BEGIN PRIVATE KEY",
+    "BEGIN " + "PRIVATE" + " KEY",
     "bash <(",
     "$(curl",
     "`curl",
@@ -73,16 +83,26 @@ FORBIDDEN_LITERAL_SNIPPETS = [
 
 FORBIDDEN_PATTERNS = [
     re.compile(r"\|\s*(?:/usr/bin/env\s+)?(?:/bin/)?(?:bash|sh|zsh)(?:\s|$)"),
+    re.compile(r"\bmp_[A-Za-z0-9_-]{16,}\b"),
+    re.compile(r"\bMACPROVIDER_[A-Z0-9_]*TOKEN\s*="),
+    re.compile(r"\bprovider[_-]token[_-][A-Za-z0-9_-]{16,}\b", re.I),
 ]
 
 ALLOWED_URLS = {
+    "https://malibu.tech/host",
+    "https://malibu.tech/j",
     "https://get.malibu.tech/skill.md",
     "https://get.malibu.tech/.well-known/skills/index.json",
     "https://get.malibu.tech/.well-known/skills/index.v1",
     "https://get.malibu.tech/install.sh",
     "https://get.malibu.tech/uninstall.sh",
+    "https://api.malibu.tech",
     "https://api.malibu.tech/v1",
     "https://api.malibu.tech/auth/github/start",
+    "https://api.malibu.tech/v1/status",
+    "https://api.malibu.tech/v1/stats/models",
+    "https://api.malibu.tech/v1/chat/completions",
+    "https://api.malibu.tech/v1/messages",
 }
 URI_RE = re.compile(r"(?:\b[A-Za-z][A-Za-z0-9+.-]*:[^\s`<>\")]+|//[^\s`<>\")]+)")
 SUPPRESS_FAILURE_OUTPUT = False
@@ -131,7 +151,11 @@ def validate_urls(text: str) -> None:
         except ValueError:
             fail(f"URL has an invalid port: {raw}")
         require(port is None, f"URL must not contain an explicit port: {raw}")
-        require(not parsed.params and not parsed.query and not parsed.fragment, f"URL must be canonical without params/query/fragment: {raw}")
+        invite_fragment = host == "malibu.tech" and parsed.path == "/j" and parsed.fragment == "/PLACEHOLDER"
+        require(
+            not parsed.params and not parsed.query and (not parsed.fragment or invite_fragment),
+            f"URL must be canonical without params/query/fragment: {raw}",
+        )
         require(not (host == "streamvc.live" or host.endswith(".streamvc.live")), f"legacy host forbidden: {raw}")
         normalized = f"{parsed.scheme.lower()}://{host}{parsed.path}"
         require(normalized in ALLOWED_URLS, f"URL is not allowlisted: {raw}")
@@ -161,16 +185,50 @@ def validate_frontmatter(skill: str) -> None:
 
     name = metadata.get("name", "")
     description = metadata.get("description", "")
-    require(name == "macprovider-agent-onboarding", "front matter name drifted")
+    require(name == "malibu-provider-api-onboarding", "front matter name drifted")
     require(
         re.fullmatch(r"[a-z0-9-]{1,64}", name) is not None,
         "front matter name must be lowercase letters, digits, and hyphens",
     )
     require(description, "front matter description missing")
-    require("MacProvider" in description, "front matter description must mention MacProvider")
+    require("Malibu" in description, "front matter description must mention Malibu")
     require(
-        "install" in description.lower() and "OpenAI-compatible SDKs" in description,
-        "front matter description must cover provider install and buyer SDK use cases",
+        "install" in description.lower()
+        and "OpenAI-compatible" in description
+        and "Anthropic-compatible" in description,
+        "front matter description must cover provider install and buyer API use cases",
+    )
+
+
+def validate_ordered_shell_safety(skill: str) -> None:
+    install_fetch = skill.find("https://get.malibu.tech/install.sh")
+    install_dry = skill.find('bash "$tmp_install" --dry-run')
+    install_gate = skill.find("Before the real install")
+    install_real = skill.find('\nbash "$tmp_install"\n', install_dry + 1)
+    install_first_real = skill.find('\nbash "$tmp_install"\n')
+    require(install_fetch >= 0, "install fetch snippet missing")
+    require(install_dry >= 0, "install dry-run snippet missing")
+    require(install_gate >= 0, "install approval gate missing")
+    require(install_real >= 0, "real install snippet missing")
+    require(install_first_real == install_real, "real install must not appear before dry-run/approval")
+    require(
+        install_fetch < install_dry < install_gate < install_real,
+        "install flow must fetch, dry-run, require approval, then run real install",
+    )
+
+    uninstall_fetch = skill.find("https://get.malibu.tech/uninstall.sh")
+    uninstall_dry = skill.find('bash "$tmp_uninstall" --dry-run')
+    uninstall_gate = skill.find("Only remove the provider when")
+    uninstall_real = skill.find('\nbash "$tmp_uninstall"\n', uninstall_dry + 1)
+    uninstall_first_real = skill.find('\nbash "$tmp_uninstall"\n')
+    require(uninstall_fetch >= 0, "uninstall fetch snippet missing")
+    require(uninstall_dry >= 0, "uninstall dry-run snippet missing")
+    require(uninstall_gate >= 0, "uninstall approval gate missing")
+    require(uninstall_real >= 0, "real uninstall snippet missing")
+    require(uninstall_first_real == uninstall_real, "real uninstall must not appear before dry-run/approval")
+    require(
+        uninstall_fetch < uninstall_dry < uninstall_gate < uninstall_real,
+        "uninstall flow must fetch, dry-run, require approval, then run real uninstall",
     )
 
 
@@ -186,6 +244,7 @@ def validate_files(
     skill = read_text(skill_path)
     index_text = read_text(index_path)
     validate_frontmatter(skill)
+    validate_ordered_shell_safety(skill)
 
     combined = f"{skill}\n{index_text}"
     for forbidden in FORBIDDEN_LITERAL_SNIPPETS:
@@ -219,9 +278,10 @@ def validate_files(
     require(isinstance(skills, list) and len(skills) == 1, "index must contain exactly one skill")
     entry = skills[0]
     require(isinstance(entry, dict), "index skill entry must be an object")
-    require(entry.get("id") == "macprovider-agent-onboarding", "index skill id drifted")
+    require(entry.get("id") == "malibu-provider-api-onboarding", "index skill id drifted")
+    require(entry.get("name") == "Malibu Provider And API Onboarding", "index skill name drifted")
     require(entry.get("url") == CANONICAL_SKILL_URL, "index skill URL drifted")
-    require(entry.get("source_path") == "docs/agent-onboarding/SKILL.md", "index source path drifted")
+    require("source_path" not in entry, "index must not expose repo source_path")
     require(
         entry.get("content_type") == "text/markdown; charset=utf-8",
         "index content_type drifted",
@@ -268,6 +328,9 @@ def run_negative_tests() -> None:
             "userinfo": "\nhttps://user:pass@get.malibu.tech/install.sh\n",
             "query": "\nhttps://get.malibu.tech/skill.md?x=1\n",
             "fragment": "\nhttps://get.malibu.tech/skill.md#install\n",
+            "real_invite_fragment": "\nhttps://malibu.tech/j#/invite-secret-token-1234567890\n",
+            "real_malibu_key": "\nMALIBU_API_KEY=" + "mp_" + ("a" * 32) + "\n",
+            "provider_token_assignment": "\nMACPROVIDER_PROVIDER_TOKEN=" + ("b" * 24) + "\n",
             "pipe_bash": "\ncurl -fsSL https://get.malibu.tech/install.sh | bash\n",
             "pipe_bash_spaces": "\ncurl -fsSL https://get.malibu.tech/install.sh |  bash\n",
             "pipe_bash_tab": "\ncurl -fsSL https://get.malibu.tech/install.sh |\tbash\n",
@@ -303,6 +366,27 @@ def run_negative_tests() -> None:
         ).hexdigest()
         index.write_text(json.dumps(index_payload, indent=2) + "\n", encoding="utf-8")
         validate_files(skill, index)
+
+        install_before_dry_run = SKILL_PATH.read_text(encoding="utf-8").replace(
+            'bash "$tmp_install" --dry-run',
+            'bash "$tmp_install"\nbash "$tmp_install" --dry-run',
+            1,
+        )
+        skill.write_text(install_before_dry_run, encoding="utf-8")
+        index_payload = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
+        index_payload["skills"][0]["sha256"] = hashlib.sha256(
+            install_before_dry_run.encode()
+        ).hexdigest()
+        index.write_text(json.dumps(index_payload, indent=2) + "\n", encoding="utf-8")
+        SUPPRESS_FAILURE_OUTPUT = True
+        try:
+            validate_files(skill, index)
+        except SystemExit as exc:
+            SUPPRESS_FAILURE_OUTPUT = False
+            require(exc.code == 1, f"negative test install_before_dry_run exited unexpectedly: {exc.code}")
+        else:
+            SUPPRESS_FAILURE_OUTPUT = False
+            fail("negative test did not fail: install_before_dry_run")
 
 
 def parse_args() -> argparse.Namespace:

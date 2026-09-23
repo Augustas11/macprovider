@@ -6111,8 +6111,8 @@
       "spec_id": "SPEC-003",
       "state": "pending",
       "implementation": [
-        "docs/agent-onboarding/SKILL.md:MacProvider Agent Onboarding Skill",
-        "docs/agent-onboarding/.well-known/skills/index.json:macprovider-agent-onboarding",
+        "docs/agent-onboarding/SKILL.md:Malibu Provider And API Onboarding",
+        "docs/agent-onboarding/.well-known/skills/index.json:malibu-provider-api-onboarding",
         "scripts/verify-agent-onboarding-skill.py:REQUIRED_SKILL_SNIPPETS",
         "scripts/install-agent-onboarding-publication.sh:agent-onboarding-current",
         "scripts/publish-agent-onboarding-skill.sh:MALIBU_GET_WEBROOT"

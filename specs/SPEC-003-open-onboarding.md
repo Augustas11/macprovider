@@ -354,7 +354,7 @@ The release tarball MUST NOT contain `install.sh`. Re-bundling it would
 reintroduce the slow-iterate path and is explicitly out of scope.
 
 **FR-C1b. Hosted agent onboarding skill.**
-MacProvider MUST publish a compact, agent-readable onboarding skill at
+Malibu MUST publish a compact, agent-readable onboarding skill at
 `https://get.malibu.tech/skill.md`. The optional discovery index MUST be served
 at `https://get.malibu.tech/.well-known/skills/index.json` when the hosting
 surface supports well-known discovery. The repository source of truth is
@@ -364,25 +364,31 @@ surface supports well-known discovery. The repository source of truth is
 The skill is a distribution artifact, not a new runtime protocol. It MUST:
 
 1. Use `malibu.tech` canonical URLs and MUST NOT point agents at legacy
-   `streamvc.live` onboarding URLs.
-2. Cover provider install, status, recovery, update, and uninstall commands
-   using the public installer/uninstaller and the existing `macprovider-cli`
-   surfaces.
-3. Cover buyer SDK compatibility by pointing OpenAI-compatible clients at
-   `https://api.malibu.tech/v1`.
-4. Include guardrails that prevent agents from printing secrets, mutating
-   production, running destructive commands, or crossing the `d-inference`
-   clean-room boundary without explicit authority.
-5. Link to the authoritative repo docs/specs instead of duplicating full
-   operational policy: `README.md`, the OpenAI SDK guide, release verification
-   runbook, first-hop recovery runbook, SPEC-003, SPEC-006, SPEC-020, and
-   SPEC-035.
+   internal onboarding URLs.
+2. Use Malibu as the public product name. Internal or wire names are allowed
+   only where the user must type them, such as `malibu-cli`,
+   `macprovider-cli`, `~/.config/macprovider`, and `X-MacProvider-*`.
+3. Cover provider prerequisites, invite-gated install, status, recovery,
+   update, uninstall, serving/routability verification, common first-run
+   failure modes, and current earnings/payout expectations.
+4. Cover buyer API compatibility for common coding-agent harnesses and generic
+   SDKs by pointing OpenAI-compatible clients at `https://api.malibu.tech/v1`
+   and Anthropic-compatible Messages clients at `https://api.malibu.tech`.
+5. Include guardrails that prevent agents from printing secrets, accepting
+   real invite/API-key material in the public artifact, mutating production,
+   running destructive commands, or piping mutable network scripts into shells
+   without explicit authority.
+6. Be self-contained for public onboarding. It MUST NOT link agents to internal
+   repo paths, specs, audits, operator-only runbooks, private hostnames, issue
+   numbers, PR numbers, or clean-room implementation boundaries that are not
+   user-actionable public guidance.
 
 `scripts/test-agent-onboarding-skill.sh` MUST run in `make test-dist` and fail
 when the skill source and discovery index drift. The validation MUST include at
 least URL/domain checks, SHA-256 index checksum verification, core command
-coverage, reference existence checks, negative tests for unsafe URL/remote
-execution mutations, and secret/production guardrail checks.
+coverage, ordered dry-run-before-mutation checks, public-brand boundary checks,
+negative tests for unsafe URL/remote execution mutations, and secret/production
+guardrail checks.
 
 The get-host static publication path MUST stage `docs/agent-onboarding/SKILL.md`
 and `docs/agent-onboarding/.well-known/skills/index.json` as root-owned,
@@ -1322,14 +1328,17 @@ to serve repo artifacts under `get.malibu.tech`.
 
 **Expected:**
 1. The hosted skill is a compact Markdown artifact that a fresh agent can use
-   to perform a non-production local onboarding smoke.
+   to onboard a provider or configure a buyer API harness safely.
 2. The discovery index points at `https://get.malibu.tech/skill.md` and its
    `sha256` matches the repo skill source.
-3. The skill uses only `malibu.tech` onboarding URLs.
-4. Secret handling, production mutation, destructive command, and clean-room
-   guardrails are present.
-5. Core provider install/status/update/uninstall commands and buyer
-   OpenAI-compatible `https://api.malibu.tech/v1` examples are present.
+3. The skill uses Malibu public branding and public `malibu.tech` or
+   `api.malibu.tech` URLs.
+4. Secret handling, production mutation, destructive command, no-pipe install,
+   and dry-run-before-mutation guardrails are present.
+5. Core provider install/status/update/uninstall commands, serving
+   verification, failure-mode guidance, and buyer OpenAI-compatible
+   `https://api.malibu.tech/v1` plus Anthropic-compatible
+   `https://api.malibu.tech` examples are present.
 
 **How to verify:** `bash scripts/test-agent-onboarding-skill.sh` for repo drift,
 `bash scripts/test-agent-onboarding-publication.sh` for static publication wiring,
