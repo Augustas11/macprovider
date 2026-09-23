@@ -142,6 +142,7 @@ test-dist:
 	bash scripts/test-renew-autotune-static-feed-signed.sh
 	bash -n scripts/renew-autotune-static-feed.sh
 	bash scripts/test-autotune-activate.sh
+	bash scripts/test-autotune-install-helpers.sh
 	bash -n scripts/lib/autotune-activate.sh
 	bash scripts/test-catalog-content-release.sh
 	bash -n scripts/catalog-content-release.sh

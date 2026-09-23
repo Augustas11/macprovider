@@ -521,7 +521,9 @@ aa_install_helpers() {
   # no inline mirror on Pearl to drift out of step.
   log "installing Pearl catalog continuity verifier bundle"
   SSH "mkdir -m 0700 '$LOCK_HELPER_DIR/scripts'" || fatal "cannot create remote verifier bundle directory"
-  while IFS= read -r bundle_path || [ -n "$bundle_path" ]; do
+  # Read the manifest on fd 3: ssh reads stdin even when the remote command
+  # does not, and would swallow the rest of a manifest fed on stdin.
+  while IFS= read -r bundle_path <&3 || [ -n "$bundle_path" ]; do
     case "$bundle_path" in '#'*|'') continue ;; esac
     case "$bundle_path" in
       scripts/.|scripts/..) fatal "invalid catalog verifier bundle entry: $bundle_path" ;;
@@ -534,10 +536,10 @@ aa_install_helpers() {
       < "$REPO_ROOT/$bundle_path" \
       || fatal "cannot install $bundle_path on $PEARL_SSH"
     bundle_sha="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$REPO_ROOT/$bundle_path")"
-    remote_bundle_sha="$(SSH "sha256sum '$remote_bundle_file'")" || fatal "cannot hash $bundle_path on $PEARL_SSH"
+    remote_bundle_sha="$(SSH "sha256sum '$remote_bundle_file'" </dev/null)" || fatal "cannot hash $bundle_path on $PEARL_SSH"
     [ "${remote_bundle_sha%% *}" = "$bundle_sha" ] \
       || fatal "$bundle_path on $PEARL_SSH does not match the reviewed copy"
-  done < "$SCRIPT_DIR/catalog-verifier-bundle.txt"
+  done 3< "$SCRIPT_DIR/catalog-verifier-bundle.txt"
   CONTINUITY_VERIFIER="$LOCK_HELPER_DIR/scripts/catalog-release.py"
   SSH "test -f '$CONTINUITY_VERIFIER'" || fatal "catalog verifier bundle must list scripts/catalog-release.py"
 }

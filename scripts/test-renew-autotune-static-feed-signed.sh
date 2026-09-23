@@ -324,8 +324,8 @@ if remote.find(continuity_call) > remote.find("mutated=1"):
 for forbidden in ("<<'PY'", "def norm(", "norm_artifact", "(presence)", 'artifact = "autotune-artifacts.json"'):
     if forbidden in remote:
         raise SystemExit(f"renew keeps an inline continuity mirror on Pearl: {forbidden}")
-if 'done < "$SCRIPT_DIR/catalog-verifier-bundle.txt"' not in script:
-    raise SystemExit("renew must ship the catalog verifier bundle to Pearl")
+if 'done 3< "$SCRIPT_DIR/catalog-verifier-bundle.txt"' not in script or 'read -r bundle_path <&3' not in script:
+    raise SystemExit("renew must ship the catalog verifier bundle to Pearl, reading the manifest on fd 3 (ssh drains stdin)")
 bundle_loop = script.split("installing Pearl catalog continuity verifier bundle", 1)[1].split('done < "$SCRIPT_DIR/catalog-verifier-bundle.txt"', 1)[0]
 if "sha256sum '$remote_bundle_file'" not in bundle_loop or "does not match the reviewed copy" not in bundle_loop:
     raise SystemExit("every shipped verifier bundle file must be sha256-verified against the reviewed copy")
