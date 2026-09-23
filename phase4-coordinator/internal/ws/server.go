@@ -765,7 +765,7 @@ func (s *Server) resolveProviderCatalog(provider pool.Provider) (resolved, curre
 // resolves the session's EXACT release (by release id, never by the stored
 // admission mode, which goes stale after a re-stamp).
 func resolveProviderCatalogIn(provider pool.Provider, cur *autotune.Catalog, compatible map[string]*autotune.Catalog) (resolved, current *autotune.Catalog, isCurrent, ok bool) {
-	if provider.CatalogAdmissionMode != "current" && provider.CatalogAdmissionMode != "previous" {
+	if !catalogEnvelopeAdmissionMode(provider.CatalogAdmissionMode) {
 		return nil, nil, false, false
 	}
 	if sha := strings.ToLower(strings.TrimSpace(provider.CandidateCatalogSHA256)); sha != "" {
@@ -1648,8 +1648,12 @@ func providerIdentityRequest(p pool.Provider) pool.ModelIdentityRequest {
 // admittedCandidateCatalogSHA256 is the release a session may bind artifact
 // identity to: only a catalog envelope the coordinator validated ("current"
 // or a compatible "previous"). A bridge or legacy session presented no
-// validated envelope, so its digest never reaches the index. Applied inside
-// resolveArtifactIdentity, so no caller can forget it.
+// validated envelope, so its digest never reaches the index. A
+// "row_continuity" session is excluded too: its older document was
+// authenticated as candidate-catalog evidence only, without an artifact feed,
+// so artifact-derived identity fails closed and only the primary row binds
+// (SPEC-023-R010 item 4). Applied inside resolveArtifactIdentity, so no
+// caller can forget it.
 func admittedCandidateCatalogSHA256(catalogAdmissionMode, candidateCatalogSHA256 string) string {
 	if catalogAdmissionMode != "current" && catalogAdmissionMode != "previous" {
 		return ""
@@ -3209,6 +3213,15 @@ func (s *Server) prepareProviderAdmissionWithQuotaCheck(conn net.Conn, auth prov
 		}
 	} else if firstHopOnly {
 		catalogAdmissionMode = "update_bridge"
+	} else if catalogAdmissionMode == catalogAdmissionRowContinuity {
+		s.log.Info().
+			Str("provider_id", hello.ProviderID).
+			Str("catalog_release_id", hello.CatalogReleaseID).
+			Str("catalog_candidate_sha256", hello.CandidateCatalogSHA256).
+			Str("catalog_signer_key_id", hello.CatalogSignerKeyID).
+			Str("current_catalog_release_id", admissionCurrent.Version).
+			Bool("catalog_refresh_recommended", true).
+			Msg("provider admitted by catalog row continuity")
 	}
 	now := s.now()
 	expectedModelHash := s.expectedAdmissionModelHashWithCatalog(hello, catalogAdmissionMode, admissionCurrent, admissionCompatible)
@@ -3429,7 +3442,7 @@ func (s *Server) expectedAdmissionModelHash(hello Hello, admissionMode string) s
 // (#1268 MED-2).
 func (s *Server) expectedAdmissionModelHashWithCatalog(hello Hello, admissionMode string, current *autotune.Catalog, compatible map[string]*autotune.Catalog) string {
 	catalog := resolveAdmissionCatalog(hello, admissionMode, current, compatible)
-	if catalog == nil || (admissionMode != "current" && admissionMode != "previous") {
+	if catalog == nil || !catalogEnvelopeAdmissionMode(admissionMode) {
 		return ""
 	}
 	_, row, ok := catalog.HighestClaimedTier(hello.ModelID)
@@ -3440,7 +3453,7 @@ func (s *Server) expectedAdmissionModelHashWithCatalog(hello Hello, admissionMod
 }
 
 func resolveAdmissionCatalog(hello Hello, admissionMode string, current *autotune.Catalog, compatible map[string]*autotune.Catalog) *autotune.Catalog {
-	if admissionMode == "previous" {
+	if admissionMode == "previous" || admissionMode == catalogAdmissionRowContinuity {
 		catalog := compatibleCatalogBySHA(compatible, hello.CandidateCatalogSHA256)
 		if catalog == nil {
 			catalog = compatible[hello.CatalogReleaseID]
@@ -3650,6 +3663,9 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 		if providerCatalog == nil {
 			providerCatalog = compatible[hello.CatalogReleaseID]
 		}
+		if providerCatalog != nil && providerCatalog.RowContinuityOnly {
+			admissionMode = catalogAdmissionRowContinuity
+		}
 	}
 	if providerCatalog == nil ||
 		hello.CatalogReleaseID != providerCatalog.Version ||
@@ -3658,7 +3674,7 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 		!strings.EqualFold(hello.CandidateCatalogSHA256, providerCatalog.SHA256) {
 		return "", false
 	}
-	if admissionMode == "previous" && providerCatalog.Version == catalog.Version && providerCatalog.SignerKeyID != catalog.SignerKeyID {
+	if admissionMode != "current" && providerCatalog.Version == catalog.Version && providerCatalog.SignerKeyID != catalog.SignerKeyID {
 		return "", false
 	}
 	key, _, ok := providerCatalog.HighestClaimedTier(hello.ModelID)
@@ -3669,11 +3685,12 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 	if !ok || !strings.EqualFold(hello.CandidateRowIdentity, providerRowIdentity) {
 		return "", false
 	}
-	// A recognized previous release is compatible only while the selected
-	// model row identity and policy-bearing structured fields are semantically
-	// equivalent to the active release. This permits unrelated catalog updates
-	// without admitting stale model artifacts, gates, speculative decoding, or
-	// workload policy.
+	// A recognized previous release — from the previous-target window or the
+	// row-continuity evidence list (SPEC-023-R010) — is compatible only while
+	// the selected model row identity and policy-bearing structured fields are
+	// semantically equivalent to the active release. This permits unrelated
+	// catalog updates without admitting stale model artifacts, gates,
+	// speculative decoding, or workload policy.
 	activeKey, _, ok := catalog.HighestClaimedTier(hello.ModelID)
 	if !ok {
 		return "", false
@@ -3682,10 +3699,23 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 	if !ok || !strings.EqualFold(providerRowIdentity, activeRowIdentity) {
 		return "", false
 	}
-	if admissionMode == "previous" && !providerCatalog.PolicyEquivalent(key, catalog, activeKey) {
+	if admissionMode != "current" && !providerCatalog.PolicyEquivalent(key, catalog, activeKey) {
 		return "", false
 	}
 	return admissionMode, true
+}
+
+// catalogAdmissionRowContinuity is the admission mode of a provider whose
+// hello names an older signed document authenticated only through the
+// `.row-continuity-target` evidence list (SPEC-023-R010, AC-CAT-22). The hello
+// ack still advertises the active catalog so the provider can refresh.
+const catalogAdmissionRowContinuity = "row_continuity"
+
+// catalogEnvelopeAdmissionMode reports whether a session presented a catalog
+// envelope the coordinator validated against a loaded signed document, so its
+// catalog-bound checks (model hash, ceiling, route) resolve that document.
+func catalogEnvelopeAdmissionMode(mode string) bool {
+	return mode == "current" || mode == "previous" || mode == catalogAdmissionRowContinuity
 }
 
 func (s *Server) populateCatalogHelloAck(ack *HelloAck) {

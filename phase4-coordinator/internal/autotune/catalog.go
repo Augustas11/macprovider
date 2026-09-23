@@ -53,9 +53,13 @@ type Catalog struct {
 	PolicyVersion string
 	SignerKeyID   string
 	SHA256        string
-	RawJSON       []byte
-	rowsByKey     map[string]Row
-	keysByModel   map[string][]string
+	// RowContinuityOnly marks a signed older document loaded solely as
+	// SPEC-023-R010 row-continuity evidence. It admits a provider only as
+	// "row_continuity" and never contributes an artifact identity set.
+	RowContinuityOnly bool
+	RawJSON           []byte
+	rowsByKey         map[string]Row
+	keysByModel       map[string][]string
 }
 
 func ParseCatalog(rawJSON []byte) (*Catalog, error) {
