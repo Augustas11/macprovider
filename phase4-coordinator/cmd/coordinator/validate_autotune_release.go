@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/augstar/macprovider-coordinator/internal/autotune"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	"github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/rs/zerolog"
 )
 
@@ -27,8 +29,20 @@ type autotuneReleaseValidation struct {
 	ConfigSHA256   string               `json:"config_sha256"`
 	OverlaySHA256  string               `json:"overlay_sha256"`
 	PreviousLoaded []autotuneReleaseRef `json:"previous_loaded"`
-	Errors         []string             `json:"errors"`
-	Notes          []string             `json:"notes"`
+	// Admitted is exactly the set of catalogs a provider hello can match
+	// after this release reloads: the release itself, every retained
+	// previous-target entry, and same-version restamps, as the ws admission
+	// map keeps them (tombstones and current-duplicates dropped). Empty
+	// whenever ok is false: a reload that fails admits nothing new.
+	Admitted []autotuneAdmittedRef `json:"admitted"`
+	Errors   []string              `json:"errors"`
+	Notes    []string              `json:"notes"`
+}
+
+type autotuneAdmittedRef struct {
+	ReleaseID        string `json:"release_id"`
+	CandidatesSHA256 string `json:"candidates_sha256"`
+	Source           string `json:"source"`
 }
 
 type autotuneReleaseRef struct {
@@ -60,7 +74,7 @@ func runValidateAutotuneRelease(out io.Writer, configPath, configOverlay, dir, p
 // the reload's own load/verify functions against it. It starts no server,
 // opens no database, and never publishes into the tier2 singleton.
 func validateAutotuneRelease(configPath, configOverlay, dir, previousTarget string, logger zerolog.Logger) autotuneReleaseValidation {
-	r := autotuneReleaseValidation{PreviousLoaded: []autotuneReleaseRef{}, Errors: []string{}, Notes: []string{}}
+	r := autotuneReleaseValidation{PreviousLoaded: []autotuneReleaseRef{}, Admitted: []autotuneAdmittedRef{}, Errors: []string{}, Notes: []string{}}
 	fail := func(format string, args ...any) { r.Errors = append(r.Errors, fmt.Sprintf(format, args...)) }
 
 	cfg, digests, err := config.LoadForSIGHUPReloadWithOverlayDigests(configPath, configOverlay)
@@ -104,6 +118,13 @@ func validateAutotuneRelease(configPath, configOverlay, dir, previousTarget stri
 	for _, previous := range compatible {
 		r.PreviousLoaded = append(r.PreviousLoaded, autotuneReleaseRef{ReleaseID: previous.Version, CandidatesSHA256: previous.SHA256})
 	}
+	// loadCompatibleAutotuneCatalogs returns the previous-target entries
+	// first (all of them, or an error), then the restamp leftovers.
+	retainedDirs, err := buyer.PreviousAutotuneReleaseTargets(cfg.AutotuneFeeds)
+	if err != nil {
+		fail("retained previous release targets: %v", err)
+	}
+	admitted := admittedAutotuneCatalogs(catalog, compatible, len(retainedDirs))
 	// The release-published observer degrades (warns) on these at SIGHUP;
 	// before activation every retained entry must load, so they fail here.
 	previousFeeds, err := buyer.LoadPreviousAutotuneFeeds(cfg.AutotuneFeeds)
@@ -129,7 +150,37 @@ func validateAutotuneRelease(configPath, configOverlay, dir, previousTarget stri
 	}
 	r.Notes = append(r.Notes, validateAutotuneReleaseBoundaryNote)
 	r.OK = len(r.Errors) == 0
+	if r.OK {
+		r.Admitted = admitted
+	}
 	return r
+}
+
+// admittedAutotuneCatalogs lists current plus every compatible catalog the ws
+// admission map (ws.CompatibleCatalogSet, the map a reload installs) reaches
+// by candidate sha, the key a provider hello must match. compatible[:retained]
+// came from .previous-target; the rest are same-version restamps.
+func admittedAutotuneCatalogs(current *autotune.Catalog, compatible []*autotune.Catalog, retained int) []autotuneAdmittedRef {
+	currentSHA := strings.ToLower(strings.TrimSpace(current.SHA256))
+	out := []autotuneAdmittedRef{{ReleaseID: current.Version, CandidatesSHA256: currentSHA, Source: "current"}}
+	set := ws.CompatibleCatalogSet(current, compatible)
+	seen := map[string]bool{currentSHA: true}
+	for i, c := range compatible {
+		if c == nil {
+			continue
+		}
+		sha := strings.ToLower(strings.TrimSpace(c.SHA256))
+		if seen[sha] || set[sha] == nil {
+			continue
+		}
+		seen[sha] = true
+		source := "restamp"
+		if i < retained {
+			source = "retained"
+		}
+		out = append(out, autotuneAdmittedRef{ReleaseID: set[sha].Version, CandidatesSHA256: sha, Source: source})
+	}
+	return out
 }
 
 // redirectAutotuneReleasePaths points every configured feed path, and the

@@ -295,6 +295,12 @@ class ServingClosureTests(unittest.TestCase):
         self.tier2_obj["models"] = [m for m in self.tier2_obj["models"] if m["model_id"].lower() != self.served.lower()]
         self.check({self.served.lower()})
 
+    def test_stale_exclusion_of_pinned_model_fails(self) -> None:
+        # The release pins the model (Tier-2 model_id+sha256 match), so it is
+        # buyer-serving whatever not-buyer-serving.json says.
+        with self.assertRaisesRegex(cr.CatalogError, f"remove the exclusion: {self.served} is structurally buyer-serving"):
+            self.check({self.served.lower()})
+
     def test_hash_mismatch_fails(self) -> None:
         for entry in self.tier2_obj["models"]:
             if entry["model_id"].lower() == self.served.lower():
@@ -330,6 +336,14 @@ class ServingClosureTests(unittest.TestCase):
                                              "models": [{"model_id": self.served, "reason": "test"}]}))
             proc = subprocess.run(base + ["--exclusions", str(excl_path)], capture_output=True, text=True, check=False)
             self.assertEqual(proc.returncode, 0, proc.stderr)
+            # The same exclusion once the pin is back (stale exclusion + new pin).
+            pinned = [sys.executable, str(SCRIPT), "check-tier2-binding", "--require-serving",
+                      "--candidate", str(CANONICAL / "autotune-candidates.json"),
+                      "--rate-card", str(CANONICAL / "rate-card.json"),
+                      "--tier2", str(CANONICAL / "tier2-catalog.json"), "--exclusions", str(excl_path)]
+            proc = subprocess.run(pinned, capture_output=True, text=True, check=False)
+            self.assertEqual(proc.returncode, 1, proc.stdout)
+            self.assertIn(f"remove the exclusion: {self.served} is structurally buyer-serving", proc.stderr)
             # Without --require-serving the legacy overlap-only check still passes.
             legacy = subprocess.run(
                 [sys.executable, str(SCRIPT), "check-tier2-binding",
@@ -386,15 +400,40 @@ class BuyerServingSetTests(unittest.TestCase):
         self.assertEqual(result["removed"], [])
         self.assertEqual(result["changed"], [])
 
-    def test_removed_exclusion_is_added(self) -> None:
+    def unpin(self, directory: Path) -> None:
+        mid = model_id(directory).lower()
+        edit_json(directory / "tier2-catalog.json",
+                  lambda o: o.update(models=[m for m in o["models"] if m["model_id"].lower() != mid]))
+
+    def test_new_pin_with_exclusion_removed_is_added(self) -> None:
+        # Live was excused (excluded, unpinned); the incoming release pins it.
+        self.unpin(self.live)
         live_ex = self.exclusions("live-ex.json", model_id(self.live))
         incoming_ex = self.exclusions("incoming-ex.json")
         result = self.diff("--exclusions", str(incoming_ex), "--live-exclusions", str(live_ex))
         self.assertEqual([m["model_id"] for m in result["added"]], [model_id(self.release)], result)
-        # The reverse direction is a removal, not an addition.
-        result = self.diff("--exclusions", str(live_ex), "--live-exclusions", str(incoming_ex))
-        self.assertEqual(result["added"], [])
-        self.assertEqual([m["model_id"] for m in result["removed"]], [model_id(self.release)], result)
+        self.assertEqual(result["removed"], [])
+
+    def test_stale_exclusion_with_new_pin_is_rejected_and_added(self) -> None:
+        # The stale exclusion stays while the incoming release adds the pin:
+        # the CLI refuses it, and the set itself (exclusions never subtract)
+        # still reports the model as newly buyer-serving.
+        self.unpin(self.live)
+        stale = self.exclusions("stale-ex.json", model_id(self.release))
+        proc = self.run_cli("--diff-live", str(self.live), "--exclusions", str(stale), "--live-exclusions", str(stale))
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, "")
+        self.assertIn(f"remove the exclusion: {model_id(self.release)} is structurally buyer-serving", proc.stderr)
+        self.assertEqual(self.run_cli("--exclusions", str(stale)).returncode, 1)
+        result = cr.buyer_serving_diff(cr.buyer_serving_set(self.release), cr.buyer_serving_set(self.live))
+        self.assertEqual([m["model_id"] for m in result["added"]], [model_id(self.release)], result)
+
+    def test_live_exclusion_does_not_hide_a_live_pin(self) -> None:
+        # Live pinned the model while (stalely) excluding it: it was serving,
+        # so the incoming release does not newly add it.
+        live_ex = self.exclusions("live-ex.json", model_id(self.live))
+        result = self.diff("--exclusions", str(self.exclusions("incoming-ex.json")), "--live-exclusions", str(live_ex))
+        self.assertEqual(result, {"added": [], "removed": [], "changed": []})
 
     def test_hash_change_is_changed(self) -> None:
         correct_hash(self.release)

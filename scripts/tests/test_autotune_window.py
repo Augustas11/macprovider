@@ -506,10 +506,9 @@ class CoverageTests(unittest.TestCase):
         self.pool()
         self.assertEqual(self.cov()[0], 1)
 
-    def test_unverifiable_restamps_and_window_entries_not_covered(self) -> None:
+    def test_unverifiable_restamps_not_covered(self) -> None:
         # Parity with the coordinator: a restamp whose candidate signature does
-        # not verify is skipped at reload, and a window entry that does not
-        # verify fails reload; neither is an admissible catalog.
+        # not verify is skipped at reload; it is not an admissible catalog.
         self.release("cur", "v2")
         self.release("new", "v3")
         self.release("v3-0000000000000001", "v3", marker="missing-sig", signer=None)
@@ -518,20 +517,31 @@ class CoverageTests(unittest.TestCase):
         # Trusted by its own keyring but not by the incoming release's.
         self.release("v3-0000000000000004", "v3", marker="own-only", signer="rogue",
                      keyring=("k1", "rogue"))
-        self.release("p1", "v1", signer=None)
-        self.release("p2", "v0", sign_as="rogue")
         self.release("v3-0000000000000005", "v3", marker="good")
         self.current("cur")
-        (self.root / aw.FILE_NAME).write_text("releases/p1\nreleases/p2\n")
         bad = ["v3-0000000000000001", "v3-0000000000000002", "v3-0000000000000003", "v3-0000000000000004"]
-        self.pool(*(self.provider("v3", n) for n in bad), self.provider("v1", "p1"), self.provider("v0", "p2"),
+        self.pool(*(self.provider("v3", n) for n in bad),
                   self.provider("v3", "v3-0000000000000005"), self.provider("v2", "cur"))
         rc, got, err = self.cov()
         self.assertEqual(rc, 4, err)
-        self.assertEqual(sorted(u["sha"] for u in got["uncovered"]),
-                         sorted(self.shas[n] for n in bad + ["p1", "p2"]))
+        self.assertEqual(sorted(u["sha"] for u in got["uncovered"]), sorted(self.shas[n] for n in bad))
         self.assertEqual([c["dir"] for c in got["covered"]],
                          ["releases/new", "releases/cur", "releases/v3-0000000000000005"])
+
+    def test_unverifiable_window_entry_is_refusal(self) -> None:
+        # The coordinator fails the reload on any explicit window entry that
+        # does not verify, even when no provider advertises it.
+        for name, kw in (("p1", {"signer": None}), ("p2", {"sign_as": "rogue"}), ("p3", {"signer": "rogue"})):
+            with self.subTest(name=name):
+                self.release(name, "v-" + name, **kw)
+                if not (self.root / "releases" / "new").exists():
+                    self.release("new", "v3")
+                (self.root / aw.FILE_NAME).write_text(f"releases/{name}\n")
+                self.pool()
+                rc, got, err = self.cov()
+                self.assertEqual(rc, 1)
+                self.assertIsNone(got)
+                self.assertIn("refusing", err)
 
     def test_signer_key_must_match_incoming_keyring_bytes(self) -> None:
         # Same key_id, different public key in the release's own keyring.
@@ -543,7 +553,8 @@ class CoverageTests(unittest.TestCase):
         (d / "trusted-keys.json").write_text(json.dumps(keys))
         self.current("cur")
         self.pool(self.provider("v2", "cur"))
-        self.assertEqual(self.cov()[0], 4)
+        # cur enters the window on activation; an unverifiable entry refuses.
+        self.assertEqual(self.cov()[0], 1)
 
     def test_unverifiable_incoming_is_refusal(self) -> None:
         for name, kw in (("missing", {"signer": None}), ("bad", {"sign_as": "rogue"}),
@@ -570,6 +581,110 @@ class CoverageTests(unittest.TestCase):
     def test_missing_poolz_is_refusal(self) -> None:
         self.release("new", "v3")
         self.assertEqual(self.cov()[0], 1)
+
+
+class AdmittedJsonCoverageTests(unittest.TestCase):
+    """coverage --admitted-json: the coordinator validator's admitted list is
+    the admissible set; nothing is loaded or verified in Python."""
+
+    SHA_A, SHA_B, SHA_C = "a" * 64, "b" * 64, "c" * 64
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name)
+        self.poolz = self.base / "poolz.json"
+        self.verdict = self.base / "admitted.json"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def write(self, ok: object = True, admitted: object = None) -> None:
+        if admitted is None:
+            admitted = [
+                {"release_id": "v3", "candidates_sha256": self.SHA_A, "source": "current"},
+                {"release_id": "v2", "candidates_sha256": self.SHA_B, "source": "retained"},
+                {"release_id": "v3", "candidates_sha256": self.SHA_C, "source": "restamp"},
+            ]
+        body = {"ok": ok, "release_id": "v3", "admitted": admitted, "errors": [], "notes": []}
+        self.verdict.write_text(json.dumps(body) + "\n")
+
+    def pool(self, *pairs: tuple[str, str]) -> None:
+        self.poolz.write_text(json.dumps({"pool": [
+            {"provider_id": "p", "catalog_release_id": rid, "catalog_candidate_sha256": sha, "routing_eligible": True}
+            for rid, sha in pairs]}))
+
+    def cov(self, *extra: str) -> tuple[int, dict | None, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = aw.main(["coverage", "--admitted-json", str(self.verdict), "--poolz-json", str(self.poolz), *extra])
+        return rc, (json.loads(out.getvalue()) if out.getvalue() else None), err.getvalue()
+
+    def test_admitted_list_is_the_admissible_set(self) -> None:
+        self.write()
+        self.pool(("v3", self.SHA_A), ("v2", self.SHA_B.upper()), ("v3", self.SHA_C))
+        rc, got, err = self.cov()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(got["uncovered"], [])
+        self.assertEqual(got["advertised_total"], 3)
+        self.assertEqual(got["covered"][1], {"release_id": "v2", "sha": self.SHA_B, "source": "retained"})
+
+    def test_release_not_admitted_is_uncovered(self) -> None:
+        self.write()
+        self.pool(("v1", "d" * 64), ("v2", self.SHA_A))
+        rc, got, err = self.cov()
+        self.assertEqual(rc, 4, err)
+        self.assertEqual(got["uncovered"], [
+            {"release_id": "v1", "sha": "d" * 64, "providers": 1, "routing_eligible": 1},
+            {"release_id": "v2", "sha": self.SHA_A, "providers": 1, "routing_eligible": 1}])
+
+    def test_root_is_never_read(self) -> None:
+        # A --root that does not exist is ignored: no Python admission mirror.
+        self.write()
+        self.pool(("v3", self.SHA_A))
+        rc, _, err = self.cov("--root", str(self.base / "missing"), "--incoming", "releases/x")
+        self.assertEqual(rc, 0, err)
+
+    def test_validator_not_ok_or_malformed_is_refusal(self) -> None:
+        good = {"release_id": "v3", "candidates_sha256": self.SHA_A, "source": "current"}
+        cases = {
+            "not ok": (False, None),
+            "ok missing": ("true", None),
+            "no admitted": (True, []),
+            "admitted not list": (True, {"x": good}),
+            "extra key": (True, [dict(good, dir="releases/x")]),
+            "missing key": (True, [{"release_id": "v3", "candidates_sha256": self.SHA_A}]),
+            "upper sha": (True, [dict(good, candidates_sha256=self.SHA_A.upper())]),
+            "short sha": (True, [dict(good, candidates_sha256="ab")]),
+            "bad release id": (True, [dict(good, release_id="../x")]),
+            "bad source": (True, [dict(good, source="previous")]),
+            "no current": (True, [dict(good, source="retained")]),
+            "two current": (True, [good, dict(good, candidates_sha256=self.SHA_B)]),
+            "current not first": (True, [dict(good, candidates_sha256=self.SHA_B, source="retained"), good]),
+        }
+        self.pool()
+        for name, (ok, admitted) in cases.items():
+            with self.subTest(name=name):
+                self.write(ok, admitted)
+                rc, got, err = self.cov()
+                self.assertEqual(rc, 1)
+                self.assertIsNone(got)
+                self.assertIn("refusing", err)
+        for body in ("", "{not json", "[]", "\xff"):
+            with self.subTest(body=body):
+                self.verdict.write_text(body, encoding="latin-1")
+                self.assertEqual(self.cov()[0], 1)
+
+    def test_missing_verdict_is_refusal(self) -> None:
+        self.pool()
+        self.assertEqual(self.cov()[0], 1)
+
+    def test_needs_verdict_or_legacy_root(self) -> None:
+        self.pool()
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = aw.main(["coverage", "--poolz-json", str(self.poolz)])
+        self.assertEqual(rc, 1)
+        self.assertIn("--admitted-json", err.getvalue())
 
 
 if __name__ == "__main__":

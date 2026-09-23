@@ -160,12 +160,46 @@ class CompareLiveTests(unittest.TestCase):
         change_content(self.incoming)
         self.assertEqual(self.verdict()["verdict"], "regression")
 
-    def test_restamped_tier2_is_unprovable_when_incoming_tier2_moved(self) -> None:
-        # Documented limit: the ledger stores only whole-file Tier-2 digests, so a
-        # re-signed live Tier-2 is provable only against bytes the tag carries.
+    def committed_tier2_index(self) -> Path:
+        """What `tier2-content-index` yields for the committed ledger row."""
+        raw = (CANONICAL / "tier2-catalog.json").read_bytes()
+        index = self.tmp / "tier2-index.json"
+        index.write_text(json.dumps({cr.sha256(raw): cr.tier2_stripped_sha256(raw, "t")}))
+        return index
+
+    def test_restamped_tier2_descends_via_content_index_when_incoming_tier2_moved(self) -> None:
+        # The ledger stores only whole-file Tier-2 digests; without the history
+        # index a re-signed live Tier-2 is provable only against bytes the tag
+        # carries. With it, the row's stripped content proves the descent.
         restamp_tier2(self.live)
         edit_json(self.incoming / "tier2-catalog.json", lambda o: o["models"].pop(), compact=False)
         self.assertEqual(self.verdict()["verdict"], "regression")
+        index = self.committed_tier2_index()
+        result = cr.compare_live(self.incoming, self.live, LEDGER, index)
+        self.assertEqual(result["verdict"], "descends", result)
+        self.assertEqual(result["matched_ledger_release"], json.loads((CANONICAL / "release.json").read_bytes())["release_id"])
+        proc = subprocess.run(
+            [sys.executable, str(SCRIPT), "compare-live", "--incoming", str(self.incoming), "--live", str(self.live),
+             "--ledger", str(LEDGER), "--tier2-content-index", str(index)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)["verdict"], "descends")
+
+    def test_content_index_does_not_excuse_changed_tier2_models(self) -> None:
+        restamp_tier2(self.live)
+        edit_json(self.live / "tier2-catalog.json", lambda o: o["models"].pop(), compact=False)
+        edit_json(self.incoming / "tier2-catalog.json", lambda o: o["models"].pop(0), compact=False)
+        self.assertEqual(cr.compare_live(self.incoming, self.live, LEDGER, self.committed_tier2_index())["verdict"],
+                         "regression")
+
+    def test_malformed_content_index_fails_closed(self) -> None:
+        for body in ("{not json", "[]", json.dumps({"A" * 64: "b" * 64}), json.dumps({"a" * 64: 7})):
+            with self.subTest(body=body):
+                index = self.tmp / "bad-index.json"
+                index.write_text(body)
+                with self.assertRaises(cr.CatalogError):
+                    cr.compare_live(self.incoming, self.live, LEDGER, index)
 
     def test_live_content_outside_ledger_is_regression(self) -> None:
         change_content(self.live)
@@ -223,6 +257,80 @@ class CompareLiveTests(unittest.TestCase):
         bad.write_bytes(b'{"schema_version":"nope","releases":{}}')
         self.assertEqual(self.run_cli(bad).returncode, 1)
         self.assertEqual(self.run_cli(self.tmp / "missing.json").returncode, 1)
+
+
+class Tier2ContentIndexTests(unittest.TestCase):
+    """`tier2-content-index`: ledger row Tier-2 sha -> stripped digest, from git history."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        self.git("init", "-q")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+        self.path = self.repo / cr.TIER2_CATALOG_REPO_PATH
+        self.path.parent.mkdir(parents=True)
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp)
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def commit(self, raw: bytes | None) -> str:
+        if raw is None:
+            self.path.unlink()
+        else:
+            self.path.write_bytes(raw)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "c")
+        return self.git("rev-parse", "HEAD")
+
+    def ledger(self, *raws: bytes) -> Path:
+        # The committed ledger with its Tier-2-carrying rows re-pointed at raws
+        # (rows past the last raw reuse it).
+        base = json.loads(LEDGER.read_bytes())
+        ids = [k for k, r in base["releases"].items() if "tier2-catalog.json" in r["feeds"]]
+        for release_id, raw in zip(ids, raws, strict=False):
+            base["releases"][release_id]["feeds"]["tier2-catalog.json"].update(sha256=cr.sha256(raw), bytes=len(raw))
+        for release_id in ids[len(raws):]:
+            base["releases"][release_id]["feeds"]["tier2-catalog.json"].update(sha256=cr.sha256(raws[-1]), bytes=len(raws[-1]))
+        path = self.tmp / "ledger.json"
+        path.write_text(json.dumps(base, indent=2))
+        return path
+
+    def test_index_maps_every_findable_row(self) -> None:
+        old = (CANONICAL / "tier2-catalog.json").read_bytes()
+        obj = json.loads(old)
+        obj["models"].pop()
+        new = json.dumps(obj, indent=2).encode()
+        missing = json.dumps(dict(obj, models=[])).encode()
+        first = self.commit(old)
+        self.commit(new)
+        self.commit(None)  # a later deletion must not stop the walk
+        ledger = self.ledger(old, new, missing)
+        proc = subprocess.run([sys.executable, str(SCRIPT), "tier2-content-index", "--repo", str(self.repo),
+                               "--ledger", str(ledger)], capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        index = json.loads(proc.stdout)
+        self.assertEqual(index, {cr.sha256(old): cr.tier2_stripped_sha256(old, "t"),
+                                 cr.sha256(new): cr.tier2_stripped_sha256(new, "t")})
+        # --rev bounds the walk to that commit's history.
+        index = cr.build_tier2_content_index(self.repo, first, cr.validate_release_ledger(ledger.read_bytes()))
+        self.assertEqual(list(index), [cr.sha256(old)])
+
+    def test_stripped_digest_ignores_only_the_envelope(self) -> None:
+        raw = (CANONICAL / "tier2-catalog.json").read_bytes()
+        obj = json.loads(raw)
+        resigned = dict(obj, issued_at="2026-10-01T03:00:00Z", expires_at="2099-01-01T00:00:00Z",
+                        catalog_id="x", version=9, signature={"sig": "A"})
+        self.assertEqual(cr.tier2_stripped_sha256(json.dumps(resigned, indent=4).encode(), "t"),
+                         cr.tier2_stripped_sha256(raw, "t"))
+        obj["models"] = obj["models"][:-1]
+        self.assertNotEqual(cr.tier2_stripped_sha256(json.dumps(obj).encode(), "t"),
+                            cr.tier2_stripped_sha256(raw, "t"))
 
 
 if __name__ == "__main__":

@@ -42,6 +42,14 @@ grep -qF '$SCP "$AUTOTUNE_RELEASE_LEDGER"' "$DEPLOY_SH" ||
   fail "release-ledger.json must be uploaded with the deploy inputs"
 grep -qF 'AUTOTUNE_RELEASE_LEDGER="$PINNED_AUTOTUNE_DIR/release-ledger.json"' "$DEPLOY_SH" ||
   fail "the ledger must come from the pinned deploy inputs"
+grep -qF '"$AUTOTUNE_TIER2_CONTENT_INDEX=tier2-content-index.json"' "$DEPLOY_SH" ||
+  fail "tier2-content-index.json must be a digested deploy input"
+grep -qF '$SCP "$AUTOTUNE_TIER2_CONTENT_INDEX"' "$DEPLOY_SH" ||
+  fail "tier2-content-index.json must be uploaded with the deploy inputs"
+grep -qF 'tier2-content-index --repo "$REPO_ROOT" \' "$DEPLOY_SH" && grep -qF -- '--rev "$COORDINATOR_RELEASE_COMMIT" --ledger "$AUTOTUNE_RELEASE_LEDGER"' "$DEPLOY_SH" ||
+  fail "the Tier-2 content index must be built from the pinned commit's history"
+grep -qF -- '--ledger $DEPLOY_TMP/release-ledger.json --tier2-content-index $DEPLOY_TMP/tier2-content-index.json' "$DEPLOY_SH" ||
+  fail "compare-live must receive the Tier-2 content index"
 skip_block="$(sed -n "${skip_line},/^else\$/p" "$DEPLOY_SH")"
 case "$skip_block" in
   *autotune_window*|*current.next*) fail "the equivalent branch must not apply the window or swap current" ;;
@@ -195,6 +203,9 @@ reset() {
     assemble "$TMP/bound-base"
     bound_ledger "$TMP/bound-base" "$DEPLOY_TMP/release-ledger.json"
   fi
+  # As deploy builds it locally from the pinned commit's history.
+  python3 -I "$REPO_ROOT/scripts/catalog-release.py" tier2-content-index --repo "$REPO_ROOT" --rev HEAD \
+    --ledger "$DEPLOY_TMP/release-ledger.json" > "$DEPLOY_TMP/tier2-content-index.json" || fail "cannot build the Tier-2 content index"
   # The same shipped closure deploy uploads (catalog-verifier-bundle.txt).
   for entry in $(grep -v '^#' "$REPO_ROOT/scripts/catalog-verifier-bundle.txt"); do
     cp "$REPO_ROOT/$entry" "$DEPLOY_TMP/$entry"

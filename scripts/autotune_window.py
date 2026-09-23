@@ -445,8 +445,12 @@ def admissible_releases(root_fd: int, incoming: str, *, required_uid: int = 0) -
 
     A release counts only if its candidate signature verifies (verify_release)
     under the incoming release's keyring, the stand-in for the coordinator's
-    autotune.public_keys. An unverifiable window entry or restamp is simply not
-    admissible; an unverifiable incoming release is a refusal.
+    autotune.public_keys. An unverifiable restamp is simply not admissible; an
+    unverifiable incoming release or window entry is a refusal (the coordinator
+    fails the reload on either).
+
+    Legacy mirror of the Go loader. New callers pass --admitted-json (the
+    coordinator's own --validate-autotune-release verdict) instead.
     """
     current = read_current(root_fd)
     window = compute_window(read_window(root_fd, required_uid=required_uid), current or None, incoming)
@@ -462,10 +466,7 @@ def admissible_releases(root_fd: int, incoming: str, *, required_uid: int = 0) -
         # entry blocks boot, so it is a refusal here too.
         for entry in window:
             prev = load_release(releases_fd, entry[len("releases/"):])
-            try:
-                verify_release(prev, trusted)
-            except WindowError:
-                continue
+            verify_release(prev, trusted)
             # ws/server.go: a same-version previous catalog must keep the
             # active signer.
             if prev["release_id"] == active["release_id"] and prev["signer"] != active["signer"]:
@@ -522,20 +523,70 @@ def advertised_catalogs(poolz: object) -> tuple[dict[tuple[str, str], dict], int
     return advertised, total
 
 
+ADMITTED_SOURCES = ("current", "retained", "restamp")
+ADMITTED_KEYS = {"release_id", "candidates_sha256", "source"}
+RELEASE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,191}")
+LOWER_SHA_RE = re.compile(r"[0-9a-f]{64}")
+
+
+def admitted_from_validator(data: bytes) -> list[dict]:
+    """The admissible set, exactly as the coordinator's
+    `--validate-autotune-release DIR --previous-target FILE` verdict lists it
+    in `admitted`. Refuses unless ok is true and every entry is well formed
+    with exactly one `current`."""
+    try:
+        verdict = json.loads(data.decode("utf-8").strip())
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise WindowError("admitted JSON is not a coordinator validator verdict") from exc
+    if not isinstance(verdict, dict):
+        raise WindowError("admitted JSON is not a coordinator validator verdict")
+    if verdict.get("ok") is not True:
+        raise WindowError("coordinator validator did not accept the release (ok is not true)")
+    admitted = verdict.get("admitted")
+    if not isinstance(admitted, list) or not admitted:
+        raise WindowError("coordinator validator verdict has no admitted list")
+    out = []
+    for entry in admitted:
+        if not isinstance(entry, dict) or set(entry) != ADMITTED_KEYS:
+            raise WindowError("admitted entry does not have exactly release_id, candidates_sha256, source")
+        rid, sha, source = entry["release_id"], entry["candidates_sha256"], entry["source"]
+        if not isinstance(rid, str) or RELEASE_ID_RE.fullmatch(rid) is None:
+            raise WindowError("admitted entry has a malformed release_id")
+        if not isinstance(sha, str) or LOWER_SHA_RE.fullmatch(sha) is None:
+            raise WindowError("admitted entry has a malformed candidates_sha256")
+        if source not in ADMITTED_SOURCES:
+            raise WindowError("admitted entry has an unknown source")
+        out.append({"release_id": rid, "sha": sha, "source": source})
+    if [e["source"] for e in out].count("current") != 1 or out[0]["source"] != "current":
+        raise WindowError("admitted list must start with exactly one current release")
+    return out
+
+
 def _coverage(args: argparse.Namespace) -> dict:
-    validate_entry(args.incoming)
+    if args.admitted_json is None:
+        if args.root is None or args.incoming is None:
+            raise WindowError("coverage needs --admitted-json (or the legacy --root and --incoming)")
+        validate_entry(args.incoming)
     with open(args.poolz_json, "rb") as fh:
         data = fh.read(MAX_POOLZ_BYTES + 1)
     if len(data) > MAX_POOLZ_BYTES:
         raise WindowError("poolz JSON is too large")
     advertised, total = advertised_catalogs(json.loads(data))
-    root_fd = open_root(args.root, required_uid=args.required_uid)
-    try:
-        admissible = admissible_releases(root_fd, args.incoming, required_uid=args.required_uid)
-    finally:
-        os.close(root_fd)
+    if args.admitted_json is not None:
+        with open(args.admitted_json, "rb") as fh:
+            verdict = fh.read(MAX_POOLZ_BYTES + 1)
+        if len(verdict) > MAX_POOLZ_BYTES:
+            raise WindowError("admitted JSON is too large")
+        admissible = admitted_from_validator(verdict)
+        covered = [dict(r) for r in admissible]
+    else:
+        root_fd = open_root(args.root, required_uid=args.required_uid)
+        try:
+            admissible = admissible_releases(root_fd, args.incoming, required_uid=args.required_uid)
+        finally:
+            os.close(root_fd)
+        covered = [{"dir": r["dir"], "release_id": r["release_id"], "sha": r["sha"]} for r in admissible]
     keys = {(r["release_id"], r["sha"]) for r in admissible}
-    covered = [{"dir": r["dir"], "release_id": r["release_id"], "sha": r["sha"]} for r in admissible]
     uncovered = [
         {"release_id": rid, "sha": sha, **counts}
         for (rid, sha), counts in sorted(advertised.items())
@@ -566,8 +617,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--from-file", required=True)
     p.add_argument("--expect-current", required=True)
     p = sub.add_parser("coverage", help="exit 4 if a connected provider's catalog would stop being admissible")
-    common(p)
-    p.add_argument("--incoming", required=True, help="releases/<id> about to become current")
+    p.add_argument("--admitted-json", help="coordinator --validate-autotune-release verdict; its admitted list is the admissible set")
+    p.add_argument("--root", help="legacy (no --admitted-json): autotune catalog root")
+    p.add_argument("--required-uid", type=int, default=0, help=argparse.SUPPRESS)
+    p.add_argument("--group", default="macprovider", help=argparse.SUPPRESS)
+    p.add_argument("--incoming", help="legacy (no --admitted-json): releases/<id> about to become current")
     p.add_argument("--poolz-json", required=True, help="coordinator /poolz response body")
 
     args = parser.parse_args(argv)

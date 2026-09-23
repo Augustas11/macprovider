@@ -3,6 +3,10 @@
 # providers still advertise. Pins the coverage check's placement in
 # deploy-pearl-vps.sh and runs the extracted coverage + activation blocks with
 # the real scripts/autotune_window.py against a local fake Pearl and /poolz.
+# The admissible set comes from the incoming coordinator's
+# --validate-autotune-release verdict (a fake binary here: it reports the
+# release and the planned window it was handed; the real verdict is pinned by
+# the Go validator tests).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -28,7 +32,13 @@ line_of() {
 # --- Static placement pins -------------------------------------------------
 compare_line="$(line_of 'catalog-release.py compare-live --incoming')"
 late_guard_line="$(line_of 'step 6c/9: pre-restart safeguard')"
-coverage_line="$(line_of 'autotune_window.py coverage --root')"
+coverage_line="$(line_of 'autotune_window.py coverage --admitted-json')"
+validator_line="$(line_of '--validate-autotune-release /opt/macprovider/autotune/releases/$AUTOTUNE_RELEASE_DIR_NAME')"
+[ "$validator_line" -lt "$coverage_line" ] || fail "the incoming coordinator must validate before coverage"
+grep -qF 'install -m 0755 $DEPLOY_TMP/coordinator-linux-amd64' "$DEPLOY_SH" || fail "coverage must run the INCOMING coordinator binary"
+grep -qF 'systemd-run --quiet --wait --pipe --collect -p EnvironmentFile=-/etc/macprovider/coordinator.env -p User=macprovider -p Group=macprovider' "$DEPLOY_SH" ||
+  fail "the validator must run under the coordinator env and user"
+grep -q 'autotune_window.py coverage --root' "$DEPLOY_SH" && fail "deploy must not use the Python admission mirror (coverage --root)"
 skip_line="$(line_of 'if [ "$CATALOG_VERDICT" = "equivalent" ]; then')"
 window_line="$(line_of 'autotune_window.py apply --root')"
 swap_line="$(line_of 'mv -Tf \"\$_catalog_root/current.next\"')"
@@ -94,6 +104,20 @@ esac
 SH
 chmod 0755 "$TMP/bin/curl"
 
+# Fake systemd-run: drop the unit options, run the command as-is.
+cat > "$TMP/bin/systemd-run" <<'SH'
+#!/usr/bin/env bash
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p) shift 2 ;;
+    --*) shift ;;
+    *) break ;;
+  esac
+done
+exec "$@"
+SH
+chmod 0755 "$TMP/bin/systemd-run"
+
 fake_ssh() {
   local script
   printf '%s\n' "$1" >> "$TMP/ssh-log"
@@ -105,6 +129,7 @@ s = s.replace("install -d -o macprovider -g macprovider -m 0750", "mkdir -p")
 s = s.replace("flock -s 8", ":").replace("logger -t", ": logger")
 s = s.replace("os.fchown(fd, 0, 0)", "pass")
 s = s.replace("mv -Tf", "python3 -c 'import os,sys; os.replace(sys.argv[1], sys.argv[2])'")
+s = s.replace("chown -R root:macprovider", ": chown")
 for cmd in ("coverage", "plan", "apply"):
     s = s.replace(f"autotune_window.py {cmd} ", f"autotune_window.py {cmd} --required-uid {uid} --group {gid} ")
 print(s, end="")
@@ -139,7 +164,7 @@ pool() {
 
 reset() {
   rm -rf "${TMP:?}/opt" "${TMP:?}/var" "$DEPLOY_TMP"
-  rm -f "$TMP/curl-calls" "$TMP/ssh-log" "$TMP/poolz.json"
+  rm -f "$TMP/curl-calls" "$TMP/ssh-log" "$TMP/poolz.json" "$TMP/validator-calls" "$TMP/validator-window"
   mkdir -p "$ROOT/autotune/releases" "$DEPLOY_TMP/scripts"
   # The shipped verifier bundle, as $DEPLOY_TMP/scripts/ holds it on Pearl:
   # autotune_window.py loads catalog-release.py's signature checks beside it.
@@ -148,6 +173,29 @@ reset() {
   done
   [ -f "$DEPLOY_TMP/scripts/autotune_window.py" ] && [ -f "$DEPLOY_TMP/scripts/catalog-release.py" ] &&
     [ -f "$DEPLOY_TMP/scripts/openrouter_pricing_engine.py" ] || fail "verifier bundle lacks the coverage closure"
+  # Fake incoming coordinator: --validate-autotune-release verdict with the
+  # admitted set = the release + every planned window entry (resolved beside
+  # --previous-target). FAKE_VALIDATOR=reject answers ok:false, rc 1.
+  cat > "$DEPLOY_TMP/coordinator-linux-amd64" <<FAKE
+#!/usr/bin/env python3
+import hashlib, json, os, sys
+args = sys.argv[1:]
+with open("$TMP/validator-calls", "a") as f:
+    f.write(" ".join(args) + "\\n")
+rel, prev = args[args.index("--validate-autotune-release") + 1], args[args.index("--previous-target") + 1]
+def ref(d, source):
+    raw = open(os.path.join(d, "autotune-candidates.json"), "rb").read()
+    return {"release_id": json.loads(raw)["version"], "candidates_sha256": hashlib.sha256(raw).hexdigest(), "source": source}
+with open("$TMP/validator-window", "w") as f:
+    f.write(open(prev).read())
+if os.environ.get("FAKE_VALIDATOR") == "reject":
+    print(json.dumps({"ok": False, "admitted": [], "errors": ["autotune previous catalog: verify releases/p1: bad"]}))
+    sys.exit(1)
+admitted = [ref(rel, "current")] + [ref(os.path.join(os.path.dirname(prev), l.strip()), "retained")
+                                   for l in open(prev) if l.strip()]
+print(json.dumps({"ok": True, "admitted": admitted, "errors": [], "notes": []}))
+FAKE
+  chmod 0755 "$DEPLOY_TMP/coordinator-linux-amd64"
   # Live current + a full retained window; activation drops releases/p3.
   release live live-v
   release p1 p1-v
@@ -208,7 +256,24 @@ grep -q '^ACTIVATED$' "$TMP/out" || fail "covered pool must reach activation"
 grep -q -- '--config -' "$TMP/curl-calls" || fail "curl must read the bearer from stdin"
 [ ! -e "$DEPLOY_TMP/poolz.json" ] || fail "the /poolz body must be removed after coverage"
 grep -qE 'provider_id|legacy|"p[0-9]+"' "$TMP/out" && fail "the report must not name providers"
+[ "$(wc -l < "$TMP/validator-calls" | tr -d ' ')" = "1" ] || fail "the incoming coordinator must validate exactly once"
+grep -qF -- "--config $ROOT/coordinator.yaml --validate-autotune-release $ROOT/autotune/releases/$INCOMING_DIR --previous-target " "$TMP/validator-calls" ||
+  { cat "$TMP/validator-calls" >&2; fail "validator must get the live config, the staged release and the planned window"; }
+[ "$(tr '\n' ' ' < "$TMP/validator-window")" = "releases/live releases/p1 releases/p2 " ] ||
+  fail "validator must be handed the window the activation writes"
 no_token_in_argv
+
+# validator rejects the release + planned window -> abort before mutation,
+# even with an override.
+reset
+pool "$(provider live-v live)"
+if FAKE_VALIDATOR=reject run_slice descends "$(printf 'x' | base64)"; then fail "a validator rejection must abort"; fi
+grep -q 'rejected the release with the planned window' "$TMP/out" || { cat "$TMP/out" >&2; fail "validator rejection must say why"; }
+grep -q 'could not prove connected providers keep an admissible catalog' "$TMP/out" || fail "validator rejection must abort the deploy"
+[ "$(current_target)" = "releases/live" ] || fail "validator rejection must not swap current"
+[ "$(window)" = "releases/p1 releases/p2 releases/p3 " ] || fail "validator rejection must not apply the window"
+[ ! -e "$VAR/catalog-window-overrides.jsonl" ] || fail "validator rejection must not log an override"
+[ ! -e "$DEPLOY_TMP/poolz.json" ] || fail "the /poolz body must be removed after a validator rejection"
 
 # uncovered: a connected provider advertises the release activation drops.
 reset
@@ -269,7 +334,7 @@ if run_slice descends ""; then fail "malformed /poolz must abort"; fi
 # equivalent and bootstrap never read /poolz.
 reset
 run_slice equivalent "" || { cat "$TMP/out" >&2; fail "equivalent coverage block must be a no-op"; }
-[ ! -e "$TMP/curl-calls" ] && [ ! -e "$TMP/ssh-log" ] || fail "equivalent must not run coverage"
+[ ! -e "$TMP/curl-calls" ] && [ ! -e "$TMP/ssh-log" ] && [ ! -e "$TMP/validator-calls" ] || fail "equivalent must not run coverage"
 reset
 rm -f "$ROOT/autotune/current" "$ROOT/autotune/.previous-target"
 LIVE_TARGET="" run_slice bootstrap "" || { cat "$TMP/out" >&2; fail "bootstrap must activate"; }

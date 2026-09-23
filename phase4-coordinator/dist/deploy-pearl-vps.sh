@@ -769,6 +769,19 @@ AUTOTUNE_RELEASE_DIR_NAME="$AUTOTUNE_RELEASE_ID-$(printf '%s' "$AUTOTUNE_RELEASE
 # a catalog regression (refuse). The staged release dir never carries it.
 AUTOTUNE_RELEASE_LEDGER="$PINNED_AUTOTUNE_DIR/release-ledger.json"
 [ -f "$AUTOTUNE_RELEASE_LEDGER" ] || { echo "missing required file: $AUTOTUNE_RELEASE_LEDGER" >&2; exit 1; }
+# The ledger records whole-file Tier-2 digests only; a Tier-2 freshness re-sign
+# of a historical row is proven by its stripped content, looked up from the
+# pinned commit's git history (catalog-release.py tier2-content-index) and
+# shipped digest-pinned beside the ledger.
+AUTOTUNE_TIER2_CONTENT_INDEX=""
+if [ "$DRY_RUN_LOCAL" != "1" ]; then
+  AUTOTUNE_TIER2_CONTENT_INDEX="$PINNED_DEPLOY_INPUT_DIR/tier2-content-index.json"
+  python3 -I "$PINNED_SCRIPTS_DIR/catalog-release.py" tier2-content-index --repo "$REPO_ROOT" \
+    --rev "$COORDINATOR_RELEASE_COMMIT" --ledger "$AUTOTUNE_RELEASE_LEDGER" > "$AUTOTUNE_TIER2_CONTENT_INDEX" || {
+    echo "aborting deploy: could not build the Tier-2 content index from $COORDINATOR_RELEASE_COMMIT history" >&2
+    exit 1
+  }
+fi
 # Operator override for a compare-live regression verdict. Printable ASCII,
 # 1-200 chars, one line; it reaches Pearl only as base64.
 CATALOG_REGRESSION_OVERRIDE_REASON="${CATALOG_REGRESSION_OVERRIDE_REASON:-}"
@@ -3229,6 +3242,7 @@ for _deploy_input in \
   "$STATIC_RATE_CARD_SIG=rate-card.json.sig" \
   "$AUTOTUNE_RELEASE_MANIFEST=release.json" \
   "$AUTOTUNE_RELEASE_LEDGER=release-ledger.json" \
+  "$AUTOTUNE_TIER2_CONTENT_INDEX=tier2-content-index.json" \
   "$AUTOTUNE_TRUSTED_KEYS=trusted-keys.json"; do
   _append_deploy_input_digest "${_deploy_input%%=*}" "${_deploy_input#*=}"
 done
@@ -3305,6 +3319,7 @@ fi
 $SCP "$AUTOTUNE_RELEASE_MANIFEST" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release.json"
 $SCP "$AUTOTUNE_TRUSTED_KEYS"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/trusted-keys.json"
 $SCP "$AUTOTUNE_RELEASE_LEDGER"   "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/release-ledger.json"
+$SCP "$AUTOTUNE_TIER2_CONTENT_INDEX" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-content-index.json"
 $SCP "$AUTOTUNE_TIER2_JSON"       "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/tier2-catalog.json"
 for _bundle_path in $CATALOG_VERIFIER_BUNDLE; do
   $SCP "$PINNED_SCRIPTS_DIR/${_bundle_path#scripts/}" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/$_bundle_path"
@@ -3380,7 +3395,7 @@ CATALOG_COMPARE_OUT="$($SSH "set -e
   for _f in $CATALOG_RELEASE_FILES; do cp $DEPLOY_TMP/\$_f \$_compare/\$_f; done
   printf '%s\\n' \"\$_live\"
   _rc=0
-  python3 -I $DEPLOY_TMP/scripts/catalog-release.py compare-live --incoming \$_compare --live /opt/macprovider/autotune/\$_live --ledger $DEPLOY_TMP/release-ledger.json || _rc=\$?
+  python3 -I $DEPLOY_TMP/scripts/catalog-release.py compare-live --incoming \$_compare --live /opt/macprovider/autotune/\$_live --ledger $DEPLOY_TMP/release-ledger.json --tier2-content-index $DEPLOY_TMP/tier2-content-index.json || _rc=\$?
   rm -rf \$_compare
   exit \$_rc")" || CATALOG_COMPARE_RC=$?
 CATALOG_LIVE_TARGET="${CATALOG_COMPARE_OUT%%$'\n'*}"
@@ -3930,7 +3945,7 @@ log "  ok: $CONNECTED_COUNT connected providers (or FORCE_RESTART=1 set)"
 case "$CATALOG_VERDICT" in
   bootstrap) log "  window coverage: bootstrap has no live current; no advertised release can be dropped" ;;
   descends|regression)
-    log "  checking that connected providers' catalog releases stay admissible (autotune_window.py coverage)"
+    log "  checking that connected providers' catalog releases stay admissible (incoming coordinator --validate-autotune-release + autotune_window.py coverage)"
     CATALOG_COVERAGE_RC=0
     CATALOG_COVERAGE_JSON="$(printf 'header = "Authorization: Bearer %s"\n' "$CATALOG_CANARY_AUTH_TOKEN" | $SSH "set -e
       umask 077
@@ -3946,8 +3961,34 @@ case "$CATALOG_VERDICT" in
         echo \"coordinator /poolz answered HTTP \$_status (operator key not accepted?)\" >&2
         exit 10
       }
+      # The admissible set is the INCOMING coordinator's own reload verdict
+      # (--validate-autotune-release, read-only, under the service env/user)
+      # over the staged release and the window this activation will write.
+      # The check dir exposes the live releases/ via a symlink so retained
+      # entries and restamps resolve exactly as they will after the switch.
+      _check=\$(mktemp -d /tmp/macprovider-window-check.XXXXXXXX)
+      trap 'rm -rf \"\$_check\"; rm -f \"\$_poolz\"' EXIT
+      python3 -I $DEPLOY_TMP/scripts/autotune_window.py plan --root /opt/macprovider/autotune --incoming releases/$AUTOTUNE_RELEASE_DIR_NAME > \$_check/plan.json
+      python3 -I -c 'import json, sys; w = json.load(open(sys.argv[1]))[\"window_after\"]; open(sys.argv[2], \"w\").write(\"\".join(e + \"\\n\" for e in w))' \$_check/plan.json \$_check/.previous-target
+      ln -s /opt/macprovider/autotune/releases \$_check/releases
+      install -m 0755 $DEPLOY_TMP/coordinator-linux-amd64 \$_check/coordinator
+      chown -R root:macprovider \$_check
+      chmod 0750 \$_check
+      chmod 0640 \$_check/.previous-target
+      _overlay=''
+      [ ! -e /etc/macprovider/coordinator.pearl-overlays.yaml ] || _overlay='--config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml'
+      _vrc=0
+      systemd-run --quiet --wait --pipe --collect -p EnvironmentFile=-/etc/macprovider/coordinator.env -p User=macprovider -p Group=macprovider \\
+        \$_check/coordinator --config /opt/macprovider/coordinator.yaml \$_overlay --validate-autotune-release /opt/macprovider/autotune/releases/$AUTOTUNE_RELEASE_DIR_NAME \\
+        --previous-target \$_check/.previous-target </dev/null > \$_check/admitted.json 2> \$_check/validate.err || _vrc=\$?
+      if [ \"\$_vrc\" != 0 ]; then
+        echo \"incoming coordinator --validate-autotune-release rejected the release with the planned window (rc=\$_vrc):\" >&2
+        tail -n 1 \$_check/admitted.json | head -c 4096 >&2
+        echo >&2
+        exit 11
+      fi
       _rc=0
-      python3 -I $DEPLOY_TMP/scripts/autotune_window.py coverage --root /opt/macprovider/autotune --incoming releases/$AUTOTUNE_RELEASE_DIR_NAME --poolz-json \$_poolz || _rc=\$?
+      python3 -I $DEPLOY_TMP/scripts/autotune_window.py coverage --admitted-json \$_check/admitted.json --poolz-json \$_poolz || _rc=\$?
       rm -f \$_poolz
       exit \$_rc")" || CATALOG_COVERAGE_RC=$?
     if [ "$CATALOG_COVERAGE_RC" != "0" ] && [ "$CATALOG_COVERAGE_RC" != "4" ]; then

@@ -334,3 +334,84 @@ func TestReloadAutotuneFeedSIGHUPLogsTier2Identity(t *testing.T) {
 	}
 	t.Fatalf("no autotune_feed_sighup_reload success event; logs=%s", logs.String())
 }
+
+// #1688: admitted is exactly what the reload's ws admission map lets a hello
+// match: the release, loaded retained entries, and same-version restamps;
+// tombstoned window entries and wrong-signer restamps are not admitted.
+func TestValidateAutotuneReleaseReportsAdmittedCatalogs(t *testing.T) {
+	defer tier2.ResetForTest()
+	base := t.TempDir()
+	dir := filepath.Join(base, "candidate")
+	candidates, _, tier2Pub := writeValidatorRelease(t, dir, "release-next", reloadTestHash)
+	previousRoot := filepath.Join(base, "retained")
+	previousRaw := validatorCandidateFeed("release-prev", reloadTestHash)
+	writeValidatorSigned(t, filepath.Join(previousRoot, "releases", "release-prev", "autotune-candidates.json"), previousRaw)
+	restampRaw := []byte(strings.Replace(string(candidates), validatorGeneratedAt, "2026-07-11T00:00:00Z", 1))
+	restampDir := "release-next-" + sha256Hex(restampRaw)[:16]
+	writeValidatorSigned(t, filepath.Join(previousRoot, "releases", restampDir, "autotune-candidates.json"), restampRaw)
+	previousTarget := filepath.Join(previousRoot, ".previous-target")
+	// The tombstoned bridge release has no directory: the reload skips it.
+	if err := os.WriteFile(previousTarget, []byte("# retained\nreleases/published-2026-07-07-p2-qwen3-8b\nreleases/release-prev\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if code := runValidateAutotuneRelease(&out, writeReloadConfig(t, validatorConfig(filepath.Join(base, "live"), tier2Pub)), "", dir, previousTarget); code != 0 {
+		t.Fatalf("exit=%d want 0 output=%s", code, out.String())
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(out.Bytes(), &raw); err != nil {
+		t.Fatalf("decode %q: %v", out.String(), err)
+	}
+	var admitted []map[string]string
+	if err := json.Unmarshal(raw["admitted"], &admitted); err != nil {
+		t.Fatalf("decode admitted %s: %v", raw["admitted"], err)
+	}
+	want := []map[string]string{
+		{"release_id": "release-next", "candidates_sha256": sha256Hex(candidates), "source": "current"},
+		{"release_id": "release-prev", "candidates_sha256": sha256Hex(previousRaw), "source": "retained"},
+		{"release_id": "release-next", "candidates_sha256": sha256Hex(restampRaw), "source": "restamp"},
+	}
+	if fmt.Sprint(admitted) != fmt.Sprint(want) {
+		t.Fatalf("admitted=%v\nwant     %v", admitted, want)
+	}
+}
+
+func TestValidateAutotuneReleaseAdmitsNothingWhenRetainedEntryInvalid(t *testing.T) {
+	for name, raw := range map[string][]byte{
+		// Signed with the trusted key but not a valid candidate catalog.
+		"schema":    []byte(`{"version":"release-bad","policy_version":"autotune-policy-v1","generated_at":"2026-07-10T00:00:00Z","source":"operator_curated_autotune_candidate_catalog","rows":{}}`),
+		"signature": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			defer tier2.ResetForTest()
+			base := t.TempDir()
+			dir := filepath.Join(base, "candidate")
+			_, _, tier2Pub := writeValidatorRelease(t, dir, "release-next", reloadTestHash)
+			previousRoot := filepath.Join(base, "retained")
+			feed := filepath.Join(previousRoot, "releases", "release-bad", "autotune-candidates.json")
+			if raw != nil {
+				writeValidatorSigned(t, feed, raw)
+			} else {
+				writeValidatorSigned(t, feed, validatorCandidateFeed("release-bad", reloadTestHash))
+				if err := os.WriteFile(feed, validatorCandidateFeed("release-bad", reloadOtherHash), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			previousTarget := filepath.Join(previousRoot, ".previous-target")
+			if err := os.WriteFile(previousTarget, []byte("releases/release-bad\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			if code := runValidateAutotuneRelease(&out, writeReloadConfig(t, validatorConfig(filepath.Join(base, "live"), tier2Pub)), "", dir, previousTarget); code == 0 {
+				t.Fatalf("exit=0 for an invalid retained entry: %s", out.String())
+			}
+			if !strings.Contains(out.String(), `"ok":false`) || !strings.Contains(out.String(), `"admitted":[]`) {
+				t.Fatalf("invalid retained entry must report ok=false and admitted=[]: %s", out.String())
+			}
+			if !strings.Contains(out.String(), "autotune previous catalog") {
+				t.Fatalf("failure must come from the retained entry: %s", out.String())
+			}
+		})
+	}
+}

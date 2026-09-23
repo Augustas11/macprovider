@@ -449,6 +449,7 @@ def _open_trusted_read(
     *,
     trusted_uid: int,
     private: bool = False,
+    binary: bool = False,
 ) -> Any:
     before = _trusted_file_stat(path, description, trusted_uid=trusted_uid, private=private)
     if not hasattr(os, "O_NOFOLLOW"):
@@ -463,6 +464,8 @@ def _open_trusted_read(
             raise UpdateError(f"{description} changed while opening: {path}")
         if not stat.S_ISREG(after.st_mode) or after.st_nlink != 1:
             raise UpdateError(f"{description} changed to an unsafe file: {path}")
+        if binary:
+            return os.fdopen(descriptor, "rb")
         return os.fdopen(descriptor, "r", encoding="utf-8")
     except Exception:
         os.close(descriptor)
@@ -3987,11 +3990,22 @@ class Updater:
             previous_target: str | None = None
             previous_window: str | None = None
             if _path_entry_exists(previous):
-                previous_window = _read_trusted_text(
+                # Raw bytes (no universal-newline translation) so rollback
+                # restores e.g. a CRLF window byte for byte; the ASCII check
+                # keeps the JSON manifest string lossless.
+                with _open_trusted_read(
                     previous,
                     "catalog previous pointer",
                     trusted_uid=self.trusted_uid,
-                )
+                    binary=True,
+                ) as handle:
+                    previous_raw = handle.read(1024 * 1024 + 1)
+                if len(previous_raw) > 1024 * 1024:
+                    raise UpdateError(f"catalog previous pointer exceeds the updater safety limit: {previous}")
+                try:
+                    previous_window = previous_raw.decode("ascii")
+                except UnicodeDecodeError as exc:
+                    raise UpdateError("catalog previous pointer window is not ascii") from exc
                 previous_entries = self._parse_catalog_window(previous_window)
                 previous_target = previous_entries[0] if previous_entries else ""
             candidate_directory_name = self._catalog_release_directory_name(release)

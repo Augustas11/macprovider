@@ -901,6 +901,45 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(manifest["previous_target"], "releases/catalog-a")
         self.assertEqual(manifest["previous_window"], window)
 
+    def test_catalog_snapshot_and_rollback_keep_crlf_window_bytes(self):
+        install = self.updater.install_root
+        install.mkdir(parents=True)
+        for name in ("coordinator", "gateway"):
+            (install / name).write_bytes(fake_elf("installed-" + name))
+            (install / name).chmod(0o750)
+        (install / "gateway.yaml").write_text("gateway: {}\n")
+        (install / "gateway.yaml").chmod(0o600)
+        base = install / "coordinator.yaml"
+        base.write_text(
+            'coordinator_advertised_version:\n  latest_binary_version: "1.8.26"\n'
+            "tier2:\n"
+            f"  catalog_path: {install}/autotune/current/tier2-catalog.json\n"
+            "  require_hash_verified: false\n"
+        )
+        base.chmod(0o600)
+        window = "# retained\r\nreleases/catalog-a\r\n\r\nreleases/catalog-z\r\n"
+        previous = self._catalog_install_fixture("releases/catalog-b", "placeholder\n")
+        previous.write_bytes(window.encode("ascii"))
+        self.updater.coordinator_runtime = mock.Mock(
+            return_value=updater_module.CoordinatorRuntime(base, None, {})
+        )
+        self.updater.previous_versions = {
+            "coordinator": "1.8.26",
+            "gateway": "1.8.26",
+        }
+        release = self.stage(self.verify())
+        self.updater.prepare_config_update(release)
+
+        tx = self.updater.snapshot(release)
+
+        manifest = json.loads((tx / "catalog-manifest.json").read_text())
+        self.assertEqual(manifest["previous_window"], window)
+        self.assertEqual(manifest["previous_target"], "releases/catalog-a")
+        self.updater.install_catalog(release)
+        self.assertNotEqual(previous.read_bytes(), window.encode("ascii"))
+        self.updater._restore_catalog(tx)
+        self.assertEqual(previous.read_bytes(), window.encode("ascii"))
+
     def test_catalog_rollback_removes_legacy_when_previously_absent(self):
         release = self.stage(self.verify())
         catalog_directory_name = self.updater._catalog_release_directory_name(release)
