@@ -28,6 +28,9 @@ lockstep: SPEC-005 v0.6.7 (SPEC-005-R011 money-table owner). CONFORMANCE `depend
   coordinator host. AC-CAT-23..AC-CAT-27 pin the behavior. Serving-closure and
   Tier-2 reload observability live in SPEC-008 v0.7.0 (`SPEC-008-R002`..`R004`).
   `SPEC-023-R012` is not used here because open PR #1677 claims it.
+  Evidence (d) counts only post-SIGHUP `catalog_incompatible` rejections of
+  keys the pre-activation validation admitted; rejections of keys that were
+  already inadmissible are chronic diagnostics, not release failures.
 - **v0.14.3 (2026-09-23)** — Identity is not settlement for loopback
   runtimes (#1694). §3.7.4 and AC-CAT-7(iii) now state that a `gguf`
   artifact stays a full SPEC-010-R007 identity member (matching, intake,
@@ -1168,8 +1171,11 @@ app release, through the operator-local catalog-content lane
    rollback, the lane MUST hold the same host lock set the coordinator deploy
    and the host updater take (the updater lock and the coordinator-deploy lock),
    so a renewal, deploy, or updater run is refused while it is held. The lease
-   has a maximum duration enforced by a watchdog; losing the lease aborts to
-   rollback. Every restore is a compare-and-swap on the expected live state.
+   has a maximum duration enforced by a watchdog, and the host-side lease
+   holder stops any still-running command at its hard deadline. Every
+   mutation and rollback runs inside the lock-holding process. Losing the
+   lease leaves state unknown: the lane MUST NOT roll back from another
+   session and MUST stop, naming the lease-lost runbook procedure. Every restore is a compare-and-swap on the expected live state.
    Activation reuses the renewal's shared activation implementation
    (`scripts/lib/autotune-activate.sh`), not a copy.
 5. **Required live evidence.** After the `current` swap and SIGHUP, the lane
@@ -1186,9 +1192,15 @@ app release, through the operator-local catalog-content lane
      catalog source `coordinator` and the new
      `(catalog_release_id, catalog_candidate_sha256)`; when the canary's
      selected row hash changed, the canary applies the new row before restart;
-   - (d) no new `catalog_incompatible` rejection and no increase in
-     catalog-unavailable providers over a 10-minute observation window
-     (raw routing-eligible counts are not the measure);
+   - (d) no new `catalog_incompatible` rejection, after the SIGHUP, of a
+     `(catalog_release_id, catalog_candidate_sha256)` key that was in the
+     admitted set validated for this release and window before activation,
+     and no increase in catalog-unavailable providers over a 10-minute
+     observation window (raw routing-eligible counts are not the measure).
+     Rejections of keys already inadmissible before activation are logged as
+     chronic diagnostics and do not fail (d): the release did not cause them,
+     and failing on them would block every release while any stale provider
+     remains connected;
    - (e) when the release makes a model newly buyer-serving, a strict-pinned
      buyer request to that model succeeds and produces its settlement row.
 6. **Rollback.** Rollback restores `current` and the exact prior window with

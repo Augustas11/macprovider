@@ -53,6 +53,14 @@ AA_COVERAGE_POLICY="${AA_COVERAGE_POLICY:-warn}"
 AA_COVERAGE_OVERRIDE="${AA_COVERAGE_OVERRIDE:-0}"
 AA_LOCK_MODE="${AA_LOCK_MODE:-flock}"
 AA_LEASE_MAX_SECONDS="${AA_LEASE_MAX_SECONDS:-1800}"
+# Past AA_LEASE_MAX_SECONDS the watchdog TERMs the controller, which may still
+# roll back under the lease for AA_LEASE_ROLLBACK_SECONDS. At MAX + ROLLBACK the
+# remote runner itself kills any command still running and exits, releasing
+# the locks; a controller still waiting AA_LEASE_KILL_GRACE_SECONDS later
+# treats the lease as lost.
+AA_LEASE_ROLLBACK_SECONDS="${AA_LEASE_ROLLBACK_SECONDS:-300}"
+AA_LEASE_KILL_GRACE_SECONDS="${AA_LEASE_KILL_GRACE_SECONDS:-30}"
+AA_LEASE_DEADLINE=""
 AA_LEASE_HELD=0
 AA_LEASE_PID=""
 AA_LEASE_WATCHDOG_PID=""
@@ -154,7 +162,11 @@ finally:
 # Frames on stdin, one per line: RUN <seq> <b64 script> <b64 arg, or - for "">...
 # Replies on stdout: RESULT <seq> <rc> <b64 stdout or -> <b64 stderr or -> END.
 # A started command runs to completion even if the controller disconnects
-# (HUP ignored); EOF on stdin ends the runner and releases the locks.
+# (HUP ignored), but never past the lease deadline (@AA_LEASE_HARD_SECONDS@ s
+# after acquisition, on this host's clock): each command runs in its own
+# process group, and at the deadline that group is TERMed, then KILLed, and
+# reaped; the runner replies LEASE-EXPIRED <seq> then RESULT <seq> 124 and
+# exits. EOF on stdin ends the runner and releases the locks.
 exec 8</run/lock/macprovider-pearl-updater.lock || exit 1
 flock -n 8 || { echo 'Pearl updater lock held' >&2; exit 1; }
 exec 9</opt/macprovider/.coordinator-deploy.lock || exit 1
@@ -164,6 +176,37 @@ trap 'rm -rf "$work"' EXIT
 trap '' HUP
 set -f
 enc() { if [ -s "$1" ]; then base64 < "$1" | tr -d '\n'; else printf -; fi; }
+# argv: <deadline epoch> <expired marker> <command...>. The command inherits
+# the locked descriptors 8 and 9 in a new session (its own process group).
+run_py='import os, signal, subprocess, sys, time
+deadline, marker, cmd = int(sys.argv[1]), sys.argv[2], sys.argv[3:]
+def expire(p):
+    open(marker, "w").close()
+    for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 10)):
+        if p is None:
+            break
+        try:
+            os.killpg(p.pid, sig)
+        except ProcessLookupError:
+            break
+        end = time.time() + grace
+        while time.time() < end:
+            p.poll()
+            try:
+                os.killpg(p.pid, 0)
+            except ProcessLookupError:
+                sys.exit(124)
+            time.sleep(0.1)
+    sys.exit(124)
+if time.time() >= deadline:
+    expire(None)
+p = subprocess.Popen(cmd, start_new_session=True, pass_fds=(8, 9))
+try:
+    rc = p.wait(timeout=max(0.0, deadline - time.time()))
+except subprocess.TimeoutExpired:
+    expire(p)
+sys.exit(128 - rc if rc < 0 else rc)'
+deadline=$(( $(date +%s) + @AA_LEASE_HARD_SECONDS@ ))
 printf 'LOCKED %s\n' "$$"
 while IFS=' ' read -r verb seq script args; do
   case "$verb" in RUN) ;; *) echo "malformed lease frame" >&2; exit 1 ;; esac
@@ -174,7 +217,14 @@ while IFS=' ' read -r verb seq script args; do
   done
   printf '%s' "$script" | base64 -d >"$work/cmd"
   rc=0
-  bash "$work/cmd" "$@" </dev/null >"$work/out" 2>"$work/err" || rc=$?
+  rm -f "$work/expired"
+  python3 -I -c "$run_py" "$deadline" "$work/expired" bash "$work/cmd" "$@" </dev/null >"$work/out" 2>"$work/err" || rc=$?
+  if [ -e "$work/expired" ]; then
+    printf 'lease-expired: command %s stopped at the lease deadline; Pearl state unknown\n' "$seq" >>"$work/err"
+    printf 'LEASE-EXPIRED %s\n' "$seq"
+    printf 'RESULT %s 124 %s %s END\n' "$seq" "$(enc "$work/out")" "$(enc "$work/err")"
+    exit 1
+  fi
   printf 'RESULT %s %s %s %s END\n' "$seq" "$rc" "$(enc "$work/out")" "$(enc "$work/err")"
 done
 LEASE
@@ -202,11 +252,13 @@ aa_lease_acquire() {
   case "$AA_LEASE_MAX_SECONDS" in ""|*[!0-9]*) fatal "AA_LEASE_MAX_SECONDS must be a whole number of seconds" ;; esac
   AA_LEASE_DIR="$(umask 077 && mktemp -d -t macprovider-activate-lease.XXXXXXXX)"
   local fifo="$AA_LEASE_DIR/stdin" status="$AA_LEASE_DIR/status" sentinel="$AA_LEASE_DIR/release-requested"
-  local controller=$$ lease_wait=0
+  local controller=$$ lease_wait=0 hard
+  case "$AA_LEASE_ROLLBACK_SECONDS$AA_LEASE_KILL_GRACE_SECONDS" in ""|*[!0-9]*) fatal "AA_LEASE_ROLLBACK_SECONDS and AA_LEASE_KILL_GRACE_SECONDS must be whole numbers of seconds" ;; esac
+  hard=$((AA_LEASE_MAX_SECONDS + AA_LEASE_ROLLBACK_SECONDS))
   mkfifo -m 600 "$fifo"
   (
     set +e
-    SSH "$AA_LEASE_REMOTE_COMMAND"
+    SSH "${AA_LEASE_REMOTE_COMMAND//@AA_LEASE_HARD_SECONDS@/$hard}"
     holder_rc=$?
     # Lost after acquisition: stop the controller. A failed acquisition is
     # reported by the wait loop below instead.
@@ -228,6 +280,9 @@ aa_lease_acquire() {
     sleep 0.1
   done
   AA_LEASE_HOLDER_PID="$(sed -n 's/^LOCKED \([0-9][0-9]*\)$/\1/p' "$status" | head -n 1)"
+  # Local bound (bash SECONDS) on waiting for any result: the runner's own
+  # deadline, which started no earlier than now, plus its kill grace.
+  AA_LEASE_DEADLINE=$((SECONDS + hard + AA_LEASE_KILL_GRACE_SECONDS))
   aa_lease_assert_held || fatal "Pearl deploy lock was lost after acquisition"
   if SSH 'test -e /var/lib/macprovider-pearl-updater/tier2-enforcement-transaction.json'; then
     fatal "a Tier-2 enforcement transaction is active"
@@ -272,8 +327,9 @@ _aa_lease_result() { # <seq>: that command's complete RESULT frame, if any
 # aa_lease_run <script> <stdout-file> <stderr-file> [args...]: execute the
 # script on Pearl as a child of the lease runner (inheriting the locked
 # descriptors) and return its exit status. If the channel is lost before the
-# result arrives, AA_LEASE_LOST=1 and it returns 1: whether the command ran,
-# and how far, is unknown.
+# result arrives, the runner stopped the command at the lease deadline, or no
+# result arrives by the local lease deadline, AA_LEASE_LOST=1 and it returns 1:
+# whether the command ran, and how far, is unknown.
 aa_lease_run() {
   local script="$1" out="$2" err="$3" frame a seq result
   shift 3
@@ -306,6 +362,11 @@ aa_lease_run() {
       echo "activation lease lost before command $seq returned; Pearl state unknown" >"$err"
       return 1
     fi
+    if [ "$SECONDS" -ge "$AA_LEASE_DEADLINE" ]; then
+      AA_LEASE_LOST=1
+      echo "activation lease deadline passed before command $seq returned; Pearl state unknown" >"$err"
+      return 1
+    fi
     sleep 0.1
   done
   # shellcheck disable=SC2086
@@ -314,6 +375,10 @@ aa_lease_run() {
 for value, path in ((sys.argv[1], sys.argv[2]), (sys.argv[3], sys.argv[4])):
     open(path, "wb").write(b"" if value == "-" else base64.b64decode(value, validate=True))' "$4" "$out" "$5" "$err" \
     || { echo "malformed lease result for command $seq" >"$err"; return 1; }
+  if grep -qx "LEASE-EXPIRED $seq" "$AA_LEASE_DIR/status" 2>/dev/null; then
+    AA_LEASE_LOST=1
+    return 1
+  fi
   return "$3"
 }
 
@@ -600,7 +665,7 @@ renewal_coverage() {
     || { rm -rf "$check"; rm -f "$poolz"; echo "renewal coverage: cannot stage the planned window" >&2; return 10; }
   overlay=""; [ ! -e /etc/macprovider/coordinator.pearl-overlays.yaml ] || overlay="--config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml"
   # shellcheck disable=SC2086
-  systemd-run --quiet --wait --pipe --collect -p EnvironmentFile=-/etc/macprovider/coordinator.env -p User=macprovider -p Group=macprovider \
+  systemd-run --quiet --wait --pipe --collect -p RuntimeMaxSec=300 -p EnvironmentFile=-/etc/macprovider/coordinator.env -p User=macprovider -p Group=macprovider \
     /opt/macprovider/coordinator --config /opt/macprovider/coordinator.yaml $overlay --validate-autotune-release "$root/releases/$final" \
     --previous-target "$check/.previous-target" </dev/null >"$check/admitted.json" 2>"$check/validate.err" \
     || { tail -n 1 "$check/admitted.json" | head -c 4096 >&2; rm -rf "$check"; rm -f "$poolz"; echo "renewal coverage: live coordinator --validate-autotune-release rejected the release (coverage unknown)" >&2; return 11; }

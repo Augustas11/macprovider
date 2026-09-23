@@ -5318,6 +5318,7 @@ def content_gate(
     now: datetime | None = None,
     exclusions_data: bytes | None = None,
     repo: pathlib.Path = ROOT,
+    tier2_index_path: pathlib.Path | None = None,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     by_lane: dict[str, list[str]] = {lane: [] for lane in CONTENT_GATE_LANE_ORDER}
@@ -5376,7 +5377,7 @@ def content_gate(
                 ledger_path = pathlib.Path(committed_ledger.name)
 
     try:
-        if compare_live(release, live, ledger_path)["verdict"] == "regression":
+        if compare_live(release, live, ledger_path, tier2_index_path)["verdict"] == "regression":
             by_lane["unknown-predecessor"].append("live content matches no release in the release ledger (modulo renewal restamp)")
     finally:
         if committed_ledger is not None:
@@ -5418,13 +5419,14 @@ def content_gate(
 
 
 def cmd_content_gate(
-    release: pathlib.Path, live: pathlib.Path, ledger: pathlib.Path | None, commit: str | None, now_raw: str | None
+    release: pathlib.Path, live: pathlib.Path, ledger: pathlib.Path | None, commit: str | None, now_raw: str | None,
+    tier2_index_path: pathlib.Path | None = None,
 ) -> int:
     try:
         now = parse_timestamp(now_raw, "--now") if now_raw is not None else None
         if ledger is None:
             ledger = release / "release-ledger.json" if (release / "release-ledger.json").exists() else LEDGER_PATH
-        result = content_gate(release, live, ledger, commit=commit, now=now)
+        result = content_gate(release, live, ledger, commit=commit, now=now, tier2_index_path=tier2_index_path)
     except (KeyError, TypeError, ValueError, AttributeError, OSError) as exc:
         fail(f"content-gate: malformed release input: {exc!r}")
     print(json.dumps(result, sort_keys=True))
@@ -5785,6 +5787,11 @@ def main() -> int:
     )
     gate_parser.add_argument("--commit", help="full sha the release was cut from; must be an ancestor of origin/main")
     gate_parser.add_argument("--now", help="RFC3339 evaluation time (default: now, UTC)")
+    gate_parser.add_argument(
+        "--tier2-content-index",
+        type=pathlib.Path,
+        help="tier2-content-index output for the predecessor check (as compare-live)",
+    )
     derive_parser = sub.add_parser("derive-tier2")
     derive_parser.add_argument(
         "--candidate",
@@ -5854,7 +5861,7 @@ def main() -> int:
         elif args.command == "buyer-serving-set":
             cmd_buyer_serving_set(args.release, args.exclusions, args.diff_live, args.live_exclusions)
         elif args.command == "content-gate":
-            return cmd_content_gate(args.release, args.live, args.ledger, args.commit, args.now)
+            return cmd_content_gate(args.release, args.live, args.ledger, args.commit, args.now, args.tier2_content_index)
         elif args.command == "derive-tier2":
             cmd_derive_tier2(
                 args.candidate,

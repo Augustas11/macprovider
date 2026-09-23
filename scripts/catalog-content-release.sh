@@ -378,6 +378,12 @@ pf_assemble() {
   cp "$a/phase3-binary/catalog/autotune/release-ledger.json" "$WORK/gate/release-ledger.json" 2>/dev/null &&
     cp "$a/phase3-binary/catalog/autotune/not-buyer-serving.json" "$WORK/gate/not-buyer-serving.json" 2>/dev/null ||
     { record release_assembled 0 "commit lacks release-ledger.json or not-buyer-serving.json"; return 1; }
+  # A Tier-2 freshness re-sign of a ledger row is provable only from git
+  # history (as deploy-pearl-vps.sh): build the index from the reviewed commit.
+  if ! python3 -I "$SCRIPT_DIR/catalog-release.py" tier2-content-index --repo "$REPO_ROOT" \
+      --ledger "$WORK/gate/release-ledger.json" --rev "$COMMIT" >"$WORK/gate/tier2-content-index.json" 2>"$WORK/t2index.err"; then
+    record release_assembled 0 "cannot build the Tier-2 content index from $COMMIT history: $(tail -n 2 "$WORK/t2index.err")"; return 1
+  fi
   if ! python3 -I "$SCRIPT_DIR/catalog-release.py" verify-directory --directory "$REL" >"$WORK/verify.out" 2>&1; then
     record release_assembled 0 "verify-directory failed: $(tail -n 3 "$WORK/verify.out")"; return 1
   fi
@@ -472,7 +478,7 @@ pf_live() {
 pf_content_gate() {
   local rc=0
   python3 -I "$SCRIPT_DIR/catalog-release.py" content-gate --release "$REL" --live "$LIVE" --commit "$COMMIT" \
-    >"$WORK/gate.json" 2>"$WORK/gate.err" || rc=$?
+    --tier2-content-index "$WORK/gate/tier2-content-index.json" >"$WORK/gate.json" 2>"$WORK/gate.err" || rc=$?
   GATE_LANE="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("lane",""))' "$WORK/gate.json" 2>/dev/null || true)"
   if [ "$rc" -ne 0 ] || [ "$GATE_LANE" != catalog-content ]; then
     record content_gate 0 "content-gate rc=$rc lane=${GATE_LANE:-?}: $(python3 -c 'import json,sys;print("; ".join(json.load(open(sys.argv[1])).get("reasons",[])))' "$WORK/gate.json" 2>/dev/null || tail -n 2 "$WORK/gate.err")"
@@ -533,7 +539,8 @@ PY
 pf_buyer_serving_e2e() {
   local rc=0 commit verdict
   python3 -I "$SCRIPT_DIR/catalog-release.py" compare-live --incoming "$REL" --live "$LIVE" \
-    --ledger "$WORK/gate/release-ledger.json" >"$WORK/compare-live.json" 2>"$WORK/compare-live.err" || rc=$?
+    --ledger "$WORK/gate/release-ledger.json" --tier2-content-index "$WORK/gate/tier2-content-index.json" \
+    >"$WORK/compare-live.json" 2>"$WORK/compare-live.err" || rc=$?
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
     record buyer_serving_e2e 0 "compare-live failed (rc=$rc): $(tail -n 2 "$WORK/compare-live.err")"; return 1
   fi
@@ -593,7 +600,7 @@ overlay_args=""
 if [ -e "$overlay" ]; then overlay_args="--config-overlay $overlay"; fi
 rc=0
 # shellcheck disable=SC2086
-systemd-run --quiet --wait --pipe --collect -p "EnvironmentFile=-$env_file" -p User=macprovider -p Group=macprovider \
+systemd-run --quiet --wait --pipe --collect -p RuntimeMaxSec=300 -p "EnvironmentFile=-$env_file" -p User=macprovider -p Group=macprovider \
   "$bin" --config "$config" $overlay_args --validate-autotune-release "$sroot/releases/$name" \
   --previous-target "$scratch/check/.previous-target" </dev/null >"$scratch/dryload.json" 2>"$scratch/dryload.err" || rc=$?
 echo "DRYLOAD_RC=$rc"
@@ -1241,8 +1248,12 @@ python3 -c 'import json, sys; r = json.load(open(sys.argv[1])); sys.exit(0 if r.
   /run/macprovider/coordinator-applied-config.json "$cfg_sha" "$ov_sha" \
   || abort_pre_mutation "the coordinator's applied config differs from the on-disk config; not mutating"
 # Re-run content-gate against the then-current live release with the reviewed
-# commit's ledger and exclusions shipped beside the verifier.
-gate_out="$(python3 -I "$verifier" content-gate --release "$incoming_path" --live "$root/current" --ledger "$(dirname "$verifier")/../phase3-binary/catalog/autotune/release-ledger.json")" \
+# commit's ledger, exclusions and Tier-2 content index shipped beside the
+# verifier; the index is digest-pinned to the one the preflight gate used.
+t2_index="$(dirname "$verifier")/../tier2-content-index.json"
+[ "$(sha256sum "$t2_index" | cut -d' ' -f1)" = "@T2_INDEX_SHA@" ] \
+  || abort_pre_mutation "the Tier-2 content index beside the verifier is not the preflight one; not mutating"
+gate_out="$(python3 -I "$verifier" content-gate --release "$incoming_path" --live "$root/current" --ledger "$(dirname "$verifier")/../phase3-binary/catalog/autotune/release-ledger.json" --tier2-content-index "$t2_index")" \
   || abort_pre_mutation "content-gate under lock refused: $gate_out"
 printf "%s" "$gate_out" | python3 -c "import json,sys; v=json.load(sys.stdin); sys.exit(0 if v.get(\"ok\") is True and v.get(\"lane\") == \"catalog-content\" else 1)" \
   || abort_pre_mutation "content-gate under lock is not lane catalog-content: $gate_out"
@@ -1250,6 +1261,7 @@ GATE
 AA_GATE_SNIPPET="${AA_GATE_SNIPPET%$'\n'}"
 AA_GATE_SNIPPET="${AA_GATE_SNIPPET//@CONFIG_SHA@/$CONFIG_DISK_SHA}"
 AA_GATE_SNIPPET="${AA_GATE_SNIPPET//@OVERLAY_SHA@/$OVERLAY_DISK_SHA}"
+AA_GATE_SNIPPET="${AA_GATE_SNIPPET//@T2_INDEX_SHA@/$(sha256_file "$WORK/gate/tier2-content-index.json")}"
 AA_COVERAGE_POLICY=refuse
 AA_COVERAGE_OVERRIDE=0
 [ -z "$CATALOG_WINDOW_OVERRIDE_REASON" ] || AA_COVERAGE_OVERRIDE=1
@@ -1257,8 +1269,8 @@ AA_LOCK_MODE=lease
 AA_ROLLBACK_POST_HOOK=ccr_after_rollback
 
 aa_install_helpers
-log "installing the commit's release ledger, serving exclusions and byte manifest beside the verifier"
-for _gate_file in phase3-binary/catalog/autotune/release-ledger.json phase3-binary/catalog/autotune/not-buyer-serving.json release-bytes.sha256; do
+log "installing the commit's release ledger, serving exclusions, Tier-2 content index and byte manifest beside the verifier"
+for _gate_file in phase3-binary/catalog/autotune/release-ledger.json phase3-binary/catalog/autotune/not-buyer-serving.json release-bytes.sha256 tier2-content-index.json; do
   case "$_gate_file" in release-bytes.sha256) _gate_src="$WORK/release-bytes.sha256" ;; *) _gate_src="$WORK/gate/${_gate_file##*/}" ;; esac
   SSH "mkdir -p -m 0700 '$LOCK_HELPER_DIR/phase3-binary/catalog/autotune' && cat >'$LOCK_HELPER_DIR/$_gate_file'" <"$_gate_src" ||
     fatal "cannot install $_gate_file on $PEARL_SSH"

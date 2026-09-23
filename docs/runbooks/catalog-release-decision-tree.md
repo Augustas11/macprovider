@@ -135,10 +135,13 @@ mutating anything.
   digests.
 - **(c)** The canary restarts onto the release, and the coordinator admits it
   on the new release id and candidate sha with catalog source `coordinator`.
-- **(d)** For the watch window, no `catalog_incompatible` rejection of an
-  admissible catalog appears, and catalog-unavailable does not increase.
-  Rejections of catalogs that were already outside the window are logged as
-  diagnostics only.
+- **(d)** For the watch window, no `catalog_incompatible` rejection appears
+  after the SIGHUP for a `(release id, candidate sha)` key that the
+  pre-activation validation admitted, and catalog-unavailable does not
+  increase. Rejections of keys that were already inadmissible before
+  activation are logged as chronic diagnostics only (SPEC-023-R017(d)): the
+  release did not cause them, and failing on them would block every release
+  while any stale provider is connected.
 - **(e)** A model that is newly buyer-serving, or re-hashed vs live, needs a
   strict-pin buyer request and a settlement row. No noninteractive production
   harness exists for that, so today **(e) is a preflight NO_GO**

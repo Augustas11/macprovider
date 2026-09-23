@@ -3978,7 +3978,7 @@ case "$CATALOG_VERDICT" in
       _overlay=''
       [ ! -e /etc/macprovider/coordinator.pearl-overlays.yaml ] || _overlay='--config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml'
       _vrc=0
-      systemd-run --quiet --wait --pipe --collect -p EnvironmentFile=-/etc/macprovider/coordinator.env -p User=macprovider -p Group=macprovider \\
+      systemd-run --quiet --wait --pipe --collect -p RuntimeMaxSec=300 -p EnvironmentFile=-/etc/macprovider/coordinator.env -p User=macprovider -p Group=macprovider \\
         \$_check/coordinator --config /opt/macprovider/coordinator.yaml \$_overlay --validate-autotune-release /opt/macprovider/autotune/releases/$AUTOTUNE_RELEASE_DIR_NAME \\
         --previous-target \$_check/.previous-target </dev/null > \$_check/admitted.json 2> \$_check/validate.err || _vrc=\$?
       if [ \"\$_vrc\" != 0 ]; then

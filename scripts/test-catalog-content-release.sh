@@ -432,7 +432,27 @@ def main():
     if cmd == "buyer-serving-set":
         sys.argv[0] = os.environ["CCR_REAL_CR"]
         runpy.run_path(os.environ["CCR_REAL_CR"], run_name="__main__")
+    def check_index(path, want_path, stage):
+        # The Tier-2 content index must be the one tier2-content-index built
+        # from the reviewed commit, at the expected location for each phase.
+        if path is None or os.path.normpath(path) != os.path.normpath(want_path):
+            refuse("%s --tier2-content-index must be %r, got %r" % (stage, want_path, path))
+        if not (ctl / "t2index.sha").exists() or sha(path) != (ctl / "t2index.sha").read_text():
+            refuse("%s Tier-2 content index bytes are not the reviewed commit's" % stage)
+        with open(ctl / "t2index-calls.log", "a") as fh:
+            fh.write(stage + "\n")
+    if cmd == "tier2-content-index":
+        if arg("--rev") != os.environ["CCR_EXPECT_COMMIT"] or not arg("--repo") or not arg("--ledger"):
+            refuse("tier2-content-index must walk the reviewed commit: %r" % args)
+        if sha(arg("--ledger")) != os.environ["CCR_EXPECT_LEDGER_SHA"]:
+            refuse("tier2-content-index --ledger is not the commit's ledger")
+        body = json.dumps({"stub-index": arg("--rev")}, sort_keys=True)
+        (ctl / "t2index.sha").write_text(hashlib.sha256(body.encode()).hexdigest())
+        sys.stdout.write(body)
+        sys.exit(0)
     if cmd == "compare-live":
+        check_index(arg("--tier2-content-index"),
+                    os.path.join(os.path.dirname(arg("--ledger") or "."), "tier2-content-index.json"), "compare-live")
         live = json.loads((pathlib.Path(arg("--live")) / "release.json").read_text())
         rel = json.loads((pathlib.Path(arg("--incoming")) / "release.json").read_text())
         if (ctl / "compare-regression").exists():
@@ -458,6 +478,7 @@ def main():
             if os.path.basename(release) != "release" or os.path.basename(live_dir) != "live":
                 refuse("preflight call must judge the assembled release against the fetched live release")
             stage = "preflight"
+            check_index(arg("--tier2-content-index"), os.path.join(os.path.dirname(release), "gate", "tier2-content-index.json"), stage)
         else:
             here = os.path.dirname(os.path.abspath(__file__))
             catalog = os.path.normpath(os.path.join(here, "..", "phase3-binary", "catalog", "autotune"))
@@ -475,6 +496,7 @@ def main():
             if os.path.dirname(release) != releases or not os.path.basename(release).startswith(".incoming-"):
                 refuse("under-lock --release must be the staged incoming dir, got %r" % release)
             stage = "under-lock"
+            check_index(arg("--tier2-content-index"), os.path.join(here, "..", "tier2-content-index.json"), stage)
         with open(ctl / "gate-calls.log", "a") as fh:
             fh.write(stage + " ok\n")
         lane = (ctl / "lane").read_text().strip() if (ctl / "lane").exists() else "catalog-content"
@@ -822,6 +844,8 @@ grep -qF "$OPKEY" "$T/out" "$T/err" && fail "deploy printed the operator bearer"
 grep -q '^\[catalog-content\] DONE' "$T/out" || fail "deploy did not report DONE"
 [ "$(sort -u "$CCR_TEST_CTL/gate-calls.log" | tr '\n' ' ')" = "preflight ok under-lock ok " ] ||
   fail "content-gate must be called (and validated) in preflight and under the lock: $(cat "$CCR_TEST_CTL/gate-calls.log" 2>/dev/null)"
+[ "$(sort -u "$CCR_TEST_CTL/t2index-calls.log" | tr '\n' ' ')" = "compare-live preflight under-lock " ] ||
+  fail "the Tier-2 content index must reach compare-live, preflight and under-lock content-gate: $(cat "$CCR_TEST_CTL/t2index-calls.log" 2>/dev/null)"
 [ "$(wc -l <"$CCR_TEST_CTL/dryload-calls" | tr -d ' ')" = 3 ] ||
   fail "the live-binary validator must run in preflight, under the lease, and in the publish's under-lock coverage: $(wc -l <"$CCR_TEST_CTL/dryload-calls")"
 [ -z "$(ls "$CCR_FAKE/tmp")" ] || fail "the lease runner must remove its work dir when the lease is released"

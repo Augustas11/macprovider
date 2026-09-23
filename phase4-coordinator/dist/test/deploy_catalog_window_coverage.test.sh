@@ -36,7 +36,7 @@ coverage_line="$(line_of 'autotune_window.py coverage --admitted-json')"
 validator_line="$(line_of '--validate-autotune-release /opt/macprovider/autotune/releases/$AUTOTUNE_RELEASE_DIR_NAME')"
 [ "$validator_line" -lt "$coverage_line" ] || fail "the incoming coordinator must validate before coverage"
 grep -qF 'install -m 0755 $DEPLOY_TMP/coordinator-linux-amd64' "$DEPLOY_SH" || fail "coverage must run the INCOMING coordinator binary"
-grep -qF 'systemd-run --quiet --wait --pipe --collect -p EnvironmentFile=-/etc/macprovider/coordinator.env -p User=macprovider -p Group=macprovider' "$DEPLOY_SH" ||
+grep -qF 'systemd-run --quiet --wait --pipe --collect -p RuntimeMaxSec=300 -p EnvironmentFile=-/etc/macprovider/coordinator.env -p User=macprovider -p Group=macprovider' "$DEPLOY_SH" ||
   fail "the validator must run under the coordinator env and user"
 grep -q 'autotune_window.py coverage --root' "$DEPLOY_SH" && fail "deploy must not use the Python admission mirror (coverage --root)"
 skip_line="$(line_of 'if [ "$CATALOG_VERDICT" = "equivalent" ]; then')"

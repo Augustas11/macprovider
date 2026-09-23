@@ -11,6 +11,8 @@ invalid-release tests.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import shutil
 import subprocess
@@ -173,6 +175,35 @@ class ContentGateTests(unittest.TestCase):
         change_content(self.live)
         result = self.gate()
         self.assertLane(result, "unknown-predecessor")
+
+    def test_restamped_live_tier2_descends_only_with_content_index(self) -> None:
+        # Live is a Tier-2 freshness re-sign of the ledger row (same signer and
+        # schema); the release moves Tier-2 models. Only the history index can
+        # prove the live predecessor (same fixture as compare-live's index test).
+        def resign(o: dict) -> None:
+            o.update(issued_at="2026-10-01T03:00:00Z", expires_at="2099-01-01T00:00:00Z",
+                     catalog_id="macprovider-tier2-model-catalog-2026-10-01-renewal")
+            o["signature"]["sig"] = "A" * 86
+
+        edit_json(self.live / "tier2-catalog.json", resign, compact=False)
+        correct_hash(self.release)
+        self.assertLane(self.gate(), "unknown-predecessor")
+        raw = (CANONICAL / "tier2-catalog.json").read_bytes()
+        index = self.tmp / "tier2-index.json"
+        index.write_text(json.dumps({cr.sha256(raw): cr.tier2_stripped_sha256(raw, "t")}))
+        result = self.gate(tier2_index_path=index)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["lane"], "catalog-content")
+        with mock.patch.object(cr, "verify_directory", lambda _directory: None), \
+                mock.patch.object(cr, "NOT_BUYER_SERVING_PATH", self.tmp / "none.json"):
+            (self.tmp / "none.json").write_bytes(NO_EXCLUSIONS)
+            for extra, code in (([], cr.CONTENT_GATE_EXIT_NOT_ELIGIBLE), (["--tier2-content-index", str(index)], 0)):
+                with self.subTest(extra=extra), mock.patch.object(
+                    sys, "argv",
+                    ["catalog-release.py", "content-gate", "--release", str(self.release), "--live", str(self.live),
+                     "--ledger", str(LEDGER), "--now", NOW.isoformat().replace("+00:00", "Z"), *extra],
+                ), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(cr.main(), code)
 
     def test_serving_closure_failure_is_not_eligible(self) -> None:
         correct_hash(self.release, tier2_hash="cd" * 32)

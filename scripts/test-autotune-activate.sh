@@ -17,6 +17,9 @@
 #      holder until that child exits.
 #   C. Lease watchdog: past AA_LEASE_MAX_SECONDS the controller is TERMed and
 #      its EXIT trap releases the locks.
+#   E. Lease deadline: a command still running at MAX + ROLLBACK seconds is
+#      killed (process group, TERM then KILL) by the remote runner, the
+#      controller ends lease-lost, and both locks free within a bounded grace.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -334,6 +337,39 @@ wait "$d2_pid" || fail "D2: controller failed: $(cat "$T/d2.err")"
 for _ in $(seq 1 50); do [ -e "$T/d2.finished" ] && free_locks && break; sleep 0.1; done
 [ -e "$T/d2.finished" ] || fail "D2: the started mutation must run to completion"
 free_locks || fail "D2: the locks must be free once the mutating child exits"
+rm -rf "$T/fake/tmp/"macprovider-activation-lease.*
+
+# ---------------------------------------------------------------------------
+# E. Lease deadline bounds a running command. The command (and its child)
+# ignore TERM, so the runner must escalate to KILL.
+# ---------------------------------------------------------------------------
+mkdir -p "$T/e"
+e_start=$SECONDS
+rc=0
+AA_LEASE_MAX_SECONDS=1 AA_LEASE_ROLLBACK_SECONDS=2 AA_LEASE_KILL_GRACE_SECONDS=20 bash -c "$(preamble)"'
+trap "" TERM
+trap aa_lease_release EXIT
+AA_WORK_DIR="$1"; AA_LOCK_MODE=lease
+aa_lease_acquire
+printf "echo quick\n" >"$AA_WORK_DIR/ok.sh"
+ok=0; aa_lease_run "$AA_WORK_DIR/ok.sh" "$AA_WORK_DIR/ok.out" "$AA_WORK_DIR/ok.err" || ok=$?
+echo "$ok $(cat "$AA_WORK_DIR/ok.out")" >"$AA_WORK_DIR/ok"
+printf "trap \"\" TERM; touch %q; sleep 59 & wait; touch %q\n" "$2" "$3" >"$AA_WORK_DIR/hang.sh"
+c=0; aa_lease_run "$AA_WORK_DIR/hang.sh" "$AA_WORK_DIR/o" "$AA_WORK_DIR/e" || c=$?
+echo "$c $AA_LEASE_LOST" >"$AA_WORK_DIR/result"
+if aa_lease_lost; then exit 6; fi
+' _ "$T/e" "$T/e.started" "$T/e.finished" 2>"$T/e.err" || rc=$?
+e_elapsed=$((SECONDS - e_start))
+[ "$(cat "$T/e/ok")" = "0 quick" ] || fail "E: a normal command must run normally under the deadline: $(cat "$T/e/ok")"
+[ -e "$T/e.started" ] || fail "E: the hanging command never started: $(cat "$T/e.err")"
+[ "$rc" -eq 6 ] && [ "$(cat "$T/e/result")" = "1 1" ] \
+  || fail "E: a command killed at the lease deadline must end the controller lease-lost (rc=$rc result=$(cat "$T/e/result" 2>/dev/null)): $(cat "$T/e.err")"
+grep -q "lease-expired: command 2 stopped at the lease deadline" "$T/e/e" || fail "E: the runner must report lease-expired: $(cat "$T/e/e")"
+[ "$e_elapsed" -le 20 ] || fail "E: the lease deadline (3s + 5s TERM grace) took ${e_elapsed}s"
+for _ in $(seq 1 50); do free_locks && break; sleep 0.1; done
+free_locks || fail "E: both locks must be acquirable once the deadline kill completes"
+[ ! -e "$T/e.finished" ] || fail "E: the command ran past the lease deadline"
+! pgrep -xf "sleep 59" >/dev/null 2>&1 || fail "E: the command's child survived the deadline kill"
 rm -rf "$T/fake/tmp/"macprovider-activation-lease.*
 
 # ---------------------------------------------------------------------------
