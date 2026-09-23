@@ -187,6 +187,7 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_window
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_compare_live
 	bash phase4-coordinator/dist/test/deploy_catalog_compare_live.test.sh
+	bash phase4-coordinator/dist/test/deploy_catalog_window_coverage.test.sh
 	bash phase4-coordinator/dist/test/coordinator_deploy_recovery.test.sh
 	bash phase4-coordinator/dist/test/coordinator_archive_rotate.test.sh
 	bash phase4-coordinator/dist/test/coordinator_sqlite_relief.test.sh

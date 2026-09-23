@@ -865,6 +865,49 @@ if [ -n "$CATALOG_REGRESSION_OVERRIDE_REASON" ]; then
   fi
   CATALOG_REGRESSION_OVERRIDE_B64="$(printf '%s' "$CATALOG_REGRESSION_OVERRIDE_REASON" | base64 | tr -d '\n')"
 fi
+# #1688 A3: operator override for a window-coverage refusal (a release that
+# connected providers advertise would stop being admissible). Same rules.
+CATALOG_WINDOW_OVERRIDE_REASON="${CATALOG_WINDOW_OVERRIDE_REASON:-}"
+CATALOG_WINDOW_OVERRIDE_B64=""
+if [ -n "$CATALOG_WINDOW_OVERRIDE_REASON" ]; then
+  case "$CATALOG_WINDOW_OVERRIDE_REASON" in
+    *$'\n'*|*$'\r'*)
+      echo "aborting deploy: CATALOG_WINDOW_OVERRIDE_REASON must be a single line" >&2
+      exit 1
+      ;;
+  esac
+  if ! printf '%s' "$CATALOG_WINDOW_OVERRIDE_REASON" | LC_ALL=C grep -Eq '^[ -~]{1,200}$'; then
+    echo "aborting deploy: CATALOG_WINDOW_OVERRIDE_REASON must be 1-200 printable ASCII characters" >&2
+    exit 1
+  fi
+  CATALOG_WINDOW_OVERRIDE_B64="$(printf '%s' "$CATALOG_WINDOW_OVERRIDE_REASON" | base64 | tr -d '\n')"
+fi
+# Appends one catalog override record to Pearl's root-only 0600 JSONL audit
+# log (O_APPEND|O_NOFOLLOW, regular file only, fsync). $1 = base64 of the
+# record JSON object without "ts"; $2 = fixed logger message.
+_append_catalog_window_override() {
+  $SSH "set -e
+    install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider
+    python3 -I - '$1' <<'PY'
+import base64, datetime, json, os, stat, sys
+record = json.loads(base64.b64decode(sys.argv[1], validate=True).decode('ascii'))
+if not isinstance(record, dict) or 'ts' in record:
+    raise SystemExit('override record must be a JSON object without ts')
+record['ts'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+path = '/var/lib/macprovider/catalog-window-overrides.jsonl'
+fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+try:
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise SystemExit(path + ' is not a regular file')
+    os.fchown(fd, 0, 0)
+    os.fchmod(fd, 0o600)
+    os.write(fd, (json.dumps(record, sort_keys=True) + '\\n').encode('ascii'))
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+    logger -t macprovider-deploy '$2'"
+}
 
 # coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
 # FR-C9.4 strict-reject path still requires `coordinator-cli
@@ -3475,32 +3518,20 @@ case "$CATALOG_VERDICT" in
       exit 1
     fi
     log "  CATALOG REGRESSION OVERRIDE: activating $AUTOTUNE_RELEASE_ID over live $CATALOG_LIVE_RELEASE_ID"
-    $SSH "set -e
-      install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider
-      python3 -I - '$CATALOG_REGRESSION_OVERRIDE_B64' '$AUTOTUNE_RELEASE_DIR_NAME' '$CATALOG_LIVE_TARGET' '$CATALOG_LIVE_RELEASE_ID' '$COORDINATOR_RELEASE_VERSION' '$COORDINATOR_RELEASE_COMMIT' <<'PY'
-import base64, datetime, json, os, stat, sys
+    CATALOG_OVERRIDE_RECORD_B64="$(python3 - "$CATALOG_REGRESSION_OVERRIDE_B64" "$AUTOTUNE_RELEASE_DIR_NAME" "$CATALOG_LIVE_TARGET" "$CATALOG_LIVE_RELEASE_ID" "$COORDINATOR_RELEASE_VERSION" "$COORDINATOR_RELEASE_COMMIT" <<'PY'
+import base64, json, sys
 reason_b64, incoming, live_target, live_id, tag, commit = sys.argv[1:]
 record = {
-    'ts': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-    'reason': base64.b64decode(reason_b64, validate=True).decode('ascii'),
-    'incoming': incoming,
-    'live': {'target': live_target, 'release_id': live_id},
-    'tag': tag,
-    'commit': commit,
+    "reason": base64.b64decode(reason_b64, validate=True).decode("ascii"),
+    "incoming": incoming,
+    "live": {"target": live_target, "release_id": live_id},
+    "tag": tag,
+    "commit": commit,
 }
-path = '/var/lib/macprovider/catalog-window-overrides.jsonl'
-fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-try:
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-        raise SystemExit(path + ' is not a regular file')
-    os.fchown(fd, 0, 0)
-    os.fchmod(fd, 0o600)
-    os.write(fd, (json.dumps(record, sort_keys=True) + '\\n').encode('ascii'))
-    os.fsync(fd)
-finally:
-    os.close(fd)
+print(base64.b64encode(json.dumps(record, sort_keys=True).encode("ascii")).decode("ascii"))
 PY
-      logger -t macprovider-deploy 'catalog regression override used for $AUTOTUNE_RELEASE_DIR_NAME'"
+)" || { echo "aborting deploy: could not build the regression override record" >&2; exit 1; }
+    _append_catalog_window_override "$CATALOG_OVERRIDE_RECORD_B64" "catalog regression override used for $AUTOTUNE_RELEASE_DIR_NAME"
     log "  AUDIT TRAIL: override appended to /var/lib/macprovider/catalog-window-overrides.jsonl"
     ;;
   *) echo "aborting deploy: unknown compare-live verdict" >&2; exit 1 ;;
@@ -3972,6 +4003,105 @@ EOF
   log "  AUDIT TRAIL: FORCE_RESTART=1 override written to /var/lib/macprovider/last-deploy-bypass.json"
 fi
 log "  ok: $CONNECTED_COUNT connected providers (or FORCE_RESTART=1 set)"
+
+# #1688 A3: before an activation changes current and .previous-target, prove
+# every catalog release that connected providers advertise stays admissible
+# (exact release_id + candidate sha in the incoming release, the retained
+# window, or a same-version restamp), else refuse. /poolz is read on Pearl
+# loopback with the operator key the C2c pairing check proved; the key rides
+# SSH stdin into curl --config, never argv, a file, or the log.
+case "$CATALOG_VERDICT" in
+  bootstrap) log "  window coverage: bootstrap has no live current; no advertised release can be dropped" ;;
+  descends|regression)
+    log "  checking that connected providers' catalog releases stay admissible (autotune_window.py coverage)"
+    CATALOG_COVERAGE_RC=0
+    CATALOG_COVERAGE_JSON="$(printf 'header = "Authorization: Bearer %s"\n' "$CATALOG_CANARY_AUTH_TOKEN" | $SSH "set -e
+      umask 077
+      _poolz=$DEPLOY_TMP/poolz.json
+      rm -f \$_poolz
+      _status=\$(curl --config - -sS --noproxy '*' --max-time 10 --max-filesize 16777216 -o \$_poolz -w '%{http_code}' http://127.0.0.1:8444/poolz) || {
+        rm -f \$_poolz
+        echo 'coordinator /poolz is unreachable on Pearl loopback' >&2
+        exit 10
+      }
+      [ \"\$_status\" = 200 ] || {
+        rm -f \$_poolz
+        echo \"coordinator /poolz answered HTTP \$_status (operator key not accepted?)\" >&2
+        exit 10
+      }
+      _rc=0
+      python3 -I $DEPLOY_TMP/scripts/autotune_window.py coverage --root /opt/macprovider/autotune --incoming releases/$AUTOTUNE_RELEASE_DIR_NAME --poolz-json \$_poolz || _rc=\$?
+      rm -f \$_poolz
+      exit \$_rc")" || CATALOG_COVERAGE_RC=$?
+    if [ "$CATALOG_COVERAGE_RC" != "0" ] && [ "$CATALOG_COVERAGE_RC" != "4" ]; then
+      echo "aborting deploy: could not prove connected providers keep an admissible catalog (rc=$CATALOG_COVERAGE_RC); refusing to change autotune/current" >&2
+      exit 1
+    fi
+    # Report counts and release ids only; stdout keeps the uncovered list for
+    # the override record.
+    CATALOG_COVERAGE_UNCOVERED="$(python3 - "$CATALOG_COVERAGE_RC" "$CATALOG_COVERAGE_JSON" <<'PY'
+import json, re, sys
+rc, raw = sys.argv[1], sys.argv[2]
+value = json.loads(raw)
+covered, uncovered, total = value["covered"], value["uncovered"], value["advertised_total"]
+if not isinstance(total, int) or not isinstance(covered, list) or not isinstance(uncovered, list):
+    raise SystemExit("coverage report has the wrong shape")
+if (rc == "4") != bool(uncovered):
+    raise SystemExit(f"coverage exit {rc} does not match its report")
+def rid(v):
+    if not isinstance(v, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,191}", v) is None:
+        raise SystemExit("coverage report carries an unsafe release id")
+    return v
+def sha(v):
+    if not isinstance(v, str) or re.fullmatch(r"[0-9a-f]{64}", v) is None:
+        raise SystemExit("coverage report carries a malformed sha")
+    return v
+def count(v):
+    if not isinstance(v, int) or v < 0:
+        raise SystemExit("coverage report carries a bad count")
+    return v
+records = []
+print(f"    window coverage: {len(covered)} admissible release(s), {count(total)} catalog-advertising provider(s), {len(uncovered)} uncovered", file=sys.stderr)
+for entry in covered:
+    print(f"      admissible {rid(entry['release_id'])} sha={sha(entry['sha'])[:16]}", file=sys.stderr)
+for entry in uncovered:
+    record = {"release_id": rid(entry["release_id"]), "sha": sha(entry["sha"]),
+              "providers": count(entry["providers"]), "routing_eligible": count(entry["routing_eligible"])}
+    records.append(record)
+    print(f"      UNCOVERED {record['release_id']} sha={record['sha'][:16]} providers={record['providers']} routing_eligible={record['routing_eligible']}", file=sys.stderr)
+print(json.dumps(records, sort_keys=True, separators=(",", ":")))
+PY
+)" || { echo "aborting deploy: window coverage output is malformed" >&2; exit 1; }
+    if [ "$CATALOG_COVERAGE_RC" = "4" ]; then
+      if [ -z "$CATALOG_WINDOW_OVERRIDE_B64" ]; then
+        echo "aborting deploy: activating $AUTOTUNE_RELEASE_ID would drop catalog release(s) connected providers still advertise;" >&2
+        echo "  those providers would be rejected catalog_incompatible on their next hello. Wait until they move to an admissible" >&2
+        echo "  release, or set CATALOG_WINDOW_OVERRIDE_REASON='<why>' to activate anyway (logged on Pearl)." >&2
+        exit 1
+      fi
+      log "  WINDOW COVERAGE OVERRIDE: activating $AUTOTUNE_RELEASE_ID although connected providers advertise dropped releases"
+      CATALOG_OVERRIDE_RECORD_B64="$(python3 - "$CATALOG_WINDOW_OVERRIDE_B64" "$CATALOG_COVERAGE_UNCOVERED" "$AUTOTUNE_RELEASE_DIR_NAME" "$CATALOG_LIVE_TARGET" "$CATALOG_LIVE_RELEASE_ID" "$COORDINATOR_RELEASE_VERSION" "$COORDINATOR_RELEASE_COMMIT" <<'PY'
+import base64, json, sys
+reason_b64, uncovered, incoming, live_target, live_id, tag, commit = sys.argv[1:]
+record = {
+    "kind": "window_coverage",
+    "reason": base64.b64decode(reason_b64, validate=True).decode("ascii"),
+    "uncovered": json.loads(uncovered),
+    "incoming": incoming,
+    "live": {"target": live_target, "release_id": live_id},
+    "tag": tag,
+    "commit": commit,
+}
+print(base64.b64encode(json.dumps(record, sort_keys=True).encode("ascii")).decode("ascii"))
+PY
+)" || { echo "aborting deploy: could not build the window coverage override record" >&2; exit 1; }
+      _append_catalog_window_override "$CATALOG_OVERRIDE_RECORD_B64" "catalog window coverage override used for $AUTOTUNE_RELEASE_DIR_NAME"
+      log "  AUDIT TRAIL: override appended to /var/lib/macprovider/catalog-window-overrides.jsonl"
+    fi
+    ;;
+  equivalent) ;;
+  *) echo "aborting deploy: unknown compare-live verdict" >&2; exit 1 ;;
+esac
 
 if [ "$CATALOG_VERDICT" = "equivalent" ]; then
   # #1688 A2: content-equivalent live catalog. No current swap, no window

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import grp
+import hashlib
 import json
 import os
 import re
@@ -252,6 +253,160 @@ def _plan(args: argparse.Namespace) -> dict:
     }
 
 
+# Mirrors cmd/coordinator/main.go loadSameVersionRestampCatalogs: dirs named
+# <current version>-<16 lowercase hex>, at most 16 examined in name order.
+MAX_RESTAMP_EXAMINED = 16
+RESTAMP_SUFFIX_RE = re.compile(r"-[0-9a-f]{16}")
+SHA_RE = re.compile(r"[0-9a-fA-F]{64}")
+MAX_FEED_BYTES = 16 * 1024 * 1024
+MAX_POOLZ_BYTES = 16 * 1024 * 1024
+CANDIDATES = "autotune-candidates.json"
+
+
+def _read_bounded_at(dir_fd: int, name: str, limit: int) -> bytes:
+    fd = os.open(name, os.O_RDONLY | NOFOLLOW, dir_fd=dir_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise WindowError(f"{name} is not a regular file")
+        chunks, total = [], 0
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise WindowError(f"{name} is too large")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def load_release(releases_fd: int, name: str) -> dict:
+    """Return the admission identity of releases/<name>.
+
+    release_id/sha are what the coordinator matches a provider hello against:
+    autotune-candidates.json "version" and sha256 of its exact bytes. signer is
+    the release.json signer bound to that same sha (None if unbound).
+    """
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=releases_fd)
+    try:
+        raw = _read_bounded_at(fd, CANDIDATES, MAX_FEED_BYTES)
+        try:
+            feed = json.loads(_read_bounded_at(fd, "release.json", MAX_FEED_BYTES))["feeds"][CANDIDATES]
+        except (OSError, ValueError, KeyError, TypeError, WindowError):
+            feed = None
+    finally:
+        os.close(fd)
+    sha = hashlib.sha256(raw).hexdigest()
+    try:
+        version = json.loads(raw).get("version")
+    except (ValueError, AttributeError) as exc:
+        raise WindowError(f"releases/{name}/{CANDIDATES} is not a JSON object") from exc
+    if not isinstance(version, str) or not version.strip():
+        raise WindowError(f"releases/{name}/{CANDIDATES} has no version")
+    signer = None
+    if (
+        isinstance(feed, dict)
+        and isinstance(feed.get("signer_key_id"), str)
+        and str(feed.get("sha256", "")).lower() == sha
+    ):
+        signer = feed["signer_key_id"]
+    return {"dir": f"releases/{name}", "release_id": version, "sha": sha, "signer": signer}
+
+
+def admissible_releases(root_fd: int, incoming: str, *, required_uid: int = 0) -> list[dict]:
+    """Every release a provider may be admitted on after incoming becomes current."""
+    current = read_current(root_fd)
+    window = compute_window(read_window(root_fd, required_uid=required_uid), current or None, incoming)
+    releases_fd = os.open("releases", os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=root_fd)
+    try:
+        active = load_release(releases_fd, incoming[len("releases/"):])
+        out = [active]
+        # previous-target is fail-closed in the coordinator: an unloadable
+        # entry blocks boot, so it is a refusal here too.
+        for entry in window:
+            prev = load_release(releases_fd, entry[len("releases/"):])
+            # ws/server.go: a same-version previous catalog must keep the
+            # active signer.
+            if prev["release_id"] == active["release_id"] and (
+                prev["signer"] is None or prev["signer"] != active["signer"]
+            ):
+                continue
+            out.append(prev)
+        prefix = active["release_id"] + "-"
+        examined = 0
+        for entry in sorted(os.scandir(releases_fd), key=lambda e: e.name):
+            if not entry.is_dir(follow_symlinks=False) or not entry.name.startswith(prefix):
+                continue
+            if RESTAMP_SUFFIX_RE.fullmatch(entry.name[len(prefix) - 1:]) is None:
+                continue
+            if examined >= MAX_RESTAMP_EXAMINED:
+                break
+            examined += 1
+            try:
+                restamp = load_release(releases_fd, entry.name)
+            except (OSError, WindowError):
+                continue
+            if (
+                restamp["release_id"] != active["release_id"]
+                or restamp["sha"] == active["sha"]
+                or restamp["signer"] is None
+                or restamp["signer"] != active["signer"]
+            ):
+                continue
+            out.append(restamp)
+    finally:
+        os.close(releases_fd)
+    return out
+
+
+def advertised_catalogs(poolz: object) -> tuple[dict[tuple[str, str], dict], int]:
+    if not isinstance(poolz, dict) or not isinstance(poolz.get("pool"), list):
+        raise WindowError("poolz JSON has no pool list")
+    advertised: dict[tuple[str, str], dict] = {}
+    total = 0
+    for provider in poolz["pool"]:
+        if not isinstance(provider, dict):
+            raise WindowError("poolz pool entry is not an object")
+        release_id = provider.get("catalog_release_id") or ""
+        sha = provider.get("catalog_candidate_sha256") or ""
+        if not isinstance(release_id, str) or not isinstance(sha, str):
+            raise WindowError("poolz catalog fields must be strings")
+        if not release_id and not sha:
+            continue  # legacy/bridge provider: advertises no catalog
+        if not release_id or SHA_RE.fullmatch(sha) is None:
+            raise WindowError("poolz provider advertises a partial or malformed catalog")
+        total += 1
+        slot = advertised.setdefault((release_id, sha.lower()), {"providers": 0, "routing_eligible": 0})
+        slot["providers"] += 1
+        if provider.get("routing_eligible") is True:
+            slot["routing_eligible"] += 1
+    return advertised, total
+
+
+def _coverage(args: argparse.Namespace) -> dict:
+    validate_entry(args.incoming)
+    with open(args.poolz_json, "rb") as fh:
+        data = fh.read(MAX_POOLZ_BYTES + 1)
+    if len(data) > MAX_POOLZ_BYTES:
+        raise WindowError("poolz JSON is too large")
+    advertised, total = advertised_catalogs(json.loads(data))
+    root_fd = open_root(args.root, required_uid=args.required_uid)
+    try:
+        admissible = admissible_releases(root_fd, args.incoming, required_uid=args.required_uid)
+    finally:
+        os.close(root_fd)
+    keys = {(r["release_id"], r["sha"]) for r in admissible}
+    covered = [{"dir": r["dir"], "release_id": r["release_id"], "sha": r["sha"]} for r in admissible]
+    uncovered = [
+        {"release_id": rid, "sha": sha, **counts}
+        for (rid, sha), counts in sorted(advertised.items())
+        if (rid, sha) not in keys
+    ]
+    return {"covered": covered, "uncovered": uncovered, "advertised_total": total}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -273,10 +428,18 @@ def main(argv: list[str] | None = None) -> int:
     common(p)
     p.add_argument("--from-file", required=True)
     p.add_argument("--expect-current", required=True)
+    p = sub.add_parser("coverage", help="exit 4 if a connected provider's catalog would stop being admissible")
+    common(p)
+    p.add_argument("--incoming", required=True, help="releases/<id> about to become current")
+    p.add_argument("--poolz-json", required=True, help="coordinator /poolz response body")
 
     args = parser.parse_args(argv)
     group: str | int = int(args.group) if args.group.isdigit() else args.group
     try:
+        if args.cmd == "coverage":
+            result = _coverage(args)
+            print(json.dumps(result, sort_keys=True))
+            return 4 if result["uncovered"] else 0
         if args.cmd == "restore":
             with open(args.from_file, "rb") as fh:
                 data = fh.read(MAX_FILE_BYTES + 1)
@@ -293,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
                              expect_current=args.expect_current, required_uid=args.required_uid)
             elif args.cmd == "apply" and result["current"] != args.expect_current:
                 raise WindowError(f"current is {result['current']!r}, expected {args.expect_current!r}")
-    except (WindowError, ValueError, OSError, KeyError) as exc:
+    except (WindowError, ValueError, OSError, KeyError, TypeError) as exc:
         print(f"autotune_window: refusing: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True))
