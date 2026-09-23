@@ -12,6 +12,8 @@ import MacProviderCore
 // timeouts, bounded bodies, no redirects, loopback-literal host only), and is
 // NON-EARNING: relay-blind and signed receipts are disabled on this path (no
 // local MLX tokenizer), so it never fabricates a `model_hash`-bound receipt.
+// Receipts stay off via `isSettlementReceiptEligible == false` and `.notEligible`
+// completions (#1695), independent of coordinator buyer-serving state.
 
 /// Serve-time recognition and normalization of an `ollama_loopback` model ref.
 enum OllamaLoopbackServeModel {
@@ -214,6 +216,9 @@ actor OllamaLoopbackRuntime: ModelRuntimeServing {
     var loadedModelHashAlgorithm: String? { evidence.algorithm }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
+    /// Non-earning loopback path (#1695): never sign a SPEC-015 receipt, even
+    /// if the coordinator routes a request here with settlement metadata.
+    nonisolated var isSettlementReceiptEligible: Bool { false }
 
     func setProviderStatus(_ providerStatus: ProviderStatus) {
         self.providerStatus = providerStatus
@@ -374,7 +379,8 @@ actor OllamaLoopbackRuntime: ModelRuntimeServing {
             finishReason: finishReason,
             promptTokens: promptTokens,
             completionTokens: completionTokens,
-            generatedCompletionTokens: completionTokens
+            generatedCompletionTokens: completionTokens,
+            settlementDisposition: .notEligible
         )
     }
 

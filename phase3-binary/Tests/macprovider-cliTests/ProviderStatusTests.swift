@@ -1214,6 +1214,7 @@ final class ProviderStatusTests: XCTestCase {
                 finishReason: "stop",
                 promptTokens: 2,
                 completionTokens: 1,
+                settlementDisposition: .eligibleOwner,
                 specDecodeDraftedTokens: 10,
                 specDecodeAcceptedTokens: 4,
                 specDecodeGeneration: generation
@@ -1252,6 +1253,7 @@ final class ProviderStatusTests: XCTestCase {
                 finishReason: "stop",
                 promptTokens: 2,
                 completionTokens: 1,
+                settlementDisposition: .eligibleOwner,
                 specDecodeDraftedTokens: 8,
                 specDecodeAcceptedTokens: 6,
                 specDecodeGeneration: generation
@@ -1290,6 +1292,7 @@ final class ProviderStatusTests: XCTestCase {
                 finishReason: "stop",
                 promptTokens: 2,
                 completionTokens: 1,
+                settlementDisposition: .eligibleOwner,
                 specDecodeDraftedTokens: 12,
                 specDecodeAcceptedTokens: 9,
                 specDecodeGeneration: oldGeneration
@@ -1329,6 +1332,7 @@ final class ProviderStatusTests: XCTestCase {
                 finishReason: "stop",
                 promptTokens: 625,
                 completionTokens: 14,
+                settlementDisposition: .eligibleOwner,
             ),
             failed: false,
             requestID: "r-1"
@@ -1342,6 +1346,7 @@ final class ProviderStatusTests: XCTestCase {
                 finishReason: "stop",
                 promptTokens: 141,
                 completionTokens: 545,
+                settlementDisposition: .eligibleOwner,
             ),
             failed: false,
             requestID: "r-2"
@@ -1378,6 +1383,7 @@ final class ProviderStatusTests: XCTestCase {
                 finishReason: "stop",
                 promptTokens: 100,
                 completionTokens: 25,
+                settlementDisposition: .eligibleOwner,
             ),
             failed: false,
             requestID: "r-1"

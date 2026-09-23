@@ -1736,7 +1736,7 @@ final class ServingKnobsConfigTests: XCTestCase {
             loader: { _ in throw TestRuntimeError.notExpected },
             testCompletion: { _, _ in
                 XCTFail("strict paged KV rejection must happen before inference")
-                return CompletionResult(content: "unexpected", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                return CompletionResult(content: "unexpected", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
         let request = try Self.request(model: "fixture-model")
@@ -1759,7 +1759,7 @@ final class ServingKnobsConfigTests: XCTestCase {
             warmSwapEnabled: false,
             loader: { _ in throw TestRuntimeError.notExpected },
             testCompletion: { _, _ in
-                CompletionResult(content: "unexpected", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                CompletionResult(content: "unexpected", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
         let request = try Self.request(model: "fixture-model", stream: true)
@@ -1785,7 +1785,7 @@ final class ServingKnobsConfigTests: XCTestCase {
             warmSwapEnabled: false,
             loader: { _ in throw TestRuntimeError.notExpected },
             testCompletion: { _, _ in
-                CompletionResult(content: "ok", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                CompletionResult(content: "ok", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
         let request = try Self.request(model: "fixture-model", conversationKey: "conv:first-rollout-scope")
@@ -1808,7 +1808,7 @@ final class ServingKnobsConfigTests: XCTestCase {
             loader: { _ in throw TestRuntimeError.notExpected },
             testCompletion: { _, _ in
                 XCTFail("strict keyed continuous batching rejection must happen before inference")
-                return CompletionResult(content: "unexpected", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                return CompletionResult(content: "unexpected", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             }
         )
         let request = try Self.request(model: "fixture-model", conversationKey: "conv:first-rollout-scope")

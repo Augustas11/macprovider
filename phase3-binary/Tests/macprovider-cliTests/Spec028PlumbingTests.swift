@@ -211,14 +211,14 @@ final class Spec028PlumbingTests: XCTestCase {
                 fallbackCalls.increment()
                 return CompletionResult(
                     content: "safe fallback", finishReason: "stop",
-                    promptTokens: 1, completionTokens: 1
+                    promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner
                 )
             },
             testSpeculativeCompletion: { _, _ in
                 speculativeCalls.increment()
                 return CompletionResult(
                     content: "unsafe", finishReason: "stop",
-                    promptTokens: 1, completionTokens: 1
+                    promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner
                 )
             }
         )
@@ -244,7 +244,8 @@ final class Spec028PlumbingTests: XCTestCase {
                     content: "fallback",
                     finishReason: "stop",
                     promptTokens: 1,
-                    completionTokens: 1
+                    completionTokens: 1,
+                    settlementDisposition: .eligibleOwner
                 )
             },
             testSpeculativeCompletion: { _, _ in
@@ -278,7 +279,8 @@ final class Spec028PlumbingTests: XCTestCase {
                     content: "fallback",
                     finishReason: "stop",
                     promptTokens: 1,
-                    completionTokens: 1
+                    completionTokens: 1,
+                    settlementDisposition: .eligibleOwner
                 )
             },
             testSpeculativeStream: { _, _ in

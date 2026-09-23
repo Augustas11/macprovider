@@ -37,6 +37,7 @@ final class ReceiptAuditTests: XCTestCase {
             "construction_failed",
             "write_failed",
             "non_settling_replay",
+            "runtime_not_settlement_eligible",
         ])
         let got = try Set(ReceiptOmissionReason.allCases.map { reason in
             let payload = try payloadObject(ReceiptAudit.omittedPayload(providerID: "provider-a", requestID: "req-1", reason: reason))
@@ -62,7 +63,9 @@ final class ReceiptAuditTests: XCTestCase {
             ttftMs: 1,
             tokensOut: 1,
             unixTsSeconds: 1,
-            modelHashSource: .warmSwapDisabled
+            modelHashSource: .warmSwapDisabled,
+            runtimeSettlementEligible: true,
+            settlementDisposition: .eligibleOwner
         )
         XCTAssertEqual(result, RouterHandler.ReceiptHeaderResult.omitted(.preV16Binary))
     }
@@ -78,7 +81,9 @@ final class ReceiptAuditTests: XCTestCase {
             ttftMs: 1,
             tokensOut: 1,
             unixTsSeconds: 1,
-            modelHashSource: .warmSwapDisabled
+            modelHashSource: .warmSwapDisabled,
+            runtimeSettlementEligible: true,
+            settlementDisposition: .eligibleOwner
         )
         XCTAssertEqual(result, RouterHandler.ReceiptHeaderResult.omitted(.noKeypair))
     }
@@ -95,6 +100,7 @@ final class ReceiptAuditTests: XCTestCase {
             tokensOut: 1,
             unixTsSeconds: 1,
             modelHashSource: .warmSwapDisabled,
+            runtimeSettlementEligible: true,
             settlementDisposition: .nonSettlingReplay
         )
         XCTAssertEqual(result, RouterHandler.ReceiptHeaderResult.omitted(.nonSettlingReplay))
@@ -107,7 +113,8 @@ final class ReceiptAuditTests: XCTestCase {
             request: fixtureRequest(),
             error: APIError(status: 499, message: "cancelled", type: "server_error", code: "buyer_cancelled"),
             startedAt: Date(),
-            modelHashSource: .warmSwapDisabled
+            modelHashSource: .warmSwapDisabled,
+            runtimeSettlementEligible: true
         )
         XCTAssertEqual(result, RouterHandler.ErrorReceiptHeaderResult.omitted(.preTokenCancel))
     }
@@ -120,7 +127,8 @@ final class ReceiptAuditTests: XCTestCase {
             request: fixtureRequest(),
             error: APIError(status: 503, message: "loading", type: "server_error", code: "provider_loading"),
             startedAt: Date(),
-            modelHashSource: .warmSwapDisabled
+            modelHashSource: .warmSwapDisabled,
+            runtimeSettlementEligible: true
         )
         XCTAssertEqual(result, RouterHandler.ErrorReceiptHeaderResult.notReceiptEligible)
     }
@@ -132,7 +140,8 @@ final class ReceiptAuditTests: XCTestCase {
             request: fixtureRequest(),
             error: APIError(status: 503, message: "drain", type: "server_error", code: "swap_drain_timeout"),
             startedAt: Date(),
-            modelHashSource: .warmSwapDisabled
+            modelHashSource: .warmSwapDisabled,
+            runtimeSettlementEligible: true
         )
         XCTAssertEqual(result, RouterHandler.ErrorReceiptHeaderResult.omitted(.modelSwapViolation))
     }

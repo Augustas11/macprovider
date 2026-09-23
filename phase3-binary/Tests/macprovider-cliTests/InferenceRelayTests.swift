@@ -1067,6 +1067,131 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertFalse(errorMessage.localizedCaseInsensitiveContains("kv"))
         XCTAssertEqual(end["chunks_sent"] as? Int, 0)
     }
+
+    // Issue #1695: loopback and fixture runtimes never sign a relay receipt,
+    // on complete and stream, even with a receipt key, a provider id and v0.4
+    // settlement metadata that match the request.
+    func testNonSettlementEligibleRuntimesNeverSignRelayReceipts() async throws {
+        let loopback = try ReceiptEligibilityFixtures.makeOllamaLoopbackRuntime(testCase: self)
+        let cases: [(label: String, runtime: any ModelRuntimeServing, model: String, hash: String)] = [
+            ("ollama_loopback", loopback.runtime, ReceiptEligibilityFixtures.ollamaServedRef, loopback.digest),
+            ("relay_blind_fixture", ReceiptEligibilityFixtures.makeRelayBlindFixtureRuntime(),
+             ReceiptEligibilityFixtures.fixtureModel, String(repeating: "a", count: 64)),
+        ]
+        for testCase in cases {
+            XCTAssertFalse(testCase.runtime.isSettlementReceiptEligible, testCase.label)
+            for stream in [false, true] {
+                let result = try await relayReceiptRoundTrip(
+                    runtime: testCase.runtime,
+                    model: testCase.model,
+                    expectedModelHash: testCase.hash,
+                    requestID: "req-\(testCase.label)-\(stream ? "stream" : "complete")",
+                    stream: stream
+                )
+                let context = "\(testCase.label) stream=\(stream)"
+                XCTAssertEqual(result.endFrame["status"] as? String, "complete", context)
+                XCTAssertNil(result.endFrame["receipt"], "non-eligible runtime MUST NOT sign a receipt: \(context)")
+                XCTAssertEqual(result.omittedReasons, ["runtime_not_settlement_eligible"], context)
+            }
+        }
+    }
+
+    // Issue #1695 regression: native MLX serving still signs relay settlement
+    // receipts on complete and stream; eligibility is not gated on admission.
+    func testNativeModelRuntimeStillSignsRelaySettlementReceipts() async throws {
+        let model = "mlx-community/Test-Model"
+        let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let runtime = ModelRuntime(
+            modelID: model,
+            modelHash: hash,
+            warmSwapEnabled: true,
+            loader: { _ in throw CancellationError() },
+            testCompletion: { _, _ in
+                CompletionResult(
+                    content: "answer",
+                    finishReason: "stop",
+                    promptTokens: 5,
+                    completionTokens: 2,
+                    settlementDisposition: .eligibleOwner
+                )
+            }
+        )
+        XCTAssertTrue(runtime.isSettlementReceiptEligible)
+        for stream in [false, true] {
+            let result = try await relayReceiptRoundTrip(
+                runtime: runtime,
+                model: model,
+                expectedModelHash: hash,
+                requestID: "req-native-\(stream ? "stream" : "complete")",
+                stream: stream
+            )
+            XCTAssertEqual(result.endFrame["status"] as? String, "complete", "stream=\(stream)")
+            let receipt = try XCTUnwrap(result.endFrame["receipt"] as? String, "stream=\(stream)")
+            let tupleBytes = try XCTUnwrap(Data(base64Encoded: String(receipt.split(separator: ".")[0])))
+            let tuple = try XCTUnwrap(JSONSerialization.jsonObject(with: tupleBytes) as? [String: Any])
+            XCTAssertEqual(tuple["receipt_version"] as? String, "4", "stream=\(stream)")
+            XCTAssertEqual(tuple["model_hash"] as? String, hash, "stream=\(stream)")
+            XCTAssertEqual(result.omittedReasons, [], "stream=\(stream)")
+        }
+    }
+
+    private func relayReceiptRoundTrip(
+        runtime: any ModelRuntimeServing,
+        model: String,
+        expectedModelHash: String,
+        requestID: String,
+        stream: Bool
+    ) async throws -> (endFrame: [String: Any], omittedReasons: [String]) {
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let providerID = "provider-relay-test"
+        let recorder = FrameRecorder()
+        let audit = ReceiptEligibilityAuditRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: ProviderStatus(
+                modelID: model,
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            ),
+            loadedModelID: model,
+            warmSwapEnabled: true,
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            receiptBuilder: ReceiptBuilder(keyStore: FixedRelayReceiptKeyStore(key: key)),
+            receiptProviderID: providerID,
+            sendFrame: { frame in
+                await recorder.append(frame)
+            }
+        )
+        let body = try JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "stream": stream,
+            "messages": [["role": "user", "content": "hello"]],
+        ] as [String: Any])
+        let settlement = ReceiptEligibilityFixtures.settlementMetadataWire(
+            requestID: requestID,
+            providerID: providerID,
+            modelID: model,
+            receiptKeyID: ReceiptEligibilityFixtures.receiptKeyID(key.publicKey.rawRepresentation),
+            expectedModelHash: expectedModelHash
+        )
+        let frames = try await ReceiptAudit.withSink({ record in audit.append(record) }) {
+            try await relay.handleInferenceRequest([
+                "type": "inference_request",
+                "request_id": requestID,
+                "stream": stream,
+                "body": String(decoding: body, as: UTF8.self),
+                "settlement": settlement,
+            ])
+            return try await waitForFrames { frames in
+                frames.contains { $0["type"] as? String == "inference_response_end" }
+            } from: {
+                await recorder.frames
+            }
+        }
+        let endFrame = try XCTUnwrap(frames.last { $0["type"] as? String == "inference_response_end" }, "\(frames)")
+        return (endFrame, ReceiptEligibilityFixtures.omittedReasons(audit.records))
+    }
 }
 
 /// SPEC-015 §M.2.2 — atomic served-snapshot override so the relay
@@ -1083,6 +1208,7 @@ private actor FakeReceiptCompletionRuntime: ModelRuntimeServing {
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
+    nonisolated var isSettlementReceiptEligible: Bool { true }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func currentSnapshot() async -> RuntimeSnapshot {
@@ -1093,14 +1219,14 @@ private actor FakeReceiptCompletionRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool
     ) async throws -> CompletionResult {
-        CompletionResult(content: "answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
+        CompletionResult(content: "answer", finishReason: "stop", promptTokens: 5, completionTokens: 2, settlementDisposition: .eligibleOwner)
     }
 
     func completeWithServedSnapshot(
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool
     ) async throws -> (CompletionResult, RuntimeSnapshot) {
-        let result = CompletionResult(content: "answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
+        let result = CompletionResult(content: "answer", finishReason: "stop", promptTokens: 5, completionTokens: 2, settlementDisposition: .eligibleOwner)
         return (result, servedSnapshot)
     }
 
@@ -1116,7 +1242,7 @@ private actor FakeReceiptCompletionRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool,
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
-        CompletionResult(content: "answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
+        CompletionResult(content: "answer", finishReason: "stop", promptTokens: 5, completionTokens: 2, settlementDisposition: .eligibleOwner)
     }
 
     func unregisterInFlight(_ id: Int) { }
@@ -1133,6 +1259,7 @@ private actor FakeCancelAfterCompletionReceiptRuntime: ModelRuntimeServing {
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
+    nonisolated var isSettlementReceiptEligible: Bool { true }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func currentSnapshot() async -> RuntimeSnapshot {
@@ -1146,7 +1273,7 @@ private actor FakeCancelAfterCompletionReceiptRuntime: ModelRuntimeServing {
         while !shouldCancel() {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
-        return CompletionResult(content: "answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
+        return CompletionResult(content: "answer", finishReason: "stop", promptTokens: 5, completionTokens: 2, settlementDisposition: .eligibleOwner)
     }
 
     func completeWithServedSnapshot(
@@ -1240,12 +1367,13 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
+    nonisolated var isSettlementReceiptEligible: Bool { true }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func complete(
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool
     ) async throws -> CompletionResult {
-        CompletionResult(content: "", finishReason: "stop", promptTokens: 7, completionTokens: 0)
+        CompletionResult(content: "", finishReason: "stop", promptTokens: 7, completionTokens: 0, settlementDisposition: .eligibleOwner)
     }
 
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
@@ -1270,7 +1398,7 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
         while !shouldCancel() {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
-        return CompletionResult(content: "onetwo", finishReason: "stop", promptTokens: 7, completionTokens: 2)
+        return CompletionResult(content: "onetwo", finishReason: "stop", promptTokens: 7, completionTokens: 2, settlementDisposition: .eligibleOwner)
     }
 
     func unregisterInFlight(_ id: Int) { }
@@ -1281,6 +1409,7 @@ private actor FakePreflightRejectRuntime: ModelRuntimeServing {
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
+    nonisolated var isSettlementReceiptEligible: Bool { true }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func currentSnapshot() async -> RuntimeSnapshot {
         RuntimeSnapshot(state: .ready, container: nil, modelID: "mlx-community/Test-Model", modelHash: nil)
@@ -1334,6 +1463,7 @@ private actor FakeCompletionRuntime: ModelRuntimeServing {
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
+    nonisolated var isSettlementReceiptEligible: Bool { true }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func observedConversationKeys() -> [String?] {
@@ -1345,7 +1475,7 @@ private actor FakeCompletionRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool
     ) async throws -> CompletionResult {
         conversationKeys.append(request.conversationKey)
-        return CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
+        return CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2, settlementDisposition: .eligibleOwner)
     }
 
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
@@ -1366,7 +1496,7 @@ private actor FakeCompletionRuntime: ModelRuntimeServing {
     ) async throws -> CompletionResult {
         conversationKeys.append(request.conversationKey)
         onChunk(.content("encrypted answer"))
-        return CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
+        return CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2, settlementDisposition: .eligibleOwner)
     }
 
     func unregisterInFlight(_ id: Int) { }

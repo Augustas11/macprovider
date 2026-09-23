@@ -1,7 +1,23 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.7 (2026-09-10, SPEC-041 relay-blind exclusion clarification; LOCKED v0.4 tuple unchanged)
+**Version:** 0.4.8 (2026-09-23, issue #1695 explicit provider receipt eligibility; LOCKED v0.4 tuple unchanged)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 candidate `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.3 (settlement/accounting semantics; v0.4+ chargeability successor expected for terminal-state rows), SPEC-006 v0.9, SPEC-008 v0.3 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.5, SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3, SPEC-022 v0.1.4 (hard — settlement-capable receipt profile consumer)
+
+**Change log v0.4.8 (2026-09-23, issue #1695 — explicit provider receipt eligibility):**
+- A provider runtime MUST declare explicitly whether it may sign receipts, and
+  each completion MUST carry an explicit settlement disposition. A runtime
+  that declares itself not settlement eligible (e.g. the SPEC-046
+  `ollama_loopback` runtime, test fixtures) MUST NOT sign any receipt:
+  success, streaming trailer, or null-usage error. This holds whatever
+  settlement metadata the coordinator attaches (§6.4 case 7).
+- `receipt_omitted` gains `runtime_not_settlement_eligible`. This version
+  also records the reasons the provider already emitted but the spec never
+  listed: `construction_failed`, `write_failed`, `non_settling_replay` (§11).
+- Native catalog MLX serving is unchanged. Its receipt eligibility MUST NOT
+  be gated on SPEC-047 admission rows.
+- This is a provider-side accident guard, not a trust boundary. A modified
+  provider can self-declare eligibility; the coordinator settlement gate stays
+  the control. No receipt tuple, wire, or verifier behavior change.
 
 **Change log v0.4.7 (SPEC-041 composition):** The locked v0.4 receipt tuple is unchanged. A relay-blind pilot request MUST NOT attach v0.4 positive-settlement metadata, fabricate plaintext prompt/output snapshots or hashes from ciphertext/envelope digests, or reuse a receipt key as the relay-blind signing identity. Provider validation/terminal evidence defined by SPEC-041 is execution evidence, not a SPEC-015 receipt.
 
@@ -1606,6 +1622,13 @@ For non-streaming responses, the receipt MUST be omitted (no
    NOT emit a receipt.
 5. The request was streaming. v0.1.x emits no receipts for streaming
    responses (§6.3).
+6. (v0.4.8) The completion is not the settlement owner of its generation (for
+   example a continuous-batching replay waiter). Audit reason:
+   `non_settling_replay`.
+7. (v0.4.8, #1695) The serving runtime does not declare itself settlement
+   eligible. This applies to success, streaming, and null-usage error
+   responses, and whatever settlement metadata the request carries. Audit
+   reason: `runtime_not_settlement_eligible`.
 
 When a receipt is omitted, the provider MUST NOT emit a placeholder,
 empty value, or `X-MacProvider-Receipt: omitted` sentinel. Header
@@ -4373,7 +4396,16 @@ absorption; tracked locally for now):
 - `receipt_omitted`: emitted by the provider/coordinator/gateway when
   a receipt is suppressed per §6.4. Fields: `provider_id`,
   `request_id`, `reason` (`pre_v1_6_binary` | `no_keypair` |
-  `model_swap_violation` | `pre_token_cancel` | `streaming_request`).
+  `model_swap_violation` | `pre_token_cancel` | `streaming_request` |
+  `construction_failed` | `write_failed` | `non_settling_replay` |
+  `runtime_not_settlement_eligible`).
+  **v0.4.8 update (#1695):** the provider emits `construction_failed` when
+  receipt construction or settlement-metadata binding fails. It emits
+  `write_failed` when the response carrying the receipt was not delivered.
+  It emits `non_settling_replay` when the completion is not its generation's
+  settlement owner (§6.4 case 6). It emits `runtime_not_settlement_eligible`
+  when the serving runtime does not declare settlement eligibility (§6.4
+  case 7).
   **v0.3 update:** the `model_swap_violation` reason is PROMOTED from
   v0.1/v0.2 placeholder to defined semantics per §M.2.2: the
   provider's runtime was in `loading` or `draining` state at

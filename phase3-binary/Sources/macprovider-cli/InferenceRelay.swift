@@ -690,6 +690,7 @@ actor InferenceRelay {
                     requestID: requestID,
                     modelHashSource: modelHashSource,
                     settlementMetadata: settlementMetadata,
+                    runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
                     terminalState: "buyer_cancel",
                     terminalStateTSUnixMS: terminalStateTSUnixMS
                 )
@@ -733,6 +734,7 @@ actor InferenceRelay {
             requestID: requestID,
             modelHashSource: modelHashSource,
             settlementMetadata: settlementMetadata,
+            runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
             terminalStateTSUnixMS: terminalStateTSUnixMS
         )
         if state.markTerminalSent() {
@@ -769,10 +771,17 @@ actor InferenceRelay {
         requestID: String,
         modelHashSource: ReceiptModelHashSource,
         settlementMetadata: SettlementReceiptMetadata? = nil,
+        runtimeSettlementEligible: Bool,
         terminalState: String = "normal_done",
         terminalStateTSUnixMS: Int64? = nil
     ) -> String? {
         guard let receiptBuilder, let providerID, !providerID.isEmpty else {
+            return nil
+        }
+        // #1695: eligibility is explicit. A runtime that is not settlement
+        // eligible (loopback, fixture) never signs, whatever its completions say.
+        guard runtimeSettlementEligible else {
+            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .runtimeNotSettlementEligible)
             return nil
         }
         guard completion.settlementDisposition == .eligibleOwner else {
@@ -1014,6 +1023,7 @@ actor InferenceRelay {
                         requestID: requestID,
                         modelHashSource: modelHashSource,
                         settlementMetadata: settlementMetadata,
+                        runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
                         terminalState: "buyer_cancel",
                         terminalStateTSUnixMS: terminalStateTSUnixMS
                     )
@@ -1101,6 +1111,7 @@ actor InferenceRelay {
                     requestID: requestID,
                     modelHashSource: modelHashSource,
                     settlementMetadata: settlementMetadata,
+                    runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
                     terminalStateTSUnixMS: terminalStateTSUnixMS
                 )
                 if let receiptHeader {

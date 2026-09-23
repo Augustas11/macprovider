@@ -54,7 +54,8 @@ final class HTTPServerReceiptTests: XCTestCase {
                 finishReason: "stop",
                 promptTokens: 1,
                 completionTokens: 2,
-                ttftMilliseconds: 7
+                ttftMilliseconds: 7,
+                settlementDisposition: .eligibleOwner
             )
         )
 
@@ -90,7 +91,8 @@ final class HTTPServerReceiptTests: XCTestCase {
                         functionName: "lookup",
                         arguments: #"{"query":"weather"}"#
                     ),
-                ]
+                ],
+                settlementDisposition: .eligibleOwner
             )
         )
 
@@ -132,7 +134,8 @@ final class HTTPServerReceiptTests: XCTestCase {
                 finishReason: "stop",
                 promptTokens: 8,
                 completionTokens: 3,
-                ttftMilliseconds: 7
+                ttftMilliseconds: 7,
+                settlementDisposition: .eligibleOwner
             ),
             warmSwapEnabled: false,
             modelHash: modelHash
@@ -175,7 +178,8 @@ final class HTTPServerReceiptTests: XCTestCase {
                 finishReason: "stop",
                 promptTokens: 8,
                 completionTokens: 3,
-                ttftMilliseconds: 7
+                ttftMilliseconds: 7,
+                settlementDisposition: .eligibleOwner
             ),
             warmSwapEnabled: false,
             modelHash: modelHash,
@@ -219,7 +223,8 @@ final class HTTPServerReceiptTests: XCTestCase {
                 finishReason: "stop",
                 promptTokens: 8,
                 completionTokens: 3,
-                ttftMilliseconds: 7
+                ttftMilliseconds: 7,
+                settlementDisposition: .eligibleOwner
             ),
             warmSwapEnabled: false,
             modelHash: servedModelHash
@@ -255,7 +260,8 @@ final class HTTPServerReceiptTests: XCTestCase {
                     finishReason: "stop",
                     promptTokens: 8,
                     completionTokens: 3,
-                    ttftMilliseconds: 7
+                    ttftMilliseconds: 7,
+                    settlementDisposition: .eligibleOwner
                 ),
                 warmSwapEnabled: false,
                 modelHash: nil
@@ -296,6 +302,8 @@ final class HTTPServerReceiptTests: XCTestCase {
             modelHashSource: .captured("not-a-valid-sha256"),
             requestID: "req-http-receipt",
             settlementMetadata: metadata,
+            runtimeSettlementEligible: true,
+            settlementDisposition: .eligibleOwner,
             terminalStateTSUnixMS: 1_800_000_000_000
         )) { error in
             XCTAssertEqual("\(error)", "settlementFieldMismatch(\"model_hash\")")
@@ -309,7 +317,7 @@ final class HTTPServerReceiptTests: XCTestCase {
                 "messages": [["role": "user", "content": "hello"]],
             ],
             receiptBuilder: ReceiptBuilder(keyStore: HTTPEmptyReceiptKeyStore()),
-            completion: CompletionResult(content: "answer", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            completion: CompletionResult(content: "answer", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
         )
 
         XCTAssertEqual(response.status, .ok, response.body)
@@ -377,7 +385,8 @@ final class HTTPServerReceiptTests: XCTestCase {
                 finishReason: "tool_calls",
                 promptTokens: 10,
                 completionTokens: 4,
-                toolCalls: [ToolCall(id: "call_0123456789abcdef", functionName: "get_weather", arguments: #"{"city":"Vilnius"}"#)]
+                toolCalls: [ToolCall(id: "call_0123456789abcdef", functionName: "get_weather", arguments: #"{"city":"Vilnius"}"#)],
+                settlementDisposition: .eligibleOwner
             )
         )
 
@@ -417,7 +426,7 @@ final class HTTPServerReceiptTests: XCTestCase {
                 "tool_choice": "none",
             ],
             receiptBuilder: nil,
-            completion: CompletionResult(content: "should-not-run", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            completion: CompletionResult(content: "should-not-run", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
         )
 
         XCTAssertEqual(response.status, .badRequest, response.body)
@@ -452,7 +461,7 @@ final class HTTPServerReceiptTests: XCTestCase {
             ],
             routerModelID: modelID,
             receiptBuilder: nil,
-            completion: CompletionResult(content: "It is 21 C.", finishReason: "stop", promptTokens: 1, completionTokens: 1),
+            completion: CompletionResult(content: "It is 21 C.", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner),
             loadedModelID: modelID
         )
 
@@ -493,7 +502,7 @@ final class HTTPServerReceiptTests: XCTestCase {
             ],
             routerModelID: nil,
             receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
-            completion: CompletionResult(content: "answer", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            completion: CompletionResult(content: "answer", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
         )
         let header = try XCTUnwrap(response.headers.first(name: RouterHandler.receiptHeaderName))
         let parsed = try parseReceiptHeader(header)
@@ -518,7 +527,7 @@ final class HTTPServerReceiptTests: XCTestCase {
                 "stream": true,
             ],
             receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
-            completion: CompletionResult(content: "chunk", finishReason: "stop", promptTokens: 1, completionTokens: 1),
+            completion: CompletionResult(content: "chunk", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner),
             modelHash: hash,
             readStreamingBody: true
         )
@@ -555,7 +564,8 @@ final class HTTPServerReceiptTests: XCTestCase {
                 finishReason: "tool_calls",
                 promptTokens: 10,
                 completionTokens: 4,
-                toolCalls: [ToolCall(id: "call_0123456789abcdef", functionName: "get_weather", arguments: #"{"city":"Vilnius"}"#)]
+                toolCalls: [ToolCall(id: "call_0123456789abcdef", functionName: "get_weather", arguments: #"{"city":"Vilnius"}"#)],
+                settlementDisposition: .eligibleOwner
             ),
             readStreamingBody: true
         )
@@ -583,7 +593,7 @@ final class HTTPServerReceiptTests: XCTestCase {
                 ],
                 requestID: "req-issued",
                 receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
-                completion: CompletionResult(content: "answer", finishReason: "stop", promptTokens: 1, completionTokens: 2, ttftMilliseconds: 7)
+                completion: CompletionResult(content: "answer", finishReason: "stop", promptTokens: 1, completionTokens: 2, ttftMilliseconds: 7, settlementDisposition: .eligibleOwner)
             )
         }
         let event = try capture.singleEvent()
@@ -613,7 +623,7 @@ final class HTTPServerReceiptTests: XCTestCase {
                 ],
                 requestID: "req-streaming",
                 receiptBuilder: nil,
-                completion: CompletionResult(content: "chunk", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                completion: CompletionResult(content: "chunk", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             )
         }
         let event = try capture.singleEvent()
@@ -634,7 +644,7 @@ final class HTTPServerReceiptTests: XCTestCase {
                 ],
                 requestID: "req-no-key",
                 receiptBuilder: ReceiptBuilder(keyStore: HTTPEmptyReceiptKeyStore()),
-                completion: CompletionResult(content: "answer", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+                completion: CompletionResult(content: "answer", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner)
             )
         }
         let event = try capture.singleEvent()
@@ -727,7 +737,9 @@ final class HTTPServerReceiptTests: XCTestCase {
             ttftMs: 12,
             tokensOut: 2,
             unixTsSeconds: 1_800_000_000,
-            modelHashSource: .warmSwapDisabled
+            modelHashSource: .warmSwapDisabled,
+            runtimeSettlementEligible: true,
+            settlementDisposition: .eligibleOwner
         ))
         let parsed = try parseReceiptHeader(header)
 
@@ -770,7 +782,9 @@ final class HTTPServerReceiptTests: XCTestCase {
             ttftMs: 1,
             tokensOut: 1,
             unixTsSeconds: 1,
-            modelHashSource: .warmSwapDisabled
+            modelHashSource: .warmSwapDisabled,
+            runtimeSettlementEligible: true,
+            settlementDisposition: .eligibleOwner
         )
 
         XCTAssertNil(header)
@@ -828,7 +842,8 @@ final class HTTPServerReceiptTests: XCTestCase {
             request: request,
             error: error,
             startedAt: Date(timeIntervalSince1970: 1_800_000_000),
-            modelHashSource: .warmSwapDisabled
+            modelHashSource: .warmSwapDisabled,
+            runtimeSettlementEligible: true
         ))
         let parsed = try parseReceiptHeader(header)
 
@@ -865,7 +880,8 @@ final class HTTPServerReceiptTests: XCTestCase {
             request: request,
             error: error,
             startedAt: Date(),
-            modelHashSource: .warmSwapDisabled
+            modelHashSource: .warmSwapDisabled,
+            runtimeSettlementEligible: true
         )
 
         XCTAssertNil(header)
@@ -894,7 +910,9 @@ final class HTTPServerReceiptTests: XCTestCase {
             ttftMs: 1,
             tokensOut: 1,
             unixTsSeconds: 1,
-            modelHashSource: .warmSwapDisabled
+            modelHashSource: .warmSwapDisabled,
+            runtimeSettlementEligible: true,
+            settlementDisposition: .eligibleOwner
         ))
 
         XCTAssertLessThanOrEqual(header.utf8.count, RouterHandler.maxReceiptHeaderBytes)
@@ -945,7 +963,8 @@ final class HTTPServerReceiptTests: XCTestCase {
                 finishReason: "stop",
                 promptTokens: 1,
                 completionTokens: 2,
-                ttftMilliseconds: 5
+                ttftMilliseconds: 5,
+                settlementDisposition: .eligibleOwner
             ),
             warmSwapEnabled: true,
             modelHash: hash
@@ -997,7 +1016,7 @@ final class HTTPServerReceiptTests: XCTestCase {
                 ],
                 requestID: "req-ambiguous",
                 receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
-                completion: CompletionResult(content: "answer", finishReason: "stop", promptTokens: 1, completionTokens: 1),
+                completion: CompletionResult(content: "answer", finishReason: "stop", promptTokens: 1, completionTokens: 1, settlementDisposition: .eligibleOwner),
                 warmSwapEnabled: true,
                 modelHash: nil  // warm-swap on + no hash → .ambiguous
             )
@@ -1040,7 +1059,9 @@ final class HTTPServerReceiptTests: XCTestCase {
             ttftMs: 5,
             tokensOut: 1,
             unixTsSeconds: 1,
-            modelHashSource: source
+            modelHashSource: source,
+            runtimeSettlementEligible: true,
+            settlementDisposition: .eligibleOwner
         )
         XCTAssertNil(header, "§M.2.2: ambiguous provenance MUST refuse the receipt")
     }
@@ -1067,10 +1088,71 @@ final class HTTPServerReceiptTests: XCTestCase {
             ttftMs: 5,
             tokensOut: 1,
             unixTsSeconds: 1,
-            modelHashSource: source
+            modelHashSource: source,
+            runtimeSettlementEligible: true,
+            settlementDisposition: .eligibleOwner
         ))
         let parsed = try parseReceiptHeader(header)
         XCTAssertEqual(parsed.tuple["model_hash"] as? String, hash)
+    }
+
+    // Issue #1695: loopback and fixture runtimes never sign a local-HTTP
+    // receipt (header or streaming trailer), even with a receipt key, a
+    // provider id and v0.4 settlement metadata that match the request.
+    func testNonSettlementEligibleRuntimesNeverSignHTTPReceipts() async throws {
+        let loopback = try ReceiptEligibilityFixtures.makeOllamaLoopbackRuntime(testCase: self)
+        let cases: [(label: String, runtime: any ModelRuntimeServing, model: String, hash: String)] = [
+            ("ollama_loopback", loopback.runtime, ReceiptEligibilityFixtures.ollamaServedRef, loopback.digest),
+            ("relay_blind_fixture", ReceiptEligibilityFixtures.makeRelayBlindFixtureRuntime(),
+             ReceiptEligibilityFixtures.fixtureModel, String(repeating: "a", count: 64)),
+        ]
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        for testCase in cases {
+            XCTAssertFalse(testCase.runtime.isSettlementReceiptEligible, testCase.label)
+            for stream in [false, true] {
+                let context = "\(testCase.label) stream=\(stream)"
+                let audit = ReceiptEligibilityAuditRecorder()
+                let response = try await ReceiptAudit.withSink({ record in audit.append(record) }) {
+                    try await eligibilityHTTPRoundTrip(
+                        runtime: testCase.runtime,
+                        model: testCase.model,
+                        expectedModelHash: testCase.hash,
+                        key: key,
+                        stream: stream
+                    )
+                }
+                XCTAssertEqual(response.status, .ok, "\(context): \(response.body)")
+                XCTAssertNil(response.headers.first(name: RouterHandler.receiptHeaderName), context)
+                XCTAssertNil(httpTrailerValue(named: RouterHandler.receiptHeaderName, in: response.body), context)
+                XCTAssertEqual(
+                    ReceiptEligibilityFixtures.omittedReasons(audit.records),
+                    ["runtime_not_settlement_eligible"],
+                    context
+                )
+            }
+        }
+    }
+
+    // Issue #1695: the zero-token model_not_loaded error receipt is gated on
+    // the runtime too; a loopback whose GGUF identity drifted signs nothing.
+    func testLoopbackModelNotLoadedErrorGetsNoHTTPReceipt() async throws {
+        let loopback = try ReceiptEligibilityFixtures.makeOllamaLoopbackRuntime(testCase: self)
+        try (Data("GGUF".utf8) + Data(repeating: 0xcd, count: 8192)).write(to: loopback.blobURL)
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let audit = ReceiptEligibilityAuditRecorder()
+        let response = try await ReceiptAudit.withSink({ record in audit.append(record) }) {
+            try await eligibilityHTTPRoundTrip(
+                runtime: loopback.runtime,
+                model: ReceiptEligibilityFixtures.ollamaServedRef,
+                expectedModelHash: loopback.digest,
+                key: key,
+                stream: false
+            )
+        }
+        XCTAssertEqual(response.status, .serviceUnavailable, response.body)
+        XCTAssertTrue(response.body.contains(#""code":"model_not_loaded""#), response.body)
+        XCTAssertNil(response.headers.first(name: RouterHandler.receiptHeaderName))
+        XCTAssertEqual(ReceiptEligibilityFixtures.omittedReasons(audit.records), ["runtime_not_settlement_eligible"])
     }
 }
 
@@ -1147,7 +1229,8 @@ private func roundTripChatCompletion(
                 content: "answer",
                 finishReason: "stop",
                 promptTokens: 1,
-                completionTokens: 1
+                completionTokens: 1,
+                settlementDisposition: .eligibleOwner
             )
         }
     )
@@ -1176,8 +1259,55 @@ private func roundTripChatCompletion(
     }
 }
 
+private func eligibilityHTTPRoundTrip(
+    runtime: any ModelRuntimeServing,
+    model: String,
+    expectedModelHash: String,
+    key: Curve25519.Signing.PrivateKey,
+    stream: Bool
+) async throws -> HTTPReceiptResponse {
+    let requestID = "req-http-receipt"
+    var metadata = ReceiptEligibilityFixtures.settlementMetadataWire(
+        requestID: requestID,
+        providerID: "provider-a",
+        modelID: model,
+        receiptKeyID: ReceiptEligibilityFixtures.receiptKeyID(key.publicKey.rawRepresentation),
+        expectedModelHash: expectedModelHash
+    )
+    metadata["output_prefix_start_byte"] = 5
+    let metadataHeader = try JSONSerialization.data(withJSONObject: metadata, options: [.withoutEscapingSlashes])
+        .base64URLUnpadded()
+    var body: [String: Any] = [
+        "model": model,
+        "messages": [["role": "user", "content": "hello"]],
+    ]
+    if stream {
+        body["stream"] = true
+    }
+    return try await withReceiptHTTPServer(
+        runtime: runtime,
+        providerStatus: ProviderStatus(
+            modelID: model,
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        ),
+        providerID: "provider-a",
+        routerModelID: model,
+        receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+        warmSwapEnabled: true
+    ) { port in
+        try rawChatCompletionRoundTrip(
+            port: port,
+            body: body,
+            headerOnly: false,
+            requestID: requestID,
+            requestHeaders: [(RouterHandler.settlementMetadataHeaderName, metadataHeader)]
+        )
+    }
+}
+
 private func withReceiptHTTPServer<T>(
-    runtime: ModelRuntime,
+    runtime: any ModelRuntimeServing,
     providerStatus: ProviderStatus,
     providerID: String?,
     routerModelID: String? = "fixture-model",

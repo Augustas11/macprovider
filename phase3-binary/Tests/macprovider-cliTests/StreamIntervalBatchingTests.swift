@@ -233,13 +233,14 @@ private actor CountingTokenRuntime: ModelRuntimeServing {
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
+    nonisolated var isSettlementReceiptEligible: Bool { true }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func complete(
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool
     ) async throws -> CompletionResult {
-        CompletionResult(content: "", finishReason: "stop", promptTokens: 1, completionTokens: tokenCount)
+        CompletionResult(content: "", finishReason: "stop", promptTokens: 1, completionTokens: tokenCount, settlementDisposition: .eligibleOwner)
     }
 
     func completeWithServedSnapshot(
@@ -271,7 +272,7 @@ private actor CountingTokenRuntime: ModelRuntimeServing {
             onChunk(.content("t\(i)"))
         }
         return CompletionResult(content: (0..<tokenCount).map { "t\($0)" }.joined(),
-                                finishReason: "stop", promptTokens: 1, completionTokens: tokenCount)
+                                finishReason: "stop", promptTokens: 1, completionTokens: tokenCount, settlementDisposition: .eligibleOwner)
     }
 
     func unregisterInFlight(_ id: Int) { }
@@ -284,9 +285,10 @@ private actor NullRuntime: ModelRuntimeServing {
     var loadedModelHashAlgorithm: String? { nil }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
+    nonisolated var isSettlementReceiptEligible: Bool { true }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult {
-        CompletionResult(content: "", finishReason: "stop", promptTokens: 0, completionTokens: 0)
+        CompletionResult(content: "", finishReason: "stop", promptTokens: 0, completionTokens: 0, settlementDisposition: .eligibleOwner)
     }
     func completeWithServedSnapshot(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> (CompletionResult, RuntimeSnapshot) {
         let r = try await complete(request, shouldCancel: shouldCancel)
@@ -297,7 +299,7 @@ private actor NullRuntime: ModelRuntimeServing {
     }
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws { }
     func stream(_ request: ChatCompletionRequest, with handle: RequestHandle, shouldCancel: @escaping @Sendable () -> Bool, onChunk: @escaping @Sendable (StreamChunk) -> Void) async throws -> CompletionResult {
-        CompletionResult(content: "", finishReason: "stop", promptTokens: 0, completionTokens: 0)
+        CompletionResult(content: "", finishReason: "stop", promptTokens: 0, completionTokens: 0, settlementDisposition: .eligibleOwner)
     }
     func unregisterInFlight(_ id: Int) { }
 }
