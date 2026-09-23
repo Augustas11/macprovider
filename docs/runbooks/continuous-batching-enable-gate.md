@@ -5,6 +5,19 @@ implementation merge. Do not enable `continuous_batching: canary` or
 `continuous_batching: on` for buyer traffic from CI, a worktree build, a unit
 test pass, or a local `swift build`.
 
+> **Stop — 2026-09-24.** Signed 176, candidate 181 and `main` @ `57022da8`
+> (the binaries tested; earlier canary binaries are unverified) produce wrong
+> output on the batched path: compiled
+> decode replays a frozen KV offset (greedy rows loop on the prompt and die at
+> exactly 256 generated tokens), and batched rows ignore the model's end of
+> turn (serial vs batched A/B on the Studio). Do not set `continuous_batching: canary` or `on` on any
+> paged-KV-eligible tuple until a binary containing the fix on
+> `campaign/ac25-m2-api-lifecycle` ships. Live 181 is unaffected only because
+> `qwen/qwen3.6-27b` is not paged-KV eligible; switching the Studio back to
+> Qwen3-Coder with canary on would re-expose buyers. The MSB-02/03/04
+> throughput wins and the "temp-0 index-9 tolerance" decision were measured on
+> the broken path and are invalid. Evidence: #1646.
+
 This runbook is the operator gate for enabling one exact
 hardware/model/quantization/KV/runtime tuple. It is intentionally narrower than
 a release checklist: it proves whether the already-packaged provider runtime may
