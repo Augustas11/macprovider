@@ -351,7 +351,7 @@ grep -q '^VERDICT=regression$' "$TMP/out" || fail "override must still report th
 [ "$(current_target)" = "releases/$INCOMING_DIR" ] || fail "override must activate the incoming release"
 log="$VAR/catalog-window-overrides.jsonl"
 [ -f "$log" ] || fail "override must append to catalog-window-overrides.jsonl"
-[ "$(stat -f %Lp "$log" 2>/dev/null || stat -c %a "$log")" = "600" ] || fail "override log must be 0600"
+[ "$(stat -c %a "$log" 2>/dev/null || stat -f %Lp "$log")" = "600" ] || fail "override log must be 0600"
 python3 - "$log" "$reason" "$INCOMING_DIR" <<'PY' || fail "override record is wrong"
 import json, sys
 lines = open(sys.argv[1]).read().splitlines()

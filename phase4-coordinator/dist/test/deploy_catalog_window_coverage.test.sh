@@ -301,7 +301,7 @@ run_slice descends "$(printf '%s' "$reason" | base64 | tr -d '\n')" || { cat "$T
 grep -qF 'WINDOW COVERAGE OVERRIDE' "$TMP/out" || fail "override must be announced"
 [ "$(current_target)" = "releases/$INCOMING_DIR" ] || fail "override must activate"
 log="$VAR/catalog-window-overrides.jsonl"
-[ "$(stat -f %Lp "$log" 2>/dev/null || stat -c %a "$log")" = "600" ] || fail "override log must be 0600"
+[ "$(stat -c %a "$log" 2>/dev/null || stat -f %Lp "$log")" = "600" ] || fail "override log must be 0600"
 python3 - "$log" "$reason" "$INCOMING_DIR" "$(sha_of p3)" <<'PY' || fail "override record is wrong"
 import json, sys
 lines = open(sys.argv[1]).read().splitlines()
