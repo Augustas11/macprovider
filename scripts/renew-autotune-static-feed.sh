@@ -308,6 +308,20 @@ if ! SSH "mkdir '$REMOTE_AUTOTUNE_DIR/.renew.lock'" 2>/dev/null; then
 fi
 LOCK_HELD=1
 
+# #1693 L0 one-writer rule: a renewal swaps `current` and SIGHUPs, so it must
+# not run while a pricing transaction journal exists (the journal records the
+# `current` target and window it will restore). The lane holds the Pearl lock
+# set for the whole transaction, so aa_publish's flock -n also refuses while
+# a lane is live; this check covers an abandoned journal.
+PRICING_TXN="${REMOTE_AUTOTUNE_DIR%/*}/.pricing-txn"
+pricing_txn_state="$(SSH "if test -e '$PRICING_TXN' || test -L '$PRICING_TXN'; then echo present; else echo absent; fi")" \
+  || fatal "cannot check for a pricing transaction journal at $PRICING_TXN"
+case "$pricing_txn_state" in
+  absent) ;;
+  present) fatal "refusing: pricing transaction journal present at $PRICING_TXN; run scripts/catalog-content-release.sh --recover-pricing-txn" ;;
+  *) fatal "unexpected pricing transaction journal state: $pricing_txn_state" ;;
+esac
+
 aa_read_live_targets
 log "current live release: $CURRENT_TARGET (prior previous-target: ${ORIG_PREVIOUS_TARGET:-<none>})"
 

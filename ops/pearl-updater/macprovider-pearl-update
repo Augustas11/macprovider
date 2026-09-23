@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -44,6 +45,8 @@ PINNED_REPOSITORY = "Augustas11/macprovider"
 PINNED_PUBLIC_KEY = Path("/usr/local/share/macprovider/release-signing-public.pem")
 CATALOG_RELEASE_VERIFIER = Path("/usr/local/share/macprovider/scripts/catalog-release.py")
 AUTOTUNE_WINDOW_MODULE = Path("/usr/local/share/macprovider/scripts/autotune_window.py")
+# #1693 L0: the shared one-writer guard (scripts/lib/coordinator_config_guard.py).
+CONFIG_GUARD_MODULE = Path("/usr/local/share/macprovider/scripts/coordinator_config_guard.py")
 TIER2_COORDINATOR_CONFIG = Path("/opt/macprovider/coordinator.yaml")
 CATALOG_CANARY_PROOF = Path("/usr/local/share/macprovider/catalog-canary-proof.py")
 CONFIG_PATH = Path("/etc/macprovider/pearl-updater.conf")
@@ -200,6 +203,10 @@ class NoEligibleRelease(UpdateError):
 
 class LockBusy(UpdateError):
     pass
+
+
+class PricingTransactionRefused(UpdateError):
+    """A #1693 pricing transaction journal exists; the updater must not write config."""
 
 
 class CommandTimeout(UpdateError):
@@ -6350,6 +6357,42 @@ def test_path(default: Path, env_name: str, testing: bool) -> Path:
     return Path(override) if override else default
 
 
+@contextlib.contextmanager
+def coordinator_config_guard(
+    module_path: Path,
+    install_root: Path,
+    *,
+    trusted_uid: int,
+    trusted_gid: int | None,
+):
+    """#1693 L0: under the updater lock, take the deploy lock (lease order) and
+    refuse while a pricing transaction journal exists, for the whole run: every
+    mode may rewrite coordinator.yaml or the overlay (apply, and the reconcile
+    each mode starts with)."""
+    source = _read_trusted_text(module_path, "coordinator config guard", trusted_uid=trusted_uid)
+    guard = types.ModuleType("macprovider_coordinator_config_guard")
+    guard.__file__ = str(module_path)
+    exec(compile(source, str(module_path), "exec"), guard.__dict__)
+    lock_set = guard.LockSet(
+        install_root,
+        hold_updater=False,
+        required_uid=trusted_uid,
+        required_gid=trusted_gid,
+    )
+    try:
+        lock_set.__enter__()
+    except guard.PricingTransactionActive as exc:
+        raise PricingTransactionRefused(str(exc)) from exc
+    except guard.GuardLockBusy as exc:
+        raise LockBusy(str(exc)) from exc
+    except guard.GuardLockError as exc:
+        raise UpdateError(str(exc)) from exc
+    try:
+        yield
+    finally:
+        lock_set.release()
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -6429,7 +6472,12 @@ def main(argv: list[str]) -> int:
         isolate_candidate_network=not testing,
     )
     lock_uid = trusted_uid
-    with FileLock(updater.lock_path, required_uid=lock_uid), tempfile.TemporaryDirectory(prefix="macprovider-pearl-update-") as temporary:
+    with FileLock(updater.lock_path, required_uid=lock_uid), coordinator_config_guard(
+        test_path(CONFIG_GUARD_MODULE, "PEARL_UPDATER_TEST_CONFIG_GUARD", testing),
+        updater.install_root,
+        trusted_uid=lock_uid,
+        trusted_gid=None if testing else 0,
+    ), tempfile.TemporaryDirectory(prefix="macprovider-pearl-update-") as temporary:
         updater.validate_recovery_inputs(args.config)
         if _path_entry_exists(updater.tier2_enforcement_journal_path):
             updater._trusted_regular_file(
@@ -6537,7 +6585,7 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main(sys.argv[1:]))
-    except LockBusy as exc:
+    except (LockBusy, PricingTransactionRefused) as exc:
         print(f"macprovider-pearl-update: {exc}", file=sys.stderr)
         raise SystemExit(75)
     except UpdateError as exc:

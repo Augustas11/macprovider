@@ -24,6 +24,7 @@ from unittest import mock
 
 SCRIPT = Path(__file__).with_name("macprovider-pearl-update")
 REPO_ROOT = SCRIPT.parents[2]
+CONFIG_GUARD = REPO_ROOT / "scripts/lib/coordinator_config_guard.py"
 loader = importlib.machinery.SourceFileLoader("pearl_updater", str(SCRIPT))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 assert spec is not None
@@ -5552,6 +5553,7 @@ class PearlUpdaterTests(unittest.TestCase):
                 "PEARL_UPDATER_TEST_STATE_ROOT": str(state),
                 "PEARL_UPDATER_TEST_AUDIT_PATH": str(audit),
                 "PEARL_UPDATER_TEST_LOCK_PATH": str(lock),
+                "PEARL_UPDATER_TEST_CONFIG_GUARD": str(CONFIG_GUARD),
             },
             clear=False,
         ):
@@ -5591,6 +5593,7 @@ class PearlUpdaterTests(unittest.TestCase):
                 "PEARL_UPDATER_TEST_STATE_ROOT": str(state),
                 "PEARL_UPDATER_TEST_AUDIT_PATH": str(audit),
                 "PEARL_UPDATER_TEST_LOCK_PATH": str(lock),
+                "PEARL_UPDATER_TEST_CONFIG_GUARD": str(CONFIG_GUARD),
             },
             clear=False,
         ):
@@ -5599,6 +5602,91 @@ class PearlUpdaterTests(unittest.TestCase):
                 "Tier-2 enforcement transaction is active",
             ):
                 updater_module.main(["--reconcile", "--config", str(config)])
+
+    def _guarded_main_environment(self, name):
+        config = self.root / f"{name}-updater.conf"
+        config.write_text("PEARL_UPDATER_BUYER_CANARY_MODE=disabled\n")
+        config.chmod(0o600)
+        install = self.root / f"{name}-install"
+        state = self.root / f"{name}-state"
+        install.mkdir(mode=0o750)
+        state.mkdir(mode=0o700)
+        environment = {
+            "MACPROVIDER_UPDATER_TESTING": "1",
+            "PEARL_UPDATER_TEST_PUBLIC_KEY": str(self.public),
+            "PEARL_UPDATER_TEST_INSTALL_ROOT": str(install),
+            "PEARL_UPDATER_TEST_STATE_ROOT": str(state),
+            "PEARL_UPDATER_TEST_AUDIT_PATH": str(self.root / f"{name}-audit.jsonl"),
+            "PEARL_UPDATER_TEST_LOCK_PATH": str(self.root / f"{name}.lock"),
+            "PEARL_UPDATER_TEST_CONFIG_GUARD": str(CONFIG_GUARD),
+        }
+        return config, install, environment
+
+    def test_pricing_transaction_journal_blocks_every_updater_mode(self):
+        # #1693 L0: the updater rewrites coordinator.yaml (apply and the
+        # reconcile every mode starts with), so an abandoned pricing journal
+        # refuses it before any state is read or written.
+        config, install, environment = self._guarded_main_environment("pricing-txn")
+        (install / ".pricing-txn").mkdir(mode=0o700)
+        with mock.patch.dict(os.environ, environment, clear=False):
+            for argv in (["--reconcile"], ["--plan"]):
+                with self.subTest(argv=argv), mock.patch.object(
+                    updater_module.Updater, "reconcile"
+                ) as reconcile:
+                    with self.assertRaisesRegex(
+                        updater_module.PricingTransactionRefused,
+                        "pricing transaction journal present at .*/\\.pricing-txn; "
+                        "run scripts/catalog-content-release.sh --recover-pricing-txn",
+                    ):
+                        updater_module.main([*argv, "--config", str(config)])
+                    reconcile.assert_not_called()
+        self.assertTrue(issubclass(updater_module.PricingTransactionRefused, updater_module.UpdateError))
+
+    def test_pricing_transaction_refusal_exits_75(self):
+        config, install, environment = self._guarded_main_environment("pricing-exit")
+        (install / ".pricing-txn").mkdir(mode=0o700)
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--reconcile", "--config", str(config)],
+            env={**os.environ, **environment},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 75, result.stderr)
+        self.assertIn("refusing: pricing transaction journal present", result.stderr)
+
+    def test_updater_takes_deploy_lock_after_its_own_lock(self):
+        # Lease order: updater lock, then <install_root>/.coordinator-deploy.lock.
+        # A deploy/lane lease holding the deploy lock makes the updater busy (75).
+        import fcntl
+
+        config, install, environment = self._guarded_main_environment("deploy-lock")
+        deploy_lock = install / ".coordinator-deploy.lock"
+        descriptor = os.open(deploy_lock, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+                updater_module.Updater, "reconcile"
+            ) as reconcile:
+                with self.assertRaisesRegex(updater_module.LockBusy, "coordinator config lock held"):
+                    updater_module.main(["--reconcile", "--config", str(config)])
+                reconcile.assert_not_called()
+        finally:
+            os.close(descriptor)
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            updater_module.Updater, "reconcile", return_value=False
+        ) as reconcile:
+            self.assertEqual(updater_module.main(["--reconcile", "--config", str(config)]), 0)
+            reconcile.assert_called_once()
+
+    def test_updater_refuses_missing_config_guard(self):
+        config, _install, environment = self._guarded_main_environment("guard-missing")
+        environment["PEARL_UPDATER_TEST_CONFIG_GUARD"] = str(self.root / "absent-guard.py")
+        with mock.patch.dict(os.environ, environment, clear=False), mock.patch.object(
+            updater_module.Updater, "reconcile"
+        ) as reconcile:
+            with self.assertRaises(updater_module.UpdateError):
+                updater_module.main(["--reconcile", "--config", str(config)])
+            reconcile.assert_not_called()
 
     def test_deadman_rejects_legacy_or_inconsistent_schema(self):
         with self.assertRaisesRegex(updater_module.UpdateError, "status/paused_at"):
@@ -7166,6 +7254,10 @@ class PearlUpdaterTests(unittest.TestCase):
         for bundle_path in bundle:
             self.assertTrue((prefix / "usr/local/share/macprovider" / bundle_path).is_file(), bundle_path)
         self.assertTrue((prefix / "usr/local/share/macprovider/catalog-canary-proof.py").is_file())
+        self.assertEqual(
+            (prefix / "usr/local/share/macprovider/scripts/coordinator_config_guard.py").read_bytes(),
+            CONFIG_GUARD.read_bytes(),
+        )
         installer = SCRIPT.with_name("install-pearl-updater.sh").read_text(encoding="utf-8")
         self.assertIn("useradd --system --gid macprovider-updater-validate", installer)
         self.assertIn(

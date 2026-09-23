@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TMP_ROOT="${TMPDIR:-/tmp}/tier2-enforce-test.$$"
 TEST_ROOT="$TMP_ROOT/tree"
-mkdir -p "$TEST_ROOT/scripts" "$TEST_ROOT/ops/pearl-updater"
+mkdir -p "$TEST_ROOT/scripts/lib" "$TEST_ROOT/ops/pearl-updater"
 
 cleanup() {
   rm -rf "$TMP_ROOT"
@@ -40,6 +40,7 @@ assert_not_contains() {
 }
 
 cp "$REPO_ROOT/scripts/enforce-tier2-hash.sh" "$TEST_ROOT/scripts/enforce-tier2-hash.sh"
+cp "$REPO_ROOT/scripts/lib/coordinator_config_guard.py" "$TEST_ROOT/scripts/lib/coordinator_config_guard.py"
 cp "$REPO_ROOT/ops/pearl-updater/macprovider-pearl-update" \
   "$TEST_ROOT/ops/pearl-updater/macprovider-pearl-update"
 cp "$REPO_ROOT/ops/pearl-updater/macprovider-tier2-enforcement-watchdog" \
@@ -191,6 +192,11 @@ assert_contains "$TMP_ROOT/ssh.log" "macprovider-pearl-update-gate"
 assert_contains "$TMP_ROOT/ssh.log" "50-pearl-updater-transaction-gate.conf"
 assert_contains "$TMP_ROOT/ssh.log" "systemctl is-enabled --quiet"
 assert_contains "$TMP_ROOT/ssh.log" "NeedDaemonReload"
+# #1693 L0: the installed one-writer guard module is hash-pinned and apply
+# refuses up front while a pricing transaction journal exists.
+assert_contains "$TMP_ROOT/ssh.log" "/usr/local/share/macprovider/scripts/coordinator_config_guard.py"
+assert_contains "$TMP_ROOT/ssh.log" "$(shasum -a 256 "$REPO_ROOT/scripts/lib/coordinator_config_guard.py" | awk '{print $1}')"
+assert_contains "$TMP_ROOT/ssh.log" "test ! -e /opt/macprovider/.pricing-txn"
 assert_not_contains "$TMP_ROOT/ssh.log" "macprovider-tier2-enforcement-watchdog --rollback"
 assert_contains "$TMP_ROOT/ssh.log" "-o BatchMode=yes"
 assert_contains "$TMP_ROOT/ssh.log" "-o StrictHostKeyChecking=yes"
