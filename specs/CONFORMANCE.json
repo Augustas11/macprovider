@@ -2566,12 +2566,15 @@
         "phase4-coordinator/cmd/coordinator/main.go:loadRowContinuityAutotuneCatalogs",
         "phase4-coordinator/internal/ws/server.go:catalogAdmissionWithCatalog",
         "phase4-coordinator/internal/ws/server.go:admittedCandidateCatalogSHA256",
+        "phase4-coordinator/internal/ws/server.go:closeCatalogDivergedSessions",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:refreshCatalogEnvelopeIfDue",
         "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:refreshCatalogEnvelope"
       ],
       "tests": [
         "phase4-coordinator/internal/ws/catalog_row_continuity_test.go::TestCatalogRowContinuityAdmitsOlderDocumentWithUnchangedRow",
         "phase4-coordinator/internal/ws/catalog_row_continuity_test.go::TestCatalogRowContinuityFailsClosed",
+        "phase4-coordinator/internal/ws/catalog_row_continuity_test.go::TestCatalogRowContinuitySessionsAreRecheckedOnPublication",
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift::testCompatibilitySetRejectionDoesNotRefreshCatalog",
         "phase4-coordinator/internal/ws/artifact_identity_test.go::TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease",
         "phase4-coordinator/cmd/coordinator/autotune_row_continuity_test.go::TestLoadCompatibleAutotuneCatalogsLoadsSignedRowContinuityRelease",
         "phase4-coordinator/cmd/coordinator/autotune_row_continuity_test.go::TestLoadRowContinuityAutotuneCatalogsSkipsUnsignedAndUntrusted",

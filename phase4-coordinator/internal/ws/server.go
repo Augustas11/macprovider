@@ -1678,6 +1678,9 @@ func (s *Server) RefreshTier2HashStatuses() int {
 // session whose identity facts changed. Lock order: registry → release
 // read; no provider section is held.
 func (s *Server) refreshSessionIdentities() int {
+	// Every release publication re-verifies sessions here, so the
+	// SPEC-023-R010 row-continuity invariant is re-checked on the same edge.
+	s.closeCatalogDivergedSessions()
 	cfg := s.tier2Config()
 	if !tier2.ModelHashActive(cfg) {
 		return s.pool.UpdateHashStatuses(func(pool.Provider) pool.HashStatus {
@@ -3703,6 +3706,71 @@ func (s *Server) catalogAdmissionWithCatalog(hello Hello, catalog *autotune.Cata
 		return "", false
 	}
 	return admissionMode, true
+}
+
+// closeCatalogDivergedSessions keeps SPEC-023-R010 a release-generation
+// invariant rather than a hello-time check: after a publication, a session
+// whose advertised document is no longer the active one stays connected only
+// while its selected row identity and PolicyEquivalent policy still equal the
+// new active row. A diverged session is closed catalog_incompatible so it
+// re-hellos (and a current CLI refreshes its envelope). A session whose
+// document no longer resolves keeps the existing catalog-unavailable handling.
+func (s *Server) closeCatalogDivergedSessions() int {
+	if s.pool == nil {
+		return 0
+	}
+	current, compatible := s.autotuneCatalogSnapshot()
+	if current == nil {
+		return 0
+	}
+	closed := 0
+	for _, provider := range s.pool.Snapshot() {
+		if !catalogEnvelopeAdmissionMode(provider.CatalogAdmissionMode) {
+			continue
+		}
+		resolved, _, isCurrent, ok := resolveProviderCatalogIn(provider, current, compatible)
+		if !ok || isCurrent || resolved == nil {
+			continue
+		}
+		if catalogRowStillEquivalent(provider, resolved, current) {
+			continue
+		}
+		s.log.Warn().
+			Str("provider_id", provider.ProviderID).
+			Str("assigned_id", provider.AssignedID).
+			Str("catalog_admission_mode", provider.CatalogAdmissionMode).
+			Str("catalog_release_id", provider.CatalogReleaseID).
+			Str("current_catalog_release_id", current.Version).
+			Msg("provider catalog row diverged from the published release; closing session")
+		if session, found := s.storedSessionFor(provider.ProviderID, provider.AssignedID); found {
+			s.closeSession(session, CloseInvalidHello, "catalog_incompatible")
+			closed++
+		}
+	}
+	return closed
+}
+
+// catalogRowStillEquivalent is the hello-time row-continuity rule applied to a
+// live session: its advertised row identity is the resolved document's row,
+// which equals the active row with PolicyEquivalent structured policy.
+func catalogRowStillEquivalent(provider pool.Provider, resolved, current *autotune.Catalog) bool {
+	key, _, ok := resolved.HighestClaimedTier(provider.ModelID)
+	if !ok {
+		return false
+	}
+	rowIdentity, ok := resolved.RowIdentity(key)
+	if !ok || (provider.CandidateRowIdentity != "" && !strings.EqualFold(provider.CandidateRowIdentity, rowIdentity)) {
+		return false
+	}
+	activeKey, _, ok := current.HighestClaimedTier(provider.ModelID)
+	if !ok {
+		return false
+	}
+	activeRowIdentity, ok := current.RowIdentity(activeKey)
+	if !ok || !strings.EqualFold(rowIdentity, activeRowIdentity) {
+		return false
+	}
+	return resolved.PolicyEquivalent(key, current, activeKey)
 }
 
 // catalogAdmissionRowContinuity is the admission mode of a provider whose

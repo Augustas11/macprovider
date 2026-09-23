@@ -247,7 +247,7 @@ final class CoordinatorClientTests: XCTestCase {
             )
         )
         XCTAssertEqual(compatibilitySet.state, .catalogIncompatible)
-        XCTAssertEqual(compatibilitySet.reasonCode, "catalog_incompatible")
+        XCTAssertEqual(compatibilitySet.reasonCode, "compatibility_update_required")
 
         let protocolFailure = CoordinatorClient.lifecycleClassification(
             for: CoordinatorAuthError.rejected(
@@ -6220,7 +6220,8 @@ final class CoordinatorClientTests: XCTestCase {
     /// closes, then stops it with a cancellation.
     private func runCatalogIncompatibleRejections(
         _ rejections: Int,
-        refreshed: CoordinatorClient.CatalogEnvelope?
+        refreshed: CoordinatorClient.CatalogEnvelope?,
+        code: String = "catalog_incompatible"
     ) async throws -> (client: CoordinatorClient, refreshCalls: Int) {
         let attempts = ReconnectAttemptRecorder()
         let refreshCalls = ReconnectAttemptRecorder()
@@ -6229,10 +6230,7 @@ final class CoordinatorClientTests: XCTestCase {
             refreshed: refreshed,
             connectAndRunOverride: {
                 if await attempts.recordAttempt() <= rejections {
-                    throw CoordinatorAuthError.rejected(
-                        code: "catalog_incompatible",
-                        message: "catalog_incompatible"
-                    )
+                    throw CoordinatorAuthError.rejected(code: code, message: code)
                 }
                 throw CancellationError()
             }
@@ -6288,6 +6286,17 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await run.client.helloMessage()
         XCTAssertEqual(hello["catalog_signer_key_id"] as? String, "operator-2026-02")
         XCTAssertEqual(hello["catalog_candidate_sha256"] as? String, String(repeating: "a", count: 64))
+    }
+
+    func testCompatibilitySetRejectionDoesNotRefreshCatalog() async throws {
+        let run = try await runCatalogIncompatibleRejections(
+            1,
+            refreshed: Self.refreshedCatalogEnvelope(),
+            code: "compatibility_set_unaccepted"
+        )
+        XCTAssertEqual(run.refreshCalls, 0)
+        let hello = await run.client.helloMessage()
+        XCTAssertEqual(hello["catalog_release_id"] as? String, "release-a")
     }
 
     func testCatalogIncompatibleRefreshIsRateLimited() async throws {

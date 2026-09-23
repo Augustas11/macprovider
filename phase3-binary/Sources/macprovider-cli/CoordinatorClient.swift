@@ -1338,6 +1338,15 @@ actor CoordinatorClient {
                     reasonCode: "binary_version_unsupported"
                 )
             }
+            // #1705: a compatibility-set rejection needs different provider
+            // software; keep it apart from a catalog document rollover, which
+            // the client refreshes in process.
+            if normalized.hasPrefix("compatibility_set") {
+                return ConnectionLifecycleClassification(
+                    state: .catalogIncompatible,
+                    reasonCode: "compatibility_update_required"
+                )
+            }
             if normalized.contains("catalog") || normalized.contains("compatibility") {
                 return ConnectionLifecycleClassification(
                     state: .catalogIncompatible,

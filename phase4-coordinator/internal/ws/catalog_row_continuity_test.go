@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"testing"
+	"time"
 
 	"github.com/gobwas/ws/wsutil"
 
@@ -206,6 +208,85 @@ func TestCatalogRowContinuityFailsClosed(t *testing.T) {
 			code, reason := sendHelloExpectClose(t, h.HTTP.URL, tc.hello(t))
 			if code != providerws.CloseInvalidHello || reason != "catalog_incompatible" {
 				t.Fatalf("code=%d reason=%q", code, reason)
+			}
+		})
+	}
+}
+
+// A catalog publication keeps R010 as a live invariant: a session admitted from
+// an older document is closed once the new active row diverges, and kept while
+// the selected row stays equivalent.
+func TestCatalogRowContinuitySessionsAreRecheckedOnPublication(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		edit     [2]string
+		wantKept bool
+	}{
+		{name: "unrelated row changes", edit: [2]string{`"min_ram_gb":28`, `"min_ram_gb":30`}, wantKept: true},
+		{name: "selected row changes", edit: [2]string{`"min_ram_gb":4`, `"min_ram_gb":6`}, wantKept: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			current := mustAutotuneCatalog(t)
+			baked := rowContinuityCatalog(t, current, "published-2026-09-02-baked-v1")
+			h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+				providerws.WithAutotuneCatalog(current, baked),
+			}, func(*config.Config) {})
+			defer h.HTTP.Close()
+
+			hello := validHello("m4-anon")
+			hello["model_id"] = rowContinuitySmallModelID
+			addCatalogAdmissionMetadata(t, hello, baked)
+			conn, br, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer conn.Close()
+			if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
+				t.Fatalf("write hello: %v", err)
+			}
+			var src io.Reader = conn
+			if br != nil {
+				src = br
+			}
+			payload, _, err := wsutil.ReadServerData(struct {
+				io.Reader
+				io.Writer
+			}{src, conn})
+			if err != nil {
+				t.Fatalf("read ack: %v", err)
+			}
+			var ack map[string]any
+			if err := json.Unmarshal(payload, &ack); err != nil {
+				t.Fatalf("ack json: %v", err)
+			}
+			if provider, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string)); !ok || provider.CatalogAdmissionMode != "row_continuity" {
+				t.Fatalf("row-continuity admission = %+v ok=%v", provider, ok)
+			}
+
+			next := rowContinuityCatalog(t, current, "published-2026-09-24-next-v1", tc.edit)
+			next.RowContinuityOnly = false
+			h.Provider.SetAutotuneCatalog(next, current, baked)
+
+			_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+			for {
+				frame, err := gobwas.ReadFrame(src)
+				if err != nil {
+					if tc.wantKept {
+						return
+					}
+					t.Fatalf("diverged session was not closed: %v", err)
+				}
+				if frame.Header.OpCode != gobwas.OpClose {
+					continue
+				}
+				if tc.wantKept {
+					t.Fatal("equivalent row-continuity session was closed on publication")
+				}
+				code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+				if code != providerws.CloseInvalidHello || reason != "catalog_incompatible" {
+					t.Fatalf("close = %d %q", code, reason)
+				}
+				return
 			}
 		})
 	}

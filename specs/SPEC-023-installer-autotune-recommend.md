@@ -833,7 +833,11 @@ with its hello `catalog_release_id` and `catalog_candidate_sha256` preserved, an
 the coordinator logs `catalog_refresh_recommended`. Its document never
 contributes an artifact identity set, so artifact-derived identity fails closed
 and only the primary row binds (item 4). A release listed in both files is
-admitted as `previous`.
+admitted as `previous`. Row continuity is re-checked on every release publication, not only
+at hello: after a catalog swap, a live session admitted from a document other
+than the new active one is closed `catalog_incompatible` once its selected row
+identity or `PolicyEquivalent` policy no longer equals the new active row. This
+applies to `previous` and `row_continuity` sessions alike.
 
 **Provider refresh (v0.15.1).** When the coordinator closes a hello with
 `catalog_incompatible`, or an accepted hello ack advertises a
