@@ -119,9 +119,12 @@ the checks above it evaluates R003(iv): the provider's single live session
 must be bound to this candidate at its current head, hash-verified and pinned
 for one of the recorded admissible members (resolved in the session's OWN
 release), with its receipt key present; otherwise `no_verified_session`.
-Until the runtime path reports another source, a session presents
-`mlx_cache` and only an `mlx_safetensors` member binds — a GGUF candidate
-cannot reach `settlement_capable` yet.
+A session presents `mlx_cache` and only an `mlx_safetensors` member binds.
+A GGUF candidate cannot reach `settlement_capable`: its sources are loopback,
+and a loopback runtime (recorded source or the session's hello source) is
+barred until a later SPEC-047-R003 amendment names a coordinator-recorded
+trust binding and a trusted usage source (SPEC-047 v0.1.10, #1694).
+Shipping the loopback runtime path does not lift this.
 
 The request appends NO event. The response repeats the current state twice,
 `coordinator_event_id` = the evaluated head, `decided_by` = actor A, and a

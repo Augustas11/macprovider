@@ -419,7 +419,7 @@ func TestModelAdmissionStaleFeedAndRuntimeSourceAtDecisionTime(t *testing.T) {
 	s.withReleaseRead(func() {
 		cur, comp := s.autotuneCatalogSnapshot()
 		if _, _, ok := s.settlementSessionMemberLocked(priced, provider, cur, comp); ok {
-			t.Fatal("a loopback-sourced GGUF member must not bind for settlement before the runtime path exists")
+			t.Fatal("a loopback-sourced GGUF member must not bind for settlement without a trusted usage source")
 		}
 	})
 	// The feed goes stale (15 days): the feed path resolves nothing at match
