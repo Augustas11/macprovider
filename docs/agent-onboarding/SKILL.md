@@ -193,8 +193,12 @@ chmod 600 "$tmp_uninstall"
 curl -fsSL --proto '=https' --tlsv1.2 --remove-on-error https://get.malibu.tech/uninstall.sh -o "$tmp_uninstall"
 uninstall_sha="$(shasum -a 256 "$tmp_uninstall" | awk '{print $1}')"
 sed -n '1,220p' "$tmp_uninstall"
-bash "$tmp_uninstall" --dry-run
+MACPROVIDER_NO_PROMPT=1 bash "$tmp_uninstall" --dry-run
 ```
+
+Use `MACPROVIDER_NO_PROMPT=1` for the dry-run because the live uninstaller can
+still ask for confirmation through `/dev/tty`; no-TTY coding-agent harnesses
+otherwise abort before showing the planned removal commands.
 
 Only remove the provider when the user explicitly asks:
 
