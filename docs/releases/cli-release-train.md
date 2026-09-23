@@ -35,6 +35,10 @@ binary the Mac runs.
   changes are merged** — never promote a candidate that predates a merged
   in-scope change.
 
+Pearl runtime `v1.8.189` is reserved for the merged #1715 settlement-finality
+release. It is not a provider CLI candidate and does not change
+`binaryVersion` or the fleet recommendation from 1.8.123.
+
 ## Current promoted stable
 
 | Field | Value |
