@@ -944,6 +944,10 @@ struct AutotuneCommand: AsyncParsableCommand {
 
         let fingerprint = MachineFingerprinter().sample()
         let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
+        // #1689: the draft term comes from the file serve reads, not this
+        // shell's environment. ConfigApplier re-reads it under the config lock
+        // right before writing, so a draft model added during the run caps too.
+        let draftModel = try Self.recommendDraftModel(configPath: config, failClosed: apply)
         let secret = try AutotuneHMACSecretStore(path: AutotuneHMACSecretStore.defaultPath).loadOrCreate()
         let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig?.providerID)
         let hardware = AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
@@ -1109,7 +1113,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                 catalogVersion: catalog.value.version,
                 catalogHash: catalogSHA,
                 hardware: hardware,
-                draftModel: resolvedConfig?.draftModel
+                draftModel: draftModel
             )
         } else {
             serveConfig = nil
@@ -1162,7 +1166,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                 catalogVersion: catalog.value.version,
                 catalogHash: catalogSHA,
                 hardware: hardware,
-                draftModel: resolvedConfig?.draftModel,
+                draftModel: draftModel,
                 maxContextOverride: calibration.recommendedContext
             )
         }
@@ -1200,7 +1204,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             } else {
                 memoryFitCap = max(1, min(hardware.recommendedMaxBatch, hardCap))
             }
-            let draftConfigured = !((resolvedConfig?.draftModel ?? "").isEmpty)
+            let draftConfigured = draftModel != nil
             // §9.2 step 3 gates each depth on the buyer-facing TTFT ceiling. Honor
             // the operator's `--buyer-ttft-ceiling-ms` when set (0 = disabled),
             // tightening — never loosening — the fixed 8000ms calibration ceiling,
@@ -1252,7 +1256,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                 catalogVersion: catalog.value.version,
                 catalogHash: catalogSHA,
                 hardware: hardware,
-                draftModel: resolvedConfig?.draftModel,
+                draftModel: draftModel,
                 maxContextOverride: calibrationContext,
                 maxBatchOverride: calibration.recommendedMaxBatch
             )
@@ -1278,7 +1282,9 @@ struct AutotuneCommand: AsyncParsableCommand {
                     recommendation: core,
                     now: now,
                     donorMode: applyingDonorFallback,
-                    benchmarkID: request.benchmarks[selected.catalogKey]?.benchmarkID
+                    benchmarkID: request.benchmarks[selected.catalogKey]?.benchmarkID,
+                    draftCapacity: .clamp,
+                    physicalMemoryGB: hardware.memoryGB
                 )
             }
         } else {
@@ -1330,7 +1336,9 @@ struct AutotuneCommand: AsyncParsableCommand {
                 recommendation: core,
                 now: now,
                 donorMode: applyingDonorFallback,
-                benchmarkID: request.benchmarks[selected.catalogKey]?.benchmarkID
+                benchmarkID: request.benchmarks[selected.catalogKey]?.benchmarkID,
+                draftCapacity: .clamp,
+                physicalMemoryGB: hardware.memoryGB
             )
             configurationApplied = true
             if emitJSON {
@@ -1426,6 +1434,7 @@ struct AutotuneCommand: AsyncParsableCommand {
             let rateCard = inputs.rateCard
             let fingerprint = MachineFingerprinter().sample()
             let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: config))
+            let draftModel = try Self.recommendDraftModel(configPath: config, failClosed: false)
             let secret = try AutotuneHMACSecretStore(path: AutotuneHMACSecretStore.defaultPath).loadOrCreate()
             let identity = HMACIdentity.derive(secret: secret, fingerprint: fingerprint, providerID: resolvedConfig?.providerID)
             let hardware = AutotuneRecommendHardware(fingerprint: fingerprint, hmacIdentity: identity)
@@ -1498,7 +1507,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                     catalogVersion: catalog.value.version,
                     catalogHash: catalogSHA,
                     hardware: hardware,
-                    draftModel: resolvedConfig?.draftModel
+                    draftModel: draftModel
                 )
             } else {
                 serveConfig = nil
@@ -1535,7 +1544,16 @@ struct AutotuneCommand: AsyncParsableCommand {
                 continue
             }
             do {
-                let artifact = try artifactResolver.verifiedExistingArtifact(for: row)
+                // Check-only never populates shared caches: read the bytes
+                // where they are, without durable-store adoption. The path it
+                // reports is still the durable copy serve loads, which
+                // `models adopt-recommendation` creates only after its checks.
+                let artifact = try artifactResolver.inspectedExistingArtifact(for: row)
+                let servedPath = (try? artifactResolver.durableStore.artifactURL(
+                    modelID: row.modelID,
+                    revision: row.modelRevision ?? "",
+                    sha256: artifact.sha256
+                ))?.standardizedFileURL.path ?? artifact.modelArgument
                 let tps = max(row.benchGate.minSustainedTPS, 0.001)
                 benchmarks[modelKey] = CandidateBenchmark(
                     modelKey: modelKey,
@@ -1544,7 +1562,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                     swapDetected: false,
                     thermalThrottleDetected: false,
                     artifactSHA256: artifact.sha256,
-                    modelArtifactPath: artifact.modelArgument,
+                    modelArtifactPath: servedPath,
                     modelConfigJSONData: artifact.configJSONData,
                     modelConfigSHA256: artifact.configSHA256,
                     benchmarkID: "installed-only-\(modelKey)",
@@ -1664,6 +1682,23 @@ struct AutotuneCommand: AsyncParsableCommand {
         demand.warnings.union(catalog.warnings).union(rateCard.warnings).union(artifactFeed.warnings)
     }
 
+    /// The draft model serve will use from the config this run applies to
+    /// (`ProviderCapacity.servedDraftModel`). A run that writes config fails
+    /// closed on a file serve cannot load; a read-only run warns and omits the
+    /// draft term, which `models adopt-recommendation` and the config applier
+    /// check again against the file before any write.
+    static func recommendDraftModel(configPath: String?, failClosed: Bool) throws -> String? {
+        do {
+            return try ProviderCapacity.servedDraftModel(configPath: configPath)
+        } catch {
+            if failClosed {
+                throw ValidationError("\(error); no state or config was changed")
+            }
+            FileHandle.standardError.write(Data("[warn] \(error)\n".utf8))
+            return nil
+        }
+    }
+
     static func recommendationCoreForConfig(
         selected: AutotuneCandidateScore,
         selectedBenchmark: CandidateBenchmark,
@@ -1675,24 +1710,45 @@ struct AutotuneCommand: AsyncParsableCommand {
         maxContextOverride: Int? = nil,
         maxBatchOverride: Int? = nil
     ) -> RecommendationCore {
-        // SPEC-028: serve refuses more than one slot with a draft model.
-        let draftConfigured = ProviderCapacity.draftModelContextLimit(
+        // SPEC-028: serve refuses more than one slot, or a context above the
+        // draft cap, with a draft model. Calibration overrides get the same
+        // cap, since serve would refuse them too.
+        let draftCap = ProviderCapacity.draftModelContextLimit(
             physicalMemoryGB: hardware.memoryGB,
             draftModel: draftModel
-        ) != nil
+        )
+        var maxBatch = maxBatchOverride ?? (draftCap != nil ? 1 : hardware.recommendedMaxBatch)
+        var maxContext = maxContextOverride ?? hardware.recommendedMaxContext(
+            modelID: selectedRow.modelID,
+            verifiedConfigJSONData: selectedBenchmark.modelConfigJSONData,
+            verifiedConfigSHA256: selectedBenchmark.modelConfigSHA256,
+            catalogMinRAMGB: selectedRow.minRAMGB,
+            draftModel: draftModel
+        )
+        if let draftCap, maxBatch > 1 || maxContext > draftCap {
+            FileHandle.standardError.write(Data(
+                "[warn] draft_model is configured: capping calibrated context \(maxContext) to \(min(maxContext, draftCap)) and max_concurrency \(maxBatch) to 1\n".utf8
+            ))
+            maxBatch = 1
+            maxContext = min(maxContext, draftCap)
+        }
+        // SPEC-023-R018 item 9: the context is sized for one full-context KV
+        // cache; the slots come down until that many caches fit memory.
+        maxBatch = AutotuneModelContextCap.memoryBoundedSlots(
+            maxBatch,
+            context: maxContext,
+            verifiedConfigJSONData: selectedBenchmark.modelConfigJSONData,
+            verifiedConfigSHA256: selectedBenchmark.modelConfigSHA256,
+            hardwareMemoryGB: hardware.memoryGB,
+            catalogMinRAMGB: selectedRow.minRAMGB
+        )
         return RecommendationCore(
             model: selected.model,
             targetContext: Self.spec023RecommendationProbeContext,
             knobs: WinningKnobs(
                 kvBits: nil,
-                maxBatch: maxBatchOverride ?? (draftConfigured ? 1 : hardware.recommendedMaxBatch),
-                maxContext: maxContextOverride ?? hardware.recommendedMaxContext(
-                    modelID: selectedRow.modelID,
-                    verifiedConfigJSONData: selectedBenchmark.modelConfigJSONData,
-                    verifiedConfigSHA256: selectedBenchmark.modelConfigSHA256,
-                    catalogMinRAMGB: selectedRow.minRAMGB,
-                    draftModel: draftModel
-                )
+                maxBatch: maxBatch,
+                maxContext: maxContext
             ),
             tpsMedian: selected.tokensPerSecond,
             ttftP95MS: 0,
@@ -2117,9 +2173,12 @@ struct AutotuneRunDependencies {
         applyConfig: { recommendation, now, configPath in
             let rawPath = configPath ?? AppConfig.defaultConfigPath
             let expanded = ConfigLoader.expandTilde(rawPath)
+            // The sweep's measured pair is not the SPEC-023-R018 generated
+            // pair, so it is written operator-owned (no provenance record).
             return try ConfigApplier(configPath: URL(fileURLWithPath: expanded)).apply(
                 recommendation: recommendation,
-                now: now
+                now: now,
+                recordsProvenance: false
             )
         },
         writeStdout: { FileHandle.standardOutput.write(Data($0.utf8)) },

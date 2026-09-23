@@ -442,6 +442,142 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertEqual(statusSnapshot.specDecodeAcceptedTokensSinceLast, 0)
     }
 
+    /// #1689 FR-20b: a recommendation-generated context follows the served
+    /// model through a warm switch and returns when switching back.
+    func testWarmSwapServesTheContextRecomputedForTheTarget() async throws {
+        let providerStatus = ProviderStatus(
+            modelID: "old-model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 32_768, maxConcurrencyOverride: 1, maxContextSource: .recommendationApply),
+            modelHash: "old-hash"
+        )
+        let runtime = ModelRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            maxContextTokensOverride: 32_768,
+            warmSwapEnabled: true,
+            switchMaxContextByTarget: ["new-model": 200_000, "old-model": 32_768],
+            switchContextProvenanceModelIDs: ["old-model"],
+            loader: { _ in throw TestError.unexpectedContainerLoader },
+            testLoader: { target in (target, "\(target)-hash") }
+        )
+        await runtime.setProviderStatus(providerStatus)
+
+        try await runtime.beginSwap(targetModelID: "New-Model", adoptionKnobs: await runtime.switchKnobs(for: "New-Model")).value
+        var capacity = await providerStatus.snapshot().capacity
+        XCTAssertEqual(capacity.maxContextTokens, 200_000)
+        XCTAssertEqual(capacity.maxContextSource, .recommendationAdoption)
+        XCTAssertEqual(capacity.maxConcurrency, 1)
+        let served = await runtime.servedContext()
+        XCTAssertEqual(served?.tokens, 200_000, "the switch terminal frame reports what /v1/status reports")
+        XCTAssertEqual(served?.source, .recommendationAdoption)
+
+        try await runtime.beginSwap(targetModelID: "old-model", adoptionKnobs: await runtime.switchKnobs(for: "old-model")).value
+        capacity = await providerStatus.snapshot().capacity
+        XCTAssertEqual(capacity.maxContextTokens, 32_768)
+        XCTAssertEqual(
+            capacity.maxContextSource,
+            .recommendationApply,
+            "switching back serves the configured generated value, not an adopted one"
+        )
+    }
+
+    /// SPEC-023-R018 item 9 (e): a switch target whose floor context does not
+    /// fit the served slots is served with fewer slots, and switching back
+    /// restores the configured model's slot count.
+    func testWarmSwapLowersSlotsForATargetWhoseFloorDoesNotFitAndRestoresThem() async throws {
+        let providerStatus = ProviderStatus(
+            modelID: "old-model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 32_768, maxConcurrencyOverride: 8, maxContextSource: .recommendationApply),
+            modelHash: "old-hash"
+        )
+        let runtime = ModelRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            maxContextTokensOverride: 32_768,
+            maxBatch: 8,
+            warmSwapEnabled: true,
+            switchMaxContextByTarget: ["new-model": 4_000, "old-model": 32_768],
+            switchMaxBatchByTarget: ["new-model": 2, "old-model": 8],
+            switchContextProvenanceModelIDs: ["old-model"],
+            loader: { _ in throw TestError.unexpectedContainerLoader },
+            testLoader: { target in (target, "\(target)-hash") }
+        )
+        await runtime.setProviderStatus(providerStatus)
+
+        try await runtime.beginSwap(targetModelID: "New-Model", adoptionKnobs: await runtime.switchKnobs(for: "New-Model")).value
+        var capacity = await providerStatus.snapshot().capacity
+        XCTAssertEqual(capacity.maxContextTokens, 4_000)
+        XCTAssertEqual(capacity.maxConcurrency, 2)
+        let lowered = await runtime.maxBatchForTest()
+        XCTAssertEqual(lowered, 2)
+
+        try await runtime.beginSwap(targetModelID: "old-model", adoptionKnobs: await runtime.switchKnobs(for: "old-model")).value
+        capacity = await providerStatus.snapshot().capacity
+        XCTAssertEqual(capacity.maxContextTokens, 32_768)
+        XCTAssertEqual(capacity.maxConcurrency, 8)
+        let restored = await runtime.maxBatchForTest()
+        XCTAssertEqual(restored, 8)
+    }
+
+    /// #1689 L2: a draft-capped context recomputes to the same number for
+    /// another model; that switch is still an adoption, not the configured
+    /// value, because the record names a different model.
+    func testWarmSwapToAnotherModelWithAnEqualContextIsLabelledAnAdoption() async throws {
+        let providerStatus = ProviderStatus(
+            modelID: "old-model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 120_000, maxConcurrencyOverride: 1, maxContextSource: .recommendationApply),
+            modelHash: "old-hash"
+        )
+        let runtime = ModelRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            maxContextTokensOverride: 120_000,
+            warmSwapEnabled: true,
+            switchMaxContextByTarget: ["new-model": 120_000, "old-model": 120_000],
+            switchContextProvenanceModelIDs: ["Old-Model"],
+            loader: { _ in throw TestError.unexpectedContainerLoader },
+            testLoader: { target in (target, "\(target)-hash") }
+        )
+        await runtime.setProviderStatus(providerStatus)
+
+        try await runtime.beginSwap(targetModelID: "new-model", adoptionKnobs: await runtime.switchKnobs(for: "new-model")).value
+        var capacity = await providerStatus.snapshot().capacity
+        XCTAssertEqual(capacity.maxContextTokens, 120_000)
+        XCTAssertEqual(capacity.maxContextSource, .recommendationAdoption)
+
+        try await runtime.beginSwap(targetModelID: "old-model", adoptionKnobs: await runtime.switchKnobs(for: "old-model")).value
+        capacity = await providerStatus.snapshot().capacity
+        XCTAssertEqual(capacity.maxContextSource, .recommendationApply)
+    }
+
+    func testWarmSwapKeepsAnOperatorContextForEveryModel() async throws {
+        let providerStatus = ProviderStatus(
+            modelID: "old-model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 16_000, maxConcurrencyOverride: 1, maxContextSource: .operatorConfig),
+            modelHash: "old-hash"
+        )
+        let runtime = ModelRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            maxContextTokensOverride: 16_000,
+            warmSwapEnabled: true,
+            loader: { _ in throw TestError.unexpectedContainerLoader },
+            testLoader: { target in (target, "\(target)-hash") }
+        )
+        await runtime.setProviderStatus(providerStatus)
+
+        let knobs = await runtime.switchKnobs(for: "new-model")
+        XCTAssertNil(knobs)
+        try await runtime.beginSwap(targetModelID: "new-model", adoptionKnobs: knobs).value
+        let capacity = await providerStatus.snapshot().capacity
+        XCTAssertEqual(capacity.maxContextTokens, 16_000)
+        XCTAssertEqual(capacity.maxContextSource, .operatorConfig)
+    }
+
     func testProviderStatusBecomesLoadedAfterSuccessfulWarmSwapFromIdle() async throws {
         let providerStatus = ProviderStatus(
             modelID: nil,

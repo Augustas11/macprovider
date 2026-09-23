@@ -520,7 +520,8 @@ struct ServeCommand: AsyncParsableCommand {
     /// command and the runtime from disagreeing about what Ready means.
     static func localRuntimeTargetAuthorities(
         supportedModels: [String]?,
-        artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
+        artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
+        onVerifiedTarget: ((_ ids: [String], _ row: CandidateCatalog.Row, _ artifact: VerifiedModelArtifact) -> Void)? = nil
     ) -> [String: ModelRuntimeTargetAuthority] {
         guard let supportedModels, !supportedModels.isEmpty,
               let catalog = try? AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(
@@ -550,6 +551,7 @@ struct ServeCommand: AsyncParsableCommand {
             authorities[catalogEntry.value.modelID.lowercased(with: nil)] = authority
             authorities[catalogEntry.key] = authority
             authorities[catalogEntry.key.lowercased(with: nil)] = authority
+            onVerifiedTarget?([target, catalogEntry.value.modelID, catalogEntry.key], catalogEntry.value, artifact)
         }
         return authorities
     }
@@ -658,7 +660,7 @@ struct ServeCommand: AsyncParsableCommand {
                 throw ExitCode(2)
             }
             let maximumContinuousBatchQueueLimit = ContinuousBatchingPolicy.maximumQueueLimit(
-                maxActiveRows: resolved.maxConcurrencyOverride ?? 1
+                maxActiveRows: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
             )
             if let queueLimit = resolved.continuousBatchQueueLimit,
                queueLimit > maximumContinuousBatchQueueLimit {
@@ -693,7 +695,7 @@ struct ServeCommand: AsyncParsableCommand {
     static func runContinuousBatchingPreflight(_ resolved: AppConfig) throws {
         let capability = ContinuousBatchingPolicy.configurationCapability(
             mode: resolved.continuousBatching,
-            maxBatch: resolved.maxConcurrencyOverride ?? 1,
+            maxBatch: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
             queueLimit: resolved.continuousBatchQueueLimit,
             kvBits: resolved.kvBitsOverride,
             draftConfigured: resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
@@ -1954,10 +1956,82 @@ struct ServeCommand: AsyncParsableCommand {
         if let root = resolved.modelArtifactRoot, root.hasPrefix("/") {
             targetResolver.durableRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
         }
+        // #1689 FR-20b: a recommendation-generated context is recomputed for
+        // each verified switch target from the same verified config.json.
+        let switchMemoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
+        var switchTargets: [(ids: [String], recomputed: Int, slots: Int)] = []
         let targetAuthorities = Self.localRuntimeTargetAuthorities(
             supportedModels: resolved.supportedModels,
-            artifactResolver: targetResolver
+            artifactResolver: targetResolver,
+            onVerifiedTarget: { ids, row, artifact in
+                guard resolved.maxContextSource == .recommendationApply else { return }
+                let knobs = ModelSwitchContext.recomputedServeKnobs(
+                    memoryGB: switchMemoryGB,
+                    modelID: row.modelID,
+                    catalogMinRAMGB: row.minRAMGB,
+                    configJSONData: artifact.configJSONData,
+                    configSHA256: artifact.configSHA256,
+                    draftModel: ProviderCapacity.servedDraftModel(configured: resolved.draftModel),
+                    // The slot count this serve runs (`maxBatch` below).
+                    slots: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
+                )
+                switchTargets.append((ids, knobs.context, knobs.slots))
+            }
         )
+        // SPEC-023-R018 item 9: a generated context gives way when the slot
+        // count this serve runs (config, environment, or --max-batch) would
+        // not fit memory at it; an operator value is kept (status warns).
+        let servedSlots = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
+        let startupBound = ModelSwitchContext.startupBoundedContext(
+            config: resolved,
+            slots: servedSlots,
+            memoryGB: switchMemoryGB,
+            configJSONData: resolved.modelArtifactPath.flatMap {
+                try? Data(contentsOf: URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent("config.json"))
+            },
+            catalogMinRAMGB: (try? AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(
+                Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+            )).flatMap { catalog in
+                [resolved.modelCatalogKey, resolved.modelCatalogModelID, resolved.model]
+                    .compactMap { $0 }
+                    .lazy
+                    .compactMap { ModelArtifactSignedRowResolver.lookup($0, in: catalog)?.1.minRAMGB }
+                    .first
+            }
+        )
+        let switchMaxContextByTarget = ModelSwitchContext.serveContextsByTarget(
+            config: resolved,
+            configuredModelIDs: [resolved.model, catalogModelIDAlias].compactMap { $0 },
+            targets: switchTargets.map { ($0.ids, $0.recomputed) },
+            configuredContext: startupBound?.context
+        )
+        let switchMaxBatchByTarget = ModelSwitchContext.serveSlotsByTarget(
+            config: resolved,
+            configuredModelIDs: [resolved.model, catalogModelIDAlias].compactMap { $0 },
+            targets: switchTargets.map { ($0.ids, $0.slots) },
+            configuredSlots: startupBound?.slots ?? servedSlots
+        )
+        let switchContextProvenanceModelIDs = ModelSwitchContext.provenanceModelIDs(
+            config: resolved,
+            configuredModelIDs: [resolved.model, catalogModelIDAlias].compactMap { $0 },
+            targets: switchTargets.map { ($0.ids, $0.recomputed) }
+        )
+        if let startupBound, let configured = resolved.maxContextOverride {
+            if startupBound.slots < servedSlots {
+                // SPEC-023-R018 item 9: even the minimum context does not fit
+                // the configured slots, so serve runs fewer rather than an
+                // over-envelope pair.
+                FileHandle.standardError.write(Data(
+                    "max_context_override \(configured) was generated by a recommendation; even the \(AutotuneModelContextCap.minimumServeContext)-token minimum context does not fit \(servedSlots) slots in memory, so serving \(startupBound.context) tokens with \(startupBound.slots) slots\n".utf8
+                ))
+                resolved.maxConcurrencyOverride = startupBound.slots
+            } else {
+                FileHandle.standardError.write(Data(
+                    "max_context_override \(configured) was generated by a recommendation; lowered to \(startupBound.context) tokens so \(servedSlots) slots fit in memory\n".utf8
+                ))
+            }
+            resolved.maxContextOverride = startupBound.context
+        }
         let authorizedSwitchModelIDs = Self.localRuntimeTargetModelIDs(
             supportedModels: resolved.supportedModels,
             authorities: targetAuthorities
@@ -2003,7 +2077,7 @@ struct ServeCommand: AsyncParsableCommand {
                     kvBitsOverride: effectiveKVBits,
                     pagedKVConfig: resolved.pagedKV,
                     prefillStepSize: resolved.prefillStepSize,
-                    maxBatch: resolved.maxConcurrencyOverride ?? 1,
+                    maxBatch: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
                     continuousBatchingMode: resolved.continuousBatching,
                     continuousBatchQueueLimit: resolved.continuousBatchQueueLimit,
                     continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage(
@@ -2018,7 +2092,10 @@ struct ServeCommand: AsyncParsableCommand {
                     // fields; nil ⇒ cold tier treats identity as unavailable (no promote/persist).
                     verifiedModelCatalogRevision: resolved.modelCatalogRevision,
                     targetAuthorities: targetAuthorities,
-                    authorizedSwitchModelIDs: authorizedSwitchModelIDs
+                    authorizedSwitchModelIDs: authorizedSwitchModelIDs,
+                    switchMaxContextByTarget: switchMaxContextByTarget,
+                    switchMaxBatchByTarget: switchMaxBatchByTarget,
+                    switchContextProvenanceModelIDs: switchContextProvenanceModelIDs
                 )
             }
         } catch {
@@ -2085,7 +2162,7 @@ struct ServeCommand: AsyncParsableCommand {
         // capacity so the coordinator's view stays consistent.
         let capacityDefaults = ProviderCapacity(
             maxContextOverride: resolved.maxContextOverride,
-            maxConcurrencyOverride: resolved.maxConcurrencyOverride ?? 1,
+            maxConcurrencyOverride: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
             maxContextSource: resolved.maxContextSource
         )
         let throughputEstimate = await Self.startupThroughputEstimate(
@@ -3226,8 +3303,22 @@ struct StatusCommand: AsyncParsableCommand {
             configPath: resolved.configPath,
             advanced: advanced,
             coordinatorURL: resolved.coordinatorURL,
-            sustainedBenchmarks: advanced ? Self.sustainedBenchmarks() : []
+            sustainedBenchmarks: advanced ? Self.sustainedBenchmarks() : [],
+            contextWarnings: advanced ? Self.contextWarnings(status: status, configPath: resolved.configPath) : []
         ))
+    }
+
+    /// Best effort, from the config file alone (the launchd service does not
+    /// inherit this shell) and the served model's local `config.json`.
+    static func contextWarnings(status: [String: Any], configPath: String) -> [String] {
+        let fileConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: configPath), environment: [:])
+        let artifactPath = ProviderContextWorkflow.servedModelArtifactPath(modelID: status["model"] as? String, config: fileConfig)
+        return ProviderContextWorkflow.statusContextWarnings(
+            status: status,
+            config: fileConfig,
+            physicalMemoryGB: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB,
+            facts: ProviderContextWorkflow.liveModelFacts(artifactPath: artifactPath)
+        )
     }
 
     /// Best effort: a missing, unsafe, or undecodable recommendation state

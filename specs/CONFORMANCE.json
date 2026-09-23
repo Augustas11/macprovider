@@ -2794,7 +2794,14 @@
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func recommendedMaxContext(",
         "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func safeMaxContextTokens(",
-        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func kvCacheBytesPerToken(configData:"
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func kvCacheBytesPerToken(configData:",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func memoryBoundedSlots(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func memoryBoundedContext(",
+        "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:static func validateMemoryFitSlots(",
+        "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:static func validatedAdoptionArtifact(",
+        "phase3-binary/Sources/macprovider-cli/ProviderContextCommand.swift:static func startupBoundedContext(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func memoryBoundedServePair(",
+        "phase3-binary/Sources/macprovider-cli/ProviderContextCommand.swift:static func serveSlotsByTarget("
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testQwen36HybridConfigOn256GBMacDoesNotRecommendFourKContext",
@@ -2804,7 +2811,19 @@
         "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testRecommendApplyServeConfigUsesRAMTierWithoutModelContextEvidence",
         "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testRecommendApplyServeConfigDerivesMemorySafeContextFromKVGeometry",
         "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testDraftModelCapsTheAppliedContextAndSlotsSoServePreflightAcceptsThem",
-        "phase3-binary/Tests/macprovider-cliTests/ProviderContextTests.swift:testApplyRecordsGeneratedContextAndLoaderReportsRecommendationApply"
+        "phase3-binary/Tests/macprovider-cliTests/ProviderContextTests.swift:testApplyRecordsGeneratedContextAndLoaderReportsRecommendationApply",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testGeneratedContextAndSlotsFitMemoryForEverySignedCandidateRow",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testGLM45AirOn256GBUltraKeepsItsContextAndLowersSlotsToFitMemory",
+        "phase3-binary/Tests/macprovider-cliTests/ModelsSubcommandTests.swift:testAdoptRecommendationRefusesSlotsThatDoNotFitMemoryAtTheSignedContext",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderContextTests.swift:testSwitchRecomputeLowersSlotsWhenEvenTheFloorContextDoesNotFit",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderContextTests.swift:testServeLowersSlotsWhenEvenTheFloorContextDoesNotFit",
+        "phase3-binary/Tests/macprovider-cliTests/ModelRuntimeSwapTests.swift:testWarmSwapLowersSlotsForATargetWhoseFloorDoesNotFitAndRestoresThem",
+        "phase3-binary/Tests/macprovider-cliTests/ModelsSubcommandTests.swift:testAdoptRecommendationWithUnknownGeometryAcceptsAtMostTheTierSlots",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderContextTests.swift:testSwitchRecomputeLowersTheContextToFitTheConfiguredSlots",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderContextTests.swift:testServeLowersAGeneratedContextThatDoesNotFitItsSlots",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderContextTests.swift:testSweepApplyWritesNoGeneratedProvenance",
+        "phase3-binary/Tests/macprovider-cliTests/ModelsSubcommandTests.swift:testAdoptionValidatesSignedSlotsBeforeAdoptingHFBytes",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testInstalledOnlyCheckNeverPopulatesTheDurableStore"
       ],
       "journeys": [],
       "evidence": [],
@@ -2812,7 +2831,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1689",
-        "rationale": "SPEC-023 v0.15.2 (SPEC-023-R018) defines the uncalibrated default serve context: min(RAM-tier default, declared model max, memory-safe context, SPEC-028 draft cap when a draft model is configured), unknown bounds drop out, declared head_dim honoured, hybrid layer_types count only full_attention layers, apply records provenance. Implemented and unit-tested, including the Qwen3.6-27B 256 GB regression; no physical apply on the 256 GB Studio has been captured under this revision."
+        "rationale": "SPEC-023 v0.15.2 (SPEC-023-R018) defines the uncalibrated default serve context: min(RAM-tier default, declared model max, memory-safe context, SPEC-028 draft cap when a draft model is configured), unknown bounds drop out, declared head_dim honoured, hybrid layer_types count only full_attention layers, apply records provenance. Item 9 bounds the generated (context, slots) pair jointly: slots = min(tier constant or calibrated depth, memoryFitBatchDepth at the context), adopt-recommendation refuses a signed pair above that cap before adopting any artifact into the durable store, a warm switch keeps the operator's slots and lowers the recomputed context, serve lowers a generated context at start when the slots it runs do not fit, the classic measured sweep writes its pair operator-owned (no provenance record), and --check-only --installed-only never adopts into the durable store. Implemented and unit-tested, including the Qwen3.6-27B 256 GB regression, a catalog-wide pair-fits-memory test over every signed row on 256/128/64 GB, and the GLM-4.5-Air 256 GB case (131072 x 5); no physical apply on the 256 GB Studio has been captured under this revision."
       }
     },
     {

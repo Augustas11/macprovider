@@ -359,6 +359,111 @@ enum AutotuneModelContextCap {
         return max(1, Int(min(slots, UInt64(Int.max))))
     }
 
+    /// SPEC-023-R018 item 9: a generated slot count lowered so that many
+    /// full-context KV caches at `context` fit the `memoryFitBatchDepth`
+    /// envelope. Unknown geometry leaves `slots` unchanged; callers pass a
+    /// value already at or below the chip/RAM tier constant or a calibrated
+    /// depth bounded the same way.
+    static func memoryBoundedSlots(
+        _ slots: Int,
+        context: Int,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int
+    ) -> Int {
+        guard let verifiedConfigJSONData, let verifiedConfigSHA256,
+              let fit = memoryFitBatchDepth(
+                  configData: verifiedConfigJSONData,
+                  verifiedConfigSHA256: verifiedConfigSHA256,
+                  hardwareMemoryGB: hardwareMemoryGB,
+                  catalogMinRAMGB: catalogMinRAMGB,
+                  calibrationContextTokens: context
+              )
+        else {
+            return slots
+        }
+        return max(1, min(slots, fit))
+    }
+
+    /// SPEC-023-R018 item 9, warm-switch direction: the largest context at or
+    /// below `context` at which `slots` full-context KV caches fit the
+    /// `memoryFitBatchDepth` envelope, never below `minimumServeContext`.
+    /// Unknown geometry leaves `context`. Nil when `slots` do not fit even at
+    /// `min(context, minimumServeContext)`: the caller must lower the slot
+    /// count (see `memoryBoundedServePair`), never serve the floor as if it fit.
+    static func memoryBoundedContext(
+        _ context: Int,
+        slots: Int,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int
+    ) -> Int? {
+        func fits(_ candidate: Int) -> Bool {
+            memoryBoundedSlots(
+                slots,
+                context: candidate,
+                verifiedConfigJSONData: verifiedConfigJSONData,
+                verifiedConfigSHA256: verifiedConfigSHA256,
+                hardwareMemoryGB: hardwareMemoryGB,
+                catalogMinRAMGB: catalogMinRAMGB
+            ) >= slots
+        }
+        guard slots > 1, !fits(context) else {
+            return context
+        }
+        guard context > minimumServeContext, fits(minimumServeContext) else {
+            return nil
+        }
+        // The fitting slot count only falls as the context grows, so the
+        // largest fitting context is found by bisection.
+        var low = minimumServeContext
+        var high = context
+        while high - low > 1 {
+            let middle = low + (high - low) / 2
+            if fits(middle) {
+                low = middle
+            } else {
+                high = middle
+            }
+        }
+        return low
+    }
+
+    /// SPEC-023-R018 item 9: the served (context, slots) pair. The context
+    /// gives way first (`memoryBoundedContext`); when even the floor does not
+    /// fit, the context stays at `min(context, minimumServeContext)` and the
+    /// slot count comes down to what fits there (at least 1).
+    static func memoryBoundedServePair(
+        context: Int,
+        slots: Int,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int
+    ) -> (context: Int, slots: Int) {
+        if let bounded = memoryBoundedContext(
+            context,
+            slots: slots,
+            verifiedConfigJSONData: verifiedConfigJSONData,
+            verifiedConfigSHA256: verifiedConfigSHA256,
+            hardwareMemoryGB: hardwareMemoryGB,
+            catalogMinRAMGB: catalogMinRAMGB
+        ) {
+            return (bounded, slots)
+        }
+        let floorContext = min(context, minimumServeContext)
+        return (floorContext, memoryBoundedSlots(
+            slots,
+            context: floorContext,
+            verifiedConfigJSONData: verifiedConfigJSONData,
+            verifiedConfigSHA256: verifiedConfigSHA256,
+            hardwareMemoryGB: hardwareMemoryGB,
+            catalogMinRAMGB: catalogMinRAMGB
+        ))
+    }
+
     private static func strictConfigRoot(_ configData: Data) -> [String: Any]? {
         guard (try? AutotuneStrictJSON.rejectDuplicateKeys(configData)) != nil,
               let root = try? JSONSerialization.jsonObject(with: configData) as? [String: Any]
@@ -3964,6 +4069,40 @@ struct CachedModelArtifactResolver {
             sha256: expectedSHA256
         )
         return try verifiedStagedArtifact(for: row, at: staged, deadline: deadline)
+    }
+
+    /// The pinned artifact verified where it already is (a valid durable
+    /// copy, else the Hugging Face snapshot) without adopting, replacing,
+    /// deleting, or downloading anything. Paths that must not populate shared
+    /// caches (background check-only runs, adoption validation before its
+    /// checks pass) read identity here (#1689 F7).
+    func inspectedExistingArtifact(for row: CandidateCatalog.Row) throws -> VerifiedModelArtifact {
+        guard let revision = row.modelRevision, let expected = row.modelSHA256 else {
+            throw AutotuneRecommendError.invalidArtifact("missing revision/hash")
+        }
+        func inspected(_ directory: URL) throws -> VerifiedModelArtifact? {
+            var st = stat()
+            guard lstat(directory.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR else { return nil }
+            let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: directory)
+            guard inspection.sha256 == expected else { return nil }
+            return VerifiedModelArtifact(
+                modelArgument: directory.standardizedFileURL.path,
+                sha256: inspection.sha256,
+                configJSONData: inspection.configJSONData,
+                configSHA256: inspection.configSHA256
+            )
+        }
+        let durable = try durableStore.artifactURL(modelID: row.modelID, revision: revision, sha256: expected)
+        if FileManager.default.fileExists(atPath: durable.path) {
+            _ = try durableStore.validatedContainedDirectory(durable.path)
+            if let artifact = try? inspected(durable) {
+                return artifact
+            }
+        }
+        if let artifact = try inspected(snapshotURL(modelID: row.modelID, revision: revision)) {
+            return artifact
+        }
+        throw AutotuneRecommendError.invalidArtifact("missing verified pinned snapshot \(row.modelID)@\(revision)")
     }
 
     func verifiedExistingArtifact(for row: CandidateCatalog.Row, deadline: Date? = nil) throws -> VerifiedModelArtifact {

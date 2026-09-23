@@ -39,7 +39,16 @@ public enum ControlSocketFrame: Equatable, Sendable {
     case rotateReceiptKeyRequest(providerID: String)
     case rotateReceiptKeyResult(status: ReceiptKeyRotationResultStatus, error: String?)
     case switchAck(accepted: Bool, reason: SwitchAckReason?, currentTarget: String?, secondsRemaining: Int?)
-    case switchProgress(state: SwitchProgressState, elapsedMs: Int, reason: String?)
+    /// `max_context_tokens` / `max_context_source` ride only on `loaded`
+    /// (additive, #1689 FR-20b): the context the runtime serves after the
+    /// switch and its FR-17 source, as `/v1/status` reports them.
+    case switchProgress(
+        state: SwitchProgressState,
+        elapsedMs: Int,
+        reason: String?,
+        maxContextTokens: Int? = nil,
+        maxContextSource: String? = nil
+    )
     case statusResponse(currentModelID: String, runtimeState: SwapState)
     case modelsRequest
     case modelsResponse(modelIDs: [String], supportedModelIDs: [String])
@@ -151,7 +160,7 @@ public enum ControlSocketCodec {
                 }
             }
             object = frame
-        case let .switchProgress(state, elapsedMs, reason):
+        case let .switchProgress(state, elapsedMs, reason, maxContextTokens, maxContextSource):
             var frame: [String: Any] = [
                 "type": "switch_progress",
                 "state": state.rawValue,
@@ -159,6 +168,10 @@ public enum ControlSocketCodec {
             ]
             if state == .failed, let reason {
                 frame["reason"] = reason
+            }
+            if state == .loaded, let maxContextTokens, let maxContextSource {
+                frame["max_context_tokens"] = maxContextTokens
+                frame["max_context_source"] = maxContextSource
             }
             object = frame
         case let .statusResponse(currentModelID, runtimeState):
@@ -428,7 +441,16 @@ public enum ControlSocketCodec {
                 throw ControlSocketError.invalidEnumValue(field: "state", value: stateRaw)
             }
             let reason = state == .failed ? try stringField("reason", in: object) : nil
-            return .switchProgress(state: state, elapsedMs: try intField("elapsed_ms", in: object), reason: reason)
+            let maxContextTokens = state == .loaded ? optionalIntField("max_context_tokens", in: object) : nil
+            let maxContextSource = state == .loaded ? object["max_context_source"] as? String : nil
+            let served = maxContextTokens != nil && maxContextSource != nil
+            return .switchProgress(
+                state: state,
+                elapsedMs: try intField("elapsed_ms", in: object),
+                reason: reason,
+                maxContextTokens: served ? maxContextTokens : nil,
+                maxContextSource: served ? maxContextSource : nil
+            )
         case "status_response":
             let stateRaw = try stringField("runtime_state", in: object)
             guard let state = SwapState(rawValue: stateRaw), state != .failed else {
@@ -1856,7 +1878,10 @@ actor ControlSocketServer {
             }
 
             let stream = await modelRuntime.swapSignals()
-            _ = try await modelRuntime.beginSwap(targetModelID: targetModelID)
+            _ = try await modelRuntime.beginSwap(
+                targetModelID: targetModelID,
+                adoptionKnobs: await modelRuntime.switchKnobs(for: targetModelID)
+            )
             await tracker.start(targetModelID)
             try await connection.send(.switchAck(accepted: true, reason: nil, currentTarget: nil, secondsRemaining: nil))
             try await connection.send(.switchProgress(state: .loading, elapsedMs: elapsedMs(since: requestedAtMs), reason: nil))
@@ -1871,7 +1896,14 @@ actor ControlSocketServer {
                     try await connection.send(.switchProgress(state: .draining, elapsedMs: elapsedMs(since: requestedAtMs), reason: nil))
                     continue
                 case .completed:
-                    try await connection.send(.switchProgress(state: .loaded, elapsedMs: elapsedMs(since: requestedAtMs), reason: nil))
+                    let served = await modelRuntime.servedContext()
+                    try await connection.send(.switchProgress(
+                        state: .loaded,
+                        elapsedMs: elapsedMs(since: requestedAtMs),
+                        reason: nil,
+                        maxContextTokens: served?.tokens,
+                        maxContextSource: served?.source.rawValue
+                    ))
                 case let .failed(reason):
                     try await connection.send(.switchProgress(state: .failed, elapsedMs: elapsedMs(since: requestedAtMs), reason: reason))
                 }

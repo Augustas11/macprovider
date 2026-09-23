@@ -2960,7 +2960,8 @@ struct LocalStatusFormatter {
         configPath: String? = nil,
         advanced: Bool = false,
         coordinatorURL: String? = nil,
-        sustainedBenchmarks: [BenchmarkPayload] = []
+        sustainedBenchmarks: [BenchmarkPayload] = [],
+        contextWarnings: [String] = []
     ) -> String {
         guard advanced else {
             return publicFormat(
@@ -2979,7 +2980,8 @@ struct LocalStatusFormatter {
             staleRecommendationSince: staleRecommendationSince,
             configPath: configPath,
             coordinatorURL: coordinatorURL,
-            sustainedBenchmarks: sustainedBenchmarks
+            sustainedBenchmarks: sustainedBenchmarks,
+            contextWarnings: contextWarnings
         )
     }
 
@@ -3084,7 +3086,8 @@ struct LocalStatusFormatter {
         staleRecommendationSince: Date?,
         configPath: String?,
         coordinatorURL: String?,
-        sustainedBenchmarks: [BenchmarkPayload]
+        sustainedBenchmarks: [BenchmarkPayload],
+        contextWarnings: [String]
     ) -> String {
         let capacity = status["capacity"] as? [String: Any] ?? [:]
         let coordinator = status["coordinator"] as? [String: Any] ?? [:]
@@ -3135,7 +3138,7 @@ struct LocalStatusFormatter {
           Requests:    \(status["requests_total"] ?? 0) served, \(status["errors_total"] ?? 0) errors
           Active WS:   \(status["active_request_id_count"] ?? 0) request_ids
           RAM:         \(capacity["ram_gb"] ?? 0) GB (\(string(capacity["ram_tier"])))
-          Context cap: \(capacity["max_context_tokens"] ?? 0) tokens\(contextSourceSuffix(status))
+          Context cap: \(capacity["max_context_tokens"] ?? 0) tokens\(contextSourceSuffix(status))\(contextWarnings.map { "\n  \($0)" }.joined())
 
         \(readinessBlock(status))
 
@@ -3192,7 +3195,8 @@ struct LocalStatusFormatter {
         case .cliFlag: return "--max-context flag"
         case .ramTierDefault: return "RAM-tier default"
         case .draftClamp: return "draft-model clamp"
-        case .recommendationAdoption: return "adopted recommendation"
+        // Also a warm switch's recompute for its target, which adopts nothing.
+        case .recommendationAdoption: return "recommendation for the served model (adoption or model switch)"
         case .recommendationApply: return "config.yaml max_context_override written by an autotune recommendation"
         case nil: return raw
         }

@@ -8,11 +8,41 @@ the effective context and its source, limits, slots, KV-memory estimate, and
 advertised value; set it with bounds and memory preflight, a config backup, and
 an optional restart plus FR-20a verification; roll back to the newest backup.
 Adds the `recommendation_apply` value to the FR-17 `max_context_source` enum,
-backed by the `config.yaml.provenance.json` sidecar that `autotune --recommend
---apply` writes, so a generated `max_context_override` is told from an
-operator-owned one. Configs without the sidecar load unchanged as
-`operator_config`. `provider verify` gains an internal expected-context gate
-used after a restart. SPEC-023 v0.15.2 stops emitting the 4,000-token floor
+backed by the `max_context_override_provenance` key that `autotune --recommend
+--apply` writes into `config.yaml` itself, so a generated
+`max_context_override` is told from an operator-owned one. The record is bound
+to the `max_context_override` value and model it was generated for, not to the
+rest of the config; configs without a matching record load unchanged as
+`operator_config`, and because it lives in the config file every backup,
+rollback, and adoption restore carries it with the value. Older CLIs ignore the
+unknown key. A warm `models switch` recomputes a generated context for
+the switch target and keeps an operator-owned one, warning when it is under
+half of what the target supports. The recomputed context is lowered, not
+the operator's slot count, when that many full-context KV caches would not
+fit memory (SPEC-023-R018 item 9); `serve` applies the same bound at start to a
+generated value when the slot count it runs (after `--max-batch` or the
+environment) does not fit, and a switch back serves that lowered value.
+When even the 4,000-token floor does not fit those slots, both serve at the
+floor with the slot count that fits there instead (a switch back restores the
+started count), so no over-envelope pair is served; `status --advanced` warns.
+`set` and `explain` count the slots serve runs (`max_concurrency_override`,
+else 1). `set --apply` and `rollback` restart only the installed launchd
+provider job and refuse when `--config`/`--port` name another provider;
+`rollback --no-restart` restores without restarting. The installed job is
+found by where its plist is (`gui/<uid>` LaunchAgent or `system`
+LaunchDaemon, the loaded one when both exist), never inferred from
+`credential_store`, and restarted in that domain; `explain` prints it. `explain`, `status
+--advanced`, and the switch notice warn when the served context is above the
+model's declared maximum, and `status --advanced` reports a context × slots
+KV estimate that does not fit or a generated value serve lowered. The
+resource check lists other serve processes neutrally, excluding the serve
+listening on the provider port. `provider verify` names an operator pause
+(`paused_by_operator`) as the network reason, and for a loaded paused serve
+(which reports `status: unavailable`) as the local reason too, exiting `3`
+(not serving) rather than `2`. `provider verify` gains an internal expected-context gate
+used after a restart; after a rollback to a config without an override it
+requires the default serve resolves (`ram_tier_default` or `draft_clamp`).
+SPEC-023 v0.15.2 stops emitting the 4,000-token floor
 as a production context when the model or memory bound is unknown.
 
 **Change log v1.9.22 (2026-09-23, post-change provider verify):** Adds
@@ -21,12 +51,16 @@ polls, with a bounded `--timeout` (default 180 s) and backoff, the local
 `/v1/models` and `/v1/status`, the coordinator view `/v1/status` reports
 (`coordinator.connected`, `network_state`, `buyer_serving_hold`), and the
 public routability feed `GET /v1/stats/routability` on the configured
-coordinator host, until they agree on model, context, and slots. It reports
-each layer, names the stale or disagreeing surface, prints one proof line, and
-exits with a distinct code per failing layer; at the deadline the code is the
-last completed evaluation's, never a local failure produced by the deadline
-itself. `--json` emits `provider_verify.v1`. No wire, config, or status field
-changes.
+coordinator the running provider reports, until they agree on model, context,
+and slots. It reports each layer, names the stale or disagreeing surface, prints
+one proof line, and exits with a distinct code per failing layer; at the
+deadline the code is the last completed evaluation's, never a local failure
+produced by the deadline itself. `--json`
+emits `provider_verify.v1`. Adds the additive `coordinator_origin_v1`
+local-status capability and its top-level `/v1/status` field
+`coordinator_origin`, the running serve's coordinator as `scheme://host[:port]`,
+so the feed is the running provider's, not the invoking shell's. No wire or
+config field changes.
 
 **Change log v1.9.21 (2026-09-23, catalog-material readiness hold):** Names
 the closed `buyer_serving_hold` set the CLI holds its accepted session through
@@ -1088,9 +1122,12 @@ them.
   `cli_flag` (`--max-context`), `ram_tier_default` (FR-9 tier default, no
   override), `draft_clamp` (the draft-model preflight lowered the implicit
   default), `recommendation_adoption` (a warm swap applied an adopted
-  recommendation's context), or `recommendation_apply` (v1.9.23: config
-  `max_context_override` whose value equals the one the knob-provenance
-  sidecar records as written by a recommendation apply). Precedence is CLI flag over environment over
+  recommendation's context, or, v1.9.23, the context a warm switch recomputed
+  for its target from a generated `max_context_override`, FR-20b), or `recommendation_apply` (v1.9.23: config
+  `max_context_override` that the config's own
+  `max_context_override_provenance` record marks as written by a
+  recommendation apply: source `recommendation_apply`, a non-empty `model`, and
+  exactly this value, FR-20b). Precedence is CLI flag over environment over
   config over tier default; the draft clamp applies after that.
 - `throughput_source`: `startup_probe` when the serve-time startup probe
   produced `throughput_tps_estimate`, else `none`.
@@ -1290,7 +1327,8 @@ The local `GET /v1/status` response includes a versioned envelope. Contract v1 h
 only fields a reader may trust through these capabilities:
 `buyer_serving_authority_v1`, `catalog_status_v1`, `credential_status_v1`,
 `status_observation_v1`, `service_instance_v1`, `lifecycle_transition_v1`,
-`capacity_provenance_v1` (FR-17 local capacity provenance), `referral_bootstrap_v1`, `referral_status_v1`, `referral_advocacy_v1`,
+`capacity_provenance_v1` (FR-17 local capacity provenance), `coordinator_origin_v1`
+(FR-20a coordinator origin), `referral_bootstrap_v1`, `referral_status_v1`, `referral_advocacy_v1`,
 `referral_fragment_links_v1`, `model_liveness_token_v1`, and
 `legacy_reader_fallback_v1`. `model_liveness_token_v1` gates the `model_liveness`
 object (a monotonic model-thread progress token + monotonic age; SPEC-025 §5.2), an
@@ -1510,6 +1548,11 @@ URL requested. Each poll evaluates three layers:
 1. **Local** passes when `GET 127.0.0.1:<port>/v1/status` reports
    `model_loaded=true` with `status` `ready` or `busy`, and `GET /v1/models`
    lists that `model`.
+   Pause exception: a serve reporting `model_loaded=true` whose `lifecycle.state`
+   is `paused_by_operator` (it reports `status` `unavailable`) fails this layer
+   with the pause reason below, and the outcome is `network_not_serving`
+   (exit `3`), not `local_not_ready`, because resuming it, not a local repair,
+   restores serving.
 2. **Network** passes when `/v1/status` reports `coordinator.connected=true`
    and `network_state=buyer_serving`. A `buyer_serving_hold` of
    `catalog_material_missing` is a distinct, terminal failure reported with its
@@ -1519,9 +1562,16 @@ URL requested. Each poll evaluates three layers:
    `paused_by_operator`, the reason is `paused by operator (resume it from
    Malibu or its control socket)`, whether or not the coordinator is
    connected, with the same not-serving outcome.
-3. **Public feed** reads `GET /v1/stats/routability` (SPEC-017) on the host
-   of the configured `coordinator_url` (`wss`/`https` map to `https`; `ws`/`http`
-   only for a loopback host). The served model matches a feed `model_id` equal to
+3. **Public feed** reads `GET /v1/stats/routability` (SPEC-017) on the
+   coordinator the running provider reports in `/v1/status` `coordinator_origin`
+   (`wss`/`https` map to `https`; `ws`/`http` only for a loopback host), never on
+   the invoking CLI's configured `coordinator_url`: a shell whose config or
+   `MACPROVIDER_COORDINATOR_URL` names another coordinator than the launchd
+   service must not produce agreement. When the running provider does not
+   advertise `coordinator_origin_v1` (an older serve), reports a `null` origin,
+   or reports one whose feed may not be read under these scheme rules, the feed
+   layer is `unverifiable` and terminal with exit `7`, never agreement; the reason may
+   name the shell's configured coordinator only labelled as such. The served model matches a feed `model_id` equal to
    the local `model`, `catalog.model_id`, or `catalog.catalog_key`. The feed passes
    when it lists the model with `max_context_tokens` at least the local
    `capacity.max_context_tokens` and lists a `serving_capable` provider entry for
@@ -1545,9 +1595,20 @@ output follows the public-language policy. `--json` emits
 (`layer`, `state` ∈ {`pass`,`fail`,`pending`,`unverifiable`}, `reason`),
 `proof`, and `unverifiable_fields`. Exit codes: `0` all agree, `2` local not
 ready, `3` network not serving, `4` public feed disagrees, `5` timed out on a
-stale or unreachable feed, `6` `catalog_material_missing`, `7` feed not
-published. The first failing layer in the order local, network, feed decides
-the code.
+stale or unreachable feed, `6` `catalog_material_missing`, `7` feed cannot be
+checked (not published, or the running provider does not report its
+coordinator). The first failing layer in the order local, network, feed decides
+the code, except that an operator-paused loaded serve exits `3` (pause
+exception, layer 1).
+
+**Coordinator origin (capability `coordinator_origin_v1`).** When the local
+status contract advertises `coordinator_origin_v1`, `GET /v1/status` carries a
+top-level `coordinator_origin`: the `coordinator_url` the running serve resolved
+at start, normalized to `scheme://host[:port]` with a lowercased scheme
+(`ws`, `wss`, `http`, or `https`) and host, and no userinfo, path, query, or
+fragment; `null` when the serve has no usable coordinator URL. It is additive
+local diagnostics, never sent to the coordinator, with no routing or
+buyer-serving authority; a reader without the capability MUST ignore it.
 
 **FR-20b. Operator context workflow (`provider context`, v1.9.23).**
 An operator changes the serve context without editing YAML:
@@ -1560,9 +1621,14 @@ An operator changes the serve context without editing YAML:
   readable from `model_artifact_path`), the slot count, a KV-memory estimate
   for context × slots, and the value `/v1/status` advertises to the network. It
   warns when the effective cap is under half of `min(RAM-tier default, model
-  limit, SPEC-028 draft cap when a `draft_model` is configured)`, and when a
+  limit, SPEC-028 draft cap when a `draft_model` is configured)`, when the
+  effective context is above the served model's declared maximum (the value is
+  not changed; the warning names the command to lower it), and when a
   recommendation-generated value was generated for a model other than the
-  configured one. It shows the draft cap when a `draft_model` is configured.
+  configured one. The model limit is read for the model the running provider
+  serves (the configured artifact for the configured model, else the signed
+  catalog copy), and the slot count is the running provider's, else the count
+  serve resolves from `config.yaml` (`max_concurrency_override`, else 1). It shows the draft cap when a `draft_model` is configured.
   The config values, their owner, and their provenance come from
   `config.yaml` alone: the launchd service does not inherit the invoking
   shell's environment, so a `MACPROVIDER_MAX_CONTEXT_OVERRIDE` set in that
@@ -1572,38 +1638,207 @@ An operator changes the serve context without editing YAML:
 - `malibu-cli provider context set <tokens> [--preflight] [--apply]
   [--timeout <s>]` MUST refuse a value outside 4,000…1,000,000 tokens, above
   the known model limit, or, when a `draft_model` is configured, above the
-  SPEC-028 draft cap (serve would exit `draft_model_capacity_shortfall`). It estimates KV memory as `kv_bytes_per_token × tokens
+  SPEC-028 draft cap or beside a `max_concurrency_override` above 1 (serve would
+  exit `draft_model_capacity_shortfall`). It estimates KV memory as `kv_bytes_per_token × tokens
   × slots` (`kv_bytes_per_token` from the SPEC-023 KV geometry of the model
   `config.json`) against three quarters of the RAM left after the artifact's
   safetensors weights and the SPEC-023 safety margin, and MUST refuse, writing
-  nothing, when it does not fit. An estimate that cannot be computed is reported
+  nothing, when it does not fit. Slots are the count serve runs after a restart
+  from `config.yaml`, resolved by the same function serve uses (1 with a draft
+  model, else `max_concurrency_override`, else 1), never the running provider's
+  `max_concurrency`, because `--apply` restarts from the file; when they differ
+  the output names both and where the file's count comes from. Every value checked comes from the
+  config file alone, read without the invoking shell's environment.
+  The check is a transaction: the model inspection runs without the
+  provider-config lock and records the fields it depends on (model, artifact
+  path and catalog identity, `max_concurrency_override`, `draft_model`,
+  `max_context_override` and its provenance); under the lock the writer
+  re-reads the file, and when any of them changed it re-runs the preflight on
+  the new file, at most three attempts in total before refusing with nothing
+  written. Under the lock it validates the complete config it is about to
+  write (model limit, draft cap and draft slot limit, KV memory) before any
+  backup or write. An estimate that cannot be computed is reported
   and does not block. `--preflight` without `--apply` writes nothing. Otherwise
   it backs up the current config as `config.yaml.bak-<unix>-<counter>` (without
-  `provider_token`), writes `max_context_override` atomically under the
-  provider-config lock as an operator-owned value (clearing its provenance
-  entry), and with `--apply` restarts the launchd provider the way `credentials`
+  `provider_token`), then, in one atomic write under the provider-config lock,
+  writes `max_context_override` and removes `max_context_override_provenance`,
+  so the value is operator-owned even when it equals the generated one (a
+  failed write changes nothing), and with `--apply` restarts the launchd provider the way `credentials`
   restart proofs do (`launchctl kickstart -k`) and runs FR-20a verification that
   additionally requires the local `capacity.max_context_tokens` to equal the new
   value. A failed verification prints the rollback command; it never rolls back
-  on its own.
-- `malibu-cli provider context rollback [--timeout <s>]` restores the
-  recommendation-owned fields from the newest `config.yaml.bak-*` backup after
-  saving the current config as a new backup (so a second rollback undoes the
-  first), then restarts and verifies as above.
-- `set` and `explain` list competing `macprovider-cli serve` processes and
-  every process listening on the provider port. They only suggest; they MUST
-  NOT stop any process.
+  on its own. The restart kicks the installed `live.malibu.provider` job, so
+  `--apply` MUST first find that job by its plist, never by the config's
+  `credential_store` (a GUI install may use `protected_file`): it reads
+  `~/Library/LaunchAgents/live.malibu.provider.plist` (domain `gui/<uid>`) and
+  `/Library/LaunchDaemons/live.malibu.provider.plist` (domain `system`), keeps
+  each that parses as a serve job, and when both do, takes the one `launchctl
+  print <domain>/live.malibu.provider` reports loaded; both or neither loaded
+  is ambiguous. For the job found it resolves the config it serves (`serve
+  --config <path>`, else its `MACPROVIDER_CONFIG`, else the default) and its
+  port (`--port`, else that config and the job's environment), and refuses,
+  writing nothing, unless both match the command's config (compared after
+  resolving symlinks) and port, or when no job or an ambiguous pair is found.
+  The refusal names what was found (`the installed service <domain>/<label>
+  runs <config> on port <n>; this config is <config> on port <n>`, `none
+  found`, or both ambiguous jobs), says to restart that provider by hand, and
+  names the `provider verify --config <path> --port <n>` command. The restart
+  runs in the domain the job was found in: `launchctl kickstart -k
+  gui/<uid>/live.malibu.provider` as the invoking user, or `sudo -n launchctl
+  kickstart -k system/live.malibu.provider`. `explain` prints the same
+  detection read-only as an `Installed:` line: `<domain>/<label> (config
+  <path>, port <n>)`, `none found`, or `ambiguous: …`.
+- `malibu-cli provider context rollback [--timeout <s>] [--no-restart]` restores the
+  recommendation-owned fields (which include
+  `max_context_override_provenance`) from the newest backup after saving the
+  current config as a new backup (so a second rollback undoes the first), then
+  restarts and verifies as above. The restart is subject to the same
+  installed-service check as `set --apply`, made before anything is restored;
+  `--no-restart` restores only and prints the restart and `provider verify`
+  next steps. When the restored config has no
+  `max_context_override`, verification requires the context serve resolves
+  without one, the RAM-tier default clamped for a configured draft model, and
+  the matching `max_context_source` (`ram_tier_default` or `draft_clamp`). "Newest" is the backup the config
+  writer created last, named in `config.yaml.latest-backup`, so the order does
+  not depend on the wall clock; without a usable pointer (backups from an older
+  CLI) it is the highest `<unix>-<counter>` name. The value and its
+  provenance come from the same backup in one atomic write, so a restored
+  generated value stays `recommendation_apply` and a backup without a record
+  restores `operator_config`. A provenance record written as a YAML block (or a
+  flow mapping continued over several lines), which the loader accepts, is
+  captured and restored in the one-line flow form, here and in adoption crash
+  recovery. Rollback validates the restored config with the `set` transaction
+  beside the fields it does not restore (such as `draft_model`): a restored
+  `max_context_override` above the model limit or the draft cap, a restored
+  slot count a draft model forbids, or a KV estimate that does not fit is
+  refused with nothing written, rather than written for serve to refuse. A
+  restored config without an override is not refused for its memory, since
+  serve resolves that default itself.
+- `set --apply` and `rollback` accept `--timeout` only in 0…3600 seconds, the
+  same bound `provider verify` enforces, and reject any other value before any
+  preflight, backup, or write.
+- `set` and `explain` list other `macprovider-cli serve` processes on the Mac
+  neutrally (they may be separate providers on other ports and configs),
+  excluding a serve that listens on the provider port (the provider being
+  checked), and every process listening on the provider port. They only suggest; they MUST
+  NOT stop any process, and MUST NOT tell the operator to stop a serve that is
+  not on the provider port.
+- `status --advanced` prints, under the context cap, a warning when the served
+  context is above the served model's declared maximum, a line when serve
+  lowered a generated value to fit its slots (the `recommendation_apply` value
+  it serves is below the configured one), and otherwise a warning when the
+  context × slots KV estimate does not fit memory. These are read from the
+  running provider's status, `config.yaml` alone, and the served model's local
+  `config.json`; they change nothing.
 
-**Knob provenance sidecar.** `autotune --recommend --apply` (and any
-recommendation adoption through the same config writer) writes
-`<config path>.provenance.json` next to the config:
-`{"schema_version":"knob_provenance.v1","max_context_override":{"value":<int>,
-"source":"recommendation_apply","model":<string>,"benchmark_id":<string|null>,
-"generated_at":<RFC3339>}}`. The config loader reports `max_context_source =
-recommendation_apply` only while the configured value equals the recorded
-value; any other value, a missing or unreadable sidecar, or another
-`schema_version` means `operator_config`. The sidecar never supplies config
-values, and a failed sidecar write never fails the apply.
+**Knob provenance in config.yaml.** `autotune --recommend --apply` (and any
+recommendation adoption through the same config writer) writes, in the same
+atomic config write as the value, one top-level key placed right after
+`max_context_override`:
+`max_context_override_provenance: {source: "recommendation_apply", value:
+<int>, model: "<model id>", benchmark_id: "<id>", generated_at: "<RFC3339>"}`
+(`benchmark_id` only when known; strings are always double-quoted). It is a
+recommendation-owned field, so the provider-config lock, the atomic write,
+`config.yaml.bak-*` backups, rollback, and the recommendation-adoption journal
+and its crash recovery treat it exactly like the value it describes. It holds no
+secret; backups keep it (they drop only `provider_token`). A recommendation's
+`serve_config` never carries it; only the apply writes it. Config loaders that
+predate v1.9.23 ignore the unknown key, and every first-party writer of
+`config.yaml` (the credential lifecycle, serve's `model_artifact_path`
+canonicalization, the installer's merge, the Malibu app) edits named lines and
+keeps other lines, so it survives them.
+
+The binding is field-scoped. The config loader reports `max_context_source =
+recommendation_apply` iff the record's `source` is `recommendation_apply`, its
+`model` (the model the value was generated for) is present and non-empty, and
+its `value` equals the configured `max_context_override`. Nothing about other
+config keys matters: serve's `model_artifact_path` canonicalization, the
+credential lifecycle's `provider_token` lines, or an operator's edit to another
+key leave a generated value generated. Ownership moves to the operator only
+through an explicit act: `provider context set` (removes the record in the same
+write), a rollback to an operator-owned backup (which has no record), or a hand
+edit of `max_context_override` to a different value. Accepted trade-off: a hand
+edit to exactly the generated number cannot be told from the generated value
+and stays `recommendation_apply`; the consequence is that a later model switch
+recomputes it to the memory-safe value for the new model, which is the
+conservative outcome. An absent record, one that is not a mapping, lacks
+`model`, has another `source`, or records another value means
+`operator_config`: every doubt resolves toward preserving the operator's value.
+A malformed record never fails the config load. A writer that edits
+`max_context_override` without knowing the key (an older CLI, or a hand edit)
+leaves a record for the old value, which no longer matches, so the value reads
+as `operator_config`.
+
+**Model switch.** A generated `max_context_override` follows the served model;
+an operator-owned one does not. When `serve` starts with `max_context_source =
+recommendation_apply`, it computes, for every warm-switch target with a signed
+catalog row and a locally verified artifact, the context
+`autotune --recommend` would write for that model on this Mac (SPEC-023-R018:
+`min(RAM-tier default, declared model max, memory-safe context, SPEC-028 draft
+cap when a `draft_model` is configured)` from the verified `config.json`), lowered to the largest context at
+which serve's slot count (`max_concurrency_override`, else 1) fits the same
+memory envelope, never below 4,000 tokens (SPEC-023-R018 item 9: the context
+gives way, the operator's slots do not, unless even 4,000 tokens do not fit
+them: then the context is `min(recomputed, 4000)` and that target is served
+with the slot count that fits there). A `models switch` to such a target serves that value,
+carried through the same swap knobs an adoption uses with KV bits unchanged
+and slots unchanged except in that floor case, and reports `max_context_source = recommendation_adoption`; a switch
+to the model the value was generated for, or back to the configured model,
+serves the recorded value, or the value serve lowered it to at start. At start,
+when `max_context_source = recommendation_apply` and the slot count serve runs
+(`max_concurrency_override` after `--max-batch` and the environment, else 1)
+does not fit the same memory envelope at the recorded value (from the
+configured model's verified `config.json` and its signed catalog row), serve
+lowers the served context to the largest one that fits, never below 4,000
+tokens, keeps `max_context_source = recommendation_apply`, logs the change on
+stderr, and never rewrites `config.yaml`; `status --advanced` reports it. When
+even 4,000 tokens do not fit that slot count, serve starts at 4,000 tokens with
+the slot count that fits there (at least 1), logs both on stderr, and a switch
+back to the configured model restores that started count; `status --advanced`
+warns that slots were lowered. An
+operator-owned value is never lowered; `status --advanced` warns when it does
+not fit. Only a switch to the model the record names (any id
+of that model) reports `recommendation_apply`; any other target reports
+`recommendation_adoption`, even when its recomputed value equals the recorded
+one (for example, both at the draft cap). The switch never rewrites `config.yaml`: it does not
+change the configured `model` either, so after a restart the configured model
+and its recorded context apply again, and the record stays true. Any other
+source (operator config, a value its record no longer matches, environment,
+CLI flag, draft clamp) is kept for every model, and
+`models switch` prints one line on stderr when it is under half of
+`min(RAM-tier default, target model limit)`, the `explain` comparison. When a
+generated value changes, `models switch` prints the recomputed value. For any
+source, it prints instead a warning when the served context is above the
+target's declared maximum; the value is not changed. Both
+lines are built from what serve applied, never recomputed by the client: the
+SPEC-011 `switch_progress` frame with `state: loaded` carries two optional
+fields, `max_context_tokens` (int) and `max_context_source` (the FR-17 enum),
+set together from the `/v1/status` capacity after the swap. They are additive:
+no other state carries them, SPEC-011 decoders ignore keys they do not know,
+and a client talking to a serve that omits them prints no context line.
+`autotune --recommend --apply` and `models adopt-recommendation` already write
+the target model's recomputed context with its provenance record; they replace
+the context by design, since the operator asked to apply that recommendation.
+
+**Draft term.** Every writer of `max_context_override` and
+`max_concurrency_override` (`autotune --recommend --apply`, including its
+calibrations, `models adopt-recommendation`, `provider context set`) takes the
+SPEC-028 draft term from the draft model serve will use: `draft_model` in the
+config file being written, read without the invoking shell's environment (the
+launchd service does not inherit it, so an empty or invalid shell variable
+neither hides nor adds a draft model); the warm-switch recompute uses serve's
+own resolved config. A whitespace-only `draft_model` is not "no draft model":
+serve refuses to start on it (`--draft-model must be non-empty`), so a writer
+refuses to write from such a file, as from a file serve cannot load. With a
+draft model the written context is at most the draft cap and
+`max_concurrency_override` is 1. `models adopt-recommendation` refuses a
+recommendation with more slots or a larger context
+(`draft_model_capacity_shortfall`) before the runtime prepares it or anything is
+written, and likewise refuses a signed slot count above the SPEC-023-R018
+item 9 memory-fit cap at the signed context. `autotune --recommend` caps its values, calibration results included,
+and the config writer re-reads the file under the provider-config lock right
+before writing, so a draft model added during the run still caps the written
+values (with a stderr warning).
 
 ---
 

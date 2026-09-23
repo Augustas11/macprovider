@@ -419,7 +419,11 @@ final class AutotuneRecommendTests: XCTestCase {
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString(serveConfig: core).utf8)) as? [String: Any])
         let serveConfig = try XCTUnwrap(root["serve_config"] as? [String: Any])
 
-        XCTAssertEqual(Set(serveConfig.keys), Set(ConfigApplier.recommendationOwnedKeys))
+        XCTAssertEqual(
+            Set(serveConfig.keys),
+            Set(ConfigApplier.recommendationOwnedKeys).subtracting([MaxContextProvenance.configKey]),
+            "the apply writes the provenance record itself"
+        )
         XCTAssertEqual(serveConfig["model"] as? String, selected.model)
         XCTAssertEqual(serveConfig["model_artifact_path"] as? String, benchmark.modelArtifactPath)
         XCTAssertEqual(serveConfig["model_artifact_sha256"] as? String, benchmark.artifactSHA256)
@@ -621,6 +625,46 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(outcomes.benchmarks.isEmpty)
         XCTAssertEqual(outcomes.diagnostics[modelKey], "installed_only_missing_verified_artifact")
         XCTAssertFalse(FileManager.default.fileExists(atPath: hubRoot.path))
+    }
+
+    /// #1689 F7: a background check-only run verifies bytes where they are
+    /// and never populates the durable store.
+    func testInstalledOnlyCheckNeverPopulatesTheDurableStore() throws {
+        var request = try makeRequest()
+        let modelKey = try XCTUnwrap(request.candidateCatalog.rows.keys.sorted().first)
+        let modelID = try XCTUnwrap(request.candidateCatalog.rows[modelKey]?.modelID)
+        let revision = String(repeating: "a", count: 40)
+        let root = URL(fileURLWithPath: "/tmp")
+            .appendingPathComponent("mpm-installed-only-hf-\(getpid())-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let durableRoot = root.appendingPathComponent("durable", isDirectory: true)
+        let resolver = CachedModelArtifactResolver(hubRoot: root.appendingPathComponent("hub", isDirectory: true), durableRoot: durableRoot)
+        let snapshot = resolver.snapshotURL(modelID: modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data(#"{"max_position_embeddings": 32768}"#.utf8).write(to: snapshot.appendingPathComponent("config.json"))
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+        request.candidateCatalog.rows[modelKey]?.modelRevision = revision
+        request.candidateCatalog.rows[modelKey]?.modelSHA256 = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+
+        let outcomes = try AutotuneCommand.installedOnlyBenchmarkOutcomes(
+            request: request,
+            candidateModelIDs: [modelID],
+            catalogSHA: request.candidateCatalogSHA256,
+            artifactResolver: resolver
+        )
+
+        XCTAssertNotNil(outcomes.benchmarks[modelKey], "\(outcomes.diagnostics)")
+        let durable = try resolver.durableStore.artifactURL(
+            modelID: modelID,
+            revision: revision,
+            sha256: try XCTUnwrap(request.candidateCatalog.rows[modelKey]?.modelSHA256)
+        )
+        XCTAssertEqual(
+            outcomes.benchmarks[modelKey]?.modelArtifactPath,
+            durable.standardizedFileURL.path,
+            "the reported path is the durable copy serve loads after adoption"
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: durableRoot.path), "check-only never writes the durable store")
     }
 
     func testCheckOnlyFlagsRejectMutationAndRequireExplicitNoSubmission() throws {
@@ -1030,7 +1074,7 @@ final class AutotuneRecommendTests: XCTestCase {
 
         let configURL = try tempDir().appendingPathComponent("config.yaml")
         try "model: m\ndraft_model: \(draftModel)\n".write(to: configURL, atomically: true, encoding: .utf8)
-        _ = try ConfigApplier(configPath: configURL).apply(recommendation: drafted, now: Date(), donorMode: false)
+        _ = try ConfigApplier(configPath: configURL).apply(recommendation: drafted, now: Date(), donorMode: false, physicalMemoryGB: 256)
         var applied = try ConfigLoader.load(cli: CLIOverrides(configPath: configURL.path), environment: [:])
         XCTAssertEqual(applied.maxContextOverride, 120_000)
         XCTAssertEqual(applied.maxContextSource, .recommendationApply)
@@ -1043,6 +1087,119 @@ final class AutotuneRecommendTests: XCTestCase {
             try ServeCommand.runSpecDecodeCapacityPreflight(&undrafted, physicalMemoryGB: 256),
             "the value written without the draft term is the one serve refuses"
         )
+    }
+
+    /// #1689 INFO1: calibration overrides are capped by the draft term too,
+    /// because serve refuses a larger context or more than one slot.
+    func testCalibrationOverridesAreCappedWhenADraftModelIsConfigured() throws {
+        var request = try makeRequest()
+        request.hardware = Self.hardware(chip: "Apple M3 Ultra", memoryGB: 256, bandwidthTier: .s)
+        let result = AutotuneRecommendEngine().recommend(request)
+        let selected = try XCTUnwrap(result.selectedCandidate)
+        let benchmark = try XCTUnwrap(request.benchmarks[selected.catalogKey])
+        let row = try XCTUnwrap(request.candidateCatalog.rows[selected.catalogKey])
+        func core(draftModel: String?) -> RecommendationCore {
+            AutotuneCommand.recommendationCoreForConfig(
+                selected: selected,
+                selectedBenchmark: benchmark,
+                selectedRow: row,
+                catalogVersion: request.candidateCatalog.version,
+                catalogHash: request.candidateCatalogSHA256,
+                hardware: request.hardware,
+                draftModel: draftModel,
+                maxContextOverride: 200_000,
+                maxBatchOverride: 4
+            )
+        }
+        XCTAssertEqual(core(draftModel: nil).knobs.maxContext, 200_000)
+        XCTAssertEqual(core(draftModel: nil).knobs.maxBatch, 4)
+        let drafted = core(draftModel: "d")
+        XCTAssertEqual(drafted.knobs.maxContext, ProviderCapacity.draftContextCap(forPhysicalMemoryGB: 256))
+        XCTAssertEqual(drafted.knobs.maxBatch, 1)
+    }
+
+    /// #1689 M2: the draft model that caps a write is the one serve reads from
+    /// the config file. The launchd service does not inherit this shell, so an
+    /// empty or invalid shell variable must not hide the file's draft model.
+    func testServedDraftModelComesFromTheConfigFileNotTheShellEnvironment() throws {
+        let configURL = try tempDir().appendingPathComponent("config.yaml")
+        try "model: m\ndraft_model: mlx-community/Qwen3-0.6B-4bit\n".write(to: configURL, atomically: true, encoding: .utf8)
+        func withEnvironment(_ key: String, _ value: String, _ body: () throws -> Void) rethrows {
+            let previous = getenv(key).map { String(cString: $0) }
+            setenv(key, value, 1)
+            defer {
+                if let previous { setenv(key, previous, 1) } else { unsetenv(key) }
+            }
+            try body()
+        }
+        try withEnvironment("MACPROVIDER_DRAFT_MODEL", "") {
+            XCTAssertEqual(try ProviderCapacity.servedDraftModel(configPath: configURL.path), "mlx-community/Qwen3-0.6B-4bit")
+        }
+        try withEnvironment("MACPROVIDER_MAX_CONTEXT_OVERRIDE", "not-a-number") {
+            XCTAssertEqual(try ProviderCapacity.servedDraftModel(configPath: configURL.path), "mlx-community/Qwen3-0.6B-4bit")
+        }
+        XCTAssertNil(try ProviderCapacity.servedDraftModel(
+            configPath: configURL.deletingLastPathComponent().appendingPathComponent("absent.yaml").path
+        ), "no config file: serve runs without a draft model")
+
+        // A blank draft_model is not "no draft model": serve refuses the file
+        // (`--draft-model must be non-empty`), so the writers refuse it too.
+        try "model: m\ndraft_model: \"  \"\n".write(to: configURL, atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try ProviderCapacity.servedDraftModel(configPath: configURL.path))
+        // A file serve cannot load fails closed instead of reading as "no draft".
+        try "model: m\ndraft_model: d\nmax_context_override: lots\n".write(to: configURL, atomically: true, encoding: .utf8)
+        XCTAssertThrowsError(try ProviderCapacity.servedDraftModel(configPath: configURL.path))
+    }
+
+    /// #1689 M2: the config writer re-reads the draft model from the file under
+    /// the config lock, so a draft_model added after recommend took its
+    /// snapshot still caps what is written.
+    func testConfigApplyCapsAgainstADraftModelAddedAfterTheSnapshot() throws {
+        var request = try makeRequest()
+        request.hardware = Self.hardware(chip: "Apple M3 Ultra", memoryGB: 256, bandwidthTier: .s)
+        let result = AutotuneRecommendEngine().recommend(request)
+        let selected = try XCTUnwrap(result.selectedCandidate)
+        let benchmark = try XCTUnwrap(request.benchmarks[selected.catalogKey])
+        let row = try XCTUnwrap(request.candidateCatalog.rows[selected.catalogKey])
+        let snapshotCore = AutotuneCommand.recommendationCoreForConfig(
+            selected: selected,
+            selectedBenchmark: benchmark,
+            selectedRow: row,
+            catalogVersion: request.candidateCatalog.version,
+            catalogHash: request.candidateCatalogSHA256,
+            hardware: request.hardware,
+            draftModel: nil,
+            maxContextOverride: 200_000,
+            maxBatchOverride: 8
+        )
+        let dir = try tempDir()
+        let configURL = dir.appendingPathComponent("config.yaml")
+        // Added after the snapshot, before the write.
+        try "model: m\ndraft_model: d\n".write(to: configURL, atomically: true, encoding: .utf8)
+
+        let before = try String(contentsOf: configURL)
+        XCTAssertThrowsError(
+            try ConfigApplier(configPath: configURL).apply(recommendation: snapshotCore, now: Date(), draftCapacity: .refuse, physicalMemoryGB: 256)
+        ) { error in
+            XCTAssertTrue(String(describing: error).contains("draft_model_capacity_shortfall"), "\(error)")
+        }
+        XCTAssertEqual(try String(contentsOf: configURL), before, "a refused write changes nothing")
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.contains(".bak-") }, [])
+
+        _ = try ConfigApplier(configPath: configURL).apply(recommendation: snapshotCore, now: Date(), draftCapacity: .clamp, physicalMemoryGB: 256)
+        var applied = try ConfigLoader.load(cli: CLIOverrides(configPath: configURL.path), environment: [:])
+        XCTAssertEqual(applied.maxContextOverride, 120_000)
+        XCTAssertEqual(applied.maxConcurrencyOverride, 1)
+        XCTAssertEqual(applied.maxContextSource, .recommendationApply, "the provenance records the value written")
+        XCTAssertNoThrow(try ServeCommand.runSpecDecodeCapacityPreflight(&applied, physicalMemoryGB: 256))
+
+        // A config serve cannot load is never overwritten with an uncapped value.
+        try "model: m\ndraft_model: d\nmax_context_override: lots\n".write(to: configURL, atomically: true, encoding: .utf8)
+        let unreadable = try String(contentsOf: configURL)
+        XCTAssertThrowsError(
+            try ConfigApplier(configPath: configURL).apply(recommendation: snapshotCore, now: Date(), draftCapacity: .clamp, physicalMemoryGB: 256)
+        )
+        XCTAssertEqual(try String(contentsOf: configURL), unreadable)
     }
 
     func testCompleteLayerTypesWithoutFullAttentionLeaveTheMemoryTermNonBinding() throws {
@@ -1165,6 +1322,111 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(core.knobs.maxContext, 200_000)
         XCTAssertEqual(serveConfig["max_concurrency_override"] as? Int, 2)
         XCTAssertEqual(serveConfig["max_context_override"] as? Int, 200_000)
+    }
+
+    /// The generated serve pair for one signed row on one Mac, through the
+    /// same path `autotune --recommend --apply` writes.
+    private func generatedServePair(
+        catalogKey: String,
+        row: CandidateCatalog.Row,
+        hardware: AutotuneRecommendHardware,
+        draftModel: String? = nil
+    ) throws -> (context: Int, slots: Int, configData: Data) {
+        var request = try makeRequest()
+        request.hardware = hardware
+        let selected = try XCTUnwrap(AutotuneRecommendEngine().recommend(request).selectedCandidate)
+        var benchmark = try XCTUnwrap(request.benchmarks[selected.catalogKey])
+        let geometry = try XCTUnwrap(Self.signedCandidateConfigGeometry[catalogKey], "no pinned config geometry for \(catalogKey)")
+        XCTAssertEqual(geometry.revision, row.modelRevision, "\(catalogKey): geometry fixture is for another revision")
+        Self.bindContextConfig(geometry.json, to: &benchmark)
+        let core = AutotuneCommand.recommendationCoreForConfig(
+            selected: selected,
+            selectedBenchmark: benchmark,
+            selectedRow: row,
+            catalogVersion: request.candidateCatalog.version,
+            catalogHash: request.candidateCatalogSHA256,
+            hardware: hardware,
+            draftModel: draftModel
+        )
+        return (core.knobs.maxContext, core.knobs.maxBatch, try XCTUnwrap(benchmark.modelConfigJSONData))
+    }
+
+    /// #1689 audit HIGH: the generated context is sized for one full-context
+    /// KV cache and the slot count is the chip/RAM tier constant, so the pair
+    /// could jointly exceed memory. For every signed candidate row on 256,
+    /// 128 and 64 GB Macs, `slots` full-context KV caches plus the catalog
+    /// `min_ram_gb` and the safety margin must fit physical memory, and the
+    /// slots must fit the `memoryFitBatchDepth` envelope at that context.
+    func testGeneratedContextAndSlotsFitMemoryForEverySignedCandidateRow() throws {
+        let catalogURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("catalog/autotune/autotune-candidates.json")
+        let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(Data(contentsOf: catalogURL))
+        XCTAssertEqual(Set(catalog.rows.keys), Set(Self.signedCandidateConfigGeometry.keys), "every signed row needs a pinned geometry fixture")
+        let gib: UInt64 = 1 << 30
+        let machines = [
+            Self.hardware(chip: "Apple M3 Ultra", memoryGB: 256, bandwidthTier: .s),
+            Self.hardware(chip: "Apple M3 Ultra", memoryGB: 128, bandwidthTier: .s),
+            Self.hardware(chip: "Apple M4 Max", memoryGB: 64, bandwidthTier: .a),
+        ]
+        var checked = 0
+        for hardware in machines {
+            for (key, row) in catalog.rows.sorted(by: { $0.key < $1.key }) {
+                let reservedGB = row.minRAMGB + AutotuneRecommendEngine.safetyMarginGB
+                guard reservedGB < hardware.memoryGB else { continue }
+                let pair = try generatedServePair(catalogKey: key, row: row, hardware: hardware)
+                let label = "\(key) on \(hardware.memoryGB) GB: context \(pair.context) x \(pair.slots) slots"
+                let bytesPerToken = try XCTUnwrap(AutotuneModelContextCap.kvCacheBytesPerToken(configData: pair.configData), label)
+                let kvBytes = UInt64(bytesPerToken) * UInt64(pair.context) * UInt64(pair.slots)
+                XCTAssertLessThanOrEqual(kvBytes + UInt64(reservedGB) * gib, UInt64(hardware.memoryGB) * gib, label)
+                XCTAssertGreaterThanOrEqual(pair.slots, 1, label)
+                XCTAssertLessThanOrEqual(pair.slots, hardware.recommendedMaxBatch, label)
+                if pair.slots > 1 {
+                    let fit = try XCTUnwrap(AutotuneModelContextCap.memoryFitBatchDepth(
+                        configData: pair.configData,
+                        verifiedConfigSHA256: Self.sha256Hex(pair.configData),
+                        hardwareMemoryGB: hardware.memoryGB,
+                        catalogMinRAMGB: row.minRAMGB,
+                        calibrationContextTokens: pair.context
+                    ), label)
+                    XCTAssertLessThanOrEqual(pair.slots, fit, label)
+                }
+                checked += 1
+            }
+        }
+        XCTAssertGreaterThan(checked, 2 * catalog.rows.count)
+    }
+
+    /// The auditor's case: signed GLM-4.5-Air on a 256 GB Ultra kept its
+    /// declared 131,072-token context beside the 8-slot tier constant, about
+    /// 200 GB of KV cache. The context stays; the slots come down to what fits.
+    func testGLM45AirOn256GBUltraKeepsItsContextAndLowersSlotsToFitMemory() throws {
+        let catalog = try AutotuneStaticInputs.decodeCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
+        let row = try XCTUnwrap(catalog.rows["z-ai/glm-4.5-air"])
+        let hardware = Self.hardware(chip: "Apple M3 Ultra", memoryGB: 256, bandwidthTier: .s)
+        XCTAssertEqual(hardware.recommendedMaxBatch, 8)
+
+        let pair = try generatedServePair(catalogKey: "z-ai/glm-4.5-air", row: row, hardware: hardware)
+
+        XCTAssertEqual(pair.context, 131_072, "R018 context is unchanged")
+        XCTAssertLessThan(pair.slots, 8)
+        XCTAssertEqual(pair.slots, 5)
+
+        let qwen = try XCTUnwrap(catalog.rows["qwen/qwen3.6-27b"])
+        let qwenPair = try generatedServePair(catalogKey: "qwen/qwen3.6-27b", row: qwen, hardware: hardware)
+        XCTAssertEqual(qwenPair.context, 200_000, "the Qwen3.6-27B 256 GB context is unchanged")
+        XCTAssertEqual(qwenPair.slots, 8, "sixteen full-attention layers leave room for all eight slots")
+
+        let drafted = try generatedServePair(
+            catalogKey: "z-ai/glm-4.5-air",
+            row: row,
+            hardware: hardware,
+            draftModel: "mlx-community/Qwen3-0.6B-4bit"
+        )
+        XCTAssertEqual(drafted.slots, 1, "a draft model still pins one slot")
+        XCTAssertEqual(drafted.context, 120_000)
     }
 
     func testAllRowsFailingEligibilityEmitsNoEligibleWarning() throws {
@@ -5390,7 +5652,7 @@ final class AutotuneRecommendTests: XCTestCase {
     }
 
     /// Geometry fields of mlx-community/Qwen3.6-27B-4bit@c000ac2c config.json.
-    private static let qwen36TwentySevenBConfigJSON = """
+    static let qwen36TwentySevenBConfigJSON = """
     {
       "model_type": "qwen3_5",
       "text_config": {
@@ -5405,6 +5667,80 @@ final class AutotuneRecommendTests: XCTestCase {
       }
     }
     """
+
+    /// KV-geometry and context fields of each signed candidate row's pinned
+    /// `config.json` (Hugging Face `<model_id>@<model_revision>`), the only
+    /// fields `AutotuneModelContextCap` reads. Keyed by catalog key.
+    static let signedCandidateConfigGeometry: [String: (revision: String, json: String)] = [
+        "google-gemma-4-26b-a4b-it": (
+            revision: "0d77464eeb233a2da68ebf9d7dc4edaac7db956d",
+            json: #"{"text_config":{"max_position_embeddings":262144,"num_hidden_layers":30,"hidden_size":2816,"num_attention_heads":16,"num_key_value_heads":8,"head_dim":256,"layer_types":["sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention"]}}"#
+        ),
+        "meta-llama/llama-3.1-8b-instruct": (
+            revision: "241a666dad6cb93c8ff213d39a7f34a36bf26db4",
+            json: #"{"max_position_embeddings":131072,"num_hidden_layers":32,"hidden_size":4096,"num_attention_heads":32,"num_key_value_heads":8}"#
+        ),
+        "meta-llama/llama-3.2-3b-instruct": (
+            revision: "7f0dc925e0d0afb0322d96f9255cfddf2ba5636e",
+            json: #"{"max_position_embeddings":131072,"num_hidden_layers":28,"hidden_size":3072,"num_attention_heads":24,"num_key_value_heads":8,"head_dim":128}"#
+        ),
+        "nvidia/nemotron-3-nano-30b-a3b": (
+            revision: "832f602eba5d22436c258c1462bdedc5afddb42b",
+            json: #"{"max_position_embeddings":262144,"num_hidden_layers":52,"hidden_size":2688,"num_attention_heads":32,"num_key_value_heads":2,"head_dim":128}"#
+        ),
+        "openai/gpt-oss-120b": (
+            revision: "08e7899579b5dd5e0364e4bcd32578134072e22d",
+            json: #"{"max_position_embeddings":131072,"num_hidden_layers":36,"hidden_size":2880,"num_attention_heads":64,"num_key_value_heads":8,"head_dim":64,"layer_types":["sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention"]}"#
+        ),
+        "openai/gpt-oss-20b": (
+            revision: "773a7da77e569019bb0fd17a554b263738d669a3",
+            json: #"{"max_position_embeddings":131072,"num_hidden_layers":24,"hidden_size":2880,"num_attention_heads":64,"num_key_value_heads":8,"head_dim":64,"layer_types":["sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention","sliding_attention","full_attention"]}"#
+        ),
+        "qwen/qwen3-30b-a3b-instruct-2507": (
+            revision: "e9675aa3ca5f900ccef55267914466d55ab325fa",
+            json: #"{"max_position_embeddings":262144,"num_hidden_layers":48,"hidden_size":2048,"num_attention_heads":32,"num_key_value_heads":4,"head_dim":128}"#
+        ),
+        "qwen/qwen3.5-27b": (
+            revision: "45797d2985a12c55e6473686e9ea91b95e959553",
+            json: #"{"text_config":{"max_position_embeddings":262144,"num_hidden_layers":64,"hidden_size":5120,"num_attention_heads":24,"num_key_value_heads":4,"head_dim":256,"layer_types":["linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention"]}}"#
+        ),
+        "qwen/qwen3.5-35b-a3b": (
+            revision: "1e20fd8d42056f870933bf98ca6211024744f7ec",
+            json: #"{"text_config":{"max_position_embeddings":262144,"num_hidden_layers":40,"hidden_size":2048,"num_attention_heads":16,"num_key_value_heads":2,"head_dim":256,"layer_types":["linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention"]}}"#
+        ),
+        "qwen/qwen3.6-27b": (
+            revision: "c000ac2c2057d94be3fa931000c31723aac53282",
+            json: #"{"text_config":{"max_position_embeddings":262144,"num_hidden_layers":64,"hidden_size":5120,"num_attention_heads":24,"num_key_value_heads":4,"head_dim":256,"layer_types":["linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention"]}}"#
+        ),
+        "qwen/qwen3.6-35b-a3b": (
+            revision: "38740b847e4cb78f352aba30aa41c76e08e6eb46",
+            json: #"{"text_config":{"max_position_embeddings":262144,"num_hidden_layers":40,"hidden_size":2048,"num_attention_heads":16,"num_key_value_heads":2,"head_dim":256,"layer_types":["linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention"]}}"#
+        ),
+        "qwen/qwen3.8-27b": (
+            revision: "10c35caafbb80f7dc6a7a432cdd11af10a6d4818",
+            json: #"{"text_config":{"max_position_embeddings":262144,"num_hidden_layers":64,"hidden_size":5120,"num_attention_heads":24,"num_key_value_heads":4,"head_dim":256,"layer_types":["linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention","linear_attention","linear_attention","linear_attention","full_attention"]}}"#
+        ),
+        "qwen2.5-coder-32b-instruct": (
+            revision: "d1e3b690c8e225d7795bccddf971ca6be68b2012",
+            json: #"{"max_position_embeddings":32768,"num_hidden_layers":64,"hidden_size":5120,"num_attention_heads":40,"num_key_value_heads":8}"#
+        ),
+        "qwen3-32b": (
+            revision: "bcaaf7f538adf166c1080a2befdb4f6019f66639",
+            json: #"{"max_position_embeddings":40960,"num_hidden_layers":64,"hidden_size":5120,"num_attention_heads":64,"num_key_value_heads":8,"head_dim":128}"#
+        ),
+        "qwen3-8b": (
+            revision: "545dc4251c05440727734bcd94334791f6ab0192",
+            json: #"{"max_position_embeddings":40960,"num_hidden_layers":36,"hidden_size":4096,"num_attention_heads":32,"num_key_value_heads":8,"head_dim":128}"#
+        ),
+        "qwen3-coder-30b-a3b-instruct": (
+            revision: "6e302ea604ad9ab206367e2c501d1571023e7b6d",
+            json: #"{"max_position_embeddings":262144,"num_hidden_layers":48,"hidden_size":2048,"num_attention_heads":32,"num_key_value_heads":4,"head_dim":128}"#
+        ),
+        "z-ai/glm-4.5-air": (
+            revision: "60837794f3caafc4682dd1a9188a82c55a9100ef",
+            json: #"{"max_position_embeddings":131072,"num_hidden_layers":46,"hidden_size":4096,"num_attention_heads":96,"num_key_value_heads":8,"head_dim":128}"#
+        ),
+    ]
 
     private static func bindContextConfig(_ json: String, to benchmark: inout CandidateBenchmark) {
         let data = Data(json.utf8)

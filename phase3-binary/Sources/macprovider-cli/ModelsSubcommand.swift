@@ -992,7 +992,7 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
 
         while true {
             let frame = try await connection.receive()
-            guard case let .switchProgress(state, elapsedMs, reason) = frame else {
+            guard case let .switchProgress(state, elapsedMs, reason, servedContext, servedSource) = frame else {
                 continue
             }
             writeStderr("switch_progress state=\(state.rawValue) elapsed_ms=\(elapsedMs)")
@@ -1022,6 +1022,14 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
             switch state {
             case .loaded:
                 await connection.close()
+                if let notice = Self.contextNotice(
+                    targetModelID: targetModelID,
+                    servedContext: servedContext,
+                    servedSource: servedSource,
+                    config: resolved
+                ) {
+                    writeStderr(notice)
+                }
                 return
             case .failed:
                 await connection.close()
@@ -1030,6 +1038,55 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
             case .loading, .draining:
                 continue
             }
+        }
+    }
+}
+
+extension ModelsSwitchCommand {
+    /// #1689 FR-20b: the one line describing what the switch did to the
+    /// context window, built from the context and source serve reports on the
+    /// `loaded` frame (the value ModelRuntime applied, never a second
+    /// computation here): a generated value recomputed for the target, a
+    /// warning that an operator value is under half of what the target
+    /// supports, or (F6) a warning that the served value is above the target's
+    /// declared maximum. Nil when serve did not report the context (an older
+    /// serve), when nothing changed, or for targets outside the signed catalog.
+    static func contextNotice(
+        targetModelID: String,
+        servedContext: Int?,
+        servedSource: String?,
+        config: AppConfig
+    ) -> String? {
+        guard let servedContext, let servedSource else {
+            return nil
+        }
+        let facts = ProviderContextWorkflow.servedModelArtifactPath(modelID: targetModelID, config: config)
+            .map { ProviderContextWorkflow.liveModelFacts(artifactPath: $0) }
+        if let warning = ProviderContextWorkflow.aboveModelLimitWarning(
+            effective: servedContext,
+            declaredMax: facts?.declaredMax,
+            model: targetModelID
+        ) {
+            return warning
+        }
+        guard let configured = config.maxContextOverride else {
+            return nil
+        }
+        switch MaxContextSource(rawValue: servedSource) {
+        case .recommendationAdoption:
+            guard servedContext != configured else { return nil }
+            return "Context window: \(servedContext) tokens, recomputed for \(targetModelID) (the configured \(configured) was generated for another model)."
+        case .recommendationApply, .ramTierDefault, nil:
+            return nil
+        case .operatorConfig, .environment, .cliFlag, .draftClamp:
+            guard let facts else { return nil }
+            let memoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
+            let supported = ProviderContextWorkflow.supportedContext(
+                ramDefault: ProviderCapacity.defaultContextTokens(forPhysicalMemoryGB: memoryGB),
+                facts: facts,
+                draftLimit: ProviderCapacity.draftModelContextLimit(physicalMemoryGB: memoryGB, draftModel: config.draftModel)
+            )
+            return ProviderContextWorkflow.underUseWarning(effective: servedContext, supported: supported)
         }
     }
 }
@@ -1149,6 +1206,10 @@ struct ModelsAdoptRecommendationCommand: AsyncParsableCommand {
         let signedAuthority: RecommendationAdoptionAuthority?
         do {
             signedAuthority = try await Self.validateSignedAuthority(recommendation, configPath: config)
+        } catch is ServedDraftModelError {
+            try fail("draft_model_unresolved", exitCode: 2)
+        } catch is DraftCapacityShortfall {
+            try fail("draft_model_capacity_shortfall", exitCode: 2)
         } catch {
             try fail("signed_authority_invalid", exitCode: 2)
         }
@@ -1162,6 +1223,16 @@ struct ModelsAdoptRecommendationCommand: AsyncParsableCommand {
 
         let effectiveConfigPath = Self.effectiveConfigURL(explicit: config)
         configPath = effectiveConfigPath
+        do {
+            try Self.validateDraftCapacity(
+                recommendation: recommendation,
+                draftModel: ProviderCapacity.servedDraftModel(configPath: effectiveConfigPath.path)
+            )
+        } catch is ServedDraftModelError {
+            try fail("draft_model_unresolved", exitCode: 2)
+        } catch {
+            try fail("draft_model_capacity_shortfall", exitCode: 2)
+        }
         let resolved = try loadModelsConfig(
             config: effectiveConfigPath.path,
             model: nil,
@@ -1254,6 +1325,8 @@ struct ModelsAdoptRecommendationCommand: AsyncParsableCommand {
                 recommendation: recommendation.core,
                 now: Date(),
                 donorMode: recommendation.donorMode,
+                draftCapacity: .refuse,
+                physicalMemoryGB: recommendation.hardwareMemoryGB,
                 beforeMutation: { before, after, backup, preSHA, postSHA in
                     let record = RecommendationAdoptionJournalRecord(
                         transactionID: transactionID,
@@ -1603,10 +1676,12 @@ extension ModelsAdoptRecommendationCommand {
         guard trustedStrings.allSatisfy(isSafeConfigString) else {
             throw ValidationError("recommendation contains unsafe strings")
         }
+        // The provenance record is written by the apply itself, never taken
+        // from a recommendation.
         let allowedKeys = Set(ConfigApplier.recommendationOwnedKeys + [
             "draft_model",
             "draft_model_artifact_sha256",
-        ])
+        ]).subtracting([MaxContextProvenance.configKey])
         let unknownKeys = Set(serveConfig.keys).subtracting(allowedKeys)
         guard unknownKeys.isEmpty else {
             throw ValidationError("serve_config contains unsupported keys: \(unknownKeys.sorted().joined(separator: ", "))")
@@ -1811,16 +1886,35 @@ extension ModelsAdoptRecommendationCommand {
             throw ValidationError("recommendation hardware or binary identity is stale")
         }
         let resolvedConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: configPath))
-        let artifact = try CachedModelArtifactResolver.forConfig(resolvedConfig).verifiedExistingArtifact(for: row)
-        guard artifact.sha256 == recommendation.core.modelArtifactSHA256 else {
+        let draftModel = try ProviderCapacity.servedDraftModel(configPath: effectiveConfigURL(explicit: configPath).path)
+        _ = try validatedAdoptionArtifact(
+            recommendation: recommendation,
+            row: row,
+            resolver: CachedModelArtifactResolver.forConfig(resolvedConfig),
+            draftModel: draftModel
+        )
+        return RecommendationAdoptionAuthority(catalogRow: row)
+    }
+
+    /// #1689 F7: every signed identity, context, slot, and draft check runs
+    /// on the artifact where it already is; only then is it adopted into the
+    /// durable store, so a refused recommendation writes nothing there.
+    static func validatedAdoptionArtifact(
+        recommendation: ParsedRecommendationAdoption,
+        row: CandidateCatalog.Row,
+        resolver: CachedModelArtifactResolver,
+        draftModel: String?
+    ) throws -> VerifiedModelArtifact {
+        let inspected = try resolver.inspectedExistingArtifact(for: row)
+        guard inspected.sha256 == recommendation.core.modelArtifactSHA256 else {
             throw ValidationError("recommendation artifact authority does not match the signed snapshot")
         }
         if let recordedPath = recommendation.core.modelArtifactPath {
             let recorded = URL(fileURLWithPath: recordedPath).standardizedFileURL
-            let loaded = URL(fileURLWithPath: artifact.modelArgument).standardizedFileURL
+            let loaded = URL(fileURLWithPath: inspected.modelArgument).standardizedFileURL
             if recorded != loaded, FileManager.default.fileExists(atPath: recorded.path) {
                 let recordedHash = try ModelArtifactVerifier.canonicalArtifactHash(directory: recorded)
-                guard recordedHash == artifact.sha256 else {
+                guard recordedHash == inspected.sha256 else {
                     throw ValidationError("recommendation artifact authority does not match the signed snapshot")
                 }
             }
@@ -1828,10 +1922,14 @@ extension ModelsAdoptRecommendationCommand {
         try validateSignedContextAuthority(
             recommendation: recommendation,
             row: row,
-            artifact: artifact,
-            draftModel: resolvedConfig?.draftModel
+            artifact: inspected,
+            draftModel: draftModel
         )
-        return RecommendationAdoptionAuthority(catalogRow: row)
+        let adopted = try resolver.verifiedExistingArtifact(for: row)
+        guard adopted.sha256 == inspected.sha256 else {
+            throw ValidationError("recommendation artifact authority does not match the signed snapshot")
+        }
+        return adopted
     }
 
     static func evaluateAdoptionRAMFit(
@@ -1874,6 +1972,61 @@ extension ModelsAdoptRecommendationCommand {
         }
     }
 
+    /// SPEC-028: serve exits `draft_model_capacity_shortfall` on more than
+    /// one slot or a context above the draft cap when the config it reads
+    /// names a draft model, so an adoption into such a config is refused
+    /// before the runtime prepares it or anything is written.
+    static func validateDraftCapacity(
+        recommendation: ParsedRecommendationAdoption,
+        draftModel: String?
+    ) throws {
+        guard let cap = ProviderCapacity.draftModelContextLimit(
+            physicalMemoryGB: recommendation.hardwareMemoryGB,
+            draftModel: draftModel
+        ) else { return }
+        let knobs = recommendation.core.knobs
+        if knobs.maxBatch > 1 {
+            throw DraftCapacityShortfall(detail: "recommendation max_concurrency \(knobs.maxBatch) exceeds the draft-enabled cap 1")
+        }
+        if knobs.maxContext > cap {
+            throw DraftCapacityShortfall(detail: "recommendation context \(knobs.maxContext) exceeds the draft-enabled cap \(cap)")
+        }
+    }
+
+    struct DraftCapacityShortfall: Error, CustomStringConvertible {
+        let detail: String
+        var description: String { "draft_model_capacity_shortfall: \(detail)" }
+    }
+
+    /// SPEC-023-R018 item 9: the signed slot count must fit memory at the
+    /// signed context. A recommendation above the cap is refused, never
+    /// rewritten, so what is adopted is exactly what was signed. The cap is
+    /// `memoryFitBatchDepth` at that context from the verified config, or the
+    /// chip/RAM tier constant when the KV geometry is unknown.
+    static func validateMemoryFitSlots(
+        recommendation: ParsedRecommendationAdoption,
+        row: CandidateCatalog.Row,
+        artifact: VerifiedModelArtifact,
+        hardware: AutotuneRecommendHardware
+    ) throws {
+        let knobs = recommendation.core.knobs
+        if let configData = artifact.configJSONData,
+           let configSHA256 = artifact.configSHA256,
+           let fit = AutotuneModelContextCap.memoryFitBatchDepth(
+               configData: configData,
+               verifiedConfigSHA256: configSHA256,
+               hardwareMemoryGB: hardware.memoryGB,
+               catalogMinRAMGB: row.minRAMGB,
+               calibrationContextTokens: knobs.maxContext
+           ) {
+            guard knobs.maxBatch <= fit else {
+                throw ValidationError("recommendation max_concurrency \(knobs.maxBatch) exceeds the memory-fit cap \(fit) at context \(knobs.maxContext)")
+            }
+        } else if knobs.maxBatch > hardware.recommendedMaxBatch {
+            throw ValidationError("recommendation max_concurrency \(knobs.maxBatch) exceeds the chip/RAM tier cap \(hardware.recommendedMaxBatch); memory fit is unknown for this model")
+        }
+    }
+
     static func validateSignedContextAuthority(
         recommendation: ParsedRecommendationAdoption,
         row: CandidateCatalog.Row,
@@ -1897,6 +2050,8 @@ extension ModelsAdoptRecommendationCommand {
             catalogMinRAMGB: row.minRAMGB,
             draftModel: draftModel
         )
+        try validateDraftCapacity(recommendation: recommendation, draftModel: draftModel)
+        try validateMemoryFitSlots(recommendation: recommendation, row: row, artifact: artifact, hardware: hardware)
         if let calibration = recommendation.contextCalibration {
             try validateCalibratedContextAuthority(
                 calibration,
@@ -2431,7 +2586,8 @@ extension ModelsAdoptRecommendationCommand {
             _ = try applier.apply(
                 recommendation: recommendation.core,
                 now: Date(),
-                donorMode: recommendation.donorMode
+                donorMode: recommendation.donorMode,
+                physicalMemoryGB: recommendation.hardwareMemoryGB
             )
             return matches()
         } catch {

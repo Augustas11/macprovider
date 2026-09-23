@@ -162,6 +162,22 @@ struct StartupThroughputProbe: Sendable, Equatable {
     let modelID: String?
 }
 
+/// Why the draft model serve would use cannot be determined; capacity writers
+/// refuse to write rather than write a value without the draft term.
+enum ServedDraftModelError: Error, CustomStringConvertible {
+    case unreadableConfig(path: String, reason: String)
+    case blankDraftModel(path: String)
+
+    var description: String {
+        switch self {
+        case .unreadableConfig(let path, let reason):
+            return "cannot read the draft_model serve would use from \(path) (serve cannot load it either): \(reason)"
+        case .blankDraftModel(let path):
+            return "draft_model in \(path) is blank; serve refuses it (--draft-model must be non-empty). Remove the key or name a draft model"
+        }
+    }
+}
+
 struct ProviderCapacity: Sendable {
     static let maxConcurrencyOverrideLimit = 8
 
@@ -242,6 +258,13 @@ struct ProviderCapacity: Sendable {
         }
     }
 
+    /// The slot count `serve` runs: `max_concurrency_override` (config,
+    /// environment, or `--max-batch`), else 1. `provider context set` and
+    /// `explain` resolve the same count so their memory check matches serve.
+    static func servedSlotCount(maxConcurrencyOverride: Int?) -> Int {
+        maxConcurrencyOverride ?? 1
+    }
+
     static func defaultContextTokens(forPhysicalMemoryGB physicalMemoryGB: Int) -> Int {
         defaults(forPhysicalMemoryGB: physicalMemoryGB).context
     }
@@ -267,6 +290,55 @@ struct ProviderCapacity: Sendable {
     static func draftModelContextLimit(physicalMemoryGB: Int, draftModel: String?) -> Int? {
         guard draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { return nil }
         return draftContextCap(forPhysicalMemoryGB: physicalMemoryGB)
+    }
+
+    /// The draft model in an already-resolved config, trimmed; nil when unset
+    /// or blank. Serve rejects a blank `draft_model` before it would matter
+    /// (`--draft-model must be non-empty`), so blank never means "capped".
+    static func servedDraftModel(configured raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    /// The draft model serve will use from the config file at `configPath`
+    /// (default path when nil), read without the process environment: the
+    /// launchd service does not inherit the invoking shell, so a shell
+    /// `MACPROVIDER_DRAFT_MODEL` (empty or not) or an invalid shell variable
+    /// must neither hide nor add a draft model. Every capacity writer
+    /// (recommend, adoption, calibration, the config applier under its lock)
+    /// resolves the draft term here. Throws, so the caller fails closed, when
+    /// serve could not load the file or would refuse its blank `draft_model`.
+    static func servedDraftModel(configPath: String?) throws -> String? {
+        let path = ConfigLoader.expandTilde(configPath ?? AppConfig.defaultConfigPath)
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        let text: String
+        do {
+            text = try String(contentsOfFile: path, encoding: .utf8)
+        } catch {
+            throw ServedDraftModelError.unreadableConfig(path: path, reason: String(describing: error))
+        }
+        return try servedDraftModel(configText: text, configPath: path)
+    }
+
+    /// `servedDraftModel(configPath:)` over config text already read, e.g.
+    /// under the provider-config lock right before a write.
+    static func servedDraftModel(configText: String, configPath: String) throws -> String? {
+        guard !configText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let config: AppConfig
+        do {
+            config = try ConfigLoader.load(
+                cli: CLIOverrides(configPath: configPath),
+                environment: [:],
+                fileExists: { _ in true },
+                readFile: { _ in configText }
+            )
+        } catch {
+            throw ServedDraftModelError.unreadableConfig(path: configPath, reason: String(describing: error))
+        }
+        if let raw = config.draftModel, servedDraftModel(configured: raw) == nil {
+            throw ServedDraftModelError.blankDraftModel(path: configPath)
+        }
+        return servedDraftModel(configured: config.draftModel)
     }
 
     static func defaultContextTokensForCurrentHost() -> Int {
@@ -632,6 +704,7 @@ actor ProviderStatus {
         modelHashAlgorithm: String? = nil,
         weightsManifestSHA256: String? = nil,
         maxContextTokens: Int? = nil,
+        maxContextSource: MaxContextSource? = nil,
         maxConcurrency: Int? = nil,
         specDecodeDraftModelID: String? = nil,
         specDecodeNumDraftTokens: Int? = nil
@@ -647,7 +720,9 @@ actor ProviderStatus {
                 maxContextOverride: maxContextTokens ?? capacity.maxContextTokens,
                 maxConcurrencyOverride: maxConcurrency ?? capacity.maxConcurrency,
                 throughputTPSEstimate: capacity.throughputTPSEstimate,
-                maxContextSource: maxContextTokens == nil ? capacity.maxContextSource : .recommendationAdoption,
+                maxContextSource: maxContextTokens == nil
+                    ? capacity.maxContextSource
+                    : maxContextSource ?? .recommendationAdoption,
                 throughputProbe: capacity.throughputProbe
             )
         }
