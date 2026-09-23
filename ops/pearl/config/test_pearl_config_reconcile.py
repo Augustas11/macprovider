@@ -615,6 +615,83 @@ class PearlConfigReconcileTest(unittest.TestCase):
         self.assertIn("live=<MASKED>", result.stdout)
         self.assertNotIn("inline-redaction-sentinel-not-for-output", result.stdout)
 
+    def test_explicit_live_ceiling_four_stays_unknown(self):
+        manifest = reconcile_module.load_yaml_file(ROOT / "ops/pearl/config/source-of-truth.yaml")
+        blessed = [
+            item
+            for item in manifest.get("known_config_drift", [])
+            if item.get("path") == "pool.max_concurrency_ceiling"
+        ]
+        self.assertEqual(blessed, [])
+        tracked = reconcile_module.load_yaml_file(ROOT / "phase4-coordinator/dist/coordinator.yaml")
+        self.assertEqual(tracked["pool"]["max_concurrency_ceiling"], 8)
+
+        evidence, inference, unknown = reconcile_module.classify_config_drifts(
+            [
+                reconcile_module.Drift(
+                    path="pool.max_concurrency_ceiling",
+                    kind="value_mismatch",
+                    tracked=8,
+                    live=4,
+                )
+            ],
+            manifest,
+        )
+        self.assertEqual(evidence, [])
+        self.assertEqual(inference, [])
+        self.assertEqual([item.path for item in unknown], ["pool.max_concurrency_ceiling"])
+        self.assertIn("live=4", unknown[0].message)
+        self.assertIn("tracked=8", unknown[0].message)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tracked_path = root / "tracked.yaml"
+            live_path = root / "live.yaml"
+            overlay_path = root / "overlay.yaml"
+            env_path = root / "live.env"
+            tracked_path.write_text("pool:\n  max_concurrency_ceiling: 8\n", encoding="utf-8")
+            live_path.write_text("pool:\n  max_concurrency_ceiling: 4\n", encoding="utf-8")
+            overlay_path.write_text("", encoding="utf-8")
+            env_path.write_text("", encoding="utf-8")
+            text, rc = reconcile_module.reconcile(
+                manifest_path=ROOT / "ops/pearl/config/source-of-truth.yaml",
+                tracked_config_path=tracked_path,
+                live_config_path=live_path,
+                live_overlay_path=overlay_path,
+                live_env_path=env_path,
+                ssh_target=None,
+            )
+        self.assertEqual(rc, 1, text)
+        self.assertIn(
+            "pool.max_concurrency_ceiling: value_mismatch: tracked=8 live=4",
+            text,
+        )
+        self.assertNotIn("Unknown:\n- none", text)
+
+    def test_matching_live_ceiling_eight_is_not_drift(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            tracked_path = root / "tracked.yaml"
+            live_path = root / "live.yaml"
+            overlay_path = root / "overlay.yaml"
+            env_path = root / "live.env"
+            body = "pool:\n  max_concurrency_ceiling: 8\n"
+            tracked_path.write_text(body, encoding="utf-8")
+            live_path.write_text(body, encoding="utf-8")
+            overlay_path.write_text("", encoding="utf-8")
+            env_path.write_text("", encoding="utf-8")
+            text, rc = reconcile_module.reconcile(
+                manifest_path=ROOT / "ops/pearl/config/source-of-truth.yaml",
+                tracked_config_path=tracked_path,
+                live_config_path=live_path,
+                live_overlay_path=overlay_path,
+                live_env_path=env_path,
+                ssh_target=None,
+            )
+        self.assertEqual(rc, 0, text)
+        self.assertIn("Unknown:\n- none", text)
+        self.assertNotIn("pool.max_concurrency_ceiling: value_mismatch", text)
+
 
 if __name__ == "__main__":
     unittest.main()

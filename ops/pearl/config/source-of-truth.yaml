@@ -52,6 +52,14 @@ fleet_version_policy_owned_prefixes:
 
 pearl_overlay_owned_prefixes: []
 
+# pool.max_concurrency_ceiling is a base product default pinned to 8 in
+# phase4-coordinator/dist/coordinator.yaml (#1678). Do not add a
+# known_config_drift entry for it. A matching rule classifies the drift as
+# Evidence and reconcile exits 0. With no blessing, an explicit live value
+# other than 8 — including the pre-2026-09-22 value 4 — stays Unknown.
+# Absence of the live key is a separate tracked_only drift once the template
+# pins 8. SIGHUP does not reload this cap.
+
 known_config_drift:
   - path: auth.credential_bootstrap_identity_retention_s
     drift_kind: tracked_only
