@@ -135,7 +135,9 @@ func main() {
 	showVersion := flag.Bool("version", false, "print build version and exit")
 	validateAutotuneRelease := flag.String("validate-autotune-release", "", "offline: prove the SIGHUP reload would accept the candidate release in DIR against --config, print one JSON line, and exit")
 	previousTarget := flag.String("previous-target", "", "with --validate-autotune-release: retained-release pointer file (lines releases/<id>, relative to its directory); unset means no retained releases")
+	appliedConfigState := flag.String("applied-config-state", defaultAppliedConfigStatePath, "state file recording the sha256 of the config + overlay bytes the running process last applied (boot or successful SIGHUP)")
 	flag.Parse()
+	appliedConfigStatePath = *appliedConfigState
 	if *showVersion {
 		fmt.Println(version)
 		return
@@ -148,11 +150,12 @@ func main() {
 		os.Exit(runValidateAutotuneRelease(os.Stdout, *configPath, *configOverlay, *validateAutotuneRelease, *previousTarget))
 	}
 
-	cfg, err := config.LoadWithOverlay(*configPath, *configOverlay)
+	cfg, bootConfigDigests, err := config.LoadWithOverlayDigests(*configPath, *configOverlay)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
 	}
+	bootConfigLoadedAt := time.Now()
 	if *validateConfig {
 		fmt.Println("config: ok")
 		return
@@ -1476,6 +1479,19 @@ func main() {
 		logger.Info().Str("addr", buyerAddr).Msg("buyer http server listening")
 		errs <- buyerHTTP.ListenAndServe()
 	}()
+
+	// Boot init succeeded: record the content identity of the config this
+	// process applied before SIGHUP handling starts.
+	logger.Info().
+		Str("config_path", *configPath).
+		Str("config_sha256", bootConfigDigests.ConfigSHA256).
+		Str("overlay_path", *configOverlay).
+		Str("overlay_sha256", bootConfigDigests.OverlaySHA256).
+		Str("source", "boot").
+		Str("version", version).
+		Str("event", "coordinator_config_applied").
+		Msg("coordinator config applied")
+	recordAppliedConfig(logger, "boot", *configPath, *configOverlay, bootConfigDigests, bootConfigLoadedAt)
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
@@ -3568,11 +3584,12 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	// edited on disk must not reject a tier2/billing reload. Payout
 	// tuning has its own dedicated SIGHUP listener
 	// (startPayoutSIGHUPListener); this path never applies payout fields.
-	cfg, err := config.LoadForSIGHUPReloadWithOverlay(configPath, configOverlay)
+	cfg, configDigests, err := config.LoadForSIGHUPReloadWithOverlayDigests(configPath, configOverlay)
 	if err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
 	}
+	configLoadedAt := time.Now()
 	// #1268 SIGHUP autotune feed reload: re-parse + verify the signed feed set so
 	// an operator can re-stamp/refresh the rate-card/candidate/demand-rank feeds
 	// (e.g. a freshness renewal) without a coordinator restart. Baseline is the
@@ -3728,6 +3745,8 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 		Int("proof_of_weights_still_evidence_stale", proofReload.StillEvidenceStale).
 		Int("proof_of_weights_cleared_gate_exclusions", proofReload.ClearedGateExclusions).
 		Int("benchmark_quarantines_cleared", benchmarkQuarantinesCleared).
+		Str("config_sha256", configDigests.ConfigSHA256).
+		Str("overlay_sha256", configDigests.OverlaySHA256).
 		Msg("tier2/proof_of_weights config reloaded")
 	// Issue #266 T1 — wire SPEC-004 FR-SR-5 paragraph 2 ("invalidate
 	// on class reconfig"): swap the buyer-server's routing.model_classes
@@ -3761,6 +3780,9 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 			Int("trusted_pools_creator_buyer_allowlist_creators", len(cfg.TrustedPools.CreatorAdminBuyerAccountIDs)).
 			Msg("trusted pools creator admin config reloaded")
 	}
+	// Every fallible step above returned early on rejection, so reaching here
+	// means this reload's config is the applied one.
+	recordAppliedConfig(logger, "sighup", configPath, configOverlay, configDigests, configLoadedAt)
 }
 
 func telemetryDriftEvaluatorForReload(cfg config.Config, autotuneCatalog *autotune.Catalog, autotuneEvidenceStore autotune.EvidenceStore) (*pow.Evaluator, error) {

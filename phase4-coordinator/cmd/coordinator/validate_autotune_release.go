@@ -17,14 +17,18 @@ import (
 // autotuneReleaseValidation is the one-line JSON verdict printed by
 // --validate-autotune-release. Slices are always non-nil so consumers see [].
 type autotuneReleaseValidation struct {
-	OK               bool                 `json:"ok"`
-	ReleaseID        string               `json:"release_id"`
-	CandidatesSHA256 string               `json:"candidates_sha256"`
-	Tier2CatalogID   string               `json:"tier2_catalog_id"`
-	Tier2SHA256      string               `json:"tier2_sha256"`
-	PreviousLoaded   []autotuneReleaseRef `json:"previous_loaded"`
-	Errors           []string             `json:"errors"`
-	Notes            []string             `json:"notes"`
+	OK               bool   `json:"ok"`
+	ReleaseID        string `json:"release_id"`
+	CandidatesSHA256 string `json:"candidates_sha256"`
+	Tier2CatalogID   string `json:"tier2_catalog_id"`
+	Tier2SHA256      string `json:"tier2_sha256"`
+	// ConfigSHA256 / OverlaySHA256 are the sha256 of the exact config and
+	// overlay bytes this dry-load decoded ("" when not loaded / no overlay).
+	ConfigSHA256   string               `json:"config_sha256"`
+	OverlaySHA256  string               `json:"overlay_sha256"`
+	PreviousLoaded []autotuneReleaseRef `json:"previous_loaded"`
+	Errors         []string             `json:"errors"`
+	Notes          []string             `json:"notes"`
 }
 
 type autotuneReleaseRef struct {
@@ -59,11 +63,12 @@ func validateAutotuneRelease(configPath, configOverlay, dir, previousTarget stri
 	r := autotuneReleaseValidation{PreviousLoaded: []autotuneReleaseRef{}, Errors: []string{}, Notes: []string{}}
 	fail := func(format string, args ...any) { r.Errors = append(r.Errors, fmt.Sprintf(format, args...)) }
 
-	cfg, err := config.LoadForSIGHUPReloadWithOverlay(configPath, configOverlay)
+	cfg, digests, err := config.LoadForSIGHUPReloadWithOverlayDigests(configPath, configOverlay)
 	if err != nil {
 		fail("config: %v", err)
 		return r
 	}
+	r.ConfigSHA256, r.OverlaySHA256 = digests.ConfigSHA256, digests.OverlaySHA256
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		fail("release dir %q is not a readable directory", dir)
 		return r

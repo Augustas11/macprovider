@@ -188,6 +188,41 @@ func TestValidateAutotuneReleaseAcceptsValidReleaseWithRetainedWindow(t *testing
 	if tier2.CatalogID() != "" {
 		t.Fatalf("validator published into the tier2 singleton: %q", tier2.CatalogID())
 	}
+	configRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ConfigSHA256 != sha256Hex(configRaw) || got.OverlaySHA256 != "" {
+		t.Fatalf("config digests=%s/%s want %s/\"\"", got.ConfigSHA256, got.OverlaySHA256, sha256Hex(configRaw))
+	}
+	if !strings.Contains(out.String(), `"config_sha256":"`) || !strings.Contains(out.String(), `"overlay_sha256":""`) {
+		t.Fatalf("validator JSON lacks config digest fields: %s", out.String())
+	}
+}
+
+func TestValidateAutotuneReleaseReportsOverlayDigest(t *testing.T) {
+	defer tier2.ResetForTest()
+	base := t.TempDir()
+	dir := filepath.Join(base, "candidate")
+	_, _, tier2Pub := writeValidatorRelease(t, dir, "release-next", reloadTestHash)
+	configPath := writeReloadConfig(t, validatorConfig(filepath.Join(base, "live"), tier2Pub))
+	overlayPath := filepath.Join(base, "overlay.yaml")
+	overlayRaw := []byte("# operator overlay: no overrides\n")
+	if err := os.WriteFile(overlayPath, overlayRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := validateAutotuneRelease(configPath, overlayPath, dir, "", zerolog.Nop())
+	if !got.OK {
+		t.Fatalf("validator result=%+v", got)
+	}
+	if got.ConfigSHA256 != sha256Hex(configRaw) || got.OverlaySHA256 != sha256Hex(overlayRaw) {
+		t.Fatalf("digests=%s/%s want %s/%s", got.ConfigSHA256, got.OverlaySHA256, sha256Hex(configRaw), sha256Hex(overlayRaw))
+	}
 }
 
 func TestValidateAutotuneReleaseRejectsRateCardParityMismatch(t *testing.T) {
