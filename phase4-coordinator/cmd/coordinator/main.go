@@ -618,6 +618,7 @@ func main() {
 	wsOpts = append(wsOpts, providerws.WithReferralPolicy(referralPolicy))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
 	wsOpts = append(wsOpts, providerws.WithModelAdmissionStore(byomOfferStore))
+	wsOpts = append(wsOpts, providerws.WithModelAdmissionRouteReadStore(byomRouteReadStore))
 	wsOpts = append(wsOpts, providerws.WithArtifactIdentitySets(artifactIdentitySets), providerws.WithReleaseStaging())
 	if previousErr != nil {
 		logger.Warn().Err(previousErr).Str("event", "artifact_identity_sets_previous_release").Msg("retained previous release feeds not loaded; its sessions keep the primary-row path only")
@@ -1715,15 +1716,19 @@ type settlementReceiptAuditOutboxObserver interface {
 }
 
 const (
-	moneySQLiteCheckpointPollInterval      = 30 * time.Second
-	moneySQLiteCheckpointIdleInterval      = 30 * time.Second
-	moneySQLiteMaintenanceMinIdle          = 10 * time.Second
-	moneySQLiteMaintenanceMaxDeferral      = 2 * time.Minute
-	moneySQLiteCheckpointMinTimeout        = 15 * time.Second
-	moneySQLiteCheckpointMaxTimeout        = 5 * time.Minute
-	moneySQLiteCheckpointBytesPerSecond    = 32 << 20
-	routeSnapshotSQLiteMaxOpenConns        = 4
-	routeSnapshotJournalSQLiteMaxOpenConns = 4
+	moneySQLiteCheckpointPollInterval   = 30 * time.Second
+	moneySQLiteCheckpointIdleInterval   = 30 * time.Second
+	moneySQLiteMaintenanceMinIdle       = 10 * time.Second
+	moneySQLiteMaintenanceMaxDeferral   = 2 * time.Minute
+	moneySQLiteCheckpointMinTimeout     = 15 * time.Second
+	moneySQLiteCheckpointMaxTimeout     = 5 * time.Minute
+	moneySQLiteCheckpointBytesPerSecond = 32 << 20
+	routeSnapshotSQLiteMaxOpenConns     = 4
+	// SQLite has one writer. Keep the pre-dispatch journal on one connection so
+	// concurrent buyer requests queue in database/sql instead of competing for
+	// the writer lock until their route-snapshot deadlines expire. The primary
+	// mirror keeps its c4-sized pool because its writes are best-effort here.
+	routeSnapshotJournalSQLiteMaxOpenConns = 1
 	routeSnapshotSQLiteBusyTimeout         = 500 * time.Millisecond
 	routeSnapshotJournalMirrorInterval     = 250 * time.Millisecond
 	routeSnapshotJournalMirrorTimeout      = 2 * time.Second

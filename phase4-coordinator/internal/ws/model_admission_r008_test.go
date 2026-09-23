@@ -161,6 +161,60 @@ func TestModelAdmissionRouteCompareAndInsertFailsClosedOnConcurrentAppend(t *tes
 	}
 }
 
+func TestModelAdmissionRouteCompareAndInsertUsesRouteReadStore(t *testing.T) {
+	f := newBindingFixture(t)
+	s := f.server
+	f.registerSession(t, "p-route-read", "s-route-read", "model-a", true)
+	offer := f.offer(t, "p-route-read", "rr", "mlx_cache", map[string]string{modelidentity.SnapshotManifestV1: bindingRowHash})
+	settled := f.decide(t, f.decide(t, offer, "catalog_priced"), "settlement_capable")
+	routeReads := s.modelAdmissions
+	s.modelAdmissions = splitModelAdmissionRouteReads(failingRouteReadModelAdmissionStore{ModelAdmissionStore: routeReads}, routeReads)
+	p, _ := s.pool.Resolve("p-route-read", "")
+	expect := ModelAdmissionRouteExpectation{
+		ProviderID:              p.ProviderID,
+		CandidateID:             settled.CandidateID,
+		CoordinatorEventID:      settled.CoordinatorEventID,
+		BindingGeneration:       p.ModelAdmissionBindingGeneration,
+		SessionEpoch:            p.ModelAdmissionSessionEpoch,
+		ProviderRouteGeneration: 0,
+	}
+	inserted := 0
+	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), expect, func() error { inserted++; return nil }); err != nil || inserted != 1 {
+		t.Fatalf("route read store compare-and-insert err=%v inserted=%d, want success", err, inserted)
+	}
+
+	f.registerSession(t, "p-route-read-legacy", "s-route-read-legacy", "model-a", true)
+	legacyProvider, _ := s.pool.Resolve("p-route-read-legacy", "")
+	generationStore := routeReads.(interface {
+		ModelAdmissionProviderRouteGeneration(context.Context, string) (uint64, error)
+	})
+	routeGeneration, err := generationStore.ModelAdmissionProviderRouteGeneration(context.Background(), "p-route-read-legacy")
+	if err != nil {
+		t.Fatalf("legacy route generation: %v", err)
+	}
+	legacy := ModelAdmissionRouteExpectation{
+		ProviderID:              legacyProvider.ProviderID,
+		BindingGeneration:       legacyProvider.ModelAdmissionBindingGeneration,
+		ProviderRouteGeneration: routeGeneration,
+		SessionEpoch:            legacyProvider.ModelAdmissionSessionEpoch,
+	}
+	if err := s.CompareAndInsertModelAdmissionRouteSnapshot(context.Background(), legacy, func() error { inserted++; return nil }); err != nil || inserted != 2 {
+		t.Fatalf("legacy route read store compare-and-insert err=%v inserted=%d, want success", err, inserted)
+	}
+}
+
+type failingRouteReadModelAdmissionStore struct {
+	ModelAdmissionStore
+}
+
+func (s failingRouteReadModelAdmissionStore) LatestModelAdmissionStatus(context.Context, string, string) (ModelAdmissionEvent, bool, error) {
+	return ModelAdmissionEvent{}, false, errors.New("writer route read should not be used")
+}
+
+func (s failingRouteReadModelAdmissionStore) ModelAdmissionProviderRouteGeneration(context.Context, string) (uint64, error) {
+	return 0, errors.New("writer legacy route read should not be used")
+}
+
 // R008: a legacy/no-BYOM route selected before a provider submits an offer
 // still fails closed at route-snapshot time when the append is visible on the
 // writer side. This protects buyer routing when its read-only store saw the

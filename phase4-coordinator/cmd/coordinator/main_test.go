@@ -216,6 +216,9 @@ func TestRouteSnapshotSQLiteKeepsBoundedDedicatedWriterLane(t *testing.T) {
 	if routeSnapshotSQLiteMaxOpenConns != 4 {
 		t.Fatalf("route snapshot SQLite max open conns=%d, want one dedicated connection per OpenRouter c4 filing benchmark request", routeSnapshotSQLiteMaxOpenConns)
 	}
+	if routeSnapshotJournalSQLiteMaxOpenConns != 1 {
+		t.Fatalf("route snapshot journal SQLite max open conns=%d, want one serialized writer", routeSnapshotJournalSQLiteMaxOpenConns)
+	}
 	if routeSnapshotSQLiteBusyTimeout < 250*time.Millisecond {
 		t.Fatalf("route snapshot busy timeout=%s, want enough headroom for short SQLite writer overlap", routeSnapshotSQLiteBusyTimeout)
 	}

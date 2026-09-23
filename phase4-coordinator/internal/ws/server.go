@@ -189,6 +189,7 @@ type Server struct {
 	capacityOverClaimMetrics       CapacityOverClaimMetrics
 	connectionEvents               ConnectionEventStore
 	modelAdmissions                ModelAdmissionStore
+	modelAdmissionRouteReads       ModelAdmissionStore
 	modelAdmissionIntakeState
 	modelAdmissionSubmitDisabled bool
 	modelAdmissionAttemptMu      sync.Mutex
@@ -1010,6 +1011,40 @@ func WithModelAdmissionStore(store ModelAdmissionStore) Option {
 	}
 }
 
+func WithModelAdmissionRouteReadStore(store ModelAdmissionStore) Option {
+	return func(s *Server) {
+		if store != nil {
+			s.modelAdmissionRouteReads = store
+		}
+	}
+}
+
+type modelAdmissionRouteReadSplitStore struct {
+	ModelAdmissionStore
+	routeReads ModelAdmissionStore
+}
+
+func (s modelAdmissionRouteReadSplitStore) LatestModelAdmissionStatus(ctx context.Context, providerID, candidateID string) (ModelAdmissionEvent, bool, error) {
+	return s.routeReads.LatestModelAdmissionStatus(ctx, providerID, candidateID)
+}
+
+func (s modelAdmissionRouteReadSplitStore) ModelAdmissionProviderRouteGeneration(ctx context.Context, providerID string) (uint64, error) {
+	store, ok := s.routeReads.(interface {
+		ModelAdmissionProviderRouteGeneration(context.Context, string) (uint64, error)
+	})
+	if !ok {
+		return 0, errors.New("model admission route read store does not expose route generation")
+	}
+	return store.ModelAdmissionProviderRouteGeneration(ctx, providerID)
+}
+
+func splitModelAdmissionRouteReads(writer, routeReads ModelAdmissionStore) ModelAdmissionStore {
+	if writer == nil || routeReads == nil {
+		return writer
+	}
+	return modelAdmissionRouteReadSplitStore{ModelAdmissionStore: writer, routeReads: routeReads}
+}
+
 // WithModelAdmissionSubmissionsDisabled is the #1248 "offer submit" staged
 // rollout switch. When set, the coordinator rejects NEW SPEC-047 offer
 // submissions with a closed reason and writes no admission event, while status
@@ -1164,6 +1199,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.modelAdmissions = splitModelAdmissionRouteReads(s.modelAdmissions, s.modelAdmissionRouteReads)
 	if tier2.ModelHashActive(s.tier2) || strings.TrimSpace(s.tier2.ModelHashLegacyUntil) != "" {
 		s.scheduleModelHashLegacyDeadline(s.tier2.ModelHashLegacyUntil)
 	}

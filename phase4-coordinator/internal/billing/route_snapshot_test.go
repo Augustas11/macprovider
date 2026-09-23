@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -393,6 +394,55 @@ func TestInsertRouteSnapshotJournalBuffersMainWriterPressure(t *testing.T) {
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM settlement_route_snapshots WHERE request_id='req-route-snapshot-journal-buffer'`); got != 1 {
 		t.Fatalf("main mirrored route snapshot rows=%d want 1", got)
+	}
+}
+
+func TestInsertRouteSnapshotJournalSerializesConcurrentWriters(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	reqStore, err := requestlog.OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reqStore.Close() })
+	store, err := NewStore(reqStore.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	journalDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath+".route-snapshots"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	journalDB.SetMaxOpenConns(1)
+	journalDB.SetMaxIdleConns(1)
+	t.Cleanup(func() { _ = journalDB.Close() })
+	store.SetRouteSnapshotJournalDB(journalDB)
+	store.SetRouteSnapshotBusyTimeout(50 * time.Millisecond)
+	if err := store.InitRouteSnapshotJournal(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	const writers = 16
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	for i := 0; i < writers; i++ {
+		go func(i int) {
+			<-start
+			snapshot := testRouteSnapshot()
+			snapshot.RequestID = fmt.Sprintf("req-route-snapshot-concurrent-%02d", i)
+			ctx, cancel := context.WithTimeout(context.Background(), 1400*time.Millisecond)
+			defer cancel()
+			_, err := store.InsertRouteSnapshot(ctx, snapshot)
+			errs <- err
+		}(i)
+	}
+	close(start)
+	for i := 0; i < writers; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent journal insert %d: %v", i, err)
+		}
+	}
+	if got := scalar(t, journalDB, `SELECT COUNT(*) FROM settlement_route_snapshot_journal WHERE request_id LIKE 'req-route-snapshot-concurrent-%'`); got != writers {
+		t.Fatalf("concurrent journal rows=%d want %d", got, writers)
 	}
 }
 
