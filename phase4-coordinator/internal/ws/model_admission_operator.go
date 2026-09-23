@@ -603,11 +603,11 @@ func (s *Server) bindDecisionToCatalogLocked(decision *ModelAdmissionEvent, head
 // (resolved by the session's EXACT release id, never by its stored
 // admission mode, which goes stale after a re-stamp), pinned hash_verified
 // for a recorded admissible member resolved in the session's OWN release's
-// fresh identity set, with its receipt key present. Until the
-// SPEC-010-R007(e) runtime path reports another source, a session presents
-// only `mlx_cache` and only an `mlx_safetensors` member can bind: the
-// offer's signed `runtime_source` is a provider assertion, never a
-// live-session fact.
+// fresh identity set, with its receipt key present. A session presents only
+// `mlx_cache` and only an `mlx_safetensors` member can bind: the offer's
+// signed `runtime_source` is a provider assertion, never a live-session
+// fact, and implementing the SPEC-010-R007(e) loopback runtime path does not
+// lift this (SPEC-047-R003(iv) v0.1.10).
 func (s *Server) settlementSessionMemberLocked(head ModelAdmissionEvent, provider pool.Provider, current *autotune.Catalog, compatible map[string]*autotune.Catalog) (ModelAdmissionCatalogMember, artifactidentityBinding, bool) {
 	none := ModelAdmissionCatalogMember{}
 	if provider.ModelAdmissionCandidateID != head.CandidateID || provider.ModelAdmissionCoordinatorEventID != head.CoordinatorEventID {
@@ -616,7 +616,10 @@ func (s *Server) settlementSessionMemberLocked(head ModelAdmissionEvent, provide
 	if !sessionReceiptKeyPresent(provider) {
 		return none, artifactidentityBinding{}, false
 	}
-	if head.RuntimeSource != modelAdmissionRuntimeSourceMLXCache {
+	// SPEC-047-R003(iv) v0.1.10: a loopback runtime never reaches
+	// settlement_capable until a trusted usage source exists for it. Neither
+	// the recorded source nor the session's hello-time source may be one.
+	if head.RuntimeSource != modelAdmissionRuntimeSourceMLXCache || isBYOMLoopbackRuntimeSource(provider.RuntimeSource) {
 		return none, artifactidentityBinding{}, false
 	}
 	sessionCatalog, _, _, ok := resolveProviderCatalogIn(provider, current, compatible)

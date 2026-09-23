@@ -1,7 +1,9 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.8 (2026-09-23, issue #1695 explicit provider receipt eligibility; LOCKED v0.4 tuple unchanged)
+**Version:** 0.4.9 (2026-09-23, informative loopback cross-reference, #1694; LOCKED v0.4 tuple unchanged)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 candidate `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.3 (settlement/accounting semantics; v0.4+ chargeability successor expected for terminal-state rows), SPEC-006 v0.9, SPEC-008 v0.3 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.5, SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3, SPEC-022 v0.1.4 (hard — settlement-capable receipt profile consumer)
+
+**Change log v0.4.9 (2026-09-23, issue #1694):** Informative cross-reference only; no normative change and the locked v0.4 tuple is unchanged. §N.6 notes that usage relayed from a SPEC-046-R002 loopback runtime is provider-only usage under the existing rule. SPEC-047-R003(iv) v0.1.10 owns the coordinator's loopback admission bar and recording rule. It is the coordinator-side control that v0.4.8's provider-side receipt-eligibility guard defers to.
 
 **Change log v0.4.8 (2026-09-23, issue #1695 — explicit provider receipt eligibility):**
 - A provider runtime MUST declare explicitly whether it may sign receipts, and
@@ -4148,6 +4150,14 @@ cross-checked against coordinator/gateway-observed canonical request
 and delivered-output state under the applicable SPEC-005 rules. A
 provider-only usage value maps to `quarantined` for positive money
 movement.
+
+*Informative (v0.4.9, no normative change):* usage a provider relays
+from an operator-controlled external runtime, such as a SPEC-046-R002
+loopback `runtime_source`, is an instance of the provider-only usage
+above. SPEC-047-R003(iv) v0.1.10 owns how the coordinator applies this
+rule to loopback runtimes: it never records such an attempt as
+`coordinator_observed`. This is independent of the v0.4.8 provider-side
+guard (§6.4 case 7), which a modified provider can bypass.
 
 ### §N.7 Chargeability table
 

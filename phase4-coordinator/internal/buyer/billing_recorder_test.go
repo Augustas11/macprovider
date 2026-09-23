@@ -226,3 +226,82 @@ func TestRecordSettlementAttemptOutputByteEstimatedBuyerCancelIsNotBillable(t *t
 		t.Fatalf("usage billable tokens = input %d output %d, want 0/0 for byte-estimated buyer cancel", usage.BillableInputTokens, usage.BillableOutputTokens)
 	}
 }
+
+// SPEC-015 §N.6 / SPEC-047-R003(iv) v0.1.10 (#1694): usage relayed from a
+// loopback runtime is provider-only, so the attempt is recorded
+// byte_estimated with zero billable usage whatever counts the provider
+// reported. Native sessions (mlx_cache, or a legacy hello with no source)
+// keep coordinator_observed with billable == observed.
+func TestRecordSettlementAttemptOutputLoopbackUsageIsNeverCoordinatorObserved(t *testing.T) {
+	for _, tc := range []struct {
+		source       string
+		wantSource   string
+		wantBillable bool
+	}{
+		{"", billing.UsageSourceCoordinatorObserved, true},
+		{"mlx_cache", billing.UsageSourceCoordinatorObserved, true},
+		{"ollama_loopback", billing.UsageSourceByteEstimated, false},
+		{"llamacpp_loopback", billing.UsageSourceByteEstimated, false},
+		{"lmstudio_loopback", billing.UsageSourceByteEstimated, false},
+		{"openai_compatible_loopback", billing.UsageSourceByteEstimated, false},
+	} {
+		t.Run("source="+tc.source, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+			reqLog, err := requestlog.OpenStore(dbPath)
+			if err != nil {
+				t.Fatalf("open request log: %v", err)
+			}
+			t.Cleanup(func() { _ = reqLog.Close() })
+			store, err := billing.NewStore(reqLog.DB())
+			if err != nil {
+				t.Fatalf("billing.NewStore: %v", err)
+			}
+			prompt := int64(900)
+			completion := int64(5000)
+			rec := &billingRecorder{accountID: "acct-loopback", requestID: "req-loopback"}
+			output := &billing.SettlementOutput{
+				Content:             "ok",
+				OutputPrefixEndByte: 2,
+				TerminalState:       billing.TerminalStateNormalDone,
+			}
+			if err := rec.recordSettlementAttemptOutput(context.Background(), store, billing.HotPathInput{
+				RequestID:             "req-loopback",
+				ProviderID:            "provider-a",
+				ProviderRuntimeSource: tc.source,
+				PromptTokens:          &prompt,
+				CompletionTokens:      &completion,
+			}, output); err != nil {
+				t.Fatalf("recordSettlementAttemptOutput: %v", err)
+			}
+			db, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatalf("open db: %v", err)
+			}
+			defer db.Close()
+			var source, raw string
+			if err := db.QueryRow(`SELECT usage_source, usage_canonical_json FROM settlement_attempt_outputs WHERE request_id = ?`, "req-loopback").Scan(&source, &raw); err != nil {
+				t.Fatalf("query attempt: %v", err)
+			}
+			var usage struct {
+				BillableInputTokens  int64 `json:"billable_input_tokens"`
+				BillableOutputTokens int64 `json:"billable_output_tokens"`
+				ObservedInputTokens  int64 `json:"observed_input_tokens"`
+			}
+			if err := json.Unmarshal([]byte(raw), &usage); err != nil {
+				t.Fatalf("decode usage: %v", err)
+			}
+			if source != tc.wantSource {
+				t.Fatalf("usage_source=%q want %q", source, tc.wantSource)
+			}
+			if tc.wantBillable {
+				if usage.BillableInputTokens != prompt || usage.BillableOutputTokens != completion {
+					t.Fatalf("native usage must stay billable==observed: %+v", usage)
+				}
+				return
+			}
+			if usage.BillableInputTokens != 0 || usage.BillableOutputTokens != 0 || usage.ObservedInputTokens == prompt {
+				t.Fatalf("loopback usage must not carry the provider-reported counts: %+v", usage)
+			}
+		})
+	}
+}

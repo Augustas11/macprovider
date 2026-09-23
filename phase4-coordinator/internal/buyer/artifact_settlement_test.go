@@ -35,6 +35,18 @@ func ggufArtifactBinding() *artifactidentity.Binding {
 	}
 }
 
+// mlxSecondaryArtifactBinding is a secondary `mlx_safetensors` feed member
+// served by `mlx_cache`: the only feed member that can settle while a loopback
+// runtime has no trusted usage source (SPEC-047-R003(iv) v0.1.10).
+func mlxSecondaryArtifactBinding() *artifactidentity.Binding {
+	binding := ggufArtifactBinding()
+	binding.Member = artifactidentity.Member{
+		ModelKey: "model-a-key", ModelID: "model-a", ArtifactID: "mlx-8bit", HashAlgorithm: modelidentity.SnapshotManifestV1,
+		Hash: strings.Repeat("e", 64), RuntimeStatus: "recommendable", AllowedRuntimeSources: "mlx_cache",
+	}
+	return binding
+}
+
 // seedBYOMArtifactSettlementState is seedBYOMAdmissionState with the
 // decision events' expected identity set to the artifact member (what the
 // coordinator records when the session resolved through the feed).
@@ -55,7 +67,8 @@ func seedBYOMArtifactSettlementState(t *testing.T, store providerws.ModelAdmissi
 	}
 	decision := offer
 	decision.State = "catalog_priced"
-	decision.RuntimeSource = "ollama_loopback"
+	// The offer's signed runtime_source is the member's first allowed source.
+	decision.RuntimeSource = strings.Split(binding.Member.AllowedRuntimeSources, ",")[0]
 	decision.RequestID = "decision-catalog-priced-artifact"
 	decision.Nonce = "nonce-catalog-priced-artifact"
 	decision.PayloadDigestSHA256 = strings.Repeat("f", 64)
@@ -121,9 +134,11 @@ func artifactSettlementServer(t *testing.T, provider pool.Provider, registry *po
 	), dbPath
 }
 
-// SPEC-010 v1.7 R007(d) / SPEC-047-R003 / AC-CAT-7(iii): a session whose GGUF
-// pair resolved through the release-bound feed settles with the six values
-// in the immutable route-time record and the member as the expected identity.
+// SPEC-010 v1.7 R007(d) / SPEC-047-R003 / AC-CAT-7(iii): a session whose
+// secondary MLX pair resolved through the release-bound feed settles with the
+// six values in the immutable route-time record and the member as the
+// expected identity. A GGUF member cannot settle: its sources are loopback
+// (TestBYOMLoopbackArtifactMemberNeverRoutesOrSettles).
 func TestBYOMArtifactMemberSettlesWithSixValueEvidence(t *testing.T) {
 	tier2.ResetForTest()
 	t.Cleanup(tier2.ResetForTest)
@@ -137,7 +152,7 @@ func TestBYOMArtifactMemberSettlesWithSixValueEvidence(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x79}, 32))
 	provider := byomAdmissionProvider(t, registry.Snapshot()[0])
-	binding := ggufArtifactBinding()
+	binding := mlxSecondaryArtifactBinding()
 	store := providerws.NewMemoryModelAdmissionStore()
 	event := seedBYOMArtifactSettlementState(t, store, provider, binding, "settlement_capable")
 
@@ -160,13 +175,13 @@ func TestBYOMArtifactMemberSettlesWithSixValueEvidence(t *testing.T) {
 	}
 	want := map[string]string{
 		"provider_reported_model_hash":           binding.Member.Hash,
-		"provider_reported_model_hash_algorithm": modelidentity.GGUFFileV1,
+		"provider_reported_model_hash_algorithm": modelidentity.SnapshotManifestV1,
 		"expected_catalog_model_hash":            binding.Member.Hash,
-		"expected_catalog_model_hash_algorithm":  modelidentity.GGUFFileV1,
+		"expected_catalog_model_hash_algorithm":  modelidentity.SnapshotManifestV1,
 		"artifact_feed_sha256":                   binding.Provenance.FeedSHA256,
-		"artifact_id":                            "gguf-q4",
+		"artifact_id":                            "mlx-8bit",
 		"artifact_hash":                          binding.Member.Hash,
-		"artifact_hash_algorithm":                modelidentity.GGUFFileV1,
+		"artifact_hash_algorithm":                modelidentity.SnapshotManifestV1,
 		"artifact_feed_signer_key_id":            binding.Provenance.SignerKeyID,
 		"artifact_candidate_catalog_sha256":      binding.Provenance.CandidateCatalogSHA256,
 		"spec008_hash_status":                    string(pool.HashStatusVerified),
@@ -251,7 +266,7 @@ func TestBYOMArtifactMemberRouteTimeGatesFailClosed(t *testing.T) {
 			registry := pool.NewRegistry(nil)
 			registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x79}, 32))
 			provider := byomAdmissionProvider(t, registry.Snapshot()[0])
-			binding := ggufArtifactBinding()
+			binding := mlxSecondaryArtifactBinding()
 			store := providerws.NewMemoryModelAdmissionStore()
 			event := seedBYOMArtifactSettlementState(t, store, provider, binding, "settlement_capable")
 			routeProvider := bindBYOMSession(clearBYOMAdmissionFields(provider), event)
@@ -349,5 +364,57 @@ func TestSecondaryMLXMemberWithoutAdmissionEvidenceNeverSettles(t *testing.T) {
 	}
 	if got := ledgerCreditCount(t, dbPath); got != 0 {
 		t.Fatalf("ledger credits=%d want 0", got)
+	}
+}
+
+// SPEC-047-R003(iv) v0.1.10 (#1694): a loopback runtime relays usage from an
+// operator-controlled process, so a GGUF member served through it never
+// routes or settles, even with a settlement_capable decision, a verified
+// feed binding, and a receipt key. The same fixture with the mlx_cache
+// secondary member settles (TestBYOMArtifactMemberSettlesWithSixValueEvidence),
+// so this fails on the runtime source, not on a missing prerequisite.
+func TestBYOMLoopbackArtifactMemberNeverRoutesOrSettles(t *testing.T) {
+	for _, sessionSource := range []string{"", "ollama_loopback"} {
+		t.Run("session_source="+sessionSource, func(t *testing.T) {
+			tier2.ResetForTest()
+			t.Cleanup(tier2.ResetForTest)
+			raw, pubkey := routeSnapshotCatalogFixture(t, "byom-loopback-never-settles-"+sessionSource, time.Now().UTC().Add(time.Hour))
+			if err := tier2.Configure(config.Tier2Config{ObserveEnabled: true, CatalogPath: writeRouteSnapshotCatalog(t, raw), CatalogPublicKey: pubkey, RequireHashVerified: true}, zerolog.Nop()); err != nil {
+				t.Fatalf("tier2.Configure: %v", err)
+			}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { writeProviderOK(w) }))
+			defer upstream.Close()
+
+			registry := pool.NewRegistry(nil)
+			registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x79}, 32))
+			provider := byomAdmissionProvider(t, registry.Snapshot()[0])
+			binding := ggufArtifactBinding()
+			store := providerws.NewMemoryModelAdmissionStore()
+			event := seedBYOMArtifactSettlementState(t, store, provider, binding, "settlement_capable")
+			if event.RuntimeSource != "llamacpp_loopback" {
+				t.Fatalf("fixture must record a loopback runtime_source, got %q", event.RuntimeSource)
+			}
+
+			routeProvider := bindBYOMSession(clearBYOMAdmissionFields(provider), event)
+			routeProvider.ModelHash = binding.Member.Hash
+			routeProvider.ModelHashAlgorithm = binding.Member.HashAlgorithm
+			routeProvider.ExpectedModelHash = buyerTestHash
+			routeProvider.HashStatus = pool.HashStatusVerified
+			routeProvider.ArtifactIdentity = binding
+			routeProvider.RuntimeSource = sessionSource
+			registry.Register(&routeProvider, nil)
+			server, dbPath := artifactSettlementServer(t, routeProvider, registry, store)
+
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+			if rr.Code == http.StatusOK {
+				t.Fatalf("loopback member must not route: status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			if rows := queryRouteSnapshotBYOMBindings(t, dbPath); len(rows) != 0 {
+				t.Fatalf("no BYOM route snapshot may be written for a loopback member: %#v", rows)
+			}
+			if got := ledgerCreditCount(t, dbPath); got != 0 {
+				t.Fatalf("ledger credits=%d want 0", got)
+			}
+		})
 	}
 }

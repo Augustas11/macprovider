@@ -11,6 +11,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
 // settlementOutputWriteContextForTest, when set, replaces the detached
@@ -333,6 +334,7 @@ func (b *billingRecorder) setRequestID(requestID string) {
 func (b *billingRecorder) recordRow(
 	providerAssignedID string,
 	providerID string,
+	providerRuntimeSource string,
 	status int,
 	promptTok, cachedPromptTok, completionTok *int64,
 	errMsg, errCode string,
@@ -457,6 +459,7 @@ func (b *billingRecorder) recordRow(
 			RequestID:                    row.RequestID,
 			AttemptN:                     attemptN,
 			ProviderAssignedID:           providerAssignedID,
+			ProviderRuntimeSource:        providerRuntimeSource,
 			ProviderID:                   stableProviderID,
 			Model:                        row.Model,
 			Status:                       status,
@@ -544,6 +547,7 @@ func (b *billingRecorder) recordRow(
 			RequestID:                    row.RequestID,
 			AttemptN:                     attemptN,
 			ProviderAssignedID:           providerAssignedID,
+			ProviderRuntimeSource:        providerRuntimeSource,
 			ProviderID:                   providerID,
 			Model:                        row.Model,
 			Status:                       status,
@@ -736,7 +740,13 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 	observedInput := int64(0)
 	observedOutput := int64(0)
 	usageSource := billing.UsageSourceByteEstimated
-	if in.PromptTokens != nil && in.CompletionTokens != nil {
+	// SPEC-015 §N.6 / SPEC-047-R003(iv) v0.1.10: a loopback runtime's token
+	// counts are relayed unchanged from an operator-controlled process, so
+	// they are provider-only usage and never coordinator_observed. The
+	// attempt falls to the byte-estimated branch: zero billable, never
+	// settlement-capable.
+	loopback := providerws.IsBYOMLoopbackRuntimeSource(in.ProviderRuntimeSource)
+	if !loopback && in.PromptTokens != nil && in.CompletionTokens != nil {
 		observedInput = *in.PromptTokens
 		observedOutput = *in.CompletionTokens
 		usageSource = billing.UsageSourceCoordinatorObserved
@@ -829,7 +839,7 @@ func (b *billingRecorder) logRow(
 	errMsg, errCode string,
 	retried int,
 ) {
-	_ = b.recordRow(providerAssignedID, "", status, promptTok, nil, completionTok, errMsg, errCode, retried, nil, billing.FaultNone, nil)
+	_ = b.recordRow(providerAssignedID, "", "", status, promptTok, nil, completionTok, errMsg, errCode, retried, nil, billing.FaultNone, nil)
 }
 
 // logBuyerFailure mirrors the pre-refactor `logBuyerFailure` closure.
@@ -845,7 +855,7 @@ func (b *billingRecorder) logProviderRow(
 	errMsg, errCode string,
 	retried int,
 ) error {
-	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, nil, completionTok, errMsg, errCode, retried, nil, billing.FaultNone, nil)
+	return b.recordRow(provider.AssignedID, provider.ProviderID, provider.RuntimeSource, status, promptTok, nil, completionTok, errMsg, errCode, retried, nil, billing.FaultNone, nil)
 }
 
 // logProviderRowWithEstimate mirrors the pre-refactor
@@ -858,7 +868,7 @@ func (b *billingRecorder) logProviderRowWithEstimate(
 	retried int,
 	estimatedCompTokens *int64,
 ) error {
-	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, nil, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone, nil)
+	return b.recordRow(provider.AssignedID, provider.ProviderID, provider.RuntimeSource, status, promptTok, nil, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone, nil)
 }
 
 func (b *billingRecorder) logProviderRowWithEstimateAndOutput(
@@ -870,7 +880,7 @@ func (b *billingRecorder) logProviderRowWithEstimateAndOutput(
 	estimatedCompTokens *int64,
 	output *billing.SettlementOutput,
 ) error {
-	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, nil, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone, output)
+	return b.recordRow(provider.AssignedID, provider.ProviderID, provider.RuntimeSource, status, promptTok, nil, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone, output)
 }
 
 func (b *billingRecorder) logProviderRowWithCacheEstimateAndOutput(
@@ -882,5 +892,5 @@ func (b *billingRecorder) logProviderRowWithCacheEstimateAndOutput(
 	estimatedCompTokens *int64,
 	output *billing.SettlementOutput,
 ) error {
-	return b.recordRow(provider.AssignedID, provider.ProviderID, status, promptTok, cachedPromptTok, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone, output)
+	return b.recordRow(provider.AssignedID, provider.ProviderID, provider.RuntimeSource, status, promptTok, cachedPromptTok, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone, output)
 }

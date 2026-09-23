@@ -44,6 +44,10 @@ type HotPathInput struct {
 	EffectivePrivacyOutcome      string
 	PositiveVerificationExcluded bool
 	RewardsExcluded              bool
+	// ProviderRuntimeSource is the serving session's hello-time
+	// runtime_source. A SPEC-046 loopback source relays usage from an
+	// operator-controlled runtime, so it is never coordinator_observed.
+	ProviderRuntimeSource string
 }
 
 type CacheBillingRoutingDecision struct {

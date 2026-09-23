@@ -357,6 +357,12 @@ func (s *Server) byomRouteSnapshotBinding(ctx context.Context, p pool.Provider, 
 // feed binding for the same artifact id; a candidate_row member (or a
 // pre-v0.1.5 record, which bound the row) needs the primary-row session.
 func byomBoundMemberMatchesSession(p pool.Provider, event providerws.ModelAdmissionEvent) bool {
+	// SPEC-047-R003(iv) v0.1.10 defence in depth: a loopback runtime's usage
+	// is provider-only, so neither a loopback decision nor a loopback session
+	// routes or settles, whatever member it bound.
+	if providerws.IsBYOMLoopbackRuntimeSource(event.RuntimeSource) || providerws.IsBYOMLoopbackRuntimeSource(p.RuntimeSource) {
+		return false
+	}
 	switch event.BoundMemberSource {
 	case "artifact_feed":
 		// SPEC-047-R003(ii) defence in depth: the member must still allow
