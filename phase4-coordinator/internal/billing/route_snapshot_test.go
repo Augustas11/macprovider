@@ -259,6 +259,9 @@ func TestInsertRouteSnapshotDedicatedHandleBypassesRequestLogPoolWait(t *testing
 	if !errors.Is(err, ErrRouteSnapshotStorePressure) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("shared route snapshot insert err=%v, want deadline-wrapped store pressure", err)
 	}
+	if detail, ok := RouteSnapshotPressureDetails(err); !ok || detail.Component != RouteSnapshotComponentPrimary || detail.Operation != RouteSnapshotOperationConnection || detail.Kind == "" {
+		t.Fatalf("pressure detail=%+v ok=%v, want route_snapshot connection with kind", detail, ok)
+	}
 
 	routeSnapshotDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
 	if err != nil {
@@ -362,6 +365,11 @@ func TestInsertRouteSnapshotJournalBuffersMainWriterPressure(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	pressureEvents := make(chan RouteSnapshotPressureEvent, 1)
+	store.SetRouteSnapshotPressureObserver(func(event RouteSnapshotPressureEvent) {
+		pressureEvents <- event
+	})
+
 	snapshot := testRouteSnapshot()
 	snapshot.RequestID = "req-route-snapshot-journal-buffer"
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -378,6 +386,17 @@ func TestInsertRouteSnapshotJournalBuffersMainWriterPressure(t *testing.T) {
 	}
 	if got := scalar(t, journalDB, `SELECT COUNT(*) FROM settlement_route_snapshot_journal WHERE request_id='req-route-snapshot-journal-buffer'`); got != 1 {
 		t.Fatalf("journal route snapshot rows=%d want 1", got)
+	}
+	select {
+	case event := <-pressureEvents:
+		if event.RequestID != snapshot.RequestID || event.ProviderID != snapshot.ProviderID || event.AttemptN != snapshot.AttemptN {
+			t.Fatalf("pressure event identity=%+v, want request/provider/attempt from snapshot", event)
+		}
+		if event.Detail.Component != RouteSnapshotComponentPrimary || event.Detail.Operation != RouteSnapshotOperationPrimaryMirror || event.Detail.Kind == "" {
+			t.Fatalf("pressure event detail=%+v, want primary mirror pressure with kind", event.Detail)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing primary mirror pressure observer event")
 	}
 
 	if _, err := lockConn.ExecContext(context.Background(), `ROLLBACK`); err != nil {
@@ -496,6 +515,9 @@ func TestInsertRouteSnapshotShortSQLiteBusyHonorsCallerDeadline(t *testing.T) {
 	elapsed := time.Since(started)
 	if !errors.Is(err, ErrRouteSnapshotStorePressure) {
 		t.Fatalf("route snapshot insert err=%v, want store pressure", err)
+	}
+	if detail, ok := RouteSnapshotPressureDetails(err); !ok || detail.Component != RouteSnapshotComponentPrimary || detail.Operation != RouteSnapshotOperationInsert || detail.Kind == "" {
+		t.Fatalf("pressure detail=%+v ok=%v, want route_snapshot insert with kind", detail, ok)
 	}
 	if elapsed > time.Second {
 		t.Fatalf("route snapshot insert held dedicated conn for %s, want caller deadline not sqlite busy timeout", elapsed)

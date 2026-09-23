@@ -18,6 +18,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
+	"github.com/rs/zerolog"
 )
 
 const (
@@ -191,12 +192,13 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 			b.routeSnapshotStorePressure = true
 			b.settlementPolicyMode = routeMode
 			b.settlementPolicyVersion = billing.RouteSnapshotPolicyVersion
-			b.server.log.Warn().
+			event := b.server.log.Warn().
 				Err(err).
 				Str("request_id", b.requestID).
 				Str("provider_id", provider.ProviderID).
-				Str("route_snapshot_mode", routeMode).
-				Msg("route snapshot store pressure skipped before provider dispatch")
+				Str("route_snapshot_mode", routeMode)
+			addRouteSnapshotPressureLogFields(event, err)
+			event.Msg("route snapshot store pressure skipped before provider dispatch")
 			return nil, nil
 		}
 		return nil, err
@@ -299,7 +301,9 @@ func stringPtrOrNil(value string) *string {
 }
 
 func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err error) {
-	rec.server.log.Warn().Err(err).Str("request_id", rec.requestID).Msg("route snapshot insert failed before provider dispatch")
+	event := rec.server.log.Warn().Err(err).Str("request_id", rec.requestID)
+	addRouteSnapshotPressureLogFields(event, err)
+	event.Msg("route snapshot insert failed before provider dispatch")
 	if errors.Is(err, context.Canceled) {
 		rec.logBuyerFailure(statusClientClosedRequest, "Buyer canceled before route snapshot dispatch")
 		writeError(w, statusClientClosedRequest, "request_canceled", "Request canceled before provider dispatch")
@@ -320,12 +324,31 @@ func writeRouteSnapshotError(w http.ResponseWriter, rec *billingRecorder, err er
 	writeError(w, http.StatusInternalServerError, "route_snapshot_failed", "Could not durably record route snapshot")
 }
 
+func addRouteSnapshotPressureLogFields(event *zerolog.Event, err error) {
+	if event == nil {
+		return
+	}
+	detail, ok := billing.RouteSnapshotPressureDetails(err)
+	if !ok {
+		return
+	}
+	if detail.Component != "" {
+		event.Str("route_snapshot_component", detail.Component)
+	}
+	if detail.Operation != "" {
+		event.Str("route_snapshot_operation", detail.Operation)
+	}
+	if detail.Kind != "" {
+		event.Str("route_snapshot_pressure_kind", detail.Kind)
+	}
+}
+
 func wrapRouteSnapshotGuardPressure(err error) error {
 	if err == nil || errors.Is(err, billing.ErrRouteSnapshotStorePressure) {
 		return err
 	}
 	if billing.IsRouteSnapshotStorePressure(err) {
-		return fmt.Errorf("%w: %w", billing.ErrRouteSnapshotStorePressure, err)
+		return billing.AnnotateRouteSnapshotPressure(err, billing.RouteSnapshotComponentGuard, billing.RouteSnapshotOperationBYOMBinding)
 	}
 	return err
 }

@@ -119,10 +119,30 @@ func TestWriteRouteSnapshotErrorShedsPreDispatchCapacityPressure(t *testing.T) {
 	}
 }
 
+func TestWriteRouteSnapshotErrorLogsPressureKind(t *testing.T) {
+	var logBuf bytes.Buffer
+	server := &Server{log: zerolog.New(&logBuf)}
+	rec := &billingRecorder{server: server, requestID: "req-route-snapshot-log"}
+	rr := httptest.NewRecorder()
+
+	writeRouteSnapshotError(rr, rec, fmt.Errorf("insert route snapshot: %w", context.DeadlineExceeded))
+
+	var entry map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(logBuf.Bytes()), &entry); err != nil {
+		t.Fatalf("decode log entry: %v; raw=%s", err, logBuf.String())
+	}
+	if got := entry["route_snapshot_pressure_kind"]; got != "context_deadline_exceeded" {
+		t.Fatalf("route_snapshot_pressure_kind=%v, want context_deadline_exceeded; entry=%v", got, entry)
+	}
+}
+
 func TestRouteSnapshotGuardPressureWrapsDedicatedDeadline(t *testing.T) {
 	err := wrapRouteSnapshotGuardPressure(fmt.Errorf("admission route generation lookup: %w", context.DeadlineExceeded))
 	if !errors.Is(err, billing.ErrRouteSnapshotStorePressure) {
 		t.Fatalf("wrapped err=%v, want route snapshot store pressure", err)
+	}
+	if detail, ok := billing.RouteSnapshotPressureDetails(err); !ok || detail.Component != billing.RouteSnapshotComponentGuard || detail.Operation != billing.RouteSnapshotOperationBYOMBinding || detail.Kind != "context_deadline_exceeded" {
+		t.Fatalf("pressure detail=%+v ok=%v, want route snapshot guard BYOM deadline", detail, ok)
 	}
 	if !routeSnapshotShouldCapacityShed(err) {
 		t.Fatalf("wrapped err=%v, want capacity shed", err)

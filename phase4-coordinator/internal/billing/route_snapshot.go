@@ -287,6 +287,76 @@ func (r RouteSnapshot) Validate() error {
 	return nil
 }
 
+const (
+	RouteSnapshotComponentPrimary = "route_snapshot"
+	RouteSnapshotComponentJournal = "route_snapshot_journal"
+	RouteSnapshotComponentGuard   = "route_snapshot_guard"
+
+	RouteSnapshotOperationConnection    = "connection"
+	RouteSnapshotOperationBusyTimeout   = "busy_timeout"
+	RouteSnapshotOperationInsert        = "route_snapshot_insert"
+	RouteSnapshotOperationBYOMBinding   = "byom_route_snapshot_binding"
+	RouteSnapshotOperationPrimaryMirror = "primary_mirror"
+)
+
+type RouteSnapshotPressureDetail struct {
+	Component string
+	Operation string
+	Kind      string
+}
+
+type RouteSnapshotPressureEvent struct {
+	RequestID  string
+	AttemptN   int64
+	ProviderID string
+	Detail     RouteSnapshotPressureDetail
+}
+
+type routeSnapshotStorePressureError struct {
+	detail RouteSnapshotPressureDetail
+	err    error
+}
+
+func (e *routeSnapshotStorePressureError) Error() string {
+	if e == nil || e.err == nil {
+		return ErrRouteSnapshotStorePressure.Error()
+	}
+	parts := []string{ErrRouteSnapshotStorePressure.Error()}
+	if e.detail.Component != "" {
+		parts = append(parts, "component="+e.detail.Component)
+	}
+	if e.detail.Operation != "" {
+		parts = append(parts, "operation="+e.detail.Operation)
+	}
+	if e.detail.Kind != "" {
+		parts = append(parts, "kind="+e.detail.Kind)
+	}
+	parts = append(parts, "cause="+e.err.Error())
+	return strings.Join(parts, " ")
+}
+
+func (e *routeSnapshotStorePressureError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+func (e *routeSnapshotStorePressureError) Is(target error) bool {
+	return target == ErrRouteSnapshotStorePressure
+}
+
+func RouteSnapshotPressureDetails(err error) (RouteSnapshotPressureDetail, bool) {
+	var detailErr *routeSnapshotStorePressureError
+	if errors.As(err, &detailErr) && detailErr != nil {
+		return detailErr.detail, true
+	}
+	if IsRouteSnapshotStorePressure(err) {
+		return RouteSnapshotPressureDetail{Kind: routeSnapshotPressureKind(err)}, true
+	}
+	return RouteSnapshotPressureDetail{}, false
+}
+
 func (s *Store) InsertRouteSnapshot(ctx context.Context, snapshot RouteSnapshot) (string, error) {
 	if s == nil {
 		return "", fmt.Errorf("billing store is nil")
@@ -300,15 +370,17 @@ func (s *Store) InsertRouteSnapshot(ctx context.Context, snapshot RouteSnapshot)
 		return "", err
 	}
 	if journalDB := s.routeSnapshotJournalDB.Load(); journalDB != nil {
-		if err := s.insertRouteSnapshotRow(ctx, journalDB, "route_snapshot_journal", "settlement_route_snapshot_journal", snapshot, digest, string(rendered), string(canonical), true); err != nil {
+		if err := s.insertRouteSnapshotRow(ctx, journalDB, RouteSnapshotComponentJournal, "settlement_route_snapshot_journal", snapshot, digest, string(rendered), string(canonical), true); err != nil {
 			return "", err
 		}
 		mirrorCtx, cancel := routeSnapshotMirrorContext(ctx, routeSnapshotPrimaryMirrorBudget)
-		_ = s.insertRouteSnapshotRow(mirrorCtx, s.routeSnapshotHandle(), "route_snapshot", "settlement_route_snapshots", snapshot, digest, string(rendered), string(canonical), false)
+		if err := s.insertRouteSnapshotRow(mirrorCtx, s.routeSnapshotHandle(), RouteSnapshotComponentPrimary, "settlement_route_snapshots", snapshot, digest, string(rendered), string(canonical), false); err != nil {
+			s.observeRouteSnapshotPressure(snapshot, err)
+		}
 		cancel()
 		return digest, nil
 	}
-	if err := s.insertRouteSnapshotRow(ctx, s.routeSnapshotHandle(), "route_snapshot", "settlement_route_snapshots", snapshot, digest, string(rendered), string(canonical), true); err != nil {
+	if err := s.insertRouteSnapshotRow(ctx, s.routeSnapshotHandle(), RouteSnapshotComponentPrimary, "settlement_route_snapshots", snapshot, digest, string(rendered), string(canonical), true); err != nil {
 		return "", err
 	}
 	return digest, nil
@@ -325,11 +397,11 @@ func (s *Store) insertRouteSnapshotRow(ctx context.Context, db *sql.DB, componen
 	conn, err := db.Conn(ctx)
 	s.observeSQLiteConnectionWait(component, err, time.Since(connWaitStarted))
 	if err != nil {
-		return wrapRouteSnapshotStorePressure(err)
+		return AnnotateRouteSnapshotPressure(err, component, RouteSnapshotOperationConnection)
 	}
 	defer conn.Close()
 	if err := s.applyRouteSnapshotBusyTimeout(ctx, conn); err != nil {
-		return wrapRouteSnapshotStorePressure(err)
+		return AnnotateRouteSnapshotPressure(err, component, RouteSnapshotOperationBusyTimeout)
 	}
 
 	hasDeadline := false
@@ -386,7 +458,7 @@ INSERT INTO `+table+` (
 			return err
 		}
 		if !retry || !hasDeadline || !sleepRouteSnapshotRetry(ctx, attempt) {
-			return wrapRouteSnapshotStorePressure(err)
+			return AnnotateRouteSnapshotPressure(err, component, RouteSnapshotOperationInsert)
 		}
 		attempt++
 	}
@@ -729,13 +801,50 @@ func sleepRouteSnapshotRetry(ctx context.Context, attempt int) bool {
 }
 
 func wrapRouteSnapshotStorePressure(err error) error {
+	return AnnotateRouteSnapshotPressure(err, "", "")
+}
+
+func AnnotateRouteSnapshotPressure(err error, component, operation string) error {
 	if err == nil {
 		return nil
 	}
+	var detailErr *routeSnapshotStorePressureError
+	if errors.As(err, &detailErr) {
+		return err
+	}
 	if routeSnapshotStorePressure(err) {
-		return fmt.Errorf("%w: %w", ErrRouteSnapshotStorePressure, err)
+		return &routeSnapshotStorePressureError{
+			detail: RouteSnapshotPressureDetail{Component: component, Operation: operation, Kind: routeSnapshotPressureKind(err)},
+			err:    err,
+		}
 	}
 	return err
+}
+
+func (s *Store) observeRouteSnapshotPressure(snapshot RouteSnapshot, err error) {
+	detail, ok := RouteSnapshotPressureDetails(err)
+	if !ok {
+		return
+	}
+	if detail.Operation == RouteSnapshotOperationInsert {
+		detail.Operation = RouteSnapshotOperationPrimaryMirror
+	}
+	s.routeSnapshotPressureMu.RLock()
+	observer := s.routeSnapshotPressureObserve
+	s.routeSnapshotPressureMu.RUnlock()
+	if observer == nil {
+		return
+	}
+	event := RouteSnapshotPressureEvent{
+		RequestID:  snapshot.RequestID,
+		AttemptN:   snapshot.AttemptN,
+		ProviderID: snapshot.ProviderID,
+		Detail:     detail,
+	}
+	go func() {
+		defer func() { _ = recover() }()
+		observer(event)
+	}()
 }
 
 // IsRouteSnapshotStorePressure reports whether err is transient pressure from
@@ -743,6 +852,27 @@ func wrapRouteSnapshotStorePressure(err error) error {
 // classified as pressure.
 func IsRouteSnapshotStorePressure(err error) bool {
 	return errors.Is(err, ErrRouteSnapshotStorePressure) || routeSnapshotStorePressure(err)
+}
+
+func routeSnapshotPressureKind(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "context_deadline_exceeded"
+	}
+	var sqliteErr *sqlite.Error
+	if errors.As(err, &sqliteErr) {
+		switch sqliteErr.Code() & 0xff {
+		case 5:
+			return "sqlite_busy"
+		case 6:
+			return "sqlite_locked"
+		default:
+			return fmt.Sprintf("sqlite_%d", sqliteErr.Code())
+		}
+	}
+	return "unknown"
 }
 
 func routeSnapshotStorePressure(err error) bool {

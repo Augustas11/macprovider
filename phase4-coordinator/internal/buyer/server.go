@@ -719,6 +719,24 @@ func WithBilling(store *billing.Store, cfg config.RewardsConfig) Option {
 		defer s.billingMu.Unlock()
 		s.billing = store
 		s.billingCfg = cfg
+		if store != nil {
+			store.SetRouteSnapshotPressureObserver(func(event billing.RouteSnapshotPressureEvent) {
+				logEvent := s.log.Warn().
+					Str("request_id", event.RequestID).
+					Int64("attempt_n", event.AttemptN).
+					Str("provider_id", event.ProviderID)
+				if event.Detail.Component != "" {
+					logEvent.Str("route_snapshot_component", event.Detail.Component)
+				}
+				if event.Detail.Operation != "" {
+					logEvent.Str("route_snapshot_operation", event.Detail.Operation)
+				}
+				if event.Detail.Kind != "" {
+					logEvent.Str("route_snapshot_pressure_kind", event.Detail.Kind)
+				}
+				logEvent.Msg("route snapshot primary mirror pressure after journal persistence")
+			})
+		}
 	}
 }
 
