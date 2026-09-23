@@ -2958,7 +2958,9 @@ struct LocalStatusFormatter {
         donorMode: Bool = false,
         staleRecommendationSince: Date? = nil,
         configPath: String? = nil,
-        advanced: Bool = false
+        advanced: Bool = false,
+        coordinatorURL: String? = nil,
+        sustainedBenchmarks: [BenchmarkPayload] = []
     ) -> String {
         guard advanced else {
             return publicFormat(
@@ -2975,7 +2977,9 @@ struct LocalStatusFormatter {
             ownerLogin: ownerLogin,
             donorMode: donorMode,
             staleRecommendationSince: staleRecommendationSince,
-            configPath: configPath
+            configPath: configPath,
+            coordinatorURL: coordinatorURL,
+            sustainedBenchmarks: sustainedBenchmarks
         )
     }
 
@@ -3078,7 +3082,9 @@ struct LocalStatusFormatter {
         ownerLogin: String?,
         donorMode: Bool,
         staleRecommendationSince: Date?,
-        configPath: String?
+        configPath: String?,
+        coordinatorURL: String?,
+        sustainedBenchmarks: [BenchmarkPayload]
     ) -> String {
         let capacity = status["capacity"] as? [String: Any] ?? [:]
         let coordinator = status["coordinator"] as? [String: Any] ?? [:]
@@ -3129,10 +3135,14 @@ struct LocalStatusFormatter {
           Requests:    \(status["requests_total"] ?? 0) served, \(status["errors_total"] ?? 0) errors
           Active WS:   \(status["active_request_id_count"] ?? 0) request_ids
           RAM:         \(capacity["ram_gb"] ?? 0) GB (\(string(capacity["ram_tier"])))
-          Context cap: \(capacity["max_context_tokens"] ?? 0) tokens
+          Context cap: \(capacity["max_context_tokens"] ?? 0) tokens\(contextSourceSuffix(status))
+
+        \(readinessBlock(status))
+
+        \(throughputBlock(status, sustainedBenchmarks: sustainedBenchmarks))
 
         Coordinator:
-          URL:         \(string(coordinator["url"]))
+          URL:         \(configuredCoordinatorURL(coordinatorURL))
           Connected:   \(connected)
           Session:     \(string(coordinator["session"]))
           Tier:        \(string(coordinator["tier"]))
@@ -3161,6 +3171,117 @@ struct LocalStatusFormatter {
           Latest:      \(latestLine)
         \(staleBlock)
         """
+    }
+
+    private static func advertises(_ capability: String, in status: [String: Any]) -> Bool {
+        let contract = status["local_status_contract"] as? [String: Any]
+        return (contract?["capabilities"] as? [String])?.contains(capability) == true
+    }
+
+    private static func contextSourceSuffix(_ status: [String: Any]) -> String {
+        guard advertises("capacity_provenance_v1", in: status),
+              let raw = (status["capacity"] as? [String: Any])?["max_context_source"] as? String
+        else { return "" }
+        let label: String
+        switch MaxContextSource(rawValue: raw) {
+        case .operatorConfig: label = "config.yaml max_context_override"
+        case .environment: label = "MACPROVIDER_MAX_CONTEXT_OVERRIDE"
+        case .cliFlag: label = "--max-context flag"
+        case .ramTierDefault: label = "RAM-tier default"
+        case .draftClamp: label = "draft-model clamp"
+        case .recommendationAdoption: label = "adopted recommendation"
+        case nil: label = raw
+        }
+        return " (source: \(label))"
+    }
+
+    /// Each readiness layer with its own reason, so a "not serving" answer
+    /// names the layer that is holding it (#1689).
+    private static func readinessBlock(_ status: [String: Any]) -> String {
+        let localState = string(status["status"])
+        let modelLoaded = (status["model_loaded"] as? Bool)
+            ?? ["ready", "busy", "degraded"].contains(localState)
+        var localReasons = [modelLoaded ? "model loaded" : "model not loaded"]
+        if let reason = (status["lifecycle"] as? [String: Any])?["reason_code"] as? String {
+            localReasons.append("reason \(reason)")
+        }
+        let coordinator = status["coordinator"] as? [String: Any] ?? [:]
+        let coordinatorLine: String
+        if (coordinator["connected"] as? Bool) == true {
+            coordinatorLine = "connected (tier \(string(coordinator["tier"])), session \(string(coordinator["session"])))"
+        } else {
+            coordinatorLine = "not connected"
+        }
+        var networkLine = string(status["network_state"])
+        if let hold = status["buyer_serving_hold"] as? String {
+            networkLine += " (hold: \(hold))"
+        }
+        let catalog = status["catalog"] as? [String: Any] ?? [:]
+        return """
+        Readiness:
+          Local inference: \(localState) (\(localReasons.joined(separator: "; ")))
+          Coordinator:     \(coordinatorLine)
+          Network:         \(networkLine)
+          Catalog trust:   \(string(catalog["state"]))
+        """
+    }
+
+    /// Labels `throughput_tps_estimate` as the short startup probe it is and
+    /// sets it beside the stored sustained benchmark for the served model.
+    private static func throughputBlock(_ status: [String: Any], sustainedBenchmarks: [BenchmarkPayload]) -> String {
+        let capacity = status["capacity"] as? [String: Any] ?? [:]
+        let servedModel = status["model"] as? String
+        let probeTPS = (capacity["throughput_tps_estimate"] as? NSNumber)?.doubleValue ?? 0
+        var lines = ["Throughput:"]
+        var probeMatchesServedModel = true
+        if advertises("capacity_provenance_v1", in: status) {
+            if capacity["throughput_source"] as? String == "startup_probe" {
+                let maxTokens = string(capacity["throughput_probe_max_tokens"])
+                let probeModel = capacity["throughput_probe_model"] as? String
+                lines.append("  Startup probe: \(tps(probeTPS)) tok/s (\(maxTokens)-token probe on \(probeModel ?? "<unknown>"); not a sustained benchmark)")
+                if let probeModel, let servedModel, probeModel != servedModel {
+                    probeMatchesServedModel = false
+                    lines.append("  Startup probe is stale: it ran on \(probeModel), but \(servedModel) is served now.")
+                }
+            } else {
+                lines.append("  Startup probe: not run")
+                probeMatchesServedModel = false
+            }
+        } else {
+            lines.append("  Startup probe: \(tps(probeTPS)) tok/s (not a sustained benchmark)")
+        }
+        let benchmark = servedModel.flatMap { model in
+            sustainedBenchmarks
+                .filter { $0.modelID == model || $0.modelKey == model || $0.modelArtifactPath == model }
+                .max { $0.generatedAt < $1.generatedAt }
+        }
+        if let benchmark {
+            lines.append("  Sustained benchmark: \(tps(benchmark.sustainedTPS)) tok/s (benchmark \(benchmark.benchmarkID ?? "<unknown>"), \(benchmark.generatedAt))")
+            if probeMatchesServedModel, probeTPS < benchmark.sustainedTPS * 0.5 {
+                lines.append("  Warning: the startup probe (\(tps(probeTPS)) tok/s) is under 50% of the sustained benchmark; it understates this Mac's capacity.")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func tps(_ value: Double) -> String {
+        String(format: "%.1f", value)
+    }
+
+    /// The URL the status command's own config names, stripped of userinfo,
+    /// query, and fragment. `/v1/status` does not report a coordinator URL.
+    private static func configuredCoordinatorURL(_ raw: String?) -> String {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return "(not configured)"
+        }
+        guard var components = URLComponents(string: raw), components.host != nil else {
+            return "(configured, unparseable)"
+        }
+        components.user = nil
+        components.password = nil
+        components.query = nil
+        components.fragment = nil
+        return "\(components.string ?? "(configured, unparseable)") (from config)"
     }
 
     private static func string(_ value: Any?) -> String {

@@ -3,6 +3,7 @@ import CryptoKit
 import Dispatch
 import Foundation
 import IOKit
+import MacProviderCore
 
 enum ProviderHealthState: String, Sendable {
     case ready
@@ -155,6 +156,12 @@ final class SystemMemoryPressureMonitor: MemoryPressureProviding, @unchecked Sen
     }
 }
 
+/// The serve-time startup probe that produced `throughputTPSEstimate` (#1689).
+struct StartupThroughputProbe: Sendable, Equatable {
+    let maxTokens: Int
+    let modelID: String?
+}
+
 struct ProviderCapacity: Sendable {
     static let maxConcurrencyOverrideLimit = 8
 
@@ -163,8 +170,19 @@ struct ProviderCapacity: Sendable {
     let maxContextTokens: Int
     let maxConcurrency: Int
     let throughputTPSEstimate: Double
+    let maxContextSource: MaxContextSource
+    let throughputProbe: StartupThroughputProbe?
 
-    init(maxContextOverride: Int?, maxConcurrencyOverride: Int?, throughputTPSEstimate: Double = 0.0) {
+    /// Without an override the source is always `ram_tier_default`. With one,
+    /// production callers pass the source recorded where the override was
+    /// resolved; the `operator_config` fallback only serves test fixtures.
+    init(
+        maxContextOverride: Int?,
+        maxConcurrencyOverride: Int?,
+        throughputTPSEstimate: Double = 0.0,
+        maxContextSource: MaxContextSource? = nil,
+        throughputProbe: StartupThroughputProbe? = nil
+    ) {
         let physicalMemoryGB = Self.systemMemoryGB()
         self.ramGB = physicalMemoryGB
 
@@ -174,13 +192,19 @@ struct ProviderCapacity: Sendable {
         self.maxContextTokens = maxContextOverride ?? defaults.context
         self.maxConcurrency = maxConcurrencyOverride ?? defaults.concurrency
         self.throughputTPSEstimate = throughputTPSEstimate
+        self.maxContextSource = maxContextOverride == nil
+            ? .ramTierDefault
+            : (maxContextSource ?? .operatorConfig)
+        self.throughputProbe = throughputProbe
     }
 
-    func withThroughputEstimate(_ value: Double) -> ProviderCapacity {
+    func withThroughputEstimate(_ value: Double, probe: StartupThroughputProbe? = nil) -> ProviderCapacity {
         ProviderCapacity(
             maxContextOverride: maxContextTokens,
             maxConcurrencyOverride: maxConcurrency,
-            throughputTPSEstimate: value
+            throughputTPSEstimate: value,
+            maxContextSource: maxContextSource,
+            throughputProbe: probe
         )
     }
 
@@ -596,10 +620,14 @@ actor ProviderStatus {
         self.modelHashAlgorithm = modelHashAlgorithm
         self.weightsManifestSHA256 = weightsManifestSHA256
         if maxContextTokens != nil || maxConcurrency != nil {
+            // The startup probe is not re-run on swap, so its model id keeps
+            // showing which model the carried estimate was measured on.
             capacity = ProviderCapacity(
                 maxContextOverride: maxContextTokens ?? capacity.maxContextTokens,
                 maxConcurrencyOverride: maxConcurrency ?? capacity.maxConcurrency,
-                throughputTPSEstimate: capacity.throughputTPSEstimate
+                throughputTPSEstimate: capacity.throughputTPSEstimate,
+                maxContextSource: maxContextTokens == nil ? capacity.maxContextSource : .recommendationAdoption,
+                throughputProbe: capacity.throughputProbe
             )
         }
         modelLoaded = true

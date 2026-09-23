@@ -55,6 +55,18 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
     }
 }
 
+/// Where the effective serve context cap came from (#1689, SPEC-001 FR-17
+/// `capacity.max_context_source`). Recorded where the value is resolved;
+/// `nil` on `AppConfig` means nothing overrode the RAM-tier default.
+public enum MaxContextSource: String, Sendable {
+    case operatorConfig = "operator_config"
+    case environment
+    case cliFlag = "cli_flag"
+    case ramTierDefault = "ram_tier_default"
+    case draftClamp = "draft_clamp"
+    case recommendationAdoption = "recommendation_adoption"
+}
+
 public enum ProviderCredentialStoreKind: String, Sendable {
     case keychain
     case protectedFile = "protected_file"
@@ -100,6 +112,7 @@ public struct AppConfig: Equatable, Sendable {
     public var logFormat: LogFormat
     public var logFile: String?
     public var maxContextOverride: Int?
+    public var maxContextSource: MaxContextSource? = nil
     public var maxConcurrencyOverride: Int?
     // SPEC-013 (autoresearch serving knobs): KV-cache quantization bits
     // forwarded to mlx-swift `GenerateParameters.kvBits`. nil ⇒ no
@@ -519,6 +532,9 @@ public enum ConfigLoader {
         try assign(&config.logFormat, from: dict, key: "log_format", expected: "json or text")
         try assign(&config.logFile, from: dict, key: "log_file", expected: "string")
         try assign(&config.maxContextOverride, from: dict, key: "max_context_override", expected: "integer")
+        if let value = dict["max_context_override"], !(value is NSNull) {
+            config.maxContextSource = .operatorConfig
+        }
         try assign(&config.maxConcurrencyOverride, from: dict, key: "max_concurrency_override", expected: "integer")
         try assign(&config.kvBitsOverride, from: dict, key: "kv_bits", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: dict, key: "drain_timeout_s", expected: "integer")
@@ -690,6 +706,9 @@ public enum ConfigLoader {
         try assign(&config.logFormat, from: environment, env: "MACPROVIDER_LOG_FORMAT", expected: "json or text")
         try assign(&config.logFile, from: environment, env: "MACPROVIDER_LOG_FILE", expected: "string")
         try assign(&config.maxContextOverride, from: environment, env: "MACPROVIDER_MAX_CONTEXT_OVERRIDE", expected: "integer")
+        if environment["MACPROVIDER_MAX_CONTEXT_OVERRIDE"] != nil {
+            config.maxContextSource = .environment
+        }
         try assign(&config.maxConcurrencyOverride, from: environment, env: "MACPROVIDER_MAX_CONCURRENCY_OVERRIDE", expected: "integer")
         try assign(&config.kvBitsOverride, from: environment, env: "MACPROVIDER_KV_BITS", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: environment, env: "MACPROVIDER_DRAIN_TIMEOUT_S", expected: "integer")
@@ -863,6 +882,7 @@ public enum ConfigLoader {
         }
         if let maxContext = cli.maxContext {
             config.maxContextOverride = maxContext
+            config.maxContextSource = .cliFlag
         }
         if let maxBatch = cli.maxBatch {
             config.maxConcurrencyOverride = maxBatch

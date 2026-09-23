@@ -229,6 +229,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     static let localStatusCapabilities = [
         "buyer_serving_authority_v1",
         "buyer_serving_hold_v1",
+        "capacity_provenance_v1",
         "catalog_status_v1",
         "compatibility_set_v1",
         "credential_status_v1",
@@ -1698,6 +1699,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "max_context_tokens": snapshot.capacity.maxContextTokens,
                 "max_concurrency": snapshot.capacity.maxConcurrency,
                 "throughput_tps_estimate": snapshot.capacity.throughputTPSEstimate,
+                // capacity_provenance_v1 (#1689): local diagnostics only; the
+                // coordinator wire still carries just the estimate above.
+                "max_context_source": snapshot.capacity.maxContextSource.rawValue,
+                "throughput_source": snapshot.capacity.throughputProbe == nil ? "none" : "startup_probe",
+                "throughput_probe_max_tokens": snapshot.capacity.throughputProbe.map { $0.maxTokens as Any } ?? NSNull(),
+                "throughput_probe_model": jsonNullable(snapshot.capacity.throughputProbe?.modelID),
             ],
             "coordinator": [
                 "connected": snapshot.coordinatorConnected,

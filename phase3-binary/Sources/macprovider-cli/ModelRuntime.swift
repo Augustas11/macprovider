@@ -5422,7 +5422,12 @@ actor ModelRuntime: ModelRuntimeServing {
             chatTemplateSHA256: currentChatTemplateSHA256)
     }
 
-    func measureStartupThroughput(maxTokens: Int = 8) async -> Double {
+    /// Token budget of the serve-time startup probe behind
+    /// `capacity.throughput_tps_estimate`; the elapsed time includes prefill,
+    /// so it is not a sustained decode benchmark (#1689).
+    static let startupThroughputProbeMaxTokens = 8
+
+    func measureStartupThroughput(maxTokens: Int = ModelRuntime.startupThroughputProbeMaxTokens) async -> Double {
         guard let container = currentContainer else {
             return 0.0
         }

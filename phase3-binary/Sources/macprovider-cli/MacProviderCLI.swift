@@ -740,6 +740,11 @@ struct ServeCommand: AsyncParsableCommand {
             FileHandle.standardError.write(Data("draft_model_capacity_shortfall: --max-batch \(explicit) exceeds draft-enabled cap 1\n".utf8))
             throw ExitCode(2)
         }
+        if effectiveContext < requestedContext {
+            resolved.maxContextSource = .draftClamp
+        } else if resolved.maxContextOverride == nil {
+            resolved.maxContextSource = .ramTierDefault
+        }
         resolved.maxContextOverride = effectiveContext
         resolved.maxConcurrencyOverride = 1
     }
@@ -2047,7 +2052,8 @@ struct ServeCommand: AsyncParsableCommand {
         // capacity so the coordinator's view stays consistent.
         let capacityDefaults = ProviderCapacity(
             maxContextOverride: resolved.maxContextOverride,
-            maxConcurrencyOverride: resolved.maxConcurrencyOverride ?? 1
+            maxConcurrencyOverride: resolved.maxConcurrencyOverride ?? 1,
+            maxContextSource: resolved.maxContextSource
         )
         let throughputEstimate = await Self.startupThroughputEstimate(
             autotuneCandidate: autotuneCandidate,
@@ -2055,11 +2061,22 @@ struct ServeCommand: AsyncParsableCommand {
             // it reports a 0 startup estimate (advisory capacity only).
             measure: {
                 if let mlxRuntime = modelRuntime as? ModelRuntime {
-                    return await mlxRuntime.measureStartupThroughput()
+                    return await mlxRuntime.measureStartupThroughput(
+                        maxTokens: ModelRuntime.startupThroughputProbeMaxTokens
+                    )
                 }
                 return 0
             }
         )
+        // #1689: operator-visible provenance for the estimate above. `nil`
+        // means no probe ran (autotune candidate or loopback runtime).
+        var startupThroughputProbe: StartupThroughputProbe?
+        if !autotuneCandidate, let mlxRuntime = modelRuntime as? ModelRuntime {
+            startupThroughputProbe = StartupThroughputProbe(
+                maxTokens: ModelRuntime.startupThroughputProbeMaxTokens,
+                modelID: await mlxRuntime.loadedModelID ?? resolved.model
+            )
+        }
         let thermalGate = ThermalGate()
         // `slots_free` in the log reflects the throttle-driven free-slot
         // ceiling (configured `maxConcurrency` when unthrottled, 0 when
@@ -2075,7 +2092,7 @@ struct ServeCommand: AsyncParsableCommand {
         let providerStatus = ProviderStatus(
             modelID: resolved.model,
             modelLoaded: await modelRuntime.isLoaded,
-            capacity: capacityDefaults.withThroughputEstimate(throughputEstimate),
+            capacity: capacityDefaults.withThroughputEstimate(throughputEstimate, probe: startupThroughputProbe),
             modelHash: await modelRuntime.loadedModelHash,
             modelHashAlgorithm: await modelRuntime.loadedModelHashAlgorithm,
             weightsManifestSHA256: await modelRuntime.loadedWeightsManifestSHA256,
@@ -3174,8 +3191,16 @@ struct StatusCommand: AsyncParsableCommand {
             donorMode: resolved.donorMode,
             staleRecommendationSince: staleSince,
             configPath: resolved.configPath,
-            advanced: advanced
+            advanced: advanced,
+            coordinatorURL: resolved.coordinatorURL,
+            sustainedBenchmarks: advanced ? Self.sustainedBenchmarks() : []
         ))
+    }
+
+    /// Best effort: a missing, unsafe, or undecodable recommendation state
+    /// yields no benchmarks and never fails `status`.
+    static func sustainedBenchmarks(stateURL: URL = RecommendationStateStore.defaultURL) -> [BenchmarkPayload] {
+        (try? RecommendationStateStore.read(from: stateURL))?.hardwareEvidence?.benchmarks ?? []
     }
 
     static func writeJSON(_ payload: [String: Any]) throws {

@@ -1,6 +1,17 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.19 (2026-09-22, WS relay capacity authority alignment)
+**Version:** 1.9.20 (2026-09-23, local capacity provenance)
+
+**Change log v1.9.20 (2026-09-23, local capacity provenance):** Adds the
+additive `capacity_provenance_v1` local-status capability (#1689). Under it,
+`GET /v1/status` `capacity` also carries `max_context_source`,
+`throughput_source`, `throughput_probe_max_tokens`, and
+`throughput_probe_model` so an operator can see where the context cap came from
+and which short startup probe produced `throughput_tps_estimate`. Existing
+`capacity` keys, `throughput_tps_estimate` wire semantics, and every
+coordinator-bound field are unchanged. `status --advanced` shows readiness per
+layer, labels the startup probe as not a sustained benchmark, and prints the
+configured coordinator URL; the default `status` view is unchanged.
 
 **Change log v1.9.19 (2026-09-22, WS relay capacity authority alignment):**
 Aligns WS-tunneled relay admission with the provider's advertised current
@@ -1019,6 +1030,35 @@ The coordinator MAY use these fields to route by actual measured
 performance rather than assumed hardware capability. The binary's
 responsibility ends at sending accurate values.
 
+`throughput_tps_estimate` is a startup-probe value, not a sustained benchmark:
+`serve` generates at most 8 tokens once after model load and divides the tokens
+produced by elapsed time including prefill (0 when the probe fails or does not
+run). A warm swap carries the value forward without re-probing. Its wire
+semantics are unchanged by v1.9.20.
+
+**Local capacity provenance (v1.9.20, capability `capacity_provenance_v1`).**
+When the local status contract advertises `capacity_provenance_v1`, the
+`GET /v1/status` `capacity` object additionally carries these local-diagnostic
+fields. They are additive, are not sent to the coordinator, and carry no
+routing or buyer-serving authority. A reader without the capability MUST ignore
+them.
+
+- `max_context_source`: closed enum naming where the effective
+  `max_context_tokens` was resolved: `operator_config` (config
+  `max_context_override`), `environment` (`MACPROVIDER_MAX_CONTEXT_OVERRIDE`),
+  `cli_flag` (`--max-context`), `ram_tier_default` (FR-9 tier default, no
+  override), `draft_clamp` (the draft-model preflight lowered the implicit
+  default), or `recommendation_adoption` (a warm swap applied an adopted
+  recommendation's context). Precedence is CLI flag over environment over
+  config over tier default; the draft clamp applies after that.
+- `throughput_source`: `startup_probe` when the serve-time startup probe
+  produced `throughput_tps_estimate`, else `none`.
+- `throughput_probe_max_tokens`: the probe's token budget, or `null` with
+  `none`.
+- `throughput_probe_model`: the model the probe ran on, or `null` with `none`.
+  After a warm swap this still names the probed model, so a mismatch with
+  `model` shows the estimate describes a previous model.
+
 ### WS-tunneled inference (v1.2)
 
 **Normative scope.** FR-21 through FR-32 apply ONLY to providers
@@ -1209,7 +1249,7 @@ The local `GET /v1/status` response includes a versioned envelope. Contract v1 h
 only fields a reader may trust through these capabilities:
 `buyer_serving_authority_v1`, `catalog_status_v1`, `credential_status_v1`,
 `status_observation_v1`, `service_instance_v1`, `lifecycle_transition_v1`,
-`referral_bootstrap_v1`, `referral_status_v1`, `referral_advocacy_v1`,
+`capacity_provenance_v1` (FR-17 local capacity provenance), `referral_bootstrap_v1`, `referral_status_v1`, `referral_advocacy_v1`,
 `referral_fragment_links_v1`, `model_liveness_token_v1`, and
 `legacy_reader_fallback_v1`. `model_liveness_token_v1` gates the `model_liveness`
 object (a monotonic model-thread progress token + monotonic age; SPEC-025 §5.2), an
@@ -1372,16 +1412,16 @@ controls (the shipped warm-up is idle-triggered, not startup/wake-triggered;
 see FR-16). `warmup_enabled` is retained for backward compatibility.
 
 **FR-20. Startup self-test.**
-On launch, after loading the model, the binary runs a single short
-inference (fixed prompt: `"Hello"`, max_tokens: 5) and verifies that:
-- The model produces non-empty output.
-- Token counting works (prompt_tokens > 0, completion_tokens > 0).
-- Output does not contain leaked stop tokens.
-- Wall time is under 30 seconds.
-
-If the self-test fails, the binary logs the failure details and exits
-with code 1. The self-test result (throughput in tok/s) is used as the
-`throughput_tps_estimate` in FR-17.
+On launch, after loading a catalog (MLX) model, `serve` runs the FR-17
+startup probe once, at serve startup only: prompt `"Reply with a short greeting."`, at most 8 tokens
+(`ModelRuntime.startupThroughputProbeMaxTokens`). Tokens produced divided by
+elapsed time, prefill included, is the `throughput_tps_estimate` in FR-17; a
+probe that fails or produces no tokens reports 0 and does not stop `serve`.
+An autotune candidate `serve` and the loopback runtime do not probe: they
+report 0 with `throughput_source: none`.
+The standalone `self-test` command loads the model, runs the same probe with
+at most 4 tokens, prints `self-test passed: throughput_tps=<n>`, and exits
+nonzero when the model does not load or the probe produces no tokens.
 
 ---
 
