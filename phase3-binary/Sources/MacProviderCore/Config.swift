@@ -65,6 +65,76 @@ public enum MaxContextSource: String, Sendable {
     case ramTierDefault = "ram_tier_default"
     case draftClamp = "draft_clamp"
     case recommendationAdoption = "recommendation_adoption"
+    /// Config `max_context_override` written by `autotune --recommend --apply`
+    /// (or a recommendation adoption), per the knob-provenance sidecar.
+    case recommendationApply = "recommendation_apply"
+}
+
+/// Which serve knobs a recommendation apply generated (#1689), stored in a
+/// sidecar next to config.yaml so `max_context_override` written by an apply
+/// can be told from an operator-owned value. The YAML loader never reads
+/// config keys from it; a missing or unreadable sidecar leaves every value
+/// operator-owned.
+public struct KnobProvenance: Codable, Equatable, Sendable {
+    public static let schemaVersion = "knob_provenance.v1"
+
+    public struct Entry: Codable, Equatable, Sendable {
+        public var value: Int
+        public var source: String
+        public var model: String?
+        public var benchmarkID: String?
+        public var generatedAt: String
+
+        public init(value: Int, source: String, model: String?, benchmarkID: String?, generatedAt: String) {
+            self.value = value
+            self.source = source
+            self.model = model
+            self.benchmarkID = benchmarkID
+            self.generatedAt = generatedAt
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case value
+            case source
+            case model
+            case benchmarkID = "benchmark_id"
+            case generatedAt = "generated_at"
+        }
+    }
+
+    public var schemaVersion: String
+    public var maxContextOverride: Entry?
+
+    public init(maxContextOverride: Entry?) {
+        self.schemaVersion = Self.schemaVersion
+        self.maxContextOverride = maxContextOverride
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case maxContextOverride = "max_context_override"
+    }
+
+    public static func path(forConfigPath configPath: String) -> String {
+        configPath + ".provenance.json"
+    }
+
+    public static func load(configPath: String, readFile: (String) throws -> String) -> KnobProvenance? {
+        guard let text = try? readFile(path(forConfigPath: configPath)),
+              let decoded = try? JSONDecoder().decode(KnobProvenance.self, from: Data(text.utf8)),
+              decoded.schemaVersion == schemaVersion
+        else {
+            return nil
+        }
+        return decoded
+    }
+
+    /// True when `value` is exactly the context a recommendation apply wrote.
+    /// Any later edit makes the value operator-owned again.
+    public func generatedMaxContext(_ value: Int?) -> Bool {
+        guard let value, let entry = maxContextOverride else { return false }
+        return entry.source == MaxContextSource.recommendationApply.rawValue && entry.value == value
+    }
 }
 
 public enum ProviderCredentialStoreKind: String, Sendable {
@@ -533,7 +603,10 @@ public enum ConfigLoader {
         try assign(&config.logFile, from: dict, key: "log_file", expected: "string")
         try assign(&config.maxContextOverride, from: dict, key: "max_context_override", expected: "integer")
         if let value = dict["max_context_override"], !(value is NSNull) {
-            config.maxContextSource = .operatorConfig
+            config.maxContextSource = KnobProvenance.load(configPath: path, readFile: readFile)?
+                .generatedMaxContext(config.maxContextOverride) == true
+                ? .recommendationApply
+                : .operatorConfig
         }
         try assign(&config.maxConcurrencyOverride, from: dict, key: "max_concurrency_override", expected: "integer")
         try assign(&config.kvBitsOverride, from: dict, key: "kv_bits", expected: "integer (4 or 8)")

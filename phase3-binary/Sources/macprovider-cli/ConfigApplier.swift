@@ -58,6 +58,7 @@ struct ConfigApplier {
         recommendation: RecommendationCore,
         now: Date,
         donorMode: Bool = false,
+        benchmarkID: String? = nil,
         beforeMutation: ((_ originalOwnedValues: [String: String], _ targetOwnedValues: [String: String], _ backupPath: URL, _ preApplySHA256: String, _ postApplySHA256: String) throws -> Void)? = nil
     ) throws -> AppliedConfig {
         let fileManager = FileManager.default
@@ -89,6 +90,13 @@ struct ConfigApplier {
                 Self.sha256Hex(updatedData)
             )
             try atomicWrite(updatedData, to: configPath, unixTS: unixTS)
+            writeKnobProvenance(maxContext: KnobProvenance.Entry(
+                value: recommendation.knobs.maxContext,
+                source: MaxContextSource.recommendationApply.rawValue,
+                model: recommendation.model,
+                benchmarkID: benchmarkID,
+                generatedAt: ISO8601DateFormatter().string(from: now)
+            ))
 
             return AppliedConfig(
                 backupPath: backupPath,
@@ -143,6 +151,105 @@ struct ConfigApplier {
     struct AppliedConfig {
         var backupPath: URL
         var summary: String
+    }
+
+    /// Writes one recommendation-owned key as an operator-owned value (#1689
+    /// `provider context set`). Backs up the current config first, like
+    /// `apply`, and clears any generated-value provenance for that key.
+    @discardableResult
+    func setOperatorOwnedValue(key: String, value: String, now: Date) throws -> URL {
+        precondition(Self.recommendationOwnedKeys.contains(key), "not a recommendation-owned key: \(key)")
+        let directory = configPath.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try validateConfigPathSafety()
+        return try ProviderConfigMutationLock.withExclusiveLock(configPath: configPath.path) {
+            let originalText = String(decoding: try readConfigDataAllowingMissing(), as: UTF8.self)
+            try validateYAML(originalText)
+            let unixTS = Int(now.timeIntervalSince1970)
+            let backupPath = try writeBackupExclusively(
+                Data(ProviderTokenPersist.removingProviderTokenLines(in: originalText).utf8),
+                unixTS: unixTS
+            )
+            var values = Self.extractOwnedValues(from: originalText)
+            values[key] = value
+            let updatedText = try replacingOwnedFields(in: originalText, with: values)
+            try validateYAML(updatedText)
+            try atomicWrite(Data(updatedText.utf8), to: configPath, unixTS: unixTS)
+            if key == "max_context_override" {
+                writeKnobProvenance(maxContext: nil)
+            }
+            return backupPath
+        }
+    }
+
+    /// Restores the recommendation-owned fields from the newest
+    /// `config.yaml.bak-<unix>-<counter>` backup, first saving the current
+    /// config as a new backup so the rollback itself can be undone.
+    func rollbackToNewestBackup(now: Date) throws -> (restoredFrom: URL, savedCurrentAs: URL) {
+        try validateConfigPathSafety()
+        return try ProviderConfigMutationLock.withExclusiveLock(configPath: configPath.path) {
+            guard let newest = try newestBackup() else {
+                throw ConfigApplierError.configReadFailed("no \(configPath.lastPathComponent).bak-* backup to roll back to")
+            }
+            let backupText = try String(contentsOf: newest, encoding: .utf8)
+            try validateYAML(backupText)
+            let originalText = String(decoding: try readConfigDataAllowingMissing(), as: UTF8.self)
+            try validateYAML(originalText)
+            let unixTS = Int(now.timeIntervalSince1970)
+            let saved = try writeBackupExclusively(
+                Data(ProviderTokenPersist.removingProviderTokenLines(in: originalText).utf8),
+                unixTS: unixTS
+            )
+            let restoredText = try replacingOwnedFields(in: originalText, with: Self.extractOwnedValues(from: backupText))
+            try validateYAML(restoredText)
+            try atomicWrite(Data(restoredText.utf8), to: configPath, unixTS: unixTS)
+            return (newest, saved)
+        }
+    }
+
+    /// The backup written last: the one `latestBackupPointerURL` names, so
+    /// the order survives a wall clock that moved backwards. Without a
+    /// usable pointer (backups from an older CLI, or the named file is gone),
+    /// the highest `<unix>-<counter>` name.
+    private func newestBackup() throws -> URL? {
+        let directory = configPath.deletingLastPathComponent()
+        if let pointed = try? String(contentsOf: latestBackupPointerURL, encoding: .utf8),
+           let name = Self.backupRank(pointed, prefix: backupNamePrefix)?.name {
+            let candidate = directory.appendingPathComponent(name)
+            var info = stat()
+            if lstat(candidate.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG {
+                return candidate
+            }
+        }
+        let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        let ranked = names.compactMap { Self.backupRank($0, prefix: backupNamePrefix) }
+        guard let newest = ranked.max(by: { ($0.ts, $0.counter) < ($1.ts, $1.counter) }) else { return nil }
+        return directory.appendingPathComponent(newest.name)
+    }
+
+    private var backupNamePrefix: String { "\(configPath.lastPathComponent).bak-" }
+
+    /// Names the backup `writeBackupExclusively` created last. Outside the
+    /// `.bak-` namespace so backup listings and token redaction ignore it.
+    private var latestBackupPointerURL: URL {
+        configPath.deletingLastPathComponent().appendingPathComponent("\(configPath.lastPathComponent).latest-backup")
+    }
+
+    private static func backupRank(_ name: String, prefix: String) -> (ts: Int, counter: Int, name: String)? {
+        guard name.hasPrefix(prefix) else { return nil }
+        let parts = name.dropFirst(prefix.count).split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 2, let ts = Int(parts[0]), let counter = Int(parts[1]) else { return nil }
+        return (ts, counter, name)
+    }
+
+    /// Best effort: a sidecar that fails to write leaves the value labelled
+    /// operator-owned, never the reverse.
+    private func writeKnobProvenance(maxContext: KnobProvenance.Entry?) {
+        let url = URL(fileURLWithPath: KnobProvenance.path(forConfigPath: configPath.path))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(KnobProvenance(maxContextOverride: maxContext)) else { return }
+        try? data.write(to: url, options: [.atomic])
     }
 
     struct RecommendationOwnedSnapshot {
@@ -271,6 +378,13 @@ struct ConfigApplier {
                     throw ConfigApplierError.backupWriteFailed(destination: candidate.path, errno: errno)
                 }
                 try syncDirectory(directory)
+                // Bookkeeping, not the config write: never the injected temp namer.
+                try atomicWrite(
+                    Data(candidate.lastPathComponent.utf8),
+                    to: latestBackupPointerURL,
+                    unixTS: unixTS,
+                    tempURL: Self.defaultTempFileName(destination: latestBackupPointerURL, unixTS: unixTS)
+                )
                 return candidate
             }
             let openErrno = errno
@@ -306,8 +420,8 @@ struct ConfigApplier {
         }
     }
 
-    private func atomicWrite(_ data: Data, to destination: URL, unixTS: Int) throws {
-        let tempURL = tempFileNamer(destination, unixTS)
+    private func atomicWrite(_ data: Data, to destination: URL, unixTS: Int, tempURL: URL? = nil) throws {
+        let tempURL = tempURL ?? tempFileNamer(destination, unixTS)
         let fd = tempURL.path.withCString { open($0, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0o600) }
         guard fd >= 0 else {
             throw ConfigApplierError.backupWriteFailed(destination: tempURL.path, errno: errno)

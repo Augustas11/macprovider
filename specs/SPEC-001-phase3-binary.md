@@ -1,6 +1,19 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.22 (2026-09-23, post-change provider verify)
+**Version:** 1.9.23 (2026-09-23, operator context workflow)
+
+**Change log v1.9.23 (2026-09-23, operator context workflow):** Adds FR-20b,
+`malibu-cli provider context explain|set|rollback` (#1689 part 3): explain
+the effective context and its source, limits, slots, KV-memory estimate, and
+advertised value; set it with bounds and memory preflight, a config backup, and
+an optional restart plus FR-20a verification; roll back to the newest backup.
+Adds the `recommendation_apply` value to the FR-17 `max_context_source` enum,
+backed by the `config.yaml.provenance.json` sidecar that `autotune --recommend
+--apply` writes, so a generated `max_context_override` is told from an
+operator-owned one. Configs without the sidecar load unchanged as
+`operator_config`. `provider verify` gains an internal expected-context gate
+used after a restart. SPEC-023 v0.15.2 stops emitting the 4,000-token floor
+as a production context when the model or memory bound is unknown.
 
 **Change log v1.9.22 (2026-09-23, post-change provider verify):** Adds
 FR-20a, the read-only `malibu-cli provider verify` command (#1689 part 2). It
@@ -10,8 +23,10 @@ polls, with a bounded `--timeout` (default 180 s) and backoff, the local
 public routability feed `GET /v1/stats/routability` on the configured
 coordinator host, until they agree on model, context, and slots. It reports
 each layer, names the stale or disagreeing surface, prints one proof line, and
-exits with a distinct code per failing layer. `--json` emits
-`provider_verify.v1`. No wire, config, or status field changes.
+exits with a distinct code per failing layer; at the deadline the code is the
+last completed evaluation's, never a local failure produced by the deadline
+itself. `--json` emits `provider_verify.v1`. No wire, config, or status field
+changes.
 
 **Change log v1.9.21 (2026-09-23, catalog-material readiness hold):** Names
 the closed `buyer_serving_hold` set the CLI holds its accepted session through
@@ -1072,8 +1087,10 @@ them.
   `max_context_override`), `environment` (`MACPROVIDER_MAX_CONTEXT_OVERRIDE`),
   `cli_flag` (`--max-context`), `ram_tier_default` (FR-9 tier default, no
   override), `draft_clamp` (the draft-model preflight lowered the implicit
-  default), or `recommendation_adoption` (a warm swap applied an adopted
-  recommendation's context). Precedence is CLI flag over environment over
+  default), `recommendation_adoption` (a warm swap applied an adopted
+  recommendation's context), or `recommendation_apply` (v1.9.23: config
+  `max_context_override` whose value equals the one the knob-provenance
+  sidecar records as written by a recommendation apply). Precedence is CLI flag over environment over
   config over tier default; the draft clamp applies after that.
 - `throughput_source`: `startup_probe` when the serve-time startup probe
   produced `throughput_tps_estimate`, else `none`.
@@ -1478,7 +1495,17 @@ nonzero when the model does not load or the probe produces no tokens.
 MUST be read-only: it never writes config, state, or processes. It polls until
 every layer passes, a terminal failure occurs, or `--timeout` (default 180 s,
 0…3600) expires, sleeping with exponential backoff (2 s doubling to 15 s,
-never past the deadline). Each poll evaluates three layers:
+never past the deadline). `--timeout` bounds the whole run's wall clock: no
+request starts once the deadline has passed, and a request still in flight is
+cancelled at the deadline or after 5 s, whichever comes first. `--timeout 0`
+checks once, with that single pass bounded by 5 s in total. When the deadline
+ends the run, the result is the last evaluation that completed: a pass is not
+started once the backoff sleep reaches the deadline, and a pass the deadline
+cuts short (a request stopped or cancelled by it) is discarded for the previous
+complete one, so exit `3` or `5` is reported as observed rather than `2` for a
+local status request the deadline never let run. Redirects are never
+followed: a 3xx is the answer, and a response is accepted only for exactly the
+URL requested. Each poll evaluates three layers:
 
 1. **Local** passes when `GET 127.0.0.1:<port>/v1/status` reports
    `model_loaded=true` with `status` `ready` or `busy`, and `GET /v1/models`
@@ -1487,7 +1514,11 @@ never past the deadline). Each poll evaluates three layers:
    and `network_state=buyer_serving`. A `buyer_serving_hold` of
    `catalog_material_missing` is a distinct, terminal failure reported with its
    label, because only a network catalog update clears it. Any other state,
-   including `model_admission_pending`, keeps polling.
+   including `model_admission_pending`, keeps polling. When the network state
+   is not `buyer_serving` and `/v1/status` `lifecycle.state` is
+   `paused_by_operator`, the reason is `paused by operator (resume it from
+   Malibu or its control socket)`, whether or not the coordinator is
+   connected, with the same not-serving outcome.
 3. **Public feed** reads `GET /v1/stats/routability` (SPEC-017) on the host
    of the configured `coordinator_url` (`wss`/`https` map to `https`; `ws`/`http`
    only for a loopback host). The served model matches a feed `model_id` equal to
@@ -1503,7 +1534,8 @@ never past the deadline). Each poll evaluates three layers:
    per-model maximum, so the provider ID and this Mac's own context are reported
    as unverifiable, never as agreement.
 
-Human output prints one `✓`/`✗`/`…` line per layer with its reason, then
+Human output prints one `✓` (pass), `✗` (fail), `…` (pending), or `?`
+(unverifiable, terminal) line per layer with its reason, then
 either the proof line `Verified: provider <id> · model <model> (artifact
 <first 12 hex of catalog.artifact_sha256, else model_hash>) · context <n> ·
 slots <n> · catalog release <release_id> · public feed <generated_at> (lag
@@ -1516,6 +1548,62 @@ ready, `3` network not serving, `4` public feed disagrees, `5` timed out on a
 stale or unreachable feed, `6` `catalog_material_missing`, `7` feed not
 published. The first failing layer in the order local, network, feed decides
 the code.
+
+**FR-20b. Operator context workflow (`provider context`, v1.9.23).**
+An operator changes the serve context without editing YAML:
+
+- `malibu-cli provider context explain [--config] [--port]` MUST be
+  read-only. It prints the effective context and its FR-17 source (from
+  `/v1/status` when the provider runs, else from config), the configured
+  `max_context_override` and who owns it, the RAM-tier default, the model limit
+  (`config.json` declared maximum and tokenizer `model_max_length` when
+  readable from `model_artifact_path`), the slot count, a KV-memory estimate
+  for context × slots, and the value `/v1/status` advertises to the network. It
+  warns when the effective cap is under half of `min(RAM-tier default, model
+  limit, SPEC-028 draft cap when a `draft_model` is configured)`, and when a
+  recommendation-generated value was generated for a model other than the
+  configured one. It shows the draft cap when a `draft_model` is configured.
+  The config values, their owner, and their provenance come from
+  `config.yaml` alone: the launchd service does not inherit the invoking
+  shell's environment, so a `MACPROVIDER_MAX_CONTEXT_OVERRIDE` set in that
+  shell is printed on its own line as a shell overlay the service does not
+  inherit, never as the config value. `rollback` likewise computes the
+  expected context from the restored file alone.
+- `malibu-cli provider context set <tokens> [--preflight] [--apply]
+  [--timeout <s>]` MUST refuse a value outside 4,000…1,000,000 tokens, above
+  the known model limit, or, when a `draft_model` is configured, above the
+  SPEC-028 draft cap (serve would exit `draft_model_capacity_shortfall`). It estimates KV memory as `kv_bytes_per_token × tokens
+  × slots` (`kv_bytes_per_token` from the SPEC-023 KV geometry of the model
+  `config.json`) against three quarters of the RAM left after the artifact's
+  safetensors weights and the SPEC-023 safety margin, and MUST refuse, writing
+  nothing, when it does not fit. An estimate that cannot be computed is reported
+  and does not block. `--preflight` without `--apply` writes nothing. Otherwise
+  it backs up the current config as `config.yaml.bak-<unix>-<counter>` (without
+  `provider_token`), writes `max_context_override` atomically under the
+  provider-config lock as an operator-owned value (clearing its provenance
+  entry), and with `--apply` restarts the launchd provider the way `credentials`
+  restart proofs do (`launchctl kickstart -k`) and runs FR-20a verification that
+  additionally requires the local `capacity.max_context_tokens` to equal the new
+  value. A failed verification prints the rollback command; it never rolls back
+  on its own.
+- `malibu-cli provider context rollback [--timeout <s>]` restores the
+  recommendation-owned fields from the newest `config.yaml.bak-*` backup after
+  saving the current config as a new backup (so a second rollback undoes the
+  first), then restarts and verifies as above.
+- `set` and `explain` list competing `macprovider-cli serve` processes and
+  every process listening on the provider port. They only suggest; they MUST
+  NOT stop any process.
+
+**Knob provenance sidecar.** `autotune --recommend --apply` (and any
+recommendation adoption through the same config writer) writes
+`<config path>.provenance.json` next to the config:
+`{"schema_version":"knob_provenance.v1","max_context_override":{"value":<int>,
+"source":"recommendation_apply","model":<string>,"benchmark_id":<string|null>,
+"generated_at":<RFC3339>}}`. The config loader reports `max_context_source =
+recommendation_apply` only while the configured value equals the recorded
+value; any other value, a missing or unreadable sidecar, or another
+`schema_version` means `operator_config`. The sidecar never supplies config
+values, and a failed sidecar write never fails the apply.
 
 ---
 

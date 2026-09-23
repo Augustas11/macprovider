@@ -948,7 +948,8 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertNoThrow(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
             recommendation: parsed,
             row: fixture.catalogRow(modelID: fixture.targetModelID),
-            artifact: artifact
+            artifact: artifact,
+            draftModel: nil
         ))
     }
 
@@ -979,7 +980,8 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertNoThrow(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
             recommendation: valid,
             row: row,
-            artifact: artifact
+            artifact: artifact,
+            draftModel: nil
         ))
 
         let inflated = Self.parsedAdoption(
@@ -990,10 +992,65 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertThrowsError(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
             recommendation: inflated,
             row: row,
-            artifact: artifact
+            artifact: artifact,
+            draftModel: nil
         )) { error in
             XCTAssertTrue(String(describing: error).contains("context authority"))
         }
+    }
+
+    func testAdoptRecommendationContextAuthorityAppliesTheDraftCap() throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: fixture.artifact)
+        let artifact = VerifiedModelArtifact(
+            modelArgument: fixture.artifact.path,
+            sha256: fixture.artifactSHA256,
+            configJSONData: inspection.configJSONData,
+            configSHA256: inspection.configSHA256
+        )
+        let row = CandidateCatalog.Row(
+            modelID: fixture.targetModelID,
+            modelRevision: String(repeating: "1", count: 40),
+            modelSHA256: fixture.artifactSHA256,
+            minRAMGB: 1,
+            minBandwidthTier: .c,
+            benchGate: CandidateCatalog.BenchGate(minSustainedTPS: 1, max4KTTFTMS: 1_000),
+            runtimeStatus: "recommendable",
+            notes: nil
+        )
+        let undrafted = AutotuneRecommendHardware(
+            machine: nil,
+            chip: "",
+            memoryGB: 16,
+            bandwidthTier: .c,
+            osVersion: "",
+            binaryVersion: "",
+            diversificationID: "",
+            hardwareIdentityHash: ""
+        ).recommendedMaxContext(
+            modelID: row.modelID,
+            verifiedConfigJSONData: artifact.configJSONData,
+            verifiedConfigSHA256: artifact.configSHA256,
+            catalogMinRAMGB: row.minRAMGB,
+            draftModel: nil
+        )
+        let draftCap = ProviderCapacity.draftContextCap(forPhysicalMemoryGB: 16)
+        XCTAssertGreaterThan(undrafted, draftCap, "precondition: the draft term binds on this fixture")
+
+        func validate(maxContext: Int, draftModel: String?) throws {
+            try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
+                recommendation: Self.parsedAdoption(fixture: fixture, maxContext: maxContext, hardwareMemoryGB: 16),
+                row: row,
+                artifact: artifact,
+                draftModel: draftModel
+            )
+        }
+        XCTAssertNoThrow(try validate(maxContext: undrafted, draftModel: nil))
+        XCTAssertNoThrow(try validate(maxContext: draftCap, draftModel: "d"))
+        XCTAssertThrowsError(
+            try validate(maxContext: undrafted, draftModel: "d"),
+            "a recommendation above the draft cap would stop serve from starting"
+        )
     }
 
     func testAdoptRecommendationContextAuthorityAcceptsCalibratedLowerContext() throws {
@@ -1016,7 +1073,8 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertNoThrow(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
             recommendation: calibrated,
             row: row,
-            artifact: artifact
+            artifact: artifact,
+            draftModel: nil
         ))
     }
 
@@ -1040,7 +1098,8 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertThrowsError(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
             recommendation: mismatch,
             row: row,
-            artifact: artifact
+            artifact: artifact,
+            draftModel: nil
         )) { error in
             XCTAssertTrue(String(describing: error).contains("context"))
         }

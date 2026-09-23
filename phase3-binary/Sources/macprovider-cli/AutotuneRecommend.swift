@@ -182,7 +182,8 @@ extension AutotuneRecommendHardware {
         modelID: String,
         verifiedConfigJSONData: Data?,
         verifiedConfigSHA256: String?,
-        catalogMinRAMGB: Int
+        catalogMinRAMGB: Int,
+        draftModel: String?
     ) -> Int {
         let hardwareCap = recommendedMaxContext
         let modelCap = AutotuneModelContextCap.safeMaxContextTokens(
@@ -192,7 +193,10 @@ extension AutotuneRecommendHardware {
             verifiedConfigJSONData: verifiedConfigJSONData,
             verifiedConfigSHA256: verifiedConfigSHA256
         )
-        return min(hardwareCap, modelCap)
+        // Without the draft term, a provider with `draft_model` configured
+        // would refuse to start on the value an apply writes.
+        let draftCap = ProviderCapacity.draftModelContextLimit(physicalMemoryGB: memoryGB, draftModel: draftModel)
+        return min(hardwareCap, modelCap, draftCap ?? .max)
     }
 
     var recommendedMaxBatch: Int {
@@ -217,10 +221,13 @@ extension AutotuneRecommendHardware {
 }
 
 enum AutotuneModelContextCap {
-    static let failClosedMaxContext = 4_000
+    /// The smallest serve context this cap ever emits: the memory-safe floor
+    /// when the KV budget is exhausted. It is never a stand-in for an unknown
+    /// model or memory bound (#1689).
+    static let minimumServeContext = 4_000
 
     private static let minimumAcceptedContext = 4_000
-    private static let maximumAcceptedContext = 1_000_000
+    static let maximumAcceptedContext = 1_000_000
     private static let bytesPerKVElement = 2
     private static let memorySafetyFractionNumerator = 3
     private static let memorySafetyFractionDenominator = 4
@@ -257,10 +264,13 @@ enum AutotuneModelContextCap {
         verifiedConfigJSONData: Data?,
         verifiedConfigSHA256: String?
     ) -> Int {
+        // An unknown bound leaves the caller's RAM-tier default in charge, the
+        // same cap `serve` uses without an override. Falling to the 4,000-token
+        // floor here wrote a 4K production cap on 256 GB Macs (#1689).
         let architecturalCap = declaredMaxContextTokens(
             modelID: modelID,
             verifiedConfigJSONData: verifiedConfigJSONData
-        ) ?? failClosedMaxContext
+        ) ?? maximumAcceptedContext
         guard let verifiedConfigJSONData,
               let verifiedConfigSHA256,
               Data(SHA256.hash(data: verifiedConfigJSONData)).hexLower == verifiedConfigSHA256,
@@ -270,7 +280,7 @@ enum AutotuneModelContextCap {
                 catalogMinRAMGB: catalogMinRAMGB
               )
         else {
-            return min(architecturalCap, failClosedMaxContext)
+            return architecturalCap
         }
         return min(architecturalCap, memoryCap)
     }
@@ -289,8 +299,11 @@ enum AutotuneModelContextCap {
     }
 
     static func memorySafeContextTokens(configData: Data, hardwareMemoryGB: Int, catalogMinRAMGB: Int) -> Int? {
+        // Zero per-token KV bytes (no full-attention layer) bind nothing: the
+        // memory term drops out like an unknown one.
         guard let root = strictConfigRoot(configData),
-              let bytesPerToken = kvCacheBytesPerToken(in: root)
+              let bytesPerToken = kvCacheBytesPerToken(in: root),
+              bytesPerToken > 0
         else {
             return nil
         }
@@ -300,10 +313,10 @@ enum AutotuneModelContextCap {
         let usableKVBytes = UInt64(spareGB) * bytesPerGB * UInt64(memorySafetyFractionNumerator)
             / UInt64(memorySafetyFractionDenominator)
         let additionalTokens = Int(min(
-            UInt64(maximumAcceptedContext - failClosedMaxContext),
+            UInt64(maximumAcceptedContext - minimumServeContext),
             usableKVBytes / UInt64(bytesPerToken)
         ))
-        return saneContext(failClosedMaxContext + additionalTokens)
+        return saneContext(minimumServeContext + additionalTokens)
     }
 
     /// SPEC-023-R009 §9.2 step 1: the largest concurrent batch depth whose
@@ -387,8 +400,15 @@ enum AutotuneModelContextCap {
         return nil
     }
 
+    /// Per-token KV-cache bytes for one sequence (0 for a complete hybrid
+    /// stack with no full-attention layer), or nil when the verified config's
+    /// attention geometry is unreadable.
+    static func kvCacheBytesPerToken(configData: Data) -> Int? {
+        strictConfigRoot(configData).flatMap(kvCacheBytesPerToken(in:))
+    }
+
     private static func kvCacheBytesPerToken(in root: [String: Any]) -> Int? {
-        guard let layers = firstInt(in: root, paths: [
+        guard let declaredLayers = firstInt(in: root, paths: [
             ["num_hidden_layers"],
             ["n_layer"],
             ["num_layers"],
@@ -419,15 +439,32 @@ enum AutotuneModelContextCap {
             ["text_config", "num_key_value_heads"],
             ["text_config", "n_kv_head"]
         ]) ?? attentionHeads
-        let headDim = firstInt(in: root, paths: [
+        let declaredHeadDim = firstInt(in: root, paths: [
             ["head_dim"],
             ["text_config", "head_dim"]
-        ]) ?? (hiddenSize / attentionHeads)
-
-        guard layers > 0, hiddenSize > 0, attentionHeads > 0, kvHeads > 0, headDim > 0,
-              hiddenSize % attentionHeads == 0
+        ])
+        // An explicit head_dim need not divide hidden_size (Qwen3.6-27B:
+        // 24 x 256 over 5120); only a derived one must.
+        guard declaredLayers > 0, hiddenSize > 0, attentionHeads > 0, kvHeads > 0,
+              declaredHeadDim != nil || hiddenSize % attentionHeads == 0
         else {
             return nil
+        }
+        let headDim = declaredHeadDim ?? (hiddenSize / attentionHeads)
+        // Hybrid stacks (layer_types) keep a per-token KV cache only in their
+        // full-attention layers; linear-attention layers hold fixed-size state.
+        // A complete stack counts only those layers, so zero of them is zero
+        // per-token KV bytes (SPEC-023-R018 item 5).
+        let layerTypes = ((root["layer_types"] ?? (root["text_config"] as? [String: Any])?["layer_types"]) as? [Any])?
+            .compactMap { $0 as? String }
+        let layers = layerTypes?.count == declaredLayers
+            ? layerTypes?.filter { $0 == "full_attention" }.count ?? 0
+            : declaredLayers
+        guard headDim > 0 else {
+            return nil
+        }
+        guard layers > 0 else {
+            return 0
         }
         guard let bytes = checkedProduct([
             UInt64(layers),

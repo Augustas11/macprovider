@@ -790,7 +790,7 @@ enum CredentialRestartProver {
         return "gui/\(getuid())"
     }
 
-    private static func restartLaunchdProvider(config: AppConfig) throws {
+    static func restartLaunchdProvider(config: AppConfig) throws {
         let domain = launchdDomain(for: config)
         let process = Process()
         if domain == "system" {

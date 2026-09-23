@@ -3182,17 +3182,20 @@ struct LocalStatusFormatter {
         guard advertises("capacity_provenance_v1", in: status),
               let raw = (status["capacity"] as? [String: Any])?["max_context_source"] as? String
         else { return "" }
-        let label: String
+        return " (source: \(maxContextSourceLabel(raw)))"
+    }
+
+    static func maxContextSourceLabel(_ raw: String) -> String {
         switch MaxContextSource(rawValue: raw) {
-        case .operatorConfig: label = "config.yaml max_context_override"
-        case .environment: label = "MACPROVIDER_MAX_CONTEXT_OVERRIDE"
-        case .cliFlag: label = "--max-context flag"
-        case .ramTierDefault: label = "RAM-tier default"
-        case .draftClamp: label = "draft-model clamp"
-        case .recommendationAdoption: label = "adopted recommendation"
-        case nil: label = raw
+        case .operatorConfig: return "config.yaml max_context_override"
+        case .environment: return "MACPROVIDER_MAX_CONTEXT_OVERRIDE"
+        case .cliFlag: return "--max-context flag"
+        case .ramTierDefault: return "RAM-tier default"
+        case .draftClamp: return "draft-model clamp"
+        case .recommendationAdoption: return "adopted recommendation"
+        case .recommendationApply: return "config.yaml max_context_override written by an autotune recommendation"
+        case nil: return raw
         }
-        return " (source: \(label))"
     }
 
     /// Each readiness layer with its own reason, so a "not serving" answer

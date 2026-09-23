@@ -259,12 +259,33 @@ struct ProviderCapacity: Sendable {
         }
     }
 
+    /// SPEC-028's context ceiling when `draftModel` is configured, else nil.
+    /// The one owner of the draft term: every writer of `max_context_override`
+    /// (recommend/apply, adoption validation, `provider context set`, the
+    /// warm-switch recompute) applies it, because serve's spec-decode
+    /// preflight exits `draft_model_capacity_shortfall` on a larger override.
+    static func draftModelContextLimit(physicalMemoryGB: Int, draftModel: String?) -> Int? {
+        guard draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { return nil }
+        return draftContextCap(forPhysicalMemoryGB: physicalMemoryGB)
+    }
+
     static func defaultContextTokensForCurrentHost() -> Int {
         defaultContextTokens(forPhysicalMemoryGB: systemMemoryGB())
     }
 
     static func draftContextCapForCurrentHost() -> Int {
         draftContextCap(forPhysicalMemoryGB: systemMemoryGB())
+    }
+
+    /// The context serve runs with when nothing sets `max_context_override`:
+    /// the RAM-tier default, clamped to the draft cap when a draft model is
+    /// configured. Serve's spec-decode preflight and `provider context
+    /// rollback` both resolve it here.
+    static func unsetOverrideContext(physicalMemoryGB: Int, draftModelConfigured: Bool) -> (tokens: Int, source: MaxContextSource) {
+        let ramDefault = defaultContextTokens(forPhysicalMemoryGB: physicalMemoryGB)
+        guard draftModelConfigured else { return (ramDefault, .ramTierDefault) }
+        let cap = draftContextCap(forPhysicalMemoryGB: physicalMemoryGB)
+        return cap < ramDefault ? (cap, .draftClamp) : (ramDefault, .ramTierDefault)
     }
 }
 

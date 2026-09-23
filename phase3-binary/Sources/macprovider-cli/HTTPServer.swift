@@ -226,6 +226,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         "buyer_serving_hold_v1",
         "capacity_provenance_v1",
         "catalog_status_v1",
+        "coordinator_origin_v1",
         "compatibility_set_v1",
         "credential_status_v1",
         "admission_identity_v1",
@@ -1658,6 +1659,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "lifecycle": lifecycleStateStatus(lifecycleStateInspection),
             "lifecycle_lease": lifecycleLeaseStatus(lifecycleLeaseInspection),
             "provider_id": jsonNullable(providerID),
+            // coordinator_origin_v1 (#1689): the coordinator this serve joined,
+            // as scheme://host[:port], so `provider verify` checks the public
+            // feed of that coordinator rather than the invoking shell's.
+            "coordinator_origin": jsonNullable(ProviderVerifier.coordinatorOrigin(coordinatorURL)),
             "status": snapshot.status.rawValue,
             "model": effectiveModelID ?? NSNull(),
             "model_loaded": effectiveModelLoaded,

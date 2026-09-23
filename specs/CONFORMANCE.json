@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.22",
+      "version": "1.9.23",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -660,7 +660,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.15.1",
+      "version": "v0.15.2",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2743,6 +2743,34 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1688",
         "rationale": "SPEC-023 v0.15.0 \u00a73.7.9 catalog-content release lane: content-gate eligibility (catalog-content vs invalid-release/full-provider-app/pricing/unknown-predecessor/unverified-commit/stale-or-future/freshness-or-noop), live-binary dry-load, lease shared with deploy and the updater, live evidence (a)-(e), rollback and failed-release retention rules. Pricing is out of scope (#1693). The operator lane script scripts/catalog-content-release.sh (preflight GO/NO_GO, evidence, rollback), the offline gate, the dry-load validator and the shared activation/lease library are mapped above. Pending, not conformant: implemented on branch feat/1688-catalog-content-lane with hermetic unit/dist tests only; no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R018",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func recommendedMaxContext(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func safeMaxContextTokens(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static func kvCacheBytesPerToken(configData:"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testQwen36HybridConfigOn256GBMacDoesNotRecommendFourKContext",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testUnprovableMemoryFitNeverFallsToTheFourKFloorOnAHighMemoryMac",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testCompleteLayerTypesWithoutFullAttentionLeaveTheMemoryTermNonBinding",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testRecommendApplyServeConfigUsesKnownModelBoundWhenConfigMissing",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testRecommendApplyServeConfigUsesRAMTierWithoutModelContextEvidence",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testRecommendApplyServeConfigDerivesMemorySafeContextFromKVGeometry",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift:testDraftModelCapsTheAppliedContextAndSlotsSoServePreflightAcceptsThem",
+        "phase3-binary/Tests/macprovider-cliTests/ProviderContextTests.swift:testApplyRecordsGeneratedContextAndLoaderReportsRecommendationApply"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1689",
+        "rationale": "SPEC-023 v0.15.2 (SPEC-023-R018) defines the uncalibrated default serve context: min(RAM-tier default, declared model max, memory-safe context, SPEC-028 draft cap when a draft model is configured), unknown bounds drop out, declared head_dim honoured, hybrid layer_types count only full_attention layers, apply records provenance. Implemented and unit-tested, including the Qwen3.6-27B 256 GB regression; no physical apply on the 256 GB Studio has been captured under this revision."
       }
     },
     {

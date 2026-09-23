@@ -1823,7 +1823,12 @@ extension ModelsAdoptRecommendationCommand {
                 }
             }
         }
-        try validateSignedContextAuthority(recommendation: recommendation, row: row, artifact: artifact)
+        try validateSignedContextAuthority(
+            recommendation: recommendation,
+            row: row,
+            artifact: artifact,
+            draftModel: resolvedConfig?.draftModel
+        )
         return RecommendationAdoptionAuthority(catalogRow: row)
     }
 
@@ -1870,7 +1875,8 @@ extension ModelsAdoptRecommendationCommand {
     static func validateSignedContextAuthority(
         recommendation: ParsedRecommendationAdoption,
         row: CandidateCatalog.Row,
-        artifact: VerifiedModelArtifact
+        artifact: VerifiedModelArtifact,
+        draftModel: String?
     ) throws {
         let hardware = AutotuneRecommendHardware(
             machine: nil,
@@ -1886,7 +1892,8 @@ extension ModelsAdoptRecommendationCommand {
             modelID: row.modelID,
             verifiedConfigJSONData: artifact.configJSONData,
             verifiedConfigSHA256: artifact.configSHA256,
-            catalogMinRAMGB: row.minRAMGB
+            catalogMinRAMGB: row.minRAMGB,
+            draftModel: draftModel
         )
         if let calibration = recommendation.contextCalibration {
             try validateCalibratedContextAuthority(

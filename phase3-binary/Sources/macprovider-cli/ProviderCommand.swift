@@ -6,8 +6,8 @@ import MacProviderCore
 struct ProviderCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "provider",
-        abstract: "Check that this Mac, the network, and the public feed agree after a change.",
-        subcommands: [ProviderVerifyCommand.self]
+        abstract: "Check or change this Mac's provider settings and prove the network sees them.",
+        subcommands: [ProviderVerifyCommand.self, ProviderContextCommand.self]
     )
 }
 
@@ -19,7 +19,8 @@ struct ProviderVerifyCommand: AsyncParsableCommand {
         Read-only: never changes configuration or processes. Exit codes: 0 all agree, \
         2 this Mac is not ready, 3 the network is not routing customers to this Mac, \
         4 the public feed disagrees, 5 timed out waiting for the public feed, \
-        6 the network catalog lacks this model, 7 the coordinator does not publish the public feed.
+        6 the network catalog lacks this model, 7 the public feed cannot be checked (the coordinator \
+        does not publish it, or the running provider does not report its coordinator).
         """
     )
 
@@ -152,6 +153,10 @@ struct ProviderVerifier {
     static let unverifiableFields = ["provider_id", "per_provider_context"]
 
     var port: Int
+    /// The invoking CLI's configured coordinator. Display only: the public
+    /// feed is read from the coordinator the running provider reports
+    /// (`coordinator_origin`), because this shell's config or environment may
+    /// name another one than the launchd service uses.
     var coordinatorURL: String?
     var timeout: TimeInterval
     var fetch: Fetch = ProviderVerifier.urlSessionFetch
@@ -161,24 +166,72 @@ struct ProviderVerifier {
     }
     var initialBackoff: TimeInterval = 2
     var maxBackoff: TimeInterval = 15
+    /// The context a change should leave running: exact tokens, and for a
+    /// config without an override the source serve reports for the default
+    /// (`ram_tier_default` or `draft_clamp`).
+    struct ExpectedContext: Equatable {
+        var tokens: Int
+        var source: MaxContextSource?
+    }
 
+    /// After a context change, the local layer passes only once the running
+    /// provider serves this context, so a not-yet-restarted process cannot pass.
+    var expectedContext: ExpectedContext? = nil
+    /// Wall-clock bound for the single pass `timeout == 0` asks for.
+    var singlePassBudget: TimeInterval = requestTimeout
+    /// When set, no request starts at or after it and an in-flight request is
+    /// cancelled at it.
+    var requestDeadline: Date? = nil
+
+    static let requestTimeout: TimeInterval = 5
+
+    /// Polls until agreement, a terminal outcome, or the deadline. At the
+    /// deadline it returns the last complete evaluation: a pass the deadline
+    /// cut short would report the unanswered request (the local status, first)
+    /// instead of the layer that was actually holding (#1689 F1).
     func run() async -> ProviderVerifyReport {
-        let deadline = now().addingTimeInterval(timeout)
+        let start = now()
+        let deadline = start.addingTimeInterval(timeout)
+        var bounded = self
+        bounded.requestDeadline = timeout > 0 ? deadline : start.addingTimeInterval(singlePassBudget)
         var backoff = initialBackoff
+        var lastComplete: ProviderVerifyReport?
         while true {
-            let report = await evaluateOnce()
+            let cut = DeadlineCut()
+            bounded.deadlineCut = cut
+            let report = await bounded.evaluateOnce()
+            if cut.hit, let lastComplete {
+                return lastComplete
+            }
             let remaining = deadline.timeIntervalSince(now())
             if report.isTerminal || remaining <= 0 {
                 return report
             }
+            lastComplete = report
             do {
                 try await sleep(min(backoff, remaining))
             } catch {
                 return report
             }
+            // Nothing starts at the deadline; a pass begun there could only
+            // report the deadline.
+            if deadline.timeIntervalSince(now()) <= 0 {
+                return report
+            }
             backoff = min(backoff * 2, maxBackoff)
         }
     }
+
+    /// Set by `boundedFetch` when the deadline stopped or cancelled a request
+    /// of the current evaluation.
+    final class DeadlineCut: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var hit: Bool { lock.withLock { value } }
+        func mark() { lock.withLock { value = true } }
+    }
+
+    var deadlineCut: DeadlineCut? = nil
 
     func evaluateOnce() async -> ProviderVerifyReport {
         var proof = ProviderVerifyReport.Proof()
@@ -211,8 +264,14 @@ struct ProviderVerifier {
             publicFeed = .init(layer: .publicFeed, state: .pending, reason: "waiting for the local provider status")
         }
 
+        // FR-20a pause exception: a loaded serve the operator paused reports
+        // `status: unavailable`; that is not-serving (exit 3), not a local fault.
+        var localPaused = false
+        if case let .success(status) = status {
+            localPaused = local.state != .pass && Self.loadedAndOperatorPaused(status)
+        }
         let outcome: ProviderVerifyReport.Outcome
-        if local.state != .pass {
+        if local.state != .pass && !localPaused {
             outcome = .localNotReady
         } else if catalogMaterialMissing {
             outcome = .catalogMaterialMissing
@@ -241,15 +300,47 @@ struct ProviderVerifier {
         case failure(String)
     }
 
+    private struct DeadlineReached: Error {}
+
+    /// `fetch`, bounded by `requestDeadline` and `requestTimeout`: nothing
+    /// starts once the deadline has passed, and a request still running when
+    /// its bound expires is cancelled.
+    private func boundedFetch(_ url: URL) async throws -> (status: Int, body: Data) {
+        guard let requestDeadline else { return try await fetch(url) }
+        let remaining = requestDeadline.timeIntervalSince(now())
+        guard remaining > 0 else {
+            deadlineCut?.mark()
+            throw DeadlineReached()
+        }
+        let bound = min(Self.requestTimeout, remaining)
+        // Only a bound set by the run deadline cuts the evaluation short; the
+        // per-request timeout is an ordinary unanswered request.
+        let cut = bound < Self.requestTimeout ? deadlineCut : nil
+        let fetch = self.fetch
+        return try await withThrowingTaskGroup(of: (status: Int, body: Data).self) { group in
+            group.addTask { try await fetch(url) }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(bound * 1_000_000_000))
+                cut?.mark()
+                throw DeadlineReached()
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw DeadlineReached() }
+            return first
+        }
+    }
+
     private func fetchJSONObject(_ raw: String) async -> Fetched {
         guard let url = URL(string: raw) else { return .failure("invalid URL") }
         do {
-            let (code, body) = try await fetch(url)
+            let (code, body) = try await boundedFetch(url)
             guard (200..<300).contains(code) else { return .failure("HTTP \(code)") }
             guard let object = try JSONSerialization.jsonObject(with: body) as? [String: Any] else {
                 return .failure("response is not a JSON object")
             }
             return .success(object)
+        } catch is DeadlineReached {
+            return .failure("did not answer before the verification deadline")
         } catch {
             return .failure("not reachable")
         }
@@ -269,6 +360,9 @@ struct ProviderVerifier {
             return .init(layer: .local, state: .fail, reason: "model not loaded (status \(state))")
         }
         guard ["ready", "busy"].contains(state) else {
+            if Self.loadedAndOperatorPaused(status) {
+                return .init(layer: .local, state: .fail, reason: Self.operatorPausedReason)
+            }
             return .init(layer: .local, state: .fail, reason: "\(model) loaded but status is \(state)")
         }
         guard case let .success(models) = await fetchJSONObject("http://127.0.0.1:\(port)/v1/models"),
@@ -277,15 +371,45 @@ struct ProviderVerifier {
         else {
             return .init(layer: .local, state: .fail, reason: "/v1/models does not list \(model)")
         }
+        if let expected = expectedContext {
+            let capacity = status["capacity"] as? [String: Any]
+            let serving = (capacity?["max_context_tokens"] as? NSNumber)?.intValue
+            guard serving == expected.tokens else {
+                return .init(layer: .local, state: .fail, reason: "serving context \(serving.map(String.init) ?? "<unknown>"), waiting for \(expected.tokens) (restart not finished)")
+            }
+            if let source = expected.source {
+                let servingSource = capacity?["max_context_source"] as? String
+                guard servingSource == source.rawValue else {
+                    return .init(layer: .local, state: .fail, reason: "serving context source \(servingSource ?? "<unknown>"), waiting for \(source.rawValue) (restart not finished)")
+                }
+            }
+        }
         return .init(layer: .local, state: .pass, reason: "\(model) loaded and \(state); /v1/models lists it")
+    }
+
+    static let operatorPausedReason = "paused by operator (resume it from Malibu or its control socket)"
+
+    private static func operatorPaused(_ status: [String: Any]) -> Bool {
+        (status["lifecycle"] as? [String: Any])?["state"] as? String == ProviderLifecycleState.pausedByOperator.rawValue
+    }
+
+    /// A paused serve keeps its model loaded; one that is not loaded is a
+    /// local fault whatever its lifecycle record says.
+    private static func loadedAndOperatorPaused(_ status: [String: Any]) -> Bool {
+        status["model_loaded"] as? Bool == true && operatorPaused(status)
     }
 
     private static func networkLayer(_ status: [String: Any]) -> (ProviderVerifyReport.LayerResult, catalogMaterialMissing: Bool) {
         let coordinator = status["coordinator"] as? [String: Any] ?? [:]
+        let networkState = status["network_state"] as? String ?? "<unknown>"
+        // An operator pause explains any not-serving network state, connected
+        // or not, and only the operator can clear it.
+        if networkState != "buyer_serving", operatorPaused(status) {
+            return (.init(layer: .network, state: .fail, reason: operatorPausedReason), false)
+        }
         guard coordinator["connected"] as? Bool == true else {
             return (.init(layer: .network, state: .fail, reason: "not connected to the coordinator"), false)
         }
-        let networkState = status["network_state"] as? String ?? "<unknown>"
         if networkState == "buyer_serving" {
             return (.init(layer: .network, state: .pass, reason: "connected; available to customers"), false)
         }
@@ -316,13 +440,29 @@ struct ProviderVerifier {
         func pending(_ reason: String) -> FeedCheck {
             FeedCheck(result: .init(layer: .publicFeed, state: .pending, reason: reason))
         }
-        guard let url = Self.publicFeedURL(coordinatorURL: coordinatorURL) else {
-            return pending("no usable coordinator URL in config")
+        func unverifiable(_ reason: String) -> FeedCheck {
+            var check = pending(reason)
+            check.result.state = .unverifiable
+            check.unavailable = true
+            return check
+        }
+        let contract = status["local_status_contract"] as? [String: Any]
+        guard (contract?["capabilities"] as? [String])?.contains("coordinator_origin_v1") == true else {
+            let shell = Self.coordinatorOrigin(coordinatorURL).map { "; this shell's config names \($0), which may not be the coordinator the provider uses" } ?? ""
+            return unverifiable("the running provider does not report its coordinator (it predates coordinator_origin_v1), so the public feed cannot be checked\(shell). Restart it with this version of malibu-cli.")
+        }
+        guard let origin = Self.coordinatorOrigin(status["coordinator_origin"] as? String) else {
+            return unverifiable("the running provider reports no coordinator, so the public feed cannot be checked")
+        }
+        guard let url = Self.publicFeedURL(coordinatorURL: origin) else {
+            return unverifiable("the running provider's coordinator \(origin) has no public feed this command may read (https, or http on loopback only)")
         }
         let code: Int
         let body: Data
         do {
-            (code, body) = try await fetch(url)
+            (code, body) = try await boundedFetch(url)
+        } catch is DeadlineReached {
+            return pending("\(url.absoluteString) did not answer before the verification deadline")
         } catch {
             return pending("\(url.absoluteString) not reachable")
         }
@@ -396,6 +536,26 @@ struct ProviderVerifier {
         return check
     }
 
+    /// `scheme://host[:port]` of a coordinator URL: lowercased scheme and
+    /// host, no userinfo, path, query, or fragment; nil unless the scheme is
+    /// ws, wss, http, or https. `/v1/status` reports it as
+    /// `coordinator_origin` (capability `coordinator_origin_v1`).
+    static func coordinatorOrigin(_ coordinatorURL: String?) -> String? {
+        guard let coordinatorURL,
+              let components = URLComponents(string: coordinatorURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = components.scheme?.lowercased(),
+              ["ws", "wss", "http", "https"].contains(scheme),
+              let host = components.host?.lowercased(), !host.isEmpty
+        else {
+            return nil
+        }
+        var origin = URLComponents()
+        origin.scheme = scheme
+        origin.host = host
+        origin.port = components.port
+        return origin.string
+    }
+
     static func publicFeedURL(coordinatorURL: String?) -> URL? {
         guard let coordinatorURL,
               var components = URLComponents(string: coordinatorURL.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -430,10 +590,33 @@ struct ProviderVerifier {
 
     static let urlSessionFetch: Fetch = { url in
         var request = URLRequest(url: url)
-        request.timeoutInterval = 5
+        request.timeoutInterval = requestTimeout
         request.setValue("application/json", forHTTPHeaderField: "accept")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        return ((response as? HTTPURLResponse)?.statusCode ?? 0, data)
+        let (data, response) = try await URLSession.shared.data(for: request, delegate: RedirectRefusal())
+        return try checkedResponse(requested: url, response: response, body: data)
+    }
+
+    /// Verification reads only the URLs it validated, so a 3xx is returned as
+    /// the answer instead of being followed.
+    final class RedirectRefusal: NSObject, URLSessionTaskDelegate, Sendable {
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping @Sendable (URLRequest?) -> Void
+        ) {
+            completionHandler(nil)
+        }
+    }
+
+    /// Accepts a response only for exactly the URL that was requested.
+    static func checkedResponse(requested: URL, response: URLResponse, body: Data) throws -> (status: Int, body: Data) {
+        guard let http = response as? HTTPURLResponse,
+              http.url?.absoluteString == requested.absoluteString else {
+            throw URLError(.badServerResponse)
+        }
+        return (http.statusCode, body)
     }
 }
 
@@ -443,7 +626,7 @@ enum ProviderVerifyFormatter {
         for layer in report.layers {
             lines.append("  \(symbol(layer.state)) \(layer.layer.label): \(layer.reason)")
         }
-        lines.append("  … Not checkable in the public feed: provider ID (anonymized), this Mac's own context (published only as a per-model maximum)")
+        lines.append("  ? Not checkable in the public feed: provider ID (anonymized), this Mac's own context (published only as a per-model maximum)")
         let proof = report.proof
         if report.outcome == .agree {
             let artifact = proof.artifactSHA256.map { String($0.prefix(12)) } ?? "<unknown>"
@@ -486,7 +669,8 @@ enum ProviderVerifyFormatter {
         switch state {
         case .pass: return "✓"
         case .fail: return "✗"
-        case .pending, .unverifiable: return "…"
+        case .pending: return "…"
+        case .unverifiable: return "?"
         }
     }
 }

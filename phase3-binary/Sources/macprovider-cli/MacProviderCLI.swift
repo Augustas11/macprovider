@@ -724,28 +724,27 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
-    static func runSpecDecodeCapacityPreflight(_ resolved: inout AppConfig) throws {
+    static func runSpecDecodeCapacityPreflight(
+        _ resolved: inout AppConfig,
+        physicalMemoryGB: Int = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
+    ) throws {
         guard resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
             return
         }
-        let defaultContext = ProviderCapacity.defaultContextTokensForCurrentHost()
-        let requestedContext = resolved.maxContextOverride ?? defaultContext
-        let draftCap = ProviderCapacity.draftContextCapForCurrentHost()
-        let effectiveContext = min(requestedContext, draftCap)
-        if let explicit = resolved.maxContextOverride, explicit > effectiveContext {
-            FileHandle.standardError.write(Data("draft_model_capacity_shortfall: --max-context \(explicit) exceeds draft-enabled cap \(effectiveContext)\n".utf8))
+        let draftCap = ProviderCapacity.draftContextCap(forPhysicalMemoryGB: physicalMemoryGB)
+        if let explicit = resolved.maxContextOverride, explicit > draftCap {
+            FileHandle.standardError.write(Data("draft_model_capacity_shortfall: --max-context \(explicit) exceeds draft-enabled cap \(draftCap)\n".utf8))
             throw ExitCode(2)
         }
         if let explicit = resolved.maxConcurrencyOverride, explicit > 1 {
             FileHandle.standardError.write(Data("draft_model_capacity_shortfall: --max-batch \(explicit) exceeds draft-enabled cap 1\n".utf8))
             throw ExitCode(2)
         }
-        if effectiveContext < requestedContext {
-            resolved.maxContextSource = .draftClamp
-        } else if resolved.maxContextOverride == nil {
-            resolved.maxContextSource = .ramTierDefault
+        if resolved.maxContextOverride == nil {
+            let unset = ProviderCapacity.unsetOverrideContext(physicalMemoryGB: physicalMemoryGB, draftModelConfigured: true)
+            resolved.maxContextOverride = unset.tokens
+            resolved.maxContextSource = unset.source
         }
-        resolved.maxContextOverride = effectiveContext
         resolved.maxConcurrencyOverride = 1
     }
 

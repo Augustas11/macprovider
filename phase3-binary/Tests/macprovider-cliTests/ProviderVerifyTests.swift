@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import macprovider_cli
@@ -208,6 +209,320 @@ final class ProviderVerifyTests: XCTestCase {
         XCTAssertTrue(verify.json)
     }
 
+    // MARK: - Deadline and redirects
+
+    func testHangingEndpointIsCancelledAtTheDeadline() async throws {
+        let verifier = ProviderVerifier(
+            port: port,
+            coordinatorURL: coordinatorURL,
+            timeout: 1,
+            fetch: { _ in
+                try await Task.sleep(nanoseconds: 30_000_000_000)
+                return (200, Data())
+            }
+        )
+        let started = Date()
+
+        let report = await verifier.run()
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2.5, "--timeout bounds the whole run, including in-flight requests")
+        XCTAssertEqual(report.outcome, .localNotReady)
+    }
+
+    func testTimeoutZeroChecksOnceWithinTheSinglePassBudget() async throws {
+        let calls = LockedCounter()
+        var verifier = ProviderVerifier(
+            port: port,
+            coordinatorURL: coordinatorURL,
+            timeout: 0,
+            fetch: { _ in
+                calls.increment()
+                try await Task.sleep(nanoseconds: 30_000_000_000)
+                return (200, Data())
+            }
+        )
+        verifier.singlePassBudget = 0.5
+        let started = Date()
+
+        let report = await verifier.run()
+
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1.5)
+        XCTAssertEqual(report.outcome, .localNotReady)
+        XCTAssertEqual(calls.value, 1, "one pass: the local status request, cancelled at the budget")
+    }
+
+    func testNoRequestStartsAfterTheDeadline() async throws {
+        let clock = TestClock(now)
+        let deadline = now.addingTimeInterval(4)
+        let lateStarts = LockedCounter()
+        let stub = HTTPStub(routes: [
+            localModelsURL: (200, modelsBody(["mlx-community/Qwen3.6-27B-4bit"])),
+            localStatusURL: (200, statusBody(status: "loading", modelLoaded: false)),
+            feedURL: (200, feedBody(generatedAt: "2026-09-23T10:04:48Z")),
+        ])
+        let verifier = ProviderVerifier(
+            port: port,
+            coordinatorURL: coordinatorURL,
+            timeout: 4,
+            fetch: { url in
+                if clock.now >= deadline { lateStarts.increment() }
+                clock.advance(3)
+                return try stub.respond(url)
+            },
+            now: { clock.now },
+            sleep: { seconds in clock.advance(seconds) }
+        )
+
+        _ = await verifier.run()
+
+        XCTAssertEqual(lateStarts.value, 0)
+        XCTAssertGreaterThan(stub.count(localStatusURL), 0)
+    }
+
+    /// #1689 F1: a run that polls to its deadline reports the last layer
+    /// state it observed, not a local failure from a fetch the deadline cut.
+    func testDeadlineReportsTheLastObservedNetworkFailure() async throws {
+        let stub = HTTPStub(routes: [
+            localModelsURL: (200, modelsBody(["mlx-community/Qwen3.6-27B-4bit"])),
+            localStatusURL: (200, statusBody(networkState: "catalog_update_required", connected: false)),
+            feedURL: (200, feedBody(generatedAt: "2026-09-23T10:04:48Z")),
+        ])
+
+        let report = await verifier(stub, timeout: 5).run()
+
+        XCTAssertEqual(report.outcome, .networkNotServing)
+        XCTAssertEqual(report.exitCode, 3)
+        XCTAssertEqual(report.layers.first?.state, .pass, "local is ready; the deadline must not relabel it")
+        XCTAssertGreaterThan(stub.count(localStatusURL), 1, "verify still polls until the deadline")
+    }
+
+    /// Studio E2E round 2 (N2): an operator pause is named, not reported
+    /// as an unexplained network state.
+    func testOperatorPausedProviderSaysItIsPaused() async throws {
+        let stub = HTTPStub(routes: [
+            localModelsURL: (200, modelsBody(["mlx-community/Qwen3.6-27B-4bit"])),
+            localStatusURL: (200, statusBody(networkState: "buyer_serving_unknown", lifecycleState: "paused_by_operator")),
+            feedURL: (200, feedBody(generatedAt: "2026-09-23T10:04:48Z")),
+        ])
+
+        let report = await verifier(stub, timeout: 0).run()
+
+        XCTAssertEqual(report.outcome, .networkNotServing)
+        XCTAssertEqual(report.exitCode, 3)
+        let network = try XCTUnwrap(report.layers.first { $0.layer == .network })
+        XCTAssertEqual(network.state, .fail)
+        XCTAssertEqual(network.reason, "paused by operator (resume it from Malibu or its control socket)")
+        XCTAssertFalse(ProviderVerifyFormatter.text(report).contains("buyer_serving_unknown"))
+    }
+
+    /// Studio E2E round 3 (N4): a paused serve reports `status: unavailable`;
+    /// the local layer names the pause and the outcome is not-serving (exit 3),
+    /// not local-not-ready (exit 2).
+    func testOperatorPausedServeWithUnavailableStatusIsNotServingNotLocalNotReady() async throws {
+        let stub = HTTPStub(routes: [
+            localModelsURL: (503, Data(#"{"error":{"code":"provider_paused"}}"#.utf8)),
+            localStatusURL: (200, statusBody(status: "unavailable", networkState: "not_buyer_serving", lifecycleState: "paused_by_operator")),
+            feedURL: (200, feedBody(generatedAt: "2026-09-23T10:04:48Z")),
+        ])
+
+        let report = await verifier(stub, timeout: 0).run()
+
+        XCTAssertEqual(report.outcome, .networkNotServing)
+        XCTAssertEqual(report.exitCode, 3)
+        let local = try XCTUnwrap(report.layers.first { $0.layer == .local })
+        XCTAssertEqual(local.state, .fail)
+        XCTAssertEqual(local.reason, "paused by operator (resume it from Malibu or its control socket)")
+        let text = ProviderVerifyFormatter.text(report)
+        XCTAssertTrue(text.contains("Not verified: Local provider — paused by operator"), text)
+        XCTAssertFalse(text.contains("status is unavailable"), text)
+    }
+
+    /// A serve that is not loaded is still local-not-ready even if a stale
+    /// lifecycle record says paused: only a loaded, paused serve is exempt.
+    func testUnloadedServeIsLocalNotReadyEvenWhenLifecycleSaysPaused() async throws {
+        let stub = HTTPStub(routes: [
+            localModelsURL: (503, Data(#"{"error":{"code":"model_not_loaded"}}"#.utf8)),
+            localStatusURL: (200, statusBody(status: "unavailable", modelLoaded: false, networkState: "not_buyer_serving", lifecycleState: "paused_by_operator")),
+            feedURL: (200, feedBody(generatedAt: "2026-09-23T10:04:48Z")),
+        ])
+
+        let report = await verifier(stub, timeout: 0).run()
+
+        XCTAssertEqual(report.outcome, .localNotReady)
+        XCTAssertEqual(report.exitCode, 2)
+    }
+
+    func testDeadlineOnAStaleFeedIsTheFeedTimeout() async throws {
+        let stub = HTTPStub(routes: [
+            localModelsURL: (200, modelsBody(["mlx-community/Qwen3.6-27B-4bit"])),
+            localStatusURL: (200, statusBody()),
+            feedURL: (503, Data(#"{"error":{"code":"stats_stale"}}"#.utf8)),
+        ])
+
+        let report = await verifier(stub, timeout: 30).run()
+
+        XCTAssertEqual(report.outcome, .timeout)
+        XCTAssertEqual(report.exitCode, 5)
+    }
+
+    /// An evaluation the deadline cuts short is discarded for the last
+    /// complete one.
+    func testEvaluationCutByTheDeadlineKeepsThePreviousReport() async throws {
+        let clock = TestClock(now)
+        let stub = HTTPStub(routes: [
+            localModelsURL: (200, modelsBody(["mlx-community/Qwen3.6-27B-4bit"])),
+            localStatusURL: (200, statusBody(networkState: "catalog_update_required", connected: false)),
+            feedURL: (200, feedBody(generatedAt: "2026-09-23T10:04:48Z")),
+        ])
+        let verifier = ProviderVerifier(
+            port: port,
+            coordinatorURL: coordinatorURL,
+            timeout: 12,
+            fetch: { url in
+                clock.advance(3)
+                return try stub.respond(url)
+            },
+            now: { clock.now },
+            sleep: { seconds in clock.advance(seconds) }
+        )
+
+        let report = await verifier.run()
+
+        XCTAssertEqual(stub.count(localStatusURL), 2, "a second evaluation started before the deadline")
+        XCTAssertEqual(report.outcome, .networkNotServing)
+        XCTAssertEqual(report.exitCode, 3)
+    }
+
+    func testRedirectIsNotFollowed() async throws {
+        let target = try LoopbackHTTPResponder(response: "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+        defer { target.stop() }
+        let redirect = try LoopbackHTTPResponder(
+            response: "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:\(target.port)/v1/status\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        defer { redirect.stop() }
+
+        let url = try XCTUnwrap(URL(string: "http://127.0.0.1:\(redirect.port)/v1/status"))
+        let (code, _) = try await ProviderVerifier.urlSessionFetch(url)
+
+        XCTAssertEqual(code, 302, "the redirect response is returned, not followed")
+        XCTAssertEqual(target.connections, 0, "the redirect target is never contacted")
+    }
+
+    func testResponseForAnotherURLIsRejected() throws {
+        let requested = try XCTUnwrap(URL(string: "https://coordinator.example/v1/stats/routability"))
+        let other = try XCTUnwrap(URL(string: "https://elsewhere.example/v1/stats/routability"))
+        let response = try XCTUnwrap(HTTPURLResponse(url: other, statusCode: 200, httpVersion: nil, headerFields: nil))
+
+        XCTAssertThrowsError(try ProviderVerifier.checkedResponse(requested: requested, response: response, body: Data()))
+        let same = try XCTUnwrap(HTTPURLResponse(url: requested, statusCode: 200, httpVersion: nil, headerFields: nil))
+        XCTAssertEqual(try ProviderVerifier.checkedResponse(requested: requested, response: same, body: Data("x".utf8)).status, 200)
+    }
+
+    /// #1689 L1: an unverifiable feed layer is terminal, so it does not use
+    /// the pending glyph.
+    func testUnverifiableLayerDoesNotUseThePendingGlyph() async throws {
+        let stub = HTTPStub(routes: [
+            localModelsURL: (200, modelsBody(["mlx-community/Qwen3.6-27B-4bit"])),
+            localStatusURL: (200, statusBody(coordinatorOrigin: nil)),
+            feedURL: (200, feedBody(generatedAt: "2026-09-23T10:04:48Z")),
+        ])
+
+        let report = await verifier(stub, timeout: 0).run()
+        let text = ProviderVerifyFormatter.text(report)
+
+        XCTAssertEqual(report.layers.last?.state, .unverifiable)
+        XCTAssertTrue(text.contains("  ? Public feed:"), text)
+        XCTAssertFalse(text.contains("… Public feed:"), text)
+    }
+
+    func testExpectedDefaultContextRequiresTheDefaultSource() async throws {
+        let expected = ProviderVerifier.ExpectedContext(tokens: 200_000, source: .ramTierDefault)
+        let operatorValue = HTTPStub(routes: [
+            localModelsURL: (200, modelsBody(["mlx-community/Qwen3.6-27B-4bit"])),
+            localStatusURL: (200, statusBody(contextSource: "operator_config")),
+            feedURL: (200, feedBody(generatedAt: "2026-09-23T10:04:48Z")),
+        ])
+        var stale = verifier(operatorValue, timeout: 0)
+        stale.expectedContext = expected
+        let staleReport = await stale.run()
+        XCTAssertEqual(staleReport.layers.first?.state, .fail)
+        XCTAssertTrue(staleReport.layers.first?.reason.contains("waiting for ram_tier_default") == true, staleReport.layers.first?.reason ?? "")
+
+        let defaultValue = HTTPStub(routes: [
+            localModelsURL: (200, modelsBody(["mlx-community/Qwen3.6-27B-4bit"])),
+            localStatusURL: (200, statusBody(contextSource: "ram_tier_default")),
+            feedURL: (200, feedBody(generatedAt: "2026-09-23T10:04:48Z")),
+        ])
+        var fresh = verifier(defaultValue, timeout: 0)
+        fresh.expectedContext = expected
+        let freshReport = await fresh.run()
+        XCTAssertEqual(freshReport.outcome, .agree)
+    }
+
+    /// #1689 R5: an SSH shell whose config or MACPROVIDER_COORDINATOR_URL
+    /// names another coordinator must not decide which public feed proves the
+    /// running provider; the running serve reports its own coordinator origin.
+    func testFeedIsCheckedAgainstTheRunningProvidersCoordinatorNotThisShells() async throws {
+        let stagingFeed = "https://staging.example/v1/stats/routability"
+        let stub = HTTPStub(routes: [
+            localModelsURL: (200, modelsBody(["mlx-community/Qwen3.6-27B-4bit"])),
+            localStatusURL: (200, statusBody(coordinatorOrigin: "wss://coordinator.example")),
+            feedURL: (200, feedBody(generatedAt: "2026-09-23T10:04:48Z")),
+            stagingFeed: (200, feedBody(generatedAt: "2026-09-23T10:04:48Z", providerSlots: 1)),
+        ])
+        var verifier = verifier(stub)
+        verifier.coordinatorURL = "wss://staging.example/ws/provider"
+
+        let report = await verifier.run()
+
+        XCTAssertEqual(report.outcome, .agree, ProviderVerifyFormatter.text(report))
+        XCTAssertEqual(stub.count(feedURL), 1)
+        XCTAssertEqual(stub.count(stagingFeed), 0, "this shell's coordinator is never the proof")
+    }
+
+    func testRunningProviderWithoutCoordinatorOriginIsNeverAgree() async throws {
+        let stub = HTTPStub(routes: [
+            localModelsURL: (200, modelsBody(["mlx-community/Qwen3.6-27B-4bit"])),
+            localStatusURL: (200, statusBody(coordinatorOrigin: nil)),
+            feedURL: (200, feedBody(generatedAt: "2026-09-23T10:04:48Z")),
+        ])
+
+        let report = await verifier(stub, timeout: 60).run()
+
+        XCTAssertNotEqual(report.outcome, .agree)
+        XCTAssertNotEqual(report.exitCode, 0)
+        XCTAssertEqual(report.layers.last?.state, .unverifiable)
+        XCTAssertEqual(stub.count(feedURL), 0, "the shell's coordinator is not checked in its place")
+        let text = ProviderVerifyFormatter.text(report)
+        XCTAssertTrue(text.contains("running provider does not report its coordinator"), text)
+        XCTAssertTrue(text.contains("this shell's config names wss://coordinator.example"), text)
+    }
+
+    func testCoordinatorOriginNormalizationStripsUserinfoPathAndQuery() {
+        XCTAssertEqual(
+            ProviderVerifier.coordinatorOrigin("wss://user:pw@Coordinator.Malibu.Tech:8443/ws/provider?token=x#f"),
+            "wss://coordinator.malibu.tech:8443"
+        )
+        XCTAssertEqual(ProviderVerifier.coordinatorOrigin(" ws://127.0.0.1:8088/ws "), "ws://127.0.0.1:8088")
+        XCTAssertEqual(ProviderVerifier.coordinatorOrigin("HTTPS://coordinator.example"), "https://coordinator.example")
+        XCTAssertNil(ProviderVerifier.coordinatorOrigin("ftp://coordinator.example"))
+        XCTAssertNil(ProviderVerifier.coordinatorOrigin("not a url"))
+        XCTAssertNil(ProviderVerifier.coordinatorOrigin(nil))
+    }
+
+    func testStatusResponseAdvertisesTheServesCoordinatorOrigin() async throws {
+        let status = ProviderStatus(modelID: "model-a", modelLoaded: true, capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil))
+        let snapshot = await status.snapshot()
+        let body = RouterHandler.statusResponse(snapshot, providerID: "p", coordinatorURL: "wss://user:pw@coordinator.example/ws/provider?x=1")
+
+        let contract = try XCTUnwrap(body["local_status_contract"] as? [String: Any])
+        XCTAssertTrue(try XCTUnwrap(contract["capabilities"] as? [String]).contains("coordinator_origin_v1"))
+        XCTAssertEqual(body["coordinator_origin"] as? String, "wss://coordinator.example")
+
+        let unset = RouterHandler.statusResponse(snapshot, providerID: "p", coordinatorURL: nil)
+        XCTAssertTrue(unset["coordinator_origin"] is NSNull)
+    }
+
     // MARK: - Fixtures
 
     private var localStatusURL: String { "http://127.0.0.1:\(port)/v1/status" }
@@ -234,7 +549,11 @@ final class ProviderVerifyTests: XCTestCase {
         status: String = "ready",
         modelLoaded: Bool = true,
         networkState: String = "buyer_serving",
-        hold: String? = nil
+        hold: String? = nil,
+        connected: Bool = true,
+        contextSource: String? = nil,
+        coordinatorOrigin: String? = "wss://coordinator.example",
+        lifecycleState: String? = nil
     ) -> Data {
         var body: [String: Any] = [
             "provider_id": "mp-studio",
@@ -245,7 +564,7 @@ final class ProviderVerifyTests: XCTestCase {
             "network_state": networkState,
             "service_instance": ["started_at": startedAt],
             "capacity": ["max_context_tokens": 200_000, "max_concurrency": 8],
-            "coordinator": ["connected": true, "session": "s-1"],
+            "coordinator": ["connected": connected, "session": "s-1"],
             "catalog": [
                 "release_id": "rel-2026-09-23",
                 "catalog_key": "qwen/qwen3.6-27b",
@@ -254,6 +573,16 @@ final class ProviderVerifyTests: XCTestCase {
             ],
         ]
         body["buyer_serving_hold"] = hold ?? NSNull()
+        if let lifecycleState {
+            body["lifecycle"] = ["record_state": "valid", "state": lifecycleState]
+        }
+        if let coordinatorOrigin {
+            body["local_status_contract"] = ["version": 1, "capabilities": ["coordinator_origin_v1"]]
+            body["coordinator_origin"] = coordinatorOrigin
+        }
+        if let contextSource {
+            body["capacity"] = ["max_context_tokens": 200_000, "max_concurrency": 8, "max_context_source": contextSource]
+        }
         return try! JSONSerialization.data(withJSONObject: body)
     }
 
@@ -318,5 +647,57 @@ private final class HTTPStub: @unchecked Sendable {
             }
             return response
         }
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
+}
+
+/// Answers every loopback connection with one fixed HTTP response.
+private final class LoopbackHTTPResponder: @unchecked Sendable {
+    let port: Int
+    private let fd: Int32
+    private let lock = NSLock()
+    private var accepted = 0
+    var connections: Int { lock.withLock { accepted } }
+
+    init(response: String) throws {
+        let listener = socket(AF_INET, SOCK_STREAM, 0)
+        guard listener >= 0 else { throw URLError(.cannotCreateFile) }
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        address.sin_port = 0
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(listener, $0, length) }
+        }
+        guard bound == 0, listen(listener, 8) == 0 else { close(listener); throw URLError(.cannotConnectToHost) }
+        _ = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(listener, $0, &length) }
+        }
+        fd = listener
+        port = Int(UInt16(bigEndian: address.sin_port))
+        let bytes = Array(response.utf8)
+        Thread.detachNewThread { [weak self] in
+            while true {
+                let client = accept(listener, nil, nil)
+                guard client >= 0 else { return }
+                self?.lock.withLock { self?.accepted += 1 }
+                var buffer = [UInt8](repeating: 0, count: 4096)
+                _ = read(client, &buffer, buffer.count)
+                _ = bytes.withUnsafeBytes { write(client, $0.baseAddress, bytes.count) }
+                close(client)
+            }
+        }
+    }
+
+    func stop() {
+        shutdown(fd, SHUT_RDWR)
+        close(fd)
     }
 }

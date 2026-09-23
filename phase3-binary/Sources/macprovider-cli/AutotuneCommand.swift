@@ -1108,7 +1108,8 @@ struct AutotuneCommand: AsyncParsableCommand {
                 selectedRow: selectedRow,
                 catalogVersion: catalog.value.version,
                 catalogHash: catalogSHA,
-                hardware: hardware
+                hardware: hardware,
+                draftModel: resolvedConfig?.draftModel
             )
         } else {
             serveConfig = nil
@@ -1161,6 +1162,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                 catalogVersion: catalog.value.version,
                 catalogHash: catalogSHA,
                 hardware: hardware,
+                draftModel: resolvedConfig?.draftModel,
                 maxContextOverride: calibration.recommendedContext
             )
         }
@@ -1250,6 +1252,7 @@ struct AutotuneCommand: AsyncParsableCommand {
                 catalogVersion: catalog.value.version,
                 catalogHash: catalogSHA,
                 hardware: hardware,
+                draftModel: resolvedConfig?.draftModel,
                 maxContextOverride: calibrationContext,
                 maxBatchOverride: calibration.recommendedMaxBatch
             )
@@ -1274,7 +1277,8 @@ struct AutotuneCommand: AsyncParsableCommand {
                 return try ConfigApplier(configPath: URL(fileURLWithPath: expanded)).apply(
                     recommendation: core,
                     now: now,
-                    donorMode: applyingDonorFallback
+                    donorMode: applyingDonorFallback,
+                    benchmarkID: request.benchmarks[selected.catalogKey]?.benchmarkID
                 )
             }
         } else {
@@ -1325,7 +1329,8 @@ struct AutotuneCommand: AsyncParsableCommand {
             let applied = try ConfigApplier(configPath: URL(fileURLWithPath: expanded)).apply(
                 recommendation: core,
                 now: now,
-                donorMode: applyingDonorFallback
+                donorMode: applyingDonorFallback,
+                benchmarkID: request.benchmarks[selected.catalogKey]?.benchmarkID
             )
             configurationApplied = true
             if emitJSON {
@@ -1492,7 +1497,8 @@ struct AutotuneCommand: AsyncParsableCommand {
                     selectedRow: selectedRow,
                     catalogVersion: catalog.value.version,
                     catalogHash: catalogSHA,
-                    hardware: hardware
+                    hardware: hardware,
+                    draftModel: resolvedConfig?.draftModel
                 )
             } else {
                 serveConfig = nil
@@ -1665,20 +1671,27 @@ struct AutotuneCommand: AsyncParsableCommand {
         catalogVersion: String,
         catalogHash: String,
         hardware: AutotuneRecommendHardware,
+        draftModel: String?,
         maxContextOverride: Int? = nil,
         maxBatchOverride: Int? = nil
     ) -> RecommendationCore {
-        RecommendationCore(
+        // SPEC-028: serve refuses more than one slot with a draft model.
+        let draftConfigured = ProviderCapacity.draftModelContextLimit(
+            physicalMemoryGB: hardware.memoryGB,
+            draftModel: draftModel
+        ) != nil
+        return RecommendationCore(
             model: selected.model,
             targetContext: Self.spec023RecommendationProbeContext,
             knobs: WinningKnobs(
                 kvBits: nil,
-                maxBatch: maxBatchOverride ?? hardware.recommendedMaxBatch,
+                maxBatch: maxBatchOverride ?? (draftConfigured ? 1 : hardware.recommendedMaxBatch),
                 maxContext: maxContextOverride ?? hardware.recommendedMaxContext(
                     modelID: selectedRow.modelID,
                     verifiedConfigJSONData: selectedBenchmark.modelConfigJSONData,
                     verifiedConfigSHA256: selectedBenchmark.modelConfigSHA256,
-                    catalogMinRAMGB: selectedRow.minRAMGB
+                    catalogMinRAMGB: selectedRow.minRAMGB,
+                    draftModel: draftModel
                 )
             ),
             tpsMedian: selected.tokensPerSecond,

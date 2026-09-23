@@ -450,7 +450,8 @@ final class AutotuneRecommendTests: XCTestCase {
             selectedRow: row,
             catalogVersion: request.candidateCatalog.version,
             catalogHash: request.candidateCatalogSHA256,
-            hardware: request.hardware
+            hardware: request.hardware,
+            draftModel: nil
         )
         let baselineRoot = try XCTUnwrap(
             JSONSerialization.jsonObject(with: Data(result.jsonString(serveConfig: tierCore).utf8)) as? [String: Any]
@@ -491,6 +492,7 @@ final class AutotuneRecommendTests: XCTestCase {
             catalogVersion: request.candidateCatalog.version,
             catalogHash: request.candidateCatalogSHA256,
             hardware: request.hardware,
+            draftModel: nil,
             maxBatchOverride: calibration.recommendedMaxBatch
         )
         let calibratedJSON = calibrated.jsonString(serveConfig: calibratedCore)
@@ -705,7 +707,7 @@ final class AutotuneRecommendTests: XCTestCase {
                 hardwareMemoryGB: request.hardware.memoryGB,
                 catalogMinRAMGB: row.minRAMGB
             ),
-            AutotuneModelContextCap.failClosedMaxContext
+            AutotuneModelContextCap.minimumServeContext
         )
 
         let core = AutotuneCommand.recommendationCoreForConfig(
@@ -714,15 +716,16 @@ final class AutotuneRecommendTests: XCTestCase {
             selectedRow: row,
             catalogVersion: request.candidateCatalog.version,
             catalogHash: request.candidateCatalogSHA256,
-            hardware: request.hardware
+            hardware: request.hardware,
+            draftModel: nil
         )
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString(serveConfig: core).utf8)) as? [String: Any])
         let serveConfig = try XCTUnwrap(root["serve_config"] as? [String: Any])
 
         XCTAssertEqual(core.targetContext, AutotuneCommand.spec023RecommendationProbeContext)
         XCTAssertEqual(row.minRAMGB, request.hardware.memoryGB - AutotuneRecommendEngine.safetyMarginGB)
-        XCTAssertEqual(core.knobs.maxContext, AutotuneModelContextCap.failClosedMaxContext)
-        XCTAssertEqual(serveConfig["max_context_override"] as? Int, AutotuneModelContextCap.failClosedMaxContext)
+        XCTAssertEqual(core.knobs.maxContext, AutotuneModelContextCap.minimumServeContext)
+        XCTAssertEqual(serveConfig["max_context_override"] as? Int, AutotuneModelContextCap.minimumServeContext)
     }
 
     func testRecommendApplyServeConfigRaisesQwenEightBContextOnThirtyTwoGBMac() throws {
@@ -742,7 +745,8 @@ final class AutotuneRecommendTests: XCTestCase {
             selectedRow: row,
             catalogVersion: request.candidateCatalog.version,
             catalogHash: request.candidateCatalogSHA256,
-            hardware: request.hardware
+            hardware: request.hardware,
+            draftModel: nil
         )
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString(serveConfig: core).utf8)) as? [String: Any])
         let serveConfig = try XCTUnwrap(root["serve_config"] as? [String: Any])
@@ -772,7 +776,8 @@ final class AutotuneRecommendTests: XCTestCase {
             selectedRow: row,
             catalogVersion: request.candidateCatalog.version,
             catalogHash: request.candidateCatalogSHA256,
-            hardware: request.hardware
+            hardware: request.hardware,
+            draftModel: nil
         )
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString(serveConfig: core).utf8)) as? [String: Any])
         let serveConfig = try XCTUnwrap(root["serve_config"] as? [String: Any])
@@ -782,7 +787,7 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertEqual(serveConfig["max_context_override"] as? Int, 32_768)
     }
 
-    func testRecommendApplyServeConfigFailsClosedForKnownModelWhenConfigMissing() throws {
+    func testRecommendApplyServeConfigUsesKnownModelBoundWhenConfigMissing() throws {
         let hardware = Self.hardware(chip: "Apple M3 Ultra", memoryGB: 512, bandwidthTier: .s)
 
         XCTAssertEqual(
@@ -790,9 +795,10 @@ final class AutotuneRecommendTests: XCTestCase {
                 modelID: "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit",
                 verifiedConfigJSONData: nil,
                 verifiedConfigSHA256: nil,
-                catalogMinRAMGB: 48
+                catalogMinRAMGB: 48,
+                draftModel: nil
             ),
-            AutotuneModelContextCap.failClosedMaxContext
+            32_768
         )
     }
 
@@ -804,7 +810,7 @@ final class AutotuneRecommendTests: XCTestCase {
         )
     }
 
-    func testRecommendApplyServeConfigFailsClosedForOverflowingKVGeometry() throws {
+    func testRecommendApplyServeConfigUsesRAMTierAndModelBoundForOverflowingKVGeometry() throws {
         let configData = Data(Self.contextConfigJSON(
             maxContext: 262_144,
             hiddenSize: 1_000_000_000,
@@ -819,13 +825,14 @@ final class AutotuneRecommendTests: XCTestCase {
                 modelID: "mlx-community/overflowing-geometry-4bit",
                 verifiedConfigJSONData: configData,
                 verifiedConfigSHA256: Self.sha256Hex(configData),
-                catalogMinRAMGB: 1
+                catalogMinRAMGB: 1,
+                draftModel: nil
             ),
-            AutotuneModelContextCap.failClosedMaxContext
+            200_000
         )
     }
 
-    func testRecommendApplyServeConfigFailsClosedForBooleanKVGeometry() throws {
+    func testRecommendApplyServeConfigUsesRAMTierAndModelBoundForBooleanKVGeometry() throws {
         let configData = Data(#"""
         {
           "max_position_embeddings": 262144,
@@ -842,13 +849,14 @@ final class AutotuneRecommendTests: XCTestCase {
                 modelID: "mlx-community/boolean-geometry-4bit",
                 verifiedConfigJSONData: configData,
                 verifiedConfigSHA256: Self.sha256Hex(configData),
-                catalogMinRAMGB: 1
+                catalogMinRAMGB: 1,
+                draftModel: nil
             ),
-            AutotuneModelContextCap.failClosedMaxContext
+            200_000
         )
     }
 
-    func testRecommendApplyServeConfigFailsClosedForDuplicateTopLevelConfigKeys() throws {
+    func testRecommendApplyServeConfigIgnoresDuplicateTopLevelConfigKeysAndUsesRAMTier() throws {
         let configData = Data(#"""
         {
           "max_position_embeddings": 32768,
@@ -867,13 +875,14 @@ final class AutotuneRecommendTests: XCTestCase {
                 modelID: "mlx-community/duplicate-top-level-config-4bit",
                 verifiedConfigJSONData: configData,
                 verifiedConfigSHA256: Self.sha256Hex(configData),
-                catalogMinRAMGB: 1
+                catalogMinRAMGB: 1,
+                draftModel: nil
             ),
-            AutotuneModelContextCap.failClosedMaxContext
+            200_000
         )
     }
 
-    func testRecommendApplyServeConfigFailsClosedForDuplicateNestedConfigKeys() throws {
+    func testRecommendApplyServeConfigUsesRAMTierAndModelBoundForDuplicateNestedConfigKeys() throws {
         let configData = Data(#"""
         {
           "max_position_embeddings": 262144,
@@ -900,9 +909,10 @@ final class AutotuneRecommendTests: XCTestCase {
                 modelID: "mlx-community/duplicate-nested-config-4bit",
                 verifiedConfigJSONData: configData,
                 verifiedConfigSHA256: Self.sha256Hex(configData),
-                catalogMinRAMGB: 1
+                catalogMinRAMGB: 1,
+                draftModel: nil
             ),
-            AutotuneModelContextCap.failClosedMaxContext
+            200_000
         )
     }
 
@@ -925,13 +935,14 @@ final class AutotuneRecommendTests: XCTestCase {
             selectedRow: row,
             catalogVersion: request.candidateCatalog.version,
             catalogHash: request.candidateCatalogSHA256,
-            hardware: request.hardware
+            hardware: request.hardware,
+            draftModel: nil
         )
 
         XCTAssertEqual(core.knobs.maxContext, 32_768)
     }
 
-    func testRecommendApplyServeConfigFailsClosedWithoutModelContextEvidence() throws {
+    func testRecommendApplyServeConfigUsesRAMTierWithoutModelContextEvidence() throws {
         let hardware = Self.hardware(chip: "Apple M4 Ultra", memoryGB: 256, bandwidthTier: .s)
 
         XCTAssertEqual(
@@ -939,9 +950,160 @@ final class AutotuneRecommendTests: XCTestCase {
                 modelID: "mlx-community/unknown-context-model-4bit",
                 verifiedConfigJSONData: nil,
                 verifiedConfigSHA256: nil,
-                catalogMinRAMGB: 1
+                catalogMinRAMGB: 1,
+                draftModel: nil
             ),
-            AutotuneModelContextCap.failClosedMaxContext
+            200_000
+        )
+    }
+
+    /// #1689 regression: the live Qwen3.6-27B switch on a 256 GB Mac Studio
+    /// wrote `max_context_override: 4000`. The pinned artifact's config.json
+    /// declares `head_dim` 256 with 24 heads over `hidden_size` 5120 (not
+    /// divisible), which the KV-geometry reader rejected, dropping every
+    /// recommendation for the row onto the 4,000-token floor.
+    func testQwen36HybridConfigOn256GBMacDoesNotRecommendFourKContext() throws {
+        var request = try makeRequest()
+        request.hardware = Self.hardware(chip: "Apple M3 Ultra", memoryGB: 256, bandwidthTier: .s)
+        let result = AutotuneRecommendEngine().recommend(request)
+        let selected = try XCTUnwrap(result.selectedCandidate)
+        var benchmark = try XCTUnwrap(request.benchmarks[selected.catalogKey])
+        var row = try XCTUnwrap(request.candidateCatalog.rows[selected.catalogKey])
+        row.minRAMGB = 24
+        Self.bindContextConfig(Self.qwen36TwentySevenBConfigJSON, to: &benchmark)
+        let configData = try XCTUnwrap(benchmark.modelConfigJSONData)
+
+        XCTAssertEqual(AutotuneModelContextCap.declaredMaxContextTokens(configData: configData), 262_144)
+        let memoryCap = try XCTUnwrap(AutotuneModelContextCap.memorySafeContextTokens(
+            configData: configData,
+            hardwareMemoryGB: 256,
+            catalogMinRAMGB: 24
+        ))
+        XCTAssertGreaterThan(memoryCap, 200_000)
+        XCTAssertEqual(AutotuneModelContextCap.kvCacheBytesPerToken(configData: configData), 16 * 4 * 256 * 2 * 2,
+                       "only the 16 full-attention layers of the hybrid stack hold a per-token KV cache")
+
+        let core = AutotuneCommand.recommendationCoreForConfig(
+            selected: selected,
+            selectedBenchmark: benchmark,
+            selectedRow: row,
+            catalogVersion: request.candidateCatalog.version,
+            catalogHash: request.candidateCatalogSHA256,
+            hardware: request.hardware,
+            draftModel: nil
+        )
+        XCTAssertNotEqual(core.knobs.maxContext, 4_000)
+        XCTAssertEqual(core.knobs.maxContext, 200_000)
+    }
+
+    func testDraftModelCapsTheAppliedContextAndSlotsSoServePreflightAcceptsThem() throws {
+        // SPEC-023-R018 draft term (SPEC-028): with `draft_model` configured,
+        // serve refuses an override above the draft cap or more than one slot,
+        // so the value an apply writes must already respect both.
+        var request = try makeRequest()
+        request.hardware = Self.hardware(chip: "Apple M3 Ultra", memoryGB: 256, bandwidthTier: .s)
+        let result = AutotuneRecommendEngine().recommend(request)
+        let selected = try XCTUnwrap(result.selectedCandidate)
+        var benchmark = try XCTUnwrap(request.benchmarks[selected.catalogKey])
+        var row = try XCTUnwrap(request.candidateCatalog.rows[selected.catalogKey])
+        row.minRAMGB = 24
+        Self.bindContextConfig(Self.qwen36TwentySevenBConfigJSON, to: &benchmark)
+        let draftModel = "mlx-community/Qwen3-0.6B-4bit"
+        func core(draftModel: String?) -> RecommendationCore {
+            AutotuneCommand.recommendationCoreForConfig(
+                selected: selected,
+                selectedBenchmark: benchmark,
+                selectedRow: row,
+                catalogVersion: request.candidateCatalog.version,
+                catalogHash: request.candidateCatalogSHA256,
+                hardware: request.hardware,
+                draftModel: draftModel
+            )
+        }
+
+        XCTAssertEqual(core(draftModel: nil).knobs.maxContext, 200_000, "no draft model: the Qwen3.6 256 GB value is unchanged")
+        XCTAssertEqual(core(draftModel: " ").knobs.maxContext, 200_000, "a blank draft_model is no draft model")
+        let drafted = core(draftModel: draftModel)
+        XCTAssertEqual(drafted.knobs.maxContext, ProviderCapacity.draftContextCap(forPhysicalMemoryGB: 256))
+        XCTAssertEqual(drafted.knobs.maxContext, 120_000)
+        XCTAssertEqual(drafted.knobs.maxBatch, 1)
+
+        let configURL = try tempDir().appendingPathComponent("config.yaml")
+        try "model: m\ndraft_model: \(draftModel)\n".write(to: configURL, atomically: true, encoding: .utf8)
+        _ = try ConfigApplier(configPath: configURL).apply(recommendation: drafted, now: Date(), donorMode: false)
+        var applied = try ConfigLoader.load(cli: CLIOverrides(configPath: configURL.path), environment: [:])
+        XCTAssertEqual(applied.maxContextOverride, 120_000)
+        XCTAssertEqual(applied.maxContextSource, .recommendationApply)
+        var undrafted = applied
+        XCTAssertNoThrow(try ServeCommand.runSpecDecodeCapacityPreflight(&applied, physicalMemoryGB: 256))
+        XCTAssertEqual(applied.maxContextOverride, 120_000)
+
+        undrafted.maxContextOverride = core(draftModel: nil).knobs.maxContext
+        XCTAssertThrowsError(
+            try ServeCommand.runSpecDecodeCapacityPreflight(&undrafted, physicalMemoryGB: 256),
+            "the value written without the draft term is the one serve refuses"
+        )
+    }
+
+    func testCompleteLayerTypesWithoutFullAttentionLeaveTheMemoryTermNonBinding() throws {
+        // SPEC-023-R018 item 5: a complete layer_types stack counts only its
+        // full_attention layers. Zero of them means no per-token KV cache, so
+        // the memory-safe term binds nothing (no divide by zero, no fallback
+        // to every layer).
+        let linearOnly = Data(#"""
+        {"num_hidden_layers": 4, "hidden_size": 1024, "num_attention_heads": 8, "num_key_value_heads": 2,
+         "max_position_embeddings": 131072,
+         "layer_types": ["linear_attention", "linear_attention", "linear_attention", "linear_attention"]}
+        """#.utf8)
+        let sha = Self.sha256Hex(linearOnly)
+        let hardware = Self.hardware(chip: "Apple M2", memoryGB: 16, bandwidthTier: .c)
+
+        XCTAssertEqual(AutotuneModelContextCap.kvCacheBytesPerToken(configData: linearOnly), 0)
+        XCTAssertNil(AutotuneModelContextCap.memorySafeContextTokens(configData: linearOnly, hardwareMemoryGB: 16, catalogMinRAMGB: 12))
+        XCTAssertEqual(
+            hardware.recommendedMaxContext(
+                modelID: "mlx-community/linear-only-4bit",
+                verifiedConfigJSONData: linearOnly,
+                verifiedConfigSHA256: sha,
+                catalogMinRAMGB: 12,
+                draftModel: nil
+            ),
+            min(ProviderCapacity.defaultContextTokens(forPhysicalMemoryGB: 16), 131_072)
+        )
+        XCTAssertNil(AutotuneModelContextCap.memoryFitBatchDepth(
+            configData: linearOnly,
+            verifiedConfigSHA256: sha,
+            hardwareMemoryGB: 16,
+            catalogMinRAMGB: 12,
+            calibrationContextTokens: 32_768
+        ))
+    }
+
+    func testUnprovableMemoryFitNeverFallsToTheFourKFloorOnAHighMemoryMac() throws {
+        let hardware = Self.hardware(chip: "Apple M3 Ultra", memoryGB: 256, bandwidthTier: .s)
+        let noGeometry = Data(#"{"max_position_embeddings": 131072}"#.utf8)
+
+        XCTAssertEqual(
+            hardware.recommendedMaxContext(
+                modelID: "mlx-community/no-geometry-4bit",
+                verifiedConfigJSONData: noGeometry,
+                verifiedConfigSHA256: Self.sha256Hex(noGeometry),
+                catalogMinRAMGB: 24,
+                draftModel: nil
+            ),
+            131_072,
+            "without a memory proof the model's declared bound and the RAM-tier default decide"
+        )
+        let geometryWithoutDeclaredMax = Data(Self.contextConfigJSON(maxContext: 0).utf8)
+        XCTAssertEqual(
+            hardware.recommendedMaxContext(
+                modelID: "mlx-community/no-declared-max-4bit",
+                verifiedConfigJSONData: geometryWithoutDeclaredMax,
+                verifiedConfigSHA256: Self.sha256Hex(geometryWithoutDeclaredMax),
+                catalogMinRAMGB: 24,
+                draftModel: nil
+            ),
+            200_000
         )
     }
 
@@ -968,7 +1130,8 @@ final class AutotuneRecommendTests: XCTestCase {
             selectedRow: row,
             catalogVersion: request.candidateCatalog.version,
             catalogHash: request.candidateCatalogSHA256,
-            hardware: request.hardware
+            hardware: request.hardware,
+            draftModel: nil
         )
 
         XCTAssertEqual(row.minRAMGB, 28)
@@ -992,7 +1155,8 @@ final class AutotuneRecommendTests: XCTestCase {
             selectedRow: row,
             catalogVersion: request.candidateCatalog.version,
             catalogHash: request.candidateCatalogSHA256,
-            hardware: request.hardware
+            hardware: request.hardware,
+            draftModel: nil
         )
         let root = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(result.jsonString(serveConfig: core).utf8)) as? [String: Any])
         let serveConfig = try XCTUnwrap(root["serve_config"] as? [String: Any])
@@ -5224,6 +5388,23 @@ final class AutotuneRecommendTests: XCTestCase {
         }
         """
     }
+
+    /// Geometry fields of mlx-community/Qwen3.6-27B-4bit@c000ac2c config.json.
+    private static let qwen36TwentySevenBConfigJSON = """
+    {
+      "model_type": "qwen3_5",
+      "text_config": {
+        "full_attention_interval": 4,
+        "head_dim": 256,
+        "hidden_size": 5120,
+        "layer_types": ["linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention", "linear_attention", "linear_attention", "linear_attention", "full_attention"],
+        "max_position_embeddings": 262144,
+        "num_attention_heads": 24,
+        "num_hidden_layers": 64,
+        "num_key_value_heads": 4
+      }
+    }
+    """
 
     private static func bindContextConfig(_ json: String, to benchmark: inout CandidateBenchmark) {
         let data = Data(json.utf8)
