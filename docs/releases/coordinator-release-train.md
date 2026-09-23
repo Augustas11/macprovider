@@ -1,15 +1,15 @@
-# Runtime Release Train — Pearl coordinator / gateway
+# Coordinator Release Train — Pearl coordinator / gateway
 
-**This file is the single source of truth for Pearl runtime releases** (the
+**This file is the single source of truth for Pearl coordinator releases** (the
 coordinator and gateway binaries plus the Pearl-side deploy assets). The
 provider CLI has its own train: `docs/releases/cli-release-train.md`. Work
 happens across many sessions and agents: read this file before cutting or
-applying a runtime release, and update it in the same commit or PR after any
+applying a coordinator release, and update it in the same commit or PR after any
 release-affecting action. If reality and this file disagree, fix this file.
 
-## How to track the next runtime
+## How to track the next coordinator release
 
-The table below is the net change against the **live** Pearl runtime.
+The table below is the net change against the **live** Pearl coordinator/gateway.
 
 1. A PR that changes what Pearl runs **merges**. Add one row the same day,
    with status `merged`. That covers:
@@ -21,21 +21,21 @@ The table below is the net change against the **live** Pearl runtime.
      `scripts/catalog-verifier-bundle.txt`).
 2. A PR is open but not merged. Status `in progress`; it is **not** in the
    next cut.
-3. A runtime release is cut and applied. Move the live row, delete the shipped
+3. A coordinator release is cut and applied. Move the live row, delete the shipped
    rows, and start a new table.
 
 Do not list spec-only or CONFORMANCE-only PRs. List catalog-content releases
-under "Catalog on Pearl", not as runtime rows: since #1706 they do not need a
-runtime release (see "Which lane" below).
+under "Catalog on Pearl", not as coordinator rows: since #1706 they do not need a
+coordinator release (see "Which lane" below).
 
 ## Core rules (do not violate)
 
-- **Runtime tags share the `v1.8.N` namespace with CLI candidates.** For
+- **Coordinator tags share the `v1.8.N` namespace with CLI candidates.** For
   example, `v1.8.176`, `v1.8.181` and `v1.8.186` are CLI candidate numbers.
   - Take the next unused number.
   - Record it here and in the CLI train, so the two trains never reuse a tag.
   - Check with `git tag -l 'v1.8.*' | sort -V | tail`, and read both train files.
-- **A runtime release never changes the provider binary recommendation.**
+- **A coordinator release never changes the provider binary recommendation.**
   `recommended_binary_version` stays at the promoted CLI stable (`1.8.123`)
   until the CLI train promotes.
 - **One cut of current `main`.**
@@ -59,13 +59,13 @@ Full decision tree: `docs/runbooks/catalog-release-decision-tree.md`.
 
 | Change | Lane |
 |---|---|
-| Coordinator/gateway code, config template, units, nginx, deploy scripts | **This train** (runtime release) |
-| Catalog content only: model hash/row/Tier-2 correction, same policy/keys/signers | Catalog-content lane (`scripts/catalog-content-release.sh`), no runtime release |
+| Coordinator/gateway code, config template, units, nginx, deploy scripts | **This train** (coordinator release) |
+| Catalog content only: model hash/row/Tier-2 correction, same policy/keys/signers | Catalog-content lane (`scripts/catalog-content-release.sh`), no coordinator release |
 | Rate-card rows (pricing) | This train, until #1693 lands |
-| Weekly feed freshness | Automatic renewal (Wednesday); never a runtime release |
+| Weekly feed freshness | Automatic renewal (Wednesday); never a coordinator release |
 | `policy_version`, keyring, CLI payload | Full provider-app release (CLI train) |
 
-A runtime deploy compares the tag's catalog with live (`compare-live`):
+A coordinator deploy compares the tag's catalog with live (`compare-live`):
 - `equivalent`: keeps live.
 - `descends`: activates the tag's catalog.
 - `regression`: aborts unless `CATALOG_REGRESSION_OVERRIDE_REASON` is set (the override is logged).
@@ -82,7 +82,7 @@ Probed 2026-09-24 (`/healthz` and read-only host checks).
 | `recommended_binary_version` | 1.8.123 (CLI train owns this) |
 | Includes | Everything on `main` through #1711, including #1706 (content lane code), #1703 and #1702 |
 
-### Recent runtime releases
+### Recent coordinator releases
 
 | Tag | Commit | Head PR |
 |---|---|---|
@@ -107,7 +107,7 @@ Probed 2026-09-24 (`/healthz` and read-only host checks).
 Renew the Tier-2 catalog before 2026-12-23. An expiry-only re-sign stays in
 the freshness lane.
 
-## Next runtime — net changes vs v1.8.188
+## Next coordinator release — net changes vs v1.8.188
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
@@ -133,7 +133,7 @@ while the binary is dated 2026-09-23.
 3. After (1), run `scripts/catalog-content-release.sh --preflight --commit
    <main sha>` once to confirm the lane reaches GO on a real content change.
 
-## Apply checklist (per runtime release)
+## Apply checklist (per coordinator release)
 
 1. All in-scope rows above are `merged`; no row you need is `in progress`.
 2. Pick the next unused `v1.8.N` (check both trains), create a signed tag on
@@ -147,15 +147,15 @@ while the binary is dated 2026-09-23.
      intentional override;
    - the retained window still holds the immediate predecessor;
    - `verify-live-coordinator-release-rollout` passes.
-5. Update this file: "Live on Pearl", "Recent runtime releases", and reset the
+5. Update this file: "Live on Pearl", "Recent coordinator releases", and reset the
    net-changes table. Put an entry in the CLI train only if the tag number or
    the recommendation matters there.
 
 ## Session protocol
 
-- Update this file when a runtime-affecting PR merges, a runtime tag is cut or
+- Update this file when a coordinator-affecting PR merges, a coordinator tag is cut or
   applied, or a catalog-content release goes live. If the update is **only**
   this file (or other docs), push direct to `origin/main`: no PR, and do not
   wait for CI. If it rides with a code change, put it in that PR.
-- If a live incident needs a hotfix runtime cut, record the owner and the tag
+- If a live incident needs a hotfix coordinator cut, record the owner and the tag
   here **before** dispatch, so a parallel session does not cut the same number.
