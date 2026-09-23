@@ -45,15 +45,17 @@ binary the Mac runs.
 
 ## Next CLI — net changes vs 1.8.123
 
-Last built candidates `v1.8.163`, `v1.8.164`, `v1.8.167`, `v1.8.168`,
-`v1.8.171`, `v1.8.172`, `v1.8.174`, and `v1.8.175` are old or off-train
-for promotion — do not promote them. Signed **`v1.8.176`** is the current
-Studio serving canary
-([run 35592782834](https://github.com/Augustas11/macprovider/actions/runs/35592782834),
-`bd75f86df829ec456a2cac7e1b23ffa4b08b4455`, includes #1665 and #1666),
-live as `live.malibu.provider`. `v1.8.173` is the Pearl
-coordinator/gateway tag, not a CLI package. Do not promote the fleet. Studio
-buyer CB is **canary** (not `on`). Do not raise slots.
+Candidates through `v1.8.176` are old or off-train for promotion. The current
+Studio serving canary is private candidate **181** at `32ea1bd0` (includes
+#1687); its reported `binaryVersion` remains **1.8.123**. Candidate 181 is not
+a public stable tag and must not be promoted to the fleet. Signed private
+candidate **182** at `710255f4` includes #1692 and is staged, not installed;
+the same source is the live coordinator/catalog `v1.8.182` release. Tags
+`v1.8.183` through `v1.8.185` were consumed by the #1699/#1704 Pearl
+money-path releases, so the next provider acceptance candidate is
+**`v1.8.186`**. #1700 landed at `d0aa3556` on top of those fixes; cut the
+candidate from that current-main lineage. Fleet recommendation stays at
+**1.8.123**.
 
 
 | Net change in CLI / Malibu / installer | Status | PR |
@@ -104,26 +106,18 @@ buyer CB is **canary** (not `on`). Do not raise slots.
 | Keep CB canary streams alive past the first lockstep hop | merged | #1665 |
 | Pearl keyed first-turn chats enter Studio CB canary (positive cache hits stay serial until AC-26) | merged | #1666 |
 | SPEC-038 FR-CB10 per-tuple acceptance coverage enforced fail-closed (see precondition below before cutting) | merged | #1672 |
+| Provider WebSocket relay admission follows advertised seats and warm swaps | merged | #1687 |
+| Refresh embedded Tier-2 identity/catalog bindings for the current model set | merged | #1692 |
+| Disable optional template thinking for final-answer mode by loaded-artifact capability | merged | #1700 |
 
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
 
-Coordinator/gateway on live Pearl is **v1.8.173** @ `18da0723ef9ebc829b3cddde829b1028e19853e4`
-([run 35548843512](https://github.com/Augustas11/macprovider/actions/runs/35548843512)).
-That runtime includes #1653 (leftover `</tool_call>` sanitizer + SPEC-006-R014
-system+tools auto-prefix) on top of #1632 / #1638 / #1639. Sticky stays off.
-Fleet CB stays off. Studio 176 buyer CB is **canary**. Fleet Macs still run
-**1.8.123** until the operator-cut CLI is promoted.
-Mac Studio serving canary is `v1.8.176` (signed package extracted into
-`/Users/a1/macprovider/`; also staged at `/Users/a1/candidate-v1.8.176/`; CLI
-SHA-256 `b0bb40342350f5d843db874bc7e0ec40648d3065754ac6ff109955136eca0075`).
-Previous canary `v1.8.175` remains staged at `/Users/a1/candidate-v1.8.175/`.
-Pearl `compatibility_set.target_id` stays `v1.8.123@37e2d232…`; `accepted_ids`
-includes `v1.8.176@bd75f86d…` (8-entry cap; dropped unused `v1.8.121` to make
-room; 175, 174, 172, 171, 170, 123, and 122 remain accepted). Studio
-`continuous_batching` is **canary** (see
-[`continuous-batching-canary-175-enable-2026-09-21.md`](../runbooks/continuous-batching-canary-175-enable-2026-09-21.md)).
-Do not set `on`. Do not raise slots. Do not promote the fleet.
+Coordinator/gateway on live Pearl is **v1.8.182** @ `710255f4`, including the
+signed Tier-2 identity/catalog update from #1692. Fleet Macs and the coordinator
+recommendation remain on provider binary **1.8.123**. The Studio serves private
+candidate 181 at `32ea1bd0`; a newer candidate is staged but not installed.
+Do not promote the fleet from this campaign.
 
 #1632 / #1638 / #1639 / #1653 (coordinator leftover rewrite + gateway R014)
 are coordinator/gateway, not CLI rows. #1653 also has the CLI
@@ -172,14 +166,14 @@ and silently never matching.
 
 | Field | Value |
 |---|---|
-| Last built from `main` | `v1.8.176` **signed** @ `bd75f86df829ec456a2cac7e1b23ffa4b08b4455`, branch `release/candidate-1.8.176`, [run 35592782834](https://github.com/Augustas11/macprovider/actions/runs/35592782834). Compat `Augustas11/macprovider:v1.8.176@bd75f86df829ec456a2cac7e1b23ffa4b08b4455`. Includes #1665 and #1666. Live on Studio. |
-| Mac Studio serving canary | `v1.8.176` @ `bd75f86df829ec456a2cac7e1b23ffa4b08b4455` — signed, live, Pearl session accepted (`serving_buyers`, slots 4, CB **canary**). Previous canary `v1.8.175` remains staged at `/Users/a1/candidate-v1.8.175/`. Do not raise slots. |
+| Last built candidate | Signed private candidate **182** @ `710255f4`, [run 35819108150](https://github.com/Augustas11/macprovider/actions/runs/35819108150). It includes #1692, reports `binaryVersion` 1.8.123, and is staged but not installed. |
+| Mac Studio serving canary | Private candidate **181** @ `32ea1bd0` — live and coordinator-connected. A newer candidate is staged but not installed. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
-| Status | **Do not promote.** Fleet stays on 1.8.123. Studio is on signed 176 with CB **canary**. Do not set `on`. Do not raise slots. |
-| Next candidate | **cut.** `v1.8.176` @ `bd75f86df829ec456a2cac7e1b23ffa4b08b4455`. Candidate tags still do not bump `binaryVersion` (stays 1.8.123). |
-| Pending on `main`, not cut | #1672 (FR-CB10 per-tuple acceptance coverage). A merged CLI row is **not** a cut trigger; recorded here so the precondition above is not missed when a cut does happen. |
-| Why the next cut | Combined #1665 (keep CB canary streams past first lockstep hop) + #1666 (Pearl keyed first-turn enters CB canary). Studio canary is on. Do not set `on`. Do not promote the fleet. |
+| Status | **Do not promote.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 181 remains the serving canary until a reviewed, signed successor passes the hardware campaign. |
+| Next candidate | **v1.8.186, not cut.** #1699, #1704, and #1700 are on `main`; cut from the current tip. Candidate identity must not bump `binaryVersion`; it stays 1.8.123. |
+| Merged on `main`, not in serving 181 | #1692 (Tier-2 identity/catalog bindings; included in staged 182), #1700 (template-capability-driven no-thinking final answers). |
+| Why the next cut | Combine #1687, #1692, #1699, #1704, and #1700 so the same signed Studio candidate can prove answer quality, eight-seat buyer routing, and complete settlement. |
 
 ## E2E tracks (independent gates)
 
@@ -250,6 +244,29 @@ combined candidate**.
   `bash scripts/test-openai-wire-compat.sh` and PR 1638 MERGED). OpenRouter
   **PASS** 29.97s. `~/.pi/agent/settings.json` untouched. Do not promote. Do
   not set CB `on`.
+
+### Track D — Studio Qwen final-answer and settlement recovery
+
+- **Owner / tracker:** #1700, with settlement dependency #1699.
+- **Gate:** install one reviewed and signed post-#1700 candidate on the Studio;
+  strict-pin real Malibu buyer requests to it; verify exact final answers,
+  useful coding/debug/test work, and a multi-turn tool scenario; classify the
+  same request IDs through durable settlement evidence. Then pass at least
+  95/100 unique coding chats at concurrency 4 and exactly 16/16 at concurrency
+  8, with eight requests observed in flight and no recurring routing, queue,
+  transport, malformed-answer, or incomplete-answer failures.
+- **Pre-merge isolated proof:** the local #1700 release build passed exact-answer
+  and no-thinking checks across all 11 loadable cached catalog artifacts: nine
+  Qwen-family artifacts spanning Qwen2.5, Qwen3 Coder/Instruct, Qwen3, Qwen3.5,
+  Qwen3.6, and Qwen3.8, plus GLM-4.5-Air and Nemotron-3-Nano. The fix is driven
+  by the loaded template's
+  `enable_thinking` capability, not a family-name guess. This proves local HTTP
+  rendering only; it does not satisfy buyer routing, billing, receipt, or
+  settlement gates.
+- **Status:** #1699, #1704, and #1700 are merged; #1700 passed required CI,
+  three-lane freeze audit, and local hardware proof. Cut signed candidate
+  **v1.8.186** and run the full live gate. Keep fleet recommendation
+  and `binaryVersion` at 1.8.123.
 
 ## Promotion gate (checklist)
 
