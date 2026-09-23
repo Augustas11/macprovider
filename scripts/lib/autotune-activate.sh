@@ -29,6 +29,12 @@
 #                       (flock is per open file description).
 #   evidence hook       aa_post_activation_evidence <fn>; fn returns non-zero
 #                       and sets AA_EVIDENCE_FAILURE to roll back.
+#   AA_ROLLBACK_WINDOW  optional: the .previous-target a rollback restores
+#                       instead of the exact prior window (content lane: keep a
+#                       failed release that live providers already adopted).
+#                       The caller validates it; empty = exact prior window.
+#   AA_ROLLBACK_POST_HOOK optional fn run after the remote rollback returns;
+#                       it reads AA_ROLLBACK_RC and AA_ROLLBACK_OUT.
 #
 # Interface globals written here: CURRENT_TARGET, ORIG_PREVIOUS_TARGET,
 # LOCK_HELPER_DIR, LOCK_HELPER, WINDOW_HELPER, CONTINUITY_VERIFIER, REMOTE_TMP,
@@ -44,6 +50,10 @@ AA_LEASE_PID=""
 AA_LEASE_WATCHDOG_PID=""
 AA_LEASE_DIR=""
 AA_EVIDENCE_FAILURE=""
+AA_ROLLBACK_WINDOW="${AA_ROLLBACK_WINDOW:-}"
+AA_ROLLBACK_POST_HOOK="${AA_ROLLBACK_POST_HOOK:-}"
+AA_ROLLBACK_RC=""
+AA_ROLLBACK_OUT=""
 
 # The freshness gate: the SAME shipped, sha-verified catalog-release.py
 # continuity-check as renew's pre-lock guard, re-run under the lock.
@@ -511,16 +521,29 @@ TAIL
 # Lease mode rolls back under the still-held lease; if the lease was lost it
 # falls back to taking the locks itself, like renew.
 aa_rollback() {
-  log "ROLLBACK: restoring current -> $CURRENT_TARGET, .previous-target -> ${ORIG_PREVIOUS_TARGET:-<none>}, re-HUPing"
+  local window="$ORIG_PREVIOUS_TARGET"
+  [ -n "$AA_ROLLBACK_WINDOW" ] && window="$AA_ROLLBACK_WINDOW"
+  log "ROLLBACK: restoring current -> $CURRENT_TARGET, .previous-target -> ${window:-<none>}, re-HUPing"
   local prev_arg="__EMPTY__" rb_mode=flock rb_script="$AA_WORK_DIR/rollback.remote.sh"
-  if [ -n "$ORIG_PREVIOUS_TARGET" ]; then
-    prev_arg="$(printf '%s' "$ORIG_PREVIOUS_TARGET" | base64 | tr -d '\n')"
+  if [ -n "$window" ]; then
+    prev_arg="$(printf '%s' "$window" | base64 | tr -d '\n')"
   fi
   if [ "$AA_LOCK_MODE" = lease ] && aa_lease_assert_held; then
     rb_mode=lease
   fi
-  aa_render_rollback_script "$rb_mode" > "$rb_script" || { log "rollback: cannot render the remote rollback"; return 0; }
-  SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$CURRENT_TARGET" "$prev_arg" "$COORDINATOR_UNIT" "$LOCK_HELPER" "releases/$RELEASE_DIRNAME" "$WINDOW_HELPER" < "$rb_script" || true
+  AA_ROLLBACK_RC=0
+  AA_ROLLBACK_OUT=""
+  if aa_render_rollback_script "$rb_mode" > "$rb_script"; then
+    AA_ROLLBACK_OUT="$(SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$CURRENT_TARGET" "$prev_arg" "$COORDINATOR_UNIT" "$LOCK_HELPER" "releases/$RELEASE_DIRNAME" "$WINDOW_HELPER" < "$rb_script" 2>&1)" || AA_ROLLBACK_RC=$?
+    [ -z "$AA_ROLLBACK_OUT" ] || printf '%s\n' "$AA_ROLLBACK_OUT"
+  else
+    AA_ROLLBACK_RC=1
+    log "rollback: cannot render the remote rollback"
+  fi
+  if [ -n "$AA_ROLLBACK_POST_HOOK" ]; then
+    "$AA_ROLLBACK_POST_HOOK" || true
+  fi
+  return 0
 }
 
 # Remote publish. Exit 2 = aborted before swapping current (do not rollback).

@@ -277,7 +277,11 @@ token_loader_tmp="$(mktemp)"
 canary_operator_guard_tmp="$(mktemp)"
 security_mock_dir="$(mktemp -d)"
 trap 'rm -f "$token_validator_tmp" "$token_loader_tmp" "$canary_operator_guard_tmp"; rm -rf "$security_mock_dir"' EXIT
-awk '/^_validate_catalog_canary_auth_token\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$DEPLOY_SH" > "$token_validator_tmp"
+# #1688: deploy sources the canary token helpers from the shared lib.
+TOKEN_LIB="$SCRIPT_DIR/../../../scripts/lib/catalog-canary-token.sh"
+grep -qF '. "$_PEARL_TLS_SCRIPT_DIR/../../scripts/lib/catalog-canary-token.sh"' "$DEPLOY_SH" ||
+  fail "deploy must source the shared catalog canary token lib"
+awk '/^_validate_catalog_canary_auth_token\(\) \{/{f=1} f{print} f&&/^\}$/{exit}' "$TOKEN_LIB" > "$token_validator_tmp"
 grep -qF '_validate_catalog_canary_auth_token()' "$token_validator_tmp" ||
   fail "deploy must keep an extractable portable canary token validator"
 awk '
@@ -285,7 +289,7 @@ awk '
   f { print }
   /^_load_catalog_canary_auth_token\(\) \{/ { loader=1 }
   f && loader && /^\}$/ { exit }
-' "$DEPLOY_SH" > "$token_loader_tmp"
+' "$TOKEN_LIB" > "$token_loader_tmp"
 grep -qF '_load_catalog_canary_auth_token()' "$token_loader_tmp" ||
   fail "deploy must keep an extractable catalog canary token loader"
 awk '
@@ -293,7 +297,7 @@ awk '
   f { print }
   /^_catalog_canary_auth_token_matches_operator_key\(\) \{/ { matcher=1 }
   f && matcher && /^\}$/ { exit }
-' "$DEPLOY_SH" > "$canary_operator_guard_tmp"
+' "$TOKEN_LIB" > "$canary_operator_guard_tmp"
 grep -qF '_catalog_canary_auth_token_matches_operator_key()' "$canary_operator_guard_tmp" ||
   fail "deploy must keep an extractable canary operator-key proof guard"
 grep -qF 'CATALOG_CANARY_AUTH_TOKEN must be the coordinator operator key' "$DEPLOY_SH" ||
@@ -302,8 +306,8 @@ grep -qF '/v1/pool/check?details=deployment is operator-only' "$DEPLOY_SH" ||
   fail "deploy must document that service tokens cannot satisfy deployment evidence"
 grep -qF 'CATALOG_CANARY_AUTH_TOKEN_FILE' "$DEPLOY_SH" &&
   grep -qF 'macOS Keychain service=' "$DEPLOY_SH" &&
-  grep -qF '/usr/bin/security find-generic-password -w' "$DEPLOY_SH" &&
-  ! grep -qF 'command -v security' "$DEPLOY_SH" ||
+  grep -qF '/usr/bin/security find-generic-password -w' "$TOKEN_LIB" &&
+  ! grep -qF 'command -v security' "$DEPLOY_SH" "$TOKEN_LIB" ||
   fail "deploy must support stable file/keychain catalog-canary token sources"
 # BSD grep rejects interval upper bounds greater than 255. Length checks belong
 # in Bash so the production deploy remains portable on the operator Mac.

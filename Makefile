@@ -143,6 +143,9 @@ test-dist:
 	bash -n scripts/renew-autotune-static-feed.sh
 	bash scripts/test-autotune-activate.sh
 	bash -n scripts/lib/autotune-activate.sh
+	bash scripts/test-catalog-content-release.sh
+	bash -n scripts/catalog-content-release.sh
+	bash -n scripts/lib/catalog-canary-token.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_feed_freshness
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pearl_autotune_deploy_lock
 	bash scripts/test-tier2-provider-artifact.sh
