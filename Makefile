@@ -141,6 +141,8 @@ test-dist:
 	bash scripts/test-install-sh-consumer-health-alarm.sh
 	bash scripts/test-renew-autotune-static-feed-signed.sh
 	bash -n scripts/renew-autotune-static-feed.sh
+	bash scripts/test-autotune-activate.sh
+	bash -n scripts/lib/autotune-activate.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_feed_freshness
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pearl_autotune_deploy_lock
 	bash scripts/test-tier2-provider-artifact.sh

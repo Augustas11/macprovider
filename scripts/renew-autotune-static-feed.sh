@@ -102,17 +102,18 @@ for _ssh_opt in "${SSH_OPTS[@]}"; do
   RSYNC_RSH="$RSYNC_RSH $_ssh_opt"
 done
 
+# #1688: the Pearl activation machinery (helper shipping, locked publish, window,
+# swap, SIGHUP, exact rollback) is shared with the catalog-content lane.
+# shellcheck source=scripts/lib/autotune-activate.sh
+. "$SCRIPT_DIR/lib/autotune-activate.sh"
+
 cleanup() {
   local rc=$?
   # Release the remote publish lock if this run acquired it (MED-3).
   if [ -n "$LOCK_HELD" ]; then
     SSH "rmdir '$REMOTE_AUTOTUNE_DIR/.renew.lock'" >/dev/null 2>&1 || true
   fi
-  if [ -n "$LOCK_HELPER_DIR" ]; then
-    SSH "rm -rf '$LOCK_HELPER_DIR'" >/dev/null 2>&1 || true
-  elif [ -n "$LOCK_HELPER" ]; then
-    SSH "rm -f '$LOCK_HELPER'" >/dev/null 2>&1 || true
-  fi
+  aa_cleanup_remote_helpers
   [ -n "$STAGING" ] && [ -d "$STAGING" ] && rm -rf "$STAGING"
   [ -n "$PREVIOUS_RELEASE_DIR" ] && [ -d "$PREVIOUS_RELEASE_DIR" ] && rm -rf "$PREVIOUS_RELEASE_DIR"
   if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
@@ -307,60 +308,10 @@ if ! SSH "mkdir '$REMOTE_AUTOTUNE_DIR/.renew.lock'" 2>/dev/null; then
 fi
 LOCK_HELD=1
 
-# Capture BOTH the outgoing current target and the existing previous-target, so a
-# rollback can restore the exact prior state (MED-2).
-CURRENT_TARGET="$(SSH "readlink '$REMOTE_AUTOTUNE_DIR/current'")" || fatal "cannot read current symlink on $PEARL_SSH"
-CURRENT_TARGET="${CURRENT_TARGET#./}"
-[ -n "$CURRENT_TARGET" ] || fatal "empty current target"
-ORIG_PREVIOUS_TARGET="$(SSH "cat '$REMOTE_AUTOTUNE_DIR/.previous-target' 2>/dev/null || true")"
-ORIG_PREVIOUS_TARGET="${ORIG_PREVIOUS_TARGET%"${ORIG_PREVIOUS_TARGET##*[![:space:]]}"}"
-
-# MED-1 (regression fix): CURRENT_TARGET and ORIG_PREVIOUS_TARGET are read from
-# the remote host and later passed through `ssh ... bash -s -- ...`, where the
-# remote shell re-parses argv. Validate their shape to exactly
-# `releases/<single-segment>` (the coordinator parser's shape) so a crafted
-# `current` symlink or `.previous-target` cannot inject remote shell. Empty is
-# allowed ONLY for the previous-target.
-validate_release_ref() {
-  local value="$1" label="$2" allow_empty="$3"
-  if [ -z "$value" ]; then
-    [ "$allow_empty" = "empty_ok" ] && return 0
-    fatal "empty $label"
-  fi
-  case "$value" in
-    releases/*) ;;
-    *) fatal "unexpected $label shape (want releases/<id>): $value" ;;
-  esac
-  local seg="${value#releases/}"
-  case "$seg" in
-    ""|*[!A-Za-z0-9._-]*) fatal "unsafe $label (single safe segment required): $value" ;;
-  esac
-}
-validate_previous_target_window() {
-  local value="$1"
-  [ -z "$value" ] && return 0
-  local n=0 line
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    [ -z "$line" ] && continue
-    n=$((n + 1))
-    if [ "$n" -gt 3 ]; then
-      fatal "previous-target has more than 3 releases"
-    fi
-    validate_release_ref "$line" "previous-target line" "no_empty"
-  done <<EOF
-$value
-EOF
-}
-validate_release_ref "$CURRENT_TARGET" "current target" "no_empty"
-validate_previous_target_window "$ORIG_PREVIOUS_TARGET"
+aa_read_live_targets
 log "current live release: $CURRENT_TARGET (prior previous-target: ${ORIG_PREVIOUS_TARGET:-<none>})"
 
-# Refuse to publish a release id that already exists (idempotency / no clobber).
-if SSH "test -e '$REMOTE_AUTOTUNE_DIR/releases/$RELEASE_DIRNAME'"; then
-  fatal "release $RELEASE_DIRNAME already exists on $PEARL_SSH; nothing to do (already renewed with this content+timestamp)"
-fi
+aa_refuse_existing_release
 
 # CONTENT-CONTINUITY GUARD: a renewal must change ONLY dates. Compare the new
 # feed content (version/generated_at stripped) against the live release; abort
@@ -395,201 +346,16 @@ esac
   || fatal "content drift vs live feed — renewal is freshness-only; this is a content release — use the catalog-content lane, not freshness renewal"
 log "content continuity confirmed (dates-only delta)"
 
-# Rollback restores the EXACT prior state — current AND .previous-target — then
-# re-HUPs. Only call this after this run has swapped `current` (remote exit 1).
-# Pre-mutation failures (remote exit 2) must not rollback: that would be the
-# first mutation and can clobber an in-flight coordinator deploy. Rollback
-# itself takes the same Pearl deploy locks; if they are held, skip mutation.
-rollback() {
-  log "ROLLBACK: restoring current -> $CURRENT_TARGET, .previous-target -> ${ORIG_PREVIOUS_TARGET:-<none>}, re-HUPing"
-  PREV_ARG="__EMPTY__"
-  if [ -n "$ORIG_PREVIOUS_TARGET" ]; then
-    PREV_ARG="$(printf '%s' "$ORIG_PREVIOUS_TARGET" | base64 | tr -d '\n')"
-  fi
-  SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$CURRENT_TARGET" "$PREV_ARG" "$COORDINATOR_UNIT" "$LOCK_HELPER" "releases/$RELEASE_DIRNAME" "$WINDOW_HELPER" <<'RB' || true
-set -euo pipefail
-root="$1"; cur="$2"; prev_b64="$3"; unit="$4"; helper="$5"; expected="$6"; window="$7"
-if [ "$prev_b64" = "__EMPTY__" ]; then prev=""; else prev="$(printf '%s' "$prev_b64" | base64 -d)"; fi
-# The exact prior window; an empty file makes restore remove .previous-target.
-prior_window="$(dirname "$window")/prior-window"
-if [ -n "$prev" ]; then printf '%s\n' "$prev" > "$prior_window"; else : > "$prior_window"; fi
-python3 "$helper" validate || { echo "rollback: lock validation failed; not mutating" >&2; exit 1; }
-exec 8</run/lock/macprovider-pearl-updater.lock || { echo "rollback: cannot open updater lock; not mutating" >&2; exit 1; }
-flock -n 8 || { echo "rollback: Pearl updater lock held; not mutating" >&2; exit 1; }
-exec 9</opt/macprovider/.coordinator-deploy.lock || { echo "rollback: cannot open coordinator lock; not mutating" >&2; exit 1; }
-flock -n 9 || { echo "rollback: coordinator deploy lock held; not mutating" >&2; exit 1; }
-live="$(readlink "$root/current")" || { echo "rollback: cannot read current; not mutating" >&2; exit 1; }
-live="${live#./}"
-if [ "$live" = "$expected" ]; then
-  ln -sfn "$cur" "$root/.current.rollback"
-  mv -Tf "$root/.current.rollback" "$root/current"
-  window_rc=0
-  python3 -I "$window" restore --root "$root" --from-file "$prior_window" --expect-current "$cur" || window_rc=$?
-  pid="$(systemctl show -p MainPID --value "$unit")"
-  [ -n "$pid" ] && [ "$pid" != "0" ] && kill -HUP "$pid" || true
-  [ "$window_rc" -eq 0 ] || { echo "rollback: rolled back current to $cur but .previous-target restore failed" >&2; exit 1; }
-  echo "rolled back to $cur"
-elif [ "$live" = "$cur" ]; then
-  python3 -I "$window" restore --root "$root" --from-file "$prior_window" --expect-current "$cur"
-  echo "rollback: restored .previous-target only (current still $cur)"
-else
-  echo "rollback: current is $live, not $expected; not mutating"
-  exit 0
-fi
-RB
-}
-
-# Push the new release dir under a staging name first, then move into place.
-REMOTE_TMP=".incoming-$RELEASE_DIRNAME.$$"
-LOCK_HELPER_DIR="$(SSH 'umask 077 && mktemp -d /tmp/macprovider-autotune-lock.XXXXXXXX')" \
-  || fatal "cannot create remote lock-helper directory"
-LOCK_HELPER_DIR="${LOCK_HELPER_DIR//$'\n'/}"
-case "$LOCK_HELPER_DIR" in
-  /tmp/macprovider-autotune-lock.[A-Za-z0-9]*) ;;
-  *) fatal "unsafe LOCK_HELPER_DIR: $LOCK_HELPER_DIR" ;;
-esac
-case "$LOCK_HELPER_DIR" in *[!A-Za-z0-9._/-]*) fatal "unsafe LOCK_HELPER_DIR: $LOCK_HELPER_DIR" ;; esac
-LOCK_HELPER="$LOCK_HELPER_DIR/pearl_autotune_deploy_lock.py"
-log "installing Pearl lock validator"
-SSH "cat >'$LOCK_HELPER' && chown root:root '$LOCK_HELPER' && chmod 0700 '$LOCK_HELPER'" \
-  < "$SCRIPT_DIR/pearl_autotune_deploy_lock.py" \
-  || fatal "cannot install pearl_autotune_deploy_lock.py on $PEARL_SSH"
-# #1688: scripts/autotune_window.py is the single .previous-target writer.
-WINDOW_HELPER="$LOCK_HELPER_DIR/autotune_window.py"
-log "installing Pearl previous-target window writer"
-SSH "cat >'$WINDOW_HELPER' && chown root:root '$WINDOW_HELPER' && chmod 0700 '$WINDOW_HELPER'" \
-  < "$SCRIPT_DIR/autotune_window.py" \
-  || fatal "cannot install autotune_window.py on $PEARL_SSH"
-WINDOW_HELPER_SHA="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$SCRIPT_DIR/autotune_window.py")"
-REMOTE_WINDOW_HELPER_SHA="$(SSH "sha256sum '$WINDOW_HELPER'")" || fatal "cannot hash autotune_window.py on $PEARL_SSH"
-[ "${REMOTE_WINDOW_HELPER_SHA%% *}" = "$WINDOW_HELPER_SHA" ] \
-  || fatal "autotune_window.py on $PEARL_SSH does not match the reviewed copy"
-# #1688: the under-lock continuity recheck runs the SAME catalog-release.py
-# continuity-check as the pre-lock guard, from the dependency-closed verifier
-# bundle, so there is no inline mirror on Pearl to drift out of step.
-log "installing Pearl catalog continuity verifier bundle"
-SSH "mkdir -m 0700 '$LOCK_HELPER_DIR/scripts'" || fatal "cannot create remote verifier bundle directory"
-while IFS= read -r bundle_path || [ -n "$bundle_path" ]; do
-  case "$bundle_path" in '#'*|'') continue ;; esac
-  case "$bundle_path" in
-    scripts/.|scripts/..) fatal "invalid catalog verifier bundle entry: $bundle_path" ;;
-    scripts/*) ;;
-    *) fatal "invalid catalog verifier bundle entry: $bundle_path" ;;
-  esac
-  case "${bundle_path#scripts/}" in ""|*[!A-Za-z0-9._-]*) fatal "invalid catalog verifier bundle entry: $bundle_path" ;; esac
-  remote_bundle_file="$LOCK_HELPER_DIR/$bundle_path"
-  SSH "cat >'$remote_bundle_file' && chown root:root '$remote_bundle_file' && chmod 0600 '$remote_bundle_file'" \
-    < "$REPO_ROOT/$bundle_path" \
-    || fatal "cannot install $bundle_path on $PEARL_SSH"
-  bundle_sha="$(python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$REPO_ROOT/$bundle_path")"
-  remote_bundle_sha="$(SSH "sha256sum '$remote_bundle_file'")" || fatal "cannot hash $bundle_path on $PEARL_SSH"
-  [ "${remote_bundle_sha%% *}" = "$bundle_sha" ] \
-    || fatal "$bundle_path on $PEARL_SSH does not match the reviewed copy"
-done < "$SCRIPT_DIR/catalog-verifier-bundle.txt"
-CONTINUITY_VERIFIER="$LOCK_HELPER_DIR/scripts/catalog-release.py"
-SSH "test -f '$CONTINUITY_VERIFIER'" || fatal "catalog verifier bundle must list scripts/catalog-release.py"
-
-log "uploading signed release bytes"
-rsync -e "$RSYNC_RSH" -a --delete \
-  "$RELEASE_STAGE/" "$PEARL_SSH:$REMOTE_AUTOTUNE_DIR/releases/$REMOTE_TMP/" \
-  || fatal "rsync failed"
-
-# Remote publish. Exit 2 = aborted before swapping current (do not rollback).
-# Exit 1 = swapped current then failed (rollback under locks).
-# The coordinator PID is resolved FIRST so a missing daemon aborts BEFORE any
-# mutation (HIGH-2). CURRENT_TARGET already carries the `releases/<id>` prefix,
-# so it must NOT be re-prefixed (HIGH-1).
-# Hold deploy-pearl-vps.sh locks for the swap window so a coordinator deploy
-# cannot clobber `current`. Validate existing lock files; do not create them
-# (a 0644 create would fail the coordinator deploy's 0600 root:root check).
-# Remote stdout is captured for the RENEW_COVERAGE_* report lines (#1688 B2).
-PUBLISH_OUT_FILE="$STAGING/publish.out"
-set +e
-SSH bash -s -- "$REMOTE_AUTOTUNE_DIR" "$REMOTE_TMP" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$COORDINATOR_UNIT" "$LOCK_HELPER" "$WINDOW_HELPER" "$CONTINUITY_VERIFIER" <<'REMOTE' >"$PUBLISH_OUT_FILE"
-set -euo pipefail
-root="$1"; incoming="$2"; final="$3"; prev="$4"; unit="$5"; helper="$6"; window="$7"; verifier="$8"
-incoming_path="$root/releases/$incoming"
-mutated=0
-abort_pre_mutation() {
-  echo "$1" >&2
-  rm -rf "$incoming_path" >/dev/null 2>&1 || true
-  exit 2
-}
-trap 'if [ "$mutated" -eq 1 ]; then exit 1; else rm -rf "$incoming_path" >/dev/null 2>&1 || true; exit 2; fi' ERR
-# Resolve the reload target BEFORE mutating anything, so a dead daemon aborts clean.
-pid="$(systemctl show -p MainPID --value "$unit")"
-[ -n "$pid" ] && [ "$pid" != "0" ] || abort_pre_mutation "coordinator MainPID unavailable; not mutating"
-python3 "$helper" validate || abort_pre_mutation "Pearl deploy lock files failed validation; not mutating"
-exec 8</run/lock/macprovider-pearl-updater.lock || abort_pre_mutation "cannot open /run/lock/macprovider-pearl-updater.lock; not mutating"
-flock -n 8 || abort_pre_mutation "Pearl updater lock held; not mutating"
-exec 9</opt/macprovider/.coordinator-deploy.lock || abort_pre_mutation "cannot open /opt/macprovider/.coordinator-deploy.lock; not mutating"
-flock -n 9 || abort_pre_mutation "coordinator deploy lock held; not mutating"
-live_current="$(readlink "$root/current")" || abort_pre_mutation "cannot read current under lock"
-live_current="${live_current#./}"
-[ "$live_current" = "$prev" ] || abort_pre_mutation "current moved under lock ($live_current != $prev); not mutating"
-# Re-check dates-only continuity under the lock so a coordinator catalog deploy
-# that landed after the pre-lock read cannot be overwritten by this restamp.
-# Same rules as the pre-lock guard: the shipped, sha-verified continuity-check.
-python3 -I "$verifier" continuity-check --incoming "$incoming_path" --live "$root/current" \
-  || abort_pre_mutation "content drift under lock; not mutating"
-cd "$root/releases"
-chown -R root:macprovider "$incoming"
-chmod 0750 "$incoming"; chmod 0640 "$incoming"/*
-mv "$incoming" "$final"
-# #1688 B2: a freshness renewal mints a NEW release_id (SPEC-023 §3.7.8: a
-# release_id bound to two feed digest sets is permanently rejected, so a restamp
-# cannot keep the live id), and each one takes a retained-window slot. Report
-# which advertised releases fall out of the window; never block the renewal.
-# The operator key is read from the running coordinator's own environment and
-# rides curl --config stdin; it is never echoed, written, or put in argv.
-renewal_coverage() {
-  local key_env key status poolz rc=0
-  umask 077
-  key_env="$(sed -n 's/^[[:space:]]\{1,\}operator_key:[[:space:]]*env:\([A-Za-z_][A-Za-z0-9_]*\)[[:space:]]*\(#.*\)\{0,1\}$/\1/p' /opt/macprovider/coordinator.yaml | head -n 1)"
-  [ -n "$key_env" ] || { echo "renewal coverage: auth.operator_key is not an env: reference" >&2; return 10; }
-  key="$(tr '\0' '\n' < "/proc/$pid/environ" | sed -n "s/^${key_env}=//p" | head -n 1)"
-  [ -n "$key" ] || { echo "renewal coverage: the coordinator process has no $key_env" >&2; return 10; }
-  poolz="$(mktemp /tmp/macprovider-renew-poolz.XXXXXXXX)" || return 10
-  status="$(printf 'header = "Authorization: Bearer %s"\n' "$key" | curl --config - -sS --noproxy '*' --max-time 10 --max-filesize 16777216 -o "$poolz" -w '%{http_code}' http://127.0.0.1:8444/poolz)" \
-    || { key=""; rm -f "$poolz"; echo "renewal coverage: coordinator /poolz is unreachable on Pearl loopback" >&2; return 10; }
-  key=""
-  [ "$status" = 200 ] || { rm -f "$poolz"; echo "renewal coverage: coordinator /poolz answered HTTP $status" >&2; return 10; }
-  python3 -I "$window" coverage --root "$root" --incoming "releases/$final" --poolz-json "$poolz" || rc=$?
-  rm -f "$poolz"
-  return "$rc"
-}
-cov_rc=0
-cov_json="$(renewal_coverage)" || cov_rc=$?
-echo "RENEW_COVERAGE_RC=$cov_rc"
-echo "RENEW_COVERAGE_JSON=$cov_json"
-# Persistent autotune metadata starts here. Set mutated before the first write so
-# a failure after .previous-target (and before current swap) still rollbacks.
-mutated=1
-# Prepend the outgoing current onto the retained window (max 3 unique
-# releases/). A single-hop overwrite kicks every serve process still
-# advertising the hop before last. See docs/reports/2026-09-19-catalog-one-hop-admission-outage.md
-python3 -I "$window" plan --root "$root" --incoming "releases/$final"
-python3 -I "$window" apply --root "$root" --incoming "releases/$final" --expect-current "$prev"
-# Atomic symlink swap: create the new link beside `current`, then rename over.
-ln -sfn "releases/$final" "$root/.current.next"
-mv -Tf "$root/.current.next" "$root/current"
-echo "retargeted current -> releases/$final (previous-target=$prev)"
-# SIGHUP the running coordinator: in-process config reload (#1268), NOT a restart.
-kill -HUP "$pid"
-echo "sent SIGHUP to $unit (pid $pid)"
-REMOTE
-publish_rc=$?
-set -e
-PUBLISH_OUT="$(cat "$PUBLISH_OUT_FILE" 2>/dev/null || true)"
-printf '%s\n' "$PUBLISH_OUT" | grep -v '^RENEW_COVERAGE_' || true
-if [ "$publish_rc" -eq 0 ]; then
-  :
-elif [ "$publish_rc" -eq 1 ]; then
-  rollback
-  fatal "remote publish failed after mutating current"
-else
-  fatal "remote publish aborted before mutating current (rc=$publish_rc)"
-fi
+# Ship + verify the helpers, stage the immutable release, then publish under the
+# Pearl deploy locks: the continuity gate re-runs under the lock, coverage is
+# warn-and-publish (#1688 B2), and a post-swap failure rolls back exactly.
+aa_install_helpers
+aa_upload_release "$RELEASE_STAGE"
+AA_WORK_DIR="$STAGING"
+AA_GATE_SNIPPET="$AA_GATE_CONTINUITY_CHECK"
+AA_COVERAGE_POLICY=warn
+AA_LOCK_MODE=flock
+aa_publish
 
 log "waiting for hot-reload to apply"
 sleep 5
@@ -602,7 +368,8 @@ sleep 5
 # stamped. A window-based freshness check could pass on a prior/concurrent feed
 # that happens to be recent; an exact match proves the coordinator reloaded THIS
 # release. generated_at is second-precision and unique to this run.
-SERVED_JSON="$(curl -fsS --max-time 20 "$COORDINATOR_HEALTH_URL" 2>/dev/null)" || { rollback; fatal "served rate-card unreachable after reload"; }
+renew_served_feed_evidence() {
+SERVED_JSON="$(curl -fsS --max-time 20 "$COORDINATOR_HEALTH_URL" 2>/dev/null)" || { AA_EVIDENCE_FAILURE="served rate-card unreachable after reload"; return 1; }
 # The check body is plain Python with no backslashes: a backslash-escaped
 # quote inside a bash single-quoted f-string is a SyntaxError at deploy time
 # (2026-09-16 renewal rolled back a GOOD reload on exactly that), and a
@@ -618,9 +385,11 @@ verdict = "OK" if ok else "MISMATCH"
 print("served generated_at=%s (expected exactly %s) -> %s" % (gen, expected, verdict), file=sys.stderr)
 sys.exit(0 if ok else 1)
 ' "$NOW_ISO"; then
-  rollback
-  fatal "served feed did not activate to this deploy (generated_at != ${NOW_ISO}) after SIGHUP"
+  AA_EVIDENCE_FAILURE="served feed did not activate to this deploy (generated_at != ${NOW_ISO}) after SIGHUP"
+  return 1
 fi
+}
+aa_post_activation_evidence renew_served_feed_evidence
 
 log "SUCCESS: coordinator now serving the renewed feed ${RELEASE_DIRNAME} (no restart, fleet undisturbed)."
 log "previous release retained as .previous-target -> $CURRENT_TARGET"
