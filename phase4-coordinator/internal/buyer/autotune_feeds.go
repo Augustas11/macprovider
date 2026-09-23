@@ -320,7 +320,7 @@ func AutotuneReleaseRoot(cfg config.AutotuneFeedsConfig) (root, previousTarget s
 
 func parseReleaseTargetLine(label, target string) (string, error) {
 	releaseID := strings.TrimPrefix(target, "releases/")
-	if releaseID == target || releaseID == "" || strings.Contains(releaseID, "/") {
+	if releaseID == target || releaseID == "" || releaseID == "." || releaseID == ".." || strings.Contains(releaseID, "/") {
 		return "", fmt.Errorf("invalid %s %q", label, target)
 	}
 	for _, r := range releaseID {

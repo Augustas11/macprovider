@@ -117,7 +117,9 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 	}
 	// Only a validated catalog envelope binds a release: a bridge/legacy
 	// session's digest never reaches the index (hello and heartbeat legs).
-	for _, mode := range []string{"update_bridge", "legacy", "legacy_bridge", "not_required", ""} {
+	// row_continuity (SPEC-023-R010) is validated but authenticated without
+	// an artifact feed, so it binds only the primary row, never a member.
+	for _, mode := range []string{"update_bridge", "legacy", "legacy_bridge", "not_required", "row_continuity", ""} {
 		if got := admittedCandidateCatalogSHA256(mode, catalog.SHA256); got != "" {
 			t.Fatalf("mode %q must not bind a release, got %q", mode, got)
 		}
@@ -131,6 +133,15 @@ func TestArtifactFeedIdentityVerifiesExactMemberForTheAdmittedRelease(t *testing
 		CandidateCatalogSHA256: catalog.SHA256, CatalogAdmissionMode: "update_bridge"}
 	if v := server.verifyModelIdentity(providerIdentityRequest(bridge)); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
 		t.Fatalf("bridge session must not bind artifact identity: %+v", v)
+	}
+	bridge.CatalogAdmissionMode = "row_continuity"
+	if v := server.verifyModelIdentity(providerIdentityRequest(bridge)); v.Status != pool.HashStatusMismatch || v.Artifact != nil {
+		t.Fatalf("row-continuity session must not bind artifact identity: %+v", v)
+	}
+	rowContinuityPrimary := bridge
+	rowContinuityPrimary.ModelHash, rowContinuityPrimary.ModelHashAlgorithm = rowHash, modelidentity.SnapshotManifestV1
+	if v := server.verifyModelIdentity(providerIdentityRequest(rowContinuityPrimary)); v.Status != pool.HashStatusVerified || v.Artifact != nil {
+		t.Fatalf("row-continuity session still verifies the primary row: %+v", v)
 	}
 	bridge.CatalogAdmissionMode = "current"
 	if v := server.verifyModelIdentity(providerIdentityRequest(bridge)); v.Status != pool.HashStatusVerified || v.Artifact == nil {

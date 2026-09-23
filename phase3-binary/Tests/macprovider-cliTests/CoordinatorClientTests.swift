@@ -6173,14 +6173,17 @@ final class CoordinatorClientTests: XCTestCase {
 
     private static func refreshedCatalogEnvelope(
         releaseID: String = "release-b",
+        candidateSHA256: String = String(repeating: "c", count: 64),
+        signerKeyID: String = "operator-2026-01",
+        rowIdentity: String = String(repeating: "b", count: 64),
         modelSHA256: String = "model-hash"
     ) -> CoordinatorClient.CatalogEnvelope {
         CoordinatorClient.CatalogEnvelope(
             releaseID: releaseID,
             policyVersion: "policy-a",
-            candidateSHA256: String(repeating: "c", count: 64),
-            signerKeyID: "operator-2026-01",
-            rowIdentity: String(repeating: "d", count: 64),
+            candidateSHA256: candidateSHA256,
+            signerKeyID: signerKeyID,
+            rowIdentity: rowIdentity,
             modelSHA256: modelSHA256
         )
     }
@@ -6250,13 +6253,20 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await run.client.helloMessage()
         XCTAssertEqual(hello["catalog_release_id"] as? String, "release-b")
         XCTAssertEqual(hello["catalog_candidate_sha256"] as? String, String(repeating: "c", count: 64))
-        XCTAssertEqual(hello["catalog_row_identity"] as? String, String(repeating: "d", count: 64))
+        XCTAssertEqual(hello["catalog_row_identity"] as? String, String(repeating: "b", count: 64))
         XCTAssertEqual(hello["catalog_policy_version"] as? String, "policy-a")
         XCTAssertEqual(hello["catalog_signer_key_id"] as? String, "operator-2026-01")
     }
 
     func testCatalogIncompatibleRefreshKeepsEnvelopeWhenRowChangedOrUnverified() async throws {
-        for refreshed in [Self.refreshedCatalogEnvelope(modelSHA256: "different-model-hash"), nil] {
+        // Same weights but a changed row identity (gate or structured policy
+        // change) still needs a restart; so do changed weights and no
+        // verified same-row document.
+        for refreshed in [
+            Self.refreshedCatalogEnvelope(modelSHA256: "different-model-hash"),
+            Self.refreshedCatalogEnvelope(rowIdentity: String(repeating: "e", count: 64)),
+            nil,
+        ] {
             let run = try await runCatalogIncompatibleRejections(1, refreshed: refreshed)
             XCTAssertEqual(run.refreshCalls, 1)
             let hello = await run.client.helloMessage()
@@ -6264,6 +6274,20 @@ final class CoordinatorClientTests: XCTestCase {
             XCTAssertEqual(hello["catalog_candidate_sha256"] as? String, String(repeating: "a", count: 64))
             XCTAssertEqual(hello["catalog_row_identity"] as? String, String(repeating: "b", count: 64))
         }
+    }
+
+    func testCatalogIncompatibleRefreshAdoptsSameBytesUnderNewSigner() async throws {
+        let run = try await runCatalogIncompatibleRejections(
+            1,
+            refreshed: Self.refreshedCatalogEnvelope(
+                releaseID: "release-a",
+                candidateSHA256: String(repeating: "a", count: 64),
+                signerKeyID: "operator-2026-02"
+            )
+        )
+        let hello = await run.client.helloMessage()
+        XCTAssertEqual(hello["catalog_signer_key_id"] as? String, "operator-2026-02")
+        XCTAssertEqual(hello["catalog_candidate_sha256"] as? String, String(repeating: "a", count: 64))
     }
 
     func testCatalogIncompatibleRefreshIsRateLimited() async throws {

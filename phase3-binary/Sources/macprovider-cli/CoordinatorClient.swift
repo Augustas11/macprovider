@@ -6237,8 +6237,10 @@ actor CoordinatorClient {
 
     /// Runs the injected refresher at most once per minimum interval and stages
     /// a new envelope for the next hello only when it is complete, differs from
-    /// the advertised document, and still names the loaded artifact. Returns
-    /// whether an envelope was staged.
+    /// the advertised document, still names the loaded artifact, and keeps the
+    /// advertised row identity. Row identity binds the gate fields and the
+    /// structured policy digest, so a policy change on the same weights still
+    /// needs a restart (SPEC-023-R010). Returns whether an envelope was staged.
     @discardableResult
     private func refreshCatalogEnvelopeIfDue(trigger: String) async -> Bool {
         guard let catalogEnvelopeRefresher,
@@ -6269,9 +6271,11 @@ actor CoordinatorClient {
             if fields.contains(where: \.isEmpty) {
                 outcome = "incomplete_envelope"
             } else if loadedModelSHA256 == nil
-                || refreshed.modelSHA256.lowercased() != loadedModelSHA256 {
+                || refreshed.modelSHA256.lowercased() != loadedModelSHA256
+                || refreshed.rowIdentity.lowercased() != catalogRowIdentity?.lowercased() {
                 outcome = "row_changed_restart_required"
-            } else if refreshed.candidateSHA256 == (pendingCatalogEnvelope?.candidateSHA256 ?? catalogCandidateSHA256) {
+            } else if refreshed.candidateSHA256 == (pendingCatalogEnvelope?.candidateSHA256 ?? catalogCandidateSHA256),
+                      refreshed.signerKeyID == (pendingCatalogEnvelope?.signerKeyID ?? catalogSignerKeyID) {
                 outcome = "unchanged"
             } else {
                 pendingCatalogEnvelope = refreshed
