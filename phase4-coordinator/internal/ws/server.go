@@ -3740,7 +3740,15 @@ func (s *Server) fenceCatalogDivergedSession(provider pool.Provider, current *au
 		return false
 	}
 	resolved, _, isCurrent, ok := resolveProviderCatalogIn(provider, current, compatible)
-	if !ok || isCurrent || resolved == nil || catalogRowStillEquivalent(provider, resolved, current) {
+	if !ok || resolved == nil {
+		// Row continuity was authorized only by its A-side evidence; once that
+		// document no longer resolves it is unverifiable and fails closed
+		// (R010 item 4). Other modes keep the catalog-unavailable handling so
+		// a window rotation does not mass-close the fleet.
+		if provider.CatalogAdmissionMode != catalogAdmissionRowContinuity {
+			return false
+		}
+	} else if isCurrent || catalogRowStillEquivalent(provider, resolved, current) {
 		return false
 	}
 	s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable)

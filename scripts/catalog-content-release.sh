@@ -592,6 +592,8 @@ python3 -I "$window" plan --root "$sroot" --incoming "releases/$name" > "$scratc
 mkdir "$scratch/check"
 python3 -c 'import json,sys; w=json.load(open(sys.argv[1]))["window_after"]; open(sys.argv[2],"w").write("".join(e+"\n" for e in w))' "$scratch/plan.json" "$scratch/check/.previous-target"
 ln -s "$root/releases" "$scratch/check/releases"
+# #1705: the live row-continuity list is part of the admitted set.
+if [ -e "$root/.row-continuity-target" ]; then install -m 0640 "$root/.row-continuity-target" "$scratch/check/.row-continuity-target"; fi
 chown -R root:macprovider "$scratch/check"
 chmod 0750 "$scratch/check"
 chmod 0640 "$scratch/check/.previous-target"

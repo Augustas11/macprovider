@@ -840,7 +840,14 @@ identity or `PolicyEquivalent` policy no longer equals the new active row. This
 applies to `previous` and `row_continuity` sessions alike. The session is made
 unroutable before its close is queued, and a session whose hello was classified
 against the prior release is re-checked when it registers, so neither a pending
-close nor a publication racing admission leaves a diverged session routable.
+close nor a publication racing admission leaves a diverged session routable. A
+`row_continuity` session whose evidence document no longer loads after a
+publication is unverifiable and is closed the same way. Every pre-activation
+validation root (deploy, renewal, and the catalog-content lane) carries the
+live `.row-continuity-target`, so `--validate-autotune-release` reports those
+releases with source `row_continuity`; that source is release-level and does
+not prove each advertised row is still equivalent, which the post-publication
+re-check enforces.
 
 **Provider refresh (v0.15.1).** When the coordinator closes a hello with
 `catalog_incompatible`, or an accepted hello ack advertises a

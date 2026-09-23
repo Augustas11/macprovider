@@ -39,12 +39,14 @@ func rowContinuityInternalCatalogFor(t *testing.T, version, minRAM string, rowCo
 // and fences a diverged session at once (SPEC-023-R010).
 func TestRegisterFencesSessionWhoseCatalogRowDivergedBeforeRegistration(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		bakedRAM   string
-		wantFenced bool
+		name         string
+		bakedRAM     string
+		evidenceGone bool
+		wantFenced   bool
 	}{
 		{name: "row still equivalent", bakedRAM: "4", wantFenced: false},
 		{name: "row diverged before registration", bakedRAM: "6", wantFenced: true},
+		{name: "row-continuity evidence no longer loaded", bakedRAM: "4", evidenceGone: true, wantFenced: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			serverConn, providerConn := net.Pipe()
@@ -53,7 +55,11 @@ func TestRegisterFencesSessionWhoseCatalogRowDivergedBeforeRegistration(t *testi
 
 			current := rowContinuityInternalCatalogFor(t, "published-current", "4", false)
 			baked := rowContinuityInternalCatalogFor(t, "published-baked-v1", tc.bakedRAM, true)
-			s := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(), WithAutotuneCatalog(current, baked))
+			loaded := []*autotune.Catalog{baked}
+			if tc.evidenceGone {
+				loaded = nil
+			}
+			s := NewServer(config.Default(), pool.NewRegistry(nil), zerolog.Nop(), WithAutotuneCatalog(current, loaded...))
 			key, _, ok := baked.HighestClaimedTier("mlx-community/Llama-3.2-3B-Instruct-4bit")
 			if !ok {
 				t.Fatal("baked row missing")
