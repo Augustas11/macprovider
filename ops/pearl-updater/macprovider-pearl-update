@@ -4122,6 +4122,19 @@ class Updater:
             self._autotune_window = module
         return self._autotune_window
 
+    def _write_catalog_window(self, writer: Any, payload: Any, *, expect_current: str) -> None:
+        rules = self._window_rules()
+        try:
+            writer(
+                str(self.install_root / "autotune"),
+                payload,
+                group=self.catalog_gid,
+                expect_current=expect_current,
+                required_uid=self.trusted_uid,
+            )
+        except (rules.WindowError, ValueError, OSError) as exc:
+            raise UpdateError(f"catalog previous pointer window write refused: {exc}") from exc
+
     def _parse_catalog_window(self, text: str) -> list[str]:
         if not text.isascii():
             raise UpdateError("catalog previous pointer window is not ascii")
@@ -4287,18 +4300,12 @@ class Updater:
             existing = self._parse_catalog_window(
                 _read_trusted_text(previous, "catalog previous pointer", trusted_uid=self.trusted_uid)
             )
-        window = self._window_rules().compute_window(existing, old_target, incoming)
-        if window and window != existing:
-            _secure_atomic_write(
-                previous,
-                "".join(entry + "\n" for entry in window).encode("ascii"),
-                mode=0o640,
-                uid=self.trusted_uid,
-                gid=self.catalog_gid,
-            )
-        elif not window and existing:
-            previous.unlink()
-            _fsync_directory(catalog_root)
+        rules = self._window_rules()
+        window = rules.compute_window(existing, old_target, incoming)
+        if window != existing:
+            # SPEC-023-R013: the shared writer is the only .previous-target
+            # writer; it refuses if current moved since old_target was read.
+            self._write_catalog_window(rules.write_window, window, expect_current=old_target or "")
         self._replace_catalog_pointer("current", f"releases/{directory_name}")
         self._remove_legacy_tier2_catalog()
         self.audit(
@@ -5660,7 +5667,6 @@ class Updater:
         else:
             legacy_tier2.unlink(missing_ok=True)
             _fsync_directory(legacy_tier2.parent)
-        previous = catalog_root / ".previous-target"
         if "previous_window" in manifest:
             # Exact prior window bytes, captured at snapshot time.
             previous_window = manifest["previous_window"]
@@ -5668,17 +5674,12 @@ class Updater:
         else:
             previous_target = manifest["previous_target"]
             previous_payload = None if previous_target is None else (previous_target + "\n").encode("utf-8")
-        if previous_payload is None:
-            previous.unlink(missing_ok=True)
-            _fsync_directory(catalog_root)
-        else:
-            _secure_atomic_write(
-                previous,
-                previous_payload,
-                mode=0o640,
-                uid=self.trusted_uid,
-                gid=self.catalog_gid,
-            )
+        # Exact bytes through the shared writer, CAS on the target just restored.
+        self._write_catalog_window(
+            self._window_rules().write_window_bytes,
+            previous_payload,
+            expect_current=manifest["current_target"] or "",
+        )
         if not manifest["candidate_existed"]:
             candidate = catalog_root / "releases" / manifest["candidate_release_id"]
             if _path_entry_exists(candidate):

@@ -36,6 +36,12 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 ReadWritePaths=/var/lib/macprovider /var/log/macprovider
+# /run/macprovider/coordinator-applied-config.json: content identity of the
+# config the running process applied (#1688). Preserved across restarts so
+# operator tooling can compare it against on-disk bytes.
+RuntimeDirectory=macprovider
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 
 # Resource limits (Pearl VPS has 4GB; coordinator should never need more than 256MB)
 MemoryMax=512M

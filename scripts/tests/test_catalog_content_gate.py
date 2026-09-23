@@ -339,5 +339,95 @@ class ServingClosureTests(unittest.TestCase):
             self.assertEqual(legacy.returncode, 0, legacy.stderr)
 
 
+class BuyerServingSetTests(unittest.TestCase):
+    """`buyer-serving-set --diff-live` (#1688 R017 evidence (e)): newly buyer-serving models."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.release = assemble(self.tmp / "release")
+        self.live = assemble(self.tmp / "live")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp)
+
+    def exclusions(self, name: str, *model_ids: str) -> Path:
+        path = self.tmp / name
+        entries = [{"model_id": m, "reason": "test"} for m in model_ids]
+        path.write_text(json.dumps({"schema_version": cr.NOT_BUYER_SERVING_SCHEMA, "models": entries}))
+        return path
+
+    def run_cli(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), "buyer-serving-set", "--release", str(self.release), *args],
+            capture_output=True, text=True, check=False,
+        )
+
+    def diff(self, *args: str) -> dict:
+        proc = self.run_cli("--diff-live", str(self.live), *args)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(proc.stdout.splitlines()), 1, proc.stdout)
+        return json.loads(proc.stdout)
+
+    def test_set_is_every_pinned_recommendable_rate_carded_model(self) -> None:
+        proc = self.run_cli()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        models = json.loads(proc.stdout)["models"]
+        candidates = json.loads((self.release / "autotune-candidates.json").read_bytes())["rows"]
+        self.assertEqual(len(models), len(candidates))
+        self.assertIn({"model_id": model_id(self.release), "sha256": candidates[MODEL_KEY]["model_sha256"]}, models)
+
+    def test_identical_releases_have_empty_diff(self) -> None:
+        self.assertEqual(self.diff(), {"added": [], "removed": [], "changed": []})
+
+    def test_listed_to_recommendable_is_added(self) -> None:
+        edit_json(self.live / "autotune-candidates.json", lambda o: o["rows"][MODEL_KEY].update(runtime_status="listed"))
+        result = self.diff()
+        self.assertEqual([m["model_id"] for m in result["added"]], [model_id(self.release)], result)
+        self.assertEqual(result["removed"], [])
+        self.assertEqual(result["changed"], [])
+
+    def test_removed_exclusion_is_added(self) -> None:
+        live_ex = self.exclusions("live-ex.json", model_id(self.live))
+        incoming_ex = self.exclusions("incoming-ex.json")
+        result = self.diff("--exclusions", str(incoming_ex), "--live-exclusions", str(live_ex))
+        self.assertEqual([m["model_id"] for m in result["added"]], [model_id(self.release)], result)
+        # The reverse direction is a removal, not an addition.
+        result = self.diff("--exclusions", str(live_ex), "--live-exclusions", str(incoming_ex))
+        self.assertEqual(result["added"], [])
+        self.assertEqual([m["model_id"] for m in result["removed"]], [model_id(self.release)], result)
+
+    def test_hash_change_is_changed(self) -> None:
+        correct_hash(self.release)
+        result = self.diff()
+        self.assertEqual(result["added"], [])
+        self.assertEqual(result["removed"], [])
+        self.assertEqual(len(result["changed"]), 1, result)
+        change = result["changed"][0]
+        self.assertEqual(change["model_id"], model_id(self.release))
+        self.assertEqual(change["sha256"], NEW_HASH)
+        self.assertNotEqual(change["live_sha256"], NEW_HASH)
+
+    def test_unpinned_model_is_not_serving(self) -> None:
+        # Recommendable + rate-carded but no matching Tier-2 pin: the closure
+        # forbids it, so it is not a member (and not "added").
+        edit_json(self.release / "autotune-candidates.json", lambda o: o["rows"][MODEL_KEY].update(model_sha256=NEW_HASH))
+        result = self.diff()
+        self.assertEqual(result["added"], [])
+        self.assertEqual([m["model_id"] for m in result["removed"]], [model_id(self.release)], result)
+
+    def test_one_sided_exclusions_are_rejected(self) -> None:
+        ex = self.exclusions("ex.json")
+        proc = self.run_cli("--diff-live", str(self.live), "--exclusions", str(ex))
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, "")
+        self.assertEqual(self.run_cli("--live-exclusions", str(ex)).returncode, 1)
+
+    def test_malformed_release_fails_closed(self) -> None:
+        (self.live / "tier2-catalog.json").write_bytes(b"{")
+        proc = self.run_cli("--diff-live", str(self.live))
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(proc.stdout, "")
+
+
 if __name__ == "__main__":
     unittest.main()

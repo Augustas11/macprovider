@@ -4881,15 +4881,26 @@ def live_equivalence_reasons(incoming: pathlib.Path, live: pathlib.Path) -> list
     return reasons
 
 
-def _live_matches_ledger_row(live: pathlib.Path, live_manifest: dict, release_id: str, row: dict) -> bool:
+def _live_matches_ledger_row(
+    incoming: pathlib.Path, live: pathlib.Path, live_manifest: dict, release_id: str, row: dict
+) -> bool:
     """True when live's feeds, re-stamped to the row's recorded identity, hash to the row.
 
     The ledger records only whole-file sha256/bytes/version per feed, never the
     bytes, so content equality is decided by REVERSING a renewal: a renewal
     changes only candidates/demand `version`+`generated_at`, the rate card
-    `generated_at`, and the artifact feed's release fields; Tier-2 bytes are
-    carried unchanged. Writing the row's values back reproduces the committed
-    bytes exactly iff the content is the committed release's content.
+    `generated_at`, and the artifact feed's release fields. Writing the row's
+    values back reproduces the committed bytes exactly iff the content is the
+    committed release's content.
+
+    Tier-2 is the exception: a freshness re-sign rewrites its whole envelope
+    (`_TIER2_ENVELOPE_FIELDS`, signature included), which cannot be reversed
+    from a digest. Live Tier-2 therefore matches the row when its raw bytes
+    hash to the row, OR when the INCOMING Tier-2 bytes hash to the row (so they
+    are the bytes the row names) and live equals them modulo the envelope — the
+    same stripped comparison `live_equivalence_reasons` uses. A row whose
+    Tier-2 differs from both live and incoming bytes cannot be proven and does
+    not match (fail closed: a regression verdict, overridable by the operator).
     """
     feeds = row["feeds"]
     if set(feeds) != set(live_manifest["feeds"]):
@@ -4909,6 +4920,13 @@ def _live_matches_ledger_row(live: pathlib.Path, live_manifest: dict, release_id
             obj["generated_at"] = row["generated_at"]
             obj["candidate_catalog_sha256"] = feeds["autotune-candidates.json"]["sha256"]
             raw = canonical_sorted_bytes(obj)
+        elif name == TIER2_CATALOG_FEED_NAME and (sha256(raw), len(raw)) != (recorded["sha256"], recorded["bytes"]):
+            incoming_raw = (incoming / name).read_bytes()
+            if (sha256(incoming_raw), len(incoming_raw)) != (recorded["sha256"], recorded["bytes"]):
+                return False
+            if _tier2_content(live)[0] != _tier2_content(incoming)[0]:
+                return False
+            continue
         if sha256(raw) != recorded["sha256"] or len(raw) != recorded["bytes"]:
             return False
     return True
@@ -4924,7 +4942,7 @@ def compare_live(incoming: pathlib.Path, live: pathlib.Path, ledger_path: pathli
     if not reasons:
         return {"verdict": "equivalent", "reasons": [], **ids}
     for release_id, row in ledger["releases"].items():
-        if _live_matches_ledger_row(live, live_manifest, release_id, row):
+        if _live_matches_ledger_row(incoming, live, live_manifest, release_id, row):
             return {"verdict": "descends", "reasons": reasons, "matched_ledger_release": release_id, **ids}
     reasons.append("live content matches no release in the incoming release-ledger.json")
     return {"verdict": "regression", "reasons": reasons, **ids}
@@ -5004,6 +5022,67 @@ def check_serving_closure(
             f"serving closure: {len(failures)} recommendable rate-carded model(s) have no matching "
             "Tier-2 model_id+sha256 and are not listed in not-buyer-serving.json: " + ", ".join(failures)
         )
+
+
+def buyer_serving_set(release: pathlib.Path, excluded: set[str]) -> dict[str, dict]:
+    """The models `release` lets buyers be routed to and billed for (#1688 R017 evidence (e)).
+
+    Exactly the rows `serving_closure_failures` requires to be pinned, minus the
+    ones that fail it: recommendable, rate-carded, not excluded, AND pinned by
+    Tier-2 to the same model_id+sha256. Keyed by normalized model_id.
+    """
+    candidate_obj = validate_candidate((release / "autotune-candidates.json").read_bytes())
+    rate_card_obj = validate_rate_card((release / RATE_CARD_FEED_NAME).read_bytes())
+    tier2_models = load_tier2_models((release / TIER2_CATALOG_FEED_NAME).read_bytes())
+    serving: dict[str, dict] = {}
+    for key, row in candidate_obj["rows"].items():
+        if row["runtime_status"] != "recommendable" or resolved_rate_row(rate_card_obj["rows"], key) is None:
+            continue
+        normalized = row["model_id"].lower().strip()
+        auto_hash = row.get("model_sha256")
+        if normalized in excluded or not isinstance(auto_hash, str) or tier2_models.get(normalized) != auto_hash:
+            continue
+        serving[normalized] = {"model_id": row["model_id"], "sha256": auto_hash}
+    return serving
+
+
+def buyer_serving_diff(incoming: dict[str, dict], live: dict[str, dict]) -> dict:
+    """added/removed by model_id; changed = same model_id served at a different sha256."""
+    return {
+        "added": [incoming[k] for k in sorted(incoming.keys() - live.keys())],
+        "removed": [live[k] for k in sorted(live.keys() - incoming.keys())],
+        "changed": [
+            {"model_id": incoming[k]["model_id"], "live_sha256": live[k]["sha256"], "sha256": incoming[k]["sha256"]}
+            for k in sorted(incoming.keys() & live.keys())
+            if incoming[k]["sha256"] != live[k]["sha256"]
+        ],
+    }
+
+
+def cmd_buyer_serving_set(
+    release: pathlib.Path,
+    exclusions_path: pathlib.Path | None,
+    live: pathlib.Path | None,
+    live_exclusions_path: pathlib.Path | None,
+) -> None:
+    def load(path: pathlib.Path | None) -> set[str]:
+        return set() if path is None else load_serving_exclusions(path.read_bytes(), str(path))
+
+    try:
+        incoming_set = buyer_serving_set(release, load(exclusions_path))
+        if live is None:
+            if live_exclusions_path is not None:
+                fail("buyer-serving-set: --live-exclusions requires --diff-live")
+            result: dict = {"models": [incoming_set[k] for k in sorted(incoming_set)]}
+        else:
+            # An exclusion dropped by the incoming release makes a model newly
+            # buyer-serving; reusing one file for both sides would hide that.
+            if (exclusions_path is None) != (live_exclusions_path is None):
+                fail("buyer-serving-set: --diff-live needs both --exclusions and --live-exclusions, or neither")
+            result = buyer_serving_diff(incoming_set, buyer_serving_set(live, load(live_exclusions_path)))
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        fail(f"buyer-serving-set: malformed release input: {exc!r}")
+    print(json.dumps(result, sort_keys=True))
 
 
 # #1688 C2: `content-gate` decides, offline, whether a committed release may go
@@ -5511,6 +5590,22 @@ def main() -> int:
         type=pathlib.Path,
         help=f"not-buyer-serving.json for --require-serving (e.g. {NOT_BUYER_SERVING_PATH}); default: none",
     )
+    serving_parser = sub.add_parser(
+        "buyer-serving-set",
+        help=(
+            "print JSON {models:[{model_id,sha256}]}: every recommendable, rate-carded, non-excluded "
+            "candidate row pinned by Tier-2 to the same model_id+sha256 (what buyers can be routed to). "
+            "With --diff-live DIR print {added,removed,changed} of --release vs the live release"
+        ),
+    )
+    serving_parser.add_argument("--release", required=True, type=pathlib.Path)
+    serving_parser.add_argument("--exclusions", type=pathlib.Path, help="not-buyer-serving.json for --release (default: none)")
+    serving_parser.add_argument("--diff-live", type=pathlib.Path, help="live release directory to diff against")
+    serving_parser.add_argument(
+        "--live-exclusions",
+        type=pathlib.Path,
+        help="not-buyer-serving.json in force for the live release; required with --diff-live when --exclusions is given",
+    )
     gate_parser = sub.add_parser(
         "content-gate",
         help=(
@@ -5586,6 +5681,8 @@ def main() -> int:
             verify_directory(args.directory, args.tier2_public_key_file, args.tier2_coordinator_config)
         elif args.command == "check-tier2-binding":
             cmd_check_tier2_binding(args.candidate, args.tier2, args.require_serving, args.rate_card, args.exclusions)
+        elif args.command == "buyer-serving-set":
+            cmd_buyer_serving_set(args.release, args.exclusions, args.diff_live, args.live_exclusions)
         elif args.command == "content-gate":
             return cmd_content_gate(args.release, args.live, args.ledger, args.commit, args.now)
         elif args.command == "derive-tier2":

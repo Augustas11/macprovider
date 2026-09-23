@@ -101,7 +101,8 @@ def fake_elf(label: str) -> bytes:
 class PearlUpdaterTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        # realpath: the shared window writer walks from / without following symlinks.
+        self.root = Path(os.path.realpath(self.temp.name))
         self.key = self.root / "release-private.pem"
         self.public = self.root / "release-public.pem"
         subprocess.run(
@@ -775,6 +776,94 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(previous.read_bytes(), prior_window.encode("ascii"))
         self.assertEqual(previous.stat().st_gid, self.updater.catalog_gid)
         self.assertEqual(stat.S_IMODE(previous.stat().st_mode), 0o640)
+
+    def test_catalog_install_refuses_window_when_current_moved(self):
+        # SPEC-023-R013: the shared writer CASes current; a window computed
+        # from a stale current must not land.
+        release = self.stage(self.verify())
+        window = "releases/r3\nreleases/r2\n"
+        previous = self._catalog_install_fixture("releases/r4", window)
+        current = self.updater.install_root / "autotune" / "current"
+        rules = self.updater._window_rules()
+        real_compute = rules.compute_window
+
+        def compute_then_move(*args):
+            result = real_compute(*args)
+            current.unlink()
+            current.symlink_to("releases/racer")
+            return result
+
+        with mock.patch.object(rules, "compute_window", side_effect=compute_then_move):
+            with self.assertRaisesRegex(updater_module.UpdateError, "current is 'releases/racer'"):
+                self.updater.install_catalog(release)
+
+        self.assertEqual(previous.read_text(), window)
+        self.assertEqual(os.readlink(current), "releases/racer")
+
+    def test_catalog_rollback_window_goes_through_shared_writer_exact_bytes(self):
+        release = self.stage(self.verify())
+        catalog_directory_name = self.updater._catalog_release_directory_name(release)
+        prior_window = "# retained\nreleases/r3\n\nreleases/r2\n\n\n"
+        previous = self._catalog_install_fixture("releases/r4", prior_window)
+        self.updater.install_catalog(release)
+
+        tx = self.root / "catalog-rollback-shared-writer"
+        tx.mkdir(mode=0o700)
+        (tx / "catalog-manifest.json").write_text(
+            json.dumps(
+                {
+                    "current_target": "releases/r4",
+                    "previous_target": "releases/r3",
+                    "previous_window": prior_window,
+                    "candidate_existed": False,
+                    "candidate_release_id": catalog_directory_name,
+                    "legacy_tier2": {"existed": False},
+                }
+            )
+            + "\n"
+        )
+        (tx / "catalog-manifest.json").chmod(0o600)
+        rules = self.updater._window_rules()
+        with mock.patch.object(rules, "write_window_bytes", wraps=rules.write_window_bytes) as writer:
+            self.updater._restore_catalog(tx)
+        writer.assert_called_once()
+        self.assertEqual(writer.call_args.args[1], prior_window.encode("ascii"))
+        self.assertEqual(writer.call_args.kwargs["expect_current"], "releases/r4")
+        self.assertEqual(previous.read_bytes(), prior_window.encode("ascii"))
+
+    def test_catalog_rollback_window_refused_when_current_moved(self):
+        release = self.stage(self.verify())
+        catalog_directory_name = self.updater._catalog_release_directory_name(release)
+        previous = self._catalog_install_fixture("releases/r4", "releases/r3\n")
+        self.updater.install_catalog(release)
+        after_install = previous.read_bytes()
+
+        tx = self.root / "catalog-rollback-moved"
+        tx.mkdir(mode=0o700)
+        (tx / "catalog-manifest.json").write_text(
+            json.dumps(
+                {
+                    "current_target": "releases/r4",
+                    "previous_target": "releases/r3",
+                    "previous_window": "releases/r3\n",
+                    "candidate_existed": False,
+                    "candidate_release_id": catalog_directory_name,
+                    "legacy_tier2": {"existed": False},
+                }
+            )
+            + "\n"
+        )
+        (tx / "catalog-manifest.json").chmod(0o600)
+        real_replace = self.updater._replace_catalog_pointer
+
+        def replace_then_race(name, target):
+            real_replace(name, target)
+            real_replace(name, "releases/racer")
+
+        with mock.patch.object(self.updater, "_replace_catalog_pointer", side_effect=replace_then_race):
+            with self.assertRaisesRegex(updater_module.UpdateError, "window write refused"):
+                self.updater._restore_catalog(tx)
+        self.assertEqual(previous.read_bytes(), after_install)
 
     def test_catalog_snapshot_accepts_multi_line_window(self):
         install = self.updater.install_root

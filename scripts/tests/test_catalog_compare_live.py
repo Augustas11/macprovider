@@ -66,6 +66,20 @@ def restamp(directory: Path, release_id: str, generated_at: str) -> None:
     edit_json(directory / "release.json", manifest, compact=False)
 
 
+def restamp_tier2(directory: Path) -> None:
+    """A Tier-2 freshness re-sign: every `_TIER2_ENVELOPE_FIELDS` value rewritten, models kept."""
+    def envelope(o: dict) -> None:
+        o.update(
+            issued_at="2026-10-01T03:00:00Z",
+            expires_at="2099-01-01T00:00:00Z",
+            catalog_id="macprovider-tier2-model-catalog-2026-10-01-renewal",
+            version=2,
+            signature={"alg": "Ed25519", "key_id": "tier2-renewal", "sig": "A" * 86},
+        )
+
+    edit_json(directory / "tier2-catalog.json", envelope, compact=False)
+
+
 def change_content(directory: Path) -> None:
     edit_json(directory / "demand-rank.json", lambda o: o.update(compare_live_test_marker=True))
 
@@ -129,6 +143,29 @@ class CompareLiveTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "descends", result)
         self.assertEqual(result["matched_ledger_release"], json.loads((CANONICAL / "release.json").read_bytes())["release_id"])
         self.assertEqual(self.run_cli().returncode, 0)
+
+    def test_renewed_live_with_restamped_tier2_envelope_descends(self) -> None:
+        # A freshness re-sign rewrites every Tier-2 envelope field; the ledger
+        # row still names the committed Tier-2 bytes, which the incoming tag carries.
+        restamp(self.live, "published-2026-10-01-renewal-v1", "2026-10-01T03:00:00Z")
+        restamp_tier2(self.live)
+        change_content(self.incoming)
+        result = self.verdict()
+        self.assertEqual(result["verdict"], "descends", result)
+        self.assertEqual(result["matched_ledger_release"], json.loads((CANONICAL / "release.json").read_bytes())["release_id"])
+
+    def test_restamped_tier2_with_changed_models_is_regression(self) -> None:
+        restamp_tier2(self.live)
+        edit_json(self.live / "tier2-catalog.json", lambda o: o["models"].pop(), compact=False)
+        change_content(self.incoming)
+        self.assertEqual(self.verdict()["verdict"], "regression")
+
+    def test_restamped_tier2_is_unprovable_when_incoming_tier2_moved(self) -> None:
+        # Documented limit: the ledger stores only whole-file Tier-2 digests, so a
+        # re-signed live Tier-2 is provable only against bytes the tag carries.
+        restamp_tier2(self.live)
+        edit_json(self.incoming / "tier2-catalog.json", lambda o: o["models"].pop(), compact=False)
+        self.assertEqual(self.verdict()["verdict"], "regression")
 
     def test_live_content_outside_ledger_is_regression(self) -> None:
         change_content(self.live)

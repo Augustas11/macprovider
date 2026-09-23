@@ -24,6 +24,8 @@ line_of() {
 
 # --- Static placement pins -------------------------------------------------
 compare_line="$(line_of 'catalog-release.py compare-live --incoming')"
+live_verify_line="$(line_of 'verify-directory --directory /opt/macprovider/autotune/\$_live')"
+[ "$live_verify_line" -lt "$compare_line" ] || fail "the live release must pass verify-directory before compare-live"
 preflight_line="$(line_of 'failed remote verify-directory preflight')"
 backup_line="$(line_of 'remote-config backup saved at')"
 stage_line="$(line_of 'mv \$_autotune_stage \$_autotune_release')"
@@ -63,27 +65,90 @@ awk '/^_append_catalog_window_override\(\) \{$/{f=1} f{print} f&&/^}$/{exit}' \
 grep -q 'cwo_override_remote_command' "$TMP/append-helper.sh" || fail "could not extract the override append helper"
 
 # --- Fake Pearl --------------------------------------------------------------
-RELEASE_FILES="demand-rank.json demand-rank.json.sig autotune-candidates.json autotune-candidates.json.sig rate-card.json rate-card.json.sig tier2-catalog.json release.json trusted-keys.json"
+BASE_FILES="demand-rank.json demand-rank.json.sig autotune-candidates.json autotune-candidates.json.sig rate-card.json rate-card.json.sig tier2-catalog.json release.json trusted-keys.json"
+BOUND_FILES="$BASE_FILES autotune-artifacts.json autotune-artifacts.json.sig"
+COMMITTED_ID="published-2026-09-23-tier2-buyer-closure-v1"
+BOUND_ID="published-2026-09-30-artifact-bound-v1"
+# BOUND=1 switches every fixture to the artifact-bound (eleven-file) release.
+BOUND=0
+RELEASE_FILES="$BASE_FILES"
+INCOMING_ID="$COMMITTED_ID"
+CR_PY="$REPO_ROOT/scripts/catalog-release.py"
 assemble() {
   mkdir -p "$1"
-  for name in $RELEASE_FILES; do
+  for name in $BASE_FILES; do
     case "$name" in
       release.json|trusted-keys.json|tier2-catalog.json) cp "$REPO_ROOT/phase3-binary/catalog/autotune/$name" "$1/$name" ;;
       *) cp "$REPO_ROOT/phase3-binary/dist/static/$name" "$1/$name" ;;
     esac
   done
+  [ "$BOUND" = 0 ] || bind_release "$1"
 }
-restamp() {
-  python3 - "$1" "$2" <<'PY'
+# The committed release re-cut as artifact-bound release $BOUND_ID: an (empty)
+# artifact feed plus its release.json binding. Unsigned, so the harness stubs
+# verify-directory except in the real-verify cases below.
+bind_release() {
+  python3 - "$CR_PY" "$1" "$BOUND_ID" <<'PY'
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("cr", sys.argv[1]); cr = importlib.util.module_from_spec(spec); spec.loader.exec_module(cr)
+d, rid, gen = pathlib.Path(sys.argv[2]), sys.argv[3], "2026-09-30T00:00:00Z"
+for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json"):
+    o = json.loads((d / name).read_bytes())
+    if name != "rate-card.json":
+        o["version"] = rid
+    o["generated_at"] = gen
+    (d / name).write_bytes(cr.canonical_bytes(o))
+candidate = (d / "autotune-candidates.json").read_bytes()
+artifact = {"models": [], "version": rid, "release_id": rid, "generated_at": gen,
+            "candidate_catalog_sha256": cr.sha256(candidate), "policy_version": "autotune-policy-v1", "source": "deploy-test"}
+(d / "autotune-artifacts.json").write_bytes(cr.canonical_sorted_bytes(artifact))
+(d / "autotune-artifacts.json.sig").write_bytes((d / "autotune-candidates.json.sig").read_bytes())
+m = json.loads((d / "release.json").read_bytes())
+m["release_id"], m["generated_at"] = rid, gen
+for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json", "autotune-artifacts.json"):
+    raw = (d / name).read_bytes()
+    entry = m["feeds"].setdefault(name, dict(m["feeds"]["autotune-candidates.json"]))
+    entry.update(sha256=cr.sha256(raw), bytes=len(raw))
+    if name != "rate-card.json":
+        entry["version"] = rid
+(d / "release.json").write_text(json.dumps(m, indent=2))
+PY
+}
+# The committed ledger plus a v3 artifact-bound row for $BOUND_ID, taken from an
+# assembled bound release (what the tag that cut it would carry).
+bound_ledger() {
+  python3 - "$1" "$2" "$BOUND_ID" <<'PY'
 import json, pathlib, sys
-d, rid = pathlib.Path(sys.argv[1]), sys.argv[2]
-def dump(o): return json.dumps(o, ensure_ascii=False, separators=(",", ":")).encode()
+d, out, rid = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+ledger = json.loads(out.read_bytes())
+ledger["schema_version"] = "macprovider.autotune-release-ledger.v3"
+m = json.loads((d / "release.json").read_bytes())
+ledger["releases"][rid] = {
+    "generated_at": m["generated_at"], "policy_version": m["policy_version"],
+    "feeds": {name: {k: e[k] for k in ("bytes", "sha256", "signer_key_id", "version")} for name, e in m["feeds"].items()},
+    "artifact_bindings": [], "intake_decision_sha256": None,
+}
+out.write_text(json.dumps(ledger, indent=2))
+PY
+}
+# What renew-autotune-static-feed.sh leaves on Pearl: same content, new
+# identity (the artifact feed's release fields included).
+restamp() {
+  python3 - "$CR_PY" "$1" "$2" <<'PY'
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("cr", sys.argv[1]); cr = importlib.util.module_from_spec(spec); spec.loader.exec_module(cr)
+d, rid = pathlib.Path(sys.argv[2]), sys.argv[3]
 for name in ("autotune-candidates.json", "demand-rank.json", "rate-card.json"):
     o = json.loads((d / name).read_bytes())
     if name != "rate-card.json":
         o["version"] = rid
     o["generated_at"] = "2026-10-01T03:00:00Z"
-    (d / name).write_bytes(dump(o))
+    (d / name).write_bytes(cr.canonical_bytes(o))
+if (d / "autotune-artifacts.json").exists():
+    o = json.loads((d / "autotune-artifacts.json").read_bytes())
+    o.update(version=rid, release_id=rid, generated_at="2026-10-01T03:00:00Z",
+             candidate_catalog_sha256=cr.sha256((d / "autotune-candidates.json").read_bytes()))
+    (d / "autotune-artifacts.json").write_bytes(cr.canonical_sorted_bytes(o))
 m = json.loads((d / "release.json").read_bytes())
 m["release_id"] = rid
 (d / "release.json").write_text(json.dumps(m, indent=2))
@@ -124,10 +189,34 @@ reset() {
   mkdir -p "$ROOT/autotune/releases" "$DEPLOY_TMP/scripts" "$TMP/pinned"
   assemble "$DEPLOY_TMP"
   cp "$REPO_ROOT/phase3-binary/catalog/autotune/release-ledger.json" "$DEPLOY_TMP/release-ledger.json"
+  if [ "$BOUND" = 1 ]; then
+    rm -rf "$TMP/bound-base"
+    assemble "$TMP/bound-base"
+    bound_ledger "$TMP/bound-base" "$DEPLOY_TMP/release-ledger.json"
+  fi
   # The same shipped closure deploy uploads (catalog-verifier-bundle.txt).
   for entry in $(grep -v '^#' "$REPO_ROOT/scripts/catalog-verifier-bundle.txt"); do
     cp "$REPO_ROOT/$entry" "$DEPLOY_TMP/$entry"
   done
+  # Same trust root deploy uploads as tier2-catalog.pub.
+  awk '/^tier2:/{on=1; next} on&&/^[^[:space:]#]/{on=0} on&&$1=="catalog_public_key:"{print $2}' \
+    "$REPO_ROOT/phase4-coordinator/dist/coordinator.yaml" > "$DEPLOY_TMP/tier2-catalog.pub"
+  [ -s "$DEPLOY_TMP/tier2-catalog.pub" ] || fail "could not derive tier2.catalog_public_key from coordinator.yaml"
+  # Record every verify-directory. VERIFY_MODE=stub accepts the re-stamped
+  # (hence unsigned) fixtures; VERIFY_MODE=real runs the shipped verifier.
+  mv "$DEPLOY_TMP/scripts/catalog-release.py" "$DEPLOY_TMP/scripts/catalog-release-real.py"
+  cat > "$DEPLOY_TMP/scripts/catalog-release.py" <<PY
+import os, runpy, sys
+real = os.path.join(os.path.dirname(os.path.abspath(__file__)), "catalog-release-real.py")
+if sys.argv[1:2] == ["verify-directory"]:
+    with open("$TMP/verify-calls", "a") as calls:
+        calls.write(" ".join(sys.argv[1:]) + "\n")
+    if "${VERIFY_MODE:-stub}" == "stub":
+        raise SystemExit(0)
+sys.argv[0] = real
+runpy.run_path(real, run_name="__main__")
+PY
+  : > "$TMP/verify-calls"
   cat > "$DEPLOY_TMP/scripts/autotune_window.py" <<PY
 import sys
 open("$TMP/window-calls", "a").write(" ".join(sys.argv[1:]) + "\\n")
@@ -141,7 +230,8 @@ live_release() {
 }
 stage_incoming() {
   # What the unconditional staging block leaves behind.
-  assemble "$ROOT/autotune/releases/$INCOMING_DIR"
+  mkdir -p "$ROOT/autotune/releases/$INCOMING_DIR"
+  for name in $RELEASE_FILES; do cp "$DEPLOY_TMP/$name" "$ROOT/autotune/releases/$INCOMING_DIR/$name"; done
   if [ ! -e "$ROOT/autotune/current" ] && [ ! -L "$ROOT/autotune/current" ]; then
     ln -sfn "releases/$INCOMING_DIR" "$ROOT/autotune/current"
   fi
@@ -155,7 +245,7 @@ run_deploy_slice() {
     log() { echo "$*"; }
     SSH=fake_ssh
     CATALOG_RELEASE_FILES="$RELEASE_FILES"
-    AUTOTUNE_RELEASE_ID="published-2026-09-23-tier2-buyer-closure-v1"
+    AUTOTUNE_RELEASE_ID="$INCOMING_ID"
     AUTOTUNE_RELEASE_DIR_NAME="$INCOMING_DIR"
     CATALOG_REGRESSION_OVERRIDE_B64="$1"
     COORDINATOR_RELEASE_VERSION="v9.9.9"
@@ -267,6 +357,137 @@ live_release newer-live
 change_content "$ROOT/autotune/releases/newer-live"
 run_deploy_slice "$(printf '%s' "$reason" | base64 | tr -d '\n')" || { cat "$TMP/out" >&2; fail "second override must proceed"; }
 [ "$(wc -l < "$log" | tr -d ' ')" = "2" ] || fail "override log must be append-only"
+
+# --- The live release passes verify-directory before it is classified --------
+reset
+live_release renewed-live
+restamp "$ROOT/autotune/releases/renewed-live" published-2026-10-01-renewal-v1
+run_deploy_slice "" || { cat "$TMP/out" >&2; fail "stubbed live verify must proceed"; }
+grep -qF "verify-directory --directory $ROOT/autotune/releases/renewed-live --tier2-public-key-file $DEPLOY_TMP/tier2-catalog.pub" \
+  "$TMP/verify-calls" || fail "the live release must be verified with the uploaded Tier-2 trust root"
+
+# Real verifier: pristine committed live verifies (control), a corrupt live
+# sidecar or keyring aborts before any staging, swap, window, or override.
+VERIFY_MODE=real
+reset
+live_release committed-live
+if run_deploy_slice ""; then
+  grep -q '^VERDICT=equivalent$' "$TMP/out" || { cat "$TMP/out" >&2; fail "pristine committed live must verify and be equivalent"; }
+  corrupt_sidecar() {
+    python3 - "$ROOT/autotune/releases/committed-live" <<'PY'
+import json, pathlib, sys
+d = pathlib.Path(sys.argv[1])
+other = json.loads((d / "autotune-candidates.json.sig").read_bytes())["signature"]
+sig = json.loads((d / "demand-rank.json.sig").read_bytes())
+sig["signature"] = other
+(d / "demand-rank.json.sig").write_text(json.dumps(sig, separators=(",", ":")))
+PY
+  }
+  corrupt_keyring() {
+    python3 - "$ROOT/autotune/releases/committed-live/trusted-keys.json" <<'PY'
+import json, pathlib, sys
+p = pathlib.Path(sys.argv[1])
+k = json.loads(p.read_bytes())
+keys = k["keys"]
+v4, v5 = "streamvc-autotune-static-v4", "streamvc-autotune-static-v5"
+keys[v4]["public_key_base64"] = keys[v5]["public_key_base64"]
+p.write_text(json.dumps(k, indent=2))
+PY
+  }
+  for corrupt in corrupt_sidecar corrupt_keyring; do
+    reset
+    live_release committed-live
+    "$corrupt"
+    if run_deploy_slice ""; then fail "$corrupt: a live release failing verify-directory must abort"; fi
+    grep -q 'LIVE catalog release autotune/current failed verify-directory' "$TMP/out" ||
+      { cat "$TMP/out" >&2; fail "$corrupt: live verify abort must say why"; }
+    grep -q '^VERDICT=' "$TMP/out" && fail "$corrupt: live verify failure must abort before staging/activation"
+    grep -q 'compare-live:' "$TMP/out" && fail "$corrupt: live verify failure must abort before classification"
+    [ "$(current_target)" = "releases/committed-live" ] || fail "$corrupt: must not touch current"
+    [ ! -d "$ROOT/autotune/releases/$INCOMING_DIR" ] || fail "$corrupt: must not stage the incoming release"
+    [ ! -s "$TMP/window-calls" ] || fail "$corrupt: must not run autotune_window"
+    [ ! -e "$VAR/catalog-window-overrides.jsonl" ] || fail "$corrupt: must not log an override"
+  done
+elif grep -q 'a Go toolchain is required' "$TMP/out"; then
+  echo "SKIP: no trusted Go toolchain; real live verify-directory cases NOT exercised" >&2
+else
+  cat "$TMP/out" >&2
+  fail "pristine committed live release failed the real verify-directory"
+fi
+VERIFY_MODE=stub
+
+# --- Artifact-bound (eleven-file) release set --------------------------------
+BOUND=1
+RELEASE_FILES="$BOUND_FILES"
+INCOMING_ID="$BOUND_ID"
+[ "$(echo $RELEASE_FILES | wc -w | tr -d ' ')" = 11 ] || fail "artifact-bound set must be eleven files"
+bound_block="$(sed -n '/^CATALOG_RELEASE_FILES="demand-rank.json/,/^fi$/p' "$DEPLOY_SH")"
+# shellcheck disable=SC2034 # consumed by the eval'd deploy block
+bound_deploy_files="$(AUTOTUNE_ARTIFACT_BOUND=bound; eval "$bound_block"; echo "$CATALOG_RELEASE_FILES")"
+[ "$bound_deploy_files" = "$BOUND_FILES" ] || fail "harness bound file set drifted from deploy's CATALOG_RELEASE_FILES"
+
+# bound equivalent: live is a renewal restamp of the bound release; the smoke
+# expectations rebind to a snapshot of all eleven live files.
+reset
+live_release renewed-live
+restamp "$ROOT/autotune/releases/renewed-live" published-2026-10-01-renewal-v1
+run_deploy_slice "" || { cat "$TMP/out" >&2; fail "bound equivalent deploy must proceed"; }
+grep -q '^VERDICT=equivalent$' "$TMP/out" || { cat "$TMP/out" >&2; fail "bound renewal restamp must be equivalent"; }
+[ "$(current_target)" = "releases/renewed-live" ] || fail "bound equivalent must not swap current"
+[ ! -s "$TMP/window-calls" ] || fail "bound equivalent must not run autotune_window"
+grep -q '^SMOKE_RELEASE_ID=published-2026-10-01-renewal-v1$' "$TMP/out" || fail "bound smokes must rebind to the live release"
+for name in $BOUND_FILES; do
+  cmp -s "$TMP/pinned/live-catalog/$name" "$ROOT/autotune/releases/renewed-live/$name" ||
+    fail "bound live snapshot must carry live $name"
+done
+
+# bound descends: live is a renewal of the bound ledger row, tag has new content.
+reset
+live_release renewed-live
+restamp "$ROOT/autotune/releases/renewed-live" published-2026-10-01-renewal-v1
+change_content "$DEPLOY_TMP"
+run_deploy_slice "" || { cat "$TMP/out" >&2; fail "bound descends deploy must activate"; }
+grep -q '^VERDICT=descends$' "$TMP/out" || { cat "$TMP/out" >&2; fail "bound live in the ledger must descend"; }
+[ "$(current_target)" = "releases/$INCOMING_DIR" ] || fail "bound descends must swap current"
+grep -q '^apply --root' "$TMP/window-calls" || fail "bound descends must apply the retained window"
+for name in $BOUND_FILES; do
+  [ -f "$ROOT/autotune/releases/$INCOMING_DIR/$name" ] || fail "bound activation lacks $name"
+done
+
+# artifact-feed activation: the first bound tag over the unbound committed live
+# release (its ledger row) is never equivalent, and descends.
+reset
+BOUND=0 live_release unbound-live
+run_deploy_slice "" || { cat "$TMP/out" >&2; fail "bound activation over the unbound ledger release must proceed"; }
+grep -q '^VERDICT=descends$' "$TMP/out" || { cat "$TMP/out" >&2; fail "bound activation must descend"; }
+grep -q 'artifact-bound vs unbound' "$TMP/out" || fail "bound/unbound feed-set change must be reported"
+[ "$(current_target)" = "releases/$INCOMING_DIR" ] || fail "bound activation must swap current"
+grep -q '^apply --root' "$TMP/window-calls" || fail "bound activation must apply the retained window"
+for name in $BOUND_FILES; do
+  [ -f "$ROOT/autotune/releases/$INCOMING_DIR/$name" ] || fail "bound activation lacks $name"
+done
+
+# bound regression: live content outside the ledger aborts; the override activates.
+reset
+live_release newer-live
+change_content "$ROOT/autotune/releases/newer-live"
+if run_deploy_slice ""; then fail "bound regression must abort"; fi
+grep -q 'catalog regression' "$TMP/out" || fail "bound regression abort must say why"
+[ "$(current_target)" = "releases/newer-live" ] || fail "bound regression must not touch current"
+reset
+live_release newer-live
+change_content "$ROOT/autotune/releases/newer-live"
+run_deploy_slice "$(printf '%s' "$reason" | base64 | tr -d '\n')" || { cat "$TMP/out" >&2; fail "bound override must proceed"; }
+grep -q '^VERDICT=regression$' "$TMP/out" || fail "bound override must report the regression verdict"
+[ "$(current_target)" = "releases/$INCOMING_DIR" ] || fail "bound override must activate the incoming release"
+python3 - "$VAR/catalog-window-overrides.jsonl" "$BOUND_ID" <<'PY' || fail "bound override record is wrong"
+import json, sys
+r = json.loads(open(sys.argv[1]).read().splitlines()[-1])
+assert r["live"] == {"target": "releases/newer-live", "release_id": sys.argv[2]}, r
+PY
+BOUND=0
+RELEASE_FILES="$BASE_FILES"
+INCOMING_ID="$COMMITTED_ID"
 
 # Override reason validation (runs before any SSH).
 validate_block="$(awk '/^CATALOG_REGRESSION_OVERRIDE_REASON="\$\{CATALOG_REGRESSION_OVERRIDE_REASON:-\}"$/{f=1} f{print} f&&/^fi$/{exit}' "$DEPLOY_SH")"

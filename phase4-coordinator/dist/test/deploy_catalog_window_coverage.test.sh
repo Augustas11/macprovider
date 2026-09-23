@@ -113,11 +113,22 @@ PY
   PATH="$TMP/bin:$PATH" bash -c "$script"
 }
 
-# release <dir> <candidate version>: distinct candidate bytes per dir.
+# Coverage admits a release only when its candidate sidecar verifies against
+# the release's own trusted-keys.json, so every fixture is really signed with
+# one OpenSSL Ed25519 key (as scripts/tests/test_autotune_window.py does).
+openssl genpkey -algorithm ed25519 -out "$TMP/k1.pem" 2>/dev/null || fail "openssl cannot generate an Ed25519 key"
+K1_PUB_B64="$(openssl pkey -in "$TMP/k1.pem" -pubout -outform DER | tail -c 32 | base64 | tr -d '\n')"
+[ -n "$K1_PUB_B64" ] || fail "could not derive the Ed25519 public key"
+
+# release <dir> <candidate version>: distinct, signed candidate bytes per dir.
 release() {
-  local d="$ROOT/autotune/releases/$1"
+  local d="$ROOT/autotune/releases/$1" sig
   mkdir -p "$d"
   printf '{"version":"%s","source":"x","rows":{"r":{"dir":"%s"}}}' "$2" "$1" > "$d/autotune-candidates.json"
+  sig="$(openssl pkeyutl -sign -rawin -inkey "$TMP/k1.pem" -in "$d/autotune-candidates.json" | base64 | tr -d '\n')"
+  printf '{"key_id":"k1","alg":"ed25519","signature":"%s"}' "$sig" > "$d/autotune-candidates.json.sig"
+  printf '{"schema_version":"macprovider.autotune-keys.v1","keys":{"k1":{"public_key_base64":"%s","status":"active"}}}' \
+    "$K1_PUB_B64" > "$d/trusted-keys.json"
 }
 sha_of() { shasum -a 256 "$ROOT/autotune/releases/$1/autotune-candidates.json" | cut -d' ' -f1; }
 provider() { printf '{"provider_id":"p%s","catalog_release_id":"%s","catalog_candidate_sha256":"%s","routing_eligible":%s}' "$RANDOM" "$1" "$(sha_of "$2")" "${3:-true}"; }
@@ -130,7 +141,13 @@ reset() {
   rm -rf "${TMP:?}/opt" "${TMP:?}/var" "$DEPLOY_TMP"
   rm -f "$TMP/curl-calls" "$TMP/ssh-log" "$TMP/poolz.json"
   mkdir -p "$ROOT/autotune/releases" "$DEPLOY_TMP/scripts"
-  cp "$REPO_ROOT/scripts/autotune_window.py" "$DEPLOY_TMP/scripts/autotune_window.py"
+  # The shipped verifier bundle, as $DEPLOY_TMP/scripts/ holds it on Pearl:
+  # autotune_window.py loads catalog-release.py's signature checks beside it.
+  for entry in $(grep -v '^#' "$REPO_ROOT/scripts/catalog-verifier-bundle.txt"); do
+    cp "$REPO_ROOT/$entry" "$DEPLOY_TMP/$entry"
+  done
+  [ -f "$DEPLOY_TMP/scripts/autotune_window.py" ] && [ -f "$DEPLOY_TMP/scripts/catalog-release.py" ] &&
+    [ -f "$DEPLOY_TMP/scripts/openrouter_pricing_engine.py" ] || fail "verifier bundle lacks the coverage closure"
   # Live current + a full retained window; activation drops releases/p3.
   release live live-v
   release p1 p1-v

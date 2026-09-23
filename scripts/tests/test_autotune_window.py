@@ -3,12 +3,15 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import hashlib
 import importlib.util
 import io
 import json
 import os
+import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -21,6 +24,31 @@ SPEC.loader.exec_module(aw)
 
 UID = os.getuid()
 GID = os.getgid()
+_KEYS: dict[str, tuple[Path, str]] = {}
+_KEY_DIR = tempfile.TemporaryDirectory()
+
+
+def ed25519_key(key_id: str) -> tuple[Path, str]:
+    """(private key path, canonical base64 raw public key) via OpenSSL 3."""
+    if key_id not in _KEYS:
+        path = Path(_KEY_DIR.name) / f"{key_id}.pem"
+        subprocess.run(["openssl", "genpkey", "-algorithm", "ed25519", "-out", str(path)], check=True,
+                       capture_output=True)
+        der = subprocess.run(["openssl", "pkey", "-in", str(path), "-pubout", "-outform", "DER"], check=True,
+                             capture_output=True).stdout
+        _KEYS[key_id] = (path, base64.b64encode(der[-32:]).decode("ascii"))
+    return _KEYS[key_id]
+
+
+def ed25519_sidecar(key_id: str, body: bytes, sign_as: str | None = None) -> bytes:
+    path, _ = ed25519_key(sign_as or key_id)
+    with tempfile.NamedTemporaryFile(dir=_KEY_DIR.name) as msg:
+        msg.write(body)
+        msg.flush()
+        sig = subprocess.run(["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(path), "-in", msg.name],
+                             check=True, capture_output=True).stdout
+    return json.dumps({"key_id": key_id, "alg": "ed25519",
+                       "signature": base64.b64encode(sig).decode("ascii")}).encode()
 
 
 class ComputeWindowTests(unittest.TestCase):
@@ -225,6 +253,42 @@ class FileTests(unittest.TestCase):
         rc, _, _ = self.cli("restore", "--from-file", str(src), "--expect-current", "releases/nope")
         self.assertNotEqual(rc, 0)
 
+    def test_restore_writes_original_bytes(self) -> None:
+        # SPEC-023-R013 exact-byte rollback: comments, blank lines and trailing
+        # newlines survive; entries are still validated.
+        src = Path(self._tmp.name) / "backup"
+        raw = b"# hand-restored\nreleases/a\n\n  releases/b  \n\n\n"
+        src.write_bytes(raw)
+        rc, out, err = self.cli("restore", "--from-file", str(src), "--expect-current", "releases/cur")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(self.pt.read_bytes(), raw)
+        self.assertEqual(json.loads(out)["window_after"], ["releases/a", "releases/b"])
+        self.assertEqual(stat.S_IMODE(os.stat(self.pt).st_mode), 0o640)
+        for bad in (b"releases/../x\n", b"releases/a\nreleases/b\nreleases/c\nreleases/d\n", b"releases/\xff\n"):
+            with self.subTest(bad=bad):
+                src.write_bytes(bad)
+                rc, _, _ = self.cli("restore", "--from-file", str(src), "--expect-current", "releases/cur")
+                self.assertNotEqual(rc, 0)
+                self.assertEqual(self.pt.read_bytes(), raw)
+
+    def test_write_window_bytes_api(self) -> None:
+        aw.write_window_bytes(str(self.root), b"releases/a\n\n", group=GID, required_uid=UID,
+                              expect_current="releases/cur")
+        self.assertEqual(self.pt.read_bytes(), b"releases/a\n\n")
+        with self.assertRaises(aw.WindowError):
+            aw.write_window_bytes(str(self.root), b"releases/b\n", group=GID, required_uid=UID,
+                                  expect_current="releases/other")
+        self.assertEqual(self.pt.read_bytes(), b"releases/a\n\n")
+        aw.write_window_bytes(str(self.root), None, group=GID, required_uid=UID, expect_current="releases/cur")
+        self.assertFalse(self.pt.exists())
+
+    def test_empty_expect_current_means_no_current(self) -> None:
+        with self.assertRaises(aw.WindowError):
+            aw.write_window(str(self.root), ["releases/a"], group=GID, required_uid=UID, expect_current="")
+        os.unlink(self.root / "current")
+        aw.write_window(str(self.root), ["releases/a"], group=GID, required_uid=UID, expect_current="")
+        self.assertEqual(self.pt.read_text(), "releases/a\n")
+
     def test_plan_json_shape(self) -> None:
         self.pt.write_text("releases/p1\n")
         rc, out, err = self.cli("plan", "--incoming", "releases/n")
@@ -266,15 +330,23 @@ class CoverageTests(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmp.cleanup()
 
-    def release(self, name: str, version: str, *, marker: str = "", signer: str | None = "k1") -> str:
+    TRUSTED = ("k1", "other")
+
+    def release(self, name: str, version: str, *, marker: str = "", signer: str | None = "k1",
+                sign_as: str | None = None, keyring: tuple[str, ...] = TRUSTED) -> str:
+        """A release dir signed like the real ones: <feed>.sig over the exact
+        candidate bytes plus the release's trusted-keys.json. signer=None omits
+        the sidecar; sign_as signs with a different key than key_id claims."""
         d = self.root / "releases" / name
         d.mkdir()
         raw = json.dumps({"version": version, "source": "x", "rows": {"r": {"marker": marker or name}}}).encode()
         (d / "autotune-candidates.json").write_bytes(raw)
-        sha = hashlib.sha256(raw).hexdigest()
         if signer is not None:
-            (d / "release.json").write_text(json.dumps(
-                {"release_id": version, "feeds": {"autotune-candidates.json": {"sha256": sha, "signer_key_id": signer}}}))
+            (d / "autotune-candidates.json.sig").write_bytes(ed25519_sidecar(signer, raw, sign_as))
+        (d / "trusted-keys.json").write_text(json.dumps({
+            "schema_version": "macprovider.autotune-keys.v1",
+            "keys": {k: {"public_key_base64": ed25519_key(k)[1], "status": "active"} for k in keyring}}))
+        sha = hashlib.sha256(raw).hexdigest()
         self.shas[name] = sha
         return sha
 
@@ -431,6 +503,67 @@ class CoverageTests(unittest.TestCase):
         self.release("new", "v3")
         self.current("cur")
         (self.root / aw.FILE_NAME).write_text("releases/missing\n")
+        self.pool()
+        self.assertEqual(self.cov()[0], 1)
+
+    def test_unverifiable_restamps_and_window_entries_not_covered(self) -> None:
+        # Parity with the coordinator: a restamp whose candidate signature does
+        # not verify is skipped at reload, and a window entry that does not
+        # verify fails reload; neither is an admissible catalog.
+        self.release("cur", "v2")
+        self.release("new", "v3")
+        self.release("v3-0000000000000001", "v3", marker="missing-sig", signer=None)
+        self.release("v3-0000000000000002", "v3", marker="bad-sig", sign_as="rogue")
+        self.release("v3-0000000000000003", "v3", marker="untrusted", signer="rogue")
+        # Trusted by its own keyring but not by the incoming release's.
+        self.release("v3-0000000000000004", "v3", marker="own-only", signer="rogue",
+                     keyring=("k1", "rogue"))
+        self.release("p1", "v1", signer=None)
+        self.release("p2", "v0", sign_as="rogue")
+        self.release("v3-0000000000000005", "v3", marker="good")
+        self.current("cur")
+        (self.root / aw.FILE_NAME).write_text("releases/p1\nreleases/p2\n")
+        bad = ["v3-0000000000000001", "v3-0000000000000002", "v3-0000000000000003", "v3-0000000000000004"]
+        self.pool(*(self.provider("v3", n) for n in bad), self.provider("v1", "p1"), self.provider("v0", "p2"),
+                  self.provider("v3", "v3-0000000000000005"), self.provider("v2", "cur"))
+        rc, got, err = self.cov()
+        self.assertEqual(rc, 4, err)
+        self.assertEqual(sorted(u["sha"] for u in got["uncovered"]),
+                         sorted(self.shas[n] for n in bad + ["p1", "p2"]))
+        self.assertEqual([c["dir"] for c in got["covered"]],
+                         ["releases/new", "releases/cur", "releases/v3-0000000000000005"])
+
+    def test_signer_key_must_match_incoming_keyring_bytes(self) -> None:
+        # Same key_id, different public key in the release's own keyring.
+        self.release("cur", "v2")
+        self.release("new", "v3")
+        d = self.root / "releases" / "cur"
+        keys = json.loads((d / "trusted-keys.json").read_text())
+        keys["keys"]["k1"]["public_key_base64"] = ed25519_key("rogue")[1]
+        (d / "trusted-keys.json").write_text(json.dumps(keys))
+        self.current("cur")
+        self.pool(self.provider("v2", "cur"))
+        self.assertEqual(self.cov()[0], 4)
+
+    def test_unverifiable_incoming_is_refusal(self) -> None:
+        for name, kw in (("missing", {"signer": None}), ("bad", {"sign_as": "rogue"}),
+                         ("untrusted", {"signer": "rogue"})):
+            with self.subTest(name=name):
+                self.release(name, "v3", **kw)
+                self.pool()
+                rc, got, err = self.cov(f"releases/{name}")
+                self.assertEqual(rc, 1)
+                self.assertIsNone(got)
+                self.assertIn("refusing", err)
+
+    def test_retired_key_is_not_trusted(self) -> None:
+        self.release("new", "v3")
+        self.release("cur", "v2")
+        d = self.root / "releases" / "new"
+        keys = json.loads((d / "trusted-keys.json").read_text())
+        keys["keys"]["k1"]["status"] = "retired"
+        (d / "trusted-keys.json").write_text(json.dumps(keys))
+        self.current("cur")
         self.pool()
         self.assertEqual(self.cov()[0], 1)
 

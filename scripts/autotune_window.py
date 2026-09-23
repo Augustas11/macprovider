@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import grp
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -186,18 +187,52 @@ def write_window(
             validate_entry(entry)
         except ValueError as exc:
             raise WindowError(str(exc)) from exc
+    payload = "".join(e + "\n" for e in entries).encode("ascii") if entries else None
+    _publish(root, payload, group=group, expect_current=expect_current, required_uid=required_uid)
+
+
+def write_window_bytes(
+    root: str,
+    data: bytes | None,
+    *,
+    group: str | int = "macprovider",
+    expect_current: str | None = None,
+    required_uid: int = 0,
+) -> None:
+    """Rollback: publish data verbatim (comments, blank lines, trailing
+    newlines kept) after validating its entries; None removes the file."""
+    if data is not None:
+        if len(data) > MAX_FILE_BYTES:
+            raise WindowError(f"{FILE_NAME} payload is too large")
+        try:
+            text = data.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise WindowError(f"{FILE_NAME} payload is not ascii") from exc
+        parse_entries(text)
+    _publish(root, data, group=group, expect_current=expect_current, required_uid=required_uid)
+
+
+def _publish(
+    root: str,
+    payload: bytes | None,
+    *,
+    group: str | int,
+    expect_current: str | None,
+    required_uid: int,
+) -> None:
     root_fd = open_root(root, required_uid=required_uid)
     try:
         if expect_current is not None:
+            # "" expects no current symlink (a rollback to a bootstrap state).
             live = read_current(root_fd)
-            if live != expect_current:
+            if (live or "") != expect_current:
                 raise WindowError(f"current is {live!r}, expected {expect_current!r}; not writing")
         info = _existing_info(root_fd)
         if info is not None:
             if not stat.S_ISREG(info.st_mode):
                 raise WindowError(f"{FILE_NAME} is not a regular file (symlink or special)")
             _check_owned(info, required_uid, FILE_NAME)
-        if not entries:
+        if payload is None:
             if info is not None:
                 os.unlink(FILE_NAME, dir_fd=root_fd)
                 os.fsync(root_fd)
@@ -218,7 +253,9 @@ def write_window(
                     or tinfo.st_nlink != 1
                 ):
                     raise WindowError("unsafe previous-target temp file")
-                os.write(fd, "".join(e + "\n" for e in entries).encode("ascii"))
+                view = memoryview(payload)
+                while view:
+                    view = view[os.write(fd, view):]
                 os.fsync(fd)
             finally:
                 os.close(fd)
@@ -259,6 +296,7 @@ MAX_RESTAMP_EXAMINED = 16
 RESTAMP_SUFFIX_RE = re.compile(r"-[0-9a-f]{16}")
 SHA_RE = re.compile(r"[0-9a-fA-F]{64}")
 MAX_FEED_BYTES = 16 * 1024 * 1024
+MAX_GO_FEED_BYTES = 4 * 1024 * 1024  # buyer.maxAutotuneFeedBytes
 MAX_POOLZ_BYTES = 16 * 1024 * 1024
 CANDIDATES = "autotune-candidates.json"
 
@@ -282,20 +320,77 @@ def _read_bounded_at(dir_fd: int, name: str, limit: int) -> bytes:
         os.close(fd)
 
 
+MAX_SIDECAR_BYTES = 16 * 1024  # buyer.maxAutotuneSidecarBytes
+MAX_KEYRING_BYTES = 1024 * 1024
+_catalog_release_module = None
+
+
+def _catalog_release():
+    """scripts/catalog-release.py, the repo's Ed25519 feed verifier.
+
+    Loaded lazily (only coverage verifies signatures) from beside this file,
+    or from scripts/ beside it (the renew/activation helper-dir layout)."""
+    global _catalog_release_module
+    if _catalog_release_module is None:
+        here = os.path.dirname(os.path.abspath(__file__))
+        for path in (os.path.join(here, "catalog-release.py"), os.path.join(here, "scripts", "catalog-release.py")):
+            if os.path.isfile(path):
+                break
+        else:
+            raise WindowError("catalog-release.py (feed signature verifier) is not shipped beside autotune_window.py")
+        name = "macprovider_catalog_release_verifier"
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            raise WindowError(f"cannot load feed signature verifier {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException as exc:
+            sys.modules.pop(name, None)
+            raise WindowError(f"cannot load feed signature verifier {path}: {exc}") from exc
+        _catalog_release_module = module
+    return _catalog_release_module
+
+
+class _Bytes:
+    """Hands already-read bytes to catalog-release.keyring(), which reads a path."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    def read_bytes(self) -> bytes:
+        return self._data
+
+
+def _decode_keyring(data: bytes, label: str) -> dict[str, bytes]:
+    cr = _catalog_release()
+    try:
+        return cr.keyring(_Bytes(data))
+    except cr.CatalogError as exc:
+        raise WindowError(f"{label}: {exc}") from exc
+
+
 def load_release(releases_fd: int, name: str) -> dict:
     """Return the admission identity of releases/<name>.
 
     release_id/sha are what the coordinator matches a provider hello against:
-    autotune-candidates.json "version" and sha256 of its exact bytes. signer is
-    the release.json signer bound to that same sha (None if unbound).
+    autotune-candidates.json "version" and sha256 of its exact bytes. The
+    candidate sidecar, the release's trusted-keys.json, and the raw bytes are
+    kept so verify_release() can check the signature like the coordinator.
     """
     fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=releases_fd)
     try:
         raw = _read_bounded_at(fd, CANDIDATES, MAX_FEED_BYTES)
+        sidecar = keys = None
         try:
-            feed = json.loads(_read_bounded_at(fd, "release.json", MAX_FEED_BYTES))["feeds"][CANDIDATES]
-        except (OSError, ValueError, KeyError, TypeError, WindowError):
-            feed = None
+            sidecar = _read_bounded_at(fd, CANDIDATES + ".sig", MAX_SIDECAR_BYTES)
+        except (OSError, WindowError):
+            pass
+        try:
+            keys = _read_bounded_at(fd, "trusted-keys.json", MAX_KEYRING_BYTES)
+        except (OSError, WindowError):
+            pass
     finally:
         os.close(fd)
     sha = hashlib.sha256(raw).hexdigest()
@@ -305,33 +400,75 @@ def load_release(releases_fd: int, name: str) -> dict:
         raise WindowError(f"releases/{name}/{CANDIDATES} is not a JSON object") from exc
     if not isinstance(version, str) or not version.strip():
         raise WindowError(f"releases/{name}/{CANDIDATES} has no version")
-    signer = None
-    if (
-        isinstance(feed, dict)
-        and isinstance(feed.get("signer_key_id"), str)
-        and str(feed.get("sha256", "")).lower() == sha
-    ):
-        signer = feed["signer_key_id"]
-    return {"dir": f"releases/{name}", "release_id": version, "sha": sha, "signer": signer}
+    return {"dir": f"releases/{name}", "release_id": version, "sha": sha, "signer": None,
+            "_raw": raw, "_sidecar": sidecar, "_keys": keys}
+
+
+def verify_release(release: dict, trusted: dict[str, bytes]) -> str:
+    """Verify the candidate feed's detached signature as the coordinator does
+    (buyer.loadAutotuneFeedPair): strict sidecar, key_id in the trusted
+    keyring, Ed25519 over the exact bytes. Conservative extra: the key must
+    also be a non-retired key, with the same bytes, in the release's own
+    trusted-keys.json. Returns the signer key_id; WindowError if unverifiable."""
+    label = f"{release['dir']}/{CANDIDATES}.sig"
+    if len(release["_raw"]) > MAX_GO_FEED_BYTES:
+        raise WindowError(f"{release['dir']}/{CANDIDATES} exceeds the coordinator feed limit")
+    if release["_sidecar"] is None:
+        raise WindowError(f"{label} is missing")
+    if release["_keys"] is None:
+        raise WindowError(f"{release['dir']}/trusted-keys.json is missing")
+    cr = _catalog_release()
+    try:
+        release["_raw"].decode("utf-8")
+        key_id, signature = cr.parse_sidecar(release["_sidecar"], label)
+        if not key_id or key_id.strip() != key_id:
+            raise WindowError(f"{label}: key_id must be a non-empty trimmed string")
+        own = _decode_keyring(release["_keys"], f"{release['dir']}/trusted-keys.json")
+        public_key = trusted.get(key_id)
+        if public_key is None or own.get(key_id) != public_key:
+            raise WindowError(f"{label}: signer {key_id!r} is not a trusted key")
+        cr.verify_ed25519(public_key, signature, release["_raw"], label)
+    except UnicodeDecodeError as exc:
+        raise WindowError(f"{release['dir']}/{CANDIDATES} is not UTF-8") from exc
+    except cr.CatalogError as exc:
+        raise WindowError(str(exc)) from exc
+    release["signer"] = key_id
+    return key_id
+
+
+def _public(release: dict) -> dict:
+    return {k: v for k, v in release.items() if not k.startswith("_")}
 
 
 def admissible_releases(root_fd: int, incoming: str, *, required_uid: int = 0) -> list[dict]:
-    """Every release a provider may be admitted on after incoming becomes current."""
+    """Every release a provider may be admitted on after incoming becomes current.
+
+    A release counts only if its candidate signature verifies (verify_release)
+    under the incoming release's keyring, the stand-in for the coordinator's
+    autotune.public_keys. An unverifiable window entry or restamp is simply not
+    admissible; an unverifiable incoming release is a refusal.
+    """
     current = read_current(root_fd)
     window = compute_window(read_window(root_fd, required_uid=required_uid), current or None, incoming)
     releases_fd = os.open("releases", os.O_RDONLY | os.O_DIRECTORY | NOFOLLOW, dir_fd=root_fd)
     try:
         active = load_release(releases_fd, incoming[len("releases/"):])
+        if active["_keys"] is None:
+            raise WindowError(f"{incoming}/trusted-keys.json is missing")
+        trusted = _decode_keyring(active["_keys"], f"{incoming}/trusted-keys.json")
+        verify_release(active, trusted)
         out = [active]
         # previous-target is fail-closed in the coordinator: an unloadable
         # entry blocks boot, so it is a refusal here too.
         for entry in window:
             prev = load_release(releases_fd, entry[len("releases/"):])
+            try:
+                verify_release(prev, trusted)
+            except WindowError:
+                continue
             # ws/server.go: a same-version previous catalog must keep the
             # active signer.
-            if prev["release_id"] == active["release_id"] and (
-                prev["signer"] is None or prev["signer"] != active["signer"]
-            ):
+            if prev["release_id"] == active["release_id"] and prev["signer"] != active["signer"]:
                 continue
             out.append(prev)
         prefix = active["release_id"] + "-"
@@ -346,19 +483,19 @@ def admissible_releases(root_fd: int, incoming: str, *, required_uid: int = 0) -
             examined += 1
             try:
                 restamp = load_release(releases_fd, entry.name)
+                verify_release(restamp, trusted)
             except (OSError, WindowError):
                 continue
             if (
                 restamp["release_id"] != active["release_id"]
                 or restamp["sha"] == active["sha"]
-                or restamp["signer"] is None
                 or restamp["signer"] != active["signer"]
             ):
                 continue
             out.append(restamp)
     finally:
         os.close(releases_fd)
-    return out
+    return [_public(r) for r in out]
 
 
 def advertised_catalogs(poolz: object) -> tuple[dict[tuple[str, str], dict], int]:
@@ -424,7 +561,7 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--outgoing", help="releases/<id> leaving current (default: readlink current)")
         if name == "apply":
             p.add_argument("--expect-current", required=True, help="refuse unless current still points here")
-    p = sub.add_parser("restore", help="write the exact entries of a saved window (rollback)")
+    p = sub.add_parser("restore", help="write the exact bytes of a saved window (rollback)")
     common(p)
     p.add_argument("--from-file", required=True)
     p.add_argument("--expect-current", required=True)
@@ -445,10 +582,10 @@ def main(argv: list[str] | None = None) -> int:
                 data = fh.read(MAX_FILE_BYTES + 1)
             if len(data) > MAX_FILE_BYTES:
                 raise WindowError("restore source is too large")
-            entries = parse_entries(data.decode("ascii"))
-            write_window(args.root, entries, group=group, expect_current=args.expect_current,
-                         required_uid=args.required_uid)
-            result = {"current": args.expect_current, "window_after": entries}
+            # Exact bytes; an empty source means the prior window was absent.
+            write_window_bytes(args.root, data or None, group=group, expect_current=args.expect_current,
+                               required_uid=args.required_uid)
+            result = {"current": args.expect_current, "window_after": parse_entries(data.decode("ascii"))}
         else:
             result = _plan(args)
             if args.cmd == "apply" and result["changed"]:

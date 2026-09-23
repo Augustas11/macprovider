@@ -3352,6 +3352,9 @@ fi
 # Pearl without a commit) before the config backup, release staging, or any
 # current swap. Line 1 is the live target (empty = bootstrap), line 2 the
 # compare-live verdict JSON; compare-live exits 3 for a regression.
+# compare-live ignores detached signatures, so the live release is first put
+# through the same verify-directory as the incoming preflight; a live release
+# that fails it exits 4 and aborts the deploy instead of being classified.
 log "  comparing staged catalog release with live autotune/current (compare-live)"
 CATALOG_COMPARE_RC=0
 CATALOG_COMPARE_OUT="$($SSH "set -e
@@ -3364,6 +3367,7 @@ CATALOG_COMPARE_OUT="$($SSH "set -e
   case \"\$_live\" in
     *[!A-Za-z0-9._/-]*|*/*/*) echo \"unsafe existing autotune current target: \$_live\" >&2; exit 1 ;;
   esac
+  python3 -I $DEPLOY_TMP/scripts/catalog-release.py verify-directory --directory /opt/macprovider/autotune/\$_live --tier2-public-key-file $DEPLOY_TMP/tier2-catalog.pub >&2 || exit 4
   _compare=$DEPLOY_TMP/catalog-compare
   rm -rf \$_compare
   install -d -m 0700 \$_compare
@@ -3376,6 +3380,10 @@ CATALOG_COMPARE_OUT="$($SSH "set -e
 CATALOG_LIVE_TARGET="${CATALOG_COMPARE_OUT%%$'\n'*}"
 CATALOG_COMPARE_JSON=""
 case "$CATALOG_COMPARE_OUT" in *$'\n'*) CATALOG_COMPARE_JSON="${CATALOG_COMPARE_OUT#*$'\n'}" ;; esac
+if [ "$CATALOG_COMPARE_RC" = "4" ]; then
+  echo "aborting deploy: the LIVE catalog release autotune/current failed verify-directory on the VPS (signature, keyring, Tier-2, or manifest binding); refusing to classify or touch it — repair the live release first" >&2
+  exit 1
+fi
 if [ "$CATALOG_COMPARE_RC" != "0" ] && [ "$CATALOG_COMPARE_RC" != "3" ]; then
   echo "aborting deploy: compare-live failed on the VPS (rc=$CATALOG_COMPARE_RC); refusing to touch the live catalog" >&2
   exit 1
