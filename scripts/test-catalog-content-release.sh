@@ -68,6 +68,9 @@ rw() {
       -e "s#\"/opt\"#\"$CCR_FAKE/opt\"#g" \
       -e "s#/run/lock/#$CCR_FAKE/run/lock/#g" \
       -e "s#/var/lib/macprovider-pearl-updater/#$CCR_FAKE/var/lib/macprovider-pearl-updater/#g" \
+      -e "s#install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider#mkdir -p $CCR_FAKE/var/lib/macprovider#g" \
+      -e "s#/var/lib/macprovider/#$CCR_FAKE/var/lib/macprovider/#g" \
+      -e "s#os\\.fchown\\(fd, 0, 0\\)#pass#g" \
       -e "s#/tmp/macprovider-content-#$CCR_RTMP/macprovider-content-#g" \
       -e "s#/proc/\\\$pid/environ#$CCR_FAKE/proc-environ#g" \
       -e "s#127\\.0\\.0\\.1:8443#127.0.0.1:$BUYER_PORT#g" \
@@ -327,7 +330,8 @@ mkdir -p "$R/scripts/lib" "$R/ops/pearl-updater" "$R/phase3-binary/catalog/autot
 cp "$root/scripts/catalog-content-release.sh" "$root/scripts/pearl_autotune_deploy_lock.py" \
    "$root/scripts/catalog-verifier-bundle.txt" "$root/scripts/autotune_window.py" \
    "$root/scripts/openrouter_pricing_engine.py" "$root/scripts/sign-catalog.go" "$R/scripts/"
-cp "$root/scripts/lib/autotune-activate.sh" "$root/scripts/lib/catalog-canary-token.sh" "$R/scripts/lib/"
+cp "$root/scripts/lib/autotune-activate.sh" "$root/scripts/lib/catalog-canary-token.sh" \
+   "$root/scripts/lib/catalog-window-override.sh" "$R/scripts/lib/"
 cp "$root/ops/pearl-updater/catalog-canary-proof.py" "$R/ops/pearl-updater/"
 cat >"$R/scripts/catalog-release.py" <<'CR'
 #!/usr/bin/env python3
@@ -516,6 +520,31 @@ export CATALOG_WINDOW_OVERRIDE_REASON="ghost provider retired per ops ticket"
 run preflight
 [ "$RC" -eq 0 ] && [ "$(verdict_check window_coverage)" = true ] || fail "coverage override must turn coverage GO (rc=$RC): $(cat "$T/out")"
 note "ok: coverage loss GO with a logged override"
+
+# #1688: a deploy that activates under a window coverage override must append
+# one durable JSON audit line to Pearl's catalog-window-overrides.jsonl,
+# through the same shared scripts/lib/catalog-window-override.sh contract
+# deploy-pearl-vps.sh and renew-autotune-static-feed.sh use.
+run deploy
+[ "$RC" -eq 0 ] || fail "deploy with a logged coverage override must succeed (rc=$RC): $(tail -n 30 "$T/out") $(tail -n 20 "$T/err")"
+OVERRIDE_LOG="$CCR_FAKE/var/lib/macprovider/catalog-window-overrides.jsonl"
+[ -f "$OVERRIDE_LOG" ] || fail "deploy with override must append to catalog-window-overrides.jsonl"
+[ "$(wc -l <"$OVERRIDE_LOG" | tr -d ' ')" = 1 ] || fail "override log must be exactly one line: $(cat "$OVERRIDE_LOG")"
+override_mode="$(stat -f '%Lp' "$OVERRIDE_LOG" 2>/dev/null || stat -c '%a' "$OVERRIDE_LOG")"
+[ "$override_mode" = 600 ] || fail "override log must be 0600, got $override_mode"
+python3 - "$OVERRIDE_LOG" <<'PY' || fail "override record shape: $(cat "$OVERRIDE_LOG")"
+import json, sys
+rec = json.loads(open(sys.argv[1]).readline())
+assert set(rec) == {"kind", "reason", "uncovered", "incoming", "live", "commit", "ts"}, sorted(rec)
+assert rec["kind"] == "content_lane_window_coverage", rec
+assert rec["reason"] == "ghost provider retired per ops ticket", rec
+assert isinstance(rec["uncovered"], list) and rec["uncovered"], rec
+assert rec["incoming"].startswith("releases/test-new-v1-"), rec
+assert set(rec["live"]) == {"target", "release_id"} and rec["live"]["release_id"] == "test-live-v1", rec
+assert rec["commit"], rec
+PY
+note "ok: deploy with override appends catalog-window-overrides.jsonl"
+
 setup_env; touch "$CCR_FAKE/opt/macprovider/coordinator.yaml"; expect_no_go "yaml drift" config_applied
 setup_env
 printf '# local edit\n' >>"$R/scripts/lib/catalog-canary-token.sh"

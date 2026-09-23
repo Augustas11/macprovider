@@ -46,8 +46,14 @@ grep -qF 'printf '"'"'header = "Authorization: Bearer %s"\n'"'"' "$CATALOG_CANAR
   fail "the operator key must reach Pearl only on SSH stdin"
 
 # --- Extract the blocks ----------------------------------------------------
+# #1688: the append primitive itself now lives in the shared
+# scripts/lib/catalog-window-override.sh (also used by the catalog-content
+# lane); deploy's local wrapper just delegates to it.
+CWO_LIB="$REPO_ROOT/scripts/lib/catalog-window-override.sh"
+[ -f "$CWO_LIB" ] || fail "missing shared catalog-window-override lib"
+grep -q 'catalog-window-overrides.jsonl' "$CWO_LIB" || fail "shared lib lost the override append"
 awk '/^_append_catalog_window_override\(\) \{$/{f=1} f{print} f&&/^}$/{exit}' "$DEPLOY_SH" > "$TMP/append-helper.sh"
-grep -q 'catalog-window-overrides.jsonl' "$TMP/append-helper.sh" || fail "could not extract the override append helper"
+grep -q 'cwo_override_remote_command' "$TMP/append-helper.sh" || fail "could not extract the override append helper"
 awk '/^# #1688 A3: before an activation changes current/{f=1} f{print} f&&/^esac$/{exit}' "$DEPLOY_SH" > "$TMP/coverage-block.sh"
 grep -q 'autotune_window.py coverage' "$TMP/coverage-block.sh" || fail "could not extract the coverage block"
 awk '/^if \[ "\$CATALOG_VERDICT" = "equivalent" \]; then$/{f=1} f{print} f&&/^fi$/{exit}' "$DEPLOY_SH" > "$TMP/activate-block.sh"
@@ -151,6 +157,8 @@ run_slice() {
     AUTOTUNE_RELEASE_DIR_NAME="$INCOMING_DIR"
     COORDINATOR_RELEASE_VERSION="v9.9.9"
     COORDINATOR_RELEASE_COMMIT="0123456789abcdef0123456789abcdef01234567"
+    # shellcheck disable=SC1091
+    . "$CWO_LIB"
     # shellcheck disable=SC1091
     . "$TMP/append-helper.sh"
     # shellcheck disable=SC1091

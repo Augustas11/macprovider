@@ -132,6 +132,8 @@ for _ssh_opt in "${SSH_OPTS[@]}"; do RSYNC_RSH="$RSYNC_RSH $_ssh_opt"; done
 . "$SCRIPT_DIR/lib/autotune-activate.sh"
 # shellcheck source=scripts/lib/catalog-canary-token.sh
 . "$SCRIPT_DIR/lib/catalog-canary-token.sh"
+# shellcheck source=scripts/lib/catalog-window-override.sh
+. "$SCRIPT_DIR/lib/catalog-window-override.sh"
 
 command -v git >/dev/null 2>&1 || fatal "git is required"
 command -v python3 >/dev/null 2>&1 || fatal "python3 is required"
@@ -1064,7 +1066,29 @@ fetch_poolz "$WORK/poolz-before.json" || fatal "coordinator /poolz unreachable b
 unavailable_counts "$WORK/poolz-before.json" >"$WORK/unavailable-before.json"
 if [ "$AA_COVERAGE_OVERRIDE" = 1 ]; then
   log "window coverage override: $CATALOG_WINDOW_OVERRIDE_REASON"
-  SSH "logger -t macprovider-catalog-content 'catalog-content window coverage override for $RELEASE_DIRNAME: $(printf '%s' "$CATALOG_WINDOW_OVERRIDE_REASON" | base64 | tr -d '\n') (base64)'" || true
+  # Same durable audit trail as deploy-pearl-vps.sh's regression/window
+  # overrides: one JSON line appended to Pearl's
+  # /var/lib/macprovider/catalog-window-overrides.jsonl via the shared
+  # scripts/lib/catalog-window-override.sh primitive.
+  CONTENT_OVERRIDE_RECORD_B64="$(python3 - "$CATALOG_WINDOW_OVERRIDE_REASON" "$WORK/coverage.json" "$RELEASE_DIRNAME" "$CURRENT_TARGET" "$LIVE_ID" "$COMMIT" <<'PY'
+import base64, json, sys
+reason, coverage_path, incoming, live_target, live_id, commit = sys.argv[1:]
+with open(coverage_path) as f:
+    coverage = json.load(f)
+record = {
+    "kind": "content_lane_window_coverage",
+    "reason": reason,
+    "uncovered": coverage.get("uncovered", []),
+    "incoming": "releases/" + incoming,
+    "live": {"target": live_target, "release_id": live_id},
+    "commit": commit,
+}
+print(base64.b64encode(json.dumps(record, sort_keys=True).encode("ascii")).decode("ascii"))
+PY
+)" || fatal "could not build the window coverage override record"
+  SSH "$(cwo_override_remote_command "$CONTENT_OVERRIDE_RECORD_B64" "catalog-content window coverage override for $RELEASE_DIRNAME" macprovider-catalog-content)" ||
+    fatal "could not append the window coverage override record"
+  log "AUDIT TRAIL: override appended to /var/lib/macprovider/catalog-window-overrides.jsonl"
 fi
 T_HUP="$(remote_now)"
 case "$T_HUP" in ""|*[!0-9]*) fatal "cannot read Pearl time" ;; esac

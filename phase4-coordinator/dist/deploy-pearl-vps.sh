@@ -201,6 +201,11 @@ _validate_dns_name "${STATS_DOMAIN:-stats.malibu.tech}" STATS_DOMAIN
 # lib so the catalog-content lane reads the token exactly as deploy does.
 # shellcheck source=../../scripts/lib/catalog-canary-token.sh
 . "$_PEARL_TLS_SCRIPT_DIR/../../scripts/lib/catalog-canary-token.sh"
+# #1688: the catalog override/coverage append primitive also lives in a
+# shared lib so deploy and the catalog-content lane write the same audit log
+# through the same byte-for-byte contract.
+# shellcheck source=../../scripts/lib/catalog-window-override.sh
+. "$_PEARL_TLS_SCRIPT_DIR/../../scripts/lib/catalog-window-override.sh"
 
 _run_with_deadline_alarm() {
   local timeout_s="$1"
@@ -800,29 +805,11 @@ if [ -n "$CATALOG_WINDOW_OVERRIDE_REASON" ]; then
 fi
 # Appends one catalog override record to Pearl's root-only 0600 JSONL audit
 # log (O_APPEND|O_NOFOLLOW, regular file only, fsync). $1 = base64 of the
-# record JSON object without "ts"; $2 = fixed logger message.
+# record JSON object without "ts"; $2 = fixed logger message. The append
+# primitive itself lives in scripts/lib/catalog-window-override.sh, shared
+# with the catalog-content lane.
 _append_catalog_window_override() {
-  $SSH "set -e
-    install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider
-    python3 -I - '$1' <<'PY'
-import base64, datetime, json, os, stat, sys
-record = json.loads(base64.b64decode(sys.argv[1], validate=True).decode('ascii'))
-if not isinstance(record, dict) or 'ts' in record:
-    raise SystemExit('override record must be a JSON object without ts')
-record['ts'] = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-path = '/var/lib/macprovider/catalog-window-overrides.jsonl'
-fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-try:
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-        raise SystemExit(path + ' is not a regular file')
-    os.fchown(fd, 0, 0)
-    os.fchmod(fd, 0o600)
-    os.write(fd, (json.dumps(record, sort_keys=True) + '\\n').encode('ascii'))
-    os.fsync(fd)
-finally:
-    os.close(fd)
-PY
-    logger -t macprovider-deploy '$2'"
+  $SSH "$(cwo_override_remote_command "$1" "$2" macprovider-deploy)"
 }
 
 # coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
