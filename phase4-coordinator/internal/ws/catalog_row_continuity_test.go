@@ -266,6 +266,9 @@ func TestCatalogRowContinuitySessionsAreRecheckedOnPublication(t *testing.T) {
 			next := rowContinuityCatalog(t, current, "published-2026-09-24-next-v1", tc.edit)
 			next.RowContinuityOnly = false
 			h.Provider.SetAutotuneCatalog(next, current, baked)
+			if provider, ok := h.Registry.Resolve("m4-anon", ack["assigned_id"].(string)); ok && provider.RoutingEligible() == !tc.wantKept {
+				t.Fatalf("routable=%v immediately after publication, want %v", provider.RoutingEligible(), tc.wantKept)
+			}
 
 			_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
 			for {

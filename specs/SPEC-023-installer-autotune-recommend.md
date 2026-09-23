@@ -837,7 +837,10 @@ admitted as `previous`. Row continuity is re-checked on every release publicatio
 at hello: after a catalog swap, a live session admitted from a document other
 than the new active one is closed `catalog_incompatible` once its selected row
 identity or `PolicyEquivalent` policy no longer equals the new active row. This
-applies to `previous` and `row_continuity` sessions alike.
+applies to `previous` and `row_continuity` sessions alike. The session is made
+unroutable before its close is queued, and a session whose hello was classified
+against the prior release is re-checked when it registers, so neither a pending
+close nor a publication racing admission leaves a diverged session routable.
 
 **Provider refresh (v0.15.1).** When the coordinator closes a hello with
 `catalog_incompatible`, or an accepted hello ack advertises a

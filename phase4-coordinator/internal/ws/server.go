@@ -3725,29 +3725,36 @@ func (s *Server) closeCatalogDivergedSessions() int {
 	}
 	closed := 0
 	for _, provider := range s.pool.Snapshot() {
-		if !catalogEnvelopeAdmissionMode(provider.CatalogAdmissionMode) {
-			continue
-		}
-		resolved, _, isCurrent, ok := resolveProviderCatalogIn(provider, current, compatible)
-		if !ok || isCurrent || resolved == nil {
-			continue
-		}
-		if catalogRowStillEquivalent(provider, resolved, current) {
-			continue
-		}
-		s.log.Warn().
-			Str("provider_id", provider.ProviderID).
-			Str("assigned_id", provider.AssignedID).
-			Str("catalog_admission_mode", provider.CatalogAdmissionMode).
-			Str("catalog_release_id", provider.CatalogReleaseID).
-			Str("current_catalog_release_id", current.Version).
-			Msg("provider catalog row diverged from the published release; closing session")
-		if session, found := s.storedSessionFor(provider.ProviderID, provider.AssignedID); found {
-			s.closeSession(session, CloseInvalidHello, "catalog_incompatible")
+		if s.fenceCatalogDivergedSession(provider, current, compatible) {
 			closed++
 		}
 	}
 	return closed
+}
+
+// fenceCatalogDivergedSession makes one diverged session unroutable at once,
+// then closes it catalog_incompatible; closeSession's delayed teardown must
+// not leave a routable window. It reports whether the session was fenced.
+func (s *Server) fenceCatalogDivergedSession(provider pool.Provider, current *autotune.Catalog, compatible map[string]*autotune.Catalog) bool {
+	if current == nil || !catalogEnvelopeAdmissionMode(provider.CatalogAdmissionMode) {
+		return false
+	}
+	resolved, _, isCurrent, ok := resolveProviderCatalogIn(provider, current, compatible)
+	if !ok || isCurrent || resolved == nil || catalogRowStillEquivalent(provider, resolved, current) {
+		return false
+	}
+	s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable)
+	s.log.Warn().
+		Str("provider_id", provider.ProviderID).
+		Str("assigned_id", provider.AssignedID).
+		Str("catalog_admission_mode", provider.CatalogAdmissionMode).
+		Str("catalog_release_id", provider.CatalogReleaseID).
+		Str("current_catalog_release_id", current.Version).
+		Msg("provider catalog row diverged from the published release; closing session")
+	if session, found := s.storedSessionFor(provider.ProviderID, provider.AssignedID); found {
+		s.closeSession(session, CloseInvalidHello, "catalog_incompatible")
+	}
+	return true
 }
 
 // catalogRowStillEquivalent is the hello-time row-continuity rule applied to a
@@ -3993,6 +4000,17 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*
 			s.helloSessionBindingLocked(entry.ProviderID, prior, hadPrior, section)
 		}
 	})
+	if session != nil {
+		// The hello classified its catalog against the snapshot pinned at
+		// admission; a publication between that and this registration was
+		// swept before the session existed. Re-check against the active
+		// release now that it is registered (SPEC-023-R010, evict-not-refuse
+		// like the trust revalidation sweep above).
+		if registered, ok := s.pool.Resolve(entry.ProviderID, entry.AssignedID); ok {
+			current, compatible := s.autotuneCatalogSnapshot()
+			s.fenceCatalogDivergedSession(registered, current, compatible)
+		}
+	}
 	return session, refusal
 }
 
