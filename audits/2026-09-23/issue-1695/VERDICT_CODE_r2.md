@@ -12,5 +12,3 @@ Validation passed:
 - `git diff --check origin/main...HEAD`
 
 VERDICT: 0 CRITICAL, 0 HIGH, 0 MEDIUM, 0 LOW
-
-
