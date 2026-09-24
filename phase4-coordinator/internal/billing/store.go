@@ -33,6 +33,10 @@ type Store struct {
 	routeSnapshotBusyTimeoutMS atomic.Int64
 	settlementMu               sync.RWMutex
 	settlement                 SettlementConfig
+	// poolAttestation is the SPEC-022-R012 durable pool authority (nil when
+	// trusted pools are disabled: pool_operator_attested is never derived).
+	poolAttestationMu sync.RWMutex
+	poolAttestation   PoolOperatorAttestationAuthority
 	// SPEC-005 v0.4 §13.2 — billing.quarantine_resolution_force_void_enabled
 	// route-layer flag. Held as atomic.Bool so the handler reads it on
 	// every request (no re-wire of the HTTP handler on reload).
@@ -362,7 +366,7 @@ CREATE TABLE IF NOT EXISTS settlement_attempt_outputs (
     settlement_output_canonical_json TEXT,
     usage_hash TEXT NOT NULL CHECK(length(usage_hash) = 64 AND usage_hash NOT GLOB '*[^0-9a-f]*'),
     usage_canonical_json TEXT NOT NULL,
-    usage_source TEXT NOT NULL CHECK(usage_source IN ('coordinator_observed','byte_estimated')),
+    usage_source TEXT NOT NULL CHECK(usage_source IN ('coordinator_observed','byte_estimated','pool_operator_attested')),
     overlapping_or_duplicate INTEGER NOT NULL DEFAULT 0 CHECK(overlapping_or_duplicate IN (0,1)),
     created_at_utc TEXT NOT NULL,
     UNIQUE(account_scope, request_id, attempt_n, provider_id)
@@ -515,6 +519,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 		return err
 	}
 	if err := s.ensureSettlementReceiptPoolLabelColumns(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureSettlementAttemptOutputUsageSourceVocabulary(ctx); err != nil {
 		return err
 	}
 	if err := s.normalizeBillingTimeTextColumns(ctx); err != nil {

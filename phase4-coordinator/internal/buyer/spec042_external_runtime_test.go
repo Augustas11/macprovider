@@ -3,8 +3,10 @@ package buyer_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,6 +48,8 @@ type externalRuntimeFixture struct {
 	delegated bool
 	// candidate binding
 	recordMember bool
+	// durable pool authority verdict (nil = supports the claim)
+	authorityErr error
 }
 
 func defaultExternalRuntimeFixture() externalRuntimeFixture {
@@ -60,14 +64,57 @@ func defaultExternalRuntimeFixture() externalRuntimeFixture {
 }
 
 type externalRuntimeHarness struct {
-	server   *buyer.Server
-	dbPath   string
-	poolID   string
-	registry *pool.Registry
-	event    providerws.ModelAdmissionEvent
-	binding  *artifactidentity.Binding
-	mu       sync.Mutex
-	metadata []string
+	server    *buyer.Server
+	dbPath    string
+	poolID    string
+	registry  *pool.Registry
+	event     providerws.ModelAdmissionEvent
+	binding   *artifactidentity.Binding
+	mu        sync.Mutex
+	metadata  []string
+	authority *externalRuntimeAuthority
+}
+
+// externalRuntimeAuthority stands in for the trust-pool durable records
+// (trustpool.Store.VerifyPoolOperatorAttestation, tested in its package).
+type externalRuntimeAuthority struct {
+	mu    sync.Mutex
+	err   error
+	calls []billing.PoolOperatorAttestationClaim
+}
+
+func (a *externalRuntimeAuthority) VerifyPoolOperatorAttestation(_ context.Context, claim billing.PoolOperatorAttestationClaim) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.calls = append(a.calls, claim)
+	return a.err
+}
+
+type externalRuntimeLedgerRow struct {
+	usageSource string
+	gross       int64
+	provider    int64
+	quarantined int64
+	reason      string
+}
+
+func externalRuntimeLedger(t *testing.T, dbPath string) externalRuntimeLedgerRow {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var row externalRuntimeLedgerRow
+	var reason sql.NullString
+	if err := db.QueryRow(`SELECT sao.usage_source, lrc.gross_credits, lrc.provider_credits, lrc.quarantined, lrc.quarantine_reason
+  FROM settlement_attempt_outputs sao JOIN ledger_request_credits lrc
+    ON lrc.request_id = sao.request_id AND lrc.attempt_n = sao.attempt_n AND lrc.provider_id = sao.provider_id`).
+		Scan(&row.usageSource, &row.gross, &row.provider, &row.quarantined, &reason); err != nil {
+		t.Fatalf("query attempt ledger: %v", err)
+	}
+	row.reason = reason.String
+	return row
 }
 
 func (h *externalRuntimeHarness) settlementMetadata() []string {
@@ -163,6 +210,8 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 		t.Fatalf("billing.NewStore: %v", err)
 	}
 	setSettlementModeForTest(billingStore, billing.RouteSnapshotModeEnforce)
+	h.authority = &externalRuntimeAuthority{err: fx.authorityErr}
+	billingStore.SetPoolOperatorAttestationAuthority(h.authority)
 	rewards := config.Default().Rewards
 	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), rewards, time.Unix(1716768000, 0).UTC())
 	if err != nil {
@@ -281,6 +330,17 @@ func TestSPEC042ExternalRuntimePoolRouteDerivesMemberAndSnapshot(t *testing.T) {
 		auth.ProviderID != meta.ProviderID || auth.RouteSnapshotDigest != meta.RouteSnapshotDigest || auth.RouteSnapshotDigest == "" {
 		t.Fatalf("pool_runtime_authorization=%+v meta=%+v", auth, meta)
 	}
+	// SPEC-042-R005 site (5) / SPEC-022-R012: the attempt is recorded
+	// pool_operator_attested from the digested snapshot values and carries
+	// ledger credit; it becomes payable only through a verified receipt.
+	ledger := externalRuntimeLedger(t, h.dbPath)
+	if ledger.usageSource != billing.UsageSourcePoolOperatorAttested || ledger.quarantined != 0 || ledger.gross == 0 || ledger.provider == 0 {
+		t.Fatalf("attested attempt ledger=%+v", ledger)
+	}
+	if len(h.authority.calls) == 0 || h.authority.calls[0].PoolGeneration != externalRuntimeGeneration ||
+		h.authority.calls[0].PoolOperatorAccountID != externalRuntimeCreator || h.authority.calls[0].RuntimeSource != "llamacpp_loopback" {
+		t.Fatalf("durable authority claims=%+v", h.authority.calls)
+	}
 	// SPEC-032-R004: selection does not clear the sandbox flag.
 	if p, ok := h.registry.Resolve("p1", ""); !ok || !p.AdmissionSandboxed {
 		t.Fatalf("pool selection cleared admission_sandboxed: %+v", p)
@@ -339,5 +399,24 @@ func TestSPEC042ExternalRuntimeFailClosedSet(t *testing.T) {
 				t.Fatalf("ledger credits=%d want 0", got)
 			}
 		})
+	}
+}
+
+// SPEC-022-R012.3 at recording: when the durable pool records do not support
+// the claim (non-member at the generation, non-creator, no v2 allowlist), the
+// selected attempt is recorded byte_estimated with zero billable usage and a
+// zero, quarantined ledger row.
+func TestSPEC042ExternalRuntimeRecordedByteEstimatedWhenDurableRecordsReject(t *testing.T) {
+	fx := defaultExternalRuntimeFixture()
+	fx.authorityErr = errors.New("durable records reject")
+	h := newExternalRuntimeHarness(t, fx)
+	rec := postChat(t, h.server, externalRuntimeBody, trustedPoolLayer2Headers(externalRuntimePoolAccount, h.poolID))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pool route status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	ledger := externalRuntimeLedger(t, h.dbPath)
+	if ledger.usageSource != billing.UsageSourceByteEstimated || ledger.gross != 0 || ledger.provider != 0 ||
+		ledger.quarantined != 1 || ledger.reason != billing.LoopbackRuntimeNotSettlementEligible {
+		t.Fatalf("rejected attempt ledger=%+v", ledger)
 	}
 }

@@ -37,6 +37,15 @@ func persistSettlementReceiptDirect(ctx context.Context, store *billing.Store, i
 			SettlementReceiptIdentity: input.identity,
 		})
 	}
+	if input.poolLabels != nil {
+		// SPEC-022-R012.4: a pool attempt may settle pool_operator_attested.
+		return store.IngestPoolSettlementReceipt(ctx, billing.SettlementReceiptIngestionInput{
+			SettlementReceiptIdentity: input.identity,
+			Header:                    input.header,
+			ProviderReceiptPubkey:     input.providerReceiptPubkey,
+			PoolLabels:                input.poolLabels,
+		})
+	}
 	return store.IngestSettlementReceipt(ctx, billing.SettlementReceiptIngestionInput{
 		SettlementReceiptIdentity: input.identity,
 		Header:                    input.header,

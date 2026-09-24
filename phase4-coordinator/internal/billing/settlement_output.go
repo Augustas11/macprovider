@@ -21,6 +21,11 @@ const (
 
 	UsageSourceCoordinatorObserved = "coordinator_observed"
 	UsageSourceByteEstimated       = "byte_estimated"
+	// UsageSourcePoolOperatorAttested is the SPEC-022-R012 pool-scoped usage
+	// source: the pool operator's own reported usage, signed in its v0.4
+	// receipt, trusted administratively under the pool's signed policy. It is
+	// never coordinator_observed and never described as coordinator-verified.
+	UsageSourcePoolOperatorAttested = "pool_operator_attested"
 )
 
 var terminalStatePattern = regexp.MustCompile(`^(normal_done|provider_error|buyer_cancel|gateway_timeout|upstream_transport_disconnect)$`)
@@ -218,7 +223,7 @@ func (a SettlementAttemptOutput) Validate() error {
 
 func validUsageSource(value string) bool {
 	switch value {
-	case UsageSourceCoordinatorObserved, UsageSourceByteEstimated:
+	case UsageSourceCoordinatorObserved, UsageSourceByteEstimated, UsageSourcePoolOperatorAttested:
 		return true
 	default:
 		return false

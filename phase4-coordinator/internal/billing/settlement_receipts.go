@@ -38,6 +38,10 @@ type SettlementReceiptIngestionInput struct {
 	SettlementReceiptIdentity
 	Header                string
 	ProviderReceiptPubkey []byte
+	// PoolLabels is the SPEC-042-R006 settlement-time view of the attempt's
+	// pool labels. A pool_operator_attested attempt is cross-checked only
+	// when these verify against its route snapshot (SPEC-022-R012.4/R-12.5).
+	PoolLabels            *SettlementPoolLabels
 	receiptReceivedUnixMS int64
 }
 
@@ -180,6 +184,63 @@ func (s *Store) IngestSettlementReceipt(ctx context.Context, input SettlementRec
 			ExpectedUsage:            evidence.attempt.Usage,
 			UsageSource:              evidence.attempt.UsageSource,
 			UsageCrossChecked:        evidence.attempt.UsageSource == UsageSourceCoordinatorObserved,
+			OverlappingOrDuplicate:   evidence.attempt.OverlappingOrDuplicate,
+			ReceiptReceivedUnixMS:    receivedAt,
+			NowUnixMS:                receivedAt,
+			CanonicalHashesAvailable: evidence.attempt.OutputAvailable && evidence.attempt.OutputHash != "",
+			TerminalOutcomeFinal:     alreadyTerminal,
+			ComputeIntegrityCapture:  evidence.computeIntegrityCapture,
+		})
+	})
+}
+
+// IngestPoolSettlementReceipt is IngestSettlementReceipt for an attempt routed
+// through a SPEC-042 Trusted Pool (the caller holds settlement-time pool
+// labels). It is identical except for the SPEC-022-R012.4 usage-source rule:
+// a pool_operator_attested attempt is cross-checked only when its persisted
+// route snapshot re-evaluates as R-12 at settlement (the durable pool records
+// and an undisputed label, evaluated before the verdict transaction against
+// the same snapshot digest). The usage must still match exactly. A separate
+// function keeps the mapped IngestSettlementReceipt, and the conformance
+// evidence bound to it, unchanged.
+func (s *Store) IngestPoolSettlementReceipt(ctx context.Context, input SettlementReceiptIngestionInput) (SettlementReceiptState, error) {
+	if err := input.SettlementReceiptIdentity.validate(); err != nil {
+		return SettlementReceiptState{}, err
+	}
+	if input.Header == "" {
+		return SettlementReceiptState{}, fmt.Errorf("receipt header is required")
+	}
+	if len(input.ProviderReceiptPubkey) == 0 {
+		return SettlementReceiptState{}, fmt.Errorf("provider receipt pubkey is required")
+	}
+	receivedAt := input.receiptReceivedUnixMS
+	if receivedAt == 0 {
+		receivedAt = s.nowUTC().UnixMilli()
+	}
+	if err := s.MirrorRouteSnapshotForAttempt(ctx, input.SettlementReceiptIdentity); err != nil {
+		return SettlementReceiptState{}, err
+	}
+	attestedRouteHash, attestedEligible := s.poolOperatorAttestedIngest(ctx, input.SettlementReceiptIdentity, input.PoolLabels)
+	return s.applySettlementReceiptVerdict(ctx, input.SettlementReceiptIdentity, true, receivedAt, func(evidence settlementEvidence, alreadyTerminal bool) SettlementVerifyResult {
+		crossChecked := evidence.attempt.UsageSource == UsageSourceCoordinatorObserved ||
+			(evidence.attempt.UsageSource == UsageSourcePoolOperatorAttested && attestedEligible && evidence.routeHash == attestedRouteHash)
+		return VerifySettlementReceipt(SettlementVerifyInput{
+			Header:                   input.Header,
+			ProviderReceiptPubkey:    input.ProviderReceiptPubkey,
+			RouteSnapshot:            evidence.route,
+			AccountScope:             input.AccountScope,
+			RequestID:                input.RequestID,
+			AttemptN:                 input.AttemptN,
+			ProviderID:               input.ProviderID,
+			ProviderReceiptKeyID:     evidence.route.ProviderReceiptKeyID,
+			TerminalState:            evidence.attempt.TerminalState,
+			TerminalStateTSUnixMS:    evidence.attempt.TerminalStateTSUnixMS,
+			OutputHash:               evidence.attempt.OutputHash,
+			OutputPrefixStartByte:    evidence.attempt.OutputPrefixStartByte,
+			OutputPrefixEndByte:      evidence.attempt.OutputPrefixEndByte,
+			ExpectedUsage:            evidence.attempt.Usage,
+			UsageSource:              evidence.attempt.UsageSource,
+			UsageCrossChecked:        crossChecked,
 			OverlappingOrDuplicate:   evidence.attempt.OverlappingOrDuplicate,
 			ReceiptReceivedUnixMS:    receivedAt,
 			NowUnixMS:                receivedAt,

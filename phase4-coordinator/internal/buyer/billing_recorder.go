@@ -468,6 +468,7 @@ func (b *billingRecorder) recordRow(
 			AttemptN:                     attemptN,
 			ProviderAssignedID:           providerAssignedID,
 			ProviderRuntimeSource:        providerRuntimeSource,
+			PoolOperatorAttested:         b.poolOperatorAttestedAttempt(ctx, billingStore, stableProviderID, providerRuntimeSource),
 			ProviderID:                   stableProviderID,
 			Model:                        row.Model,
 			Status:                       status,
@@ -556,6 +557,7 @@ func (b *billingRecorder) recordRow(
 			AttemptN:                     attemptN,
 			ProviderAssignedID:           providerAssignedID,
 			ProviderRuntimeSource:        providerRuntimeSource,
+			PoolOperatorAttested:         b.poolOperatorAttestedAttempt(ctx, billingStore, providerID, providerRuntimeSource),
 			ProviderID:                   providerID,
 			Model:                        row.Model,
 			Status:                       status,
@@ -725,6 +727,46 @@ func routeSnapshotGapReason(pressure bool) string {
 	return ""
 }
 
+// poolOperatorAttestedAttempt decides, once per attempt, whether an attempt
+// served by an external runtime is SPEC-022-R012 pool_operator_attested. It
+// reads only the attempt's recorded route snapshot (its digested values) and
+// the durable pool records they name, then runs the SPEC-042-R006 label
+// comparison against the live registry, which can only take the source away
+// (condition 5). Everything else, including every global attempt, is false.
+func (b *billingRecorder) poolOperatorAttestedAttempt(ctx context.Context, store *billing.Store, providerID, providerRuntimeSource string) bool {
+	if b == nil || store == nil || !providerws.IsBYOMLoopbackRuntimeSource(providerRuntimeSource) {
+		return false
+	}
+	snap := b.settlementRouteSnapshot
+	if snap == nil || !b.hasSettlementAttemptN || snap.RuntimeSource != providerRuntimeSource ||
+		snap.ProviderID != providerID || snap.AttemptN != int64(b.settlementAttemptN) {
+		return false
+	}
+	if err := store.PoolOperatorAttestationEligible(ctx, *snap); err != nil {
+		if b.server != nil {
+			b.server.log.Warn().Err(err).
+				Str("event", "pool_operator_attestation_rejected").
+				Str("pool_id", snap.PoolID).
+				Str("request_id", b.requestID).
+				Str("provider_id", providerID).
+				Msg("external-runtime attempt recorded byte_estimated: durable pool records do not support pool_operator_attested")
+		}
+		return false
+	}
+	if !billing.PoolOperatorAttestedLabelVerified(*snap, b.settlementRouteSnapshotDigest, b.settlementPoolLabels()) {
+		if b.server != nil {
+			b.server.log.Warn().
+				Str("event", "trusted_pool_label_disputed").
+				Str("pool_id", snap.PoolID).
+				Str("request_id", b.requestID).
+				Str("provider_id", providerID).
+				Msg("external-runtime attempt recorded byte_estimated: pool label disputed at recording")
+		}
+		return false
+	}
+	return true
+}
+
 func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, store *billing.Store, in billing.HotPathInput, output *billing.SettlementOutput) error {
 	if store == nil || in.ProviderID == "" {
 		return nil
@@ -754,7 +796,15 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 	// attempt falls to the byte-estimated branch: zero billable, never
 	// settlement-capable.
 	loopback := providerws.IsBYOMLoopbackRuntimeSource(in.ProviderRuntimeSource)
-	if !loopback && in.PromptTokens != nil && in.CompletionTokens != nil {
+	if loopback && in.PoolOperatorAttested && in.PromptTokens != nil && in.CompletionTokens != nil {
+		// SPEC-042-R005 site (5) / SPEC-022-R012: the pool operator's own
+		// reported usage, recorded as pool_operator_attested (never
+		// coordinator_observed). It settles only through a verified receipt
+		// whose usage matches exactly (R-12.4).
+		observedInput = *in.PromptTokens
+		observedOutput = *in.CompletionTokens
+		usageSource = billing.UsageSourcePoolOperatorAttested
+	} else if !loopback && in.PromptTokens != nil && in.CompletionTokens != nil {
 		observedInput = *in.PromptTokens
 		observedOutput = *in.CompletionTokens
 		usageSource = billing.UsageSourceCoordinatorObserved

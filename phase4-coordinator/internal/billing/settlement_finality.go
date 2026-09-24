@@ -209,6 +209,7 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 		Mode:          rows[0].mode,
 	}
 	var firstTerminalRefund *requestSettlementVerdictRow
+	poolOperatorAttested := false
 	for i := range rows {
 		row := rows[i]
 		if row.policyVersion != finality.PolicyVersion || row.mode != finality.Mode {
@@ -226,9 +227,14 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 			finality.PendingDeadlineUnixMS = minPositiveDeadline(finality.PendingDeadlineUnixMS, row.pendingDeadlineUnixMS)
 		case SettlementOutcomeVerified:
 			if row.closed && row.receiptResult == SettlementReceiptResultValid {
-				usage, blocked, err := s.requestSettlementUsage(ctx, accountScope, requestID, row.attemptN, row.providerID)
+				usage, blocked, source, err := s.requestSettlementUsage(ctx, accountScope, requestID, row.attemptN, row.providerID)
 				if err != nil {
 					return RequestSettlementFinality{}, false, err
+				}
+				// SPEC-022-R012.6a: the reported source comes from the
+				// persisted per-attempt sources; the weaker one governs.
+				if source == UsageSourcePoolOperatorAttested {
+					poolOperatorAttested = true
 				}
 				if blocked {
 					finality.OverlappingBlockedTokens += usage.BillableInputTokens + usage.BillableOutputTokens
@@ -285,7 +291,7 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 		finality.ReceiptResult = SettlementReceiptResultValid
 		finality.Reason = "verified_settlement"
 		finality.Closed = true
-		finality.TokenSource = UsageSourceCoordinatorObserved
+		finality.TokenSource = finalityTokenSource(poolOperatorAttested)
 		finality.TotalTokens = finality.PromptTokens + finality.CompletionTokens
 		return finality, true, nil
 	}
@@ -301,7 +307,7 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 		finality.ReceiptResult = SettlementReceiptResultValid
 		finality.Reason = "overlap_blocked_terminal"
 		finality.Closed = true
-		finality.TokenSource = UsageSourceCoordinatorObserved
+		finality.TokenSource = finalityTokenSource(poolOperatorAttested)
 		finality.TotalTokens = 0
 		return finality, true, nil
 	}
@@ -459,12 +465,31 @@ SELECT attempt_n, provider_id, route_snapshot_policy_version, route_snapshot_mod
 	return reason, nil
 }
 
-func (s *Store) requestSettlementUsage(ctx context.Context, accountScope, requestID string, attemptN int64, providerID string) (SettlementUsage, bool, error) {
-	var raw string
+// finalityTokenSource is SPEC-022-R012.6a: coordinator_observed only when
+// every verified attempt persisted coordinator_observed; pool_operator_attested
+// when any did (the weaker provenance governs a mixed request).
+func finalityTokenSource(poolOperatorAttested bool) string {
+	if poolOperatorAttested {
+		return UsageSourcePoolOperatorAttested
+	}
+	return UsageSourceCoordinatorObserved
+}
+
+func anyPoolOperatorAttested(finalities []RequestSettlementFinality) bool {
+	for _, f := range finalities {
+		if f.TokenSource == UsageSourcePoolOperatorAttested {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) requestSettlementUsage(ctx context.Context, accountScope, requestID string, attemptN int64, providerID string) (SettlementUsage, bool, string, error) {
+	var raw, source string
 	var overlap int
 	var ledgerPrompt, ledgerChargedPrompt, ledgerCompletion sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `
-	SELECT sao.usage_canonical_json, sao.overlapping_or_duplicate,
+	SELECT sao.usage_canonical_json, sao.overlapping_or_duplicate, sao.usage_source,
 	       lrc.prompt_tokens, lrc.charged_prompt_tokens, lrc.completion_tokens
 	  FROM settlement_attempt_outputs sao
 	  JOIN ledger_request_credits lrc
@@ -476,12 +501,12 @@ func (s *Store) requestSettlementUsage(ctx context.Context, accountScope, reques
 	 WHERE sao.account_scope = ? AND sao.request_id = ? AND sao.attempt_n = ? AND sao.provider_id = ?
 	 ORDER BY lrc.id DESC
 	 LIMIT 1`,
-		SettlementAccountScopeHash(accountScope), accountScope, requestID, attemptN, providerID).Scan(&raw, &overlap, &ledgerPrompt, &ledgerChargedPrompt, &ledgerCompletion)
+		SettlementAccountScopeHash(accountScope), accountScope, requestID, attemptN, providerID).Scan(&raw, &overlap, &source, &ledgerPrompt, &ledgerChargedPrompt, &ledgerCompletion)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return SettlementUsage{}, false, fmt.Errorf("verified charged ledger usage missing for request %s attempt %d provider %s", requestID, attemptN, providerID)
+			return SettlementUsage{}, false, "", fmt.Errorf("verified charged ledger usage missing for request %s attempt %d provider %s", requestID, attemptN, providerID)
 		}
-		return SettlementUsage{}, false, err
+		return SettlementUsage{}, false, "", err
 	}
 	var usage struct {
 		BillableInputTokens  int64 `json:"billable_input_tokens"`
@@ -491,7 +516,7 @@ func (s *Store) requestSettlementUsage(ctx context.Context, accountScope, reques
 		ObservedOutputTokens int64 `json:"observed_output_tokens"`
 	}
 	if err := json.Unmarshal([]byte(raw), &usage); err != nil {
-		return SettlementUsage{}, false, err
+		return SettlementUsage{}, false, "", err
 	}
 	out := SettlementUsage{
 		BillableInputTokens:  chargedPromptTokensFromLedger(ledgerChargedPrompt, ledgerPrompt),
@@ -501,9 +526,9 @@ func (s *Store) requestSettlementUsage(ctx context.Context, accountScope, reques
 		ObservedOutputTokens: usage.ObservedOutputTokens,
 	}
 	if err := out.Validate(); err != nil {
-		return SettlementUsage{}, false, err
+		return SettlementUsage{}, false, "", err
 	}
-	return out, overlap == 1, nil
+	return out, overlap == 1, source, nil
 }
 
 func chargedPromptTokensFromLedger(charged, prompt sql.NullInt64) int64 {
@@ -618,7 +643,7 @@ func aggregateExternalRequestFinality(externalRequestID string, finalities []Req
 		out.ReceiptResult = SettlementReceiptResultValid
 		out.Reason = "verified_settlement"
 		out.Closed = true
-		out.TokenSource = UsageSourceCoordinatorObserved
+		out.TokenSource = finalityTokenSource(anyPoolOperatorAttested(finalities))
 		return out
 	}
 	if hasTerminalRefund {
@@ -633,7 +658,7 @@ func aggregateExternalRequestFinality(externalRequestID string, finalities []Req
 		out.ReceiptResult = SettlementReceiptResultValid
 		out.Reason = "overlap_blocked_terminal"
 		out.Closed = true
-		out.TokenSource = UsageSourceCoordinatorObserved
+		out.TokenSource = finalityTokenSource(anyPoolOperatorAttested(finalities))
 		out.TotalTokens = 0
 		return out
 	}

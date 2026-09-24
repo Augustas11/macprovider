@@ -1096,6 +1096,9 @@ func main() {
 			logger.Fatal().Err(err).Msg("trusted pools durable store open failed")
 		}
 		if trustPoolsReady {
+			// SPEC-022-R012: settlement re-derives pool_operator_attested from
+			// the durable pool records only.
+			billingStore.SetPoolOperatorAttestationAuthority(trustPoolStore)
 			buyerOpts = append(
 				buyerOpts,
 				buyer.WithPoolMembership(trustPoolRegistry),
