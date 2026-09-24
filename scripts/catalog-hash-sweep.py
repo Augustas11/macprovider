@@ -13,10 +13,17 @@ sorted by relative path.
 
 File set (mirrors `HuggingFaceSnapshotDownloader.downloadSnapshot`): every
 `siblings[].rfilename` of `/api/models/<repo>/revision/<rev>`, `.gitattributes`
-included. Per-file size and SHA-256 come from the recursive tree API at the
-pinned revision: the LFS `oid` for LFS/Xet files, and a download-and-hash of
-the resolved bytes for plain git files (cross-checked against the git blob
-SHA-1 the tree reports). The sibling set and the tree's file set must match.
+included. The manifest path is the form `URL.appendingPathComponent` produces
+on Apple platforms, not the raw Hub string: Unicode NFD per component, except
+the scalars Foundation does not decompose. Names Swift treats as equal
+(canonical equivalence, which is how APFS `removeItem` then `moveItem`
+collapses two siblings onto one directory entry) become one entry. The last
+sibling in revision-API order wins, and its stored URL form is the path.
+Per-file size and SHA-256 come from the recursive tree API at the pinned
+revision: the LFS `oid` for LFS/Xet files, and a download-and-hash of the
+resolved bytes for plain git files (cross-checked against the git blob SHA-1
+the tree reports). Downloads use the raw Hub filename. The sibling set and
+the tree's file set must match.
 
 Read-only: no catalog write, no signing, no key material. Exit 0 when every row
 matches, 1 on any mismatch, 3 when any row could not be recomputed (2 stays
@@ -32,6 +39,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -113,6 +121,110 @@ def validate_relative_path(path: str) -> None:
         raise SweepError(f"unsafe path {path!r}")
 
 
+# Scalars whose `URL.appendingPathComponent` form is not Unicode NFD.
+# Measured on Foundation, macOS 2026-09-25, by prefixing an ASCII base and
+# comparing scalars. Combining marks are not in this set: a lone mark does
+# not round-trip through a path, but `e` + U+0340 becomes `e` + U+0300.
+# Inclusive ranges. Re-measure if Foundation's path normalization changes.
+_APPLE_KEEP_RANGES: tuple[tuple[int, int], ...] = (
+    (0x2000, 0x2001),
+    (0x2126, 0x2126),
+    (0x212A, 0x212B),
+    (0x219A, 0x219B),
+    (0x21AE, 0x21AE),
+    (0x21CD, 0x21CF),
+    (0x2204, 0x2204),
+    (0x2209, 0x2209),
+    (0x220C, 0x220C),
+    (0x2224, 0x2224),
+    (0x2226, 0x2226),
+    (0x2241, 0x2241),
+    (0x2244, 0x2244),
+    (0x2247, 0x2247),
+    (0x2249, 0x2249),
+    (0x2260, 0x2260),
+    (0x2262, 0x2262),
+    (0x226D, 0x2271),
+    (0x2274, 0x2275),
+    (0x2278, 0x2279),
+    (0x2280, 0x2281),
+    (0x2284, 0x2285),
+    (0x2288, 0x2289),
+    (0x22AC, 0x22AF),
+    (0x22E0, 0x22E3),
+    (0x22EA, 0x22ED),
+    (0x2329, 0x232A),
+    (0x2ADC, 0x2ADC),
+    (0xF900, 0xFA0D),
+    (0xFA10, 0xFA10),
+    (0xFA12, 0xFA12),
+    (0xFA15, 0xFA1E),
+    (0xFA20, 0xFA20),
+    (0xFA22, 0xFA22),
+    (0xFA25, 0xFA26),
+    (0xFA2A, 0xFA6D),
+    (0xFA70, 0xFAD9),
+    (0x105C9, 0x105C9),
+    (0x105E4, 0x105E4),
+    (0x2F800, 0x2FA1D),
+)
+
+
+def _apple_keeps(code: int) -> bool:
+    lo, hi = 0, len(_APPLE_KEEP_RANGES) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        start, end = _APPLE_KEEP_RANGES[mid]
+        if code < start:
+            hi = mid - 1
+        elif code > end:
+            lo = mid + 1
+        else:
+            return True
+    return False
+
+
+def _canonical_reorder(text: str) -> str:
+    """Unicode canonical combining-class order. Starters stay put."""
+    chars = list(text)
+    out: list[str] = []
+    index = 0
+    count = len(chars)
+    while index < count:
+        if unicodedata.combining(chars[index]) == 0:
+            out.append(chars[index])
+            index += 1
+            if index >= count:
+                break
+        end = index
+        while end < count and unicodedata.combining(chars[end]) != 0:
+            end += 1
+        marks = chars[index:end]
+        marks.sort(key=unicodedata.combining)
+        out.extend(marks)
+        index = end
+    return "".join(out)
+
+
+def _apple_nfd(component: str) -> str:
+    parts: list[str] = []
+    for char in component:
+        if _apple_keeps(ord(char)):
+            parts.append(char)
+        else:
+            parts.append(unicodedata.normalize("NFD", char))
+    return _canonical_reorder("".join(parts))
+
+
+def apple_relative_path(path: str) -> str:
+    """Path `inspectCanonicalArtifact` records after `appendingPathComponent`.
+
+    Slashes stay. Each component is normalized on its own, which is what one
+    `appendingPathComponent` call does with a multi-segment `rfilename`.
+    """
+    return "/".join(_apple_nfd(part) for part in path.split("/"))
+
+
 def canonical_manifest_hash(entries: list[FileEntry]) -> str:
     seen: set[str] = set()
     for entry in entries:
@@ -122,6 +234,9 @@ def canonical_manifest_hash(entries: list[FileEntry]) -> str:
         seen.add(entry.path)
         if entry.size < 0 or not HEX64.fullmatch(entry.sha256):
             raise SweepError(f"bad size/sha256 for {entry.path!r}")
+    # Code-point order of the stored paths. ASCII matches Swift `String.<`.
+    # Swift's `<` follows the process locale for some diacritics (en_LT puts
+    # A+diaeresis after README); the signed catalog rows are ASCII.
     manifest = "".join(
         f"{e.path}\n{e.size}\n{e.sha256}\n" for e in sorted(entries, key=lambda e: e.path)
     )
@@ -220,12 +335,56 @@ class HuggingFaceClient:
         files = [item for item in items if item.get("type") == "file"]
         if not all(isinstance(item.get("path"), str) for item in files):
             raise SweepError("tree entry without a path")
+        seen: set[str] = set()
+        for item in files:
+            path = item["path"]
+            if path in seen:
+                raise SweepError(f"duplicate tree path {path!r}")
+            seen.add(path)
         return files
 
     def resolve(self, repo_id: str, revision: str, path: str) -> bytes:
         repo = urllib.parse.quote(repo_id, safe="/")
         body, _ = self._get(f"{HF}/{repo}/resolve/{revision}/{urllib.parse.quote(path)}")
         return body
+
+
+def _file_entry(
+    client: HuggingFaceClient,
+    repo_id: str,
+    revision: str,
+    stored: str,
+    raw: str,
+    item: dict,
+    notes: list[str],
+) -> FileEntry:
+    """One manifest line. `stored` is the Apple URL path; `raw` is the Hub name."""
+    size = item.get("size")
+    # bool is an int subclass; f"{True}" is "True", not the byte count Swift prints.
+    if type(size) is not int:
+        raise SweepError(f"tree entry {raw!r} has no size")
+    lfs = item.get("lfs")
+    if lfs:
+        if not isinstance(lfs, dict):
+            raise SweepError(f"tree entry {raw!r} has a malformed LFS object")
+        oid, lfs_size = lfs.get("oid"), lfs.get("size")
+        if not isinstance(oid, str) or not HEX64.fullmatch(oid):
+            raise SweepError(f"tree entry {raw!r} has no LFS sha256")
+        if type(lfs_size) is not int or lfs_size != size:
+            raise SweepError(f"tree entry {raw!r} size {size} != LFS size {lfs_size}")
+        return FileEntry(stored, size, oid)
+    if size > MAX_PLAIN_FILE_BYTES:
+        raise SweepError(f"plain git file {raw!r} is {size} bytes; refusing download")
+    data = client.resolve(repo_id, revision, raw)
+    if len(data) != size:
+        raise SweepError(f"{raw!r}: downloaded {len(data)} bytes, tree says {size}")
+    blob_oid = item.get("oid")
+    if isinstance(blob_oid, str) and HEX40.fullmatch(blob_oid):
+        if git_blob_sha1(data) != blob_oid:
+            raise SweepError(f"{raw!r}: git blob SHA-1 mismatch")
+    else:
+        notes.append(f"{raw}: no git blob oid to cross-check")
+    return FileEntry(stored, size, hashlib.sha256(data).hexdigest())
 
 
 def recompute(client: HuggingFaceClient, repo_id: str, revision: str) -> tuple[list[FileEntry], list[str]]:
@@ -243,33 +402,22 @@ def recompute(client: HuggingFaceClient, repo_id: str, revision: str) -> tuple[l
             "sibling/tree file sets differ: only-siblings="
             f"{sorted(sibling_set - tree_set)} only-tree={sorted(tree_set - sibling_set)}"
         )
+    # Revision-API order. APFS removeItem+moveItem keeps the last sibling
+    # when two raw names are canonically equivalent (café NFC/NFD, or
+    # U+212B and U+00C5). The manifest path is that sibling's URL form.
+    winners: dict[str, tuple[str, str]] = {}
+    order: list[str] = []
+    for raw in siblings:
+        stored = apple_relative_path(raw)
+        validate_relative_path(stored)
+        key = unicodedata.normalize("NFD", stored)
+        if key not in winners:
+            order.append(key)
+        winners[key] = (stored, raw)
     entries: list[FileEntry] = []
-    for path in sorted(sibling_set):
-        item = tree[path]
-        size = item.get("size")
-        if not isinstance(size, int):
-            raise SweepError(f"tree entry {path!r} has no size")
-        lfs = item.get("lfs")
-        if lfs:
-            oid, lfs_size = lfs.get("oid"), lfs.get("size")
-            if not isinstance(oid, str) or not HEX64.fullmatch(oid):
-                raise SweepError(f"tree entry {path!r} has no LFS sha256")
-            if lfs_size != size:
-                raise SweepError(f"tree entry {path!r} size {size} != LFS size {lfs_size}")
-            entries.append(FileEntry(path, size, oid))
-            continue
-        if size > MAX_PLAIN_FILE_BYTES:
-            raise SweepError(f"plain git file {path!r} is {size} bytes; refusing download")
-        data = client.resolve(repo_id, revision, path)
-        if len(data) != size:
-            raise SweepError(f"{path!r}: downloaded {len(data)} bytes, tree says {size}")
-        blob_oid = item.get("oid")
-        if isinstance(blob_oid, str) and HEX40.fullmatch(blob_oid):
-            if git_blob_sha1(data) != blob_oid:
-                raise SweepError(f"{path!r}: git blob SHA-1 mismatch")
-        else:
-            notes.append(f"{path}: no git blob oid to cross-check")
-        entries.append(FileEntry(path, size, hashlib.sha256(data).hexdigest()))
+    for key in order:
+        stored, raw = winners[key]
+        entries.append(_file_entry(client, repo_id, revision, stored, raw, tree[raw], notes))
     return entries, notes
 
 
@@ -280,24 +428,40 @@ def load_rows(feed_path: Path, source_path: Path | None) -> list[RowResult]:
         source_models = json.loads(source_path.read_text()).get("models", {})
     rows = []
     for key, row in sorted(feed["rows"].items()):
-        source_hash = None
-        model = source_models.get(key)
-        if model:
-            source_hash = model["artifacts"][model["primary_artifact_id"]].get("hash")
-        rows.append(
-            RowResult(
-                key=key,
-                repo_id=row["model_id"],
-                revision=row["model_revision"],
-                signed_sha256=row["model_sha256"],
-                source_sha256=source_hash,
+        try:
+            if not isinstance(row, dict):
+                raise TypeError(f"row {key!r} is not an object")
+            source_hash = None
+            model = source_models.get(key)
+            if model:
+                source_hash = model["artifacts"][model["primary_artifact_id"]].get("hash")
+            rows.append(
+                RowResult(
+                    key=key,
+                    repo_id=row["model_id"],
+                    revision=row["model_revision"],
+                    signed_sha256=row["model_sha256"],
+                    source_sha256=source_hash,
+                )
             )
-        )
+        except (KeyError, TypeError, IndexError) as exc:
+            rows.append(
+                RowResult(
+                    key=str(key),
+                    repo_id=row.get("model_id", "") if isinstance(row, dict) else "",
+                    revision=row.get("model_revision", "") if isinstance(row, dict) else "",
+                    signed_sha256=row.get("model_sha256", "") if isinstance(row, dict) else "",
+                    source_sha256=None,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            )
     return rows
 
 
 def sweep(rows: list[RowResult], client: HuggingFaceClient) -> list[RowResult]:
     for row in rows:
+        if row.error is not None:
+            continue
         try:
             if not HEX40.fullmatch(row.revision):
                 raise SweepError(f"revision {row.revision!r} is not a pinned commit")

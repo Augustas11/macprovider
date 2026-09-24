@@ -280,6 +280,44 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(code, sweep.EXIT_INCOMPLETE)
         self.assertIn("left huggingface.co", row["error"])
 
+    def test_boolean_size_is_not_a_manifest_integer(self) -> None:
+        hub = FakeHub(FILES, tree_overrides={"config.json": {"size": True}})
+        code, row = self.sweep_json(hub, self.expected)
+        self.assertEqual(code, sweep.EXIT_INCOMPLETE)
+        self.assertIn("no size", row["error"])
+        self.assertIsNone(row["recomputed_sha256"])
+
+    def test_duplicate_tree_path_is_an_error(self) -> None:
+        hub = FakeHub(FILES)
+        original = hub.__call__
+
+        def duplicated(url, headers):
+            status, body, out = original(url, headers)
+            if "/tree/" in url and "cursor=" not in url:
+                page = json.loads(body)
+                files = [item for item in page if item.get("type") == "file"]
+                body = json.dumps(page + [files[0]]).encode()
+            return status, body, out
+
+        code, row = self.sweep_json(duplicated, self.expected)
+        self.assertEqual(code, sweep.EXIT_INCOMPLETE)
+        self.assertIn("duplicate tree path", row["error"])
+
+    def test_missing_revision_is_a_row_error(self) -> None:
+        feed = {"rows": {"vendor/fake": {"model_id": REPO_ID, "model_sha256": "ab" * 32}}}
+        path = self.tmp / "bad-feed.json"
+        path.write_text(json.dumps(feed))
+        out = self.tmp / "bad-out.json"
+        code, _, _ = run(
+            ["--feed", str(path), "--artifact-source", str(self.tmp / "none.json"), "--json-out", str(out)],
+            FakeHub(FILES),
+        )
+        self.assertEqual(code, sweep.EXIT_INCOMPLETE)
+        row = json.loads(out.read_text())[0]
+        self.assertEqual(row["status"], "ERROR")
+        self.assertIn("model_revision", row["error"])
+        self.assertIsNone(row["recomputed_sha256"])
+
     def test_markdown_table_lists_every_row(self) -> None:
         feed = write_feed(self.tmp, self.expected)
         code, out, _ = run(["--feed", str(feed), "--artifact-source", str(self.tmp / "none.json"), "--markdown"],
@@ -287,6 +325,73 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("| `vendor/fake` |", out)
         self.assertIn("MATCH", out)
+
+
+class ApplePathTests(unittest.TestCase):
+    def test_foundation_url_vectors(self) -> None:
+        # Scalars measured from URL.appendingPathComponent on this Mac.
+        vectors = {
+            "caf\u00e9.json": "cafe\u0301.json",
+            "dir/caf\u00e9.json": "dir/cafe\u0301.json",
+            "\u1e9b\u0323": "\u017f\u0323\u0307",
+            "\u212b.txt": "\u212b.txt",
+            "\u00c5.txt": "A\u030a.txt",
+            "e\u0340": "e\u0300",
+            "\u00e9\u0323": "e\u0323\u0301",
+            "\uac00": "\u1100\u1161",
+            "foo/\u2126/bar": "foo/\u2126/bar",
+        }
+        for raw, stored in vectors.items():
+            self.assertEqual(sweep.apple_relative_path(raw), stored, raw)
+
+    def test_nfc_filename_is_hashed_under_the_stored_path(self) -> None:
+        name = "caf\u00e9.json"
+        data = b"{}\n"
+        stored = "cafe\u0301.json"
+        digest = hashlib.sha256(data).hexdigest()
+        expected = hashlib.sha256(f"{stored}\n{len(data)}\n{digest}\n".encode()).hexdigest()
+        code, row = self._sweep({name: data}, [name], expected)
+        self.assertEqual(code, 0, row)
+        self.assertEqual(row["file_count"], 1)
+        self.assertEqual(row["recomputed_sha256"], expected)
+
+    def test_equivalent_names_collapse_to_the_last_sibling(self) -> None:
+        nfc, nfd = "caf\u00e9.txt", "cafe\u0301.txt"
+        files = {nfc: b"first", nfd: b"second"}
+        digest = hashlib.sha256(b"second").hexdigest()
+        expected = hashlib.sha256(f"{nfd}\n6\n{digest}\n".encode()).hexdigest()
+        code, row = self._sweep(files, [nfc, nfd], expected)
+        self.assertEqual(code, 0, row)
+        self.assertEqual(row["file_count"], 1)
+        self.assertEqual(row["recomputed_sha256"], expected)
+
+    def test_angstrom_keeps_the_last_url_form(self) -> None:
+        angstrom, aring = "\u212b.txt", "\u00c5.txt"
+        files = {angstrom: b"ANG", aring: b"ARING"}
+        stored = "A\u030a.txt"
+        digest = hashlib.sha256(b"ARING").hexdigest()
+        expected = hashlib.sha256(f"{stored}\n5\n{digest}\n".encode()).hexdigest()
+        code, row = self._sweep(files, [angstrom, aring], expected)
+        self.assertEqual(code, 0, row)
+        self.assertEqual(row["recomputed_sha256"], expected)
+        digest = hashlib.sha256(b"ANG").hexdigest()
+        expected = hashlib.sha256(f"{angstrom}\n3\n{digest}\n".encode()).hexdigest()
+        code, row = self._sweep(files, [aring, angstrom], expected)
+        self.assertEqual(code, 0, row)
+        self.assertEqual(row["recomputed_sha256"], expected)
+
+    def _sweep(self, files: dict[str, bytes], siblings: list[str], signed: str) -> tuple[int, dict]:
+        hub = FakeHub(files, siblings=siblings)
+        # FakeHub's LFS set is the module constant; these names are plain files.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            feed = write_feed(root, signed)
+            out = root / "out.json"
+            code, _, _ = run(
+                ["--feed", str(feed), "--artifact-source", str(root / "none.json"), "--json-out", str(out)],
+                hub,
+            )
+            return code, json.loads(out.read_text())[0]
 
 
 class SignedFeedShapeTests(unittest.TestCase):
