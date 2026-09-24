@@ -97,8 +97,44 @@ billing code changed.
 The footprint stayed at 18–19 GB. Each committed entry holds its attention KV
 plus 2 recurrent checkpoints, bounded by the conversation cache's LRU/TTL.
 
+## Step 2: batched cached follow-up turns (`f9a71a3b`, AC-26)
+
+Cached follow-up turns are opt-in, behind `continuous_batching_cached_turns`
+(default off, SPEC-038 v0.2.8). With the flag on, a keyed hybrid first turn
+retains its paged KV plus recurrent checkpoints. The follow-up reattaches the
+KV trimmed to the checkpoint, restores the recurrent state into its batched
+row, prefills only the new tokens, and chains to the next turn.
+
+Setup: rig build `f1bb870b`. Four conversations with distinct scaffolds; each
+runs turn 1, then all four follow-ups run concurrently. Files:
+`step2-{on,off}.json` and `step2-{on,off}-long.json`.
+
+- **Batching:** with the flag on, all 18 requests across the runs were admitted
+  to batching, the cached follow-ups included, with 0 forward failures. With the
+  flag off, the follow-ups serial-route (`sticky_cache_handoff_unavailable`).
+- **Checkpoint hits:** follow-ups hit the history checkpoint C2 (1258–1331
+  cached tokens). Position 1260 is the assistant header of a 1267-token turn-1
+  prompt.
+
+**First-token time, 4 concurrent cached follow-ups:**
+
+| Mode | First-token times | Worst |
+| --- | --- | --- |
+| Flag off (serial) | 0.63 / 3.76 / 6.58 / 9.72 s | 9.7 s |
+| Flag on (batched) | 0.84 / 1.72 / 2.42 / 4.41 s | **4.4 s** |
+
+- **Throughput:** aggregate is about 30–32 tok/s either way. These answers stop
+  at around 90 tokens, so admission and prefill dominate. The scheduler admits
+  one prefill per iteration (`maxPrefillRowsPerIteration`), which is a tuning
+  follow-up. Batched decode throughput itself was measured at 1.41–1.86×.
+- **Parity:** of 3 conversations, one is exact. The others diverge mid-answer
+  at a near-tie word choice (char 72 and char 201). Both texts are coherent and
+  mean the same thing. This is the FR-CB6 tolerance, not a restore fault.
+- **Memory:** footprint 21 GB.
+
 ## Not yet
 
-- **M4 step 2 (AC-26):** batching the positive-cached follow-up turn itself.
-  It still takes the serial path.
-- **Codex three-lane audit** of `b8486a5c` and `25767bd5`.
+- **AC-26 packaged proof** before the flag goes on on a live provider: the
+  relay path with receipt and settlement fields. The rig runs legacy
+  settlement and cannot show receipts.
+- **Codex three-lane audit** of `f9a71a3b`.

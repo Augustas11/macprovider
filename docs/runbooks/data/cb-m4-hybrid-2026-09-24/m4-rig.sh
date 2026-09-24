@@ -10,7 +10,7 @@ rm -f $P/macprovider-cli; cp /Users/a1/macprovider-cb-sampling/phase3-binary/.bu
 cp /Users/a1/lab-ac25-m2/mlx.metallib $P/mlx.metallib
 MSHA=$(shasum -a 256 $P/mlx.metallib | cut -d' ' -f1)
 /usr/bin/python3 - "$P/config.yaml" "$MSHA" <<'PY'
-import re, sys
+import os, re, sys
 q = open("/Users/a1/lab-ac25-m2/q36/config.yaml").read()
 keep = [l for l in q.splitlines() if l.startswith(("model", "model_artifact", "model_catalog"))]
 cfg = "\n".join(keep) + f"""
@@ -24,6 +24,7 @@ mlx_cache_limit_mb: 2048
 enable_receipts: true
 credential_store: protected_file
 continuous_batching: canary
+continuous_batching_cached_turns: {os.environ.get("CACHED_TURNS", "false")}
 paged_kv:
   enabled: true
 continuous_batching_accepted_tuples:
