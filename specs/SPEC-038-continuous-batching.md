@@ -764,10 +764,17 @@ hardware-capability run or a static-review obligation. Every
   row's token equals the serial sampler's token (same algorithm). A row's token
   is unchanged by its batch neighbours. A nucleus small enough to keep only the
   argmax yields the greedy token.
-  On hardware, a sampled request near-deterministic under its parameters (for
-  example a tiny top_p) matches its greedy serial output as a lone row and
-  among concurrent sampled rows, with no cross-row leak signal. Distinct
-  concurrent requests MUST NOT share a sampler seed.
+  On hardware, three things hold:
+  - a sampled request's output for a given request identity is identical as a
+    lone row and as one row among concurrent sampled rows;
+  - it is identical across repeats;
+  - there is no cross-row leak signal.
+  Against the serial path's own sampler for the same parameters it matches
+  within the FR-CB6 numerical tolerance. Differences are allowed only where the
+  batched forward's logits differ by accumulation order, or at exact bf16 logit
+  ties that sampling filters and argmax break differently. A tiny top_p is NOT
+  equivalent to greedy even on the serial path, because of those ties.
+  Distinct concurrent requests MUST NOT share a sampler seed.
 - **AC-7 unsupported cache/`kv_bits`/local capability rejection (FR-CB8,
   FR-CB10):** a `newCache`-overriding model family, an unsupported
   `SPEC-039` tuple, an unsupported MoE expert-dispatch surface, and an

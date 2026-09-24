@@ -1,0 +1,4 @@
+{"serial_topp_vs_serial_greedy": [null, null, 193, 139], "serial_topp_self_consistent": [true, true, true, true]}
+{"batched_topp_lone_vs_serial_topp": [null, 56, 21, 257]}
+{"rep": 0, "batched_topp_x4_vs_serial_topp": [null, 56, 21, 257]}
+{"rep": 1, "batched_topp_x4_vs_serial_topp": [null, 56, 21, 257]}
