@@ -78,7 +78,9 @@ SELECT closed FROM settlement_receipt_verdicts
 	}
 	out.RollbackBlocked = out.OpenPoolVerdicts > 0 || out.InWindowNoVerdict > 0
 	if out.OpenPoolVerdicts > 0 {
-		// An open verdict closes on its own schedule; no time bound is known.
+		// An open verdict closes on a receipt, a finality read, or the
+		// coordinator's expiry sweep after its deadline; an undecidable
+		// one may stay open, so no time bound is reported.
 		out.EarliestSafeUnixMS = 0
 	}
 	return out, nil

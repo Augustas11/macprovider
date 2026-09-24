@@ -1131,6 +1131,9 @@ func main() {
 	} else {
 		logger.Info().Msg("trusted pools disabled; coordinator will not advertise pool support")
 	}
+	// SPEC-022-R012.8: runs whether or not the trusted-pool feature is on,
+	// because disabling it is one way to stop pool traffic before a rollback.
+	startPoolSettlementExpirySweeper(shutdownCtx, billingStore, moneySQLiteActivity, logger)
 	buyerServer := buyer.NewServer(registry, logger, startedAt, buyerOpts...)
 	wsServer.SetCatalogMaterialRoutingGate(buyerServer.CatalogMaterialMissingUnderEnforce)
 	providerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
@@ -2525,6 +2528,53 @@ func startReferralServingReconciler(ctx context.Context, reconciler referralapi.
 				return
 			case <-ticker.C:
 				reconcileIfIdle()
+			}
+		}
+	}()
+}
+
+type poolSettlementExpirySweeper interface {
+	SweepExpiredPoolSettlementVerdicts(context.Context, int64, int) (int, error)
+}
+
+// startPoolSettlementExpirySweeper closes expired pending pool verdicts that no
+// finality read will reach (a refunded gateway retry), so
+// pool-rollback-preflight can clear without a buyer request touching them.
+func startPoolSettlementExpirySweeper(ctx context.Context, sweeper poolSettlementExpirySweeper, idle moneySQLiteIdleTracker, logger zerolog.Logger) {
+	if sweeper == nil {
+		return
+	}
+	go func() {
+		attempts := newMoneySQLiteMaintenanceAttemptState(time.Now())
+		sweep := func() {
+			attempts.MarkAttempt(time.Now())
+			sweepCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			closed, err := sweeper.SweepExpiredPoolSettlementVerdicts(sweepCtx, time.Now().UTC().UnixMilli(), billing.DefaultPoolSettlementExpirySweepLimit)
+			if err != nil && ctx.Err() == nil {
+				logger.Error().Err(err).Int("closed", closed).Msg("pool settlement expiry sweep failed")
+				return
+			}
+			if closed > 0 {
+				logger.Info().Int("closed", closed).Msg("expired pending pool settlement verdicts finalized")
+			}
+		}
+		sweepIfIdle := func() {
+			if shouldYieldMoneySQLiteMaintenance(idle, moneySQLiteMaintenanceMinIdle, attempts, moneySQLiteMaintenanceMaxDeferral, time.Now()) {
+				logger.Debug().Msg("pool settlement expiry sweep skipped during active buyer money-path traffic")
+				return
+			}
+			sweep()
+		}
+		sweep()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sweepIfIdle()
 			}
 		}
 	}()

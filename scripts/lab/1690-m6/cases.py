@@ -325,16 +325,19 @@ def case_reconcile():
           "gateway settled pool_operator_attested finality (no stuck holds)", {"held_active": held, "usage_events": sources})
     before_code, before_doc = rollback_preflight()
     # A gateway retry of a 502 opens a new coordinator attempt that the gateway
-    # refunds at once and never asks finality for, so its pending verdict stays
-    # open until something re-reads it. Ask finality for every open pool
-    # verdict past its deadline, as the gateway reconciler does for held ones.
-    open_ids = [r[0] for r in db().execute(
-        "SELECT request_id FROM settlement_receipt_verdicts WHERE pool_id IS NOT NULL AND pool_id != '' AND closed != 1 "
-        "AND pending_deadline_unix_ms < ?", (int(time.time() * 1000),))]
-    closed = [finality(rid).get("closed") for rid in open_ids]
-    code, doc = rollback_preflight()
-    save("rollback_preflight_after", {"before_finality": {"exit": before_code, "result": before_doc},
-                                      "finality_closed": closed, "exit": code, "result": doc})
+    # refunds at once and never asks finality for. The coordinator's expiry
+    # sweeper (one pass a minute) must close it after its pending deadline with
+    # no buyer-side read; wait for that instead of nudging finality.
+    last_deadline = db().execute(
+        "SELECT MAX(pending_deadline_unix_ms) FROM settlement_receipt_verdicts WHERE pool_id IS NOT NULL AND pool_id != '' "
+        "AND closed != 1").fetchone()[0] or 0
+    deadline = max(time.time(), last_deadline / 1000) + 150
+    code, doc = before_code, before_doc
+    while code != 0 and time.time() < deadline:
+        time.sleep(10)
+        code, doc = rollback_preflight()
+    save("rollback_preflight_after", {"before_sweep": {"exit": before_code, "result": before_doc},
+                                      "last_open_pending_deadline_unix_ms": last_deadline, "exit": code, "result": doc})
     check("reconcile", code == 0, "pool-rollback-preflight clears once every pool verdict is closed", {"exit": code, "result": doc})
 
 

@@ -995,6 +995,18 @@ the pool attempts recorded before a downgrade.
   `CheckPoolRollbackPreflight`). An operator MUST NOT roll back while it
   exits non-zero; the fix is to roll forward. A rollback between two
   coordinators that both implement v0.2.0 is not affected.
+- Expiry sweep: a gateway retry can refund its reservation while the
+  coordinator attempt it opened stays `pending`, and no later finality read
+  reaches that attempt. The v0.2.0 coordinator therefore runs a bounded,
+  periodic sweep, independent of gateway holds and of whether the
+  trusted-pool feature is enabled, that closes every open `pending` pool
+  verdict past its pending deadline through `RecordMissingSettlementReceipt`,
+  the same terminalization a finality read applies
+  (`phase4-coordinator/internal/billing/pool_settlement_expiry_sweep.go`,
+  `SweepExpiredPoolSettlementVerdicts`). It never touches a verdict still
+  inside its window, and a closed verdict is never selected again. The
+  downgrade gate still counts every open verdict; the sweep only makes
+  expired ones close without a buyer request.
 - Compatibility floor: a v0.2.0 coordinator records billing contract 2 in
   `billing_compat_floor` and refuses to open a database whose floor is above
   its own contract (`requireBillingCompatFloor`), so every later downgrade

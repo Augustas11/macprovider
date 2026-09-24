@@ -253,7 +253,14 @@ has run on the new coordinator:
    only in-window attempts block, `earliest_safe_unix_ms`.
 3. Do not roll back while the gate exits non-zero. Wait and re-run, or roll
    forward instead. The old coordinator would leave those attempts
-   unverifiable, pending, or quarantined.
+   unverifiable, pending, or quarantined. The running coordinator closes an
+   open pending pool verdict within about a minute of its pending deadline
+   (the expiry sweep, log line `expired pending pool settlement verdicts
+   finalized`), including an attempt a gateway retry already refunded, so
+   `open_pool_verdicts` normally reaches 0 without buyer traffic. If it stays
+   above 0 more than a few minutes past the latest pending deadline, check
+   the coordinator log for `pool settlement expiry sweep failed`; do not roll
+   back.
 
 A rollback between two coordinators that both implement SPEC-022 v0.2.0 needs
 no gate. The Pearl updater's automatic rollback does not run this gate, and the

@@ -8,12 +8,15 @@
 #   rig.sh build-spoof  build a lab-only CLI whose auth runtime_source can be
 #                   overridden by LAB_SPOOF_RUNTIME_SOURCE (a hostile client)
 #   rig.sh up       start everything, offer + price the candidate, create pool A
-#   rig.sh down     stop every lab process (by recorded PID only)
+#   rig.sh down     stop every lab process (by recorded, verified identity only)
 #   rig.sh status   show lab processes and the coordinator's view of the member
 #
 # It never signals a process by name, never uses port 8080/8443/8444, never
 # reads ~/.config/macprovider, and never contacts a production host. The lab
 # CLI runs through cli.sh, which redirects every home-derived path into $LAB.
+# A process is signalled only after pidguard.sh re-verifies the identity it
+# recorded at start. Swift builds run in an exported copy of HEAD under
+# $LAB/src*; the worktree is never modified.
 set -euo pipefail
 LAB="${LAB:-/Users/a1/lab-1690-m6}"
 WT="${WT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
@@ -29,24 +32,37 @@ MLX_ID=mlx-community/Qwen2.5-0.5B-Instruct-4bit
 MLX_REV=a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3
 ROW_KEY=qwen2.5-0.5b-instruct
 export PATH="$GO_BIN:$PATH" GOTOOLCHAIN=local LAB
+# shellcheck source=pidguard.sh
+. "$HERE/pidguard.sh"
 
 mkdir -p "$LAB"/{bin,logs,models,keys,db,run,static,pools,home,tmp,provider}
 chmod 700 "$LAB/keys" "$LAB/home"
 
 secret() { python3 -c "import json,sys;print(json.load(open('$LAB/keys/secrets.json'))[sys.argv[1]])" "$1"; }
-start_bg() { # name pidfile log cmd...
+start_bg() { # name cmd...
   local pidf="$LAB/run/$1.pid" log="$LAB/logs/$1.log"; shift
   nohup "$@" >>"$log" 2>&1 &
-  echo $! >"$pidf"
+  pg_record "$pidf" $!
 }
-stop_pid() {
-  local pidf="$LAB/run/$1.pid"
-  if [[ -f "$pidf" ]] && kill -0 "$(cat "$pidf")" 2>/dev/null; then
-    kill -TERM "$(cat "$pidf")"
-    for _ in $(seq 1 20); do kill -0 "$(cat "$pidf")" 2>/dev/null || break; sleep 0.5; done
-    kill -0 "$(cat "$pidf")" 2>/dev/null && kill -KILL "$(cat "$pidf")" || true
+stop_pid() { pg_stop "$LAB/run/$1.pid" 20 0.5; }
+# prep_src DIR: export HEAD's phase3-binary into $LAB/DIR with the lab static
+# release compiled in. Refuses a dirty phase3-binary, because the lab CLI
+# would silently not contain those edits. SwiftPM's .build cache is kept;
+# extracted files get fresh mtimes so every source recompiles.
+prep_src() {
+  local dirty
+  dirty=$(git -C "$WT" status --porcelain -- phase3-binary ':(exclude)phase3-binary/Package.resolved')
+  if [[ -n "$dirty" ]]; then
+    printf 'refusing: phase3-binary has uncommitted changes; the lab CLI builds from HEAD only\n%s\n' "$dirty" >&2
+    exit 1
   fi
-  rm -f "$pidf"
+  SRC="$LAB/$1/phase3-binary"
+  if [[ -d "$SRC/.build" ]]; then mv "$SRC/.build" "$LAB/$1.build-cache"; fi
+  rm -rf "${LAB:?}/$1"
+  mkdir -p "$LAB/$1"
+  git -C "$WT" archive HEAD phase3-binary | tar -xm -C "$LAB/$1"
+  if [[ -d "$LAB/$1.build-cache" ]]; then mv "$LAB/$1.build-cache" "$SRC/.build"; fi
+  cp "$LAB/static/AutotuneCatalog.generated.swift" "$SRC/Sources/macprovider-cli/AutotuneCatalog.generated.swift"
 }
 wait_http() { for _ in $(seq 1 60); do curl -fs "$1" >/dev/null 2>&1 && return 0; sleep 0.5; done; echo "timeout waiting for $1" >&2; return 1; }
 
@@ -63,26 +79,20 @@ cmd_build() {
   printf '{"Replace":{"%s/cmd/lab1690m6/main.go":"%s"}}' "$WT/phase4-coordinator" "$HERE/labtool/main.go" >"$LAB/run/overlay.json"
   (cd "$WT/phase4-coordinator" && go build -overlay "$LAB/run/overlay.json" -o "$LAB/bin/labtool" ./cmd/lab1690m6)
   cmd_static
-  # The lab CLI is the branch CLI with the lab static release compiled in.
-  # The generated file is swapped only for this build and restored after.
-  local gen="$WT/phase3-binary/Sources/macprovider-cli/AutotuneCatalog.generated.swift"
-  cp "$LAB/static/AutotuneCatalog.generated.swift" "$gen"
-  trap 'git -C "$WT" checkout -- phase3-binary/Sources/macprovider-cli/AutotuneCatalog.generated.swift' EXIT
-  (cd "$WT/phase3-binary" && swift build -c release --product macprovider-cli)
-  cp "$WT/phase3-binary/.build/release/macprovider-cli" "$LAB/bin/macprovider-cli-lab"
+  # The lab CLI is the branch CLI (HEAD) with the lab static release compiled in.
+  prep_src src
+  (cd "$SRC" && swift build -c release --product macprovider-cli)
+  cp "$SRC/.build/release/macprovider-cli" "$LAB/bin/macprovider-cli-lab"
   cp "$METALLIB" "$LAB/bin/mlx.metallib"
   echo "build ok"
 }
 
 cmd_build_spoof() {
   # A spoofing client for the SPEC-042-R013 spoofed-hello case. The patch is
-  # applied to the worktree only for this build and reverted after; the
-  # binary lives only in $LAB/bin.
-  local cc="$WT/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift"
-  local gen="$WT/phase3-binary/Sources/macprovider-cli/AutotuneCatalog.generated.swift"
-  trap 'git -C "$WT" checkout -- phase3-binary/Sources/macprovider-cli/AutotuneCatalog.generated.swift phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift' EXIT
-  cp "$LAB/static/AutotuneCatalog.generated.swift" "$gen"
-  python3 - "$cc" <<'PY'
+  # applied only to its own exported tree ($LAB/src-spoof), never the
+  # worktree; the binary lives only in $LAB/bin.
+  prep_src src-spoof
+  python3 - "$SRC/Sources/macprovider-cli/CoordinatorClient.swift" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p).read()
@@ -99,8 +109,8 @@ new = """        if let spoof = ProcessInfo.processInfo.environment["LAB_SPOOF_R
 assert s.count(old) == 1, "auth runtime_source block not found"
 open(p, "w").write(s.replace(old, new))
 PY
-  (cd "$WT/phase3-binary" && swift build -c release --product macprovider-cli)
-  cp "$WT/phase3-binary/.build/release/macprovider-cli" "$LAB/bin/macprovider-cli-lab-spoof"
+  (cd "$SRC" && swift build -c release --product macprovider-cli)
+  cp "$SRC/.build/release/macprovider-cli" "$LAB/bin/macprovider-cli-lab-spoof"
   echo "spoof build ok"
 }
 
@@ -183,7 +193,7 @@ cmd_down() {
 
 cmd_status() {
   for p in serve usage-tap llama-server gateway coordinator; do
-    if [[ -f "$LAB/run/$p.pid" ]] && kill -0 "$(cat "$LAB/run/$p.pid")" 2>/dev/null; then echo "$p: pid $(cat "$LAB/run/$p.pid")"; else echo "$p: stopped"; fi
+    if pid=$(pg_verify "$LAB/run/$p.pid"); then echo "$p: pid $pid"; elif [[ -f "$LAB/run/$p.pid" ]]; then echo "$p: stale pid file"; else echo "$p: stopped"; fi
   done
   if curl -fs http://127.0.0.1:19102/healthz >/dev/null 2>&1; then
     curl -s -H "Authorization: Bearer $(secret operator_key)" http://127.0.0.1:19102/poolz | python3 -c '

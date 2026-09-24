@@ -104,6 +104,11 @@ Run 3 findings:
   now does the same. Before a rollback, an operator has to close open,
   past-deadline pool verdicts the same way. Whether the nightly reconcile
   (`job_enabled`) closes them was not verified here.
+  Resolved after run 3 (final-audit R2): the coordinator now runs a
+  periodic expiry sweep (`SweepExpiredPoolSettlementVerdicts`, SPEC-022
+  R-12.8) that closes these verdicts without a finality read, and the case
+  now waits for the gate instead of reading finality. No operator step is
+  needed. This run's evidence predates the sweep.
 - Resolved from the earlier findings: 4, with `45d0702c` (legacy HTTP
   disconnect; the XCTest runs in CI only); 5, active-window routing
   (`future_manifest`, `active_window`); and the reconciler's
