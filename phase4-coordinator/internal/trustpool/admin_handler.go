@@ -2116,6 +2116,7 @@ type adminPoolState struct {
 	RootIssuerKeyID                string   `json:"root_issuer_key_id,omitempty"`
 	RootIssuerPublicKeyFingerprint string   `json:"root_issuer_public_key_fingerprint,omitempty"`
 	LaunchEnvironment              string   `json:"launch_environment,omitempty"`
+	RootCustodyClass               string   `json:"root_custody_class,omitempty"`
 	MinBinaryVersion               string   `json:"min_binary_version,omitempty"`
 	Members                        []string `json:"members"`
 	Revoked                        []string `json:"revoked"`
@@ -2163,6 +2164,7 @@ func adminPoolResponse(p *ReconstructedPoolState, routeGateCheckedAt time.Time) 
 		RootIssuerKeyID:                rootIssuerKeyID(p),
 		RootIssuerPublicKeyFingerprint: rootIssuerFingerprint(p),
 		LaunchEnvironment:              rootIssuerLaunchEnvironment(p),
+		RootCustodyClass:               rootIssuerCustodyClass(p),
 		MinBinaryVersion:               policyMinBinaryVersion(p),
 		Members:                        members,
 		Revoked:                        revoked,
@@ -2278,6 +2280,13 @@ func rootIssuerFingerprint(p *ReconstructedPoolState) string {
 		return ""
 	}
 	return p.RootIssuer.PublicKeyFingerprint
+}
+
+func rootIssuerCustodyClass(p *ReconstructedPoolState) string {
+	if p == nil || p.RootIssuer == nil {
+		return ""
+	}
+	return p.RootIssuer.CustodyClass
 }
 
 func rootIssuerLaunchEnvironment(p *ReconstructedPoolState) string {

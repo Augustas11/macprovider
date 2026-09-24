@@ -3302,6 +3302,7 @@ func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsCo
 		trustpool.WithProductionActivationGate(trustpool.ProductionActivationGate{
 			AllowedLaunchEnvironments: cfg.ProductionActivation.AllowedLaunchEnvironments,
 			RootCustodyHashes:         cfg.ProductionActivation.RootCustodyHashes,
+			RootCustodyClasses:        cfg.ProductionActivation.RootCustodyClasses,
 			EvidenceSHA256:            cfg.ProductionActivation.EvidenceSHA256,
 		}),
 	}
@@ -3325,6 +3326,11 @@ func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsCo
 	if err != nil {
 		logger.Error().Err(err).Msg("trusted pools routeable registry build failed; pool support disabled")
 		return nil, nil, false, nil
+	}
+	if store.ProductionActivationEnabled() {
+		// SPEC-042: a production-activated coordinator never routes a pool
+		// whose root launch_environment is candidate.
+		registry.RejectCandidateLaunchEnvironment()
 	}
 	logger.Info().
 		Int("pool_count", len(reconstructed.Pools)).

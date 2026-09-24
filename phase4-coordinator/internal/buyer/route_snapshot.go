@@ -205,8 +205,11 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		PromptHashBasis:                    promptHashBasisCoordinatorV1,
 		PromptHash:                         promptHash,
 		// SPEC-042 R006: label the settlement route-snapshot with the pool
-		// that served the request ("" for global -> omitted from the digest).
-		PoolID: b.state.poolID,
+		// that served the request and its routing-time manifest labels (all
+		// empty for global -> omitted from the digest).
+		PoolID:             b.state.poolID,
+		ManifestVersion:    b.state.poolManifestVersion,
+		ManifestCoreDigest: b.state.poolManifestCoreDigest,
 	}
 	applyBYOMRouteSnapshotBinding(&snapshot, byomBinding)
 	computeIntegrityRequired, computeIntegrityCovered, computeIntegrityHardwareDigest, err := computeIntegrityRouteBinding(provider, routeMode)
@@ -241,6 +244,7 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	}
 	b.settlementAttemptN = attemptN
 	b.hasSettlementAttemptN = true
+	b.settlementRouteSnapshotDigest = digest
 	b.settlementPolicyMode = snapshot.RouteSnapshotMode
 	b.settlementPolicyVersion = snapshot.RouteSnapshotPolicyVersion
 	return &providerws.SettlementReceiptMetadata{
@@ -458,6 +462,7 @@ func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header
 		identity:              identity,
 		header:                header,
 		providerReceiptPubkey: append([]byte(nil), provider.ReceiptPubkey...),
+		poolLabels:            b.settlementPoolLabels(),
 	}
 	if header == "" {
 		// #1578: a leg the coordinator deliberately never settled — a 503

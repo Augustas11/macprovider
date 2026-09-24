@@ -135,14 +135,18 @@ type billingRecorder struct {
 	// committed write and records every credited row, then asserts the two
 	// agree. It NEVER gates a billing row. May be nil on recorders built by
 	// direct struct construction in tests — every call site nil-guards.
-	terminal                   *requestTerminal
-	outputCursorByte           int64
-	settlementAttemptN         int
-	hasSettlementAttemptN      bool
-	settlementPolicyMode       string
-	settlementPolicyVersion    string
-	routeSnapshotStorePressure bool
-	relayBlind                 *relayBlindAuditFields
+	terminal                *requestTerminal
+	outputCursorByte        int64
+	settlementAttemptN      int
+	hasSettlementAttemptN   bool
+	settlementPolicyMode    string
+	settlementPolicyVersion string
+	// settlementRouteSnapshotDigest is the route snapshot digest recorded at
+	// routing time for the current settlement attempt (SPEC-042 R006
+	// route_snapshot_hash).
+	settlementRouteSnapshotDigest string
+	routeSnapshotStorePressure    bool
+	relayBlind                    *relayBlindAuditFields
 	// lastRecordedSettlementSubject latches whether the MOST RECENTLY recorded
 	// row was a leg the coordinator settles at all. It is the single expression
 	// that recordRow's two billing branches gate on: a settlement attempt

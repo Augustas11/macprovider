@@ -17,7 +17,7 @@ func (h *adminHandler) handlePromotePoolGuarded(w http.ResponseWriter, r *http.R
 			// only their sentinel: a lifecycle/on-call read that fails (missing
 			// table, malformed row, storage error) must block production
 			// promote rather than fall through to the mapped handler, which
-			// does not re-check these rows. writeMutationError maps the
+			// re-checks on-call but not the lifecycle row. writeMutationError maps the
 			// sentinels to their rejection codes and unexpected errors to a
 			// closed response.
 			if err := h.deps.Store.RequireOnCallReadinessForPromotion(r.Context(), poolID); err != nil {

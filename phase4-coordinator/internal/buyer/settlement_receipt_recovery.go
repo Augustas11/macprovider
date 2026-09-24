@@ -20,6 +20,7 @@ type settlementReceiptRecoveryInput struct {
 	identity              billing.SettlementReceiptIdentity
 	header                string
 	providerReceiptPubkey []byte
+	poolLabels            *billing.SettlementPoolLabels
 }
 
 type settlementReceiptRecoveryItem struct {
@@ -48,7 +49,63 @@ func (s *Server) persistSettlementReceipt(ctx context.Context, store *billing.St
 	if persist == nil {
 		persist = persistSettlementReceiptDirect
 	}
-	return persist(ctx, store, input)
+	state, err := persist(ctx, store, input)
+	if err == nil && input.poolLabels != nil && store != nil {
+		s.recordSettlementPoolLabels(ctx, store, input)
+	}
+	return state, err
+}
+
+// recordSettlementPoolLabels stamps the SPEC-042 R006 labels after the verdict
+// is durable. A failure only leaves the label unrecorded, which already keeps
+// the request out of pool-scoped accounting; it never fails settlement.
+func (s *Server) recordSettlementPoolLabels(ctx context.Context, store *billing.Store, input settlementReceiptRecoveryInput) {
+	rec, err := store.RecordSettlementPoolLabels(ctx, input.identity, input.poolLabels)
+	if err != nil {
+		s.log.Warn().Err(err).
+			Str("pool_id", input.poolLabels.PoolID).
+			Str("request_id", input.identity.RequestID).
+			Str("provider_id", input.identity.ProviderID).
+			Msg("trusted pool settlement label not recorded; request excluded from pool-scoped accounting")
+		return
+	}
+	if rec.Status != billing.PoolLabelStatusDisputed {
+		return
+	}
+	// SPEC-042 R006 pool-audit event. Usage already settled under SPEC-005;
+	// only pool-scoped attribution is withheld.
+	s.log.Warn().
+		Str("event", "trusted_pool_label_disputed").
+		Str("pool_id", rec.PoolID).
+		Uint64("routing_manifest_version", rec.ManifestVersion).
+		Str("routing_manifest_core_digest", rec.ManifestCoreDigest).
+		Uint64("settlement_manifest_version", input.poolLabels.ManifestVersion).
+		Str("settlement_manifest_core_digest", input.poolLabels.ManifestCoreDigest).
+		Str("route_snapshot_hash", rec.RouteSnapshotHash).
+		Str("request_id", input.identity.RequestID).
+		Int64("attempt_n", input.identity.AttemptN).
+		Str("provider_id", input.identity.ProviderID).
+		Msg("trusted pool settlement label disputed; request excluded from pool-scoped accounting")
+}
+
+// settlementPoolLabels captures the SPEC-042 R006 settlement-time labels: the
+// selected pool, its manifest as the live registry holds it now, and the route
+// snapshot digest recorded at routing time. nil for global traffic.
+func (b *billingRecorder) settlementPoolLabels() *billing.SettlementPoolLabels {
+	if b == nil || b.state == nil || b.state.poolID == "" {
+		return nil
+	}
+	labels := &billing.SettlementPoolLabels{
+		PoolID:            b.state.poolID,
+		RouteSnapshotHash: b.settlementRouteSnapshotDigest,
+	}
+	if b.server != nil && b.server.trustPools != nil {
+		if snap := b.server.trustPools.Snapshot(b.state.poolID); snap.Exists {
+			labels.ManifestVersion = snap.ManifestVersion
+			labels.ManifestCoreDigest = snap.ManifestCoreDigest
+		}
+	}
+	return labels
 }
 
 func settlementReceiptRecoveryKey(input settlementReceiptRecoveryInput) string {

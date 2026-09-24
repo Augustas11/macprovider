@@ -28,8 +28,8 @@ var (
 
 // OnCallReadiness is the SPEC-043-R008/R011 signed launch-environment
 // on-call record. Operator HTTP/CLI production promote consults this row
-// via RequireOnCallReadinessForPromotion. Store.PromotePool still does not;
-// wiring that mapped path needs a recapture window.
+// via RequireOnCallReadinessForPromotion, and Store.PromotePool re-checks it
+// in the mapped validatePromotion path.
 type OnCallReadiness struct {
 	OperationID                           string        `json:"operation_id"`
 	LaunchEnvironmentID                   string        `json:"launch_environment_id"`
@@ -389,8 +389,8 @@ ON CONFLICT(launch_environment_id) DO UPDATE SET
 // promote when the reconstructed pool is non-candidate and the matching
 // on-call row is missing or expired. Candidate pools skip this check so the
 // isolated-candidate journey stays valid. Missing pools and pools without a
-// root issuer are left to PromotePool preconditions. This is not inside the
-// PromotePool transaction.
+// root issuer are left to PromotePool preconditions. PromotePool re-checks the
+// same row inside its transaction via validatePromotion.
 func (s *Store) RequireOnCallReadinessForPromotion(ctx context.Context, poolID string) error {
 	poolID = strings.TrimSpace(poolID)
 	if poolID == "" {
@@ -415,10 +415,16 @@ func (s *Store) RequireOnCallReadinessForPromotion(ctx context.Context, poolID s
 	if err != nil {
 		return err
 	}
+	return requireCurrentOnCallReadiness(rec, ok, environment, time.Now().UTC())
+}
+
+// requireCurrentOnCallReadiness is the shared on-call check for the guarded
+// HTTP promote wrapper and the mapped PromotePool/validatePromotion path.
+func requireCurrentOnCallReadiness(rec OnCallReadiness, ok bool, environment string, now time.Time) error {
 	if !ok {
 		return fmt.Errorf("%w: production promotion requires current on-call readiness for %s", ErrOnCallReadiness, environment)
 	}
-	if rec.Expired(time.Now().UTC()) {
+	if rec.Expired(now) {
 		return fmt.Errorf("%w: on-call readiness expired for %s", ErrOnCallReadiness, environment)
 	}
 	return nil

@@ -514,6 +514,9 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 	if err := s.ensureSettlementReceiptAuditOutboxSnapshotColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureSettlementReceiptPoolLabelColumns(ctx); err != nil {
+		return err
+	}
 	if err := s.normalizeBillingTimeTextColumns(ctx); err != nil {
 		return err
 	}

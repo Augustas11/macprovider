@@ -21,9 +21,9 @@ Confirm all of the following, or stop:
   pool-authorized accounts, and distribution is reviewed-only.
 - Settlement stays observe/labels-only (`split_execution_status` remains
   `declared_not_executed`) for the MVP.
-- You accept the residual launch blockers still open on #1233 (custody-class
-  recording, full R006 re-verification, unresolved SPEC-042 rows) or have an
-  explicit written decision to carry them.
+- You accept the residual launch blockers still open on #1233 (full R006
+  re-verification, unresolved SPEC-042 rows) or have an explicit written
+  decision to carry them.
 
 The coordinator admin surface is served on the **provider port** (`:8444`),
 authenticated with the coordinator `OPERATOR_KEY`. On Pearl the operator key
@@ -102,7 +102,13 @@ trusted_pools:
     allowed_launch_environments: ["<non-candidate launch env>"]
     evidence_sha256: "<lowercase sha256 of the signed launch evidence>"
     root_custody_hashes: ["<lowercase sha256 root-custody disclosure hash>"]
+    root_custody_classes:
+      "<same hash>": "<hsm | mpc | other>"
 ```
+
+Every approved custody hash needs a class. `software` is rejected until a
+signed-exception path exists. A coordinator with `production_activation` set
+never promotes or routes a pool whose root `launch_environment` is `candidate`.
 
 `production_activation` is default-blocked: absent or mismatched config keeps the
 fail-closed `launch_environment_not_candidate` behavior. Restart the coordinator
@@ -178,9 +184,9 @@ coordinator-cli trust-pool-admin promote --pool-id <id> --operation-id <op>
 
 The guarded operator promote wrapper re-checks on-call readiness and the
 production reviewed-artifact lifecycle owner and **fails closed on any error**
-before the mapped promote runs. In-process `Store.PromotePool` still does not
-consult these rows; that mapped-`validatePromotion` wiring is deferred and needs
-a fresh signed candidate recapture window.
+before the mapped promote runs. In-process `Store.PromotePool` re-checks on-call
+readiness inside its transaction and records the approved root custody class on
+the promotion event (`get-pool` shows it as `root_custody_class`).
 
 ## 8. Verify and roll back
 
@@ -195,8 +201,7 @@ a fresh signed candidate recapture window.
 
 ## Still open after this runbook (do not skip)
 
-Executing this runbook does not by itself close #1233. Custody-class recording
-from the R002 registration, full R006 re-verification before reactivation, the
-mapped-`validatePromotion` wiring, and any unresolved SPEC-042 conformance rows
+Executing this runbook does not by itself close #1233. Full R006
+re-verification before reactivation and any unresolved SPEC-042 conformance rows
 remain launch blockers or explicit-accept decisions. Do not announce a live
 external creator from isolated-candidate CONFORMANCE.
