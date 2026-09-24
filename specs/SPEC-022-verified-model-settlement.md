@@ -870,6 +870,25 @@ with zero billable usage, whether or not the provider is a member of any
 pool (SPEC-047-R003(iv)). Such a session MUST NOT be selected for paid
 global traffic.
 
+R-12.6a. Usage-source provenance end to end. The source is set once, per
+attempt, when the attempt is recorded
+(`recordSettlementAttemptOutput`,
+`phase4-coordinator/internal/buyer/billing_recorder.go:747-757`). It is
+persisted in `settlement_attempt_outputs.usage_source`, whose CHECK constraint
+(`phase4-coordinator/internal/billing/store.go:365`) a migration MUST widen to
+the R-12.2 vocabulary without rewriting existing rows. Receipt ingestion and
+the verifier read it from that row (R-12.4). Every later report MUST derive
+from the persisted per-attempt values and MUST NOT substitute a constant.
+Request finality today hardcodes `coordinator_observed` for every verified
+result (`phase4-coordinator/internal/billing/settlement_finality.go:283-304`).
+Its `token_source` MUST instead be `coordinator_observed` when every verified
+attempt of the request persisted `coordinator_observed`, and
+`pool_operator_attested` when any verified attempt persisted
+`pool_operator_attested`. The weaker provenance governs a request that mixes
+native and pool-attested verified attempts. The same rule applies to the
+overlap-blocked terminal result. Aggregates and disclosure surfaces MUST
+group by the persisted source.
+
 R-12.7. Scope. R-12 adds no receipt tuple field, no receipt-less settlement
 path, and no SPEC-016 payout path. It does not change SPEC-008
 `attestation_tier`, and it changes no native-session settlement.
@@ -1104,7 +1123,11 @@ path, and no SPEC-016 payout path. It does not change SPEC-008
   under SPEC-005 with the byte and prompt ceilings applied. The same completion
   on a global route, with a disputed label, with a non-creator provider, or with
   a snapshot missing any R-12.1 member is `byte_estimated`, or `quarantined`,
-  with zero buyer debit and zero provider credit.
+  with zero buyer debit and zero provider credit. The settled request's
+  finality reports `token_source: pool_operator_attested`. A request whose
+  verified attempts mix a native attempt and a pool-attested attempt also
+  reports `pool_operator_attested`. An all-native request still reports
+  `coordinator_observed` (R-12.6a).
 - **AC-022-64:** Provider-facing onboarding or operating docs state that receipts
   arriving after `pending_deadline_seconds` are non-settling and non-recoverable
   unless a future operator-review spec defines an exception.

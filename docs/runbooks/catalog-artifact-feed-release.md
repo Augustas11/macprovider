@@ -184,10 +184,13 @@ mismatches and hash-less reports, and only a model change resets it. A stale fee
 `artifact_identity_index_stale` once per refresh. `scripts/verify-tier2-live.sh`
 accepts both canonical algorithms in its ready-cohort check.
 
-What this slice does NOT do: the provider CLI has no GGUF serving runtime, and
-SPEC-046 does not proxy buyer traffic, so a served GGUF model cannot yet
-report the wire pair in hello/heartbeat. R007 defines the identity that
-runtime path will report; the path itself is a later runtime slice.
+Historical context for the R007 slice: at that time the provider CLI had no
+GGUF serving runtime. Since #1690 M2 the CLI serves GGUF through the
+`llamacpp:` and `ollama:` selectors (SPEC-046-R009). Such a session is
+sandboxed for global traffic and earns only on a SPEC-042 Trusted Pool route
+whose signed policy allowlists its runtime, under SPEC-047-R003(iv)'s pool
+route-time clause and SPEC-022-R012. Check those rules, not this slice note,
+before serving a GGUF member.
 
 ## Activation state
 
