@@ -439,10 +439,10 @@ func insertProviderIdentitySnapshotTx(ctx context.Context, db sqlExecutor, in Ho
 	INSERT INTO ledger_provider_identity_snapshots (
 	    request_id, attempt_n, provider_assigned_id, provider_id, resolved_from,
 	    pool_session_started_at_utc, config_snapshot_id, provider_reported_prompt_tokens,
-	    created_at_utc
-	) VALUES (?, ?, ?, ?, 'pool_entry', NULL, ?, ?, ?)
+	    runtime_source, created_at_utc
+	) VALUES (?, ?, ?, ?, 'pool_entry', NULL, ?, ?, ?, ?)
 	ON CONFLICT(request_id, attempt_n, provider_assigned_id) DO NOTHING`,
-		in.RequestID, in.AttemptN, in.ProviderAssignedID, in.ProviderID, nullPositiveInt64(in.ConfigSnapshotID), nullInt64(in.ProviderReportedPromptTokens), now,
+		in.RequestID, in.AttemptN, in.ProviderAssignedID, in.ProviderID, nullPositiveInt64(in.ConfigSnapshotID), nullInt64(in.ProviderReportedPromptTokens), in.ProviderRuntimeSource, now,
 	)
 	return err
 }

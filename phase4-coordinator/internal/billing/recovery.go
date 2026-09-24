@@ -200,10 +200,11 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		ambiguousAttempt := attemptN == 1 && retried == 0
 		var providerID string
 		var identityConfigSnapshotID, providerReportedPrompt sql.NullInt64
+		var identityRuntimeSource sql.NullString
 		err = tx.QueryRowContext(ctx, `
-	SELECT provider_id, config_snapshot_id, provider_reported_prompt_tokens FROM ledger_provider_identity_snapshots
+	SELECT provider_id, config_snapshot_id, provider_reported_prompt_tokens, runtime_source FROM ledger_provider_identity_snapshots
 	 WHERE request_id = ? AND attempt_n = ? AND provider_assigned_id = ?
-		 ORDER BY id DESC LIMIT 1`, requestID, attemptN, assignedID).Scan(&providerID, &identityConfigSnapshotID, &providerReportedPrompt)
+		 ORDER BY id DESC LIMIT 1`, requestID, attemptN, assignedID).Scan(&providerID, &identityConfigSnapshotID, &providerReportedPrompt, &identityRuntimeSource)
 		if err != nil {
 			reason := "missing_provider_identity"
 			if ambiguousAttempt {
@@ -359,6 +360,20 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 			quarantined++
 			continue
 		}
+		// The hot path's SPEC-047-R003(iv) / SPEC-022-R012 loopback rule
+		// holds for a re-created row too: never a byte-estimated credit.
+		if !recoveredLoopbackAttemptBillable(ctx, tx, identityRuntimeSource, SettlementReceiptIdentity{
+			AccountScope: AccountScopeForSettlement(accountID.String),
+			RequestID:    requestID,
+			AttemptN:     int64(attemptN),
+			ProviderID:   providerID,
+		}, pp, cp) {
+			if _, err := insertRequestCreditTx(ctx, tx, input, zeroCredits(result), in.Source, now, true, LoopbackRuntimeNotSettlementEligible); err != nil {
+				return err
+			}
+			quarantined++
+			continue
+		}
 		id, err := insertRequestCreditTx(ctx, tx, input, result, in.Source, now, false, "")
 		if err != nil {
 			return err
@@ -407,6 +422,32 @@ INSERT INTO ledger_reconciliation_runs (
 		return err
 	}
 	return tx.Commit()
+}
+
+// recoveredLoopbackAttemptBillable applies the hot path's loopback rule to a
+// ledger row recovery re-creates. A native attempt is billable as before. A
+// loopback attempt is billable only with the pool runtime's reported prompt
+// and completion tokens on a readable enforce-mode pool route snapshot that
+// carries every R-12.1 member for the same runtime; settlement still has to
+// verify a receipt before its credit is payable. An attempt whose runtime
+// was not recorded (a row written before runtime_source existed) might be
+// loopback, so it fails closed. The snapshot is read only for an attempt
+// that is or might be loopback, so native recovery reads nothing new.
+func recoveredLoopbackAttemptBillable(ctx context.Context, tx *sql.Tx, runtimeSource sql.NullString, id SettlementReceiptIdentity, prompt, completion *int64) bool {
+	if runtimeSource.Valid && !IsLoopbackRuntimeSource(runtimeSource.String) {
+		return true
+	}
+	if prompt == nil || completion == nil {
+		return false
+	}
+	route, _, err := loadSettlementRouteSnapshotConn(ctx, tx, id)
+	if err != nil {
+		return false
+	}
+	if runtimeSource.Valid && route.RuntimeSource != runtimeSource.String {
+		return false
+	}
+	return route.RouteSnapshotMode == RouteSnapshotModeEnforce && poolOperatorAttestationSnapshotComplete(route)
 }
 
 func (s *Store) StartStartupScan(ctx context.Context, cfg SettlementConfig, now time.Time) error {

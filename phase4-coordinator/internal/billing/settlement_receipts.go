@@ -865,7 +865,7 @@ func loadSettlementEvidenceConn(ctx context.Context, conn *sql.Conn, id Settleme
 	}, nil
 }
 
-func loadSettlementRouteSnapshotConn(ctx context.Context, conn *sql.Conn, id SettlementReceiptIdentity) (RouteSnapshot, string, error) {
+func loadSettlementRouteSnapshotConn(ctx context.Context, conn settlementReceiptCreditSyncDB, id SettlementReceiptIdentity) (RouteSnapshot, string, error) {
 	var r RouteSnapshot
 	var providerSession, providerGeneration sql.NullString
 	var computeIntegrityHardwareDigest sql.NullString

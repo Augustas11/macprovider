@@ -85,9 +85,7 @@ func (s *Store) poolOperatorAttestationAuthority() PoolOperatorAttestationAuthor
 // for a recorded route snapshot. Condition 5 (the label is not disputed) is
 // the caller's, because it compares the snapshot with a settlement-time view.
 func (s *Store) PoolOperatorAttestationEligible(ctx context.Context, route RouteSnapshot) error {
-	if route.RuntimeSource == "" || !IsLoopbackRuntimeSource(route.RuntimeSource) ||
-		route.PoolID == "" || route.ManifestVersion == 0 || !hex64Pattern.MatchString(route.ManifestCoreDigest) ||
-		route.PoolGeneration == 0 || strings.TrimSpace(route.PoolOperatorAccountID) == "" {
+	if !poolOperatorAttestationSnapshotComplete(route) {
 		return errPoolOperatorAttestationSnapshot
 	}
 	if route.RouteSnapshotMode != RouteSnapshotModeEnforce {
@@ -106,6 +104,14 @@ func (s *Store) PoolOperatorAttestationEligible(ctx context.Context, route Route
 		PoolOperatorAccountID: route.PoolOperatorAccountID,
 		ProviderID:            route.ProviderID,
 	})
+}
+
+// poolOperatorAttestationSnapshotComplete reports whether a route snapshot
+// carries every SPEC-022-R012.1 member of a loopback pool route.
+func poolOperatorAttestationSnapshotComplete(route RouteSnapshot) bool {
+	return route.RuntimeSource != "" && IsLoopbackRuntimeSource(route.RuntimeSource) &&
+		route.PoolID != "" && route.ManifestVersion != 0 && hex64Pattern.MatchString(route.ManifestCoreDigest) &&
+		route.PoolGeneration != 0 && strings.TrimSpace(route.PoolOperatorAccountID) != ""
 }
 
 // PoolOperatorAttestedLabelVerified is SPEC-042-R006 condition 5: the

@@ -165,8 +165,8 @@ INSERT INTO request_log (
 	if _, err := db.Exec(`
 INSERT INTO ledger_provider_identity_snapshots (
     request_id, attempt_n, provider_assigned_id, provider_id, resolved_from,
-    config_snapshot_id, provider_reported_prompt_tokens, created_at_utc
-) VALUES (?, 0, ?, ?, 'pool_entry', ?, 8, ?)`,
+    config_snapshot_id, provider_reported_prompt_tokens, runtime_source, created_at_utc
+) VALUES (?, 0, ?, ?, 'pool_entry', ?, 8, '', ?)`,
 		crashRecoveryRequestID, crashRecoveryAssignedID, s.providerID, snapshotID, stamp,
 	); err != nil {
 		s.t.Fatalf("insert identity snapshot: %v", err)

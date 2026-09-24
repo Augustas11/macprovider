@@ -268,6 +268,7 @@ CREATE INDEX IF NOT EXISTS idx_lcs_effective_at ON ledger_config_snapshots(effec
 	    pool_session_started_at_utc TEXT NULL,
 	    config_snapshot_id INTEGER NULL CHECK(config_snapshot_id IS NULL OR config_snapshot_id > 0),
 	    provider_reported_prompt_tokens INTEGER NULL CHECK(provider_reported_prompt_tokens IS NULL OR provider_reported_prompt_tokens >= 0),
+	    runtime_source TEXT NULL,
 	    created_at_utc TEXT NOT NULL,
 	    UNIQUE(request_id, attempt_n, provider_assigned_id)
 	);
@@ -1104,6 +1105,16 @@ ADD COLUMN config_snapshot_id INTEGER NULL CHECK(config_snapshot_id IS NULL OR c
 		if _, err := s.db.ExecContext(ctx, `
 ALTER TABLE ledger_provider_identity_snapshots
 ADD COLUMN provider_reported_prompt_tokens INTEGER NULL CHECK(provider_reported_prompt_tokens IS NULL OR provider_reported_prompt_tokens >= 0)`); err != nil {
+			return err
+		}
+	}
+	// runtime_source is the serving session's hello-time runtime class, so
+	// ledger recovery can apply the loopback rule to a re-created row. NULL
+	// marks a row written before it was recorded.
+	if !cols["runtime_source"] {
+		if _, err := s.db.ExecContext(ctx, `
+ALTER TABLE ledger_provider_identity_snapshots
+ADD COLUMN runtime_source TEXT NULL`); err != nil {
 			return err
 		}
 	}
