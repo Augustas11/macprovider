@@ -199,7 +199,7 @@ func TestAC1_OverviewJSONShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("timeseries missing")
 	}
-	for _, k := range []string{"rpm_30m", "tpm_30m"} {
+	for _, k := range []string{"rpm_30m", "tpm_30m", "daily_90d"} {
 		sub, ok := ts[k].(map[string]any)
 		if !ok {
 			t.Errorf("timeseries.%s missing or not object", k)
@@ -210,8 +210,13 @@ func TestAC1_OverviewJSONShape(t *testing.T) {
 			t.Errorf("timeseries.%s.points missing or not array", k)
 			continue
 		}
-		if len(pts) != 30 {
+		if k != "daily_90d" && len(pts) != 30 {
 			t.Errorf("timeseries.%s.points len = %d, want 30", k, len(pts))
+		}
+		if k == "daily_90d" {
+			if sub["bucket"] != "1d" {
+				t.Errorf("timeseries.daily_90d.bucket = %v, want 1d", sub["bucket"])
+			}
 		}
 	}
 }

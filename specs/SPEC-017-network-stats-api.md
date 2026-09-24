@@ -689,6 +689,12 @@ with `Allow: GET, HEAD, OPTIONS` (`Allow: GET, HEAD` on `/v1/stats/intake`).
       "points": [
         {"t":"2026-06-25T17:45:00Z","input_tokens": 92000, "output_tokens": 28000}
       ]
+    },
+    "daily_90d": {
+      "bucket": "1d",
+      "points": [
+        {"t":"2026-06-24","requests": 1200, "input_tokens": 900000, "output_tokens": 210000}
+      ]
     }
   }
 }
@@ -711,6 +717,14 @@ with `Allow: GET, HEAD, OPTIONS` (`Allow: GET, HEAD` on `/v1/stats/intake`).
   distinguishes "no data" from "zero traffic").
 - `timeseries.tpm_30m.points` — same shape but with `input_tokens` and
   `output_tokens` instead of `value`.
+- `timeseries.daily_90d` — issue #1736. `bucket` is `"1d"`. `points`
+  are complete UTC days, oldest first, at most 90. `t` is `YYYY-MM-DD`.
+  The UTC day that contains `generated_at` is omitted. Each point has
+  `requests`, `input_tokens`, and `output_tokens`, counted with the same
+  ledger filter as `network.tokens_*` and `network.requests_total`. A day
+  inside the window with no rows is `0`. Days before rollup start are
+  absent. An empty `points` array means the rollup has not written the
+  series yet.
 
 **Response headers.**
 
