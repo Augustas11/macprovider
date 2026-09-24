@@ -588,7 +588,7 @@ protocol ContinuousBatchSchedulerReplayAuthority: Sendable {
     func release(_ key: ContinuousBatchSchedulerReplayKey)
 }
 
-private final class ContinuousBatchTokenDeliveryCapacity: @unchecked Sendable {
+final class ContinuousBatchTokenDeliveryCapacity: @unchecked Sendable {
     private let lock = NSLock()
     private let limit: Int
     private var inUse = 0
@@ -613,7 +613,7 @@ private final class ContinuousBatchTokenDeliveryCapacity: @unchecked Sendable {
     }
 }
 
-private final class ContinuousBatchTokenDelivery: @unchecked Sendable {
+final class ContinuousBatchTokenDelivery: @unchecked Sendable {
     private let lock = NSLock()
     private let bufferLimit: Int
     private let timeoutNanoseconds: UInt64
@@ -628,6 +628,9 @@ private final class ContinuousBatchTokenDelivery: @unchecked Sendable {
     private var drainGeneration: UUID?
     private var deliveryTask: Task<Void, Never>?
     private var timeoutTask: Task<Void, Never>?
+    /// Test seam: runs after the drain loop sees an empty queue and before it
+    /// decides whether to finish, the window an `offer()` can land in.
+    var afterDrainSawEmptyQueueForTest: (@Sendable () -> Void)?
 
     init(
         bufferLimit: Int,
@@ -746,11 +749,21 @@ private final class ContinuousBatchTokenDelivery: @unchecked Sendable {
     }
 
     private func drain(generation: UUID) async {
-        while let event = nextEvent(generation: generation) {
-            await sink(event)
-            if Task.isCancelled { break }
+        while true {
+            while let event = nextEvent(generation: generation) {
+                await sink(event)
+                if Task.isCancelled { break }
+            }
+            afterDrainSawEmptyQueueForTest?()
+            // An `offer()` between the empty check above and this call saw
+            // `draining == true`, appended, and started no drain of its own;
+            // finishing here would strand that event and the terminal
+            // `finish(afterDraining:)` would wait forever. `finishDrain`
+            // re-checks the queue under the same lock that clears `draining`.
+            if finishDrain(generation: generation, keepDrainingIfQueued: !Task.isCancelled) {
+                return
+            }
         }
-        finishDrain(generation: generation)
     }
 
     private func nextEvent(generation: UUID) -> ContinuousBatchSchedulerTokenEvent? {
@@ -784,7 +797,9 @@ private final class ContinuousBatchTokenDelivery: @unchecked Sendable {
         completion(false)
     }
 
-    private func finishDrain(generation: UUID) {
+    /// Returns `false` only when events were queued after the drain loop saw
+    /// an empty queue; the caller keeps draining.
+    private func finishDrain(generation: UUID, keepDrainingIfQueued: Bool) -> Bool {
         lock.lock()
         guard drainGeneration == generation else {
             let shouldReleaseDetachedCapacity = timedOut
@@ -795,7 +810,11 @@ private final class ContinuousBatchTokenDelivery: @unchecked Sendable {
             }
             lock.unlock()
             if shouldReleaseDetachedCapacity { capacity.release() }
-            return
+            return true
+        }
+        if keepDrainingIfQueued, !timedOut, !queue.isEmpty {
+            lock.unlock()
+            return false
         }
         draining = false
         drainGeneration = nil
@@ -811,6 +830,7 @@ private final class ContinuousBatchTokenDelivery: @unchecked Sendable {
         timeout?.cancel()
         if shouldRelease { capacity.release() }
         completion?(completedBeforeTimeout)
+        return true
     }
 }
 
@@ -1197,8 +1217,11 @@ actor ContinuousBatchScheduler {
         nextAdmissionSequence += 1
         pendingBindingChecks += 1
         pendingBindingTokenCount += retainedTokenCost
+        CBTrace.log(request.id, "sch_submit seq=\(admissionSequence) cur=\(currentAdmissionSequence) active=\(activeDecode.count)")
         let bindingsAreValid = await localBindingsAreValid()
+        CBTrace.log(request.id, "sch_bindings")
         await waitForAdmissionTurn(admissionSequence)
+        CBTrace.log(request.id, "sch_turn")
         pendingBindingChecks -= 1
         pendingBindingTokenCount -= retainedTokenCost
         guard bindingsAreValid else {
@@ -1230,6 +1253,7 @@ actor ContinuousBatchScheduler {
                     continuation: continuation,
                     delivery: delivery
                 )
+                CBTrace.log(request.id, "sch_enqueued waiting=\(waiting.count) active=\(activeDecode.count)")
                 finishAdmissionTurn(admissionSequence)
             }
         } onCancel: {
@@ -1636,6 +1660,7 @@ actor ContinuousBatchScheduler {
     }
 
     private func cancelWaiter(requestID: String, waiterID: UUID) async {
+        CBTrace.log(requestID, "sch_cancel_waiter")
         guard stoppingWaiterIDs.insert(waiterID).inserted else { return }
         if let delivered = deliveredRetainedOwners.removeValue(forKey: waiterID) {
             stoppingWaiterIDs.remove(waiterID)
@@ -2112,6 +2137,7 @@ actor ContinuousBatchScheduler {
         let firstVisibleIndex = row.outputTokens.count
         row.outputTokens.append(contentsOf: visibleTokens)
         activeDecode[row.request.id] = row
+        CBTrace.log(row.request.id, "sch_active")
         if !deliverVisibleTokens(
             visibleTokens,
             firstIndex: firstVisibleIndex,
@@ -2455,6 +2481,7 @@ actor ContinuousBatchScheduler {
             }
         } else {
             activeDecode[row.request.id] = row
+            CBTrace.log(row.request.id, "sch_active")
             record(.joinedDecode)
         }
     }
@@ -2576,6 +2603,7 @@ actor ContinuousBatchScheduler {
     }
 
     private func complete(requestID: String, result: ContinuousBatchSchedulerResult) {
+        CBTrace.log(requestID, "sch_complete status=\(result.terminalStatus) waiters=\(requestWaiters[requestID]?.count ?? 0) stopping=\(stoppingActiveWaiters.values.contains(where: { $0.requestID == requestID }))")
         endQueueWait(requestID: requestID)
         guard terminalResults[requestID] == nil, pendingTerminalDeliveries[requestID] == nil else { return }
         requestAdmissionSequences.removeValue(forKey: requestID)
@@ -2626,9 +2654,16 @@ actor ContinuousBatchScheduler {
     }
 
     private func finishTerminalDelivery(requestID: String, waiterID: UUID, delivered: Bool) async {
-        guard !stoppingWaiterIDs.contains(waiterID) else { return }
+        guard !stoppingWaiterIDs.contains(waiterID) else {
+            CBTrace.log(requestID, "sch_ftd_skip_stopping")
+            return
+        }
         guard var pending = pendingTerminalDeliveries[requestID],
-              pending.remainingWaiterIDs.remove(waiterID) != nil else { return }
+              pending.remainingWaiterIDs.remove(waiterID) != nil else {
+            CBTrace.log(requestID, "sch_ftd_skip_no_pending")
+            return
+        }
+        CBTrace.log(requestID, "sch_ftd delivered=\(delivered) remaining=\(pending.remainingWaiterIDs.count)")
         pending.deliveryOutcomes[waiterID] = delivered
         guard pending.remainingWaiterIDs.isEmpty else {
             pendingTerminalDeliveries[requestID] = pending
@@ -2719,6 +2754,7 @@ actor ContinuousBatchScheduler {
                 }
                 waiter.continuation.resume(returning: waiterResult)
             }
+            CBTrace.log(requestID, "sch_resumed")
         }
         while terminalResultOrder.count > configuration.terminalResultLimit {
             let evictedID = terminalResultOrder.removeFirst()

@@ -3740,6 +3740,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxContextTokens = maxContextTokens
         let stopTokenFilter = stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
+        CBTrace.log(schedulerRequestID, "rt_cb_prepare")
         let prepared = try await container.perform { context -> ContinuousBatchPreparedRequest in
             try drainCancelled.check()
             try Task.checkCancellation()
@@ -3779,11 +3780,13 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBits: batchKVBits,
             allowRetainedPagedKVHandoff: true
         )
+        CBTrace.log(schedulerRequestID, "rt_cb_lease cached=\(lease?.cachedPromptTokens ?? -1)")
         if try await serialRouteCanaryCachedHitMissingRetainedHandoff(lease, capability: capability) {
             return nil
         }
         let result: ContinuousBatchSchedulerResult
         do {
+            CBTrace.log(schedulerRequestID, "rt_cb_submit")
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
                 try await scheduler.submit(ContinuousBatchSchedulerRequest(
                     id: schedulerRequestID,
@@ -3805,8 +3808,10 @@ actor ModelRuntime: ModelRuntimeServing {
             }
             // SPEC-038 AC-25: one shared scheduler-error map, so the
             // non-streaming and streaming paths cannot drift.
+            CBTrace.log(schedulerRequestID, "rt_cb_threw \(type(of: error))")
             throw (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error
         }
+        CBTrace.log(schedulerRequestID, "rt_cb_returned status=\(result.terminalStatus)")
         do {
             try drainCancelled.check()
             try Task.checkCancellation()
@@ -4352,6 +4357,7 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try drainCancelled.check()
+        CBTrace.log(request.requestID, "rt_complete_enter")
         if let completion = try await attachedContinuousBatchCompletion(
             request: request,
             snapshot: snapshot,
@@ -4362,6 +4368,7 @@ actor ModelRuntime: ModelRuntimeServing {
         ) {
             return (completion, snapshot)
         }
+        CBTrace.log(request.requestID, "rt_serial_path")
         if speculativeCacheWrapValidated,
            let testSpeculativeCompletion,
            Self.speculativeRoute(

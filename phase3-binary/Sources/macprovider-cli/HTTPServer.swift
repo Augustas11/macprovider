@@ -431,6 +431,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     // Inactivity after the response has been written is harmless: the
     // inference task has already stopped reading the flag.
     func channelInactive(context: ChannelHandlerContext) {
+        CBTrace.log(nil, "http_channel_inactive armed=\(inflightDisconnects.count)")
         for disconnect in inflightDisconnects {
             disconnect.markDisconnected()
         }
@@ -672,6 +673,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 // catch paths fall back to the pre-snapshot for the
                 // §7.6 / AC-31 error-receipt hash inheritance
                 // (no served snapshot exists when complete() throws).
+                CBTrace.log(auditRequestID, "http_task_start")
                 let preSnapshot = await modelRuntime.currentSnapshot()
                 let fallbackHashSource = Self.resolveModelHashSource(
                     warmSwapEnabled: warmSwapEnabled,
@@ -679,6 +681,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 )
                 do {
                     let handle = try await modelRuntime.acquireRequestHandle(request)
+                    CBTrace.log(auditRequestID, "http_handle")
                     defer {
                         Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
                     }
@@ -693,8 +696,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
                     startedAt = admittedAt
                     providerRequestStarted = true
+                    CBTrace.log(auditRequestID, "http_provider_admitted")
                     await idlePrewarmer?.cancelInflightPrewarm()
+                    CBTrace.log(auditRequestID, "http_runtime_call")
                     let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, with: handle, shouldCancel: { disconnect.isDisconnected })
+                    CBTrace.log(auditRequestID, "http_runtime_returned")
                     let modelHashSource = Self.resolveModelHashSource(
                         warmSwapEnabled: warmSwapEnabled,
                         snapshot: servedSnapshot,
@@ -754,6 +760,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         writer.writeJSON(status: .ok, body: response)
                     }
 	                } catch is CancellationError {
+	                    CBTrace.log(auditRequestID, "http_catch_cancellation")
 	                    // SPEC-038 AC-25 (`:620`): the buyer closed the
 	                    // connection. A non-streaming request has emitted
 	                    // nothing buyer-visible yet, so this is always the
@@ -769,12 +776,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .preTokenCancel)
 	                    writer.writeAPIError(Self.buyerCancelledError())
 	                } catch is DrainCancelledError {
+	                    CBTrace.log(auditRequestID, "http_catch_drain")
 	                    if providerRequestStarted {
 	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
 	                    }
 	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .modelSwapViolation)
 	                    writer.writeJSON(status: .serviceUnavailable, body: Self.swapDrainTimeoutEnvelope())
 	                } catch let apiErr as APIError {
+	                    CBTrace.log(auditRequestID, "http_catch_api_error")
 	                    if providerRequestStarted {
 	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
 	                    }
@@ -808,6 +817,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         writer.writeAPIError(apiErr)
                     }
 	                } catch {
+	                    CBTrace.log(auditRequestID, "http_catch_other")
 	                    if providerRequestStarted {
 	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
 	                    }

@@ -995,6 +995,54 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(decodeCalls, 1)
     }
 
+    /// Studio soak 2026-09-24: ~1 in 400 non-streaming batched requests never
+    /// returned. The drain task saw an empty queue and released the lock before
+    /// clearing `draining`; an `offer()` in that gap appended a token and
+    /// started no drain, so the terminal `finish(afterDraining:)` waited on a
+    /// drain that would never run, and the timeout could not fire because
+    /// `drainGeneration` was already nil. The seam lands the offer in that gap
+    /// deterministically.
+    func testOfferRacingDrainExitIsDeliveredAndTerminalCompletes() async throws {
+        let delivered = DeliveredTokenLog()
+        let delivery = ContinuousBatchTokenDelivery(
+            bufferLimit: 16,
+            timeoutNanoseconds: 60_000_000_000,
+            capacity: ContinuousBatchTokenDeliveryCapacity(limit: 4),
+            sink: { event in delivered.append(event.token) }
+        )
+        let raced = DeliveredTokenLog()
+        delivery.afterDrainSawEmptyQueueForTest = { [delivery] in
+            guard raced.isEmpty else { return }
+            raced.append(1)
+            XCTAssertTrue(delivery.offer(Self.deliveryEvent(token: 1)))
+        }
+
+        XCTAssertTrue(delivery.offer(Self.deliveryEvent(token: 0)))
+        try await eventually { raced.isEmpty == false }
+
+        // An expectation, not a task-group race: a stranded completion never
+        // resumes, and a task group would wait on it forever.
+        let terminal = expectation(description: "terminal drain completion fires")
+        let outcome = DeliveredTokenLog()
+        delivery.finish(afterDraining: { completedBeforeTimeout in
+            outcome.append(completedBeforeTimeout ? 1 : 0)
+            terminal.fulfill()
+        })
+        await fulfillment(of: [terminal], timeout: 2)
+        XCTAssertEqual(outcome.tokens, [1], "the terminal drain completion must fire before its timeout")
+        XCTAssertEqual(delivered.tokens, [0, 1], "the racing offer must be delivered, in order")
+    }
+
+    private static func deliveryEvent(token: Int) -> ContinuousBatchSchedulerTokenEvent {
+        ContinuousBatchSchedulerTokenEvent(
+            requestID: "race",
+            tokenIndex: token,
+            token: token,
+            replayTokens: nil,
+            snapshot: ContinuousBatchSchedulerSnapshot(modelID: "m", modelSHA256: "h", weightsGeneration: 0)
+        )
+    }
+
     func testDuplicateSuccessfulWaitersHaveExactlyOneSettlementOwner() async throws {
         let decodeGate = AsyncGate()
         let backend = ScriptedBackend(scripts: ["settlement": [7]], decodeGate: decodeGate)
@@ -3964,4 +4012,23 @@ private func eventually(
         try await Task.sleep(nanoseconds: 10_000_000)
     }
     XCTFail("condition was not met before timeout", file: file, line: line)
+}
+
+private final class DeliveredTokenLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Int] = []
+
+    func append(_ value: Int) {
+        lock.lock()
+        values.append(value)
+        lock.unlock()
+    }
+
+    var tokens: [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
+
+    var isEmpty: Bool { tokens.isEmpty }
 }

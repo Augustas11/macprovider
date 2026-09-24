@@ -457,3 +457,15 @@ enum ContinuousBatchingPolicy {
         return bounded.isEmpty ? "unrecognized_prefill_error" : bounded
     }
 }
+
+/// Lab-only request lifecycle trace, on only with `MACPROVIDER_CB_TRACE=1`.
+/// Request ids and stage names only; never prompt or completion content.
+enum CBTrace {
+    static let enabled = ProcessInfo.processInfo.environment["MACPROVIDER_CB_TRACE"] == "1"
+
+    static func log(_ requestID: String?, _ event: @autoclosure () -> String) {
+        guard enabled else { return }
+        let ms = DispatchTime.now().uptimeNanoseconds / 1_000_000
+        FileHandle.standardError.write(Data("cbtrace t=\(ms) rid=\(requestID ?? "-") ev=\(event())\n".utf8))
+    }
+}
