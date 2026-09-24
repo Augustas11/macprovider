@@ -29,9 +29,8 @@ row mismatched.
 - For every row, the unsigned artifact source (`autotune-artifacts-source.json`)
   equals the signed `model_sha256`. The 8 bad values are therefore in the
   source as well as in the signed feed.
-- A corrected unsigned source value for GLM-4.5-Air is ready in
-  `glm-4.5-air-artifact-source.patch` (not applied; see below). The other 7
-  rows need the same correction in the #1735 catalog cut.
+- Corrected unsigned source values for all 8 rows are ready in
+  `catalog-artifact-source-corrections.patch` (not applied; see below).
 
 **Provenance:** every value comes from `sweep.json`, the machine output of
 the run below, committed beside this report. The earlier revision of this
@@ -124,25 +123,63 @@ The signed `350c018e…` matches neither.
    It exited `1`, with 8 `MISMATCH` rows, 9 `MATCH` rows and 0 `ERROR` rows.
    The operator committed its `--json-out` as `sweep.json` (commit `565917e`).
 
-## Prepared GLM-4.5-Air source correction (unsigned, not applied)
+## Prepared source corrections for all 8 rows (unsigned, not applied)
 
-`glm-4.5-air-artifact-source.patch` changes the `z-ai/glm-4.5-air` primary
-artifact `hash` in `phase3-binary/catalog/autotune/autotune-artifacts-source.json`
-from `350c018e…d57d` to `7fbf8e5005fbdadbf1d345a04b7d283ad20aec959ee001bc4b0dc902ea7f11ed`.
+`catalog-artifact-source-corrections.patch` changes the primary-artifact
+`hash` of every MISMATCH row in
+`phase3-binary/catalog/autotune/autotune-artifacts-source.json` to its value
+in `sweep.json`. It changes nothing else: not `hash_algorithm`, not
+`source_ref` (repo and revision are unchanged), and not notes or
+`verified_at`. It replaces the earlier GLM-only patch.
 
-It is committed as a patch and not applied to the tree, for this reason:
-`catalog-release.py` requires every source primary-artifact hash to equal the
-signed candidate row's `model_sha256` ("primary artifact hash does not equal the
-candidate model_sha256"). Applied alone, it fails 53 tests in
-`scripts.tests.test_catalog_artifact_feed`. It has to land in the same catalog
-cut that changes `model_sha256` in `catalog/autotune/autotune-candidates.json`.
-That cut also regenerates the generated/static outputs, re-signs the static
-feeds, appends the ledger row, and updates the Tier-2 binding. All of those are
-signing-lane work (#1735 fix step 2) and are out of scope here. The same cut
-should also refresh the row's provenance note, which still cites
-`snapshot-manifest 350c018e8a33`.
+| Row | Current source/signed `hash` | Corrected `hash` (from `sweep.json`) |
+|---|---|---|
+| `google-gemma-4-26b-a4b-it` | `436ce68d2ac5a27dde3b54569736fb7a69dc3b7a175d2f633147c7802b3bc88a` | `b245e39f1476907653e3fe1897bba36b0e2a90c471828a9e13b5fdf3e1b6db01` |
+| `openai/gpt-oss-120b` | `5003c9196bd6664b22227d687472ba2eb50c2c4daa224b36c230edbbe36b18fb` | `c8b99b694c6730ebcb86a8b2277f8c441c99c6275d4bedf9d3913b7e9d2b6156` |
+| `qwen/qwen3-30b-a3b-instruct-2507` | `6ed599e763ccfcf2731b2c383e81e6638375f62359ccb8bf730e1f17f583e3e7` | `a0ca3d59f301f08ae4c4c2010b07f80b890d35f4e8562c213b1d01aed8328e42` |
+| `qwen/qwen3.5-27b` | `01b20ff61b8f635d25515287bd6d2ac26877eab0de2fb2056b3d8b314ab4e2a3` | `7777cf15fbd096d66ccec5f0f76ec915eb4800f4f3e8dd899d1b4ae3041387ae` |
+| `qwen/qwen3.5-35b-a3b` | `58f00ca2bc7bb007b69145143d8a3fee90a3e5839a5a06e6443e8a7ef3906ad2` | `893c5fd5a4f6adf19a97faeff19d67f2b7a5d8c29e81cd857bd5949ce0b31e43` |
+| `qwen/qwen3.6-35b-a3b` | `c4d82befa782da05bea1bdc4000ab9422a7173d9cd96bab739374d28d9ad4827` | `3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1` |
+| `qwen/qwen3.8-27b` | `1a955b957b75d2e3264bd914600048cc8047b7cfc08117e82fa4c8272e7e8086` | `8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05` |
+| `z-ai/glm-4.5-air` | `350c018e8a3397a753bcb7c22c839a5c5a24041e6dee014bb42c2d766d6db57d` | `7fbf8e5005fbdadbf1d345a04b7d283ad20aec959ee001bc4b0dc902ea7f11ed` |
 
-`git apply --check` passes against this branch's base.
+Checks made while generating the patch:
+
+- For each row, the current source `hash` equals the signed `model_sha256`.
+- `source_ref.repo_id` and `source_ref.revision` equal the swept repo and
+  revision.
+- The algorithm is `macprovider.snapshot-manifest.v1`.
+- Every corrected value is 64 lowercase hex characters, the 8 values are
+  distinct, and none collides with any existing artifact hash in the source.
+  This is the uniqueness rule for `(hash_algorithm, hash)`.
+- `git apply --check` passes against this branch.
+
+**Why it is not applied:** `catalog-release.py` requires each source
+primary-artifact hash to equal the signed candidate row's `model_sha256`
+("primary artifact hash does not equal the candidate model_sha256"). Applying
+only the GLM change broke 53 tests in `scripts.tests.test_catalog_artifact_feed`.
+The patch must land in the same catalog cut that changes `model_sha256` for
+these 8 rows in `catalog/autotune/autotune-candidates.json` (#1735 fix step 2).
+
+The same cut must also update every other place that carries the old values.
+This command lists them, audits excluded:
+`git grep -l <old hash> -- ':!audits/'`
+
+| File | Old hashes present | Notes |
+|---|---|---|
+| `phase3-binary/catalog/autotune/autotune-candidates.json` | 8 | Signed candidate body |
+| `phase3-binary/dist/static/autotune-candidates.json` (+ `.sig`) | 8 | Signed static feed; re-sign |
+| `phase3-binary/Sources/macprovider-cli/AutotuneCatalog.generated.swift` | 8 | Regenerate |
+| `phase3-binary/catalog/autotune/tier2-identity-binding.json` | 8 | Tier-2 binding (#1692) |
+| `phase3-binary/catalog/autotune/tier2-catalog.json` | 8 | Tier-2 catalog |
+| `release.json`, `release-ledger.json` | n/a | New release id and append-only ledger row |
+| `scripts/tests/fixtures/openrouter_pricing/recommendable-catalog.json` | 1 | Test fixture; check whether it mirrors live |
+| `phase3-binary/catalog/autotune/testdata/published-2026-07-10-…json`, `tier2-llama-conflict-template.json` | 1 each | Historical fixtures; probably leave |
+| `beta/catalog-expansion/P1-gemma4-catalog-rollout.md` | 1 | Narrative doc |
+| `scripts/tests/test_catalog_hash_sweep.py` | 1 | Uses the old GLM value as a sample mismatch; leave |
+
+Each row's provenance `notes` (for example, GLM's `snapshot-manifest
+350c018e8a33`) should be refreshed in the same cut.
 
 ## Scope guard
 
