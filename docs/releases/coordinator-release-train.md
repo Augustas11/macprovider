@@ -76,22 +76,24 @@ Probed 2026-09-24 (`/healthz` and read-only host checks).
 
 | Field | Value |
 |---|---|
-| Coordinator | **v1.8.188** @ `57022da8` (#1711), running since 2026-09-23 16:30Z |
-| Gateway | **v1.8.188** |
-| Release | [Pearl runtime v1.8.188](https://github.com/Augustas11/macprovider/releases/tag/v1.8.188), 2026-09-23 16:24Z |
+| Coordinator | **v1.8.190** @ `0a63ddab`, live and healthy on 2026-09-24 |
+| Gateway | **v1.8.190** |
+| Release | [Pearl runtime v1.8.190](https://github.com/Augustas11/macprovider/releases/tag/v1.8.190), 2026-09-24 01:19Z |
 | `recommended_binary_version` | 1.8.123 (CLI train owns this) |
-| Includes | Everything on `main` through #1711, including #1706 (content lane code), #1703 and #1702 |
+| Includes | Everything on `main` through the v1.8.190 tag, including #1714, #1715, #1688 follow-up, and #1718 |
 
 Signed prerelease `v1.8.189` at `0ac51afa` exists and is immutable, but it was
 **not applied**. Its full deploy failed closed before any Pearl mutation because
 repository-level catalog verification was invoked from a history-free bounded
-archive (#1717). #1718 fixed that deploy boundary on `main`; the replacement
-runtime cut is reserved as `v1.8.190`.
+archive (#1717). #1718 fixed that deploy boundary; replacement runtime
+`v1.8.190` was signed and applied successfully. The next runtime tag is reserved
+as `v1.8.191` for the post-v1.8.190 changes listed below.
 
 ### Recent coordinator releases
 
 | Tag | Commit | Head PR |
 |---|---|---|
+| v1.8.190 | `0a63ddab` | #1718 deploy-boundary replacement; also includes #1714/#1715 and the feed-bundle fix |
 | v1.8.188 | `57022da8` | #1711 WAL maintenance no longer starves completed buyer work |
 | v1.8.187 | `afbee248` | #1710 recover held settlements after transient finality failures |
 | v1.8.185 | `a89bef31` | #1704 receipt verification off the contended money writer |
@@ -122,14 +124,13 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 16:00 UTC), or earlier with a manual dispatch of
 `renew-autotune-static-feed-signed.yml`.
 
-## Next coordinator release — net changes vs v1.8.188
+## Next coordinator release — net changes vs v1.8.190
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
-| Keep unchanged catalog rows admitted across catalog publishes (SPEC-023 v0.15.1 R010: `.row-continuity-target` evidence, `row_continuity` admission, re-check on every publication). Also changes `dist/deploy-pearl-vps.sh`, `scripts/lib/autotune-activate.sh`, `scripts/catalog-content-release.sh` and `scripts/autotune_window.py`, so **needs a full deploy**, not a binary swap. Post-apply step: Open Pearl action 4 | merged `3abf42a8` | #1714 (#1705) |
-| Preserve served buyer success through transient receipt persistence pressure: bounded in-memory receipt retry, explicit pending coordinator authority, durable deadline closure, and gateway rechecks for held settlement. Requires a signed coordinator/gateway release and fresh Studio buyer soak before acceptance. Cut owner: Studio settlement recovery. `v1.8.189` was signed but its deploy failed closed before mutation; replacement tag `v1.8.190` is reserved. | merged `8056224f` | #1715 (#1680) |
-| Feed renewal ships the whole catalog verifier bundle to Pearl. It was fixed because the 2026-09-23 renewal aborted when ssh swallowed the bundle manifest in `aa_install_helpers`. This is renewal tooling that runs from `main`: it needs **no coordinator release** and takes effect at the next renewal. It is not in `v1.8.189`, whose tag predates it; the `v1.8.190` full deploy will also install these current assets. Regression test: `scripts/test-autotune-install-helpers.sh` | merged `314d3fbc` | #1688 follow-up |
-| Run repository-level catalog verification from a complete archive of the signed release commit, with isolated Python, replacement objects disabled, and ledger evolution pinned to the signed commit's parent. The bounded verifier bundle remains the authority for staged and remote `verify-directory`. This closes the fail-closed `v1.8.189` deploy blocker and therefore requires the replacement full deploy. | merged `248368f9` | #1718 (#1717) |
+| Stop buyer-facing disclosure from naming internal hosts and specification identifiers in gateway responses and pages. | merged `761e5f0c` | #1720 |
+| Wait for coordinator readiness before the deploy rollback boundary, so a slow healthy restart does not trigger an unnecessary rollback. This changes the full-deploy tooling. | merged `b401e9af` | #1722 |
+| Recover every persisted settlement-hold path promptly through the authenticated, request-scoped reconciler. This closes the live non-stream pending-finality hold reproduced during the Studio soak; requires a signed runtime and a fresh strict-pinned settlement-complete rerun. Cut owner: Studio settlement recovery. **Reserved tag: `v1.8.191`.** | merged `258c78c2` | #1728 (#1727/#1680) |
 | Node operator status, safe context changes, model diagnostics | in progress | #1713 (#1689) |
 | Build 1 Lane A orchestrated PR | in progress | #1658 (#1642) |
 | Pricing corrections through the catalog-content lane (SPEC-005-R013, SPEC-023-R018, SPEC-006-R008 amended). Coordinator: request billing table and served signed rate card switch under one economics lock (release lock → economics lock → feed lock), prices resolved once before the billing write context; `--validate-autotune-release` gains `--expect-base-equivalent` and `--resolve-model-names` plus `rate_table_sha256` / `signed_rate_card_sha256` verdict fields; applied-config record gains `rate_table_sha256`, `signed_rate_card_sha256`, `autotune_release_id`, `billing_snapshot_id`. **Wholesale statements change**: each request is priced at the generation it was recorded under (uncapped aggregate math), so a model-month above 10M tokens is no longer zeroed — affected partner statements go **up**; a period with no billing snapshot now fails closed. Lane tooling that deploy ships: `scripts/catalog-release.py` (splice / extract / effective-price diff / gate), new `acknowledged-pricing-moves.json`; still to land in the same PR: journal + pre-start recovery + post-start closer units, the one-writer guard on every live-config writer, lane preflight/evidence/rollback. **Enabling rollout is two steps from the same tag, in order**: (1) reinstall the Pearl updater bundle (`install-pearl-updater.sh`: guard-bearing updater, Tier-2 watchdog, Python guard module), then (2) a full `deploy-pearl-vps.sh` (new units, recovery helper, shell guard, verifier bundle) — never a binary swap. Pricing preflight hashes every installed writer against the commit, so a deploy without step 1 stays NO_GO. Procedure: `catalog-release-decision-tree.md` §Enabling rollout. Afterwards rows-only pricing needs no coordinator release. Plan (approved 0C/0H/0M): [#1693 comment](https://github.com/Augustas11/macprovider/issues/1693#issuecomment-5800624020) | in progress (branch `feat/1693-pricing-content-lane`, PR not yet open) | #1693 |

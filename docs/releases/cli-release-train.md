@@ -36,10 +36,11 @@ binary the Mac runs.
   in-scope change.
 
 Pearl runtime `v1.8.189` was consumed by the signed but unapplied #1715
-settlement-finality cut. Its deploy failed closed before Pearl mutation; the
-replacement Pearl runtime tag `v1.8.190` is reserved for #1715 + #1718. Neither
-tag is a provider CLI candidate, and neither changes `binaryVersion` or the
-fleet recommendation from 1.8.123.
+settlement-finality cut. Its deploy failed closed before Pearl mutation. The
+replacement Pearl runtime `v1.8.190` is live, and `v1.8.191` is reserved for
+the next Pearl runtime carrying #1728. None of these tags is a provider CLI
+candidate, and none changes `binaryVersion` or the fleet recommendation from
+1.8.123.
 
 ## Current promoted stable
 
@@ -51,17 +52,13 @@ fleet recommendation from 1.8.123.
 
 ## Next CLI — net changes vs 1.8.123
 
-Candidates through `v1.8.176` are old or off-train for promotion. The current
-Studio serving canary is private candidate **181** at `32ea1bd0` (includes
-#1687); its reported `binaryVersion` remains **1.8.123**. Candidate 181 is not
-a public stable tag and must not be promoted to the fleet. Signed private
-candidate **182** at `710255f4` includes #1692 and is staged, not installed;
-the same source is the live coordinator/catalog `v1.8.182` release. Tags
-`v1.8.183` through `v1.8.185` were consumed by the #1699/#1704 Pearl
-money-path releases, so the next provider acceptance candidate is
-**`v1.8.186`**. #1700 landed at `d0aa3556` on top of those fixes; cut the
-candidate from that current-main lineage. Fleet recommendation stays at
-**1.8.123**.
+Candidates through `v1.8.176` are old or off-train for promotion. The Studio
+serving canary is signed private candidate **186**, which includes #1700 and
+still reports `binaryVersion` **1.8.123**. It replaced private candidate 181
+only on the Studio; it is not a public stable tag and must not be promoted to
+the fleet. Pearl runtime tags `v1.8.189` and `v1.8.190` are already consumed,
+and `v1.8.191` is reserved for the next coordinator/gateway runtime. Fleet
+recommendation stays at **1.8.123**.
 
 
 | Net change in CLI / Malibu / installer | Status | PR |
@@ -120,11 +117,10 @@ candidate from that current-main lineage. Fleet recommendation stays at
 #1453 closes when a candidate that includes the **merged** rows is promoted to
 the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
 
-Coordinator/gateway on live Pearl is **v1.8.182** @ `710255f4`, including the
-signed Tier-2 identity/catalog update from #1692. Fleet Macs and the coordinator
-recommendation remain on provider binary **1.8.123**. The Studio serves private
-candidate 181 at `32ea1bd0`; a newer candidate is staged but not installed.
-Do not promote the fleet from this campaign.
+Coordinator/gateway on live Pearl is **v1.8.190** @ `0a63ddab`. Fleet Macs and
+the coordinator recommendation remain on provider binary **1.8.123**. The
+Studio serves signed private candidate **186**; do not promote the fleet from
+this campaign.
 
 #1632 / #1638 / #1639 / #1653 (coordinator leftover rewrite + gateway R014)
 are coordinator/gateway, not CLI rows. #1653 also has the CLI
@@ -173,14 +169,14 @@ and silently never matching.
 
 | Field | Value |
 |---|---|
-| Last built candidate | Signed private candidate **182** @ `710255f4`, [run 35819108150](https://github.com/Augustas11/macprovider/actions/runs/35819108150). It includes #1692, reports `binaryVersion` 1.8.123, and is staged but not installed. |
-| Mac Studio serving canary | Private candidate **181** @ `32ea1bd0` — live and coordinator-connected. A newer candidate is staged but not installed. |
+| Last built candidate | Signed private candidate **186**, including #1700; it reports `binaryVersion` 1.8.123 and is installed only on the Studio. |
+| Mac Studio serving canary | Signed private candidate **186** — live, coordinator-connected, serving Qwen3.6-27B with the expected catalog hash, context 200000, and eight advertised seats. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
-| Status | **Do not promote.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 181 remains the serving canary until a reviewed, signed successor passes the hardware campaign. |
-| Next candidate | **v1.8.186, not cut.** #1699, #1704, and #1700 are on `main`; cut from the current tip. Candidate identity must not bump `binaryVersion`; it stays 1.8.123. |
-| Merged on `main`, not in serving 181 | #1692 (Tier-2 identity/catalog bindings; included in staged 182), #1700 (template-capability-driven no-thinking final answers), #1714 (in-process catalog envelope refresh + "Catalog refresh needed" status, #1705). |
-| Why the next cut | Combine #1687, #1692, #1699, #1704, and #1700 so the same signed Studio candidate can prove answer quality, eight-seat buyer routing, and complete settlement. |
+| Status | **Do not promote.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 186 is the Studio-only serving canary while the settlement-complete rerun finishes. |
+| Next candidate | No provider candidate is reserved. `v1.8.191` belongs to the Pearl runtime train. Any later Studio successor must keep `binaryVersion` 1.8.123 unless the fleet is explicitly promoted. |
+| Merged after candidate 186 | #1714 in-process catalog envelope refresh; coordinator/gateway settlement recovery continues separately through #1728. |
+| Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build. |
 
 ## E2E tracks (independent gates)
 
@@ -270,10 +266,14 @@ combined candidate**.
   `enable_thinking` capability, not a family-name guess. This proves local HTTP
   rendering only; it does not satisfy buyer routing, billing, receipt, or
   settlement gates.
-- **Status:** #1699, #1704, and #1700 are merged; #1700 passed required CI,
-  three-lane freeze audit, and local hardware proof. Cut signed candidate
-  **v1.8.186** and run the full live gate. Keep fleet recommendation
-  and `binaryVersion` at 1.8.123.
+- **Status:** signed Studio candidate **186** is live. Answer quality passed;
+  the strict-pinned buyer soak reached **99/100 at concurrency 4** and **16/16
+  at concurrency 8**, with all successful replies free of thinking text and
+  eight seats observed in flight. Durable evidence was **113/116 complete**;
+  the three incomplete settlements keep this track open. #1728 is merged and
+  reserved for Pearl runtime `v1.8.191`; after that runtime is live, rerun the
+  full settlement gate. Keep fleet recommendation and `binaryVersion` at
+  1.8.123.
 
 ## Promotion gate (checklist)
 
