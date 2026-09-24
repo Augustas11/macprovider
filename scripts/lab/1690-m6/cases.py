@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""Run the #1690 M6 cases against a rig that `rig.sh up` started.
+
+  cases.py [--only CASE ...] [--spoof-binary PATH]
+
+Each case prints PASS or FAIL lines with the observed values and writes its
+sanitized captures to LAB/captures/. Cases: paid, omitted_usage, global,
+fail_closed_pools, spoof, disputed, generation_bump, concurrency, reconcile.
+`spoof` needs a lab-only CLI that honours LAB_SPOOF_RUNTIME_SOURCE (see the
+evidence doc); it is skipped without --spoof-binary. It restarts serve for the
+spoof runs and restores the normal lab CLI afterwards.
+"""
+import argparse
+import json
+import os
+import pathlib
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.request
+
+LAB = pathlib.Path(os.environ.get("LAB", "/Users/a1/lab-1690-m6"))
+HERE = pathlib.Path(__file__).resolve().parent
+CAPTURES = LAB / "captures"
+RESULTS = []
+
+
+def secret(name):
+    return json.loads((LAB / "keys" / "secrets.json").read_text())[name]
+
+
+def check(case, ok, what, observed):
+    line = f"{'PASS' if ok else 'FAIL'} [{case}] {what}: {observed}"
+    RESULTS.append(line)
+    print(line, flush=True)
+
+
+def buyer(*args):
+    out = subprocess.run([sys.executable, str(HERE / "buyer.py"), *args], check=True, capture_output=True, text=True).stdout
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+def db():
+    return sqlite3.connect(f"file:{LAB / 'db' / 'coordinator.db'}?mode=ro", uri=True)
+
+
+def snapshots_count():
+    return db().execute("SELECT COUNT(*) FROM settlement_route_snapshots").fetchone()[0]
+
+
+def upstream_lines():
+    path = LAB / "logs" / "upstream-usage.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def last_attempts(n):
+    """The last n requests' settlement rows, newest last."""
+    con = db()
+    ids = [r[0] for r in con.execute("SELECT request_id FROM settlement_route_snapshots ORDER BY id DESC LIMIT ?", (n,))][::-1]
+    out = []
+    for rid in ids:
+        snap = json.loads(con.execute("SELECT route_snapshot_json FROM settlement_route_snapshots WHERE request_id = ? ORDER BY id DESC LIMIT 1", (rid,)).fetchone()[0])
+        sao = con.execute("SELECT usage_source, usage_canonical_json, terminal_state FROM settlement_attempt_outputs WHERE request_id = ? ORDER BY id DESC LIMIT 1", (rid,)).fetchone()
+        ver = con.execute("SELECT receipt_version, receipt_result, settlement_outcome, reason, pool_label_status FROM settlement_receipt_verdicts WHERE request_id = ? ORDER BY id DESC LIMIT 1", (rid,)).fetchone()
+        led = con.execute("SELECT usage_source, prompt_tokens, completion_tokens, provider_credits, quarantined, quarantine_reason FROM ledger_request_credits WHERE request_id = ? ORDER BY id DESC LIMIT 1", (rid,)).fetchone()
+        usage = json.loads(sao[1]) if sao else {}
+        out.append({
+            "request_id": rid,
+            "snapshot": {k: snap.get(k) for k in ("pool_id", "manifest_version", "manifest_core_digest", "runtime_source", "pool_generation", "pool_operator_account_id", "route_snapshot_mode")},
+            "usage_source": sao[0] if sao else None, "terminal_state": sao[2] if sao else None,
+            "billable": (usage.get("billable_input_tokens"), usage.get("billable_output_tokens")),
+            "receipt_version": ver[0] if ver else None, "receipt_result": ver[1] if ver else None,
+            "settlement_outcome": ver[2] if ver else None, "reason": ver[3] if ver else None, "pool_label_status": ver[4] if ver else None,
+            "ledger": dict(zip(("usage_source", "prompt_tokens", "completion_tokens", "provider_credits", "quarantined", "quarantine_reason"), led)) if led else None,
+        })
+    return out
+
+
+def finality(request_id):
+    req = urllib.request.Request(f"http://127.0.0.1:19102/internal/settlement/finality?account_id=acct-lab-1690-buyer&request_id={request_id}",
+                                 headers={"Authorization": f"Bearer {secret('gateway_service_token')}"})
+    return json.load(urllib.request.urlopen(req))
+
+
+def save(name, doc):
+    CAPTURES.mkdir(parents=True, exist_ok=True)
+    (CAPTURES / f"{name}.json").write_text(json.dumps(doc, indent=2, sort_keys=True))
+
+
+def pool(name, *args):
+    subprocess.run([sys.executable, str(HERE / "pool_setup.py"), *args], check=True, capture_output=True, text=True)
+
+
+def ensure_pool(name, *create_args):
+    if not (LAB / "pools" / name / "pool_id").exists():
+        pool(name, "create", name, *create_args)
+
+
+def wait_settled(n, timeout=20):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        rows = last_attempts(n)
+        if all(r["settlement_outcome"] for r in rows):
+            return rows
+        time.sleep(1)
+    return last_attempts(n)
+
+
+def case_paid():
+    before = len(upstream_lines())
+    served = buyer("--pool", "A", "--n", "2") + buyer("--pool", "A", "--stream", "--n", "2")
+    rows = wait_settled(4)
+    upstream = upstream_lines()[before:]
+    save("paid", {"buyer": served, "attempts": rows, "upstream": upstream, "finality": [finality(r["request_id"]) for r in rows]})
+    for r in rows:
+        s = r["snapshot"]
+        check("paid", s["pool_id"] and s["runtime_source"] == "llamacpp_loopback" and s["pool_generation"] and s["pool_operator_account_id"],
+              "route snapshot R012 labels", s)
+        check("paid", r["receipt_version"] == "4" and r["receipt_result"] == "valid" and r["settlement_outcome"] == "verified",
+              "CLI v0.4 receipt verified", (r["receipt_version"], r["receipt_result"], r["settlement_outcome"], r["pool_label_status"]))
+        check("paid", r["usage_source"] == "pool_operator_attested" and (r["ledger"] or {}).get("provider_credits", 0) > 0,
+              "attested usage and ledger credit", (r["usage_source"], r["billable"], r["ledger"]))
+        f = finality(r["request_id"])
+        check("paid", f.get("token_source") == "pool_operator_attested", "finality token_source", f.get("token_source"))
+    up = sorted((u["usage"]["prompt_tokens"], u["usage"]["completion_tokens"]) for u in upstream if u.get("usage"))
+    attested = sorted(r["billable"] for r in rows)
+    check("paid", [tuple(x) for x in attested] == up, "attested usage == llama-server usage", {"attested": attested, "upstream": up})
+    check("paid", all(x["status"] == 200 for x in served) and all(x.get("stream_intact", True) is not False for x in served),
+          "stream and non-stream served", [(x["stream"], x["status"], x.get("finish_reason")) for x in served])
+
+
+def case_omitted_usage():
+    flag = LAB / "run" / "strip-usage"
+    flag.touch()
+    try:
+        served = buyer("--pool", "A", "--n", "1") + buyer("--pool", "A", "--stream", "--n", "1")
+    finally:
+        flag.unlink()
+    rows = last_attempts(2)
+    save("omitted_usage", {"buyer": served, "attempts": rows})
+    for r in rows:
+        check("omitted_usage", r["usage_source"] != "pool_operator_attested" and r["billable"] == (0, 0)
+              and (r["ledger"] or {}).get("provider_credits", 0) == 0,
+              "upstream without usage is not billable", (r["usage_source"], r["billable"], r["terminal_state"], r["reason"], r["ledger"]))
+
+
+def case_global():
+    before, snaps = len(upstream_lines()), snapshots_count()
+    served = buyer("--n", "1") + buyer("--stream", "--n", "1")
+    save("global", {"buyer": served})
+    check("global", all(x["status"] == 503 for x in served) and len(upstream_lines()) == before and snapshots_count() == snaps,
+          "member on a global route gets no paid routing", [(x["status"], x.get("error")) for x in served])
+
+
+def case_fail_closed_pools():
+    ensure_pool("B", "--encoding", "1")
+    ensure_pool("C", "--encoding", "2", "--runtime-allowlist", "ollama_loopback")
+    ensure_pool("E", "--encoding", "2")
+    time.sleep(2)
+    before, snaps = len(upstream_lines()), snapshots_count()
+    served = []
+    for p in ("B", "C", "E"):
+        served += buyer("--pool", p, "--n", "1") + buyer("--pool", p, "--stream", "--n", "1")
+    save("fail_closed_pools", {"buyer": served})
+    check("fail_closed_pools", all(x["status"] == 503 for x in served) and len(upstream_lines()) == before and snapshots_count() == snaps,
+          "v1 core / runtime not allowlisted / empty v2 allowlist fail closed", [(x["pool"], x["status"], x.get("error")) for x in served])
+
+
+def serve_restart(binary, env=None):
+    e = dict(os.environ, **(env or {}))
+    subprocess.run([str(HERE / "serve.sh"), "start", binary], check=True, env=e, capture_output=True, text=True)
+    time.sleep(2)
+
+
+def poolz():
+    req = urllib.request.Request("http://127.0.0.1:19102/poolz", headers={"Authorization": f"Bearer {secret('operator_key')}"})
+    return json.load(urllib.request.urlopen(req))["pool"]
+
+
+def case_spoof(spoof_binary):
+    if not spoof_binary:
+        check("spoof", True, "skipped", "no --spoof-binary")
+        return
+    ensure_pool("C", "--encoding", "2", "--runtime-allowlist", "ollama_loopback")
+    try:
+        for spoof in ("ollama_loopback", "none"):
+            serve_restart(spoof_binary, {"LAB_SPOOF_RUNTIME_SOURCE": spoof})
+            session = [{k: p.get(k) for k in ("runtime_source", "hash_status", "catalog_admission_mode")} for p in poolz()]
+            before, snaps = len(upstream_lines()), snapshots_count()
+            served = buyer("--pool", "A", "--n", "1") + buyer("--pool", "C", "--n", "1") + buyer("--n", "1")
+            save(f"spoof_{spoof}", {"session": session, "buyer": served})
+            check("spoof", all(x["status"] == 503 for x in served) and len(upstream_lines()) == before and snapshots_count() == snaps,
+                  f"hello runtime_source={spoof} vs signed offer llamacpp_loopback drops the session", {"session": session, "status": [x["status"] for x in served]})
+    finally:
+        serve_restart(str(LAB / "bin" / "macprovider-cli-lab"))
+
+
+def inflight_then(pool_name, action):
+    flag = LAB / "run" / "slow-stream"
+    flag.touch()
+    proc = subprocess.Popen([sys.executable, str(HERE / "buyer.py"), "--pool", pool_name, "--stream", "--n", "1", "--max-tokens", "300"],
+                            stdout=subprocess.PIPE, text=True)
+    try:
+        time.sleep(4)
+        action()
+        out = proc.communicate(timeout=300)[0]
+    finally:
+        if flag.exists():
+            flag.unlink()
+    return [json.loads(line) for line in out.splitlines() if line.strip()]
+
+
+def case_disputed():
+    ensure_pool("F", "--encoding", "2", "--runtime-allowlist", "llamacpp_loopback")
+    served = inflight_then("F", lambda: pool("F", "manifest", "F", "--encoding", "2", "--runtime-allowlist", "llamacpp_loopback"))
+    time.sleep(3)
+    rows = last_attempts(1)
+    save("disputed", {"buyer": served, "attempts": rows, "finality": finality(rows[0]["request_id"])})
+    r = rows[0]
+    check("disputed", r["pool_label_status"] == "label_disputed" and r["usage_source"] == "byte_estimated" and r["billable"] == (0, 0)
+          and (r["ledger"] or {}).get("provider_credits", 0) == 0,
+          "manifest bumped mid-flight -> byte_estimated, zero billable", (r["snapshot"]["manifest_version"], r["pool_label_status"], r["usage_source"], r["settlement_outcome"], r["ledger"]))
+
+
+def case_generation_bump():
+    served = inflight_then("A", lambda: pool("A", "event", "A", "member_admitted", "--provider-id", f"lab-dummy-{int(time.time())}"))
+    time.sleep(3)
+    rows = last_attempts(1)
+    save("generation_bump", {"buyer": served, "attempts": rows})
+    r = rows[0]
+    check("generation_bump", r["usage_source"] == "pool_operator_attested" and r["pool_label_status"] == "verified",
+          "membership change (generation bump, same manifest) mid-flight stays attested", (r["snapshot"]["pool_generation"], r["pool_label_status"], r["usage_source"]))
+
+
+def case_concurrency():
+    before = len(upstream_lines())
+    served = []
+    for _ in range(3):
+        served += buyer("--pool", "A", "--stream", "--n", "4", "--concurrency", "4", "--max-tokens", "300")
+    upstream = upstream_lines()[before:]
+    b = sorted((x["content_sha256"], x["usage"]["prompt_tokens"], x["usage"]["completion_tokens"]) for x in served if x["status"] == 200)
+    u = sorted((x["content_sha256"], x["usage"]["prompt_tokens"], x["usage"]["completion_tokens"]) for x in upstream if x.get("usage"))
+    rows = wait_settled(len(served))
+    save("concurrency", {"buyer": served, "upstream": upstream, "attempts": rows})
+    check("concurrency", len(served) == 12 and all(x["status"] == 200 and x["stream_intact"] for x in served),
+          "12 streams (4 concurrent) complete", sum(1 for x in served if x["status"] == 200))
+    check("concurrency", b == u, "buyer content+usage == llama-server content+usage", f"{len(b)} of {len(u)} match" if b == u else {"buyer": b, "upstream": u})
+    check("concurrency", all(r["usage_source"] == "pool_operator_attested" and r["receipt_result"] == "valid" for r in rows),
+          "all settled attested with valid receipts", sum(r["receipt_result"] == "valid" for r in rows))
+
+
+def case_reconcile():
+    # A missing-receipt attempt (case omitted_usage) stays pending until the
+    # coordinator's 300 s deadline quarantines it, so wait past that.
+    g = sqlite3.connect(f"file:{LAB / 'db' / 'gateway.db'}?mode=ro", uri=True)
+    deadline = time.time() + 360
+    while True:
+        held = g.execute("SELECT COUNT(*) FROM quota_reservations WHERE status = 'active' AND settlement_hold = 1").fetchone()[0]
+        if held == 0 or time.time() > deadline:
+            break
+        time.sleep(10)
+    sources = g.execute("SELECT token_source, outcome, COUNT(*) FROM usage_events GROUP BY 1, 2").fetchall()
+    save("reconcile", {"held_active": held, "usage_events": sources})
+    check("reconcile", held == 0 and any(s[0] == "pool_operator_attested" for s in sources),
+          "gateway settled pool_operator_attested finality (no stuck holds)", {"held_active": held, "usage_events": sources})
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--only", nargs="*")
+    p.add_argument("--spoof-binary")
+    a = p.parse_args()
+    cases = {"paid": case_paid, "omitted_usage": case_omitted_usage, "global": case_global, "fail_closed_pools": case_fail_closed_pools,
+             "spoof": lambda: case_spoof(a.spoof_binary), "disputed": case_disputed, "generation_bump": case_generation_bump,
+             "concurrency": case_concurrency, "reconcile": case_reconcile}
+    for name, fn in cases.items():
+        if not a.only or name in a.only:
+            fn()
+    CAPTURES.mkdir(parents=True, exist_ok=True)
+    (CAPTURES / "results.txt").write_text("\n".join(RESULTS) + "\n")
+    sys.exit(1 if any(line.startswith("FAIL") for line in RESULTS) else 0)
+
+
+if __name__ == "__main__":
+    main()
