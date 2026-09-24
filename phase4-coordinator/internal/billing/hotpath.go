@@ -65,7 +65,7 @@ const LoopbackRuntimeNotSettlementEligible = "loopback_runtime_not_settlement_el
 // usage is provider-only (SPEC-015 §N.6).
 func IsLoopbackRuntimeSource(value string) bool {
 	switch value {
-	case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback":
+	case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback", "mlxlm_loopback":
 		return true
 	default:
 		return false

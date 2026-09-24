@@ -2743,7 +2743,7 @@ func isBYOMLoopbackRuntimeSource(value string) bool {
 // and SPEC-047-R003(iv) v0.1.10 keeps it out of settlement.
 func IsBYOMLoopbackRuntimeSource(value string) bool {
 	switch value {
-	case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback":
+	case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback", modelAdmissionRuntimeSourceMLXLMLoopback:
 		return true
 	default:
 		return false

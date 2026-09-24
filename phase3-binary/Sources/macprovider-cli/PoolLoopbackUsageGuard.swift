@@ -23,9 +23,22 @@ enum PoolLoopbackUsageGuard {
     static let absoluteTolerance: Int64 = 8
     static let relativeTolerance = 0.05
 
-    /// GGUF runtimes only (SPEC-023 §3.7.4 identity matrix).
+    /// GGUF runtimes (SPEC-023 §3.7.4 identity matrix) and mlxlm_loopback,
+    /// which serves the catalog row's own MLX snapshot (SPEC-010-R009).
     static func applies(to authorization: PoolRuntimeAuthorization) -> Bool {
-        ArtifactFeed.identityMatrix["gguf"]?.runtimeSources.contains(authorization.runtimeSource) == true
+        authorization.runtimeSource == MLXLMLoopbackServeModel.runtimeSource ||
+            ArtifactFeed.identityMatrix["gguf"]?.runtimeSources.contains(authorization.runtimeSource) == true
+    }
+
+    /// mlxlm_loopback re-counts with the tokenizer in the served snapshot
+    /// itself; every other runtime uses the catalog model id's local Hugging
+    /// Face snapshot.
+    static func snapshotDirectory(for authorization: PoolRuntimeAuthorization) -> (String) -> URL? {
+        if authorization.runtimeSource == MLXLMLoopbackServeModel.runtimeSource,
+           let directory = MLXLMLoopbackServeModel.snapshotDirectory() {
+            return { _ in directory }
+        }
+        return ModelRuntime.localHuggingFaceSnapshot(for:)
     }
 
     static func schedule(
@@ -43,7 +56,8 @@ enum PoolLoopbackUsageGuard {
                 authorization: authorization,
                 providerID: providerID,
                 completionText: completionText,
-                reportedCompletionTokens: reportedCompletionTokens
+                reportedCompletionTokens: reportedCompletionTokens,
+                snapshotDirectory: snapshotDirectory(for: authorization)
             )
         }
     }

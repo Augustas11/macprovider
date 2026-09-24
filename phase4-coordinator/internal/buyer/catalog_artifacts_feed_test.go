@@ -529,3 +529,46 @@ func TestLoadAutotuneFeedsRejectsCatalogArtifactsWithoutBaseFeeds(t *testing.T) 
 		t.Fatalf("LoadAutotuneFeeds error=%v, want pair requirement", err)
 	}
 }
+
+// SPEC-023 v0.17.0 / SPEC-010-R009 (#1690 M8): an mlx_safetensors artifact may
+// allow mlxlm_loopback next to mlx_cache; a gguf artifact never may, and an
+// mlx artifact still may not allow any other loopback adapter (AC-CAT-16).
+func TestLoadAutotuneFeedsMLXLMLoopbackTuple(t *testing.T) {
+	t.Parallel()
+	hash := strings.Repeat("4", 64)
+	cases := []struct {
+		name  string
+		model func() string
+		want  string
+	}{
+		{"mlx primary allows mlxlm_loopback", func() string {
+			return strings.Replace(artifactModelJSON(""), `"allowed_runtime_sources":["mlx_cache"]`, `"allowed_runtime_sources":["mlx_cache","mlxlm_loopback"]`, 1)
+		}, ""},
+		{"mlx primary allows ollama_loopback", func() string {
+			return strings.Replace(artifactModelJSON(""), `"allowed_runtime_sources":["mlx_cache"]`, `"allowed_runtime_sources":["mlx_cache","ollama_loopback"]`, 1)
+		}, `may not allow runtime source "ollama_loopback"`},
+		{"gguf allows mlxlm_loopback", func() string {
+			return artifactModelJSON(strings.Replace(ggufArtifactJSON(hash, "sha256:"+hash), `"allowed_runtime_sources":["ollama_loopback"]`, `"allowed_runtime_sources":["mlxlm_loopback","ollama_loopback"]`, 1))
+		}, `may not allow runtime source "mlxlm_loopback"`},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			publicKey, privateKey := testSigningKey(t)
+			fixture := artifactBoundFeedSet(t, func(candidateSHA string) []byte {
+				return catalogArtifactsFeedWithModels("test-release", "2026-07-10T00:00:00Z", "autotune-policy-v1", candidateSHA, `"test-model":`+tc.model())
+			}, privateKey, "test-key", map[string]ed25519.PublicKey{"test-key": publicKey}, privateKey)
+			_, err := buyer.LoadAutotuneFeeds(fixture.cfg)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("legal mlxlm tuple rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("LoadAutotuneFeeds error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}

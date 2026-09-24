@@ -328,6 +328,12 @@ class ArtifactFeedValidationTest(unittest.TestCase):
 
     # --- AC-CAT-16: closed identity matrix + GGUF digest binding ---------------
 
+    def test_mlx_artifact_may_allow_mlxlm_loopback(self):
+        # SPEC-023 v0.17.0 / SPEC-010-R009 (#1690 M8).
+        feed = feed_from(artifact_source())
+        feed["models"]["qwen3-8b"]["artifacts"]["mlx-4bit"]["allowed_runtime_sources"] = ["mlx_cache", "mlxlm_loopback"]
+        self.validate(feed)
+
     def test_illegal_identity_tuples_are_rejected(self):
         cases = {
             "mlx with gguf algorithm": ("mlx-4bit", {"hash_algorithm": "macprovider.gguf-file.v1"}),
@@ -342,6 +348,7 @@ class ArtifactFeedValidationTest(unittest.TestCase):
         gguf_cases = {
             "gguf with snapshot-manifest algorithm": {"hash_algorithm": "macprovider.snapshot-manifest.v1"},
             "gguf allowing mlx_cache": {"allowed_runtime_sources": ["mlx_cache"]},
+            "gguf allowing mlxlm_loopback": {"allowed_runtime_sources": ["mlxlm_loopback"]},
             "gguf with a huggingface source_ref": {
                 "source_ref": {
                     "kind": "huggingface_revision",

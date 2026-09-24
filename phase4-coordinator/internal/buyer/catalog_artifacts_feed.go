@@ -44,7 +44,9 @@ var (
 		"mlx_safetensors": {
 			hashAlgorithm:  artifactSnapshotManifestAlg,
 			sourceRefKinds: map[string]struct{}{"huggingface_revision": {}},
-			runtimeSources: map[string]struct{}{"mlx_cache": {}},
+			// SPEC-023 v0.17.0: mlx_lm.server serves the same snapshot
+			// (SPEC-010-R009).
+			runtimeSources: map[string]struct{}{"mlx_cache": {}, "mlxlm_loopback": {}},
 		},
 		"gguf": {
 			hashAlgorithm: artifactGGUFFileAlg,

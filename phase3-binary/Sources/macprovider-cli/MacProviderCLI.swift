@@ -864,7 +864,8 @@ struct ServeCommand: AsyncParsableCommand {
         // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569, #1690): an
         // `ollama_loopback` / `llamacpp_loopback` model carries a
         // `macprovider.gguf-file.v1` identity resolved from the local GGUF
-        // file at serve time, not a catalog
+        // file at serve time (an `mlxlm_loopback` model the CLI-computed
+        // snapshot-manifest pair of its declared snapshot), not a catalog
         // artifact SHA. It is intentionally uncatalogued and non-earning, so it
         // neither requires nor runs the MLX catalog-artifact preflight. Returning
         // nil (no catalog trust) lets the daemon stay connected instead of
@@ -2194,6 +2195,16 @@ struct ServeCommand: AsyncParsableCommand {
                         servedModelRef: loopbackServedRef,
                         origin: LlamaCppLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
                         selector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: nil, cliPath: nil),
+                        catalogModelIDAlias: catalogModelIDAlias
+                    )
+                case .mlxLM:
+                    // SPEC-010-R009: the MLX snapshot mlx_lm.server serves is
+                    // named by the operator (MACPROVIDER_MLXLM_MODEL_PATH) and
+                    // hashed by the CLI, never reported by the runtime.
+                    modelRuntime = try await OpenAICompatibleLoopbackRuntime.mlxLM(
+                        servedModelRef: loopbackServedRef,
+                        origin: MLXLMLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
+                        snapshotDirectory: MLXLMLoopbackServeModel.snapshotDirectory(),
                         catalogModelIDAlias: catalogModelIDAlias
                     )
                 }

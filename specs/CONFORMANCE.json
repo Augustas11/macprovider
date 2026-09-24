@@ -2038,15 +2038,34 @@
       "requirement_id": "SPEC-010-R009",
       "spec_id": "SPEC-010",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:struct MLXSnapshotIdentity",
+        "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:enum MLXLMLoopbackServeModel",
+        "phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:static func mlxLM",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMMLXLMDiscovery",
+        "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:func submitMLXLMOffer",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func candidateRowAllowsRuntimeSource",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func matchRuntimeOfferArtifactHashes",
+        "phase4-coordinator/internal/ws/model_admission_pool_route.go:func poolRuntimeMemberAlgorithm",
+        "phase4-coordinator/internal/ws/model_admission_pool_route.go:func PoolRouteSessionBoundMember",
+        "phase4-coordinator/internal/buyer/catalog_artifacts_feed.go:artifactIdentityMatrix"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/MLXLMLoopbackTests.swift:testRuntimeReportsTheNativeSnapshotPairAndBindsTheListedDirectory",
+        "phase3-binary/Tests/macprovider-cliTests/MLXLMLoopbackTests.swift:testRuntimeFailsClosedWithoutADeclaredOrListedSnapshot",
+        "phase4-coordinator/internal/ws/model_admission_mlxlm_test.go:TestSPEC010R009CandidateRowAdmissibility",
+        "phase4-coordinator/internal/ws/model_admission_mlxlm_test.go:TestSPEC010R009OfferMatchAdmitsMLXLMOnlyWhenPrimaryAllows",
+        "phase4-coordinator/internal/ws/model_admission_mlxlm_test.go:TestSPEC010R009PoolRouteDerivesMLXLMRowMember",
+        "phase4-coordinator/internal/ws/model_admission_mlxlm_test.go:TestSPEC010R009MLXLMClaimServingGGUFFailsClosed",
+        "phase4-coordinator/internal/buyer/catalog_artifacts_feed_test.go:TestLoadAutotuneFeedsMLXLMLoopbackTuple"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-010 1.12 (#1690 M8) specifies the MLX-snapshot identity leg for mlxlm_loopback (mlx_lm.server): the CLI-computed snapshot-manifest pair of the operator-declared snapshot, the /v1/models runtime binding, admissibility only where the release-bound artifact allows mlxlm_loopback, and pool-only settlement. No implementation is mapped yet. Pending until the CLI leg, the coordinator member derivation and feed matrix, their fail-closed tests, and a signed pool journey exist."
+        "rationale": "SPEC-010 1.12 (#1690 M8) specifies the MLX-snapshot identity leg for mlxlm_loopback (mlx_lm.server): the CLI-computed snapshot-manifest pair of the operator-declared snapshot, the /v1/models runtime binding, admissibility only where the release-bound artifact allows mlxlm_loopback, and pool-only settlement. The #1690 M8 CLI leg (MLXSnapshotIdentity, the mlxlm: selector, the /v1/models binding, the offer hash, the mlxlm_loopback discovery adapter) and the coordinator side (primary-row admissibility gated on the release-bound primary artifact, the pool route-time snapshot-manifest member derivation, the SPEC-023 v0.17.0 feed matrix) are mapped with fail-closed tests. Pending until a signed pool journey; the #1690 M8 lab e2e is local evidence only."
       }
     },
     {

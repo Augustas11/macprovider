@@ -2172,6 +2172,11 @@ struct BYOMDiscoveryEnvironment: Sendable {
     let llamacppModelRoot: URL?
     /// #1478 option (c): the one llama.cpp file the operator pins; overrides the root.
     let llamacppModelPath: URL?
+    /// SPEC-046 v0.3.0 `mlxlm_loopback` (#1690 M8): the operator-named
+    /// mlx_lm.server origin and the MLX snapshot directory it serves. The
+    /// adapter has no default and is attempted only when both are set.
+    let mlxlmOrigin: String?
+    let mlxlmModelPath: URL?
     let artifactDigestCacheURL: URL
 
     init(
@@ -2185,6 +2190,8 @@ struct BYOMDiscoveryEnvironment: Sendable {
         lmstudioModelsRoot: URL? = nil,
         llamacppModelRoot: URL? = nil,
         llamacppModelPath: URL? = nil,
+        mlxlmOrigin: String? = nil,
+        mlxlmModelPath: URL? = nil,
         artifactDigestCacheURL: URL? = nil
     ) {
         self.namespaceURL = namespaceURL
@@ -2197,6 +2204,8 @@ struct BYOMDiscoveryEnvironment: Sendable {
         self.lmstudioModelsRoot = lmstudioModelsRoot ?? BYOMLMStudioModelStore.defaultRoot()
         self.llamacppModelRoot = llamacppModelRoot
         self.llamacppModelPath = llamacppModelPath
+        self.mlxlmOrigin = mlxlmOrigin
+        self.mlxlmModelPath = mlxlmModelPath
         self.artifactDigestCacheURL = artifactDigestCacheURL ?? BYOMArtifactDigestCache.defaultURL()
     }
 
@@ -2223,6 +2232,10 @@ struct BYOMDiscoveryEnvironment: Sendable {
 
     /// The runtimes whose candidates carry a CLI-computed GGUF artifact leg.
     /// `openai_compatible_loopback` is deliberately absent (SPEC-023 §3.7.4).
+    /// The MLX snapshot legs (`mlx_cache`, and `mlxlm_loopback` per
+    /// SPEC-010-R009) are not GGUF files: `submitOffer` hashes an mlx_cache
+    /// snapshot and `submitMLXLMOffer` an mlxlm one with the snapshot-manifest
+    /// algorithm instead (#1486).
     static let artifactHashingRuntimes: Set<String> = [
         "ollama_loopback",
         BYOMLMStudioDiscovery.runtimeSource,
@@ -2262,6 +2275,8 @@ struct BYOMDiscoveryEnvironment: Sendable {
             lmstudioModelsRoot: BYOMLMStudioModelStore.defaultRoot(environment: environment, homeDirectory: homeDirectory),
             llamacppModelRoot: llamacppSelector.root,
             llamacppModelPath: llamacppSelector.pinnedFile,
+            mlxlmOrigin: LoopbackServeSelection.nonEmpty(environment[MLXLMLoopbackServeModel.originEnvironmentKey]),
+            mlxlmModelPath: MLXLMLoopbackServeModel.snapshotDirectory(environment: environment),
             artifactDigestCacheURL: BYOMArtifactDigestCache.defaultURL(homeDirectory: homeDirectory)
         )
     }
@@ -4355,6 +4370,130 @@ struct BYOMLlamaCppDiscovery: Sendable {
         case .unknown:
             return "unknown"
         }
+    }
+}
+
+/// SPEC-046 v0.3.0 `mlxlm_loopback` adapter (#1690 M8).
+///
+/// mlx_lm.server lists every MLX model in its Hugging Face cache plus, by
+/// resolved path, the model it was started with. The adapter reports exactly
+/// one candidate: the operator-declared snapshot directory, and only when the
+/// runtime lists it as its started model. The artifact leg is the CLI's own
+/// SPEC-010-R009 snapshot-manifest pair, computed at offer time; the catalog
+/// match is made by the coordinator from that pair, so `catalog_model_key`
+/// stays null here.
+struct BYOMMLXLMDiscovery: Sendable {
+    static let runtimeSource = MLXLMLoopbackServeModel.runtimeSource
+
+    private let origin: String
+    private let snapshotDirectory: URL
+    private let namespace: Data?
+    private let namespaceWarnings: [BYOMDiscoveryWarning]
+    private let httpClient: any BYOMDiscoveryHTTPClient
+
+    init(
+        origin: String,
+        snapshotDirectory: URL,
+        namespace: Data?,
+        namespaceWarnings: [BYOMDiscoveryWarning] = [],
+        httpClient: any BYOMDiscoveryHTTPClient
+    ) {
+        self.origin = origin
+        self.snapshotDirectory = snapshotDirectory
+        self.namespace = namespace
+        self.namespaceWarnings = namespaceWarnings
+        self.httpClient = httpClient
+    }
+
+    func discover() async -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
+        guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
+            return (
+                BYOMDiscoveryWire.Adapter(
+                    runtimeSource: Self.runtimeSource,
+                    status: "rejected",
+                    originClass: "rejected",
+                    warningCodes: [BYOMDiscoveryWarning.adapterRejectedNonLoopback.rawValue]
+                ),
+                []
+            )
+        }
+        let listed: Bool
+        do {
+            listed = try await MLXLMLoopbackServeModel.listsSnapshot(httpClient, origin: baseURL, directory: snapshotDirectory)
+        } catch {
+            return (
+                BYOMDiscoveryWire.Adapter(
+                    runtimeSource: Self.runtimeSource,
+                    status: "unavailable",
+                    originClass: "loopback_http",
+                    warningCodes: [BYOMDiscoveryWarning.adapterUnavailable.rawValue]
+                ),
+                []
+            )
+        }
+        let adapter = BYOMDiscoveryWire.Adapter(
+            runtimeSource: Self.runtimeSource,
+            status: "ok",
+            originClass: "loopback_http",
+            warningCodes: []
+        )
+        let name = snapshotDirectory.lastPathComponent
+        guard listed, BYOMDiscoveryPrivacy.isSafeRuntimeModelReference(name) else {
+            return (adapter, [])
+        }
+        return (adapter, [buildCandidate(name: name)])
+    }
+
+    private func buildCandidate(name: String) -> BYOMDiscoveryWire.Candidate {
+        let servedModelRef = MLXLMLoopbackServeModel.servedModelRef(for: snapshotDirectory)
+        let (candidateID, idWarnings) = BYOMCandidateIdentity.candidateID(
+            namespace: namespace,
+            runtimeSource: Self.runtimeSource,
+            servedModelRef: servedModelRef
+        )
+        let warnings = Set((namespaceWarnings + idWarnings + [.capabilityUnevaluated, .evaluationRequired]).map(\.rawValue))
+        let fit: String
+        switch ModelFit.evaluate(modelID: name, ramGB: BYOMFitEnvironment.detectedRAMGB()) {
+        case .fits, .tight: fit = "fits"
+        case .wontFit: fit = "does_not_fit"
+        case .unknown: fit = "unknown"
+        }
+        let admission = localAdmissionState(
+            stableID: idWarnings.isEmpty,
+            readinessState: "ready",
+            fitState: fit,
+            blockingWarnings: warnings
+        )
+        return BYOMDiscoveryWire.Candidate(
+            candidateID: candidateID,
+            runtimeSource: Self.runtimeSource,
+            displayName: BYOMDiscoveryPrivacy.displayName(from: name),
+            servedModelRef: servedModelRef,
+            catalogModelKey: nil,
+            identityState: "artifact_hash_available",
+            locality: "loopback_runtime",
+            estimatedGB: ModelFit.estimateWeightSizeGB(modelID: name).map(Double.init),
+            contextWindowTokens: nil,
+            capabilities: BYOMDiscoveryWire.Capabilities(
+                chatCompletions: true,
+                streaming: nil,
+                toolCallPassthrough: nil,
+                structuredOutputPassthrough: nil,
+                jsonMode: nil,
+                usageReporting: nil,
+                maxContextTokens: nil,
+                quantization: nil,
+                family: nil,
+                runtimeVersion: nil
+            ),
+            readinessState: "ready",
+            fitState: fit,
+            evaluationState: "not_evaluated",
+            admissionState: admission,
+            admissionStateSource: "local_default",
+            providerGuidance: BYOMDiscoveryGuidance.guidance(forAdmissionState: admission, warnings: warnings),
+            warningCodes: Array(warnings).sorted()
+        )
     }
 }
 

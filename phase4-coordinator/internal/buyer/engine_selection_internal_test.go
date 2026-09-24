@@ -36,6 +36,7 @@ func TestInternalEngineSelectionClosedVocabulary(t *testing.T) {
 		{[]string{"mlx_cache"}, "mlx_cache", true},
 		{[]string{" llamacpp_loopback "}, "llamacpp_loopback", true},
 		{[]string{"ollama_loopback", "ollama_loopback"}, "ollama_loopback", true},
+		{[]string{"mlxlm_loopback"}, "mlxlm_loopback", true},
 		{[]string{"native"}, "", false},
 		{[]string{"lmstudio_loopback"}, "", false},
 		{[]string{"openai_compatible_loopback"}, "", false},

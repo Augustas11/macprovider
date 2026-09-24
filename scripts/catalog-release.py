@@ -100,7 +100,8 @@ GGUF_FILE_ALG = "macprovider.gguf-file.v1"
 # SPEC-023 §3.7.4 closed artifact-identity matrix: runtime_format determines the
 # only legal hash_algorithm, source_ref.kind, and allowed_runtime_sources set.
 ARTIFACT_IDENTITY_MATRIX = {
-    "mlx_safetensors": (SNAPSHOT_MANIFEST_ALG, "huggingface_revision", frozenset({"mlx_cache"})),
+    # SPEC-023 v0.17.0: mlx_lm.server (mlxlm_loopback) serves the same snapshot.
+    "mlx_safetensors": (SNAPSHOT_MANIFEST_ALG, "huggingface_revision", frozenset({"mlx_cache", "mlxlm_loopback"})),
     "gguf": (GGUF_FILE_ALG, "ollama_library_tag", frozenset({
         "ollama_loopback", "llamacpp_loopback", "lmstudio_loopback", "openai_compatible_loopback",
     })),

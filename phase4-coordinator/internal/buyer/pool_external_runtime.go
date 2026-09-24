@@ -166,8 +166,9 @@ func (s *Server) poolExternalRuntimeRouteBinding(ctx context.Context, p pool.Pro
 	if !s.byomSettlementPrereqsReady(p, material) {
 		return providerws.ModelAdmissionSettlementBinding{}, false, nil
 	}
-	// Step 1: the recorded GGUF feed member the session's pin names; its
-	// format must agree with the loopback class.
+	// Step 1: the recorded member the session's pin names; its format must
+	// agree with the loopback class (GGUF feed member, or for mlxlm_loopback
+	// a snapshot-manifest feed member or the row's own pair).
 	member, ok := providerws.PoolRouteSessionBoundMember(p, event)
 	if !ok {
 		return providerws.ModelAdmissionSettlementBinding{}, false, nil
@@ -189,7 +190,12 @@ func (s *Server) poolExternalRuntimeRouteBinding(ctx context.Context, p pool.Pro
 		ExpectedCatalogModelHashAlgorithm: member.HashAlgorithm,
 	}
 	byomArtifactPredicate(p, &predicate)
-	if predicate.ArtifactID != member.ArtifactID || predicate.ArtifactHash != member.Hash || predicate.ArtifactHashAlgorithm != member.HashAlgorithm {
+	if member.ArtifactID == "" {
+		// A row pair (mlxlm_loopback only): no feed binding, no six values.
+		if p.ArtifactIdentity != nil || predicate.ArtifactDerived() {
+			return providerws.ModelAdmissionSettlementBinding{}, false, nil
+		}
+	} else if predicate.ArtifactID != member.ArtifactID || predicate.ArtifactHash != member.Hash || predicate.ArtifactHashAlgorithm != member.HashAlgorithm {
 		return providerws.ModelAdmissionSettlementBinding{}, false, nil
 	}
 	// Step 3: every other field compares exactly as the global helper does.

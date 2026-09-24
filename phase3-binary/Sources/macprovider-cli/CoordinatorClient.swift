@@ -193,7 +193,7 @@ actor CoordinatorClient {
     /// `isBYOMLoopbackRuntimeSource` vocabulary.
     static func isBYOMLoopbackRuntimeSource(_ value: String?) -> Bool {
         switch value {
-        case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback":
+        case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback", "mlxlm_loopback":
             return true
         default:
             return false

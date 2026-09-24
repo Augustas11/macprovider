@@ -21,7 +21,7 @@ const (
 
 func validEngineClass(class string) bool {
 	switch class {
-	case engineClassNative, "llamacpp_loopback", "ollama_loopback":
+	case engineClassNative, "llamacpp_loopback", "mlxlm_loopback", "ollama_loopback":
 		return true
 	default:
 		return false

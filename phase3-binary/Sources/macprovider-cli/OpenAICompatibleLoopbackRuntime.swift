@@ -5,13 +5,17 @@ import MacProviderCore
 //
 // One `macprovider-cli serve` process can serve a GGUF hosted by a loopback
 // OpenAI-compatible runtime by proxying inference to that runtime's
-// `/v1/chat/completions` endpoint. Two runtimes are selectable by model-ref
-// prefix, each with its own GGUF identity leg:
+// `/v1/chat/completions` endpoint. Three runtimes are selectable by model-ref
+// prefix, each with its own identity leg:
 //   - `--model ollama:<tag>`    -> `ollama_loopback`   (Ollama blob store)
 //   - `--model llamacpp:<stem>` -> `llamacpp_loopback` (operator-declared
 //     GGUF root/pin, bound to the path llama-server reports in `/props`)
-// Other OpenAI-compatible runtimes (`lmstudio:`, `openai:`) are deliberately
-// not selectable here: they arrive with their identity leg, one at a time.
+//   - `--model mlxlm:<name>`    -> `mlxlm_loopback`    (operator-declared MLX
+//     snapshot, bound to the path mlx_lm.server lists in `/v1/models`;
+//     SPEC-010-R009, #1690 M8)
+// Other OpenAI-compatible runtimes (`lmstudio:`, `openai:`, oMLX) are
+// deliberately not selectable here: they arrive with their identity leg,
+// one at a time.
 //
 // The adapter reports the `macprovider.gguf-file.v1` identity of the LOCAL
 // GGUF file (never a runtime-reported digest), keeps the loopback constraints
@@ -95,10 +99,12 @@ enum LlamaCppLoopbackServeModel {
 enum LoopbackServeSelection: Equatable {
     case ollama
     case llamaCpp
+    case mlxLM
 
     static func select(_ ref: String?) -> LoopbackServeSelection? {
         if OllamaLoopbackServeModel.isOllamaLoopbackRef(ref) { return .ollama }
         if LlamaCppLoopbackServeModel.isLlamaCppLoopbackRef(ref) { return .llamaCpp }
+        if MLXLMLoopbackServeModel.isMLXLMLoopbackRef(ref) { return .mlxLM }
         return nil
     }
 
@@ -106,6 +112,7 @@ enum LoopbackServeSelection: Equatable {
         switch self {
         case .ollama: return OllamaLoopbackServeModel.runtimeSource
         case .llamaCpp: return LlamaCppLoopbackServeModel.runtimeSource
+        case .mlxLM: return MLXLMLoopbackServeModel.runtimeSource
         }
     }
 
@@ -210,7 +217,7 @@ struct LoopbackGenerationTimeouts: Equatable, Sendable {
 /// prompt-token preflight); the Ollama path only ever posts chat completions.
 final class LoopbackServeHTTPClient: BYOMLoopbackStreamingHTTPClient, @unchecked Sendable {
     static let allowedPOSTPaths: Set<String> = ["/v1/chat/completions", "/apply-template", "/tokenize"]
-    static let allowedGETPaths: Set<String> = ["/props"]
+    static let allowedGETPaths: Set<String> = ["/props", "/v1/models"]
     /// How much later than the runtime watchdog the URLSession timers fire.
     static let backstopSlackSeconds: TimeInterval = 30
 
@@ -703,11 +710,11 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     private let runtimeArtifactPath: String?
     private let catalogModelIDAlias: String?
     private let httpClient: any BYOMDiscoveryHTTPClient
-    private let digestResolver: BYOMArtifactDigestResolver
 
-    /// GGUF-file identity bound at construction and re-validated before every
-    /// identity-binding report (SPEC-010-R007(a)).
-    private let evidence: BYOMArtifactEvidence
+    /// The artifact identity bound at construction and re-validated before
+    /// every identity-binding report: a GGUF file (SPEC-010-R007(a)) or, for
+    /// `mlxlm_loopback`, an MLX snapshot (SPEC-010-R009(a)).
+    private let identity: LoopbackServedIdentity
     private var providerStatus: ProviderStatus?
     private var registrationCounter: Int = 0
 
@@ -728,14 +735,20 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         catalogModelIDAlias: String? = nil,
         httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
         digestResolver: BYOMArtifactDigestResolver? = nil,
+        mlxSnapshot: MLXSnapshotIdentity? = nil,
         deadline: Date? = nil
     ) throws {
         let trimmedRef = servedModelRef.trimmingCharacters(in: .whitespacesAndNewlines)
         self.servedModelRef = trimmedRef
         self.runtimeSource = runtimeSource
-        self.upstreamModelName = runtimeSource == LlamaCppLoopbackServeModel.runtimeSource
-            ? LlamaCppLoopbackServeModel.upstreamModelName(fromServedRef: trimmedRef)
-            : OllamaLoopbackServeModel.upstreamModelName(fromServedRef: trimmedRef)
+        switch runtimeSource {
+        case LlamaCppLoopbackServeModel.runtimeSource:
+            self.upstreamModelName = LlamaCppLoopbackServeModel.upstreamModelName(fromServedRef: trimmedRef)
+        case MLXLMLoopbackServeModel.runtimeSource:
+            self.upstreamModelName = MLXLMLoopbackServeModel.upstreamModelName
+        default:
+            self.upstreamModelName = OllamaLoopbackServeModel.upstreamModelName(fromServedRef: trimmedRef)
+        }
         guard let validatedOrigin = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
             throw OpenAICompatibleLoopbackRuntimeError.invalidLoopbackOrigin(origin)
         }
@@ -747,20 +760,32 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             return trimmed.isEmpty ? nil : trimmed
         }
         self.httpClient = httpClient ?? LoopbackServeHTTPClient()
-        let resolver = digestResolver ?? BYOMArtifactDigestResolver(
-            store: BYOMOllamaModelStore(root: BYOMOllamaModelStore.defaultRoot()),
-            cache: BYOMArtifactDigestCache(url: BYOMArtifactDigestCache.defaultURL())
-        )
-        self.digestResolver = resolver
-        do {
-            self.evidence = try resolver.computeEvidence(
-                runtimeSource: runtimeSource,
-                servedModelRef: trimmedRef,
-                runtimeArtifactPath: runtimeArtifactPath,
-                deadline: deadline
+        if let mlxSnapshot {
+            // SPEC-010-R009: an MLX snapshot is never a GGUF file, and only
+            // mlxlm_loopback serves one.
+            guard runtimeSource == MLXLMLoopbackServeModel.runtimeSource else {
+                throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("an MLX snapshot is served only by mlxlm_loopback")
+            }
+            self.identity = .mlxSnapshot(mlxSnapshot)
+        } else {
+            guard runtimeSource != MLXLMLoopbackServeModel.runtimeSource else {
+                throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("mlxlm_loopback requires an MLX snapshot identity")
+            }
+            let resolver = digestResolver ?? BYOMArtifactDigestResolver(
+                store: BYOMOllamaModelStore(root: BYOMOllamaModelStore.defaultRoot()),
+                cache: BYOMArtifactDigestCache(url: BYOMArtifactDigestCache.defaultURL())
             )
-        } catch {
-            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(String(describing: error))
+            do {
+                let evidence = try resolver.computeEvidence(
+                    runtimeSource: runtimeSource,
+                    servedModelRef: trimmedRef,
+                    runtimeArtifactPath: runtimeArtifactPath,
+                    deadline: deadline
+                )
+                self.identity = .ggufFile(evidence, resolver)
+            } catch {
+                throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(String(describing: error))
+            }
         }
     }
 
@@ -811,10 +836,57 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         )
     }
 
+    /// `mlxlm:<name>` (SPEC-010-R009, #1690 M8): require mlx_lm.server to list
+    /// the operator-declared snapshot directory, hash that directory with
+    /// the native snapshot-manifest algorithm, and bind the runtime to it.
+    /// No declared directory, or a runtime that does not list it, fails
+    /// closed (no identity).
+    static func mlxLM(
+        servedModelRef: String,
+        origin: String,
+        snapshotDirectory: URL?,
+        catalogModelIDAlias: String? = nil,
+        httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
+        deadline: Date? = nil
+    ) async throws -> OpenAICompatibleLoopbackRuntime {
+        guard let validatedOrigin = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
+            throw OpenAICompatibleLoopbackRuntimeError.invalidLoopbackOrigin(origin)
+        }
+        guard let snapshotDirectory else {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("\(MLXLMLoopbackServeModel.snapshotPathEnvironmentKey) is not set to an absolute snapshot directory")
+        }
+        let client = httpClient ?? LoopbackServeHTTPClient()
+        let listed: Bool
+        do {
+            listed = try await MLXLMLoopbackServeModel.listsSnapshot(client, origin: validatedOrigin, directory: snapshotDirectory)
+        } catch {
+            throw OpenAICompatibleLoopbackRuntimeError.upstreamNotRecognized(MLXLMLoopbackServeModel.runtimeSource)
+        }
+        guard listed else {
+            throw OpenAICompatibleLoopbackRuntimeError.upstreamNotRecognized(MLXLMLoopbackServeModel.runtimeSource)
+        }
+        let snapshot: MLXSnapshotIdentity
+        do {
+            snapshot = try MLXSnapshotIdentity.compute(directory: snapshotDirectory, deadline: deadline)
+        } catch {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(String(describing: error))
+        }
+        return try OpenAICompatibleLoopbackRuntime(
+            servedModelRef: servedModelRef,
+            origin: origin,
+            runtimeSource: MLXLMLoopbackServeModel.runtimeSource,
+            runtimeArtifactPath: snapshot.directory.path,
+            catalogModelIDAlias: catalogModelIDAlias,
+            httpClient: client,
+            mlxSnapshot: snapshot,
+            deadline: deadline
+        )
+    }
+
     // MARK: ModelRuntimeServing identity surface
 
-    var loadedModelHash: String? { identityIsValid() ? evidence.digest : nil }
-    var loadedModelHashAlgorithm: String? { evidence.algorithm }
+    var loadedModelHash: String? { identityIsValid() ? identity.digest : nil }
+    var loadedModelHashAlgorithm: String? { identity.algorithm }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     /// Non-earning loopback path (#1695): never sign a SPEC-015 receipt on
@@ -897,12 +969,17 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// reference or an in-place rewrite fails closed rather than report a
     /// stale digest (SPEC-010-R007(a)).
     private func identityIsValid() -> Bool {
-        (try? digestResolver.validateCurrent(
-            evidence,
-            runtimeSource: runtimeSource,
-            servedModelRef: servedModelRef,
-            runtimeArtifactPath: runtimeArtifactPath
-        )) != nil
+        switch identity {
+        case .ggufFile(let evidence, let resolver):
+            return (try? resolver.validateCurrent(
+                evidence,
+                runtimeSource: runtimeSource,
+                servedModelRef: servedModelRef,
+                runtimeArtifactPath: runtimeArtifactPath
+            )) != nil
+        case .mlxSnapshot(let snapshot):
+            return snapshot.isCurrent()
+        }
     }
 
     private func snapshot() -> RuntimeSnapshot {
@@ -910,17 +987,34 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             state: .ready,
             container: nil,
             modelID: servedModelRef,
-            modelHash: identityIsValid() ? evidence.digest : nil,
-            modelHashAlgorithm: evidence.algorithm
+            modelHash: identityIsValid() ? identity.digest : nil,
+            modelHashAlgorithm: identity.algorithm
         )
     }
 
     private var isLlamaCpp: Bool { runtimeSource == LlamaCppLoopbackServeModel.runtimeSource }
 
+    /// mlxlm_loopback: before every request the runtime must still list the
+    /// bound snapshot directory (SPEC-010-R009(b)). mlx_lm.server reports no
+    /// context window, so an over-context request fails upstream.
+    private func requireMLXLMServesBoundSnapshot() async throws {
+        guard case .mlxSnapshot(let snapshot) = identity else { return }
+        let listed: Bool
+        do {
+            listed = try await MLXLMLoopbackServeModel.listsSnapshot(httpClient, origin: origin, directory: snapshot.directory)
+        } catch {
+            throw APIError(status: 502, message: "Upstream loopback error", type: "server_error", code: "upstream_unavailable")
+        }
+        guard listed else {
+            throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
+        }
+    }
+
     /// llama.cpp only: re-read `/props`, require the bound file is still the
     /// one served, then gate prompt + max_tokens against `n_ctx`. Returns the
     /// context window used (nil when the runtime reports none).
     private func upstreamContextGate(_ request: ChatCompletionRequest) async throws -> Int? {
+        try await requireMLXLMServesBoundSnapshot()
         guard isLlamaCpp else { return nil }
         let props: BYOMHTTPResponse
         do {
@@ -1323,5 +1417,26 @@ final class LoopbackProgressClock: @unchecked Sendable {
             return now.timeIntervalSince(startedAt) > timeouts.firstByte
         }
         return now.timeIntervalSince(lastProgress) > timeouts.idle
+    }
+}
+
+/// The artifact identity a loopback runtime reports: the complete-file GGUF
+/// digest with the locator that re-validates it, or an MLX snapshot.
+enum LoopbackServedIdentity {
+    case ggufFile(BYOMArtifactEvidence, BYOMArtifactDigestResolver)
+    case mlxSnapshot(MLXSnapshotIdentity)
+
+    var digest: String {
+        switch self {
+        case .ggufFile(let evidence, _): return evidence.digest
+        case .mlxSnapshot(let snapshot): return snapshot.digest
+        }
+    }
+
+    var algorithm: String {
+        switch self {
+        case .ggufFile(let evidence, _): return evidence.algorithm
+        case .mlxSnapshot(let snapshot): return snapshot.algorithm
+        }
     }
 }

@@ -76,6 +76,7 @@ func TestEngineSelection_EmitsMappedRuntimeClass(t *testing.T) {
 		{"  native ", "", "mlx_cache"},
 		{"native", testPoolID, "mlx_cache"},
 		{"llamacpp", testPoolID, "llamacpp_loopback"},
+		{"mlxlm", testPoolID, "mlxlm_loopback"},
 		{"ollama", testPoolID, "ollama_loopback"},
 	} {
 		h, cap, key := newEngineHarness(t, "")
@@ -99,7 +100,7 @@ func TestEngineSelection_EmitsMappedRuntimeClass(t *testing.T) {
 // SPEC-006-R016 rule 3 / SPEC-042-R014 (a): a non-native engine on a global
 // route fails closed before dispatch; it is never served natively.
 func TestEngineSelection_NonNativeOnGlobalRouteFailsClosed(t *testing.T) {
-	for _, selector := range []string{"llamacpp", "ollama"} {
+	for _, selector := range []string{"llamacpp", "mlxlm", "ollama"} {
 		h, cap, key := newEngineHarness(t, "")
 		resp := postChat(t, h, key, poolChatBody, map[string]string{engineSelectHeader: selector})
 		if resp.Code != http.StatusServiceUnavailable {
@@ -175,6 +176,7 @@ func TestEngineSelection_ResponseHeaderDisclosedWithClosedVocabulary(t *testing.
 		{"llamacpp_loopback", "llamacpp_loopback"},
 		{"mlx_cache", "mlx_cache"},
 		{"ollama_loopback", "ollama_loopback"},
+		{"mlxlm_loopback", "mlxlm_loopback"},
 		{"lmstudio_loopback", ""},
 		{"llamacpp_loopback\r\nX-Evil: 1", ""},
 		{" mlx_cache", ""},

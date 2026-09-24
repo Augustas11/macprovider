@@ -310,3 +310,16 @@ func TestPolicyCoreV2RejectionVectors(t *testing.T) {
 		t.Fatal("adding a runtime to the allowlist did not change manifest_core_digest")
 	}
 }
+
+// SPEC-042-R001 0.0.34 (#1690 M8): mlxlm_loopback joins the closed allowlist
+// vocabulary; LM Studio and the generic OpenAI-compatible adapter stay out.
+func TestRuntimeAllowlistVocabularyMLXLM(t *testing.T) {
+	for source, want := range map[string]bool{
+		"llamacpp_loopback": true, "mlxlm_loopback": true, "ollama_loopback": true,
+		"mlx_cache": false, "lmstudio_loopback": false, "openai_compatible_loopback": false, "": false,
+	} {
+		if got := ValidRuntimeAllowlistSource(source); got != want {
+			t.Errorf("ValidRuntimeAllowlistSource(%q) = %v, want %v", source, got, want)
+		}
+	}
+}

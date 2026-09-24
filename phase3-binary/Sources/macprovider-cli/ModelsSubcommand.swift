@@ -274,14 +274,23 @@ struct ModelsOfferCommand: AsyncParsableCommand {
                 identityStore: ProviderCredentialStoreFactory.receiptKeyStore(for: resolved.config),
                 client: client
             )
-            let status = try await runtime.submitOffer(
-                providerID: resolved.providerID,
-                target: candidate,
-                evaluationDigestSHA256: evaluationDigestSHA256,
-                requestedDisclosureClass: requestedDisclosureClass,
-                servedArtifactPath: resolved.config.modelArtifactPath,
-                servedModelID: resolved.config.model
-            )
+            // SPEC-046 v0.3.0: an `mlxlm:` target is offered through the
+            // mlxlm_loopback adapter and its snapshot-manifest leg.
+            let status = MLXLMLoopbackServeModel.isMLXLMLoopbackRef(candidate)
+                ? try await runtime.submitMLXLMOffer(
+                    providerID: resolved.providerID,
+                    target: candidate,
+                    evaluationDigestSHA256: evaluationDigestSHA256,
+                    requestedDisclosureClass: requestedDisclosureClass
+                )
+                : try await runtime.submitOffer(
+                    providerID: resolved.providerID,
+                    target: candidate,
+                    evaluationDigestSHA256: evaluationDigestSHA256,
+                    requestedDisclosureClass: requestedDisclosureClass,
+                    servedArtifactPath: resolved.config.modelArtifactPath,
+                    servedModelID: resolved.config.model
+                )
             try ModelSwitchingWireCodec.printJSON(status)
         } catch let error as BYOMModelAdmissionError {
             writeStderr(error.description)
