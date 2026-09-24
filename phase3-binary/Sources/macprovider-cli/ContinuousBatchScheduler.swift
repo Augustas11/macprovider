@@ -2681,6 +2681,9 @@ actor ContinuousBatchScheduler {
         // retained install) wins over the admission outcome: nothing ran for
         // it, and `requestFailed`/`rejected` would contradict the caller's
         // cancel. A cleanup failure stays visible as such.
+        await discardUnacceptedRetainedCache(for: request)
+        // Checked after the last await and with none before the result is
+        // built, so a cancel recorded during the discard above wins too.
         var status = status
         var errorCode = errorCode
         if status != .cancelled,
@@ -2689,7 +2692,6 @@ actor ContinuousBatchScheduler {
             status = .cancelled
             errorCode = "request_cancelled"
         }
-        await discardUnacceptedRetainedCache(for: request)
         let result = ContinuousBatchSchedulerResult(
             requestID: request.id,
             conversationKey: request.conversationKey,
