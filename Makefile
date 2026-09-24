@@ -199,6 +199,7 @@ test-dist:
 	bash phase4-coordinator/dist/test/deploy_catalog_window_coverage.test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_restart_readiness.test.sh
 	bash phase4-coordinator/dist/test/coordinator_deploy_recovery.test.sh
+	bash phase4-coordinator/dist/test/coordinator_pricing_recover.test.sh
 	bash phase4-coordinator/dist/test/coordinator_archive_rotate.test.sh
 	bash phase4-coordinator/dist/test/coordinator_sqlite_relief.test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_smoke_probe.test.sh

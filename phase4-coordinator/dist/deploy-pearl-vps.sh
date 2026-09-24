@@ -550,6 +550,7 @@ if [ "$DRY_RUN_LOCAL" != "1" ]; then
     phase3-binary/dist/static \
     phase3-binary/catalog/autotune \
     scripts/catalog-verifier-bundle.txt \
+    scripts/lib/coordinator-config-guard.sh \
     $CATALOG_VERIFIER_BUNDLE \
     | tar -xf - -C "$PINNED_DEPLOY_INPUT_DIR"
   PINNED_REPOSITORY_DIR="$PINNED_DEPLOY_INPUT_DIR/repository"
@@ -627,6 +628,11 @@ DEPLOY_RECOVER="$PINNED_DIST_DIR/coordinator-deploy-recover.sh"
 DEPLOY_GUARD="$PINNED_DIST_DIR/systemd/macprovider-coordinator-deploy-guard.conf"
 DEPLOY_RECOVERY_SERVICE="$PINNED_DIST_DIR/systemd/macprovider-coordinator-deploy-recovery.service"
 DEPLOY_WATCHDOG_SERVICE="$PINNED_DIST_DIR/systemd/macprovider-coordinator-deploy-watchdog.service"
+# #1693 L4b: pricing-transaction pre-start recovery helper, its post-start
+# closer unit, and the shared L0 config guard deploy-recover calls.
+PRICING_RECOVER="$PINNED_DIST_DIR/coordinator-pricing-recover"
+PRICING_CLOSE_SERVICE="$PINNED_DIST_DIR/systemd/macprovider-coordinator-pricing-close.service"
+CONFIG_GUARD_LIB="$PINNED_SCRIPTS_DIR/lib/coordinator-config-guard.sh"
 STATS_INVENTORY_SERVICE="$PINNED_DIST_DIR/stats-inventory-sync.service"
 STATS_INVENTORY_TIMER="$PINNED_DIST_DIR/stats-inventory-sync.timer"
 STATS_BILLING_MIRROR_SERVICE="$PINNED_DIST_DIR/stats-billing-mirror.service"
@@ -1308,6 +1314,16 @@ if $SSH 'test -e /var/lib/macprovider-pearl-updater/tier2-enforcement-transactio
   echo "aborting deploy: a Tier-2 enforcement transaction is active" >&2
   exit 12
 fi
+# #1693 L0: a pricing transaction journal means a catalog-content pricing
+# release is mid-transaction (or abandoned). Check it right after the lease and
+# before step 0, so this deploy never replaces a recovery helper/unit or the
+# live config under it. Recover it first with
+# scripts/catalog-content-release.sh --recover-pricing-txn. (Pre-#1693 deploy
+# tags lack this check and must not run while a journal exists.)
+if $SSH 'test -e /opt/macprovider/.pricing-txn || test -L /opt/macprovider/.pricing-txn'; then
+  echo "aborting deploy: refusing: pricing transaction journal present at /opt/macprovider/.pricing-txn; run scripts/catalog-content-release.sh --recover-pricing-txn" >&2
+  exit 12
+fi
 
 # Recover the prior complete snapshot before using any live state as input to
 # config drift checks or a new rollback baseline.
@@ -1720,6 +1736,9 @@ $SCP "$DEPLOY_RECOVER" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/coordinator-dep
 $SCP "$DEPLOY_GUARD" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/10-deploy-transaction-guard.conf"
 $SCP "$DEPLOY_RECOVERY_SERVICE" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/macprovider-coordinator-deploy-recovery.service"
 $SCP "$DEPLOY_WATCHDOG_SERVICE" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/macprovider-coordinator-deploy-watchdog.service"
+$SCP "$PRICING_RECOVER" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/coordinator-pricing-recover"
+$SCP "$PRICING_CLOSE_SERVICE" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/macprovider-coordinator-pricing-close.service"
+$SCP "$CONFIG_GUARD_LIB" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/coordinator-config-guard.sh"
 RECOVERY_INPUT_MANIFEST_TMP="$(umask 077 && mktemp -t macprovider-recovery-inputs.XXXXXXXX)" || {
   echo "aborting deploy: mktemp failed for recovery input manifest" >&2
   exit 2
@@ -1728,6 +1747,9 @@ shasum -a 256 "$DEPLOY_RECOVER" | awk '{ print $1 "  coordinator-deploy-recover"
 shasum -a 256 "$DEPLOY_GUARD" | awk '{ print $1 "  10-deploy-transaction-guard.conf" }' >> "$RECOVERY_INPUT_MANIFEST_TMP"
 shasum -a 256 "$DEPLOY_RECOVERY_SERVICE" | awk '{ print $1 "  macprovider-coordinator-deploy-recovery.service" }' >> "$RECOVERY_INPUT_MANIFEST_TMP"
 shasum -a 256 "$DEPLOY_WATCHDOG_SERVICE" | awk '{ print $1 "  macprovider-coordinator-deploy-watchdog.service" }' >> "$RECOVERY_INPUT_MANIFEST_TMP"
+shasum -a 256 "$PRICING_RECOVER" | awk '{ print $1 "  coordinator-pricing-recover" }' >> "$RECOVERY_INPUT_MANIFEST_TMP"
+shasum -a 256 "$PRICING_CLOSE_SERVICE" | awk '{ print $1 "  macprovider-coordinator-pricing-close.service" }' >> "$RECOVERY_INPUT_MANIFEST_TMP"
+shasum -a 256 "$CONFIG_GUARD_LIB" | awk '{ print $1 "  coordinator-config-guard.sh" }' >> "$RECOVERY_INPUT_MANIFEST_TMP"
 $SCP "$RECOVERY_INPUT_MANIFEST_TMP" "$VPS_USER@$VPS_HOST:$RECOVERY_DEPLOY_TMP/recovery-inputs.sha256"
 $SSH "cd $RECOVERY_DEPLOY_TMP && shasum -a 256 -c recovery-inputs.sha256 >/dev/null"
 echo "  recovery staged input digests OK"
@@ -1737,9 +1759,19 @@ $SSH "set -e
   _watchdog_next=/etc/systemd/system/macprovider-coordinator-deploy-watchdog.service.next.\$\$
   install -d -o root -g root -m 0755 /etc/systemd/system/macprovider-coordinator.service.d
   _guard_next=/etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf.next.\$\$
-  trap 'rm -f \"\$_helper_next\" \"\$_unit_next\" \"\$_watchdog_next\" \"\$_guard_next\"' EXIT HUP INT TERM
+  _pricing_next=/opt/macprovider/coordinator-pricing-recover.next.\$\$
+  _config_guard_next=/opt/macprovider/coordinator-config-guard.sh.next.\$\$
+  _close_next=/etc/systemd/system/macprovider-coordinator-pricing-close.service.next.\$\$
+  trap 'rm -f \"\$_helper_next\" \"\$_unit_next\" \"\$_watchdog_next\" \"\$_guard_next\" \"\$_pricing_next\" \"\$_config_guard_next\" \"\$_close_next\"' EXIT HUP INT TERM
+  # Helpers before units: a unit never names a helper that is not installed.
+  install -o root -g root -m 0644 $RECOVERY_DEPLOY_TMP/coordinator-config-guard.sh \"\$_config_guard_next\"
+  mv -Tf \"\$_config_guard_next\" /opt/macprovider/coordinator-config-guard.sh
+  install -o root -g root -m 0750 $RECOVERY_DEPLOY_TMP/coordinator-pricing-recover \"\$_pricing_next\"
+  mv -Tf \"\$_pricing_next\" /opt/macprovider/coordinator-pricing-recover
   install -o root -g root -m 0750 $RECOVERY_DEPLOY_TMP/coordinator-deploy-recover \"\$_helper_next\"
   mv -Tf \"\$_helper_next\" /opt/macprovider/coordinator-deploy-recover
+  install -o root -g root -m 0644 $RECOVERY_DEPLOY_TMP/macprovider-coordinator-pricing-close.service \"\$_close_next\"
+  mv -Tf \"\$_close_next\" /etc/systemd/system/macprovider-coordinator-pricing-close.service
   install -o root -g root -m 0644 $RECOVERY_DEPLOY_TMP/macprovider-coordinator-deploy-recovery.service \"\$_unit_next\"
   mv -Tf \"\$_unit_next\" /etc/systemd/system/macprovider-coordinator-deploy-recovery.service
   install -o root -g root -m 0644 $RECOVERY_DEPLOY_TMP/macprovider-coordinator-deploy-watchdog.service \"\$_watchdog_next\"
@@ -3150,6 +3182,18 @@ $SSH "set -e
   if [ -e /etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf ] || [ -L /etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf ]; then
     cp -a /etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf \"\$_rollback_stage/10-deploy-transaction-guard.conf\"
     touch \"\$_rollback_stage/had-guard-dropin\"
+  fi
+  if [ -e /opt/macprovider/coordinator-pricing-recover ] || [ -L /opt/macprovider/coordinator-pricing-recover ]; then
+    cp -a /opt/macprovider/coordinator-pricing-recover \"\$_rollback_stage/coordinator-pricing-recover\"
+    touch \"\$_rollback_stage/had-pricing-recover-helper\"
+  fi
+  if [ -e /opt/macprovider/coordinator-config-guard.sh ] || [ -L /opt/macprovider/coordinator-config-guard.sh ]; then
+    cp -a /opt/macprovider/coordinator-config-guard.sh \"\$_rollback_stage/coordinator-config-guard.sh\"
+    touch \"\$_rollback_stage/had-config-guard-lib\"
+  fi
+  if [ -e /etc/systemd/system/macprovider-coordinator-pricing-close.service ] || [ -L /etc/systemd/system/macprovider-coordinator-pricing-close.service ]; then
+    cp -a /etc/systemd/system/macprovider-coordinator-pricing-close.service \"\$_rollback_stage/macprovider-coordinator-pricing-close.service\"
+    touch \"\$_rollback_stage/had-pricing-close-unit\"
   fi
   _catalog_target=\$(readlink /opt/macprovider/autotune/current 2>/dev/null || true)
   case \"\$_catalog_target\" in

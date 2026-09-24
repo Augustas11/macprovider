@@ -25,6 +25,9 @@ RECOVERY_HELPER="$ROOT/coordinator-deploy-recover"
 RECOVERY_UNIT="$SYSTEMD_ROOT/macprovider-coordinator-deploy-recovery.service"
 WATCHDOG_UNIT="$SYSTEMD_ROOT/macprovider-coordinator-deploy-watchdog.service"
 GUARD_DROPIN="$SYSTEMD_ROOT/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf"
+PRICING_CLOSE_UNIT="$SYSTEMD_ROOT/macprovider-coordinator-pricing-close.service"
+PRICING_RECOVER_HELPER="$ROOT/coordinator-pricing-recover"
+CONFIG_GUARD_LIB_PATH="$ROOT/coordinator-config-guard.sh"
 TIER2_CATALOG="$ROOT/tier2-catalog.json"
 OVERLAY="$ETC_MACPROVIDER_ROOT/coordinator.pearl-overlays.yaml"
 MODE=${1:---recover}
@@ -100,6 +103,30 @@ fi
 if [ -f "$ROLLBACK/committed" ]; then
   rm -rf "$ROLLBACK"
   exit 0
+fi
+
+# #1693 L0/L4b: a restore rewrites coordinator.yaml and autotune/current, so it
+# must not run while a pricing transaction journal exists. With nothing to
+# restore this script already exited above (pre-start with only a pricing
+# journal is a no-op; coordinator-pricing-recover --pre-start ran first and
+# owns that journal). A deploy snapshot to restore AND a pricing journal is a
+# genuine conflict: block, preserve both, follow the runbook.
+PRICING_GUARD_LIB=${MACPROVIDER_PRICING_GUARD_LIB:-$ROOT/coordinator-config-guard.sh}
+pricing_guard_rc=0
+if [ -r "$PRICING_GUARD_LIB" ]; then
+  if [ "$MODE" = "--pre-start" ]; then
+    # shellcheck source=/dev/null
+    ( . "$PRICING_GUARD_LIB"; ccg_refuse_if_pricing_txn "$ROOT" --pre-start ) || pricing_guard_rc=$?
+  else
+    # shellcheck source=/dev/null
+    ( . "$PRICING_GUARD_LIB"; ccg_refuse_if_pricing_txn "$ROOT" ) || pricing_guard_rc=$?
+  fi
+elif [ -e "$ROOT/.pricing-txn" ] || [ -L "$ROOT/.pricing-txn" ]; then
+  pricing_guard_rc=75
+fi
+if [ "$pricing_guard_rc" -ne 0 ]; then
+  echo "coordinator deploy rollback snapshot AND pricing transaction journal ($ROOT/.pricing-txn) present; not restoring either. Follow docs/runbooks/catalog-release-decision-tree.md §pricing-txn (deploy-and-pricing conflict)" >&2
+  exit 1
 fi
 
 restore_regular() {
@@ -261,6 +288,9 @@ fi
 restore_link_or_file had-recovery-unit macprovider-coordinator-deploy-recovery.service "$RECOVERY_UNIT"
 restore_link_or_file had-watchdog-unit macprovider-coordinator-deploy-watchdog.service "$WATCHDOG_UNIT"
 restore_link_or_file had-guard-dropin 10-deploy-transaction-guard.conf "$GUARD_DROPIN"
+restore_link_or_file had-pricing-close-unit macprovider-coordinator-pricing-close.service "$PRICING_CLOSE_UNIT"
+restore_link_or_file had-pricing-recover-helper coordinator-pricing-recover "$PRICING_RECOVER_HELPER"
+restore_link_or_file had-config-guard-lib coordinator-config-guard.sh "$CONFIG_GUARD_LIB_PATH"
 
 if [ "$MODE" = "--recover" ]; then
   $SYSTEMCTL daemon-reload

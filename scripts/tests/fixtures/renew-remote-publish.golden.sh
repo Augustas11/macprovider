@@ -16,6 +16,35 @@ exec 8</run/lock/macprovider-pearl-updater.lock || abort_pre_mutation "cannot op
 flock -n 8 || abort_pre_mutation "Pearl updater lock held; not mutating"
 exec 9</opt/macprovider/.coordinator-deploy.lock || abort_pre_mutation "cannot open /opt/macprovider/.coordinator-deploy.lock; not mutating"
 flock -n 9 || abort_pre_mutation "coordinator deploy lock held; not mutating"
+# ---- from scripts/lib/coordinator-config-guard.sh ----
+CCG_EX_REFUSED=75
+CCG_EX_PRE_START_JOURNAL=76
+
+# ccg_refuse_if_pricing_txn <install_root> [--pre-start]
+#   0 when <install_root>/.pricing-txn is absent (as a path entry: a dangling
+#   symlink counts as present); otherwise prints the refusal and returns 75, or
+#   76 with --pre-start.
+ccg_refuse_if_pricing_txn() {
+  ccg_txn_root=${1:?ccg_refuse_if_pricing_txn: install root required}
+  ccg_txn_mode=${2:-}
+  case "$ccg_txn_mode" in
+    ""|--pre-start) ;;
+    *) printf 'ccg_refuse_if_pricing_txn: unknown flag %s\n' "$ccg_txn_mode" >&2; return 2 ;;
+  esac
+  ccg_txn_path="${ccg_txn_root%/}/.pricing-txn"
+  if [ -e "$ccg_txn_path" ] || [ -L "$ccg_txn_path" ]; then
+    printf 'refusing: pricing transaction journal present at %s; run scripts/catalog-content-release.sh --recover-pricing-txn\n' "$ccg_txn_path" >&2
+    if [ "$ccg_txn_mode" = --pre-start ]; then
+      return "$CCG_EX_PRE_START_JOURNAL"
+    fi
+    return "$CCG_EX_REFUSED"
+  fi
+  return 0
+}
+# ---- end ----
+# #1693 L0: under the locks, refuse while a pricing transaction journal exists
+# (a pricing publish creates its own journal only after this point).
+ccg_refuse_if_pricing_txn /opt/macprovider/ || abort_pre_mutation "pricing transaction journal present; not mutating"
 live_current="$(readlink "$root/current")" || abort_pre_mutation "cannot read current under lock"
 live_current="${live_current#./}"
 [ "$live_current" = "$prev" ] || abort_pre_mutation "current moved under lock ($live_current != $prev); not mutating"

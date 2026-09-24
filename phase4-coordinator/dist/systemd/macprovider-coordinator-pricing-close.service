@@ -1,0 +1,12 @@
+[Unit]
+Description=Close a pricing transaction restored before coordinator start (#1693)
+After=macprovider-coordinator.service
+OnFailure=macprovider-pearl-updater-alert@%n.service
+
+[Service]
+Type=oneshot
+# Waits (bounded) for the lane lock set, then up to 120 s for the
+# coordinator's source=boot applied-config record of THIS boot proving the
+# restored prior pair; no-op unless the journal is restored-unverified.
+TimeoutStartSec=600
+ExecStart=/usr/bin/python3 -I /opt/macprovider/coordinator-pricing-recover --close-restored

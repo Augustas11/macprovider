@@ -20,6 +20,8 @@
 #   E. Lease deadline: a command still running at MAX + ROLLBACK seconds is
 #      killed (process group, TERM then KILL) by the remote runner, the
 #      controller ends lease-lost, and both locks free within a bounded grace.
+#   F. #1693 L0: renewal's publish and rollback refuse under the locks while a
+#      pricing transaction journal exists.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -390,5 +392,21 @@ exit 0
   || fail "lease watchdog must TERM the controller past AA_LEASE_MAX_SECONDS (rc=$rc): $(cat "$T/wd.err")"
 rc=0; run_publish flock || rc=$?
 grep -q "content drift under lock" "$T/pub.err" || fail "watchdog exit must release the lease: $(cat "$T/pub.err")"
+
+# ---------------------------------------------------------------------------
+# F. #1693 L0: under the locks, renewal's publish and rollback refuse while a
+# pricing transaction journal exists (the lane owns /opt/macprovider/.pricing-txn).
+# ---------------------------------------------------------------------------
+mkdir -m 0700 "$T/fake/opt/macprovider/.pricing-txn"
+rc=0; run_publish flock || rc=$?
+[ "$rc" -eq 2 ] && grep -q "pricing transaction journal present; not mutating" "$T/pub.err" \
+  || fail "F: renewal publish must refuse under the lock while a pricing journal exists (rc=$rc): $(cat "$T/pub.err")"
+[ "$(readlink "$A/current")" = releases/old ] || fail "F: refused renewal mutated current"
+rc=0; run_rollback || rc=$?
+[ "$rc" -eq 1 ] && grep -q "rollback: pricing transaction journal present; not mutating" "$T/rb.err" \
+  || fail "F: renewal rollback must refuse under the lock while a pricing journal exists (rc=$rc): $(cat "$T/rb.err")"
+rmdir "$T/fake/opt/macprovider/.pricing-txn"
+rc=0; run_publish flock || rc=$?
+grep -q "content drift under lock" "$T/pub.err" || fail "F: without a journal renewal must reach its gate: $(cat "$T/pub.err")"
 
 printf '[test-autotune-activate] ok: shared activation keeps renew bytes, mutates only through the lease runner, and treats channel loss as lease loss\n'
