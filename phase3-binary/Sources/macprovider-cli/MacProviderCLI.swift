@@ -876,7 +876,12 @@ struct ServeCommand: AsyncParsableCommand {
         // SPEC-032 hello-gate ceiling flag (which is set only when the gate is
         // ON), is what holds in the gate-off E2E posture (SPEC-047-R003/R005).
         if LoopbackServeSelection.select(resolved.model) != nil {
-            return nil
+            return try await runLoopbackPoolCatalogPreflight(
+                resolved,
+                joiningCoordinator: joiningCoordinator,
+                isolateLifecycle: isolateLifecycle,
+                staticInputs: staticInputs
+            )
         }
         var artifactResolver = artifactResolver
         if let root = resolved.modelArtifactRoot, root.hasPrefix("/") {
@@ -947,6 +952,62 @@ struct ServeCommand: AsyncParsableCommand {
             )
         }
         return nil
+    }
+
+    /// SPEC-042-R013 / SPEC-047-R003(iv) pool route-time clause (#1690 M6): a
+    /// loopback model the operator pins to a signed catalog row
+    /// (`model_catalog_key` + `model_catalog_model_id`) is a Trusted Pool
+    /// member candidate. The coordinator binds its GGUF identity only for a
+    /// session admitted on a current or compatible catalog release, so the
+    /// hello must carry the release envelope of that row. Without the pin the
+    /// loopback path stays envelope-less and non-earning, as before. The row
+    /// check is the same one the MLX preflight applies; the weights are proven
+    /// by the GGUF file digest, never by the row's MLX `model_sha256`, so no
+    /// served-model refresher is attached (`modelSHA256` is nil).
+    static func runLoopbackPoolCatalogPreflight(
+        _ resolved: AppConfig,
+        joiningCoordinator: Bool,
+        isolateLifecycle: Bool,
+        staticInputs: AutotuneStaticInputs
+    ) async throws -> CatalogRuntimeTrust? {
+        guard joiningCoordinator, !resolved.donorMode,
+              let key = LoopbackServeSelection.nonEmpty(resolved.modelCatalogKey),
+              let modelID = LoopbackServeSelection.nonEmpty(resolved.modelCatalogModelID)
+        else {
+            return nil
+        }
+        // A lab join (isolated lifecycle, loopback coordinator) binds the
+        // compiled-in release and never fetches the production static feeds.
+        var inputs = staticInputs
+        if relaxesJoinAdmissionForLab(isolateLifecycle: isolateLifecycle, coordinatorURL: resolved.coordinatorURL) {
+            inputs.fetch = { _ in throw AutotuneRecommendError.invalidStaticJSON("lab join: static feed fetch disabled") }
+        }
+        let catalog = await inputs.loadCandidateCatalog()
+        if !catalog.warnings.isDisjoint(with: [.candidateCatalogIntegrityFailure, .candidateCatalogUpdateRequired]) {
+            let state = catalog.warnings.contains(.candidateCatalogIntegrityFailure)
+                ? "catalog_integrity_failure"
+                : "catalog_update_required"
+            FileHandle.standardError.write(Data("\(state): refusing coordinator join with an untrusted or incompatible catalog release\n".utf8))
+            throw ExitCode(2)
+        }
+        guard let row = catalog.value.rows[key],
+              row.runtimeStatus == "recommendable",
+              row.modelID == modelID,
+              let rowIdentity = catalog.value.rowIdentity(for: key)
+        else {
+            FileHandle.standardError.write(Data("loopback model_catalog_key/model_catalog_model_id is not a recommendable row of the signed candidate catalog\n".utf8))
+            throw ExitCode(2)
+        }
+        return CatalogRuntimeTrust(
+            state: catalog.usedFallback ? "safe_offline_fallback" : "live_verified",
+            releaseID: catalog.value.version,
+            digest: AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes),
+            signerKeyID: catalog.signerKeyID,
+            source: catalog.usedFallback ? "baked" : "coordinator",
+            policyVersion: catalog.value.policyVersion,
+            rowIdentity: rowIdentity,
+            modelSHA256: nil
+        )
     }
 
     private static func isExistingDirectory(_ path: String) -> Bool {
