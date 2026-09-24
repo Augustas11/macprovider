@@ -49,7 +49,8 @@ type HotPathInput struct {
 	// operator-controlled runtime, so it is never coordinator_observed.
 	ProviderRuntimeSource string
 	// PoolOperatorAttested is set only for an attempt the recorder derived as
-	// SPEC-022-R012 pool_operator_attested. It is the single case in which a
+	// SPEC-022-R012 pool_operator_attested. With the pool runtime's reported
+	// PromptTokens and CompletionTokens it is the single case in which a
 	// loopback-served attempt may carry ledger credit; settlement still has
 	// to verify a receipt before that credit becomes payable.
 	PoolOperatorAttested bool
@@ -209,8 +210,12 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		// loopback-served attempt earns nothing and bills nothing unless the
 		// recorder derived it pool_operator_attested. This holds whatever
 		// routing decided, so a routing regression can never pay loopback
-		// usage.
-		if IsLoopbackRuntimeSource(in.ProviderRuntimeSource) && !in.PoolOperatorAttested {
+		// usage. Attested usage is the pool runtime's own reported usage
+		// (R-12); an attempt without it, such as a cancelled stream whose
+		// runtime never reported usage, is byte_estimated and zero billable
+		// even on an authorizing pool route.
+		poolAttestedUsage := in.PoolOperatorAttested && in.PromptTokens != nil && in.CompletionTokens != nil
+		if IsLoopbackRuntimeSource(in.ProviderRuntimeSource) && !poolAttestedUsage {
 			result := zeroCredits(ComputeCredits(
 				in.PromptTokens,
 				in.CompletionTokens,

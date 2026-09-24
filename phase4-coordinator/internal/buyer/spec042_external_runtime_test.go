@@ -53,6 +53,8 @@ type externalRuntimeFixture struct {
 	// nativeMember adds a native (mlx_cache) pool member p2 next to the
 	// external-runtime member p1 (#1690 M7 engine selection).
 	nativeMember bool
+	// upstream, when set, replaces the provider's OK completion.
+	upstream http.HandlerFunc
 }
 
 func defaultExternalRuntimeFixture() externalRuntimeFixture {
@@ -139,6 +141,10 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 		h.mu.Lock()
 		h.metadata = append(h.metadata, r.Header.Get("X-MacProvider-Settlement-Metadata"))
 		h.mu.Unlock()
+		if fx.upstream != nil {
+			fx.upstream(w, r)
+			return
+		}
 		writeProviderOK(w)
 	}))
 	t.Cleanup(upstream.Close)

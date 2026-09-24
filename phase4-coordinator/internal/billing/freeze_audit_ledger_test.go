@@ -11,27 +11,40 @@ import (
 // pool_operator_attested, whatever routing decided.
 func TestWriteHotPath_LoopbackRuntimeNeverEarnsOutsideAttestedPool(t *testing.T) {
 	for _, tc := range []struct {
-		source   string
-		attested bool
-		wantPaid bool
+		source        string
+		attested      bool
+		byteEstimated bool
+		wantPaid      bool
 	}{
-		{"", false, true},
-		{"mlx_cache", false, true},
-		{"llamacpp_loopback", false, false},
-		{"ollama_loopback", false, false},
-		{"lmstudio_loopback", false, false},
-		{"openai_compatible_loopback", false, false},
-		{"llamacpp_loopback", true, true},
+		{"", false, false, true},
+		{"mlx_cache", false, false, true},
+		{"mlx_cache", false, true, true},
+		{"llamacpp_loopback", false, false, false},
+		{"ollama_loopback", false, false, false},
+		{"lmstudio_loopback", false, false, false},
+		{"openai_compatible_loopback", false, false, false},
+		{"llamacpp_loopback", true, false, true},
+		// A pool attempt whose runtime reported no usage (a cancelled
+		// stream) has only a byte estimate: zero billable at the source.
+		{"llamacpp_loopback", true, true, false},
 	} {
 		name := tc.source
 		if tc.attested {
 			name += "+pool_operator_attested"
+		}
+		if tc.byteEstimated {
+			name += "+byte_estimated"
 		}
 		t.Run("source="+name, func(t *testing.T) {
 			reqStore, store := newRequestAndBillingStores(t)
 			input, row := testHotPathInput(t, store)
 			input.ProviderRuntimeSource = tc.source
 			input.PoolOperatorAttested = tc.attested
+			if tc.byteEstimated {
+				estimate := int64(75)
+				input.CompletionTokens, row.CompletionTokens = nil, nil
+				input.EstimatedCompTokens, row.EstimatedCompTokens = &estimate, &estimate
+			}
 			if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
 				t.Fatal(err)
 			}
