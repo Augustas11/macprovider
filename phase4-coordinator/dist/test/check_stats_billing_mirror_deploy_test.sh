@@ -11,13 +11,15 @@ SERVICE="$DIST_DIR/stats-billing-mirror.service"
 TIMER="$DIST_DIR/stats-billing-mirror.timer"
 ENV_EXAMPLE="$DIST_DIR/stats-billing-mirror.env.example"
 BOOTSTRAP_SQL="$DIST_DIR/stats-billing-mirror-bootstrap.sql"
+MIGRATION_SQL="$DIST_DIR/../internal/stats/migrations/029_stats_billing_mirror_privacy_columns.up.sql"
+MIRROR_GO="$DIST_DIR/../internal/stats/billingmirror/mirror.go"
 
 fail() {
   echo "FAIL: $*" >&2
   exit 1
 }
 
-for f in "$DEPLOY_SH" "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$BOOTSTRAP_SQL"; do
+for f in "$DEPLOY_SH" "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$BOOTSTRAP_SQL" "$MIGRATION_SQL" "$MIRROR_GO"; do
   [ -f "$f" ] || fail "missing required file: $f"
 done
 
@@ -51,8 +53,10 @@ grep -qF 'install -o root -g root       -m 0644 $DEPLOY_TMP/stats-billing-mirror
   fail "deploy script missing billing mirror timer install"
 grep -qF '[ -f /etc/macprovider-stats/stats-billing-mirror.env ] && [ -f /var/lib/macprovider/request-log.sqlite ]' "$DEPLOY_SH" ||
   fail "deploy script must only enable timer when env and SQLite source exist"
-grep -qF 'warning: stats-billing-mirror.service failed; leaving coordinator deploy running' "$DEPLOY_SH" ||
-  fail "deploy script must not fail coordinator deploy on mirror run failure"
+grep -qF 'systemctl disable --now stats-billing-mirror.timer' "$DEPLOY_SH" ||
+  fail "deploy script must disable the billing mirror timer after a failed initial run"
+grep -qF 'aborting deploy: stats-billing-mirror.service failed its initial schema/binary parity run' "$DEPLOY_SH" ||
+  fail "deploy script must fail closed when the configured billing mirror cannot run"
 
 grep -qxF 'User=macprovider-stats' "$SERVICE" ||
   fail "billing mirror must run as dedicated stats user"
@@ -105,8 +109,71 @@ grep -qF 'REVOKE ALL ON ledger_request_credit_spec022_verified_audit FROM stats_
   fail "bootstrap SQL must revoke direct writer audit table DML"
 grep -qF 'REVOKE ALL ON FUNCTION stats_billing_mirror_upsert_request_credit' "$BOOTSTRAP_SQL" ||
   fail "bootstrap SQL must revoke public function execute"
-grep -qF 'GRANT EXECUTE ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN, TEXT, BOOLEAN) TO stats_billing_mirror_writer' "$BOOTSTRAP_SQL" ||
-  fail "bootstrap SQL must grant constrained upsert function"
+MIRROR_UPSERT_SIGNATURE='stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN, TEXT, BOOLEAN, TEXT, TEXT, BOOLEAN, BOOLEAN)'
+for sql in "$BOOTSTRAP_SQL" "$MIGRATION_SQL"; do
+  grep -qF "GRANT EXECUTE ON FUNCTION $MIRROR_UPSERT_SIGNATURE TO stats_billing_mirror_writer" "$sql" ||
+    fail "$sql must grant only the 20-argument mirror upsert function"
+  for column in requested_privacy_mode effective_privacy_outcome positive_verification_excluded rewards_excluded; do
+    grep -qF "$column" "$sql" || fail "$sql missing mirror column $column"
+  done
+done
+if grep -qF 'GRANT EXECUTE ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN, TEXT, BOOLEAN) TO stats_billing_mirror_writer' "$BOOTSTRAP_SQL" "$MIGRATION_SQL"; then
+  fail "bootstrap/migration must not grant the legacy 16-argument mirror upsert"
+fi
+LEGACY_16_WRITER_REVOKE='REVOKE ALL ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN, TEXT, BOOLEAN) FROM stats_billing_mirror_writer'
+for source in "$BOOTSTRAP_SQL" "$MIGRATION_SQL" "$MIRROR_GO"; do
+  grep -qF "$LEGACY_16_WRITER_REVOKE" "$source" ||
+    fail "$source must revoke the legacy 16-argument SECURITY DEFINER function from the mirror writer"
+done
+
+if ! BOOTSTRAP_SQL="$BOOTSTRAP_SQL" MIGRATION_SQL="$MIGRATION_SQL" MIRROR_GO="$MIRROR_GO" python3 <<'PY'
+import os
+import re
+import sys
+
+expected = [
+    "p_sqlite_lrc_id", "p_request_id", "p_attempt_n", "p_provider_id",
+    "p_ts_utc", "p_created_at_utc", "p_updated_at_utc", "p_prompt_tokens",
+    "p_completion_tokens", "p_estimated_completion_tokens", "p_usage_source",
+    "p_provider_credits", "p_fault_flag", "p_quarantined",
+    "p_settlement_policy_mode", "p_spec022_verified", "p_requested_privacy_mode",
+    "p_effective_privacy_outcome", "p_positive_verification_excluded",
+    "p_rewards_excluded",
+]
+
+def signature(path):
+    text = open(path, encoding="utf-8").read()
+    matches = re.findall(
+        r"CREATE OR REPLACE FUNCTION stats_billing_mirror_upsert_request_credit\(\s*(.*?)\s*\)\s*"
+        r"RETURNS void\s*LANGUAGE plpgsql\s*SECURITY DEFINER\s*"
+        r"SET search_path = pg_catalog, public, pg_temp",
+        text,
+        flags=re.S,
+    )
+    if not matches:
+        raise AssertionError(f"missing upsert definition in {path}")
+    args = [part.strip().split()[0] for part in matches[-1].split(",")]
+    if args != expected:
+        raise AssertionError(f"{path}: upsert args {args!r}")
+
+for name in ("BOOTSTRAP_SQL", "MIGRATION_SQL", "MIRROR_GO"):
+    signature(os.environ[name])
+
+go = open(os.environ["MIRROR_GO"], encoding="utf-8").read()
+call = re.search(
+    r"SELECT stats_billing_mirror_upsert_request_credit\((.*?)\)`,",
+    go,
+    flags=re.S,
+)
+if not call:
+    raise AssertionError("missing mirror upsert call")
+placeholders = [int(value) for value in re.findall(r"\$(\d+)", call.group(1))]
+if placeholders != list(range(1, 21)):
+    raise AssertionError(f"mirror call placeholders {placeholders!r}")
+PY
+then
+  fail "binary, bootstrap, and migration mirror signatures diverge"
+fi
 grep -qF 'CHECK (usage_source IN' "$BOOTSTRAP_SQL" ||
   fail "bootstrap SQL must carry source billing enum constraints"
 
