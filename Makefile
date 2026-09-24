@@ -89,6 +89,7 @@ test-dist:
 	bash scripts/test-pearl-runtime-release.sh
 	bash scripts/test-live-coordinator-release-gate.sh
 	bash scripts/test-release-security-posture.sh
+	bash scripts/test-h1-undercredit-probe.sh
 	bash scripts/test-malibu-bootstrap-bridge.sh
 	bash scripts/test-recover-malibu-publication.sh
 	bash scripts/test-acceptance-candidate-security.sh

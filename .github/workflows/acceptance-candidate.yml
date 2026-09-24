@@ -107,7 +107,7 @@ jobs:
         shell: bash
         env:
           CANDIDATE_COMMIT: ${{ steps.source.outputs.candidate_commit }}
-        run: bash candidate/scripts/verify-app-build-inputs.sh "$CANDIDATE_COMMIT"
+        run: bash control/scripts/verify-app-build-inputs.sh "$CANDIDATE_COMMIT" candidate
 
       - name: Verify candidate Pearl Go module parity
         shell: bash
