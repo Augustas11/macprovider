@@ -741,6 +741,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         requestID: auditRequestID,
                         settlementMetadata: settlementMetadata,
                         runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
+                        settlementRuntimeSource: modelRuntime.settlementRuntimeSource,
                         settlementDisposition: completion.settlementDisposition,
                         terminalStateTSUnixMS: terminalStateTSUnixMS
                     )
@@ -1157,6 +1158,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         requestID: requestID,
                         settlementMetadata: settlementMetadata,
                         runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
+                        settlementRuntimeSource: modelRuntime.settlementRuntimeSource,
                         settlementDisposition: completion.settlementDisposition,
                         terminalStateTSUnixMS: terminalStateTSUnixMS
                     )
@@ -1509,6 +1511,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         requestID: String? = nil,
         settlementMetadata: SettlementReceiptMetadata? = nil,
         runtimeSettlementEligible: Bool,
+        settlementRuntimeSource: String? = nil,
         settlementDisposition: ContinuousBatchSettlementDisposition,
         terminalState: String = "normal_done",
         terminalStateTSUnixMS: Int64? = nil
@@ -1520,11 +1523,24 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             return .omitted(.preV16Binary)
         }
         // #1695: eligibility is explicit. A runtime that is not settlement
-        // eligible (loopback, fixture) never signs, whatever its completions say.
-        guard runtimeSettlementEligible else {
+        // eligible (loopback, fixture) never signs, whatever its completions
+        // say, unless this request's v0.4 settlement metadata carries a
+        // matching SPEC-015 §N.12 pool_runtime_authorization (#1690 M5).
+        // Error receipts pass no runtime source, so they never qualify.
+        let poolAuthorized = !runtimeSettlementEligible && SettlementReceiptEligibility.poolAuthorizes(
+            runtimeSource: settlementRuntimeSource,
+            settlementMetadata: settlementMetadata,
+            providerID: providerID
+        )
+        guard runtimeSettlementEligible || poolAuthorized else {
             return .omitted(.runtimeNotSettlementEligible)
         }
-        guard settlementDisposition == .eligibleOwner else {
+        // A pool-authorized loopback completion carries the runtime-level
+        // `.notEligible` marker (#1695); only a replay waiter stays excluded.
+        let dispositionSettles = poolAuthorized
+            ? settlementDisposition != .nonSettlingReplay
+            : settlementDisposition == .eligibleOwner
+        guard dispositionSettles else {
             return .omitted(.nonSettlingReplay)
         }
         // SPEC-015 §M.2.2 — fail-closed refusal BEFORE construction.
@@ -1551,6 +1567,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                       settlementMetadata.modelID == request.model,
                       case .captured(let modelHash) = modelHashSource else {
                     return .omitted(.constructionFailed)
+                }
+                if poolAuthorized {
+                    PoolLoopbackUsageGuard.schedule(
+                        settlementMetadata: settlementMetadata,
+                        providerID: providerID,
+                        completionText: outputContent,
+                        reportedCompletionTokens: tokensOut
+                    )
                 }
                 let issuedAt = Int64(Date().timeIntervalSince1970 * 1000)
                 let header = try receiptBuilder.buildSettlement(

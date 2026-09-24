@@ -5525,10 +5525,17 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/ws/messages.go:type PoolRuntimeAuthorization",
-        "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) recordRouteSnapshot"
+        "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) recordRouteSnapshot",
+        "phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:PoolRuntimeAuthorization",
+        "phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:SettlementReceiptEligibility",
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:buildReceiptHeader",
+        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:receiptHeaderResult"
       ],
       "tests": [
-        "phase4-coordinator/internal/buyer/spec042_external_runtime_test.go:TestSPEC042ExternalRuntimePoolRouteDerivesMemberAndSnapshot"
+        "phase4-coordinator/internal/buyer/spec042_external_runtime_test.go:TestSPEC042ExternalRuntimePoolRouteDerivesMemberAndSnapshot",
+        "phase3-binary/Tests/macprovider-cliTests/PoolRuntimeAuthorizationTests.swift:testDecisionRequiresEveryBoundField",
+        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayTests.swift:testPoolAuthorizedLoopbackSignsRelayReceiptOnlyForMatchingAuthorization",
+        "phase3-binary/Tests/macprovider-cliTests/PoolRuntimeAuthorizationTests.swift:testAbsentOrMalformedAuthorizationParsesAsNotAuthorized"
       ],
       "journeys": [],
       "evidence": [],

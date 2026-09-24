@@ -20,8 +20,10 @@ import MacProviderCore
 // receipts are disabled on this path (no local MLX tokenizer), so it never
 // fabricates a `model_hash`-bound receipt. Receipts stay off via
 // `isSettlementReceiptEligible == false` and `.notEligible` completions
-// (#1695), independent of coordinator buyer-serving state. Usage is copied
-// from the upstream runtime.
+// (#1695), independent of coordinator buyer-serving state, except for one
+// request whose settlement metadata carries a matching SPEC-015 §N.12
+// `pool_runtime_authorization` (#1690 M5). Usage is copied from the
+// upstream runtime.
 
 /// Serve-time recognition and normalization of an `ollama_loopback` model ref.
 enum OllamaLoopbackServeModel {
@@ -769,9 +771,12 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     var loadedModelHashAlgorithm: String? { evidence.algorithm }
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
-    /// Non-earning loopback path (#1695): never sign a SPEC-015 receipt, even
-    /// if the coordinator routes a request here with settlement metadata.
+    /// Non-earning loopback path (#1695): never sign a SPEC-015 receipt on
+    /// settlement metadata alone. The one exception (SPEC-015 §N.12, #1690
+    /// M5) is a request whose metadata carries a `pool_runtime_authorization`
+    /// naming this runtime's `runtime_source`.
     nonisolated var isSettlementReceiptEligible: Bool { false }
+    nonisolated var settlementRuntimeSource: String? { runtimeSource }
 
     func setProviderStatus(_ providerStatus: ProviderStatus) {
         self.providerStatus = providerStatus

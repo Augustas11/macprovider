@@ -1239,6 +1239,75 @@ final class InferenceRelayTests: XCTestCase {
         }
     }
 
+    // SPEC-015 §N.12 / AC-12b (#1690 M5): a loopback runtime signs exactly one
+    // relay receipt when the request's settlement metadata carries a matching
+    // pool_runtime_authorization, and nothing (one runtime_not_settlement_eligible
+    // row) when it is absent, malformed, for another runtime, or copied from
+    // another request, attempt, provider, or route snapshot.
+    func testPoolAuthorizedLoopbackSignsRelayReceiptOnlyForMatchingAuthorization() async throws {
+        let loopback = try ReceiptEligibilityFixtures.makeOllamaLoopbackRuntime(testCase: self)
+        let model = ReceiptEligibilityFixtures.ollamaServedRef
+        let providerID = "provider-relay-test"
+        for stream in [false, true] {
+            let requestID = "req-pool-\(stream ? "stream" : "complete")"
+            func authorization(
+                runtimeSource: String = OllamaLoopbackServeModel.runtimeSource,
+                requestID authorizedRequestID: String? = nil,
+                providerID authorizedProviderID: String? = nil,
+                attemptN: Int = 0,
+                routeSnapshotDigest: String = String(repeating: "3", count: 64)
+            ) -> [String: Any] {
+                ReceiptEligibilityFixtures.poolRuntimeAuthorizationWire(
+                    runtimeSource: runtimeSource,
+                    requestID: authorizedRequestID ?? requestID,
+                    providerID: authorizedProviderID ?? providerID,
+                    attemptN: attemptN,
+                    routeSnapshotDigest: routeSnapshotDigest
+                )
+            }
+
+            let authorized = try await relayReceiptRoundTrip(
+                runtime: loopback.runtime,
+                model: model,
+                expectedModelHash: loopback.digest,
+                requestID: requestID,
+                stream: stream,
+                providerID: providerID,
+                settlementExtras: [PoolRuntimeAuthorization.wireKey: authorization()]
+            )
+            XCTAssertEqual(authorized.endFrame["status"] as? String, "complete", "stream=\(stream)")
+            XCTAssertNotNil(authorized.endFrame["receipt"], "authorized loopback MUST sign: stream=\(stream)")
+            XCTAssertEqual(authorized.omittedReasons, [], "stream=\(stream)")
+
+            var malformed = authorization()
+            malformed["extra"] = "member"
+            let refused: [(label: String, extras: [String: Any])] = [
+                ("absent", [:]),
+                ("malformed", [PoolRuntimeAuthorization.wireKey: malformed]),
+                ("other_runtime_source", [PoolRuntimeAuthorization.wireKey: authorization(runtimeSource: LlamaCppLoopbackServeModel.runtimeSource)]),
+                ("other_request", [PoolRuntimeAuthorization.wireKey: authorization(requestID: "req-other")]),
+                ("other_attempt", [PoolRuntimeAuthorization.wireKey: authorization(attemptN: 1)]),
+                ("other_provider", [PoolRuntimeAuthorization.wireKey: authorization(providerID: "provider-other")]),
+                ("other_route_snapshot", [PoolRuntimeAuthorization.wireKey: authorization(routeSnapshotDigest: String(repeating: "5", count: 64))]),
+            ]
+            for testCase in refused {
+                let result = try await relayReceiptRoundTrip(
+                    runtime: loopback.runtime,
+                    model: model,
+                    expectedModelHash: loopback.digest,
+                    requestID: requestID,
+                    stream: stream,
+                    providerID: providerID,
+                    settlementExtras: testCase.extras
+                )
+                let context = "\(testCase.label) stream=\(stream)"
+                XCTAssertEqual(result.endFrame["status"] as? String, "complete", context)
+                XCTAssertNil(result.endFrame["receipt"], "unauthorized loopback MUST NOT sign: \(context)")
+                XCTAssertEqual(result.omittedReasons, ["runtime_not_settlement_eligible"], context)
+            }
+        }
+    }
+
     private func relayReceiptRoundTrip(
         runtime: any ModelRuntimeServing,
         model: String,
@@ -1249,7 +1318,8 @@ final class InferenceRelayTests: XCTestCase {
             key: try! Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
         ),
         providerID: String? = "provider-relay-test",
-        attachSettlement: Bool = true
+        attachSettlement: Bool = true,
+        settlementExtras: [String: Any] = [:]
     ) async throws -> (endFrame: [String: Any], omittedReasons: [String]) {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
         let recorder = FrameRecorder()
@@ -1289,7 +1359,7 @@ final class InferenceRelayTests: XCTestCase {
                 modelID: model,
                 receiptKeyID: ReceiptEligibilityFixtures.receiptKeyID(key.publicKey.rawRepresentation),
                 expectedModelHash: expectedModelHash
-            )
+            ).merging(settlementExtras) { _, extra in extra }
         }
         let frames = try await ReceiptAudit.withSink({ record in audit.append(record) }) {
             try await relay.handleInferenceRequest(frame)
@@ -1319,6 +1389,7 @@ private actor FakeReceiptCompletionRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func currentSnapshot() async -> RuntimeSnapshot {
@@ -1372,6 +1443,7 @@ private actor FakeCancelAfterCompletionReceiptRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { settlementEligible }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func currentSnapshot() async -> RuntimeSnapshot {
@@ -1493,6 +1565,7 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func complete(
         _ request: ChatCompletionRequest,
@@ -1535,6 +1608,7 @@ private actor FakePreflightRejectRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func currentSnapshot() async -> RuntimeSnapshot {
         RuntimeSnapshot(state: .ready, container: nil, modelID: "mlx-community/Test-Model", modelHash: nil)
@@ -1589,6 +1663,7 @@ private actor FakeCompletionRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func observedConversationKeys() -> [String?] {

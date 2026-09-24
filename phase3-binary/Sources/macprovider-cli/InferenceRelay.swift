@@ -691,6 +691,7 @@ actor InferenceRelay {
                     modelHashSource: modelHashSource,
                     settlementMetadata: settlementMetadata,
                     runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
+                    settlementRuntimeSource: modelRuntime.settlementRuntimeSource,
                     relayBlindSuppressed: relayBlindClaim != nil,
                     terminalState: "buyer_cancel",
                     terminalStateTSUnixMS: terminalStateTSUnixMS
@@ -736,6 +737,7 @@ actor InferenceRelay {
             modelHashSource: modelHashSource,
             settlementMetadata: settlementMetadata,
             runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
+            settlementRuntimeSource: modelRuntime.settlementRuntimeSource,
             relayBlindSuppressed: relayBlindClaim != nil,
             terminalStateTSUnixMS: terminalStateTSUnixMS
         )
@@ -774,6 +776,7 @@ actor InferenceRelay {
         modelHashSource: ReceiptModelHashSource,
         settlementMetadata: SettlementReceiptMetadata? = nil,
         runtimeSettlementEligible: Bool,
+        settlementRuntimeSource: String? = nil,
         relayBlindSuppressed: Bool,
         terminalState: String = "normal_done",
         terminalStateTSUnixMS: Int64? = nil
@@ -794,12 +797,24 @@ actor InferenceRelay {
             return nil
         }
         // #1695: eligibility is explicit. A runtime that is not settlement
-        // eligible (loopback, fixture) never signs, whatever its completions say.
-        guard runtimeSettlementEligible else {
+        // eligible (loopback, fixture) never signs, whatever its completions
+        // say, unless this request's settlement metadata carries a matching
+        // SPEC-015 §N.12 pool_runtime_authorization (#1690 M5).
+        let poolAuthorized = !runtimeSettlementEligible && SettlementReceiptEligibility.poolAuthorizes(
+            runtimeSource: settlementRuntimeSource,
+            settlementMetadata: settlementMetadata,
+            providerID: providerID
+        )
+        guard runtimeSettlementEligible || poolAuthorized else {
             ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .runtimeNotSettlementEligible)
             return nil
         }
-        guard completion.settlementDisposition == .eligibleOwner else {
+        // A pool-authorized loopback completion carries the runtime-level
+        // `.notEligible` marker (#1695); only a replay waiter stays excluded.
+        let dispositionSettles = poolAuthorized
+            ? completion.settlementDisposition != .nonSettlingReplay
+            : completion.settlementDisposition == .eligibleOwner
+        guard dispositionSettles else {
             ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .nonSettlingReplay)
             return nil
         }
@@ -825,6 +840,14 @@ actor InferenceRelay {
                 guard let modelHash = resolvedModelHash else {
                     ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .constructionFailed)
                     return nil
+                }
+                if poolAuthorized {
+                    PoolLoopbackUsageGuard.schedule(
+                        settlementMetadata: settlementMetadata,
+                        providerID: providerID,
+                        completionText: completion.content,
+                        reportedCompletionTokens: Int64(completion.generatedCompletionTokens)
+                    )
                 }
                 let issuedAt = Int64(Date().timeIntervalSince1970 * 1000)
                 return try receiptBuilder.buildSettlement(
@@ -1042,6 +1065,7 @@ actor InferenceRelay {
                         modelHashSource: modelHashSource,
                         settlementMetadata: settlementMetadata,
                         runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
+                        settlementRuntimeSource: modelRuntime.settlementRuntimeSource,
                         relayBlindSuppressed: relayBlindClaim != nil,
                         terminalState: "buyer_cancel",
                         terminalStateTSUnixMS: terminalStateTSUnixMS
@@ -1131,6 +1155,7 @@ actor InferenceRelay {
                     modelHashSource: modelHashSource,
                     settlementMetadata: settlementMetadata,
                     runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
+                    settlementRuntimeSource: modelRuntime.settlementRuntimeSource,
                     relayBlindSuppressed: relayBlindClaim != nil,
                     terminalStateTSUnixMS: terminalStateTSUnixMS
                 )

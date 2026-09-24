@@ -1596,3 +1596,103 @@ private extension HTTPHeaders {
         map { "\($0.name.lowercased()): \($0.value)" }
     }
 }
+
+// SPEC-015 §N.12 / AC-12b (#1690 M5): the HTTP receipt decision for a runtime
+// that is not settlement eligible is made per request from the settlement
+// metadata's pool_runtime_authorization.
+extension HTTPServerReceiptTests {
+    private static let poolServedModelHash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+
+    private func poolReceiptDecision(
+        authorization: [String: Any]?,
+        runtimeSource: String? = LlamaCppLoopbackServeModel.runtimeSource,
+        disposition: ContinuousBatchSettlementDisposition = .notEligible
+    ) throws -> (issued: Bool, omitted: ReceiptOmissionReason?) {
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        var wire = httpSettlementMetadataWire(
+            receiptKeyID: httpReceiptKeyID(key.publicKey.rawRepresentation),
+            expectedModelHash: Self.poolServedModelHash
+        )
+        if let authorization {
+            wire[PoolRuntimeAuthorization.wireKey] = authorization
+        }
+        let metadata = try XCTUnwrap(SettlementReceiptMetadata(wire: wire))
+        let request = try parseRequest([
+            "model": "fixture-model",
+            "messages": [["role": "user", "content": "hello"]],
+        ])
+        let result = try RouterHandler.receiptHeaderResult(
+            providerID: "provider-a",
+            receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+            request: request,
+            outputContent: "answer",
+            outputToolCalls: nil,
+            finishReason: "stop",
+            promptTokens: 8,
+            ttftMs: 7,
+            tokensOut: 3,
+            unixTsSeconds: 1_800_000_000,
+            modelHashSource: .captured(Self.poolServedModelHash),
+            requestID: "req-http-receipt",
+            settlementMetadata: metadata,
+            runtimeSettlementEligible: false,
+            settlementRuntimeSource: runtimeSource,
+            settlementDisposition: disposition,
+            terminalStateTSUnixMS: 1_800_000_000_000
+        )
+        switch result {
+        case .issued:
+            return (true, nil)
+        case .omitted(let reason):
+            return (false, reason)
+        }
+    }
+
+    private func httpPoolAuthorization(
+        runtimeSource: String = LlamaCppLoopbackServeModel.runtimeSource,
+        requestID: String = "req-http-receipt",
+        providerID: String = "provider-a",
+        attemptN: Int = 0,
+        routeSnapshotDigest: String = String(repeating: "3", count: 64)
+    ) -> [String: Any] {
+        ReceiptEligibilityFixtures.poolRuntimeAuthorizationWire(
+            runtimeSource: runtimeSource,
+            requestID: requestID,
+            providerID: providerID,
+            attemptN: attemptN,
+            routeSnapshotDigest: routeSnapshotDigest
+        )
+    }
+
+    func testHTTPPoolAuthorizedLoopbackSignsV04Receipt() throws {
+        let decision = try poolReceiptDecision(authorization: httpPoolAuthorization())
+        XCTAssertTrue(decision.issued)
+        XCTAssertNil(decision.omitted)
+    }
+
+    func testHTTPLoopbackWithoutMatchingPoolAuthorizationSignsNothing() throws {
+        var malformed = httpPoolAuthorization()
+        malformed["attempt_n"] = true
+        let cases: [(label: String, authorization: [String: Any]?, runtimeSource: String?)] = [
+            ("absent", nil, LlamaCppLoopbackServeModel.runtimeSource),
+            ("malformed", malformed, LlamaCppLoopbackServeModel.runtimeSource),
+            ("other_runtime_source", httpPoolAuthorization(runtimeSource: OllamaLoopbackServeModel.runtimeSource), LlamaCppLoopbackServeModel.runtimeSource),
+            ("other_request", httpPoolAuthorization(requestID: "req-other"), LlamaCppLoopbackServeModel.runtimeSource),
+            ("other_attempt", httpPoolAuthorization(attemptN: 2), LlamaCppLoopbackServeModel.runtimeSource),
+            ("other_provider", httpPoolAuthorization(providerID: "provider-b"), LlamaCppLoopbackServeModel.runtimeSource),
+            ("other_route_snapshot", httpPoolAuthorization(routeSnapshotDigest: String(repeating: "5", count: 64)), LlamaCppLoopbackServeModel.runtimeSource),
+            ("runtime_without_source", httpPoolAuthorization(), nil),
+        ]
+        for testCase in cases {
+            let decision = try poolReceiptDecision(authorization: testCase.authorization, runtimeSource: testCase.runtimeSource)
+            XCTAssertFalse(decision.issued, testCase.label)
+            XCTAssertEqual(decision.omitted, .runtimeNotSettlementEligible, testCase.label)
+        }
+    }
+
+    func testHTTPPoolAuthorizedReplayWaiterStillSignsNothing() throws {
+        let decision = try poolReceiptDecision(authorization: httpPoolAuthorization(), disposition: .nonSettlingReplay)
+        XCTAssertFalse(decision.issued)
+        XCTAssertEqual(decision.omitted, .nonSettlingReplay)
+    }
+}

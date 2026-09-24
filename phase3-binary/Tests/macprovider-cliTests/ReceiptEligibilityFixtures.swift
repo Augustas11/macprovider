@@ -82,6 +82,26 @@ enum ReceiptEligibilityFixtures {
         ]
     }
 
+    /// SPEC-015 §N.12 (#1690 M5): a well-formed `pool_runtime_authorization`
+    /// bound to `settlementMetadataWire`'s attempt and route snapshot.
+    static func poolRuntimeAuthorizationWire(
+        runtimeSource: String,
+        requestID: String,
+        providerID: String,
+        attemptN: Int = 0,
+        routeSnapshotDigest: String = String(repeating: "3", count: 64)
+    ) -> [String: Any] {
+        [
+            "pool_id": "pool-lab-1",
+            "manifest_core_digest": String(repeating: "6", count: 64),
+            "runtime_source": runtimeSource,
+            "request_id": requestID,
+            "attempt_n": attemptN,
+            "provider_id": providerID,
+            "route_snapshot_digest": routeSnapshotDigest,
+        ]
+    }
+
     static func receiptKeyID(_ pubkey: Data) -> String {
         "ed25519-sha256:" + SHA256.hash(data: pubkey).map { String(format: "%02x", $0) }.joined()
     }

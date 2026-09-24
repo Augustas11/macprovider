@@ -45,7 +45,14 @@ protocol ModelRuntimeServing: Actor {
     /// protocol-extension default) so a new loopback or fixture runtime cannot
     /// inherit receipt eligibility by omission. This is a CLI accident guard,
     /// not a security boundary: the coordinator settlement gate is the control.
+    /// SPEC-015 §N.12 (#1690 M5) lifts it for one request at a time, only
+    /// through a matching coordinator `pool_runtime_authorization`.
     nonisolated var isSettlementReceiptEligible: Bool { get }
+    /// SPEC-015 §N.12: the SPEC-046 `runtime_source` a request's
+    /// `pool_runtime_authorization` must name to let this runtime sign that
+    /// request's v0.4 receipt. Nil for a runtime no pool authorization can
+    /// enable. Declared explicitly by every conformer, as above.
+    nonisolated var settlementRuntimeSource: String? { get }
 }
 
 struct RelayBlindPreparedRequest: @unchecked Sendable {
@@ -1285,6 +1292,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// Native MLX catalog serving settles through SPEC-015 receipts; it has no
     /// SPEC-047 admission rows, so eligibility is never gated on admission.
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
 
     private nonisolated static func makeServeGenerateParameters(
         maxTokens: Int?,

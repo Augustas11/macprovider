@@ -4431,18 +4431,19 @@ MUST NOT sign, except for one request at a time when the coordinator's
 route metadata for that request authorizes it. The SPEC-046 loopback
 runtimes are such runtimes
 (`OpenAICompatibleLoopbackRuntime.isSettlementReceiptEligible == false`,
-`phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:774`).
+`phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:778`).
 The provider decides per request, not from a per-runtime constant.
 
 1. **Authorization member.** The coordinator's v0.4 settlement metadata for
    a request, the object the provider parses into `SettlementReceiptMetadata`
-   (`phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:57-106`),
+   (`phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:157-224`),
    MAY carry `pool_runtime_authorization`. It is a closed JSON object with
    exactly `pool_id` (string), `manifest_core_digest` (64 lowercase hex),
    `runtime_source` (string), `request_id` (string), `attempt_n` (integer),
    `provider_id` (string), and `route_snapshot_digest` (64 lowercase hex).
-   It is request metadata, not a receipt field. Current state (pending
-   implementation): the parser does not read this member yet. The coordinator MUST attach it only when the attempt satisfies
+   It is request metadata, not a receipt field. The provider parses it
+   tolerantly: an absent or malformed member means not authorized
+   (`PoolRuntimeAuthorization`, `ReceiptBuilder.swift`; #1690 M5). The coordinator MUST attach it only when the attempt satisfies
    SPEC-022-R012 at route time, and its three values MUST equal the route
    snapshot's digested `pool_id`, `manifest_core_digest`, and
    `runtime_source`. The receipt binds those values through
