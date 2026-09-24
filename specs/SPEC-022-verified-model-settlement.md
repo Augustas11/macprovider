@@ -1,11 +1,19 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.2.0
+Version: v0.2.1
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.2.1
+
+Conformance tracking only (#1690). R-3.4.2, the `pool_operator_attested`
+exception to R-3.4.1, is a conformance obligation of `SPEC-022-R012`
+(pending), not of `SPEC-022-R003`. R-3 keeps its native-path obligations,
+which the signed 2026-09-18 JOURNEY-BUYER-PAID-PATH evidence covers, so
+`SPEC-022-R003` stays conformant. No requirement text or obligation changes.
 
 ### v0.2.0
 
@@ -546,7 +554,8 @@ satisfies R-12 and carries usage source `pool_operator_attested`. Its usage
 is the pool operator's own reported usage, which the serving provider signs
 in its v0.4 receipt, trusted administratively under the SPEC-042 pool policy.
 The SPEC-005 ceilings still bound it (R-12.4). No other attempt may rely on
-this exception.
+this exception. (v0.2.1) R-3.4.2 is a conformance obligation of
+`SPEC-022-R012`, not of `SPEC-022-R003`.
 
 R-3.5. Settlement MUST compare receipt `prompt_hash` and `output_hash` against
 persisted canonical hashes for the exact request attempt: the buyer request

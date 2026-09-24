@@ -680,13 +680,27 @@ actor InferenceRelay {
         if state.isCancelled {
             if state.markTerminalSent() {
                 let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
-                // A cancelled non-streaming request delivered no output, so a
-                // receipt over the generated result would bind undelivered
-                // output (SPEC-015 delivered-prefix rule). It is omitted.
-                let receiptHeader: String? = nil
-                if relayBlindClaim == nil {
-                    ReceiptAudit.emitOmitted(providerID: receiptProviderID, requestID: requestID, reason: .preTokenCancel)
-                }
+                // A cancelled non-streaming request delivered no output. The
+                // buyer_cancel receipt binds the empty delivered prefix with
+                // zero billable usage (SPEC-015 §N.5/§N.7), never the
+                // generated result.
+                let receiptHeader = Self.buildReceiptHeader(
+                    receiptBuilder: receiptBuilder,
+                    providerID: receiptProviderID,
+                    request: request,
+                    completion: completion,
+                    ttftMs: completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt),
+                    unixTsSeconds: unixTsSeconds,
+                    requestID: requestID,
+                    modelHashSource: modelHashSource,
+                    settlementMetadata: settlementMetadata,
+                    runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
+                    settlementRuntimeSource: modelRuntime.settlementRuntimeSource,
+                    relayBlindSuppressed: relayBlindClaim != nil,
+                    terminalState: "buyer_cancel",
+                    terminalStateTSUnixMS: terminalStateTSUnixMS,
+                    deliveredOutput: .nothing
+                )
                 var endFrame: [String: Any] = [
                     "type": "inference_response_end",
                     "request_id": requestID,
@@ -705,7 +719,10 @@ actor InferenceRelay {
                 try attachRelayBlindTerminal(
                     &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
                 )
-                try await sendEndFrame(endFrame, requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
+                let issued = receiptHeader.map { _ in
+                    ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: 0, ttftMs: completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt), unixTs: unixTsSeconds)
+                }
+                try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
             }
             return completion
         }
@@ -790,6 +807,16 @@ actor InferenceRelay {
         }
     }
 
+    /// What the buyer received of the generated output (SPEC-015 delivered-
+    /// prefix rule). `.nothing`: no output, so a settlement receipt binds the empty
+    /// prefix and a legacy receipt is omitted. `.unknown`: some frames may not
+    /// have reached the buyer, so no receipt is signed.
+    enum DeliveredOutput {
+        case complete
+        case nothing
+        case unknown
+    }
+
     private static func buildReceiptHeader(
         receiptBuilder: ReceiptBuilder?,
         providerID: String?,
@@ -804,7 +831,8 @@ actor InferenceRelay {
         settlementRuntimeSource: String? = nil,
         relayBlindSuppressed: Bool,
         terminalState: String = "normal_done",
-        terminalStateTSUnixMS: Int64? = nil
+        terminalStateTSUnixMS: Int64? = nil,
+        deliveredOutput: DeliveredOutput = .complete
     ) -> String? {
         // SPEC-015 v0.4.7: relay-blind execution evidence is not a SPEC-015
         // receipt, so there is no receipt omission to audit.
@@ -848,6 +876,22 @@ actor InferenceRelay {
             ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .nonSettlingReplay)
             return nil
         }
+        // Delivery is checked after eligibility, so an ineligible runtime
+        // keeps its #1695 omission reason on every cancel path.
+        switch deliveredOutput {
+        case .complete:
+            break
+        case .unknown:
+            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .constructionFailed)
+            return nil
+        case .nothing where settlementMetadata == nil:
+            // A legacy receipt has no delivered-prefix binding.
+            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .preTokenCancel)
+            return nil
+        case .nothing:
+            break
+        }
+        let emptyPrefix = deliveredOutput == .nothing
         // SPEC-015 §M.2.2 — refuse receipt construction when the
         // request-start container cannot be identified.
         let resolvedModelHash: String?
@@ -885,9 +929,9 @@ actor InferenceRelay {
                     input: SettlementReceiptInput(
                         metadata: settlementMetadata,
                         modelHash: modelHash,
-                        content: completion.content,
-                        toolCalls: completion.toolCalls,
-                        finishReason: completion.finishReason,
+                        content: emptyPrefix ? "" : completion.content,
+                        toolCalls: emptyPrefix ? nil : completion.toolCalls,
+                        finishReason: emptyPrefix ? "" : completion.finishReason,
                         promptTokens: Int64(completion.promptTokens),
                         completionTokens: Int64(completion.generatedCompletionTokens),
                         terminalState: terminalState,
@@ -1041,10 +1085,7 @@ actor InferenceRelay {
                         snapshot: handle.snapshot,
                         settlementMetadata: settlementMetadata
                     )
-                    if !outputDelivered, relayBlindClaim == nil {
-                        ReceiptAudit.emitOmitted(providerID: receiptProviderID, requestID: requestID, reason: .constructionFailed)
-                    }
-                    let receiptHeader = !outputDelivered ? nil : Self.buildReceiptHeader(
+                    let receiptHeader = Self.buildReceiptHeader(
                         receiptBuilder: receiptBuilder,
                         providerID: receiptProviderID,
                         request: request,
@@ -1058,7 +1099,8 @@ actor InferenceRelay {
                         settlementRuntimeSource: modelRuntime.settlementRuntimeSource,
                         relayBlindSuppressed: relayBlindClaim != nil,
                         terminalState: "buyer_cancel",
-                        terminalStateTSUnixMS: terminalStateTSUnixMS
+                        terminalStateTSUnixMS: terminalStateTSUnixMS,
+                        deliveredOutput: outputDelivered ? .complete : .unknown
                     )
                     var endFrame: [String: Any] = [
                         "type": "inference_response_end",

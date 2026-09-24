@@ -8,9 +8,13 @@ import MacProviderCore
 /// snapshot-manifest pair of the operator-declared snapshot directory.
 final class MLXLMLoopbackTests: XCTestCase {
     private func makeSnapshot() throws -> URL {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("mlxlm-snapshot-\(UUID().uuidString)")
+        // The unique part is the parent: the served ref is the snapshot's
+        // last path component, and discovery refuses a credential-shaped one
+        // (40+ [A-Za-z0-9_-] characters, such as "mlxlm-snapshot-<UUID>").
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent("mlxlm-\(UUID().uuidString)")
+        let root = parent.appendingPathComponent("mlxlm-snapshot")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        addTeardownBlock { try? FileManager.default.removeItem(at: parent) }
         try Data(#"{"model_type":"qwen2"}"#.utf8).write(to: root.appendingPathComponent("config.json"))
         try Data(repeating: 0x42, count: 8192).write(to: root.appendingPathComponent("model.safetensors"))
         return root.resolvingSymlinksInPath().standardizedFileURL
@@ -99,6 +103,12 @@ final class MLXLMLoopbackTests: XCTestCase {
         ))
     }
 
+    func testCredentialShapedSnapshotNameIsNotADiscoverableRef() {
+        XCTAssertFalse(BYOMDiscoveryPrivacy.isSafeRuntimeModelReference("mlxlm-snapshot-\(UUID().uuidString)"))
+        XCTAssertTrue(BYOMDiscoveryPrivacy.isSafeRuntimeModelReference("mlxlm-snapshot"))
+        XCTAssertTrue(BYOMDiscoveryPrivacy.isSafeRuntimeModelReference("Qwen2.5-0.5B-Instruct-4bit"))
+    }
+
     func testDiscoveryReportsOnlyTheListedDeclaredSnapshot() async throws {
         let snapshot = try makeSnapshot()
         let listed = await BYOMMLXLMDiscovery(
@@ -162,9 +172,11 @@ private final class MLXLMStubClient: BYOMDiscoveryHTTPClient, @unchecked Sendabl
 // hashing (CODE H1-H3/M4/L5, SECURITY M1).
 final class MLXLMLoopbackAuditR1Tests: XCTestCase {
     private func makeSnapshot() throws -> URL {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("mlxlm-r1-\(UUID().uuidString)")
+        // Unique parent, model-shaped snapshot name (see MLXLMLoopbackTests).
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent("mlxlm-r1-\(UUID().uuidString)")
+        let root = parent.appendingPathComponent("mlxlm-snapshot")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        addTeardownBlock { try? FileManager.default.removeItem(at: parent) }
         try Data(#"{"model_type":"qwen2"}"#.utf8).write(to: root.appendingPathComponent("config.json"))
         try FileManager.default.createDirectory(at: root.appendingPathComponent("sub"), withIntermediateDirectories: true)
         try Data(repeating: 0x42, count: 8192).write(to: root.appendingPathComponent("sub/model.safetensors"))

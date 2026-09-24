@@ -381,9 +381,14 @@ struct ReceiptBuilder: Sendable {
             outputPrefixEndByte: outputEnd
         )
         let outputHash = try RFC8785JCS.sha256Hex(of: output)
+        // SPEC-015 §N.7: a non-normal_done attempt that delivered no output
+        // bills nothing; observed usage is still reported.
+        let billsNothing = input.terminalState != "normal_done" && deliveredBytes == 0
+        let billableInputTokens = billsNothing ? 0 : input.promptTokens
+        let billableOutputTokens = billsNothing ? 0 : input.completionTokens
         let usage = RFC8785JCS.Value.object([
-            "billable_input_tokens": .int(try checkedInt(input.promptTokens, field: "billable_input_tokens")),
-            "billable_output_tokens": .int(try checkedInt(input.completionTokens, field: "billable_output_tokens")),
+            "billable_input_tokens": .int(try checkedInt(billableInputTokens, field: "billable_input_tokens")),
+            "billable_output_tokens": .int(try checkedInt(billableOutputTokens, field: "billable_output_tokens")),
             "delivered_output_bytes": .int(try checkedInt(deliveredBytes, field: "delivered_output_bytes")),
             "observed_input_tokens": .int(try checkedInt(input.promptTokens, field: "observed_input_tokens")),
             "observed_output_tokens": .int(try checkedInt(input.completionTokens, field: "observed_output_tokens")),
