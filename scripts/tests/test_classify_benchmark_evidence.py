@@ -186,6 +186,14 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         self.assertEqual(result["classification"], "incomplete")
         self.assertIn("ledger_charged_prompt_mismatch", result["missing"])
 
+    def test_populated_charged_prompt_cannot_replace_missing_ledger_prompt(self):
+        self.coord.execute("""UPDATE ledger_request_credits
+                               SET prompt_tokens=NULL, charged_prompt_tokens=10,
+                                   provider_reported_prompt_tokens=10""")
+        result = self.result()
+        self.assertEqual(result["classification"], "incomplete")
+        self.assertIn("ledger_prompt_missing", result["missing"])
+
     def test_charged_prompt_cannot_exceed_provider_observed_prompt(self):
         self.gateway.execute("UPDATE usage_events SET prompt_tokens=12")
         self.gateway.execute("UPDATE quota_reservations SET settled_tokens=44")

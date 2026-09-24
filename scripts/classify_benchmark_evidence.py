@@ -137,17 +137,20 @@ def classify(coordinator, gateway, account_id, external_request_id, journal=None
             reasons.append("settlement_output_not_successful")
         elif credit:
             settled_usage = json.loads(output["usage_canonical_json"])
-            charged_prompt = credit["charged_prompt_tokens"]
+            ledger_prompt = credit["prompt_tokens"]
+            stored_charged_prompt = credit["charged_prompt_tokens"]
+            charged_prompt = stored_charged_prompt
             if charged_prompt is None:
-                charged_prompt = credit["prompt_tokens"]
+                charged_prompt = ledger_prompt
             charged_completion = credit["completion_tokens"]
             observed_prompt = credit["provider_reported_prompt_tokens"]
             if observed_prompt is None:
                 observed_prompt = charged_prompt
             if charged_prompt is None or charged_completion is None:
                 reasons.append("charged_usage_missing")
-            elif (credit["prompt_tokens"] is not None and
-                  credit["prompt_tokens"] != charged_prompt):
+            elif ledger_prompt is None and stored_charged_prompt is not None:
+                reasons.append("ledger_prompt_missing")
+            elif ledger_prompt != charged_prompt:
                 reasons.append("ledger_charged_prompt_mismatch")
             elif usage and (charged_prompt != usage["prompt_tokens"] or
                             charged_completion != usage["completion_tokens"]):
