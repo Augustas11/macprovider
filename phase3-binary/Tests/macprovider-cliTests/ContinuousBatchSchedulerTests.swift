@@ -248,6 +248,47 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
+    // Codex M4 R1 (MEDIUM): a cancel that lands while the row is suspended in
+    // `snapshotRecurrentState` must still cancel it, before it can materialize
+    // a cache or join decode.
+    func testCancelDuringRecurrentSnapshotCancelsWithoutMaterializing() async throws {
+        let gate = AsyncGate()
+        let backend = ScriptedBackend(
+            scripts: ["hybrid": [7, 8]],
+            recurrentCheckpointBackend: true,
+            snapshotGate: gate
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 4,
+            backend: backend,
+            allocator: allocator
+        )
+        let task = Task {
+            try await scheduler.submit(.init(
+                id: "hybrid",
+                conversationKey: "conv:hybrid",
+                promptTokens: Array(1...12),
+                maxOutputTokens: 0,
+                temperature: 0.0,
+                recurrentCheckpointPositions: [11]
+            ))
+        }
+        try await eventually { await backend.recurrentSnapshots()["hybrid"] == [11] }
+        await scheduler.cancel(requestID: "hybrid")
+        await gate.open()
+
+        let result = try await task.value
+        XCTAssertEqual(result.terminalStatus, .cancelled)
+        XCTAssertNil(result.serialConversationCache)
+        let materialized = await backend.serialMaterializations()
+        XCTAssertTrue(materialized.isEmpty)
+        let decodeCalls = await backend.decodeCallCount()
+        XCTAssertEqual(decodeCalls, 0)
+        try await eventually { await allocator.freeBlockCount() == 16 }
+    }
+
     func testFailedHybridRowDeliversNoSerialCacheAndReleasesBlocks() async throws {
         let backend = ScriptedBackend(
             scripts: ["hybrid": [7, 8]],
@@ -3941,6 +3982,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     /// Acts as a hybrid backend: snapshots and materializes the serial cache.
     private let recurrentCheckpointBackend: Bool
     private var recurrentSnapshotLog: [String: [Int]] = [:]
+    private let snapshotGate: AsyncGate?
     private var serialMaterializeLog: [String: [Int]] = [:]
     private var retainedInstallAttemptLog: [String: Int] = [:]
     private var prefillRowsLog: [[String]] = []
@@ -3970,9 +4012,11 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         terminalCommitCaches: [PagedKVCache] = [],
         retainedInstallGates: [String: AsyncGate] = [:],
         retainedInstallErrors: [String: any Error] = [:],
-        recurrentCheckpointBackend: Bool = false
+        recurrentCheckpointBackend: Bool = false,
+        snapshotGate: AsyncGate? = nil
     ) {
         self.recurrentCheckpointBackend = recurrentCheckpointBackend
+        self.snapshotGate = snapshotGate
         self.scripts = scripts
         self.prefillGate = prefillGate
         self.decodeGate = decodeGate
@@ -4081,6 +4125,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     func snapshotRecurrentState(requestID: String, tokenCount: Int) async -> RecurrentStateCheckpoint? {
         guard recurrentCheckpointBackend else { return nil }
         recurrentSnapshotLog[requestID, default: []].append(tokenCount)
+        await snapshotGate?.wait()
         eventLog.append("snapshot:\(requestID):\(tokenCount)")
         return RecurrentStateCheckpoint(tokenCount: tokenCount, states: [1: []])
     }

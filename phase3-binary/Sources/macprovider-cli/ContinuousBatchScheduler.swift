@@ -2546,6 +2546,18 @@ actor ContinuousBatchScheduler {
                     row.recurrentCheckpoints.append(checkpoint)
                 }
                 guard activePrompt[id] != nil else { continue }
+                // A cancel that arrived while the snapshot was suspended only
+                // recorded the ID; honour it here, before the row can
+                // materialize a cache or move on to decode.
+                if cancelledIDs.remove(id) != nil {
+                    _ = removePromptRow(id)
+                    let released = await release(row.handle)
+                    finish(row, status: released ? .cancelled : .requestFailed, errorCode: released
+                        ? "request_cancelled"
+                        : "continuous_batching_cleanup_failed")
+                    if !released { return true }
+                    continue
+                }
             }
             if row.prefillCursor == row.request.promptTokens.count - 1 {
                 activePrompt[id] = row
