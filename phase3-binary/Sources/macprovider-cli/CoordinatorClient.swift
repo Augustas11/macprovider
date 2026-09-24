@@ -6188,6 +6188,13 @@ actor CoordinatorClient {
         if let compatibilitySetID {
             message["compatibility_set_id"] = compatibilitySetID
         }
+        // SPEC-047 v0.1.6 auth `runtime_source` (#1690 M6): the WS-tunneled
+        // session must declare its SPEC-046 loopback adapter exactly as the
+        // legacy hello does, or the coordinator records it as a native session
+        // (no FR-HG8 sandbox, and no SPEC-042-R004 runtime-allowlist binding).
+        if let runtimeSource {
+            message["runtime_source"] = runtimeSource
+        }
         if let endpointURL {
             message["endpoint_url"] = endpointURL
         }
