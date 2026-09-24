@@ -1459,6 +1459,36 @@ private func buyerCancelOutputHash(content: String, start: Int) throws -> String
     return SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
 }
 
+final class UnattestedUsageWireTests: XCTestCase {
+    private func completion(_ disposition: ContinuousBatchSettlementDisposition) -> CompletionResult {
+        CompletionResult(
+            content: "answer",
+            finishReason: "stop",
+            promptTokens: 0,
+            completionTokens: 7,
+            generatedCompletionTokens: 7,
+            settlementDisposition: disposition
+        )
+    }
+
+    // Independent review HIGH: a loopback completion whose upstream omitted
+    // usage carries placeholder counts (promptTokens ?? 0, delta events); the
+    // wire must not send them as billing usage.
+    func testUnattestedUsageSendsNoBillingTokenCounts() {
+        for usage in [InferenceRelay.usage(completion(.usageUnattested)), RouterHandler.usage(completion(.usageUnattested))] {
+            for key in ["prompt_tokens", "cached_prompt_tokens", "completion_tokens", "total_tokens"] {
+                XCTAssertNil(usage[key], "\(key) sent for unattested usage")
+            }
+        }
+    }
+
+    func testAttestedUsageStillSendsTokenCounts() {
+        let usage = InferenceRelay.usage(completion(.notEligible))
+        XCTAssertEqual(usage["prompt_tokens"] as? Int, 0)
+        XCTAssertEqual(usage["completion_tokens"] as? Int, 7)
+    }
+}
+
 private actor FakeCancelAfterCompletionReceiptRuntime: ModelRuntimeServing {
     private let servedSnapshot: RuntimeSnapshot
     private let settlementEligible: Bool

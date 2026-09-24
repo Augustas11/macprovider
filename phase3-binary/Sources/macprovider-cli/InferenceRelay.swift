@@ -1436,8 +1436,15 @@ actor InferenceRelay {
         return result
     }
 
-    private static func usage(_ completion: CompletionResult) -> [String: Any] {
-        [
+    /// Wire usage for a completion. Usage the upstream did not report is
+    /// never sent as token counts: a `.usageUnattested` completion carries only
+    /// placeholder or display-only counts, so its billing fields are omitted
+    /// and the coordinator falls back to its own byte estimate.
+    static func usage(_ completion: CompletionResult) -> [String: Any] {
+        guard completion.settlementDisposition != .usageUnattested else {
+            return ["macprovider_model_hash_observed": completion.modelHashObserved ?? NSNull()]
+        }
+        return [
             "prompt_tokens": completion.promptTokens,
             "cached_prompt_tokens": completion.cachedPromptTokens,
             "completion_tokens": completion.completionTokens,

@@ -200,11 +200,14 @@ func buyerCancelUsage(t *testing.T, raw string) map[string]int64 {
 	return usage
 }
 
-// A buyer that cancels a stream mid-way received a prefix. The coordinator
-// must record buyer_cancel over that prefix, carry the provider's receipt into
-// settlement, and settle exactly the delivered prefix (SPEC-015 §N.7,
-// SPEC-022 R-5.6, AC-022-50c).
-func TestWSStreamingBuyerCancelSettlesDeliveredPrefixReceipt(t *testing.T) {
+// A buyer that cancels a native stream mid-way received a prefix. The
+// coordinator records buyer_cancel over that prefix and carries the provider's
+// receipt into settlement. SPEC-015 §N.7 / SPEC-022 R-5.6 settle only the
+// verified delivered prefix, but a native receipt signs every generated token
+// (stop-string holdback included) and the SPEC defines no delivered-completion
+// count, so the native attempt keeps its pre-#1690 byte-estimate billing and
+// its receipt cannot verify (independent review MEDIUM).
+func TestWSStreamingNativeBuyerCancelKeepsByteEstimateBilling(t *testing.T) {
 	const delivered = "Hello, partial"
 	h := newBuyerCancelHarness(t, "buyer-cancel-stream-catalog", func(h *buyerCancelHarness, ctx context.Context, requestID string, meta *providerws.SettlementReceiptMetadata) *providerws.RelayStream {
 		chunks := make(chan providerws.InferenceResponseChunk)
@@ -241,25 +244,21 @@ func TestWSStreamingBuyerCancelSettlesDeliveredPrefixReceipt(t *testing.T) {
 	if ev.deliveredBytes != int64(len(delivered)) {
 		t.Fatalf("recorded delivered bytes=%d, want %d", ev.deliveredBytes, len(delivered))
 	}
-	if ev.usageSource != billing.UsageSourceCoordinatorObserved {
-		t.Fatalf("usage_source=%q, want coordinator_observed", ev.usageSource)
+	if ev.usageSource != billing.UsageSourceByteEstimated {
+		t.Fatalf("usage_source=%q, want byte_estimated (no delivered-completion binding)", ev.usageSource)
 	}
-	if ev.settlementOutcome != billing.SettlementOutcomeVerified || ev.receiptResult != billing.SettlementReceiptResultValid || !ev.closed {
-		t.Fatalf("verdict=(%s,%s,closed=%v), want verified valid closed", ev.settlementOutcome, ev.receiptResult, ev.closed)
+	if ev.settlementOutcome == billing.SettlementOutcomeVerified || ev.settlementOutcome == billing.SettlementOutcomeZeroSettled {
+		t.Fatalf("verdict=%s: a native partial cancel receipt must not settle provider-reported usage", ev.settlementOutcome)
 	}
-	usage := buyerCancelUsage(t, ev.usageJSON)
-	if usage["billable_input_tokens"] != 5 || usage["billable_output_tokens"] != 3 || usage["delivered_output_bytes"] != int64(len(delivered)) {
-		t.Fatalf("settled usage=%v, want the delivered prefix 5/3", usage)
-	}
-	if !ev.ledgerCompletion.Valid || ev.ledgerCompletion.Int64 != 3 || ev.ledgerQuarantined {
-		t.Fatalf("ledger completion=%v quarantined=%v, want the delivered 3 tokens billed", ev.ledgerCompletion, ev.ledgerQuarantined)
+	if ev.ledgerCompletion.Valid {
+		t.Fatalf("ledger completion=%v, want the pre-#1690 byte estimate, never the provider's generated count", ev.ledgerCompletion)
 	}
 	finality, ok, err := h.store.RequestSettlementFinalityForAccount(context.Background(), "acct_gateway", finalityRequestID(t, h.dbPath), time.Now().UTC().UnixMilli())
 	if err != nil || !ok {
 		t.Fatalf("finality ok=%v err=%v", ok, err)
 	}
-	if finality.Outcome != billing.SettlementOutcomeVerified || finality.CompletionTokens != 3 || finality.VerifiedAttempts != 1 {
-		t.Fatalf("finality=%+v, want verified with 3 completion tokens", finality)
+	if finality.Outcome == billing.SettlementOutcomeVerified || finality.CompletionTokens != 0 {
+		t.Fatalf("finality=%+v, want no verified provider-reported completion", finality)
 	}
 }
 

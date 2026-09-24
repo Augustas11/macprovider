@@ -1867,8 +1867,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         return result
     }
 
-    private static func usage(_ completion: CompletionResult) -> [String: Any] {
-        [
+    static func usage(_ completion: CompletionResult) -> [String: Any] {
+        var usage: [String: Any] = [
             "prompt_tokens": completion.promptTokens,
             "cached_prompt_tokens": completion.cachedPromptTokens,
             "completion_tokens": completion.completionTokens,
@@ -1893,6 +1893,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             // OpenAI-compat. NSNull when the serve path did not record timing.
             "macprovider_generation_ms": completion.generationMilliseconds ?? NSNull(),
         ]
+        // Usage the upstream did not report is never sent as billing token
+        // counts; the display-only vendor extensions stay.
+        if completion.settlementDisposition == .usageUnattested {
+            for key in ["prompt_tokens", "cached_prompt_tokens", "completion_tokens", "total_tokens"] {
+                usage.removeValue(forKey: key)
+            }
+        }
+        return usage
     }
 
     /// Which coordinator hold, if any, local status may report (#1616).

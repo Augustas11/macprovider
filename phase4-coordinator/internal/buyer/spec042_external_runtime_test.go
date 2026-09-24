@@ -3,12 +3,14 @@ package buyer_test
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -55,6 +57,11 @@ type externalRuntimeFixture struct {
 	nativeMember bool
 	// upstream, when set, replaces the provider's OK completion.
 	upstream http.HandlerFunc
+	// receipt picks the v0.4 receipt the provider returns with its OK
+	// completion: "" signs one bound to the attempt with the reported usage,
+	// "none" returns numbers without a receipt (an old CLI whose loopback
+	// upstream omitted usage), "mismatched" signs different usage.
+	receipt string
 }
 
 func defaultExternalRuntimeFixture() externalRuntimeFixture {
@@ -69,6 +76,7 @@ func defaultExternalRuntimeFixture() externalRuntimeFixture {
 }
 
 type externalRuntimeHarness struct {
+	key       ed25519.PrivateKey
 	server    *buyer.Server
 	dbPath    string
 	poolID    string
@@ -142,7 +150,11 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 	if err := tier2.Configure(config.Tier2Config{ObserveEnabled: true, CatalogPath: writeRouteSnapshotCatalog(t, raw), CatalogPublicKey: pubkey, RequireHashVerified: true}, zerolog.Nop()); err != nil {
 		t.Fatalf("tier2.Configure: %v", err)
 	}
-	h := &externalRuntimeHarness{}
+	_, key, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("receipt key: %v", err)
+	}
+	h := &externalRuntimeHarness{key: key}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.mu.Lock()
 		h.metadata = append(h.metadata, r.Header.Get("X-MacProvider-Settlement-Metadata"))
@@ -151,12 +163,23 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 			fx.upstream(w, r)
 			return
 		}
+		if fx.receipt != "none" {
+			if meta := decodeSettlementMetadataHeader(r.Header.Get("X-MacProvider-Settlement-Metadata")); meta != nil {
+				terminalTS := time.Now().UTC().UnixMilli()
+				completion := int64(1)
+				if fx.receipt == "mismatched" {
+					completion = 5
+				}
+				w.Header().Set("X-MacProvider-Receipt-Terminal-State-TS-Unix-MS", strconv.FormatInt(terminalTS, 10))
+				w.Header().Set("X-MacProvider-Receipt", signedNormalDoneReceipt(t, key, meta, "ok", 1, completion, terminalTS))
+			}
+		}
 		writeProviderOK(w)
 	}))
 	t.Cleanup(upstream.Close)
 
 	registry := pool.NewRegistry(nil)
-	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x79}, 32))
+	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, key.Public().(ed25519.PublicKey))
 	provider := byomAdmissionProvider(t, registry.Snapshot()[0])
 	binding := ggufArtifactBinding()
 	binding.Member.AllowedRuntimeSources = fx.allowedSources
@@ -447,5 +470,79 @@ func TestSPEC042ExternalRuntimeRecordedByteEstimatedWhenDurableRecordsReject(t *
 	if ledger.usageSource != billing.UsageSourceByteEstimated || ledger.gross != 0 || ledger.provider != 0 ||
 		ledger.quarantined != 1 || ledger.reason != billing.LoopbackRuntimeNotSettlementEligible {
 		t.Fatalf("rejected attempt ledger=%+v", ledger)
+	}
+}
+
+func decodeSettlementMetadataHeader(value string) *providerws.SettlementReceiptMetadata {
+	raw, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil || len(raw) == 0 {
+		return nil
+	}
+	var meta providerws.SettlementReceiptMetadata
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return nil
+	}
+	return &meta
+}
+
+// signedNormalDoneReceipt signs the v0.4 normal_done tuple an honest provider
+// returns for a completion of content with the given usage.
+func signedNormalDoneReceipt(t *testing.T, key ed25519.PrivateKey, meta *providerws.SettlementReceiptMetadata, content string, promptTokens, completionTokens, terminalTS int64) string {
+	t.Helper()
+	delivered := billing.SettlementDeliveredOutputBytes(content)
+	outputHash, _, err := billing.SettlementOutput{
+		Content:               content,
+		Available:             true,
+		OutputPrefixStartByte: meta.OutputPrefixStartByte,
+		OutputPrefixEndByte:   meta.OutputPrefixStartByte + delivered,
+		TerminalState:         billing.TerminalStateNormalDone,
+	}.Digest()
+	if err != nil {
+		t.Fatalf("output digest: %v", err)
+	}
+	tuple := map[string]any{
+		"account_scope": meta.AccountScope, "attempt_n": meta.AttemptN,
+		"catalog_body_digest": meta.CatalogBodyDigest, "catalog_id": meta.CatalogID,
+		"expected_catalog_model_hash": meta.ExpectedCatalogModelHash, "issued_at_unix_ms": terminalTS,
+		"model_hash": meta.ExpectedCatalogModelHash, "model_id": meta.ModelID, "output_hash": outputHash,
+		"output_prefix_end_byte": meta.OutputPrefixStartByte + delivered, "output_prefix_start_byte": meta.OutputPrefixStartByte,
+		"prompt_hash": meta.PromptHash, "provider_id": meta.ProviderID, "provider_receipt_key_id": meta.ProviderReceiptKeyID,
+		"receipt_version": "4", "request_id": meta.RequestID, "route_snapshot_digest": meta.RouteSnapshotDigest,
+		"route_snapshot_mode": meta.RouteSnapshotMode, "route_snapshot_policy_version": meta.RouteSnapshotPolicyVersion,
+		"signature_key_alg": "Ed25519", "terminal_state": billing.TerminalStateNormalDone, "terminal_state_ts_unix_ms": terminalTS,
+		"usage": map[string]any{
+			"billable_input_tokens": promptTokens, "billable_output_tokens": completionTokens,
+			"delivered_output_bytes": delivered, "observed_input_tokens": promptTokens, "observed_output_tokens": completionTokens,
+		},
+	}
+	_, canonical, err := billing.CanonicalSHA256Hex(tuple)
+	if err != nil {
+		t.Fatalf("canonical tuple: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(canonical) + "." + base64.StdEncoding.EncodeToString(ed25519.Sign(key, canonical))
+}
+
+// Independent review HIGH: a loopback pool attempt whose numbers no bound
+// receipt backs (an old CLI sending placeholder usage when its upstream
+// omitted usage, or a receipt signing other usage) is zero-billed at the
+// ledger write.
+func TestSPEC042ExternalRuntimeUsageWithoutBoundReceiptIsZeroBilled(t *testing.T) {
+	for _, mode := range []string{"none", "mismatched"} {
+		t.Run(mode, func(t *testing.T) {
+			fx := defaultExternalRuntimeFixture()
+			fx.receipt = mode
+			h := newExternalRuntimeHarness(t, fx)
+			rec := postChat(t, h.server, externalRuntimeBody, trustedPoolLayer2Headers(externalRuntimePoolAccount, h.poolID))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("pool route status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			ledger := externalRuntimeLedger(t, h.dbPath)
+			if ledger.gross != 0 || ledger.provider != 0 || ledger.quarantined != 1 || ledger.reason != billing.LoopbackRuntimeNotSettlementEligible {
+				t.Fatalf("ledger=%+v, want 0/0 quarantined %s", ledger, billing.LoopbackRuntimeNotSettlementEligible)
+			}
+			if ledger.usageSource != billing.UsageSourceByteEstimated {
+				t.Fatalf("evidence usage_source=%q, want byte_estimated", ledger.usageSource)
+			}
+		})
 	}
 }

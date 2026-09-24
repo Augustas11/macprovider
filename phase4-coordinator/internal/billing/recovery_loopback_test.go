@@ -22,6 +22,9 @@ type recoveryLoopbackCase struct {
 	authority PoolOperatorAttestationAuthority
 	// labels is the settlement-time pool label view (nil: none wired).
 	labels SettlementPoolLabelSource
+	// attestedOutput seeds the pool_operator_attested attempt output the
+	// recorder writes only behind a receipt-backed ledger credit.
+	attestedOutput bool
 }
 
 // recoverLoopbackFallbackRow writes what a failed hot path leaves behind (the
@@ -79,6 +82,18 @@ func recoverLoopbackFallbackRow(t *testing.T, tc recoveryLoopbackCase) (gross, p
 			}
 		}
 	}
+	if tc.attestedOutput {
+		// The evidence the recorder writes behind a bound-receipt credit.
+		now := time.Now().UTC().UnixMilli()
+		if _, err := store.InsertSettlementAttemptOutput(context.Background(), SettlementAttemptOutput{
+			AccountScope: AccountScopeForSettlement(""), RequestID: row.RequestID, AttemptN: 0, ProviderID: input.ProviderID,
+			Output:          SettlementOutput{Content: "ok", Available: true, OutputPrefixEndByte: 2, TerminalState: TerminalStateNormalDone, TerminalStateTSUnixMS: now},
+			OutputAvailable: true, UsageSource: UsageSourcePoolOperatorAttested, TerminalStateTSUnixMS: now,
+			Usage: SettlementUsage{BillableInputTokens: prompt, BillableOutputTokens: completion, DeliveredOutputBytes: 2, ObservedInputTokens: prompt, ObservedOutputTokens: completion},
+		}); err != nil {
+			t.Fatalf("seed attested attempt output: %v", err)
+		}
+	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits`); got != 0 {
 		t.Fatalf("fallback left %d ledger rows before recovery", got)
 	}
@@ -124,7 +139,7 @@ func TestRecoverLedger_AppliesLoopbackZeroBillRule(t *testing.T) {
 		return &fencedPoolAuthority{fakePoolAttestationAuthority: fakePoolAttestationAuthority{err: fmt.Errorf("%w: revoked", ErrPoolOperatorAttestationRejected)}, highWaters: []int64{7}}
 	}
 	attested := func(runtime string) recoveryLoopbackCase {
-		return recoveryLoopbackCase{runtimeSource: runtime, recordRuntime: true, snapshot: attestedPoolSnapshot, authority: stableFencedAuthority(), labels: matchingPoolLabels}
+		return recoveryLoopbackCase{runtimeSource: runtime, recordRuntime: true, snapshot: attestedPoolSnapshot, authority: stableFencedAuthority(), labels: matchingPoolLabels, attestedOutput: true}
 	}
 	for name, tc := range map[string]struct {
 		recoveryLoopbackCase
@@ -150,6 +165,13 @@ func TestRecoverLedger_AppliesLoopbackZeroBillRule(t *testing.T) {
 		"no durable authority is zero":      {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.authority = nil; return c }(), false},
 		"moved pool label is zero":          {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.labels = movedPoolLabels; return c }(), false},
 		"no label view is zero":             {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.labels = nil; return c }(), false},
+		// Independent review HIGH: loopback usage is billable only behind a
+		// bound receipt, evidenced as a pool_operator_attested attempt output.
+		"no receipt-backed attempt output is zero": {func() recoveryLoopbackCase {
+			c := attested("llamacpp_loopback")
+			c.attestedOutput = false
+			return c
+		}(), false},
 		// Audit R2: the pre-read decision is fenced inside the recovery
 		// transaction; a pool change in between zero-bills the row.
 		"pool event between pre-read and commit is zero": {func() recoveryLoopbackCase {

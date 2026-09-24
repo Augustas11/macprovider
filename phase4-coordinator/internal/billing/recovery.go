@@ -458,6 +458,11 @@ func (s *Store) recoveredLoopbackAttemptBillable(ctx context.Context, tx *sql.Tx
 	if err != nil || routeHash != verified.routeHash || route.RuntimeSource != runtimeSource.String {
 		return false
 	}
+	// Loopback usage is billable only behind a bound receipt, which the
+	// recorder evidences as a pool_operator_attested attempt output.
+	if !poolAttestedAttemptOutputRecorded(ctx, tx, id) {
+		return false
+	}
 	// The pool state the pre-read decided on must still hold inside this
 	// transaction.
 	return s.poolAttestationFenceHolds(ctx, tx, &verified.fence)
@@ -530,6 +535,9 @@ SELECT DISTINCT COALESCE(rl.account_id, ''), lpis.request_id, lpis.attempt_n, lp
 			continue
 		}
 		if route.RuntimeSource != c.runtimeSource || route.RouteSnapshotMode != RouteSnapshotModeEnforce || !poolOperatorAttestationSnapshotComplete(route) {
+			continue
+		}
+		if !poolAttestedAttemptOutputRecorded(ctx, s.db, c.id) {
 			continue
 		}
 		// The fence is read before the durable checks, so any pool change
