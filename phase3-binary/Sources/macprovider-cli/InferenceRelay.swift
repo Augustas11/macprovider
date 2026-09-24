@@ -1181,6 +1181,14 @@ actor InferenceRelay {
             status = "error_context_exceeded"
         case "queue_full":
             status = "error_queue_full"
+        // SPEC-001 FR-27 / SPEC-038 lifecycle overlay: continuous-batching
+        // queue pressure is refused before admission, so no inference ran and
+        // nothing reached the buyer. `error_queue_full` is the one status
+        // SPEC-002 FR-P14.1 re-routes; `error_internal` would be a
+        // non-rerouted 502. Post-token delivery backpressure is deliberately
+        // absent: it stays `error_internal`.
+        case "continuous_batching_stream_backpressure", "continuous_batching_queue_wait_timeout":
+            status = "error_queue_full"
         // AC-V2-3a + AC-V2-9 + AC-V2-9b (SPEC-019 v0.2.4 §5): these
         // four terminal structured-output codes are the canonical table.
         // Asymmetry across provider WS, coordinator SSE, and gateway SSE
