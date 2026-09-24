@@ -1,6 +1,8 @@
 # #1690 M0: llama-server vs native MLX benchmark evidence (2026-09-24)
 
-This is premise measurement M0 for #1690: does an external runtime earn a place next to native MLX? **Verdict: the premise fails for now.** Throughput arm (a) fails, and coverage arm (b) has no evidence in 30 days of production request logs. Under the plan's kill criterion, the external-runtime earning path (M4-M6) is on hold until 2026-10-24 for evidenced (b) demand. M1 (pool activation) and M2 (buyer-correct loopback adapter) stand on their own.
+This is the M0 measurement for #1690: how an external engine (llama.cpp `llama-server`) compares with native MLX on the Studio's live catalog key.
+
+**How to read it.** Engine-agnostic serving is a product goal: providers and buyers choose the engine (llama.cpp, Ollama, mlx_lm.server / mlx-serve, oMLX, LM Studio, and others). It is not a race native MLX has to lose first. These numbers are inputs for routing, pricing and buyer-facing disclosure. They are not a go/no-go gate. An earlier draft of this doc treated them as a gate that put M4-M6 on hold; the operator rejected that on 2026-09-24, and #1690 proceeds at full speed.
 
 ## Setup
 
@@ -52,10 +54,13 @@ Source: 30 days of production `request_log` (Pearl coordinator), unserved rows o
 
 There is no model that buyers asked for and native cannot run. The demand signal says "more native capacity", not "external runtimes".
 
-## Verdict and next steps
+## What the numbers mean for the engine-agnostic rollout
 
-- **(a) fails.** (b) has no evidence. M4-M6 are on hold until 2026-10-24. Before then, only evidenced (b) demand reopens them: ≥100 unserved requests for a native-unservable model, or a written buyer commitment. If (b) does appear, re-measure (a) against native CB.
-- **#1719 freezes at M0 harness + M1 code + M2 adapter.** The M3 SPEC bundle (audited to 0 C/H/M over 4 rounds) stays parked on a branch and is not merged without its implementation.
+- **Throughput.** On a dense 27B key, llama-server delivers 0.70-0.85x of native serial aggregate throughput. Pricing and buyer disclosure should reflect that per engine. Route-time selection should not assume engines are interchangeable on throughput.
+- **TTFT.** Under bursts, llama-server has better TTFT than native serial, because it interleaves requests and native serial queues them. Native CB (the v1.8.192 Qwen3.6 canary) changes the native side; re-measure once CB is on for this key.
+- **Quality.** Perplexity differences follow the quant (Q4_K_M vs MLX 4-bit g64), not the engine. Disclosure should name the artifact and quant, not only the engine.
+- **Demand.** 30 days of logs show only capacity shortfalls on catalog models. Letting operators bring engines adds capacity, and that is the point.
+- **Harness.** The same harness (`msb-loopback`, `msb-perplexity`) is the qualification tool for every new engine: run it before an engine enters a pool allowlist.
 
 ## Process notes
 
