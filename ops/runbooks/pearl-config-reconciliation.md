@@ -94,6 +94,13 @@ when `pearl-release.json` declares or defaults to the catalog-bound
 `pearl_runtime_catalog` lane. Runtime-only `pearl_runtime` releases deliberately
 leave Pearl's existing `tier2.catalog_path` and static feed state unchanged.
 
+The full deploy (`deploy-pearl-vps.sh`) additionally requires the release to
+sign `stats-inventory-sync-linux-amd64`, `stats-billing-mirror-linux-amd64`,
+and `stats-hardware-verifier-linux-amd64` (issue #1721). Only the Pearl runtime
+workflow publishes them today, so a catalog-lane tag from the provider-app
+release can be applied by the updater but not full-deployed; cut a Pearl
+runtime release at the deploy tag instead of staging sidecar binaries by hand.
+
 For issue #785, this check is the boundary between the solved config-drift
 blocker and the signed-pair release blocker. Publish a runtime-only Pearl
 release from the exact reviewed source as a GitHub prerelease/non-latest
