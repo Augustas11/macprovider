@@ -252,8 +252,14 @@ func objectHasDuplicateJSONKeys(dec *json.Decoder) bool {
 			_, _ = dec.Token()
 		case '[':
 			for dec.More() {
+				before := dec.InputOffset()
 				if objectHasDuplicateJSONKeys(dec) {
 					return true
+				}
+				// A truncated element consumes nothing; without this check a
+				// torn line (a provider or buyer cut mid-event) loops forever.
+				if dec.InputOffset() == before {
+					return false
 				}
 			}
 			_, _ = dec.Token()
@@ -292,15 +298,6 @@ func completeSSEEventsLen(b []byte) int {
 		}
 	}
 	return end
-}
-
-// observeCompleteEvents records only the SSE events of prefix that end with
-// their blank-line terminator. It is used for a partially written block, whose
-// torn last event never reached the buyer whole. A malformed event stops it.
-func (t *settlementStreamOutputTracker) observeCompleteEvents(prefix []byte) {
-	if end := completeSSEEventsLen(prefix); end > 0 {
-		_ = t.observeBlock(prefix[:end])
-	}
 }
 
 func (t *settlementStreamOutputTracker) observeBlock(block []byte) error {

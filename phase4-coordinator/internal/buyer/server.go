@@ -3840,36 +3840,26 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	chunks := relay.Chunks
 	committed := false
 	finishReason := ""
-	bytesEmitted := 0
-	var promptTok, cachedPromptTok, completionTok *int64
 	toolFinal := newStreamToolCallFinalValidator()
-	settlementTracker := newSettlementStreamOutputTracker()
+	// acct is the attempt's single source of delivered bytes, usage, and
+	// settlement evidence (deliveredSSEAccounting).
+	acct := newDeliveredSSEAccounting()
 	streamingMode := s.streamingMode(r, provider)
 	streamingBuyer := s.streamingBuyerKey(r)
 	progressAttempt := func(message string, faultFlag string) requestLogAttempt {
-		return requestLogAttempt{Status: http.StatusOK, Error: message, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: faultFlag, SettlementOutput: settlementTracker.output(terminalStateFromAttempt(http.StatusOK, message, ""))}
+		attempt := requestLogAttempt{Status: http.StatusOK, Error: message, FaultFlag: faultFlag, SettlementOutput: acct.output(terminalStateFromAttempt(http.StatusOK, message, ""))}
+		acct.applyUsage(s, &attempt, acct.billableUsage())
+		return attempt
 	}
 	progressUnavailableAttempt := func(message string, code string, faultFlag string) requestLogAttempt {
-		return requestLogAttempt{Status: http.StatusOK, Error: message, ErrorCode: code, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: faultFlag, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
-	}
-	// wsPendingEvent holds written bytes of an event whose blank-line
-	// terminator has not been written yet. Only terminated events are
-	// delivered: settled, and counted in bytesEmitted.
-	var wsPendingEvent []byte
-	recordWSDelivered := func(written []byte) {
-		wsPendingEvent = append(wsPendingEvent, written...)
-		end := completeSSEEventsLen(wsPendingEvent)
-		if end == 0 {
-			return
-		}
-		_ = settlementTracker.observeBlock(wsPendingEvent[:end])
-		bytesEmitted += end
-		wsPendingEvent = append(wsPendingEvent[:0], wsPendingEvent[end:]...)
+		attempt := requestLogAttempt{Status: http.StatusOK, Error: message, ErrorCode: code, FaultFlag: faultFlag, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
+		acct.applyUsage(s, &attempt, acct.billableUsage())
+		return attempt
 	}
 	// buyerCancelledAttempt records a buyer cancel after relay.Cancel and binds
 	// it to the provider's buyer_cancel terminal frame when one arrives.
 	buyerCancelledAttempt := func() requestLogAttempt {
-		return awaitBuyerCancelTerminal(progressAttempt("Buyer disconnected during streaming", billing.FaultNone), relay, settlementTracker, started, providerws.IsBYOMLoopbackRuntimeSource(provider.RuntimeSource))
+		return awaitBuyerCancelTerminal(progressAttempt("Buyer disconnected during streaming", billing.FaultNone), relay, acct.tracker, started, providerws.IsBYOMLoopbackRuntimeSource(provider.RuntimeSource))
 	}
 	streamFailureAttempt := requestLogAttempt{}
 	hasStreamFailureAttempt := false
@@ -3885,7 +3875,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		}
 	}
 	setStreamFailureAttempt := func(status int, message string, code string) {
-		streamFailureAttempt = requestLogAttempt{Status: status, Error: message, ErrorCode: code, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
+		streamFailureAttempt = requestLogAttempt{Status: status, Error: message, ErrorCode: code, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes()), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 		hasStreamFailureAttempt = true
 	}
 	if streamingMode != streamingModeIncremental {
@@ -3927,7 +3917,6 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			finishReason = reason
 		}
 		if sanitized, p, cached, c := sseBlockWithCachedPromptTokens([]byte(checked), state, billingAttemptN); p != nil || cached != nil || c != nil {
-			promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 			checked = string(sanitized)
 		}
 		rewritten, err := toolFinal.rewriteAndObserve(checked)
@@ -3947,7 +3936,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		}
 		// Validate now; the tracker records the block only once the buyer
 		// write accepted it (SPEC-015 delivered-prefix rule).
-		if err := settlementTracker.validateBlock([]byte(rewritten)); err != nil {
+		if err := acct.validate([]byte(rewritten)); err != nil {
 			relay.Cancel("malformed_settlement_stream")
 			if s.streamingDowngrade != nil {
 				s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -3967,16 +3956,17 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			return true, wsForwardCancelled
 		}
 		commit()
+		acct.render([]byte(rewritten))
 		if n, err := w.Write([]byte(rewritten)); err != nil {
 			// Only the complete SSE events the writer accepted reached the
 			// buyer; a torn event does not count.
-			recordWSDelivered([]byte(rewritten)[:n])
+			acct.written([]byte(rewritten)[:n])
 			relay.Cancel("buyer_disconnected")
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
 			markProviderDone()
 			return true, wsForwardCancelled
 		}
-		recordWSDelivered([]byte(rewritten))
+		acct.written([]byte(rewritten))
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -4005,6 +3995,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		if sse, ok := buyerSSEFromProviderJSONCompletion([]byte(data), state); ok {
 			data = string(sse)
 		}
+		acct.provider([]byte(data))
 		data = string(sanitizeQwenLeakedToolMarkupBlock([]byte(data), state))
 		if data != "" && !ttftLogged {
 			ttftLogged = true
@@ -4115,17 +4106,13 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			if providerTS, ok := trustedProviderTerminalStateTSInt(end.TerminalStateTSUnixMS, started, time.Now().UTC()); ok {
 				terminalTS = providerTS
 			}
-			settlementOutput := settlementTracker.outputAt(billing.TerminalStateNormalDone, terminalTS)
-			attempt := requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(bytesEmitted), SettlementOutput: settlementOutput, SettlementReceipt: receiptValue}
+			settlementOutput := acct.outputAt(billing.TerminalStateNormalDone, terminalTS)
+			attempt := requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(acct.deliveredBytes()), SettlementOutput: settlementOutput, SettlementReceipt: receiptValue}
 			if end.Status == "cancelled" {
-				attempt = withProviderCancelTerminal(requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: attempt.EstimatedCompTokens}, end, settlementTracker, started, providerws.IsBYOMLoopbackRuntimeSource(provider.RuntimeSource))
+				attempt = withProviderCancelTerminal(requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: attempt.EstimatedCompTokens}, end, acct.tracker, started, providerws.IsBYOMLoopbackRuntimeSource(provider.RuntimeSource))
 			} else {
-				if p, cached, c := tokenPointersFromUsageObject(end.Usage); p != nil || cached != nil || c != nil {
-					attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
-				}
-				if attempt.PromptTokens == nil && attempt.CachedPromptTokens == nil && attempt.CompletionTokens == nil {
-					attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = promptTok, cachedPromptTok, completionTok
-				}
+				usage := acct.completionUsage(end.Usage)
+				attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = usage.prompt, usage.cached, usage.completion
 			}
 			if end.Status == "complete" && s.zeroTokenFault(end, finishReason) {
 				attempt.FaultFlag = billing.FaultBreakerQualifying
@@ -4138,9 +4125,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				attempt.Error = "Provider closed before tool-call stream completed"
 				attempt.ErrorCode = "tool_call_final_close_failed"
 				attempt.FaultFlag = billing.FaultBreakerQualifying
-				attempt.SettlementOutput = settlementTracker.outputAt(terminalStateFromAttempt(http.StatusOK, attempt.Error, attempt.ErrorCode), terminalTS)
+				attempt.SettlementOutput = acct.outputAt(terminalStateFromAttempt(http.StatusOK, attempt.Error, attempt.ErrorCode), terminalTS)
 				if attempt.CompletionTokens == nil {
-					attempt.EstimatedCompTokens = s.estimatedCompletionTokensFromBytes(bytesEmitted)
+					attempt.EstimatedCompTokens = s.estimatedCompletionTokensFromBytes(acct.deliveredBytes())
 				}
 			}
 			if end.Status != "complete" && end.Status != "cancelled" {
@@ -4175,9 +4162,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				attempt.Error = requestLogEndErrorMessage(end)
 				attempt.ErrorCode = spec001EndStatus(end.Status)
 				attempt.FaultFlag = billing.FaultBreakerQualifying
-				attempt.SettlementOutput = settlementTracker.outputAt(terminalStateFromAttempt(http.StatusOK, attempt.Error, attempt.ErrorCode), terminalTS)
+				attempt.SettlementOutput = acct.outputAt(terminalStateFromAttempt(http.StatusOK, attempt.Error, attempt.ErrorCode), terminalTS)
 				if attempt.CompletionTokens == nil {
-					attempt.EstimatedCompTokens = s.estimatedCompletionTokensFromBytes(bytesEmitted)
+					attempt.EstimatedCompTokens = s.estimatedCompletionTokensFromBytes(acct.deliveredBytes())
 				}
 			}
 			if flusher != nil {
@@ -4196,13 +4183,13 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				}
 				s.recordBreakerFault(provider, breakerFaultDeadWS, requestID)
 				if !committed {
-					return wsForwardProviderDisconnected, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider disconnected; buyer should retry", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
+					return wsForwardProviderDisconnected, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider disconnected; buyer should retry", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes()), FaultFlag: billing.FaultBreakerQualifying}
 				}
 				writeSSEError(w, "Provider disconnected during streaming", "provider_disconnected")
 				if flusher != nil {
 					flusher.Flush()
 				}
-				return wsForwardProviderDisconnectedCommitted, requestLogAttempt{Status: http.StatusOK, Error: "Provider disconnected during streaming", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementTracker.output(billing.TerminalStateUpstreamTransportDisconnect)}
+				return wsForwardProviderDisconnectedCommitted, requestLogAttempt{Status: http.StatusOK, Error: "Provider disconnected during streaming", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes()), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: acct.output(billing.TerminalStateUpstreamTransportDisconnect)}
 			}
 			if errors.Is(err, providerws.ErrRelayTimeout) {
 				if r.Context().Err() != nil {
@@ -4210,14 +4197,14 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				}
 				s.recordBreakerFault(provider, breakerFaultRelayTimeout, requestID)
 				if !committed {
-					return wsForwardTimedOut, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Selected provider timed out; buyer should retry", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
+					return wsForwardTimedOut, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Selected provider timed out; buyer should retry", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes()), FaultFlag: billing.FaultBreakerQualifying}
 				}
 				commit()
 				writeSSEError(w, "Provider timed out during streaming", "provider_timeout", requestID)
 				if flusher != nil {
 					flusher.Flush()
 				}
-				return wsForwardProviderDisconnectedCommitted, requestLogAttempt{Status: http.StatusOK, Error: "Provider timed out during streaming", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementTracker.output(billing.TerminalStateGatewayTimeout)}
+				return wsForwardProviderDisconnectedCommitted, requestLogAttempt{Status: http.StatusOK, Error: "Provider timed out during streaming", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes()), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: acct.output(billing.TerminalStateGatewayTimeout)}
 			}
 			if errors.Is(err, providerws.ErrRelayAEADFailed) {
 				if !committed {
@@ -4227,17 +4214,17 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				if flusher != nil {
 					flusher.Flush()
 				}
-				return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider encrypted response failed authentication", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementTracker.output(billing.TerminalStateProviderError)}
+				return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider encrypted response failed authentication", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes()), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: acct.output(billing.TerminalStateProviderError)}
 			}
 			if !committed {
-				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider failed; buyer should retry", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
+				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider failed; buyer should retry", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes()), FaultFlag: billing.FaultBreakerQualifying}
 			}
 			commit()
 			writeSSEError(w, "Provider failed during streaming", "provider_error")
 			if flusher != nil {
 				flusher.Flush()
 			}
-			return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider failed during streaming", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementTracker.output(billing.TerminalStateProviderError)}
+			return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider failed during streaming", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes()), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: acct.output(billing.TerminalStateProviderError)}
 		}
 	}
 }
@@ -4246,7 +4233,9 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 	guard := tier2.NewPillarDGuard(s.tier2Config(), requestID, provider, s.log)
 	started := time.Now()
 	var raw bytes.Buffer
-	var promptTok, cachedPromptTok, completionTok *int64
+	// acct is the attempt's single source of delivered bytes, usage, and
+	// settlement evidence (deliveredSSEAccounting).
+	acct := newDeliveredSSEAccounting()
 	toolFinal := newStreamToolCallFinalValidator()
 	markProviderDone := func() {
 		if state != nil {
@@ -4258,8 +4247,8 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 	// A buffered stream delivers nothing before it completes, so a buyer
 	// cancel binds the empty prefix to the provider's buyer_cancel terminal.
 	bufferedBuyerCancelledAttempt := func() requestLogAttempt {
-		attempt := requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone}
-		return awaitBuyerCancelTerminal(attempt, relay, newSettlementStreamOutputTracker(), started, providerws.IsBYOMLoopbackRuntimeSource(provider.RuntimeSource))
+		attempt := requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone, SettlementOutput: acct.output(billing.TerminalStateBuyerCancel)}
+		return awaitBuyerCancelTerminal(attempt, relay, acct.tracker, started, providerws.IsBYOMLoopbackRuntimeSource(provider.RuntimeSource))
 	}
 	for {
 		select {
@@ -4274,9 +4263,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 			if chunk.Data != "" && state != nil {
 				state.phaseTiming.markProviderFirstByte(phaseTimingNow(s))
 			}
-			if _, p, cached, c := sseBlockWithCachedPromptTokens([]byte(chunk.Data), state, billingAttemptN); p != nil || cached != nil || c != nil {
-				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
-			}
+			acct.provider([]byte(chunk.Data))
 			checked, stop, err := guard.CheckStreamingChunk(chunk.Data)
 			if err != nil {
 				relay.Cancel("tier2_encoding_invalid")
@@ -4289,7 +4276,6 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider buffered stream exceeded cap", ErrorCode: "provider_stream_too_large", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
 			if sanitized, p, cached, c := sseBlockWithCachedPromptTokens([]byte(checked), state, billingAttemptN); p != nil || cached != nil || c != nil {
-				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 				checked = string(sanitized)
 			}
 			rewritten, err := toolFinal.rewriteAndObserve(checked)
@@ -4305,7 +4291,8 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 			if stop {
 				relay.Cancel("tier2_output_truncated")
 				markProviderDone()
-				return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(raw.Len())}
+				// Nothing of the truncated buffered stream was written.
+				return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(acct.deliveredBytes())}
 			}
 		case end := <-relay.Done:
 			if end.Status != "complete" {
@@ -4316,7 +4303,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				attempt := requestLogAttempt{Status: wsEndHTTPStatus(end.Status), Error: requestLogEndErrorMessage(end), ErrorCode: spec001EndStatus(end.Status), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 				if end.Status == "cancelled" {
 					// Nothing of a buffered stream reached the buyer.
-					attempt = withProviderCancelTerminal(attempt, end, newSettlementStreamOutputTracker(), started, providerws.IsBYOMLoopbackRuntimeSource(provider.RuntimeSource))
+					attempt = withProviderCancelTerminal(attempt, end, acct.tracker, started, providerws.IsBYOMLoopbackRuntimeSource(provider.RuntimeSource))
 				}
 				return wsForwardFailed, attempt
 			}
@@ -4335,31 +4322,18 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
-			settlementTracker := newSettlementStreamOutputTracker()
-			if err := settlementTracker.validateBlock(out); err != nil {
+			if err := acct.validate(out); err != nil {
 				if s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 				}
 				markProviderDone()
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed settlement stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 			}
-			// Only terminated events are delivered; an unterminated tail is
-			// neither settled nor counted.
-			deliveredOut := out[:completeSSEEventsLen(out)]
-			_ = settlementTracker.observeBlock(deliveredOut)
 			markProviderDone()
 			receiptValue := normalizeReceiptHeaderValue(end.Receipt)
 			terminalTS := int64(0)
 			if providerTS, ok := trustedProviderTerminalStateTSInt(end.TerminalStateTSUnixMS, started, time.Now().UTC()); ok {
 				terminalTS = providerTS
-			}
-			settlementOutput := settlementTracker.outputAt(billing.TerminalStateNormalDone, terminalTS)
-			attempt := requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(len(deliveredOut)), SettlementOutput: settlementOutput, SettlementReceipt: receiptValue}
-			if p, cached, c := tokenPointersFromUsageObject(end.Usage); p != nil || cached != nil || c != nil {
-				attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
-			}
-			if attempt.PromptTokens == nil && attempt.CachedPromptTokens == nil && attempt.CompletionTokens == nil {
-				attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = promptTok, cachedPromptTok, completionTok
 			}
 			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 			w.Header().Set("X-Accel-Buffering", "no")
@@ -4372,15 +4346,21 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				return wsForwardCancelled, requestLogAttempt{}
 			}
 			w.WriteHeader(http.StatusOK)
+			acct.render(out)
 			if n, err := w.Write(out); err != nil {
 				relay.Cancel("buyer_disconnected")
 				// The provider completed, but only the complete events the
 				// writer accepted reached the buyer: a buyer_cancel over that
 				// prefix, never the provider's normal_done receipt.
-				delivered := newSettlementStreamOutputTracker()
-				delivered.observeCompleteEvents(out[:n])
-				return wsForwardCancelled, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone, SettlementOutput: delivered.output(billing.TerminalStateBuyerCancel)}
+				acct.written(out[:n])
+				cancelled := requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone, SettlementOutput: acct.output(billing.TerminalStateBuyerCancel)}
+				acct.applyUsage(s, &cancelled, acct.billableUsage())
+				return wsForwardCancelled, cancelled
 			}
+			acct.written(out)
+			attempt := requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(acct.deliveredBytes()), SettlementOutput: acct.outputAt(billing.TerminalStateNormalDone, terminalTS), SettlementReceipt: receiptValue}
+			usage := acct.completionUsage(end.Usage)
+			attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = usage.prompt, usage.cached, usage.completion
 			if flusher, ok := w.(http.Flusher); ok {
 				flusher.Flush()
 			}
@@ -4570,29 +4550,19 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	// committed, EOF/error are committed-terminal exactly as before.
 	reader := bufio.NewReader(resp.Body)
 	toolFinal := newStreamToolCallFinalValidator()
-	// settlementTracker records only complete SSE events the buyer write
-	// accepted; streamProbe sees every block first, only to validate it
-	// (SPEC-015 delivered-prefix rule). deliveredEvent holds written lines of
-	// the event not yet terminated, and delivered*Tok the provider usage of
-	// events that were delivered, the only usage a cancelled or failed stream
-	// may bill.
-	settlementTracker := newSettlementStreamOutputTracker()
+	// acct is the attempt's single source of delivered bytes, usage, and
+	// settlement evidence (deliveredSSEAccounting). streamProbe sees every
+	// block first, only to validate it.
+	acct := newDeliveredSSEAccounting()
 	streamProbe := newSettlementStreamOutputTracker()
-	var deliveredEvent []byte
-	// usageAwaitingDelivery marks provider usage adopted from a line that is
-	// not yet part of a delivered event. The buyer-visible line may have its
-	// usage rewritten, so the flag is set where the provider line is read.
-	usageAwaitingDelivery := false
-	var deliveredPromptTok, deliveredCachedPromptTok, deliveredCompletionTok *int64
 	coalescer := newConcatSafeToolStream()
 	var preCommit bytes.Buffer
 	var lineBuf bytes.Buffer
 	sawCommitWorthyDataLine := false
 	flusher, _ := w.(http.Flusher)
+	// promptTok and cachedPromptTok drive only the buyer-facing cached-token
+	// rewrite; billing reads acct.
 	var promptTok, cachedPromptTok, completionTok *int64
-	// deliveredBytes counts the bytes of delivered (terminated) events only;
-	// it is the byte basis of every estimate on this path.
-	deliveredBytes := 0
 	contentEmittedBytes := int64(0)
 	outputByteCeiling := streamingRequestOutputHardByteCeiling(body)
 	terminalSSEErrorCode := ""
@@ -4604,47 +4574,20 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			Error:               "Provider stream exceeded requested max_tokens",
 			ErrorCode:           "stream_output_exceeded",
 			FaultFlag:           billing.FaultBreakerQualifying,
-			SettlementOutput:    settlementTracker.output(billing.TerminalStateProviderError),
-		}
-	}
-	// recordDelivered accounts one written line: its event becomes delivered
-	// once the event's blank-line terminator was written.
-	recordDelivered := func(line []byte) {
-		deliveredEvent = append(deliveredEvent, line...)
-		if !isSSEBlankLine(line) {
-			return
-		}
-		_ = settlementTracker.observeBlock(deliveredEvent)
-		deliveredBytes += len(deliveredEvent)
-		if usageAwaitingDelivery {
-			deliveredPromptTok, deliveredCachedPromptTok, deliveredCompletionTok = promptTok, cachedPromptTok, completionTok
-			usageAwaitingDelivery = false
-		}
-		deliveredEvent = deliveredEvent[:0]
-	}
-	recordDeliveredBlock := func(block []byte) {
-		for _, line := range bytes.SplitAfter(block, []byte("\n")) {
-			if len(line) > 0 {
-				recordDelivered(line)
-			}
+			SettlementOutput:    acct.output(billing.TerminalStateProviderError),
 		}
 	}
 	progressAttemptWithTerminal := func(message string, faultFlag string, terminalState string) requestLogAttempt {
-		attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: deliveredPromptTok, CachedPromptTokens: deliveredCachedPromptTok, CompletionTokens: deliveredCompletionTok, Error: message, FaultFlag: faultFlag}
-		if deliveredCompletionTok == nil {
-			attempt.EstimatedCompTokens = s.estimatedCompletionTokensFromBytes(deliveredBytes)
-		}
-		attempt.SettlementOutput = settlementTracker.output(terminalState)
+		attempt := requestLogAttempt{Status: http.StatusOK, Error: message, FaultFlag: faultFlag, SettlementOutput: acct.output(terminalState)}
+		acct.applyUsage(s, &attempt, acct.billableUsage())
 		return attempt
 	}
 	progressAttempt := func(message string, faultFlag string) requestLogAttempt {
 		return progressAttemptWithTerminal(message, faultFlag, terminalStateFromAttempt(http.StatusOK, message, ""))
 	}
 	progressUnavailableAttempt := func(message string, code string, faultFlag string) requestLogAttempt {
-		attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: deliveredPromptTok, CachedPromptTokens: deliveredCachedPromptTok, CompletionTokens: deliveredCompletionTok, Error: message, ErrorCode: code, FaultFlag: faultFlag, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
-		if deliveredCompletionTok == nil {
-			attempt.EstimatedCompTokens = s.estimatedCompletionTokensFromBytes(deliveredBytes)
-		}
+		attempt := requestLogAttempt{Status: http.StatusOK, Error: message, ErrorCode: code, FaultFlag: faultFlag, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
+		acct.applyUsage(s, &attempt, acct.billableUsage())
 		return attempt
 	}
 	writeBuyerHeaders := func() {
@@ -4689,9 +4632,9 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				continue
 			}
 			line := lineBuf.Bytes()
+			acct.provider(line)
 			if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
 				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
-				usageAwaitingDelivery = true
 				billed, observed := buyerCachedPair(cachedPromptTok, promptTok, state, billingAttemptN)
 				line = sseLineWithCachedPromptTokens(line, billed, observed)
 				if line == nil {
@@ -4752,6 +4695,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 					sawCommitWorthyDataLine = true
 				}
 				preCommit.Write(outLine)
+				acct.render(outLine)
 				if isSSEBlankLine(outLine) && sawCommitWorthyDataLine {
 					commitNow = true
 				}
@@ -4805,12 +4749,12 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	writeBuyerHeaders()
 	firstForwardedAt := s.now()
 	if n, writeErr := w.Write(preCommit.Bytes()); writeErr != nil {
-		recordDeliveredBlock(preCommit.Bytes()[:completeSSEEventsLen(preCommit.Bytes()[:n])])
+		acct.written(preCommit.Bytes()[:n])
 		s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer pre-commit write failed")
 		markProviderDone()
 		return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 	}
-	recordDeliveredBlock(preCommit.Bytes())
+	acct.written(preCommit.Bytes())
 	if s.streamingTiming != nil {
 		timingHeaders := resp.Header.Clone()
 		timingHeaders.Set(streamingTimingCoordinatorHeader, strconv.FormatInt(firstForwardedAt.UnixMilli(), 10))
@@ -4824,10 +4768,15 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	}
 	for {
 		line, err := reader.ReadBytes('\n')
+		if err != nil && err != io.EOF && !bytes.HasSuffix(line, []byte("\n")) {
+			// A line torn by a transport error or a buyer cancel is neither
+			// forwarded nor accounted.
+			line = nil
+		}
 		if len(line) > 0 {
+			acct.provider(line)
 			if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
 				promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
-				usageAwaitingDelivery = true
 				billed, observed := buyerCachedPair(cachedPromptTok, promptTok, state, billingAttemptN)
 				line = sseLineWithCachedPromptTokens(line, billed, observed)
 				if line == nil {
@@ -4896,13 +4845,14 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				markProviderDone()
 				return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed settlement stream", "malformed_settlement_stream", billing.FaultBreakerQualifying)
 			}
+			acct.render(line)
 			if n, writeErr := w.Write(line); writeErr != nil {
-				recordDeliveredBlock(line[:completeSSEEventsLen(line[:n])])
+				acct.written(line[:n])
 				s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer streaming write failed")
 				markProviderDone()
 				return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 			}
-			recordDeliveredBlock(line)
+			acct.written(line)
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -4967,23 +4917,22 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 					markProviderDone()
 					return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed settlement stream", "malformed_settlement_stream", billing.FaultBreakerQualifying)
 				}
+				acct.render(flushed)
 				if n, writeErr := w.Write(flushed); writeErr != nil {
-					recordDeliveredBlock(flushed[:completeSSEEventsLen(flushed[:n])])
+					acct.written(flushed[:n])
 					s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer streaming write failed")
 					markProviderDone()
 					return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 				}
-				recordDeliveredBlock(flushed)
+				acct.written(flushed)
 				if flusher != nil {
 					flusher.Flush()
 				}
 			}
 			markProviderDone()
 			// A final event without its blank-line terminator was never
-			// delivered as an event, even on a clean EOF: its bytes and usage
-			// are neither settled nor billed. A well-formed stream ends with
-			// "data: [DONE]\n\n", so this drops nothing from it.
-			deliveredEvent = deliveredEvent[:0]
+			// delivered as an event, even on a clean EOF: acct neither settles
+			// nor bills it. A well-formed stream ends with "data: [DONE]\n\n".
 			receiptValue := normalizeReceiptHeaderValue(resp.Trailer.Get("X-MacProvider-Receipt"))
 			if terminalSSEErrorCode != "" {
 				attempt := progressAttempt("Provider emitted terminal structured-output streaming error", billing.FaultBreakerQualifying)
@@ -5009,8 +4958,9 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			if providerTS, ok := trustedProviderTerminalStateTS(resp.Trailer.Get(receiptTerminalStateTSHeaderName), started, time.Now().UTC()); ok {
 				terminalTS = providerTS
 			}
-			settlementOutput := settlementTracker.outputAt(billing.TerminalStateNormalDone, terminalTS)
-			return wsForwardComplete, http.StatusOK, requestLogAttempt{Status: http.StatusOK, PromptTokens: deliveredPromptTok, CachedPromptTokens: deliveredCachedPromptTok, CompletionTokens: deliveredCompletionTok, EstimatedCompTokens: s.observedCompletionTokensFromBytes(deliveredBytes), SettlementOutput: settlementOutput, SettlementReceipt: receiptValue}
+			settlementOutput := acct.outputAt(billing.TerminalStateNormalDone, terminalTS)
+			usage := acct.completionUsage(nil)
+			return wsForwardComplete, http.StatusOK, requestLogAttempt{Status: http.StatusOK, PromptTokens: usage.prompt, CachedPromptTokens: usage.cached, CompletionTokens: usage.completion, EstimatedCompTokens: s.observedCompletionTokensFromBytes(acct.deliveredBytes()), SettlementOutput: settlementOutput, SettlementReceipt: receiptValue}
 		}
 		if r.Context().Err() != nil {
 			markProviderDone()
@@ -5064,6 +5014,10 @@ func (s *Server) forwardStreamingBuffered(w http.ResponseWriter, r *http.Request
 		return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider buffered stream failed", FaultFlag: billing.FaultBreakerQualifying}
 	}
 	markProviderDone()
+	// acct is the attempt's single source of delivered bytes, usage, and
+	// settlement evidence; it reads the provider's original stream.
+	acct := newDeliveredSSEAccounting()
+	acct.provider(raw)
 	receiptValue := normalizeReceiptHeaderValue(resp.Trailer.Get("X-MacProvider-Receipt"))
 	validator := newStreamToolCallFinalValidator()
 	rewrittenRaw, err := validator.rewriteAndObserve(string(raw))
@@ -5081,26 +5035,14 @@ func (s *Server) forwardStreamingBuffered(w http.ResponseWriter, r *http.Request
 		}
 		return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
 	}
-	var promptTok, cachedPromptTok, completionTok *int64
 	if sanitized, p, cached, c := sseBlockWithCachedPromptTokens(out, state, billingAttemptN); p != nil || cached != nil || c != nil {
-		promptTok, cachedPromptTok, completionTok = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
 		out = sanitized
 	}
-	settlementTracker := newSettlementStreamOutputTracker()
-	if err := settlementTracker.validateBlock(out); err != nil {
+	if err := acct.validate(out); err != nil {
 		if s.streamingDowngrade != nil {
 			s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 		}
 		return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed settlement stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
-	}
-	// Only terminated events are delivered: an unterminated tail is neither
-	// settled nor counted, and usage it carries is not billed.
-	deliveredOut := out[:completeSSEEventsLen(out)]
-	_ = settlementTracker.observeBlock(deliveredOut)
-	for _, line := range bytes.SplitAfter(out[len(deliveredOut):], []byte("\n")) {
-		if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
-			promptTok, cachedPromptTok, completionTok = nil, nil, nil
-		}
 	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -5110,11 +5052,14 @@ func (s *Server) forwardStreamingBuffered(w http.ResponseWriter, r *http.Request
 	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 	w.Header().Set(streamingModeHeader, streamingMode)
 	w.WriteHeader(http.StatusOK)
+	acct.render(out)
 	if n, err := w.Write(out); err != nil {
-		delivered := newSettlementStreamOutputTracker()
-		delivered.observeCompleteEvents(out[:n])
-		return wsForwardCancelled, 0, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone, SettlementOutput: delivered.output(billing.TerminalStateBuyerCancel)}
+		acct.written(out[:n])
+		cancelled := requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone, SettlementOutput: acct.output(billing.TerminalStateBuyerCancel)}
+		acct.applyUsage(s, &cancelled, acct.billableUsage())
+		return wsForwardCancelled, 0, cancelled
 	}
+	acct.written(out)
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
@@ -5126,8 +5071,9 @@ func (s *Server) forwardStreamingBuffered(w http.ResponseWriter, r *http.Request
 	if providerTS, ok := trustedProviderTerminalStateTS(resp.Trailer.Get(receiptTerminalStateTSHeaderName), started, time.Now().UTC()); ok {
 		terminalTS = providerTS
 	}
-	settlementOutput := settlementTracker.outputAt(billing.TerminalStateNormalDone, terminalTS)
-	return wsForwardComplete, http.StatusOK, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CachedPromptTokens: cachedPromptTok, CompletionTokens: completionTok, EstimatedCompTokens: s.observedCompletionTokensFromBytes(len(deliveredOut)), SettlementOutput: settlementOutput, SettlementReceipt: receiptValue}
+	settlementOutput := acct.outputAt(billing.TerminalStateNormalDone, terminalTS)
+	usage := acct.completionUsage(nil)
+	return wsForwardComplete, http.StatusOK, requestLogAttempt{Status: http.StatusOK, PromptTokens: usage.prompt, CachedPromptTokens: usage.cached, CompletionTokens: usage.completion, EstimatedCompTokens: s.observedCompletionTokensFromBytes(acct.deliveredBytes()), SettlementOutput: settlementOutput, SettlementReceipt: receiptValue}
 }
 
 type bufferedToolCall struct {
@@ -5175,6 +5121,15 @@ func consolidatedToolCallSSE(raw []byte) ([]byte, error) {
 		out.WriteString("data: ")
 		out.Write(data)
 		out.WriteString("\n\n")
+	}
+	// The provider's usage events (terminated ones only) survive
+	// materialization, so the buyer and the accounting still see them.
+	complete := raw[:completeSSEEventsLen(raw)]
+	for _, line := range bytes.SplitAfter(complete, []byte("\n")) {
+		if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
+			out.Write(bytes.TrimRight(line, "\r\n"))
+			out.WriteString("\n\n")
+		}
 	}
 	out.WriteString("data: [DONE]\n\n")
 	return out.Bytes(), nil

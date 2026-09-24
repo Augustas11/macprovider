@@ -45,28 +45,3 @@ func TestForwardStreamingHTTPTornUsageWriteBillsOnlyDelivered(t *testing.T) {
 		t.Fatalf("settlement output=%+v, want buyer_cancel over the delivered %q", out, "Hello")
 	}
 }
-
-// Audit R2 CODE M: CRLF-framed events count toward a torn prefix exactly as
-// LF-framed ones do.
-func TestObserveCompleteEventsCountsCRLFFramedEvents(t *testing.T) {
-	first := "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\r\n\r\n"
-	second := "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\r\n\r\n"
-	for name, tc := range map[string]struct {
-		prefix string
-		want   string
-	}{
-		"one complete CRLF event":          {first, "Hello"},
-		"torn second CRLF event":           {first + second[:len(second)-3], "Hello"},
-		"two complete CRLF events":         {first + second, "Hello world"},
-		"data line without its terminator": {first[:len(first)-2], ""},
-		"LF framing still counted":         {strings.ReplaceAll(first, "\r\n", "\n"), "Hello"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			tracker := newSettlementStreamOutputTracker()
-			tracker.observeCompleteEvents([]byte(tc.prefix))
-			if got := tracker.output(billing.TerminalStateBuyerCancel).Content; got != tc.want {
-				t.Fatalf("delivered content=%q, want %q", got, tc.want)
-			}
-		})
-	}
-}
