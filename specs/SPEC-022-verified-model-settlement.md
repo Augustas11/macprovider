@@ -802,7 +802,9 @@ so global and native-pool digests are byte-identical to v0.1.8. A non-empty
 `runtime_source` with an empty `pool_id`, `manifest_version`, or
 `manifest_core_digest` is an invalid snapshot and MUST fail closed before
 dispatch. The recorded value is the coordinator-derived runtime class of
-SPEC-042-R004, never the hello value alone. A snapshot with a non-empty
+SPEC-042-R004, never the hello value alone. Its `expected_catalog_model_hash`
+is the GGUF member derived at route time by the SPEC-047-R003(iv) pool
+route-time member derivation. A snapshot with a non-empty
 `runtime_source` MUST also carry `pool_generation` (the fenced pool
 generation of the selection) and `pool_operator_account_id` (the account the
 coordinator verified as both pool creator and provider owner at routing).
@@ -1060,7 +1062,8 @@ path, and no SPEC-016 payout path. It does not change SPEC-008
   the provider or re-debit the buyer.
 - **AC-022-54:** Partial-output settlement usage is derived from or
   cross-checked against the coordinator/gateway-observed delivered prefix and
-  cannot rely solely on provider-signed usage fields.
+  cannot rely solely on provider-signed usage fields, except for an R-12
+  `pool_operator_attested` attempt, which R-5.6 and AC-022-65 govern.
 - **AC-022-55:** Buyer-facing surfaces co-locate any use of "verified" model
   language with the provider-reported-hash caveat in the same view.
 - **AC-022-56:** Buyer-facing quota and usage surfaces explain that a completed

@@ -5434,7 +5434,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-015 0.4.10 (#1690 M3) adds per-request receipt eligibility for a pool-authorized loopback runtime through the pool_runtime_authorization settlement-metadata member; the v0.4 tuple, wire, and verifier are unchanged. The CLI still decides from the per-runtime constant (ModelRuntime.isSettlementReceiptEligible), so loopback never signs. Pending until the #1690 M5 CLI slice lands and AC-12b plus the SPEC-042-R013 journey pass."
+        "rationale": "SPEC-015 0.4.10 (#1690 M3) adds per-request receipt eligibility for a pool-authorized loopback runtime through the pool_runtime_authorization settlement-metadata member; the v0.4 tuple and wire are unchanged, while coordinator verifier and receipt-ingestion usage-source handling must change to accept pool_operator_attested for SPEC-022 R-12 attempts only (SPEC-022 R-12.4). The CLI still decides from the per-runtime constant (ModelRuntime.isSettlementReceiptEligible), so loopback never signs. Pending until the #1690 M5 CLI slice lands and AC-12b plus the SPEC-042-R013 journey pass."
       }
     },
     {
@@ -8550,7 +8550,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "SPEC-047 v0.2.0 (#1690 M3) adds the pool route-time clause: the SPEC-042 pool policy is the coordinator-recorded trust binding and the pool operator's signed receipt (pool_operator_attested) the trusted usage source, applied only at route time on pool routes; the admission bar and hello sandbox stay unlifted. The pool clause is unimplemented (#1690 M4). Pearl admission binding recovery changes updated the mapped refreshModelAdmissionBindingLocked selector after the 2026-09-16 signed JOURNEY-NETWORK-MODEL-ADMISSION evidence was captured. Local regression coverage proves the transient-refresh fail-closed behavior, but the historical signed journey binds earlier selector bytes; fresh independently trusted network-model-admission evidence at HEAD is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+        "rationale": "SPEC-047 v0.2.0 (#1690 M3) adds the pool route-time clause: the SPEC-042 pool policy is the coordinator-recorded trust binding and the pool operator's signed receipt (pool_operator_attested) the trusted usage source, applied only at route time on pool routes; the admission bar and hello sandbox stay unlifted. The pool clause, its pool route-time member derivation, and the pool-qualified R004 disclosure are unimplemented (#1690 M4). Pearl admission binding recovery changes updated the mapped refreshModelAdmissionBindingLocked selector after the 2026-09-16 signed JOURNEY-NETWORK-MODEL-ADMISSION evidence was captured. Local regression coverage proves the transient-refresh fail-closed behavior, but the historical signed journey binds earlier selector bytes; fresh independently trusted network-model-admission evidence at HEAD is required before restoring conformant status. Historical evidence is retained without redating or replacement."
       }
     },
     {
