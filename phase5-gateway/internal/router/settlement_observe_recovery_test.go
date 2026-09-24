@@ -999,6 +999,127 @@ func TestSettlementReconcileNudgeRetriesPendingCoordinatorFinality(t *testing.T)
 	}
 }
 
+func TestSettlementHoldPathsNudgeRequestScopedReconciler(t *testing.T) {
+	tests := []struct {
+		name       string
+		prompt     int64
+		completion int64
+		trigger    func(*Server, *http.Request, usageSubject, http.Header)
+	}{
+		{
+			name:   "provider_selected_error",
+			prompt: 7,
+			trigger: func(server *Server, req *http.Request, subject usageSubject, h http.Header) {
+				resp := &http.Response{StatusCode: http.StatusBadGateway, Header: h}
+				server.passThroughReceiptEligibleProviderError(
+					httptest.NewRecorder(), req, resp, subject,
+					[]byte(`{"error":{"code":"upstream_provider_error"}}`), 7, 32, 16,
+				)
+			},
+		},
+		{
+			name:       "streaming_pending_finality",
+			prompt:     7,
+			completion: 5,
+			trigger: func(server *Server, req *http.Request, subject usageSubject, h http.Header) {
+				trailers := h.Clone()
+				headers := http.Header{}
+				headers.Set(coordinatorInternalRequestIDHeader, h.Get(coordinatorInternalRequestIDHeader))
+				server.settleStreamingAfterCommitWithCoordinatorFinality(
+					req, subject, 7, 5, 32, "provider_reported", "ok", "",
+					&http.Response{Header: headers, Trailer: trailers},
+				)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			accountID := "acct_nudge_" + tt.name
+			requestID := "req_nudge_" + tt.name
+			internalRequestID := "internal_nudge_" + tt.name
+			createdAt := fixedNow()
+			var calls atomic.Int32
+			coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.URL.Path != "/internal/settlement/finality" || r.Header.Get("Authorization") != "Bearer service-token" ||
+					r.URL.Query().Get("account_id") != accountID || r.URL.Query().Get("request_id") != requestID ||
+					r.URL.Query().Get("required_internal_request_id") != internalRequestID ||
+					r.URL.Query().Get("reservation_created_at_unix_ms") != strconv.FormatInt(createdAt.UnixMilli(), 10) {
+					t.Errorf("finality lookup missing authenticated current-attempt scope: %s", r.URL.RawQuery)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(coordinatorRequestSettlementFinality{
+					RequestID:                 requestID,
+					RequiredInternalRequestID: internalRequestID,
+					Mode:                      "enforce",
+					ModeScopeComplete:         true,
+					PolicyVersion:             settlementPolicyVersion,
+					Outcome:                   "verified",
+					ReceiptResult:             "valid",
+					Reason:                    "verified_settlement",
+					Closed:                    true,
+					PromptTokens:              tt.prompt,
+					CompletionTokens:          tt.completion,
+					TotalTokens:               tt.prompt + tt.completion,
+					TokenSource:               "coordinator_observed",
+					VerifiedAttempts:          1,
+				})
+			}))
+			defer coordinator.Close()
+
+			cfg := config.Default()
+			cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+			cfg.Auth.Demo.SigningSecret = "test-demo-secret"
+			cfg.Coordinator.OperatorURL = coordinator.URL
+			cfg.Coordinator.ServiceToken = "service-token"
+			cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
+			cfg.Settlement.ReconcileEnabled = true
+			cfg.Settlement.ReconcileRequestTimeoutSeconds = 1
+			store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
+			if err != nil {
+				t.Fatalf("sqlite.Open: %v", err)
+			}
+			defer store.Close()
+			if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+				AccountID:       accountID,
+				RequestID:       requestID,
+				WindowDate:      createdAt.UTC().Format("2006-01-02"),
+				RequestedTokens: 32,
+				DailyQuota:      cfg.Quotas.AccountDailyTokens,
+				CreatedAt:       createdAt,
+				ExpiresAt:       createdAt.Add(time.Minute),
+			}); err != nil {
+				t.Fatalf("ReserveQuota: %v", err)
+			}
+
+			server := New(cfg, store, fakeOAuth{}, WithHTTPClient(coordinator.Client()), WithNow(func() time.Time { return createdAt }))
+			h := settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "pending", "inconclusive", "false", "receipt_verdict_pending")
+			h.Set(coordinatorInternalRequestIDHeader, internalRequestID)
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			req = req.WithContext(context.WithValue(req.Context(), requestIDKey{}, requestID))
+			tt.trigger(server, req, usageSubject{AccountID: accountID, ReservationCreatedAt: createdAt}, h)
+
+			deadline := time.After(3 * time.Second)
+			for {
+				state := gatewaySettlementSnapshot(t, cfg.Storage.DBPath, accountID)
+				if state.usageRows == 1 && state.settledRows == 1 && state.activeRows == 0 && state.heldRows == 0 {
+					break
+				}
+				select {
+				case <-deadline:
+					t.Fatalf("settlement path did not auto-reconcile; state=%+v calls=%d", state, calls.Load())
+				case <-time.After(20 * time.Millisecond):
+				}
+			}
+			if got := calls.Load(); got != 1 {
+				t.Fatalf("coordinator calls=%d want one request-scoped lookup", got)
+			}
+		})
+	}
+}
+
 func TestSettlementReconcileNudgeDoesNotRetryPermanentCoordinatorFailure(t *testing.T) {
 	const (
 		accountID         = "acct_nudge_permanent"
