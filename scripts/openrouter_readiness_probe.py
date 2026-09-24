@@ -1934,6 +1934,18 @@ def missing_token_error(env_name: str, path: str, label: str) -> str:
 
 
 def main(argv: list[str]) -> int:
+    legacy_saturation_flags = {
+        "--saturation-requests",
+        "--saturation-concurrency",
+        "--saturation-max-tokens",
+    }
+    for argument in argv:
+        flag = argument.split("=", 1)[0]
+        if flag in legacy_saturation_flags:
+            raise SystemExit(
+                f"{flag} is no longer accepted because exact-capacity and overload are separate gates; "
+                "use --exact-capacity-* together with --overload-*"
+            )
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="https://api.malibu.tech")
     parser.add_argument("--api-key-env", default="MACPROVIDER_SPEC015_API_KEY")
@@ -1953,7 +1965,6 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--min-output-tokens-per-second", type=float, default=DEFAULT_MIN_OUTPUT_TOKENS_PER_SECOND)
     parser.add_argument(
         "--exact-capacity-requests",
-        "--saturation-requests",
         dest="exact_capacity_requests",
         type=int,
         default=0,
@@ -1961,7 +1972,6 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--exact-capacity-concurrency",
-        "--saturation-concurrency",
         dest="exact_capacity_concurrency",
         type=int,
         default=DEFAULT_EXACT_CAPACITY_CONCURRENCY,
@@ -1969,7 +1979,6 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--exact-capacity-max-tokens",
-        "--saturation-max-tokens",
         dest="exact_capacity_max_tokens",
         type=int,
         default=0,

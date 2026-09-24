@@ -1784,6 +1784,13 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             self.assertEqual(report["checks"]["exact_capacity"]["classification"], "exact_capacity_passed")
             self.assertEqual(report["checks"]["overload_shedding"]["classification"], "overload_shed_observed")
 
+    def test_legacy_saturation_flags_fail_closed_with_migration_guidance(self):
+        for flag in ("--saturation-requests", "--saturation-concurrency", "--saturation-max-tokens"):
+            with self.subTest(flag=flag), self.assertRaisesRegex(
+                SystemExit, "exact-capacity and overload are separate gates"
+            ):
+                probe.main([flag, "16"])
+
     def test_filing_mode_requires_expected_healthz_version(self):
         argv = [
             "--base-url",

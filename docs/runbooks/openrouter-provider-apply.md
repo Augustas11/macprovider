@@ -48,6 +48,10 @@ The probe validates:
 - `/privacy` retaining the plaintext/no-ZDR/no-training disclosure and the
   default 90-day request-log retention statement
 
+The former `--saturation-*` flags are rejected because one ambiguous pass
+cannot prove both exact-capacity success and over-capacity shedding. Use both
+argument groups shown above.
+
 Do not submit the OpenRouter form on a failing soak.
 
 ## Apply packet
