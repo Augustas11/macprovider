@@ -1245,6 +1245,9 @@ actor ModelRuntime: ModelRuntimeServing {
     /// SPEC-038 AC-25 bounded admission wait, in milliseconds. Nil ⇒ the
     /// scheduler configuration default.
     private let continuousBatchQueueWaitTimeoutMS: Int?
+    /// SPEC-038 AC-26 opt-in: positive-cached turns with a usable retained
+    /// handoff batch instead of serial-routing. Off keeps the fence.
+    private let continuousBatchingCachedTurns: Bool
     /// SPEC-038 FR-CB10 operator-declared per-tuple acceptance coverage.
     private let continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage
     private let warmSwapEnabled: Bool
@@ -2034,6 +2037,7 @@ actor ModelRuntime: ModelRuntimeServing {
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
         continuousBatchQueueWaitTimeoutMS: Int? = nil,
+        continuousBatchingCachedTurns: Bool = false,
         continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage = .empty,
         continuousBatchingDurableReplayAuthorityAvailable: Bool = false,
         warmSwapEnabled: Bool = false,
@@ -2090,6 +2094,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
+        self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingDurableReplayAuthorityAvailable = false
         self.warmSwapEnabled = warmSwapEnabled
@@ -2220,7 +2225,8 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsGeneration: self.currentSpecDecodeGeneration,
             kvBitsOverride: self.kvBitsOverride,
             prefillStepSize: self.prefillStepSize,
-            replayAuthority: self.continuousBatchReplayAuthority
+            replayAuthority: self.continuousBatchReplayAuthority,
+            cachedTurns: self.continuousBatchingCachedTurns
         )
         if self.continuousBatchScheduler == nil {
             self.pagedKVSchedulerBackendInstalled = false
@@ -2292,6 +2298,7 @@ actor ModelRuntime: ModelRuntimeServing {
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
         continuousBatchQueueWaitTimeoutMS: Int? = nil,
+        continuousBatchingCachedTurns: Bool = false,
         // Test-only init: mirrors `ContinuousBatchRuntimeReplayAuthority
         // .inMemoryForTests` — coverage is unrestricted unless a test asserts
         // on the FR-CB10 gate itself.
@@ -2422,6 +2429,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
+        self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingDurableReplayAuthorityAvailable = false
         self.warmSwapEnabled = warmSwapEnabled
@@ -3250,7 +3258,8 @@ actor ModelRuntime: ModelRuntimeServing {
         weightsGeneration: Int,
         kvBitsOverride: Int?,
         prefillStepSize: Int,
-        replayAuthority: any ContinuousBatchSchedulerReplayAuthority
+        replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
+        cachedTurns: Bool
     ) async -> ContinuousBatchScheduler? {
         if let backendOverride {
             return makeContinuousBatchScheduler(
@@ -3274,10 +3283,12 @@ actor ModelRuntime: ModelRuntimeServing {
         else {
             return nil
         }
-        // Retained cross-turn KV cannot restore Qwen3.6's recurrent state.
-        // Mixed-cache batching is first-turn-only until that handoff exists.
+        // A hybrid (Qwen3.6) row retains its paged KV only when cached-turn
+        // batching is on (SPEC-038 AC-26): the next turn then restores the
+        // recurrent layers from a checkpoint. Off, a keyed hybrid row keeps the
+        // serial-format materialize at terminal instead.
         let isHybrid = cacheKinds.contains(.recurrentMamba)
-        let contiguousCacheBridge = isHybrid ? nil : PagedKVRuntimeContiguousCacheBridge()
+        let contiguousCacheBridge = isHybrid && !cachedTurns ? nil : PagedKVRuntimeContiguousCacheBridge()
         return makeContinuousBatchScheduler(
             decision: decision,
             tuple: tuple,
@@ -3334,7 +3345,8 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsGeneration: currentSpecDecodeGeneration,
             kvBitsOverride: kvBitsOverride,
             prefillStepSize: prefillStepSize,
-            replayAuthority: continuousBatchReplayAuthority
+            replayAuthority: continuousBatchReplayAuthority,
+            cachedTurns: continuousBatchingCachedTurns
         )
         continuousBatchingDurableReplayAuthorityAvailable =
             continuousBatchScheduler != nil && continuousBatchReplayAuthority.durableAvailable
@@ -3844,6 +3856,9 @@ actor ModelRuntime: ModelRuntimeServing {
         let stopTokenSequences: [[Int]]
         let modelStopTokenIDs: Set<Int>
         let recurrentCheckpointPositions: [Int]
+        /// The loaded model has recurrent (hybrid) layers; computed for keyed
+        /// requests only, false otherwise.
+        let modelHasRecurrentLayers: Bool
     }
 
     /// Keyed hybrid requests only: where the batched row snapshots recurrent
@@ -3851,13 +3866,14 @@ actor ModelRuntime: ModelRuntimeServing {
     private nonisolated static func continuousBatchRecurrentCheckpointPositions(
         promptTokens: [Int],
         conversationKey: String?,
+        hybrid: Bool,
         context: ModelContext
     ) -> [Int] {
         guard nonEmpty(conversationKey) != nil else { return [] }
         return ConversationCache.recurrentCheckpointPositions(
             promptTokenIds: promptTokens.map(Int32.init),
             imStartTokenID: context.tokenizer.convertTokenToId("<|im_start|>").map(Int32.init),
-            hybrid: ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil)),
+            hybrid: hybrid,
             decode: { context.tokenizer.decode(tokenIds: $0) })
     }
 
@@ -3921,17 +3937,25 @@ actor ModelRuntime: ModelRuntimeServing {
 
     private func serialRouteCanaryCachedHitMissingRetainedHandoff(
         _ lease: ConversationCacheLease?,
-        capability: ContinuousBatchingCapability
+        capability: ContinuousBatchingCapability,
+        modelHasRecurrentLayers: Bool
     ) async throws -> Bool {
         guard let lease,
               Self.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
                   mode: capability.mode,
                   cachedPromptTokens: lease.cachedPromptTokens,
-                  hasRetainedPagedKVHandoff: lease.reusableCache?.retainedPagedKVSequence != nil
+                  hasRetainedPagedKVHandoff: Self.leaseHasUsableRetainedHandoff(
+                      lease,
+                      modelHasRecurrentLayers: modelHasRecurrentLayers
+                  ),
+                  cachedTurnsEnabled: continuousBatchingCachedTurns
               )
         else {
             return false
         }
+        // A retained entry (hybrid or not) cannot serve the serial path, so
+        // this discards it and the serial request misses; a serial-format entry
+        // is put back for the serial path to reuse.
         await conversationCache.abortForSerialFallback(lease)
         let blocked = ContinuousBatchingCapability(
             mode: capability.mode,
@@ -3950,13 +3974,50 @@ actor ModelRuntime: ModelRuntimeServing {
     static func canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
         mode: ContinuousBatchingMode,
         cachedPromptTokens: Int,
-        hasRetainedPagedKVHandoff: Bool
+        hasRetainedPagedKVHandoff: Bool,
+        cachedTurnsEnabled: Bool = false
     ) -> Bool {
-        // AC-26: any positive cached-token hit stays out of the scheduler until
-        // packaged sticky/cross-turn proof. A retained paged-KV handoff is
-        // capability, not authorization.
-        _ = hasRetainedPagedKVHandoff
-        return mode != .off && cachedPromptTokens > 0
+        // AC-26: a positive cached-token hit stays out of the scheduler unless
+        // the operator opted into `continuous_batching_cached_turns` AND the
+        // lease carries a usable retained handoff. A retained paged-KV handoff
+        // alone is capability, not authorization.
+        guard mode != .off, cachedPromptTokens > 0 else { return false }
+        return !(cachedTurnsEnabled && hasRetainedPagedKVHandoff)
+    }
+
+    /// A hybrid retained delivery is resumable only from a recurrent checkpoint;
+    /// one without any is discarded instead of committed as an entry no turn
+    /// could resume (SPEC-038 AC-26).
+    nonisolated static func retainedCacheIsCommittable(
+        _ retainedCache: ContinuousBatchRetainedCache,
+        modelHasRecurrentLayers: Bool
+    ) -> Bool {
+        !modelHasRecurrentLayers || !retainedCache.recurrentCheckpoints.isEmpty
+    }
+
+    /// A retained paged-KV sequence, plus on a hybrid model the recurrent
+    /// checkpoint at exactly the cached length (SPEC-038 AC-26).
+    nonisolated static func leaseHasUsableRetainedHandoff(
+        _ lease: ConversationCacheLease,
+        modelHasRecurrentLayers: Bool
+    ) -> Bool {
+        guard lease.reusableCache?.retainedPagedKVSequence != nil else { return false }
+        guard modelHasRecurrentLayers else { return true }
+        return lease.recurrentCheckpoint?.tokenCount == lease.cachedPromptTokens
+    }
+
+    /// The stored checkpoints a hybrid cached turn hands the scheduler: every
+    /// one at or below the cached length (they are a prefix of this prompt).
+    /// Empty unless the lease resumes a retained hybrid entry.
+    nonisolated static func retainedRecurrentCheckpoints(
+        for lease: ConversationCacheLease?
+    ) -> [RecurrentStateCheckpoint] {
+        guard let lease,
+              lease.recurrentCheckpoint != nil,
+              let reusable = lease.reusableCache,
+              reusable.retainedPagedKVSequence != nil
+        else { return [] }
+        return reusable.recurrentCheckpoints.filter { $0.tokenCount <= lease.cachedPromptTokens }
     }
 
     private func attachedContinuousBatchCompletion(
@@ -4002,6 +4063,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 requestStops: request.stop,
                 context: context
             )
+            // Only keyed requests can hold or reuse conversation state.
+            let hybrid = Self.nonEmpty(request.conversationKey) != nil
+                && ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
             return ContinuousBatchPreparedRequest(
                 promptTokens: promptTokens,
                 stopTokenSequences: stopTokenSequences,
@@ -4011,8 +4075,10 @@ actor ModelRuntime: ModelRuntimeServing {
                 recurrentCheckpointPositions: Self.continuousBatchRecurrentCheckpointPositions(
                     promptTokens: promptTokens,
                     conversationKey: request.conversationKey,
+                    hybrid: hybrid,
                     context: context
-                )
+                ),
+                modelHasRecurrentLayers: hybrid
             )
         }
 
@@ -4033,7 +4099,11 @@ actor ModelRuntime: ModelRuntimeServing {
             allowRetainedPagedKVHandoff: true
         )
         CBTrace.log(schedulerRequestID, "rt_cb_lease cached=\(lease?.cachedPromptTokens ?? -1)")
-        if try await serialRouteCanaryCachedHitMissingRetainedHandoff(lease, capability: capability) {
+        if try await serialRouteCanaryCachedHitMissingRetainedHandoff(
+            lease,
+            capability: capability,
+            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+        ) {
             return nil
         }
         let result: ContinuousBatchSchedulerResult
@@ -4053,7 +4123,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     frequencyPenalty: request.frequencyPenalty,
                     cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
                     retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
-                    recurrentCheckpointPositions: prepared.recurrentCheckpointPositions
+                    recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
+                    retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease)
                 ))
             }
         } catch {
@@ -4144,7 +4215,11 @@ actor ModelRuntime: ModelRuntimeServing {
                     settlementDisposition: result.settlementDisposition
                 ), request: request)
             }
-            if let lease, let retainedCache = result.retainedCache {
+            if let lease, let retainedCache = result.retainedCache,
+               Self.retainedCacheIsCommittable(
+                   retainedCache,
+                   modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+               ) {
                 await conversationCache.commit(
                     lease,
                     cache: ConversationCacheLayers(
@@ -4152,7 +4227,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         retainedPagedKVSequence: retainedCache.retainedSequence,
                         discardRetainedPagedKVSequence: { retained, key in
                             await scheduler.discardRetainedCache(retained, conversationKey: key)
-                        }
+                        },
+                        recurrentCheckpoints: retainedCache.recurrentCheckpoints
                     ),
                     fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
@@ -4177,6 +4253,9 @@ actor ModelRuntime: ModelRuntimeServing {
                     retainedCache,
                     conversationKey: result.conversationKey
                 )
+                if let lease {
+                    await conversationCache.abort(lease)
+                }
             } else if let lease {
                 await conversationCache.abort(lease)
             }
@@ -4246,6 +4325,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 context: context
             )
             let tokenizer = context.tokenizer
+            // Only keyed requests can hold or reuse conversation state.
+            let hybrid = Self.nonEmpty(request.conversationKey) != nil
+                && ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
             return (
                 ContinuousBatchPreparedRequest(
                     promptTokens: promptTokens,
@@ -4256,8 +4338,10 @@ actor ModelRuntime: ModelRuntimeServing {
                     recurrentCheckpointPositions: Self.continuousBatchRecurrentCheckpointPositions(
                         promptTokens: promptTokens,
                         conversationKey: request.conversationKey,
+                        hybrid: hybrid,
                         context: context
-                    )
+                    ),
+                    modelHasRecurrentLayers: hybrid
                 ),
                 StreamingDetokenizer { tokenizer.decode(tokenIds: $0) }
             )
@@ -4280,7 +4364,11 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBits: batchKVBits,
             allowRetainedPagedKVHandoff: true
         )
-        if try await serialRouteCanaryCachedHitMissingRetainedHandoff(lease, capability: capability) {
+        if try await serialRouteCanaryCachedHitMissingRetainedHandoff(
+            lease,
+            capability: capability,
+            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+        ) {
             return nil
         }
         let result: ContinuousBatchSchedulerResult
@@ -4299,7 +4387,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     frequencyPenalty: request.frequencyPenalty,
                     cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
                     retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
-                    recurrentCheckpointPositions: prepared.recurrentCheckpointPositions
+                    recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
+                    retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease)
                 ), tokenSink: { event in
                     let eventTokens = event.replayTokens ?? [event.token]
                     guard !eventTokens.isEmpty else { return }
@@ -4413,7 +4502,11 @@ actor ModelRuntime: ModelRuntimeServing {
                 request: request,
                 buyerVisibleContent: structuredAccumulator.content
             )
-            if let lease, let retainedCache = result.retainedCache {
+            if let lease, let retainedCache = result.retainedCache,
+               Self.retainedCacheIsCommittable(
+                   retainedCache,
+                   modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+               ) {
                 await conversationCache.commit(
                     lease,
                     cache: ConversationCacheLayers(
@@ -4421,7 +4514,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         retainedPagedKVSequence: retainedCache.retainedSequence,
                         discardRetainedPagedKVSequence: { retained, key in
                             await scheduler.discardRetainedCache(retained, conversationKey: key)
-                        }
+                        },
+                        recurrentCheckpoints: retainedCache.recurrentCheckpoints
                     ),
                     fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
@@ -4446,6 +4540,9 @@ actor ModelRuntime: ModelRuntimeServing {
                     retainedCache,
                     conversationKey: result.conversationKey
                 )
+                if let lease {
+                    await conversationCache.abort(lease)
+                }
             } else if let lease {
                 await conversationCache.abort(lease)
             }

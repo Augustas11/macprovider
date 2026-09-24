@@ -192,6 +192,12 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// a keyed hybrid row snapshots its recurrent state during prefill. Derived
     /// from `promptTokens`, so it stays out of the idempotency fingerprint.
     let recurrentCheckpointPositions: [Int]
+    /// SPEC-038 AC-26 hybrid cached turn: the retained entry's recurrent
+    /// checkpoints at or below `cachedPromptTokens`. The one at exactly
+    /// `cachedPromptTokens` is installed with the retained paged KV; any others
+    /// that sit on this prompt's checkpoint positions carry forward into the
+    /// row's own checkpoints. Empty for every non-hybrid request.
+    let retainedRecurrentCheckpoints: [RecurrentStateCheckpoint]
 
     init(
         id: String,
@@ -206,7 +212,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         frequencyPenalty: Double = 0.0,
         cachedPromptTokens: Int = 0,
         retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
-        recurrentCheckpointPositions: [Int] = []
+        recurrentCheckpointPositions: [Int] = [],
+        retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = []
     ) {
         self.id = id
         self.conversationKey = conversationKey
@@ -221,6 +228,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.cachedPromptTokens = max(0, cachedPromptTokens)
         self.retainedPagedKVSequence = retainedPagedKVSequence
         self.recurrentCheckpointPositions = recurrentCheckpointPositions
+        self.retainedRecurrentCheckpoints = retainedRecurrentCheckpoints
     }
 
     enum CodingKeys: String, CodingKey {
@@ -324,18 +332,28 @@ final class ContinuousBatchRetainedCache: @unchecked Sendable {
     let retainedSequence: PagedKVRetainedSequence
     let layers: [KVCache]
     let deliveryID: UUID?
+    /// Keyed hybrid rows: recurrent state at each checkpoint the row reached, so
+    /// the next cached turn can resume from one (SPEC-038 AC-26). Empty otherwise.
+    let recurrentCheckpoints: [RecurrentStateCheckpoint]
 
-    init(retainedSequence: PagedKVRetainedSequence, layers: [KVCache], deliveryID: UUID? = nil) {
+    init(
+        retainedSequence: PagedKVRetainedSequence,
+        layers: [KVCache],
+        deliveryID: UUID? = nil,
+        recurrentCheckpoints: [RecurrentStateCheckpoint] = []
+    ) {
         self.retainedSequence = retainedSequence
         self.layers = layers
         self.deliveryID = deliveryID
+        self.recurrentCheckpoints = recurrentCheckpoints
     }
 
     func withDeliveryID(_ deliveryID: UUID?) -> ContinuousBatchRetainedCache {
         ContinuousBatchRetainedCache(
             retainedSequence: retainedSequence,
             layers: layers,
-            deliveryID: deliveryID
+            deliveryID: deliveryID,
+            recurrentCheckpoints: recurrentCheckpoints
         )
     }
 }
@@ -490,11 +508,14 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     ) async throws -> [ContinuousBatchDecodeOutcome]
     /// Install a same-conversation retained paged-KV handoff before the row resumes
     /// prefill at its serial LCP. Backends that cannot consume FR-PKV10 must fail
-    /// closed instead of accepting positive cached-token credit.
+    /// closed instead of accepting positive cached-token credit. A hybrid backend
+    /// restores its recurrent layers from `recurrentCheckpoint`, taken at exactly
+    /// the handoff length, and must fail closed without one.
     func installRetainedPagedKVCache(
         requestID: String,
         handoff: PagedKVPagedCacheHandoff,
-        binding: PagedKVStorageBinding
+        binding: PagedKVStorageBinding,
+        recurrentCheckpoint: RecurrentStateCheckpoint?
     ) async throws
     /// Commit the final buyer-visible token into row-local KV state when a row
     /// stops immediately after sampling it. Retention happens after this step so
@@ -596,7 +617,8 @@ extension ContinuousBatchSchedulerBackend {
     func installRetainedPagedKVCache(
         requestID: String,
         handoff: PagedKVPagedCacheHandoff,
-        binding: PagedKVStorageBinding
+        binding: PagedKVStorageBinding,
+        recurrentCheckpoint: RecurrentStateCheckpoint?
     ) async throws {
         throw ContinuousBatchSchedulerError.unsupported("continuous_batching_paged_kv_handoff_unavailable")
     }
@@ -1063,6 +1085,7 @@ extension ContinuousBatchSchedulerError {
         "continuous_batching_admission_sequence_exhausted": 503,
         "continuous_batching_local_binding_mismatch": 503,
         "continuous_batching_terminal_kv_commit_unavailable": 503,
+        "continuous_batching_retained_hybrid_cache_unavailable": 503,
         "continuous_batching_terminal_kv_commit_missing_token": 503,
         "continuous_batching_decode_row_mismatch": 503,
         "continuous_batching_duplicate_decode_row": 503,
@@ -2354,6 +2377,16 @@ actor ContinuousBatchScheduler {
                             "continuous_batching_paged_kv_handoff_unavailable"
                         )
                     }
+                    // A hybrid handoff resumes only from a checkpoint at exactly
+                    // the cached length; the reattach below trims to it.
+                    let recurrentCheckpoint = request.retainedRecurrentCheckpoints.first {
+                        $0.tokenCount == request.cachedPromptTokens
+                    }
+                    if !request.retainedRecurrentCheckpoints.isEmpty && recurrentCheckpoint == nil {
+                        throw ContinuousBatchSchedulerError.unsupported(
+                            "continuous_batching_retained_hybrid_cache_unavailable"
+                        )
+                    }
                     handle = try await allocator.reattach(
                         retained,
                         conversationKey: request.conversationKey,
@@ -2369,7 +2402,8 @@ actor ContinuousBatchScheduler {
                     try await backend.installRetainedPagedKVCache(
                         requestID: request.id,
                         handoff: handoff,
-                        binding: binding
+                        binding: binding,
+                        recurrentCheckpoint: recurrentCheckpoint
                     )
                     prefillCursor = request.cachedPromptTokens
                 } else {
@@ -2413,7 +2447,12 @@ actor ContinuousBatchScheduler {
                     outputTokens: [],
                     pendingOutputTokens: [],
                     prefillCursor: prefillCursor,
-                    snapshot: configuration.snapshot
+                    snapshot: configuration.snapshot,
+                    // Stored checkpoints on this prompt's own positions are a
+                    // prefix of it, so they carry forward (as on the serial path).
+                    recurrentCheckpoints: request.retainedRecurrentCheckpoints.filter {
+                        request.recurrentCheckpointPositions.contains($0.tokenCount)
+                    }
                 )
                 promptOrder.append(request.id)
                 endQueueWait(requestID: request.id)
@@ -2964,7 +3003,8 @@ actor ContinuousBatchScheduler {
             )
             return ContinuousBatchRetainedCache(
                 retainedSequence: retained,
-                layers: handoff.caches
+                layers: handoff.caches,
+                recurrentCheckpoints: row.recurrentCheckpoints
             )
         } catch {
             if let retainedSequence {

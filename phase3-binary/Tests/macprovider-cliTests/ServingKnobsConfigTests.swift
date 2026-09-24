@@ -716,6 +716,116 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNoThrow(try ServeCommand.runContinuousBatchingPreflight(config))
     }
 
+    // SPEC-038 AC-26: `continuous_batching_cached_turns` lifts the fence only
+    // for a lease that carries a usable retained handoff; off keeps it exactly.
+    func testCachedTurnsFlagLiftsFenceOnlyForUsableRetainedHandoff() {
+        for mode in [ContinuousBatchingMode.canary, .on] {
+            XCTAssertTrue(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+                mode: mode, cachedPromptTokens: 32, hasRetainedPagedKVHandoff: true, cachedTurnsEnabled: false
+            ), "flag off: fence unchanged in \(mode)")
+            XCTAssertFalse(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+                mode: mode, cachedPromptTokens: 32, hasRetainedPagedKVHandoff: true, cachedTurnsEnabled: true
+            ), "flag on + usable handoff batches in \(mode)")
+            XCTAssertTrue(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+                mode: mode, cachedPromptTokens: 32, hasRetainedPagedKVHandoff: false, cachedTurnsEnabled: true
+            ), "flag on without a usable handoff: serial route (canary) / fail closed (on)")
+            XCTAssertFalse(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+                mode: mode, cachedPromptTokens: 0, hasRetainedPagedKVHandoff: false, cachedTurnsEnabled: true
+            ))
+        }
+        XCTAssertFalse(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+            mode: .off, cachedPromptTokens: 32, hasRetainedPagedKVHandoff: false, cachedTurnsEnabled: true
+        ))
+    }
+
+    func testUsableRetainedHandoffRequiresCheckpointAtCachedLengthOnHybridModels() async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let handle = try await allocator.allocate(
+            conversationKey: "conv", initialCapacityTokens: 40, maxLogicalTokens: 48, initialTokens: 40)
+        let retained = try await allocator.retain(handle)
+        let checkpoint = RecurrentStateCheckpoint(tokenCount: 36, states: [1: []])
+        func lease(
+            retained: PagedKVRetainedSequence?, checkpoints: [RecurrentStateCheckpoint], chosen: RecurrentStateCheckpoint?
+        ) -> ConversationCacheLease {
+            ConversationCacheLease(
+                key: "conv", keyHash: "h", incomingTokens: [], modelID: "m", kvBits: nil,
+                reusableCache: ConversationCacheLayers([], retainedPagedKVSequence: retained, recurrentCheckpoints: checkpoints),
+                cachedPromptTokens: 36, lcp: 36, trimBy: 4, recurrentCheckpoint: chosen)
+        }
+        let hybridHit = lease(retained: retained, checkpoints: [checkpoint], chosen: checkpoint)
+        XCTAssertTrue(ModelRuntime.leaseHasUsableRetainedHandoff(hybridHit, modelHasRecurrentLayers: true))
+        XCTAssertEqual(ModelRuntime.retainedRecurrentCheckpoints(for: hybridHit), [checkpoint])
+        let noCheckpoint = lease(retained: retained, checkpoints: [], chosen: nil)
+        XCTAssertFalse(ModelRuntime.leaseHasUsableRetainedHandoff(noCheckpoint, modelHasRecurrentLayers: true))
+        XCTAssertTrue(ModelRuntime.leaseHasUsableRetainedHandoff(noCheckpoint, modelHasRecurrentLayers: false))
+        XCTAssertTrue(ModelRuntime.retainedRecurrentCheckpoints(for: noCheckpoint).isEmpty)
+        let serialFormat = lease(retained: nil, checkpoints: [checkpoint], chosen: nil)
+        XCTAssertFalse(ModelRuntime.leaseHasUsableRetainedHandoff(serialFormat, modelHasRecurrentLayers: true))
+        XCTAssertFalse(ModelRuntime.leaseHasUsableRetainedHandoff(serialFormat, modelHasRecurrentLayers: false))
+        XCTAssertTrue(ModelRuntime.retainedRecurrentCheckpoints(for: serialFormat).isEmpty)
+
+        let bare = ContinuousBatchRetainedCache(retainedSequence: retained, layers: [])
+        XCTAssertFalse(ModelRuntime.retainedCacheIsCommittable(bare, modelHasRecurrentLayers: true))
+        XCTAssertTrue(ModelRuntime.retainedCacheIsCommittable(bare, modelHasRecurrentLayers: false))
+        let withCheckpoint = ContinuousBatchRetainedCache(
+            retainedSequence: retained, layers: [], recurrentCheckpoints: [checkpoint])
+        XCTAssertTrue(ModelRuntime.retainedCacheIsCommittable(withCheckpoint, modelHasRecurrentLayers: true))
+        XCTAssertEqual(withCheckpoint.withDeliveryID(UUID()).recurrentCheckpoints, [checkpoint])
+        try await allocator.discardRetained(retained)
+    }
+
+    func testContinuousBatchingCachedTurnsDefaultsOffAndResolvesCLIOverEnvironmentOverYAML() throws {
+        XCTAssertFalse(AppConfig.defaults().continuousBatchingCachedTurns)
+        let yaml = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching_cached_turns: true\n" }
+        )
+        XCTAssertTrue(yaml.continuousBatchingCachedTurns)
+        let environment = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS": "false"],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching_cached_turns: true\n" }
+        )
+        XCTAssertFalse(environment.continuousBatchingCachedTurns)
+        let cli = try ConfigLoader.load(
+            cli: CLIOverrides(continuousBatchingCachedTurns: true),
+            environment: ["MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS": "false"],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching_cached_turns: false\n" }
+        )
+        XCTAssertTrue(cli.continuousBatchingCachedTurns)
+        XCTAssertThrowsError(try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching_cached_turns: sometimes\n" }
+        ))
+    }
+
+    func testContinuousBatchingCachedTurnsCLIFlagAndPreflightLine() throws {
+        XCTAssertNil(try ServeCommand.parse([]).continuousBatchingCachedTurns)
+        XCTAssertEqual(try ServeCommand.parse(["--continuous-batching-cached-turns"]).continuousBatchingCachedTurns, true)
+        XCTAssertEqual(try ServeCommand.parse(["--no-continuous-batching-cached-turns"]).continuousBatchingCachedTurns, false)
+
+        var config = AppConfig.defaults()
+        XCTAssertNil(ServeCommand.continuousBatchingCachedTurnsPreflightLine(config))
+        config.continuousBatchingCachedTurns = true
+        XCTAssertEqual(
+            ServeCommand.continuousBatchingCachedTurnsPreflightLine(config),
+            "event=batching_cached_turns action=inert reason=continuous_batching_off\n"
+        )
+        config.continuousBatching = .canary
+        config.maxConcurrencyOverride = 2
+        XCTAssertEqual(
+            ServeCommand.continuousBatchingCachedTurnsPreflightLine(config),
+            "event=batching_cached_turns action=enabled mode=canary\n"
+        )
+        XCTAssertNoThrow(try ServeCommand.runContinuousBatchingPreflight(config))
+    }
+
     func testCanarySerialRoutesCachedHitWithoutRetainedPagedHandoff() {
         XCTAssertTrue(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
             mode: .canary,

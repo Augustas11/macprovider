@@ -868,6 +868,89 @@ final class ConversationCacheTests: XCTestCase {
         await cache.abort(hit!)
     }
 
+    private func seedRetainedHybridEntry(
+        _ cache: ConversationCache,
+        allocator: PagedKVBlockAllocator,
+        recorder: RetainedDiscardRecorder,
+        tokens: [Int32],
+        checkpoints: [Int]
+    ) async throws -> PagedKVRetainedSequence {
+        let retained = try await retainedSequence(allocator: allocator, conversationKey: "conv:hybrid", tokenCount: tokens.count)
+        let seed = await cache.begin(conversationKey: "conv:hybrid", incomingTokens: tokens, modelID: "hybrid", kvBits: nil)
+        await cache.commit(
+            seed!,
+            cache: ConversationCacheLayers(
+                [],
+                retainedPagedKVSequence: retained,
+                discardRetainedPagedKVSequence: { retained, key in
+                    await recorder.record(retained)
+                    try? await allocator.discardRetained(retained, conversationKey: key)
+                },
+                recurrentCheckpoints: checkpoints.map { RecurrentStateCheckpoint(tokenCount: $0, states: [1: []]) }
+            ),
+            fullTokens: tokens)
+        return retained
+    }
+
+    /// SPEC-038 AC-26: a retained hybrid entry resumes from the largest
+    /// checkpoint inside the shared prefix. The lease carries that checkpoint and
+    /// reports it as the cached length, and the trim stays with the scheduler.
+    func testRetainedHybridEntryLeasesLargestCheckpointAndLeavesTrimToScheduler() async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 32)
+        let recorder = RetainedDiscardRecorder()
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let retained = try await seedRetainedHybridEntry(
+            cache, allocator: allocator, recorder: recorder, tokens: int32Range(0..<90), checkpoints: [40, 70])
+
+        let hit = await cache.begin(
+            conversationKey: "conv:hybrid",
+            incomingTokens: int32Range(0..<75) + int32Range(500..<520),
+            modelID: "hybrid",
+            kvBits: nil,
+            allowRetainedPagedKVHandoff: true)
+
+        XCTAssertEqual(hit?.cachedPromptTokens, 70, "the serial checkpoint hit reports the same length")
+        XCTAssertEqual(hit?.lcp, 70)
+        XCTAssertEqual(hit?.trimBy, 20)
+        XCTAssertEqual(hit?.recurrentCheckpoint?.tokenCount, 70)
+        XCTAssertEqual(hit?.reusableCache?.retainedPagedKVSequence, retained)
+        XCTAssertTrue(ModelRuntime.leaseHasUsableRetainedHandoff(hit!, modelHasRecurrentLayers: true))
+        XCTAssertEqual(ModelRuntime.retainedRecurrentCheckpoints(for: hit).map(\.tokenCount), [40, 70])
+        let discardsBeforeAbort = await recorder.count()
+        XCTAssertEqual(discardsBeforeAbort, 0)
+        await cache.abort(hit!)
+        await assertRetainedSequenceDiscarded(retained, allocator: allocator, conversationKey: "conv:hybrid")
+    }
+
+    func testRetainedHybridEntryMissesWithoutCheckpointInPrefixAndDiscardsOwner() async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 32)
+        let recorder = RetainedDiscardRecorder()
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let retained = try await seedRetainedHybridEntry(
+            cache, allocator: allocator, recorder: recorder, tokens: int32Range(0..<90), checkpoints: [40, 70])
+
+        let miss = await cache.begin(
+            conversationKey: "conv:hybrid",
+            incomingTokens: int32Range(0..<36) + int32Range(500..<540),
+            modelID: "hybrid",
+            kvBits: nil,
+            allowRetainedPagedKVHandoff: true)
+
+        XCTAssertEqual(miss?.cachedPromptTokens, 0, "recurrent_checkpoint_diverged is a miss")
+        XCTAssertNil(miss?.reusableCache)
+        XCTAssertNil(miss?.recurrentCheckpoint)
+        let discards = await recorder.count()
+        XCTAssertEqual(discards, 1, "the retained owner is discarded exactly like other retained misses")
+        await cache.abort(miss!)
+        await assertRetainedSequenceDiscarded(retained, allocator: allocator, conversationKey: "conv:hybrid")
+        let freeBlocks = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocks, 32)
+        let next = await cache.begin(
+            conversationKey: "conv:hybrid", incomingTokens: int32Range(0..<90), modelID: "hybrid", kvBits: nil)
+        XCTAssertNil(next?.reusableCache, "no entry survives the miss")
+        await cache.abort(next!)
+    }
+
     private func trimmableCache(offset: Int) -> KVCacheSimple {
         let cache = KVCacheSimple()
         cache.offset = offset

@@ -265,6 +265,14 @@ public struct AppConfig: Equatable, Sendable {
     // milliseconds. Unset ⇒ the scheduler's 30s default. A request still
     // queued when it expires is rejected pre-admission, non-settling.
     public var continuousBatchQueueWaitTimeoutMS: Int?
+    // SPEC-038 AC-26: let positive-cached follow-up turns that carry a usable
+    // retained paged-KV handoff (plus a recurrent checkpoint on hybrid models)
+    // batch instead of serial-routing. Default off; inert while
+    // `continuous_batching` is off. Triple-exposed: yaml key
+    // `continuous_batching_cached_turns`, env
+    // `MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS`, CLI
+    // `--[no-]continuous-batching-cached-turns`.
+    public var continuousBatchingCachedTurns: Bool
     // MLX buffer-cache ceiling in MiB. MLX defaults it to its memory limit, so
     // freed GPU buffers accumulate for the life of the process (Studio live
     // provider 2026-09-24: 50 GB fresh -> ~130 GB under traffic -> kernel
@@ -349,6 +357,7 @@ public struct AppConfig: Equatable, Sendable {
             continuousBatching: .off,
             continuousBatchQueueLimit: nil,
             continuousBatchQueueWaitTimeoutMS: nil,
+            continuousBatchingCachedTurns: false,
             mlxCacheLimitMB: nil,
             continuousBatchingAcceptedTuples: [],
             kvDiskCache: .defaults(),
@@ -401,6 +410,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var continuousBatching: String?
     public var continuousBatchQueueLimit: Int?
     public var continuousBatchQueueWaitTimeoutMS: Int?
+    public var continuousBatchingCachedTurns: Bool?
     // SPEC-037 FR-KVP11: KV disk-tier CLI flags (`--kv-disk-cache-*`).
     public var kvDiskCache: KVDiskCacheCLIOverrides
     // SPEC-039 FR-PKV14: paged KV CLI flags (`--paged-kv-*`).
@@ -448,6 +458,7 @@ public struct CLIOverrides: Equatable, Sendable {
         continuousBatching: String? = nil,
         continuousBatchQueueLimit: Int? = nil,
         continuousBatchQueueWaitTimeoutMS: Int? = nil,
+        continuousBatchingCachedTurns: Bool? = nil,
         pagedKV: PagedKVCLIOverrides = PagedKVCLIOverrides()
     ) {
         self.port = port
@@ -490,6 +501,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.continuousBatching = continuousBatching
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
+        self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.kvDiskCache = kvDiskCache
         self.pagedKV = pagedKV
     }
@@ -703,6 +715,12 @@ public enum ConfigLoader {
             key: "continuous_batch_queue_wait_timeout_ms",
             expected: "integer >= 1"
         )
+        try assign(
+            &config.continuousBatchingCachedTurns,
+            from: dict,
+            key: "continuous_batching_cached_turns",
+            expected: "boolean"
+        )
         try assign(&config.mlxCacheLimitMB, from: dict, key: "mlx_cache_limit_mb", expected: "integer >= 0")
         if let rawTuples = dict["continuous_batching_accepted_tuples"] {
             config.continuousBatchingAcceptedTuples = try parseContinuousBatchingAcceptedTuples(rawTuples)
@@ -873,6 +891,12 @@ public enum ConfigLoader {
             from: environment,
             env: "MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS",
             expected: "integer >= 1"
+        )
+        try assign(
+            &config.continuousBatchingCachedTurns,
+            from: environment,
+            env: "MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS",
+            expected: "boolean"
         )
         try assign(&config.mlxCacheLimitMB, from: environment, env: "MACPROVIDER_MLX_CACHE_LIMIT_MB", expected: "integer >= 0")
         return config
@@ -1054,6 +1078,9 @@ public enum ConfigLoader {
         }
         if let continuousBatchQueueWaitTimeoutMS = cli.continuousBatchQueueWaitTimeoutMS {
             config.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
+        }
+        if let continuousBatchingCachedTurns = cli.continuousBatchingCachedTurns {
+            config.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         }
         return config
     }

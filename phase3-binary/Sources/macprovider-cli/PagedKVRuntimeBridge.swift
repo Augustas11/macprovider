@@ -627,13 +627,40 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     func installRetainedPagedKVCache(
         requestID: String,
         handoff: PagedKVPagedCacheHandoff,
-        binding: PagedKVStorageBinding
+        binding: PagedKVStorageBinding,
+        recurrentCheckpoint: RecurrentStateCheckpoint?
     ) async throws {
-        guard cacheKinds.allSatisfy({ $0 == .pagedAttention }) else {
-            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_retained_hybrid_cache_unavailable")
+        let unavailable = ContinuousBatchSchedulerError.unsupported("continuous_batching_retained_hybrid_cache_unavailable")
+        guard cacheKinds.contains(.recurrentMamba) else {
+            guard recurrentCheckpoint == nil else { throw unavailable }
+            let state = RowState(caches: handoff.caches, state: nil)
+            try setRowState(state, for: requestID, binding: binding)
+            return
         }
-        let state = RowState(caches: handoff.caches, state: nil)
-        try setRowState(state, for: requestID, binding: binding)
+        // SPEC-038 AC-26 hybrid cached turn: attention layers come from the
+        // handoff, recurrent layers from the checkpoint taken at exactly the
+        // handoff length. Never a zero recurrent state.
+        guard let recurrentCheckpoint,
+              recurrentCheckpoint.tokenCount == handoff.logicalTokenCount
+        else {
+            throw unavailable
+        }
+        var attention = handoff.caches.makeIterator()
+        var caches: [KVCache] = []
+        for (index, kind) in cacheKinds.enumerated() {
+            switch kind {
+            case .pagedAttention:
+                guard let cache = attention.next() else { throw unavailable }
+                caches.append(cache)
+            case .recurrentMamba:
+                guard let state = recurrentCheckpoint.states[index], !state.isEmpty else { throw unavailable }
+                let cache = MambaCache()
+                cache.state = state
+                caches.append(cache)
+            }
+        }
+        guard attention.next() == nil else { throw unavailable }
+        try setRowState(RowState(caches: caches, state: nil), for: requestID, binding: binding)
     }
 
     func commitTerminalKV(_ input: ContinuousBatchTerminalKVCommitInput) async throws {

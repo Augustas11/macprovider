@@ -1,6 +1,6 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2.7
+Version: v0.2.8
 Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
@@ -12,6 +12,20 @@ clarifies the API-visible admission/replay/terminal contract, records
 decode-first scheduling as a conservative v0.2 choice rather than a claim of
 vLLM/SGLang-style unified-token scheduling, and tightens the real-serving
 evidence gate for retained paged-KV reuse.
+
+**Change log v0.2.8 (2026-09-24, opt-in cached-turn batching):** A new
+provider config flag `continuous_batching_cached_turns` (default off; env
+`MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS`, CLI
+`--[no-]continuous-batching-cached-turns`) lets a positive
+`cached_prompt_tokens` turn enter the scheduler in `canary`/`on` when its
+conversation-cache lease carries a usable retained FR-PKV10 handoff. For a
+hybrid model the handoff is usable only with a recurrent checkpoint at exactly
+the cached length. With the flag on, a keyed hybrid row retains its paged KV
+plus its checkpoints instead of committing the v0.2.7 serial-format entry.
+Everything else keeps today's behaviour: the flag off, or a lease without a
+usable handoff, still serial-routes in canary and fails closed in `on`. The
+AC-26 packaged real-serving proof is still required before the flag is enabled
+on a live provider.
 
 **Change log v0.2.7 (2026-09-24, hybrid first-turn conversation cache):**
 FR-CB4 now covers hybrid models (attention plus recurrent layers, e.g.
@@ -332,6 +346,39 @@ model stop dropped), and the snapshots as that entry's recurrent checkpoints.
 Keyless, cancelled and failed rows MUST commit nothing and MUST release every
 block and snapshot they hold. A later turn with positive
 `cached_prompt_tokens` still serial-routes until AC-26.
+
+**Opt-in cached turns (v0.2.8).** A positive-`cached_prompt_tokens` turn MAY
+enter the scheduler only when the provider flag
+`continuous_batching_cached_turns` is on (default off) AND its lease carries a
+usable retained handoff. A usable handoff is a retained FR-PKV10 paged-KV
+sequence and, for a hybrid model, the recurrent checkpoint the lease resumes
+from. Any other positive-cached turn MUST keep the AC-26 fence: canary
+serial-routes with `sticky_cache_handoff_unavailable`, and `on` fails closed
+(FR-CB8). With the flag off, behaviour MUST be identical to v0.2.7 for every
+model. With the flag on, for a hybrid model:
+- A conversation-keyed row that reached at least one checkpoint MUST, at a
+  normal terminal, retain its paged attention KV through FR-PKV10 together with
+  those checkpoints, in place of the serial-format entry above. A retained
+  delivery without any checkpoint MUST be discarded, not committed.
+- `begin` on a retained hybrid entry MUST resume from the largest checkpoint C
+  with `lcpThreshold <= C <= lcp` and report `cached_prompt_tokens = C`, which
+  is the value the serial path reports for the same checkpoint hit (SPEC-024
+  FR-CI2). If no checkpoint qualifies, the turn misses with
+  `recurrent_checkpoint_diverged` and the retained sequence is discarded.
+- Admission MUST reattach the retained sequence trimmed to exactly C. The
+  backend MUST install the paged attention layers from the handoff and restore
+  every recurrent layer from the checkpoint at exactly C. It MUST fail closed
+  when that checkpoint is missing, has another length, or lacks a recurrent
+  layer; it MUST NOT install a zero recurrent state. Prefill resumes at C.
+- Stored checkpoints below C that fall on the new prompt's checkpoint
+  positions carry forward into the row's checkpoints; the row snapshots the
+  rest itself and retains again at terminal, so the conversation keeps
+  chaining.
+- A cancel recorded during the reattach or install awaits MUST win: the row
+  never prefills and its blocks are released.
+- A positive-cached request that is serial-routed anyway (for example a
+  tool-bearing request) discards the retained entry, and the serial path
+  misses.
 
 ### FR-CB5 - dynamic insertion and removal between decode steps (SPEC-038-R005)
 
@@ -945,7 +992,12 @@ hardware-capability run or a static-review obligation. Every
   emit sticky cached-token credit. A retained paged-KV handoff produced by a
   first-turn MUST NOT admit a later positive-`cached_prompt_tokens` turn until
   this AC is satisfied. A keyless loopback 200 is not proof that Pearl-routed
-  keyed traffic entered the batch.
+  keyed traffic entered the batch. The v0.2.8 `continuous_batching_cached_turns`
+  flag (FR-CB4) implements the admission path, but it does not satisfy this AC.
+  An operator MUST NOT enable the flag on a live provider until this packaged
+  proof, covering the relay path and the usage, receipt and settlement fields,
+  has been recorded for the tuple. Hybrid tuples need the proof too, including a
+  checkpoint-resumed turn.
 
 ## 8. Go/no-go gates
 

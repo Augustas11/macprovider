@@ -253,6 +253,93 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         XCTAssertNil(noneSerial)
     }
 
+    /// SPEC-038 AC-26 hybrid cached turn: a retained handoff installs its paged
+    /// attention layers plus recurrent layers restored from the checkpoint at
+    /// exactly the handoff length, and refuses anything else.
+    func testHybridRetainedInstallRestoresRecurrentStateFromCheckpoint() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
+            model: MixedCacheFakeModel(recorder: MixedCacheRecorder(), nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let bridge = PagedKVRuntimeContiguousCacheBridge()
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention],
+            contiguousCacheBridge: bridge
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16, contiguousCacheBridge: bridge)
+        let handle = try await allocator.allocate(conversationKey: "conv", maxTokens: 8)
+
+        func prefill(_ tokens: [Int], from offset: Int) async throws {
+            _ = try await allocator.extend(handle, by: tokens.count)
+            let binding = try await allocator.binding(for: handle)
+            _ = try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+                requestID: "turn-1",
+                promptTokens: tokens,
+                binding: binding,
+                promptTokenOffset: offset,
+                committedKVTokenCount: offset,
+                targetKVTokenCount: offset + tokens.count,
+                isFinalChunk: false
+            )])
+        }
+
+        try await prefill([1, 2, 3], from: 0)
+        let snapshot = await backend.snapshotRecurrentState(requestID: "turn-1", tokenCount: 3)
+        let checkpoint = try XCTUnwrap(snapshot)
+        try await prefill([4, 5], from: 3)
+        let retained = try await allocator.retain(handle)
+        backend.finish(requestID: "turn-1")
+
+        let reattached = try await allocator.reattach(retained, conversationKey: "conv", trimToLogicalTokens: 3)
+        let binding = try await allocator.binding(for: reattached)
+        let handoff = try bridge.reattachPagedKVCache(handle: reattached, table: binding.currentTable)
+        XCTAssertEqual(handoff.logicalTokenCount, 3)
+
+        for invalid in [nil, RecurrentStateCheckpoint(tokenCount: 2, states: checkpoint.states)] {
+            do {
+                try await backend.installRetainedPagedKVCache(
+                    requestID: "turn-2", handoff: handoff, binding: binding, recurrentCheckpoint: invalid)
+                XCTFail("a hybrid install needs a checkpoint at exactly the handoff length")
+            } catch ContinuousBatchSchedulerError.unsupported(let reason) {
+                XCTAssertEqual(reason, "continuous_batching_retained_hybrid_cache_unavailable")
+            }
+        }
+
+        try await backend.installRetainedPagedKVCache(
+            requestID: "turn-2", handoff: handoff, binding: binding, recurrentCheckpoint: checkpoint)
+        let restoredSnapshot = await backend.snapshotRecurrentState(requestID: "turn-2", tokenCount: 3)
+        let restored = try XCTUnwrap(restoredSnapshot)
+        XCTAssertEqual(restored.states[0]?.first?.asArray(Float.self), [201, 202, 203], "state at the checkpoint, not after it")
+
+        let pagedOnly = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2
+        )
+        do {
+            try await pagedOnly.installRetainedPagedKVCache(
+                requestID: "turn-2", handoff: handoff, binding: binding, recurrentCheckpoint: checkpoint)
+            XCTFail("a non-hybrid backend must refuse a recurrent checkpoint")
+        } catch ContinuousBatchSchedulerError.unsupported(let reason) {
+            XCTAssertEqual(reason, "continuous_batching_retained_hybrid_cache_unavailable")
+        }
+        backend.finish(requestID: "turn-2")
+        try await allocator.release(reattached)
+    }
+
     private func decodeInput(
         requestID: String,
         currentToken: Int,
