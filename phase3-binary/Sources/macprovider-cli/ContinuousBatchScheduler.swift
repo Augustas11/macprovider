@@ -2239,6 +2239,17 @@ actor ContinuousBatchScheduler {
               occupiedSlots < configuration.maxActiveRows,
               !waiting.isEmpty {
             attempts += 1
+            // SPEC-038 AC-25: a request already past its absolute admission
+            // deadline (for example re-queued by a `capacityExceeded` bounce
+            // after the deadline passed) expires here, synchronously. Its
+            // zero-delay timeout task would otherwise race this pump, and the
+            // pump could admit it after the bound it was promised.
+            if let deadline = queueWaitDeadlines[waiting[0].id],
+               DispatchTime.now().uptimeNanoseconds >= deadline {
+                await expireQueueWait(requestID: waiting[0].id)
+                madeProgress = true
+                continue
+            }
             let request = waiting.removeFirst()
             suspendQueueWaitTimeout(requestID: request.id)
             madeProgress = true
