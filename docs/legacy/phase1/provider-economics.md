@@ -228,9 +228,9 @@ Self-serve promotion is on the roadmap but is not implemented.
 
 The binary holds a `caffeinate` process for the duration of its run
 (`phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:66-98`,
-`CaffeinateSleepAssertion`). This prevents display sleep and user-idle system
-sleep via `caffeinate -dimsu -w <pid>`. It does **not** prevent lid-close
-sleep.
+`CaffeinateSleepAssertion`). This prevents user-idle system sleep, and system
+sleep on AC, via `caffeinate -ims -w <pid>`; the display may still sleep. It
+does **not** prevent lid-close sleep.
 
 **Lid-closed sleep drops the WebSocket connection.** The binary will reconnect
 automatically when the Mac wakes, but requests in flight during the sleep are
