@@ -316,6 +316,30 @@ class EffectiveDiffTests(unittest.TestCase):
         self.assertEqual(cr.escape_model_name("a\\x07"), "a\\x5cx07")
         self.assertNotEqual(cr.escape_model_name("a\x07"), cr.escape_model_name("a\\x07"))
 
+    def test_unicode_format_and_bidi_controls_are_escaped(self) -> None:
+        # SEC-L1: bidi embeddings/overrides/isolates/marks, other Cf, Zl/Zp and
+        # astral Cf become ASCII escapes; a backslash stays escaped, so the
+        # encoding is injective and the terminal never sees a raw one.
+        controls = ["\u200e", "\u200f", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+                    "\u2066", "\u2067", "\u2068", "\u2069", "\u061c", "\u200b", "\u00ad",
+                    "\ufeff", "\u2028", "\u2029", "\U000e0001"]
+        for ch in controls:
+            with self.subTest(code=hex(ord(ch))):
+                escaped = cr.escape_model_name("m" + ch + "x")
+                width = 8 if ord(ch) > 0xFFFF else 4
+                prefix = "\\U" if ord(ch) > 0xFFFF else "\\u"
+                self.assertEqual(escaped, "m" + prefix + format(ord(ch), f"0{width}x") + "x")
+                self.assertTrue(escaped.isascii())
+        self.assertEqual(cr.escape_model_name("\u65e5\u672c-model"), "\u65e5\u672c-model")
+        self.assertNotEqual(cr.escape_model_name("a\u202eb"), cr.escape_model_name("a\\u202eb"))
+        self.assertEqual(cr.escape_model_name("a\\u202eb"), "a\\x5cu202eb")
+        hostile = "gpt\u202e4-mini\u2066"
+        diff, _ = self.diff(copy.deepcopy(self.live), pinned={hostile})
+        self.assertEqual(diff["unresolved_names"], ["gpt\\u202e4-mini\\u2066"])
+        obj = cr.pricing_acknowledged_object(diff, go_resolutions(hostile))
+        self.assertEqual(obj["model_resolutions"][0]["name"], "gpt\\u202e4-mini\\u2066")
+        self.assertTrue(all(b < 0x80 for b in cr.pricing_canonical_bytes(obj)))
+
     def test_diff_is_deterministic(self) -> None:
         candidate = copy.deepcopy(self.live)
         candidate["qwen3-8b"]["prompt_rate_per_mtok"] += 1

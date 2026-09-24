@@ -20,6 +20,10 @@ import stat
 from typing import Optional
 
 PRICING_TXN_NAME = ".pricing-txn"
+# coordinator-pricing-recover --resolve-deploy-conflict sets the journal aside
+# under this prefix while it runs deploy recovery under the lock set; one left
+# behind (the resolver was killed) is still a live pricing transaction.
+PRICING_TXN_HELD_PREFIX = PRICING_TXN_NAME + ".conflict-held."
 DEPLOY_LOCK_NAME = ".coordinator-deploy.lock"
 UPDATER_LOCK_PATH = Path("/run/lock/macprovider-pearl-updater.lock")
 EX_REFUSED = 75
@@ -54,14 +58,23 @@ def refusal_message(path: os.PathLike[str] | str) -> str:
 
 
 def refuse_if_pricing_txn(install_root: os.PathLike[str] | str) -> None:
-    """Raise PricingTransactionActive when <install_root>/.pricing-txn exists.
+    """Raise PricingTransactionActive when <install_root>/.pricing-txn exists,
+    or a journal set aside under PRICING_TXN_HELD_PREFIX does.
 
     Presence is a path-entry test (a dangling symlink counts), matching the
-    shell guard's `[ -e ] || [ -L ]`.
+    shell guard's `[ -e ] || [ -L ]`. The shell guard does not check set-aside
+    journals: deploy recovery, which uses it, runs inside the set-aside window.
     """
     path = pricing_txn_path(install_root)
     if os.path.lexists(path):
         raise PricingTransactionActive(path)
+    try:
+        names = os.listdir(install_root)
+    except FileNotFoundError:
+        return
+    for name in sorted(names):
+        if name.startswith(PRICING_TXN_HELD_PREFIX):
+            raise PricingTransactionActive(Path(install_root) / name)
 
 
 def acquire_lock(

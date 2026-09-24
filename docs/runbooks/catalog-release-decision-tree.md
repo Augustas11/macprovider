@@ -231,6 +231,12 @@ from a clean checkout of the same signed tag on `main`:
 If a later tag changes any file in the installed-writers list, repeat step 1
 from that tag before the next pricing correction.
 
+**Runtime floor.** The first pricing correction's journal `begin` writes
+`/opt/macprovider/.pricing-runtime-floor`. From then on the enabling runtime
+is the minimum: never deploy, restore, or update to a coordinator older than
+it ([Pricing runtime floor](#pricing-runtime-floor)). Treat step 2's tag as
+that floor from the moment you run the first correction.
+
 ### Author the PR
 
 One PR, reviewed by CODEOWNERS, carrying all of:
@@ -367,8 +373,10 @@ The same coordinator release changed how D1a wholesale statements price
 - Each `request_log` row is priced at its own rate generation (its linked
   `config_snapshot_id`, else the snapshot in effect at `ts_utc`), not at the
   current table. A price change never re-prices earlier requests.
-- Lines group by `(model, resolved rate row, global_multiplier_ppm)`, so a
-  model repriced mid-month shows one line per generation.
+- The statement has one line per model. For its gross, the model's source
+  rows are grouped by `(resolved rate row, global_multiplier_ppm)` of their
+  generation, each group is priced on its own, and the line's gross is the
+  sum of those group grosses. A model repriced mid-month is still one line.
 - A model-month above 10,000,000 tokens is no longer zeroed (the per-request
   cap does not apply to the aggregate). A regenerated draft for such a month
   now shows the real amount; issued statements change only with `force=true`. A total above int64 fails the statement.
@@ -636,31 +644,76 @@ and a pricing journal both exist. Deploy pre-start recovery refuses to restore
 either, so the coordinator does not start. The guarded tools cannot create
 this state (the content lane refuses on a deploy snapshot; the deploy refuses
 on a journal), so a pre-#1693 deploy tag or a hand change ran during a pricing
-transaction. Two operators, by hand:
+transaction. Two operators; never rename the journal or edit the snapshot by
+hand.
 
-1. Freeze writers as in [Rollback failed](#rollback-failed) step 1. Delete
-   neither the snapshot nor the journal. Leave the coordinator stopped.
-2. Record `txn.json`, `ls -la /opt/macprovider/.coordinator-deploy-rollback/`,
-   the sha256 of its `coordinator.yaml`, and its `catalog-current-target`.
-3. Continue only if the snapshot's `coordinator.yaml` equals the journal's
-   prior or candidate yaml, its `catalog-current-target` equals the journal's
-   prior or candidate `current`, and the live overlay equals the journal's
-   overlay. Otherwise stop here and escalate with the recorded state; do not
-   start the coordinator on a hand-assembled pair.
-4. Resolve the deploy first, with the journal set aside under a name no tool
-   reads:
+1. **Freeze.** Disable the renewal workflow
+   (`renew-autotune-static-feed-signed.yml`) and stop
+   `macprovider-pearl-updater.timer`. Do not take the Pearl locks yourself:
+   the command in step 3 takes and holds them. Leave the coordinator stopped.
+   Delete neither the snapshot nor the journal.
+2. **Record.** Save `txn.json`, `ls -la /opt/macprovider/.coordinator-deploy-rollback/`,
+   and the command's output from step 3 in the incident.
+3. **Resolve the deploy snapshot:**
    ```bash
-   sudo mv -T /opt/macprovider/.pricing-txn /opt/macprovider/.pricing-txn-held
-   sudo /opt/macprovider/coordinator-deploy-recover --recover
-   sudo mv -T /opt/macprovider/.pricing-txn-held /opt/macprovider/.pricing-txn
+   sudo python3 -I /opt/macprovider/coordinator-pricing-recover --resolve-deploy-conflict
    ```
-   The deploy restore may restart the coordinator on the restored pair. A
-   consistent pair passes parity; a mixed one fails closed.
-5. Check that `/opt/macprovider/coordinator-pricing-recover` and the pricing
-   units still hash to the reviewed #1693 copies (the deploy restore puts back
-   the pre-deploy set). Reinstall them if not.
-6. Run `--recover-pricing-txn`. If the coordinator is stopped, start it and
-   let the closer finalize.
+   It takes the lock set (updater lock, then deploy lock, validated as every
+   writer does) and holds it throughout. It refuses (exit 1, nothing changed)
+   unless all of these hold: the coordinator is stopped; the snapshot is
+   complete and uncommitted; its `coordinator.yaml`, `catalog-current-target`
+   and `catalog-previous-target` are together exactly the journal's prior
+   pair or exactly its candidate pair (a `verified` journal accepts only its
+   candidate, a `rolled-back` one only its prior); its overlay is the
+   journal's; it deletes no release the journal names; and its coordinator
+   binary carries per-generation pricing. Then it sets the journal aside
+   (`.pricing-txn.conflict-held.<pid>.<start>`), runs
+   `coordinator-deploy-recover --recover-under-global` under its own locks
+   (no restart, no second lock acquisition), and puts the journal back on
+   every exit path, including an interrupt. Last, it checks that the
+   coordinator is still stopped, the disk is exactly the chosen journal
+   pair, `/opt/macprovider/coordinator` carries per-generation pricing, and
+   the pricing helper, shell guard, closer unit, recovery unit and guard
+   drop-in are byte-identical to before. It never starts a unit.
+
+   | Result | Action |
+   | --- | --- |
+   | exit 0, `{"resolved": ..., "stopped_sidecar_timers": [...]}` | step 5 |
+   | exit 1 `refused: ... not one coherent journal pair` (mixed or foreign), overlay differs, deletes a journal release, or the snapshot binary lacks per-generation pricing | stop; escalate with the recorded state. Never start the coordinator on a hand-assembled pair |
+   | exit 1 `refused: the coordinator must be stopped` | `sudo systemctl stop macprovider-coordinator`, rerun step 3 |
+   | exit 1 `refused: the lock set ... is held` | find the holder (a lane lease, deploy, or updater run) and wait for it; rerun |
+   | exit 5 `... failed (rc=N)` | journal restored, snapshot kept. Fix what `coordinator-deploy-recover` logged; rerun step 3 |
+   | exit 5 `interrupted (...)` | deploy recovery was stopped; journal restored. Rerun step 3 |
+   | exit 5 `... lacks per-generation wholesale pricing; do not start it` or `changed pricing recovery files` | step 4 |
+   | exit 5 `the coordinator started during deploy recovery` | stop it, then step 5 |
+   | exit 5 `the disk is not the journal's ... pair` | [State mismatch](#state-mismatch) |
+
+   If the command is killed outright (SIGKILL, host crash), the journal can
+   remain set aside. Rerun step 3 first: it puts the journal back before
+   anything else (so does the next coordinator pre-start). Until then the
+   deploy script, the Pearl updater, the Tier-2 watchdog and the content lane
+   refuse; the shell-guard tools (Tier-2 activation, renewal) do not, which is
+   why step 1 freezes them.
+4. **Reinstall the #1693 runtime by hand** (only when step 3 said so). The
+   deploy script refuses while the journal exists, so two operators copy the
+   files from the enabling (or a later) signed tag's release and checkout,
+   verifying each sha256 against the tag first: `coordinator-linux-amd64` to
+   `/opt/macprovider/coordinator`, and any file step 3 named
+   (`coordinator-pricing-recover`, `coordinator-config-guard.sh`,
+   `macprovider-coordinator-pricing-close.service`,
+   `macprovider-coordinator-deploy-recovery.service`,
+   `macprovider-coordinator.service.d/10-deploy-transaction-guard.conf`), each
+   with `install -o root -g root` and its release mode; then
+   `systemctl daemon-reload`. Do not start the coordinator.
+5. **Pricing recovery.** The journal is visible again. Start the coordinator:
+   its pre-start takes the journal on (restores the prior pair, or finalizes a
+   `verified` / `rolled-back` one) and the closer finalizes
+   ([`restored-unverified`](#restored-unverified)). Or run
+   `--recover-pricing-txn` first. Once the coordinator is healthy, start the
+   timers listed in `stopped_sidecar_timers` (deploy recovery under the
+   global lock leaves sidecars stopped; check the migration-019 note in
+   `coordinator-deploy-recover` before `stats-inventory-sync`).
+6. Unfreeze: re-enable the updater timer and the renewal workflow.
 
 ### Closer failure alert
 
@@ -717,10 +770,48 @@ lane is NO_GO on `pricing_txn_absent`. Manual SIGHUPs and hand config edits
 `test -e /opt/macprovider/.pricing-txn` first and do not proceed while it
 exists.
 
-### Pre-#1693 deploy tags
+### Pricing runtime floor
 
-Deploy tags older than the enabling release lack the journal check, the
-writer guard, and the pricing recovery units. **Never run one while a journal
-exists.** Deploying one with no journal is allowed but removes the pricing
-prerequisites: pricing preflight is NO_GO on `pricing_host_state` until a tag
-carrying #1693 is deployed again.
+`/opt/macprovider/.pricing-runtime-floor` (root, 0644: `commit=<release
+commit>`, `written_at=<UTC>`) marks that pricing corrections are enabled. The
+first pricing release writes it in `coordinator-pricing-recover begin`, before
+its journal and so before any pricing mutation: from that transaction's
+SIGHUP on, requests can bill at a new rate generation even if it later rolls
+back. Nothing removes it.
+
+Once it exists, wholesale history spans more than one rate generation. A
+coordinator without #1693 prices every historical row at the current table
+and re-prices that history (`SPEC-005` I5). The floor is enforced by:
+
+- `deploy-pearl-vps.sh`: it probes the incoming binary right after the lease
+  (before step 0a), and the live one, this deploy's rollback target, after
+  step 0a and before its own first mutation. Either failing aborts with exit
+  12 and `PRICING RUNTIME FLOOR: refusing: ...`. Deploy a tag carrying #1693. A pre-#1693 live binary
+  means the operator rule below was broken: stop and escalate; do not run a
+  wholesale statement until a #1693 coordinator is live again.
+- `coordinator-deploy-recover` (pre-start, watchdog, step 0a): it refuses to
+  restore a snapshot coordinator binary without #1693 (`pricing runtime floor
+  (...): the rollback target coordinator lacks ...`) and preserves the
+  snapshot, so the coordinator does not start. Two operators: replace
+  `/opt/macprovider/.coordinator-deploy-rollback/coordinator` with the
+  enabling (or a later) signed release's `coordinator-linux-amd64` after
+  checking its sha256, then run `coordinator-deploy-recover --recover`. If the
+  snapshot's config does not load on that binary, escalate.
+- The Pearl updater: `apply` refuses (`PricingRuntimeFloorRefused`) before
+  any mutation when the candidate or the installed coordinator (its rollback
+  target) lacks #1693.
+- `--resolve-deploy-conflict`: refuses a snapshot binary without #1693 and
+  stops if one is installed after deploy recovery.
+
+A capable binary is one whose `--validate-autotune-release` accepts
+`--expect-base-equivalent`: run on nonexistent paths it prints the JSON
+verdict (with `model_resolutions`) and exits 1; an older one rejects the flag
+(exit 2).
+
+**Operator rule.** After enablement, never deploy a pre-#1693 tag. Its deploy
+script predates the marker and cannot enforce the floor, so this rule is the
+only guard: before a deploy from any tag older than the enabling release, run
+`test -e /opt/macprovider/.pricing-runtime-floor` on Pearl, and do not deploy
+it if the marker exists. Pre-#1693 tags also lack the journal check, the
+writer guard and the pricing recovery units; never run one while a journal
+exists either.

@@ -2001,6 +2001,57 @@ class PearlUpdaterTests(unittest.TestCase):
             [{**row, "binary_version": "1.8.30"} for row in protected_providers],
         )
 
+    FLOOR_NEW = subprocess.CompletedProcess(
+        ["coordinator"], 1, stdout='{"ok":false,"model_resolutions":[],"errors":["config: probe"]}\n', stderr=""
+    )
+    FLOOR_OLD = subprocess.CompletedProcess(
+        ["coordinator"], 2, stdout="", stderr="flag provided but not defined: -expect-base-equivalent\n"
+    )
+
+    def _floor_apply(self, candidate, installed):
+        release = self.verify()
+        self.updater.install_root.mkdir(parents=True, exist_ok=True)
+        (self.updater.install_root / updater_module.PRICING_RUNTIME_FLOOR_NAME).write_text("commit=" + "c" * 40 + "\n")
+        (self.updater.install_root / "coordinator").write_bytes(fake_elf("installed"))
+        self.updater.run_candidate_command = mock.Mock(return_value=candidate)
+        self.updater.run_command = mock.Mock(return_value=installed)
+        self.updater.stop_for_rollout = mock.Mock()
+        self.updater.snapshot = mock.Mock()
+        self.updater.install_release = mock.Mock()
+        self.updater._start_journal = mock.Mock()
+        return release
+
+    def test_pricing_runtime_floor_refuses_a_pre_1693_candidate_before_mutation(self):
+        release = self._floor_apply(self.FLOOR_OLD, self.FLOOR_NEW)
+        with self.assertRaisesRegex(updater_module.PricingRuntimeFloorRefused, "candidate .* lacks per-generation"):
+            self.updater.apply(release, updater_module.SemVer.parse("1.8.26"))
+        probe = self.updater.run_candidate_command.call_args
+        self.assertEqual(probe.args[0][0], str(release.directory / release.coordinator.asset))
+        self.assertIn("--expect-base-equivalent", probe.args[0])
+        self.updater._start_journal.assert_not_called()
+        self.updater.stop_for_rollout.assert_not_called()
+        self.updater.snapshot.assert_not_called()
+        self.updater.install_release.assert_not_called()
+
+    def test_pricing_runtime_floor_refuses_a_pre_1693_rollback_target(self):
+        release = self._floor_apply(self.FLOOR_NEW, self.FLOOR_OLD)
+        with self.assertRaisesRegex(updater_module.PricingRuntimeFloorRefused, "rollback target"):
+            self.updater.apply(release, updater_module.SemVer.parse("1.8.26"))
+        self.assertEqual(self.updater.run_command.call_args.args[0][0], str(self.updater.install_root / "coordinator"))
+        self.updater.stop_for_rollout.assert_not_called()
+        self.updater.install_release.assert_not_called()
+
+    def test_pricing_runtime_floor_allows_1693_runtimes_and_is_inert_without_marker(self):
+        release = self._floor_apply(self.FLOOR_NEW, self.FLOOR_NEW)
+        self.updater.require_pricing_runtime_floor(release)
+        self.assertEqual(self.updater.run_candidate_command.call_count, 1)
+        (self.updater.install_root / updater_module.PRICING_RUNTIME_FLOOR_NAME).unlink()
+        self.updater.run_candidate_command = mock.Mock(return_value=self.FLOOR_OLD)
+        self.updater.run_command = mock.Mock(return_value=self.FLOOR_OLD)
+        self.updater.require_pricing_runtime_floor(release)
+        self.updater.run_candidate_command.assert_not_called()
+        self.updater.run_command.assert_not_called()
+
     def test_restart_failure_invokes_rollback(self):
         release = self.verify()
         self.updater.audit = mock.Mock()

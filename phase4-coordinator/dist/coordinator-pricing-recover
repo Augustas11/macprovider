@@ -17,6 +17,20 @@ This helper owns the on-host half of that transaction:
                 macprovider-coordinator-pricing-close.service: finalize a
                 `restored-unverified` journal once the coordinator's boot
                 record proves the prior pair is live.
+  --resolve-deploy-conflict
+                operator break-glass for a coordinator deploy rollback
+                snapshot AND a pricing journal (docs/runbooks/
+                catalog-release-decision-tree.md §Deploy-and-pricing
+                conflict): takes the lock set, restores the deploy snapshot
+                only when it carries one coherent journal pair, and leaves the
+                journal for normal pricing recovery. The coordinator stays
+                stopped.
+
+`begin` also writes the pricing runtime floor marker
+(/opt/macprovider/.pricing-runtime-floor) before the first pricing journal:
+from then on no coordinator without per-generation wholesale pricing may be
+installed (deploy-pearl-vps.sh, coordinator-deploy-recover.sh and the Pearl
+updater refuse one).
 
 State S = (base yaml sha, overlay presence+sha, `current` target, window
 bytes|absent, digest set of the `current` release). Restore order is always
@@ -59,6 +73,8 @@ UNIT = ENV.get("MACPROVIDER_COORDINATOR_UNIT", "macprovider-coordinator")
 BUYER_URL = ENV.get("MACPROVIDER_COORDINATOR_URL", "http://127.0.0.1:8443")
 BOOT_ID_FILE = ENV.get("MACPROVIDER_BOOT_ID_FILE", "/proc/sys/kernel/random/boot_id")
 REQUIRED_UID = int(ENV.get("MACPROVIDER_REQUIRED_UID", "0"))
+SYSTEMD_ROOT = ENV.get("MACPROVIDER_SYSTEMD_ROOT", "/etc/systemd/system")
+DEPLOY_RECOVER = ENV.get("MACPROVIDER_DEPLOY_RECOVER", os.path.join(ROOT, "coordinator-deploy-recover"))
 # Lock ownership, as coordinator-deploy-recover.sh and the shared guard
 # (scripts/lib/coordinator_config_guard.py) require it.
 LOCK_REQUIRED_UID = int(ENV.get("MACPROVIDER_DEPLOY_LOCK_REQUIRED_UID", "0"))
@@ -78,6 +94,22 @@ RECORD = os.path.join(RUN_ROOT, "coordinator-applied-config.json")
 APPLIED_SCHEMA = "macprovider.coordinator-applied-config.v1"
 SCHEMA = "macprovider.pricing-txn.v1"
 RUNBOOK = "docs/runbooks/catalog-release-decision-tree.md §pricing-txn"
+RUNBOOK_CONFLICT = "docs/runbooks/catalog-release-decision-tree.md §Deploy-and-pricing conflict"
+# The deploy-and-pricing conflict resolution sets the journal aside under this
+# prefix + its (pid, starttime) tag, only while it runs deploy recovery.
+HELD_PREFIX = JOURNAL_NAME + ".conflict-held."
+ROLLBACK_NAME = ".coordinator-deploy-rollback"
+# Pricing runtime floor (#1693): present once any pricing transaction began.
+FLOOR_NAME = ".pricing-runtime-floor"
+FLOOR_TMP_PREFIX = FLOOR_NAME + ".tmp."
+HEX40 = re.compile(r"[0-9a-f]{40}")
+# A coordinator supports per-generation wholesale pricing and the pricing lane
+# when its offline validator accepts --expect-base-equivalent: with nonexistent
+# paths it prints the one-line JSON verdict (which carries model_resolutions)
+# and exits 1. A runtime without it rejects the flag (exit 2).
+FLOOR_PROBE_ARGS = ("--config", "/nonexistent/macprovider-pricing-floor-probe.yaml",
+                    "--validate-autotune-release", "/nonexistent/macprovider-pricing-floor-probe",
+                    "--expect-base-equivalent", "/nonexistent/macprovider-pricing-floor-probe.yaml")
 
 PHASES = ("prepared", "mutating", "hup-intent", "verifying", "verified",
           "rolling-back", "rolled-back", "restored-unverified")
@@ -102,6 +134,10 @@ class Mismatch(Exception):
 
 class Stop(Exception):
     """exit 5: stopped with the journal kept."""
+
+
+class Interrupted(Exception):
+    """A termination signal arrived during --resolve-deploy-conflict."""
 
 
 def log(msg: str) -> None:
@@ -292,11 +328,38 @@ def remove_tree_at(dir_fd: int, name: str) -> None:
         os.unlink(name, dir_fd=dir_fd)
 
 
+def held_journals() -> list[str]:
+    try:
+        return sorted(n for n in os.listdir(ROOT) if n.startswith(HELD_PREFIX))
+    except FileNotFoundError:
+        return []
+
+
+def restore_orphan_held() -> None:
+    """Put back a journal that --resolve-deploy-conflict set aside and could not
+    restore (it was killed). A live holder's is left alone. Called with the
+    lock set held."""
+    for name in held_journals():
+        if tag_is_live(name[len(HELD_PREFIX):]):
+            continue
+        root_fd = open_dir(ROOT)
+        try:
+            if stat_at(root_fd, JOURNAL_NAME) is not None:
+                raise Stop(f"both {JOURNAL} and a set-aside journal {name} exist; keep both and escalate")
+            os.rename(name, JOURNAL_NAME, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+            os.fsync(root_fd)
+        finally:
+            os.close(root_fd)
+        log(f"restored the set-aside pricing journal {name} to {JOURNAL}")
+
+
 def cleanup_tmp() -> list[str]:
-    """Remove journal temp dirs whose (pid, starttime) is not a live process,
-    leftover finalize renames, and this helper's own stale temp files."""
+    """Put back an orphaned set-aside journal, then remove journal temp dirs
+    whose (pid, starttime) is not a live process, leftover finalize renames,
+    and this helper's own stale temp files."""
+    restore_orphan_held()
     removed = []
-    for base, prefixes in ((ROOT, (TMP_PREFIX, DONE_PREFIX, YAML_TMP_PREFIX)),
+    for base, prefixes in ((ROOT, (TMP_PREFIX, DONE_PREFIX, YAML_TMP_PREFIX, FLOOR_TMP_PREFIX)),
                            (AUTOTUNE, (CURRENT_TMP_PREFIX, WINDOW_TMP_PREFIX))):
         try:
             fd = open_dir(base)
@@ -481,58 +544,67 @@ def check_state(j: Journal, side: str, verifier: str | None = None) -> None:
 
 
 def restore_disk(j: Journal) -> None:
-    """CAS each item back to prior, in order yaml, current, window: candidate
-    -> prior, prior -> skip, anything else -> Mismatch (nothing further done)."""
+    """Compare-and-swap yaml, `current` and window back to prior. The complete
+    tuple (overlay, yaml, current, window) and every journal payload the
+    restore needs are checked BEFORE the first write: any member that is
+    neither the journal's prior nor its candidate, or a missing/corrupt
+    payload, refuses with every member unchanged. Then, in order yaml,
+    current, window: candidate -> prior, prior -> skip."""
     if j.phase in TERMINAL:
         raise Refused(f"journal is {j.phase} (terminal); not restoring")
     prior, cand = j.txn["prior"], j.txn["candidate"]
     got = disk_state()
     if got["overlay"] != j.txn["overlay"]:
         raise Mismatch("overlay differs from the journal; not restoring")
-    if got["yaml_sha256"] == prior["yaml_sha256"]:
-        pass
-    elif got["yaml_sha256"] == cand["yaml_sha256"]:
-        data = j.file("prior-coordinator.yaml")
-        if data is None or sha256(data) != prior["yaml_sha256"]:
-            raise Stop("journal prior-coordinator.yaml is missing or corrupt")
+    psha = prior["window"]["sha256"] if prior["window"]["present"] else None
+    csha = cand["window"]["sha256"] if cand["window"]["present"] else None
+
+    def side(value, prior_value, cand_value, label):
+        if value == prior_value:
+            return "prior"
+        if value == cand_value:
+            return "candidate"
+        raise Mismatch(f"{label} is neither the journal's prior nor candidate; not restoring (nothing changed)")
+
+    yaml_side = side(got["yaml_sha256"], prior["yaml_sha256"], cand["yaml_sha256"], "coordinator.yaml")
+    current_side = side(got["current"], prior["current"], cand["current"], f"current ({got['current']!r})")
+    window_side = side(got["window_sha256"], psha, csha, ".previous-target")
+    prior_yaml = prior_window = None
+    if yaml_side == "candidate":
+        prior_yaml = j.file("prior-coordinator.yaml")
+        if prior_yaml is None or sha256(prior_yaml) != prior["yaml_sha256"]:
+            raise Stop("journal prior-coordinator.yaml is missing or corrupt (nothing changed)")
+    if window_side == "candidate" and prior["window"]["present"]:
+        prior_window = j.file("prior-window")
+        if prior_window is None or sha256(prior_window) != psha:
+            raise Stop("journal prior-window is missing or corrupt (nothing changed)")
+    # The prior release (current's target after the restore) must still hash
+    # as the journal recorded it, or the final check_state would refuse after
+    # the writes.
+    if release_digests(prior["current"]) != prior["release_digests"]:
+        raise Mismatch(f"release {prior['current']} differs from the journal; not restoring (nothing changed)")
+
+    if prior_yaml is not None:
         root_fd = open_dir(ROOT)
         try:
-            durable_install_at(root_fd, CONFIG_NAME, data, prior["yaml_uid"], prior["yaml_gid"],
+            durable_install_at(root_fd, CONFIG_NAME, prior_yaml, prior["yaml_uid"], prior["yaml_gid"],
                                prior["yaml_mode"], YAML_TMP_PREFIX)
         finally:
             os.close(root_fd)
         log("restored prior coordinator.yaml")
-    else:
-        raise Mismatch("coordinator.yaml is neither the journal's prior nor candidate; not restoring")
     at_fd = open_dir(AUTOTUNE)
     try:
-        current = read_current(at_fd)
-        if current == prior["current"]:
-            pass
-        elif current == cand["current"]:
+        if current_side == "candidate":
             swap_current(at_fd, prior["current"])
             log(f"restored current -> {prior['current']}")
-        else:
-            raise Mismatch(f"current is {current!r}, neither prior nor candidate; not restoring")
-        window = read_at(at_fd, ".previous-target", 64 * 1024)
-        wsha = None if window is None else sha256(window)
-        psha = prior["window"]["sha256"] if prior["window"]["present"] else None
-        csha = cand["window"]["sha256"] if cand["window"]["present"] else None
-        if wsha == psha:
-            pass
-        elif wsha == csha:
-            if prior["window"]["present"]:
-                data = j.file("prior-window")
-                if data is None or sha256(data) != psha:
-                    raise Stop("journal prior-window is missing or corrupt")
-                durable_install_at(at_fd, ".previous-target", data, prior["window"]["uid"],
+        if window_side == "candidate":
+            if prior_window is not None:
+                durable_install_at(at_fd, ".previous-target", prior_window, prior["window"]["uid"],
                                    prior["window"]["gid"], prior["window"]["mode"], WINDOW_TMP_PREFIX)
             else:
                 os.unlink(".previous-target", dir_fd=at_fd)
                 os.fsync(at_fd)
             log("restored prior .previous-target")
-        else:
-            raise Mismatch(".previous-target is neither the journal's prior nor candidate; not restoring")
     finally:
         os.close(at_fd)
     check_state(j, "prior")
@@ -698,7 +770,48 @@ def foreign_state(allow_journal: bool = False) -> list[str]:
         problems.append(f"pricing transaction journal present ({JOURNAL}); run --recover-pricing-txn")
     for name in live_tmp_dirs():
         problems.append(f"pricing journal being built by a live process ({name})")
+    for name in held_journals():
+        problems.append(f"pricing journal set aside by a deploy-and-pricing conflict resolution ({name}); "
+                        "rerun coordinator-pricing-recover --resolve-deploy-conflict")
     return problems
+
+
+def ensure_runtime_floor(commit: str) -> None:
+    """Write <ROOT>/.pricing-runtime-floor (root-owned 0644, durable) unless it
+    already exists. Once a pricing correction can be live, wholesale history
+    spans more than one rate generation: a coordinator without per-generation
+    pricing (#1693) would re-price it, so deploy, deploy recovery and the Pearl
+    updater refuse to install one while this marker exists. Never removed."""
+    root_fd = open_dir(ROOT)
+    try:
+        info = stat_at(root_fd, FLOOR_NAME)
+        if info is not None:
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != REQUIRED_UID:
+                raise Refused(f"{os.path.join(ROOT, FLOOR_NAME)} is not a root-owned regular file")
+            return
+        body = f"commit={commit}\nwritten_at={now_iso()}\n".encode()
+        durable_install_at(root_fd, FLOOR_NAME, body, REQUIRED_UID, os.fstat(root_fd).st_gid, 0o644, FLOOR_TMP_PREFIX)
+    finally:
+        os.close(root_fd)
+    log(f"pricing runtime floor written ({os.path.join(ROOT, FLOOR_NAME)}, commit {commit})")
+
+
+def runtime_supports_pricing(binary: str) -> bool:
+    """True when `binary` is a coordinator with per-generation wholesale
+    pricing and the pricing lane's --expect-base-equivalent (FLOOR_PROBE_ARGS)."""
+    try:
+        out = subprocess.run([binary, *FLOOR_PROBE_ARGS], stdin=subprocess.DEVNULL, capture_output=True,
+                             text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    lines = out.stdout.strip().splitlines()
+    if out.returncode != 1 or not lines:
+        return False
+    try:
+        verdict = json.loads(lines[0])
+    except ValueError:
+        return False
+    return isinstance(verdict, dict) and isinstance(verdict.get("model_resolutions"), list)
 
 
 def cmd_begin(args: dict) -> int:
@@ -711,6 +824,9 @@ def cmd_begin(args: dict) -> int:
             raise Refused(f"verdict {field} must be 64 lowercase hex")
     if not isinstance(verdict.get("prior_billing_snapshot_id"), int):
         raise Refused("verdict prior_billing_snapshot_id must be an integer")
+    floor_commit = verdict.get("runtime_floor_commit")
+    if not isinstance(floor_commit, str) or not HEX40.fullmatch(floor_commit):
+        raise Refused("verdict runtime_floor_commit must be a 40-hex commit")
     candidate_yaml = open(args["--candidate-yaml"], "rb").read()
     if sha256(candidate_yaml) != verdict["candidate_config_sha256"]:
         raise Refused("candidate yaml is not the verdict's candidate_config_sha256")
@@ -739,6 +855,9 @@ def cmd_begin(args: dict) -> int:
     prior_current = state["current"]
     if prior_current is None or prior_current != args["--prior-current"]:
         raise Refused(f"current is {prior_current!r}, not {args['--prior-current']!r}")
+    # Pricing runtime floor: durable before the journal (and so before the
+    # first mutation) of the first pricing transaction.
+    ensure_runtime_floor(floor_commit)
     txn = {
         "schema": SCHEMA,
         "id": secrets.token_hex(16),
@@ -877,7 +996,7 @@ def restore_stamp() -> dict:
 
 
 def cmd_pre_start() -> int:
-    if not os.path.lexists(JOURNAL):
+    if not os.path.lexists(JOURNAL) and not held_journals():
         return 0
     fds = take_locks(0)
     if fds is None:
@@ -948,6 +1067,236 @@ def cmd_close_restored(args: dict) -> int:
             os.close(fd)
 
 
+# ---------------------------------------------------------------------------
+# Deploy-and-pricing conflict (runbook §Deploy-and-pricing conflict).
+# ---------------------------------------------------------------------------
+SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+# Snapshot "<unit>-was-active" markers deploy recovery acts on only in its
+# --recover mode; --recover-under-global leaves those sidecars stopped.
+SIDECAR_MARKERS = (("stats-inventory-timer-was-active", "stats-inventory-sync.timer"),
+                   ("stats-billing-timer-was-active", "stats-billing-mirror.timer"),
+                   ("stats-hardware-timer-was-active", "stats-hardware-verifier.timer"))
+
+
+def pricing_machinery() -> list[str]:
+    """The installed pricing recovery set that must survive deploy recovery
+    byte-for-byte: the helper, the shell guard, the closer unit, the recovery
+    unit (both ExecStart lines) and the guard drop-in (Wants= the closer)."""
+    return [os.path.join(ROOT, "coordinator-pricing-recover"),
+            os.path.join(ROOT, "coordinator-config-guard.sh"),
+            os.path.join(SYSTEMD_ROOT, "macprovider-coordinator-pricing-close.service"),
+            os.path.join(SYSTEMD_ROOT, "macprovider-coordinator-deploy-recovery.service"),
+            os.path.join(SYSTEMD_ROOT, "macprovider-coordinator.service.d", "10-deploy-transaction-guard.conf")]
+
+
+def file_sha(path: str) -> str | None:
+    try:
+        with open(path, "rb") as fh:
+            return sha256(fh.read(MAX_FILE + 1))
+    except FileNotFoundError:
+        return None
+
+
+def coordinator_running() -> str | None:
+    """None when the coordinator unit is stopped; otherwise its state."""
+    state = systemctl_show("ActiveState")
+    if state not in ("inactive", "failed"):
+        return f"{UNIT} ActiveState={state or 'unknown'}"
+    pid = coordinator_pid()
+    if pid:
+        return f"{UNIT} MainPID={pid}"
+    return None
+
+
+def snapshot_tuple(j: Journal) -> tuple[str, list[str]]:
+    """Validate the deploy rollback snapshot against the journal. Returns the
+    one journal side (prior|candidate) the snapshot restores coherently, and
+    the sidecar timers it recorded as active. Refused on anything else."""
+    path = os.path.join(ROOT, ROLLBACK_NAME)
+    try:
+        snap_fd = open_dir(path)
+    except FileNotFoundError:
+        raise Refused(f"no deploy rollback snapshot at {path}; nothing to resolve") from None
+    except OSError as exc:
+        raise Refused(f"deploy rollback snapshot {path} cannot be opened safely: {exc}") from exc
+    try:
+        def has(name: str) -> bool:
+            return stat_at(snap_fd, name) is not None
+
+        def need(name: str) -> bytes:
+            data = read_at(snap_fd, name)
+            if data is None:
+                raise Refused(f"deploy rollback snapshot lacks {name}")
+            return data
+
+        if not has("complete"):
+            raise Refused("deploy rollback snapshot is incomplete; preserve it and escalate")
+        if has("committed"):
+            raise Refused("deploy rollback snapshot is committed (deploy pre-start only removes it); "
+                          "not a conflict: start the coordinator")
+        if not has("had-config"):
+            raise Refused("deploy rollback snapshot restores no coordinator.yaml")
+        yaml_sha = sha256(need("coordinator.yaml"))
+        target = need("catalog-current-target").decode("utf-8", "replace").rstrip("\n")
+        window = need("catalog-previous-target") if has("had-previous-target") else None
+        window_sha = None if window is None else sha256(window)
+        overlay = need("coordinator.pearl-overlays.yaml") if has("had-overlay") else None
+        snap_overlay = {"present": overlay is not None, "sha256": "" if overlay is None else sha256(overlay)}
+        if snap_overlay != j.txn["overlay"]:
+            raise Refused("the snapshot's overlay is not the journal's overlay")
+        if has("release-was-absent"):
+            removed = "releases/" + need("release-id").decode("utf-8", "replace").strip()
+            if removed in (j.txn["prior"]["current"], j.txn["candidate"]["current"]):
+                raise Refused(f"deploy recovery would delete {removed}, a release the journal names")
+        allowed = [TERMINAL[j.phase]] if j.phase in TERMINAL else ["prior", "candidate"]
+        matches = []
+        for side in allowed:
+            s = j.txn[side]
+            want = (s["yaml_sha256"], s["current"], s["window"]["sha256"] if s["window"]["present"] else None)
+            if (yaml_sha, target, window_sha) == want:
+                matches.append(side)
+        if len(matches) != 1:
+            raise Refused(f"the snapshot (yaml {yaml_sha[:12]}, current {target!r}, window "
+                          f"{(window_sha or 'absent')[:12]}) is not one coherent journal pair "
+                          f"({' or '.join(allowed)}, journal phase {j.phase}); mixed or foreign: nothing changed")
+        if not has("had-coordinator"):
+            raise Refused("deploy rollback snapshot restores no coordinator binary")
+        if not runtime_supports_pricing(os.path.join(path, "coordinator")):
+            raise Refused("the snapshot's coordinator binary lacks per-generation wholesale pricing "
+                          "(--validate-autotune-release --expect-base-equivalent); it must not run after pricing")
+        sidecars = [unit for marker, unit in SIDECAR_MARKERS if has(marker)]
+        return matches[0], sidecars
+    finally:
+        os.close(snap_fd)
+
+
+def _interrupt(signum, _frame):
+    raise Interrupted(signal.Signals(signum).name)
+
+
+def rename_in_root(src: str, dst: str) -> None:
+    root_fd = open_dir(ROOT)
+    try:
+        if stat_at(root_fd, dst) is not None:
+            raise Stop(f"{os.path.join(ROOT, dst)} already exists")
+        os.rename(src, dst, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        os.fsync(root_fd)
+    finally:
+        os.close(root_fd)
+
+
+def run_deploy_recover_with_journal_set_aside(fds: list[int]) -> tuple[int, str | None]:
+    """The critical section: set the journal aside, run deploy recovery under
+    the lock set this process holds (its descriptors are inherited, so deploy
+    recovery never re-takes them), and put the journal back on every exit path.
+    Termination signals are blocked around both renames; one during deploy
+    recovery terminates its process group first. Returns (rc, signal name)."""
+    held = HELD_PREFIX + self_tag()
+    interrupted = None
+    rc = 1
+    previous = {sig: signal.signal(sig, _interrupt) for sig in SIGNALS}
+    signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
+    try:
+        rename_in_root(JOURNAL_NAME, held)
+        log(f"journal set aside as {os.path.join(ROOT, held)} for deploy recovery")
+        proc = None
+        try:
+            try:
+                # Started with signals still blocked here (so `proc` always
+                # names it) and unblocked in the child before exec.
+                proc = subprocess.Popen([DEPLOY_RECOVER, "--recover-under-global"], pass_fds=tuple(fds),
+                                        stdin=subprocess.DEVNULL, start_new_session=True,
+                                        preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_UNBLOCK, SIGNALS))
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, SIGNALS)
+                rc = proc.wait()
+            except Interrupted as exc:
+                signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
+                interrupted = str(exc)
+                if proc is not None and proc.poll() is None:
+                    log(f"{interrupted}: stopping deploy recovery (pid {proc.pid})")
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                        proc.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                        proc.wait()
+                    except ProcessLookupError:
+                        proc.wait()
+            except OSError as exc:
+                log(f"cannot run {DEPLOY_RECOVER}: {exc}")
+                rc = 127
+        finally:
+            signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
+            try:
+                rename_in_root(held, JOURNAL_NAME)
+            except (OSError, Stop) as exc:
+                raise Stop(f"CANNOT restore the pricing journal from {os.path.join(ROOT, held)} ({exc}); "
+                           f"every writer is unguarded until it is back at {JOURNAL}") from exc
+            log(f"journal restored at {JOURNAL}")
+    finally:
+        try:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, SIGNALS)
+        except Interrupted as exc:
+            interrupted = interrupted or str(exc)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    return rc, interrupted
+
+
+def cmd_resolve_deploy_conflict() -> int:
+    fds = take_locks(0)
+    if fds is None:
+        raise Refused("the lock set (updater lock, coordinator deploy lock) is held; find the holder first")
+    j = None
+    try:
+        cleanup_tmp()
+        j = need_journal()
+        running = coordinator_running()
+        if running:
+            raise Refused(f"the coordinator must be stopped ({running}); this command never starts it")
+        side, sidecars = snapshot_tuple(j)
+        before = {path: file_sha(path) for path in pricing_machinery()}
+        missing = [path for path, digest in before.items() if digest is None]
+        if missing:
+            raise Refused(f"pricing recovery files are not installed: {', '.join(missing)}")
+        if not os.access(DEPLOY_RECOVER, os.X_OK):
+            raise Refused(f"{DEPLOY_RECOVER} is not executable")
+        log(f"journal {j.txn['id']} ({j.phase}); the deploy snapshot restores the journal's {side} pair")
+
+        rc, interrupted = run_deploy_recover_with_journal_set_aside(fds)
+        if interrupted:
+            raise Stop(f"interrupted ({interrupted}); deploy recovery stopped, journal restored; the snapshot is "
+                       f"kept unless deploy recovery had finished: rerun --resolve-deploy-conflict ({RUNBOOK_CONFLICT})")
+        if rc != 0:
+            raise Stop(f"coordinator-deploy-recover --recover-under-global failed (rc={rc}); journal restored, "
+                       f"snapshot kept: fix the cause it logged, then rerun ({RUNBOOK_CONFLICT})")
+        running = coordinator_running()
+        if running:
+            raise Stop(f"the coordinator started during deploy recovery ({running}); stop it ({RUNBOOK_CONFLICT})")
+        try:
+            check_state(j, side)
+        except Mismatch as exc:
+            raise Stop(f"after deploy recovery the disk is not the journal's {side} pair: {exc} "
+                       f"({RUNBOOK_CONFLICT})") from exc
+        if not runtime_supports_pricing(os.path.join(ROOT, "coordinator")):
+            raise Stop(f"the restored {os.path.join(ROOT, 'coordinator')} lacks per-generation wholesale pricing; "
+                       f"do not start it: install a #1693 coordinator binary first ({RUNBOOK_CONFLICT}, step 4)")
+        changed = [path for path, digest in before.items() if file_sha(path) != digest]
+        if changed:
+            raise Stop(f"deploy recovery changed pricing recovery files: {', '.join(changed)}; do not start the "
+                       f"coordinator: reinstall them from the reviewed tag ({RUNBOOK_CONFLICT}, step 4)")
+        print(json.dumps({"resolved": side, "journal": j.txn["id"], "phase": j.phase,
+                          "stopped_sidecar_timers": sidecars}))
+        log(f"deploy snapshot restored the journal's {side} pair; the journal is left for pricing recovery. "
+            "Start the coordinator (its pre-start recovers the journal) or run --recover-pricing-txn")
+        return 0
+    finally:
+        if j is not None:
+            j.close()
+        for fd in fds:
+            os.close(fd)
+
+
 def parse(argv: list[str], flags: tuple[str, ...]) -> dict:
     out: dict = {}
     i = 0
@@ -965,6 +1314,10 @@ def main(argv: list[str]) -> int:
     cmd, rest = argv[0], argv[1:]
     if cmd == "--pre-start":
         return cmd_pre_start()
+    if cmd == "--resolve-deploy-conflict":
+        if rest:
+            raise Refused("--resolve-deploy-conflict takes no arguments")
+        return cmd_resolve_deploy_conflict()
     if cmd == "--close-restored":
         return cmd_close_restored(parse(rest, ("--wait-seconds", "--lock-wait-seconds")))
     if cmd in ("recover", "--recover"):

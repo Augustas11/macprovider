@@ -324,6 +324,18 @@ class PythonGuardTests(unittest.TestCase):
         with self.assertRaises(guard.PricingTransactionActive):
             guard.refuse_if_pricing_txn(self.root)
 
+    def test_set_aside_journal_counts_as_present(self):
+        # A journal left set aside by a killed --resolve-deploy-conflict is
+        # still a pricing transaction for every Python writer.
+        held = self.root / ".pricing-txn.conflict-held.4242.99"
+        held.mkdir()
+        with self.assertRaises(guard.PricingTransactionActive) as raised:
+            guard.refuse_if_pricing_txn(self.root)
+        self.assertEqual(raised.exception.path, held)
+        with self.assertRaises(guard.PricingTransactionActive):
+            with self.lock_set():
+                pass
+
     def test_lock_set_holds_both_locks_in_lease_order_and_releases(self):
         with self.lock_set() as held:
             self.assertEqual(len(held.descriptors), 2)

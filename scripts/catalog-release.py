@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import types
+import unicodedata
 from datetime import datetime, timezone
 
 
@@ -5523,13 +5524,30 @@ COORDINATOR_CONFIG_REPO_PATH = "phase4-coordinator/dist/coordinator.yaml"
 PRICING_RESOLVABLE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 
 
+# Unicode general categories that must never reach an operator's terminal raw:
+# controls, format characters (every bidi embedding/override/isolate and mark,
+# U+061C, U+200E/U+200F, U+202A-U+202E, U+2066-U+2069, zero-width characters)
+# and line/paragraph separators.
+ESCAPED_UNICODE_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+
 def escape_model_name(name: str) -> str:
-    """Render a buyer-controlled name for the diff and terminal: C0, DEL, C1 and the
-    backslash itself become `\\xNN` (escaping `\\` keeps the encoding injective)."""
-    return "".join(
-        f"\\x{ord(ch):02x}" if ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F or ch == "\\" else ch
-        for ch in name
-    )
+    """Render a buyer-controlled name for the diff and terminal. C0, DEL, C1 and the
+    backslash itself become `\\xNN`; any other Cc/Cf/Zl/Zp code point becomes
+    `\\uXXXX` (`\\UXXXXXXXX` above U+FFFF). Every escape starts with a backslash
+    and its letter fixes its length, and a literal backslash is always escaped,
+    so the encoding is injective and its output has no control, format or
+    separator character."""
+    out = []
+    for ch in name:
+        code = ord(ch)
+        if code < 0x20 or 0x7F <= code <= 0x9F or ch == "\\":
+            out.append(f"\\x{code:02x}")
+        elif unicodedata.category(ch) in ESCAPED_UNICODE_CATEGORIES:
+            out.append(f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def pricing_canonical_bytes(value: object) -> bytes:

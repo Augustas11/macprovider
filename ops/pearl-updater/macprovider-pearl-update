@@ -89,6 +89,20 @@ REQUIRED_REQUEST_LOG_INDEX_KEYS = frozenset(
     }
 )
 COORDINATOR_ASSET = "coordinator-linux-amd64"
+# #1693 pricing runtime floor: <install_root>/.pricing-runtime-floor exists once
+# a pricing transaction has begun. From then on only a coordinator with
+# per-generation wholesale pricing may be installed (or be the rollback target):
+# its offline validator accepts --expect-base-equivalent and, on nonexistent
+# paths, prints the JSON verdict carrying model_resolutions and exits 1.
+PRICING_RUNTIME_FLOOR_NAME = ".pricing-runtime-floor"
+PRICING_FLOOR_PROBE_ARGS = (
+    "--config",
+    "nonexistent-pricing-floor-probe.yaml",
+    "--validate-autotune-release",
+    "nonexistent-pricing-floor-probe",
+    "--expect-base-equivalent",
+    "nonexistent-pricing-floor-probe.yaml",
+)
 COORDINATOR_CLI_ASSET = "coordinator-cli-linux-amd64"
 GATEWAY_ASSET = "gateway-linux-amd64"
 CATALOG_ASSETS = (
@@ -211,6 +225,21 @@ class PricingTransactionRefused(UpdateError):
 
 class CommandTimeout(UpdateError):
     pass
+
+
+class PricingRuntimeFloorRefused(UpdateError):
+    """The pricing runtime floor forbids installing (or rolling back to) this coordinator."""
+
+
+def pricing_floor_probe_supported(result: subprocess.CompletedProcess[str]) -> bool:
+    lines = (result.stdout or "").strip().splitlines()
+    if result.returncode != 1 or not lines:
+        return False
+    try:
+        verdict = json.loads(lines[0])
+    except ValueError:
+        return False
+    return isinstance(verdict, dict) and isinstance(verdict.get("model_resolutions"), list)
 
 
 class AssetNotFound(UpdateError):
@@ -6094,8 +6123,39 @@ class Updater:
         )
         self._journal_transition("success_state_persisted", pending_action=None, success_persisted=True)
 
+    def require_pricing_runtime_floor(self, release: Release) -> None:
+        """Before any mutation: with the #1693 floor marker present, refuse a
+        candidate coordinator (or a live one, the rollback target) without
+        per-generation wholesale pricing."""
+        if not os.path.lexists(self.install_root / PRICING_RUNTIME_FLOOR_NAME):
+            return
+        runbook = "docs/runbooks/catalog-release-decision-tree.md §Pricing runtime floor"
+        candidate = self.run_candidate_command(
+            [str(release.directory / release.coordinator.asset), *PRICING_FLOOR_PROBE_ARGS],
+            timeout=30,
+            cwd=release.directory,
+        )
+        if not pricing_floor_probe_supported(candidate):
+            raise PricingRuntimeFloorRefused(
+                f"pricing runtime floor: candidate {release.tag} coordinator lacks per-generation wholesale "
+                f"pricing (--validate-autotune-release --expect-base-equivalent); not installing ({runbook})"
+            )
+        installed = self.install_root / "coordinator"
+        if os.path.lexists(installed):
+            live = self.run_command(
+                [str(installed), *("/" + arg if arg.startswith("nonexistent") else arg for arg in PRICING_FLOOR_PROBE_ARGS)],
+                check=False,
+                timeout=30,
+            )
+            if not pricing_floor_probe_supported(live):
+                raise PricingRuntimeFloorRefused(
+                    "pricing runtime floor: the installed coordinator (this rollout's rollback target) lacks "
+                    f"per-generation wholesale pricing; not rolling out ({runbook})"
+                )
+
     def apply(self, release: Release, previous: SemVer) -> None:
         self.verify_runtime_only_buyer_canary_policy(release)
+        self.require_pricing_runtime_floor(release)
         self.audit("rollout_started", "in_progress", candidate=release.tag, previous=str(previous))
         self._start_journal(release, previous)
         try:

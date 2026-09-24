@@ -1345,7 +1345,8 @@ record_is "pricing happy path" "$CAND_SHA" "$A_ROOT/$(readlink "$A_ROOT/current"
 [ ! -e "$CCR_FAKE/opt/macprovider/.pricing-txn" ] || fail "a verified pricing journal must be finalized"
 grep -q 'gateway convergence: .* serves the release rate card' "$T/out" || fail "gateway convergence must be checked: $(tail -n 5 "$T/out")"
 grep -q 'journal phase verified' "$T/out" || fail "the journal must pass through verified: $(grep -c journal "$T/out")"
-note "ok: pricing deploy splices the yaml 0640, verifies record digests, finalizes the journal"
+grep -qx "commit=$PRICE_COMMIT" "$CCR_FAKE/opt/macprovider/.pricing-runtime-floor" || fail "the first pricing release must write the pricing runtime floor naming its commit"
+note "ok: pricing deploy splices the yaml 0640, verifies record digests, finalizes the journal, sets the runtime floor"
 
 # Gateway not converged: alert only, still exit 0.
 setup_env

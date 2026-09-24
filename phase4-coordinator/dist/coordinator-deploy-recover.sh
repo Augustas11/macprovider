@@ -129,6 +129,28 @@ if [ "$pricing_guard_rc" -ne 0 ]; then
   exit 1
 fi
 
+# #1693 pricing runtime floor: once a pricing transaction has begun
+# ($ROOT/.pricing-runtime-floor exists), wholesale history spans more than one
+# rate generation, and a coordinator without per-generation pricing would
+# re-price it. Never restore such a binary; preserve the snapshot instead.
+# Capable = its offline validator accepts --expect-base-equivalent (prints the
+# JSON verdict with model_resolutions and exits 1 on nonexistent paths).
+pricing_runtime_supported() {
+  _probe_rc=0
+  _probe_out=$("$1" --config /nonexistent/macprovider-pricing-floor-probe.yaml \
+    --validate-autotune-release /nonexistent/macprovider-pricing-floor-probe \
+    --expect-base-equivalent /nonexistent/macprovider-pricing-floor-probe.yaml </dev/null 2>/dev/null) || _probe_rc=$?
+  [ "$_probe_rc" -eq 1 ] || return 1
+  case "$_probe_out" in *'"model_resolutions":['*) return 0 ;; esac
+  return 1
+}
+if { [ -e "$ROOT/.pricing-runtime-floor" ] || [ -L "$ROOT/.pricing-runtime-floor" ]; } && [ -f "$ROLLBACK/had-coordinator" ]; then
+  if ! pricing_runtime_supported "$ROLLBACK/coordinator"; then
+    echo "pricing runtime floor ($ROOT/.pricing-runtime-floor): the rollback target coordinator lacks per-generation wholesale pricing (--validate-autotune-release --expect-base-equivalent); not restoring, snapshot preserved. Follow docs/runbooks/catalog-release-decision-tree.md §Pricing runtime floor" >&2
+    exit 1
+  fi
+fi
+
 restore_regular() {
   marker=$1
   snapshot=$2

@@ -322,6 +322,55 @@ _coordinator_verify_deployed_version() {
   fi
 }
 
+# #1693 pricing runtime floor. Once a pricing transaction has begun on Pearl
+# (/opt/macprovider/.pricing-runtime-floor, written by coordinator-pricing-recover
+# begin), wholesale history spans more than one rate generation and a
+# coordinator without per-generation pricing would re-price it. Only when the
+# marker exists, the remote script refuses: mode `incoming` (binary on stdin)
+# an incoming coordinator without it (exit 64); mode `rollback-target` the live
+# /opt/macprovider/coordinator (this deploy's rollback target) without it
+# (exit 65). Capable = its offline validator accepts --expect-base-equivalent:
+# on nonexistent paths it prints the JSON verdict carrying model_resolutions
+# and exits 1. Read-only: it writes only its own temp dir.
+_pricing_runtime_floor_remote_script() {
+  case "${1:-}" in incoming|rollback-target) ;; *) echo "_pricing_runtime_floor_remote_script: mode must be incoming or rollback-target" >&2; return 2 ;; esac
+  printf 'set -eu\nMODE=%s\n' "$1"
+  cat <<'SH'
+ROOT="/opt/macprovider"
+FLOOR="$ROOT/.pricing-runtime-floor"
+if [ ! -e "$FLOOR" ] && [ ! -L "$FLOOR" ]; then
+  cat >/dev/null
+  echo "pricing runtime floor: not set (no pricing transaction has run)"
+  exit 0
+fi
+pricing_runtime_supported() {
+  _probe_rc=0
+  _probe_out=$("$1" --config /nonexistent/macprovider-pricing-floor-probe.yaml \
+    --validate-autotune-release /nonexistent/macprovider-pricing-floor-probe \
+    --expect-base-equivalent /nonexistent/macprovider-pricing-floor-probe.yaml </dev/null 2>/dev/null) || _probe_rc=$?
+  [ "$_probe_rc" -eq 1 ] || return 1
+  case "$_probe_out" in *'"model_resolutions":['*) return 0 ;; esac
+  return 1; }
+if [ "$MODE" = rollback-target ]; then
+  if [ -e "$ROOT/coordinator" ] && ! pricing_runtime_supported "$ROOT/coordinator"; then
+    echo "PRICING RUNTIME FLOOR: refusing: the live $ROOT/coordinator (this deploy's rollback target) lacks per-generation wholesale pricing and $FLOOR exists. See docs/runbooks/catalog-release-decision-tree.md §Pricing runtime floor" >&2
+    exit 65
+  fi
+  echo "pricing runtime floor: the rollback-target coordinator carries per-generation pricing"
+  exit 0
+fi
+probe_dir=$(umask 077 && mktemp -d /tmp/macprovider-pricing-floor.XXXXXXXX)
+trap 'rm -rf "$probe_dir"' EXIT
+cat >"$probe_dir/coordinator"
+chmod 0700 "$probe_dir/coordinator"
+if ! pricing_runtime_supported "$probe_dir/coordinator"; then
+  echo "PRICING RUNTIME FLOOR: refusing: the incoming coordinator lacks per-generation wholesale pricing (--validate-autotune-release --expect-base-equivalent) and $FLOOR exists; deploy a tag carrying #1693. See docs/runbooks/catalog-release-decision-tree.md §Pricing runtime floor" >&2
+  exit 64
+fi
+echo "pricing runtime floor: the incoming coordinator carries per-generation pricing"
+SH
+}
+
 _tier2_migration_gate_remote_script() {
   cat <<'SH'
 set -eu
@@ -1324,6 +1373,20 @@ if $SSH 'test -e /opt/macprovider/.pricing-txn || test -L /opt/macprovider/.pric
   echo "aborting deploy: refusing: pricing transaction journal present at /opt/macprovider/.pricing-txn; run scripts/catalog-content-release.sh --recover-pricing-txn" >&2
   exit 12
 fi
+# #1693 L0: a journal set aside by an interrupted --resolve-deploy-conflict is
+# still a pricing transaction.
+if $SSH 'for f in /opt/macprovider/.pricing-txn.conflict-held.*; do if [ -e "$f" ] || [ -L "$f" ]; then exit 0; fi; done; exit 1'; then
+  echo "aborting deploy: refusing: a pricing transaction journal is set aside (/opt/macprovider/.pricing-txn.conflict-held.*); rerun coordinator-pricing-recover --resolve-deploy-conflict" >&2
+  exit 12
+fi
+# #1693 pricing runtime floor for the incoming coordinator, before any
+# mutation (step 0a's recovery enforces the floor on its own snapshot).
+_floor_rc=0
+$SSH "$(_pricing_runtime_floor_remote_script incoming)" <"$BINARY" || _floor_rc=$?
+if [ "$_floor_rc" -ne 0 ]; then
+  echo "aborting deploy: pricing runtime floor check failed (rc=$_floor_rc); see docs/runbooks/catalog-release-decision-tree.md §Pricing runtime floor" >&2
+  exit 12
+fi
 
 # Recover the prior complete snapshot before using any live state as input to
 # config drift checks or a new rollback baseline.
@@ -1338,6 +1401,15 @@ if $SSH 'test -d /opt/macprovider/.coordinator-deploy-rollback'; then
     echo "aborting deploy: interrupted coordinator release could not be recovered; snapshot preserved" >&2
     exit 70
   }
+fi
+# #1693 pricing runtime floor for the live coordinator, which becomes this
+# deploy's rollback target: checked after step 0a (which may restore it) and
+# before this deploy's first mutation.
+_floor_rc=0
+$SSH "$(_pricing_runtime_floor_remote_script rollback-target)" </dev/null || _floor_rc=$?
+if [ "$_floor_rc" -ne 0 ]; then
+  echo "aborting deploy: pricing runtime floor check failed (rc=$_floor_rc); see docs/runbooks/catalog-release-decision-tree.md §Pricing runtime floor" >&2
+  exit 12
 fi
 fi
 

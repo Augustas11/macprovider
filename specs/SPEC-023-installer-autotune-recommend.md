@@ -1498,6 +1498,18 @@ continuity, and every `SPEC-023-R017` rule not amended here apply unchanged.
     never rolls back: the lane stops, keeps the journal, and recovery runs after
     the lock set is reacquired. Rollback is proven by automated and harness
     tests; it is not drilled against production pricing.
+12. **Runtime floor.** From the SIGHUP on, requests can be priced at a new
+    rate generation, and only a #1693-capable coordinator prices wholesale
+    history per generation (SPEC-005-R013 I5). So before the first pricing
+    mutation the lane MUST durably write a root-owned floor marker
+    (`<install root>/.pricing-runtime-floor`, recording the enabling commit)
+    that is never rewritten or removed. While it exists, the deploy (incoming
+    binary and rollback target), its crash recovery, and the Pearl updater
+    (candidate and rollback target) MUST refuse, before any mutation, to
+    install or restore a coordinator binary that lacks the pricing validator
+    capability (`--validate-autotune-release --expect-base-equivalent`). Deploy
+    scripts from tags older than #1693 cannot enforce this, so running one
+    after enablement is prohibited by operator rule.
 
 Every refusal, override, recovery, and rollback MUST leave an audit record
 naming the release ids, the effective-diff digest, and the reason. Nothing in

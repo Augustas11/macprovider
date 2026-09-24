@@ -1089,25 +1089,32 @@ PY
   read -r CAND_CONFIG_SHA PRICING_DIFF_SHA EXPECTED_RATE_SHA EXPECTED_SIGNED_SHA <<VALS
 $out
 VALS
+  pricing_show_table >&3 || { record pricing_effective_diff 0 "the price table carries an unescaped label; not acknowledgeable"; return 1; }
   record pricing_effective_diff 1 "effective-price diff $PRICING_DIFF_SHA over every served name; no unacknowledged row move; candidate yaml $CAND_CONFIG_SHA"
-  pricing_show_table >&3
 }
 
-# The price table the operator acknowledges (names escaped by the diff).
+# The price table the operator acknowledges. Model and row labels arrive
+# escaped by catalog-release.py escape_model_name (no Cc/Cf/Zl/Zp code point
+# survives it); a label that still carries one is refused, never printed.
 pricing_show_table() {
   python3 - "$PRICING_DIR/stage-summary.json" <<'PY'
-import json, sys
+import json, sys, unicodedata
 s = json.load(open(sys.argv[1]))
+def label(value):
+    value = str(value)
+    if any(unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp") for ch in value):
+        raise SystemExit("[catalog-content] pricing: refusing to print an unescaped control/format character in a price-table label")
+    return value
 print("[catalog-content] pricing: effective price changes (credits per Mtok: prompt / cache-hit / completion)")
 fmt = lambda r: "%s / %s / %s" % (r["prompt_rate_per_mtok"], r["prompt_cache_hit_rate_per_mtok"], r["completion_rate_per_mtok"])
 for m in s.get("models") or []:
-    move = " (row %s -> %s)" % (m["old_row"], m["new_row"]) if m.get("move") else ""
-    print("[catalog-content]   %s: %s -> %s%s" % (m["model"], fmt(m["old"]), fmt(m["new"]), move))
+    move = " (row %s -> %s)" % (label(m["old_row"]), label(m["new_row"])) if m.get("move") else ""
+    print("[catalog-content]   %s: %s -> %s%s" % (label(m["model"]), fmt(m["old"]), fmt(m["new"]), move))
 gofmt = lambda r: "%s / %s / %s" % (r["prompt_credits_per_mtok"], r["prompt_cache_hit_credits_per_mtok"], r["completion_credits_per_mtok"])
 for r in s.get("model_resolutions") or []:
     if r["old"] != r["new"]:
-        move = " (row %s -> %s)" % (r["old"]["row_key"], r["new"]["row_key"]) if r["old"]["row_key"] != r["new"]["row_key"] else ""
-        print("[catalog-content]   %s (resolved by the live binary): %s -> %s%s" % (r["name"], gofmt(r["old"]), gofmt(r["new"]), move))
+        move = " (row %s -> %s)" % (label(r["old"]["row_key"]), label(r["new"]["row_key"])) if r["old"]["row_key"] != r["new"]["row_key"] else ""
+        print("[catalog-content]   %s (resolved by the live binary): %s -> %s%s" % (label(r["name"]), gofmt(r["old"]), gofmt(r["new"]), move))
 print("[catalog-content] pricing: acknowledge with --pricing-diff-sha256 %s" % s["pricing_diff_sha256"])
 PY
 }
@@ -1843,7 +1850,7 @@ if [ "$PRICING" = 1 ]; then
   [ "$CAND_CONFIG_SHA $PRICING_DIFF_SHA $EXPECTED_RATE_SHA $EXPECTED_SIGNED_SHA $PRIOR_RATE_SHA $PRIOR_SIGNED_SHA $PRIOR_SNAPSHOT_ID $CONFIG_DISK_SHA ${OVERLAY_DISK_SHA:--}" = "$PF_PRICING_DIGESTS" ] ||
     fatal "pricing digests moved between the acknowledged preflight and the lease; re-run preflight"
   python3 - "$PRICING_DIR/verdict.json" "$PRICING_DIFF_SHA" "$CAND_CONFIG_SHA" "$COMMIT_BLOCK_SHA" "$EXPECTED_RATE_SHA" \
-      "$EXPECTED_SIGNED_SHA" "$PRIOR_RATE_SHA" "$PRIOR_SIGNED_SHA" "$CONFIG_DISK_SHA" "$PRIOR_SNAPSHOT_ID" "$OVERLAY_DISK_SHA" <<'PY' || fatal "cannot build the pricing journal verdict"
+      "$EXPECTED_SIGNED_SHA" "$PRIOR_RATE_SHA" "$PRIOR_SIGNED_SHA" "$CONFIG_DISK_SHA" "$PRIOR_SNAPSHOT_ID" "$OVERLAY_DISK_SHA" "$COMMIT" <<'PY' || fatal "cannot build the pricing journal verdict"
 import json, sys
 out = sys.argv[1]
 keys = ("pricing_diff_sha256", "candidate_config_sha256", "commit_block_sha256", "expected_rate_table_sha256",
@@ -1851,6 +1858,8 @@ keys = ("pricing_diff_sha256", "candidate_config_sha256", "commit_block_sha256",
 v = dict(zip(keys, sys.argv[2:10]))
 v["prior_billing_snapshot_id"] = int(sys.argv[10])
 v["overlay_sha256"] = sys.argv[11]
+# The pricing runtime floor marker names this commit (written by `begin`).
+v["runtime_floor_commit"] = sys.argv[12]
 json.dump(v, open(out, "w"), sort_keys=True)
 PY
 fi

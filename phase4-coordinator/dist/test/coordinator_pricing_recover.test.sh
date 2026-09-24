@@ -36,12 +36,19 @@ export MACPROVIDER_ROOT="$T/opt/macprovider" MACPROVIDER_ETC_ROOT="$T/etc/macpro
 R="$MACPROVIDER_ROOT"; A="$R/autotune"
 
 mkdir -p "$T/bin" "$CTL"
-# systemctl: MainPID and ActiveEnterTimestampMonotonic of the stub coordinator.
+# systemctl: MainPID, ActiveState and ActiveEnterTimestampMonotonic of the stub
+# coordinator; what coordinator-deploy-recover --recover-under-global calls
+# (sidecars not installed, daemon-reload, nginx reload). Any start/restart is
+# recorded in $CTL/started (the conflict resolution must never start anything).
 cat >"$T/bin/systemctl" <<'SH'
 #!/bin/sh
 case "$*" in
   *"-p MainPID"*) if [ -e "$CTL/stopped" ]; then echo 0; else cat "$CTL/pid"; fi ;;
   *"-p ActiveEnterTimestampMonotonic"*) cat "$CTL/active-enter" ;;
+  *"-p ActiveState --value macprovider-coordinator") if [ -e "$CTL/stopped" ]; then echo inactive; else echo active; fi ;;
+  *"-p LoadState"*) echo not-found ;;
+  daemon-reload|"try-reload-or-restart nginx") ;;
+  start*|restart*) printf '%s\n' "$*" >>"$CTL/started"; exit 1 ;;
   *) exit 1 ;;
 esac
 SH
@@ -152,7 +159,7 @@ json.dump({"pricing_diff_sha256": "1" * 64, "candidate_config_sha256": hashlib.s
            "expected_signed_rate_card_sha256": hashlib.sha256(open(sys.argv[3], "rb").read()).hexdigest(),
            "prior_rate_table_sha256": rec["rate_table_sha256"], "prior_signed_rate_card_sha256": rec["signed_rate_card_sha256"],
            "prior_config_sha256": sys.argv[5], "prior_billing_snapshot_id": rec["billing_snapshot_id"],
-           "overlay_sha256": ""}, open(sys.argv[4], "w"))
+           "overlay_sha256": "", "runtime_floor_commit": "c" * 40}, open(sys.argv[4], "w"))
 PY
 }
 begin() {
@@ -466,6 +473,279 @@ rc=0; run_deploy_recover --pre-start 2>"$T/err" || rc=$?
 [ -d "$R/.coordinator-deploy-rollback" ] || fail "the conflicting deploy snapshot must be preserved"
 [ "$(sha "$R/coordinator.yaml")" = "$(sha "$T/stage/candidate.yaml")" ] || fail "deploy-recover conflict must not write coordinator.yaml"
 note "deploy-recover --pre-start: pricing journal alone -> no-op; with a deploy marker -> blocked (runbook)"
+
+# ---------------------------------------------------------------------------
+# restore_disk preflights the COMPLETE tuple and payloads (CODE-1693-R2-2): a
+# foreign member anywhere refuses with every member unchanged.
+# ---------------------------------------------------------------------------
+tuple_digest() { # yaml sha, current target, window sha (or absent)
+  printf '%s %s %s\n' "$(sha "$R/coordinator.yaml")" "$(readlink "$A/current")" \
+    "$( [ -e "$A/.previous-target" ] && sha "$A/.previous-target" || echo absent)"
+}
+foreign_release() {
+  mkdir -p "$A/releases/foreign"; printf '{"row": "Z"}\n' >"$A/releases/foreign/rate-card.json"; chmod 0750 "$A/releases/foreign"
+  ln -s releases/foreign "$A/.c.tmp"; if mv --version >/dev/null 2>&1; then mv -Tf "$A/.c.tmp" "$A/current"; else mv -hf "$A/.c.tmp" "$A/current"; fi
+}
+# candidate yaml + foreign current
+setup; forward_until 3; foreign_release; before="$(tuple_digest)"
+rc=0; h restore-disk 2>"$T/err" || rc=$?
+[ "$rc" = 3 ] && grep -q 'nothing changed' "$T/err" || fail "candidate yaml + foreign current must refuse with exit 3 (rc=$rc): $(cat "$T/err")"
+[ "$(tuple_digest)" = "$before" ] || fail "candidate yaml + foreign current: a member changed ($before -> $(tuple_digest))"
+[ "$(sha "$R/coordinator.yaml")" = "$(sha "$T/stage/candidate.yaml")" ] || fail "the candidate yaml must stay installed"
+# candidate yaml + candidate current + foreign window
+setup; forward_until 5; printf 'releases/prev\nreleases/foreign\n' >"$A/.previous-target"; before="$(tuple_digest)"
+rc=0; h restore-disk 2>"$T/err" || rc=$?
+[ "$rc" = 3 ] || fail "candidate yaml/current + foreign window must refuse with exit 3 (rc=$rc): $(cat "$T/err")"
+[ "$(tuple_digest)" = "$before" ] || fail "candidate yaml/current + foreign window: a member changed"
+[ "$(readlink "$A/current")" = releases/new ] || fail "current must stay the candidate"
+# a corrupt prior payload refuses before the first write as well
+setup; forward_until 5; before="$(tuple_digest)"; printf 'x' >>"$R/.pricing-txn/prior-window"
+rc=0; h restore-disk 2>"$T/err" || rc=$?
+[ "$rc" = 5 ] && [ "$(tuple_digest)" = "$before" ] || fail "a corrupt prior-window must stop with every member unchanged (rc=$rc)"
+note "restore-disk: foreign current / foreign window / corrupt payload refuse with every member unchanged"
+
+# ---------------------------------------------------------------------------
+# Pricing runtime floor: begin writes it once, durably, and never rewrites it.
+# ---------------------------------------------------------------------------
+setup; rm -f "$R/.pricing-runtime-floor"; begin
+[ -f "$R/.pricing-runtime-floor" ] && grep -qx "commit=$(printf 'c%.0s' $(seq 1 40))" "$R/.pricing-runtime-floor" \
+  || fail "begin must write the pricing runtime floor naming the verdict commit"
+[ "$(mode_of "$R/.pricing-runtime-floor")" = 644 ] || fail "the floor marker must be 0644"
+floor_before="$(cat "$R/.pricing-runtime-floor")"
+h phase rolling-back; h restore-disk; h phase rolled-back; h finalize prior
+sleep 1; begin
+[ "$(cat "$R/.pricing-runtime-floor")" = "$floor_before" ] || fail "a later begin must keep the first floor marker"
+h phase rolling-back; h restore-disk; h phase rolled-back; h finalize prior
+[ -f "$R/.pricing-runtime-floor" ] || fail "finalize must never remove the floor marker"
+python3 - "$T/stage/verdict.json" <<'PY'
+import json, sys
+v = json.load(open(sys.argv[1])); v["runtime_floor_commit"] = "not-a-commit"; json.dump(v, open(sys.argv[1], "w"))
+PY
+rc=0; begin 2>"$T/err" || rc=$?
+[ "$rc" = 1 ] && grep -q 'runtime_floor_commit' "$T/err" && [ ! -e "$R/.pricing-txn" ] || fail "begin must refuse a verdict without a floor commit (rc=$rc)"
+note "begin writes the pricing runtime floor once (0644, commit), before the journal; never removed"
+
+# ---------------------------------------------------------------------------
+# Deploy-and-pricing conflict: --resolve-deploy-conflict (CODE-1693-R2-1,
+# SEC-M4, ARCH-002).
+# ---------------------------------------------------------------------------
+SYSD="$T/systemd"
+DIST="$SCRIPT_DIR/.."
+cat >"$T/bin/coordinator-new" <<'SH'
+#!/bin/sh
+case "$*" in *--expect-base-equivalent*) echo '{"ok":false,"model_resolutions":[],"errors":["config: probe"]}'; exit 1 ;; esac
+exit 0
+SH
+cat >"$T/bin/coordinator-old" <<'SH'
+#!/bin/sh
+case "$*" in *--expect-base-equivalent*) echo 'flag provided but not defined: -expect-base-equivalent' >&2; exit 2 ;; esac
+exit 0
+SH
+# nginx -t: probe that the helper's lock set is held while deploy recovery runs
+# (flock -n on each lock must fail), optionally hang or fail.
+cat >"$T/bin/nginx" <<'SH'
+#!/bin/sh
+[ "${1:-}" = -t ] || exit 0
+python3 -c '
+import fcntl, os, sys
+out = []
+for p in sys.argv[1:]:
+    fd = os.open(p, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); out.append("free")
+    except BlockingIOError:
+        out.append("held")
+    os.close(fd)
+print(" ".join(out))' "$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE" "$MACPROVIDER_DEPLOY_LOCK_FILE" >"$CTL/lockprobe"
+if [ -e "$CTL/nginx-hang" ]; then touch "$CTL/nginx-waiting"; while :; do sleep 0.1; done; fi
+[ ! -e "$CTL/nginx-fail" ]
+SH
+printf '#!/bin/sh\nexit 0\n' >"$T/bin/setfacl"
+chmod 0755 "$T/bin/coordinator-new" "$T/bin/coordinator-old" "$T/bin/nginx" "$T/bin/setfacl"
+
+resolve_env() {
+  MACPROVIDER_SYSTEMD_ROOT="$SYSD" MACPROVIDER_NGINX_ROOT="$T/etc/nginx" MACPROVIDER_STATS_ROOT="$T/opt/macprovider-stats" \
+    MACPROVIDER_NGINX="$T/bin/nginx" MACPROVIDER_SETFACL="$T/bin/setfacl" MACPROVIDER_PYTHON=python3 \
+    MACPROVIDER_DEPLOY_OPERATION_LOCK_FILE="$T/op.lock" "$@"
+}
+resolve() { resolve_env python3 -I "$HELPER" --resolve-deploy-conflict; }
+
+# One conflict: a journal (forward steps <n>), the coordinator stopped, the
+# #1693 pricing machinery installed, and a complete deploy rollback snapshot
+# whose (yaml, current, window) are <yaml> <current> <window> (prior|candidate
+# each), binary <new|old>.
+conflict_setup() { # <n> <yaml> <current> <window> [old]
+  setup; forward_until "$1"; stop_coordinator
+  rm -rf "$SYSD"; mkdir -p "$SYSD/macprovider-coordinator.service.d"
+  cp "$HELPER" "$R/coordinator-pricing-recover"
+  cp "$REPO_ROOT/scripts/lib/coordinator-config-guard.sh" "$R/coordinator-config-guard.sh"
+  cp "$DIST/systemd/macprovider-coordinator-pricing-close.service" "$DIST/systemd/macprovider-coordinator-deploy-recovery.service" "$SYSD/"
+  cp "$DIST/systemd/macprovider-coordinator-deploy-guard.conf" "$SYSD/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf"
+  cp "$DEPLOY_RECOVER" "$R/coordinator-deploy-recover"; chmod 0755 "$R/coordinator-deploy-recover"
+  cp "$T/bin/coordinator-new" "$R/coordinator"
+  local S="$R/.coordinator-deploy-rollback"
+  mkdir -p "$S"; chmod 0700 "$S"
+  case "$2" in prior) cp "$R/.pricing-txn/prior-coordinator.yaml" "$S/coordinator.yaml" ;; *) cp "$T/stage/candidate.yaml" "$S/coordinator.yaml" ;; esac
+  case "$3" in prior) printf 'releases/old' ;; candidate) printf 'releases/new' ;; *) printf 'releases/prev' ;; esac >"$S/catalog-current-target"
+  case "$4" in prior) cp "$R/.pricing-txn/prior-window" "$S/catalog-previous-target" ;; *) cp "$T/stage/window" "$S/catalog-previous-target" ;; esac
+  printf 'coordinator.yaml.bak-20260924T000000Z' >"$S/config-backup-name"
+  cp "$T/bin/coordinator-${5:-new}" "$S/coordinator"
+  cp "$R/coordinator-pricing-recover" "$S/coordinator-pricing-recover"
+  cp "$R/coordinator-config-guard.sh" "$S/coordinator-config-guard.sh"
+  cp "$SYSD/macprovider-coordinator-pricing-close.service" "$SYSD/macprovider-coordinator-deploy-recovery.service" "$S/"
+  cp "$SYSD/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf" "$S/10-deploy-transaction-guard.conf"
+  cp "$R/coordinator-deploy-recover" "$S/coordinator-deploy-recover"
+  for m in complete had-config had-previous-target had-coordinator had-pricing-recover-helper had-config-guard-lib \
+    had-pricing-close-unit had-recovery-unit had-guard-dropin had-recovery-helper stats-billing-timer-was-active; do
+    touch "$S/$m"
+  done
+}
+state_digest() { # everything the resolution may change: disk tuple, journal, snapshot, machinery
+  { tuple_digest; ls -a "$R" | grep '^\.pricing-txn' || true
+    [ -d "$R/.pricing-txn" ] && cat "$R/.pricing-txn/txn.json"
+    [ -d "$R/.coordinator-deploy-rollback" ] && (cd "$R/.coordinator-deploy-rollback" && ls && cat coordinator.yaml catalog-current-target)
+    shasum -a 256 "$R/coordinator" "$R/coordinator-pricing-recover" "$SYSD"/*.service; } 2>/dev/null | shasum -a 256
+}
+no_held() { [ -z "$(ls -a "$R" | grep '^\.pricing-txn\.conflict-held\.' || true)" ] || fail "$1: a set-aside journal was left behind"; }
+refused_unchanged() { # <label> <expected message>
+  local before rc=0; before="$(state_digest)"
+  resolve >"$T/out" 2>"$T/err" || rc=$?
+  [ "$rc" = 1 ] && grep -q "$2" "$T/err" || fail "$1: must refuse with exit 1 (rc=$rc): $(cat "$T/err")"
+  [ "$(state_digest)" = "$before" ] || fail "$1: a refusal changed state"
+  [ -d "$R/.pricing-txn" ] && [ -d "$R/.coordinator-deploy-rollback" ] || fail "$1: journal and snapshot must both be kept"
+  [ ! -e "$CTL/started" ] || fail "$1: something was started: $(cat "$CTL/started")"
+  no_held "$1"
+}
+
+# Coherent PRIOR pair (the disk carries the candidate): deploy recovery runs
+# under the helper's lock set (no self-deadlock), restores the prior pair, the
+# journal comes back for pricing recovery, nothing is started.
+conflict_setup 5 prior prior prior
+rc=0; resolve >"$T/out" 2>"$T/err" || rc=$?
+[ "$rc" = 0 ] || fail "a coherent prior snapshot must resolve (rc=$rc): $(cat "$T/err")"
+[ "$(cat "$CTL/lockprobe")" = "held held" ] || fail "deploy recovery must run while the helper holds both locks (got $(cat "$CTL/lockprobe"))"
+[ -d "$R/.pricing-txn" ] && [ ! -e "$R/.coordinator-deploy-rollback" ] || fail "prior: journal must be visible and the snapshot consumed"
+no_held "prior"; prior_on_disk "resolve prior"
+[ ! -e "$CTL/started" ] || fail "the resolution must never start a unit: $(cat "$CTL/started")"
+grep -q '"resolved": "prior"' "$T/out" && grep -q 'stats-billing-mirror.timer' "$T/out" || fail "must report the side and the stopped sidecar timers: $(cat "$T/out")"
+h --pre-start; [ "$(phase)" = restored-unverified ] || fail "prior: pre-start must take the journal on"
+start_coordinator; h --close-restored --wait-seconds 5 || fail "prior: the closer must finalize"
+[ ! -e "$R/.pricing-txn" ] || fail "prior: the journal must finalize through normal pricing recovery"
+note "conflict: coherent prior pair resolves under the held lock set (no self-deadlock); pricing recovery finalizes"
+
+# Coherent CANDIDATE pair (the disk carries only the candidate yaml).
+conflict_setup 3 candidate candidate candidate
+rc=0; resolve >"$T/out" 2>"$T/err" || rc=$?
+[ "$rc" = 0 ] && grep -q '"resolved": "candidate"' "$T/out" || fail "a coherent candidate snapshot must resolve (rc=$rc): $(cat "$T/err")"
+[ "$(readlink "$A/current")" = releases/new ] && [ "$(sha "$R/coordinator.yaml")" = "$(sha "$T/stage/candidate.yaml")" ] || fail "candidate: the candidate pair must be on disk"
+no_held "candidate"
+h --pre-start; prior_on_disk "candidate then pre-start"
+start_coordinator; h --close-restored --wait-seconds 5 || fail "candidate: the closer must finalize the rollback"
+note "conflict: coherent candidate pair resolves; pre-start then rolls the journal back to prior"
+
+# Mixed or foreign snapshots are refused with nothing changed.
+for combo in "candidate prior prior" "prior candidate prior" "prior prior candidate" "candidate candidate prior" \
+  "prior candidate candidate" "candidate prior candidate" "prior foreign prior"; do
+  set -- $combo
+  conflict_setup 5 "$1" "$2" "$3"
+  refused_unchanged "mixed snapshot ($combo)" 'not one coherent journal pair'
+done
+conflict_setup 5 prior prior prior; printf 'x' >>"$R/.coordinator-deploy-rollback/coordinator.yaml"
+refused_unchanged "foreign snapshot yaml" 'not one coherent journal pair'
+conflict_setup 5 prior prior prior; touch "$R/.coordinator-deploy-rollback/had-overlay"; printf 'o: 1\n' >"$R/.coordinator-deploy-rollback/coordinator.pearl-overlays.yaml"
+refused_unchanged "snapshot overlay differs" "overlay is not the journal's overlay"
+note "conflict: every mixed prior/candidate combination and a foreign yaml/current/overlay are refused, nothing changed"
+
+# A verified (terminal) journal accepts only its candidate pair.
+conflict_setup 5 prior prior prior; h phase hup-intent; h phase verifying; h phase verified
+refused_unchanged "verified journal + prior snapshot" 'not one coherent journal pair'
+note "conflict: a verified journal never takes a prior snapshot"
+
+# The coordinator is active: refused, nothing changed, nothing started.
+conflict_setup 5 prior prior prior; start_coordinator
+refused_unchanged "coordinator active" 'coordinator must be stopped'
+stop_coordinator
+# Someone else holds the lock set: refused.
+conflict_setup 5 prior prior prior
+python3 -c 'import fcntl,os,sys,time;fd=os.open(sys.argv[1],os.O_RDWR|os.O_CREAT,0o600);fcntl.flock(fd,fcntl.LOCK_EX);open(sys.argv[2],"w").close();time.sleep(30)' \
+  "$MACPROVIDER_DEPLOY_LOCK_FILE" "$T/locked" & LOCKER=$!
+for _ in $(seq 1 50); do [ -e "$T/locked" ] && break; sleep 0.1; done
+refused_unchanged "lock set held" 'lock set .* is held'
+kill "$LOCKER"; wait "$LOCKER" 2>/dev/null || true; rm -f "$T/locked"
+# The snapshot's coordinator binary is pre-#1693: refused before any change.
+conflict_setup 5 prior prior prior old
+refused_unchanged "pre-#1693 snapshot binary" 'lacks per-generation wholesale pricing'
+note "conflict: coordinator active, lock set held, or a pre-#1693 snapshot binary -> refused, nothing changed"
+
+# Deploy recovery fails: the journal is restored, the snapshot kept.
+conflict_setup 5 prior prior prior; touch "$CTL/nginx-fail"
+rc=0; resolve >"$T/out" 2>"$T/err" || rc=$?
+[ "$rc" = 5 ] && grep -q 'failed (rc=' "$T/err" || fail "a failed deploy recovery must stop (rc=$rc): $(cat "$T/err")"
+[ -d "$R/.pricing-txn" ] && [ -d "$R/.coordinator-deploy-rollback" ] || fail "failure: journal restored and snapshot kept"
+no_held "failure"; rm -f "$CTL/nginx-fail"
+# ...and a rerun completes.
+rc=0; resolve >"$T/out" 2>"$T/err" || rc=$?
+[ "$rc" = 0 ] || fail "a rerun after a failed deploy recovery must resolve (rc=$rc): $(cat "$T/err")"
+note "conflict: deploy recovery failure restores the journal and keeps the snapshot; a rerun resolves"
+
+# Interrupted (SIGTERM) during deploy recovery: its process group is stopped,
+# the journal restored, the snapshot kept.
+conflict_setup 5 prior prior prior; touch "$CTL/nginx-hang"
+resolve_env exec python3 -I "$HELPER" --resolve-deploy-conflict >"$T/out" 2>"$T/err" & HP=$!
+for _ in $(seq 1 100); do [ -e "$CTL/nginx-waiting" ] && break; sleep 0.1; done
+[ -e "$CTL/nginx-waiting" ] || fail "interrupt: deploy recovery did not reach nginx -t: $(cat "$T/err")"
+[ -n "$(ls -a "$R" | grep '^\.pricing-txn\.conflict-held\.' || true)" ] && [ ! -e "$R/.pricing-txn" ] || fail "the journal must be set aside only inside the critical section"
+kill -TERM "$HP"; rc=0; wait "$HP" || rc=$?
+[ "$rc" = 5 ] && grep -q 'interrupted (SIGTERM)' "$T/err" || fail "interrupt must stop with exit 5 (rc=$rc): $(cat "$T/err")"
+[ -d "$R/.pricing-txn" ] && [ -d "$R/.coordinator-deploy-rollback" ] || fail "interrupt: journal restored and snapshot kept"
+no_held "interrupt"; rm -f "$CTL/nginx-hang" "$CTL/nginx-waiting"
+sleep 0.3; ! pgrep -f "$T/bin/nginx" >/dev/null || fail "interrupt: deploy recovery's process group must be stopped"
+note "conflict: SIGTERM during deploy recovery stops it, restores the journal, keeps the snapshot"
+
+# An orphaned set-aside journal (the resolver was SIGKILLed) is refused by the
+# writers' Python guard and put back by the next pricing pre-start.
+setup; forward_until 3; stop_coordinator
+mv "$R/.pricing-txn" "$R/.pricing-txn.conflict-held.999999.1"
+rc=0; h foreign-state >"$T/out" || rc=$?
+[ "$rc" = 3 ] && grep -q 'set aside' "$T/out" || fail "foreign-state must report a set-aside journal (rc=$rc)"
+python3 - "$REPO_ROOT/scripts/lib/coordinator_config_guard.py" "$R" <<'PY' || fail "the Python writer guard must refuse a set-aside journal"
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("g", sys.argv[1]); spec = importlib.util.spec_from_loader("g", loader)
+g = importlib.util.module_from_spec(spec); loader.exec_module(g)
+try:
+    g.refuse_if_pricing_txn(sys.argv[2])
+except g.PricingTransactionActive as exc:
+    assert ".pricing-txn.conflict-held." in str(exc), exc
+else:
+    raise SystemExit("not refused")
+PY
+h --pre-start
+[ -d "$R/.pricing-txn" ] && [ "$(phase)" = restored-unverified ] || fail "pre-start must restore an orphaned set-aside journal and recover it"
+no_held "orphan"
+note "orphaned set-aside journal: writers refuse it, the next pre-start puts it back"
+
+# Deploy recovery removes the pricing machinery (a pre-#1693 snapshot has no
+# had-pricing-* markers): stop with the journal visible.
+conflict_setup 5 prior prior prior
+rm -f "$R/.coordinator-deploy-rollback/had-pricing-recover-helper"
+rc=0; resolve >"$T/out" 2>"$T/err" || rc=$?
+[ "$rc" = 5 ] && grep -q 'changed pricing recovery files' "$T/err" || fail "removed pricing machinery must stop (rc=$rc): $(cat "$T/err")"
+[ -d "$R/.pricing-txn" ] || fail "machinery stop: journal must stay visible"; no_held "machinery stop"
+# The binary after deploy recovery is pre-#1693 (a deploy recovery that
+# installs one): stop with the journal visible and a named runbook step.
+conflict_setup 5 prior prior prior
+cat >"$T/bin/deploy-recover-old-binary" <<SH
+#!/bin/sh
+sh "$R/coordinator-deploy-recover" "\$@" || exit \$?
+cp "$T/bin/coordinator-old" "$R/coordinator"
+SH
+chmod 0755 "$T/bin/deploy-recover-old-binary"
+rc=0; MACPROVIDER_DEPLOY_RECOVER="$T/bin/deploy-recover-old-binary" resolve >"$T/out" 2>"$T/err" || rc=$?
+[ "$rc" = 5 ] && grep -q 'lacks per-generation wholesale pricing; do not start it' "$T/err" && grep -q 'Deploy-and-pricing conflict, step 4' "$T/err" \
+  || fail "a pre-#1693 binary after deploy recovery must stop (rc=$rc): $(cat "$T/err")"
+[ -d "$R/.pricing-txn" ] || fail "old binary stop: journal must stay visible"; no_held "old binary stop"
+[ ! -e "$CTL/started" ] || fail "old binary stop: nothing may be started"
+note "conflict: pricing machinery removed or a pre-#1693 binary after deploy recovery -> stop, journal visible"
 
 # ---------------------------------------------------------------------------
 # Unit wiring (v20 L4b) and the deploy install, by unit properties / text.
