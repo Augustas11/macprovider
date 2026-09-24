@@ -69,19 +69,20 @@ def usdc(credits):
     return str((Decimal(credits) / USDC_BASE_UNITS).quantize(Decimal("0.000001")))
 
 
-def usdc_per_day(credits, window_seconds):
-    """Earned USDC scaled to a day over the candidate's whole run window, so
-    excluded and failed rows count as zero-revenue time rather than vanishing."""
-    return usdc(Decimal(credits) * SECONDS_PER_DAY / Decimal(str(window_seconds)))
+def usdc_per_day(credits, seconds):
+    """Earned USDC scaled to a day over the candidate's whole run, so excluded
+    and failed rows count as zero-revenue time rather than vanishing."""
+    return usdc(Decimal(credits) * SECONDS_PER_DAY / Decimal(str(seconds)))
 
 
 def is_int(value):
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def request_times(coordinator, account_id, request_id):
-    return [classifier.parse_utc(r["ts_utc"]) for r in coordinator.execute(
-        "SELECT ts_utc FROM request_log WHERE account_id = ? AND external_request_id = ?",
+def request_log_rows(coordinator, account_id, request_id):
+    """Return [(ts_utc, latency_seconds)] for every coordinator attempt of one buyer request."""
+    return [(classifier.parse_utc(r["ts_utc"]), max(0.0, float(r["latency_ms"])) / 1000) for r in coordinator.execute(
+        "SELECT ts_utc, latency_ms FROM request_log WHERE account_id = ? AND external_request_id = ?",
         (account_id, request_id))]
 
 
@@ -97,11 +98,11 @@ def ledger_credit(coordinator, receipt_scope, attempt):
     ).fetchone()
 
 
-def evaluate_row(candidate, case, evidence, coordinator, receipt_scope, times):
+def evaluate_row(candidate, case, evidence, coordinator, receipt_scope, log_rows):
     """Return (reasons, economics). Empty reasons means the row counts toward revenue."""
     if evidence["classification"] != "complete":
         return [evidence["classification"]], None
-    if not times or any(t < candidate["started"] or t > candidate["finished"] for t in times):
+    if not log_rows or any(t < candidate["started"] or t > candidate["finished"] for t, _ in log_rows):
         return ["outside_candidate_window"], None
     if len(evidence["attempts"]) != 1:
         return ["multiple_attempts"], None
@@ -199,7 +200,7 @@ def calculate(manifest, coordinator, gateway, journal=None, now=None, doc=None):
     _, receipt_scope = classifier.evidence_scopes(manifest["account_id"])
     totals = {cid: {"attempted": 0, "counted": 0, "excluded": Counter(), "prompt_tokens": 0,
                     "cached_prompt_tokens": 0, "completion_tokens": 0, "gross_credits": 0,
-                    "provider_credits": 0, "payout_terms": set(), "cases_counted": set()}
+                    "provider_credits": 0, "busy_seconds": 0.0, "payout_terms": set(), "cases_counted": set()}
               for cid in candidates}
     rows = []
     for row in manifest["requests"]:
@@ -207,19 +208,20 @@ def calculate(manifest, coordinator, gateway, journal=None, now=None, doc=None):
         try:
             evidence = classifier.classify(coordinator, gateway, manifest["account_id"], row["request_id"],
                                            journal, now=now, expected_provider_id=candidate["expected_provider_id"])
-            times = request_times(coordinator, manifest["account_id"], row["request_id"])
+            log_rows = request_log_rows(coordinator, manifest["account_id"], row["request_id"])
         except ValueError as exc:
             if not str(exc).startswith("no successful provider-bound request"):
                 evidence = {"classification": "evidence_unreadable:" + type(exc).__name__, "missing": [], "pending": []}
             else:
                 evidence = {"classification": "no_successful_provider_request", "missing": [], "pending": []}
-            times = []
+            log_rows = []
         except (TypeError, KeyError, sqlite3.Error) as exc:
             evidence = {"classification": "evidence_unreadable:" + type(exc).__name__, "missing": [], "pending": []}
-            times = []
-        reasons, economics = evaluate_row(candidate, case, evidence, coordinator, receipt_scope, times)
+            log_rows = []
+        reasons, economics = evaluate_row(candidate, case, evidence, coordinator, receipt_scope, log_rows)
         bucket = totals[row["candidate_id"]]
         bucket["attempted"] += 1
+        bucket["busy_seconds"] += sum(latency for _, latency in log_rows)
         if reasons:
             bucket["excluded"].update(reasons)
         else:
@@ -263,7 +265,11 @@ def calculate(manifest, coordinator, gateway, journal=None, now=None, doc=None):
             "provider_credits": bucket["provider_credits"],
             "provider_usdc": usdc(bucket["provider_credits"]),
             "window_seconds": candidate["window_seconds"],
-            "provider_usdc_per_day_over_window": usdc_per_day(bucket["provider_credits"], candidate["window_seconds"]),
+            "busy_seconds": round(bucket["busy_seconds"], 3),
+            # The declared window cannot be shorter than the coordinator-recorded serial
+            # busy time, so shrinking it cannot inflate the per-day figure.
+            "provider_usdc_per_day_over_window": usdc_per_day(
+                bucket["provider_credits"], max(candidate["window_seconds"], bucket["busy_seconds"])),
             "payout_terms": [{"global_multiplier_ppm": m, "provider_share_bps": s}
                              for m, s in sorted(bucket["payout_terms"])],
         })
@@ -272,6 +278,8 @@ def calculate(manifest, coordinator, gateway, journal=None, now=None, doc=None):
     if len(all_terms) > 1:
         blockers.append("payout_terms_changed_during_run")
     for entry in report_candidates:
+        if entry["window_seconds"] < entry["busy_seconds"]:
+            blockers.append("declared_window_shorter_than_busy_time:" + entry["candidate_id"])
         if entry["counted_rows"] == 0:
             blockers.append("candidate_without_counted_rows:" + entry["candidate_id"])
         elif entry["cases_without_counted_rows"]:
@@ -289,6 +297,10 @@ def calculate(manifest, coordinator, gateway, journal=None, now=None, doc=None):
 
 
 def main(argv=None):
+    if sys.version_info < (3, 11):
+        # Older fromisoformat rejects the coordinator's nanosecond ts_utc, which
+        # would silently exclude every row as unreadable.
+        raise SystemExit("revenue_benchmark_calculator.py requires Python 3.11+")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", required=True, help="benchmark run manifest JSON")
     parser.add_argument("--coordinator-db", required=True)

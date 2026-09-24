@@ -8,8 +8,8 @@ recommendations.
 
 `coding_agent_workload_v1.json` is the fixed coding-agent workload. It has 9
 non-streaming, temperature-0 cases (debug, tests, implement, refactor, review,
-and one multi-file agent-loop step). Five cases have a completion floor of 512
-tokens or more; the agent-loop case needs 1024 or more.
+and one multi-file agent-loop step). Six cases have a completion floor of 512
+tokens or more, including the agent-loop case at 1024.
 
 `scripts/revenue_benchmark_workload.py` pins the canonical SHA-256 of each
 version. If you edit v1 in place, loading fails. Add a new version file and pin
@@ -30,6 +30,9 @@ deterministic run-scoped `X-Request-ID`. Every candidate gets the same cases.
 (`malibu.revenue_benchmark_run.v1`, fixture in
 `scripts/tests/fixtures/revenue_benchmark/run_manifest.json`) and read-only
 copies of the coordinator and gateway databases.
+
+The calculator needs Python 3.11 or newer. Older `fromisoformat` rejects the
+coordinator's nanosecond `ts_utc`.
 
 ```bash
 python3 scripts/revenue_benchmark_calculator.py --manifest run.json \
@@ -74,10 +77,16 @@ value is echoed in the report.
 
 Per candidate, the report gives token and credit totals, provider USDC
 (1 credit = 1 USDC base unit), and USDC per day over the candidate's whole run
-window. USDC per day is serial benchmark throughput scaled to a day, not a
-demand forecast.
+window.
 
-`comparable` is false when either of these holds:
+USDC per day is serial benchmark throughput scaled to a day, not a demand
+forecast. Its denominator is the larger of two values: the declared window, or
+the candidate's busy time (the sum of `request_log.latency_ms` over its
+requests). Squeezing the window therefore cannot inflate the figure.
+
+`comparable` is false when any of these holds:
+
+- The declared window is shorter than the candidate's busy time.
 
 - Payout terms changed during the run.
 - A candidate has no counted row for some workload case.

@@ -6,7 +6,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from datetime import timedelta
+from datetime import timedelta, timezone
 from pathlib import Path
 
 
@@ -18,7 +18,7 @@ spec.loader.exec_module(calculator)
 classifier = calculator.classifier
 
 COORDINATOR_SCHEMA = """
-CREATE TABLE request_log (id INTEGER PRIMARY KEY, request_id TEXT, attempt_n INTEGER, ts_utc TEXT,
+CREATE TABLE request_log (id INTEGER PRIMARY KEY, request_id TEXT, attempt_n INTEGER, ts_utc TEXT, latency_ms REAL,
     status INTEGER, provider_assigned_id TEXT, provider_header TEXT,
     account_id TEXT, external_request_id TEXT, model TEXT);
 CREATE TABLE ledger_request_credits (id INTEGER PRIMARY KEY, request_id TEXT, attempt_n INTEGER,
@@ -53,6 +53,11 @@ def load_fixture(name):
         return json.load(f)
 
 
+def coordinator_time_text(when):
+    """Mirror requestlog.sqliteTimeText: fixed-width nanosecond UTC with a Z suffix."""
+    return when.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f") + "000Z"
+
+
 def seed(coordinator, gateway, account_id, rows, now):
     """Write durable coordinator/gateway evidence for each fixture row's state."""
     coordinator.executescript(COORDINATOR_SCHEMA)
@@ -66,9 +71,9 @@ def seed(coordinator, gateway, account_id, rows, now):
         assigned = "assigned-" + provider
         digest = "d" * 64
         coordinator.execute(
-            "INSERT INTO request_log(request_id, attempt_n, ts_utc, status, provider_assigned_id, provider_header,"
-            " account_id, external_request_id, model) VALUES (?, 0, ?, 200, ?, NULL, ?, ?, ?)",
-            (internal, when.isoformat(), assigned, account_id, row["request_id"], row["model"]))
+            "INSERT INTO request_log(request_id, attempt_n, ts_utc, latency_ms, status, provider_assigned_id,"
+            " provider_header, account_id, external_request_id, model) VALUES (?, 0, ?, ?, 200, ?, NULL, ?, ?, ?)",
+            (internal, coordinator_time_text(when), row["latency_ms"], assigned, account_id, row["request_id"], row["model"]))
         quarantined = row["state"] == "quarantined"
         coordinator.execute(
             "INSERT INTO ledger_request_credits(request_id, attempt_n, provider_id, provider_assigned_id, model,"
@@ -225,7 +230,7 @@ class RevenueCalculatorFixtureTests(unittest.TestCase):
 
     def test_retried_request_is_excluded_even_when_every_attempt_is_complete(self):
         tables = {
-            "request_log": "request_id, 1, ts_utc, status, provider_assigned_id, provider_header, account_id, external_request_id, model",
+            "request_log": "request_id, 1, ts_utc, latency_ms, status, provider_assigned_id, provider_header, account_id, external_request_id, model",
             "settlement_route_snapshots": "account_scope, request_id, 1, provider_id, pending_deadline_seconds, request_start_ts_unix_ms, route_snapshot_digest, provider_reported_model_hash, expected_catalog_model_hash, model_id, spec008_hash_status",
             "settlement_attempt_outputs": "account_scope, request_id, 1, provider_id, terminal_state, usage_canonical_json",
             "settlement_receipt_verdicts": "account_scope_hash, request_id, 1, provider_id, settlement_outcome, closed, reason, pending_deadline_unix_ms, route_snapshot_digest",
@@ -333,6 +338,24 @@ class RevenueCalculatorFixtureTests(unittest.TestCase):
         self.assertEqual(calculator.expected_credits(row(1000, None, 0, 1_000_000, 2_000_000), 0), (1000, 900))
         self.assertEqual(calculator.expected_credits(row(1000, None, 500, 500_000, 1_000_000), 0), (1000, 900))
         self.assertEqual(calculator.expected_credits(row(1000, 400, 100, 1_000_000, 2_000_000), 250_000), (900, 810))
+
+    def test_squeezed_window_cannot_inflate_per_day_below_busy_time(self):
+        report = self.report()
+        incumbent = self.candidate(report, "incumbent-qwen-coder")
+        self.assertEqual(incumbent["busy_seconds"], 180.0)
+        manifest = copy.deepcopy(self.manifest)
+        manifest["candidates"][0].update(started_at="2026-09-24T11:40:00Z", finished_at="2026-09-24T11:59:00.000001Z")
+        manifest["candidates"][1].update(started_at="2026-09-24T11:40:00Z", finished_at="2026-09-24T11:40:00.000001Z")
+        report = self.report(manifest)
+        incumbent = self.candidate(report, "incumbent-qwen-coder")
+        challenger = self.candidate(report, "challenger-qwen35-a3b")
+        self.assertEqual(incumbent["counted_rows"], 7)
+        self.assertEqual(challenger["counted_rows"], 6)
+        # 1550 credits over 8 logged requests x 20s busy time, not over 1 microsecond.
+        self.assertEqual(challenger["busy_seconds"], 160.0)
+        self.assertEqual(challenger["provider_usdc_per_day_over_window"], "0.837000")
+        self.assertIn("declared_window_shorter_than_busy_time:challenger-qwen35-a3b", report["comparison_blockers"])
+        self.assertNotIn("declared_window_shorter_than_busy_time:incumbent-qwen-coder", report["comparison_blockers"])
 
     def test_round_half_even_matches_billing_formula(self):
         self.assertEqual(calculator.round_half_even(5, 2), 2)
