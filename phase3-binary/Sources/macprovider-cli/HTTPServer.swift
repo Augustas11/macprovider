@@ -550,9 +550,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 providerID: providerID,
                 assignedID: checkedAssignedID
             )
-            let runtimeSnapshot = warmSwapEnabled ? await modelRuntime.currentSnapshot() : nil
-            let telemetryMatchesRuntime = runtimeSnapshot.map { $0.specDecodeGeneration == snapshot.specDecodeGeneration } ?? true
-            let telemetryRuntimeEligible = runtimeSnapshot.map { $0.state == .ready && $0.hasTargetCompatibleDraft } ?? true
+            let runtimeSnapshot = await modelRuntime.currentSnapshot()
+            let telemetryMatchesRuntime = !warmSwapEnabled
+                || runtimeSnapshot.specDecodeGeneration == snapshot.specDecodeGeneration
+            let telemetryRuntimeEligible = !warmSwapEnabled
+                || (runtimeSnapshot.state == .ready && runtimeSnapshot.hasTargetCompatibleDraft)
             let readiness = await latestReadiness
             // The hold-through state machine is unchanged: it still consumes
             // the same three-valued verdict it always did.
@@ -1906,6 +1908,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "max_concurrency": snapshot.capacity.maxConcurrency,
                 "throughput_tps_estimate": snapshot.capacity.throughputTPSEstimate,
             ],
+            "continuous_batching": continuousBatchingStatusFields(runtimeSnapshot?.continuousBatching),
             "coordinator": [
                 "connected": snapshot.coordinatorConnected,
                 "session": jsonNullable(snapshot.coordinatorAssignedID),
@@ -2009,6 +2012,26 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             ]
         }
         return body
+    }
+
+    static func continuousBatchingStatusFields(
+        _ snapshot: RuntimeContinuousBatchingSnapshot?
+    ) -> [String: Any] {
+        let scheduler = snapshot?.scheduler
+        return [
+            "mode": snapshot?.mode.rawValue ?? ContinuousBatchingMode.off.rawValue,
+            "active": snapshot?.active ?? false,
+            "unsupported_reason": jsonNullable(snapshot?.unsupportedReason),
+            "paged_kv_decision": jsonNullable(snapshot?.pagedKVDecision),
+            "cache_class": jsonNullable(snapshot?.cacheClass),
+            "scheduler": [
+                "active_decode_rows": scheduler?.activeDecodeRows ?? 0,
+                "waiting_count": scheduler?.waitingCount ?? 0,
+                "max_observed_batch_depth": scheduler?.maxObservedBatchDepth ?? 0,
+                "slots_total": scheduler?.slotsTotal ?? 0,
+                "slots_free": scheduler?.slotsFree ?? 0,
+            ],
+        ]
     }
 
     private static func lifecycleStateStatus(_ inspection: ProviderLifecycleStateInspection) -> [String: Any] {

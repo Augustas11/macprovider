@@ -120,6 +120,13 @@ final class PagedKVEngineTests: XCTestCase {
         )
     }
 
+    func testMixedCacheClassRequiresVerifiedHybridArchitecture() {
+        XCTAssertTrue(PagedKVAttachGate.supportsCacheClass("KVCacheSimple"))
+        XCTAssertTrue(PagedKVAttachGate.supportsCacheClass("mixed", hybridDecoderArchitectureVerified: true))
+        XCTAssertFalse(PagedKVAttachGate.supportsCacheClass("mixed"))
+        XCTAssertFalse(PagedKVAttachGate.supportsCacheClass("RotatingKVCache", hybridDecoderArchitectureVerified: true))
+    }
+
     func testPagedKVConfigDefaultsOffAndCLIOverridesEnvironmentOverridesYAML() {
         let yaml: [String: Any] = [
             "enabled": true,

@@ -432,18 +432,22 @@ extension PagedKVRuntimeContiguousCacheBridge: ContinuousBatchRetainedCacheBridg
 
 /// SPEC-039 / SPEC-038 Increment 1 runtime bridge.
 ///
-/// This backend is intentionally installable only after the attach gate has a
-/// separately measured runtime identity. Production construction still passes
-/// nil observation, so no buyer request reaches this path by default.
+/// This backend is installable only after the attach gate has separately
+/// measured the runtime identity and validated the model's cache topology.
 final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unchecked Sendable {
+    enum CacheKind: Equatable, Sendable {
+        case pagedAttention
+        case recurrentMamba
+    }
+
     private struct RowState {
-        var caches: [PagedKVCache]
+        var caches: [KVCache]
         var state: LMOutput.State?
     }
 
     private struct DecodeSession {
         var requestIDs: [String]
-        var batchedCaches: [PagedKVBatchLayerCache]
+        var batchedCaches: [PagedKVSharedLayerBatch]
         var compiledCaches: [KVCache]
         var compiledStep: CompiledDecodeStep?
     }
@@ -452,7 +456,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private let blockSizeTokens: Int
     private let maxPhysicalBlocks: Int
     private let poolEpoch: Int
-    private let layerCount: Int
+    private let cacheKinds: [CacheKind]
     private let contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)?
     /// When true, lockstep decode reuses a compiled `[B, 1]` graph over batched
     /// contiguous KV. Tests keep the default off so fake models are not traced.
@@ -470,6 +474,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         maxPhysicalBlocks: Int,
         poolEpoch: Int,
         layerCount: Int,
+        cacheKinds: [CacheKind]? = nil,
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
         compiledDecode: Bool = false
     ) {
@@ -477,7 +482,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         self.blockSizeTokens = blockSizeTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.poolEpoch = poolEpoch
-        self.layerCount = max(1, layerCount)
+        if let cacheKinds, !cacheKinds.isEmpty {
+            self.cacheKinds = cacheKinds
+        } else {
+            self.cacheKinds = Array(repeating: .pagedAttention, count: max(1, layerCount))
+        }
         self.contiguousCacheBridge = contiguousCacheBridge
         self.compiledDecode = compiledDecode
     }
@@ -491,6 +500,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         container: ModelContainer,
         descriptor: PagedKVDescriptor,
         layerCount: Int,
+        cacheKinds: [CacheKind]? = nil,
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
         compiledDecode: Bool = false
     ) {
@@ -500,6 +510,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             maxPhysicalBlocks: descriptor.maxPhysicalBlocks,
             poolEpoch: descriptor.poolEpoch,
             layerCount: layerCount,
+            cacheKinds: cacheKinds,
             contiguousCacheBridge: contiguousCacheBridge,
             compiledDecode: compiledDecode
         )
@@ -617,6 +628,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         handoff: PagedKVPagedCacheHandoff,
         binding: PagedKVStorageBinding
     ) async throws {
+        guard cacheKinds.allSatisfy({ $0 == .pagedAttention }) else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_retained_hybrid_cache_unavailable")
+        }
         let state = RowState(caches: handoff.caches, state: nil)
         try setRowState(state, for: requestID, binding: binding)
     }
@@ -649,7 +663,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             lock.lock()
             cancelRequested = true
             decodeSession = nil
-            let handlesToDiscard = rows.compactMap { $0.value.caches.first?.binding.handle }
+            let handlesToDiscard = rows.compactMap { Self.pagedAttentionCaches(in: $0.value.caches).first?.binding.handle }
             rows.removeAll()
             if activeOperations == 0 {
                 lock.unlock()
@@ -698,15 +712,20 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             return existing
         }
         return RowState(
-            caches: (0 ..< layerCount).map { _ in
-                PagedKVCache(
-                    blockSizeTokens: blockSizeTokens,
-                    maxPhysicalBlocks: maxPhysicalBlocks,
-                    poolEpoch: poolEpoch,
-                    binding: binding,
-                    initialOffset: initialOffset,
-                    reconstructViaGather: false
-                )
+            caches: cacheKinds.map { kind in
+                switch kind {
+                case .pagedAttention:
+                    PagedKVCache(
+                        blockSizeTokens: blockSizeTokens,
+                        maxPhysicalBlocks: maxPhysicalBlocks,
+                        poolEpoch: poolEpoch,
+                        binding: binding,
+                        initialOffset: initialOffset,
+                        reconstructViaGather: false
+                    )
+                case .recurrentMamba:
+                    MambaCache()
+                }
             },
             state: nil
         )
@@ -724,7 +743,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             contiguousCacheBridge?.discardContiguousCache(handle: binding.handle)
             return
         }
-        try contiguousCacheBridge?.record(caches: state.caches, binding: binding)
+        try contiguousCacheBridge?.record(caches: Self.pagedAttentionCaches(in: state.caches), binding: binding)
         lock.lock()
         if !cancelRequested {
             rows[requestID] = state
@@ -739,7 +758,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         lock.lock()
         let removed = rows.removeValue(forKey: requestID)
         lock.unlock()
-        if discardRecordedCache, let handle = removed?.caches.first?.binding.handle {
+        if discardRecordedCache, let handle = removed.flatMap({ Self.pagedAttentionCaches(in: $0.caches).first?.binding.handle }) {
             contiguousCacheBridge?.discard(handle: handle)
         }
     }
@@ -763,12 +782,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
         let requestIDs = supportedInputs.map(\.requestID)
         var session = copyDecodeSession()
-        let batchedCaches: [PagedKVBatchLayerCache]
+        let batchedCaches: [PagedKVSharedLayerBatch]
         if let existing = session, existing.requestIDs == requestIDs {
             batchedCaches = existing.batchedCaches
         } else {
             session?.batchedCaches.forEach { $0.syncRowsFromBatch() }
-            batchedCaches = try Self.batchedCaches(from: rowStates.map(\.caches))
+            batchedCaches = try makeBatchedCaches(from: rowStates.map(\.caches))
             session = DecodeSession(
                 requestIDs: requestIDs,
                 batchedCaches: batchedCaches,
@@ -776,8 +795,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 compiledStep: nil
             )
         }
-        let cachesAsKV: [KVCache] = batchedCaches
+        let cachesAsKV = batchedCaches.map(\.cache)
         let canCompile = compiledDecode
+            && cacheKinds.allSatisfy({ $0 == .pagedAttention })
             && rowStates.allSatisfy({ $0.state == nil })
             && cachesAsKV.allSatisfy { !$0.innerState().isEmpty }
 
@@ -842,6 +862,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
                     model(text, cache: cachesAsKV, state: supportedInputs.count == 1 ? rowStates[0].state : nil)
                 }
+                try batchedCaches.forEach { try $0.validateBatchState() }
                 let stepSampled = argMax(output.logits[0..., -1, 0...], axis: -1).asArray(Int.self)
                 guard stepSampled.count == supportedInputs.count else {
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
@@ -937,14 +958,101 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             && input.frequencyPenalty == 0.0
     }
 
-    private static func batchedCaches(from rowCaches: [[PagedKVCache]]) throws -> [PagedKVBatchLayerCache] {
+    private func makeBatchedCaches(from rowCaches: [[KVCache]]) throws -> [PagedKVSharedLayerBatch] {
         guard let layerCount = rowCaches.first?.count,
-              rowCaches.allSatisfy({ $0.count == layerCount })
+              rowCaches.allSatisfy({ $0.count == layerCount }),
+              layerCount == cacheKinds.count
         else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
         }
-        return (0 ..< layerCount).map { layerIndex in
-            PagedKVBatchLayerCache(rowCaches: rowCaches.map { $0[layerIndex] })
+        return try (0 ..< layerCount).map { layerIndex in
+            switch cacheKinds[layerIndex] {
+            case .pagedAttention:
+                let rows = rowCaches.compactMap { $0[layerIndex] as? PagedKVCache }
+                guard rows.count == rowCaches.count else {
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                }
+                let cache = PagedKVBatchLayerCache(rowCaches: rows)
+                return PagedKVSharedLayerBatch(
+                    cache: cache,
+                    validateBatchStateClosure: {},
+                    syncRowsFromBatchClosure: { cache.syncRowsFromBatch() },
+                    writebackCompiledInnerStateClosure: { compiledState, targets in
+                        try cache.writebackCompiledInnerState(compiledState, targets: targets)
+                    }
+                )
+            case .recurrentMamba:
+                let rows = rowCaches.compactMap { $0[layerIndex] as? MambaCache }
+                guard rows.count == rowCaches.count else {
+                    throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                }
+                let cache = MambaCache()
+                try Self.packMambaRows(rows, into: cache)
+                return PagedKVSharedLayerBatch(
+                    cache: cache,
+                    validateBatchStateClosure: {
+                        guard cache.state.count == 2,
+                              cache.state.allSatisfy({ $0.ndim >= 1 && $0.dim(0) == rows.count })
+                        else {
+                            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_mamba_state")
+                        }
+                    },
+                    syncRowsFromBatchClosure: { Self.syncMambaRows(from: cache, into: rows) },
+                    writebackCompiledInnerStateClosure: { compiledState, targets in
+                        guard targets.count == rows.count else {
+                            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                        }
+                        cache.state = compiledState
+                        Self.syncMambaRows(from: cache, into: rows)
+                        try Self.packMambaRows(rows, into: cache)
+                    }
+                )
+            }
+        }
+    }
+
+    private static func pagedAttentionCaches(in caches: [KVCache]) -> [PagedKVCache] {
+        caches.compactMap { $0 as? PagedKVCache }
+    }
+
+    private static func packMambaRows(_ rows: [MambaCache], into batch: MambaCache) throws {
+        let rowStates = rows.map(\.state)
+        let slotCount = rowStates.map(\.count).max() ?? 0
+        guard slotCount > 0 else { return }
+        for slot in 0 ..< slotCount {
+            guard let first = rowStates.first(where: { $0.indices.contains(slot) })?[slot] else {
+                throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+            }
+            // A one-token joining row has not run prefill, so its recurrent
+            // slots are empty. Qwen35 initializes those slots with zeros.
+            let slotArrays = rowStates.map { states in
+                states.indices.contains(slot)
+                    ? states[slot]
+                    : MLXArray.zeros(first.shape, dtype: first.dtype)
+            }
+            guard slotArrays.allSatisfy({
+                      $0.ndim >= 1
+                          && $0.dim(0) == 1
+                          && Array($0.shape.dropFirst()) == Array(first.shape.dropFirst())
+                          && $0.dtype == first.dtype
+                  })
+            else {
+                throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+            }
+            batch[slot] = concatenated(slotArrays, axis: 0)
+        }
+    }
+
+    private static func syncMambaRows(from batch: MambaCache, into rows: [MambaCache]) {
+        let batchedState = batch.state
+        guard batchedState.count == 2,
+              batchedState.allSatisfy({ $0.ndim >= 1 && $0.dim(0) == rows.count })
+        else { return }
+        for rowIndex in rows.indices {
+            rows[rowIndex].state = batchedState.map { array in
+                return array[rowIndex ..< rowIndex + 1, .ellipsis]
+            }
+            rows[rowIndex].offset = batch.offset
         }
     }
 }
@@ -981,6 +1089,29 @@ enum PagedKVCompiledWriteback {
                 values[rowIndex ..< rowIndex + 1, 0..., 0..<target, 0...]
             )
         }
+    }
+}
+
+private struct PagedKVSharedLayerBatch {
+    let cache: KVCache
+    let validateBatchStateClosure: () throws -> Void
+    let syncRowsFromBatchClosure: () -> Void
+    let writebackCompiledInnerStateClosure: ([MLXArray], [Int]) throws -> Void
+
+    func innerState() -> [MLXArray] {
+        cache.innerState()
+    }
+
+    func validateBatchState() throws {
+        try validateBatchStateClosure()
+    }
+
+    func syncRowsFromBatch() {
+        syncRowsFromBatchClosure()
+    }
+
+    func writebackCompiledInnerState(_ compiledState: [MLXArray], targets: [Int]) throws {
+        try writebackCompiledInnerStateClosure(compiledState, targets)
     }
 }
 
