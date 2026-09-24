@@ -17,7 +17,26 @@ EXPECTED_MAIN_PACKAGES = {
     "coordinator-linux-amd64": "github.com/augstar/macprovider-coordinator/cmd/coordinator",
     "coordinator-cli-linux-amd64": "github.com/augstar/macprovider-coordinator/cmd/coordinator-cli",
     "gateway-linux-amd64": "github.com/augstar/macprovider-gateway/cmd/gateway",
+    "stats-inventory-sync-linux-amd64": "github.com/augstar/macprovider-coordinator/cmd/stats-inventory-sync",
+    "stats-billing-mirror-linux-amd64": "github.com/augstar/macprovider-coordinator/cmd/stats-billing-mirror",
+    "stats-hardware-verifier-linux-amd64": "github.com/augstar/macprovider-coordinator/cmd/stats-hardware-verifier",
 }
+RUNTIME_PAIR_BINARIES = [
+    "coordinator-linux-amd64",
+    "coordinator-cli-linux-amd64",
+    "gateway-linux-amd64",
+]
+# The Pearl runtime lane also signs the stats sidecars that the full deploy
+# requires byte-for-byte (issue #1721); the catalog release lane does not.
+ALLOWED_BINARY_SETS = (
+    RUNTIME_PAIR_BINARIES,
+    RUNTIME_PAIR_BINARIES
+    + [
+        "stats-inventory-sync-linux-amd64",
+        "stats-billing-mirror-linux-amd64",
+        "stats-hardware-verifier-linux-amd64",
+    ],
+)
 
 
 def expected_go_version() -> str:
@@ -138,11 +157,21 @@ def self_test() -> None:
         "\tbuild\tvcs.modified=false\n"
     )
     verify_build_info(binary, valid, expected, revision)
+    sidecar = pathlib.Path("stats-hardware-verifier-linux-amd64")
+    verify_build_info(
+        sidecar,
+        valid.replace(str(binary), str(sidecar), 1).replace(
+            EXPECTED_MAIN_PACKAGES[binary.name], EXPECTED_MAIN_PACKAGES[sidecar.name], 1
+        ),
+        expected,
+        revision,
+    )
     for invalid in (
         valid.replace(expected, "go0.0.0", 1),
         valid.replace("\tbuild\tGOOS=linux\n", "", 1),
         valid.replace("\tbuild\tGOARCH=amd64\n", "", 1),
         valid.replace("/cmd/coordinator\n", "/cmd/coordinator-cli\n", 1),
+        valid.replace("/cmd/coordinator\n", "/cmd/stats-billing-mirror\n", 1),
         valid.replace(revision, "0" * 40, 1),
         valid.replace("vcs.modified=false", "vcs.modified=true", 1),
         valid + f"\tbuild\tvcs.revision={revision}\n",
@@ -165,9 +194,10 @@ def main(argv: list[str]) -> int:
         return 2
 
     basenames = [pathlib.Path(value).name for value in argv]
-    if basenames != list(EXPECTED_MAIN_PACKAGES):
+    if basenames not in ALLOWED_BINARY_SETS:
         print(
-            "verify-pearl-go-binaries: expected coordinator, coordinator-cli, and gateway in order",
+            "verify-pearl-go-binaries: expected coordinator, coordinator-cli, and gateway in order,"
+            " optionally followed by stats-inventory-sync, stats-billing-mirror, and stats-hardware-verifier",
             file=sys.stderr,
         )
         return 2

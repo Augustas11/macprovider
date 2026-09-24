@@ -102,6 +102,20 @@ for required in (
 ):
     if required not in publish:
         raise SystemExit(f"runtime workflow latest-preservation check is incomplete: {required}")
+for sidecar in ("stats-inventory-sync", "stats-billing-mirror", "stats-hardware-verifier"):
+    asset = f"{sidecar}-linux-amd64"
+    if "for sidecar in stats-inventory-sync stats-billing-mirror stats-hardware-verifier; do" not in build:
+        raise SystemExit("runtime workflow must build every stats sidecar the full deploy compares byte-for-byte")
+    if f'"$artifact_dir/{asset}"' not in build.split("python3 scripts/verify-pearl-go-binaries.py", 1)[1]:
+        raise SystemExit(f"runtime workflow must verify {asset} with the Pearl Go binary verifier")
+    if f'install -m 0755 "$artifact_dir/{asset}" {asset}' not in build:
+        raise SystemExit(f"runtime workflow must stage {asset} as a release asset")
+    key = sidecar.replace("-", "_")
+    if f'"{key}": {{\n                      "asset": "{asset}",' not in sign:
+        raise SystemExit(f"runtime workflow must bind {asset} in signed pearl-release.json operator_artifacts")
+    assets_block = sign.split("release_assets=(", 1)[1].split(")", 1)[0]
+    if asset not in assets_block.split():
+        raise SystemExit(f"runtime workflow must publish {asset} in the signed release asset list")
 latest_window = publish[publish.find("stable-latest-before.json"):publish.find("python3 scripts/capture-release-publication.py --runtime-only")]
 if "printf '%s\\n' '{}'" in latest_window:
     raise SystemExit("runtime workflow must fail closed when stable latest cannot be fetched")
@@ -128,11 +142,17 @@ make_release_dir() {
   local tag="$2"
   local commit="$3"
   local lane="${4:-pearl_runtime_catalog}"
+  local sidecars="${5:-}"
   rm -rf "$directory"
   mkdir -p "$directory"
   printf '%s\n' coordinator > "$directory/coordinator-linux-amd64"
   printf '%s\n' coordinator-cli > "$directory/coordinator-cli-linux-amd64"
   printf '%s\n' gateway > "$directory/gateway-linux-amd64"
+  if [[ "$sidecars" == sidecars ]]; then
+    printf '%s\n' stats-inventory-sync > "$directory/stats-inventory-sync-linux-amd64"
+    printf '%s\n' stats-billing-mirror > "$directory/stats-billing-mirror-linux-amd64"
+    printf '%s\n' stats-hardware-verifier > "$directory/stats-hardware-verifier-linux-amd64"
+  fi
   printf '%s\n' signed-metadata > "$directory/pearl-release.json.sig"
   printf '%s\n' signed-checksums > "$directory/checksums.txt.sig"
   printf '%s\n' catalog-release > "$directory/release.json"
@@ -226,6 +246,10 @@ metadata = {
 }
 if lane == "pearl_runtime_catalog":
     metadata["provider_advertised_version"] = version
+for key in ("stats_inventory_sync", "stats_billing_mirror", "stats_hardware_verifier"):
+    asset = key.replace("_", "-") + "-linux-amd64"
+    if (directory / asset).is_file():
+        metadata["operator_artifacts"][key] = {"asset": asset, "sha256": digest(asset)}
 (directory / "pearl-release.json").write_text(
     json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n",
     encoding="utf-8",
@@ -495,6 +519,96 @@ if FAKE_GH_RELEASE_DIR="$work/release-github-catalog-bound-missing-feed" PATH="$
 fi
 grep -q 'missing catalog/feed asset(s) for catalog-bound Pearl runtime release: demand-rank.json' \
   "$work/github-catalog-bound-missing-feed.out"
+
+# Issue #1721: the full deploy's exact-copy gates take coordinator, CLI, and
+# stats sidecar bytes only from a verified release that signs all of them.
+resign_checksums() {
+  python3 - "$1" <<'PY'
+import hashlib, pathlib, sys
+directory = pathlib.Path(sys.argv[1])
+rows = [f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in sorted(directory.iterdir()) if path.name != "checksums.txt"]
+(directory / "checksums.txt").write_text("".join(rows), encoding="utf-8")
+PY
+}
+deploy_assets=(coordinator-linux-amd64 coordinator-cli-linux-amd64 stats-inventory-sync-linux-amd64 stats-billing-mirror-linux-amd64 stats-hardware-verifier-linux-amd64)
+make_release_dir "$work/release-sidecars" v1.8.66 "$second" pearl_runtime_catalog sidecars
+mkdir "$work/deploy-sidecars"
+bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-sidecars" \
+  --deploy-artifacts-dir "$work/deploy-sidecars" |
+  grep -q 'ok: v1.8.66 has Pearl runtime assets'
+for asset in "${deploy_assets[@]}"; do
+  cmp -s "$work/release-sidecars/$asset" "$work/deploy-sidecars/$asset" ||
+    fail "deploy artifact dir does not hold the verified release bytes for $asset"
+done
+[ "$(find "$work/deploy-sidecars" -type f | wc -l | tr -d ' ')" = 5 ] ||
+  fail "deploy artifact dir must hold exactly the five exact-copy binaries"
+
+mkdir "$work/deploy-no-sidecars"
+if bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-ok" \
+  --deploy-artifacts-dir "$work/deploy-no-sidecars" >"$work/deploy-no-sidecars.out" 2>&1; then
+  fail "full deploy accepted a release that does not sign the stats sidecars"
+fi
+grep -q 'does not bind the stats sidecars the full deploy requires' "$work/deploy-no-sidecars.out"
+[ -z "$(ls -A "$work/deploy-no-sidecars")" ] || fail "rejected release still staged deploy artifacts"
+
+make_release_dir "$work/release-sidecars-partial" v1.8.66 "$second" pearl_runtime_catalog sidecars
+python3 - "$work/release-sidecars-partial" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1]) / "pearl-release.json"
+metadata = json.loads(path.read_text(encoding="utf-8"))
+del metadata["operator_artifacts"]["stats_billing_mirror"]
+path.write_text(json.dumps(metadata, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+PY
+resign_checksums "$work/release-sidecars-partial"
+if bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-sidecars-partial" \
+  >"$work/sidecars-partial.out" 2>&1; then
+  fail "accepted a release binding an incomplete stats sidecar set"
+fi
+grep -q 'binds an incomplete stats sidecar set' "$work/sidecars-partial.out"
+
+make_release_dir "$work/release-sidecars-stray" v1.8.66 "$second"
+printf '%s\n' stray > "$work/release-sidecars-stray/stats-billing-mirror-linux-amd64"
+resign_checksums "$work/release-sidecars-stray"
+if bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-sidecars-stray" \
+  >"$work/sidecars-stray.out" 2>&1; then
+  fail "accepted a stats sidecar asset the signed metadata does not bind"
+fi
+grep -q 'release carries stats sidecar asset(s) pearl-release.json does not bind: stats-billing-mirror-linux-amd64' \
+  "$work/sidecars-stray.out"
+
+make_release_dir "$work/release-sidecars-tampered" v1.8.66 "$second" pearl_runtime_catalog sidecars
+printf '%s\n' tampered > "$work/release-sidecars-tampered/stats-hardware-verifier-linux-amd64"
+if bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+  --remote "$work/remote.git" --release-dir "$work/release-sidecars-tampered" \
+  >"$work/sidecars-tampered.out" 2>&1; then
+  fail "accepted stats sidecar bytes that differ from signed metadata"
+fi
+grep -q 'stats-hardware-verifier-linux-amd64 sha256 does not match pearl-release.json' "$work/sidecars-tampered.out"
+
+make_release_dir "$work/release-github-sidecars" v1.8.66 "$second" pearl_runtime sidecars
+rm "$work/release-github-sidecars"/release.json \
+  "$work/release-github-sidecars"/trusted-keys.json \
+  "$work/release-github-sidecars"/tier2-catalog.json \
+  "$work/release-github-sidecars"/autotune-candidates.json \
+  "$work/release-github-sidecars"/autotune-candidates.json.sig \
+  "$work/release-github-sidecars"/demand-rank.json \
+  "$work/release-github-sidecars"/demand-rank.json.sig \
+  "$work/release-github-sidecars"/rate-card.json \
+  "$work/release-github-sidecars"/rate-card.json.sig
+resign_checksums "$work/release-github-sidecars"
+mkdir "$work/deploy-github-sidecars"
+FAKE_GH_RELEASE_DIR="$work/release-github-sidecars" PATH="$fake_gh_dir:$PATH" \
+  bash "$guard" --tag v1.8.66 --expected-commit "$second" \
+    --remote "$work/remote.git" --deploy-artifacts-dir "$work/deploy-github-sidecars" |
+  grep -q 'ok: v1.8.66 has Pearl runtime assets'
+for asset in "${deploy_assets[@]}"; do
+  cmp -s "$work/release-github-sidecars/$asset" "$work/deploy-github-sidecars/$asset" ||
+    fail "GitHub deploy artifact dir does not hold the verified release bytes for $asset"
+done
 
 if bash "$guard" --tag v1.8.65 --expected-commit "$second" \
   --remote "$work/remote.git" --release-dir "$work/release-ok" \

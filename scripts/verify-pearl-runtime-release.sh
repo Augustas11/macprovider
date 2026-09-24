@@ -14,6 +14,9 @@ Options:
   --repository OWNER/REPO    GitHub repository (default: Augustas11/macprovider)
   --remote REMOTE            git remote used for tag-target verification (default: origin)
   --release-dir DIR          verify a local release asset directory instead of GitHub
+  --deploy-artifacts-dir DIR  require the stats sidecars and copy the verified
+                            coordinator, coordinator-cli, and stats sidecar
+                            binaries into DIR for deploy-pearl-vps.sh
 
 This is a preflight only. It checks source identity and the Pearl runtime asset
 set; macprovider-pearl-update remains the authority for signature verification,
@@ -31,6 +34,7 @@ expected_commit=""
 repository="Augustas11/macprovider"
 remote="origin"
 release_dir=""
+deploy_artifacts_dir=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,6 +58,10 @@ while [[ $# -gt 0 ]]; do
       release_dir="${2:-}"
       shift 2
       ;;
+    --deploy-artifacts-dir)
+      deploy_artifacts_dir="${2:-}"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -74,6 +82,10 @@ done
   die "--expected-commit must be a full lowercase commit SHA"
 }
 [[ "$repository" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "--repository must be OWNER/REPO"
+if [[ -n "$deploy_artifacts_dir" ]]; then
+  [[ -d "$deploy_artifacts_dir" && ! -L "$deploy_artifacts_dir" ]] ||
+    die "--deploy-artifacts-dir must be an existing directory"
+fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 bash "$root/scripts/verify-release-tag-target.sh" \
@@ -87,6 +99,18 @@ required_assets=(
   coordinator-linux-amd64
   coordinator-cli-linux-amd64
   gateway-linux-amd64
+)
+# Issue #1721: the full deploy compares these byte-for-byte with Pearl and
+# never installs them itself; the signed updater installs them from the release.
+stats_sidecar_assets=(
+  stats-inventory-sync-linux-amd64
+  stats-billing-mirror-linux-amd64
+  stats-hardware-verifier-linux-amd64
+)
+deploy_exact_copy_assets=(
+  coordinator-linux-amd64
+  coordinator-cli-linux-amd64
+  "${stats_sidecar_assets[@]}"
 )
 
 validate_release_dir() {
@@ -105,6 +129,7 @@ validate_release_dir() {
   PEARL_RELEASE_EXPECTED_COMMIT="$expected_commit" \
   PEARL_RELEASE_REPOSITORY="$repository" \
   PEARL_RELEASE_REQUIRED_ASSETS="$(printf '%s\n' "${required_assets[@]}")" \
+  PEARL_RELEASE_REQUIRE_STATS_SIDECARS="$([[ -n "$deploy_artifacts_dir" ]] && echo 1 || echo 0)" \
     python3 - <<'PY'
 import hashlib
 import json
@@ -183,6 +208,40 @@ if not isinstance(coordinator_cli_digest, str) or not sha_re.fullmatch(coordinat
 actual = hashlib.sha256((directory / "coordinator-cli-linux-amd64").read_bytes()).hexdigest()
 if actual != coordinator_cli_digest:
     fail("coordinator-cli-linux-amd64 sha256 does not match pearl-release.json")
+
+stats_sidecars = {
+    "stats_inventory_sync": "stats-inventory-sync-linux-amd64",
+    "stats_billing_mirror": "stats-billing-mirror-linux-amd64",
+    "stats_hardware_verifier": "stats-hardware-verifier-linux-amd64",
+}
+unknown_operator_artifacts = sorted(set(operator_artifacts) - {"coordinator_cli", *stats_sidecars})
+if unknown_operator_artifacts:
+    fail("pearl-release.json binds unknown operator artifacts: " + " ".join(unknown_operator_artifacts))
+bound_sidecars = [key for key in stats_sidecars if key in operator_artifacts]
+if bound_sidecars and len(bound_sidecars) != len(stats_sidecars):
+    fail("pearl-release.json binds an incomplete stats sidecar set")
+if not bound_sidecars:
+    stray_sidecars = sorted(asset for asset in stats_sidecars.values() if (directory / asset).is_file())
+    if stray_sidecars:
+        fail("release carries stats sidecar asset(s) pearl-release.json does not bind: " + " ".join(stray_sidecars))
+    if os.environ.get("PEARL_RELEASE_REQUIRE_STATS_SIDECARS") == "1":
+        fail(
+            "pearl-release.json does not bind the stats sidecars the full deploy requires; "
+            "cut a Pearl runtime release that signs stats-inventory-sync, stats-billing-mirror, "
+            "and stats-hardware-verifier"
+        )
+for key, asset in stats_sidecars.items() if bound_sidecars else ():
+    row = operator_artifacts[key]
+    if not isinstance(row, dict) or row.get("asset") != asset:
+        fail(f"pearl-release.json {key} artifact does not bind {asset}")
+    sidecar_digest = row.get("sha256")
+    if not isinstance(sidecar_digest, str) or not sha_re.fullmatch(sidecar_digest):
+        fail(f"pearl-release.json {key} sha256 is invalid")
+    if not (directory / asset).is_file():
+        fail(f"missing Pearl runtime release asset(s): {asset}")
+    if hashlib.sha256((directory / asset).read_bytes()).hexdigest() != sidecar_digest:
+        fail(f"{asset} sha256 does not match pearl-release.json")
+    required_assets.append(asset)
 
 checksums = {}
 for raw in (directory / "checksums.txt").read_text(encoding="utf-8").splitlines():
@@ -274,8 +333,18 @@ print(f"[verify-pearl-runtime-release] ok: {tag} has Pearl runtime assets for {e
 PY
 }
 
+copy_deploy_artifacts() {
+  local directory="$1"
+  local asset
+  [[ -n "$deploy_artifacts_dir" ]] || return 0
+  for asset in "${deploy_exact_copy_assets[@]}"; do
+    install -m 0755 "$directory/$asset" "$deploy_artifacts_dir/$asset"
+  done
+}
+
 if [[ -n "$release_dir" ]]; then
   validate_release_dir "$release_dir"
+  copy_deploy_artifacts "$release_dir"
   exit 0
 fi
 
@@ -320,6 +389,30 @@ gh release download "$tag" --repo "$repository" --dir "$work/assets" \
   --pattern checksums.txt --pattern checksums.txt.sig \
   --pattern coordinator-linux-amd64 --pattern coordinator-cli-linux-amd64 \
   --pattern gateway-linux-amd64 --clobber >/dev/null
+
+# The stats sidecars are bound all-or-none by pearl-release.json; fetch any the
+# release publishes so the local validator can check the binding both ways.
+sidecar_patterns=()
+while IFS= read -r sidecar_asset; do
+  [[ -n "$sidecar_asset" ]] && sidecar_patterns+=(--pattern "$sidecar_asset")
+done < <(
+  PEARL_RELEASE_VIEW="$work/release.json" \
+  PEARL_RELEASE_SIDECAR_ASSETS="$(printf '%s\n' "${stats_sidecar_assets[@]}")" \
+    python3 - <<'PY'
+import json
+import os
+
+payload = json.loads(open(os.environ["PEARL_RELEASE_VIEW"], encoding="utf-8").read())
+names = {row.get("name") for row in payload.get("assets") if isinstance(row, dict)}
+for asset in os.environ["PEARL_RELEASE_SIDECAR_ASSETS"].splitlines():
+    if asset in names:
+        print(asset)
+PY
+)
+if [[ "${#sidecar_patterns[@]}" -gt 0 ]]; then
+  gh release download "$tag" --repo "$repository" --dir "$work/assets" \
+    "${sidecar_patterns[@]}" --clobber >/dev/null
+fi
 
 lane="$(
   PEARL_RELEASE_METADATA="$work/assets/pearl-release.json" python3 - <<'PY'
@@ -450,3 +543,4 @@ PY
 fi
 
 validate_release_dir "$work/assets"
+copy_deploy_artifacts "$work/assets"
