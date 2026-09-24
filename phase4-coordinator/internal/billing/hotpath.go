@@ -229,7 +229,10 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		// trusted pools going off, before the commit zero-bills it.
 		poolAttestedUsage := in.PoolOperatorAttested && in.PromptTokens != nil && in.CompletionTokens != nil &&
 			s.poolAttestationFenceHolds(ctx, conn, in.PoolAttestationFence)
-		if IsLoopbackRuntimeSource(in.ProviderRuntimeSource) && !poolAttestedUsage {
+		// Only a known-native runtime bills as before; any other value,
+		// recognised or not, could be loopback and fails closed, the rule
+		// ledger recovery applies (recoveredLoopbackAttemptBillable).
+		if !IsNativeRuntimeSource(in.ProviderRuntimeSource) && !poolAttestedUsage {
 			result := zeroCredits(ComputeCredits(
 				in.PromptTokens,
 				in.CompletionTokens,

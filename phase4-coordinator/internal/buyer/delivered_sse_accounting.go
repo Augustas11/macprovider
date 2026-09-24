@@ -7,10 +7,17 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 )
 
+// maxDeliveredSSEBuffer caps each partial buffer the accounting holds (a
+// provider line awaiting its "\n", accepted bytes awaiting an event
+// terminator) at the stream byte limit. Past it the accounting stops at the
+// last delivered event, and nothing after it bills.
+const maxDeliveredSSEBuffer = int(maxUpstreamResponseBodyBytes)
+
 // deliveredSSEAccounting is the single source of truth for what an SSE
 // attempt delivered to the buyer and may bill, on every SSE path (HTTP
-// incremental, HTTP buffered, WS incremental, WS buffered, and tool-call
-// materialization). SPEC-015 delivered-prefix rule, SPEC-022 R-5.6.
+// incremental, HTTP buffered, WS incremental, WS buffered, tool-call
+// materialization, and JSON-to-SSE tool-call rendering). SPEC-015
+// delivered-prefix rule, SPEC-022 R-5.6.
 //
 // It sees two streams:
 //   - provider: the provider's ORIGINAL SSE bytes, before any buyer-facing
@@ -20,28 +27,32 @@ import (
 //     the buyer writer accepted. An event is delivered only once its
 //     blank-line terminator ("\n" or "\r\n" framed) was accepted.
 //
-// Each terminated provider usage is pinned to the last complete event of the
-// next rendering queued at or after it, and counts once the buyer received
-// through that event's terminator. Delivered usage accumulates in stream
-// order and is never cleared by a later tail. Once content was delivered, a
-// prompt count is kept as soon as the buyer received any byte of the event
-// it is pinned to, even if that event's terminator never arrived: the prompt
-// was consumed either way. The completion follows delivery only.
+// Each terminated provider usage is pinned to the rendered event that carries
+// usage, in stream order, in the next rendering queued at or after it; a
+// rendering that carries no usage pins it to its last complete event. It
+// counts once the buyer received through that event's terminator. Delivered
+// usage accumulates in stream order and is never cleared by a later tail.
+// Once content was delivered, a prompt count is kept as soon as the buyer
+// received any byte of the event it is pinned to, even if that event's
+// terminator never arrived: the prompt was consumed either way. The
+// completion follows delivery only.
 type deliveredSSEAccounting struct {
 	// provider side
 	providerLine  []byte     // partial provider line awaiting its "\n"
-	providerEvent []sseUsage // usages of the provider event not yet terminated
-	unassigned    []sseUsage // terminated usages awaiting a rendering
+	providerEvent sseUsage   // usage of the provider event not yet terminated
+	unassigned    []sseUsage // terminated event usages awaiting a rendering
 	staged        []stagedSSEUsage
 
 	// buyer side
-	queued       int    // rendered bytes queued for the buyer
-	lastBoundary int    // queued offset of the last event terminator
-	pending      []byte // accepted bytes after the last delivered event boundary
-	delivered    int    // accepted bytes through the last delivered event boundary
-	usage        sseUsage
-	reached      sseUsage // prompt of pinned events the buyer began to receive
-	tracker      *settlementStreamOutputTracker
+	queued        int    // rendered bytes queued for the buyer
+	lastBoundary  int    // queued offset of the last event terminator
+	renderedUsage bool   // the open rendered event carries usage
+	pending       []byte // accepted bytes after the last delivered event boundary
+	delivered     int    // accepted bytes through the last delivered event boundary
+	usage         sseUsage
+	reached       sseUsage // prompt of pinned events the buyer began to receive
+	overflow      bool     // a buffer passed maxDeliveredSSEBuffer
+	tracker       *settlementStreamOutputTracker
 }
 
 type sseUsage struct {
@@ -69,23 +80,32 @@ func newDeliveredSSEAccounting() *deliveredSSEAccounting {
 
 // provider records original provider bytes.
 func (a *deliveredSSEAccounting) provider(original []byte) {
-	for len(original) > 0 {
+	for len(original) > 0 && !a.overflow {
 		i := bytes.IndexByte(original, '\n')
+		take := i + 1
 		if i < 0 {
-			a.providerLine = append(a.providerLine, original...)
+			take = len(original)
+		}
+		if len(a.providerLine)+take > maxDeliveredSSEBuffer {
+			a.overflow = true
 			return
 		}
-		a.providerLine = append(a.providerLine, original[:i+1]...)
-		original = original[i+1:]
+		a.providerLine = append(a.providerLine, original[:take]...)
+		original = original[take:]
+		if i < 0 {
+			return
+		}
 		line := a.providerLine
 		a.providerLine = nil
 		if isSSEBlankLine(line) {
-			a.unassigned = append(a.unassigned, a.providerEvent...)
-			a.providerEvent = nil
+			if !a.providerEvent.empty() {
+				a.unassigned = append(a.unassigned, a.providerEvent)
+			}
+			a.providerEvent = sseUsage{}
 			continue
 		}
 		if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
-			a.providerEvent = append(a.providerEvent, sseUsage{prompt: p, cached: cached, completion: c})
+			a.providerEvent = a.providerEvent.merge(sseUsage{prompt: p, cached: cached, completion: c})
 		}
 	}
 }
@@ -97,34 +117,55 @@ func (a *deliveredSSEAccounting) validate(rendered []byte) error {
 
 // render queues buyer-facing bytes, before they are written.
 func (a *deliveredSSEAccounting) render(rendered []byte) {
-	if len(rendered) == 0 {
+	if len(rendered) == 0 || a.overflow {
 		return
 	}
-	var bounds []int
-	offset := 0
+	var carriers []stagedSSEUsage // complete rendered events that carry usage
+	last := stagedSSEUsage{offset: -1}
+	start, offset := a.lastBoundary, a.queued
 	for _, line := range bytes.SplitAfter(rendered, []byte("\n")) {
 		offset += len(line)
 		if isSSEBlankLine(line) {
-			bounds = append(bounds, a.queued+offset)
+			event := stagedSSEUsage{start: start, offset: offset}
+			if a.renderedUsage {
+				carriers = append(carriers, event)
+			}
+			last, start, a.renderedUsage = event, offset, false
+			continue
 		}
-	}
-	if len(bounds) > 0 {
-		end := bounds[len(bounds)-1]
-		start := a.lastBoundary
-		if len(bounds) > 1 {
-			start = bounds[len(bounds)-2]
+		if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
+			a.renderedUsage = true
 		}
-		for _, u := range a.unassigned {
-			a.staged = append(a.staged, stagedSSEUsage{usage: u, start: start, offset: end})
-		}
-		a.unassigned = nil
-		a.lastBoundary = end
 	}
 	a.queued += len(rendered)
+	if last.offset < 0 {
+		return
+	}
+	// The i-th terminated provider usage rides the i-th usage-carrying
+	// rendered event; extra usages (a rendering that merged several) ride
+	// the last one. A rendered event is never earlier than the provider
+	// event whose usage it carries, so this never bills ahead of delivery.
+	for i, u := range a.unassigned {
+		target := last
+		if len(carriers) > 0 {
+			target = carriers[min(i, len(carriers)-1)]
+		}
+		target.usage = u
+		a.staged = append(a.staged, target)
+	}
+	a.unassigned = nil
+	a.lastBoundary = last.offset
 }
 
 // written records buyer-facing bytes the buyer writer accepted.
 func (a *deliveredSSEAccounting) written(accepted []byte) {
+	if a.overflow {
+		return
+	}
+	if len(a.pending)+len(accepted) > maxDeliveredSSEBuffer {
+		a.overflow = true
+		return
+	}
 	a.pending = append(a.pending, accepted...)
 	received := a.delivered + len(a.pending)
 	for _, s := range a.staged {
@@ -173,7 +214,7 @@ func (a *deliveredSSEAccounting) billableUsage() sseUsage {
 // fullyDelivered reports whether everything the provider terminated and the
 // path queued reached the buyer as complete events, with no provider tail.
 func (a *deliveredSSEAccounting) fullyDelivered() bool {
-	return len(a.providerLine) == 0 && len(a.providerEvent) == 0 && len(a.unassigned) == 0 &&
+	return !a.overflow && len(a.providerLine) == 0 && a.providerEvent.empty() && len(a.unassigned) == 0 &&
 		len(a.staged) == 0 && len(a.pending) == 0 && a.delivered == a.queued
 }
 

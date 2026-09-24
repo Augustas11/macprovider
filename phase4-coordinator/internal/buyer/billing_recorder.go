@@ -181,12 +181,18 @@ type billingRecorder struct {
 type pendingSettlementReceipt struct {
 	header     string
 	providerID string
-	pubkey     []byte
+	// pubkeys are the provider's receipt keys: the current one and, within
+	// the SPEC-015 rotation grace window, the previous one.
+	pubkeys [][]byte
 }
 
 // withPendingReceipt runs a ledger write with the attempt's receipt in view.
 func (b *billingRecorder) withPendingReceipt(provider pool.Provider, header string, write func() error) error {
-	b.pendingReceipt = pendingSettlementReceipt{header: normalizeReceiptHeaderValue(header), providerID: provider.ProviderID, pubkey: provider.ReceiptPubkey}
+	pubkeys := [][]byte{provider.ReceiptPubkey}
+	if prev := provider.ActiveReceiptPubkeyPrev(time.Now()); prev != nil {
+		pubkeys = append(pubkeys, prev.Pubkey)
+	}
+	b.pendingReceipt = pendingSettlementReceipt{header: normalizeReceiptHeaderValue(header), providerID: provider.ProviderID, pubkeys: pubkeys}
 	defer func() { b.pendingReceipt = pendingSettlementReceipt{} }()
 	return write()
 }
@@ -480,7 +486,7 @@ func (b *billingRecorder) recordRow(
 		}
 		accountScope := accountScopeForSettlement(b.accountID)
 		settlementMode, settlementVersion := b.settlementPolicyForLedger()
-		poolAttested, poolFence := b.poolOperatorAttestation(ctx, billingStore, stableProviderID, providerRuntimeSource, promptTok, completionTok)
+		poolAttested, poolFence := b.poolOperatorAttestation(ctx, billingStore, stableProviderID, providerRuntimeSource, promptTok, cachedPromptTok, completionTok)
 		billingInput := billing.HotPathInput{
 			RequestID:                    row.RequestID,
 			AttemptN:                     attemptN,
@@ -576,7 +582,7 @@ func (b *billingRecorder) recordRow(
 			AttemptN:                     attemptN,
 			ProviderAssignedID:           providerAssignedID,
 			ProviderRuntimeSource:        providerRuntimeSource,
-			PoolOperatorAttested:         b.poolOperatorAttestedAttempt(ctx, billingStore, providerID, providerRuntimeSource, promptTok, completionTok),
+			PoolOperatorAttested:         b.poolOperatorAttestedAttempt(ctx, billingStore, providerID, providerRuntimeSource, promptTok, cachedPromptTok, completionTok),
 			ProviderID:                   providerID,
 			Model:                        row.Model,
 			Status:                       status,
@@ -752,15 +758,15 @@ func routeSnapshotGapReason(pressure bool) string {
 // the durable pool records they name, then runs the SPEC-042-R006 label
 // comparison against the live registry, which can only take the source away
 // (condition 5). Everything else, including every global attempt, is false.
-func (b *billingRecorder) poolOperatorAttestedAttempt(ctx context.Context, store *billing.Store, providerID, providerRuntimeSource string, promptTok, completionTok *int64) bool {
-	attested, _ := b.poolOperatorAttestation(ctx, store, providerID, providerRuntimeSource, promptTok, completionTok)
+func (b *billingRecorder) poolOperatorAttestedAttempt(ctx context.Context, store *billing.Store, providerID, providerRuntimeSource string, promptTok, cachedPromptTok, completionTok *int64) bool {
+	attested, _ := b.poolOperatorAttestation(ctx, store, providerID, providerRuntimeSource, promptTok, cachedPromptTok, completionTok)
 	return attested
 }
 
 // poolOperatorAttestation is poolOperatorAttestedAttempt plus the pool fence
 // the decision used, read before the durable checks. The ledger write
 // transaction re-reads the fence and keeps the credit only if it holds.
-func (b *billingRecorder) poolOperatorAttestation(ctx context.Context, store *billing.Store, providerID, providerRuntimeSource string, promptTok, completionTok *int64) (bool, *billing.PoolAttestationFence) {
+func (b *billingRecorder) poolOperatorAttestation(ctx context.Context, store *billing.Store, providerID, providerRuntimeSource string, promptTok, cachedPromptTok, completionTok *int64) (bool, *billing.PoolAttestationFence) {
 	if b == nil || store == nil || !providerws.IsBYOMLoopbackRuntimeSource(providerRuntimeSource) {
 		return false, nil
 	}
@@ -772,7 +778,7 @@ func (b *billingRecorder) poolOperatorAttestation(ctx context.Context, store *bi
 	// A loopback runtime's numbers are billable only when the provider
 	// signed a v0.4 receipt bound to this attempt whose billable usage is
 	// exactly the usage being recorded (independent review HIGH).
-	if !b.pendingReceiptBacksUsage(providerID, promptTok, completionTok) {
+	if !b.pendingReceiptBacksUsage(providerID, promptTok, cachedPromptTok, completionTok) {
 		if b.server != nil {
 			b.server.log.Warn().
 				Str("event", "pool_operator_attestation_unreceipted").
@@ -821,11 +827,16 @@ func (b *billingRecorder) poolOperatorAttestation(ctx context.Context, store *bi
 }
 
 // pendingReceiptBacksUsage reports whether the attempt's receipt is a v0.4
-// receipt bound to this attempt whose billable usage equals the usage being
-// recorded.
-func (b *billingRecorder) pendingReceiptBacksUsage(providerID string, promptTok, completionTok *int64) bool {
+// receipt bound to this attempt, signed by the provider's current or
+// rotation-grace receipt key, whose billable usage equals the usage being
+// recorded. The v0.4 tuple signs no cached count, so a cached count is bound
+// as a part of the receipted prompt: it must lie within [0, prompt].
+func (b *billingRecorder) pendingReceiptBacksUsage(providerID string, promptTok, cachedPromptTok, completionTok *int64) bool {
 	receipt := b.pendingReceipt
 	if promptTok == nil || completionTok == nil || receipt.header == "" || receipt.providerID != providerID {
+		return false
+	}
+	if cachedPromptTok != nil && (*cachedPromptTok < 0 || *cachedPromptTok > *promptTok) {
 		return false
 	}
 	id := billing.SettlementReceiptIdentity{
@@ -834,8 +845,13 @@ func (b *billingRecorder) pendingReceiptBacksUsage(providerID string, promptTok,
 		AttemptN:     int64(b.settlementAttemptN),
 		ProviderID:   providerID,
 	}
-	billableInput, billableOutput, ok := billing.BoundSettlementReceiptUsage(receipt.header, receipt.pubkey, id, b.settlementRouteSnapshotDigest)
-	return ok && billableInput == *promptTok && billableOutput == *completionTok
+	for _, pubkey := range receipt.pubkeys {
+		billableInput, billableOutput, ok := billing.BoundSettlementReceiptUsage(receipt.header, pubkey, id, b.settlementRouteSnapshotDigest)
+		if ok {
+			return billableInput == *promptTok && billableOutput == *completionTok
+		}
+	}
+	return false
 }
 
 func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, store *billing.Store, in billing.HotPathInput, output *billing.SettlementOutput) error {
@@ -866,7 +882,7 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 	// they are provider-only usage and never coordinator_observed. The
 	// attempt falls to the byte-estimated branch: zero billable, never
 	// settlement-capable.
-	loopback := providerws.IsBYOMLoopbackRuntimeSource(in.ProviderRuntimeSource)
+	loopback := !billing.IsNativeRuntimeSource(in.ProviderRuntimeSource)
 	promptObserved, completionObserved := in.PromptTokens, in.CompletionTokens
 	if out.ObservedInputTokens != nil && out.ObservedOutputTokens != nil {
 		promptObserved, completionObserved = out.ObservedInputTokens, out.ObservedOutputTokens

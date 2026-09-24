@@ -1511,8 +1511,15 @@ private final class RelayRequestState: @unchecked Sendable {
         return currentUsage
     }
 
+    /// Usage the upstream did not report is never stored as token counts, so a
+    /// cancellation fallback frame cannot send it as billing numbers.
     func setUsage(_ completion: CompletionResult) {
         lock.lock()
+        guard completion.settlementDisposition != .usageUnattested else {
+            currentUsage = [:]
+            lock.unlock()
+            return
+        }
         currentUsage = [
             "prompt_tokens": completion.promptTokens,
             "cached_prompt_tokens": completion.cachedPromptTokens,

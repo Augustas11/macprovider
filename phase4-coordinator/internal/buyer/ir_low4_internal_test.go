@@ -29,7 +29,7 @@ func TestForwardWSNonStreamingBuyerCancelBillsNoUndeliveredBytes(t *testing.T) {
 	relay := &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: make(chan providerws.InferenceResponseEnd), Errors: errs}
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
 	server := &Server{}
-	result, attempt := server.forwardWSNonStreaming(httptest.NewRecorder(), req, requestID, pool.Provider{ProviderID: "provider-a"}, relay, nil, &forwardState{}, 0)
+	result, attempt := server.forwardWSNonStreaming(httptest.NewRecorder(), req, requestID, pool.Provider{ProviderID: "provider-a"}, relay, nil, nil, &forwardState{}, 0)
 	if result != wsForwardCancelled {
 		t.Fatalf("result=%q, want cancelled", result)
 	}

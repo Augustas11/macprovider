@@ -1111,7 +1111,21 @@ func (s *Server) beginTier2RekeyIfDue(session *providerSession, providerID, assi
 func (s *Server) runTier2Rekey(session *providerSession, providerID, assignedID string, exchange *tier2RekeyExchange) {
 	barrierPoll := time.NewTicker(25 * time.Millisecond)
 	defer barrierPoll.Stop()
-	for session.hasActive() || session.hasPendingCancelTerminal() || s.losslessnessProviderHasPending(providerID, assignedID) {
+	// Cancel terminals owed under the current key hold the rekey for at most
+	// cancelTerminalRekeyHold in total once nothing else holds it, however
+	// many buyer cancels keep arriving, so they cannot starve the rekey.
+	var cancelHoldUntil time.Time
+	for {
+		if !session.hasActive() && !s.losslessnessProviderHasPending(providerID, assignedID) {
+			if !session.hasPendingCancelTerminal() {
+				break
+			}
+			if cancelHoldUntil.IsZero() {
+				cancelHoldUntil = time.Now().Add(cancelTerminalRekeyHold)
+			} else if !time.Now().Before(cancelHoldUntil) {
+				break
+			}
+		}
 		select {
 		case <-session.activeChanged:
 		case <-barrierPoll.C:

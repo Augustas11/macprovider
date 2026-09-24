@@ -1040,6 +1040,10 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
 	}
+	// Delivered-only billing (SPEC-022 R-5.6): the coordinator records a
+	// non-streaming success only after its body write, so the settlement
+	// finality of a 200 arrives as trailers, read with the body above.
+	resp.Header = withSettlementFinalityTrailers(resp)
 	anthropicDuplicateProviderResponse := false
 	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream && anthropicRawHasDuplicateKeys(body) {
 		anthropicDuplicateProviderResponse = true
@@ -2799,6 +2803,22 @@ func hasAnySettlementFinalityHeader(h http.Header) bool {
 		}
 	}
 	return false
+}
+
+// withSettlementFinalityTrailers is resp.Header with any settlement finality
+// trailers the coordinator sent folded in. Without them the headers stand as
+// they are.
+func withSettlementFinalityTrailers(resp *http.Response) http.Header {
+	if !hasAnySettlementFinalityHeader(resp.Trailer) {
+		return resp.Header
+	}
+	h := resp.Header.Clone()
+	for name, values := range resp.Trailer {
+		if isSettlementFinalityHeader(name) {
+			h[name] = append([]string(nil), values...)
+		}
+	}
+	return h
 }
 
 func hasSettlementFinalityTrailerDeclaration(resp *http.Response) bool {

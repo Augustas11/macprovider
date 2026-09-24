@@ -1,11 +1,24 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.2.1
+Version: v0.2.2
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.2.2
+
+Delivered-only recording note (#1690); no requirement text changes. Under
+R-5.6 and AC-022-54/63, a buyer is debited, and a provider credited, only for
+output confirmed delivered to the buyer. The coordinator records a
+non-streaming success, its usage, and its bytes only after the buyer write
+succeeded; a failed or cancelled write records a `buyer_cancel` over an empty
+prefix. A non-streaming body is usable only whole, so a native (catalog MLX)
+non-streaming buyer disconnect now bills nothing, where it previously billed a
+byte estimate. That is the intended delivered-only outcome, not a regression.
+A non-streaming success therefore carries its settlement outcome as HTTP
+trailers, which the gateway reads with the body.
 
 ### v0.2.1
 

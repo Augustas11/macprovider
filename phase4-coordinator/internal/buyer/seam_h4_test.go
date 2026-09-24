@@ -290,22 +290,18 @@ func TestSeamH4_PostTerminalBillingRowIsOrderedAndAgrees(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// H4-3 · THE TRIPWIRE: provider credited while the buyer was told the request
-// failed (INV-6 / I-1).
+// H4-3 · delivered-only ordering (SPEC-022 R-5.6): the WS non-streaming
+// success is recorded only after the body reached the buyer.
 //
-// Forced deterministically without touching production code: the credit write
-// succeeds, then the settlement-output write returns a hard error. The WS
-// success path runs logSuccess → recordRow → WriteHotPath SUCCEEDS (the
-// provider is credited) → the output write fails → logSuccess returns an
-// error → forwardWSNonStreaming writes 500 request_log_failed to the buyer.
-//
-// Result: the ledger says a provider earned a 200-status credit with no
-// breaker-qualifying fault flag (so neither of the two accidental zeroing
-// rules applies), while the buyer was told the request failed. Pre-#766
-// nothing in the coordinator could see that. If this test ever reports zero
-// conflicts, the arbiter has stopped observing the money seam it exists for.
+// Forced deterministically: the credit write succeeds, then the
+// settlement-output write returns a hard error. Before delivered-only
+// billing, the success was logged before the write, so this failure turned
+// into a 500 request_log_failed for a credited provider (INV-6). Now the
+// buyer already holds the 200 body when the row is written: the credit and
+// the buyer terminal agree, and a failed evidence write cannot rewrite what
+// the buyer received. The INV-6 predicate itself stays pinned by H4-4.
 // ---------------------------------------------------------------------------
-func TestSeamH4_CreditedWhileBuyerToldFailedIsAConflict(t *testing.T) {
+func TestSeamH4_WSNonStreamingCreditFollowsDeliveredBody(t *testing.T) {
 	prev := settlementOutputWriteErrForTest
 	settlementOutputWriteErrForTest = errors.New("settlement attempt output table missing")
 	t.Cleanup(func() { settlementOutputWriteErrForTest = prev })
@@ -317,8 +313,8 @@ func TestSeamH4_CreditedWhileBuyerToldFailedIsAConflict(t *testing.T) {
 	before := buyerTerminalConflictTotal.Load()
 	rr := h4PostChat(t, s, []byte(h4ChatBody))
 
-	if rr.Code != http.StatusInternalServerError {
-		t.Fatalf("buyer status = %d, want 500 (request_log_failed); body=%s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusOK || strings.Contains(rr.Body.String(), "request_log_failed") {
+		t.Fatalf("buyer status = %d, want the delivered 200 body; body=%s", rr.Code, rr.Body.String())
 	}
 	if statuses := h4RequestLogStatuses(t, dbPath); len(statuses) != 1 || statuses[0] != http.StatusOK {
 		t.Fatalf("request_log statuses = %v, want exactly [200] (the provider WAS credited)", statuses)
@@ -326,33 +322,15 @@ func TestSeamH4_CreditedWhileBuyerToldFailedIsAConflict(t *testing.T) {
 	if observed == nil {
 		t.Fatal("terminal arbiter was never evaluated")
 	}
-	claim, ok := observed.claimedBuyer()
-	if !ok || claim.Status != http.StatusInternalServerError {
-		t.Fatalf("claimed buyer terminal = %+v (ok=%v), want status 500", claim, ok)
-	}
 	rows := observed.Rows()
-	if len(rows) != 1 {
-		t.Fatalf("credited rows = %d, want 1: %#v", len(rows), rows)
+	if len(rows) != 1 || rows[0].Status != http.StatusOK {
+		t.Fatalf("credited rows = %#v, want one 200 row", rows)
 	}
-	if rows[0].Status != http.StatusOK {
-		t.Fatalf("credited row status = %d, want 200", rows[0].Status)
+	if got := observed.Conflicts(); got != 0 {
+		t.Fatalf("conflicts = %d, want 0: the credited 200 follows the delivered 200", got)
 	}
-	if rows[0].FaultFlag == billing.FaultBreakerQualifying {
-		t.Fatalf("credited row carries %q — the formula.go zeroing rule would apply and this would "+
-			"not be a money conflict; the fixture no longer exercises INV-6", rows[0].FaultFlag)
-	}
-	if got := observed.Conflicts(); got != 1 {
-		t.Fatalf("conflicts = %d, want 1 — a provider was credited (200, no breaker fault) while the "+
-			"buyer was told 500. This is INV-6 'paid while the buyer was told it failed'; the arbiter "+
-			"must observe it", got)
-	}
-	if delta := buyerTerminalConflictTotal.Load() - before; delta != 1 {
-		t.Fatalf("buyerTerminalConflictTotal delta = %d, want 1", delta)
-	}
-	// The billing row is NOT suppressed: consistency arbiter, not suppression
-	// arbiter. Suppressing it would erase a real provider credit.
-	if !observed.Rows()[0].Conflicted {
-		t.Fatal("conflicting row not marked Conflicted")
+	if delta := buyerTerminalConflictTotal.Load() - before; delta != 0 {
+		t.Fatalf("buyerTerminalConflictTotal delta = %d, want 0", delta)
 	}
 }
 
@@ -513,8 +491,10 @@ func TestSeamH4_HotPathDeadlineDoesNotPretendPaid(t *testing.T) {
 	var observed *requestTerminal
 	s := h4Server(t, reqLog, h4RelaySuccess(), &observed)
 	rr := h4PostChat(t, s, []byte(h4ChatBody))
-	if rr.Code == http.StatusOK {
-		t.Fatalf("buyer status = 200, want a failure when the credit write did not land; body=%s", rr.Body.String())
+	// Delivered-only (SPEC-022 R-5.6): the body reached the buyer before the
+	// credit write, so the buyer holds a 200 and the provider is not paid.
+	if rr.Code != http.StatusOK {
+		t.Fatalf("buyer status = %d, want the delivered 200; body=%s", rr.Code, rr.Body.String())
 	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -529,8 +509,10 @@ func TestSeamH4_HotPathDeadlineDoesNotPretendPaid(t *testing.T) {
 		t.Fatalf("credited rows = %d, want 0", credits)
 	}
 	if observed != nil {
-		if got := observed.Conflicts(); got != 0 {
-			t.Fatalf("conflicts = %d, want 0 — no credit was recorded", got)
+		// The buyer holds a delivered 200 the ledger did not credit: the
+		// arbiter reports it served-but-unpaid (I-2), once.
+		if got := observed.Conflicts(); got != 1 {
+			t.Fatalf("conflicts = %d, want 1 (served without credit)", got)
 		}
 		for _, row := range observed.Rows() {
 			t.Fatalf("credited row was noted without a ledger credit: %+v", row)
