@@ -506,6 +506,7 @@ func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header
 		header:                header,
 		providerReceiptPubkey: append([]byte(nil), provider.ReceiptPubkey...),
 		poolLabels:            b.settlementPoolLabels(),
+		receivedAtUnixMS:      store.ReceiptObservedAtUnixMS(),
 	}
 	if header == "" {
 		// #1578: a leg the coordinator deliberately never settled — a 503
@@ -534,7 +535,7 @@ func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header
 	}
 	state, err := b.server.persistSettlementReceipt(ctx, store, input)
 	if err != nil {
-		if settlementOutputPersistFailedAfterCredit(err) {
+		if settlementReceiptRetryable(err) {
 			if b.server.deferSettlementReceiptRecovery(input) {
 				b.server.log.Warn().Err(err).Str("request_id", b.requestID).Str("provider_id", provider.ProviderID).Msg("settlement receipt ingestion deferred")
 				return b.deferredSettlementReceiptState(input), true, nil

@@ -3,6 +3,7 @@ package buyer
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"time"
 
@@ -21,6 +22,15 @@ type settlementReceiptRecoveryInput struct {
 	header                string
 	providerReceiptPubkey []byte
 	poolLabels            *billing.SettlementPoolLabels
+	// receivedAtUnixMS is the first observation of the receipt; every retry
+	// re-uses it as the authoritative arrival time.
+	receivedAtUnixMS int64
+}
+
+// settlementReceiptRetryable is the recovery-queue retry predicate: transient
+// SQLite pressure, or a pool-authority read that could not decide.
+func settlementReceiptRetryable(err error) bool {
+	return settlementOutputPersistFailedAfterCredit(err) || errors.Is(err, billing.ErrPoolOperatorAttestationTransient)
 }
 
 type settlementReceiptRecoveryItem struct {
@@ -44,13 +54,13 @@ func persistSettlementReceiptDirect(ctx context.Context, store *billing.Store, i
 			Header:                    input.header,
 			ProviderReceiptPubkey:     input.providerReceiptPubkey,
 			PoolLabels:                input.poolLabels,
-		})
+		}.WithReceivedAt(input.receivedAtUnixMS))
 	}
 	return store.IngestSettlementReceipt(ctx, billing.SettlementReceiptIngestionInput{
 		SettlementReceiptIdentity: input.identity,
 		Header:                    input.header,
 		ProviderReceiptPubkey:     input.providerReceiptPubkey,
-	})
+	}.WithReceivedAt(input.receivedAtUnixMS))
 }
 
 func (s *Server) persistSettlementReceipt(ctx context.Context, store *billing.Store, input settlementReceiptRecoveryInput) (billing.SettlementReceiptState, error) {
@@ -217,7 +227,7 @@ func (s *Server) drainSettlementReceiptRecoveries() {
 			ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 			_, err = s.persistSettlementReceipt(ctx, store, item.input)
 			cancel()
-			retryable = settlementOutputPersistFailedAfterCredit(err)
+			retryable = settlementReceiptRetryable(err)
 		}
 		if err == nil {
 			s.finishSettlementReceiptRecovery(item.key)

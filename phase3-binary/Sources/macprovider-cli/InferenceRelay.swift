@@ -680,22 +680,13 @@ actor InferenceRelay {
         if state.isCancelled {
             if state.markTerminalSent() {
                 let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
-                let receiptHeader = Self.buildReceiptHeader(
-                    receiptBuilder: receiptBuilder,
-                    providerID: receiptProviderID,
-                    request: request,
-                    completion: completion,
-                    ttftMs: completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt),
-                    unixTsSeconds: unixTsSeconds,
-                    requestID: requestID,
-                    modelHashSource: modelHashSource,
-                    settlementMetadata: settlementMetadata,
-                    runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
-                    settlementRuntimeSource: modelRuntime.settlementRuntimeSource,
-                    relayBlindSuppressed: relayBlindClaim != nil,
-                    terminalState: "buyer_cancel",
-                    terminalStateTSUnixMS: terminalStateTSUnixMS
-                )
+                // A cancelled non-streaming request delivered no output, so a
+                // receipt over the generated result would bind undelivered
+                // output (SPEC-015 delivered-prefix rule). It is omitted.
+                let receiptHeader: String? = nil
+                if relayBlindClaim == nil {
+                    ReceiptAudit.emitOmitted(providerID: receiptProviderID, requestID: requestID, reason: .preTokenCancel)
+                }
                 var endFrame: [String: Any] = [
                     "type": "inference_response_end",
                     "request_id": requestID,
@@ -760,9 +751,43 @@ actor InferenceRelay {
             try attachRelayBlindTerminal(
                 &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
             )
-            try await sendEndFrame(endFrame, requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
+            let issued = receiptHeader.map { _ in
+                ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: ttftMs, unixTs: unixTsSeconds)
+            }
+            try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
         }
         return completion
+    }
+
+    /// SPEC-015 §11 audit for a relay receipt: it is issued only once the
+    /// terminal frame that carries it was delivered.
+    private struct ReceiptIssuedAudit {
+        let providerID: String?
+        let modelID: String
+        let tokensOut: Int64
+        let ttftMs: Int64
+        let unixTs: Int64
+    }
+
+    private static func sendReceiptEndFrame(
+        _ frame: sending [String: Any],
+        issued: ReceiptIssuedAudit?,
+        requestID: String,
+        stream: Bool,
+        tier2Session: Tier2ProviderSession?,
+        sendFrame: @escaping SendFrame
+    ) async throws {
+        do {
+            try await sendEndFrame(frame, requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
+        } catch {
+            if let issued {
+                ReceiptAudit.emitOmitted(providerID: issued.providerID, requestID: requestID, reason: .writeFailed)
+            }
+            throw error
+        }
+        if let issued {
+            ReceiptAudit.emitIssued(providerID: issued.providerID, requestID: requestID, modelID: issued.modelID, tokensOut: issued.tokensOut, ttftMs: issued.ttftMs, unixTs: issued.unixTs)
+        }
     }
 
     private static func buildReceiptHeader(
@@ -806,6 +831,11 @@ actor InferenceRelay {
             providerID: providerID
         )
         guard runtimeSettlementEligible || poolAuthorized else {
+            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .runtimeNotSettlementEligible)
+            return nil
+        }
+        // Usage the upstream did not report is never signed (SPEC-015 §N.12).
+        guard completion.settlementDisposition != .usageUnattested else {
             ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .runtimeNotSettlementEligible)
             return nil
         }
@@ -939,6 +969,14 @@ actor InferenceRelay {
         let id = "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
         let buffer = BlockingChunkBuffer(capacity: 256, resumeAt: 128)
         state.setBuffer(buffer)
+        let model = request.model
+        let batcher = RelayStreamBatcher(
+            streamInterval: streamInterval,
+            deltaFrame: { delta in
+                Self.sseEvent(Self.chatCompletionChunk(id: id, created: created, model: model, delta: delta, finishReason: NSNull()))
+            },
+            enqueueFrame: { buffer.enqueue($0) }
+        )
 
         let consumer = Task<Int, Error> {
             while let data = buffer.next() {
@@ -968,85 +1006,34 @@ actor InferenceRelay {
                 }
             }
             try await modelRuntime.pagedKVPreflight(request, with: handle)
-            _ = buffer.enqueue(sseEvent(chatCompletionChunk(
-                id: id,
-                created: created,
-                model: request.model,
-                delta: ["role": "assistant", "content": ""],
-                finishReason: NSNull()
-            )))
+            batcher.enqueueDelta(["role": "assistant", "content": ""])
 
             let streamedToolArgs = StreamedToolCallArgs()
             // T3-01: accumulate content-token deltas until streamInterval tokens,
             // then emit one combined SSE frame. Tool-call deltas flush any pending
-            // content immediately and are never batched.
-            var pendingContent = ""
-            var pendingCount = 0
-            var emittedToolCall = false
-
+            // content immediately and are never batched. The batcher serializes
+            // the @Sendable callback's state and its enqueue order.
             let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { state.isCancelled }) { chunk in
-                switch chunk {
-                case .content(let text):
-                    if emittedToolCall {
-                        // Leftover </tool_call> or chatter after tool_calls opened
-                        // must not become a content delta (coordinator would kill
-                        // the stream as "fell back to content").
-                        break
-                    }
-                    pendingContent += text
-                    pendingCount += 1
-                    if pendingCount >= streamInterval {
-                        _ = buffer.enqueue(sseEvent(chatCompletionChunk(
-                            id: id,
-                            created: created,
-                            model: request.model,
-                            delta: ["content": pendingContent],
-                            finishReason: NSNull()
-                        )))
-                        pendingContent = ""
-                        pendingCount = 0
-                    }
-                case .toolCallDelta(let toolDelta):
-                    if !pendingContent.isEmpty {
-                        _ = buffer.enqueue(sseEvent(chatCompletionChunk(
-                            id: id,
-                            created: created,
-                            model: request.model,
-                            delta: ["content": pendingContent],
-                            finishReason: NSNull()
-                        )))
-                        pendingContent = ""
-                        pendingCount = 0
-                    }
-                    emittedToolCall = true
+                if case .toolCallDelta(let toolDelta) = chunk {
                     streamedToolArgs.note(index: toolDelta.index, fragment: toolDelta.arguments)
-                    _ = buffer.enqueue(sseEvent(chatCompletionChunk(
-                        id: id,
-                        created: created,
-                        model: request.model,
-                        delta: ["tool_calls": [toolDelta.openAIDeltaDict()]],
-                        finishReason: NSNull()
-                    )))
                 }
+                batcher.accept(chunk)
             }
 
             // Flush remaining batched content only if no tool call opened.
             // Post-open leftovers (</tool_call>, chatter) must not go on the wire.
-            if !pendingContent.isEmpty, !emittedToolCall {
-                _ = buffer.enqueue(sseEvent(chatCompletionChunk(
-                    id: id,
-                    created: created,
-                    model: request.model,
-                    delta: ["content": pendingContent],
-                    finishReason: NSNull()
-                )))
-            }
+            batcher.flushContent()
 
             state.setUsage(completion)
             if state.isCancelled {
                 buffer.cancel()
                 consumer.cancel()
-                let chunksSent = (try? await consumer.value) ?? state.chunksSent
+                let consumerSent = try? await consumer.value
+                let chunksSent = consumerSent ?? state.chunksSent
+                // SPEC-015 delivered-prefix rule: the receipt may bind only
+                // output the buyer received. It is issued only when every
+                // frame carrying generated output was accepted and sent.
+                let outputDelivered = consumerSent.map { batcher.everyFrameDelivered(sent: $0) } ?? false
                 if state.markTerminalSent() {
                     let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
                     let modelHashSource = RouterHandler.resolveModelHashSource(
@@ -1054,7 +1041,10 @@ actor InferenceRelay {
                         snapshot: handle.snapshot,
                         settlementMetadata: settlementMetadata
                     )
-                    let receiptHeader = Self.buildReceiptHeader(
+                    if !outputDelivered, relayBlindClaim == nil {
+                        ReceiptAudit.emitOmitted(providerID: receiptProviderID, requestID: requestID, reason: .constructionFailed)
+                    }
+                    let receiptHeader = !outputDelivered ? nil : Self.buildReceiptHeader(
                         receiptBuilder: receiptBuilder,
                         providerID: receiptProviderID,
                         request: request,
@@ -1088,7 +1078,10 @@ actor InferenceRelay {
                     try attachRelayBlindTerminal(
                         &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
                     )
-                    try await sendEndFrame(endFrame, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
+                    let issued = receiptHeader.map { _ in
+                        ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: 0, unixTs: Int64(Date().timeIntervalSince1970))
+                    }
+                    try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
                 }
                 return completion
             }
@@ -1100,24 +1093,18 @@ actor InferenceRelay {
                     toolCalls: toolCalls,
                     streamedArgumentsByIndex: streamedToolArgs.snapshot()
                 ) {
-                    _ = buffer.enqueue(sseEvent(chatCompletionChunk(
-                        id: id,
-                        created: created,
-                        model: request.model,
-                        delta: ["tool_calls": delta],
-                        finishReason: NSNull()
-                    )))
+                    batcher.enqueueDelta(["tool_calls": delta])
                 }
             }
 
-            _ = buffer.enqueue(sseEvent(chatCompletionChunk(
+            batcher.enqueue(sseEvent(chatCompletionChunk(
                 id: id,
                 created: created,
                 model: request.model,
                 delta: [:],
                 finishReason: completion.finishReason
             )))
-            _ = buffer.enqueue(sseEvent([
+            batcher.enqueue(sseEvent([
                 "id": id,
                 "object": "chat.completion.chunk",
                 "created": created,
@@ -1125,7 +1112,7 @@ actor InferenceRelay {
                 "choices": [],
                 "usage": usage(completion),
             ]))
-            _ = buffer.enqueue("data: [DONE]\n\n")
+            batcher.enqueue("data: [DONE]\n\n")
             buffer.finish()
 
             let chunksSent = try await consumer.value
@@ -1169,7 +1156,10 @@ actor InferenceRelay {
                 try attachRelayBlindTerminal(
                     &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
                 )
-                try await sendEndFrame(endFrame, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
+                let issued = receiptHeader.map { _ in
+                    ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: 0, unixTs: Int64(Date().timeIntervalSince1970))
+                }
+                try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
             }
             return completion
         } catch {
@@ -1500,6 +1490,92 @@ private final class RelayRequestState: @unchecked Sendable {
         }
         terminal = true
         return true
+    }
+}
+
+/// T3-01 batching state for one streamed relay request. The runtime's chunk
+/// callback is `@Sendable`, so every transition, and the enqueue it causes,
+/// happens under one lock: concurrent delivery cannot interleave or corrupt
+/// frames. It also counts accepted and dropped frames, so a buyer-cancel
+/// receipt is issued only when all generated output reached the buyer.
+final class RelayStreamBatcher: @unchecked Sendable {
+    private let lock = NSLock()
+    private let streamInterval: Int
+    private let deltaFrame: ([String: Any]) -> String
+    private let enqueueFrame: (String) -> Bool
+    private var pendingContent = ""
+    private var pendingCount = 0
+    private var emittedToolCall = false
+    private var accepted = 0
+    private var dropped = 0
+
+    init(streamInterval: Int, deltaFrame: @escaping ([String: Any]) -> String, enqueueFrame: @escaping (String) -> Bool) {
+        self.streamInterval = max(1, streamInterval)
+        self.deltaFrame = deltaFrame
+        self.enqueueFrame = enqueueFrame
+    }
+
+    func enqueue(_ frame: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        enqueueLocked(frame)
+    }
+
+    func enqueueDelta(_ delta: [String: Any]) {
+        lock.lock()
+        defer { lock.unlock() }
+        enqueueLocked(deltaFrame(delta))
+    }
+
+    func accept(_ chunk: StreamChunk) {
+        lock.lock()
+        defer { lock.unlock() }
+        switch chunk {
+        case .content(let text):
+            // Leftover </tool_call> or chatter after tool_calls opened must
+            // not become a content delta (the coordinator would kill the
+            // stream as "fell back to content").
+            guard !emittedToolCall else { return }
+            pendingContent += text
+            pendingCount += 1
+            if pendingCount >= streamInterval {
+                flushContentLocked()
+            }
+        case .toolCallDelta(let toolDelta):
+            flushContentLocked()
+            emittedToolCall = true
+            enqueueLocked(deltaFrame(["tool_calls": [toolDelta.openAIDeltaDict()]]))
+        }
+    }
+
+    /// Flushes batched content unless a tool call opened.
+    func flushContent() {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !emittedToolCall else { return }
+        flushContentLocked()
+    }
+
+    /// True when no frame was dropped and every accepted frame was sent.
+    func everyFrameDelivered(sent: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return dropped == 0 && sent >= accepted
+    }
+
+    private func flushContentLocked() {
+        guard !pendingContent.isEmpty else { return }
+        enqueueLocked(deltaFrame(["content": pendingContent]))
+        pendingContent = ""
+        pendingCount = 0
+    }
+
+    private func enqueueLocked(_ frame: String) {
+        if enqueueFrame(frame) {
+            accepted += 1
+        } else {
+            dropped += 1
+        }
     }
 }
 

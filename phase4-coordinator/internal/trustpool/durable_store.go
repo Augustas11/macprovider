@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -1864,6 +1865,11 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 		if err := preState.validateMutationCreatorGate(e, time.Now().UTC()); err != nil {
 			return err
 		}
+		if e.EventType == EventManifestAccepted {
+			if err := verifyManifestAcceptanceOnline(e); err != nil {
+				return fmt.Errorf("%w: manifest policy not acceptable now: %v", errCreatorInvalidEvent, err)
+			}
+		}
 		if e.EventType == EventRootIssuerRegistered {
 			if err := consumeRootRegistrationNonce(ctx, conn, e, time.Now().UTC()); err != nil {
 				return err
@@ -2724,6 +2730,11 @@ type ReconstructedPoolState struct {
 	ManifestRuntimeAllowlist     []string
 	ManifestRetentionPolicyID    string
 	ManifestSplitExecutionStatus string
+	// ManifestPolicies is every accepted policy core's routing projection with
+	// its validity window, ascending by version. The Manifest* fields above
+	// are the newest accepted core; routing uses the core ACTIVE at the
+	// route-gate instant (SPEC-042-R001), see activePolicyView.
+	ManifestPolicies             []manifestPolicyWindow
 	RootIssuer                   *ReconstructedRootIssuer
 	Members                      map[string]bool
 	MemberDelegationIDs          map[string]string
@@ -2936,6 +2947,20 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		p.ManifestRuntimeAllowlist = append([]string(nil), core.RuntimeAllowlist...)
 		p.ManifestRetentionPolicyID = core.RetentionPolicyID
 		p.ManifestSplitExecutionStatus = core.SplitExecutionStatus
+		p.ManifestPolicies = append(p.ManifestPolicies, manifestPolicyWindow{
+			Version:              e.ManifestVersion,
+			CoreDigest:           e.ManifestCoreDigest,
+			NotBeforeUnix:        core.NotBeforeUnix,
+			ExpiresAtUnix:        core.ExpiresAtUnix,
+			MinEligibleMembers:   core.MinEligibleMembers,
+			MinBinaryVersion:     core.MinBinaryVersion,
+			ModelAllowlist:       append([]string(nil), core.ModelAllowlist...),
+			SettlementMode:       canonicalPoolSettlementMode(core.SettlementMode),
+			PolicyCoreV2:         core.IsV2(),
+			RuntimeAllowlist:     append([]string(nil), core.RuntimeAllowlist...),
+			RetentionPolicyID:    core.RetentionPolicyID,
+			SplitExecutionStatus: core.SplitExecutionStatus,
+		})
 	case EventLifecycleChanged:
 		if e.Lifecycle == LifecycleActive && p.ManifestVersion == 0 {
 			return nil, fmt.Errorf("%w: event %d active lifecycle before manifest_accepted for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
@@ -3440,6 +3465,61 @@ func hasSignedControlProof(e DurableEvent) bool {
 	return strings.TrimSpace(e.SignedControl) != "" || strings.TrimSpace(e.ControlSignatures) != ""
 }
 
+// manifestPolicyWindow is one accepted policy core's routing projection and its
+// half-open validity window [NotBeforeUnix, ExpiresAtUnix) (SPEC-042-R001).
+type manifestPolicyWindow struct {
+	Version              uint64
+	CoreDigest           string
+	NotBeforeUnix        uint64
+	ExpiresAtUnix        uint64
+	MinEligibleMembers   uint64
+	MinBinaryVersion     string
+	ModelAllowlist       []string
+	SettlementMode       string
+	PolicyCoreV2         bool
+	RuntimeAllowlist     []string
+	RetentionPolicyID    string
+	SplitExecutionStatus string
+}
+
+// activePolicyView returns a copy of p whose manifest fields are the accepted
+// policy core active at `at`, plus that core's expiry. accepted policy windows
+// never overlap, so at most one matches. ok=false means the pool has accepted
+// policies but none is active at `at` (pool_policy_stale): a future-dated
+// core never routes early and an expired core never keeps routing. A pool with
+// no accepted policy is returned unchanged.
+func (p *ReconstructedPoolState) activePolicyView(at time.Time) (*ReconstructedPoolState, time.Time, bool) {
+	if p == nil || len(p.ManifestPolicies) == 0 {
+		return p, time.Time{}, true
+	}
+	now := at.UTC().Unix()
+	if now < 0 {
+		return p, time.Time{}, false
+	}
+	for _, w := range p.ManifestPolicies {
+		if uint64(now) < w.NotBeforeUnix || uint64(now) >= w.ExpiresAtUnix {
+			continue
+		}
+		view := *p
+		view.ManifestVersion = w.Version
+		view.ManifestCoreDigest = w.CoreDigest
+		view.ManifestMinEligibleMembers = w.MinEligibleMembers
+		view.ManifestMinBinaryVersion = w.MinBinaryVersion
+		view.ManifestModelAllowlist = w.ModelAllowlist
+		view.ManifestSettlementMode = w.SettlementMode
+		view.ManifestPolicyCoreV2 = w.PolicyCoreV2
+		view.ManifestRuntimeAllowlist = w.RuntimeAllowlist
+		view.ManifestRetentionPolicyID = w.RetentionPolicyID
+		view.ManifestSplitExecutionStatus = w.SplitExecutionStatus
+		var until time.Time
+		if w.ExpiresAtUnix <= uint64(math.MaxInt64) {
+			until = time.Unix(int64(w.ExpiresAtUnix), 0).UTC()
+		}
+		return &view, until, true
+	}
+	return p, time.Time{}, false
+}
+
 func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 	if s == nil {
 		return nil
@@ -3451,14 +3531,26 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 	sort.Strings(ids)
 	out := make([]RouteableSnapshot, 0, len(ids))
 	for _, id := range ids {
-		p := s.Pools[id]
+		at := s.RouteGateCheckedAt
+		if at.IsZero() {
+			at = time.Now().UTC()
+		}
+		pool := s.Pools[id]
+		p, policyUntil, policyActive := pool.activePolicyView(at)
 		routeable, routeabilityReason := poolRouteability(p)
+		if routeable && !policyActive {
+			routeable, routeabilityReason = false, "pool_policy_stale"
+		}
+		generation := pool.EffectiveGeneration()
+		if pool.Lifecycle == LifecycleActive && !routeable {
+			generation++
+		}
+		routeableUntil := earliestDeadline(p.CreatorGateExpiresAtUTC, p.OnCallReadinessExpiresAtUTC)
+		if routeable {
+			routeableUntil = earliestDeadline(routeableUntil, policyUntil)
+		}
 		members := make([]string, 0, len(p.Members))
 		if routeable {
-			at := s.RouteGateCheckedAt
-			if at.IsZero() {
-				at = time.Now().UTC()
-			}
 			for id := range p.Members {
 				if p.Revoked[id] {
 					continue
@@ -3503,8 +3595,8 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			DelegatedMembers:          delegatedMembers,
 			SettlementMode:            routeablePoolSettlementMode(p.ManifestSettlementMode),
 			Routeable:                 routeable,
-			Generation:                p.RouteableSnapshotGeneration(),
-			RouteableUntilUTC:         earliestDeadline(p.CreatorGateExpiresAtUTC, p.OnCallReadinessExpiresAtUTC),
+			Generation:                generation,
+			RouteableUntilUTC:         routeableUntil,
 			RouteableExpired:          routeabilityReason == "creator_agreement_expired",
 			ManifestVersion:           p.ManifestVersion,
 			ManifestCoreDigest:        p.ManifestCoreDigest,

@@ -700,6 +700,17 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     CBTrace.log(auditRequestID, "http_runtime_call")
                     let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, with: handle, shouldCancel: { disconnect.isDisconnected })
                     CBTrace.log(auditRequestID, "http_runtime_returned")
+                    guard !disconnect.isDisconnected else {
+                        // The buyer left while generation ran: a buyer
+                        // disconnect, not a completion. No usage, receipt,
+                        // or completion telemetry, and nothing is written.
+                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+                        if settlementMetadata != nil {
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                        }
+                        writer.close()
+                        return
+                    }
                     let modelHashSource = Self.resolveModelHashSource(
                         warmSwapEnabled: warmSwapEnabled,
                         snapshot: servedSnapshot,
@@ -761,9 +772,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
 	                } catch is CancellationError {
 	                    CBTrace.log(auditRequestID, "http_catch_cancellation")
-	                    // SPEC-038 AC-25 (`:620`): the buyer closed the
-	                    // connection. A non-streaming request has emitted
-	                    // nothing buyer-visible yet, so this is always the
+	                    // SPEC-038 AC-25 (`:620`) and #1690: the buyer closed
+	                    // the connection, a buyer cancel and never a provider
+	                    // failure. A non-streaming request has emitted nothing
+	                    // buyer-visible yet, so this is always the
 	                    // before-first-token case: one terminal outcome,
 	                    // non-settling, no receipt. The scheduler slot and any
 	                    // block-table reservation are already released —
@@ -771,10 +783,15 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                    // `withTaskCancellationHandler`, which runs
 	                    // `cancelWaiter`.
 	                    if providerRequestStarted {
-	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false)
 	                    }
 	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .preTokenCancel)
-	                    writer.writeAPIError(Self.buyerCancelledError())
+	                    if disconnect.isDisconnected {
+	                        // Nothing is written to the closed socket.
+	                        writer.close()
+	                    } else {
+	                        writer.writeAPIError(Self.buyerCancelledError())
+	                    }
 	                } catch is DrainCancelledError {
 	                    CBTrace.log(auditRequestID, "http_catch_drain")
 	                    if providerRequestStarted {
@@ -1570,6 +1587,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             providerID: providerID
         )
         guard runtimeSettlementEligible || poolAuthorized else {
+            return .omitted(.runtimeNotSettlementEligible)
+        }
+        guard settlementDisposition != .usageUnattested else {
             return .omitted(.runtimeNotSettlementEligible)
         }
         // A pool-authorized loopback completion carries the runtime-level

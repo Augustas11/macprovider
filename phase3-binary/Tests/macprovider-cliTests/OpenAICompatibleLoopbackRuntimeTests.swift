@@ -379,6 +379,70 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         XCTAssertEqual(result.settlementDisposition, .notEligible)
     }
 
+    // #1690 final audit R1 CODE-5: settlement never rests on counts the
+    // upstream did not report. Missing or partial usage marks the result
+    // usage_unattested; complete usage is copied verbatim and does not depend
+    // on how the upstream chunked its deltas.
+    private static func streamResult(deltas: [String], usage: String?) throws -> CompletionResult {
+        var accumulator = OpenAICompatibleStreamAccumulator()
+        for text in deltas {
+            _ = try accumulator.consume(line: #"data: {"choices":[{"index":0,"delta":{"content":"# + "\"" + text + "\"" + #"}}]}"#)
+            _ = try accumulator.consume(line: "")
+        }
+        if let usage {
+            _ = try accumulator.consume(line: "data: " + usage)
+            _ = try accumulator.consume(line: "")
+        }
+        _ = try accumulator.consume(line: "data: [DONE]")
+        _ = try accumulator.consume(line: "")
+        return try accumulator.finish().result
+    }
+
+    func testStreamAccumulatorMissingOrPartialUpstreamUsageIsUnattested() throws {
+        for usage in [nil, #"{"choices":[],"usage":{"prompt_tokens":17}}"#, #"{"choices":[],"usage":{"completion_tokens":9}}"#] {
+            let result = try Self.streamResult(deltas: ["Hel", "lo"], usage: usage)
+            XCTAssertEqual(result.settlementDisposition, .usageUnattested, usage ?? "no usage")
+            XCTAssertEqual(result.content, "Hello")
+        }
+        let complete = try Self.streamResult(deltas: ["Hel", "lo"], usage: #"{"choices":[],"usage":{"prompt_tokens":17,"completion_tokens":9}}"#)
+        XCTAssertEqual(complete.settlementDisposition, .notEligible, "complete upstream usage keeps the pool-authorizable marker")
+    }
+
+    func testStreamAccumulatorUsageIsChunkBoundaryInvariant() throws {
+        let usage = #"{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":3}}"#
+        let whole = try Self.streamResult(deltas: ["abc"], usage: usage)
+        let split = try Self.streamResult(deltas: ["a", "b", "c"], usage: usage)
+        XCTAssertEqual(whole.content, split.content)
+        XCTAssertEqual(whole.completionTokens, 3)
+        XCTAssertEqual(split.completionTokens, 3)
+        XCTAssertEqual(whole.promptTokens, split.promptTokens)
+        XCTAssertEqual(whole.settlementDisposition, split.settlementDisposition)
+    }
+
+    func testDecodeUpstreamResponseWithoutCompleteUsageIsUnattested() throws {
+        let noUsage = Data(#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#.utf8)
+        XCTAssertEqual(try OpenAICompatibleLoopbackRuntime.decodeUpstreamResponse(noUsage).settlementDisposition, .usageUnattested)
+        let partial = Data(#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"completion_tokens":2}}"#.utf8)
+        XCTAssertEqual(try OpenAICompatibleLoopbackRuntime.decodeUpstreamResponse(partial).settlementDisposition, .usageUnattested)
+        let complete = try OpenAICompatibleLoopbackRuntime.decodeUpstreamResponse(Self.completionJSON(content: "ok", completionTokens: 2))
+        XCTAssertEqual(complete.settlementDisposition, .notEligible)
+        XCTAssertEqual(complete.completionTokens, 2)
+    }
+
+    // #1690 final audit R1 CODE-12: bytes of a line still in flight are
+    // progress for the idle watchdog; the timeouts copy carries the clock
+    // without changing equality.
+    func testGenerationTimeoutsCarryTheByteProgressClock() {
+        let clock = LoopbackProgressClock(now: Date(timeIntervalSince1970: 0))
+        let base = LoopbackGenerationTimeouts(firstByte: 10, idle: 2, overall: 60)
+        let tracked = base.withByteProgress(clock)
+        XCTAssertEqual(base, tracked)
+        XCTAssertTrue(tracked.byteProgress === clock)
+        XCTAssertTrue(clock.hasExpired(base, now: Date(timeIntervalSince1970: 11)), "no byte yet: first-byte deadline")
+        tracked.byteProgress?.touch(now: Date(timeIntervalSince1970: 9))
+        XCTAssertFalse(clock.hasExpired(base, now: Date(timeIntervalSince1970: 10.5)), "a partial line touched the clock")
+    }
+
     func testStreamAccumulatorFallsBackToPlainJSONBody() throws {
         var accumulator = OpenAICompatibleStreamAccumulator()
         for line in LoopbackLineSplitter.lines(of: Self.completionJSON(content: "ok", completionTokens: 2)) {

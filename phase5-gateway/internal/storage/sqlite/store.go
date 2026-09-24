@@ -111,6 +111,8 @@ func (s *Store) Ping(ctx context.Context) error {
 //	v11 — SPEC-041 relay-blind replay ledger.
 //	v12 — OAuth issuance intent and reservation-bound observe recovery candidates.
 //	v13 — SPEC-041 relay-blind accounting metadata and independent clear caps.
+//	v14 — SPEC-022 v0.2.0 (#1690): usage_events accepts pool_operator_attested
+//	     rows from coordinator finality for SPEC-042 Trusted Pool attempts.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -121,7 +123,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 13
+const maxKnownSchemaVersion = 14
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -198,6 +200,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureRelayBlindAccountingColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureUsageEventsPoolOperatorAttestedSource(ctx); err != nil {
+		return err
+	}
 	// Stamp the schema version. We always insert v1 (preserves
 	// historical behavior for any tooling that checked exactly that
 	// row) AND the post-#196 marker v2. INSERT OR IGNORE keeps it
@@ -248,7 +253,67 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(13, ?)", now); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(14, ?)", now); err != nil {
+		return err
+	}
 	return nil
+}
+
+// ensureUsageEventsPoolOperatorAttestedSource rebuilds a v13 usage_events
+// table whose token_source CHECK predates SPEC-022 v0.2.0, so coordinator
+// finality for a Trusted Pool attempt (token_source pool_operator_attested)
+// can settle instead of rolling back. It runs after every column migration,
+// copies every column, and stamps v14 in the same transaction; an older
+// gateway then refuses the database through maxKnownSchemaVersion.
+func (s *Store) ensureUsageEventsPoolOperatorAttestedSource(ctx context.Context) error {
+	var sqlText string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT sql FROM sqlite_master
+		WHERE type = 'table' AND name = 'usage_events'`).Scan(&sqlText)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(sqlText, "pool_operator_attested") {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+	}()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	const columns = `request_id, account_id, demo_identity, window_date,
+			 prompt_tokens, completion_tokens, total_tokens,
+			 token_source, outcome, requested_privacy_mode, effective_privacy_outcome,
+			 relay_blind_envelope_digest, relay_blind_key_record_digest, relay_blind_kid,
+			 relay_blind_provider_binding_digest, input_token_upper_bound, max_output_tokens,
+			 created_at`
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE usage_events RENAME TO usage_events_legacy`); err != nil {
+		return fmt.Errorf("rename usage_events for pool_operator_attested migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, usageEventsTableDDL); err != nil {
+		return fmt.Errorf("create usage_events with pool_operator_attested source: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO usage_events (`+columns+`) SELECT `+columns+` FROM usage_events_legacy`); err != nil {
+		return fmt.Errorf("copy usage_events rows for pool_operator_attested migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE usage_events_legacy`); err != nil {
+		return fmt.Errorf("drop legacy usage_events after pool_operator_attested migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, usageEventsAuxiliaryDDL); err != nil {
+		return fmt.Errorf("recreate usage_events index/trigger after pool_operator_attested migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(14, ?)`,
+		encodeTime(time.Now().UTC())); err != nil {
+		return fmt.Errorf("stamp schema_migrations v14 inside pool_operator_attested migration tx: %w", err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ensureRelayBlindAccountingColumns(ctx context.Context) error {

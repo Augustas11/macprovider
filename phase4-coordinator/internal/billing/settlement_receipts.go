@@ -220,7 +220,10 @@ func (s *Store) IngestPoolSettlementReceipt(ctx context.Context, input Settlemen
 	if err := s.MirrorRouteSnapshotForAttempt(ctx, input.SettlementReceiptIdentity); err != nil {
 		return SettlementReceiptState{}, err
 	}
-	attestedRouteHash, attestedEligible := s.poolOperatorAttestedIngest(ctx, input.SettlementReceiptIdentity, input.PoolLabels)
+	attestedRouteHash, attestedEligible, err := s.poolOperatorAttestedIngest(ctx, input.SettlementReceiptIdentity, input.PoolLabels)
+	if err != nil {
+		return SettlementReceiptState{}, err
+	}
 	return s.applySettlementReceiptVerdict(ctx, input.SettlementReceiptIdentity, true, receivedAt, func(evidence settlementEvidence, alreadyTerminal bool) SettlementVerifyResult {
 		crossChecked := evidence.attempt.UsageSource == UsageSourceCoordinatorObserved ||
 			(evidence.attempt.UsageSource == UsageSourcePoolOperatorAttested && attestedEligible && evidence.routeHash == attestedRouteHash)
@@ -249,6 +252,23 @@ func (s *Store) IngestPoolSettlementReceipt(ctx context.Context, input Settlemen
 			ComputeIntegrityCapture:  evidence.computeIntegrityCapture,
 		})
 	})
+}
+
+// WithReceivedAt carries the coordinator's first observation of the receipt
+// through recovery retries, so a receipt that arrived before its pending
+// deadline is never judged late because a verdict write had to be retried.
+// Zero keeps the ingestion-time default.
+func (in SettlementReceiptIngestionInput) WithReceivedAt(unixMS int64) SettlementReceiptIngestionInput {
+	if unixMS > 0 {
+		in.receiptReceivedUnixMS = unixMS
+	}
+	return in
+}
+
+// ReceiptObservedAtUnixMS is this store's clock reading for stamping a
+// receipt's first observation.
+func (s *Store) ReceiptObservedAtUnixMS() int64 {
+	return s.nowUTC().UnixMilli()
 }
 
 func (s *Store) RecordMissingSettlementReceipt(ctx context.Context, input SettlementReceiptMissingInput) (SettlementReceiptState, error) {

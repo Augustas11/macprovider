@@ -462,3 +462,25 @@ func ReconstructPool(snapshot ManifestSnapshot) (*ReconstructedPool, error) {
 	}
 	return &ReconstructedPool{AuthorityLog: authLog, PolicyHistory: history}, nil
 }
+
+// VerifyNewestPolicyAcceptance applies the ONLINE acceptance gate
+// (VerifyPolicyCore: the signer set it names must be unrevoked and its window
+// must contain the core's not_before) to the newest policy of a snapshot that is
+// being accepted NOW. ReconstructPool replays earlier verdicts with the timeless
+// verifier; a new acceptance must never be grandfathered that way, or a policy
+// signed by a revoked or inactive signer set would be accepted (SPEC-042-R012).
+func VerifyNewestPolicyAcceptance(snapshot ManifestSnapshot) error {
+	if len(snapshot.Policies) == 0 {
+		return errPolicyUnknownSignerSet
+	}
+	authLog, err := BuildAuthorityLog(snapshot.IdentityCore, snapshot.RootIssuerKey, snapshot.AuthorityLog)
+	if err != nil {
+		return err
+	}
+	newest := snapshot.Policies[len(snapshot.Policies)-1].SignedCore
+	ss, ok := authLog.SignerSet(newest.Core.SignerSetVersion)
+	if !ok {
+		return errPolicyUnknownSignerSet
+	}
+	return VerifyPolicyCore(newest.Core, newest.Signatures, ss)
+}

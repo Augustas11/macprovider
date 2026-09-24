@@ -520,7 +520,10 @@ func manifestSnapshotWithPolicyCoreMutation(t *testing.T, version uint64, root r
 		MetadataVisible:      "standard",
 		DowngradePolicy:      "reject",
 		NotBeforeUnix:        2,
-		ExpiresAtUnix:        9999999999,
+		// 2100-01-01: an extending core's window [expiry, expiry+1000)
+		// must still sit inside the signer set window to pass the online
+		// acceptance gate.
+		ExpiresAtUnix: 4102444800,
 	}
 	if mutate != nil {
 		mutate(&core)

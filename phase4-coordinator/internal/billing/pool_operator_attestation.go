@@ -42,7 +42,25 @@ var (
 	// derived.
 	ErrPoolOperatorAttestationUnavailable = errors.New("billing: pool operator attestation authority unavailable")
 	errPoolOperatorAttestationSnapshot    = errors.New("billing: route snapshot does not carry the SPEC-022-R012 members")
+	// ErrPoolOperatorAttestationRejected is a PERMANENT eligibility rejection
+	// by the durable pool authority. Authority implementations wrap it.
+	ErrPoolOperatorAttestationRejected = errors.New("billing: pool operator attestation rejected")
+	// ErrPoolOperatorAttestationTransient means eligibility could not be
+	// evaluated (a store or authority read failed). The receipt is retried;
+	// it never becomes an un-cross-checked terminal verdict.
+	ErrPoolOperatorAttestationTransient = errors.New("billing: pool operator attestation temporarily unavailable")
 )
+
+// poolOperatorAttestationPermanent reports whether an eligibility error is a
+// decided rejection rather than an operational failure.
+func poolOperatorAttestationPermanent(err error) bool {
+	return errors.Is(err, ErrPoolOperatorAttestationRejected) ||
+		errors.Is(err, ErrPoolOperatorAttestationUnavailable) ||
+		errors.Is(err, errPoolOperatorAttestationSnapshot) ||
+		errors.Is(err, errPoolOperatorAttestationNotEnforce)
+}
+
+var errPoolOperatorAttestationNotEnforce = errors.New("billing: pool_operator_attested requires an enforce-mode route snapshot")
 
 // SetPoolOperatorAttestationAuthority wires the durable pool authority.
 func (s *Store) SetPoolOperatorAttestationAuthority(authority PoolOperatorAttestationAuthority) {
@@ -73,7 +91,7 @@ func (s *Store) PoolOperatorAttestationEligible(ctx context.Context, route Route
 		return errPoolOperatorAttestationSnapshot
 	}
 	if route.RouteSnapshotMode != RouteSnapshotModeEnforce {
-		return fmt.Errorf("billing: pool_operator_attested requires an enforce-mode route snapshot")
+		return errPoolOperatorAttestationNotEnforce
 	}
 	authority := s.poolOperatorAttestationAuthority()
 	if authority == nil {
@@ -101,8 +119,11 @@ func PoolOperatorAttestedLabelVerified(route RouteSnapshot, routeHash string, la
 // transaction, whether the persisted route snapshot of an attempt satisfies
 // SPEC-022-R012 at settlement (R-12.4): the durable conditions and an
 // undisputed label. It returns the route digest it evaluated so the verdict
-// can require the same snapshot.
-func (s *Store) poolOperatorAttestedIngest(ctx context.Context, id SettlementReceiptIdentity, labels *SettlementPoolLabels) (string, bool) {
+// can require the same snapshot. An operational failure (a store read or an
+// authority lookup that could not decide) returns
+// ErrPoolOperatorAttestationTransient so the receipt is retried instead of
+// being settled as un-cross-checked.
+func (s *Store) poolOperatorAttestedIngest(ctx context.Context, id SettlementReceiptIdentity, labels *SettlementPoolLabels) (string, bool, error) {
 	var route RouteSnapshot
 	var routeHash string
 	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
@@ -110,14 +131,20 @@ func (s *Store) poolOperatorAttestedIngest(ctx context.Context, id SettlementRec
 		route, routeHash, err = loadSettlementRouteSnapshotConn(ctx, conn, id)
 		return err
 	})
-	if err != nil || route.RuntimeSource == "" {
-		return "", false
+	if err != nil {
+		return "", false, fmt.Errorf("%w: load route snapshot: %v", ErrPoolOperatorAttestationTransient, err)
+	}
+	if route.RuntimeSource == "" {
+		return "", false, nil
 	}
 	if err := s.PoolOperatorAttestationEligible(ctx, route); err != nil {
-		return "", false
+		if poolOperatorAttestationPermanent(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("%w: %v", ErrPoolOperatorAttestationTransient, err)
 	}
 	if labels == nil || labels.RouteSnapshotHash != routeHash || !PoolOperatorAttestedLabelVerified(route, routeHash, labels) {
-		return "", false
+		return "", false, nil
 	}
-	return routeHash, true
+	return routeHash, true, nil
 }

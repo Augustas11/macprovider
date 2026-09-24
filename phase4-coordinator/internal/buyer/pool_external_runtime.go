@@ -76,6 +76,19 @@ func routingEligibleForRoute(p pool.Provider, view poolRouteView) bool {
 	return p.RoutingEligible()
 }
 
+// providerForRoute is the slot-queue form of routingEligibleForRoute: the
+// queue re-derives capacity and routing gates by hand, so a pool route that
+// already establishes the external-runtime predicate sees the member session
+// without its hello sandbox term, exactly as the candidate and pinned paths
+// do. Every other provider and every global route is returned unchanged, and
+// the paid-routing predicate (binding half) is still applied by the caller.
+func providerForRoute(p pool.Provider, view poolRouteView) pool.Provider {
+	if view.externalRuntimeCandidate(p) {
+		p.AdmissionSandboxed = false
+	}
+	return p
+}
+
 type poolRouteViewKey struct{}
 
 // withPoolRouteView carries a pool route's selection-time view on the route

@@ -2,7 +2,6 @@ package trustpool
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -11,7 +10,7 @@ import (
 
 // ErrPoolOperatorAttestation rejects a SPEC-022-R012 pool_operator_attested
 // claim that the durable pool records do not support.
-var ErrPoolOperatorAttestation = errors.New("trustpool: pool operator attestation rejected")
+var ErrPoolOperatorAttestation = fmt.Errorf("trustpool: %w", billing.ErrPoolOperatorAttestationRejected)
 
 var _ billing.PoolOperatorAttestationAuthority = (*Store)(nil)
 

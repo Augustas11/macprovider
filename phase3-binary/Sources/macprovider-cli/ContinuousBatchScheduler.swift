@@ -264,6 +264,11 @@ enum ContinuousBatchSettlementDisposition: String, Sendable, Equatable {
     case eligibleOwner = "eligible_owner"
     case nonSettlingReplay = "non_settling_replay"
     case notEligible = "not_eligible"
+    /// A loopback completion whose upstream did not report complete usage
+    /// (`prompt_tokens` and `completion_tokens`). Its counts are not the
+    /// upstream's, so it never signs a settlement receipt, even under a
+    /// pool runtime authorization (SPEC-015 §N.12, SPEC-022 R-12).
+    case usageUnattested = "usage_unattested"
 }
 
 struct ContinuousBatchSchedulerResult: Sendable, Equatable {

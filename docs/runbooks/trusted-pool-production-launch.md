@@ -222,13 +222,18 @@ Rollout, in this order:
 1. Pause every pool, deploy the coordinator that implements SPEC-022 v0.2.0
    (the `pool_operator_attested` usage source), confirm `/healthz` reports it
    and the updater transaction committed, then resume the pools.
-2. Ship the provider CLI that signs pool-authorized loopback receipts
+2. Deploy the gateway that accepts `pool_operator_attested` finality
+   (gateway schema v14). An older gateway refuses a v14 database, so a gateway
+   rollback restores the pre-deploy snapshot.
+3. Ship the provider CLI that signs pool-authorized loopback receipts
    (SPEC-015 0.4.10).
-3. Only then accept a v2 policy core with a non-empty `runtime_allowlist`.
+4. Only then accept a v2 policy core with a non-empty `runtime_allowlist`.
 
 An old CLI against the new coordinator, or the new CLI against an old
 coordinator, fails closed: no pool-authorized receipt is signed and no
-provider credit is created. The gateway is unchanged.
+provider credit is created. A coordinator from this release on also refuses a database whose
+`billing_compat_floor` is above its own contract, so a later downgrade onto a
+binary that cannot read newer settlement rows fails closed at startup.
 
 Rollback to a coordinator that predates SPEC-022 v0.2.0, once any pool route
 has run on the new coordinator:

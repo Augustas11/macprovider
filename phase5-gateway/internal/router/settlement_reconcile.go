@@ -720,8 +720,12 @@ func finalityTokenTotals(finality coordinatorRequestSettlementFinality) (int64, 
 	if total != prompt+completion {
 		return 0, 0, 0, fmt.Errorf("coordinator finality total_tokens mismatch")
 	}
+	// SPEC-022 R-12.6a: a verified request reports coordinator_observed, or
+	// pool_operator_attested when any verified attempt was a Trusted Pool
+	// attestation. Both settle and are recorded under their own source; every
+	// other value is not settlement-capable.
 	source := strings.TrimSpace(finality.TokenSource)
-	if source != "coordinator_observed" {
+	if source != "coordinator_observed" && source != "pool_operator_attested" {
 		return 0, 0, 0, fmt.Errorf("coordinator finality token_source %q is not settlement-capable", source)
 	}
 	return prompt, completion, total, nil

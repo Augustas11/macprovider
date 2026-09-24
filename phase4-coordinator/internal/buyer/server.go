@@ -8114,11 +8114,15 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 		if !s.providerMatchesRequest(provider, model, class) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
-		if !provider.CapacityEligible() || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
+		// SPEC-042-R005 site (2): the same pool-scoped sandbox view the
+		// candidate and pinned paths use, so a valid external-runtime member
+		// can recover a seat through the queue.
+		routeProvider := providerForRoute(provider, state.poolRouteView())
+		if !routeProvider.CapacityEligible() || s.tier2ProviderExcluded(provider) || !s.checkQuota(provider) {
 			return pool.Provider{}, queuedProviderTerminal
 		}
-		if !provider.RoutingEligible() {
-			if provider.SlotQueueEligible() {
+		if !routeProvider.RoutingEligible() {
+			if routeProvider.SlotQueueEligible() {
 				return pool.Provider{}, queuedProviderWait
 			}
 			return pool.Provider{}, queuedProviderTerminal
@@ -8157,7 +8161,7 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 			}
 			return pool.Provider{}, queuedProviderTerminal
 		}
-		if !provider.RoutingEligible() {
+		if !routeProvider.RoutingEligible() {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		if !s.slotQueue.reserveHead(waiter, provider.SlotsFree) {
@@ -8174,8 +8178,12 @@ func (s *Server) slotQueueCandidates(providers []pool.Provider, excluded routing
 		return nil
 	}
 	out := make([]pool.Provider, 0, len(providers))
+	var view poolRouteView
+	if checker != nil {
+		view = checker.poolView
+	}
 	for _, provider := range providers {
-		if excluded.Has(provider.SortKey()) || !s.providerSlotQueueEligible(provider) {
+		if excluded.Has(provider.SortKey()) || !s.providerSlotQueueEligible(providerForRoute(provider, view)) {
 			continue
 		}
 		if !s.providerMatchesRequest(provider, checker.model, checker.class) || !checker.ProviderContextSufficient(provider) {

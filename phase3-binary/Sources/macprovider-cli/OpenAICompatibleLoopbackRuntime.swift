@@ -172,6 +172,20 @@ struct LoopbackGenerationTimeouts: Equatable, Sendable {
     let firstByte: TimeInterval
     let idle: TimeInterval
     let overall: TimeInterval
+    /// The watchdog clock the streaming reader touches as bytes arrive, so a
+    /// large event still in flight (no newline yet) is progress. Not part of
+    /// equality.
+    var byteProgress: LoopbackProgressClock?
+
+    static func == (lhs: LoopbackGenerationTimeouts, rhs: LoopbackGenerationTimeouts) -> Bool {
+        lhs.firstByte == rhs.firstByte && lhs.idle == rhs.idle && lhs.overall == rhs.overall
+    }
+
+    func withByteProgress(_ clock: LoopbackProgressClock) -> LoopbackGenerationTimeouts {
+        var copy = self
+        copy.byteProgress = clock
+        return copy
+    }
 
     static let firstByteSeconds: TimeInterval = 600
     static let idleSeconds: TimeInterval = 120
@@ -285,7 +299,13 @@ final class LoopbackServeHTTPClient: BYOMLoopbackStreamingHTTPClient, @unchecked
             let reader = Task {
                 do {
                     var splitter = LoopbackLineSplitter(maxLineBytes: maxLineBytes, maxTotalBytes: maxTotalBytes)
+                    var sinceTouch = 0
                     for try await byte in bytes {
+                        sinceTouch += 1
+                        if sinceTouch >= 512 {
+                            timeouts.byteProgress?.touch()
+                            sinceTouch = 0
+                        }
                         if let line = try splitter.append(byte) {
                             continuation.yield(line)
                         }
@@ -515,6 +535,8 @@ struct OpenAICompatibleStreamAccumulator {
             throw OpenAICompatibleLoopbackRuntimeError.malformedUpstreamResponse
         }
         let calls = toolCalls.map { ToolCall(id: $0.id, functionName: $0.name, arguments: $0.arguments) }
+        // The delta-event fallback is display-only: it depends on chunking,
+        // so a completion without complete upstream usage never settles.
         let generated = completionTokens ?? deltaEvents
         let result = CompletionResult(
             content: content,
@@ -523,7 +545,7 @@ struct OpenAICompatibleStreamAccumulator {
             completionTokens: generated,
             generatedCompletionTokens: generated,
             toolCalls: calls.isEmpty ? nil : calls,
-            settlementDisposition: .notEligible
+            settlementDisposition: promptTokens != nil && completionTokens != nil ? .notEligible : .usageUnattested
         )
         return (result, late)
     }
@@ -967,10 +989,11 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     ) async throws -> CompletionResult {
         if shouldCancel() { throw CancellationError() }
         let body = try Self.encodeUpstreamRequest(request, upstreamModelName: upstreamModelName)
+        let clock = LoopbackProgressClock()
         let timeouts = LoopbackGenerationTimeouts.forGeneration(maxTokens: request.maxTokens, contextWindow: contextWindow)
+            .withByteProgress(clock)
         let client = httpClient
         let url = chatCompletionsURL
-        let clock = LoopbackProgressClock()
 
         return try await withThrowingTaskGroup(of: CompletionResult?.self) { group in
             group.addTask {
@@ -1231,20 +1254,20 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         if case .string(let reason)? = firstChoice["finish_reason"], !reason.isEmpty {
             finishReason = reason
         }
-        var completionTokens = 0
-        var promptTokens = 0
+        var completionTokens: Int?
+        var promptTokens: Int?
         if case .object(let usage)? = root["usage"] {
-            completionTokens = intValue(usage["completion_tokens"]) ?? 0
-            promptTokens = intValue(usage["prompt_tokens"]) ?? 0
+            completionTokens = intValue(usage["completion_tokens"])
+            promptTokens = intValue(usage["prompt_tokens"])
         }
         return CompletionResult(
             content: content,
             finishReason: finishReason,
-            promptTokens: promptTokens,
-            completionTokens: completionTokens,
-            generatedCompletionTokens: completionTokens,
+            promptTokens: promptTokens ?? 0,
+            completionTokens: completionTokens ?? 0,
+            generatedCompletionTokens: completionTokens ?? 0,
             toolCalls: toolCalls.isEmpty ? nil : toolCalls,
-            settlementDisposition: .notEligible
+            settlementDisposition: promptTokens != nil && completionTokens != nil ? .notEligible : .usageUnattested
         )
     }
 

@@ -1695,6 +1695,14 @@ extension HTTPServerReceiptTests {
         XCTAssertFalse(decision.issued)
         XCTAssertEqual(decision.omitted, .nonSettlingReplay)
     }
+
+    // #1690 final audit R1 CODE-5: usage the upstream did not report is never
+    // signed, even under a matching pool runtime authorization.
+    func testHTTPPoolAuthorizedLoopbackWithoutUpstreamUsageSignsNothing() throws {
+        let decision = try poolReceiptDecision(authorization: httpPoolAuthorization(), disposition: .usageUnattested)
+        XCTAssertFalse(decision.issued)
+        XCTAssertEqual(decision.omitted, .runtimeNotSettlementEligible)
+    }
 }
 
 // #1690 freeze audit R1 CODE-1/CODE-2: a buyer that disconnects mid-stream

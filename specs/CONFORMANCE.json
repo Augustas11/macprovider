@@ -5529,13 +5529,17 @@
         "phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:PoolRuntimeAuthorization",
         "phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:SettlementReceiptEligibility",
         "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:buildReceiptHeader",
-        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:receiptHeaderResult"
+        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:receiptHeaderResult",
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:RelayStreamBatcher"
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/spec042_external_runtime_test.go:TestSPEC042ExternalRuntimePoolRouteDerivesMemberAndSnapshot",
         "phase3-binary/Tests/macprovider-cliTests/PoolRuntimeAuthorizationTests.swift:testDecisionRequiresEveryBoundField",
         "phase3-binary/Tests/macprovider-cliTests/InferenceRelayTests.swift:testPoolAuthorizedLoopbackSignsRelayReceiptOnlyForMatchingAuthorization",
-        "phase3-binary/Tests/macprovider-cliTests/PoolRuntimeAuthorizationTests.swift:testAbsentOrMalformedAuthorizationParsesAsNotAuthorized"
+        "phase3-binary/Tests/macprovider-cliTests/PoolRuntimeAuthorizationTests.swift:testAbsentOrMalformedAuthorizationParsesAsNotAuthorized",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testStreamAccumulatorMissingOrPartialUpstreamUsageIsUnattested",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testStreamAccumulatorUsageIsChunkBoundaryInvariant",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testDecodeUpstreamResponseWithoutCompleteUsageIsUnattested"
       ],
       "journeys": [],
       "evidence": [],
@@ -5922,7 +5926,12 @@
         "phase4-coordinator/internal/billing/settlement_finality.go:func finalityTokenSource",
         "phase4-coordinator/internal/buyer/billing_recorder.go:func (b *billingRecorder) poolOperatorAttestedAttempt",
         "phase4-coordinator/internal/billing/pool_rollback_preflight.go:func CheckPoolRollbackPreflight",
-        "phase4-coordinator/cmd/coordinator/pool_rollback_preflight.go:func runPoolRollbackPreflightIO"
+        "phase4-coordinator/cmd/coordinator/pool_rollback_preflight.go:func runPoolRollbackPreflightIO",
+        "phase4-coordinator/internal/billing/usage_source_migration.go:func (s *Store) requireBillingCompatFloor",
+        "phase4-coordinator/internal/billing/pool_operator_attestation.go:func (s *Store) poolOperatorAttestedIngest",
+        "phase4-coordinator/internal/buyer/settlement_receipt_recovery.go:func settlementReceiptRetryable",
+        "phase5-gateway/internal/router/settlement_reconcile.go:func finalityTokenTotals",
+        "phase5-gateway/internal/storage/sqlite/store.go:func (s *Store) ensureUsageEventsPoolOperatorAttestedSource"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/spec022_r012_test.go:TestSPEC022R012PoolOperatorAttestedSettlesOnlyWhenR012Holds",
@@ -5932,7 +5941,11 @@
         "phase4-coordinator/internal/billing/route_snapshot_runtime_source_test.go:TestRouteSnapshotRuntimeSourceDigestedOnlyWhenPresent",
         "phase4-coordinator/internal/billing/route_snapshot_runtime_source_test.go:TestRouteSnapshotRuntimeSourceValidateFailsClosed",
         "phase4-coordinator/internal/billing/pool_rollback_preflight_test.go:TestCheckPoolRollbackPreflightBlocksUntilPoolSettlementCloses",
-        "phase4-coordinator/internal/billing/pool_rollback_preflight_test.go:TestCheckPoolRollbackPreflightIgnoresNativeAndExpiredAttempts"
+        "phase4-coordinator/internal/billing/pool_rollback_preflight_test.go:TestCheckPoolRollbackPreflightIgnoresNativeAndExpiredAttempts",
+        "phase4-coordinator/internal/billing/pool_settlement_retry_test.go:TestIngestPoolSettlementReceiptTransientAuthorityErrorIsRetryable",
+        "phase4-coordinator/internal/billing/pool_settlement_retry_test.go:TestBillingCompatFloorRefusesNewerDatabase",
+        "phase5-gateway/internal/router/settlement_pool_finality_test.go:TestSettlementReconcileSettlesPoolOperatorAttestedFinality",
+        "phase5-gateway/internal/storage/sqlite/usage_events_pool_source_test.go:TestUsageEventsMigratesToPoolOperatorAttestedSource"
       ],
       "journeys": [],
       "evidence": [],
@@ -6607,7 +6620,9 @@
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) Reconstruct",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) migrateManifestAcceptanceTables",
         "phase4-coordinator/internal/poolmanifest/manifest.go:func (pc PolicyCore) ValidateAcceptance",
-        "phase4-coordinator/internal/poolmanifest/signature.go:func PolicyCoreSigningMessageV2"
+        "phase4-coordinator/internal/poolmanifest/signature.go:func PolicyCoreSigningMessageV2",
+        "phase4-coordinator/internal/poolmanifest/persist.go:func VerifyNewestPolicyAcceptance",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (p *ReconstructedPoolState) activePolicyView"
       ],
       "tests": [
         "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestGoldenVectors",
@@ -6621,7 +6636,9 @@
         "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestPolicyCoreV2GoldenVectors",
         "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestPolicyCoreV2RejectionVectors",
         "phase4-coordinator/internal/poolmanifest/persist_test.go:TestManifestSnapshotV2MigrationFixture",
-        "phase4-coordinator/internal/trustpool/spec042_runtime_allowlist_test.go:TestReconstructEvents_AcceptsPolicyCoreV2RuntimeAllowlist"
+        "phase4-coordinator/internal/trustpool/spec042_runtime_allowlist_test.go:TestReconstructEvents_AcceptsPolicyCoreV2RuntimeAllowlist",
+        "phase4-coordinator/internal/poolmanifest/newest_policy_acceptance_test.go:TestVerifyNewestPolicyAcceptanceUsesOnlineGate",
+        "phase4-coordinator/internal/trustpool/active_policy_window_test.go:TestRouteableSnapshotsUseActivePolicyWindow"
       ],
       "journeys": [],
       "evidence": [],
@@ -7072,7 +7089,8 @@
         "phase4-coordinator/internal/ws/model_admission_pool_route.go:func ModelAdmissionPoolSettlementBindingForRouteSnapshot",
         "phase4-coordinator/internal/billing/hotpath.go:func IsLoopbackRuntimeSource",
         "phase4-coordinator/internal/billing/pool_operator_attestation.go:func (s *Store) PoolOperatorAttestationEligible",
-        "phase4-coordinator/internal/trustpool/pool_operator_attestation.go:func (s *Store) VerifyPoolOperatorAttestation"
+        "phase4-coordinator/internal/trustpool/pool_operator_attestation.go:func (s *Store) VerifyPoolOperatorAttestation",
+        "phase4-coordinator/internal/buyer/pool_external_runtime.go:func providerForRoute"
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/spec042_external_runtime_test.go:TestSPEC042ExternalRuntimePoolRouteDerivesMemberAndSnapshot",
@@ -7082,7 +7100,8 @@
         "phase4-coordinator/internal/billing/spec022_r012_test.go:TestSPEC022R012FailClosedSet",
         "phase4-coordinator/internal/billing/freeze_audit_ledger_test.go:TestWriteHotPath_LoopbackRuntimeNeverEarnsOutsideAttestedPool",
         "phase4-coordinator/internal/trustpool/pool_operator_attestation_test.go:TestVerifyPoolOperatorAttestationFromDurableRecords",
-        "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestPolicyCoreV2GoldenVectors"
+        "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestPolicyCoreV2GoldenVectors",
+        "phase4-coordinator/internal/buyer/pool_external_runtime_queue_internal_test.go:TestProviderForRouteMatchesCandidatePathSandboxView"
       ],
       "journeys": [],
       "evidence": [],
@@ -7090,7 +7109,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-042 0.0.32 (#1690 M3) specifies external-runtime serving on Trusted Pools. The #1690 M4 coordinator side is implemented: policy-core/v2 encode/verify/replay with golden vectors, the route-time runtime-allowlist predicate at the five SPEC-042-R005 sites (the admission bar and the FR-HG8 hello sandbox stay unlifted), the SPEC-047-R003(iv) pool route-time member derivation, the SPEC-022-R012 route-snapshot members and pool_operator_attested usage source re-derived from durable pool records, and the route-time half of the fail-closed test set. Pending: the SPEC-015-R006 CLI per-request signing path and its older-CLI-never-signs test (#1690 M5), and a signed enforce-mode pool journey with a verified receipt and a provider ledger credit (#1690 M6)."
+        "rationale": "SPEC-042 0.0.32 (#1690 M3) specifies external-runtime serving on Trusted Pools. The #1690 M4 coordinator side is implemented: policy-core/v2 encode/verify/replay with golden vectors, the route-time runtime-allowlist predicate at the five SPEC-042-R005 sites (the admission bar and the FR-HG8 hello sandbox stay unlifted), the SPEC-047-R003(iv) pool route-time member derivation, the SPEC-022-R012 route-snapshot members and pool_operator_attested usage source re-derived from durable pool records, and the route-time half of the fail-closed test set. The SPEC-015-R006 CLI per-request signing path and its older-CLI-never-signs test landed in #1690 M5 (mapped under SPEC-015-R006), and the slot queue now applies the same pool-scoped sandbox view as the candidate path. Pending: a signed enforce-mode pool journey with a verified receipt and a provider ledger credit (#1690 M6)."
       }
     },
     {

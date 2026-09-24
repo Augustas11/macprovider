@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -143,7 +143,7 @@ func TestSPEC022R012FailClosedSet(t *testing.T) {
 		authority PoolOperatorAttestationAuthority
 		labels    func(string) *SettlementPoolLabels
 	}{
-		"durable records reject (non-member, non-creator, or no v2 allowlist)": {true, UsageSourcePoolOperatorAttested, &fakePoolAttestationAuthority{err: errors.New("rejected")}, matchingR012Labels},
+		"durable records reject (non-member, non-creator, or no v2 allowlist)": {true, UsageSourcePoolOperatorAttested, &fakePoolAttestationAuthority{err: fmt.Errorf("%w: rejected", ErrPoolOperatorAttestationRejected)}, matchingR012Labels},
 		"no durable authority (trusted pools off)":                             {true, UsageSourcePoolOperatorAttested, nil, matchingR012Labels},
 		"label disputed at settlement":                                         {true, UsageSourcePoolOperatorAttested, &fakePoolAttestationAuthority{}, disputed},
 		"no settlement-time labels":                                            {true, UsageSourcePoolOperatorAttested, &fakePoolAttestationAuthority{}, nil},

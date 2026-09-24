@@ -1747,3 +1747,48 @@ private func waitForFrames(
     XCTFail("Timed out waiting for frames")
     return await read()
 }
+
+// #1690 final audit R1 CODE-6: the streaming chunk callback is @Sendable and
+// may run concurrently; batching state and frame order stay consistent.
+final class RelayStreamBatcherConcurrencyTests: XCTestCase {
+    private final class FrameSink: @unchecked Sendable {
+        private let lock = NSLock()
+        private var frames: [String] = []
+        func append(_ frame: String) -> Bool {
+            lock.lock()
+            frames.append(frame)
+            lock.unlock()
+            return true
+        }
+        var all: [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return frames
+        }
+    }
+
+    func testConcurrentContentDeliveryKeepsEveryTokenExactlyOnce() {
+        let sink = FrameSink()
+        let batcher = RelayStreamBatcher(
+            streamInterval: 7,
+            deltaFrame: { delta in (delta["content"] as? String) ?? "" },
+            enqueueFrame: { sink.append($0) }
+        )
+        let tokens = 2_000
+        DispatchQueue.concurrentPerform(iterations: tokens) { _ in
+            batcher.accept(.content("x"))
+        }
+        batcher.flushContent()
+        let frames = sink.all
+        XCTAssertEqual(frames.joined().count, tokens, "every token lands in exactly one frame")
+        XCTAssertTrue(frames.dropLast().allSatisfy { $0.count == 7 }, "full batches are never torn")
+        XCTAssertTrue(batcher.everyFrameDelivered(sent: frames.count))
+        XCTAssertFalse(batcher.everyFrameDelivered(sent: frames.count - 1))
+    }
+
+    func testDroppedFrameIsNeverReportedDelivered() {
+        let batcher = RelayStreamBatcher(streamInterval: 1, deltaFrame: { _ in "f" }, enqueueFrame: { _ in false })
+        batcher.accept(.content("x"))
+        XCTAssertFalse(batcher.everyFrameDelivered(sent: 0))
+    }
+}

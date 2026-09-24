@@ -20,9 +20,10 @@ R-3.4.2 makes it the single, bounded exception to R-3.4.1. It still needs a
 verified v0.4 receipt with an exact usage match, and SPEC-005 arithmetic and
 ceilings are unchanged. A disputed pool label or a global route gets zero
 billable. No v0.4 receipt tuple change; SPEC-008 `attestation_tier` unchanged.
-R-12.8 fixes the rollout order (coordinator, then CLI, then v2 allowlists) and
-makes a downgrade to a pre-v0.2.0 coordinator fail closed behind the
-`coordinator pool-rollback-preflight` gate.
+R-12.8 fixes the rollout order (coordinator, gateway, then CLI, then v2
+allowlists), records a billing compatibility floor, and makes a downgrade to a
+pre-v0.2.0 coordinator fail closed behind the `coordinator
+pool-rollback-preflight` gate.
 
 ### v0.1.9
 
@@ -969,10 +970,13 @@ attempt it still has to settle unverifiable, `pending`, or `quarantined`. It
 never records a new `pool_operator_attested` attempt, so the hazard is only
 the pool attempts recorded before a downgrade.
 
-- Rollout order: deploy the v0.2.0 coordinator first, then the provider CLI
-  that signs pool-authorized receipts (SPEC-015-R006), and only then accept a
-  v2 policy core with a non-empty `runtime_allowlist` (SPEC-042-R001). The
-  gateway needs no change. Pool traffic MUST stay paused while the v0.2.0
+- Rollout order: deploy the v0.2.0 coordinator first, then the gateway that
+  accepts `pool_operator_attested` request finality (gateway schema v14,
+  `usage_events.token_source`), then the provider CLI that signs
+  pool-authorized receipts (SPEC-015-R006), and only then accept a v2 policy
+  core with a non-empty `runtime_allowlist` (SPEC-042-R001). An older gateway
+  refuses a v14 database at open (its schema-version gate), so a gateway
+  rollback restores the pre-deploy snapshot. Pool traffic MUST stay paused while the v0.2.0
   coordinator deploy can still roll back automatically, because v0.2.0
   writes the new labels on every pool route, native pools included, and an
   automatic rollback runs no gate. An old CLI against a new coordinator, and a new
@@ -991,6 +995,16 @@ the pool attempts recorded before a downgrade.
   `CheckPoolRollbackPreflight`). An operator MUST NOT roll back while it
   exits non-zero; the fix is to roll forward. A rollback between two
   coordinators that both implement v0.2.0 is not affected.
+- Compatibility floor: a v0.2.0 coordinator records billing contract 2 in
+  `billing_compat_floor` and refuses to open a database whose floor is above
+  its own contract (`requireBillingCompatFloor`), so every later downgrade
+  onto a binary that cannot read newer rows fails closed at startup. A
+  coordinator that predates the floor cannot read it; the preflight gate above
+  is what governs a downgrade to one.
+- A pool-authority read that cannot decide (a store or authority error) is
+  not an eligibility verdict. Receipt ingestion returns a retryable error and
+  keeps the receipt's first-observed arrival time for the retry; only a
+  decided rejection leaves an attempt un-cross-checked.
 
 ## Acceptance criteria
 

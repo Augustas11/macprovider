@@ -14,7 +14,7 @@ const usageEventsTableDDL = `CREATE TABLE IF NOT EXISTS usage_events (
 	prompt_tokens INTEGER NOT NULL CHECK (prompt_tokens >= 0),
 	completion_tokens INTEGER NOT NULL CHECK (completion_tokens >= 0),
 	total_tokens INTEGER NOT NULL CHECK (total_tokens >= 0),
-	token_source TEXT NOT NULL CHECK (token_source IN ('provider_reported', 'gateway_estimated', 'manual_fixture', 'coordinator_observed')),
+	token_source TEXT NOT NULL CHECK (token_source IN ('provider_reported', 'gateway_estimated', 'manual_fixture', 'coordinator_observed', 'pool_operator_attested')),
 	outcome TEXT NOT NULL,
 	requested_privacy_mode TEXT NOT NULL DEFAULT '',
 	effective_privacy_outcome TEXT NOT NULL DEFAULT '',
