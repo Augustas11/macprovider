@@ -20,6 +20,29 @@ DB="${1:?db path (use a .backup snapshot, not the live file)}"
 START="${2:?start RFC3339 UTC, e.g. 2026-07-04T00:00:00Z}"
 END="${3:?end RFC3339 UTC, e.g. 2026-07-11T00:00:00Z}"
 
+# Whole-second RFC3339 UTC only (no fractional seconds or offsets): the values
+# are interpolated into single-quoted sqlite literals and compared lexically.
+RFC3339_UTC_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$'
+if [[ ! "$START" =~ $RFC3339_UTC_RE ]] || [[ ! "$END" =~ $RFC3339_UTC_RE ]]; then
+  echo "h1-undercredit-probe: START and END must be whole-second RFC3339 UTC like 2026-07-04T00:00:00Z" >&2
+  exit 2
+fi
+
+# SQLite normalizes impossible dates (2026-02-30 -> 2026-03-02) or returns
+# NULL, so a round-trip mismatch means the value is not a real UTC instant.
+for ts in "$START" "$END"; do
+  canonical="$(sqlite3 :memory: "SELECT strftime('%Y-%m-%dT%H:%M:%SZ', '$ts');")"
+  if [[ "$canonical" != "$ts" ]]; then
+    echo "h1-undercredit-probe: not a valid calendar timestamp: $ts" >&2
+    exit 2
+  fi
+done
+# Fixed-width format, so lexical order is chronological order.
+if [[ ! "$START" < "$END" ]]; then
+  echo "h1-undercredit-probe: START must be earlier than END" >&2
+  exit 2
+fi
+
 sqlite3 -readonly -box "file:${DB}?mode=ro" <<SQL
 -- Read-only is enforced by \`-readonly\` + \`?mode=ro\` on the main (snapshot) DB above.
 -- Do NOT add \`PRAGMA query_only = ON;\` here: it also blocks the temp DB, so the

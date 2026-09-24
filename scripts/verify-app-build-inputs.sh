@@ -6,19 +6,38 @@ die() {
   exit 1
 }
 
-[[ "$#" == 1 && "$1" =~ ^[0-9a-f]{40}$ ]] || die "usage: REVIEWED_COMMIT"
+[[ ( "$#" == 1 || "$#" == 2 ) && "$1" =~ ^[0-9a-f]{40}$ ]] ||
+  die "usage: REVIEWED_COMMIT [CHECKOUT_ROOT]"
 commit="$1"
-repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+# An explicit checkout root lets a trusted (main-owned) copy of this verifier
+# check an untrusted candidate checkout without executing candidate code.
+if [[ "$#" == 2 ]]; then
+  checkout_root="$2"
+  # Strip trailing slashes first: `-L link/` tests the target, not the link.
+  while [[ "$checkout_root" == */ && "$checkout_root" != / ]]; do
+    checkout_root="${checkout_root%/}"
+  done
+  [[ -d "$checkout_root" && ! -L "$checkout_root" ]] ||
+    die "checkout root is not a directory: $2"
+  repo_root="$(cd "$checkout_root" && pwd -P)"
+else
+  repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+fi
 paths=(
   phase3-binary/Package.resolved
   phase3-binary/app/project.yml
 )
 
+reviewed_copy="$(mktemp "${TMPDIR:-/tmp}/verify-app-build-inputs.XXXXXX")"
+trap 'rm -f "$reviewed_copy"' EXIT
+
 for relative in "${paths[@]}"; do
   path="$repo_root/$relative"
   [[ -f "$path" && ! -L "$path" ]] || die "reviewed build input is not a regular file: $relative"
   git -C "$repo_root" cat-file -e "$commit:$relative" || die "reviewed commit omits $relative"
-  git -C "$repo_root" show "$commit:$relative" | cmp -s - "$path" ||
+  git -C "$repo_root" show "$commit:$relative" >"$reviewed_copy" ||
+    die "cannot read $relative from reviewed commit"
+  cmp -s "$reviewed_copy" "$path" ||
     die "working-tree bytes differ from reviewed commit: $relative"
 done
 
