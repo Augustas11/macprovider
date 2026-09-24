@@ -1,8 +1,17 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.4 (2026-09-21, keyed first-turn may enter continuous batching)
+**Version:** 0.2.5 (2026-09-24, hybrid recurrent-state checkpoint reuse)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.8 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.30 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+
+**Change log v0.2.5 (2026-09-24, hybrid recurrent-state checkpoint reuse):**
+- **FR-CI2 hybrid models.** Recurrent layers (`ArraysCache`/`MambaCache`, e.g.
+  Qwen3.6 linear attention) cannot be trimmed, so a keyed hybrid conversation
+  missed every turn with `cache_not_trimmable`. Keyed serial serve now snapshots
+  recurrent state at up to two ChatML checkpoints (scaffold end, last turn start).
+  A later turn reuses the largest checkpoint within the common prefix and reports
+  that checkpoint length as `cached_prompt_tokens`. Hot tier only (SPEC-037
+  v0.1.4). Continuous-batching admission is unchanged.
 
 **Change log v0.2.4 (2026-09-21, keyed first-turn continuous batching):**
 - Conversation-keyed **first-turn / cache-miss** requests MAY enter the
@@ -335,7 +344,14 @@ memory-capped `RotatingKVCache` (`maxKVSize = maxContextTokens`) and allocate `K
 for full-attention models so this trim guard can succeed after the serve cap would have
 filled. Keyless traffic keeps the rotating cap. Genuine sliding-window models that remain
 `RotatingKVCache` with `maxKVSize = nil` MUST miss even while `isTrimmable` is temporarily
-true (`offset < maxSize`). Because reused KV corresponds to *identical
+true (`offset < maxSize`). **(v0.2.5):** non-trimmable recurrent layers MUST be reused only from
+a recurrent-state checkpoint taken while prefilling a stable history prefix. For ChatML that is
+the token before the first `<|im_start|>` opening a `user` turn (end of the system/tools
+scaffold) and before the last `<|im_start|>`; at most two checkpoints per entry, each ≥ the LCP
+minimum. A hit restores the largest checkpoint `C ≤ LCP`, trims every attention layer to exactly
+`C` tokens, and reports `C` as the reused length (so `cached_prompt_tokens = C`). When LCP
+reaches no checkpoint the request is a **miss** (`recurrent_checkpoint_diverged`); a hybrid
+entry without checkpoints stays a `cache_not_trimmable` miss. Because reused KV corresponds to *identical
 tokens*, reuse preserves **model semantics conditional on identical sampler/RNG state** — the
 per-position logits/KV are equivalent to a cold prefill. It does **not** guarantee
 bit-for-bit identical *sampled output*: the shipped default is stochastic sampling

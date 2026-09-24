@@ -4712,7 +4712,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         do {
                             let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
                             let kvCache: [KVCache]
-                            let iteratorInput: LMInput
+                            var iteratorInput: LMInput
                             if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
                                 kvCache = reusableCache.layers
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
@@ -4728,6 +4728,12 @@ actor ModelRuntime: ModelRuntimeServing {
                                         eligible: coldContext?.eligible == true,
                                         conversationKey: request.conversationKey))
                                 iteratorInput = lmInput
+                            }
+                            let recurrent = Self.prefillRecurrentCheckpoints(
+                                lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
+                                context: generationContext, prefillStepSize: parameters.prefillStepSize)
+                            if let resumeAt = recurrent.resumeAt {
+                                iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                             }
 
                             let iterator = try TokenIterator(input: iteratorInput, model: generationContext.model, cache: kvCache, parameters: parameters)
@@ -4838,7 +4844,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             settlementDisposition: .eligibleOwner
                         ), request: request)
                         if let lease {
-                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
+                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache, recurrentCheckpoints: recurrent.checkpoints), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
                         }
                         return completion
                     } catch {
@@ -5320,7 +5326,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         cold: coldContext
                     )
                     let kvCache: [KVCache]
-                    let iteratorInput: LMInput
+                    var iteratorInput: LMInput
                     if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
                         kvCache = reusableCache.layers
                         iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
@@ -5333,6 +5339,12 @@ actor ModelRuntime: ModelRuntimeServing {
                                 eligible: coldContext?.eligible == true,
                                 conversationKey: request.conversationKey))
                         iteratorInput = lmInput
+                    }
+                    let recurrent = Self.prefillRecurrentCheckpoints(
+                        lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
+                        context: generationContext, prefillStepSize: parameters.prefillStepSize)
+                    if let resumeAt = recurrent.resumeAt {
+                        iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                     }
 
                     var emittedText = ""
@@ -5579,7 +5591,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             buyerVisibleContent: structuredAccumulator.content
                         )
                         if let lease {
-                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
+                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache, recurrentCheckpoints: recurrent.checkpoints), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
                         }
                         return validated
                     } catch {
@@ -6415,6 +6427,59 @@ actor ModelRuntime: ModelRuntimeServing {
             return (String(stripped[..<earliestStop]), true)
         }
         return (stripped, false)
+    }
+
+    /// SPEC-024 FR-CI2 hybrid reuse. For a keyed serial request on a model with
+    /// recurrent layers, prefill `cache` from the tokens it already holds up to each
+    /// recurrent checkpoint position (`ConversationCache.recurrentCheckpointPositions`)
+    /// and snapshot the recurrent states there. Checkpoint positions the restored
+    /// cache is already past reuse the stored checkpoint at that exact length (still
+    /// a prefix of this prompt). `resumeAt` is the prompt index the TokenIterator
+    /// must continue from, or nil when nothing was prefilled here.
+    static func prefillRecurrentCheckpoints(
+        lease: ConversationCacheLease?,
+        cache: [KVCache],
+        promptTokenIds: [Int32],
+        context: ModelContext,
+        prefillStepSize: Int
+    ) -> (checkpoints: [RecurrentStateCheckpoint], resumeAt: Int?) {
+        guard let lease else { return ([], nil) }
+        let positions = ConversationCache.recurrentCheckpointPositions(
+            promptTokenIds: promptTokenIds,
+            imStartTokenID: context.tokenizer.convertTokenToId("<|im_start|>").map(Int32.init),
+            hybrid: ConversationCacheLayers.hasRecurrentLayers(cache),
+            decode: { context.tokenizer.decode(tokenIds: $0) })
+        guard !positions.isEmpty else { return ([], nil) }
+        let cachedTokens = lease.reusableCache == nil ? 0 : lease.lcp
+        let reusable = lease.reusableCache?.recurrentCheckpoints ?? []
+        var cursor = cachedTokens
+        var checkpoints: [RecurrentStateCheckpoint] = []
+        for position in positions {
+            if position < cursor {
+                if let stored = reusable.first(where: { $0.tokenCount == position }) {
+                    checkpoints.append(stored)
+                }
+                continue
+            }
+            var start = cursor
+            while start < position {
+                let end = min(start + max(1, prefillStepSize), position)
+                let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[start..<end])))
+                _ = context.model(chunk[text: .newAxis], cache: cache, state: nil)
+                asyncEval(cache)
+                start = end
+            }
+            eval(cache)
+            cursor = position
+            var states: [Int: [MLXArray]] = [:]
+            for (index, layer) in cache.enumerated() where layer is ArraysCache {
+                let state = layer.state
+                guard !state.isEmpty else { return (checkpoints, cursor > cachedTokens ? cursor : nil) }
+                states[index] = state
+            }
+            checkpoints.append(RecurrentStateCheckpoint(tokenCount: position, states: states))
+        }
+        return (checkpoints, cursor > cachedTokens ? cursor : nil)
     }
 
     static func cachedPromptUTF8Bytes(

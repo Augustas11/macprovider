@@ -1,4 +1,5 @@
 import Foundation
+import MLX
 import MLXLMCommon
 @testable import MacProviderCore
 @testable import macprovider_cli
@@ -689,6 +690,153 @@ final class ConversationCacheTests: XCTestCase {
         } catch {
             XCTFail("unexpected retained sequence error: \(error)", file: file, line: line)
         }
+    }
+
+    // MARK: - Hybrid (recurrent) checkpoint reuse
+
+    private static let imStart: Int32 = 7
+    private static let vocabulary: [Int: String] = [100: "system", 101: "user", 102: "assistant", 103: "us", 104: "er", 10: "\n"]
+
+    private func decodeFake(_ ids: [Int]) -> String {
+        ids.map { Self.vocabulary[$0] ?? "x" }.joined()
+    }
+
+    private func turn(_ role: Int32, filler: Int) -> [Int32] {
+        [Self.imStart, role, 10] + Array(repeating: Int32(1), count: filler)
+    }
+
+    func testRecurrentCheckpointPositionsPickScaffoldEndAndLastTurnStart() {
+        // system(40) | user(20) | assistant(10) | user(5) | assistant header
+        let prompt = turn(100, filler: 40) + turn(101, filler: 20) + turn(102, filler: 10) + turn(101, filler: 5) + [Self.imStart, 102, 10]
+        let positions = ConversationCache.recurrentCheckpointPositions(
+            promptTokenIds: prompt, imStartTokenID: Self.imStart, hybrid: true, decode: decodeFake)
+        XCTAssertEqual(positions, [43, 87])
+        XCTAssertEqual(prompt[43], Self.imStart)
+        XCTAssertEqual(prompt[87], Self.imStart)
+    }
+
+    func testRecurrentCheckpointPositionsDetectUserRoleAcrossTokenSplits() {
+        let prompt = turn(100, filler: 40) + [Self.imStart, 103, 104, 10] + Array(repeating: Int32(1), count: 5) + [Self.imStart, 102, 10]
+        let positions = ConversationCache.recurrentCheckpointPositions(
+            promptTokenIds: prompt, imStartTokenID: Self.imStart, hybrid: true, decode: decodeFake)
+        XCTAssertEqual(positions, [43, 52])
+    }
+
+    func testRecurrentCheckpointPositionsEmptyWhenInapplicable() {
+        let prompt = turn(100, filler: 40) + turn(101, filler: 20) + [Self.imStart, 102, 10]
+        XCTAssertEqual(ConversationCache.recurrentCheckpointPositions(
+            promptTokenIds: prompt, imStartTokenID: Self.imStart, hybrid: false, decode: decodeFake), [], "non-hybrid")
+        XCTAssertEqual(ConversationCache.recurrentCheckpointPositions(
+            promptTokenIds: prompt, imStartTokenID: nil, hybrid: true, decode: decodeFake), [], "no <|im_start|> id")
+        XCTAssertEqual(ConversationCache.recurrentCheckpointPositions(
+            promptTokenIds: Array(repeating: 1, count: 80), imStartTokenID: Self.imStart, hybrid: true, decode: decodeFake), [], "absent")
+        let short = turn(100, filler: 5) + turn(101, filler: 5) + [Self.imStart, 102, 10]
+        XCTAssertEqual(ConversationCache.recurrentCheckpointPositions(
+            promptTokenIds: short, imStartTokenID: Self.imStart, hybrid: true, decode: decodeFake), [], "below lcpThreshold")
+        // First user turn IS the last marker (no generation header): one checkpoint.
+        let single = turn(100, filler: 40) + turn(101, filler: 5)
+        XCTAssertEqual(ConversationCache.recurrentCheckpointPositions(
+            promptTokenIds: single, imStartTokenID: Self.imStart, hybrid: true, decode: decodeFake), [43])
+    }
+
+    func testSelectRecurrentCheckpointTakesLargestWithinCommonPrefix() {
+        let checkpoints = [40, 70].map { RecurrentStateCheckpoint(tokenCount: $0, states: [:]) }
+        XCTAssertEqual(ConversationCache.selectRecurrentCheckpoint(checkpoints, lcp: 75)?.tokenCount, 70, "full-history match")
+        XCTAssertEqual(ConversationCache.selectRecurrentCheckpoint(checkpoints, lcp: 70)?.tokenCount, 70)
+        XCTAssertEqual(ConversationCache.selectRecurrentCheckpoint(checkpoints, lcp: 69)?.tokenCount, 40, "scaffold-only match")
+        XCTAssertNil(ConversationCache.selectRecurrentCheckpoint(checkpoints, lcp: 39))
+        XCTAssertNil(ConversationCache.selectRecurrentCheckpoint(
+            [RecurrentStateCheckpoint(tokenCount: 20, states: [:])], lcp: 64), "below lcpThreshold")
+    }
+
+    private func seedHybridEntry(
+        _ cache: ConversationCache, key: String, tokens: [Int32], checkpoints: [Int]
+    ) async -> (attention: KVCacheSimple, recurrent: MambaCache) {
+        let seed = await cache.begin(conversationKey: key, incomingTokens: tokens, modelID: "hybrid", kvBits: nil)
+        let attention = trimmableCache(offset: tokens.count)
+        let recurrent = MambaCache()
+        let stored = checkpoints.map { RecurrentStateCheckpoint(tokenCount: $0, states: [1: []]) }
+        await cache.commit(seed!, cache: ConversationCacheLayers([attention, recurrent], recurrentCheckpoints: stored), fullTokens: tokens)
+        return (attention, recurrent)
+    }
+
+    func testHybridEntryHitsFullHistoryCheckpoint() async {
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let stored = int32Range(0..<90)
+        let layers = await seedHybridEntry(cache, key: "conv:hybrid", tokens: stored, checkpoints: [40, 70])
+
+        let incoming = int32Range(0..<75) + int32Range(500..<520)
+        let hit = await cache.begin(conversationKey: "conv:hybrid", incomingTokens: incoming, modelID: "hybrid", kvBits: nil)
+        XCTAssertEqual(hit?.cachedPromptTokens, 70)
+        XCTAssertEqual(hit?.lcp, 70)
+        XCTAssertEqual(hit?.trimBy, 20)
+        XCTAssertEqual(layers.attention.offset, 70, "attention layers trimmed to the checkpoint")
+        XCTAssertEqual(hit?.reusableCanonicalPromptTokens, int32Range(0..<70))
+        XCTAssertEqual(hit?.reusableCache?.recurrentCheckpoints.map(\.tokenCount), [40, 70])
+        await cache.abort(hit!)
+    }
+
+    func testHybridEntryScaffoldOnlyMatchHitsFirstCheckpoint() async {
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let stored = int32Range(0..<90)
+        let layers = await seedHybridEntry(cache, key: "conv:hybrid", tokens: stored, checkpoints: [40, 70])
+
+        let incoming = int32Range(0..<50) + int32Range(500..<540)
+        let hit = await cache.begin(conversationKey: "conv:hybrid", incomingTokens: incoming, modelID: "hybrid", kvBits: nil)
+        XCTAssertEqual(hit?.cachedPromptTokens, 40)
+        XCTAssertEqual(hit?.lcp, 40)
+        XCTAssertEqual(layers.attention.offset, 40)
+        await cache.abort(hit!)
+    }
+
+    func testHybridEntryMissesWhenPrefixStopsBeforeEveryCheckpoint() async {
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let stored = int32Range(0..<90)
+        let layers = await seedHybridEntry(cache, key: "conv:hybrid", tokens: stored, checkpoints: [40, 70])
+
+        let incoming = int32Range(0..<36) + int32Range(500..<540)
+        let miss = await cache.begin(conversationKey: "conv:hybrid", incomingTokens: incoming, modelID: "hybrid", kvBits: nil)
+        XCTAssertEqual(miss?.cachedPromptTokens, 0)
+        XCTAssertNil(miss?.reusableCache, "recurrent_checkpoint_diverged is a miss")
+        XCTAssertEqual(layers.attention.offset, 90, "a miss trims nothing")
+        await cache.abort(miss!)
+    }
+
+    func testHybridEntryWithoutCheckpointStaysNotTrimmable() async {
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let stored = int32Range(0..<90)
+        _ = await seedHybridEntry(cache, key: "conv:hybrid", tokens: stored, checkpoints: [])
+
+        let miss = await cache.begin(conversationKey: "conv:hybrid", incomingTokens: stored + [999], modelID: "hybrid", kvBits: nil)
+        XCTAssertEqual(miss?.cachedPromptTokens, 0)
+        XCTAssertNil(miss?.reusableCache)
+        await cache.abort(miss!)
+    }
+
+    func testHybridCheckpointHitRestoresRecurrentState() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let stored = int32Range(0..<90)
+        let seed = await cache.begin(conversationKey: "conv:hybrid", incomingTokens: stored, modelID: "hybrid", kvBits: nil)
+        let attention = trimmableCache(offset: stored.count)
+        let recurrent = MambaCache()
+        recurrent.state = [MLXArray([Float(9)]), MLXArray([Float(9)])]
+        let checkpointState = [MLXArray([Float(1)]), MLXArray([Float(2)])]
+        await cache.commit(
+            seed!,
+            cache: ConversationCacheLayers([attention, recurrent], recurrentCheckpoints: [
+                RecurrentStateCheckpoint(tokenCount: 70, states: [1: checkpointState]),
+            ]),
+            fullTokens: stored)
+
+        let hit = await cache.begin(conversationKey: "conv:hybrid", incomingTokens: int32Range(0..<80) + [999], modelID: "hybrid", kvBits: nil)
+        XCTAssertEqual(hit?.cachedPromptTokens, 70)
+        XCTAssertEqual(recurrent.state.count, 2)
+        XCTAssertTrue(recurrent.state[0] === checkpointState[0])
+        XCTAssertTrue(recurrent.state[1] === checkpointState[1])
+        await cache.abort(hit!)
     }
 
     private func trimmableCache(offset: Int) -> KVCacheSimple {
