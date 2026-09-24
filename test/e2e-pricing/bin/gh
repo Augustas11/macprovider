@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# E2E GitHub-release shim (tier E2). deploy-pearl-vps.sh preflights the tag's
+# Pearl runtime release assets with `gh release view/download`; in tier E2 those
+# assets live in $E2E_WORK/gh-releases/<tag>/ (lib/make-gh-release.sh, signed
+# with the TEST release key). Only those two read-only verbs exist here.
+set -euo pipefail
+: "${E2E_WORK:?}"
+[ "${1:-}" = release ] || { echo "gh shim: only 'gh release view|download' exist in tier E2: $*" >&2; exit 1; }
+verb="${2:-}"; tag="${3:-}"; shift 3 || true
+dir="$E2E_WORK/gh-releases/$tag"
+[ -d "$dir" ] || { echo "release not found" >&2; exit 1; }
+case "$verb" in
+  view)
+    python3 - "$dir" "$tag" <<'PY'
+import json, os, sys
+d, tag = sys.argv[1:]
+print(json.dumps({"tagName": tag, "isDraft": False, "isPrerelease": False,
+                  "assets": [{"name": n} for n in sorted(os.listdir(d))]}))
+PY
+    ;;
+  download)
+    out=""; pats=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --dir) out="$2"; shift 2 ;;
+        --pattern) pats+=("$2"); shift 2 ;;
+        --repo) shift 2 ;;
+        --clobber) shift ;;
+        *) echo "gh shim: unsupported download arg $1" >&2; exit 1 ;;
+      esac
+    done
+    mkdir -p "$out"
+    for p in "${pats[@]}"; do
+      found=0
+      for f in "$dir"/$p; do [ -f "$f" ] && { cp "$f" "$out/"; found=1; }; done
+      [ "$found" = 1 ] || { echo "no assets match $p" >&2; exit 1; }
+    done ;;
+  *) echo "gh shim: unsupported: release $verb" >&2; exit 1 ;;
+esac
