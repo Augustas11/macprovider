@@ -13,6 +13,12 @@ fail() {
 }
 
 bash -n "$guard"
+# Operator deploys run this guard under macOS /bin/bash 3.2. A process
+# substitution is parsed before its quoted heredoc, so a Python set
+# comprehension inside <() dies before any asset is staged.
+if grep -n 'done < <(' "$guard"; then
+  fail "verify-pearl-runtime-release.sh uses process substitution; operator Mac bash 3.2 rejects a heredoc inside <()"
+fi
 python3 - "$runtime_workflow" <<'PY'
 import pathlib
 import sys

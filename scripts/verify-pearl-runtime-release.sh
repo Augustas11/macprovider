@@ -392,10 +392,9 @@ gh release download "$tag" --repo "$repository" --dir "$work/assets" \
 
 # The stats sidecars are bound all-or-none by pearl-release.json; fetch any the
 # release publishes so the local validator can check the binding both ways.
-sidecar_patterns=()
-while IFS= read -r sidecar_asset; do
-  [[ -n "$sidecar_asset" ]] && sidecar_patterns+=(--pattern "$sidecar_asset")
-done < <(
+# bash 3.2 (the operator Mac) parses <() before a quoted heredoc, so a Python
+# set comprehension there is a bad substitution. Command substitution is safe.
+sidecar_assets_present="$(
   PEARL_RELEASE_VIEW="$work/release.json" \
   PEARL_RELEASE_SIDECAR_ASSETS="$(printf '%s\n' "${stats_sidecar_assets[@]}")" \
     python3 - <<'PY'
@@ -408,7 +407,13 @@ for asset in os.environ["PEARL_RELEASE_SIDECAR_ASSETS"].splitlines():
     if asset in names:
         print(asset)
 PY
-)
+)"
+sidecar_patterns=()
+while IFS= read -r sidecar_asset; do
+  [[ -n "$sidecar_asset" ]] && sidecar_patterns+=(--pattern "$sidecar_asset")
+done <<EOF
+${sidecar_assets_present}
+EOF
 if [[ "${#sidecar_patterns[@]}" -gt 0 ]]; then
   gh release download "$tag" --repo "$repository" --dir "$work/assets" \
     "${sidecar_patterns[@]}" --clobber >/dev/null
