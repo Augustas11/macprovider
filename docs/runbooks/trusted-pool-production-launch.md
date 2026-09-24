@@ -219,7 +219,16 @@ SPEC-022-R012 (R-12.8) is normative; this is the operator sequence.
 
 Rollout, in this order:
 
-0. Drain ledger recovery on the OLD coordinator immediately before step 1:
+0. Deploy the gateway first: gateway schema v14 accepts `pool_operator_attested`
+   finality and reads the settlement outcome of non-streaming responses from
+   declared HTTP trailers (delivered-only billing records success only after
+   the buyer write, so the outcome can no longer ride on the response headers).
+   Against the still-old coordinator, which sends no trailers, the new gateway
+   holds those settlements as `missing_settlement_finality_trailer` until the
+   reconciler resolves them from coordinator finality. Keep the gap between
+   this step and step 2 short. An older gateway refuses a v14 database, so a
+   gateway rollback restores the pre-deploy snapshot.
+1. Drain ledger recovery on the OLD coordinator immediately before step 2:
    let the startup/nightly ledger recovery run to completion (or trigger it)
    and confirm no request is missing its ledger row. Provider identity rows
    written before this release carry no recorded `runtime_source`, so the new
@@ -228,12 +237,10 @@ Rollout, in this order:
    `loopback_runtime_not_settlement_eligible`. A native row caught this way is
    released with `force_credit` after review. Draining first keeps that window
    empty.
-1. Pause every pool, deploy the coordinator that implements SPEC-022 v0.2.0
-   (the `pool_operator_attested` usage source), confirm `/healthz` reports it
-   and the updater transaction committed, then resume the pools.
-2. Deploy the gateway that accepts `pool_operator_attested` finality
-   (gateway schema v14). An older gateway refuses a v14 database, so a gateway
-   rollback restores the pre-deploy snapshot.
+2. Pause every pool, deploy the coordinator that implements SPEC-022 v0.2.2
+   (the `pool_operator_attested` usage source, delivered-only billing and
+   settlement trailers), confirm `/healthz` reports it and the updater
+   transaction committed, then resume the pools.
 3. Ship the provider CLI that signs pool-authorized loopback receipts
    (SPEC-015 0.4.10).
 4. Only then accept a v2 policy core with a non-empty `runtime_allowlist`.
