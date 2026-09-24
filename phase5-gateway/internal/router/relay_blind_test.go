@@ -74,6 +74,7 @@ func TestRelayBlindModelsDisclosureEnabledUnavailable(t *testing.T) {
 	if bytes.Contains(resp.Body.Bytes(), []byte("capable_provider_count")) || bytes.Contains(resp.Body.Bytes(), []byte("incapable_provider_count")) {
 		t.Fatalf("relay-blind disclosure must omit unknown provider counts without fresh evidence: %s", resp.Body.String())
 	}
+	assertPreservedRelayBlindVersionToken(t, resp.Body.String(), disclosure.Version)
 }
 
 func TestRelayBlindRouteReservationFailsClosedNoStoreNoQuota(t *testing.T) {

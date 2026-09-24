@@ -114,19 +114,29 @@ func TestTier1DisclosureMatchesSpecSection16(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read spec: %v", err)
 	}
-	spec := normalizeDisclosureText(string(raw))
+	section := specSection(string(raw), "### 1.6 ")
+	if section == "" {
+		t.Fatal("SPEC-006 section 1.6 missing")
+	}
+	normalizedSection := normalizeDisclosureText(section)
 	for _, item := range tier1DisclosureText {
-		if !strings.Contains(spec, normalizeDisclosureText(item.Text)) {
+		if !strings.Contains(normalizedSection, normalizeDisclosureText(item.Text)) {
 			t.Fatalf("%s disclosure drifted from SPEC-006 section 1.6", item.Key)
 		}
 	}
 
-	rendered := renderAccountForDisclosureTest(t)
+	renderedRaw := renderAccountForDisclosureTest(t)
+	rendered := accountVisibleText(renderedRaw)
 	for _, item := range tier1DisclosureText {
 		if !strings.Contains(normalizeDisclosureText(rendered), normalizeDisclosureText(item.Text)) {
 			t.Fatalf("%s disclosure missing from rendered account page", item.Key)
 		}
 	}
+	panel := accountDisclosureText(renderedRaw)
+	if panel == "" {
+		t.Fatal("account disclosure panel missing")
+	}
+	assertBuyerDisclosureHasNoInternalIdentifiers(t, panel)
 
 	docsRaw, err := pageFS.ReadFile("templates/docs.md")
 	if err != nil {
@@ -164,7 +174,35 @@ func TestTier1DisclosureMatchesSpecSection16(t *testing.T) {
 		if strings.Contains(normalized, "Transparent streaming failover bills") {
 			t.Fatalf("%s surface contains stale transparent streaming failover claim", surface.name)
 		}
+		assertBuyerDisclosureHasNoInternalIdentifiers(t, stripFencedCode(buyerDisclosureSurfaceText(surface.name, surface.text)))
 	}
+	var disclosureProse strings.Builder
+	for _, item := range tier1DisclosureText {
+		disclosureProse.WriteString(item.Text)
+		disclosureProse.WriteByte('\n')
+	}
+	assertBuyerDisclosureHasNoInternalIdentifiers(t, disclosureProse.String())
+}
+
+var fencedCodePattern = regexp.MustCompile("(?s)```.*?```")
+
+func stripFencedCode(text string) string {
+	return fencedCodePattern.ReplaceAllString(text, "")
+}
+
+func buyerDisclosureSurfaceText(name, text string) string {
+	if name != "console" {
+		return text
+	}
+	start := strings.Index(text, `aria-label="Tier 1 disclosure"`)
+	if start < 0 {
+		return text
+	}
+	end := strings.Index(text[start:], `</section>`)
+	if end < 0 {
+		return text
+	}
+	return text[start : start+end]
 }
 
 func TestProviderPartnerDocsIncludeLateReceiptDeadlineDisclosure(t *testing.T) {
@@ -235,9 +273,47 @@ func renderAccountForDisclosureTest(t *testing.T) string {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("account status=%d body=%s", resp.Code, resp.Body.String())
 	}
+	return resp.Body.String()
+}
+
+func accountVisibleText(raw string) string {
 	re := regexp.MustCompile(`<[^>]+>`)
-	text := re.ReplaceAllString(resp.Body.String(), "")
-	return html.UnescapeString(text)
+	return html.UnescapeString(re.ReplaceAllString(raw, ""))
+}
+
+func accountDisclosureText(raw string) string {
+	var b strings.Builder
+	rest := raw
+	for {
+		start := strings.Index(rest, `<ol class="disclosure">`)
+		if start < 0 {
+			break
+		}
+		rest = rest[start:]
+		end := strings.Index(rest, `</ol>`)
+		if end < 0 {
+			break
+		}
+		b.WriteString(rest[:end])
+		rest = rest[end+5:]
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return accountVisibleText(b.String())
+}
+
+func specSection(spec, heading string) string {
+	start := strings.Index(spec, heading)
+	if start < 0 {
+		return ""
+	}
+	rest := spec[start+len(heading):]
+	next := strings.Index(rest, "\n### ")
+	if next < 0 {
+		return spec[start:]
+	}
+	return spec[start : start+len(heading)+next]
 }
 
 func normalizeDisclosureText(text string) string {

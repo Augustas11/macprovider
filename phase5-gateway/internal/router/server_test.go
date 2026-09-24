@@ -333,12 +333,12 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 	if !reflect.DeepEqual(settlement.IncludedPaidEntrypoints, []string{"POST /v1/chat/completions"}) {
 		t.Fatalf("included paid entrypoints=%v", settlement.IncludedPaidEntrypoints)
 	}
-	if len(settlement.ExcludedPaidEntrypoints) == 0 ||
-		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "coordinator.malibu.tech") ||
-		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "m4.malibu.tech") ||
-		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "m1.malibu.tech") {
-		t.Fatalf("excluded paid entrypoints must name legacy/direct paths: %+v", settlement.ExcludedPaidEntrypoints)
+	if len(settlement.ExcludedPaidEntrypoints) != 1 ||
+		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "legacy direct provider tunnels and the coordinator buyer listener that bypass the gateway paid ledger") ||
+		!strings.Contains(settlement.ExcludedPaidEntrypoints[0], "unless those paths are separately disabled or migrated behind the gateway paid ledger") {
+		t.Fatalf("excluded paid entrypoints must describe legacy direct tunnels without naming hosts: %+v", settlement.ExcludedPaidEntrypoints)
 	}
+	assertBuyerDisclosureHasNoInternalIdentifiers(t, resp.Body.String())
 	for _, got := range []string{
 		settlement.ModelIdentity,
 		settlement.ModelIdentityCaveat,
@@ -360,9 +360,9 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 	if !strings.Contains(settlement.ModelIdentityCaveat, "provider-reported request-start model hash") ||
 		!strings.Contains(settlement.ModelIdentityCaveat, "does not provide hardware attestation") ||
 		settlement.SettlementIntegrity.SchemaVersion != "buyer_settlement_integrity_disclosure_v1" ||
-		!strings.Contains(settlement.SettlementIntegrity.ReceiptBinding, "SPEC-022 enforce mode") ||
+		!strings.Contains(settlement.SettlementIntegrity.ReceiptBinding, "verified-model settlement is in enforce mode") ||
 		!strings.Contains(settlement.SettlementIntegrity.ReceiptBinding, "disclosure-only") ||
-		!strings.Contains(settlement.SettlementIntegrity.ComputeIntegrity, "SPEC-036 compute integrity") ||
+		!strings.Contains(settlement.SettlementIntegrity.ComputeIntegrity, "Compute integrity is a sampled, overt distribution-drift gate") ||
 		!strings.Contains(settlement.SettlementIntegrity.ComputeIntegrity, "buyer-visible compute-integrity settlement effect remains unavailable") ||
 		!strings.Contains(settlement.SettlementIntegrity.ClaimLimit, "proof of honest computation") ||
 		!strings.Contains(settlement.ObserveMode, "cannot claim verified model integrity") ||
@@ -611,7 +611,7 @@ func TestUsageIncludesSPEC022SettlementDisclosure(t *testing.T) {
 	if !strings.Contains(disclosure.PendingReservation, "quota or balance can remain reserved") ||
 		!strings.Contains(disclosure.PendingReservation, "Non-verified terminal outcomes release or refund") ||
 		disclosure.SettlementIntegrity.SchemaVersion != "buyer_settlement_integrity_disclosure_v1" ||
-		!strings.Contains(disclosure.SettlementIntegrity.ReceiptBinding, "SPEC-022 enforce mode") ||
+		!strings.Contains(disclosure.SettlementIntegrity.ReceiptBinding, "verified-model settlement is in enforce mode") ||
 		!strings.Contains(disclosure.SettlementIntegrity.ComputeIntegrity, "buyer-visible compute-integrity settlement effect remains unavailable") ||
 		!strings.Contains(disclosure.SettlementIntegrity.ClaimLimit, "malicious-provider resistance") ||
 		!strings.Contains(disclosure.Outcomes.Pending, "not final usage") ||
@@ -631,6 +631,66 @@ func TestUsageIncludesSPEC022SettlementDisclosure(t *testing.T) {
 	if strings.Contains(disclosure.StreamingFailover, "Transparent streaming failover bills") {
 		t.Fatalf("usage settlement disclosure overclaims post-commit transparent failover: %q", disclosure.StreamingFailover)
 	}
+	assertBuyerDisclosureHasNoInternalIdentifiers(t, resp.Body.String())
+}
+
+var buyerDisclosureHostPattern = regexp.MustCompile(`(?i)\b(?:[a-z0-9-]+\.)+(?:tech|com|net|org|live|local|internal|io)\b`)
+var buyerDisclosureSpecIDPattern = regexp.MustCompile(`(?i)\bspec-\d+`)
+
+func assertBuyerDisclosureHasNoInternalIdentifiers(t *testing.T, text string) {
+	t.Helper()
+	for _, host := range buyerDisclosureHostPattern.FindAllString(text, -1) {
+		if !strings.EqualFold(host, "api.malibu.tech") {
+			t.Fatalf("buyer disclosure contains hostname %q", host)
+		}
+	}
+	if id := buyerDisclosureSpecIDPattern.FindString(text); id != "" {
+		t.Fatalf("buyer disclosure contains spec document id %q", id)
+	}
+}
+
+const preservedRelayBlindVersionToken = "spec-041-v0.1"
+
+func assertPreservedRelayBlindVersionToken(t *testing.T, body, version string) {
+	t.Helper()
+	if version != preservedRelayBlindVersionToken {
+		t.Fatalf("relay-blind version=%q", version)
+	}
+	var payload any
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		t.Fatalf("relay-blind disclosure json: %v", err)
+	}
+	if !blankPreservedRelayBlindVersionFields(payload) {
+		t.Fatal("preserved relay-blind version field missing")
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("relay-blind disclosure json: %v", err)
+	}
+	assertBuyerDisclosureHasNoInternalIdentifiers(t, string(encoded))
+}
+
+func blankPreservedRelayBlindVersionFields(v any) bool {
+	found := false
+	switch node := v.(type) {
+	case map[string]any:
+		if token, ok := node["version"].(string); ok && token == preservedRelayBlindVersionToken {
+			node["version"] = ""
+			found = true
+		}
+		for _, child := range node {
+			if blankPreservedRelayBlindVersionFields(child) {
+				found = true
+			}
+		}
+	case []any:
+		for _, child := range node {
+			if blankPreservedRelayBlindVersionFields(child) {
+				found = true
+			}
+		}
+	}
+	return found
 }
 
 func TestModelsStickyDisclosureUsesCoordinatorRoutingMetadata(t *testing.T) {

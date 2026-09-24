@@ -266,6 +266,17 @@ func TestRelayBlindModelCapabilitiesAreFreshAndModelScoped(t *testing.T) {
 			if w.Code != 200 {
 				t.Fatalf("models status %d", w.Code)
 			}
+			var parsed struct {
+				Tier1Disclosure tier1Disclosure `json:"tier1_disclosure"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
+				t.Fatalf("models json: %v", err)
+			}
+			version := ""
+			if parsed.Tier1Disclosure.RelayBlindRequestEncryption != nil {
+				version = parsed.Tier1Disclosure.RelayBlindRequestEncryption.Version
+			}
+			assertPreservedRelayBlindVersionToken(t, w.Body.String(), version)
 			if strings.Contains(w.Body.String(), "hidden-model") {
 				t.Fatal("hidden model capability leaked")
 			}
