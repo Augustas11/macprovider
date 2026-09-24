@@ -750,6 +750,52 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
+    // Codex M4 step 2 R2 (MEDIUM): a cancel recorded during a retained install
+    // that then FAILS must still report `cancelled`, not `requestFailed`. Every
+    // pre-admission completion goes through `finishQueued`, which now lets a
+    // recorded cancel win.
+    func testCancelDuringFailingRetainedInstallReportsCancelled() async throws {
+        let gate = AsyncGate()
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let retained = try await makeRetainedSequence(allocator: allocator, conversationKey: "conv:hybrid")
+        let backend = ScriptedBackend(
+            scripts: ["sticky": [7]],
+            retainedInstallGates: ["sticky": gate],
+            retainedInstallErrors: [
+                "sticky": ContinuousBatchSchedulerError.unsupported("continuous_batching_retained_hybrid_cache_unavailable") as any Error,
+            ],
+            recurrentCheckpointBackend: true
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            backend: backend,
+            allocator: allocator,
+            contiguousCacheBridge: HeadlessRetainedCacheBridge()
+        )
+        let task = Task {
+            try await scheduler.submit(.init(
+                id: "sticky",
+                conversationKey: "conv:hybrid",
+                promptTokens: Array(0..<8),
+                maxOutputTokens: 1,
+                temperature: 0.0,
+                cachedPromptTokens: 6,
+                retainedPagedKVSequence: retained,
+                retainedRecurrentCheckpoints: [RecurrentStateCheckpoint(tokenCount: 6, states: [1: []])]
+            ))
+        }
+        try await eventually { await backend.retainedInstallAttempts()["sticky"] == 1 }
+        await scheduler.cancel(requestID: "sticky")
+        await gate.open()
+
+        let result = try await task.value
+        XCTAssertEqual(result.terminalStatus, .cancelled)
+        XCTAssertEqual(result.errorCode, "request_cancelled")
+        let prefillCalls = await backend.prefillCallCount()
+        XCTAssertEqual(prefillCalls, 0)
+        try await eventually { await allocator.freeBlockCount() == 16 }
+    }
+
     func testRetainedReattachExpandsMaxLogicalTokensForContinuation() async throws {
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
         let handle = try await allocator.allocate(

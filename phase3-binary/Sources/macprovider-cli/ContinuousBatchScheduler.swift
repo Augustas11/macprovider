@@ -2676,6 +2676,19 @@ actor ContinuousBatchScheduler {
         status: ContinuousBatchSchedulerTerminalStatus,
         errorCode: String?
     ) async {
+        // Every pre-admission completion funnels through here. A cancel recorded
+        // while the request was out of `waiting` (mid-admission, e.g. during a
+        // retained install) wins over the admission outcome: nothing ran for
+        // it, and `requestFailed`/`rejected` would contradict the caller's
+        // cancel. A cleanup failure stays visible as such.
+        var status = status
+        var errorCode = errorCode
+        if status != .cancelled,
+           errorCode != "continuous_batching_cleanup_failed",
+           cancelledIDs.remove(request.id) != nil {
+            status = .cancelled
+            errorCode = "request_cancelled"
+        }
         await discardUnacceptedRetainedCache(for: request)
         let result = ContinuousBatchSchedulerResult(
             requestID: request.id,
