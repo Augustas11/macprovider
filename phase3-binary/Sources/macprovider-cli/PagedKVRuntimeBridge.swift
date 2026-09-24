@@ -129,7 +129,6 @@ final class PagedKVRuntimeContiguousCacheBridge: PagedKVContiguousCacheBridge, P
         let handle: PagedKVBlockTableHandle
         var table: PagedKVBlockTable
         let caches: [PagedKVCache]
-        var physicalLayers: [PagedKVRuntimePhysicalLayerBlocks]
     }
 
     private let lock = NSLock()
@@ -139,16 +138,16 @@ final class PagedKVRuntimeContiguousCacheBridge: PagedKVContiguousCacheBridge, P
         let table = binding.currentTable
         try caches.forEach { cache in
             try Self.validateHandle(cache.binding.handle, matches: binding.handle)
-        }
-        let physicalLayers = try caches.enumerated().map { layerIndex, cache in
-            try cache.physicalLayerBlocks(layerIndex: layerIndex, table: table)
+            // Same offset/table/shape guards the eager host copy used to
+            // enforce, without the copy: that copy was ~40% of every batched
+            // decode window and only the FR-PKV10 materialize path reads it.
+            try cache.validateRecordable(table: table)
         }
         lock.lock()
         recordsByHandle[binding.handle.handleID] = Record(
             handle: binding.handle,
             table: table,
-            caches: caches,
-            physicalLayers: physicalLayers
+            caches: caches
         )
         lock.unlock()
     }
@@ -203,9 +202,6 @@ final class PagedKVRuntimeContiguousCacheBridge: PagedKVContiguousCacheBridge, P
         for cache in record.caches {
             try Self.validateRecordableCache(cache, expectedHandle: handle, table: table)
         }
-        record.physicalLayers = try record.caches.enumerated().map { layerIndex, cache in
-            try cache.physicalLayerBlocks(layerIndex: layerIndex, table: table)
-        }
         record.table = table
         lock.lock()
         if recordsByHandle[handle.handleID]?.version == record.version {
@@ -226,7 +222,15 @@ final class PagedKVRuntimeContiguousCacheBridge: PagedKVContiguousCacheBridge, P
         guard table == record.table else {
             throw PagedKVContiguousCacheBridgeError.blockTableMismatch
         }
-        let materializedLayers = try record.physicalLayers.sorted(by: { $0.layerIndex < $1.layerIndex }).map { layer in
+        // Built on demand from the recorded caches, which the record keeps
+        // bound to its handle exactly as `reattachPagedKVCache` relies on.
+        // `physicalLayerBlocks` re-checks offset == table, so a cache that
+        // moved past the recorded table fails closed instead of returning
+        // bytes for a different state.
+        let physicalLayers = try record.caches.enumerated().map { layerIndex, cache in
+            try cache.physicalLayerBlocks(layerIndex: layerIndex, table: table)
+        }
+        let materializedLayers = try physicalLayers.sorted(by: { $0.layerIndex < $1.layerIndex }).map { layer in
             guard layer.keyBlocks.count == table.physicalBlocks.count,
                   layer.valueBlocks.count == table.physicalBlocks.count
             else {
