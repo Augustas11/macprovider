@@ -1,0 +1,55 @@
+{
+ "case": "c5d",
+ "run": "07e584e8",
+ "result": {
+  "original": {
+   "rid": "ac25-07e584e8-c5d-orig",
+   "status": 200,
+   "stream": false,
+   "elapsed_s": 0.347,
+   "headers_present": [],
+   "retry_after_header": null,
+   "finish_reason": "length",
+   "content_len": 8,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 8
+   },
+   "response_id": "chatcmpl-db656e3849bb40209e29ae61fca59de4"
+  },
+  "filler_statuses": [
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200,
+   200
+  ],
+  "resend": {
+   "rid": "ac25-07e584e8-c5d-orig",
+   "status": 409,
+   "stream": false,
+   "elapsed_s": 0.001,
+   "headers_present": [],
+   "retry_after_header": null,
+   "error": {
+    "code": "continuous_batching_idempotency_window_expired",
+    "type": "invalid_request_error",
+    "retryable": false,
+    "inference_ran": false,
+    "settlement_ran": false
+   }
+  }
+ }
+}

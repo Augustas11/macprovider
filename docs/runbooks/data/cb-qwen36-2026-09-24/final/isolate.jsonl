@@ -1,0 +1,5 @@
+{"scenario": "equal_len_x4_same_prompt", "rows(prompt_tokens,exact)": [[24, true], [24, true], [24, true], [24, true]]}
+{"scenario": "ragged_x3", "rows(prompt_tokens,exact)": [[24, true], [22, true], [23, true]]}
+{"scenario": "ragged_x4_simultaneous", "rows(prompt_tokens,exact)": [[24, true], [22, true], [23, true], [25, true]]}
+{"scenario": "ragged_x4_staggered_0.5s", "rows(prompt_tokens,exact)": [[24, true], [22, true], [23, true], [25, true]]}
+{"scenario": "ragged_x2_long_short", "rows(prompt_tokens,exact)": [[22, true], [25, true]]}

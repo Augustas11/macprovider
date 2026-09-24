@@ -1,0 +1,36 @@
+{
+ "case": "c5a",
+ "run": "85437eb8",
+ "result": [
+  {
+   "rid": "ac25-85437eb8-c5a",
+   "status": 200,
+   "stream": false,
+   "elapsed_s": 0.938,
+   "headers_present": [],
+   "retry_after_header": null,
+   "finish_reason": "length",
+   "content_len": 64,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 64
+   },
+   "response_id": "chatcmpl-955cfdf3b216424894b5e2b852c324ce"
+  },
+  {
+   "rid": "ac25-85437eb8-c5a",
+   "status": 200,
+   "stream": false,
+   "elapsed_s": 0.878,
+   "headers_present": [],
+   "retry_after_header": null,
+   "finish_reason": "length",
+   "content_len": 64,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 64
+   },
+   "response_id": "chatcmpl-5b732730b496436a8b4d6b24b5a5decb"
+  }
+ ]
+}

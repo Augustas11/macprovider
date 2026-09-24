@@ -1,6 +1,6 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2.3
+Version: v0.2.5
 Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
@@ -12,6 +12,20 @@ clarifies the API-visible admission/replay/terminal contract, records
 decode-first scheduling as a conservative v0.2 choice rather than a claim of
 vLLM/SGLang-style unified-token scheduling, and tightens the real-serving
 evidence gate for retained paged-KV reuse.
+
+**Change log v0.2.5 (2026-09-24, runtime-revision-bound acceptance):** FR-CB10
+acceptance coverage now binds the runtime revision the evidence was measured
+on (Metal library SHA-256 and paged-KV kernel identifier) in addition to model,
+cache, KV dtype, MoE and hardware identity. A build with a different metallib
+or kernel does not inherit an earlier acceptance entry; it must be re-measured,
+including the SPEC-039 FR-PKV13 overhead ceiling, and re-accepted. This is how
+the FR-PKV13 ceiling is enforced for real traffic.
+
+**Change log v0.2.4 (2026-09-24, relay backpressure surface):** Names the
+existing client-visible surface for the queue-full and queue-wait-timeout rows
+on the coordinator-relayed path: SPEC-001 FR-27 `error_queue_full`, which
+SPEC-002 FR-P14.1 re-routes to the next candidate and otherwise answers with a
+503 carrying the gateway's bounded `Retry-After`. No new wire code or status.
 
 **Change log v0.2.3 (2026-09-21, keyed first-turn canary):**
 - A conversation key alone MUST NOT keep a request out of canary/`on`
@@ -419,6 +433,17 @@ explicit operator policy and reason-coded telemetry. The activation reason
 MUST reference the local capability and MUST NOT cite a missing upstream pin
 as the path to success.
 
+Acceptance coverage MUST bind the runtime revision the acceptance evidence was
+measured on: the Metal library SHA-256 and the paged-KV kernel identifier, as
+well as model id and SHA, cache class, KV dtype, MoE requirement and hardware
+class. An entry missing any of these fields MUST be rejected at configuration
+load, and an entry recorded on a different runtime revision MUST NOT cover the
+requested tuple. An operator MUST NOT record acceptance for a tuple until that
+exact runtime revision has met the SPEC-039 FR-PKV13 overhead ceiling on the
+packaged build. Acceptance coverage is therefore the per-tuple gate that keeps
+a path over the ceiling from serving real traffic. Derived or per-boot
+descriptor fields (parity label, pool epoch) remain the descriptor's job.
+
 ### FR-CB11 - Entry 110 capacity mapping (SPEC-038-R011)
 
 The scheduler's maximum active decode rows MUST equal the persisted Entry 110
@@ -611,8 +636,8 @@ snapshot-binding requirements to buyer-visible behavior:
 
 | Lifecycle point | Required API-visible behavior | Settlement / receipt rule |
 |---|---|---|
-| Queue full before admission | Reject through the existing client-visible backpressure/error surface; include bounded retry guidance (`Retry-After` or equivalent) when the gateway surface supports it. No request state may be retained except non-receipt diagnostics. | Non-settling; no receipt. |
-| Queue wait timeout before admission | Reject as queue timeout, not model failure. The response/log MUST distinguish timeout from scheduler crash and from unsupported tuple. | Non-settling; no receipt. |
+| Queue full before admission | Reject through the existing client-visible backpressure/error surface; include bounded retry guidance (`Retry-After` or equivalent) when the gateway surface supports it. On direct HTTP that is `continuous_batching_stream_backpressure` with `Retry-After`; on the coordinator relay it is SPEC-001 FR-27 `error_queue_full` (re-route, else 503 with the gateway's `Retry-After`). No request state may be retained except non-receipt diagnostics. | Non-settling; no receipt. |
+| Queue wait timeout before admission | Reject as queue timeout, not model failure. The response/log MUST distinguish timeout from scheduler crash and from unsupported tuple. On direct HTTP the code is `continuous_batching_queue_wait_timeout`; on the coordinator relay it is SPEC-001 FR-27 `error_queue_full`, and the provider log keeps the distinct code. | Non-settling; no receipt. |
 | Unsupported tuple before admission | Strict mode fails preflight; explicit permissive/canary mode MAY serial-route with reason-coded telemetry. | Serial route settles only if the serial request succeeds; rejected path emits no receipt. |
 | Duplicate stable request ID before acceptance | Deterministically attach to the existing queued request or reject as duplicate; MUST NOT create a second accepted unit of work. | At most one settling owner. |
 | Duplicate stable request ID after acceptance | Deterministically reattach/replay the existing terminal result, or reject as non-settling replay when retention has rolled; MUST NOT duplicate inference or settlement. | At most one receipt. |

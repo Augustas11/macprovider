@@ -1,0 +1,25 @@
+{"build": "q36_f3f210fa", "n": 1, "rep": 0, "batched": false, "agg_tps": 36.52, "ok": 1, "errors": 0, "live_cpu_mean": 2.6, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 1, "rep": 0, "batched": true, "agg_tps": 33.13, "ok": 1, "errors": 0, "live_cpu_mean": 5.0, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 1, "rep": 1, "batched": false, "agg_tps": 36.63, "ok": 1, "errors": 0, "live_cpu_mean": 2.5, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 1, "rep": 1, "batched": true, "agg_tps": 33.19, "ok": 1, "errors": 0, "live_cpu_mean": 4.9, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 1, "rep": 2, "batched": false, "agg_tps": 36.61, "ok": 1, "errors": 0, "live_cpu_mean": 2.6, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 1, "rep": 2, "batched": true, "agg_tps": 33.2, "ok": 1, "errors": 0, "live_cpu_mean": 2.5, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 2, "rep": 0, "batched": false, "agg_tps": 36.99, "ok": 2, "errors": 0, "live_cpu_mean": 2.3, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 2, "rep": 0, "batched": true, "agg_tps": 54.49, "ok": 2, "errors": 0, "live_cpu_mean": 3.8, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 2, "rep": 1, "batched": false, "agg_tps": 36.94, "ok": 2, "errors": 0, "live_cpu_mean": 2.3, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 2, "rep": 1, "batched": true, "agg_tps": 51.72, "ok": 2, "errors": 0, "live_cpu_mean": 2.4, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 2, "rep": 2, "batched": false, "agg_tps": 36.97, "ok": 2, "errors": 0, "live_cpu_mean": 3.2, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 2, "rep": 2, "batched": true, "agg_tps": 52.02, "ok": 2, "errors": 0, "live_cpu_mean": 2.4, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 4, "rep": 0, "batched": false, "agg_tps": 37.13, "ok": 4, "errors": 0, "live_cpu_mean": 3.2, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 4, "rep": 0, "batched": true, "agg_tps": 61.03, "ok": 4, "errors": 0, "live_cpu_mean": 2.8, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 4, "rep": 1, "batched": false, "agg_tps": 37.09, "ok": 4, "errors": 0, "live_cpu_mean": 2.8, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 4, "rep": 1, "batched": true, "agg_tps": 60.91, "ok": 4, "errors": 0, "live_cpu_mean": 3.8, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 4, "rep": 2, "batched": false, "agg_tps": 37.12, "ok": 4, "errors": 0, "live_cpu_mean": 2.7, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 4, "rep": 2, "batched": true, "agg_tps": 61.07, "ok": 4, "errors": 0, "live_cpu_mean": 3.4, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 8, "rep": 0, "batched": false, "agg_tps": 37.19, "ok": 8, "errors": 0, "live_cpu_mean": 2.8, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 8, "rep": 0, "batched": true, "agg_tps": 69.26, "ok": 8, "errors": 0, "live_cpu_mean": 2.8, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 8, "rep": 1, "batched": false, "agg_tps": 37.15, "ok": 8, "errors": 0, "live_cpu_mean": 3.2, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 8, "rep": 1, "batched": true, "agg_tps": 68.98, "ok": 8, "errors": 0, "live_cpu_mean": 3.0, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 8, "rep": 2, "batched": false, "agg_tps": 37.14, "ok": 8, "errors": 0, "live_cpu_mean": 2.8, "contaminated": false}
+{"build": "q36_f3f210fa", "n": 8, "rep": 2, "batched": true, "agg_tps": 69.0, "ok": 8, "errors": 0, "live_cpu_mean": 3.0, "contaminated": false}
+{"summary": {"q36_f3f210fa|n=1|serial": {"median_clean_tps": 36.61, "clean_runs": 3}, "q36_f3f210fa|n=1|batched": {"median_clean_tps": 33.19, "clean_runs": 3}, "q36_f3f210fa|n=2|serial": {"median_clean_tps": 36.97, "clean_runs": 3}, "q36_f3f210fa|n=2|batched": {"median_clean_tps": 52.02, "clean_runs": 3}, "q36_f3f210fa|n=4|serial": {"median_clean_tps": 37.12, "clean_runs": 3}, "q36_f3f210fa|n=4|batched": {"median_clean_tps": 61.03, "clean_runs": 3}, "q36_f3f210fa|n=8|serial": {"median_clean_tps": 37.15, "clean_runs": 3}, "q36_f3f210fa|n=8|batched": {"median_clean_tps": 69.0, "clean_runs": 3}}}

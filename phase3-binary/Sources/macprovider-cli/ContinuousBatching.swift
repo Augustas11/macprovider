@@ -110,11 +110,14 @@ struct ContinuousBatchingRequestedTuple: Sendable, Equatable {
 /// Compiling a global "evidence available" constant into the binary is not
 /// per-tuple coverage: every Mac taking that binary would inherit it.
 ///
-/// Coverage deliberately keys on the stable identity of the *evidence*:
-/// hardware class, model id + SHA, cache class, KV dtype, and MoE requirement.
-/// `metallibSHA256`, `kernelIdentifier`, `parityLabel`, and `poolEpoch` stay
-/// the SPEC-039 descriptor's job (`isAdmitted(by:)`), which runs first — this
-/// is not a weakened match, it is the other half of the FR-CB10 conjunction.
+/// Coverage keys on the identity the *evidence* was measured on: hardware
+/// class, model id + SHA, cache class, KV dtype, MoE requirement, and the
+/// runtime revision (Metal library SHA + paged-KV kernel identifier). Binding
+/// the runtime revision means a new build re-earns acceptance on its own
+/// measurements (including the SPEC-039 FR-PKV13 overhead ceiling) instead of
+/// inheriting an entry recorded on a different kernel. `parityLabel` is derived
+/// from these fields plus the pool shape, and `poolEpoch` is per-boot; both stay
+/// the SPEC-039 descriptor's job (`isAdmitted(by:)`), which runs first.
 struct ContinuousBatchingAcceptanceCoverage: Sendable, Equatable {
     let acceptedTuples: [ContinuousBatchingAcceptedTuple]
     private let unrestricted: Bool
@@ -147,6 +150,8 @@ struct ContinuousBatchingAcceptanceCoverage: Sendable, Equatable {
                 && accepted.kvDType == tuple.kvDType
                 && accepted.requiresMoE == tuple.requiresMoE
                 && accepted.hardwareClass == tuple.hardwareClass
+                && accepted.metallibSHA256 == tuple.metallibSHA256
+                && accepted.kernelIdentifier == tuple.kernelIdentifier
         }
     }
 }
@@ -390,7 +395,8 @@ enum ContinuousBatchingPolicy {
 
     static func logSerialRouteIfNeeded(_ capability: ContinuousBatchingCapability) {
         guard let line = serialRouteTelemetryLine(capability) else { return }
-        FileHandle.standardError.write(Data(line.utf8))
+        // write(contentsOf:) fails recoverably on a closed stderr; write(_:) aborts.
+        try? FileHandle.standardError.write(contentsOf: Data(line.utf8))
     }
 
     static func serialRouteTelemetryLine(_ capability: ContinuousBatchingCapability) -> String? {
@@ -404,11 +410,11 @@ enum ContinuousBatchingPolicy {
     /// an opaque 503. Never include the error's localized description: MLX
     /// dumps can carry prompt tokens.
     static func logPrefillFailed(_ error: Error) {
-        FileHandle.standardError.write(Data(prefillFailureTelemetryLine(error).utf8))
+        try? FileHandle.standardError.write(contentsOf: Data(prefillFailureTelemetryLine(error).utf8))
     }
 
     static func logForwardFailed(_ error: Error) {
-        FileHandle.standardError.write(Data(forwardFailureTelemetryLine(error).utf8))
+        try? FileHandle.standardError.write(contentsOf: Data(forwardFailureTelemetryLine(error).utf8))
     }
 
     static func prefillFailureTelemetryLine(_ error: Error) -> String {
@@ -455,5 +461,19 @@ enum ContinuousBatchingPolicy {
             .joined(separator: "_")
         let bounded = String(collapsed.prefix(96))
         return bounded.isEmpty ? "unrecognized_prefill_error" : bounded
+    }
+}
+
+/// Lab-only request lifecycle trace, on only with `MACPROVIDER_CB_TRACE=1`.
+/// Request ids and stage names only; never prompt or completion content.
+enum CBTrace {
+    static let enabled = ProcessInfo.processInfo.environment["MACPROVIDER_CB_TRACE"] == "1"
+
+    static func log(_ requestID: String?, _ event: @autoclosure () -> String) {
+        guard enabled else { return }
+        let ms = DispatchTime.now().uptimeNanoseconds / 1_000_000
+        // `write(contentsOf:)` fails recoverably on a closed stderr; the
+        // deprecated `write(_:)` would abort serving (see PagedKVRuntimeDiagnostics).
+        try? FileHandle.standardError.write(contentsOf: Data("cbtrace t=\(ms) rid=\(requestID ?? "-") ev=\(event())\n".utf8))
     }
 }

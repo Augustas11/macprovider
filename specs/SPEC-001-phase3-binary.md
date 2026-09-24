@@ -1,6 +1,14 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.23 (2026-09-23, operator context workflow)
+**Version:** 1.9.24 (2026-09-24, continuous-batching queue pressure on the WS relay)
+
+**Change log v1.9.24 (2026-09-24, continuous-batching queue pressure on the WS
+relay):** FR-27 maps the two SPEC-038 pre-admission queue-pressure outcomes
+(`continuous_batching_stream_backpressure`,
+`continuous_batching_queue_wait_timeout`) to `error_queue_full`, the existing
+re-routable capacity status. They previously fell through to `error_internal`,
+which SPEC-002 FR-P14.1 answers with a non-rerouted 502 although no inference
+ran. Post-token delivery backpressure stays `error_internal`.
 
 **Change log v1.9.23 (2026-09-23, operator context workflow):** Adds FR-20b,
 `malibu-cli provider context explain|set|rollback` (#1689 part 3): explain
@@ -1211,7 +1219,13 @@ Inference errors map to `status` values in `inference_response_end`:
 | Model not loaded | `"error_model_not_loaded"` |
 | Context length exceeded | `"error_context_exceeded"` |
 | WS capacity overflow (active requests already equal advertised relay capacity; no queue exists — FR-25) | `"error_queue_full"` |
+| Continuous-batching scheduler queue pressure before admission: `continuous_batching_stream_backpressure` or `continuous_batching_queue_wait_timeout` (SPEC-038 API-visible lifecycle overlay; no inference ran, nothing reached the buyer) | `"error_queue_full"` |
 | Internal inference error | `"error_internal"` |
+
+Post-token continuous-batching delivery backpressure
+(`continuous_batching_stream_delivery_backpressure`) is **not** queue pressure: the
+row was decoding and tokens may already have reached the buyer, so re-routing
+would re-run work that partly happened. It stays `"error_internal"`.
 
 **FR-28. Provider-side write buffer backpressure.**
 Per § 6.6 "Backpressure — provider-side write buffer": 256-chunk

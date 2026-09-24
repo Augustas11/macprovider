@@ -995,6 +995,54 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(decodeCalls, 1)
     }
 
+    /// Studio soak 2026-09-24: ~1 in 400 non-streaming batched requests never
+    /// returned. The drain task saw an empty queue and released the lock before
+    /// clearing `draining`; an `offer()` in that gap appended a token and
+    /// started no drain, so the terminal `finish(afterDraining:)` waited on a
+    /// drain that would never run, and the timeout could not fire because
+    /// `drainGeneration` was already nil. The seam lands the offer in that gap
+    /// deterministically.
+    func testOfferRacingDrainExitIsDeliveredAndTerminalCompletes() async throws {
+        let delivered = DeliveredTokenLog()
+        let delivery = ContinuousBatchTokenDelivery(
+            bufferLimit: 16,
+            timeoutNanoseconds: 60_000_000_000,
+            capacity: ContinuousBatchTokenDeliveryCapacity(limit: 4),
+            sink: { event in delivered.append(event.token) }
+        )
+        let raced = DeliveredTokenLog()
+        delivery.afterDrainSawEmptyQueueForTest = { [delivery] in
+            guard raced.isEmpty else { return }
+            raced.append(1)
+            XCTAssertTrue(delivery.offer(Self.deliveryEvent(token: 1)))
+        }
+
+        XCTAssertTrue(delivery.offer(Self.deliveryEvent(token: 0)))
+        try await eventually { raced.isEmpty == false }
+
+        // An expectation, not a task-group race: a stranded completion never
+        // resumes, and a task group would wait on it forever.
+        let terminal = expectation(description: "terminal drain completion fires")
+        let outcome = DeliveredTokenLog()
+        delivery.finish(afterDraining: { completedBeforeTimeout in
+            outcome.append(completedBeforeTimeout ? 1 : 0)
+            terminal.fulfill()
+        })
+        await fulfillment(of: [terminal], timeout: 2)
+        XCTAssertEqual(outcome.tokens, [1], "the terminal drain completion must fire before its timeout")
+        XCTAssertEqual(delivered.tokens, [0, 1], "the racing offer must be delivered, in order")
+    }
+
+    private static func deliveryEvent(token: Int) -> ContinuousBatchSchedulerTokenEvent {
+        ContinuousBatchSchedulerTokenEvent(
+            requestID: "race",
+            tokenIndex: token,
+            token: token,
+            replayTokens: nil,
+            snapshot: ContinuousBatchSchedulerSnapshot(modelID: "m", modelSHA256: "h", weightsGeneration: 0)
+        )
+    }
+
     func testDuplicateSuccessfulWaitersHaveExactlyOneSettlementOwner() async throws {
         let decodeGate = AsyncGate()
         let backend = ScriptedBackend(scripts: ["settlement": [7]], decodeGate: decodeGate)
@@ -1505,9 +1553,13 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 tokenSink: { _ in }
             )
             XCTFail("expected the still-live sink task to retain the global delivery slot")
-        } catch ContinuousBatchSchedulerError.backpressure {
+        } catch ContinuousBatchSchedulerError.deliveryBackpressure {
             // Scheduler state completed at the hard deadline, but the actual
             // live task remains counted until the cancellation-insensitive sink exits.
+            // Post-token, not pre-admission: this request was admitted and
+            // decoded, and the refusal came from the pump trying to hand its
+            // first token to a delivery with no task slot left. Inference ran
+            // and burned a slot, so it is not blind-retryable.
         }
         try await eventually { await scheduler.metrics().slotsFree == 1 }
         let freeBlocks = await allocator.freeBlockCount()
@@ -1583,7 +1635,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let duplicateResult = try await duplicate.value
         XCTAssertEqual(duplicateResult.outputTokens, [])
         XCTAssertEqual(duplicateResult.terminalStatus, .requestFailed)
-        XCTAssertEqual(duplicateResult.errorCode, "continuous_batching_stream_backpressure")
+        XCTAssertEqual(
+            duplicateResult.errorCode,
+            ContinuousBatchSchedulerError.deliveryBackpressureCode
+        )
         XCTAssertEqual(duplicateResult.settlementDisposition, .notEligible)
         do {
             _ = try await original.value
@@ -1794,6 +1849,466 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(aResult.snapshot?.modelSHA256, bResult.snapshot?.modelSHA256)
         let batches = await backend.decodeBatches()
         XCTAssertTrue(batches.contains(["serial-a", "serial-b"]))
+    }
+
+    // MARK: - SPEC-038 AC-25 API lifecycle
+
+    // One shared scheduler-error map, asserted case by case so the streaming
+    // and non-streaming serve paths cannot drift apart again.
+    func testAC25SchedulerErrorAPIMappingIsExhaustiveAndNonSettling() {
+        let expected: [(ContinuousBatchSchedulerError, Int, String)] = [
+            (.backpressure, 503, "continuous_batching_stream_backpressure"),
+            (.queueWaitTimedOut, 503, "continuous_batching_queue_wait_timeout"),
+            (.duplicateRequestMismatch, 409, "continuous_batching_duplicate_request_mismatch"),
+            (.idempotencyWindowExpired, 409, "continuous_batching_idempotency_window_expired"),
+            (
+                .idempotencyAuthorityUnavailable,
+                503,
+                "continuous_batching_idempotency_authority_unavailable"
+            ),
+        ]
+        for (error, status, code) in expected {
+            guard let apiError = error.asAPIError() else {
+                return XCTFail("expected an API mapping for \(error)")
+            }
+            XCTAssertEqual(apiError.status, status, code)
+            XCTAssertEqual(apiError.code, code)
+            // Every mapped case rejects before inference, so no receipt.
+            XCTAssertFalse(apiError.inferenceRan, code)
+            XCTAssertFalse(apiError.settlementRan, code)
+        }
+        // A queue-wait expiry must never read as queue-full at submit.
+        XCTAssertNotEqual(
+            ContinuousBatchSchedulerError.queueWaitTimedOut.asAPIError()?.code,
+            ContinuousBatchSchedulerError.backpressure.asAPIError()?.code
+        )
+    }
+
+    // `.backpressure` covers only the pre-admission sites — the submit-time
+    // and enqueue-time queue/duplicate-waiter guards, none of which has
+    // offered its caller an event. The decode pump's post-token failure is
+    // `.deliveryBackpressure`: inference ran, partial output may already be
+    // with the buyer, so it is a distinct code and not retryable.
+    func testAC25DeliveryBackpressureIsAPostTokenNonRetryableOutcome() throws {
+        let apiError = try XCTUnwrap(ContinuousBatchSchedulerError.deliveryBackpressure.asAPIError())
+        XCTAssertEqual(apiError.status, 503)
+        XCTAssertEqual(apiError.code, "continuous_batching_stream_delivery_backpressure")
+        XCTAssertTrue(apiError.inferenceRan)
+        XCTAssertFalse(apiError.settlementRan)
+
+        let envelope = apiError.envelope["error"] as? [String: Any]
+        XCTAssertEqual(envelope?["retryable"] as? Bool, false)
+        XCTAssertEqual(envelope?["inference_ran"] as? Bool, true)
+        XCTAssertEqual(envelope?["settlement_ran"] as? Bool, false)
+
+        // Pinned false at the call site, so adding the code to
+        // `APIError.retryableByCode` later cannot silently flip it.
+        XCTAssertEqual(
+            APIError(
+                status: 503,
+                message: "m",
+                type: "server_error",
+                code: ContinuousBatchSchedulerError.deliveryBackpressureCode
+            ).envelope["error"].flatMap { ($0 as? [String: Any])?["retryable"] as? Bool },
+            false
+        )
+    }
+
+    // `.drained` / `.drainTimedOut` are harness-only: reachable solely through
+    // `drain()`, whose only `Sources/` caller is the MSB benchmark command. A
+    // buyer-visible mapping for them would be unreachable code.
+    func testAC25UnmappedSchedulerErrorsRethrowUnchanged() {
+        let unmapped: [ContinuousBatchSchedulerError] = [
+            .drained,
+            .drainTimedOut,
+        ]
+        for error in unmapped {
+            XCTAssertNil(error.asAPIError(), "\(error) must not carry an API mapping")
+        }
+    }
+
+    // `.unsupported` / `.requestFailed` already carry a well-formed code
+    // string; the mapping keeps that string verbatim and only decides the
+    // status. Codes `ContinuousBatchingUnsupportedReason` already publishes
+    // must agree with that reason's status.
+    func testAC25CarriedSchedulerCodesMapToStatusByShape() {
+        let expected: [(ContinuousBatchSchedulerError, Int, String)] = [
+            // Exact `apiCode` of `.stickyCacheHandoffUnavailable`, which the
+            // preflight surface publishes as 400.
+            (.unsupported("continuous_batching_paged_kv_handoff_unavailable"), 400, "invalid_request_error"),
+            // `localCapabilityReason` reports these two without the API
+            // prefix; they mirror `.tupleNotAdvertised` /
+            // `.moePromotionEvidenceUnavailable`, both 400.
+            (.unsupported("local_paged_kv_descriptor_mismatch"), 400, "invalid_request_error"),
+            (.unsupported("moe_promotion_evidence_unavailable"), 400, "invalid_request_error"),
+            (.unsupported("continuous_batching_cached_tokens_require_conversation_key"), 400, "invalid_request_error"),
+            (.requestFailed("continuous_batching_invalid_cached_prompt_tokens"), 400, "invalid_request_error"),
+            (.requestFailed("continuous_batching_invalid_request"), 400, "invalid_request_error"),
+            (.requestFailed("continuous_batching_request_fingerprint_failed"), 400, "invalid_request_error"),
+            (.unsupported("continuous_batching_scheduler_failed_closed"), 503, "server_error"),
+            (.unsupported("continuous_batching_admission_sequence_exhausted"), 503, "server_error"),
+            (.unsupported("continuous_batching_local_binding_mismatch"), 503, "server_error"),
+            // Unknown/future codes fail to a provider-side status rather than
+            // blaming the buyer.
+            (.unsupported("continuous_batching_some_unseen_code"), 503, "server_error"),
+        ]
+        for (error, status, type) in expected {
+            guard let apiError = error.asAPIError() else {
+                return XCTFail("expected an API mapping for \(error)")
+            }
+            XCTAssertEqual(apiError.status, status, apiError.code)
+            XCTAssertEqual(apiError.type, type, apiError.code)
+            // Neither case can escape `submit()` after inference ran: the
+            // decode/prefill-structure `.requestFailed` codes are converted
+            // into a terminal result by the pump and never thrown to a caller.
+            XCTAssertFalse(apiError.inferenceRan, apiError.code)
+            XCTAssertFalse(apiError.settlementRan, apiError.code)
+        }
+        XCTAssertEqual(
+            ContinuousBatchSchedulerError
+                .unsupported("continuous_batching_paged_kv_handoff_unavailable")
+                .asAPIError()?.code,
+            "continuous_batching_paged_kv_handoff_unavailable"
+        )
+        XCTAssertEqual(
+            ContinuousBatchSchedulerError
+                .unsupported("continuous_batching_paged_kv_handoff_unavailable")
+                .asAPIError()?.status,
+            ContinuousBatchingUnsupportedReason.stickyCacheHandoffUnavailable.status
+        )
+    }
+
+    // SPEC-038 `:614`: a queue-pressure rejection must carry bounded retry
+    // guidance. Both queue-pressure codes therefore serialize `retryable:
+    // true`; the other AC-25 codes stay non-retryable.
+    func testAC25QueuePressureCodesSerializeAsRetryable() {
+        for error in [ContinuousBatchSchedulerError.backpressure, .queueWaitTimedOut] {
+            let envelope = try? XCTUnwrap(error.asAPIError()?.envelope["error"] as? [String: Any])
+            XCTAssertEqual(envelope?["retryable"] as? Bool, true, "\(error)")
+            XCTAssertEqual(envelope?["inference_ran"] as? Bool, false, "\(error)")
+            XCTAssertEqual(envelope?["settlement_ran"] as? Bool, false, "\(error)")
+        }
+        let mismatch = ContinuousBatchSchedulerError.duplicateRequestMismatch.asAPIError()?.envelope["error"] as? [String: Any]
+        XCTAssertEqual(mismatch?["retryable"] as? Bool, false)
+    }
+
+    // A request that is admitted to the queue but never reaches a slot inside
+    // the deadline is rejected pre-admission: distinct error, non-settling, no
+    // retained terminal result, no leaked waiter.
+    func testAC25QueueWaitDeadlineRejectsUnadmittedRequestAndLeavesNoState() async throws {
+        let gate = AsyncGate()
+        let backend = ScriptedBackend(scripts: ["held": [1], "late": [2]], prefillGate: gate)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            queueLimit: 4,
+            queueWaitTimeoutNanoseconds: 150_000_000,
+            backend: backend
+        )
+
+        let held = Task {
+            try await scheduler.submit(.init(
+                id: "held",
+                conversationKey: "",
+                promptTokens: [1, 11],
+                maxOutputTokens: 1
+            ))
+        }
+        try await eventually { await backend.prefillCallCount() == 1 }
+
+        do {
+            _ = try await scheduler.submit(.init(
+                id: "late",
+                conversationKey: "",
+                promptTokens: [2, 22],
+                maxOutputTokens: 1
+            ))
+            XCTFail("expected queue-wait timeout")
+        } catch ContinuousBatchSchedulerError.queueWaitTimedOut {
+            // expected — and specifically not `.backpressure`: the queue had room.
+        }
+
+        let afterTimeout = await scheduler.metrics()
+        XCTAssertTrue(afterTimeout.diagnostics.contains(.queueWaitTimedOut))
+        XCTAssertFalse(afterTimeout.diagnostics.contains(.backpressureRejected))
+        XCTAssertEqual(afterTimeout.waitingCount, 0)
+        // Only the still-running held row keeps a waiter; the expired one is gone.
+        XCTAssertEqual(afterTimeout.attachedWaiters, 1)
+        // Non-settling: the expired request produced no terminal result at all,
+        // so it can never be replayed or settled.
+        XCTAssertEqual(afterTimeout.retainedTerminalResults, 0)
+        let prefillCalls = await backend.prefillCallCount()
+        XCTAssertEqual(prefillCalls, 1)
+
+        await gate.open()
+        let heldResult = try await held.value
+        XCTAssertEqual(heldResult.terminalStatus, .length)
+        // The expired request never occupied a slot, so the held row keeps the
+        // only reservation and releases it normally.
+        let afterDrain = await scheduler.metrics()
+        XCTAssertEqual(afterDrain.slotsFree, afterDrain.slotsTotal)
+    }
+
+    // The deadline bounds queue wait only: a request that reaches a slot in
+    // time is unaffected by a short timeout.
+    func testAC25QueueWaitDeadlineDoesNotExpireAdmittedRows() async throws {
+        let backend = ScriptedBackend(scripts: ["admitted": [7, 8]])
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            queueLimit: 2,
+            queueWaitTimeoutNanoseconds: 100_000_000,
+            backend: backend
+        )
+
+        let result = try await scheduler.submit(.init(
+            id: "admitted",
+            conversationKey: "",
+            promptTokens: [1, 2],
+            maxOutputTokens: 2
+        ))
+        XCTAssertEqual(result.outputTokens, [7, 8])
+        let metrics = await scheduler.metrics()
+        XCTAssertFalse(metrics.diagnostics.contains(.queueWaitTimedOut))
+    }
+
+    // A timeout task that wakes while its request is out of `waiting` for an
+    // admission attempt must not consume the deadline. `late` is parked inside
+    // the backend's retained-cache install — removed from `waiting`, present
+    // in `admittingRequests` — while its deadline passes; admission then fails
+    // `capacityExceeded` and re-queues it. The original absolute deadline has
+    // to survive that round trip and expire the request, or the bounded wait
+    // silently becomes unbounded again.
+    func testAC25StaleQueueWaitTimeoutDuringAdmissionKeepsTheDeadline() async throws {
+        let holdInstall = AsyncGate()
+        let lateInstall = AsyncGate()
+        let bridge = HeadlessRetainedCacheBridge()
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let retainedHold = try await makeRetainedSequence(
+            allocator: allocator,
+            conversationKey: "conversation-hold",
+            initialCapacityTokens: 8,
+            maxLogicalTokens: 8,
+            initialTokens: 3
+        )
+        let retainedLate = try await makeRetainedSequence(
+            allocator: allocator,
+            conversationKey: "conversation-late",
+            initialCapacityTokens: 8,
+            maxLogicalTokens: 8,
+            initialTokens: 3
+        )
+        let backend = ScriptedBackend(
+            scripts: ["hold": [10, 11, 12, 13, 14, 15], "late": [20]],
+            retainedInstallGates: ["hold": holdInstall, "late": lateInstall],
+            // Raised on every admission attempt for `late`, so the request is
+            // re-queued rather than admitted however often the pump retries.
+            retainedInstallErrors: [
+                "late": PagedKVAllocatorError.capacityExceeded(requiredBlocks: 2, availableBlocks: 0) as any Error,
+            ]
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            maxPromptChunkTokens: 4,
+            queueWaitTimeoutNanoseconds: 600_000_000,
+            maxPrefillRowsPerIteration: 2,
+            backend: backend,
+            allocator: allocator,
+            contiguousCacheBridge: bridge
+        )
+
+        let hold = Task {
+            try await scheduler.submit(.init(
+                id: "hold",
+                conversationKey: "conversation-hold",
+                promptTokens: Array(0..<5),
+                maxOutputTokens: 6,
+                temperature: 0.0,
+                topP: 1.0,
+                cachedPromptTokens: 3,
+                retainedPagedKVSequence: retainedHold
+            ))
+        }
+        try await eventually { await backend.retainedInstallAttempts()["hold"] == 1 }
+
+        let late = Task {
+            try await scheduler.submit(.init(
+                id: "late",
+                conversationKey: "conversation-late",
+                promptTokens: Array(10..<15),
+                maxOutputTokens: 1,
+                temperature: 0.0,
+                topP: 1.0,
+                cachedPromptTokens: 3,
+                retainedPagedKVSequence: retainedLate
+            ))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+
+        // Releasing `hold` lets the same admit loop reach `late`, which then
+        // parks inside its own install.
+        await holdInstall.open()
+        try await eventually { await backend.retainedInstallAttempts()["late"] == 1 }
+        let duringAdmission = await scheduler.metrics()
+        XCTAssertEqual(duringAdmission.waitingCount, 0, "`late` must be out of `waiting`, mid-admission")
+
+        // The deadline elapses here, with `late` mid-admission. The armed
+        // timeout task cancels out, so drive the stale wake explicitly: this
+        // is the timeout task that already woke when `suspendQueueWaitTimeout`
+        // cancelled it, reaching the actor with the request no longer queued.
+        try await Task.sleep(nanoseconds: 900_000_000)
+        await scheduler.expireQueueWait(requestID: "late")
+
+        // Admission now fails `capacityExceeded` and re-queues `late`.
+        await lateInstall.open()
+
+        do {
+            _ = try await late.value
+            XCTFail("expected the original queue-wait deadline to still expire the request")
+        } catch ContinuousBatchSchedulerError.queueWaitTimedOut {
+            // expected: the re-queued request kept its absolute deadline.
+        }
+
+        let metrics = await scheduler.metrics()
+        XCTAssertTrue(metrics.diagnostics.contains(.queueWaitTimedOut))
+        XCTAssertEqual(metrics.waitingCount, 0)
+
+        let heldResult = try await hold.value
+        XCTAssertEqual(heldResult.outputTokens, [10, 11, 12, 13, 14, 15])
+    }
+
+    // SPEC-038 AC-25: a queue-wait expiry runs nothing and settles nothing, so
+    // the durable replay claim taken at submit is released. A client that
+    // honours `retryable: true` and re-sends the same `X-Request-ID` must be
+    // able to run, not collect a 409 for work that never happened.
+    // SPEC-038 AC-25: an overdue request must never be admitted, even when its
+    // timeout task has not run yet. The hook cancels the timer but keeps the
+    // absolute deadline, so admission itself has to expire the request.
+    func testAC25OverdueRequestIsExpiredAtAdmissionEvenIfItsTimerHasNotRun() async throws {
+        let gate = AsyncGate()
+        let backend = ScriptedBackend(
+            scripts: ["held": [1], "late": [2]],
+            prefillGate: gate
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            queueLimit: 4,
+            queueWaitTimeoutNanoseconds: 150_000_000,
+            backend: backend
+        )
+        let held = Task {
+            try await scheduler.submit(.init(id: "held", conversationKey: "", promptTokens: [1, 11], maxOutputTokens: 1))
+        }
+        try await eventually { await backend.prefillCallCount() == 1 }
+        let late = Task {
+            try await scheduler.submit(.init(id: "late", conversationKey: "", promptTokens: [2, 22], maxOutputTokens: 1))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+
+        await scheduler.cancelQueueWaitTimerForTest(requestID: "late")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let queued = await scheduler.metrics().waitingCount
+        XCTAssertEqual(queued, 1, "with its timer cancelled, `late` is still queued and now overdue")
+
+        // Freeing the slot sends the pump to admission with `late` overdue.
+        await gate.open()
+        _ = try await held.value
+        do {
+            _ = try await late.value
+            XCTFail("an overdue request must not be admitted")
+        } catch ContinuousBatchSchedulerError.queueWaitTimedOut {
+            // expected
+        }
+        let prefills = await backend.prefillCallCount()
+        XCTAssertEqual(prefills, 1, "`late` must never reach prefill")
+    }
+
+    func testAC25QueueWaitTimeoutReleasesTheReplayClaimSoTheSameIDCanRetry() async throws {
+        let gate = AsyncGate()
+        let authority = TestReplayAuthority()
+        let backend = ScriptedBackend(
+            scripts: ["held": [1], "late": [2]],
+            prefillGate: gate
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            queueLimit: 4,
+            queueWaitTimeoutNanoseconds: 150_000_000,
+            backend: backend,
+            replayAuthority: authority
+        )
+
+        let held = Task {
+            try await scheduler.submit(.init(
+                id: "held",
+                conversationKey: "",
+                promptTokens: [1, 11],
+                maxOutputTokens: 1
+            ))
+        }
+        try await eventually { await backend.prefillCallCount() == 1 }
+
+        do {
+            _ = try await scheduler.submit(.init(
+                id: "late",
+                conversationKey: "",
+                promptTokens: [2, 22],
+                maxOutputTokens: 1
+            ))
+            XCTFail("expected queue-wait timeout")
+        } catch ContinuousBatchSchedulerError.queueWaitTimedOut {
+            // expected
+        }
+        XCTAssertEqual(authority.released(), ["late"])
+
+        await gate.open()
+        _ = try await held.value
+
+        // The same request ID, same body: the retry the 503 advertised.
+        let retry = try await scheduler.submit(.init(
+            id: "late",
+            conversationKey: "",
+            promptTokens: [2, 22],
+            maxOutputTokens: 1
+        ))
+        XCTAssertEqual(retry.outputTokens, [2])
+        XCTAssertEqual(retry.terminalStatus, .length)
+    }
+
+    // SPEC-038 AC-25 (F-5): the 503 fallback in `carriedCodeStatus` is a
+    // runtime safety net, not the classification. Every code the scheduler
+    // can carry to the buyer is listed explicitly, so a new serve-path code
+    // fails this test instead of silently inheriting 503.
+    func testEveryCarriedSchedulerCodeIsClassified() throws {
+        let source = try String(contentsOf: Self.schedulerSourceURL, encoding: .utf8)
+        let pattern = "ContinuousBatchSchedulerError\\s*\\.\\s*(?:unsupported|requestFailed)\\s*\\(\\s*\"([a-z0-9_]+)\"\\s*\\)"
+        let regex = try NSRegularExpression(pattern: pattern)
+        let matches = regex.matches(
+            in: source,
+            range: NSRange(source.startIndex..<source.endIndex, in: source)
+        )
+        let codes = Set(matches.compactMap { match -> String? in
+            guard let range = Range(match.range(at: 1), in: source) else { return nil }
+            return String(source[range])
+        })
+        XCTAssertFalse(codes.isEmpty, "the code-literal scan matched nothing; the pattern has rotted")
+        for code in codes.sorted() {
+            XCTAssertNotNil(
+                ContinuousBatchSchedulerError.carriedCodeStatuses[code],
+                "\(code) is thrown by the scheduler but has no explicit status classification"
+            )
+        }
+        // Codes carried through a variable (`localCapabilityReason`) are not
+        // literals at the throw site, so they are asserted by name here.
+        for code in ["local_paged_kv_descriptor_mismatch", "moe_promotion_evidence_unavailable"] {
+            XCTAssertNotNil(ContinuousBatchSchedulerError.carriedCodeStatuses[code], code)
+        }
+    }
+
+    private static var schedulerSourceURL: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // macprovider-cliTests
+            .deletingLastPathComponent() // Tests
+            .deletingLastPathComponent() // phase3-binary
+            .appendingPathComponent("Sources/macprovider-cli/ContinuousBatchScheduler.swift")
     }
 
     func testSchedulerContractBoundedFCFSQueueRejectsAtBackpressureLimit() async throws {
@@ -2125,7 +2640,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         do {
             _ = try await slow.value
             XCTFail("expected bounded stream-delivery backpressure")
-        } catch ContinuousBatchSchedulerError.backpressure {
+        } catch ContinuousBatchSchedulerError.deliveryBackpressure {
             // Only this waiter/request fails; the scheduler actor never awaits
             // the consumer callback.
         }
@@ -2164,7 +2679,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         do {
             _ = try await blocked.value
             XCTFail("expected lockstep hop 2 to overflow a 16-token delivery buffer")
-        } catch ContinuousBatchSchedulerError.backpressure {
+        } catch ContinuousBatchSchedulerError.deliveryBackpressure {
             // Same fail-closed as live canary: first hop fills the buffer,
             // the waiter is still in sink work, hop 2 cannot offer.
         }
@@ -2883,6 +3398,25 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
     }
 
+    func testOversizedQueueWaitIsClampedNotTurnedIntoAnUnboundedWait() {
+        let configuration = ContinuousBatchSchedulerConfiguration(
+            descriptor: Self.descriptor(),
+            tuple: Self.tuple(),
+            maxActiveRows: 1,
+            decodeHeadroomTokens: 1,
+            queueWaitTimeoutNanoseconds: UInt64.max,
+            snapshot: ContinuousBatchSchedulerSnapshot(
+                modelID: Self.modelID,
+                modelSHA256: Self.modelSHA,
+                weightsGeneration: 3
+            )
+        )
+        XCTAssertEqual(
+            configuration.queueWaitTimeoutNanoseconds,
+            ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutNanoseconds
+        )
+    }
+
     private static func configuration(
         descriptor: PagedKVDescriptor = descriptor(),
         tuple: ContinuousBatchingRequestedTuple = tuple(),
@@ -2915,11 +3449,15 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         decodeHeadroomTokens: Int = 2,
         maxPromptChunkTokens: Int = 2,
         tokenDeliveryTimeoutNanoseconds: UInt64 = 5_000_000_000,
+        queueWaitTimeoutNanoseconds: UInt64 = ContinuousBatchSchedulerConfiguration
+            .defaultQueueWaitTimeoutNanoseconds,
         tokenDeliveryBufferLimit: Int = 16,
         maxDecodeLockstepWindow: Int = 1,
+        maxPrefillRowsPerIteration: Int = 1,
         backend: any ContinuousBatchSchedulerBackend,
         allocator: PagedKVBlockAllocator? = nil,
-        contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil
+        contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil,
+        replayAuthority: any ContinuousBatchSchedulerReplayAuthority = TestReplayAuthority()
     ) async throws -> ContinuousBatchScheduler {
         let allocator = try allocator ?? PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
         let config = ContinuousBatchSchedulerConfiguration(
@@ -2929,10 +3467,11 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             maxActiveRows: maxActiveRows,
             queueLimit: queueLimit,
             decodeHeadroomTokens: decodeHeadroomTokens,
-            maxPrefillRowsPerIteration: 1,
+            maxPrefillRowsPerIteration: maxPrefillRowsPerIteration,
             maxPromptChunkTokens: maxPromptChunkTokens,
             tokenDeliveryBufferLimit: tokenDeliveryBufferLimit,
             tokenDeliveryTimeoutNanoseconds: tokenDeliveryTimeoutNanoseconds,
+            queueWaitTimeoutNanoseconds: queueWaitTimeoutNanoseconds,
             snapshot: ContinuousBatchSchedulerSnapshot(
                 modelID: Self.modelID,
                 modelSHA256: Self.modelSHA,
@@ -2944,7 +3483,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             configuration: config,
             allocator: allocator,
             backend: backend,
-            replayAuthority: TestReplayAuthority(),
+            replayAuthority: replayAuthority,
             contiguousCacheBridge: contiguousCacheBridge
         )
     }
@@ -3067,6 +3606,24 @@ private final class TestReplayAuthority: ContinuousBatchSchedulerReplayAuthority
         }
         fingerprints[key.requestID] = key.fingerprintSHA256
         return .claimed
+    }
+
+    func release(_ key: ContinuousBatchSchedulerReplayKey) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard fingerprints[key.requestID] == key.fingerprintSHA256 else { return }
+        fingerprints.removeValue(forKey: key.requestID)
+        releasedIDs.append(key.requestID)
+    }
+
+    /// Release log, so a test can distinguish "claim dropped" from "claim
+    /// never taken".
+    private(set) var releasedIDs: [String] = []
+
+    func released() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return releasedIDs
     }
 }
 
@@ -3221,6 +3778,13 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private let rowFailures: Set<String>
     private let terminalCommitBridge: PagedKVRuntimeContiguousCacheBridge?
     private let terminalCommitCaches: [PagedKVCache]
+    /// Per-request hold on the retained-cache install, so a test can park a
+    /// request inside admission — out of `waiting`, in `admittingRequests` —
+    /// for as long as it needs.
+    private let retainedInstallGates: [String: AsyncGate]
+    /// Per-request install failure, raised on every attempt for that request.
+    private let retainedInstallErrors: [String: any Error]
+    private var retainedInstallAttemptLog: [String: Int] = [:]
     private var prefillRowsLog: [[String]] = []
     private var decodeRowsLog: [[String]] = []
     private var currentTokenLog: [[String: Int]] = []
@@ -3245,7 +3809,9 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         prefillError: (any Error)? = nil,
         rowFailures: Set<String> = [],
         terminalCommitBridge: PagedKVRuntimeContiguousCacheBridge? = nil,
-        terminalCommitCaches: [PagedKVCache] = []
+        terminalCommitCaches: [PagedKVCache] = [],
+        retainedInstallGates: [String: AsyncGate] = [:],
+        retainedInstallErrors: [String: any Error] = [:]
     ) {
         self.scripts = scripts
         self.prefillGate = prefillGate
@@ -3255,6 +3821,8 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         self.rowFailures = rowFailures
         self.terminalCommitBridge = terminalCommitBridge
         self.terminalCommitCaches = terminalCommitCaches
+        self.retainedInstallGates = retainedInstallGates
+        self.retainedInstallErrors = retainedInstallErrors
     }
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
@@ -3283,7 +3851,18 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     ) async throws {
         XCTAssertEqual(handoff.handle, binding.handle)
         XCTAssertEqual(handoff.blockTable, binding.currentTable)
+        retainedInstallAttemptLog[requestID, default: 0] += 1
+        if let gate = retainedInstallGates[requestID] {
+            await gate.wait()
+        }
+        if let error = retainedInstallErrors[requestID] {
+            throw error
+        }
         retainedInstallLog[requestID] = handoff.logicalTokenCount
+    }
+
+    func retainedInstallAttempts() -> [String: Int] {
+        retainedInstallAttemptLog
     }
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
@@ -3494,4 +4073,23 @@ private func eventually(
         try await Task.sleep(nanoseconds: 10_000_000)
     }
     XCTFail("condition was not met before timeout", file: file, line: line)
+}
+
+private final class DeliveredTokenLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [Int] = []
+
+    func append(_ value: Int) {
+        lock.lock()
+        values.append(value)
+        lock.unlock()
+    }
+
+    var tokens: [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return values
+    }
+
+    var isEmpty: Bool { tokens.isEmpty }
 }

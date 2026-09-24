@@ -324,6 +324,32 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         return copied
     }
 
+    /// The structural guards of `physicalLayerBlocks` without copying any KV
+    /// to host memory. Recording runs after every decode window, so it must
+    /// not pay a full-history device-to-host copy per row per window.
+    func validateRecordable(table: PagedKVBlockTable) throws {
+        guard offset == table.logicalTokenCount,
+              table.blockSizeTokens == blockSizeTokens,
+              keyBlocks.count == valueBlocks.count,
+              keyBlocks.count == table.physicalBlocks.count
+        else {
+            throw PagedKVContiguousCacheBridgeError.blockTableMismatch
+        }
+        guard let firstKey = keyBlocks.first,
+              let firstValue = valueBlocks.first,
+              firstKey.shape == firstValue.shape,
+              firstKey.ndim >= 3,
+              firstKey.dtype == firstValue.dtype
+        else {
+            throw PagedKVContiguousCacheBridgeError.invalidLayerState
+        }
+        do {
+            _ = try Self.pagedDType(for: firstKey.dtype)
+        } catch {
+            throw PagedKVContiguousCacheBridgeError.invalidLayerState
+        }
+    }
+
     func physicalLayerBlocks(
         layerIndex: Int,
         table: PagedKVBlockTable

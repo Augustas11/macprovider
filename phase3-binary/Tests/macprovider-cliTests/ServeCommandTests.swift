@@ -611,6 +611,23 @@ final class ServeCommandTests: XCTestCase {
         ))
     }
 
+    func testLabLoopbackReadinessWaiverRequiresEveryIsolatedLabCondition() {
+        let loopback = "ws://127.0.0.1:19082/ws/provider"
+        XCTAssertTrue(ServeCommand.waivesLabLoopbackCatalogReadiness(
+            isolateLifecycle: true, credentialStore: .protectedFile, coordinatorURL: loopback, hasCatalogTrust: false))
+        XCTAssertFalse(ServeCommand.waivesLabLoopbackCatalogReadiness(
+            isolateLifecycle: true, credentialStore: .protectedFile,
+            coordinatorURL: "wss://coordinator.malibu.tech/ws/provider", hasCatalogTrust: false),
+            "a production coordinator keeps the readiness gate")
+        XCTAssertFalse(ServeCommand.waivesLabLoopbackCatalogReadiness(
+            isolateLifecycle: false, credentialStore: .protectedFile, coordinatorURL: loopback, hasCatalogTrust: false))
+        XCTAssertFalse(ServeCommand.waivesLabLoopbackCatalogReadiness(
+            isolateLifecycle: true, credentialStore: .keychain, coordinatorURL: loopback, hasCatalogTrust: false))
+        XCTAssertFalse(ServeCommand.waivesLabLoopbackCatalogReadiness(
+            isolateLifecycle: true, credentialStore: .protectedFile, coordinatorURL: loopback, hasCatalogTrust: true),
+            "a provider with a catalog envelope is checked normally")
+    }
+
     func testAutotuneCandidateIsolationRootIsFreshAndOwnerOnly() throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("serve-candidate-root-\(UUID().uuidString)", isDirectory: true)

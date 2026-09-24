@@ -37,6 +37,12 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
     public let kvDType: PagedKVDType
     public let requiresMoE: Bool
     public let hardwareClass: String
+    /// The runtime revision the acceptance evidence was measured on. A new
+    /// build with a different Metal library or paged-KV kernel is a different
+    /// runtime: it must be re-measured (including the SPEC-039 FR-PKV13
+    /// overhead ceiling) and re-accepted, not inherit this entry.
+    public let metallibSHA256: String
+    public let kernelIdentifier: String
 
     public init(
         modelID: String,
@@ -44,7 +50,9 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
         cacheClass: String,
         kvDType: PagedKVDType,
         requiresMoE: Bool,
-        hardwareClass: String
+        hardwareClass: String,
+        metallibSHA256: String,
+        kernelIdentifier: String
     ) {
         self.modelID = modelID
         self.modelSHA256 = modelSHA256
@@ -52,6 +60,8 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
         self.kvDType = kvDType
         self.requiresMoE = requiresMoE
         self.hardwareClass = hardwareClass
+        self.metallibSHA256 = metallibSHA256
+        self.kernelIdentifier = kernelIdentifier
     }
 }
 
@@ -251,6 +261,15 @@ public struct AppConfig: Equatable, Sendable {
     public var prefillStepSize: Int
     public var continuousBatching: ContinuousBatchingMode
     public var continuousBatchQueueLimit: Int?
+    // SPEC-038 AC-25: bounded continuous-batching admission wait, in
+    // milliseconds. Unset ⇒ the scheduler's 30s default. A request still
+    // queued when it expires is rejected pre-admission, non-settling.
+    public var continuousBatchQueueWaitTimeoutMS: Int?
+    // MLX buffer-cache ceiling in MiB. MLX defaults it to its memory limit, so
+    // freed GPU buffers accumulate for the life of the process (Studio live
+    // provider 2026-09-24: 50 GB fresh -> ~130 GB under traffic -> kernel
+    // memory kill). Unset keeps MLX's default; 0 disables the cache.
+    public var mlxCacheLimitMB: Int?
 
     // SPEC-038 FR-CB10: per-tuple acceptance coverage. Descriptor membership
     // alone is not support; a tuple may only batch when the operator has
@@ -329,6 +348,8 @@ public struct AppConfig: Equatable, Sendable {
             prefillStepSize: 512,
             continuousBatching: .off,
             continuousBatchQueueLimit: nil,
+            continuousBatchQueueWaitTimeoutMS: nil,
+            mlxCacheLimitMB: nil,
             continuousBatchingAcceptedTuples: [],
             kvDiskCache: .defaults(),
             pagedKV: .defaults()
@@ -379,6 +400,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var prefillStepSize: Int?
     public var continuousBatching: String?
     public var continuousBatchQueueLimit: Int?
+    public var continuousBatchQueueWaitTimeoutMS: Int?
     // SPEC-037 FR-KVP11: KV disk-tier CLI flags (`--kv-disk-cache-*`).
     public var kvDiskCache: KVDiskCacheCLIOverrides
     // SPEC-039 FR-PKV14: paged KV CLI flags (`--paged-kv-*`).
@@ -425,6 +447,7 @@ public struct CLIOverrides: Equatable, Sendable {
         kvDiskCache: KVDiskCacheCLIOverrides = KVDiskCacheCLIOverrides(),
         continuousBatching: String? = nil,
         continuousBatchQueueLimit: Int? = nil,
+        continuousBatchQueueWaitTimeoutMS: Int? = nil,
         pagedKV: PagedKVCLIOverrides = PagedKVCLIOverrides()
     ) {
         self.port = port
@@ -466,6 +489,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.prefillStepSize = prefillStepSize
         self.continuousBatching = continuousBatching
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
+        self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
         self.kvDiskCache = kvDiskCache
         self.pagedKV = pagedKV
     }
@@ -673,6 +697,13 @@ public enum ConfigLoader {
             config.continuousBatching = mode
         }
         try assign(&config.continuousBatchQueueLimit, from: dict, key: "continuous_batch_queue_limit", expected: "integer >= 1")
+        try assign(
+            &config.continuousBatchQueueWaitTimeoutMS,
+            from: dict,
+            key: "continuous_batch_queue_wait_timeout_ms",
+            expected: "integer >= 1"
+        )
+        try assign(&config.mlxCacheLimitMB, from: dict, key: "mlx_cache_limit_mb", expected: "integer >= 0")
         if let rawTuples = dict["continuous_batching_accepted_tuples"] {
             config.continuousBatchingAcceptedTuples = try parseContinuousBatchingAcceptedTuples(rawTuples)
         }
@@ -700,7 +731,7 @@ public enum ConfigLoader {
                 throw ConfigError.invalidValue(
                     key: entryKey,
                     value: String(describing: entry),
-                    expected: "map with model_id, model_sha256, cache_class, kv_dtype, requires_moe, hardware_class"
+                    expected: "map with model_id, model_sha256, cache_class, kv_dtype, requires_moe, hardware_class, metallib_sha256, kernel_identifier"
                 )
             }
             // Coverage matching in `ContinuousBatchingAcceptanceCoverage.covers(_:)`
@@ -763,7 +794,9 @@ public enum ConfigLoader {
                 cacheClass: try requiredString("cache_class"),
                 kvDType: kvDType,
                 requiresMoE: requiresMoE,
-                hardwareClass: try requiredString("hardware_class")
+                hardwareClass: try requiredString("hardware_class"),
+                metallibSHA256: try requiredSHA256("metallib_sha256"),
+                kernelIdentifier: try requiredString("kernel_identifier")
             )
         }
     }
@@ -835,6 +868,13 @@ public enum ConfigLoader {
         try assign(&config.prefillStepSize, from: environment, env: "MACPROVIDER_PREFILL_STEP_SIZE", expected: "integer >= 1")
         try assign(&config.continuousBatching, from: environment, env: "MACPROVIDER_CONTINUOUS_BATCHING", expected: "off, canary, or on")
         try assign(&config.continuousBatchQueueLimit, from: environment, env: "MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT", expected: "integer >= 1")
+        try assign(
+            &config.continuousBatchQueueWaitTimeoutMS,
+            from: environment,
+            env: "MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS",
+            expected: "integer >= 1"
+        )
+        try assign(&config.mlxCacheLimitMB, from: environment, env: "MACPROVIDER_MLX_CACHE_LIMIT_MB", expected: "integer >= 0")
         return config
     }
 
@@ -1011,6 +1051,9 @@ public enum ConfigLoader {
         }
         if let continuousBatchQueueLimit = cli.continuousBatchQueueLimit {
             config.continuousBatchQueueLimit = continuousBatchQueueLimit
+        }
+        if let continuousBatchQueueWaitTimeoutMS = cli.continuousBatchQueueWaitTimeoutMS {
+            config.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
         }
         return config
     }
