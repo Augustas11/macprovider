@@ -54,3 +54,17 @@ The round 1 findings are fixed in `217ebfe7`:
 Carried, pre-existing and confirmed by both round 2 lanes: `on` has no Gate A5
 promotion predicate. `on` fails closed today and the rollout is `canary` only;
 add the A5 gate before any production-default promotion.
+
+### Round 3–4: after the gate, a CI-caught race (`b332156b`, `919cf12e`)
+
+After the gate, CI caught an AC-25 race. A request re-queued past its
+queue-wait deadline could be admitted before its zero-delay expiry task ran.
+The fix is `b332156b`: expire an overdue request synchronously at admission.
+
+| Lane | Round 3 (`b332156b`) | Round 4 (`919cf12e`) |
+| --- | --- | --- |
+| Code | FAIL 0/0/1: test gap, the stale test could not observe admission | **PASS** (deterministic regression test added; it fails without the fix) |
+| Security | **PASS** | not re-run |
+| Architecture | **PASS** | not re-run |
+
+Merged as #1716 squash `36946873`.
