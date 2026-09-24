@@ -6793,6 +6793,8 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			state.poolMinBinaryVersion = snap.MinBinaryVersion
 			state.poolModelAllowlist = append([]string(nil), snap.ModelAllowlist...)
 			state.poolRequiresSettlementEnforce = poolRequiresSettlementEnforce
+			state.poolManifestVersion = snap.ManifestVersion
+			state.poolManifestCoreDigest = snap.ManifestCoreDigest
 			state.poolGenSet = true
 		}
 	}

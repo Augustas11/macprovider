@@ -41,6 +41,12 @@ const (
 
 	promotionLaunchEnvironmentCandidate = "candidate"
 	RootCompromiseFreezeReason          = "root_compromise_freeze"
+
+	// SPEC-043-R002 key_custody_disclosure.class vocabulary.
+	RootCustodyClassSoftware = "software"
+	RootCustodyClassHSM      = "hsm"
+	RootCustodyClassMPC      = "mpc"
+	RootCustodyClassOther    = "other"
 )
 
 var (
@@ -127,6 +133,10 @@ type DurableEvent struct {
 	ManifestSnapshot    string    `json:"manifest_snapshot,omitempty"`
 	SignedControl       string    `json:"signed_control,omitempty"`
 	ControlSignatures   string    `json:"control_signatures,omitempty"`
+	// RootCustodyClass is stamped by PromotePool on a production promotion from
+	// the operator-approved class of the root's custody disclosure hash
+	// (SPEC-043-R002/R008). It is never accepted from a caller.
+	RootCustodyClass string `json:"root_custody_class,omitempty"`
 
 	CurrentApprovalVersion             string `json:"current_approval_version,omitempty"`
 	RootIssuerKeyID                    string `json:"root_issuer_key_id,omitempty"`
@@ -170,6 +180,7 @@ type productionActivationGate struct {
 	enabled                  bool
 	allowedLaunchEnvironment map[string]bool
 	rootCustodyHashes        map[string]bool
+	rootCustodyClasses       map[string]string
 	evidenceSHA256           string
 }
 
@@ -180,7 +191,11 @@ type productionActivationGate struct {
 type ProductionActivationGate struct {
 	AllowedLaunchEnvironments []string
 	RootCustodyHashes         []string
-	EvidenceSHA256            string
+	// RootCustodyClasses maps every approved custody disclosure hash to its
+	// SPEC-043-R002 class. software is rejected until a signed-exception path
+	// exists.
+	RootCustodyClasses map[string]string
+	EvidenceSHA256     string
 }
 
 type StoreOption func(*Store) error
@@ -341,7 +356,7 @@ func NewStore(db *sql.DB, opts ...StoreOption) (*Store, error) {
 
 func normalizeProductionActivationGate(g ProductionActivationGate) (productionActivationGate, error) {
 	evidenceSHA := strings.TrimSpace(g.EvidenceSHA256)
-	if evidenceSHA == "" && len(g.AllowedLaunchEnvironments) == 0 && len(g.RootCustodyHashes) == 0 {
+	if evidenceSHA == "" && len(g.AllowedLaunchEnvironments) == 0 && len(g.RootCustodyHashes) == 0 && len(g.RootCustodyClasses) == 0 {
 		return productionActivationGate{}, nil
 	}
 	if requireLowerHex64(evidenceSHA) != nil {
@@ -351,6 +366,7 @@ func normalizeProductionActivationGate(g ProductionActivationGate) (productionAc
 		enabled:                  true,
 		allowedLaunchEnvironment: make(map[string]bool),
 		rootCustodyHashes:        make(map[string]bool),
+		rootCustodyClasses:       make(map[string]string),
 		evidenceSHA256:           evidenceSHA,
 	}
 	for _, value := range g.AllowedLaunchEnvironments {
@@ -370,7 +386,42 @@ func normalizeProductionActivationGate(g ProductionActivationGate) (productionAc
 	if len(out.allowedLaunchEnvironment) == 0 || len(out.rootCustodyHashes) == 0 {
 		return productionActivationGate{}, fmt.Errorf("%w: incomplete production activation gate", ErrPromotionPreconditionFailed)
 	}
+	for hash, class := range g.RootCustodyClasses {
+		hash = strings.TrimSpace(hash)
+		class = strings.TrimSpace(class)
+		if !out.rootCustodyHashes[hash] || !ProductionRootCustodyClassApproved(class) {
+			return productionActivationGate{}, fmt.Errorf("%w: production activation custody class", ErrPromotionPreconditionFailed)
+		}
+		out.rootCustodyClasses[hash] = class
+	}
+	if len(out.rootCustodyClasses) != len(out.rootCustodyHashes) {
+		return productionActivationGate{}, fmt.Errorf("%w: production activation custody class", ErrPromotionPreconditionFailed)
+	}
 	return out, nil
+}
+
+// ProductionActivationEnabled reports whether this store runs with the
+// production activation gate, i.e. it backs a production coordinator.
+func (s *Store) ProductionActivationEnabled() bool {
+	return s != nil && s.productionActivationGate.enabled
+}
+
+// ValidRootCustodyClass reports whether class is in the SPEC-043-R002
+// key_custody_disclosure.class vocabulary.
+func ValidRootCustodyClass(class string) bool {
+	switch class {
+	case RootCustodyClassSoftware, RootCustodyClassHSM, RootCustodyClassMPC, RootCustodyClassOther:
+		return true
+	default:
+		return false
+	}
+}
+
+// ProductionRootCustodyClassApproved reports whether class may back a
+// production promotion. software custody needs a signed, expiring exception
+// (SPEC-043-R002) that the coordinator cannot record yet, so it is rejected.
+func ProductionRootCustodyClassApproved(class string) bool {
+	return ValidRootCustodyClass(class) && class != RootCustodyClassSoftware
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -1888,6 +1939,7 @@ func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*Reconstructed
 	}
 	e.EventType = EventLifecycleChanged
 	e.Lifecycle = LifecycleActive
+	e.RootCustodyClass = ""
 	timestampProvided := !e.TimestampUTC.IsZero()
 	if timestampProvided {
 		e.TimestampUTC = e.TimestampUTC.UTC()
@@ -1914,6 +1966,7 @@ func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*Reconstructed
 			if !timestampProvided {
 				e.TimestampUTC = existing.TimestampUTC.UTC()
 			}
+			e.RootCustodyClass = existing.RootCustodyClass
 			if err := validateEvent(e); err != nil {
 				return err
 			}
@@ -1949,8 +2002,15 @@ func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*Reconstructed
 		if err != nil {
 			return err
 		}
-		if err := preState.validatePromotion(e, now, s.productionActivationGate); err != nil {
+		onCall, err := onCallReadinessFromQueryer(ctx, conn)
+		if err != nil {
 			return err
+		}
+		if err := preState.validatePromotion(e, now, s.productionActivationGate, onCall); err != nil {
+			return err
+		}
+		if root := preState.Pools[e.PoolID].RootIssuer; root.LaunchEnvironment != promotionLaunchEnvironmentCandidate {
+			e.RootCustodyClass = s.productionActivationGate.rootCustodyClasses[root.StructuredCustodyDisclosureHash]
 		}
 		next := append(append([]DurableEvent(nil), events...), e)
 		state, err := reconstructEventsWithApprovals(next, approvals, now)
@@ -2618,11 +2678,15 @@ type ReconstructedRootIssuer struct {
 	ManifestAuthorityRootKeyID      string
 	ManifestAuthorityRootPublicKey  string
 	StructuredCustodyDisclosureHash string
-	GenesisNonceDigest              string
-	IntendedPoolDisplayNameHash     string
-	LaunchEnvironment               string
-	RegistrationNonce               string
-	RegistrationNonceExpiry         string
+	// CustodyClass is the operator-approved SPEC-043-R002 class of
+	// StructuredCustodyDisclosureHash, recorded by the first production
+	// promotion and immutable afterwards. Empty for candidate pools.
+	CustodyClass                string
+	GenesisNonceDigest          string
+	IntendedPoolDisplayNameHash string
+	LaunchEnvironment           string
+	RegistrationNonce           string
+	RegistrationNonceExpiry     string
 }
 
 func ReconstructEvents(events []DurableEvent) (*ReconstructedState, error) {
@@ -2796,6 +2860,12 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		}
 		if !validLifecycleTransition(p.Lifecycle, e.Lifecycle) {
 			return nil, fmt.Errorf("%w: event %d invalid lifecycle transition %s -> %s for pool %q", ErrMalformedDurableEvent, index, p.Lifecycle, e.Lifecycle, e.PoolID)
+		}
+		if e.RootCustodyClass != "" {
+			if p.RootIssuer == nil || (p.RootIssuer.CustodyClass != "" && p.RootIssuer.CustodyClass != e.RootCustodyClass) {
+				return nil, fmt.Errorf("%w: event %d root custody class changed for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
+			}
+			p.RootIssuer.CustodyClass = e.RootCustodyClass
 		}
 		p.Lifecycle = e.Lifecycle
 		p.LifecycleReason = e.Reason
@@ -3175,7 +3245,7 @@ func (s *ReconstructedState) validateMutationCreatorGate(e DurableEvent, now tim
 	return nil
 }
 
-func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time, gate productionActivationGate) error {
+func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time, gate productionActivationGate, onCall map[string]OnCallReadiness) error {
 	if s == nil {
 		return PromotionPreconditionError{Reason: "state_unavailable"}
 	}
@@ -3192,10 +3262,15 @@ func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time, ga
 	if p.RootIssuer == nil {
 		return PromotionPreconditionError{Reason: "root_issuer_missing"}
 	}
-	if p.RootIssuer.LaunchEnvironment != promotionLaunchEnvironmentCandidate {
+	production := p.RootIssuer.LaunchEnvironment != promotionLaunchEnvironmentCandidate
+	if production {
 		if err := validateProductionPromotionGate(p.RootIssuer, gate); err != nil {
 			return err
 		}
+	} else if gate.enabled {
+		// A production-activated coordinator never promotes a candidate root:
+		// that would skip the production, on-call, and lifecycle gates.
+		return PromotionPreconditionError{Reason: "launch_environment_candidate_on_production"}
 	}
 	if p.ManifestVersion == 0 || p.ManifestCoreDigest == "" {
 		return PromotionPreconditionError{Reason: "manifest_missing"}
@@ -3221,6 +3296,12 @@ func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time, ga
 			return PromotionPreconditionError{Reason: approval.InvalidReason(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now)}
 		}
 	}
+	if production {
+		rec, ok := onCall[p.RootIssuer.LaunchEnvironment]
+		if err := requireCurrentOnCallReadiness(rec, ok, p.RootIssuer.LaunchEnvironment, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -3236,6 +3317,13 @@ func validateProductionPromotionGate(root *ReconstructedRootIssuer, gate product
 	}
 	if !gate.rootCustodyHashes[root.StructuredCustodyDisclosureHash] {
 		return PromotionPreconditionError{Reason: "production_root_custody_unapproved"}
+	}
+	class := gate.rootCustodyClasses[root.StructuredCustodyDisclosureHash]
+	if !ProductionRootCustodyClassApproved(class) {
+		return PromotionPreconditionError{Reason: "production_root_custody_class_unapproved"}
+	}
+	if root.CustodyClass != "" && root.CustodyClass != class {
+		return PromotionPreconditionError{Reason: "production_root_custody_class_changed"}
 	}
 	if gate.evidenceSHA256 == "" {
 		return PromotionPreconditionError{Reason: "production_activation_evidence_missing"}
@@ -3330,6 +3418,9 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			Generation:                p.RouteableSnapshotGeneration(),
 			RouteableUntilUTC:         p.CreatorGateExpiresAtUTC,
 			RouteableExpired:          routeabilityReason == "creator_agreement_expired",
+			ManifestVersion:           p.ManifestVersion,
+			ManifestCoreDigest:        p.ManifestCoreDigest,
+			LaunchEnvironment:         rootIssuerLaunchEnvironment(p),
 		})
 	}
 	return out
@@ -3393,6 +3484,9 @@ func validateEvent(e DurableEvent) error {
 	}
 	if err := ValidatePromiseClaimsText(e.PoolID); err != nil {
 		return err
+	}
+	if e.RootCustodyClass != "" && (e.EventType != EventLifecycleChanged || e.Lifecycle != LifecycleActive || !ProductionRootCustodyClassApproved(e.RootCustodyClass)) {
+		return fmt.Errorf("root_custody_class is only valid on a production promotion")
 	}
 	switch e.EventType {
 	case EventPoolCreated:

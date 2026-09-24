@@ -1267,6 +1267,10 @@ type TrustedPoolsProductionActivationConfig struct {
 	AllowedLaunchEnvironments []string `yaml:"allowed_launch_environments"`
 	EvidenceSHA256            string   `yaml:"evidence_sha256"`
 	RootCustodyHashes         []string `yaml:"root_custody_hashes"`
+	// RootCustodyClasses records the SPEC-043-R002 custody class approved for
+	// each root_custody_hashes entry: hsm, mpc, or other. software is not
+	// production-approvable until a signed-exception path exists.
+	RootCustodyClasses map[string]string `yaml:"root_custody_classes"`
 }
 
 type TrustedPoolsCreatorAdminCredentialConfig struct {
@@ -1616,6 +1620,7 @@ func Default() Config {
 			ProductionActivation: TrustedPoolsProductionActivationConfig{
 				AllowedLaunchEnvironments: []string{},
 				RootCustodyHashes:         []string{},
+				RootCustodyClasses:        map[string]string{},
 			},
 		},
 		Logging: LoggingConfig{
@@ -2969,7 +2974,7 @@ func (c Config) validateAdvertisedVersions() error {
 
 func validateTrustedPoolsProductionActivation(c TrustedPoolsConfig) error {
 	gate := c.ProductionActivation
-	configured := strings.TrimSpace(gate.EvidenceSHA256) != "" || len(gate.AllowedLaunchEnvironments) != 0 || len(gate.RootCustodyHashes) != 0
+	configured := strings.TrimSpace(gate.EvidenceSHA256) != "" || len(gate.AllowedLaunchEnvironments) != 0 || len(gate.RootCustodyHashes) != 0 || len(gate.RootCustodyClasses) != 0
 	if !configured {
 		return nil
 	}
@@ -3006,6 +3011,14 @@ func validateTrustedPoolsProductionActivation(c TrustedPoolsConfig) error {
 			return fmt.Errorf("trusted_pools.production_activation.root_custody_hashes must be unique")
 		}
 		seenCustody[value] = true
+		switch gate.RootCustodyClasses[value] {
+		case "hsm", "mpc", "other":
+		default:
+			return fmt.Errorf("trusted_pools.production_activation.root_custody_classes must map every root_custody_hashes entry to hsm, mpc, or other")
+		}
+	}
+	if len(gate.RootCustodyClasses) != len(seenCustody) {
+		return fmt.Errorf("trusted_pools.production_activation.root_custody_classes must only name root_custody_hashes entries")
 	}
 	return nil
 }

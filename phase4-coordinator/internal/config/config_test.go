@@ -1224,6 +1224,38 @@ func TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate(t *testing
 			want: "non-candidate",
 		},
 		{
+			name: "missing custody class",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
+				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
+				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+			},
+			want: "root_custody_classes",
+		},
+		{
+			name: "software custody class rejected",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
+				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
+				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+				cfg.TrustedPools.ProductionActivation.RootCustodyClasses = map[string]string{digest: "software"}
+			},
+			want: "root_custody_classes",
+		},
+		{
+			name: "custody class for unapproved hash rejected",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
+				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
+				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+				cfg.TrustedPools.ProductionActivation.RootCustodyClasses = map[string]string{digest: "hsm", strings.Repeat("b", 64): "hsm"}
+			},
+			want: "root_custody_classes",
+		},
+		{
 			name: "invalid custody digest",
 			build: func(cfg *Config) {
 				cfg.TrustedPools.Enabled = true
@@ -1253,6 +1285,7 @@ func TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate(t *testing
 	cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
 	cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
 	cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+	cfg.TrustedPools.ProductionActivation.RootCustodyClasses = map[string]string{digest: "hsm"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("complete production activation gate should validate: %v", err)
 	}

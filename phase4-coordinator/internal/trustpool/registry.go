@@ -35,6 +35,10 @@ type Registry struct {
 	revision           uint64
 	revocationWatchers map[string]map[chan struct{}]struct{}
 	activeDeliveries   map[string]uint64
+	// rejectCandidateLaunch is set on a production-activated coordinator
+	// (trusted_pools.production_activation configured): a pool whose root
+	// launch_environment is candidate is never routeable there.
+	rejectCandidateLaunch bool
 }
 
 type poolState struct {
@@ -73,6 +77,11 @@ type poolState struct {
 	generation        uint64
 	routeableUntilUTC time.Time
 	routeableExpired  bool
+	// SPEC-042 R006 routing-time labels and the root launch environment,
+	// captured with the same durable snapshot as membership.
+	manifestVersion    uint64
+	manifestCoreDigest string
+	launchEnvironment  string
 }
 
 // Snapshot is a single consistent read of a pool's routable membership and
@@ -95,6 +104,10 @@ type Snapshot struct {
 	Revision          uint64
 	RouteableUntilUTC time.Time
 	RouteableExpired  bool
+	// ManifestVersion and ManifestCoreDigest label the accepted manifest that
+	// authorizes routing (SPEC-042 R006). Zero/empty for seed-only pools.
+	ManifestVersion    uint64
+	ManifestCoreDigest string
 }
 
 // RouteableSnapshot is a durable reconstruction input: one coherent pool state
@@ -115,6 +128,9 @@ type RouteableSnapshot struct {
 	Generation                uint64
 	RouteableUntilUTC         time.Time
 	RouteableExpired          bool
+	ManifestVersion           uint64
+	ManifestCoreDigest        string
+	LaunchEnvironment         string
 }
 
 // NewRegistry returns an empty registry.
@@ -403,17 +419,20 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pools[s.PoolID] = &poolState{
-		creatorAccountID:  s.CreatorAccountID,
-		members:           members,
-		revoked:           revoked,
-		buyers:            buyers,
-		routeable:         s.Routeable,
-		minBinaryVersion:  s.MinBinaryVersion,
-		modelAllowlist:    modelAllowlist,
-		settlementMode:    canonicalPoolSettlementMode(s.SettlementMode),
-		generation:        s.Generation,
-		routeableUntilUTC: s.RouteableUntilUTC.UTC(),
-		routeableExpired:  s.RouteableExpired,
+		creatorAccountID:   s.CreatorAccountID,
+		members:            members,
+		revoked:            revoked,
+		buyers:             buyers,
+		routeable:          s.Routeable && !r.candidateLaunchBlockedLocked(s.LaunchEnvironment),
+		minBinaryVersion:   s.MinBinaryVersion,
+		modelAllowlist:     modelAllowlist,
+		settlementMode:     canonicalPoolSettlementMode(s.SettlementMode),
+		generation:         s.Generation,
+		routeableUntilUTC:  s.RouteableUntilUTC.UTC(),
+		routeableExpired:   s.RouteableExpired,
+		manifestVersion:    s.ManifestVersion,
+		manifestCoreDigest: s.ManifestCoreDigest,
+		launchEnvironment:  s.LaunchEnvironment,
 	}
 	r.notifyRevokedWatchersForPoolsLocked(map[string]*poolState{s.PoolID: r.pools[s.PoolID]})
 	return nil
@@ -459,6 +478,28 @@ func (r *Registry) Disable() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pools = make(map[string]*poolState)
+}
+
+// RejectCandidateLaunchEnvironment marks this registry as serving a
+// production-activated coordinator. Pools whose root launch_environment is
+// candidate become non-routeable now and on every later snapshot load, so they
+// fail closed as pool_unavailable at route time. There is no way to clear it.
+func (r *Registry) RejectCandidateLaunchEnvironment() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rejectCandidateLaunch = true
+	for _, ps := range r.pools {
+		if r.candidateLaunchBlockedLocked(ps.launchEnvironment) {
+			ps.routeable = false
+		}
+	}
+}
+
+func (r *Registry) candidateLaunchBlockedLocked(launchEnvironment string) bool {
+	return r.rejectCandidateLaunch && launchEnvironment == promotionLaunchEnvironmentCandidate
 }
 
 // BeginPoolDelivery records a provider-dispatched pool request until the
@@ -612,11 +653,19 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 			generation:              s.Generation,
 			routeableUntilUTC:       s.RouteableUntilUTC.UTC(),
 			routeableExpired:        s.RouteableExpired,
+			manifestVersion:         s.ManifestVersion,
+			manifestCoreDigest:      s.ManifestCoreDigest,
+			launchEnvironment:       s.LaunchEnvironment,
 		}
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	for _, ps := range next {
+		if r.candidateLaunchBlockedLocked(ps.launchEnvironment) {
+			ps.routeable = false
+		}
+	}
 	if enforceRevision && r.revision != 0 {
 		switch {
 		case revision < r.revision:
@@ -713,6 +762,9 @@ func poolStatesEqual(a, b *poolState) bool {
 		a.generation == b.generation &&
 		a.routeableUntilUTC.Equal(b.routeableUntilUTC) &&
 		a.routeableExpired == b.routeableExpired &&
+		a.manifestVersion == b.manifestVersion &&
+		a.manifestCoreDigest == b.manifestCoreDigest &&
+		a.launchEnvironment == b.launchEnvironment &&
 		stringSetsEqual(a.members, b.members) &&
 		stringSetsEqual(a.revoked, b.revoked) &&
 		stringSetsEqual(a.buyers, b.buyers) &&
@@ -823,18 +875,21 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 		sort.Strings(revoked)
 		sort.Strings(buyers)
 		out = append(out, RouteableSnapshot{
-			PoolID:            poolID,
-			CreatorAccountID:  ps.creatorAccountID,
-			Members:           members,
-			Revoked:           revoked,
-			BuyerAccounts:     buyers,
-			MinBinaryVersion:  ps.minBinaryVersion,
-			ModelAllowlist:    cloneStringSlice(ps.modelAllowlist),
-			SettlementMode:    routeablePoolSettlementMode(ps.settlementMode),
-			Routeable:         ps.routeable,
-			Generation:        ps.generation,
-			RouteableUntilUTC: ps.routeableUntilUTC,
-			RouteableExpired:  ps.routeableExpired,
+			PoolID:             poolID,
+			CreatorAccountID:   ps.creatorAccountID,
+			Members:            members,
+			Revoked:            revoked,
+			BuyerAccounts:      buyers,
+			MinBinaryVersion:   ps.minBinaryVersion,
+			ModelAllowlist:     cloneStringSlice(ps.modelAllowlist),
+			SettlementMode:     routeablePoolSettlementMode(ps.settlementMode),
+			Routeable:          ps.routeable,
+			Generation:         ps.generation,
+			RouteableUntilUTC:  ps.routeableUntilUTC,
+			RouteableExpired:   ps.routeableExpired,
+			ManifestVersion:    ps.manifestVersion,
+			ManifestCoreDigest: ps.manifestCoreDigest,
+			LaunchEnvironment:  ps.launchEnvironment,
 		})
 	}
 	return out
@@ -880,17 +935,19 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 	routeableExpired := ps.routeableExpired || ps.routeableExpiredAt(now)
 	members, _ := r.routeMembersLocked(ps, now)
 	return Snapshot{
-		PoolID:            poolID,
-		Exists:            true,
-		Members:           members,
-		MinBinaryVersion:  ps.minBinaryVersion,
-		ModelAllowlist:    cloneStringSlice(ps.modelAllowlist),
-		SettlementMode:    routeablePoolSettlementMode(ps.settlementMode),
-		Routeable:         ps.routeableAt(now),
-		Generation:        r.effectiveGenerationLocked(ps, now),
-		Revision:          r.revision,
-		RouteableUntilUTC: ps.routeableUntilUTC,
-		RouteableExpired:  routeableExpired,
+		PoolID:             poolID,
+		Exists:             true,
+		Members:            members,
+		MinBinaryVersion:   ps.minBinaryVersion,
+		ModelAllowlist:     cloneStringSlice(ps.modelAllowlist),
+		SettlementMode:     routeablePoolSettlementMode(ps.settlementMode),
+		Routeable:          ps.routeableAt(now),
+		Generation:         r.effectiveGenerationLocked(ps, now),
+		Revision:           r.revision,
+		RouteableUntilUTC:  ps.routeableUntilUTC,
+		RouteableExpired:   routeableExpired,
+		ManifestVersion:    ps.manifestVersion,
+		ManifestCoreDigest: ps.manifestCoreDigest,
 	}
 }
 
@@ -916,17 +973,19 @@ func (r *Registry) AuthorizeAndSnapshot(poolID, buyerAccountID string) (Snapshot
 		authorized = false
 	}
 	return Snapshot{
-		PoolID:            poolID,
-		Exists:            true,
-		Members:           members,
-		MinBinaryVersion:  ps.minBinaryVersion,
-		ModelAllowlist:    cloneStringSlice(ps.modelAllowlist),
-		SettlementMode:    routeablePoolSettlementMode(ps.settlementMode),
-		Routeable:         ps.routeableAt(now),
-		Generation:        r.effectiveGenerationLocked(ps, now),
-		Revision:          r.revision,
-		RouteableUntilUTC: ps.routeableUntilUTC,
-		RouteableExpired:  routeableExpired,
+		PoolID:             poolID,
+		Exists:             true,
+		Members:            members,
+		MinBinaryVersion:   ps.minBinaryVersion,
+		ModelAllowlist:     cloneStringSlice(ps.modelAllowlist),
+		SettlementMode:     routeablePoolSettlementMode(ps.settlementMode),
+		Routeable:          ps.routeableAt(now),
+		Generation:         r.effectiveGenerationLocked(ps, now),
+		Revision:           r.revision,
+		RouteableUntilUTC:  ps.routeableUntilUTC,
+		RouteableExpired:   routeableExpired,
+		ManifestVersion:    ps.manifestVersion,
+		ManifestCoreDigest: ps.manifestCoreDigest,
 	}, authorized
 }
 

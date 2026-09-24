@@ -61,6 +61,10 @@ type forwardState struct {
 	// settlement-mode hot reload cannot downgrade an enforce-required pool
 	// after selection but before provider relay.
 	poolRequiresSettlementEnforce bool
+	// poolManifestVersion and poolManifestCoreDigest are the SPEC-042 R006
+	// routing-time labels of the manifest that authorized this route.
+	poolManifestVersion    uint64
+	poolManifestCoreDigest string
 
 	// routingDone is the wall-clock at which the current provider was
 	// selected. Updated on every advanceToNextProvider so the
