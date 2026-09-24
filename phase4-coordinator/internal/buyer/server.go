@@ -3715,6 +3715,10 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				if isSpec019ProviderDetailCode(attempt.ErrorCode) {
 					attempt.FaultFlag = billing.FaultBreakerQualifying
 				}
+				if end.Status == "cancelled" {
+					// Nothing reached the buyer.
+					attempt = withProviderCancelTerminal(attempt, end, newSettlementStreamOutputTracker(), started)
+				}
 				return wsForwardFailed, attempt
 			}
 			markProviderDone()
@@ -3800,7 +3804,10 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				return wsForwardTimedOut, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Selected provider timed out; buyer should retry", EstimatedCompTokens: estimatedCompletion(), FaultFlag: billing.FaultBreakerQualifying}
 			} else if errors.Is(err, providerws.ErrRelayClosed) {
 				if r.Context().Err() != nil {
-					return wsForwardCancelled, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during request", EstimatedCompTokens: estimatedCompletion()}
+					attempt := requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during request", EstimatedCompTokens: estimatedCompletion()}
+					// A non-streaming response is written only on completion,
+					// so the buyer received nothing.
+					return wsForwardCancelled, awaitBuyerCancelTerminal(attempt, relay, newSettlementStreamOutputTracker(), started)
 				}
 				s.recordBreakerFault(provider, breakerFaultDeadWS, requestID)
 				return wsForwardProviderDisconnected, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider disconnected; buyer should retry", EstimatedCompTokens: estimatedCompletion(), FaultFlag: billing.FaultBreakerQualifying}
@@ -3840,6 +3847,11 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	}
 	progressUnavailableAttempt := func(message string, code string, faultFlag string) requestLogAttempt {
 		return requestLogAttempt{Status: http.StatusOK, Error: message, ErrorCode: code, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: faultFlag, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
+	}
+	// buyerCancelledAttempt records a buyer cancel after relay.Cancel and binds
+	// it to the provider's buyer_cancel terminal frame when one arrives.
+	buyerCancelledAttempt := func() requestLogAttempt {
+		return awaitBuyerCancelTerminal(progressAttempt("Buyer disconnected during streaming", billing.FaultNone), relay, settlementTracker, started)
 	}
 	streamFailureAttempt := requestLogAttempt{}
 	hasStreamFailureAttempt := false
@@ -4002,7 +4014,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		case <-r.Context().Done():
 			relay.Cancel("buyer_disconnected")
 			markProviderDone()
-			return wsForwardCancelled, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
+			return wsForwardCancelled, buyerCancelledAttempt()
 		case chunk, ok := <-chunks:
 			if !ok {
 				chunks = nil
@@ -4016,6 +4028,11 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 					}
 					faultFlag = billing.FaultBreakerQualifying
 					return result, progressUnavailableAttempt("Provider emitted malformed settlement stream", "malformed_settlement_stream", faultFlag)
+				}
+				if result == wsForwardCancelled {
+					// The buyer went away (or the pool revoked the attempt)
+					// and relay.Cancel sent the provider a cancel_request.
+					return result, buyerCancelledAttempt()
 				}
 				return result, progressAttempt("", faultFlag)
 			}
@@ -4077,11 +4094,15 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			}
 			settlementOutput := settlementTracker.outputAt(billing.TerminalStateNormalDone, terminalTS)
 			attempt := requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(bytesEmitted), SettlementOutput: settlementOutput, SettlementReceipt: receiptValue}
-			if p, cached, c := tokenPointersFromUsageObject(end.Usage); p != nil || cached != nil || c != nil {
-				attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
-			}
-			if attempt.PromptTokens == nil && attempt.CachedPromptTokens == nil && attempt.CompletionTokens == nil {
-				attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = promptTok, cachedPromptTok, completionTok
+			if end.Status == "cancelled" {
+				attempt = withProviderCancelTerminal(requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: attempt.EstimatedCompTokens}, end, settlementTracker, started)
+			} else {
+				if p, cached, c := tokenPointersFromUsageObject(end.Usage); p != nil || cached != nil || c != nil {
+					attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = mergeStreamUsagePointers(promptTok, cachedPromptTok, completionTok, p, cached, c)
+				}
+				if attempt.PromptTokens == nil && attempt.CachedPromptTokens == nil && attempt.CompletionTokens == nil {
+					attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = promptTok, cachedPromptTok, completionTok
+				}
 			}
 			if end.Status == "complete" && s.zeroTokenFault(end, finishReason) {
 				attempt.FaultFlag = billing.FaultBreakerQualifying
@@ -4148,7 +4169,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws streaming relay failed")
 			if errors.Is(err, providerws.ErrRelayClosed) {
 				if r.Context().Err() != nil {
-					return wsForwardCancelled, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
+					return wsForwardCancelled, buyerCancelledAttempt()
 				}
 				s.recordBreakerFault(provider, breakerFaultDeadWS, requestID)
 				if !committed {
@@ -9995,6 +10016,76 @@ func trustedProviderTerminalStateTSInt(ts int64, requestStartedAt, observedAt ti
 		return 0, false
 	}
 	return ts, true
+}
+
+// providerCancelTerminalGrace bounds how long a buyer-cancelled WS attempt
+// waits for the provider's "cancelled" terminal frame and its receipt.
+const providerCancelTerminalGrace = 2 * time.Second
+
+// awaitBuyerCancelTerminal waits, after relay.Cancel, for the provider's
+// "cancelled" terminal frame and binds attempt to it. Without one the attempt
+// stays as recorded and its receipt is missing (SPEC-015 §N.7).
+func awaitBuyerCancelTerminal(attempt requestLogAttempt, relay *providerws.RelayStream, delivered *settlementStreamOutputTracker, started time.Time) requestLogAttempt {
+	end, ok := relay.AwaitCancelTerminal(providerCancelTerminalGrace)
+	if !ok {
+		return attempt
+	}
+	return withProviderCancelTerminal(attempt, end, delivered, started)
+}
+
+// withProviderCancelTerminal records a buyer-cancelled attempt with the
+// terminal state the provider signs, buyer_cancel, over the output that
+// actually reached the buyer, and carries the provider's receipt into
+// settlement (SPEC-015 §N.4, §N.7; SPEC-022 R-5.6). The provider's usage is
+// used only when its receipt claims exactly the delivered byte count:
+//   - delivered prefix: the ledger bills that usage and the receipt settles it;
+//   - nothing delivered: the ledger bills nothing and the usage stays evidence,
+//     so a valid receipt is zero_settled.
+//
+// Any other receipt keeps the byte estimate and fails verification.
+func withProviderCancelTerminal(attempt requestLogAttempt, end providerws.InferenceResponseEnd, delivered *settlementStreamOutputTracker, started time.Time) requestLogAttempt {
+	terminalTS := int64(0)
+	if providerTS, ok := trustedProviderTerminalStateTSInt(end.TerminalStateTSUnixMS, started, time.Now().UTC()); ok {
+		terminalTS = providerTS
+	}
+	output := delivered.outputAt(billing.TerminalStateBuyerCancel, terminalTS)
+	attempt.SettlementOutput = output
+	attempt.SettlementReceipt = normalizeReceiptHeaderValue(end.Receipt)
+	if attempt.SettlementReceipt == "" || !output.Available {
+		return attempt
+	}
+	deliveredBytes := output.OutputPrefixEndByte - output.OutputPrefixStartByte
+	if receiptBytes, ok := receiptDeliveredOutputBytes(attempt.SettlementReceipt); !ok || receiptBytes != deliveredBytes {
+		return attempt
+	}
+	prompt, cached, completion := tokenPointersFromUsageObject(end.Usage)
+	if prompt == nil || completion == nil {
+		return attempt
+	}
+	if deliveredBytes == 0 {
+		zero := int64(0)
+		attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = &zero, nil, &zero
+		output.ObservedInputTokens, output.ObservedOutputTokens = prompt, completion
+		return attempt
+	}
+	attempt.PromptTokens, attempt.CachedPromptTokens, attempt.CompletionTokens = prompt, cached, completion
+	return attempt
+}
+
+// receiptDeliveredOutputBytes reads usage.delivered_output_bytes from an
+// unverified v0.4 receipt tuple. It only gates which usage the coordinator
+// records; the settlement verifier still checks the signed receipt.
+func receiptDeliveredOutputBytes(header string) (int64, bool) {
+	var tuple struct {
+		Usage struct {
+			DeliveredOutputBytes json.Number `json:"delivered_output_bytes"`
+		} `json:"usage"`
+	}
+	if !decodeReceiptTuple(header, &tuple) {
+		return 0, false
+	}
+	n, err := tuple.Usage.DeliveredOutputBytes.Int64()
+	return n, err == nil
 }
 
 func decodeReceiptTuple(header string, out any) bool {

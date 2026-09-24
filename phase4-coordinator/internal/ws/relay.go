@@ -50,12 +50,32 @@ type RelayStream struct {
 	Done        <-chan InferenceResponseEnd
 	Errors      <-chan error
 	Validations <-chan RelayBlindValidation
-	cancel      func(string)
+	// CancelTerminal yields the provider's "cancelled" terminal frame after a
+	// buyer_disconnected cancel_request. The frame arrives after the request is
+	// retired, and it carries the provider's buyer_cancel receipt.
+	CancelTerminal <-chan InferenceResponseEnd
+	cancel         func(string)
 }
 
 func (r *RelayStream) Cancel(reason string) {
 	if r.cancel != nil {
 		r.cancel(reason)
+	}
+}
+
+// AwaitCancelTerminal waits up to timeout for the provider's "cancelled"
+// terminal frame that answers a buyer_disconnected cancel_request.
+func (r *RelayStream) AwaitCancelTerminal(timeout time.Duration) (InferenceResponseEnd, bool) {
+	if r == nil || r.CancelTerminal == nil || timeout <= 0 {
+		return InferenceResponseEnd{}, false
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case end := <-r.CancelTerminal:
+		return end, true
+	case <-timer.C:
+		return InferenceResponseEnd{}, false
 	}
 }
 
@@ -77,6 +97,7 @@ func ConversationKeyFromContext(ctx context.Context) string {
 type relayActive struct {
 	requestID           string
 	stream              bool
+	cancelTerminal      chan InferenceResponseEnd
 	bufferMu            sync.Mutex
 	bufferedBytes       int64
 	chunks              chan InferenceResponseChunk
@@ -153,6 +174,9 @@ func RelayBufferExceededTotalForTest() uint64 {
 type retiredRelayRequest struct {
 	stream    bool
 	retiredAt time.Time
+	// cancelTerminal is set only while a buyer_disconnected cancel_request
+	// waits for the provider's "cancelled" terminal frame. It is one-shot.
+	cancelTerminal chan InferenceResponseEnd
 }
 
 type tier2RekeyExchange struct {
@@ -433,12 +457,13 @@ func (ps *providerSession) addActive(requestID string, maxConcurrency int, strea
 		return nil, ErrRelayBackpressure
 	}
 	active := &relayActive{
-		requestID:   requestID,
-		stream:      stream,
-		chunks:      make(chan InferenceResponseChunk, 256),
-		done:        make(chan InferenceResponseEnd, 1),
-		errs:        make(chan error, 1),
-		validations: make(chan RelayBlindValidation, 2),
+		requestID:      requestID,
+		stream:         stream,
+		cancelTerminal: make(chan InferenceResponseEnd, 1),
+		chunks:         make(chan InferenceResponseChunk, 256),
+		done:           make(chan InferenceResponseEnd, 1),
+		errs:           make(chan error, 1),
+		validations:    make(chan RelayBlindValidation, 2),
 	}
 	ps.active[requestID] = active
 	return active, nil
@@ -517,6 +542,11 @@ func (ps *providerSession) cancelActive(requestID string, reason string, err err
 	if !ok {
 		return false
 	}
+	if reason == "buyer_disconnected" {
+		// Armed before the cancel_request is sent, so the provider's answer
+		// cannot arrive first.
+		ps.armCancelTerminal(active)
+	}
 	b, _ := json.Marshal(CancelRequest{Type: "cancel_request", RequestID: requestID, Reason: reason})
 	_ = ps.send(b)
 	if err != nil {
@@ -526,6 +556,41 @@ func (ps *providerSession) cancelActive(requestID string, reason string, err err
 		}
 	}
 	close(active.chunks)
+	return true
+}
+
+func (ps *providerSession) armCancelTerminal(active *relayActive) {
+	ps.activeMu.Lock()
+	defer ps.activeMu.Unlock()
+	retired, ok := ps.retired[active.requestID]
+	if !ok {
+		return
+	}
+	retired.cancelTerminal = active.cancelTerminal
+	ps.retired[active.requestID] = retired
+}
+
+// deliverCancelTerminal hands a retired request's "cancelled" terminal frame
+// to the buyer handler waiting on RelayStream.CancelTerminal. Any other frame,
+// or a second one, is not delivered.
+func (ps *providerSession) deliverCancelTerminal(end InferenceResponseEnd) bool {
+	if end.Status != "cancelled" {
+		return false
+	}
+	ps.activeMu.Lock()
+	retired, ok := ps.retired[end.RequestID]
+	if !ok || retired.cancelTerminal == nil || time.Since(retired.retiredAt) > retiredRelayRequestTTL {
+		ps.activeMu.Unlock()
+		return false
+	}
+	ch := retired.cancelTerminal
+	retired.cancelTerminal = nil
+	ps.retired[end.RequestID] = retired
+	ps.activeMu.Unlock()
+	select {
+	case ch <- end:
+	default:
+	}
 	return true
 }
 
@@ -817,27 +882,27 @@ func relayBlindValidationMatches(expected *RelayBlindDispatchContext, validation
 		validation.MaxOutputTokens == expected.MaxOutputTokens
 }
 
-func (ps *providerSession) consumeRetiredEncryptedFrame(providerID, assignedID string, retired retiredRelayRequest, expectedType, expectedRequestID string, aad tier2.AEADFrameAAD, envelope tier2.AEADEnvelope) error {
+func (ps *providerSession) consumeRetiredEncryptedFrame(providerID, assignedID string, retired retiredRelayRequest, expectedType, expectedRequestID string, aad tier2.AEADFrameAAD, envelope tier2.AEADEnvelope) ([]byte, error) {
 	ps.tier2Mu.Lock()
 	defer ps.tier2Mu.Unlock()
 	if ps.tier2 == nil {
-		return errors.New("encrypted frame for provider without tier2 session")
+		return nil, errors.New("encrypted frame for provider without tier2 session")
 	}
 	seq := aad.Seq
 	if seq == ^uint64(0) {
-		return errors.New("tier2 p2c frame counter exhausted")
+		return nil, errors.New("tier2 p2c frame counter exhausted")
 	}
 	if aad.Type != expectedType {
-		return errors.New("tier2 retired frame type mismatch")
+		return nil, errors.New("tier2 retired frame type mismatch")
 	}
 	if aad.Direction != "p2c" {
-		return errors.New("tier2 retired frame direction mismatch")
+		return nil, errors.New("tier2 retired frame direction mismatch")
 	}
 	if aad.RequestID != expectedRequestID {
-		return errors.New("tier2 retired frame request_id mismatch")
+		return nil, errors.New("tier2 retired frame request_id mismatch")
 	}
 	if aad.Stream != retired.stream {
-		return errors.New("tier2 retired frame stream mismatch")
+		return nil, errors.New("tier2 retired frame stream mismatch")
 	}
 	expectedAAD := tier2.AEADFrameAAD{
 		Type:       expectedType,
@@ -849,16 +914,17 @@ func (ps *providerSession) consumeRetiredEncryptedFrame(providerID, assignedID s
 		Seq:        seq,
 	}
 	if ps.tier2P2CSequenceOutsideWindow(seq) {
-		return errors.New("tier2 p2c frame sequence outside receive window")
+		return nil, errors.New("tier2 p2c frame sequence outside receive window")
 	}
 	if ps.tier2P2CSequenceSeen(seq) {
-		return errors.New("tier2 p2c frame replayed")
+		return nil, errors.New("tier2 p2c frame replayed")
 	}
-	if _, err := tier2.OpenPillarBFrame(ps.tier2.P2CKey, ps.tier2.P2CNonceBase, ps.tier2.KeyID, seq, expectedAAD, envelope); err != nil {
-		return err
+	plaintext, err := tier2.OpenPillarBFrame(ps.tier2.P2CKey, ps.tier2.P2CNonceBase, ps.tier2.KeyID, seq, expectedAAD, envelope)
+	if err != nil {
+		return nil, err
 	}
 	ps.markTier2P2CSequenceSeen(seq)
-	return nil
+	return plaintext, nil
 }
 
 func (ps *providerSession) tier2P2CSequenceOutsideWindow(seq uint64) bool {
@@ -1417,12 +1483,13 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 	}()
 	chunks, done := active.delivered(ctx)
 	return &RelayStream{
-		RequestID:   requestID,
-		Chunks:      chunks,
-		Done:        done,
-		Errors:      active.errs,
-		Validations: active.validations,
-		cancel:      cancel,
+		RequestID:      requestID,
+		Chunks:         chunks,
+		Done:           done,
+		Errors:         active.errs,
+		Validations:    active.validations,
+		CancelTerminal: active.cancelTerminal,
+		cancel:         cancel,
 	}, nil
 }
 
@@ -1466,7 +1533,7 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 		active, ok := session.activeFor(requestID)
 		if !ok {
 			if retired, ok := session.recentlyRetired(requestID); ok {
-				if err := session.consumeRetiredEncryptedFrame(providerID, assignedID, retired, "inference_response_chunk", requestID, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc}); err != nil {
+				if _, err := session.consumeRetiredEncryptedFrame(providerID, assignedID, retired, "inference_response_chunk", requestID, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc}); err != nil {
 					s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, err.Error())
 					return
 				}
@@ -1637,9 +1704,17 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 		active, ok := session.activeFor(requestID)
 		if !ok {
 			if retired, ok := session.recentlyRetired(requestID); ok {
-				if err := session.consumeRetiredEncryptedFrame(providerID, assignedID, retired, "inference_response_end", requestID, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc}); err != nil {
+				plaintext, err := session.consumeRetiredEncryptedFrame(providerID, assignedID, retired, "inference_response_end", requestID, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
+				if err != nil {
 					s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, err.Error())
 					return
+				}
+				var late InferenceResponseEnd
+				if json.Unmarshal(plaintext, &late) == nil {
+					late.RequestID = requestID
+					if session.deliverCancelTerminal(late) {
+						return
+					}
 				}
 				s.log.Warn().Str("provider_id", providerID).Str("request_id", requestID).Msg("late encrypted inference_response_end for retired request dropped")
 				return
@@ -1697,6 +1772,9 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 	}
 	active, ok := session.removeActive(end.RequestID)
 	if !ok {
+		if session.deliverCancelTerminal(end) {
+			return
+		}
 		s.log.Warn().Str("provider_id", providerID).Str("request_id", end.RequestID).Msg("unknown inference_response_end request_id")
 		return
 	}

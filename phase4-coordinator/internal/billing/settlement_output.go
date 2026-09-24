@@ -46,6 +46,12 @@ type SettlementOutput struct {
 	TerminalState         string
 	TerminalStateTSUnixMS int64
 	ToolCalls             []SettlementToolCall
+	// ObservedInputTokens and ObservedOutputTokens are the attempt's observed
+	// usage when its ledger row bills none of it: a buyer_cancel that delivered
+	// nothing (SPEC-015 §N.6/§N.7). They are evidence only and are not part of
+	// settlement_output_v1.
+	ObservedInputTokens  *int64
+	ObservedOutputTokens *int64
 }
 
 type SettlementUsage struct {

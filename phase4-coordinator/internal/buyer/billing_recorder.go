@@ -796,17 +796,21 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 	// attempt falls to the byte-estimated branch: zero billable, never
 	// settlement-capable.
 	loopback := providerws.IsBYOMLoopbackRuntimeSource(in.ProviderRuntimeSource)
-	if loopback && in.PoolOperatorAttested && in.PromptTokens != nil && in.CompletionTokens != nil {
+	promptObserved, completionObserved := in.PromptTokens, in.CompletionTokens
+	if out.ObservedInputTokens != nil && out.ObservedOutputTokens != nil {
+		promptObserved, completionObserved = out.ObservedInputTokens, out.ObservedOutputTokens
+	}
+	if loopback && in.PoolOperatorAttested && promptObserved != nil && completionObserved != nil {
 		// SPEC-042-R005 site (5) / SPEC-022-R012: the pool operator's own
 		// reported usage, recorded as pool_operator_attested (never
 		// coordinator_observed). It settles only through a verified receipt
 		// whose usage matches exactly (R-12.4).
-		observedInput = *in.PromptTokens
-		observedOutput = *in.CompletionTokens
+		observedInput = *promptObserved
+		observedOutput = *completionObserved
 		usageSource = billing.UsageSourcePoolOperatorAttested
-	} else if !loopback && in.PromptTokens != nil && in.CompletionTokens != nil {
-		observedInput = *in.PromptTokens
-		observedOutput = *in.CompletionTokens
+	} else if !loopback && promptObserved != nil && completionObserved != nil {
+		observedInput = *promptObserved
+		observedOutput = *completionObserved
 		usageSource = billing.UsageSourceCoordinatorObserved
 	} else if outputAvailable {
 		coordinatorOutputEstimate := b.server.estimatedCompletionTokensFromBytes(int(delivered))

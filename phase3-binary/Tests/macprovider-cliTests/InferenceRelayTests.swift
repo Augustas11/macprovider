@@ -869,6 +869,15 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual((tuple["terminal_state_ts_unix_ms"] as? NSNumber)?.int64Value, terminalTS)
         let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: key.publicKey.rawRepresentation)
         XCTAssertTrue(publicKey.isValidSignature(signature, for: tupleBytes))
+        // Nothing reached the buyer: the receipt binds the empty prefix and
+        // bills nothing, while still reporting observed usage (SPEC-015 §N.7).
+        let usage = try XCTUnwrap(tuple["usage"] as? [String: Any])
+        XCTAssertEqual((usage["delivered_output_bytes"] as? NSNumber)?.int64Value, 0)
+        XCTAssertEqual((usage["billable_input_tokens"] as? NSNumber)?.int64Value, 0)
+        XCTAssertEqual((usage["billable_output_tokens"] as? NSNumber)?.int64Value, 0)
+        XCTAssertEqual((usage["observed_input_tokens"] as? NSNumber)?.int64Value, 5)
+        XCTAssertEqual((usage["observed_output_tokens"] as? NSNumber)?.int64Value, 2)
+        XCTAssertEqual(tuple["output_hash"] as? String, try buyerCancelOutputHash(content: "", start: 0))
         XCTAssertTrue(telemetry.records.isEmpty)
     }
 
@@ -940,6 +949,13 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual((tuple["terminal_state_ts_unix_ms"] as? NSNumber)?.int64Value, terminalTS)
         let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: key.publicKey.rawRepresentation)
         XCTAssertTrue(publicKey.isValidSignature(signature, for: tupleBytes))
+        // The buyer received "answer" and no finish chunk: the receipt binds
+        // that delivered prefix with a null finish reason (SPEC-015 §N.5).
+        let usage = try XCTUnwrap(tuple["usage"] as? [String: Any])
+        XCTAssertEqual((usage["delivered_output_bytes"] as? NSNumber)?.int64Value, 6)
+        XCTAssertEqual((usage["billable_input_tokens"] as? NSNumber)?.int64Value, 5)
+        XCTAssertEqual((usage["billable_output_tokens"] as? NSNumber)?.int64Value, 2)
+        XCTAssertEqual(tuple["output_hash"] as? String, try buyerCancelOutputHash(content: "answer", start: 0))
         XCTAssertTrue(telemetry.records.isEmpty)
     }
 
@@ -1429,6 +1445,20 @@ private actor FakeReceiptCompletionRuntime: ModelRuntimeServing {
     func unregisterInFlight(_ id: Int) { }
 }
 
+/// sha256(JCS(settlement_output_v1)) for a buyer_cancel prefix that carried no
+/// finish reason and no tool calls.
+private func buyerCancelOutputHash(content: String, start: Int) throws -> String {
+    let canonical = try RFC8785JCS.canonicalString(.object([
+        "content": .string(content),
+        "finish_reason": .null,
+        "output_prefix_end_byte": .int(start + content.utf8.count),
+        "output_prefix_start_byte": .int(start),
+        "terminal_state": .string("buyer_cancel"),
+        "tool_calls": .null,
+    ]))
+    return SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+}
+
 private actor FakeCancelAfterCompletionReceiptRuntime: ModelRuntimeServing {
     private let servedSnapshot: RuntimeSnapshot
     private let settlementEligible: Bool
@@ -1784,6 +1814,34 @@ final class RelayStreamBatcherConcurrencyTests: XCTestCase {
         XCTAssertTrue(frames.dropLast().allSatisfy { $0.count == 7 }, "full batches are never torn")
         XCTAssertTrue(batcher.everyFrameDelivered(sent: frames.count))
         XCTAssertFalse(batcher.everyFrameDelivered(sent: frames.count - 1))
+    }
+
+    func testDeliveredContentIsTheSentContentOnly() {
+        let sink = FrameSink()
+        let batcher = RelayStreamBatcher(
+            streamInterval: 2,
+            deltaFrame: { delta in (delta["content"] as? String) ?? "" },
+            enqueueFrame: { sink.append($0) }
+        )
+        batcher.accept(.content("ab"))
+        batcher.accept(.content("cd"))
+        batcher.accept(.content("e"))
+        XCTAssertEqual(batcher.deliveredContent(sent: sink.all.count), "abcd", "unflushed content was never sent")
+        XCTAssertNil(batcher.deliveredContent(sent: sink.all.count - 1))
+        batcher.flushContent()
+        XCTAssertEqual(batcher.deliveredContent(sent: sink.all.count), "abcde")
+    }
+
+    func testDeliveredContentIsNilOnceAToolCallOpened() {
+        let sink = FrameSink()
+        let batcher = RelayStreamBatcher(
+            streamInterval: 1,
+            deltaFrame: { _ in "f" },
+            enqueueFrame: { sink.append($0) }
+        )
+        batcher.accept(.content("a"))
+        batcher.accept(.toolCallDelta(StreamToolCallDelta(index: 0, id: "call_1", type: "function", functionName: "f", arguments: "{")))
+        XCTAssertNil(batcher.deliveredContent(sent: sink.all.count))
     }
 
     func testDroppedFrameIsNeverReportedDelivered() {

@@ -809,11 +809,13 @@ actor InferenceRelay {
 
     /// What the buyer received of the generated output (SPEC-015 delivered-
     /// prefix rule). `.nothing`: no output, so a settlement receipt binds the empty
-    /// prefix and a legacy receipt is omitted. `.unknown`: some frames may not
-    /// have reached the buyer, so no receipt is signed.
-    enum DeliveredOutput {
+    /// prefix and a legacy receipt is omitted. `.prefix`: a cancelled stream's
+    /// delivered content, with no finish reason or tool calls. `.unknown`: some
+    /// frames may not have reached the buyer, so no receipt is signed.
+    enum DeliveredOutput: Equatable {
         case complete
         case nothing
+        case prefix(String)
         case unknown
     }
 
@@ -879,7 +881,7 @@ actor InferenceRelay {
         // Delivery is checked after eligibility, so an ineligible runtime
         // keeps its #1695 omission reason on every cancel path.
         switch deliveredOutput {
-        case .complete:
+        case .complete, .prefix:
             break
         case .unknown:
             ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .constructionFailed)
@@ -891,7 +893,21 @@ actor InferenceRelay {
         case .nothing:
             break
         }
-        let emptyPrefix = deliveredOutput == .nothing
+        // A cancelled attempt binds only what the buyer received: no finish
+        // reason and no tool calls were sent (SPEC-015 §N.5).
+        let settlementContent: String
+        let settlementComplete: Bool
+        switch deliveredOutput {
+        case .complete:
+            settlementContent = completion.content
+            settlementComplete = true
+        case .prefix(let delivered):
+            settlementContent = delivered
+            settlementComplete = false
+        case .nothing, .unknown:
+            settlementContent = ""
+            settlementComplete = false
+        }
         // SPEC-015 §M.2.2 — refuse receipt construction when the
         // request-start container cannot be identified.
         let resolvedModelHash: String?
@@ -929,9 +945,9 @@ actor InferenceRelay {
                     input: SettlementReceiptInput(
                         metadata: settlementMetadata,
                         modelHash: modelHash,
-                        content: emptyPrefix ? "" : completion.content,
-                        toolCalls: emptyPrefix ? nil : completion.toolCalls,
-                        finishReason: emptyPrefix ? "" : completion.finishReason,
+                        content: settlementContent,
+                        toolCalls: settlementComplete ? completion.toolCalls : nil,
+                        finishReason: settlementComplete ? completion.finishReason : "",
                         promptTokens: Int64(completion.promptTokens),
                         completionTokens: Int64(completion.generatedCompletionTokens),
                         terminalState: terminalState,
@@ -1076,8 +1092,9 @@ actor InferenceRelay {
                 let chunksSent = consumerSent ?? state.chunksSent
                 // SPEC-015 delivered-prefix rule: the receipt may bind only
                 // output the buyer received. It is issued only when every
-                // frame carrying generated output was accepted and sent.
-                let outputDelivered = consumerSent.map { batcher.everyFrameDelivered(sent: $0) } ?? false
+                // frame carrying generated output was accepted and sent, and
+                // it binds the content those frames carried.
+                let deliveredContent = consumerSent.flatMap { batcher.deliveredContent(sent: $0) }
                 if state.markTerminalSent() {
                     let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
                     let modelHashSource = RouterHandler.resolveModelHashSource(
@@ -1100,7 +1117,7 @@ actor InferenceRelay {
                         relayBlindSuppressed: relayBlindClaim != nil,
                         terminalState: "buyer_cancel",
                         terminalStateTSUnixMS: terminalStateTSUnixMS,
-                        deliveredOutput: outputDelivered ? .complete : .unknown
+                        deliveredOutput: deliveredContent.map { .prefix($0) } ?? .unknown
                     )
                     var endFrame: [String: Any] = [
                         "type": "inference_response_end",
@@ -1548,6 +1565,7 @@ final class RelayStreamBatcher: @unchecked Sendable {
     private var pendingContent = ""
     private var pendingCount = 0
     private var emittedToolCall = false
+    private var enqueuedContent = ""
     private var accepted = 0
     private var dropped = 0
 
@@ -1605,19 +1623,32 @@ final class RelayStreamBatcher: @unchecked Sendable {
         return dropped == 0 && sent >= accepted
     }
 
+    /// The content the buyer received, when every accepted frame was sent
+    /// and no tool call opened; nil otherwise.
+    func deliveredContent(sent: Int) -> String? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard dropped == 0, sent >= accepted, !emittedToolCall else { return nil }
+        return enqueuedContent
+    }
+
     private func flushContentLocked() {
         guard !pendingContent.isEmpty else { return }
-        enqueueLocked(deltaFrame(["content": pendingContent]))
+        if enqueueLocked(deltaFrame(["content": pendingContent])) {
+            enqueuedContent += pendingContent
+        }
         pendingContent = ""
         pendingCount = 0
     }
 
-    private func enqueueLocked(_ frame: String) {
+    @discardableResult
+    private func enqueueLocked(_ frame: String) -> Bool {
         if enqueueFrame(frame) {
             accepted += 1
-        } else {
-            dropped += 1
+            return true
         }
+        dropped += 1
+        return false
     }
 }
 
