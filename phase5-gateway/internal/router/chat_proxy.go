@@ -322,6 +322,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, poolErr.status, poolErr.typ, poolErr.code, poolErr.message)
 		return
 	}
+	// SPEC-006-R016: resolve a buyer engine selection after the pool, before
+	// quota reservation. A non-native engine without a pool is refused here.
+	engineClass, engineErr := resolveEngineSelection(r.Header, poolID)
+	if engineErr != nil {
+		writeError(w, engineErr.status, engineErr.typ, engineErr.code, engineErr.message)
+		return
+	}
 	maxTokens := maxAllowed
 	if chat.MaxTokens != nil {
 		maxTokens = *chat.MaxTokens
@@ -372,6 +379,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")),
 			strings.TrimSpace(r.Header.Get("X-MacProvider-Retry")),
 			poolID,
+			engineClass,
 			dedupeBody,
 		)
 		entry, adopted := s.idlessDedupe.claim(dedupeFingerprint, requestID(r), s.now(), dedupeWindow)
@@ -677,6 +685,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			// keeping the poolless path byte-identical.
 			if poolID != "" {
 				upReq.Header.Set(poolEmitHeader, poolID)
+			}
+			// SPEC-006-R016: the engine selection travels only as the mapped
+			// runtime class, under the same bearer + account pair.
+			if engineClass != "" {
+				upReq.Header.Set(engineEmitHeader, engineClass)
 			}
 		}
 		if internalConversation != "" {

@@ -95,6 +95,9 @@ var spec018RetryableByCode = map[string]bool{
 	"pool_attestation_unsatisfied":         false, // 503, pool members exist but none satisfy the required attestation tier
 	"pool_encrypted_leg_unsatisfied":       false, // 503, pool members exist but none satisfy the encrypted provider-leg requirement
 	"pool_settlement_mode_unsatisfied":     false, // 503, pool members exist but none satisfy enforce-mode settlement prerequisites
+	// SPEC-006-R016 / SPEC-042-R014 buyer engine selection.
+	"engine_unavailable":       false, // 503, the selected engine cannot serve this route; never served by another engine
+	"invalid_engine_selection": false, // 400, internal engine header outside the closed runtime classes
 	// Permanent/client errors — retrying will not help (SPEC-006 §5.2).
 	"model_not_found":                                         false,
 	"request_canceled":                                        false,
@@ -2291,6 +2294,10 @@ type chatRequest struct {
 	poolID          string
 	poolSnapshot    trustpool.Snapshot
 	poolSnapshotSet bool
+	// engineClass is the SPEC-006-R016 buyer engine selection as a runtime
+	// class (from the gateway's X-MacProvider-Internal-Engine). "" means no
+	// selection, which keeps selection byte-identical.
+	engineClass string
 }
 
 type chatMessage struct {
@@ -2449,6 +2456,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		req.poolSnapshot = snap
 		req.poolSnapshotSet = true
 	}
+	// SPEC-006-R016: honor the engine selection only on a gateway-authenticated
+	// request and only as a closed runtime class; anything else fails closed
+	// before routing. SPEC-042-R014 filtering happens at every selection.
+	engineClass, engineOK := internalEngineSelection(r.Header)
+	if !engineOK || (engineClass != "" && !hasAuthenticatedAccount) {
+		rec.logBuyerFailure(http.StatusBadRequest, "Invalid engine selection")
+		writeError(w, http.StatusBadRequest, "invalid_engine_selection", "Invalid engine selection")
+		return
+	}
+	req.engineClass = engineClass
 	if idempotencyKey := normalizeIdempotencyKey(r.Header.Get("Idempotency-Key")); idempotencyKey != "" {
 		if s.reqLogStore == nil {
 			rec.logBuyerFailure(http.StatusServiceUnavailable, "Idempotency-Key requires durable request logging")
@@ -3233,6 +3250,7 @@ func (s *Server) forwardHTTPSequence(
 					w.Header().Set("Content-Type", "application/json")
 				}
 				w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
+				w.Header().Set(engineResponseHeader, providerEngineClass(state.provider))
 				w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
 				if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
 					cancelAttempt()
@@ -3297,6 +3315,7 @@ func (s *Server) forwardHTTPSequence(
 						w.Header().Set("Content-Type", "application/json")
 					}
 					w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
+					w.Header().Set(engineResponseHeader, providerEngineClass(state.provider))
 					w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
 					if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
 						cancelAttempt()
@@ -3338,6 +3357,7 @@ func (s *Server) forwardHTTPSequence(
 							w.Header().Set("Content-Type", "application/json")
 						}
 						w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
+						w.Header().Set(engineResponseHeader, providerEngineClass(state.provider))
 						w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
 						if cancelled, ok := s.poolAttemptCancelledDuringDispatch(r, state); ok {
 							cancelAttempt()
@@ -3758,6 +3778,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+			w.Header().Set(engineResponseHeader, providerEngineClass(provider))
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 			setReceiptHeaderForProvider(w.Header(), receiptValue, provider)
 			markProviderDone()
@@ -3849,6 +3870,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+		w.Header().Set(engineResponseHeader, providerEngineClass(provider))
 		w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 		w.Header().Set(streamingModeHeader, streamingMode)
 		w.WriteHeader(http.StatusOK)
@@ -4284,6 +4306,7 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 			w.Header().Set("X-Accel-Buffering", "no")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+			w.Header().Set(engineResponseHeader, providerEngineClass(provider))
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 			w.Header().Set(streamingModeHeader, streamingMode)
 			if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
@@ -4366,6 +4389,7 @@ func (s *Server) forwardStreamingJSONAsBuyerSSE(
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+	w.Header().Set(engineResponseHeader, providerEngineClass(provider))
 	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 	w.Header().Set(streamingModeHeader, streamingModeIncremental)
 	w.WriteHeader(http.StatusOK)
@@ -4524,6 +4548,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+		w.Header().Set(engineResponseHeader, providerEngineClass(provider))
 		w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 		w.Header().Set(streamingModeHeader, streamingMode)
 		w.WriteHeader(http.StatusOK)
@@ -4958,6 +4983,7 @@ func (s *Server) forwardStreamingBuffered(w http.ResponseWriter, r *http.Request
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+	w.Header().Set(engineResponseHeader, providerEngineClass(provider))
 	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 	w.Header().Set(streamingModeHeader, streamingMode)
 	w.WriteHeader(http.StatusOK)
@@ -6837,6 +6863,16 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			state.poolGenSet = true
 		}
 	}
+	// SPEC-042-R014 (a): a non-native engine needs a pool route whose active
+	// allowlist (the snapshot captured above) contains it. Re-checked on every
+	// selection attempt, failover included.
+	engineClass := req.engineClass
+	if routeErr := engineRouteError(engineClass, poolActive, poolRuntimeAllowlist); routeErr != nil {
+		return pool.Provider{}, routeErr
+	}
+	if state != nil {
+		state.engineClass = engineClass
+	}
 	trustedInternalRouting := false
 	if hasInternalRoutingHeader(headers) {
 		if !s.internalBearerAuthorized(headers) {
@@ -6863,6 +6899,10 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				}
 				if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
+				}
+				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
+				if engineClass != "" && providerEngineClass(p) != engineClass {
+					return pool.Provider{}, engineUnavailableRouteError("Pinned session provider does not serve the selected engine")
 				}
 				provider, routeErr := s.validatePinnedProviderForRequestWithState(p, req.Model, estimatedTokens, "Pinned session not available", class, poolRequiresSettlementEnforce, admissionCtx, state)
 				if routeErr != nil {
@@ -6891,6 +6931,10 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 				if poolActive && !poolModelAllowed(req.Model, class, poolModelAllowlist) {
 					return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
 				}
+				// SPEC-042-R014 (c): a pin never bypasses the engine filter.
+				if engineClass != "" && providerEngineClass(p) != engineClass {
+					return pool.Provider{}, engineUnavailableRouteError("Pinned provider does not serve the selected engine")
+				}
 				provider, routeErr := s.validatePinnedProviderForRequestWithState(p, req.Model, estimatedTokens, "Pinned provider not available", class, poolRequiresSettlementEnforce, admissionCtx, state)
 				if routeErr != nil {
 					return provider, routeErr
@@ -6907,6 +6951,15 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "pool_model_not_allowed", message: "Requested model is not allowed by the selected pool"}
 	}
 
+	// SPEC-042-R014 (b)/(d): the candidate and slot-queue passes see only the
+	// selected class, and a scope with no session of that class for the model
+	// fails closed instead of spilling to another engine.
+	if engineClass != "" {
+		providers = providersForEngine(providers, engineClass)
+		if !s.engineServesModelInScope(providers, req.Model, class, poolActive, poolMembers) {
+			return pool.Provider{}, engineUnavailableRouteError("No provider serves the requested model with the selected engine")
+		}
+	}
 	exSet := routing.NewExcluded(len(excluded))
 	for k := range excluded {
 		exSet.AddKey(k)
@@ -8106,6 +8159,10 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		if state != nil && state.poolID != "" && !poolModelAllowed(model, class, state.poolModelAllowlist) {
+			return pool.Provider{}, queuedProviderTerminal
+		}
+		// SPEC-042-R014 (c): a same-ID reconnect of another class is terminal.
+		if state != nil && state.engineClass != "" && providerEngineClass(provider) != state.engineClass {
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		if s.poolSettlementModeUnsatisfied(state) {

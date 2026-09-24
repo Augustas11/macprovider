@@ -50,6 +50,9 @@ type externalRuntimeFixture struct {
 	recordMember bool
 	// durable pool authority verdict (nil = supports the claim)
 	authorityErr error
+	// nativeMember adds a native (mlx_cache) pool member p2 next to the
+	// external-runtime member p1 (#1690 M7 engine selection).
+	nativeMember bool
 }
 
 func defaultExternalRuntimeFixture() externalRuntimeFixture {
@@ -202,6 +205,12 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 	routeProvider.TrustedPoolV1 = true
 	routeProvider.AdmissionSandboxed = true // SPEC-032 FR-HG8: the hello sandbox stays set.
 	registry.Register(&routeProvider, nil)
+	if fx.nativeMember {
+		registerSettlementProvider(registry, "p2", "session-2", upstream.URL, 30, bytes.Repeat([]byte{0x7a}, 32))
+		native, _ := registry.Resolve("p2", "")
+		native.TrustedPoolV1 = true
+		registry.Register(&native, nil)
+	}
 
 	reqLog, dbPath := openBuyerRequestLog(t)
 	t.Cleanup(func() { _ = reqLog.Close() })
@@ -221,6 +230,9 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 	members := []string{}
 	if fx.member {
 		members = append(members, "p1")
+	}
+	if fx.nativeMember {
+		members = append(members, "p2")
 	}
 	var delegated []string
 	if fx.delegated {

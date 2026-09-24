@@ -71,6 +71,9 @@ type forwardState struct {
 	poolRuntimeAllowlist    []string
 	poolCreatorAccountID    string
 	poolCreatorOwnedMembers map[string]bool
+	// engineClass is the SPEC-042-R014 buyer engine selection, captured at
+	// selection so the slot-queue poll re-applies it. "" means none.
+	engineClass string
 
 	// routingDone is the wall-clock at which the current provider was
 	// selected. Updated on every advanceToNextProvider so the

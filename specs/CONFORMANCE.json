@@ -5406,15 +5406,33 @@
       "requirement_id": "SPEC-006-R016",
       "spec_id": "SPEC-006",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase5-gateway/internal/router/engine_selection.go:func resolveEngineSelection",
+        "phase5-gateway/internal/router/engine_selection.go:func buyerVisibleEngineHeader",
+        "phase5-gateway/internal/router/server.go:func copyCleanHeadersWithReceipt",
+        "phase5-gateway/internal/router/relay_blind_success.go:func relayBlindPoolSelected",
+        "phase5-gateway/internal/router/idless_dedupe.go:func idlessRequestFingerprint",
+        "phase4-coordinator/internal/buyer/engine_selection.go:func internalEngineSelection",
+        "phase4-coordinator/internal/buyer/engine_selection.go:func providerEngineClass"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/engine_selection_test.go:TestEngineSelection_EmitsMappedRuntimeClass",
+        "phase5-gateway/internal/router/engine_selection_test.go:TestEngineSelection_NonNativeOnGlobalRouteFailsClosed",
+        "phase5-gateway/internal/router/engine_selection_test.go:TestEngineSelection_InvalidSelectorRejected",
+        "phase5-gateway/internal/router/engine_selection_test.go:TestEngineSelection_UnauthorizedPoolAnswersPoolUnavailableFirst",
+        "phase5-gateway/internal/router/engine_selection_test.go:TestEngineSelection_ResponseHeaderDisclosedWithClosedVocabulary",
+        "phase5-gateway/internal/router/engine_selection_test.go:TestEngineSelection_RelayBlindRejectsSelector",
+        "phase5-gateway/internal/router/engine_selection_test.go:TestEngineSelection_IdlessFingerprintSeparatesEngines",
+        "phase4-coordinator/internal/buyer/engine_selection_internal_test.go:TestInternalEngineSelectionClosedVocabulary",
+        "phase4-coordinator/internal/buyer/spec042_engine_selection_test.go:TestSPEC042R014EngineFailClosedSet"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-006 0.9.34 (#1690 M7) specifies buyer engine selection: the X-MacProvider-Engine-Select closed vocabulary (native, llamacpp, ollama), invalid_engine_selection and engine_unavailable, the internal X-MacProvider-Internal-Engine transport, and the X-MacProvider-Engine served-class disclosure. No implementation is mapped yet. Pending until the gateway and coordinator slices and their fail-closed tests exist, plus a journey that serves an engine-selected pool request."
+        "rationale": "SPEC-006 0.9.34 (#1690 M7) specifies buyer engine selection. The #1690 M7 gateway and coordinator slices implement it: the X-MacProvider-Engine-Select closed vocabulary resolved after the pool and before quota reservation, 400 invalid_engine_selection and 503 engine_unavailable (both non-retryable), the internal X-MacProvider-Internal-Engine transport honored only on gateway-authenticated requests, the relay-blind rejection, the id-less dedupe key, and the X-MacProvider-Engine disclosure with a closed-value pass-through guard. Pending until a signed journey serves an engine-selected pool request; the #1690 M7 lab e2e is local evidence only."
       }
     },
     {
@@ -7131,15 +7149,29 @@
       "requirement_id": "SPEC-042-R014",
       "spec_id": "SPEC-042",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase4-coordinator/internal/buyer/engine_selection.go:func engineRouteError",
+        "phase4-coordinator/internal/buyer/engine_selection.go:func providersForEngine",
+        "phase4-coordinator/internal/buyer/engine_selection.go:func (s *Server) engineServesModelInScope",
+        "phase4-coordinator/internal/buyer/engine_selection.go:func providerEngineClass"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/engine_selection_internal_test.go:TestEngineSelection_NonNativeFailsClosedWithoutAllowlistingPool",
+        "phase4-coordinator/internal/buyer/engine_selection_internal_test.go:TestEngineSelection_NativeSelectsOnlyNativeSessions",
+        "phase4-coordinator/internal/buyer/engine_selection_internal_test.go:TestEngineSelection_NativeOnPoolWithOnlyExternalRuntimeFailsClosed",
+        "phase4-coordinator/internal/buyer/engine_selection_internal_test.go:TestEngineSelection_PinnedProviderOfOtherClassFailsClosed",
+        "phase4-coordinator/internal/buyer/engine_selection_internal_test.go:TestEngineSelection_SlotQueuePollTerminalForOtherClass",
+        "phase4-coordinator/internal/buyer/spec042_engine_selection_test.go:TestSPEC042R014LlamacppOnAllowlistingPoolServedAndDisclosed",
+        "phase4-coordinator/internal/buyer/spec042_engine_selection_test.go:TestSPEC042R014MixedPoolHonoursEachSelection",
+        "phase4-coordinator/internal/buyer/spec042_engine_selection_test.go:TestSPEC042R014EngineFailClosedSet"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-042 0.0.33 (#1690 M7) specifies the buyer engine filter on pool routes: coordinator-recorded runtime class, non-native only on an allowlisting v2 pool, native excludes external-runtime members, re-applied on every R005 selection attempt, no spill. No implementation is mapped yet. Pending until the coordinator filter, its fail-closed test set, and a journey that serves engine=llamacpp on an allowlisting pool with pool_operator_attested settlement exist."
+        "rationale": "SPEC-042 0.0.33 (#1690 M7) specifies the buyer engine filter on pool routes. The #1690 M7 coordinator slice implements it: engine_unavailable for a non-native class on a global route or outside the active v2 allowlist, the filter on the candidate, pinned/self-route, and slot-queue paths (failover re-enters the same selection), no-spill when the scope has no session of the class for the model, and the X-MacProvider-Engine disclosure of the coordinator-recorded class. Settlement is unchanged. Pending until a signed journey serves engine=llamacpp on an allowlisting pool with pool_operator_attested settlement; the #1690 M7 lab e2e is local evidence only."
       }
     },
     {

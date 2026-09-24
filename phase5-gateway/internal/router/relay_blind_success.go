@@ -62,7 +62,8 @@ func relayBlindOutcomeMetadata(h http.Header, code string) map[string]any {
 	return map[string]any{"requested_privacy_mode": "relay_blind_required", "effective_privacy_outcome": h.Get(relayBlindEffectiveHeader), "scope": relayBlindScope, "retry_action": retry, "settlement": relayBlindDisclosureUnavailable().Settlement}
 }
 func relayBlindPoolSelected(r *http.Request) bool {
-	for _, name := range []string{poolSelectHeader, poolEmitHeader} {
+	// An engine selector is a routing control too (SPEC-006-R016 rule 6).
+	for _, name := range []string{poolSelectHeader, poolEmitHeader, engineSelectHeader} {
 		for _, v := range r.Header.Values(name) {
 			if strings.TrimSpace(v) != "" {
 				return true
