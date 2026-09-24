@@ -287,7 +287,7 @@ matrix on all four identity fields; anything else fails the release closed.
 | `runtime_format` | `hash_algorithm` | `source_ref.kind` | `allowed_runtime_sources` ⊆ |
 |---|---|---|---|
 | `mlx_safetensors` | `macprovider.snapshot-manifest.v1` | `huggingface_revision` | `{mlx_cache}` |
-| `gguf` | `macprovider.gguf-file.v1` | `ollama_library_tag` | `{ollama_loopback, llamacpp_loopback, lmstudio_loopback, openai_compatible_loopback}` |
+| `gguf` | `macprovider.gguf-file.v1` | `ollama_library_tag`, or (SPEC-023 v0.16.0) `huggingface_revision` with `file_path` | `{ollama_loopback, llamacpp_loopback, lmstudio_loopback, openai_compatible_loopback}` |
 
 A `verified` artifact may never allow `openai_compatible_loopback` — an opaque
 endpoint supplies no bytes to hash.

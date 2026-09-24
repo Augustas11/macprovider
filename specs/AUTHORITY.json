@@ -714,6 +714,7 @@
       "owner_spec": "SPEC-047",
       "consumers": [
         "SPEC-022",
+        "SPEC-023",
         "SPEC-032",
         "SPEC-042",
         "SPEC-043",
