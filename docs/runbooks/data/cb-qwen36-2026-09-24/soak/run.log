@@ -1,0 +1,9 @@
+{"iteration": 1, "requests": 65, "timeouts": 0, "errors": 0, "elapsed_min": 1.9}
+{"iteration": 2, "requests": 130, "timeouts": 0, "errors": 0, "elapsed_min": 3.8}
+{"iteration": 3, "requests": 195, "timeouts": 0, "errors": 0, "elapsed_min": 5.6}
+{"iteration": 4, "requests": 260, "timeouts": 0, "errors": 0, "elapsed_min": 7.5}
+{"iteration": 5, "requests": 325, "timeouts": 0, "errors": 0, "elapsed_min": 9.4}
+{"iteration": 6, "requests": 390, "timeouts": 0, "errors": 0, "elapsed_min": 11.3}
+{"iteration": 7, "requests": 455, "timeouts": 0, "errors": 0, "elapsed_min": 13.1}
+{"iteration": 8, "requests": 520, "timeouts": 0, "errors": 0, "elapsed_min": 15.0}
+SUMMARY {"port": 18080, "iterations": 8, "requests": 520, "timeouts": 0, "errors": 0, "elapsed_min": 15.0}
