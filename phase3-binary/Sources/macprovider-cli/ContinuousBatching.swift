@@ -466,6 +466,8 @@ enum CBTrace {
     static func log(_ requestID: String?, _ event: @autoclosure () -> String) {
         guard enabled else { return }
         let ms = DispatchTime.now().uptimeNanoseconds / 1_000_000
-        FileHandle.standardError.write(Data("cbtrace t=\(ms) rid=\(requestID ?? "-") ev=\(event())\n".utf8))
+        // `write(contentsOf:)` fails recoverably on a closed stderr; the
+        // deprecated `write(_:)` would abort serving (see PagedKVRuntimeDiagnostics).
+        try? FileHandle.standardError.write(contentsOf: Data("cbtrace t=\(ms) rid=\(requestID ?? "-") ev=\(event())\n".utf8))
     }
 }

@@ -95,6 +95,13 @@ the model. Caveat: another session's `--no-join` lab instance (#1689, port
 18180) was resident on the box during the run; the interleaving exposes both
 builds to it equally.
 
+**Do not reuse this layout.** Two ~84 GB lab serves (each Qwen3-Coder serve
+reserves its paged pool) plus the live provider exhausted the VM compressor
+during the first attempt: at 2026-09-24T04:32Z the kernel killed the live
+buyer-serving provider (`vm-compressor-space-shortage`, exit -9; launchd
+restarted it). Re-record this A/B one lab serve at a time, restarting between
+builds.
+
 ## FR-PKV13 overhead ceiling (recorded)
 
 For this tuple the batched serving path may carry real traffic only if, on

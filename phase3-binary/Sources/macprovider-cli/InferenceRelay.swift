@@ -1189,6 +1189,11 @@ actor InferenceRelay {
         // absent: it stays `error_internal`.
         case "continuous_batching_stream_backpressure", "continuous_batching_queue_wait_timeout":
             status = "error_queue_full"
+            // SPEC-038 v0.2.4: the wire status collapses both codes; the
+            // provider log keeps which one it was.
+            try? FileHandle.standardError.write(contentsOf: Data(
+                "event=batching_relay_queue_pressure status=error_queue_full code=\(error.code) request_id=\(requestID)\n".utf8
+            ))
         // AC-V2-3a + AC-V2-9 + AC-V2-9b (SPEC-019 v0.2.4 §5): these
         // four terminal structured-output codes are the canonical table.
         // Asymmetry across provider WS, coordinator SSE, and gateway SSE
