@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # #1690 benchmark: llama.cpp llama-server vs native MLX on one catalog key.
-# Runs on a DRAINED lab Mac only. It refuses to start while any
-# macprovider-cli serve process or another llama-server is running, because
-# contention invalidates the numbers and must never degrade a live provider.
+# Runs on a DRAINED lab Mac only. It refuses to start while another
+# llama-server or any unpaused macprovider-cli serve process is running,
+# because contention invalidates the numbers and must never degrade a live
+# provider. With PAUSE_PROVIDER_SOCKET and PAUSE_PROVIDER_PORT set, the script
+# drains one live provider through its control socket (operator pause: the
+# provider drains in-flight work, the coordinator stops routing to it, the
+# watchdog leaves it alone) and always resumes it on exit.
 #
 # Usage:
 #   CLI=/path/to/run/macprovider-cli   # release build with mlx.metallib beside it
@@ -23,8 +27,43 @@ CONCURRENCY="${CONCURRENCY:-1 4 8}"
 PPL_CTX="${PPL_CTX:-512}"
 PPL_CHUNKS="${PPL_CHUNKS:-}"
 
-if pgrep -f "macprovider-cli serve" >/dev/null || pgrep -x llama-server >/dev/null; then
-  echo "bench-1690: refusing to run: a provider serve process or llama-server is running" >&2
+provider_control() {
+  python3 - "$PAUSE_PROVIDER_SOCKET" "$1" <<'PY'
+import json, socket, sys
+path, frame = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(300)
+s.connect(path)
+s.sendall((json.dumps({"type": frame}) + "\n").encode())
+buf = b""
+while b"\n" not in buf:
+    chunk = s.recv(4096)
+    if not chunk:
+        break
+    buf += chunk
+ack = json.loads(buf.split(b"\n", 1)[0] or b"{}")
+print(json.dumps(ack))
+sys.exit(0 if ack.get("accepted") is True else 1)
+PY
+}
+
+provider_paused() {
+  curl -fsS --max-time 5 "http://127.0.0.1:$1/v1/status" | python3 -c 'import json,sys; l=json.load(sys.stdin).get("lifecycle") or {}; sys.exit(0 if l.get("operator_paused") is True else 1)'
+}
+
+if [[ -n "${PAUSE_PROVIDER_SOCKET:-}" ]]; then
+  : "${PAUSE_PROVIDER_PORT:?PAUSE_PROVIDER_PORT is required with PAUSE_PROVIDER_SOCKET}"
+  provider_control pause_request >&2
+  trap 'provider_control resume_request >&2 || echo "bench-1690: RESUME FAILED; resume the provider by hand" >&2' EXIT
+fi
+
+serve_count=$(pgrep -f "macprovider-cli serve" | wc -l | tr -d " ")
+if pgrep -x llama-server >/dev/null || {
+     [[ "$serve_count" -gt 0 ]] && ! {
+       [[ "$serve_count" -eq 1 && -n "${PAUSE_PROVIDER_PORT:-}" ]] && provider_paused "$PAUSE_PROVIDER_PORT"
+     }
+   }; then
+  echo "bench-1690: refusing to run: llama-server or an unpaused provider serve process is running" >&2
   pgrep -fl "macprovider-cli serve|llama-server" >&2 || true
   exit 3
 fi
@@ -45,6 +84,7 @@ slot_ctx=$(( PROMPT_TOKENS + DECODE_TOKENS + 64 ))
   echo "mlx_model=$MLX_MODEL"
   for g in $GGUFS; do echo "gguf=$(basename "$g") sha256=$(shasum -a 256 "$g" | cut -c1-64)"; done
   echo "text_sha256=$(shasum -a 256 "$TEXT" | cut -c1-64)"
+  echo "paused_provider_port=${PAUSE_PROVIDER_PORT:-none}"
   echo "prompt_tokens=$PROMPT_TOKENS decode_tokens=$DECODE_TOKENS runs=$RUNS concurrency=$CONCURRENCY ppl_ctx=$PPL_CTX"
 } > "$OUT/env.txt"
 
@@ -66,7 +106,7 @@ for g in $GGUFS; do
     -np "$max_c" -c $(( slot_ctx * max_c )) -ngl 999 -fa on --no-mmap --no-webui \
     > "$OUT/llama-server-$tag.log" 2>&1 &
   server_pid=$!
-  trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+  trap 'kill "$server_pid" 2>/dev/null || true; [[ -n "${PAUSE_PROVIDER_SOCKET:-}" ]] && provider_control resume_request >&2' EXIT
   for _ in $(seq 1 300); do
     curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && break
     sleep 1
@@ -77,7 +117,11 @@ for g in $GGUFS; do
     --runs "$RUNS" --label "$tag" --output "$OUT/loopback-$tag.json" 2> "$OUT/loopback-$tag.err"
   kill "$server_pid"
   wait "$server_pid" 2>/dev/null || true
-  trap - EXIT
+  if [[ -n "${PAUSE_PROVIDER_SOCKET:-}" ]]; then
+    trap 'provider_control resume_request >&2 || echo "bench-1690: RESUME FAILED; resume the provider by hand" >&2' EXIT
+  else
+    trap - EXIT
+  fi
 
   chunk_args=()
   [[ -n "$PPL_CHUNKS" ]] && chunk_args=(--chunks "$PPL_CHUNKS")
