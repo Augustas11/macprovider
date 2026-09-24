@@ -1919,6 +1919,15 @@ func readStreamingLineWithIdleTimeout(ctx context.Context, reader *bufio.Reader,
 		_ = body.Close()
 		return nil, errStreamingIdleTimeout
 	}
+	// A complete line already in the buffer cannot block, so it needs
+	// no deadline race. Every SSE event ends in a blank separator line
+	// that arrives with its data line, so this skips the goroutine,
+	// channel and timer for at least half of all reads.
+	if buffered := reader.Buffered(); buffered > 0 {
+		if peek, _ := reader.Peek(buffered); bytes.IndexByte(peek, '\n') >= 0 {
+			return reader.ReadSlice('\n')
+		}
+	}
 	ch := make(chan streamingReadResult, 1)
 	go func() {
 		line, err := reader.ReadSlice('\n')
