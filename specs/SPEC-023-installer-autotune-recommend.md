@@ -1,12 +1,41 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.15.1
+version: v0.15.2
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-09-23
 lockstep: SPEC-005 v0.6.7 (SPEC-005-R011 money-table owner). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.15.2 (2026-09-23)** — No 4,000-token production context from an
+  unknown bound (#1689). The live Qwen3.6-27B apply on a 256 GB Mac Studio wrote
+  `max_context_override: 4000` because the KV-geometry reader required
+  `hidden_size` to divide by `num_attention_heads` even when `head_dim` is
+  declared (5120 / 24), so the memory bound was treated as unknown and the
+  implementation fell back to its 4,000-token floor. §6 now defines the
+  `serve_config.max_context_override` derivation: an unknown model or memory
+  bound drops out of the minimum instead of becoming 4,000, a declared `head_dim`
+  is used as declared, and hybrid stacks count only full-attention layers. An
+  apply also records the generated value's provenance (SPEC-001 v1.9.23).
+  Registers `SPEC-023-R018` (§9.3) and AC-47 for the derivation
+  (`SPEC-023-R012` and AC-46 stay reserved for open PR #1677). AC-40 and
+  R003 now name the R018 default as the uncalibrated context instead of the
+  pre-v0.9.5 cap. R018 item 9 bounds the generated pair jointly: the context
+  is sized for one full-context KV cache, so the emitted
+  `max_concurrency_override` is the chip/RAM tier constant (or a calibrated
+  depth) lowered to `memoryFitBatchDepth` at that context (signed GLM-4.5-Air
+  on a 256 GB Ultra: 131,072 tokens × 5 slots, not × 8). Adoption refuses a
+  signed pair above that cap (checked before the artifact is adopted into the
+  durable store), a warm switch keeps the operator's slots and lowers the
+  recomputed context instead, and `serve` lowers a generated context at start
+  when the slots it runs do not fit; when even the 4,000-token floor does not
+  fit those slots, both paths serve the floor with the slot count that fits
+  there. The classic measured sweep writes its
+  pair operator-owned, without a provenance record. `--check-only
+  --installed-only` reads artifacts where they are and never adopts them. R009's "tier constant unchanged"
+  and AC-44 now read through item 9; AC-47 adds a catalog-wide assertion. No
+  JSON field, schema, or calibration rule changes.
 
 - **v0.15.1 (2026-09-23)** — `SPEC-023-R010` implementation contract (#1705).
   The 2026-09-23 content cut rotated the fleet's CLI-baked document
@@ -57,7 +86,6 @@ lockstep: SPEC-005 v0.6.7 (SPEC-005-R011 money-table owner). CONFORMANCE `depend
   loopback from settlement until a later SPEC-047-R003 amendment names a
   coordinator-recorded trust binding and a trusted usage source. No feed
   schema, matrix, generator, or consumer change.
-
 - **v0.14.2 (2026-09-22)** — Ultra ≥256 GB default `recommendedMaxBatch` is 8
   (#1669). Studio M3 Ultra 256 GB proved keyed 8-wide Coder-30B on live 8080
   (8/8 HTTP 200, overlap ~6s vs serial ~41s, memory pressure normal). Ultra
@@ -869,7 +897,9 @@ normalized name contains `ultra` and `memoryGB >= 256`,
 clamped by `ProviderCapacity.maxConcurrencyOverrideLimit`. Ultra 128–255 GB
 stays 4. This is the uncalibrated hardware-tier constant after Studio M3
 Ultra 256 GB Coder-30B keyed 8-wide proof. `--calibrate-concurrency` MAY
-still emit a lower value in `[1, 8]`.
+still emit a lower value in `[1, 8]`, and the emitted uncalibrated value is
+lowered by `SPEC-023-R018` item 9 when 8 full-context slots do not fit memory
+(v0.15.2).
 
 ### 3.7 Catalog artifact feed (v0.10.0)
 
@@ -1542,6 +1572,7 @@ Schema rules:
 - `recommended_model` is a model key string when at least one eligible row exists; otherwise `null`.
 - `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` are USD/M rates for the selected recommendation, derived from rate-card credits and `usd_per_million_credits`. Both are `null` when `recommended_model` is `null`.
 - `serve_config` is `null` in recommendation-only output when no apply-ready serving configuration has been attached. When present, it is the exact model/knob payload the installer can apply for the selected recommendation; donor outcomes keep `donor_mode = true`.
+- Without `--calibrate-context`, `serve_config.max_context_override` is the `SPEC-023-R018` default (§9.3, v0.15.2): `min(RAM-tier default, declared model maximum, memory-safe context, SPEC-028 draft cap when a draft model is configured)`, where an unknown bound drops out and the 4,000-token floor never stands in for one. `serve_config.max_concurrency_override` is then bounded jointly with it (R018 item 9): at most `memoryFitBatchDepth` at that context. `--apply` records that the written value was generated in the config's `max_context_override_provenance` key (SPEC-001 v1.9.23 FR-20b).
 - `candidates[]` default length is at most 5. It is sorted by eligibility first, then `raw_score` descending, then `model` lexicographically for deterministic ties. It MAY contain one additional donor fallback candidate when `donor_fallback_explanation` is present and the fallback is outside the default 5 rows.
 - Candidate `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` are USD display rates from the rate-card row used for that candidate.
 - Top-level `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` MUST be finite, non-negative, and equal to the selected candidate's candidate-level rates. When `selected_explanation` is present, they MUST also equal `selected_explanation.rate_signal.prompt_rate_usd_per_million_tokens` and `selected_explanation.rate_signal.completion_rate_usd_per_million_tokens`.
@@ -1726,13 +1757,13 @@ Run: malibu-cli autotune --recommend
 
 ### 9.1 Guarded interactive-context calibration
 
-**SPEC-023-R003:** When `autotune --recommend --calibrate-context` is explicitly requested, the CLI MUST calibrate only the selected, already-verified signed model artifact. It MUST keep the existing RAM/model context cap as a hard upper bound, use 4,000 tokens as the minimum, search in 1,000-token cells, and select the largest cell whose uncached-prefill p95 TTFT is no greater than 8,000 ms. Each measured request MUST use a one-token completion and fill the candidate context to its advertised boundary minus an explicit 256-token reserve for chat-template/token-estimation overhead. Search MAY use one sample per cell, but the final selected cell MUST pass three distinct uncached prompts. Prompt identity MUST differ between measured samples; the model/JIT MAY be warmed with a separate short prompt, but the measured long prompt MUST NOT be prewarmed. Sustained memory-pressure or thermal-throttle vetoes, malformed results, timeouts, interruption, a failing minimum, or a failing final validation MUST fail closed before recommendation state or config mutation. JSON and stored recommendation state MUST carry the calibration policy, prompt reserve, completion-token count, measurements, safe upper bound, and selected context. Without `--calibrate-context`, behavior and output shape MUST remain unchanged.
+**SPEC-023-R003:** When `autotune --recommend --calibrate-context` is explicitly requested, the CLI MUST calibrate only the selected, already-verified signed model artifact. It MUST keep the `SPEC-023-R018` default context (§9.3) as a hard upper bound, use 4,000 tokens as the minimum, search in 1,000-token cells, and select the largest cell whose uncached-prefill p95 TTFT is no greater than 8,000 ms. Each measured request MUST use a one-token completion and fill the candidate context to its advertised boundary minus an explicit 256-token reserve for chat-template/token-estimation overhead. Search MAY use one sample per cell, but the final selected cell MUST pass three distinct uncached prompts. Prompt identity MUST differ between measured samples; the model/JIT MAY be warmed with a separate short prompt, but the measured long prompt MUST NOT be prewarmed. Sustained memory-pressure or thermal-throttle vetoes, malformed results, timeouts, interruption, a failing minimum, or a failing final validation MUST fail closed before recommendation state or config mutation. JSON and stored recommendation state MUST carry the calibration policy, prompt reserve, completion-token count, measurements, safe upper bound, and selected context. Without `--calibrate-context`, output shape MUST remain unchanged and the emitted context is the `SPEC-023-R018` default.
 
 Automatic installer use of this requirement is not authorized by v0.9.5. It remains pending a signed `JOURNEY-PROVIDER-PREBETA-ADMISSION` result covering the selected hardware/model/context and an owner decision under issue #1201.
 
 ### 9.2 Guarded concurrency calibration
 
-The served provider's concurrent request capacity — `max_concurrency_override`, which sizes the serve `--max-batch` semaphore and is advertised 1:1 to the coordinator as `slots_total` — is emitted by `autotune --recommend` from a fixed chip/RAM tier constant (`AutotuneRecommendHardware.recommendedMaxBatch`). That constant is not measured: it returns the same value for every box of a chip class regardless of installed memory, the selected model's weight and KV footprint, or the box's real GPU-compute and tail-latency ceiling. Memory is rarely the binding constraint at realistic contexts; the binding constraint is aggregate decode throughput under concurrency subject to acceptable tail latency, which can only be measured on the specific box. §9.2 makes that value measurable while keeping the tier constant as the default (when calibration is not run) and the conservative fallback (when the memory-fit bound cannot be computed).
+The served provider's concurrent request capacity — `max_concurrency_override`, which sizes the serve `--max-batch` semaphore and is advertised 1:1 to the coordinator as `slots_total` — is emitted by `autotune --recommend` from a fixed chip/RAM tier constant (`AutotuneRecommendHardware.recommendedMaxBatch`). That constant is not measured: it returns the same value for every box of a chip class regardless of installed memory, the selected model's weight and KV footprint, or the box's real GPU-compute and tail-latency ceiling. Memory is rarely the binding constraint at realistic contexts; the binding constraint is aggregate decode throughput under concurrency subject to acceptable tail latency, which can only be measured on the specific box. §9.2 makes that value measurable while keeping the tier constant as the default (when calibration is not run, bounded by `SPEC-023-R018` item 9) and the conservative fallback (when the memory-fit bound cannot be computed).
 
 **SPEC-023-R009:** When `autotune --recommend --calibrate-concurrency` is explicitly requested, the CLI MUST calibrate only the selected, already-verified signed model artifact, after selection, before recommendation-state or config mutation. It MUST:
 
@@ -1744,9 +1775,105 @@ The served provider's concurrent request capacity — `max_concurrency_override`
 6. **Fail closed.** Sustained memory-pressure or thermal-throttle vetoes (the same § v0.9.0 probe-safety assessment used elsewhere), malformed or non-finite metrics, timeouts, interruption, a failing `B = 1` baseline, or a serve/process failure MUST fail closed before recommendation state or config mutation, leaving the tier-constant recommendation unchanged.
 7. **Persist the evidence.** JSON and stored recommendation state MUST carry the calibration policy (the memory-fit cap, hard cap, TTFT ceiling, TTFT regression factor, minimum aggregate-gain fraction, calibration context, prompt reserve, completion-token count), the tier-constant value it was compared against, the per-depth measurements, and the selected `recommended_max_batch`. When `--apply` is combined with `--calibrate-concurrency`, the applied `max_concurrency_override` MUST be the calibrated `recommended_max_batch`; otherwise the emitted `serve_config` value is unchanged.
 
-Without `--calibrate-concurrency`, behavior and output shape MUST remain unchanged: the RAM/chip tier constant emits and applies exactly as before, and the §6 `concurrency_calibration` field is absent. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both run, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against.
+Without `--calibrate-concurrency`, output shape MUST remain unchanged: the RAM/chip tier constant emits and applies, lowered only by `SPEC-023-R018` item 9 when that many full-context KV caches do not fit memory at the emitted context (v0.15.2), and the §6 `concurrency_calibration` field is absent. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both run, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against.
 
 Automatic installer use of this requirement is not authorized by v0.13.0. It remains pending signed physical-hardware evidence (including a `JOURNEY-PROVIDER-PREBETA-ADMISSION`-class result on a representative multi-slot box, such as the live 256 GB M3 Ultra) and an owner decision under issue #1589. The pre-existing default path — the tier constant — is unchanged and remains the fleet default until that evidence and decision land.
+
+### 9.3 Default serve context (v0.15.2)
+
+**SPEC-023-R018 — Default serve context.** Without `--calibrate-context`,
+`serve_config.max_context_override` MUST be `min(RAM-tier default, declared
+model maximum, memory-safe context, draft cap)`, where:
+
+1. The RAM-tier default is the context `serve` uses with no override for this
+   Mac's memory.
+2. The declared model maximum is read from the verified artifact `config.json`
+   (top-level or `text_config` context fields), else a CLI-known bound for the
+   model id.
+3. The memory-safe context is `4000 + floor(usable_kv_bytes /
+   kv_bytes_per_token)`, capped at 1,000,000, where `usable_kv_bytes` is three
+   quarters of the RAM left after the catalog `min_ram_gb` and the §5 safety
+   margin, and `kv_bytes_per_token = layers × kv_heads × head_dim × 2 × 2`.
+   It is computed only from `config.json` bytes whose SHA-256 matches the
+   verified artifact.
+4. A declared `head_dim` MUST be used as declared; only a `head_dim` derived as
+   `hidden_size / num_attention_heads` must divide exactly.
+5. When the config declares `layer_types` for every layer, `layers` counts only
+   the `full_attention` entries. A complete stack with no `full_attention`
+   entry has `kv_bytes_per_token = 0`: the memory-safe term binds nothing and
+   drops out of the minimum, like an unknown bound.
+6. An unknown bound (no declared maximum, unverified or duplicated config bytes,
+   unreadable or overflowing geometry) drops out of the minimum. The
+   4,000-token floor is emitted only when the memory-safe term itself is 4,000;
+   it MUST NOT stand in for an unknown model or memory bound.
+7. `--apply` records the written value's provenance in the same config write,
+   as the `max_context_override_provenance` key of `config.yaml` (SPEC-001
+   v1.9.23 FR-20b, `recommendation_apply`); `serve_config` never carries it.
+   A warm model switch recomputes a generated value with this same function
+   (SPEC-001 FR-20b).
+8. The draft cap is the SPEC-028 draft-enabled context cap for this Mac's
+   memory tier (8,192 / 20,000 / 50,000 / 120,000 tokens), and applies only
+   when the config names a `draft_model`; with none it drops out. With one,
+   `serve_config.max_concurrency_override` is 1. Serve's spec-decode preflight
+   exits `draft_model_capacity_shortfall` on a larger explicit override or more
+   than one slot, so every writer of the value (this apply, the
+   `models adopt-recommendation` context check, SPEC-001 FR-20b
+   `provider context set` and the warm-switch recompute) applies the same term.
+9. The context and slot count are bounded jointly. The context above is sized
+   for ONE full-context KV cache, so `serve_config.max_concurrency_override`
+   MUST be `max(1, min(slots, memory_fit_cap))`, where `slots` is the chip/RAM
+   tier constant (§9.2), the calibrated depth, or 1 with a draft model, and
+   `memory_fit_cap` is the R009 `memoryFitBatchDepth` at the emitted context:
+   `floor(usable_kv_bytes / (kv_bytes_per_token × context))`, the same
+   `usable_kv_bytes` as item 3, from the same verified `config.json`. The
+   context is never lowered to make room for slots on this path. When the
+   memory fit is unknown (item 6, or `kv_bytes_per_token = 0`), the slot count
+   stays at most the tier constant. Every path that writes or validates a
+   generated pair uses this same function:
+   - `models adopt-recommendation` refuses, before the runtime prepares
+     anything or a byte is written, a signed recommendation whose
+     `max_concurrency_override` exceeds `memory_fit_cap` at its signed context
+     (or the tier constant when the fit is unknown); it never rewrites a
+     signed value. Every signed identity, context, slot, and draft check runs
+     on the verified artifact where it already is (a valid durable copy, else
+     the Hugging Face snapshot); only an adoption that passes them copies a
+     Hugging Face snapshot into the durable store.
+   - `autotune --recommend --check-only --installed-only` reads the same
+     identity without adoption and MUST NOT create or replace anything in the
+     durable store (background checks never populate shared caches).
+   - A warm-switch recompute (SPEC-001 FR-20b) keeps the operator's configured
+     slot count (serve's `max_concurrency_override`, 1 with a draft model) and
+     lowers the recomputed context to the largest one at which that many slots
+     fit, never below 4,000.
+   - `serve` start (SPEC-001 FR-20b) applies the same context bound to a
+     `recommendation_apply` value for the configured model when the slot
+     count it runs (`max_concurrency_override` after `--max-batch` and the
+     environment, else 1) does not fit at the recorded value, and a switch
+     back to that model serves the lowered value. An operator-owned value is
+     never lowered.
+   - Floor exception (warm switch and `serve` start). When that many slots do
+     not fit even at `min(context, 4000)`, the context MUST NOT be served as if
+     it fit: it stays at `min(context, 4000)` and the served slot count is
+     lowered to `max(1, memory_fit_cap)` at that context. `serve` writes a
+     stderr warning naming both values and runs with the lowered count;
+     `status --advanced` warns that slots were lowered while `config.yaml`
+     keeps the configured count. A warm switch carries the lowered count for
+     that target through the same knob path an adoption uses, and a switch
+     back to the configured model restores the count serve started with. No
+     over-envelope pair is ever served on either path.
+   - The classic measured sweep (`autotune --apply` without `--recommend`)
+     emits a measured (context, slots) cell, not this generated pair, so its
+     config write carries no provenance record (and removes an earlier one):
+     the pair is operator-owned, kept across switches and restarts, and
+     `provider context explain` and `status --advanced` warn when it does not
+     fit memory.
+   - `provider context set`/`explain` (SPEC-001 FR-20b) check the same
+     three-quarters envelope for operator-chosen values, with the artifact's
+     measured weight bytes in place of the catalog `min_ram_gb`. Where a
+     signed row's `min_ram_gb` is at least its weights, a generated pair of
+     more than one slot also passes that check; a single slot at the
+     memory-safe context can exceed the three-quarters share by the KV of the
+     4,000-token floor (item 3) while still fitting physical memory.
 
 ## 10. Goodhart mitigations
 
@@ -1846,7 +1973,7 @@ AC-38: `rate_card_version` changes when the recommendation projection rows, prov
 
 AC-39: `candidate_catalog_sha256` is computed over the exact selected catalog JSON bytes, so changing catalog whitespace changes the stored hash while preserving schema validation behavior.
 
-AC-40 (`SPEC-023-R003`): An explicit context-calibration run never exceeds the RAM/model upper bound, measures near the advertised boundary with one completion token and a 256-token overhead reserve, uses unique measured prompts, validates the final context with three samples, persists the evidence, and fails before state/config mutation when interrupted or when the minimum, safety checks, deadline, response validation, or final p95 TTFT ceiling fails. The same recommendation command without `--calibrate-context` preserves the pre-v0.9.5 output shape and emits/applies the pre-v0.9.5 RAM/model-derived cap unchanged.
+AC-40 (`SPEC-023-R003`): An explicit context-calibration run never exceeds the `SPEC-023-R018` default context as its upper bound, measures near the advertised boundary with one completion token and a 256-token overhead reserve, uses unique measured prompts, validates the final context with three samples, persists the evidence, and fails before state/config mutation when interrupted or when the minimum, safety checks, deadline, response validation, or final p95 TTFT ceiling fails. The same recommendation command without `--calibrate-context` preserves the pre-v0.9.5 output shape and emits/applies the `SPEC-023-R018` default context (AC-47).
 
 AC-41 (`SPEC-023-R007`, RAM-class rule): On a Mac with `ram_gb >= 16` where the Llama 3.1 8B (`min_ram_gb = 12`) row is eligible under §5, `autotune --recommend` selects it — not the Llama 3.2 3B onboarding SKU (`min_ram_gb = 4`) — as `recommended_model`, even when the 3B row has the higher §4 `raw_score` from its ~2× measured TPS at equal `$0.027/M` payout. The 3B row remains eligible and carries `lost_reason = "deprioritized_ram_class_onboarding_sku"` in `all_candidates` (and in the displayed `candidates[]` when it ranks within the §4 top-5 set — always so among a 16 GB Mac's three eligible rows), and the selected 8B row keeps the stable `lost_reason = "selected_best_expected_earning_potential"` (no distinct winner slug). Among eligible RAM-class-matched rows (fixed floor `min_ram_gb >= 12`) the §4 argmax and tiebreakers are unchanged, so Llama 3.1 8B (demand weight `0.45`, higher measured TPS) is preferred over Qwen3-8B on M3-class 16 GB hardware, and Qwen3-8B stays eligible as an alternate. No rate-card row, candidate catalog row, or signed feed changes to produce this pick.
 
@@ -1854,9 +1981,11 @@ AC-42 (`SPEC-023-R007`, hard-gate carve-out and 8 GB path): When every eligible 
 
 AC-43 (`SPEC-023-R009`, concurrency calibration measures aggregate throughput under bounds): An explicit `--calibrate-concurrency` run measures the selected already-verified artifact by driving `B` genuinely concurrent uncached streams at each swept batch depth `B` (never serialized single-stream replicates), records per-depth aggregate tokens/sec and per-stream p95 TTFT, and selects the feasible depth with the highest aggregate tokens/sec — tie-broken toward the lower depth within the aggregate-gain fraction. The selected `recommended_max_batch` never exceeds `min(memory_fit_cap, max_concurrency_override_limit = 8)` and is never below `1`. A depth is feasible only when all `B` streams succeed with measurable throughput, no stop-token leak occurs, its per-stream p95 TTFT is within the buyer-facing ceiling, and it does not regress the `B = 1` p95 TTFT beyond the bounded factor; `B = 1` is measured first and must pass. Sustained memory-pressure/thermal vetoes, malformed/non-finite metrics, timeout, interruption, or a serve/process failure fail closed before recommendation-state or config mutation, leaving the tier-constant recommendation intact. JSON and stored state carry the policy, the tier-constant comparison value, the per-depth measurements, and the selected value; with `--apply`, the applied `max_concurrency_override` equals `recommended_max_batch`. When a draft model is configured, the run emits `recommended_max_batch = 1` with `draft_pinned = true` and performs no sweep (SPEC-028 FR-4).
 
-AC-44 (`SPEC-023-R009`, opt-in and byte-shape preservation): The same recommendation command without `--calibrate-concurrency` preserves the pre-v0.13.0 output shape exactly — the `concurrency_calibration` field is absent — and emits and applies the `AutotuneRecommendHardware.recommendedMaxBatch` chip/RAM tier constant as `max_concurrency_override` unchanged. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both are requested, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against, and both optional fields appear in the fixed §6 order (`context_calibration` then `concurrency_calibration`).
+AC-44 (`SPEC-023-R009`, opt-in and byte-shape preservation): The same recommendation command without `--calibrate-concurrency` preserves the pre-v0.13.0 output shape exactly — the `concurrency_calibration` field is absent — and emits and applies the `AutotuneRecommendHardware.recommendedMaxBatch` chip/RAM tier constant as `max_concurrency_override`, lowered only by `SPEC-023-R018` item 9 (v0.15.2) when that many slots do not fit memory at the emitted context. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both are requested, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against, and both optional fields appear in the fixed §6 order (`context_calibration` then `concurrency_calibration`).
 
 AC-45 (`SPEC-023-R011`, Ultra ≥256 GB default 8): `AutotuneRecommendHardware` for an Ultra chip with 256 GB or more returns `recommendedMaxBatch = 8`. The same Ultra chip with 128 GB or 192 GB still returns 4. The served hard cap remains 8. A `--calibrate-concurrency` run MAY still emit a lower value.
+
+AC-47 (`SPEC-023-R018`, default serve context): On a 256 GB M3 Ultra with the pinned Qwen3.6-27B artifact (`head_dim` 256 declared over 24 heads and `hidden_size` 5120, a `layer_types` stack with 16 `full_attention` layers, declared maximum 262,144), `autotune --recommend --apply` without calibration writes `max_context_override: 200000` (the RAM-tier default, the smallest term), never 4,000, and records `recommendation_apply` provenance as the config's `max_context_override_provenance` key. `kv_bytes_per_token` for that config counts 16 layers × 4 KV heads × 256 × 2 × 2. With no declared maximum and unprovable memory fit on a high-memory Mac the value is the RAM-tier default; with a known model bound below it, that bound. The 4,000-token value appears only when the memory-safe term is exactly 4,000 (no spare KV memory after weights and the safety margin). With a `draft_model` configured on the same Mac the apply writes `max_context_override: 120000` (the SPEC-028 draft cap) and `max_concurrency_override: 1`, and serve's spec-decode preflight accepts the written config. For every signed row of `autotune-candidates.json` on 256, 128, and 64 GB Macs (rows whose `min_ram_gb` plus the safety margin fit), the generated pair satisfies `kv_bytes_per_token × context × slots + (min_ram_gb + safety margin) GB ≤ physical memory` and, above one slot, `slots ≤ memoryFitBatchDepth(context)`; signed GLM-4.5-Air on a 256 GB Ultra emits 131,072 tokens × 5 slots (tier constant 8) and the pinned Qwen3.6-27B still emits 200,000 × 8. `models adopt-recommendation` refuses GLM-4.5-Air at 131,072 × 6 on that Mac, and a warm switch to it with 8 configured slots serves the largest context that fits 8 slots.
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
 

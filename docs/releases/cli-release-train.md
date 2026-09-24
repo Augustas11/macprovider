@@ -24,7 +24,7 @@ binary the Mac runs.
 ## Core rule (do not violate)
 
 - **Candidate tags do NOT bump `binaryVersion`.** Every acceptance candidate
-  (v1.8.124 … v1.8.16x) was cut with the source
+  (v1.8.124 … v1.8.186) was cut with the source
   `binaryVersion` constant unchanged (it is `1.8.123` = the last promoted
   stable). The candidate's identity lives in its signed `compatibility_set_id`
   (`owner/repo:vX.Y.Z@<commit>`), not in `binaryVersion`.
@@ -37,10 +37,15 @@ binary the Mac runs.
 
 Pearl runtime `v1.8.189` was consumed by the signed but unapplied #1715
 settlement-finality cut. Its deploy failed closed before Pearl mutation. The
-replacement Pearl runtime `v1.8.190` is live, and `v1.8.191` is reserved for
-the next Pearl runtime carrying #1728. None of these tags is a provider CLI
-candidate, and none changes `binaryVersion` or the fleet recommendation from
-1.8.123.
+replacement Pearl runtime `v1.8.190` was consumed in turn. `v1.8.191` @
+`98e3e4af` (includes #1728) is the **live** Pearl coordinator/gateway runtime
+since 2026-09-24 05:23Z (coordinator + gateway healthz report v1.8.191;
+`pearl-runtime-release` run
+[35958041007](https://github.com/Augustas11/macprovider/actions/runs/35958041007)).
+`v1.8.192` is reserved for the Studio-only CLI candidate from #1716 (see
+Active candidate below), so the next Pearl coordinator/gateway runtime tag
+must be `v1.8.193` or later. None of these tags is a provider CLI candidate,
+and none changes `binaryVersion` or the fleet recommendation from 1.8.123.
 
 ## Current promoted stable
 
@@ -55,10 +60,12 @@ candidate, and none changes `binaryVersion` or the fleet recommendation from
 Candidates through `v1.8.176` are old or off-train for promotion. The Studio
 serving canary is signed private candidate **186**, which includes #1700 and
 still reports `binaryVersion` **1.8.123**. It replaced private candidate 181
-only on the Studio; it is not a public stable tag and must not be promoted to
-the fleet. Pearl runtime tags `v1.8.189` and `v1.8.190` are already consumed,
-and `v1.8.191` is reserved for the next coordinator/gateway runtime. Fleet
-recommendation stays at **1.8.123**.
+(two runs tagged `v1.8.181`: run 91 @ `32ea1bd0`, run 92 @ `710255f4`) only on
+the Studio; it is not a public stable tag and must not be promoted to the
+fleet. Pearl runtime tags `v1.8.189` and `v1.8.190` are already consumed; the
+coordinator/gateway runtime **live** on Pearl is `v1.8.191` @ `98e3e4af`
+(includes #1728). `v1.8.192` is reserved for the Studio-only CLI candidate
+from #1716. Fleet recommendation stays at **1.8.123**.
 
 
 | Net change in CLI / Malibu / installer | Status | PR |
@@ -78,14 +85,16 @@ recommendation stays at **1.8.123**.
 | First-install no longer false `rollback_failed` | merged | #1443 |
 | Sparkle public key only on the v1.8.39 bridge build | merged | #1450 |
 | Prepare/stage catalog artifacts without turning them on | merged | #1525 #1530 #1533 |
-| Storage / Build 1 prep stays private until activation | merged | #1504 #1507 #1525 |
+| Storage / Build 1 prep stays private until activation | merged | #1504 #1506 #1507 #1510 #1519 #1525 |
 | SPEC-038 attach needs measured runtime evidence | merged | #1502 |
 | SPEC-039 attach without sticky reattach | merged | #1475 |
 | FR-PKV10 extract exists; serving still off | merged | #1476 |
 | Paged KV sticky billing parity | merged | #1489 |
-| Reward eligibility not claimed from the wrong state | merged | (Malibu rewards, `422fc2f1`) |
-| Buyer prompt/content not leaked on relays | merged | #1467 |
+| Reward eligibility not claimed from the wrong state | merged | #1466 (`422fc2f1`) |
+| Relay-blind encryption pilot for buyer prompt/content, default off | merged | #1467 |
 | Pricing metadata only from validated endpoints | merged | #1455 |
+| Security fixes F05–F11 across wallet and provider update boundaries | merged | #1454 |
+| Signed conformance evidence path made reproducible and protectable (#1433) | merged | #1459 |
 | OpenRouter slot-delta / stale-capacity routing on CLI path | merged | #1571 #1535 |
 | Installer 404 fix: paginate latest-release lookup, de-quadratic parser | merged | #1582 (#1574) |
 | Live Ollama serve + Gemma tokens (non-earning) | merged | #1576 (#1569) |
@@ -109,22 +118,46 @@ recommendation stays at **1.8.123**.
 | Keep CB canary streams alive past the first lockstep hop | merged | #1665 |
 | Pearl keyed first-turn chats enter Studio CB canary (positive cache hits stay serial until AC-26) | merged | #1666 |
 | SPEC-038 FR-CB10 per-tuple acceptance coverage enforced fail-closed (see precondition below before cutting) | merged | #1672 |
+| SPEC-038 FR-CB6 accepts batched-vs-serial numeric ties so MoE CB can attach | merged | #1608 |
+| install.sh: fresh-install paid-yield recommend is resumable, visible, and bounded | merged | #1613 (#1605) |
+| Admit `gpt_oss` only behind SPEC-039 proof gates | merged | #1617 |
+| install.sh: unblock provider recovery after catalog and evidence retries | merged | #1620 |
+| Prove CB scales on M3 Ultra via compiled contiguous decode (MSB command) | merged | #1623 |
+| install.sh: keep pool-ready providers alive during admission lag | merged | #1625 |
+| install.sh: fail SSH installs before inaccessible Keychain work | merged | #1627 |
+| install.sh: preserve hardware-evidence retry guidance before rollback | merged | #1631 |
+| Stage Lane A artifact preparation path | merged | #1649 |
+| Raise FR-KVP9 promotion hard ceiling to 1 GiB for KVS-01b | merged | #1655 |
+| Close proved #1616 recovery-hardening gaps (installed identity, buyer-serving reason, evidence record, dangling launchd repair) | merged | #1668 |
+| Drop slot reservation once the Mac has the chat | merged | #1670 |
+| Keep four seats admitting four chats after a late Mac busy report | merged | #1674 |
+| Correct Qwen3.6 artifact identity so providers can use the signed row (catalog) | merged | #1686 |
+| Stop loopback runtimes from signing settlement receipts | merged | #1707 (#1695) |
 | Provider WebSocket relay admission follows advertised seats and warm swaps | merged | #1687 |
 | Refresh embedded Tier-2 identity/catalog bindings for the current model set | merged | #1692 |
 | Disable optional template thinking for final-answer mode by loaded-artifact capability | merged | #1700 |
 | Running provider refreshes its signed catalog envelope on `catalog_incompatible` or a newer hello ack and adopts it only for the same served row identity (no Malibu restart after a content cut). Compatibility-set rejections keep their own reason. Malibu/CLI status says "Catalog refresh needed", not "software update required" | merged `3abf42a8` | #1714 (#1705) |
+| Node-operator UX (#1689): honest `status --advanced` (readiness layers, probe-vs-sustained TPS, context source); `provider verify` bound to the live coordinator; `provider context explain | set --apply | rollback --no-restart` with installed-service-aware restart; 4K context fix (declared head_dim / hybrid layers) with context × slots memory bound and draft cap; in-config `max_context_override_provenance`; model-switch recompute; `models verify-artifact | identity | prepare --profile catalog`; CLI holds through coordinator `catalog_material_missing`. Studio lab E2E rounds 1–4 PASS. Operators with a stored 4K recommendation need a fresh `autotune --recommend`. Coordinator side (SPEC-022 R-2.7, `/poolz` gate) ships with the next Pearl runtime ≥ v1.8.193 | merged `57686a84` | #1713 (#1689) |
+| BYOM v0.2 slice 2a: catalog artifact feed generator, class rate rows, ledger v3 (catalog sources only, no Swift changes) | merged | #1461 (#1453) |
+| Ship catalog content release without a Pearl runtime cut (`not-buyer-serving.json` only, catalog-lane; binary unchanged) | merged | #1706 (#1688) |
 
-#1453 closes when a candidate that includes the **merged** rows is promoted to
-the fleet. #1569 is a later CLI. Spec promotion #1583 is not a CLI change.
+Catalog-json-only rule: rule 1 above ("a PR that changes `phase3-binary/`
+merges → add one row") is a path rule, not a compiled-binary rule, so a PR
+that only touches JSON sources under `phase3-binary/catalog/` still gets a
+row even though it does not change the Swift binary the fleet runs; #1461 and
+#1706 are rows on that basis, each noted as catalog-only above.
 
-Coordinator/gateway on live Pearl is **v1.8.190** @ `0a63ddab`. Fleet Macs and
-the coordinator recommendation remain on provider binary **1.8.123**. The
-Studio serves signed private candidate **186**; do not promote the fleet from
-this campaign.
+#1453 is **CLOSED** (2026-09-19); it does not gate a future promotion. #1569
+is a later CLI. Spec promotion #1583 is not a CLI change.
 
-#1632 / #1638 / #1639 / #1653 (coordinator leftover rewrite + gateway R014)
-are coordinator/gateway, not CLI rows. #1653 also has the CLI
-`InferenceRelay` drop; that CLI change is in `v1.8.174`.
+Coordinator/gateway on live Pearl is **v1.8.191** @ `98e3e4af` (includes
+#1728). Fleet Macs and the coordinator recommendation remain on provider
+binary **1.8.123**. The Studio serves signed private candidate **186**; do
+not promote the fleet from this campaign.
+
+#1632 / #1638 / #1639 (coordinator leftover rewrite + gateway R014) are
+coordinator/gateway, not CLI rows. #1653 **is** a CLI row (above); its
+`InferenceRelay` drop is in `v1.8.174`.
 
 #1600 is the install.sh consumer-health alarm
 (scripts/CI), not the Mac binary. Curl-channel `get.malibu.tech/install.sh`
@@ -136,6 +169,11 @@ against fleet **v1.8.123**. The parity alarm still compares served bytes to
 the latest **stable tag** (v1.8.123) and stays red until this CLI is promoted
 and the tag's `install.sh` matches served (re-publish from that tag, or
 confirm bytes are unchanged).
+
+`install.sh` on `main` has moved past served bytes: #1613, #1620, #1625,
+#1627, and #1631 all touch `phase3-binary/dist/install.sh` after the
+2026-09-19 republish and are **not** in the served `c90fb44d…` bytes. Do not
+assume the curl-channel one-liner carries them until the next republish.
 
 ### Precondition for any candidate cut after #1672
 
@@ -170,13 +208,13 @@ and silently never matching.
 | Field | Value |
 |---|---|
 | Last built candidate | Signed private candidate **186**, including #1700; it reports `binaryVersion` 1.8.123 and is installed only on the Studio. |
-| Mac Studio serving canary | Signed private candidate **186** — live, coordinator-connected, serving Qwen3.6-27B with the expected catalog hash, context 200000, and eight advertised seats. |
+| Mac Studio serving canary | Signed private candidate **186** — live, coordinator-connected, serving Qwen3.6-27B with the expected catalog hash and context 200000. The 2026-09-24 honest-batching session reduced advertised seats from eight to **one** (`max_concurrency_override: 1`, continuous batching off); the eight-seat soak in Track D below is historical, not the current live state. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
-| Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` BYOM @ `cdbb0257`; CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
+| Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` @ `eb30981c` (BYOM #1576 `cdbb0257` + #1591 + #1590 + #1593); CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
 | Status | **Do not promote.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 186 is the Studio-only serving canary while the settlement-complete rerun finishes. |
-| Next candidate | No provider candidate is reserved. `v1.8.191` belongs to the Pearl runtime train. Any later Studio successor must keep `binaryVersion` 1.8.123 unless the fleet is explicitly promoted. |
-| Merged after candidate 186 | #1714 in-process catalog envelope refresh; coordinator/gateway settlement recovery continues separately through #1728. |
-| Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build. |
+| Next candidate | **`v1.8.192` is reserved** for the Studio-only successor to 186. It is cut as a signed private candidate from the #1716 branch (`campaign/ac25-m2-api-lifecycle`) after the Codex three-lane audit and green CI. It carries 186's content plus #1714 and #1716: batched-output fixes, the Qwen3.6 hybrid cache (#1731), the AC-25 lifecycle and the MLX cache limit, and per the #1716 session agreement also carries #1713. On the Studio it enables `continuous_batching: canary` for the exact Qwen3.6 M3 Ultra 256 GB tuple with 8 seats and `mlx_cache_limit_mb: 2048`. `binaryVersion` stays 1.8.123. Do not promote to the fleet. `v1.8.191` is the live Pearl coordinator/gateway runtime tag (consumed); the next Pearl runtime tag is `v1.8.193` or later. |
+| Merged after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — rides in `v1.8.192` per the #1716 session agreement). Coordinator/gateway settlement recovery continued separately through #1728, now live in Pearl runtime `v1.8.191`. |
+| Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build (soak proof; live seats since reduced to one — see Mac Studio serving canary above). |
 
 ## E2E tracks (independent gates)
 
@@ -269,11 +307,13 @@ combined candidate**.
 - **Status:** signed Studio candidate **186** is live. Answer quality passed;
   the strict-pinned buyer soak reached **99/100 at concurrency 4** and **16/16
   at concurrency 8**, with all successful replies free of thinking text and
-  eight seats observed in flight. Durable evidence was **113/116 complete**;
-  the three incomplete settlements keep this track open. #1728 is merged and
-  reserved for Pearl runtime `v1.8.191`; after that runtime is live, rerun the
-  full settlement gate. Keep fleet recommendation and `binaryVersion` at
-  1.8.123.
+  eight seats observed in flight (historical — live seats were reduced to one
+  on 2026-09-24; see Active candidate above). Durable evidence was **113/116
+  complete**; the three incomplete settlements keep this track open. #1728
+  is merged and now **live** in Pearl runtime `v1.8.191` @ `98e3e4af` (since
+  2026-09-24 05:23Z), so the settlement-complete rerun is unblocked — run it
+  against this runtime before closing Track D. Keep fleet recommendation and
+  `binaryVersion` at 1.8.123.
 
 ## Promotion gate (checklist)
 

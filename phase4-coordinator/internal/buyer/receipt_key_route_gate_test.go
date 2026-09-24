@@ -16,8 +16,8 @@ import (
 // route-snapshot guard in route_snapshot.go so the eligibility filter
 // and the fail-closed backstop cannot diverge.
 func TestEligibilityCtx_ProviderHasSettlementReceiptKey(t *testing.T) {
-	t.Parallel()
-	withKey := pool.Provider{ProviderID: "with", ReceiptPubkey: []byte("k")}
+	withModelACatalogMaterial(t)
+	withKey := pool.Provider{ProviderID: "with", ModelID: "model-a", ReceiptPubkey: []byte("k")}
 	noKey := pool.Provider{ProviderID: "without"}
 	// A real Server is required: the enforce-exclusion path emits a
 	// receipt_key_missing_excluded log via c.s, so c.s must be non-nil.

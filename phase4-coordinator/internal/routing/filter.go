@@ -53,6 +53,10 @@ const (
 	// the settlement store/config is unavailable — the checker returns
 	// true for every provider and this reason never fires, so default /
 	// observe selection stays byte-identical to pre-fix behaviour.
+	// EligibleCandidates also counts SPEC-022-R002 R-2.7 exclusions (no
+	// Tier-2 route-snapshot material) here, because both fail the one
+	// ProviderHasSettlementReceiptKey gate; the buyer re-attributes those to
+	// ReasonCatalogMaterialMissing from the checker's typed verdict.
 	ReasonReceiptKeyMissing
 	// ReasonPoolNotMember — the request carries a pool_id (SPEC-042) and
 	// the provider is not a current, non-revoked member of that pool. A
@@ -88,6 +92,13 @@ const (
 	// but has coordinator-owned BYOM admission state that is not currently
 	// settlement_capable for the trusted catalog/hash tuple.
 	ReasonBYOMNonSettlement
+	// ReasonCatalogMaterialMissing — verified_model_settlement_mode=enforce
+	// and the served model has no Tier-2 route-snapshot material, so the
+	// route snapshot must fail (SPEC-022-R002 R-2.7). The same gate as
+	// ReasonReceiptKeyMissing and the same buyer response; kept separate in
+	// routing telemetry so operators can tell a catalog gap from a key gap.
+	// Appended last so existing reason values do not shift.
+	ReasonCatalogMaterialMissing
 )
 
 // EligibilityChecker is the cross-package boundary between the
@@ -135,9 +146,11 @@ type EligibilityChecker interface {
 	// ProviderHasSettlementReceiptKey reports whether the provider can
 	// have a route snapshot recorded under the active settlement mode.
 	// A false return is reported as ReasonReceiptKeyMissing (SPEC-022
-	// R-2.4/R-2.5). Implementations MUST return true UNLESS
+	// R-2.4/R-2.5; an R-2.7 miss is re-attributed to
+	// ReasonCatalogMaterialMissing by the buyer). Implementations MUST return true UNLESS
 	// verified_model_settlement_mode is `enforce` AND the provider's
-	// active receipt public key is empty — the SAME (store, mode) source
+	// active receipt public key is empty or its served model has no Tier-2
+	// route-snapshot material — the SAME (store, mode) source
 	// the pre-dispatch route-snapshot guard in route_snapshot.go reads,
 	// so the eligibility filter and the fail-closed backstop cannot
 	// diverge. In observe mode, or when the settlement store/config is

@@ -790,16 +790,25 @@ enum CredentialRestartProver {
         return "gui/\(getuid())"
     }
 
-    private static func restartLaunchdProvider(config: AppConfig) throws {
-        let domain = launchdDomain(for: config)
-        let process = Process()
+    static func restartLaunchdProvider(config: AppConfig) throws {
+        try restartLaunchdProvider(domain: launchdDomain(for: config))
+    }
+
+    /// `launchctl kickstart -k <domain>/live.malibu.provider`; the system
+    /// domain goes through `sudo -n`, a gui domain runs as this user.
+    static func kickstartCommand(domain: String) -> (executable: String, arguments: [String]) {
+        let target = "\(domain)/\(launchdLabel)"
         if domain == "system" {
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-            process.arguments = ["-n", "/bin/launchctl", "kickstart", "-k", "\(domain)/\(launchdLabel)"]
-        } else {
-            process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-            process.arguments = ["kickstart", "-k", "\(domain)/\(launchdLabel)"]
+            return ("/usr/bin/sudo", ["-n", "/bin/launchctl", "kickstart", "-k", target])
         }
+        return ("/bin/launchctl", ["kickstart", "-k", target])
+    }
+
+    static func restartLaunchdProvider(domain: String) throws {
+        let command = kickstartCommand(domain: domain)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: command.executable)
+        process.arguments = command.arguments
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run()

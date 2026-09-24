@@ -182,7 +182,8 @@ extension AutotuneRecommendHardware {
         modelID: String,
         verifiedConfigJSONData: Data?,
         verifiedConfigSHA256: String?,
-        catalogMinRAMGB: Int
+        catalogMinRAMGB: Int,
+        draftModel: String?
     ) -> Int {
         let hardwareCap = recommendedMaxContext
         let modelCap = AutotuneModelContextCap.safeMaxContextTokens(
@@ -192,7 +193,10 @@ extension AutotuneRecommendHardware {
             verifiedConfigJSONData: verifiedConfigJSONData,
             verifiedConfigSHA256: verifiedConfigSHA256
         )
-        return min(hardwareCap, modelCap)
+        // Without the draft term, a provider with `draft_model` configured
+        // would refuse to start on the value an apply writes.
+        let draftCap = ProviderCapacity.draftModelContextLimit(physicalMemoryGB: memoryGB, draftModel: draftModel)
+        return min(hardwareCap, modelCap, draftCap ?? .max)
     }
 
     var recommendedMaxBatch: Int {
@@ -217,10 +221,13 @@ extension AutotuneRecommendHardware {
 }
 
 enum AutotuneModelContextCap {
-    static let failClosedMaxContext = 4_000
+    /// The smallest serve context this cap ever emits: the memory-safe floor
+    /// when the KV budget is exhausted. It is never a stand-in for an unknown
+    /// model or memory bound (#1689).
+    static let minimumServeContext = 4_000
 
     private static let minimumAcceptedContext = 4_000
-    private static let maximumAcceptedContext = 1_000_000
+    static let maximumAcceptedContext = 1_000_000
     private static let bytesPerKVElement = 2
     private static let memorySafetyFractionNumerator = 3
     private static let memorySafetyFractionDenominator = 4
@@ -257,10 +264,13 @@ enum AutotuneModelContextCap {
         verifiedConfigJSONData: Data?,
         verifiedConfigSHA256: String?
     ) -> Int {
+        // An unknown bound leaves the caller's RAM-tier default in charge, the
+        // same cap `serve` uses without an override. Falling to the 4,000-token
+        // floor here wrote a 4K production cap on 256 GB Macs (#1689).
         let architecturalCap = declaredMaxContextTokens(
             modelID: modelID,
             verifiedConfigJSONData: verifiedConfigJSONData
-        ) ?? failClosedMaxContext
+        ) ?? maximumAcceptedContext
         guard let verifiedConfigJSONData,
               let verifiedConfigSHA256,
               Data(SHA256.hash(data: verifiedConfigJSONData)).hexLower == verifiedConfigSHA256,
@@ -270,7 +280,7 @@ enum AutotuneModelContextCap {
                 catalogMinRAMGB: catalogMinRAMGB
               )
         else {
-            return min(architecturalCap, failClosedMaxContext)
+            return architecturalCap
         }
         return min(architecturalCap, memoryCap)
     }
@@ -289,8 +299,11 @@ enum AutotuneModelContextCap {
     }
 
     static func memorySafeContextTokens(configData: Data, hardwareMemoryGB: Int, catalogMinRAMGB: Int) -> Int? {
+        // Zero per-token KV bytes (no full-attention layer) bind nothing: the
+        // memory term drops out like an unknown one.
         guard let root = strictConfigRoot(configData),
-              let bytesPerToken = kvCacheBytesPerToken(in: root)
+              let bytesPerToken = kvCacheBytesPerToken(in: root),
+              bytesPerToken > 0
         else {
             return nil
         }
@@ -300,10 +313,10 @@ enum AutotuneModelContextCap {
         let usableKVBytes = UInt64(spareGB) * bytesPerGB * UInt64(memorySafetyFractionNumerator)
             / UInt64(memorySafetyFractionDenominator)
         let additionalTokens = Int(min(
-            UInt64(maximumAcceptedContext - failClosedMaxContext),
+            UInt64(maximumAcceptedContext - minimumServeContext),
             usableKVBytes / UInt64(bytesPerToken)
         ))
-        return saneContext(failClosedMaxContext + additionalTokens)
+        return saneContext(minimumServeContext + additionalTokens)
     }
 
     /// SPEC-023-R009 §9.2 step 1: the largest concurrent batch depth whose
@@ -344,6 +357,111 @@ enum AutotuneModelContextCap {
         }
         let slots = usableKVBytes / perSlotKVBytes
         return max(1, Int(min(slots, UInt64(Int.max))))
+    }
+
+    /// SPEC-023-R018 item 9: a generated slot count lowered so that many
+    /// full-context KV caches at `context` fit the `memoryFitBatchDepth`
+    /// envelope. Unknown geometry leaves `slots` unchanged; callers pass a
+    /// value already at or below the chip/RAM tier constant or a calibrated
+    /// depth bounded the same way.
+    static func memoryBoundedSlots(
+        _ slots: Int,
+        context: Int,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int
+    ) -> Int {
+        guard let verifiedConfigJSONData, let verifiedConfigSHA256,
+              let fit = memoryFitBatchDepth(
+                  configData: verifiedConfigJSONData,
+                  verifiedConfigSHA256: verifiedConfigSHA256,
+                  hardwareMemoryGB: hardwareMemoryGB,
+                  catalogMinRAMGB: catalogMinRAMGB,
+                  calibrationContextTokens: context
+              )
+        else {
+            return slots
+        }
+        return max(1, min(slots, fit))
+    }
+
+    /// SPEC-023-R018 item 9, warm-switch direction: the largest context at or
+    /// below `context` at which `slots` full-context KV caches fit the
+    /// `memoryFitBatchDepth` envelope, never below `minimumServeContext`.
+    /// Unknown geometry leaves `context`. Nil when `slots` do not fit even at
+    /// `min(context, minimumServeContext)`: the caller must lower the slot
+    /// count (see `memoryBoundedServePair`), never serve the floor as if it fit.
+    static func memoryBoundedContext(
+        _ context: Int,
+        slots: Int,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int
+    ) -> Int? {
+        func fits(_ candidate: Int) -> Bool {
+            memoryBoundedSlots(
+                slots,
+                context: candidate,
+                verifiedConfigJSONData: verifiedConfigJSONData,
+                verifiedConfigSHA256: verifiedConfigSHA256,
+                hardwareMemoryGB: hardwareMemoryGB,
+                catalogMinRAMGB: catalogMinRAMGB
+            ) >= slots
+        }
+        guard slots > 1, !fits(context) else {
+            return context
+        }
+        guard context > minimumServeContext, fits(minimumServeContext) else {
+            return nil
+        }
+        // The fitting slot count only falls as the context grows, so the
+        // largest fitting context is found by bisection.
+        var low = minimumServeContext
+        var high = context
+        while high - low > 1 {
+            let middle = low + (high - low) / 2
+            if fits(middle) {
+                low = middle
+            } else {
+                high = middle
+            }
+        }
+        return low
+    }
+
+    /// SPEC-023-R018 item 9: the served (context, slots) pair. The context
+    /// gives way first (`memoryBoundedContext`); when even the floor does not
+    /// fit, the context stays at `min(context, minimumServeContext)` and the
+    /// slot count comes down to what fits there (at least 1).
+    static func memoryBoundedServePair(
+        context: Int,
+        slots: Int,
+        verifiedConfigJSONData: Data?,
+        verifiedConfigSHA256: String?,
+        hardwareMemoryGB: Int,
+        catalogMinRAMGB: Int
+    ) -> (context: Int, slots: Int) {
+        if let bounded = memoryBoundedContext(
+            context,
+            slots: slots,
+            verifiedConfigJSONData: verifiedConfigJSONData,
+            verifiedConfigSHA256: verifiedConfigSHA256,
+            hardwareMemoryGB: hardwareMemoryGB,
+            catalogMinRAMGB: catalogMinRAMGB
+        ) {
+            return (bounded, slots)
+        }
+        let floorContext = min(context, minimumServeContext)
+        return (floorContext, memoryBoundedSlots(
+            slots,
+            context: floorContext,
+            verifiedConfigJSONData: verifiedConfigJSONData,
+            verifiedConfigSHA256: verifiedConfigSHA256,
+            hardwareMemoryGB: hardwareMemoryGB,
+            catalogMinRAMGB: catalogMinRAMGB
+        ))
     }
 
     private static func strictConfigRoot(_ configData: Data) -> [String: Any]? {
@@ -387,8 +505,15 @@ enum AutotuneModelContextCap {
         return nil
     }
 
+    /// Per-token KV-cache bytes for one sequence (0 for a complete hybrid
+    /// stack with no full-attention layer), or nil when the verified config's
+    /// attention geometry is unreadable.
+    static func kvCacheBytesPerToken(configData: Data) -> Int? {
+        strictConfigRoot(configData).flatMap(kvCacheBytesPerToken(in:))
+    }
+
     private static func kvCacheBytesPerToken(in root: [String: Any]) -> Int? {
-        guard let layers = firstInt(in: root, paths: [
+        guard let declaredLayers = firstInt(in: root, paths: [
             ["num_hidden_layers"],
             ["n_layer"],
             ["num_layers"],
@@ -419,15 +544,32 @@ enum AutotuneModelContextCap {
             ["text_config", "num_key_value_heads"],
             ["text_config", "n_kv_head"]
         ]) ?? attentionHeads
-        let headDim = firstInt(in: root, paths: [
+        let declaredHeadDim = firstInt(in: root, paths: [
             ["head_dim"],
             ["text_config", "head_dim"]
-        ]) ?? (hiddenSize / attentionHeads)
-
-        guard layers > 0, hiddenSize > 0, attentionHeads > 0, kvHeads > 0, headDim > 0,
-              hiddenSize % attentionHeads == 0
+        ])
+        // An explicit head_dim need not divide hidden_size (Qwen3.6-27B:
+        // 24 x 256 over 5120); only a derived one must.
+        guard declaredLayers > 0, hiddenSize > 0, attentionHeads > 0, kvHeads > 0,
+              declaredHeadDim != nil || hiddenSize % attentionHeads == 0
         else {
             return nil
+        }
+        let headDim = declaredHeadDim ?? (hiddenSize / attentionHeads)
+        // Hybrid stacks (layer_types) keep a per-token KV cache only in their
+        // full-attention layers; linear-attention layers hold fixed-size state.
+        // A complete stack counts only those layers, so zero of them is zero
+        // per-token KV bytes (SPEC-023-R018 item 5).
+        let layerTypes = ((root["layer_types"] ?? (root["text_config"] as? [String: Any])?["layer_types"]) as? [Any])?
+            .compactMap { $0 as? String }
+        let layers = layerTypes?.count == declaredLayers
+            ? layerTypes?.filter { $0 == "full_attention" }.count ?? 0
+            : declaredLayers
+        guard headDim > 0 else {
+            return nil
+        }
+        guard layers > 0 else {
+            return 0
         }
         guard let bytes = checkedProduct([
             UInt64(layers),
@@ -3927,6 +4069,40 @@ struct CachedModelArtifactResolver {
             sha256: expectedSHA256
         )
         return try verifiedStagedArtifact(for: row, at: staged, deadline: deadline)
+    }
+
+    /// The pinned artifact verified where it already is (a valid durable
+    /// copy, else the Hugging Face snapshot) without adopting, replacing,
+    /// deleting, or downloading anything. Paths that must not populate shared
+    /// caches (background check-only runs, adoption validation before its
+    /// checks pass) read identity here (#1689 F7).
+    func inspectedExistingArtifact(for row: CandidateCatalog.Row) throws -> VerifiedModelArtifact {
+        guard let revision = row.modelRevision, let expected = row.modelSHA256 else {
+            throw AutotuneRecommendError.invalidArtifact("missing revision/hash")
+        }
+        func inspected(_ directory: URL) throws -> VerifiedModelArtifact? {
+            var st = stat()
+            guard lstat(directory.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR else { return nil }
+            let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: directory)
+            guard inspection.sha256 == expected else { return nil }
+            return VerifiedModelArtifact(
+                modelArgument: directory.standardizedFileURL.path,
+                sha256: inspection.sha256,
+                configJSONData: inspection.configJSONData,
+                configSHA256: inspection.configSHA256
+            )
+        }
+        let durable = try durableStore.artifactURL(modelID: row.modelID, revision: revision, sha256: expected)
+        if FileManager.default.fileExists(atPath: durable.path) {
+            _ = try durableStore.validatedContainedDirectory(durable.path)
+            if let artifact = try? inspected(durable) {
+                return artifact
+            }
+        }
+        if let artifact = try inspected(snapshotURL(modelID: row.modelID, revision: revision)) {
+            return artifact
+        }
+        throw AutotuneRecommendError.invalidArtifact("missing verified pinned snapshot \(row.modelID)@\(revision)")
     }
 
     func verifiedExistingArtifact(for row: CandidateCatalog.Row, deadline: Date? = nil) throws -> VerifiedModelArtifact {

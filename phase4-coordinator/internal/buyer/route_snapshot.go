@@ -25,6 +25,42 @@ const (
 	statusClientClosedRequest    = 499
 )
 
+// routeSnapshotCatalogMaterial is the ONE Tier-2 route-snapshot material
+// lookup. Dispatch (recordRouteSnapshot) and paid-routing eligibility both key
+// it by the admitted row (byomMaterialHash), so routing can never select a
+// session that dispatch then fails for missing material (#1689).
+func routeSnapshotCatalogMaterial(p pool.Provider) (tier2.RouteSnapshotMaterial, bool) {
+	return tier2.SnapshotMaterial(p.ModelID, byomMaterialHash(p))
+}
+
+// catalogMaterialMissing is the SPEC-022-R002 R-2.7 predicate: the session is
+// not bound to a BYOM candidate and its served model has no Tier-2
+// route-snapshot material, so under enforce recordRouteSnapshot must fail it
+// ("missing catalog material"). BYOM-bound sessions fail closed without
+// material on their own paths (dispatch and byomDefaultPaidRoutingEligibility),
+// so they are not counted here.
+func catalogMaterialMissing(p pool.Provider) bool {
+	if byomAdmissionCandidate(p) {
+		return false
+	}
+	_, ok := routeSnapshotCatalogMaterial(p)
+	return !ok
+}
+
+// catalogMaterialMissingUnderEnforce applies R-2.7 with the live settlement
+// mode, read from the same source dispatch reads (a nil billing store is not
+// enforce, exactly as dispatch treats it).
+func (s *Server) catalogMaterialMissingUnderEnforce(p pool.Provider) bool {
+	return s != nil && catalogMaterialMissing(p) && s.settlementEnforceMode()
+}
+
+// CatalogMaterialMissingUnderEnforce exports the R-2.7 verdict so the
+// provider WS server's /poolz.routing_eligible projection applies the same
+// gate buyer routing does (wired in cmd/coordinator).
+func (s *Server) CatalogMaterialMissingUnderEnforce(p pool.Provider) bool {
+	return s.catalogMaterialMissingUnderEnforce(p)
+}
+
 func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool.Provider) (*providerws.SettlementReceiptMetadata, error) {
 	attemptN := b.routeSnapshotAttemptN
 	b.routeSnapshotAttemptN++
@@ -87,11 +123,13 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	// up by the row the session was admitted against (byomMaterialHash, the
 	// same derivation the routing-eligibility path uses).
 	materialHash := byomMaterialHash(provider)
-	material, ok := tier2.SnapshotMaterial(provider.ModelID, materialHash)
+	material, ok := routeSnapshotCatalogMaterial(provider)
 	if !ok {
 		if byomAdmissionCandidate(provider) {
 			return nil, fmt.Errorf("BYOM model admission requires trusted catalog material")
 		}
+		// catalogMaterialMissing(provider): routing already excludes this
+		// session under enforce (R-2.7); this is the fail-closed backstop.
 		return skipOrEnforceError("missing catalog material")
 	}
 	// The tier-2 row must agree with the ROW the session was admitted for

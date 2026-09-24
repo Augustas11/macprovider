@@ -3,6 +3,7 @@ import CryptoKit
 import Dispatch
 import Foundation
 import IOKit
+import MacProviderCore
 
 enum ProviderHealthState: String, Sendable {
     case ready
@@ -155,6 +156,28 @@ final class SystemMemoryPressureMonitor: MemoryPressureProviding, @unchecked Sen
     }
 }
 
+/// The serve-time startup probe that produced `throughputTPSEstimate` (#1689).
+struct StartupThroughputProbe: Sendable, Equatable {
+    let maxTokens: Int
+    let modelID: String?
+}
+
+/// Why the draft model serve would use cannot be determined; capacity writers
+/// refuse to write rather than write a value without the draft term.
+enum ServedDraftModelError: Error, CustomStringConvertible {
+    case unreadableConfig(path: String, reason: String)
+    case blankDraftModel(path: String)
+
+    var description: String {
+        switch self {
+        case .unreadableConfig(let path, let reason):
+            return "cannot read the draft_model serve would use from \(path) (serve cannot load it either): \(reason)"
+        case .blankDraftModel(let path):
+            return "draft_model in \(path) is blank; serve refuses it (--draft-model must be non-empty). Remove the key or name a draft model"
+        }
+    }
+}
+
 struct ProviderCapacity: Sendable {
     static let maxConcurrencyOverrideLimit = 8
 
@@ -163,8 +186,19 @@ struct ProviderCapacity: Sendable {
     let maxContextTokens: Int
     let maxConcurrency: Int
     let throughputTPSEstimate: Double
+    let maxContextSource: MaxContextSource
+    let throughputProbe: StartupThroughputProbe?
 
-    init(maxContextOverride: Int?, maxConcurrencyOverride: Int?, throughputTPSEstimate: Double = 0.0) {
+    /// Without an override the source is always `ram_tier_default`. With one,
+    /// production callers pass the source recorded where the override was
+    /// resolved; the `operator_config` fallback only serves test fixtures.
+    init(
+        maxContextOverride: Int?,
+        maxConcurrencyOverride: Int?,
+        throughputTPSEstimate: Double = 0.0,
+        maxContextSource: MaxContextSource? = nil,
+        throughputProbe: StartupThroughputProbe? = nil
+    ) {
         let physicalMemoryGB = Self.systemMemoryGB()
         self.ramGB = physicalMemoryGB
 
@@ -174,13 +208,19 @@ struct ProviderCapacity: Sendable {
         self.maxContextTokens = maxContextOverride ?? defaults.context
         self.maxConcurrency = maxConcurrencyOverride ?? defaults.concurrency
         self.throughputTPSEstimate = throughputTPSEstimate
+        self.maxContextSource = maxContextOverride == nil
+            ? .ramTierDefault
+            : (maxContextSource ?? .operatorConfig)
+        self.throughputProbe = throughputProbe
     }
 
-    func withThroughputEstimate(_ value: Double) -> ProviderCapacity {
+    func withThroughputEstimate(_ value: Double, probe: StartupThroughputProbe? = nil) -> ProviderCapacity {
         ProviderCapacity(
             maxContextOverride: maxContextTokens,
             maxConcurrencyOverride: maxConcurrency,
-            throughputTPSEstimate: value
+            throughputTPSEstimate: value,
+            maxContextSource: maxContextSource,
+            throughputProbe: probe
         )
     }
 
@@ -218,6 +258,13 @@ struct ProviderCapacity: Sendable {
         }
     }
 
+    /// The slot count `serve` runs: `max_concurrency_override` (config,
+    /// environment, or `--max-batch`), else 1. `provider context set` and
+    /// `explain` resolve the same count so their memory check matches serve.
+    static func servedSlotCount(maxConcurrencyOverride: Int?) -> Int {
+        maxConcurrencyOverride ?? 1
+    }
+
     static func defaultContextTokens(forPhysicalMemoryGB physicalMemoryGB: Int) -> Int {
         defaults(forPhysicalMemoryGB: physicalMemoryGB).context
     }
@@ -235,12 +282,82 @@ struct ProviderCapacity: Sendable {
         }
     }
 
+    /// SPEC-028's context ceiling when `draftModel` is configured, else nil.
+    /// The one owner of the draft term: every writer of `max_context_override`
+    /// (recommend/apply, adoption validation, `provider context set`, the
+    /// warm-switch recompute) applies it, because serve's spec-decode
+    /// preflight exits `draft_model_capacity_shortfall` on a larger override.
+    static func draftModelContextLimit(physicalMemoryGB: Int, draftModel: String?) -> Int? {
+        guard draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else { return nil }
+        return draftContextCap(forPhysicalMemoryGB: physicalMemoryGB)
+    }
+
+    /// The draft model in an already-resolved config, trimmed; nil when unset
+    /// or blank. Serve rejects a blank `draft_model` before it would matter
+    /// (`--draft-model must be non-empty`), so blank never means "capped".
+    static func servedDraftModel(configured raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    /// The draft model serve will use from the config file at `configPath`
+    /// (default path when nil), read without the process environment: the
+    /// launchd service does not inherit the invoking shell, so a shell
+    /// `MACPROVIDER_DRAFT_MODEL` (empty or not) or an invalid shell variable
+    /// must neither hide nor add a draft model. Every capacity writer
+    /// (recommend, adoption, calibration, the config applier under its lock)
+    /// resolves the draft term here. Throws, so the caller fails closed, when
+    /// serve could not load the file or would refuse its blank `draft_model`.
+    static func servedDraftModel(configPath: String?) throws -> String? {
+        let path = ConfigLoader.expandTilde(configPath ?? AppConfig.defaultConfigPath)
+        guard FileManager.default.fileExists(atPath: path) else { return nil }
+        let text: String
+        do {
+            text = try String(contentsOfFile: path, encoding: .utf8)
+        } catch {
+            throw ServedDraftModelError.unreadableConfig(path: path, reason: String(describing: error))
+        }
+        return try servedDraftModel(configText: text, configPath: path)
+    }
+
+    /// `servedDraftModel(configPath:)` over config text already read, e.g.
+    /// under the provider-config lock right before a write.
+    static func servedDraftModel(configText: String, configPath: String) throws -> String? {
+        guard !configText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let config: AppConfig
+        do {
+            config = try ConfigLoader.load(
+                cli: CLIOverrides(configPath: configPath),
+                environment: [:],
+                fileExists: { _ in true },
+                readFile: { _ in configText }
+            )
+        } catch {
+            throw ServedDraftModelError.unreadableConfig(path: configPath, reason: String(describing: error))
+        }
+        if let raw = config.draftModel, servedDraftModel(configured: raw) == nil {
+            throw ServedDraftModelError.blankDraftModel(path: configPath)
+        }
+        return servedDraftModel(configured: config.draftModel)
+    }
+
     static func defaultContextTokensForCurrentHost() -> Int {
         defaultContextTokens(forPhysicalMemoryGB: systemMemoryGB())
     }
 
     static func draftContextCapForCurrentHost() -> Int {
         draftContextCap(forPhysicalMemoryGB: systemMemoryGB())
+    }
+
+    /// The context serve runs with when nothing sets `max_context_override`:
+    /// the RAM-tier default, clamped to the draft cap when a draft model is
+    /// configured. Serve's spec-decode preflight and `provider context
+    /// rollback` both resolve it here.
+    static func unsetOverrideContext(physicalMemoryGB: Int, draftModelConfigured: Bool) -> (tokens: Int, source: MaxContextSource) {
+        let ramDefault = defaultContextTokens(forPhysicalMemoryGB: physicalMemoryGB)
+        guard draftModelConfigured else { return (ramDefault, .ramTierDefault) }
+        let cap = draftContextCap(forPhysicalMemoryGB: physicalMemoryGB)
+        return cap < ramDefault ? (cap, .draftClamp) : (ramDefault, .ramTierDefault)
     }
 }
 
@@ -587,6 +704,7 @@ actor ProviderStatus {
         modelHashAlgorithm: String? = nil,
         weightsManifestSHA256: String? = nil,
         maxContextTokens: Int? = nil,
+        maxContextSource: MaxContextSource? = nil,
         maxConcurrency: Int? = nil,
         specDecodeDraftModelID: String? = nil,
         specDecodeNumDraftTokens: Int? = nil
@@ -596,10 +714,16 @@ actor ProviderStatus {
         self.modelHashAlgorithm = modelHashAlgorithm
         self.weightsManifestSHA256 = weightsManifestSHA256
         if maxContextTokens != nil || maxConcurrency != nil {
+            // The startup probe is not re-run on swap, so its model id keeps
+            // showing which model the carried estimate was measured on.
             capacity = ProviderCapacity(
                 maxContextOverride: maxContextTokens ?? capacity.maxContextTokens,
                 maxConcurrencyOverride: maxConcurrency ?? capacity.maxConcurrency,
-                throughputTPSEstimate: capacity.throughputTPSEstimate
+                throughputTPSEstimate: capacity.throughputTPSEstimate,
+                maxContextSource: maxContextTokens == nil
+                    ? capacity.maxContextSource
+                    : maxContextSource ?? .recommendationAdoption,
+                throughputProbe: capacity.throughputProbe
             )
         }
         modelLoaded = true

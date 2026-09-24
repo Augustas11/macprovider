@@ -730,6 +730,17 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(held["network_state"] as? String, "not_buyer_serving")
         XCTAssertEqual(held["buyer_serving_hold"] as? String, "model_admission_pending")
 
+        let catalogHeld = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.malibu.tech/provider/ws",
+            catalogStatus: context,
+            coordinatorBuyerServing: false,
+            coordinatorBuyerServingHold: .catalogMaterialMissing
+        )
+        XCTAssertEqual(catalogHeld["network_state"] as? String, "not_buyer_serving")
+        XCTAssertEqual(catalogHeld["buyer_serving_hold"] as? String, "catalog_material_missing")
+
         // An authoritative not-serving with no coordinator reason is explicitly
         // null, never a locally invented one.
         let unexplained = RouterHandler.statusResponse(
@@ -1126,6 +1137,9 @@ final class ProviderStatusTests: XCTestCase {
         // SPEC-047-R003(iv): the coordinator's admission hold rides on an
         // authoritative not-serving verdict.
         XCTAssertEqual(readiness(try body(serving: false, hold: "model_admission_pending")), .notServing(hold: .modelAdmissionPending))
+        // SPEC-001 v1.9.21: missing network catalog material is a closed hold too.
+        XCTAssertEqual(readiness(try body(serving: false, hold: "catalog_material_missing")), .notServing(hold: .catalogMaterialMissing))
+        XCTAssertEqual(readiness(try body(serving: true, hold: "catalog_material_missing")), .confirmed)
         // No hold, or a hold outside the closed set, is the plain fail-closed false.
         XCTAssertEqual(readiness(try body(serving: false, hold: nil)), .notServing(hold: nil))
         XCTAssertEqual(readiness(try body(serving: false, hold: "something_else")), .notServing(hold: nil))
