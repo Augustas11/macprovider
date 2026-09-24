@@ -1,0 +1,52 @@
+conv_cache action=miss key_hash=19baeb00 reason=cold_start
+conv_cache action=cold_unattached key_hash=19baeb00
+conv_cache action=hit key_hash=19baeb00 cached_prompt_tokens=1664 prompt_tokens=1736 lcp=1667 trim_by=54 recurrent_checkp
+conv_cache action=hit key_hash=19baeb00 cached_prompt_tokens=1664 prompt_tokens=1736 lcp=1664 trim_by=0 recurrent_checkpo
+conv_cache action=cold_unattached key_hash=19baeb00
+conv_cache action=miss key_hash=2fb42fbb reason=cold_start
+conv_cache action=cold_unattached key_hash=2fb42fbb
+conv_cache action=hit key_hash=19baeb00 cached_prompt_tokens=1647 prompt_tokens=1665 lcp=1650 trim_by=137 recurrent_check
+conv_cache action=hit key_hash=19baeb00 cached_prompt_tokens=1647 prompt_tokens=1665 lcp=1647 trim_by=0 recurrent_checkpo
+conv_cache action=cold_unattached key_hash=19baeb00
+conv_cache action=miss key_hash=c9e91198 reason=cold_start
+conv_cache action=cold_unattached key_hash=c9e91198
+conv_cache action=hit key_hash=19baeb00 cached_prompt_tokens=1647 prompt_tokens=1801 lcp=1650 trim_by=66 recurrent_checkp
+conv_cache action=hit key_hash=19baeb00 cached_prompt_tokens=1647 prompt_tokens=1801 lcp=1647 trim_by=0 recurrent_checkpo
+conv_cache action=cold_unattached key_hash=19baeb00
+conv_cache action=miss key_hash=2bbb62b5 reason=cold_start
+conv_cache action=cold_unattached key_hash=2bbb62b5
+conv_cache action=miss key_hash=09a2c4f3 reason=cold_start
+conv_cache action=cold_unattached key_hash=09a2c4f3
+conv_cache action=hit key_hash=09a2c4f3 cached_prompt_tokens=1667 prompt_tokens=1740 lcp=1670 trim_by=54 recurrent_checkp
+conv_cache action=hit key_hash=09a2c4f3 cached_prompt_tokens=1667 prompt_tokens=1740 lcp=1667 trim_by=0 recurrent_checkpo
+conv_cache action=cold_unattached key_hash=09a2c4f3
+conv_cache action=miss key_hash=3920493d reason=cold_start
+conv_cache action=cold_unattached key_hash=3920493d
+conv_cache action=miss key_hash=0fea641c reason=cold_start
+conv_cache action=cold_unattached key_hash=0fea641c
+conv_cache action=hit key_hash=0fea641c cached_prompt_tokens=1667 prompt_tokens=1740 lcp=1670 trim_by=54 recurrent_checkp
+conv_cache action=hit key_hash=0fea641c cached_prompt_tokens=1667 prompt_tokens=1740 lcp=1667 trim_by=0 recurrent_checkpo
+conv_cache action=cold_unattached key_hash=0fea641c
+conv_cache action=miss key_hash=c92e8c2a reason=cold_start
+conv_cache action=cold_unattached key_hash=c92e8c2a
+conv_cache action=miss key_hash=3e7da7ae reason=cold_start
+conv_cache action=evict key_hash=2fb42fbb reason=lru
+conv_cache action=cold_unattached key_hash=3e7da7ae
+conv_cache action=hit key_hash=3e7da7ae cached_prompt_tokens=1667 prompt_tokens=1740 lcp=1670 trim_by=54 recurrent_checkp
+conv_cache action=hit key_hash=3e7da7ae cached_prompt_tokens=1667 prompt_tokens=1740 lcp=1667 trim_by=0 recurrent_checkpo
+conv_cache action=cold_unattached key_hash=3e7da7ae
+conv_cache action=miss key_hash=f9cab327 reason=cold_start
+conv_cache action=evict key_hash=c9e91198 reason=lru
+conv_cache action=cold_unattached key_hash=f9cab327
+conv_cache action=miss key_hash=4187d3c3 reason=cold_start
+conv_cache action=evict key_hash=19baeb00 reason=lru
+conv_cache action=cold_unattached key_hash=4187d3c3
+conv_cache action=hit key_hash=4187d3c3 cached_prompt_tokens=15776 prompt_tokens=15810 lcp=15779 trim_by=22 recurrent_che
+conv_cache action=hit key_hash=4187d3c3 cached_prompt_tokens=15776 prompt_tokens=15810 lcp=15776 trim_by=0 recurrent_chec
+conv_cache action=cold_unattached key_hash=4187d3c3
+conv_cache action=miss key_hash=765f6867 reason=cold_start
+conv_cache action=evict key_hash=2bbb62b5 reason=lru
+conv_cache action=cold_unattached key_hash=765f6867
+conv_cache action=hit key_hash=765f6867 cached_prompt_tokens=15776 prompt_tokens=15810 lcp=15779 trim_by=22 recurrent_che
+conv_cache action=hit key_hash=765f6867 cached_prompt_tokens=15776 prompt_tokens=15810 lcp=15776 trim_by=0 recurrent_chec
+conv_cache action=cold_unattached key_hash=765f6867
