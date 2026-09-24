@@ -10,12 +10,12 @@ enum ReceiptEligibilityFixtures {
     static let fixtureModel = "relay-blind-fixture-model"
 
     struct LoopbackRuntime {
-        let runtime: OllamaLoopbackRuntime
+        let runtime: OpenAICompatibleLoopbackRuntime
         let blobURL: URL
         let digest: String
     }
 
-    /// A real `OllamaLoopbackRuntime` over a fake Ollama store and a stubbed
+    /// A real `OpenAICompatibleLoopbackRuntime` over a fake Ollama store and a stubbed
     /// loopback upstream, so its snapshot carries a genuine GGUF digest.
     static func makeOllamaLoopbackRuntime(
         testCase: XCTestCase,
@@ -38,7 +38,7 @@ enum ReceiptEligibilityFixtures {
         let upstream = Data("""
         {"id":"chatcmpl-x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"\(content)"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11}}
         """.utf8)
-        let runtime = try OllamaLoopbackRuntime(
+        let runtime = try OpenAICompatibleLoopbackRuntime(
             servedModelRef: ollamaServedRef,
             origin: "http://127.0.0.1:11434",
             httpClient: ReceiptEligibilityStubLoopbackClient(responseBody: upstream),

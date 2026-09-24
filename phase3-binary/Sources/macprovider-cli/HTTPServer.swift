@@ -1053,6 +1053,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
                 let toolCallOpenEmitted = StreamedFlag()
                 let streamedToolArgs = StreamedToolCallArgs()
+                // A buyer that disconnects mid-stream cancels generation
+                // (the runtime stops; a loopback runtime cancels upstream).
                 let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { disconnect.isDisconnected }) { chunk in
                     emittedBuyerToken.set()
                     switch chunk {
