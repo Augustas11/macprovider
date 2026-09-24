@@ -207,7 +207,13 @@ Open, AC-25 does **not** close:
   coordinator (the rig ran `legacy`).
 - 5a / 9 settlement halves: single owner and receipt parity need the relay path.
 - Cases 8a / 8b: fixture-only by decision (no fault-injection hook).
-- Case 10: warm-swap drain.
+- Case 10: warm-swap drain. `ModelRuntime.beginSwap` refuses without a signed
+  catalog authority for the target (`signed catalog identity unavailable`),
+  and every lab mode (`--no-join`, isolated loopback join) skips the catalog
+  preflight that supplies it. Packaged evidence therefore needs a
+  catalog-trusted provider joined over `wss`; today that is only the live
+  buyer-serving Studio. The case 6 receipt half has the same prerequisite.
+  Both are open on that one unblock.
 
 The enable-gate API lifecycle row stays unchecked.
 
