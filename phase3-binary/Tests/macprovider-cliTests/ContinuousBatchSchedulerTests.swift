@@ -289,6 +289,43 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
+    // Codex M4 R2 (MEDIUM): a cancel that lands while a finished row is
+    // suspended in terminal materialization must win: the request finishes
+    // cancelled and no conversation cache is published.
+    func testCancelDuringTerminalMaterializeSuppressesTheCache() async throws {
+        let gate = AsyncGate()
+        let backend = ScriptedBackend(
+            scripts: ["hybrid": [7, 8]],
+            recurrentCheckpointBackend: true,
+            materializeGate: gate
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 4,
+            backend: backend,
+            allocator: allocator
+        )
+        let task = Task {
+            try await scheduler.submit(.init(
+                id: "hybrid",
+                conversationKey: "conv:hybrid",
+                promptTokens: Array(1...12),
+                maxOutputTokens: 0,
+                temperature: 0.0,
+                recurrentCheckpointPositions: [5]
+            ))
+        }
+        try await eventually { await backend.serialMaterializations()["hybrid"] != nil }
+        await scheduler.cancel(requestID: "hybrid")
+        await gate.open()
+
+        let result = try await task.value
+        XCTAssertEqual(result.terminalStatus, .cancelled)
+        XCTAssertNil(result.serialConversationCache)
+        try await eventually { await allocator.freeBlockCount() == 16 }
+    }
+
     func testFailedHybridRowDeliversNoSerialCacheAndReleasesBlocks() async throws {
         let backend = ScriptedBackend(
             scripts: ["hybrid": [7, 8]],
@@ -3983,6 +4020,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private let recurrentCheckpointBackend: Bool
     private var recurrentSnapshotLog: [String: [Int]] = [:]
     private let snapshotGate: AsyncGate?
+    private let materializeGate: AsyncGate?
     private var serialMaterializeLog: [String: [Int]] = [:]
     private var retainedInstallAttemptLog: [String: Int] = [:]
     private var prefillRowsLog: [[String]] = []
@@ -4013,8 +4051,10 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         retainedInstallGates: [String: AsyncGate] = [:],
         retainedInstallErrors: [String: any Error] = [:],
         recurrentCheckpointBackend: Bool = false,
-        snapshotGate: AsyncGate? = nil
+        snapshotGate: AsyncGate? = nil,
+        materializeGate: AsyncGate? = nil
     ) {
+        self.materializeGate = materializeGate
         self.recurrentCheckpointBackend = recurrentCheckpointBackend
         self.snapshotGate = snapshotGate
         self.scripts = scripts
@@ -4138,6 +4178,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     ) async throws -> ContinuousBatchSerialConversationCache? {
         guard recurrentCheckpointBackend else { return nil }
         serialMaterializeLog[requestID] = [tokenCount, binding.currentTable.logicalTokenCount]
+        await materializeGate?.wait()
         return ContinuousBatchSerialConversationCache(
             layers: [KVCacheSimple(), MambaCache()],
             recurrentCheckpoints: recurrentCheckpoints,

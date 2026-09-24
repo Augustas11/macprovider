@@ -2231,19 +2231,41 @@ actor ContinuousBatchScheduler {
 
         if let terminalStatus {
             activeDecode.removeValue(forKey: row.request.id)
-            if let retainedCache = await retainTerminalCache(
-                for: row,
-                targetLogicalTokens: row.retainedLogicalTokenCount
-            ) {
-                finish(row, status: terminalStatus, errorCode: nil, retainedCache: retainedCache)
-            } else {
-                let serialCache = await materializeSerialConversationCache(for: row)
-                let released = await release(row.handle)
-                finish(row, status: released ? terminalStatus : .requestFailed, errorCode: released
-                    ? nil
-                    : "continuous_batching_cleanup_failed", serialConversationCache: serialCache)
-            }
+            await finishTerminal(row, status: terminalStatus)
         }
+    }
+
+    /// Normal terminal for a row already removed from active tracking. The
+    /// retain / materialize awaits can interleave with `cancel(requestID:)`,
+    /// which only records the ID and no longer finds the row; a cancel recorded
+    /// meanwhile wins, and no conversation cache is published for it.
+    private func finishTerminal(_ row: Row, status: ContinuousBatchSchedulerTerminalStatus) async {
+        if let retainedCache = await retainTerminalCache(
+            for: row,
+            targetLogicalTokens: row.retainedLogicalTokenCount
+        ) {
+            if cancelledIDs.remove(row.request.id) != nil {
+                await discardRetainedCache(
+                    retainedCache.retainedSequence,
+                    conversationKey: schedulerConversationKey(for: row.request)
+                )
+                finish(row, status: .cancelled, errorCode: "request_cancelled")
+                return
+            }
+            finish(row, status: status, errorCode: nil, retainedCache: retainedCache)
+            return
+        }
+        let serialCache = await materializeSerialConversationCache(for: row)
+        let released = await release(row.handle)
+        if cancelledIDs.remove(row.request.id) != nil {
+            finish(row, status: released ? .cancelled : .requestFailed, errorCode: released
+                ? "request_cancelled"
+                : "continuous_batching_cleanup_failed")
+            return
+        }
+        finish(row, status: released ? status : .requestFailed, errorCode: released
+            ? nil
+            : "continuous_batching_cleanup_failed", serialConversationCache: serialCache)
     }
 
     private func deliverVisibleTokens(_ tokens: [Int], firstIndex: Int, row: Row) -> Bool {
@@ -2573,18 +2595,7 @@ actor ContinuousBatchScheduler {
     private func transitionPrefilledRow(_ row: Row) async {
         _ = removePromptRow(row.request.id)
         if row.request.maxOutputTokens == 0 {
-            if let retainedCache = await retainTerminalCache(
-                for: row,
-                targetLogicalTokens: row.retainedLogicalTokenCount
-            ) {
-                finish(row, status: .length, errorCode: nil, retainedCache: retainedCache)
-            } else {
-                let serialCache = await materializeSerialConversationCache(for: row)
-                let released = await release(row.handle)
-                finish(row, status: released ? .length : .requestFailed, errorCode: released
-                    ? nil
-                    : "continuous_batching_cleanup_failed", serialConversationCache: serialCache)
-            }
+            await finishTerminal(row, status: .length)
         } else {
             activeDecode[row.request.id] = row
             CBTrace.log(row.request.id, "sch_active")
