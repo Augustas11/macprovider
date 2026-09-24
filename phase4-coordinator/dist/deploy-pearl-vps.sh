@@ -4859,8 +4859,10 @@ $SSH 'set -e
   if [ -f /etc/macprovider-stats/stats-billing-mirror.env ] && [ -f /var/lib/macprovider/request-log.sqlite ] && su -s /bin/sh -c "test -r /var/lib/macprovider/request-log.sqlite" macprovider-stats; then
     systemctl enable --now stats-billing-mirror.timer
     if ! systemctl start stats-billing-mirror.service; then
-      echo "warning: stats-billing-mirror.service failed; leaving coordinator deploy running"
+      systemctl disable --now stats-billing-mirror.timer
+      echo "aborting deploy: stats-billing-mirror.service failed its initial schema/binary parity run" >&2
       journalctl -u stats-billing-mirror.service -n 30 --no-pager || true
+      exit 13
     fi
     systemctl is-active stats-billing-mirror.timer
   elif [ -f /opt/macprovider/.coordinator-deploy-rollback/stats-billing-timer-was-active ]; then
