@@ -1,8 +1,9 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.9
-**Status:** v1.9 row-continuity admission clarification (#1615,
-2026-09-20) over v1.8 R004 composite-proof clarification (BYOM v0.2 epic #1453,
+**Version:** 1.10
+**Status:** v1.10 GGUF `huggingface_revision` source and pool-scoped
+settlement scope for R007 (#1690, 2026-09-24) over v1.9 row-continuity
+admission clarification (#1615, 2026-09-20) over v1.8 R004 composite-proof clarification (BYOM v0.2 epic #1453,
 slice 4, 2026-09-10) over the v1.7 multi-artifact identity amendment (slice 3,
 2026-09-10) over the v1.6 canonical model-identity amendment proposed by issue #609
 (2026-07-18). The supported-model catalog contract remains **LOCKED** at
@@ -40,6 +41,18 @@ SPEC-023 owns candidate-catalog `bench_gate` provenance, including
   artifact-derived identity across a scheduled catalog re-stamp by resolving
   in its own release's set (slice-4 implementation). Bounded
   `model-catalog-identity` amendment.
+
+**Change log v1.10 (issue #1690 M3 — external runtimes on Trusted Pools):**
+- R007(f): a GGUF member served by a loopback runtime MAY settle only at
+  route time on a SPEC-042 Trusted Pool route whose signed v2 policy core
+  allowlists that runtime (SPEC-047-R003(iv) pool clause, SPEC-022-R012).
+  It never settles through global admission. This supersedes the
+  2026-09-23 compatibility note for pool routes only.
+- R007(g): a GGUF artifact MAY be sourced by `huggingface_revision` as well
+  as `ollama_library_tag` (SPEC-023 v0.16.0 §3.7.4). The source kind
+  describes where the bytes come from and never changes identity.
+- R007(h): the MLX-snapshot identity leg for external runtimes (oMLX,
+  `mlx_lm.server`) is explicitly deferred.
 
 **Change log v1.9 (issue #1615 — row-continuity admission):**
 - R004 now distinguishes the signed catalog document a provider selected at
@@ -1185,7 +1198,28 @@ algorithm.
   the identity lift is not a settlement lift for loopback runtimes.
   SPEC-047-R003(iv) v0.1.10 keeps every loopback `runtime_source` out of
   `settlement_capable` until a trusted usage source exists, and implementing
-  the runtime path does not change that.
+  the runtime path does not change that. (v1.10: still true for global
+  admission; (f) states the only exception.)
+  (f) **Pool-scoped settlement (v1.10, #1690).** A member whose
+  `runtime_format` is `gguf`, served by a loopback `runtime_source`, MAY
+  bind a SPEC-022 route-time settlement snapshot only at route time, on a
+  SPEC-042 Trusted Pool route whose signed v2 policy core allowlists that
+  `runtime_source`, under the SPEC-047-R003(iv) pool route-time clause and
+  SPEC-022-R012. Its candidate never reaches `settlement_capable`, and the
+  member never settles on a global route. (a)–(d) apply to it unchanged: the
+  CLI recomputes the complete-file digest, the pair matches one member
+  exactly, and the route snapshot carries the six (d) values.
+  (g) **GGUF source kinds (v1.10).** A GGUF member MAY be published with
+  `source_ref.kind` `ollama_library_tag` or `huggingface_revision` (SPEC-023
+  v0.16.0 §3.7.4). The source kind describes where the bytes come from and
+  never changes identity: the pair is always `macprovider.gguf-file.v1`
+  over the complete file bytes the CLI holds, per (a).
+  (h) **Deferred MLX-snapshot leg (v1.10).** No loopback `runtime_source` may
+  bind an `mlx_safetensors` member: the SPEC-023 matrix keeps that format to
+  `mlx_cache`. An external runtime that serves MLX safetensors (oMLX,
+  `mlx_lm.server`) has no identity leg until a later amendment defines how
+  the CLI binds that runtime process to a snapshot manifest. That amendment
+  waits until a runtime needs it.
 
 ---
 

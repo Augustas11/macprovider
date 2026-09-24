@@ -258,7 +258,7 @@
     {
       "spec_id": "SPEC-010",
       "title": "Provider Model Catalog",
-      "version": "1.9",
+      "version": "1.10",
       "path": "specs/SPEC-010-model-catalog.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -394,7 +394,7 @@
     {
       "spec_id": "SPEC-015",
       "title": "Verifiable inference receipts",
-      "version": "0.4.9",
+      "version": "0.4.10",
       "path": "specs/SPEC-015-receipts.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -411,7 +411,8 @@
         "SPEC-010",
         "SPEC-011",
         "SPEC-013",
-        "SPEC-022"
+        "SPEC-022",
+        "SPEC-042"
       ],
       "implementation_status": "pending-reconciliation",
       "production_status": "pending-verification",
@@ -625,7 +626,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.1.8",
+      "version": "v0.2.0",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -642,7 +643,10 @@
         "SPEC-010",
         "SPEC-011",
         "SPEC-015",
-        "SPEC-016"
+        "SPEC-016",
+        "SPEC-042",
+        "SPEC-046",
+        "SPEC-047"
       ],
       "implementation_status": "pending-reconciliation",
       "production_status": "pending-verification",
@@ -660,7 +664,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.15.1",
+      "version": "v0.16.0",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -671,6 +675,7 @@
       "depends_on": [
         "SPEC-017",
         "SPEC-028",
+        "SPEC-042",
         "SPEC-047"
       ],
       "implementation_status": "pending-reconciliation",
@@ -913,7 +918,7 @@
     {
       "spec_id": "SPEC-032",
       "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
-      "version": "v0.2.6",
+      "version": "v0.3.0",
       "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -927,7 +932,10 @@
         "SPEC-008",
         "SPEC-020",
         "SPEC-030",
-        "SPEC-031"
+        "SPEC-031",
+        "SPEC-042",
+        "SPEC-046",
+        "SPEC-047"
       ],
       "implementation_status": "partial",
       "production_status": "pending-verification",
@@ -1229,7 +1237,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.31",
+      "version": "0.0.32",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1249,8 +1257,11 @@
         "SPEC-016",
         "SPEC-020",
         "SPEC-022",
+        "SPEC-032",
         "SPEC-040",
-        "SPEC-041"
+        "SPEC-041",
+        "SPEC-046",
+        "SPEC-047"
       ],
       "implementation_status": "partial",
       "production_status": "not-deployed",
@@ -1268,7 +1279,7 @@
     {
       "spec_id": "SPEC-043",
       "title": "Trusted Pool Creator Onboarding MVP",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "specs/SPEC-043-trusted-pool-creator-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1288,7 +1299,9 @@
         "SPEC-020",
         "SPEC-022",
         "SPEC-040",
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-046",
+        "SPEC-047"
       ],
       "implementation_status": "partial",
       "production_status": "not-deployed",
@@ -1379,7 +1392,7 @@
     {
       "spec_id": "SPEC-046",
       "title": "Provider BYOM Discovery",
-      "version": "0.1.5",
+      "version": "0.2.0",
       "path": "specs/SPEC-046-provider-byom-discovery.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1397,6 +1410,7 @@
         "SPEC-023",
         "SPEC-032",
         "SPEC-033",
+        "SPEC-042",
         "SPEC-045",
         "SPEC-047"
       ],
@@ -1416,7 +1430,7 @@
     {
       "spec_id": "SPEC-047",
       "title": "Network Model Admission",
-      "version": "0.1.10",
+      "version": "0.2.0",
       "path": "specs/SPEC-047-network-model-admission.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1439,6 +1453,7 @@
         "SPEC-023",
         "SPEC-032",
         "SPEC-033",
+        "SPEC-042",
         "SPEC-046"
       ],
       "implementation_status": "partial",
@@ -1451,7 +1466,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "SPEC-047 v0.1.10 bars loopback runtime sources from settlement_capable until a trusted usage source exists (#1694); v0.1.9 marks offer_rejected reserved/unreachable and drops the rejected-reoffer journey observation; v0.1.8 clarifies settlement-capable guidance as conditional eligibility, freezes coordinator-backed not-offered copy, and rejects catalog-only reuse of per-candidate admission authority. Local CLI/coordinator/routing/buyer safeguards exist and are mapped, but Issue #1240 still needs the full admission policy/probe lifecycle, updated copy evidence, and signed JOURNEY-NETWORK-MODEL-ADMISSION evidence before conformance or production status can be claimed."
+        "rationale": "SPEC-047 v0.2.0 adds the #1690 pool route-time clause for loopback runtimes on SPEC-042 Trusted Pool routes only; the global loopback bar is unchanged. SPEC-047 v0.1.10 bars loopback runtime sources from settlement_capable until a trusted usage source exists (#1694); v0.1.9 marks offer_rejected reserved/unreachable and drops the rejected-reoffer journey observation; v0.1.8 clarifies settlement-capable guidance as conditional eligibility, freezes coordinator-backed not-offered copy, and rejects catalog-only reuse of per-candidate admission authority. Local CLI/coordinator/routing/buyer safeguards exist and are mapped, but Issue #1240 still needs the full admission policy/probe lifecycle, updated copy evidence, and signed JOURNEY-NETWORK-MODEL-ADMISSION evidence before conformance or production status can be claimed."
       }
     }
   ],
@@ -1974,7 +1989,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
-        "rationale": "SPEC-010 v1.7 specifies artifact-feed identity: `macprovider.gguf-file.v1` as a canonical wire pair computed by the CLI over the local GGUF bytes, a release-bound `verified` artifact-feed entry as an expected identity resolving by the globally unique (hash_algorithm, hash) pair to one (model_key, artifact_id), and six-value route-time evidence with fail-closed settlement re-verification for a non-primary member. Owner is the BYOM v0.2 epic (issue #1453), slice 3."
+        "rationale": "SPEC-010 1.10 (#1690 M3) adds R007(f) pool-scoped settlement for loopback-served GGUF members, (g) the huggingface_revision GGUF source kind, and (h) defers the MLX-snapshot identity leg for external runtimes; unimplemented (#1690 M4). SPEC-010 v1.7 specifies artifact-feed identity: `macprovider.gguf-file.v1` as a canonical wire pair computed by the CLI over the local GGUF bytes, a release-bound `verified` artifact-feed entry as an expected identity resolving by the globally unique (hash_algorithm, hash) pair to one (model_key, artifact_id), and six-value route-time evidence with fail-closed settlement re-verification for a non-primary member. Owner is the BYOM v0.2 epic (issue #1453), slice 3."
       }
     },
     {
@@ -2429,7 +2444,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
-        "rationale": "Current as of SPEC-023 v0.14.3: R004 settlement identity is the SPEC-010-R007 identity set (v0.10.3 lifted primary-only), minus loopback-served members, so no gguf artifact reaches settlement_capable while the SPEC-047-R003(iv) v0.1.10 loopback bar holds (#1694). Generator, coordinator, and CLI implementations now exist (SPEC-010-R007 and SPEC-047-R003 mappings); this entry stays pending because signed journey evidence is missing. Original v0.10.0 scope: SPEC-023 v0.10.0 specifies the signed catalog artifact feed, its closed artifact-identity matrix, its release.json binding and release-ledger feed-set evolution, the Stage-A/Stage-B activation that keeps the compatibility-set manifest's file map unchanged until a bridge CLI ships, primary-artifact consistency scoped to `listed`/`recommendable` rows, primary-artifact-only settlement identity, global `(hash_algorithm, hash)` uniqueness within a feed, GGUF source-digest equality, the closed `artifact_id` grammar with its ledger-backed cross-release rebinding check, artifact-feed signer-identity equality against the release binding and the candidate-feed signer, artifact evidence bound into the immutable SPEC-022 route-time record with settlement failing closed on missing, changed, cross-release, or wrong-signer evidence (a SPEC-047-owned optional record that leaves SPEC-022's minimum snapshot fields unchanged), release-ledger schema version 3 with its closed artifact-bound row and canonically ordered `artifact_bindings` array, and its fail-closed-without-fleet-fail-close failure classes, but no generator, coordinator, or CLI implementation exists yet. Owner is the BYOM v0.2 epic (issue #1453)."
+        "rationale": "SPEC-023 v0.16.0 (#1690 M3) adds a gguf huggingface_revision source kind (with file_path) and a route-time, pool-scoped settlement exception for gguf members served by an allowlisted runtime; global admission is unchanged. Consumers and the generator still accept gguf only with ollama_library_tag (buyer/catalog_artifacts_feed.go, scripts/catalog-release.py). Current as of SPEC-023 v0.14.3: R004 settlement identity is the SPEC-010-R007 identity set (v0.10.3 lifted primary-only), minus loopback-served members, so no gguf artifact reaches settlement_capable while the SPEC-047-R003(iv) v0.1.10 loopback bar holds (#1694). Generator, coordinator, and CLI implementations now exist (SPEC-010-R007 and SPEC-047-R003 mappings); this entry stays pending because signed journey evidence is missing. Original v0.10.0 scope: SPEC-023 v0.10.0 specifies the signed catalog artifact feed, its closed artifact-identity matrix, its release.json binding and release-ledger feed-set evolution, the Stage-A/Stage-B activation that keeps the compatibility-set manifest's file map unchanged until a bridge CLI ships, primary-artifact consistency scoped to `listed`/`recommendable` rows, primary-artifact-only settlement identity, global `(hash_algorithm, hash)` uniqueness within a feed, GGUF source-digest equality, the closed `artifact_id` grammar with its ledger-backed cross-release rebinding check, artifact-feed signer-identity equality against the release binding and the candidate-feed signer, artifact evidence bound into the immutable SPEC-022 route-time record with settlement failing closed on missing, changed, cross-release, or wrong-signer evidence (a SPEC-047-owned optional record that leaves SPEC-022's minimum snapshot fields unchanged), release-ledger schema version 3 with its closed artifact-bound row and canonically ordered `artifact_bindings` array, and its fail-closed-without-fleet-fail-close failure classes, but no generator, coordinator, or CLI implementation exists yet. Owner is the BYOM v0.2 epic (issue #1453)."
       }
     },
     {
@@ -2916,6 +2931,21 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Runtime reload lifecycle changes updated the mapped reloadCoordinatorConfig selector. Local regression checks pass, but the historical signed provider prebeta admission journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
+    },
+    {
+      "requirement_id": "SPEC-032-R004",
+      "spec_id": "SPEC-032",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-032 v0.3.0 (#1690 M3) amends FR-HG8 with a route-time, pool-scoped buyer-serving path for admission_sandboxed loopback sessions, selected only under the SPEC-042-R004 runtime-allowlist predicate. Global sandboxing stays. No pool path selects a sandboxed session today (Provider.RoutingEligible excludes it). Pending until the #1690 M4 code and the SPEC-042-R013 fail-closed tests exist."
       }
     },
     {
@@ -5393,6 +5423,21 @@
       }
     },
     {
+      "requirement_id": "SPEC-015-R006",
+      "spec_id": "SPEC-015",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-015 0.4.10 (#1690 M3) adds per-request receipt eligibility for a pool-authorized loopback runtime through the pool_runtime_authorization settlement-metadata member; the v0.4 tuple, wire, and verifier are unchanged. The CLI still decides from the per-runtime constant (ModelRuntime.isSettlementReceiptEligible), so loopback never signs. Pending until the #1690 M5 CLI slice lands and AC-12b plus the SPEC-042-R013 journey pass."
+      }
+    },
+    {
       "requirement_id": "SPEC-022-R001",
       "spec_id": "SPEC-022",
       "state": "conformant",
@@ -5726,6 +5771,21 @@
         }
       ],
       "gap": null
+    },
+    {
+      "requirement_id": "SPEC-022-R012",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-022 v0.2.0 (#1690 M3) adds pool-scoped settlement eligibility: a runtime_source route-snapshot member digested only when non-empty, and the pool_operator_attested usage source distinct from coordinator_observed, valid only under the SPEC-042-R006 conditions and a verified v0.4 receipt with an exact usage match. RouteSnapshot has no runtime_source member and the usage-source vocabulary is coordinator_observed/byte_estimated today (billing/route_snapshot.go, billing/settlement_output.go). Pending until the #1690 M4 code and a signed enforce-mode pool journey exist."
+      }
     },
     {
       "requirement_id": "SPEC-016-R001",
@@ -6407,7 +6467,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Signed manifest identity/rollback controls remain pending for production, but the coordinator durable store now records accepted manifest verdict evidence in trustpool_manifest_acceptances plus trustpool_manifest_acceptance_high_water, guards one-time backfill with a durable migration marker, verifies the projection against replayed manifest events during reconstruction and later opens, and treats projection/event divergence as malformed durable state. Still pending: rollback-resistant production promotion authorization, signed journey evidence, full signer/delegation lifecycle reconstruction, and production migration/full-rollback proof."
+        "rationale": "SPEC-042 0.0.32 (#1690 M3) amends this requirement for external-runtime serving (policy-core/v2 runtime_allowlist, route-time runtime-allowlist predicate, pool_operator_attested usage source); those amendments are unimplemented and tracked by SPEC-042-R013. Signed manifest identity/rollback controls remain pending for production, but the coordinator durable store now records accepted manifest verdict evidence in trustpool_manifest_acceptances plus trustpool_manifest_acceptance_high_water, guards one-time backfill with a durable migration marker, verifies the projection against replayed manifest events during reconstruction and later opens, and treats projection/event divergence as malformed durable state. Still pending: rollback-resistant production promotion authorization, signed journey evidence, full signer/delegation lifecycle reconstruction, and production migration/full-rollback proof."
       }
     },
     {
@@ -6485,7 +6545,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool-enforceable fail-closed trust predicates: the minimum-binary-version predicate is implemented fail-closed on every dispatch path (#1079). Other R004 predicates (attestation-tier-as-pool-predicate, require_encrypted_leg, model-hash policy, hardware_mda) and SPEC-020 signed-version evidence are deferred; the binary floor keys off self-reported binary_version (documented carry)."
+        "rationale": "SPEC-042 0.0.32 (#1690 M3) amends this requirement for external-runtime serving (policy-core/v2 runtime_allowlist, route-time runtime-allowlist predicate, pool_operator_attested usage source); those amendments are unimplemented and tracked by SPEC-042-R013. Pool-enforceable fail-closed trust predicates: the minimum-binary-version predicate is implemented fail-closed on every dispatch path (#1079). Other R004 predicates (attestation-tier-as-pool-predicate, require_encrypted_leg, model-hash policy, hardware_mda) and SPEC-020 signed-version evidence are deferred; the binary floor keys off self-reported binary_version (documented carry)."
       }
     },
     {
@@ -6520,7 +6580,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "The Layer 2 MVP journey envelope expired 2026-08-31 and was cleared from evidence[]; it previously covered per-attempt pool-scoped tenant isolation, successful member-only dispatch, generation-bumped no-member fail-closed behavior, and no global fallback. The row remains pending because broader production rollout evidence and remaining lifecycle carries are outside this evidence-only journey."
+        "rationale": "SPEC-042 0.0.32 (#1690 M3) amends this requirement for external-runtime serving (policy-core/v2 runtime_allowlist, route-time runtime-allowlist predicate, pool_operator_attested usage source); those amendments are unimplemented and tracked by SPEC-042-R013. The Layer 2 MVP journey envelope expired 2026-08-31 and was cleared from evidence[]; it previously covered per-attempt pool-scoped tenant isolation, successful member-only dispatch, generation-bumped no-member fail-closed behavior, and no global fallback. The row remains pending because broader production rollout evidence and remaining lifecycle carries are outside this evidence-only journey."
       }
     },
     {
@@ -6560,7 +6620,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "The Layer 2 MVP journey envelope expired 2026-08-31 and was cleared from evidence[]; it previously covered labels-only settlement route-snapshot binding, including pool_id and canonical route digest with no payout-ready mutation. SPEC-042 0.0.31 implements manifest_version/manifest_core_digest route labels and sticky label_disputed verdict labeling locally. The row remains pending until a fresh signed journey recaptures that evidence, and because creator revenue-split execution remains deferred."
+        "rationale": "SPEC-042 0.0.32 (#1690 M3) amends this requirement for external-runtime serving (policy-core/v2 runtime_allowlist, route-time runtime-allowlist predicate, pool_operator_attested usage source); those amendments are unimplemented and tracked by SPEC-042-R013. The Layer 2 MVP journey envelope expired 2026-08-31 and was cleared from evidence[]; it previously covered labels-only settlement route-snapshot binding, including pool_id and canonical route digest with no payout-ready mutation. SPEC-042 0.0.31 implements manifest_version/manifest_core_digest route labels and sticky label_disputed verdict labeling locally. The row remains pending until a fresh signed journey recaptures that evidence, and because creator revenue-split execution remains deferred."
       }
     },
     {
@@ -6832,6 +6892,21 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
         "rationale": "Manifest authority + signer-set key lifecycle: slice 2 (v0.0.9) implements policy-core signature verification against a signer set; slice 3 (v0.0.10) implements the append-only, hash-chained AUTHORITY LOG that establishes/versions those signer sets and sets their revocation state - the authority-log-entry content byte grammar + hash + signing preimage, and BuildAuthorityLog chain-replay verification (structural signer-set validation, strictly-monotonic signer_set_version/rollback reject, prev-hash chain, revokes_versions prior-existing-only, and authorization by one root-issuer signature or M-of-N of a prior still-authorized lower-versioned set), materializing signer_set_version -> SignerSet for policy-core verification - frozen by golden vectors (genesis->rotate->revoke). Slice 5 (v0.0.12) adds verdict-replay reconstruction (ReconstructPool in persist.go): a recorded acceptance verdict is replayed on restart rather than re-evaluated against the current wall-clock, grandfathering a policy accepted before its signer set was later revoked. Signed emergency control messages now verify against the manifest authority root or current operational signer set, bind latest accepted manifest version/digest, and for `revoke_immediate` bind the target provider identity. Still deferred: operator-provenance binding, root-issuer-compromise supersedes lineage, and production signed evidence."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R013",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-042 0.0.32 (#1690 M3) specifies external-runtime serving on Trusted Pools: policy-core/v2 runtime_allowlist, the route-time runtime-allowlist predicate, and the pool_operator_attested usage source. The global network stays native-only, and the SPEC-047-R003(iv) admission bar and the SPEC-032 FR-HG8 hello sandbox stay unlifted. No implementation exists yet: v2 encode/verify/replay, route-time predicate, and usage source are the #1690 M4/M5 slices. Pending until the R013 fail-closed test set, v2 golden vectors, and a signed enforce-mode pool journey with a verified receipt and ledger credit exist."
       }
     },
     {
@@ -7343,6 +7418,21 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
         "rationale": "The previously consumed same-day signed SPEC-043 journey evidence (trusted-pool-creator-mvp-20260827T032524Z plus sibling spec043-ppt-20260827T032524Z-1) expired on 2026-08-27, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh same-day signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope and PoolPromotionTransitionV1 are produced by the protected main workflows and consumed by scripts/promote-signed-journey-result.py."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R013",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-043 0.2.0 (#1690 M3) requires runtime allowlist disclosure in pool_policy.json, pool_status.json, the reviewed distribution artifact, and public announcements, with a mismatch failing activation and announcement approval, plus a launch-checklist step. No implementation exists yet. Pending until the policy/status surfaces publish the allowlist and the SPEC-042-R013 pool journey exercises the disclosure check."
       }
     },
     {
@@ -8292,6 +8382,21 @@
       }
     },
     {
+      "requirement_id": "SPEC-046-R009",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-046 0.2.0 (#1690 M3) records the loopback serving selectors llamacpp: and ollama: (implemented in #1690 M2, LoopbackServeSelection) and names llamacpp_loopback the first external runtime for buyer serving; lmstudio: and openai: are deferred until they have a serving-time identity leg. Pending until the M2 selector tests are mapped here and the SPEC-042-R013 pool journey runs."
+      }
+    },
+    {
       "requirement_id": "SPEC-047-R001",
       "spec_id": "SPEC-047",
       "state": "conformant",
@@ -8445,7 +8550,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "Pearl admission binding recovery changes updated the mapped refreshModelAdmissionBindingLocked selector after the 2026-09-16 signed JOURNEY-NETWORK-MODEL-ADMISSION evidence was captured. Local regression coverage proves the transient-refresh fail-closed behavior, but the historical signed journey binds earlier selector bytes; fresh independently trusted network-model-admission evidence at HEAD is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+        "rationale": "SPEC-047 v0.2.0 (#1690 M3) adds the pool route-time clause: the SPEC-042 pool policy is the coordinator-recorded trust binding and the pool operator's signed receipt (pool_operator_attested) the trusted usage source, applied only at route time on pool routes; the admission bar and hello sandbox stay unlifted. The pool clause is unimplemented (#1690 M4). Pearl admission binding recovery changes updated the mapped refreshModelAdmissionBindingLocked selector after the 2026-09-16 signed JOURNEY-NETWORK-MODEL-ADMISSION evidence was captured. Local regression coverage proves the transient-refresh fail-closed behavior, but the historical signed journey binds earlier selector bytes; fresh independently trusted network-model-admission evidence at HEAD is required before restoring conformant status. Historical evidence is retained without redating or replacement."
       }
     },
     {

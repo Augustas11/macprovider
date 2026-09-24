@@ -131,6 +131,16 @@ Drive the admin surface (provider port, operator key) in order:
 4. Admit the creator's own Macs (`trust-pool-admin admit-provider`) and authorize
    buyers on dedicated accounts (`trust-pool-admin authorize-buyer`). Keep the
    pool in a non-routeable lifecycle until promotion.
+5. Runtime allowlist disclosure (SPEC-043-R013, #1690). Read the
+   `runtime_allowlist` of the accepted policy core. A v1 core, or v2 with an
+   empty list, is native MLX only. If the list is non-empty, confirm before
+   promotion that `pool_policy.json`, the reviewed distribution artifact, and
+   the announcement text each name exactly those runtimes and state that the
+   pool operator attests the served weights and token counts. Also confirm
+   that the policy declares settlement `enforce` and that every member
+   serving an allowlisted runtime is owned by the creator account. Stop on
+   any mismatch; loosening the list needs a new manifest version and a fresh
+   review.
 
 Confirm with `trust-pool-admin get-pool --pool-id <id>`.
 

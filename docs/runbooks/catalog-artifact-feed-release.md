@@ -137,7 +137,10 @@ provenance. A verified member served by `mlx_cache` (a secondary
 source is a loopback runtime, and SPEC-047-R003(iv) v0.1.10 / SPEC-023
 v0.14.3 bar loopback from `settlement_capable` until a later SPEC-047-R003
 amendment names a coordinator-recorded trust binding and a trusted usage
-source (#1694). A GGUF member reaches at most `catalog_priced`. For a member
+source (#1694). A GGUF member reaches at most `catalog_priced` globally.
+The one exception (SPEC-047 v0.2.0 / SPEC-023 v0.16.0, #1690) is route-time
+settlement on a SPEC-042 Trusted Pool route whose signed policy allowlists
+the serving runtime; it never changes global admission. For a member
 that settles, the BYOM admission predicate, the route snapshot, and
 settlement carry the SPEC-047-R003 six values
 (`artifact_feed_sha256`, `artifact_id`, `artifact_hash`,
@@ -335,9 +338,14 @@ endpoint supplies no bytes to hash.
    settlement bar holds: every GGUF source is a loopback runtime (SPEC-023
    v0.14.3 §3.7.4, #1694). It reaches at most `catalog_priced`. Only
    `mlx_safetensors` artifacts served by `mlx_cache` (the primary, or a
-   verified secondary) may settle. A catalog release that adds a `gguf` row
-   is safe to ship only because of this bar; do not ship one on a build
-   without it.
+   verified secondary) may settle globally. A catalog release that adds a
+   `gguf` row is safe to ship only because of this bar; do not ship one on a
+   build without it. From SPEC-023 v0.16.0 (#1690) a `gguf` member may also
+   settle at route time on a SPEC-042 Trusted Pool route whose signed
+   policy allowlists the serving runtime, never through global admission.
+   A `gguf` artifact may use `source_ref.kind: "huggingface_revision"` with
+   a `file_path` only after the generator and every consumer of the release
+   implement v0.16.0. An older consumer rejects the whole feed.
 
 ### Never rebind an `artifact_id`
 
