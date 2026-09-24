@@ -88,6 +88,12 @@ type externalRuntimeAuthority struct {
 	calls []billing.PoolOperatorAttestationClaim
 }
 
+// PoolEventHighWater stands in for the durable pool event high-water mark the
+// ledger transaction fences on (audit R2); the harness pool never changes.
+func (a *externalRuntimeAuthority) PoolEventHighWater(context.Context, billing.PoolFenceQueryer, string) (int64, error) {
+	return 1, nil
+}
+
 func (a *externalRuntimeAuthority) VerifyPoolOperatorAttestation(_ context.Context, claim billing.PoolOperatorAttestationClaim) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -245,6 +251,11 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 		delegated = []string{"p1"}
 	}
 	trustPools := trustpool.NewRegistry()
+	// main.go wires the settlement-time pool label view from the registry.
+	billingStore.SetSettlementPoolLabelSource(func(poolID string) (uint64, string, bool) {
+		snap := trustPools.Snapshot(poolID)
+		return snap.ManifestVersion, snap.ManifestCoreDigest, snap.Exists
+	})
 	loadTrustedPoolLayer2Snapshot(t, trustPools, 0, trustpool.RouteableSnapshot{
 		PoolID:             poolID,
 		CreatorAccountID:   externalRuntimeCreator,

@@ -120,10 +120,11 @@ func movedPoolLabels(poolID string) (uint64, string, bool) {
 // the settlement-time R006 label both still verify. Native recovery is
 // unchanged.
 func TestRecoverLedger_AppliesLoopbackZeroBillRule(t *testing.T) {
-	ok := &fakePoolAttestationAuthority{}
-	rejects := &fakePoolAttestationAuthority{err: fmt.Errorf("%w: revoked", ErrPoolOperatorAttestationRejected)}
+	rejects := func() PoolOperatorAttestationAuthority {
+		return &fencedPoolAuthority{fakePoolAttestationAuthority: fakePoolAttestationAuthority{err: fmt.Errorf("%w: revoked", ErrPoolOperatorAttestationRejected)}, highWaters: []int64{7}}
+	}
 	attested := func(runtime string) recoveryLoopbackCase {
-		return recoveryLoopbackCase{runtimeSource: runtime, recordRuntime: true, snapshot: attestedPoolSnapshot, authority: ok, labels: matchingPoolLabels}
+		return recoveryLoopbackCase{runtimeSource: runtime, recordRuntime: true, snapshot: attestedPoolSnapshot, authority: stableFencedAuthority(), labels: matchingPoolLabels}
 	}
 	for name, tc := range map[string]struct {
 		recoveryLoopbackCase
@@ -132,10 +133,10 @@ func TestRecoverLedger_AppliesLoopbackZeroBillRule(t *testing.T) {
 		"native reported usage is priced":          {recoveryLoopbackCase{runtimeSource: "", recordRuntime: true}, true},
 		"native mlx_cache byte estimate is priced": {recoveryLoopbackCase{runtimeSource: "mlx_cache", recordRuntime: true, byteEstimated: true}, true},
 		"attested pool usage stays attested":       {attested("llamacpp_loopback"), true},
-		"loopback on global route is zero": {recoveryLoopbackCase{runtimeSource: "llamacpp_loopback", recordRuntime: true, authority: ok, labels: matchingPoolLabels,
+		"loopback on global route is zero": {recoveryLoopbackCase{runtimeSource: "llamacpp_loopback", recordRuntime: true, authority: stableFencedAuthority(), labels: matchingPoolLabels,
 			snapshot: func(r RouteSnapshot) *RouteSnapshot { return &r }}, false},
 		"loopback byte estimate on pool route is zero":     {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.byteEstimated = true; return c }(), false},
-		"loopback missing snapshot fails closed":           {recoveryLoopbackCase{runtimeSource: "llamacpp_loopback", recordRuntime: true, authority: ok, labels: matchingPoolLabels}, false},
+		"loopback missing snapshot fails closed":           {recoveryLoopbackCase{runtimeSource: "llamacpp_loopback", recordRuntime: true, authority: stableFencedAuthority(), labels: matchingPoolLabels}, false},
 		"loopback snapshot for another runtime is zero":    {func() recoveryLoopbackCase { c := attested("ollama_loopback"); return c }(), false},
 		"unrecorded runtime missing snapshot fails closed": {recoveryLoopbackCase{runtimeSource: "llamacpp_loopback", recordRuntime: false}, false},
 		// Audit R1 ARCH HIGH: an unrecorded runtime fails closed even on a
@@ -145,10 +146,22 @@ func TestRecoverLedger_AppliesLoopbackZeroBillRule(t *testing.T) {
 		// verifiable loopback.
 		"unrecognised runtime fails closed": {recoveryLoopbackCase{runtimeSource: "future_engine_loopback", recordRuntime: true}, false},
 		// Audit R1 SECURITY M2 / ARCH HIGH: durable R-12.3 and the R006 label.
-		"durable authority rejects is zero": {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.authority = rejects; return c }(), false},
+		"durable authority rejects is zero": {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.authority = rejects(); return c }(), false},
 		"no durable authority is zero":      {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.authority = nil; return c }(), false},
 		"moved pool label is zero":          {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.labels = movedPoolLabels; return c }(), false},
 		"no label view is zero":             {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.labels = nil; return c }(), false},
+		// Audit R2: the pre-read decision is fenced inside the recovery
+		// transaction; a pool change in between zero-bills the row.
+		"pool event between pre-read and commit is zero": {func() recoveryLoopbackCase {
+			c := attested("llamacpp_loopback")
+			c.authority = &fencedPoolAuthority{highWaters: []int64{7, 8}}
+			return c
+		}(), false},
+		"label moved between pre-read and commit is zero": {func() recoveryLoopbackCase {
+			c := attested("llamacpp_loopback")
+			c.labels = labelsChangingAfter(2)
+			return c
+		}(), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			gross, provider, quarantined, reason, operatorRows := recoverLoopbackFallbackRow(t, tc.recoveryLoopbackCase)

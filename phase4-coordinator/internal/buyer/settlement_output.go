@@ -273,30 +273,34 @@ func settlementSSEDataValue(line string) (string, bool) {
 	return value, true
 }
 
-// clone returns an independent copy of the tracker.
-func (t *settlementStreamOutputTracker) clone() *settlementStreamOutputTracker {
-	out := *t
-	out.toolCalls = make(map[int]*settlementStreamToolCall, len(t.toolCalls))
-	for index, call := range t.toolCalls {
-		copied := *call
-		out.toolCalls[index] = &copied
+// validateBlock reports whether observeBlock would accept block, without
+// recording it. The tracker records a block only once the buyer write
+// accepted it (SPEC-015 delivered-prefix rule).
+func (t *settlementStreamOutputTracker) validateBlock(block []byte) error {
+	probe := settlementStreamOutputTracker{toolCalls: map[int]*settlementStreamToolCall{}, terminalState: t.terminalState}
+	return probe.observeBlock(block)
+}
+
+// completeSSEEventsLen returns the length of the longest prefix of b that ends
+// with an event's blank-line terminator, "\n" or "\r\n" framed alike.
+func completeSSEEventsLen(b []byte) int {
+	end, offset := 0, 0
+	for _, line := range bytes.SplitAfter(b, []byte("\n")) {
+		offset += len(line)
+		if isSSEBlankLine(line) {
+			end = offset
+		}
 	}
-	if t.finishReason != nil {
-		value := *t.finishReason
-		out.finishReason = &value
-	}
-	return &out
+	return end
 }
 
 // observeCompleteEvents records only the SSE events of prefix that end with
 // their blank-line terminator. It is used for a partially written block, whose
 // torn last event never reached the buyer whole. A malformed event stops it.
 func (t *settlementStreamOutputTracker) observeCompleteEvents(prefix []byte) {
-	end := bytes.LastIndex(prefix, []byte("\n\n"))
-	if end < 0 {
-		return
+	if end := completeSSEEventsLen(prefix); end > 0 {
+		_ = t.observeBlock(prefix[:end])
 	}
-	_ = t.observeBlock(prefix[:end+2])
 }
 
 func (t *settlementStreamOutputTracker) observeBlock(block []byte) error {

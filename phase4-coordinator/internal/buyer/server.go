@@ -3927,10 +3927,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			}
 			return true, wsForwardFailed
 		}
-		// Validate on a copy; the tracker records a block only once the
-		// buyer write accepted it (SPEC-015 delivered-prefix rule).
-		observed := settlementTracker.clone()
-		if err := observed.observeBlock([]byte(rewritten)); err != nil {
+		// Validate now; the tracker records the block only once the buyer
+		// write accepted it (SPEC-015 delivered-prefix rule).
+		if err := settlementTracker.validateBlock([]byte(rewritten)); err != nil {
 			relay.Cancel("malformed_settlement_stream")
 			if s.streamingDowngrade != nil {
 				s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -3960,7 +3959,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			markProviderDone()
 			return true, wsForwardCancelled
 		}
-		*settlementTracker = *observed
+		_ = settlementTracker.observeBlock([]byte(rewritten))
 		bytesEmitted += len(rewritten)
 		if flusher != nil {
 			flusher.Flush()
@@ -4551,7 +4550,17 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	// committed, EOF/error are committed-terminal exactly as before.
 	reader := bufio.NewReader(resp.Body)
 	toolFinal := newStreamToolCallFinalValidator()
+	// settlementTracker records only complete SSE events the buyer write
+	// accepted; streamProbe sees every block first, only to validate it
+	// (SPEC-015 delivered-prefix rule). deliveredEvent holds written lines of
+	// the event not yet terminated, and delivered*Tok the provider usage of
+	// events that were delivered, the only usage a cancelled or failed stream
+	// may bill.
 	settlementTracker := newSettlementStreamOutputTracker()
+	streamProbe := newSettlementStreamOutputTracker()
+	var deliveredEvent []byte
+	deliveredEventHasUsage := false
+	var deliveredPromptTok, deliveredCachedPromptTok, deliveredCompletionTok *int64
 	coalescer := newConcatSafeToolStream()
 	var preCommit bytes.Buffer
 	var lineBuf bytes.Buffer
@@ -4573,9 +4582,32 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			SettlementOutput:    settlementTracker.output(billing.TerminalStateProviderError),
 		}
 	}
+	// recordDelivered accounts one written line: its event becomes delivered
+	// once the event's blank-line terminator was written.
+	recordDelivered := func(line []byte) {
+		deliveredEvent = append(deliveredEvent, line...)
+		if p, cached, c := tokenPointersFromSSE(line); p != nil || cached != nil || c != nil {
+			deliveredEventHasUsage = true
+		}
+		if !isSSEBlankLine(line) {
+			return
+		}
+		_ = settlementTracker.observeBlock(deliveredEvent)
+		if deliveredEventHasUsage {
+			deliveredPromptTok, deliveredCachedPromptTok, deliveredCompletionTok = promptTok, cachedPromptTok, completionTok
+		}
+		deliveredEvent, deliveredEventHasUsage = deliveredEvent[:0], false
+	}
+	recordDeliveredBlock := func(block []byte) {
+		for _, line := range bytes.SplitAfter(block, []byte("\n")) {
+			if len(line) > 0 {
+				recordDelivered(line)
+			}
+		}
+	}
 	progressAttemptWithTerminal := func(message string, faultFlag string, terminalState string) requestLogAttempt {
-		attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CachedPromptTokens: cachedPromptTok, CompletionTokens: completionTok, Error: message, FaultFlag: faultFlag}
-		if completionTok == nil {
+		attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: deliveredPromptTok, CachedPromptTokens: deliveredCachedPromptTok, CompletionTokens: deliveredCompletionTok, Error: message, FaultFlag: faultFlag}
+		if deliveredCompletionTok == nil {
 			attempt.EstimatedCompTokens = s.estimatedCompletionTokensFromBytes(bytesEmitted)
 		}
 		attempt.SettlementOutput = settlementTracker.output(terminalState)
@@ -4585,8 +4617,8 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		return progressAttemptWithTerminal(message, faultFlag, terminalStateFromAttempt(http.StatusOK, message, ""))
 	}
 	progressUnavailableAttempt := func(message string, code string, faultFlag string) requestLogAttempt {
-		attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CachedPromptTokens: cachedPromptTok, CompletionTokens: completionTok, Error: message, ErrorCode: code, FaultFlag: faultFlag, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
-		if completionTok == nil {
+		attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: deliveredPromptTok, CachedPromptTokens: deliveredCachedPromptTok, CompletionTokens: deliveredCompletionTok, Error: message, ErrorCode: code, FaultFlag: faultFlag, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
+		if deliveredCompletionTok == nil {
 			attempt.EstimatedCompTokens = s.estimatedCompletionTokensFromBytes(bytesEmitted)
 		}
 		return attempt
@@ -4677,7 +4709,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				return errPreCommitMalformedToolCalls
 			}
 			line = []byte(rewritten)
-			if err := settlementTracker.observeBlock(line); err != nil {
+			if err := streamProbe.observeBlock(line); err != nil {
 				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed settlement data before commit")
 				return errPreCommitMalformedToolCalls
 			}
@@ -4747,11 +4779,14 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	}
 	writeBuyerHeaders()
 	firstForwardedAt := s.now()
-	if _, writeErr := w.Write(preCommit.Bytes()); writeErr != nil {
+	if n, writeErr := w.Write(preCommit.Bytes()); writeErr != nil {
+		recordDeliveredBlock(preCommit.Bytes()[:completeSSEEventsLen(preCommit.Bytes()[:n])])
+		bytesEmitted = n
 		s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer pre-commit write failed")
 		markProviderDone()
 		return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 	}
+	recordDeliveredBlock(preCommit.Bytes())
 	if s.streamingTiming != nil {
 		timingHeaders := resp.Header.Clone()
 		timingHeaders.Set(streamingTimingCoordinatorHeader, strconv.FormatInt(firstForwardedAt.UnixMilli(), 10))
@@ -4825,7 +4860,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 					contentEmittedBytes = projected
 				}
 			}
-			if err := settlementTracker.observeBlock(line); err != nil {
+			if err := streamProbe.observeBlock(line); err != nil {
 				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed settlement data")
 				if s.streamingDowngrade != nil {
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -4837,11 +4872,14 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				markProviderDone()
 				return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed settlement stream", "malformed_settlement_stream", billing.FaultBreakerQualifying)
 			}
-			if _, writeErr := w.Write(line); writeErr != nil {
+			if n, writeErr := w.Write(line); writeErr != nil {
+				recordDeliveredBlock(line[:completeSSEEventsLen(line[:n])])
+				bytesEmitted += n
 				s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer streaming write failed")
 				markProviderDone()
 				return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 			}
+			recordDeliveredBlock(line)
 			bytesEmitted += len(line)
 			if flusher != nil {
 				flusher.Flush()
@@ -4895,7 +4933,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 					return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed tool-call stream", "malformed_tool_call", billing.FaultBreakerQualifying)
 				}
 				flushed = []byte(rewritten)
-				if settleErr := settlementTracker.observeBlock(flushed); settleErr != nil {
+				if settleErr := streamProbe.observeBlock(flushed); settleErr != nil {
 					s.log.Warn().Err(settleErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed settlement data")
 					if s.streamingDowngrade != nil {
 						s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -4907,17 +4945,24 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 					markProviderDone()
 					return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressUnavailableAttempt("Provider emitted malformed settlement stream", "malformed_settlement_stream", billing.FaultBreakerQualifying)
 				}
-				if _, writeErr := w.Write(flushed); writeErr != nil {
+				if n, writeErr := w.Write(flushed); writeErr != nil {
+					recordDeliveredBlock(flushed[:completeSSEEventsLen(flushed[:n])])
+					bytesEmitted += n
 					s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer streaming write failed")
 					markProviderDone()
 					return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 				}
+				recordDeliveredBlock(flushed)
 				bytesEmitted += len(flushed)
 				if flusher != nil {
 					flusher.Flush()
 				}
 			}
 			markProviderDone()
+			if len(deliveredEvent) > 0 {
+				_ = settlementTracker.observeBlock(deliveredEvent)
+				deliveredEvent = deliveredEvent[:0]
+			}
 			receiptValue := normalizeReceiptHeaderValue(resp.Trailer.Get("X-MacProvider-Receipt"))
 			if terminalSSEErrorCode != "" {
 				attempt := progressAttempt("Provider emitted terminal structured-output streaming error", billing.FaultBreakerQualifying)
@@ -5035,8 +5080,10 @@ func (s *Server) forwardStreamingBuffered(w http.ResponseWriter, r *http.Request
 	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 	w.Header().Set(streamingModeHeader, streamingMode)
 	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write(out); err != nil {
-		return wsForwardCancelled, 0, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone}
+	if n, err := w.Write(out); err != nil {
+		delivered := newSettlementStreamOutputTracker()
+		delivered.observeCompleteEvents(out[:n])
+		return wsForwardCancelled, 0, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone, SettlementOutput: delivered.output(billing.TerminalStateBuyerCancel)}
 	}
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()

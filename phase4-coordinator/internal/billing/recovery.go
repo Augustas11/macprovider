@@ -369,7 +369,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		}
 		// The hot path's SPEC-047-R003(iv) / SPEC-022-R012 loopback rule
 		// holds for a re-created row too: never a byte-estimated credit.
-		if !recoveredLoopbackAttemptBillable(ctx, tx, identityRuntimeSource, SettlementReceiptIdentity{
+		if !s.recoveredLoopbackAttemptBillable(ctx, tx, identityRuntimeSource, SettlementReceiptIdentity{
 			AccountScope: AccountScopeForSettlement(accountID.String),
 			RequestID:    requestID,
 			AttemptN:     int64(attemptN),
@@ -440,7 +440,7 @@ INSERT INTO ledger_reconciliation_runs (
 //     transaction and the route snapshot read here is still that digest;
 //   - anything else, including a row written before runtime_source existed
 //     (NULL) and an unrecognised runtime, is never billable.
-func recoveredLoopbackAttemptBillable(ctx context.Context, tx *sql.Tx, runtimeSource sql.NullString, id SettlementReceiptIdentity, prompt, completion *int64, poolAttested map[SettlementReceiptIdentity]string) bool {
+func (s *Store) recoveredLoopbackAttemptBillable(ctx context.Context, tx *sql.Tx, runtimeSource sql.NullString, id SettlementReceiptIdentity, prompt, completion *int64, poolAttested map[SettlementReceiptIdentity]recoveryPoolAttestation) bool {
 	if !runtimeSource.Valid {
 		return false
 	}
@@ -450,15 +450,24 @@ func recoveredLoopbackAttemptBillable(ctx context.Context, tx *sql.Tx, runtimeSo
 	if !IsLoopbackRuntimeSource(runtimeSource.String) || prompt == nil || completion == nil {
 		return false
 	}
-	verifiedDigest, ok := poolAttested[id]
+	verified, ok := poolAttested[id]
 	if !ok {
 		return false
 	}
 	route, routeHash, err := loadSettlementRouteSnapshotConn(ctx, tx, id)
-	if err != nil || routeHash != verifiedDigest || route.RuntimeSource != runtimeSource.String {
+	if err != nil || routeHash != verified.routeHash || route.RuntimeSource != runtimeSource.String {
 		return false
 	}
-	return true
+	// The pool state the pre-read decided on must still hold inside this
+	// transaction.
+	return s.poolAttestationFenceHolds(ctx, tx, &verified.fence)
+}
+
+// recoveryPoolAttestation is one pre-read pool_operator_attested decision:
+// the route snapshot digest and the pool fence it was made against.
+type recoveryPoolAttestation struct {
+	routeHash string
+	fence     PoolAttestationFence
 }
 
 // recoveryPoolAttestedRoutes finds, outside any transaction, the loopback
@@ -468,7 +477,7 @@ func recoveredLoopbackAttemptBillable(ctx context.Context, tx *sql.Tx, runtimeSo
 // R006 label against the settlement-time pool view. It returns the snapshot
 // digest each was verified against. Any attempt that cannot be verified is
 // left out, so recovery zero-bills it.
-func (s *Store) recoveryPoolAttestedRoutes(ctx context.Context, in RecoverInput) (map[SettlementReceiptIdentity]string, error) {
+func (s *Store) recoveryPoolAttestedRoutes(ctx context.Context, in RecoverInput) (map[SettlementReceiptIdentity]recoveryPoolAttestation, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT DISTINCT COALESCE(rl.account_id, ''), lpis.request_id, lpis.attempt_n, lpis.provider_id, lpis.runtime_source
   FROM ledger_provider_identity_snapshots lpis
@@ -509,7 +518,7 @@ SELECT DISTINCT COALESCE(rl.account_id, ''), lpis.request_id, lpis.attempt_n, lp
 		return nil, err
 	}
 	_ = rows.Close()
-	verified := make(map[SettlementReceiptIdentity]string, len(candidates))
+	verified := make(map[SettlementReceiptIdentity]recoveryPoolAttestation, len(candidates))
 	for _, c := range candidates {
 		var route RouteSnapshot
 		var routeHash string
@@ -523,13 +532,19 @@ SELECT DISTINCT COALESCE(rl.account_id, ''), lpis.request_id, lpis.attempt_n, lp
 		if route.RuntimeSource != c.runtimeSource || route.RouteSnapshotMode != RouteSnapshotModeEnforce || !poolOperatorAttestationSnapshotComplete(route) {
 			continue
 		}
+		// The fence is read before the durable checks, so any pool change
+		// after it makes the in-transaction re-read differ.
+		fence, ok := s.PoolAttestationFenceFor(ctx, route.PoolID)
+		if !ok || !PoolAttestationFenceMatchesRoute(fence, route) {
+			continue
+		}
 		if err := s.PoolOperatorAttestationEligible(ctx, route); err != nil {
 			continue
 		}
 		if !PoolOperatorAttestedLabelVerified(route, routeHash, s.settlementPoolLabels(route.PoolID, routeHash)) {
 			continue
 		}
-		verified[c.id] = routeHash
+		verified[c.id] = recoveryPoolAttestation{routeHash: routeHash, fence: *fence}
 	}
 	return verified, nil
 }

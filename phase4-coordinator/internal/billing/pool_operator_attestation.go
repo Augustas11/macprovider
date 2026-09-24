@@ -62,6 +62,93 @@ func poolOperatorAttestationPermanent(err error) bool {
 
 var errPoolOperatorAttestationNotEnforce = errors.New("billing: pool_operator_attested requires an enforce-mode route snapshot")
 
+// PoolFenceQueryer is the read handle a pool attestation fence is read
+// through: the ledger write transaction itself, so the fence and the credit
+// commit are one atomic decision.
+type PoolFenceQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// PoolEventHighWaterSource reads the id of a pool's latest durable event
+// through q. The durable pool authority implements it; any durable change
+// to a pool (membership, manifest, lifecycle) advances it.
+type PoolEventHighWaterSource interface {
+	PoolEventHighWater(ctx context.Context, q PoolFenceQueryer, poolID string) (int64, error)
+}
+
+// PoolAttestationFence pins the pool state a pool_operator_attested decision
+// used: the pool's durable event high-water mark, read before the durable
+// checks, and the settlement-time label it verified against.
+type PoolAttestationFence struct {
+	PoolID             string
+	PoolEventHighWater int64
+	ManifestVersion    uint64
+	ManifestCoreDigest string
+}
+
+// PoolAttestationFenceFor reads the fence for poolID before a
+// pool_operator_attested decision. False when trusted pools are off or the
+// pool state cannot be read.
+func (s *Store) PoolAttestationFenceFor(ctx context.Context, poolID string) (*PoolAttestationFence, bool) {
+	if s == nil || poolID == "" {
+		return nil, false
+	}
+	return s.readPoolAttestationFence(ctx, s.db, poolID)
+}
+
+func (s *Store) readPoolAttestationFence(ctx context.Context, q PoolFenceQueryer, poolID string) (*PoolAttestationFence, bool) {
+	source, ok := s.poolOperatorAttestationAuthority().(PoolEventHighWaterSource)
+	if !ok || source == nil {
+		return nil, false
+	}
+	highWater, err := source.PoolEventHighWater(ctx, q, poolID)
+	if err != nil || highWater <= 0 {
+		return nil, false
+	}
+	labels := s.settlementPoolLabels(poolID, "")
+	if labels == nil {
+		return nil, false
+	}
+	return &PoolAttestationFence{
+		PoolID:             poolID,
+		PoolEventHighWater: highWater,
+		ManifestVersion:    labels.ManifestVersion,
+		ManifestCoreDigest: labels.ManifestCoreDigest,
+	}, true
+}
+
+// poolAttestationFenceHolds re-reads the fence through the ledger write
+// transaction q and reports whether the pool is unchanged since the
+// decision. Trusted pools off, an unreadable state, or any change is false.
+func (s *Store) poolAttestationFenceHolds(ctx context.Context, q PoolFenceQueryer, fence *PoolAttestationFence) bool {
+	if fence == nil || fence.PoolID == "" {
+		return false
+	}
+	current, ok := s.readPoolAttestationFence(ctx, q, fence.PoolID)
+	return ok && *current == *fence
+}
+
+// PoolAttestationFenceMatchesRoute reports whether a fence's label is the
+// route snapshot's routing-time label.
+func PoolAttestationFenceMatchesRoute(fence *PoolAttestationFence, route RouteSnapshot) bool {
+	return fence != nil && fence.PoolID == route.PoolID &&
+		fence.ManifestVersion == route.ManifestVersion && fence.ManifestCoreDigest == route.ManifestCoreDigest
+}
+
+// PoolAttestedCreditRecorded reports whether an attempt's ledger row carries
+// unquarantined credit, i.e. the ledger commit kept its pool attestation.
+func (s *Store) PoolAttestedCreditRecorded(ctx context.Context, requestID string, attemptN int, providerID string) bool {
+	if s == nil {
+		return false
+	}
+	var quarantined int
+	err := s.db.QueryRowContext(ctx, `
+SELECT quarantined FROM ledger_request_credits
+ WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
+ LIMIT 1`, requestID, attemptN, providerID).Scan(&quarantined)
+	return err == nil && quarantined == 0
+}
+
 // SettlementPoolLabelSource returns the settlement-time SPEC-042 R006 labels of
 // a pool (its current manifest version and core digest), or false when the
 // pool is unknown.

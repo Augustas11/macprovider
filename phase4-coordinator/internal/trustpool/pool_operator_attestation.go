@@ -13,6 +13,19 @@ import (
 var ErrPoolOperatorAttestation = fmt.Errorf("trustpool: %w", billing.ErrPoolOperatorAttestationRejected)
 
 var _ billing.PoolOperatorAttestationAuthority = (*Store)(nil)
+var _ billing.PoolEventHighWaterSource = (*Store)(nil)
+
+// PoolEventHighWater returns the id of the pool's latest durable event, read
+// through q so a caller holding the ledger write transaction fences on it
+// without a second connection. 0 means the pool has no durable events.
+func (s *Store) PoolEventHighWater(ctx context.Context, q billing.PoolFenceQueryer, poolID string) (int64, error) {
+	if s == nil || q == nil {
+		return 0, ErrStoreClosed
+	}
+	var highWater int64
+	err := q.QueryRowContext(ctx, `SELECT COALESCE(MAX(id), 0) FROM trustpool_events WHERE pool_id = ?`, poolID).Scan(&highWater)
+	return highWater, err
+}
 
 // VerifyPoolOperatorAttestation re-evaluates SPEC-042-R006 conditions 2-4 for
 // a route snapshot's digested values from the durable, append-only event log

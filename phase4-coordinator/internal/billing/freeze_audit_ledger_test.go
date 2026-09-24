@@ -40,6 +40,12 @@ func TestWriteHotPath_LoopbackRuntimeNeverEarnsOutsideAttestedPool(t *testing.T)
 			input, row := testHotPathInput(t, store)
 			input.ProviderRuntimeSource = tc.source
 			input.PoolOperatorAttested = tc.attested
+			if tc.attested {
+				// The decision's pool fence, held at commit (audit R2).
+				store.SetPoolOperatorAttestationAuthority(stableFencedAuthority())
+				store.SetSettlementPoolLabelSource(labelsChangingAfter(1 << 30))
+				input.PoolAttestationFence = testPoolFence()
+			}
 			if tc.byteEstimated {
 				estimate := int64(75)
 				input.CompletionTokens, row.CompletionTokens = nil, nil

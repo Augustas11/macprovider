@@ -463,12 +463,14 @@ func (b *billingRecorder) recordRow(
 		}
 		accountScope := accountScopeForSettlement(b.accountID)
 		settlementMode, settlementVersion := b.settlementPolicyForLedger()
+		poolAttested, poolFence := b.poolOperatorAttestation(ctx, billingStore, stableProviderID, providerRuntimeSource)
 		billingInput := billing.HotPathInput{
 			RequestID:                    row.RequestID,
 			AttemptN:                     attemptN,
 			ProviderAssignedID:           providerAssignedID,
 			ProviderRuntimeSource:        providerRuntimeSource,
-			PoolOperatorAttested:         b.poolOperatorAttestedAttempt(ctx, billingStore, stableProviderID, providerRuntimeSource),
+			PoolOperatorAttested:         poolAttested,
+			PoolAttestationFence:         poolFence,
 			ProviderID:                   stableProviderID,
 			Model:                        row.Model,
 			Status:                       status,
@@ -734,13 +736,33 @@ func routeSnapshotGapReason(pressure bool) string {
 // comparison against the live registry, which can only take the source away
 // (condition 5). Everything else, including every global attempt, is false.
 func (b *billingRecorder) poolOperatorAttestedAttempt(ctx context.Context, store *billing.Store, providerID, providerRuntimeSource string) bool {
+	attested, _ := b.poolOperatorAttestation(ctx, store, providerID, providerRuntimeSource)
+	return attested
+}
+
+// poolOperatorAttestation is poolOperatorAttestedAttempt plus the pool fence
+// the decision used, read before the durable checks. The ledger write
+// transaction re-reads the fence and keeps the credit only if it holds.
+func (b *billingRecorder) poolOperatorAttestation(ctx context.Context, store *billing.Store, providerID, providerRuntimeSource string) (bool, *billing.PoolAttestationFence) {
 	if b == nil || store == nil || !providerws.IsBYOMLoopbackRuntimeSource(providerRuntimeSource) {
-		return false
+		return false, nil
 	}
 	snap := b.settlementRouteSnapshot
 	if snap == nil || !b.hasSettlementAttemptN || snap.RuntimeSource != providerRuntimeSource ||
 		snap.ProviderID != providerID || snap.AttemptN != int64(b.settlementAttemptN) {
-		return false
+		return false, nil
+	}
+	fence, ok := store.PoolAttestationFenceFor(ctx, snap.PoolID)
+	if !ok || !billing.PoolAttestationFenceMatchesRoute(fence, *snap) {
+		if b.server != nil {
+			b.server.log.Warn().
+				Str("event", "pool_operator_attestation_unfenced").
+				Str("pool_id", snap.PoolID).
+				Str("request_id", b.requestID).
+				Str("provider_id", providerID).
+				Msg("external-runtime attempt recorded byte_estimated: pool state could not be fenced")
+		}
+		return false, nil
 	}
 	if err := store.PoolOperatorAttestationEligible(ctx, *snap); err != nil {
 		if b.server != nil {
@@ -751,7 +773,7 @@ func (b *billingRecorder) poolOperatorAttestedAttempt(ctx context.Context, store
 				Str("provider_id", providerID).
 				Msg("external-runtime attempt recorded byte_estimated: durable pool records do not support pool_operator_attested")
 		}
-		return false
+		return false, nil
 	}
 	if !billing.PoolOperatorAttestedLabelVerified(*snap, b.settlementRouteSnapshotDigest, b.settlementPoolLabels()) {
 		if b.server != nil {
@@ -762,9 +784,9 @@ func (b *billingRecorder) poolOperatorAttestedAttempt(ctx context.Context, store
 				Str("provider_id", providerID).
 				Msg("external-runtime attempt recorded byte_estimated: pool label disputed at recording")
 		}
-		return false
+		return false, nil
 	}
-	return true
+	return true, fence
 }
 
 func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, store *billing.Store, in billing.HotPathInput, output *billing.SettlementOutput) error {
@@ -800,7 +822,10 @@ func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, sto
 	if out.ObservedInputTokens != nil && out.ObservedOutputTokens != nil {
 		promptObserved, completionObserved = out.ObservedInputTokens, out.ObservedOutputTokens
 	}
-	if loopback && in.PoolOperatorAttested && promptObserved != nil && completionObserved != nil {
+	// The evidence follows the ledger commit: an attempt whose fenced
+	// attestation did not hold at commit is byte_estimated here too.
+	if loopback && in.PoolOperatorAttested && promptObserved != nil && completionObserved != nil &&
+		store.PoolAttestedCreditRecorded(ctx, in.RequestID, in.AttemptN, in.ProviderID) {
 		// SPEC-042-R005 site (5) / SPEC-022-R012: the pool operator's own
 		// reported usage, recorded as pool_operator_attested (never
 		// coordinator_observed). It settles only through a verified receipt

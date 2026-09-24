@@ -54,6 +54,9 @@ type HotPathInput struct {
 	// loopback-served attempt may carry ledger credit; settlement still has
 	// to verify a receipt before that credit becomes payable.
 	PoolOperatorAttested bool
+	// PoolAttestationFence is the pool state that decision used. The ledger
+	// transaction re-reads it and keeps the credit only if it still holds.
+	PoolAttestationFence *PoolAttestationFence
 }
 
 // LoopbackRuntimeNotSettlementEligible is the ledger quarantine reason for an
@@ -221,7 +224,11 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		// (R-12); an attempt without it, such as a cancelled stream whose
 		// runtime never reported usage, is byte_estimated and zero billable
 		// even on an authorizing pool route.
-		poolAttestedUsage := in.PoolOperatorAttested && in.PromptTokens != nil && in.CompletionTokens != nil
+		// The pool state that decision used is re-read inside this
+		// transaction, so a manifest, membership, or lifecycle change, or
+		// trusted pools going off, before the commit zero-bills it.
+		poolAttestedUsage := in.PoolOperatorAttested && in.PromptTokens != nil && in.CompletionTokens != nil &&
+			s.poolAttestationFenceHolds(ctx, conn, in.PoolAttestationFence)
 		if IsLoopbackRuntimeSource(in.ProviderRuntimeSource) && !poolAttestedUsage {
 			result := zeroCredits(ComputeCredits(
 				in.PromptTokens,
