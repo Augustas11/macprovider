@@ -2637,19 +2637,24 @@ type frozenLineageKey struct {
 }
 
 type ReconstructedPoolState struct {
-	PoolID                       string
-	CreatorAccountID             string
-	ApprovalRecordID             string
-	Lifecycle                    string
-	LifecycleReason              string
-	MinBinaryVersion             string
-	ManifestVersion              uint64
-	ManifestCoreDigest           string
-	ManifestSnapshot             string
-	ManifestMinEligibleMembers   uint64
-	ManifestMinBinaryVersion     string
-	ManifestModelAllowlist       []string
-	ManifestSettlementMode       string
+	PoolID                     string
+	CreatorAccountID           string
+	ApprovalRecordID           string
+	Lifecycle                  string
+	LifecycleReason            string
+	MinBinaryVersion           string
+	ManifestVersion            uint64
+	ManifestCoreDigest         string
+	ManifestSnapshot           string
+	ManifestMinEligibleMembers uint64
+	ManifestMinBinaryVersion   string
+	ManifestModelAllowlist     []string
+	ManifestSettlementMode     string
+	// ManifestPolicyCoreV2 and ManifestRuntimeAllowlist project the accepted
+	// core's SPEC-042-R001 encoding and signed runtime_allowlist. A v1 core or
+	// an empty list is native MLX only.
+	ManifestPolicyCoreV2         bool
+	ManifestRuntimeAllowlist     []string
 	ManifestRetentionPolicyID    string
 	ManifestSplitExecutionStatus string
 	RootIssuer                   *ReconstructedRootIssuer
@@ -2852,6 +2857,8 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		p.ManifestMinBinaryVersion = core.MinBinaryVersion
 		p.ManifestModelAllowlist = append([]string(nil), core.ModelAllowlist...)
 		p.ManifestSettlementMode = canonicalPoolSettlementMode(core.SettlementMode)
+		p.ManifestPolicyCoreV2 = core.IsV2()
+		p.ManifestRuntimeAllowlist = append([]string(nil), core.RuntimeAllowlist...)
 		p.ManifestRetentionPolicyID = core.RetentionPolicyID
 		p.ManifestSplitExecutionStatus = core.SplitExecutionStatus
 	case EventLifecycleChanged:
@@ -3399,9 +3406,13 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		sort.Strings(revoked)
 		sort.Strings(buyers)
 		memberDelegationExpiry := make(map[string]time.Time, len(members))
+		var delegatedMembers []string
 		for _, memberID := range members {
 			if expiry, ok := p.MemberDelegationExpiresUTC[memberID]; ok && !expiry.IsZero() {
 				memberDelegationExpiry[memberID] = expiry.UTC()
+			}
+			if p.MemberDelegationIDs[memberID] != "" {
+				delegatedMembers = append(delegatedMembers, memberID)
 			}
 		}
 		out = append(out, RouteableSnapshot{
@@ -3413,6 +3424,8 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			BuyerAccounts:             buyers,
 			MinBinaryVersion:          policyMinBinaryVersion(p),
 			ModelAllowlist:            append([]string(nil), p.ManifestModelAllowlist...),
+			RuntimeAllowlist:          policyRuntimeAllowlist(p),
+			DelegatedMembers:          delegatedMembers,
 			SettlementMode:            routeablePoolSettlementMode(p.ManifestSettlementMode),
 			Routeable:                 routeable,
 			Generation:                p.RouteableSnapshotGeneration(),

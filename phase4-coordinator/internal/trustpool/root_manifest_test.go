@@ -445,7 +445,7 @@ func signedManifestExtendingWithPolicyCoreMutation(t *testing.T, op string, ts t
 	if err != nil {
 		t.Fatalf("ManifestCoreDigest extending: %v", err)
 	}
-	policyMsg, err := poolmanifest.PolicyCoreSigningMessage(digest)
+	policyMsg, err := core.SigningMessage()
 	if err != nil {
 		t.Fatalf("PolicyCoreSigningMessage extending: %v", err)
 	}
@@ -529,7 +529,7 @@ func manifestSnapshotWithPolicyCoreMutation(t *testing.T, version uint64, root r
 	if err != nil {
 		t.Fatalf("ManifestCoreDigest: %v", err)
 	}
-	policyMsg, err := poolmanifest.PolicyCoreSigningMessage(digest)
+	policyMsg, err := core.SigningMessage()
 	if err != nil {
 		t.Fatalf("PolicyCoreSigningMessage: %v", err)
 	}

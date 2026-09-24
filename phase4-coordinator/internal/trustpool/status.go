@@ -60,6 +60,8 @@ type StatusPolicy struct {
 	ManifestCoreDigest              string   `json:"manifest_core_digest,omitempty"`
 	MinBinaryVersion                string   `json:"min_binary_version,omitempty"`
 	ModelAllowlist                  []string `json:"model_allowlist,omitempty"`
+	RuntimeAllowlist                []string `json:"runtime_allowlist"`
+	RuntimeScope                    string   `json:"runtime_scope"`
 	RootIssuerKeyID                 string   `json:"root_issuer_key_id,omitempty"`
 	RootIssuerKeyHash               string   `json:"root_issuer_public_key_fingerprint,omitempty"`
 	CustodyEvidence                 string   `json:"custody_evidence,omitempty"`
@@ -196,11 +198,13 @@ func buildStatusDocumentForPool(state *ReconstructedState, p *ReconstructedPoolS
 		routeableUntilUTC = p.CreatorGateExpiresAtUTC
 	}
 	visibility := "authorized"
+	runtimeScope, runtimeDisclosure := policyRuntimeDisclosure(p)
 	disclosures := []string{
 		"prompts and responses are visible to the MacProvider coordinator",
 		"prompts and responses may be visible to the selected provider operator",
 		"single-operator Trusted Pools do not provide a high-availability guarantee",
 		statusEligibilityDisclosure(false, live != nil),
+		runtimeDisclosure,
 		"this status document is not a Privacy Pool, anonymous-routing, zero-knowledge, or regulated-compliance claim",
 		"public unauthenticated policy/status exposure requires an operator approval bound to the current manifest digest",
 	}
@@ -245,6 +249,8 @@ func buildStatusDocumentForPool(state *ReconstructedState, p *ReconstructedPoolS
 			ManifestCoreDigest:              p.ManifestCoreDigest,
 			MinBinaryVersion:                policyMinBinaryVersion(p),
 			ModelAllowlist:                  policyModelAllowlist(p),
+			RuntimeAllowlist:                nonNilStrings(policyRuntimeAllowlist(p)),
+			RuntimeScope:                    runtimeScope,
 			RootIssuerKeyID:                 statusRootIssuerKeyID(p),
 			RootIssuerKeyHash:               statusRootIssuerFingerprint(p),
 			CustodyEvidence:                 statusCustodyEvidence(p),
@@ -550,6 +556,34 @@ func policyModelAllowlist(p *ReconstructedPoolState) []string {
 		return nil
 	}
 	return append([]string(nil), p.ManifestModelAllowlist...)
+}
+
+// policyRuntimeAllowlist is the external runtime_source set the accepted core
+// authorizes (SPEC-042-R001). A v1 core or an empty list yields nil: native
+// MLX only.
+func policyRuntimeAllowlist(p *ReconstructedPoolState) []string {
+	if p == nil || !p.ManifestPolicyCoreV2 || len(p.ManifestRuntimeAllowlist) == 0 {
+		return nil
+	}
+	return append([]string(nil), p.ManifestRuntimeAllowlist...)
+}
+
+// SPEC-043-R013 runtime disclosure values shared by pool_policy.json and
+// pool_status.json.
+const (
+	RuntimeScopeNativeMLXOnly             = "native_mlx_only"
+	RuntimeScopeNativeAndExternalRuntimes = "native_mlx_and_allowlisted_external_runtimes"
+	runtimeDisclosureNativeOnly           = "this pool serves native MLX only; no external runtime is allowlisted"
+	runtimeDisclosureExternal             = "allowlisted external runtimes serve under administrative trust: the pool operator attests which process executes, the weights it loaded, and its token counts, and MacProvider does not verify them; the allowlist constrains the runtime identity the operator declares and the coordinator records, not the executing process; external runtimes are not attested, verified, or confidential"
+)
+
+// policyRuntimeDisclosure returns the SPEC-043-R013 runtime scope and the
+// plain-language statement for the accepted core.
+func policyRuntimeDisclosure(p *ReconstructedPoolState) (string, string) {
+	if len(policyRuntimeAllowlist(p)) == 0 {
+		return RuntimeScopeNativeMLXOnly, runtimeDisclosureNativeOnly
+	}
+	return RuntimeScopeNativeAndExternalRuntimes, runtimeDisclosureExternal
 }
 
 func policySplitExecutionStatus(p *ReconstructedPoolState) string {

@@ -297,3 +297,59 @@ func TestVerifyPoolIDBinding(t *testing.T) {
 		t.Fatalf("want errPoolIDMismatch for mismatched identity, got %v", err)
 	}
 }
+
+// TestPolicyCoreV2SignatureDomainSeparation: a v2 core verifies only under the
+// v2 signing tag, and a v1 signature over the same digest never verifies it.
+func TestPolicyCoreV2SignatureDomainSeparation(t *testing.T) {
+	ss, privs := signerSet3(2)
+	pid, _ := sampleIdentity().PoolID()
+	core := samplePolicyV2(pid, RuntimeSourceLlamacppLoopback)
+	digest := must(core.ManifestCoreDigest())
+	v2msg := must(core.SigningMessage())
+	v1msg := must(PolicyCoreSigningMessage(digest))
+	good := []Signature{{KeyID: "k1", Sig: ed25519.Sign(privs[0], v2msg)}, {KeyID: "k2", Sig: ed25519.Sign(privs[1], v2msg)}}
+	if err := VerifyPolicyCore(core, good, ss); err != nil {
+		t.Fatalf("v2 core with v2 signatures: %v", err)
+	}
+	cross := []Signature{{KeyID: "k1", Sig: ed25519.Sign(privs[0], v1msg)}, {KeyID: "k2", Sig: ed25519.Sign(privs[1], v1msg)}}
+	if err := VerifyPolicyCore(core, cross, ss); !errors.Is(err, errBadSignature) {
+		t.Fatalf("v2 core with v1-tag signatures: err=%v, want errBadSignature", err)
+	}
+	// And the reverse: a v1 core never verifies under v2-tag signatures.
+	v1core := samplePolicy(pid)
+	v1digest := must(v1core.ManifestCoreDigest())
+	v2tag := must(PolicyCoreSigningMessageV2(v1digest))
+	reverse := []Signature{{KeyID: "k1", Sig: ed25519.Sign(privs[0], v2tag)}, {KeyID: "k2", Sig: ed25519.Sign(privs[1], v2tag)}}
+	if err := VerifyPolicyCore(v1core, reverse, ss); !errors.Is(err, errBadSignature) {
+		t.Fatalf("v1 core with v2-tag signatures: err=%v, want errBadSignature", err)
+	}
+}
+
+// TestVerifyPolicyCoreRejectsV2AcceptanceViolations: a correctly signed v2
+// core that breaks an acceptance rule is still rejected, online and on replay.
+func TestVerifyPolicyCoreRejectsV2AcceptanceViolations(t *testing.T) {
+	ss, privs := signerSet3(2)
+	pid, _ := sampleIdentity().PoolID()
+	for name, core := range map[string]PolicyCore{
+		"observe": func() PolicyCore {
+			c := samplePolicyV2(pid, RuntimeSourceLlamacppLoopback)
+			c.SettlementMode = "observe"
+			return c
+		}(),
+		"mlx_cache": samplePolicyV2(pid, "mlx_cache"),
+		"extension": func() PolicyCore {
+			c := samplePolicyV2(pid)
+			c.Extensions = []PolicyExtension{{ID: "relay_blind/v1"}}
+			return c
+		}(),
+	} {
+		msg := must(core.SigningMessage())
+		sigs := []Signature{{KeyID: "k1", Sig: ed25519.Sign(privs[0], msg)}, {KeyID: "k2", Sig: ed25519.Sign(privs[1], msg)}}
+		if err := VerifyPolicyCore(core, sigs, ss); err == nil {
+			t.Errorf("%s: VerifyPolicyCore accepted", name)
+		}
+		if err := verifyPolicyCoreSignature(core, sigs, ss); err == nil {
+			t.Errorf("%s: replay verification accepted", name)
+		}
+	}
+}

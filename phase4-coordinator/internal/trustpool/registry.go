@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/poolmanifest"
 	"github.com/augstar/macprovider-coordinator/internal/versionfloor"
 )
 
@@ -66,6 +67,12 @@ type poolState struct {
 	// modelAllowlist is the pool manifest's request-model allowlist. Empty
 	// means no allowlist is configured and the route gate is inert.
 	modelAllowlist []string
+	// runtimeAllowlist is the accepted v2 core's signed runtime_allowlist
+	// (SPEC-042-R001). Empty (or a v1 core) means native MLX only.
+	runtimeAllowlist []string
+	// delegatedMembers are members admitted through a ProviderPoolDelegationV1
+	// grant; they are never creator-owned (SPEC-042-R006 condition 4).
+	delegatedMembers map[string]struct{}
 	// settlementMode is the manifest-derived settlement policy. "enforce"
 	// requires the coordinator's effective verified-model settlement mode to be
 	// enforce before pool traffic can route; "observe" is inert for the v0.1
@@ -96,14 +103,24 @@ type Snapshot struct {
 	// MinBinaryVersion is the pool's minimum provider binary version floor
 	// (SPEC-042 R004), captured under the same lock as Members/Generation.
 	// "" means no floor — the eligibility gate is inert.
-	MinBinaryVersion  string
-	ModelAllowlist    []string
-	SettlementMode    string
-	Routeable         bool
-	Generation        uint64
-	Revision          uint64
-	RouteableUntilUTC time.Time
-	RouteableExpired  bool
+	MinBinaryVersion string
+	ModelAllowlist   []string
+	// RuntimeAllowlist is the accepted core's signed runtime_allowlist,
+	// read from the same consistent snapshot as Members (SPEC-042-R004).
+	RuntimeAllowlist []string
+	// CreatorAccountID is the pool creator's account from the durable
+	// pool-creation record.
+	CreatorAccountID string
+	// CreatorOwnedMembers are the Members owned by the creator account: not
+	// admitted through a delegation, and inside the creator's owned-provider
+	// ceiling when one is configured (SPEC-042-R004(e) / R006 condition 4).
+	CreatorOwnedMembers map[string]bool
+	SettlementMode      string
+	Routeable           bool
+	Generation          uint64
+	Revision            uint64
+	RouteableUntilUTC   time.Time
+	RouteableExpired    bool
 	// ManifestVersion and ManifestCoreDigest label the accepted manifest that
 	// authorizes routing (SPEC-042 R006). Zero/empty for seed-only pools.
 	ManifestVersion    uint64
@@ -123,6 +140,8 @@ type RouteableSnapshot struct {
 	BuyerAccounts             []string
 	MinBinaryVersion          string
 	ModelAllowlist            []string
+	RuntimeAllowlist          []string
+	DelegatedMembers          []string
 	SettlementMode            string
 	Routeable                 bool
 	Generation                uint64
@@ -416,6 +435,10 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 		buyers[id] = struct{}{}
 	}
 
+	runtimeAllowlist, err := normalizeRuntimeAllowlist(s.PoolID, s.RuntimeAllowlist)
+	if err != nil {
+		return err
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.pools[s.PoolID] = &poolState{
@@ -426,6 +449,8 @@ func (r *Registry) LoadRouteableSnapshot(s RouteableSnapshot) error {
 		routeable:          s.Routeable && !r.candidateLaunchBlockedLocked(s.LaunchEnvironment),
 		minBinaryVersion:   s.MinBinaryVersion,
 		modelAllowlist:     modelAllowlist,
+		runtimeAllowlist:   runtimeAllowlist,
+		delegatedMembers:   stringSet(s.DelegatedMembers),
 		settlementMode:     canonicalPoolSettlementMode(s.SettlementMode),
 		generation:         s.Generation,
 		routeableUntilUTC:  s.RouteableUntilUTC.UTC(),
@@ -611,6 +636,10 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 		if err != nil {
 			return false, err
 		}
+		runtimeAllowlist, err := normalizeRuntimeAllowlist(s.PoolID, s.RuntimeAllowlist)
+		if err != nil {
+			return false, err
+		}
 		members := make(map[string]struct{}, len(s.Members))
 		for _, id := range s.Members {
 			if id == "" {
@@ -649,6 +678,8 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 			routeable:               s.Routeable,
 			minBinaryVersion:        s.MinBinaryVersion,
 			modelAllowlist:          modelAllowlist,
+			runtimeAllowlist:        runtimeAllowlist,
+			delegatedMembers:        stringSet(s.DelegatedMembers),
 			settlementMode:          canonicalPoolSettlementMode(s.SettlementMode),
 			generation:              s.Generation,
 			routeableUntilUTC:       s.RouteableUntilUTC.UTC(),
@@ -758,6 +789,8 @@ func poolStatesEqual(a, b *poolState) bool {
 		a.creatorAccountID == b.creatorAccountID &&
 		a.minBinaryVersion == b.minBinaryVersion &&
 		stringSlicesEqual(a.modelAllowlist, b.modelAllowlist) &&
+		stringSlicesEqual(a.runtimeAllowlist, b.runtimeAllowlist) &&
+		stringSetsEqual(a.delegatedMembers, b.delegatedMembers) &&
 		a.settlementMode == b.settlementMode &&
 		a.generation == b.generation &&
 		a.routeableUntilUTC.Equal(b.routeableUntilUTC) &&
@@ -815,6 +848,52 @@ func normalizeModelAllowlist(poolID string, models []string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// normalizeRuntimeAllowlist validates a routeable snapshot's runtime_allowlist
+// against the closed SPEC-042-R001 vocabulary. The accepted core already
+// enforced order and vocabulary; this keeps a malformed durable projection
+// from ever authorizing an external runtime.
+func normalizeRuntimeAllowlist(poolID string, sources []string) ([]string, error) {
+	if len(sources) == 0 {
+		return nil, nil
+	}
+	out := append([]string(nil), sources...)
+	sort.Strings(out)
+	for i, source := range out {
+		if !poolmanifest.ValidRuntimeAllowlistSource(source) {
+			return nil, fmt.Errorf("trustpool: runtime allowlist for pool %q contains unsupported runtime_source %q", poolID, source)
+		}
+		if i > 0 && out[i-1] == source {
+			return nil, fmt.Errorf("trustpool: runtime allowlist for pool %q contains duplicate runtime_source %q", poolID, source)
+		}
+	}
+	return out, nil
+}
+
+func stringSet(in []string) map[string]struct{} {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(in))
+	for _, v := range in {
+		if v != "" {
+			out[v] = struct{}{}
+		}
+	}
+	return out
+}
+
+func sortedSetKeys(in map[string]struct{}) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(in))
+	for k := range in {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func cloneStringSlice(in []string) []string {
@@ -882,6 +961,8 @@ func (r *Registry) RouteableSnapshots() []RouteableSnapshot {
 			BuyerAccounts:      buyers,
 			MinBinaryVersion:   ps.minBinaryVersion,
 			ModelAllowlist:     cloneStringSlice(ps.modelAllowlist),
+			RuntimeAllowlist:   cloneStringSlice(ps.runtimeAllowlist),
+			DelegatedMembers:   sortedSetKeys(ps.delegatedMembers),
 			SettlementMode:     routeablePoolSettlementMode(ps.settlementMode),
 			Routeable:          ps.routeable,
 			Generation:         ps.generation,
@@ -935,19 +1016,22 @@ func (r *Registry) Snapshot(poolID string) Snapshot {
 	routeableExpired := ps.routeableExpired || ps.routeableExpiredAt(now)
 	members, _ := r.routeMembersLocked(ps, now)
 	return Snapshot{
-		PoolID:             poolID,
-		Exists:             true,
-		Members:            members,
-		MinBinaryVersion:   ps.minBinaryVersion,
-		ModelAllowlist:     cloneStringSlice(ps.modelAllowlist),
-		SettlementMode:     routeablePoolSettlementMode(ps.settlementMode),
-		Routeable:          ps.routeableAt(now),
-		Generation:         r.effectiveGenerationLocked(ps, now),
-		Revision:           r.revision,
-		RouteableUntilUTC:  ps.routeableUntilUTC,
-		RouteableExpired:   routeableExpired,
-		ManifestVersion:    ps.manifestVersion,
-		ManifestCoreDigest: ps.manifestCoreDigest,
+		PoolID:              poolID,
+		Exists:              true,
+		Members:             members,
+		MinBinaryVersion:    ps.minBinaryVersion,
+		ModelAllowlist:      cloneStringSlice(ps.modelAllowlist),
+		RuntimeAllowlist:    cloneStringSlice(ps.runtimeAllowlist),
+		CreatorAccountID:    ps.creatorAccountID,
+		CreatorOwnedMembers: r.creatorOwnedMembersLocked(ps, members),
+		SettlementMode:      routeablePoolSettlementMode(ps.settlementMode),
+		Routeable:           ps.routeableAt(now),
+		Generation:          r.effectiveGenerationLocked(ps, now),
+		Revision:            r.revision,
+		RouteableUntilUTC:   ps.routeableUntilUTC,
+		RouteableExpired:    routeableExpired,
+		ManifestVersion:     ps.manifestVersion,
+		ManifestCoreDigest:  ps.manifestCoreDigest,
 	}
 }
 
@@ -973,19 +1057,22 @@ func (r *Registry) AuthorizeAndSnapshot(poolID, buyerAccountID string) (Snapshot
 		authorized = false
 	}
 	return Snapshot{
-		PoolID:             poolID,
-		Exists:             true,
-		Members:            members,
-		MinBinaryVersion:   ps.minBinaryVersion,
-		ModelAllowlist:     cloneStringSlice(ps.modelAllowlist),
-		SettlementMode:     routeablePoolSettlementMode(ps.settlementMode),
-		Routeable:          ps.routeableAt(now),
-		Generation:         r.effectiveGenerationLocked(ps, now),
-		Revision:           r.revision,
-		RouteableUntilUTC:  ps.routeableUntilUTC,
-		RouteableExpired:   routeableExpired,
-		ManifestVersion:    ps.manifestVersion,
-		ManifestCoreDigest: ps.manifestCoreDigest,
+		PoolID:              poolID,
+		Exists:              true,
+		Members:             members,
+		MinBinaryVersion:    ps.minBinaryVersion,
+		ModelAllowlist:      cloneStringSlice(ps.modelAllowlist),
+		RuntimeAllowlist:    cloneStringSlice(ps.runtimeAllowlist),
+		CreatorAccountID:    ps.creatorAccountID,
+		CreatorOwnedMembers: r.creatorOwnedMembersLocked(ps, members),
+		SettlementMode:      routeablePoolSettlementMode(ps.settlementMode),
+		Routeable:           ps.routeableAt(now),
+		Generation:          r.effectiveGenerationLocked(ps, now),
+		Revision:            r.revision,
+		RouteableUntilUTC:   ps.routeableUntilUTC,
+		RouteableExpired:    routeableExpired,
+		ManifestVersion:     ps.manifestVersion,
+		ManifestCoreDigest:  ps.manifestCoreDigest,
 	}, authorized
 }
 
@@ -1120,6 +1207,30 @@ func (r *Registry) routeMembersLocked(ps *poolState, now time.Time) (map[string]
 		members[id] = true
 	}
 	return members, delegationExpired
+}
+
+// creatorOwnedMembersLocked returns the route members the creator account
+// owns: never a delegated member, and, when the creator's owned-provider
+// ceiling is configured, only an id inside it (SPEC-042-R004(e)).
+func (r *Registry) creatorOwnedMembersLocked(ps *poolState, members map[string]bool) map[string]bool {
+	owned := make(map[string]bool, len(members))
+	if ps == nil || ps.creatorAccountID == "" {
+		return owned
+	}
+	_, ownedCeilingConfigured := r.providerCeilings[ps.creatorAccountID]
+	for id, ok := range members {
+		if !ok {
+			continue
+		}
+		if _, delegated := ps.delegatedMembers[id]; delegated {
+			continue
+		}
+		if ownedCeilingConfigured && !r.providerAllowedByCreatorCeilingLocked(ps.creatorAccountID, id) {
+			continue
+		}
+		owned[id] = true
+	}
+	return owned
 }
 
 func (r *Registry) providerMembershipAllowedByCreatorCeilingLocked(creatorID, providerID string) bool {

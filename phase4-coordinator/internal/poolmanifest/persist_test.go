@@ -305,3 +305,88 @@ func TestReconstructRejectsTamperedAuthorityLog(t *testing.T) {
 		t.Fatalf("tampered authority log should fail reconstruction, got %v", err)
 	}
 }
+
+// signPolicy2of3Any signs a core of either encoding with k1,k2.
+func signPolicy2of3Any(t *testing.T, core PolicyCore) SignedPolicyCore {
+	t.Helper()
+	_, p1 := seedKey(1)
+	_, p2 := seedKey(2)
+	msg := must(core.SigningMessage())
+	return SignedPolicyCore{Core: core, Signatures: []Signature{
+		{KeyID: "k1", Sig: ed25519.Sign(p1, msg)},
+		{KeyID: "k2", Sig: ed25519.Sign(p2, msg)},
+	}}
+}
+
+// mixedHistorySnapshot is a v1 genesis loosened by a v2 core that allowlists
+// llamacpp_loopback (new manifest_version, prev = v1 digest; SPEC-042-R001
+// migration fixture).
+func mixedHistorySnapshot(t *testing.T) ManifestSnapshot {
+	t.Helper()
+	root, entries, _ := genesisAuthLog(t)
+	v1 := policyCore(t, 1, GenesisPrevHash(), 1000, 2000)
+	d1 := must(v1.ManifestCoreDigest())
+	v2 := policyCore(t, 2, d1, 2000, 3000)
+	v2.Encoding = PolicyCoreEncodingV2
+	v2.RuntimeAllowlist = []string{RuntimeSourceLlamacppLoopback}
+	return ManifestSnapshot{
+		IdentityCore:  sampleIdentity(),
+		RootIssuerKey: root,
+		AuthorityLog:  entries,
+		Policies: []AcceptedPolicyRecord{
+			{SignedCore: signPolicy2of3Any(t, v1), AcceptedAtUnix: 1500},
+			{SignedCore: signPolicy2of3Any(t, v2), AcceptedAtUnix: 2500},
+		},
+	}
+}
+
+func TestManifestSnapshotV2MigrationFixture(t *testing.T) {
+	snap := mixedHistorySnapshot(t)
+	b := must(snap.CanonicalBytes())
+	if string(b[:len(manifestSnapshotTagV2)]) != manifestSnapshotTagV2 {
+		t.Fatal("a snapshot carrying a v2 core must use the v2 snapshot tag")
+	}
+	got, err := ParseManifestSnapshot(b)
+	if err != nil {
+		t.Fatalf("ParseManifestSnapshot: %v", err)
+	}
+	if !reflect.DeepEqual(got, snap) {
+		t.Fatalf("v2 round-trip mismatch:\n got=%#v\nwant=%#v", got, snap)
+	}
+	rec, err := ReconstructPool(got)
+	if err != nil {
+		t.Fatalf("ReconstructPool over a v1->v2 history: %v", err)
+	}
+	active, err := rec.PolicyHistory.ActivePolicy(2500)
+	if err != nil || !active.IsV2() || !active.AllowsRuntimeSource(RuntimeSourceLlamacppLoopback) {
+		t.Fatalf("active v2 policy=%+v err=%v", active, err)
+	}
+	prior, err := rec.PolicyHistory.ActivePolicy(1500)
+	if err != nil || prior.IsV2() || prior.AllowsRuntimeSource(RuntimeSourceLlamacppLoopback) {
+		t.Fatalf("v1 genesis must stay native-only: %+v err=%v", prior, err)
+	}
+	// The v1-only fixture still uses the v1 tag and its golden digest (above).
+	if b1 := must(fixtureSnapshot(t).CanonicalBytes()); string(b1[:len(manifestSnapshotTag)]) != manifestSnapshotTag {
+		t.Fatal("a v1-only snapshot must keep the v1 snapshot tag")
+	}
+	// A v2 core signed under the v1 tag fails reconstruction (timeless re-verify).
+	bad := mixedHistorySnapshot(t)
+	_, p1 := seedKey(1)
+	_, p2 := seedKey(2)
+	v1msg := must(PolicyCoreSigningMessage(must(bad.Policies[1].SignedCore.Core.ManifestCoreDigest())))
+	bad.Policies[1].SignedCore.Signatures = []Signature{
+		{KeyID: "k1", Sig: ed25519.Sign(p1, v1msg)},
+		{KeyID: "k2", Sig: ed25519.Sign(p2, v1msg)},
+	}
+	if _, err := ReconstructPool(bad); err == nil {
+		t.Fatal("v2 core with v1-tag signatures reconstructed")
+	}
+	// An unknown per-core encoding byte is rejected.
+	tampered := mixedHistorySnapshot(t)
+	tampered.Policies[0].SignedCore.Core.Encoding = 9
+	// The snapshot codec does not validate cores on encode; the parser must.
+	raw := must(tampered.CanonicalBytes())
+	if _, err := ParseManifestSnapshot(raw); !errors.Is(err, errPolicyEncoding) {
+		t.Fatalf("unknown encoding byte: err=%v", err)
+	}
+}

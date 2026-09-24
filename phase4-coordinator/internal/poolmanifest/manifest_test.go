@@ -2,6 +2,7 @@ package poolmanifest
 
 import (
 	"encoding/hex"
+	"errors"
 	"regexp"
 	"testing"
 )
@@ -170,5 +171,142 @@ func TestDigestSensitivity(t *testing.T) {
 		if got := must(p.ManifestCoreDigest()); string(got) == string(base) {
 			t.Errorf("mutation %q did not change manifest_core_digest", name)
 		}
+	}
+}
+
+// --- SPEC-042-R001 policy-core/v2 (0.0.32, #1690) golden vectors ---
+
+// samplePolicyV2 is the sample core re-encoded as v2 with the given allowlist.
+func samplePolicyV2(poolID string, allowlist ...string) PolicyCore {
+	pc := samplePolicy(poolID)
+	pc.Encoding = PolicyCoreEncodingV2
+	pc.RuntimeAllowlist = allowlist
+	return pc
+}
+
+// GOLDEN VECTORS — freeze the v2 grammar next to the unchanged v1 vectors above.
+const (
+	goldenPolicyCoreV2EmptyHex        = "6d616370726f76696465722f737065633034322f706f6c6963792d636f72652f763200000016696a556e632d5a51662d4c4a6552766b68692d3069510000000000000001000000200000000000000000000000000000000000000000000000000000000000000000000000000000000100000002000000076d6f64656c2d61000000076d6f64656c2d6200000005312e382e300000000b73656c665f7369676e65640100000007656e666f7263650000000000000000000000156465636c617265645f6e6f745f6578656375746564000000057265742d310000000000000001000000046e6f6e65000000000000000000000000000000000000000003e800000000000007d00000000000000000"
+	goldenPolicyCoreV2EmptyDigest     = "7c243fd4d761b44f9378743dba10c65e0fa8c99c280d1bb224a90e5b741919f1"
+	goldenPolicyCoreV2AllowlistHex    = "6d616370726f76696465722f737065633034322f706f6c6963792d636f72652f763200000016696a556e632d5a51662d4c4a6552766b68692d3069510000000000000001000000200000000000000000000000000000000000000000000000000000000000000000000000000000000100000002000000076d6f64656c2d61000000076d6f64656c2d6200000005312e382e300000000b73656c665f7369676e65640100000007656e666f7263650000000000000000000000156465636c617265645f6e6f745f6578656375746564000000057265742d310000000000000001000000046e6f6e65000000000000000000000000000000000000000003e800000000000007d000000002000000116c6c616d616370705f6c6f6f706261636b0000000f6f6c6c616d615f6c6f6f706261636b00000000"
+	goldenPolicyCoreV2AllowlistDigest = "c53cd675a6203ed47ad34e407a897dcead849d1a456a02cc644fb881ddc87fa9"
+	goldenPolicyCoreV2SigMsgHex       = "6d616370726f76696465722f737065633034322f706f6c6963792d636f72652d7369672f7632c53cd675a6203ed47ad34e407a897dcead849d1a456a02cc644fb881ddc87fa9"
+)
+
+func TestPolicyCoreV2GoldenVectors(t *testing.T) {
+	pid, _ := sampleIdentity().PoolID()
+	empty := samplePolicyV2(pid)
+	if got := hex.EncodeToString(must(empty.CanonicalBytes())); got != goldenPolicyCoreV2EmptyHex {
+		t.Fatalf("v2 empty-allowlist bytes drifted:\n got=%s\nwant=%s", got, goldenPolicyCoreV2EmptyHex)
+	}
+	emptyDigest := hex.EncodeToString(must(empty.ManifestCoreDigest()))
+	if emptyDigest != goldenPolicyCoreV2EmptyDigest {
+		t.Fatalf("v2 empty-allowlist digest=%s, want %s", emptyDigest, goldenPolicyCoreV2EmptyDigest)
+	}
+	// Same fields, different domain tag: the v2 digest differs from v1.
+	if emptyDigest == goldenManifestDigest {
+		t.Fatal("v2 core with an empty allowlist digests like the v1 core")
+	}
+	// The v1 golden vector is unchanged by the v2 encoder.
+	if got := hex.EncodeToString(must(samplePolicy(pid).CanonicalBytes())); got != goldenPolicyCoreHex {
+		t.Fatal("v1 bytes changed")
+	}
+	allow := samplePolicyV2(pid, RuntimeSourceLlamacppLoopback, RuntimeSourceOllamaLoopback)
+	if got := hex.EncodeToString(must(allow.CanonicalBytes())); got != goldenPolicyCoreV2AllowlistHex {
+		t.Fatalf("v2 allowlist bytes drifted:\n got=%s\nwant=%s", got, goldenPolicyCoreV2AllowlistHex)
+	}
+	allowDigest := must(allow.ManifestCoreDigest())
+	if got := hex.EncodeToString(allowDigest); got != goldenPolicyCoreV2AllowlistDigest {
+		t.Fatalf("v2 allowlist digest=%s, want %s", got, goldenPolicyCoreV2AllowlistDigest)
+	}
+	msg := must(allow.SigningMessage())
+	if got := hex.EncodeToString(msg); got != goldenPolicyCoreV2SigMsgHex {
+		t.Fatalf("v2 signing message drifted:\n got=%s\nwant=%s", got, goldenPolicyCoreV2SigMsgHex)
+	}
+	if got := hex.EncodeToString(must(PolicyCoreSigningMessageV2(allowDigest))); got != goldenPolicyCoreV2SigMsgHex {
+		t.Fatal("PolicyCoreSigningMessageV2 disagrees with SigningMessage")
+	}
+	if !allow.AllowsRuntimeSource(RuntimeSourceLlamacppLoopback) || allow.AllowsRuntimeSource("mlx_cache") {
+		t.Fatal("AllowsRuntimeSource wrong for the v2 allowlist vector")
+	}
+	if empty.AllowsRuntimeSource(RuntimeSourceLlamacppLoopback) || samplePolicy(pid).AllowsRuntimeSource(RuntimeSourceLlamacppLoopback) {
+		t.Fatal("v1 core or empty v2 allowlist must mean native MLX only")
+	}
+}
+
+func TestPolicyCoreV2RejectionVectors(t *testing.T) {
+	pid, _ := sampleIdentity().PoolID()
+	cases := map[string]struct {
+		mut  func(*PolicyCore)
+		want error
+	}{
+		"allowlist unsorted": {func(p *PolicyCore) {
+			p.RuntimeAllowlist = []string{RuntimeSourceOllamaLoopback, RuntimeSourceLlamacppLoopback}
+		}, errRuntimeAllowlistOrder},
+		"allowlist duplicated": {func(p *PolicyCore) {
+			p.RuntimeAllowlist = []string{RuntimeSourceLlamacppLoopback, RuntimeSourceLlamacppLoopback}
+		}, errRuntimeAllowlistOrder},
+		"allowlist mlx_cache": {func(p *PolicyCore) { p.RuntimeAllowlist = []string{"mlx_cache"} }, errRuntimeAllowlistValue},
+		"allowlist lmstudio":  {func(p *PolicyCore) { p.RuntimeAllowlist = []string{"lmstudio_loopback"} }, errRuntimeAllowlistValue},
+		"allowlist openai":    {func(p *PolicyCore) { p.RuntimeAllowlist = []string{"openai_compatible_loopback"} }, errRuntimeAllowlistValue},
+		"allowlist unknown":   {func(p *PolicyCore) { p.RuntimeAllowlist = []string{"vllm"} }, errRuntimeAllowlistValue},
+		"allowlist under observe": {func(p *PolicyCore) {
+			p.RuntimeAllowlist = []string{RuntimeSourceLlamacppLoopback}
+			p.SettlementMode = "observe"
+		}, errRuntimeAllowlistObserve},
+		"unknown extension": {func(p *PolicyCore) {
+			p.Extensions = []PolicyExtension{{ID: "relay_blind/v1", Body: []byte{1}}}
+		}, errExtensionUnknown},
+		"extension grammar": {func(p *PolicyCore) {
+			p.Extensions = []PolicyExtension{{ID: "Relay/v1"}}
+		}, errExtensionGrammar},
+		"extension version zero": {func(p *PolicyCore) {
+			p.Extensions = []PolicyExtension{{ID: "relay_blind/v0"}}
+		}, errExtensionGrammar},
+		"extensions unsorted": {func(p *PolicyCore) {
+			p.Extensions = []PolicyExtension{{ID: "b_ext/v1"}, {ID: "a_ext/v1"}}
+		}, errExtensionOrder},
+		"extensions duplicated": {func(p *PolicyCore) {
+			p.Extensions = []PolicyExtension{{ID: "a_ext/v1"}, {ID: "a_ext/v1"}}
+		}, errExtensionOrder},
+		"unknown encoding": {func(p *PolicyCore) { p.Encoding = 3 }, errPolicyEncoding},
+	}
+	for name, tc := range cases {
+		p := samplePolicyV2(pid)
+		tc.mut(&p)
+		if err := p.ValidateAcceptance(); !errors.Is(err, tc.want) {
+			t.Errorf("%s: err=%v, want %v", name, err, tc.want)
+		}
+	}
+	// Grammar failures have no canonical preimage at all.
+	for _, name := range []string{"allowlist unsorted", "allowlist duplicated", "extension grammar", "extensions unsorted", "extensions duplicated", "unknown encoding"} {
+		p := samplePolicyV2(pid)
+		cases[name].mut(&p)
+		if _, err := p.CanonicalBytes(); !errors.Is(err, cases[name].want) {
+			t.Errorf("%s: CanonicalBytes err=%v, want %v", name, err, cases[name].want)
+		}
+	}
+	// A v1 core can never carry the v2 fields.
+	v1 := samplePolicy(pid)
+	v1.RuntimeAllowlist = []string{RuntimeSourceLlamacppLoopback}
+	if _, err := v1.CanonicalBytes(); !errors.Is(err, errV1CarriesV2Fields) {
+		t.Fatalf("v1 core with a runtime_allowlist: err=%v", err)
+	}
+	v1 = samplePolicy(pid)
+	v1.Extensions = []PolicyExtension{{ID: "a_ext/v1"}}
+	if _, err := v1.CanonicalBytes(); !errors.Is(err, errV1CarriesV2Fields) {
+		t.Fatalf("v1 core with extensions: err=%v", err)
+	}
+	// An explicit v1 encoding is byte-identical to the zero value.
+	explicit := samplePolicy(pid)
+	explicit.Encoding = PolicyCoreEncodingV1
+	if hex.EncodeToString(must(explicit.CanonicalBytes())) != goldenPolicyCoreHex {
+		t.Fatal("explicit v1 encoding changed the v1 bytes")
+	}
+	// Every v2 field change moves the digest.
+	base := must(samplePolicyV2(pid).ManifestCoreDigest())
+	loosened := must(samplePolicyV2(pid, RuntimeSourceLlamacppLoopback).ManifestCoreDigest())
+	if string(base) == string(loosened) {
+		t.Fatal("adding a runtime to the allowlist did not change manifest_core_digest")
 	}
 }

@@ -287,6 +287,11 @@ func validateCandidatePolicyCoreClaims(core poolmanifest.PolicyCore) error {
 	if !validPoolSettlementMode(core.SettlementMode) {
 		return errManifestSnapshot
 	}
+	// SPEC-042-R001 0.0.32: the v2 acceptance rules (closed runtime
+	// vocabulary, enforce for a non-empty allowlist, no unknown extension).
+	if err := core.ValidateAcceptance(); err != nil {
+		return errManifestSnapshot
+	}
 	if err := ValidatePromiseClaimsText(core.ModelAllowlist...); err != nil {
 		return err
 	}
