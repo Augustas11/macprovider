@@ -847,7 +847,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         snapshotDirectory: URL?,
         catalogModelIDAlias: String? = nil,
         httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
-        deadline: Date? = nil
+        deadline: Date = MLXLMLoopbackServeModel.snapshotHashingDeadline()
     ) async throws -> OpenAICompatibleLoopbackRuntime {
         guard let validatedOrigin = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
             throw OpenAICompatibleLoopbackRuntimeError.invalidLoopbackOrigin(origin)
@@ -868,6 +868,10 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         let snapshot: MLXSnapshotIdentity
         do {
             snapshot = try MLXSnapshotIdentity.compute(directory: snapshotDirectory, deadline: deadline)
+        } catch AutotuneContextCalibrationError.deadlineExceeded {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(
+                "MLX snapshot hashing exceeded the \(Int(BYOMModelAdmissionRuntime.artifactHashBudgetSeconds)) s artifact hashing budget; refusing to serve without an identity (SPEC-010-R009(a))"
+            )
         } catch {
             throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(String(describing: error))
         }

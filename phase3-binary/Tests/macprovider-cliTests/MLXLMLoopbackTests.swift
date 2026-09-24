@@ -368,3 +368,49 @@ final class MLXLMLoopbackAuditR2Tests: XCTestCase {
         XCTAssertFalse(identity.isCurrent(), "one file past the hashed set stops the walk and fails closed")
     }
 }
+
+// #1690 M8 audit R3: serve-time snapshot hashing is bounded by the BYOM
+// artifact hashing budget and fails startup closed on overrun.
+final class MLXLMLoopbackAuditR3Tests: XCTestCase {
+    func testServeTimeHashingUsesTheArtifactBudgetAndFailsClosedOnOverrun() async throws {
+        let now = Date()
+        XCTAssertEqual(
+            MLXLMLoopbackServeModel.snapshotHashingDeadline(now: now),
+            now.addingTimeInterval(BYOMModelAdmissionRuntime.artifactHashBudgetSeconds)
+        )
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("mlxlm-r3-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        try Data(repeating: 0x42, count: 4096).write(to: root.appendingPathComponent("model.safetensors"))
+        let snapshot = root.resolvingSymlinksInPath().standardizedFileURL
+        let client = MLXLMRecordingClientR3(listed: [snapshot.path])
+        do {
+            _ = try await OpenAICompatibleLoopbackRuntime.mlxLM(
+                servedModelRef: "mlxlm:" + snapshot.lastPathComponent, origin: "http://127.0.0.1:9191",
+                snapshotDirectory: snapshot, httpClient: client, deadline: Date().addingTimeInterval(-1)
+            )
+            XCTFail("an expired serve-time hashing deadline must fail startup closed")
+        } catch let OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(reason) {
+            XCTAssertTrue(reason.contains("artifact hashing budget"), reason)
+        }
+        // The default deadline serves a normal snapshot.
+        let runtime = try await OpenAICompatibleLoopbackRuntime.mlxLM(
+            servedModelRef: "mlxlm:" + snapshot.lastPathComponent, origin: "http://127.0.0.1:9191",
+            snapshotDirectory: snapshot, httpClient: client
+        )
+        let hash = await runtime.loadedModelHash
+        XCTAssertNotNil(hash)
+    }
+}
+
+private final class MLXLMRecordingClientR3: BYOMDiscoveryHTTPClient, @unchecked Sendable {
+    let listed: [String]
+    init(listed: [String]) { self.listed = listed }
+    func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        let body: [String: Any] = ["object": "list", "data": listed.map { ["id": $0, "object": "model"] }]
+        return BYOMHTTPResponse(statusCode: 200, headers: [], body: try JSONSerialization.data(withJSONObject: body))
+    }
+    func post(_ url: URL, jsonBody: Data, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        BYOMHTTPResponse(statusCode: 500, headers: [], body: Data())
+    }
+}

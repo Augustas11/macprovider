@@ -24,6 +24,13 @@ enum MLXLMLoopbackServeModel {
     static let originEnvironmentKey = "MACPROVIDER_MLXLM_ORIGIN"
     static let maxModelsBodyBytes = 4 * 1024 * 1024
 
+    /// The serve-time snapshot hashing deadline: the same budget the BYOM
+    /// offer path gives artifact hashing, so startup fails closed instead of
+    /// blocking on a large or slow snapshot.
+    static func snapshotHashingDeadline(now: Date = Date()) -> Date {
+        now.addingTimeInterval(BYOMModelAdmissionRuntime.artifactHashBudgetSeconds)
+    }
+
     static func isMLXLMLoopbackRef(_ ref: String?) -> Bool {
         guard let ref else { return false }
         return ref.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix(servedRefPrefix)
