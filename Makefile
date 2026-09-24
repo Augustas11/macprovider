@@ -123,6 +123,7 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_pricing_receipt
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_catalog_propose
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_fetch_health
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_hash_sweep
 	bash scripts/test-acceptance-candidate-metadata.sh
 	bash scripts/test-acceptance-promotion.sh
 	bash scripts/test-release-toolchain.sh

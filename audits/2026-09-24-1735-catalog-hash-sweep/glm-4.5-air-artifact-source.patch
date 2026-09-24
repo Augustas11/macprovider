@@ -1,0 +1,13 @@
+diff --git a/phase3-binary/catalog/autotune/autotune-artifacts-source.json b/phase3-binary/catalog/autotune/autotune-artifacts-source.json
+index b98ba80..0f679e1 100644
+--- a/phase3-binary/catalog/autotune/autotune-artifacts-source.json
++++ b/phase3-binary/catalog/autotune/autotune-artifacts-source.json
+@@ -406,7 +406,7 @@
+           "allowed_runtime_sources": [
+             "mlx_cache"
+           ],
+-          "hash": "350c018e8a3397a753bcb7c22c839a5c5a24041e6dee014bb42c2d766d6db57d",
++          "hash": "7fbf8e5005fbdadbf1d345a04b7d283ad20aec959ee001bc4b0dc902ea7f11ed",
+           "hash_algorithm": "macprovider.snapshot-manifest.v1",
+           "min_ram_gb": 80,
+           "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",
