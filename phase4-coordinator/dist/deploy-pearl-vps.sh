@@ -528,6 +528,7 @@ _parse_catalog_verifier_bundle() {
 }
 
 PINNED_DEPLOY_INPUT_DIR=""
+PINNED_REPOSITORY_DIR=""
 PINNED_DIST_DIR="$DIST_DIR"
 PINNED_STATIC_FEEDS_DIR="$DIST_DIR/../../phase3-binary/dist/static"
 PINNED_AUTOTUNE_DIR="$DIST_DIR/../../phase3-binary/catalog/autotune"
@@ -544,18 +545,23 @@ if [ "$DRY_RUN_LOCAL" != "1" ]; then
   }
   CATALOG_VERIFIER_BUNDLE="$(printf '%s\n' "$CATALOG_VERIFIER_BUNDLE_TEXT" | _parse_catalog_verifier_bundle)" || exit 2
   # shellcheck disable=SC2086 # validated scripts/<name> entries, no IFS/glob chars
-  git -C "$REPO_ROOT" archive --format=tar "$COORDINATOR_RELEASE_COMMIT" -- \
+  GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" archive --format=tar "$COORDINATOR_RELEASE_COMMIT" -- \
     phase4-coordinator/dist \
     phase3-binary/dist/static \
     phase3-binary/catalog/autotune \
     scripts/catalog-verifier-bundle.txt \
     $CATALOG_VERIFIER_BUNDLE \
     | tar -xf - -C "$PINNED_DEPLOY_INPUT_DIR"
+  PINNED_REPOSITORY_DIR="$PINNED_DEPLOY_INPUT_DIR/repository"
+  install -d -m 0700 "$PINNED_REPOSITORY_DIR"
+  GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" archive --format=tar "$COORDINATOR_RELEASE_COMMIT" \
+    | tar -xf - -C "$PINNED_REPOSITORY_DIR"
   PINNED_DIST_DIR="$PINNED_DEPLOY_INPUT_DIR/phase4-coordinator/dist"
   PINNED_STATIC_FEEDS_DIR="$PINNED_DEPLOY_INPUT_DIR/phase3-binary/dist/static"
   PINNED_AUTOTUNE_DIR="$PINNED_DEPLOY_INPUT_DIR/phase3-binary/catalog/autotune"
   PINNED_SCRIPTS_DIR="$PINNED_DEPLOY_INPUT_DIR/scripts"
 else
+  PINNED_REPOSITORY_DIR="$REPO_ROOT"
   CATALOG_VERIFIER_BUNDLE="$(_parse_catalog_verifier_bundle < "$PINNED_SCRIPTS_DIR/catalog-verifier-bundle.txt")" || exit 2
 fi
 
@@ -668,7 +674,23 @@ AUTOTUNE_RELEASE_VERIFY="$PINNED_SCRIPTS_DIR/catalog-release.py"
 AUTOTUNE_TIER2_VERIFIER="$PINNED_SCRIPTS_DIR/sign-catalog.go"
 CATALOG_SOURCE="${CATALOG_SOURCE:-$AUTOTUNE_TIER2_JSON}"
 
-python3 "$AUTOTUNE_RELEASE_VERIFY" verify
+# Repository-level verification reads the complete source tree and Git history.
+# Execute immutable bytes archived from the signed release commit, while giving
+# the verifier read-only object access for the ledger comparison against that
+# commit's direct parent. Isolated Python plus the pinned base ref prevent the
+# caller's worktree, import path, or CATALOG_RELEASE_BASE_REF from weakening the
+# gate. The smaller verifier bundle remains authoritative for staged and remote
+# verify-directory checks.
+if [ "$DRY_RUN_LOCAL" = "1" ]; then
+  python3 -I "$PINNED_REPOSITORY_DIR/scripts/catalog-release.py" verify
+else
+  PINNED_GIT_DIR="$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir)"
+  env -u OPENSSL_BIN -u MACPROVIDER_INTAKE_AUDIT_DIR \
+    GIT_DIR="$PINNED_GIT_DIR" \
+    GIT_NO_REPLACE_OBJECTS=1 \
+    CATALOG_RELEASE_BASE_REF="$COORDINATOR_RELEASE_COMMIT^" \
+    python3 -I "$PINNED_REPOSITORY_DIR/scripts/catalog-release.py" verify
+fi
 # SPEC-023 §3.7.8 Stage A: release.json decides whether the artifact feed and
 # its sidecar are members of the immutable release envelope. verify-directory
 # rejects a five-feed release.json beside nine files (and nine-file bytes

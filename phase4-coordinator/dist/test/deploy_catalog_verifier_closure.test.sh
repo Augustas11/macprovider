@@ -67,6 +67,26 @@ for entry in $bundle; do
     && fail "install-pearl-updater.sh hard-codes $entry; derive it from the manifest"
 done
 
+# Full repository verification needs generated source files and Git history.
+# Its source tree must come from an immutable archive of the signed commit, not
+# the mutable operator checkout or the intentionally bounded verifier bundle.
+grep -qF 'PINNED_REPOSITORY_DIR="$PINNED_DEPLOY_INPUT_DIR/repository"' "$DEPLOY" \
+  || fail "deploy must reserve a separate pinned repository archive"
+grep -qF 'GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" archive --format=tar "$COORDINATOR_RELEASE_COMMIT" \' "$DEPLOY" \
+  || fail "repository catalog verify must archive the signed commit with replace refs disabled"
+grep -qF 'CATALOG_RELEASE_BASE_REF="$COORDINATOR_RELEASE_COMMIT^" \' "$DEPLOY" \
+  || fail "repository catalog verify must pin ledger evolution to the signed commit parent"
+[ "$(grep -cF 'python3 -I "$PINNED_REPOSITORY_DIR/scripts/catalog-release.py" verify' "$DEPLOY")" = 2 ] \
+  || fail "dry-run and production repository verification must both use isolated Python"
+if grep -qF 'python3 "$REPO_ROOT/scripts/catalog-release.py" verify' "$DEPLOY" ||
+   grep -qxF 'python3 "$AUTOTUNE_RELEASE_VERIFY" verify' "$DEPLOY"; then
+  fail "repository catalog verify must not execute mutable checkout or history-free bundle bytes"
+fi
+verify_line="$(grep -nF 'python3 -I "$PINNED_REPOSITORY_DIR/scripts/catalog-release.py" verify' "$DEPLOY" | tail -n1 | cut -d: -f1 || true)"
+archive_line="$(grep -nF 'PINNED_REPOSITORY_DIR="$PINNED_DEPLOY_INPUT_DIR/repository"' "$DEPLOY" | cut -d: -f1 || true)"
+[ -n "$archive_line" ] && [ -n "$verify_line" ] && [ "$archive_line" -lt "$verify_line" ] \
+  || fail "signed repository archive must be materialized before repository verification"
+
 # Pre-mutation remote verify-directory over the staged release file set.
 preflight='python3 -I $DEPLOY_TMP/scripts/catalog-release.py verify-directory --directory \$_preflight --tier2-public-key-file $DEPLOY_TMP/tier2-catalog.pub'
 preflight_line="$(grep -nF "$preflight" "$DEPLOY" | cut -d: -f1 || true)"
@@ -138,6 +158,23 @@ elif grep -q 'a Go toolchain is required' "$tmp/out"; then
 else
   cat "$tmp/out" >&2
   fail "verify-directory failed from an isolated copy of catalog-verifier-bundle.txt"
+fi
+
+# The production repository gate must remain valid when the caller attempts to
+# poison Python imports or neutralize ledger evolution through ambient state.
+mkdir "$tmp/pinned-repository" "$tmp/python-poison"
+printf '%s\n' 'raise SystemExit("poisoned json import")' > "$tmp/python-poison/json.py"
+GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" archive --format=tar HEAD \
+  | tar -xf - -C "$tmp/pinned-repository"
+pinned_git_dir="$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir)"
+if ! OPENSSL_BIN=/does/not/exist CATALOG_RELEASE_BASE_REF=HEAD PYTHONPATH="$tmp/python-poison" \
+  env -u OPENSSL_BIN -u MACPROVIDER_INTAKE_AUDIT_DIR \
+    GIT_DIR="$pinned_git_dir" \
+    GIT_NO_REPLACE_OBJECTS=1 \
+    CATALOG_RELEASE_BASE_REF="HEAD^" \
+    python3 -I "$tmp/pinned-repository/scripts/catalog-release.py" verify > "$tmp/repository-verify.out" 2>&1; then
+  cat "$tmp/repository-verify.out" >&2
+  fail "immutable repository verification failed under hostile ambient overrides"
 fi
 
 echo "PASS: catalog verifier bundle is manifest-driven, dependency-closed, and preflighted"
