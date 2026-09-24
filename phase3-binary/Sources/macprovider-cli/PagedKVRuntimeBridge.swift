@@ -1012,6 +1012,14 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
     }
 
     func syncRowsFromBatch() {
+        // Only the lockstep-concat path (equal-length rows) writes KV to the
+        // batch tensors alone; it is the one that sets `batchedOffset`. Ragged
+        // rows take the per-row `update` path, which already wrote each row's
+        // own cache and left the batch tensors padded to the longest row.
+        // Copying those padded tensors back would give every shorter row the
+        // batch-max length and fail the next window with
+        // `paged_kv_block_table_mismatch` (Studio, 2+ concurrent rows).
+        guard batchedOffset != nil else { return }
         guard let keys, let values,
               keys.ndim == 4,
               values.ndim == 4,
@@ -1200,7 +1208,14 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         }
         keys = Self.concatenatePadded(keyArrays, fallback: firstKey)
         values = Self.concatenatePadded(valueArrays, fallback: firstValue)
-        batchedOffset = rowCaches.map(\.offset).min()
+        // `batchedOffset` asserts every row is at the same length (the
+        // lockstep invariant). Setting it to the minimum for ragged rows made
+        // the first step of every rebuilt batch treat all rows as that length:
+        // `makeMask` returned no mask (shorter rows attended padding) and
+        // `ropeOffset` gave longer rows the wrong positions. Studio: ragged
+        // concurrent greedy rows diverged from serial or emitted EOS first.
+        let offsets = rowCaches.map(\.offset)
+        batchedOffset = Set(offsets).count == 1 ? offsets.first : nil
     }
 
     private static func concatenatePadded(_ arrays: [MLXArray], fallback: MLXArray) -> MLXArray {
