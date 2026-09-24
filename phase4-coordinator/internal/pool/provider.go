@@ -586,6 +586,17 @@ func (p Provider) RoutingEligible() bool {
 	return (p.State == StateReady || p.State == StateBusy) && p.SlotsFree > 0 && !p.capacitySafetyHold
 }
 
+// PoolExternalRuntimeRoutingEligible is RoutingEligible without the SPEC-032
+// FR-HG8 admission_sandboxed term. It is the separate pool-scoped predicate of
+// SPEC-042-R005 site (2) / SPEC-032-R004: only a SPEC-042 pool route that has
+// already established the SPEC-042-R004 runtime-allowlist predicate may use
+// it, and the sandbox flag itself stays set. RoutingEligible keeps its global
+// answer for every other caller.
+func (p Provider) PoolExternalRuntimeRoutingEligible() bool {
+	p.AdmissionSandboxed = false
+	return p.RoutingEligible()
+}
+
 // ServingCapable reports whether an admitted provider is still part of the
 // network's buyer-serving capacity. Unlike RoutingEligible it deliberately
 // ignores transient free-slot availability: a busy provider remains serving

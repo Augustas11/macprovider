@@ -65,6 +65,12 @@ type forwardState struct {
 	// routing-time labels of the manifest that authorized this route.
 	poolManifestVersion    uint64
 	poolManifestCoreDigest string
+	// SPEC-042-R004 external-runtime predicate inputs, captured from the same
+	// consistent snapshot: the signed runtime allowlist, the pool creator's
+	// account, and the creator-owned members.
+	poolRuntimeAllowlist    []string
+	poolCreatorAccountID    string
+	poolCreatorOwnedMembers map[string]bool
 
 	// routingDone is the wall-clock at which the current provider was
 	// selected. Updated on every advanceToNextProvider so the

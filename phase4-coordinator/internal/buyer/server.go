@@ -6782,6 +6782,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	var poolMin string
 	var poolModelAllowlist []string
 	var poolRequiresSettlementEnforce bool
+	var poolRuntimeAllowlist []string
+	var poolCreatorAccountID string
+	var poolCreatorOwned map[string]bool
 	poolActive := s.trustPools != nil && req.poolID != ""
 	if poolActive {
 		snap := req.poolSnapshot
@@ -6810,6 +6813,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		poolGen = snap.Generation
 		poolMin = snap.MinBinaryVersion
 		poolModelAllowlist = snap.ModelAllowlist
+		poolRuntimeAllowlist = snap.RuntimeAllowlist
+		poolCreatorAccountID = snap.CreatorAccountID
+		poolCreatorOwned = snap.CreatorOwnedMembers
 		if state != nil {
 			state.poolID = req.poolID
 			state.poolMembers = snap.Members
@@ -6819,6 +6825,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			state.poolRequiresSettlementEnforce = poolRequiresSettlementEnforce
 			state.poolManifestVersion = snap.ManifestVersion
 			state.poolManifestCoreDigest = snap.ManifestCoreDigest
+			state.poolRuntimeAllowlist = append([]string(nil), snap.RuntimeAllowlist...)
+			state.poolCreatorAccountID = snap.CreatorAccountID
+			state.poolCreatorOwnedMembers = snap.CreatorOwnedMembers
 			state.poolGenSet = true
 		}
 	}
@@ -6916,6 +6925,14 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		checker.poolMinBinaryVersion = poolMin
 		checker.poolModelAllowlist = poolModelAllowlist
 		checker.settlementEnforce = checker.settlementEnforce || poolRequiresSettlementEnforce
+		checker.poolView = poolRouteView{
+			poolID:           req.poolID,
+			members:          poolMembers,
+			runtimeAllowlist: poolRuntimeAllowlist,
+			creatorAccountID: poolCreatorAccountID,
+			creatorOwned:     poolCreatorOwned,
+		}
+		checker.routeAdmissionCtx = withPoolRouteView(admissionCtx, checker.poolView)
 	}
 	result := s.eligibleCandidates(providers, exSet, checker)
 	candidates := result.Eligible
@@ -7852,7 +7869,8 @@ func (s *Server) validatePinnedProviderForRequestWithState(p pool.Provider, mode
 	if !s.providerMatchesRequest(p, model, class) {
 		return pool.Provider{}, &routeError{status: http.StatusNotFound, code: "model_not_found", message: "Pinned provider serves different model"}
 	}
-	byomEligibility := s.byomDefaultPaidRoutingEligibilityWithContext(admissionCtx, p)
+	poolView := state.poolRouteView()
+	byomEligibility := s.byomPaidRoutingEligibilityForRoute(admissionCtx, p, poolView)
 	if !byomEligibility.eligible {
 		if byomEligibility.requestCanceled {
 			return pool.Provider{}, requestCanceledRouteError()
@@ -7889,7 +7907,7 @@ func (s *Server) validatePinnedProviderForRequestWithState(p pool.Provider, mode
 	if p.MaxContextTokens < estimatedTokens {
 		return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds pinned provider context capacity"}
 	}
-	if !p.RoutingEligible() {
+	if !routingEligibleForRoute(p, poolView) {
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 	}
 	if s.slotQueue != nil && s.slotQueue.blocksProvider(p.ProviderID, p.SlotsFree) {
@@ -8100,7 +8118,7 @@ func (s *Server) pollQueuedProviderWithContext(ctx context.Context, waiter *slot
 			return pool.Provider{}, queuedProviderTerminal
 		}
 		admissionCtx, admissionCancel := newRouteSnapshotDispatchContext(ctx)
-		byomEligibility := s.byomDefaultPaidRoutingEligibilityWithContext(admissionCtx, provider)
+		byomEligibility := s.byomPaidRoutingEligibilityForRoute(admissionCtx, provider, state.poolRouteView())
 		admissionCancel()
 		if byomEligibility.requestCanceled {
 			return pool.Provider{}, queuedProviderRequestCanceled
@@ -8478,6 +8496,9 @@ type eligibilityCtx struct {
 	// poolModelAllowlist is the selected pool's manifest request-model
 	// allowlist. Empty means no allowlist -> inert.
 	poolModelAllowlist []string
+	// poolView carries the SPEC-042-R004 external-runtime predicate inputs of
+	// the same snapshot. Zero for global requests.
+	poolView poolRouteView
 
 	legacyModelAdmissionRouteGenerations map[string]uint64
 
@@ -8494,7 +8515,7 @@ type eligibilityCtx struct {
 // (`!matches || !eligible → continue`), so the new helper reports
 // either failure as ReasonModelMismatch to preserve byte identity.
 func (c *eligibilityCtx) ProviderMatchesRequest(p pool.Provider) bool {
-	return c.s.providerMatchesRequest(p, c.model, c.class) && p.RoutingEligible()
+	return c.s.providerMatchesRequest(p, c.model, c.class) && routingEligibleForRoute(p, c.poolView)
 }
 
 func (c *eligibilityCtx) ProviderBYOMSettlementEligible(p pool.Provider) bool {

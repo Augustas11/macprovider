@@ -848,9 +848,12 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 		// column), so it MUST be recovered here before the digest recompute
 		// below, or a pool snapshot's recompute-digest would omit pool_id and
 		// mismatch the stored insert-digest.
-		PoolID             string `json:"pool_id"`
-		ManifestVersion    uint64 `json:"manifest_version"`
-		ManifestCoreDigest string `json:"manifest_core_digest"`
+		PoolID                string `json:"pool_id"`
+		ManifestVersion       uint64 `json:"manifest_version"`
+		ManifestCoreDigest    string `json:"manifest_core_digest"`
+		RuntimeSource         string `json:"runtime_source"`
+		PoolGeneration        uint64 `json:"pool_generation"`
+		PoolOperatorAccountID string `json:"pool_operator_account_id"`
 		// SPEC-010 v1.7 R007(d) / SPEC-047-R003: the six artifact values are
 		// likewise json-carried and MUST be recovered before the recompute;
 		// a snapshot whose evidence is missing or changed fails Validate()
@@ -876,6 +879,9 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	r.PoolID = recovered.PoolID
 	r.ManifestVersion = recovered.ManifestVersion
 	r.ManifestCoreDigest = recovered.ManifestCoreDigest
+	r.RuntimeSource = recovered.RuntimeSource
+	r.PoolGeneration = recovered.PoolGeneration
+	r.PoolOperatorAccountID = recovered.PoolOperatorAccountID
 	r.ArtifactFeedSHA256 = recovered.ArtifactFeedSHA256
 	r.ArtifactID = recovered.ArtifactID
 	r.ArtifactHash = recovered.ArtifactHash

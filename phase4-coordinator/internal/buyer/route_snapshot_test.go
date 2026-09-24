@@ -2230,6 +2230,20 @@ type testRouteGuard struct {
 	store    providerws.ModelAdmissionStore
 }
 
+// CompareAndInsertPoolModelAdmissionRouteSnapshot stands in for the pool
+// sibling guard: the head must be the expected catalog_priced event.
+func (g testRouteGuard) CompareAndInsertPoolModelAdmissionRouteSnapshot(ctx context.Context, expect providerws.ModelAdmissionRouteExpectation, insert func() error) error {
+	head, found, err := g.store.LatestModelAdmissionStatus(ctx, expect.ProviderID, expect.CandidateID)
+	if err != nil || !found || head.CoordinatorEventID != expect.CoordinatorEventID || head.State != "catalog_priced" {
+		return providerws.ErrModelAdmissionRouteStale
+	}
+	provider, ok := g.registry.Resolve(expect.ProviderID, "")
+	if !ok || provider.ModelAdmissionCandidateID != expect.CandidateID || provider.ModelAdmissionCoordinatorEventID != expect.CoordinatorEventID {
+		return providerws.ErrModelAdmissionRouteStale
+	}
+	return insert()
+}
+
 func (g testRouteGuard) CompareAndInsertModelAdmissionRouteSnapshot(ctx context.Context, expect providerws.ModelAdmissionRouteExpectation, insert func() error) error {
 	if expect.CandidateID == "" {
 		generationStore, ok := g.store.(interface {

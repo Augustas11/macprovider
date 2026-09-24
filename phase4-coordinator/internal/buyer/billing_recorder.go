@@ -145,8 +145,12 @@ type billingRecorder struct {
 	// routing time for the current settlement attempt (SPEC-042 R006
 	// route_snapshot_hash).
 	settlementRouteSnapshotDigest string
-	routeSnapshotStorePressure    bool
-	relayBlind                    *relayBlindAuditFields
+	// settlementRouteSnapshot is the recorded route snapshot of the current
+	// attempt, kept only for a SPEC-022-R012 external-runtime attempt so the
+	// usage source is derived from its digested values.
+	settlementRouteSnapshot    *billing.RouteSnapshot
+	routeSnapshotStorePressure bool
+	relayBlind                 *relayBlindAuditFields
 	// lastRecordedSettlementSubject latches whether the MOST RECENTLY recorded
 	// row was a leg the coordinator settles at all. It is the single expression
 	// that recordRow's two billing branches gate on: a settlement attempt
