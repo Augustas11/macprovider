@@ -30,3 +30,27 @@ no regression test; extracted into `firstDistinguishingIsolationProbe` and
 pinned by `IsolationProbePairSelectionTests`. Hybrid Mamba leave/join packing
 tests are Metal-gated and skip here; carried, with Studio isolation-probe and
 serial-vs-batched evidence as proof.
+
+## Codex gate (authoritative)
+
+The Grok rounds above are reference evidence only; the audit gate is Codex
+(`omc ask codex`), three lanes on the full `origin/main...HEAD` diff. Prompts
+and results are in `codex/`.
+
+| Lane | Round 1 (`8c8ab335`) | Round 2 (`30e634eb`, after `217ebfe7` + #1713 merge) |
+| --- | --- | --- |
+| Code | **PASS** 0/0/0 | not re-run (passed) |
+| Security / money path | FAIL 0/0/3 MEDIUM | **PASS** 0/0/0 |
+| Architecture | FAIL 0/2 HIGH/1 MEDIUM | **PASS** 0/0/0 |
+
+The round 1 findings are fixed in `217ebfe7`:
+- Security M1: a failed isolation probe could be retried away.
+- Security M2: the cache limit failed open.
+- Security M3: the queue-wait timeout could overflow.
+- Architecture H1: acceptance was not bound to the runtime revision.
+- Architecture H2: the FR-PKV13 ceiling was not enforced. Its enforcement is
+  now revision-bound acceptance (SPEC-038 v0.2.5, SPEC-039 v0.1.5).
+
+Carried, pre-existing and confirmed by both round 2 lanes: `on` has no Gate A5
+promotion predicate. `on` fails closed today and the rollout is `canary` only;
+add the A5 gate before any production-default promotion.
