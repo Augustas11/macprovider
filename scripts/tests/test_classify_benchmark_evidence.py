@@ -168,6 +168,38 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         self.assertEqual(result["classification"], "complete")
         self.assertIsNone(result["attempts"][0]["usage_accounting_split"])
 
+    def test_legacy_null_usage_columns_fall_back_without_split_annotation(self):
+        self.coord.execute("""UPDATE ledger_request_credits
+                               SET charged_prompt_tokens=NULL,
+                                   provider_reported_prompt_tokens=NULL""")
+
+        result = self.result()
+
+        self.assertEqual(result["classification"], "complete")
+        self.assertIsNone(result["attempts"][0]["usage_accounting_split"])
+
+    def test_ledger_prompt_must_match_charged_prompt(self):
+        self.coord.execute("""UPDATE ledger_request_credits
+                               SET prompt_tokens=10, charged_prompt_tokens=9,
+                                   provider_reported_prompt_tokens=10""")
+        result = self.result()
+        self.assertEqual(result["classification"], "incomplete")
+        self.assertIn("ledger_charged_prompt_mismatch", result["missing"])
+
+    def test_charged_prompt_cannot_exceed_provider_observed_prompt(self):
+        self.gateway.execute("UPDATE usage_events SET prompt_tokens=12")
+        self.gateway.execute("UPDATE quota_reservations SET settled_tokens=44")
+        self.coord.execute("""UPDATE ledger_request_credits
+                               SET prompt_tokens=12, charged_prompt_tokens=12,
+                                   provider_reported_prompt_tokens=10""")
+        self.coord.execute("""UPDATE settlement_attempt_outputs
+                               SET usage_canonical_json=?""",
+                           (json.dumps({"billable_input_tokens": 10, "billable_output_tokens": 32}),))
+        result = self.result()
+        self.assertEqual(result["classification"], "incomplete")
+        self.assertIn("charged_prompt_exceeds_provider_observed", result["missing"])
+        self.assertIsNone(result["attempts"][0]["usage_accounting_split"])
+
     def test_gateway_usage_must_match_charged_ledger_usage(self):
         self.coord.execute("UPDATE ledger_request_credits SET charged_prompt_tokens=9, prompt_tokens=9")
         result = self.result()

@@ -146,15 +146,20 @@ def classify(coordinator, gateway, account_id, external_request_id, journal=None
                 observed_prompt = charged_prompt
             if charged_prompt is None or charged_completion is None:
                 reasons.append("charged_usage_missing")
+            elif (credit["prompt_tokens"] is not None and
+                  credit["prompt_tokens"] != charged_prompt):
+                reasons.append("ledger_charged_prompt_mismatch")
             elif usage and (charged_prompt != usage["prompt_tokens"] or
                             charged_completion != usage["completion_tokens"]):
                 reasons.append("gateway_coordinator_usage_mismatch")
             if observed_prompt is None or charged_completion is None:
                 reasons.append("provider_observed_usage_missing")
+            elif charged_prompt is not None and charged_prompt > observed_prompt:
+                reasons.append("charged_prompt_exceeds_provider_observed")
             elif (settled_usage["billable_input_tokens"] != observed_prompt or
                   settled_usage["billable_output_tokens"] != charged_completion):
                 reasons.append("receipt_observed_usage_mismatch")
-            elif charged_prompt != observed_prompt:
+            elif charged_prompt is not None and charged_prompt < observed_prompt:
                 usage_accounting_split = {
                     "provider_observed_prompt_tokens": observed_prompt,
                     "charged_prompt_tokens": charged_prompt,
