@@ -228,6 +228,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         // `aggregateVsProductionSerial` ratio is token-comparable, not skewed by
         // a different prompt length.
         var serialRunTPS: [Double] = []
+        var serialRunTTFTSeconds: [Double] = []
         _ = try await runProductionSerialOnce(
             container: container, promptTokens: baselinePrompt, timedDecodeTokens: decodeTokens
         ) // warmup
@@ -236,6 +237,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 container: container, promptTokens: baselinePrompt, timedDecodeTokens: decodeTokens
             )
             serialRunTPS.append(serial.timedTokensPerSecond)
+            serialRunTTFTSeconds.append(serial.ttftSeconds)
             peakRSSMB = max(peakRSSMB, memoryRSSMB())
         }
 
@@ -343,7 +345,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             perRowFractionOfPagedSingleRow: perRowFraction,
             peakRSSMB: peakRSSMB,
             leftovers: nil,
-            timestamp: ISO8601DateFormatter().string(from: Date())
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            productionSerialTTFTSecondsRuns: serialRunTTFTSeconds,
+            peakPhysFootprintMB: msbLifetimePeakPhysFootprintMB(pid: getpid())
         )
 
         let encoder = JSONEncoder()
@@ -1594,7 +1598,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             var prompts: [[Int]] = []
             prompts.reserveCapacity(count)
             for index in 0..<count {
-                let text = buildPromptText(index: index, targetTokens: tokens)
+                let text = Self.buildPromptText(index: index, targetTokens: tokens)
                 var encoded = context.tokenizer.encode(text: text, addSpecialTokens: true)
                 // Extend deterministically if the corpus text under-shot the target.
                 var salt = 0
@@ -1617,7 +1621,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             var prompts: [[Int]] = []
             prompts.reserveCapacity(lengths.count)
             for (index, tokens) in lengths.enumerated() {
-                let text = self.buildPromptText(index: index, targetTokens: tokens)
+                let text = Self.buildPromptText(index: index, targetTokens: tokens)
                 var encoded = context.tokenizer.encode(text: text, addSpecialTokens: true)
                 var salt = 0
                 while encoded.count < tokens {
@@ -1636,7 +1640,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
     /// A distinct, topically-varied prompt string seeded by `index`, long enough
     /// to tokenize past `targetTokens`.
-    private func buildPromptText(index: Int, targetTokens: Int) -> String {
+    static func buildPromptText(index: Int, targetTokens: Int) -> String {
         var text = "Document \(index) revision \(index * 7 + 3): "
         var salt = 0
         // Roughly 1 token per ~0.75 words; over-generate then the caller truncates.
@@ -1649,7 +1653,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
     /// Distinct topical paragraphs so concurrent rows exercise different MoE
     /// expert routing rather than a shared repeated filler.
-    private static let corpus: [String] = [
+    static let corpus: [String] = [
         "The distributed ledger reconciled every settlement receipt against the coordinator's canonical usage log before payout.",
         "Photosynthesis converts sunlight, water, and carbon dioxide into glucose while releasing oxygen through the stomata of leaves.",
         "The compiler lowered the intermediate representation into register-allocated machine code and scheduled the instructions for the pipeline.",
@@ -1718,6 +1722,12 @@ struct MSBThroughputReport: Codable, Sendable {
     let peakRSSMB: Int
     let leftovers: MSBLeftoversEvidence?
     let timestamp: String
+    /// Serial-path TTFT per timed run, so `msb-loopback` c=1 TTFT has a
+    /// native counterpart (#1690 benchmark). Absent on leftover scenarios.
+    var productionSerialTTFTSecondsRuns: [Double]? = nil
+    /// Lifetime max phys footprint (includes Metal buffers, unlike RSS); the
+    /// same measure `msb-loopback` reads from the external server pid.
+    var peakPhysFootprintMB: Int? = nil
 }
 
 /// Times `decodeLockstepWindow` so scheduler-path MSB numbers exclude prefill.
