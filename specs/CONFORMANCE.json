@@ -151,7 +151,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.33",
+      "version": "0.9.34",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1237,7 +1237,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.32",
+      "version": "0.0.33",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -5403,6 +5403,21 @@
       }
     },
     {
+      "requirement_id": "SPEC-006-R016",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-006 0.9.34 (#1690 M7) specifies buyer engine selection: the X-MacProvider-Engine-Select closed vocabulary (native, llamacpp, ollama), invalid_engine_selection and engine_unavailable, the internal X-MacProvider-Internal-Engine transport, and the X-MacProvider-Engine served-class disclosure. No implementation is mapped yet. Pending until the gateway and coordinator slices and their fail-closed tests exist, plus a journey that serves an engine-selected pool request."
+      }
+    },
+    {
       "requirement_id": "SPEC-015-R001",
       "spec_id": "SPEC-015",
       "state": "conformant",
@@ -7110,6 +7125,21 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
         "rationale": "SPEC-042 0.0.32 (#1690 M3) specifies external-runtime serving on Trusted Pools. The #1690 M4 coordinator side is implemented: policy-core/v2 encode/verify/replay with golden vectors, the route-time runtime-allowlist predicate at the five SPEC-042-R005 sites (the admission bar and the FR-HG8 hello sandbox stay unlifted), the SPEC-047-R003(iv) pool route-time member derivation, the SPEC-022-R012 route-snapshot members and pool_operator_attested usage source re-derived from durable pool records, and the route-time half of the fail-closed test set. The SPEC-015-R006 CLI per-request signing path and its older-CLI-never-signs test landed in #1690 M5 (mapped under SPEC-015-R006), and the slot queue now applies the same pool-scoped sandbox view as the candidate path. Pending: a signed enforce-mode pool journey with a verified receipt and a provider ledger credit (#1690 M6)."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R014",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-042 0.0.33 (#1690 M7) specifies the buyer engine filter on pool routes: coordinator-recorded runtime class, non-native only on an allowlisting v2 pool, native excludes external-runtime members, re-applied on every R005 selection attempt, no spill. No implementation is mapped yet. Pending until the coordinator filter, its fail-closed test set, and a journey that serves engine=llamacpp on an allowlisting pool with pool_operator_attested settlement exist."
       }
     },
     {

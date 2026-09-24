@@ -1,7 +1,14 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.33 (2026-09-24, buyer disclosure copy)
+**Version:** 0.9.34 (2026-09-24, buyer engine selection)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.34 (2026-09-24, issue #1690 M7 — buyer engine selection):**
+- New §5.4.2: a buyer MAY name the inference engine with the request header `X-MacProvider-Engine-Select`, closed vocabulary `native | llamacpp | ollama`, mapped to the SPEC-046-R002 runtime classes `mlx_cache`, `llamacpp_loopback`, `ollama_loopback`. Exact match only; there is no prefer mode. Absent means today's behavior.
+- An unknown or conflicting value is 400 `invalid_engine_selection`. A non-native engine without a Trusted Pool selection is 503 `engine_unavailable`: global routes stay native-only. On a pool route the coordinator filters candidates by the coordinator-recorded runtime class (SPEC-042-R014). Both codes are `retryable: false`, and a request is never silently served by another engine.
+- The gateway forwards the selection only as the internal `X-MacProvider-Internal-Engine` (runtime class) under the service-token bearer. Responses carry `X-MacProvider-Engine` with the served runtime class; it joins the §8.3 response-pass-through allowlist with a closed-value guard.
+- Buyer docs say that engines differ and point to the M0 benchmark numbers. Pricing is unchanged: a request is priced by its model row (SPEC-005), whatever the engine.
+- Registers `SPEC-006-R016` (pending). Not promoted.
 
 **Change log v0.9.33 (2026-09-24, issue #1697 — buyer disclosure copy):**
 - Authenticated `GET /v1/models` `tier1_disclosure`, authenticated `GET /v1/usage` `settlement_disclosure`, `/docs`, `/account`, and the front-door console MUST describe excluded paid paths as legacy direct provider tunnels and the coordinator buyer listener that bypass the gateway paid ledger. They MUST NOT name provider hostnames, internal coordinator URLs, or spec document IDs.
@@ -302,8 +309,13 @@ changing them:
 - `SPEC-006-R015` — Coordinator slot reservation is released on provider accept;
   occupancy after accept is the consumed pool snapshot plus heartbeat; bounded
   slot-queue deadline is at most 10 seconds (§7.8, v0.9.32).
+- `SPEC-006-R016` — Buyer engine selection: `X-MacProvider-Engine-Select`
+  closed vocabulary, `invalid_engine_selection` / `engine_unavailable`,
+  internal `X-MacProvider-Internal-Engine` transport, and the
+  `X-MacProvider-Engine` served-class disclosure (§5.4.2, §8.3, v0.9.34;
+  SPEC-042-R014).
 
-`requirement_id_migration` is `complete`. R004–R015 are not promoted from
+`requirement_id_migration` is `complete`. R004–R016 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -1249,6 +1261,8 @@ The gateway MUST install panic recovery middleware that converts unexpected pani
 
 **Permanent (`false`) — retrying the identical request cannot succeed:** validation errors (e.g. `invalid_request`, `invalid_json`, `invalid_tools`), `model_not_found`, `context_exceeds_capacity`, `unsupported_content_shape`, byte/schema-cap and stream-cap violations (e.g. `byte_cap_exceeded`, `request_body_too_large`, `stream_output_exceeded`, the `json_schema_*` cap/shape codes), Tier-2/config lookup failures (e.g. `autotune_feed_not_found`), and auth/admin/oauth-signup client errors. Any code not explicitly classified — on either service — defaults to `retryable: false`.
 
+**Buyer engine selection (v0.9.34).** `invalid_engine_selection` and `engine_unavailable` (§5.4.2) are permanent (`false`) on both services: the same request cannot be served by the named engine later without a different route.
+
 **Abuse-limit exception (security).** `feedback_rate_limited`, `oauth_state_rate_limited`, `demo_session_rate_limited`, and `signup_rate_limited` (gateway) are 429s from the same `rate_limit_exceeded` family as the temporal 429s above, but are classified `false` rather than true: none ships a `Retry-After`/reset header, and none sits behind the gateway's 30-RPS per-account request clamp the way `/v1/chat/completions` does. Marking them `true` would tell a conforming SDK to auto-retry a 429 against an endpoint with no other throttle — a DoS-amplification risk, not a convenience. (`signup_rate_limited` is a per-IP daily account-creation cap; retrying the identical signup within the 24h window cannot succeed, so it is permanent from the buyer's perspective until the window rolls off — it was reclassified from `true` to `false` alongside its three siblings.) A future header-bearing fix on these paths should flip them to `true` alongside adding the header, not before.
 
 **Header agreement.** A response that ships a positive `Retry-After` or `X-RateLimit-Reset*` header MUST be `retryable: true` — the two signals MUST NOT disagree, since a buyer honoring either one must reach the same conclusion. The converse does not hold in general: `retryable: true` does not by itself obligate a header — the gateway attaches `Retry-After` only to its `503`/`504` retryable responses and the fixed-window codes (`setGatewayRetryAfter` / `gatewayRetryAfterByCode`), so a retryable `502` availability code (e.g. `provider_error`, `upstream_provider_error`) legitimately carries no backoff hint. But the absence of a header on a `rate_limit_exceeded`-family 429 is a signal in the OTHER direction: without a backoff window and without an account-level throttle, that family is classified `false` (see the abuse-limit exception above). Codes with a backoff window materially longer than the generic fast-availability default carry that fixed value instead: `provisional_quota_exceeded` is 3600s; the capacity-pause codes (`public_api_paused`, `demo_paused`, `capacity_signup_closed`) are 30s (vs. 1s for a fast transient blip) — these three DO ship `Retry-After: 30`, so they are not headerless.
@@ -1745,6 +1759,10 @@ The documented response-pass-through allowlist is:
   smuggling arbitrary header content past the `X-MacProvider-*` strip). The
   header is observation-only (SPEC-018 §10d.4); buyers MUST NOT use it for
   negotiation.
+- `X-MacProvider-Engine` (v0.9.34, §5.4.2), the coordinator-recorded
+  runtime class of the serving provider. The gateway MUST forward it only
+  when its value is byte-exactly `mlx_cache`, `llamacpp_loopback`, or
+  `ollama_loopback`, and MUST drop any other value.
 
 The gateway MUST return 503 when no provider slot is available after
 any allowed bounded pre-dispatch slot queue expires.
@@ -1804,6 +1822,43 @@ Buyer-triggered deletion:
 ```
 
 `entries` is the number of account-scoped sticky entries deleted. A repeated request after prior deletion MUST still return `purged: true` and MAY return `entries: 0`.
+
+#### 5.4.2 Buyer engine selection (v0.9.34, SPEC-006-R016)
+
+A buyer MAY name the inference engine for a chat request with the request header `X-MacProvider-Engine-Select`. It applies to `POST /v1/chat/completions` and to the `/v1/responses` and `/v1/messages` facades that share its dispatch path. It is a control-plane header only, never a request-body field, so the data-plane body forwarded to the coordinator and provider carries no engine control metadata.
+
+The vocabulary is closed. After trimming surrounding ASCII whitespace, the value MUST byte-exactly equal one selector below. Matching is case-sensitive.
+
+| Selector | Runtime class (SPEC-046-R002 `runtime_source`) |
+|---|---|
+| `native` | `mlx_cache` |
+| `llamacpp` | `llamacpp_loopback` |
+| `ollama` | `ollama_loopback` |
+
+Semantics are exact match only; there is no prefer mode. A request that names an engine is served by that runtime class or refused, and it MUST NOT be silently served by another engine.
+
+1. **Absent or empty.** Today's behavior, unchanged: any engine the route allows (native only on a global route; SPEC-042-R004 on a pool route). Nothing is emitted upstream.
+2. **Invalid.** An unknown value, a value in another case, or two distinct non-empty values MUST be rejected before quota reservation and dispatch with HTTP 400, `type: "invalid_request_error"`, `code: "invalid_engine_selection"`.
+3. **Non-native without a pool.** `llamacpp` or `ollama` on a request that selects no Trusted Pool (a global route, including demo and wallet-session traffic, which cannot select a pool) MUST be rejected before quota reservation with HTTP 503, `type: "service_unavailable"`, `code: "engine_unavailable"`. Global routes stay native-only (SPEC-042-R013).
+4. **Pool route.** The coordinator applies the SPEC-042-R014 engine filter. A non-native class outside the pool's active runtime allowlist, a pinned provider of another class, or no provider for the requested model with the selected class fails with 503 `engine_unavailable`. `native` on a pool route excludes every external-runtime member session.
+5. **Ordering.** The pool selection (SPEC-042-R002/R010) is resolved first, so an unknown or unauthorized pool still gets the generic `pool_unavailable`. A pool-route `engine_unavailable` therefore reaches only a caller already authorized for that pool; on a global route it reveals nothing about any pool.
+6. **Relay-blind.** A relay-blind request (SPEC-041) carrying a non-empty engine selector MUST be rejected with the existing `relay_blind_downgrade_rejected`, the same way a pool selector is.
+
+Both codes are `retryable: false` (§5.2).
+
+Internal transport:
+
+- The gateway MUST NOT forward the buyer header. For an authenticated account context it emits the mapped runtime class as `X-MacProvider-Internal-Engine`, next to `X-MacProvider-Account` under the gateway service-token bearer, and only when the buyer selected an engine.
+- The coordinator honors `X-MacProvider-Internal-Engine` only on a gateway-authenticated request. A buyer-port request carrying any `X-MacProvider-Internal-*` header without the service-token bearer is rejected by the existing internal-routing rule. An internal value outside the three runtime classes is 400 `invalid_engine_selection`.
+- The coordinator re-applies rule 3 itself, so a request that reaches it with a non-native class and no pool fails closed even if the gateway did not reject it.
+
+Disclosure:
+
+- Every coordinator response that names its serving provider carries `X-MacProvider-Engine`, set to that provider's coordinator-recorded runtime class (SPEC-042-R004), whether or not the buyer selected an engine. The gateway forwards it only when the value is byte-exactly `mlx_cache`, `llamacpp_loopback`, or `ollama_loopback`, and drops any other value (§8.3).
+- For a pool attempt served by an external runtime, the settlement route snapshot records the same class as `runtime_source`, together with the served artifact identity (SPEC-022-R012). The header and the snapshot name the same class.
+- The header discloses the declared, coordinator-recorded runtime identity. It is not an attestation of the executing process (SPEC-042-R004 administrative trust).
+
+Engines differ. Buyer docs MUST say that engines differ in throughput, time to first token, and quantization quality, and that the per-engine numbers come from the #1690 M0 benchmark harness (`docs/runbooks/runtime-agnostic-m0-benchmark-evidence-2026-09-24.md`). Pricing is unchanged by this version: a request is priced by its model row (SPEC-005), whatever the engine.
 
 ### 5.5 `GET /v1/usage`
 
@@ -2600,6 +2655,14 @@ The documented response-pass-through allowlist is:
   smuggling arbitrary header content past the `X-MacProvider-*` strip). The
   header is observation-only (SPEC-018 §10d.4); buyers MUST NOT use it for
   negotiation.
+- `X-MacProvider-Engine` (v0.9.34, §5.4.2), the coordinator-recorded
+  runtime class of the serving provider. The gateway MUST forward it only
+  when its value is byte-exactly `mlx_cache`, `llamacpp_loopback`, or
+  `ollama_loopback`, and MUST drop any other value.
+
+The inbound `X-MacProvider-Engine-Select` buyer header (§5.4.2) is read by
+the gateway and never forwarded verbatim; the gateway emits the internal
+`X-MacProvider-Internal-Engine` itself.
 
 The gateway MAY expose a public request ID.
 
