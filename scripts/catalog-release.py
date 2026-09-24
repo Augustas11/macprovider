@@ -5693,6 +5693,72 @@ def pricing_effective_diff(
     return diff, pricing_model_moves(live, candidate, set(new_names) - names, acks)
 
 
+PRICING_ACKNOWLEDGED_SCHEMA = "macprovider.pricing-acknowledged.v1"
+# The coordinator validator's resolved-rate fields (`autotuneResolvedRate`).
+PRICING_RESOLVED_RATE_FIELDS = ("completion_credits_per_mtok", "prompt_cache_hit_credits_per_mtok", "prompt_credits_per_mtok")
+
+
+def _pricing_resolved_rate(value: object, label: str) -> dict:
+    if not isinstance(value, dict):
+        fail(f"{label}: must be an object")
+    fields = {"row_key", *PRICING_RESOLVED_RATE_FIELDS}
+    exact_keys(value, fields, fields, label)
+    if not isinstance(value["row_key"], str) or not value["row_key"]:
+        fail(f"{label}: row_key must be a non-empty string (no matching row and no default)")
+    for field in PRICING_RESOLVED_RATE_FIELDS:
+        if type(value[field]) is not int or value[field] < 0:
+            fail(f"{label}: {field} must be a non-negative integer")
+    return {"row_key": value["row_key"], **{field: value[field] for field in PRICING_RESOLVED_RATE_FIELDS}}
+
+
+def _pricing_resolution_entry(value: object, label: str) -> dict:
+    if not isinstance(value, dict):
+        fail(f"{label}: must be an object")
+    exact_keys(value, {"name", "old", "new"}, {"name", "old", "new"}, label)
+    if not isinstance(value["name"], str):
+        fail(f"{label}: name must be a string")
+    return {
+        "name": value["name"],
+        "old": _pricing_resolved_rate(value["old"], f"{label}.old"),
+        "new": _pricing_resolved_rate(value["new"], f"{label}.new"),
+    }
+
+
+def pricing_acknowledged_object(diff: dict, resolutions: object) -> dict:
+    """The object the operator acknowledges (#1693 L3): the effective diff plus
+    the coordinator binary's resolution of every digested name outside the
+    Python key grammar (`diff.unresolved_names`), with old/new row key and all
+    three credits, escaped and sorted. Resolutions of names first seen after
+    pinning stay out of it (judged only by the move check), so a name leaving
+    or entering the 30-day window never changes the acknowledged digest."""
+    digested = diff.get("unresolved_names")
+    if not isinstance(digested, list) or not all(isinstance(name, str) for name in digested):
+        fail("pricing diff: unresolved_names must be a list of strings")
+    if not isinstance(resolutions, list):
+        fail("model_resolutions must be a list")
+    wanted = set(digested)
+    entries: dict[str, dict] = {}
+    for index, value in enumerate(resolutions):
+        entry = _pricing_resolution_entry(value, f"model_resolutions[{index}]")
+        name = escape_model_name(entry["name"])
+        if name not in wanted:
+            continue
+        if name in entries:
+            fail(f"model_resolutions: duplicate resolution for {name!r}")
+        entries[name] = {
+            "name": name,
+            **{side: dict(entry[side], row_key=escape_model_name(entry[side]["row_key"])) for side in ("old", "new")},
+        }
+    missing = sorted(wanted - entries.keys())
+    if missing:
+        fail(f"model_resolutions: the coordinator binary did not resolve {missing}")
+    return {
+        "schema_version": PRICING_ACKNOWLEDGED_SCHEMA,
+        "effective_diff": diff,
+        "model_resolutions": [entries[name] for name in sorted(entries)],
+    }
+
+
 def cmd_pricing_effective_diff(
     live_config: pathlib.Path | None,
     live_rate_card: pathlib.Path | None,
@@ -5789,8 +5855,13 @@ def _content_gate_pricing(
         reasons.append("pricing-diff.json sha256 does not match --pricing-diff-sha256")
         return rows_diff
     try:
-        diff = strict_json(pricing_diff, "pricing-diff.json")
-        if diff.get("schema_version") != PRICING_EFFECTIVE_DIFF_SCHEMA:
+        acknowledged = strict_json(pricing_diff, "pricing-diff.json")
+        top = {"schema_version", "effective_diff", "model_resolutions"}
+        exact_keys(acknowledged, top, top, "pricing-diff.json")
+        if acknowledged["schema_version"] != PRICING_ACKNOWLEDGED_SCHEMA:
+            fail(f"pricing-diff.json: schema_version must be {PRICING_ACKNOWLEDGED_SCHEMA!r}")
+        diff = acknowledged["effective_diff"]
+        if not isinstance(diff, dict) or diff.get("schema_version") != PRICING_EFFECTIVE_DIFF_SCHEMA:
             fail(f"pricing-diff.json: schema_version must be {PRICING_EFFECTIVE_DIFF_SCHEMA!r}")
         expected = {
             "live_table_sha256": pricing_table_sha256(live_credits),
@@ -5810,6 +5881,19 @@ def _content_gate_pricing(
         for entry in models:
             if entry["old_row"] != entry["new_row"] and (entry["model"], entry["old_row"], entry["new_row"]) not in escaped_acks:
                 reasons.append(f"pricing-diff.json move {entry['model']!r} is not acknowledged")
+        # The coordinator-resolved names: exactly the digested unresolved names,
+        # each in the validator's shape, every row move acknowledged.
+        resolutions = acknowledged["model_resolutions"]
+        if not isinstance(resolutions, list):
+            fail("pricing-diff.json: model_resolutions must be a list")
+        checked = [_pricing_resolution_entry(value, f"pricing-diff.json model_resolutions[{index}]") for index, value in enumerate(resolutions)]
+        if [entry["name"] for entry in checked] != diff.get("unresolved_names"):
+            reasons.append("pricing-diff.json model_resolutions do not cover exactly the digested unresolved names")
+        for entry in checked:
+            if entry["old"]["row_key"] != entry["new"]["row_key"] and (
+                entry["name"], entry["old"]["row_key"], entry["new"]["row_key"]
+            ) not in escaped_acks:
+                reasons.append(f"pricing-diff.json coordinator-resolved move {entry['name']!r} is not acknowledged")
     except (CatalogError, KeyError, TypeError) as exc:
         reasons.append(f"pricing-diff.json malformed: {exc}")
     return rows_diff

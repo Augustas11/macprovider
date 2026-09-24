@@ -285,6 +285,7 @@ The price table goes to stderr, one line per affected served name:
 ```text
 [catalog-content] pricing: effective price changes (credits per Mtok: prompt / cache-hit / completion)
 [catalog-content]   <model>: <old p> / <old c-h> / <old c> -> <new p> / <new c-h> / <new c> (row <old> -> <new>)
+[catalog-content]   <name> (resolved by the live binary): <old p> / <old c-h> / <old c> -> <new p> / <new c-h> / <new c> (row <old> -> <new>)
 [catalog-content] pricing: acknowledge with --pricing-diff-sha256 <64 hex>
 ```
 
@@ -292,7 +293,11 @@ The name set covers catalog keys and served model ids of the candidate,
 current, and window releases, every row key of both tables, and the distinct
 `request_log.model` values of the last 30 days. Those last names are
 buyer-controlled: control characters are shown escaped (`\xNN`). Read every
-line. The digest on the last line is the ack: it names exactly this table.
+line. Names outside the Python key grammar are resolved by the live
+coordinator binary and shown as `(resolved by the live binary)`. The digest on
+the last line is the ack: it covers the effective diff and every such
+resolution (row key and all three rates, old and new), so it names exactly
+this table.
 The same value is `pricing.pricing_diff_sha256` in `verdict.json`.
 
 ### Deploy
@@ -342,9 +347,17 @@ not rolled back)` means the gateway cache has not caught up. Billing switched
 at the SIGHUP (`SPEC-005-R013` I2/I3); the public card is a recommendation
 feed. Check the gateway, never roll back a correct price for it.
 
-`ALERT: the pricing journal could not be marked verified/finalized; the
-candidate is live` means the price is live but the journal remains, so every
-config writer refuses. Run `--recover-pricing-txn` ([Pricing txn](#pricing-txn)).
+Marking the journal `verified` and finalizing it are separate steps:
+
+- `ALERT: the pricing journal could not be marked verified` exits 5. The run
+  did not succeed. The journal stays in `verifying` and every config writer
+  refuses. `--recover-pricing-txn` rolls the unverified transaction back
+  ([Pricing txn](#pricing-txn)).
+- `ALERT: the pricing journal is verified but could not be finalized` exits 0.
+  The price is live, and a `verified` journal is never rolled back: the helper
+  refuses any phase change out of `verified` (or `rolled-back`), and an
+  interrupted run or rollback only validates and finalizes the candidate. Run
+  `--recover-pricing-txn` to finalize it.
 
 ### Wholesale statements
 
@@ -362,6 +375,12 @@ The same coordinator release changed how D1a wholesale statements price
 - A row with no billing snapshot linked and none in effect at its timestamp
   fails the statement closed (`wholesale row has no billing config
   generation`); it does not bill at the current table.
+- A row is linked through its provider identity at the persisted attempt
+  ordinal and, for an ambiguous attempt, at the hot path's re-derived ordinal.
+  An identity with no snapshot id counts as absent. If both link a snapshot
+  and they price the row differently (rate row or multiplier), the statement
+  fails closed (`wholesale row links conflicting billing config
+  generations`).
 
 ## Window semantics
 

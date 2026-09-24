@@ -275,6 +275,20 @@ if "txt" in args:
 else:
     print(pid)
 LSOF
+# #1693 failure injection around the pricing journal's verified/finalize steps
+# (the helper itself is sha-pinned, so the shim sits in front of python3).
+cat >"$T/bin/python3" <<SH
+#!/usr/bin/env bash
+case " \$* " in
+  *"coordinator-pricing-recover phase verified "*)
+    [ ! -e "\${CCR_TEST_CTL:-/nonexistent}/fail-verified" ] || { echo "injected: phase verified failed" >&2; exit 1; } ;;
+  *"coordinator-pricing-recover finalize candidate "*)
+    if [ -e "\${CCR_TEST_CTL:-/nonexistent}/fail-finalize-once" ]; then
+      rm -f "\$CCR_TEST_CTL/fail-finalize-once"; echo "injected: finalize candidate failed" >&2; exit 1
+    fi ;;
+esac
+exec "$(command -v python3)" "\$@"
+SH
 chmod 0755 "$T"/bin/*
 export PATH="$T/bin:$PATH"
 
@@ -485,7 +499,8 @@ import collections, hashlib, json, os, pathlib, runpy, subprocess, sys
 
 # The pricing-lane pieces the lane (and its on-host stage) call by name.
 _REAL = runpy.run_path(os.environ["CCR_REAL_CR"])
-for _name in ("PRICING_RESOLVABLE_NAME", "release_model_names", "names_sha256"):
+for _name in ("PRICING_RESOLVABLE_NAME", "release_model_names", "names_sha256",
+              "pricing_acknowledged_object", "pricing_canonical_bytes", "CatalogError"):
     globals()[_name] = _REAL[_name]
 
 def main():
@@ -843,9 +858,18 @@ if "--expect-base-equivalent" in args:
         errors.append("base_not_equivalent: (outside rewards.rate_card)")
     if "--resolve-model-names" in args:
         live_rows = stubparity.yaml_rows(live_path)
+        def resolved(rows, n):
+            k = stubparity.rate_row_for(rows, n)
+            return {"row_key": k, "prompt_credits_per_mtok": rows[k]["prompt_rate_per_mtok"],
+                    "prompt_cache_hit_credits_per_mtok": rows[k]["prompt_cache_hit_rate_per_mtok"],
+                    "completion_credits_per_mtok": rows[k]["completion_rate_per_mtok"]}
         for n in json.load(open(args[args.index("--resolve-model-names") + 1])):
-            o, nw = stubparity.rate_row_for(live_rows, n), stubparity.rate_row_for(cand_rows, n)
-            resolutions.append({"name": n, "old": {"row_key": o}, "new": {"row_key": nw}})
+            o, nw = resolved(live_rows, n), resolved(cand_rows, n)
+            # The binary resolves a name outside the Python key grammar to a
+            # different price than the Python diff can see (same row key).
+            if os.path.exists(os.path.join(ctl, "dryload-resolve-skew")):
+                nw = dict(nw, completion_credits_per_mtok=nw["completion_credits_per_mtok"] + 1)
+            resolutions.append({"name": n, "old": o, "new": nw})
 bad = bad or bool(errors)
 # admitted: current + every retained entry, as the ws admission map keeps them.
 sroot = os.path.dirname(args[args.index("--previous-target") + 1])
@@ -1277,6 +1301,7 @@ moved = {m["model"] for m in p["models"]}
 assert "qwen3-32b" in moved and "mlx-community/Qwen3-32B-4bit" in moved, moved
 assert "weird name\\x01with control" in p["unresolved_names"], p["unresolved_names"]
 assert all(r["old"]["row_key"] == r["new"]["row_key"] for r in p["model_resolutions"])
+assert [r["name"] for r in p["model_resolutions"]] == p["unresolved_names"], p["model_resolutions"]
 PY
 grep -q 'acknowledge with --pricing-diff-sha256' "$T/err" || fail "pricing preflight must show the price table: $(tail -n 20 "$T/err")"
 grep -q 'qwen3-32b: 110000 / 27500 / 220000 -> 110000 / 27500 / 230000' "$T/err" || fail "price table must show the qwen3-32b change"
@@ -1293,6 +1318,20 @@ runc "$PRICE_COMMIT" --deploy --pricing-diff-sha256 "$(printf 'ab%.0s' $(seq 1 3
 [ "$RC" -eq 3 ] && grep -q 'does not match this preflight' "$T/out" || fail "a wrong ack must refuse (rc=$RC)"
 prior_pair "missing/mismatched ack"
 note "ok: pricing deploy refuses without the acknowledged diff digest"
+
+# The acknowledged digest covers the names the live binary resolves: when only
+# a Go-resolved name's price differs, the digest moves, the table shows its
+# old/new rates, and the earlier acknowledgement no longer deploys.
+setup_env; touch "$CCR_TEST_CTL/dryload-resolve-skew"
+runc "$PRICE_COMMIT" --preflight
+[ "$RC" -eq 0 ] || fail "pricing preflight with a Go-resolved price change (rc=$RC): $(tail -n 20 "$T/err")"
+SKEW_PDIFF="$(pricing_field pricing_diff_sha256)"
+[ -n "$SKEW_PDIFF" ] && [ "$SKEW_PDIFF" != "$PDIFF" ] || fail "a Go-resolved price change must change the acknowledged digest ($SKEW_PDIFF vs $PDIFF)"
+grep -qF 'weird name\x01with control (resolved by the live binary): 500000 / 125000 / 1000000 -> 500000 / 125000 / 1000001' "$T/err" || fail "price table must show the Go-resolved name's old/new rates: $(tail -n 20 "$T/err")"
+runc "$PRICE_COMMIT" --deploy --pricing-diff-sha256 "$PDIFF"
+[ "$RC" -eq 3 ] && grep -q 'does not match this preflight' "$T/out" || fail "the pre-skew ack must not deploy a Go-resolved price change (rc=$RC)"
+prior_pair "Go-resolved price change"
+note "ok: the acknowledged digest covers Go-resolved names"
 
 # Happy path.
 setup_env
@@ -1315,6 +1354,40 @@ runc "$PRICE_COMMIT" --deploy --pricing-diff-sha256 "$PDIFF"
 [ "$RC" -eq 0 ] && grep -q 'ALERT (informational, not rolled back)' "$T/out" || fail "an unconverged gateway must alert only (rc=$RC): $(tail -n 10 "$T/out")"
 case "$(readlink "$A_ROOT/current")" in releases/test-new-v1-*) ;; *) fail "gateway alert must not roll back" ;; esac
 note "ok: gateway not converged -> alert only"
+
+# Marking the journal verified fails: the run does NOT succeed, the journal
+# stays in `verifying` (no in-lane rollback), and --recover-pricing-txn rolls
+# the unverified transaction back.
+pricing_journal_phase() { python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["phase"])' "$CCR_FAKE/opt/macprovider/.pricing-txn/txn.json"; }
+setup_env
+touch "$CCR_TEST_CTL/fail-verified"
+runc "$PRICE_COMMIT" --deploy --pricing-diff-sha256 "$PDIFF"
+[ "$RC" -eq 5 ] && grep -q 'could not be marked verified' "$T/out" || fail "a failed verified mark must not report success (rc=$RC): $(tail -n 20 "$T/out") $(tail -n 5 "$T/err")"
+grep -q 'DONE:' "$T/out" && fail "a failed verified mark must not log DONE"
+grep -q 'ROLLBACK' "$T/out" && fail "a failed verified mark must keep the journal for recovery, not roll back in-lane"
+[ "$(pricing_journal_phase)" = verifying ] || fail "the journal must stay in verifying (got $(pricing_journal_phase))"
+rm -f "$CCR_TEST_CTL/fail-verified"
+RC=0; (cd "$R" && bash scripts/catalog-content-release.sh --recover-pricing-txn) >"$T/out" 2>"$T/err" || RC=$?
+[ "$RC" -eq 0 ] || fail "--recover-pricing-txn must roll an unverified journal back (rc=$RC): $(tail -n 20 "$T/out") $(tail -n 10 "$T/err")"
+prior_pair "recover after a failed verified mark"
+record_is "recover after a failed verified mark" "$PRIOR_YAML_SHA" "$(LIVE_CARD)"
+note "ok: verified mark fails -> exit 5, journal kept in verifying, recovery rolls back"
+
+# Finalize fails after a durable `verified`: exit 0 with an ALERT, the price
+# stays live, and --recover-pricing-txn finalizes the candidate (no rollback).
+setup_env
+touch "$CCR_TEST_CTL/fail-finalize-once"
+runc "$PRICE_COMMIT" --deploy --pricing-diff-sha256 "$PDIFF"
+[ "$RC" -eq 0 ] && grep -q 'ALERT: the pricing journal is verified but could not be finalized' "$T/out" || fail "a finalize failure after verified must exit 0 with an ALERT (rc=$RC): $(tail -n 20 "$T/out")"
+grep -q 'ROLLBACK' "$T/out" && fail "a verified price must never be rolled back"
+[ "$(pricing_journal_phase)" = verified ] || fail "the journal must stay verified (got $(pricing_journal_phase))"
+[ "$(shasum -a 256 "$YAML" | cut -d' ' -f1)" = "$CAND_SHA" ] || fail "the candidate yaml must stay live after a finalize failure"
+RC=0; (cd "$R" && bash scripts/catalog-content-release.sh --recover-pricing-txn) >"$T/out" 2>"$T/err" || RC=$?
+[ "$RC" -eq 0 ] || fail "--recover-pricing-txn must finalize a verified journal (rc=$RC): $(tail -n 20 "$T/out") $(tail -n 10 "$T/err")"
+[ ! -e "$CCR_FAKE/opt/macprovider/.pricing-txn" ] || fail "recovery must finalize the verified journal"
+[ "$(shasum -a 256 "$YAML" | cut -d' ' -f1)" = "$CAND_SHA" ] || fail "recovery must not roll back a verified journal"
+case "$(readlink "$A_ROOT/current")" in releases/test-new-v1-*) ;; *) fail "recovery must keep the verified release current" ;; esac
+note "ok: finalize fails after verified -> exit 0 + ALERT, recovery finalizes the candidate"
 
 # NO_GO before any mutation.
 pricing_no_go() { # <label> <check> <commit>

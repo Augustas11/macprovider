@@ -530,20 +530,111 @@ class GatePricingScopeTests(unittest.TestCase):
         self.rate_card(lambda o: o["rows"]["qwen3-8b"].update(completion_rate_per_mtok=27001))
         live_rows = cr.pricing_credit_rows(json.loads((self.live / "rate-card.json").read_bytes())["rows"])
         release_rows = cr.pricing_credit_rows(json.loads((self.release / "rate-card.json").read_bytes())["rows"])
-        diff, _ = cr.pricing_effective_diff(live_rows, release_rows, set(), {"x"}, EMPTY_ACKS)
-        data = cr.pricing_canonical_bytes(diff)
+
+        def acknowledged(rows: dict, ack: bytes = EMPTY_ACKS, resolutions: list | None = None) -> bytes:
+            diff, _ = cr.pricing_effective_diff(live_rows, rows, set(), {"x", "bad name"}, ack)
+            return cr.pricing_canonical_bytes(cr.pricing_acknowledged_object(diff, go_resolutions("bad name") if resolutions is None else resolutions))
+
+        data = acknowledged(release_rows)
         result = self.gate(pricing_diff=data, pricing_diff_sha256=cr.sha256(data))
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["pricing_diff_sha256"], cr.sha256(data))
         self.assertLane(self.gate(pricing_diff=data, pricing_diff_sha256="0" * 64), "pricing-unacked-move")
         other_rows = copy.deepcopy(release_rows)
         other_rows["qwen3-8b"]["completion_rate_per_mtok"] += 1
-        other = cr.pricing_canonical_bytes(cr.pricing_effective_diff(live_rows, other_rows, set(), {"x"}, EMPTY_ACKS)[0])
+        other = acknowledged(other_rows)
         self.assertLane(self.gate(pricing_diff=other, pricing_diff_sha256=cr.sha256(other)), "pricing-unacked-move")
         # A diff produced under a different acknowledgement file is refused.
-        acked = acks(("q", "default", "qwen3-8b"))
-        stale = cr.pricing_canonical_bytes(cr.pricing_effective_diff(live_rows, release_rows, set(), {"x"}, acked)[0])
+        stale = acknowledged(release_rows, acks(("q", "default", "qwen3-8b")))
         self.assertLane(self.gate(pricing_diff=stale, pricing_diff_sha256=cr.sha256(stale)), "pricing-unacked-move")
+        # The bare effective diff (no coordinator resolutions) is not the acknowledged object.
+        bare = cr.pricing_canonical_bytes(cr.pricing_effective_diff(live_rows, release_rows, set(), {"x", "bad name"}, EMPTY_ACKS)[0])
+        self.assertLane(self.gate(pricing_diff=bare, pricing_diff_sha256=cr.sha256(bare)), "pricing-unacked-move")
+
+    def test_coordinator_resolved_names_are_bound_and_moves_need_acks(self) -> None:
+        self.rate_card(lambda o: o["rows"]["qwen3-8b"].update(completion_rate_per_mtok=27001))
+        live_rows = cr.pricing_credit_rows(json.loads((self.live / "rate-card.json").read_bytes())["rows"])
+        release_rows = cr.pricing_credit_rows(json.loads((self.release / "rate-card.json").read_bytes())["rows"])
+        diff, _ = cr.pricing_effective_diff(live_rows, release_rows, set(), {"bad name"}, EMPTY_ACKS)
+        obj = cr.pricing_acknowledged_object(diff, go_resolutions("bad name"))
+        # A coordinator-resolved row move without an acknowledgement is refused.
+        obj["model_resolutions"][0]["new"]["row_key"] = "qwen3-8b"
+        moved = cr.pricing_canonical_bytes(obj)
+        result = self.gate(pricing_diff=moved, pricing_diff_sha256=cr.sha256(moved))
+        self.assertLane(result, "pricing-unacked-move")
+        self.assertTrue(any("coordinator-resolved move" in r for r in result["reasons"]), result)
+        # ...and accepted once the reviewed commit acknowledges exactly that move.
+        ack = acks(("bad name", "default", "qwen3-8b"))
+        diff, _ = cr.pricing_effective_diff(live_rows, release_rows, set(), {"bad name"}, ack)
+        obj = cr.pricing_acknowledged_object(diff, go_resolutions("bad name"))
+        obj["model_resolutions"][0]["new"]["row_key"] = "qwen3-8b"
+        acked = cr.pricing_canonical_bytes(obj)
+        result = self.gate(ack_data=ack, pricing_diff=acked, pricing_diff_sha256=cr.sha256(acked))
+        self.assertTrue(result["ok"], result)
+        # Resolutions must cover exactly the digested unresolved names.
+        obj["model_resolutions"] = []
+        uncovered = cr.pricing_canonical_bytes(obj)
+        self.assertLane(self.gate(ack_data=ack, pricing_diff=uncovered, pricing_diff_sha256=cr.sha256(uncovered)), "pricing-unacked-move")
+
+
+def go_resolution(name: str, row: str = "default", rates: tuple[int, int, int] = (500000, 125000, 1000000),
+                  new_rates: tuple[int, int, int] | None = None, new_row: str | None = None) -> dict:
+    def side(key: str, values: tuple[int, int, int]) -> dict:
+        return {"row_key": key, "prompt_credits_per_mtok": values[0],
+                "prompt_cache_hit_credits_per_mtok": values[1], "completion_credits_per_mtok": values[2]}
+
+    return {"name": name, "old": side(row, rates), "new": side(new_row or row, new_rates or rates)}
+
+
+def go_resolutions(*names: str) -> list:
+    return [go_resolution(name) for name in names]
+
+
+class AcknowledgedPricingObjectTests(unittest.TestCase):
+    """SEC-M1: the acknowledged digest covers the coordinator-resolved names."""
+
+    def setUp(self) -> None:
+        self.live = {"default": {"completion_rate_per_mtok": 2, "prompt_cache_hit_rate_per_mtok": 1, "prompt_rate_per_mtok": 1},
+                     "qwen3-8b": {"completion_rate_per_mtok": 4, "prompt_cache_hit_rate_per_mtok": 1, "prompt_rate_per_mtok": 2}}
+        self.candidate = copy.deepcopy(self.live)
+        self.candidate["qwen3-8b"]["completion_rate_per_mtok"] = 5
+        self.diff, _ = cr.pricing_effective_diff(self.live, self.candidate, set(), {"b name", "a\x1bname", "qwen3-8b"}, EMPTY_ACKS)
+
+    def digest(self, resolutions: list) -> str:
+        return cr.sha256(cr.pricing_canonical_bytes(cr.pricing_acknowledged_object(self.diff, resolutions)))
+
+    def test_object_is_sorted_escaped_and_complete(self) -> None:
+        obj = cr.pricing_acknowledged_object(self.diff, [go_resolution("b name"), go_resolution("a\x1bname")])
+        self.assertEqual(obj["schema_version"], cr.PRICING_ACKNOWLEDGED_SCHEMA)
+        self.assertEqual(obj["effective_diff"], self.diff)
+        self.assertEqual([r["name"] for r in obj["model_resolutions"]], self.diff["unresolved_names"])
+        self.assertEqual(obj["model_resolutions"][0]["name"], "a\\x1bname")
+        self.assertEqual(set(obj["model_resolutions"][0]["old"]), {"row_key", *cr.PRICING_RESOLVED_RATE_FIELDS})
+
+    def test_only_a_go_resolved_price_change_moves_the_digest(self) -> None:
+        base = self.digest([go_resolution("b name"), go_resolution("a\x1bname")])
+        for index in range(3):
+            with self.subTest(field=index):
+                bumped = [500000, 125000, 1000000]
+                bumped[index] += 1
+                changed = self.digest([go_resolution("b name", new_rates=tuple(bumped)), go_resolution("a\x1bname")])
+                self.assertNotEqual(changed, base)
+        self.assertNotEqual(self.digest([go_resolution("b name", new_row="qwen3-8b"), go_resolution("a\x1bname")]), base)
+        # A name first seen after pinning stays out of the acknowledged digest.
+        self.assertEqual(self.digest([go_resolution("b name"), go_resolution("a\x1bname"), go_resolution("new name")]), base)
+
+    def test_missing_duplicate_or_malformed_resolutions_fail(self) -> None:
+        for resolutions in (
+            [go_resolution("b name")],
+            [go_resolution("b name"), go_resolution("b name"), go_resolution("a\x1bname")],
+            [go_resolution("b name", row=""), go_resolution("a\x1bname")],
+            [dict(go_resolution("b name"), extra=1), go_resolution("a\x1bname")],
+            [go_resolution("b name", rates=(1, 1, -1)), go_resolution("a\x1bname")],
+            "not a list",
+        ):
+            with self.subTest(resolutions=resolutions):
+                with self.assertRaises(cr.CatalogError):
+                    cr.pricing_acknowledged_object(self.diff, resolutions)
 
 
 class GateCommitBlockTests(unittest.TestCase):

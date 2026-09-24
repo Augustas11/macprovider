@@ -450,9 +450,11 @@ func TestWholesaleStatementAttemptsAcrossAPriceChangeUseTheirOwnGenerations(t *t
 	}
 }
 
-// An exact-key identity wins over the id-derived ordinal; an ambiguous row
-// with only the derived-ordinal identity uses that one.
-func TestWholesaleStatementAmbiguousAttemptIdentityPrecedence(t *testing.T) {
+// The exact-ordinal and id-derived-ordinal identities are resolved
+// independently (SPEC-005 §11.7): a NULL config_snapshot_id is absent, one
+// non-null id prices the row, two non-null ids must agree on (rate row,
+// multiplier) or the statement fails closed.
+func TestWholesaleStatementAmbiguousAttemptIdentityResolution(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	day := time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC)
 	first := wsRewards(13500, 27000, 1)
@@ -476,20 +478,66 @@ func TestWholesaleStatementAmbiguousAttemptIdentityPrecedence(t *testing.T) {
 	if _, err := store.db.Exec(`UPDATE request_log SET attempt_n = 0 WHERE request_id = 'req-amb'`); err != nil {
 		t.Fatal(err)
 	}
-	want := wsGross(t, prompt1, completion1, first, wsModel) + wsGross(t, 3000, 5000, second, wsModel)
-	if got := wsLine(t, wsStatement(t, store), wsModel).GrossCredits; got != want {
-		t.Fatalf("derived-ordinal-only gross=%d want %d", got, want)
+	derivedWant := wsGross(t, prompt1, completion1, first, wsModel) + wsGross(t, 3000, 5000, second, wsModel)
+	if got := wsLine(t, wsStatement(t, store), wsModel).GrossCredits; got != derivedWant {
+		t.Fatalf("derived-ordinal-only gross=%d want %d", got, derivedWant)
 	}
 
-	// Now an identity exists at the exact key (attempt 0, first generation):
-	// it wins for row 2 over the derived-ordinal identity. Row 1 links it too.
-	in := HotPathInput{RequestID: "req-amb", AttemptN: 0, ProviderAssignedID: "assigned-req-amb", ProviderID: "provider-a", ConfigSnapshotID: firstID}
+	// An exact-key identity with a NULL config_snapshot_id is absent: row 2
+	// still prices at the derived identity, row 1 at its ts_utc snapshot.
+	in := HotPathInput{RequestID: "req-amb", AttemptN: 0, ProviderAssignedID: "assigned-req-amb", ProviderID: "provider-a"}
 	if err := insertProviderIdentitySnapshotTx(context.Background(), store.db, in, day.Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	want = wsGross(t, prompt1+3000, completion1+5000, first, wsModel)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_provider_identity_snapshots WHERE request_id = 'req-amb' AND attempt_n = 0 AND config_snapshot_id IS NULL`); got != 1 {
+		t.Fatalf("precondition: NULL-snapshot exact identity=%d want 1", got)
+	}
+	if got := wsLine(t, wsStatement(t, store), wsModel).GrossCredits; got != derivedWant {
+		t.Fatalf("exact-null + derived gross=%d want derived %d", got, derivedWant)
+	}
+
+	// Both non-null and pricing the row identically: the statement succeeds.
+	// A later snapshot with second's prices stands in for the exact identity.
+	samePriceID := wsSnapshot(t, store, second, day.Add(4*time.Hour))
+	if _, err := store.db.Exec(`UPDATE ledger_provider_identity_snapshots SET config_snapshot_id = ? WHERE request_id = 'req-amb' AND attempt_n = 0`, samePriceID); err != nil {
+		t.Fatal(err)
+	}
+	// Row 1 now links the exact identity too, so it prices at second.
+	sameWant := wsGross(t, prompt1+3000, completion1+5000, second, wsModel)
+	if got := wsLine(t, wsStatement(t, store), wsModel).GrossCredits; got != sameWant {
+		t.Fatalf("both-linked same-price gross=%d want %d", got, sameWant)
+	}
+
+	// Both non-null and pricing the row differently: fail closed, no line.
+	if _, err := store.db.Exec(`UPDATE ledger_provider_identity_snapshots SET config_snapshot_id = ? WHERE request_id = 'req-amb' AND attempt_n = 0`, firstID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GenerateWholesaleStatement(context.Background(), wsAccount, "2026-09", true); !errors.Is(err, ErrWholesaleConflictingGenerations) {
+		t.Fatalf("conflicting generations err=%v want ErrWholesaleConflictingGenerations", err)
+	}
+}
+
+// A normal multi-attempt request whose persisted ordinals equal their id
+// ordinals, priced across a price change, never consults a derived identity:
+// each attempt bills at its own generation and no conflict is reported.
+func TestWholesaleStatementNormalAttemptsAcrossAPriceChangeDoNotConflict(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	day := time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC)
+	first := wsRewards(13500, 27000, 1)
+	second := wsRewards(20000, 40000, 1)
+	firstID := wsSnapshot(t, store, first, day)
+	wsPricedAttempt(t, reqStore, store, "req-normal", 0, 0, day.Add(time.Hour), 3000, 5000, first, firstID)
+	secondID := wsSnapshot(t, store, second, day.Add(2*time.Hour))
+	wsPricedAttempt(t, reqStore, store, "req-normal", 1, 1, day.Add(3*time.Hour), 7000, 11000, second, secondID)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM request_log rl WHERE rl.request_id = 'req-normal' AND `+requestLogAttemptOrdinalSQL("rl")+` = `+requestLogIDOrdinalSQL("rl")); got != 2 {
+		t.Fatalf("precondition: rows with persisted ordinal == id ordinal=%d want 2", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_provider_identity_snapshots WHERE request_id = 'req-normal' AND config_snapshot_id IS NOT NULL`); got != 2 {
+		t.Fatalf("precondition: linked identities=%d want 2", got)
+	}
+	want := wsGross(t, 3000, 5000, first, wsModel) + wsGross(t, 7000, 11000, second, wsModel)
 	if got := wsLine(t, wsStatement(t, store), wsModel).GrossCredits; got != want {
-		t.Fatalf("exact-key gross=%d want %d", got, want)
+		t.Fatalf("gross=%d want each attempt at its own generation %d", got, want)
 	}
 }
 

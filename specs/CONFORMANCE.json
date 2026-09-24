@@ -2750,22 +2750,50 @@
       "spec_id": "SPEC-023",
       "state": "pending",
       "implementation": [
-        "scripts/catalog-release.py:def content_gate",
+        "scripts/catalog-release.py:def _content_gate_pricing(",
+        "scripts/catalog-release.py:def pricing_effective_diff(",
+        "scripts/catalog-release.py:def pricing_acknowledged_object(",
+        "scripts/catalog-release.py:def splice_coordinator_rate_card(",
+        "scripts/catalog-release.py:def extract_coordinator_rate_card_block(",
+        "scripts/catalog-release.py:def content_gate_commit_block(",
         "scripts/catalog-content-release.sh:run_preflight() {",
+        "scripts/catalog-content-release.sh:pf_pricing_stage_results() {",
+        "scripts/catalog-content-release.sh:pricing_finalize() {",
         "phase4-coordinator/cmd/coordinator/validate_autotune_release.go:func validateAutotuneRelease(",
+        "phase4-coordinator/cmd/coordinator/validate_pricing_release.go:func validatePricingRelease(",
+        "phase4-coordinator/dist/coordinator-pricing-recover:def cmd_recover(",
+        "phase4-coordinator/dist/coordinator-pricing-recover:def open_lock(",
+        "scripts/lib/coordinator_config_guard.py:def acquire_lock(",
+        "scripts/lib/coordinator-config-guard.sh:ccg_refuse_if_pricing_txn() {",
         "scripts/lib/autotune-activate.sh:aa_rollback"
       ],
       "tests": [
         "scripts/tests/test_catalog_content_gate.py::ContentGateTests",
+        "scripts/tests/test_catalog_pricing_lane.py::SpliceBoundaryTests",
+        "scripts/tests/test_catalog_pricing_lane.py::EffectiveDiffTests",
+        "scripts/tests/test_catalog_pricing_lane.py::GatePricingScopeTests",
+        "scripts/tests/test_catalog_pricing_lane.py::AcknowledgedPricingObjectTests",
+        "scripts/tests/test_catalog_pricing_lane.py::GateCommitBlockTests",
+        "scripts/tests/test_catalog_pricing_lane.py::ProvenanceCommentTests",
+        "scripts/tests/test_coordinator_config_guard.py::WriterInventoryTests",
+        "scripts/tests/test_coordinator_config_guard.py::PythonGuardTests",
+        "scripts/tests/test_coordinator_config_guard.py::ShellGuardTests",
+        "phase4-coordinator/cmd/coordinator/pricing_reload_test.go::TestValidateAutotuneReleaseExpectBaseEquivalentRejectsOtherChanges",
+        "phase4-coordinator/cmd/coordinator/pricing_reload_test.go::TestValidateAutotuneReleaseResolvesModelNamesAgainstLiveAndCandidate",
+        "phase4-coordinator/dist/test/coordinator_pricing_recover.test.sh:terminal phases are monotonic: only finalize leaves verified / rolled-back",
+        "phase4-coordinator/dist/test/coordinator_pricing_recover.test.sh:unsafe lock (wrong owner, mode, symlink, hard link; either lock) fails pre-start and the closer closed",
+        "scripts/test-catalog-content-release.sh:ok: the acknowledged digest covers Go-resolved names",
+        "scripts/test-catalog-content-release.sh:ok: verified mark fails -> exit 5, journal kept in verifying, recovery rolls back",
+        "scripts/test-catalog-content-release.sh:ok: finalize fails after verified -> exit 0 + ALERT, recovery finalizes the candidate",
         "scripts/test-catalog-content-release.sh:ok: preflight, deploy, evidence rollback (a-d), HUP-rejected restart, interrupt/lease-lost, lease refusal"
       ],
       "journeys": [],
       "evidence": [],
       "gap": {
-        "verdict": "CODE_BUG",
+        "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1693",
-        "rationale": "SPEC-023 v0.16.0 \u00a73.7.10 rows-only pricing through the catalog-content lane: pricing scope (default removal invalid-release; usd_per_million_credits/provider_share_bps/global_multiplier_ppm \u2192 pricing-globals; policy/schema stay full-provider-app), effective-price diff over served models with the reviewed acknowledged-pricing-moves.json and a pinned name set, commit-bound verbatim rate_card block, one-writer guard and journal refusal, on-host splice with the coordinator yaml base-equivalence proof, operator diff-digest acknowledgement, durable journal phases with recovery, pre-start recovery and post-start closer, evidence (b) record digests (gateway convergence alert-only), and rollback. CODE_BUG: today the content gate refuses every rate-card row change as lane=pricing. Mapped selectors are the existing gate, lane, dry-load, and rollback surfaces the slices extend. Planned tests (plan v20 Tests): effective-price diff (removal to default refused unless acknowledged, shadowing addition refused unless acknowledged, retained-window coverage, diff determinism, escaped control characters); splice boundary/refusal matrix, byte identity, comments; gate scope; commit-block mismatch refused; writer-guard static inventory and provenance-comment check; --expect-base-equivalent accepts rate-card-only (incl. comments) and rejects other node/tag/style/order changes; shell harness for parity refusal pre-mutation, missing/mismatched ack, foreign recovery state, installed-writer hash mismatch, yaml/overlay moved under lock, HUP rejected and half-applied reload rollback, evidence (a)/(c)/(d) rollback, gateway non-convergence alert-only, interrupt per phase, lease loss keeps journal, crash/reboot at every journal write/fsync/rename/signal, restored-unverified finalized only on matching boot record, every writer refuses with an abandoned journal. Pending, not conformant: specified on branch feat/1693-pricing-content-lane (S0); implementation lands in later slices of the same PR, no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+        "rationale": "SPEC-023 v0.16.0 \u00a73.7.10 rows-only pricing through the catalog-content lane. Implementation and local tests landed on branch feat/1693-pricing-content-lane: pricing scope in the content gate (default removal invalid-release; usd_per_million_credits/provider_share_bps/global_multiplier_ppm \u2192 pricing-globals; policy/schema stay full-provider-app), the effective-price diff over served models with the reviewed acknowledged-pricing-moves.json and a pinned name set, one acknowledged object whose digest covers the Python effective diff and the coordinator binary's resolutions of names outside the key grammar (row key and all three rates, old and new), the commit-bound verbatim rate_card block, the one-writer guard and journal refusal, the on-host splice with the base-equivalence proof, the journaled transaction with separate verified and finalize steps (terminal phases monotonic; a verified price is never rolled back), pre-start recovery that fails closed on an unsafe lock, the post-start closer, evidence (b) record digests, gateway convergence alert-only, and rollback. Mapped tests are the hermetic unit, dist and shell-harness selectors above. Pending, not conformant: only live coordinator-host deployment evidence is outstanding; the change is not yet merged or deployed."
       }
     },
     {
@@ -4920,23 +4948,40 @@
       "state": "pending",
       "implementation": [
         "phase4-coordinator/internal/buyer/runtime_rate_card_parity.go:func ValidateRuntimeRateCardParity(",
+        "phase4-coordinator/internal/buyer/economics.go:func (s *Server) PublishEconomics(",
+        "phase4-coordinator/internal/billing/rate_table.go:func RateTableDigest(",
+        "phase4-coordinator/internal/billing/rate_table.go:func WholesaleGross(",
+        "phase4-coordinator/internal/billing/attempt_ordinal.go:func requestLogAttemptOrdinalSQL(",
         "phase4-coordinator/internal/billing/snapshot.go:func (s *Store) InsertConfigSnapshot(",
         "phase4-coordinator/internal/billing/snapshot.go:func (s *Store) ReloadBillingConfigV05(",
-        "phase4-coordinator/internal/billing/wholesale.go:func (s *Store) GenerateWholesaleStatement("
+        "phase4-coordinator/internal/billing/wholesale.go:func (s *Store) GenerateWholesaleStatement(",
+        "phase4-coordinator/internal/billing/wholesale_generation.go:func (s *Store) wholesaleLineTotals(",
+        "phase4-coordinator/internal/billing/wholesale_generation.go:func (s *Store) wholesaleRowRate("
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/runtime_rate_card_parity_test.go::TestRuntimeRateCardParityRejectsRowKeyDrift",
         "phase4-coordinator/internal/buyer/runtime_rate_card_parity_test.go::TestRuntimeRateCardParityRejectsRateDrift",
         "phase4-coordinator/internal/buyer/runtime_rate_card_parity_test.go::TestRuntimeRateCardParityRejectsGlobalEconomicsDrift",
-        "phase4-coordinator/internal/billing/wholesale_test.go::TestGenerateWholesaleStatementPaidVersusFreeSKU"
+        "phase4-coordinator/internal/billing/wholesale_test.go::TestGenerateWholesaleStatementPaidVersusFreeSKU",
+        "phase4-coordinator/internal/buyer/economics_test.go::TestEconomicsPublicationSwitchesPricingAndRateCardTogether",
+        "phase4-coordinator/internal/buyer/economics_test.go::TestEconomicsEveryBilledRowLinksAPublishedGeneration",
+        "phase4-coordinator/internal/buyer/economics_test.go::TestEconomicsForwardAndReversalBillAndServeTheSameGeneration",
+        "phase4-coordinator/cmd/coordinator/pricing_reload_test.go::TestPricingReloadTransitionTable",
+        "phase4-coordinator/internal/billing/pricing_generation_test.go::TestRateTableDigestIsDigestOfStoredSnapshotBytes",
+        "phase4-coordinator/internal/billing/pricing_generation_test.go::TestWholesaleGrossEqualsComputeCreditsWithinRequestLimits",
+        "phase4-coordinator/internal/billing/pricing_generation_test.go::TestWholesaleStatementPricesEachRowAtItsOwnGenerationAcrossForwardAndRollback",
+        "phase4-coordinator/internal/billing/pricing_generation_test.go::TestWholesaleStatementAmbiguousAttemptIdentityResolution",
+        "phase4-coordinator/internal/billing/pricing_generation_test.go::TestWholesaleStatementNormalAttemptsAcrossAPriceChangeDoNotConflict",
+        "phase4-coordinator/internal/billing/pricing_generation_test.go::TestWholesaleStatementSingleGenerationMatchesPreviousFormula",
+        "phase4-coordinator/internal/billing/pricing_generation_test.go::TestWholesaleStatementGrossOverflowFailsClosed"
       ],
       "journeys": [],
       "evidence": [],
       "gap": {
-        "verdict": "CODE_BUG",
+        "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1693",
-        "rationale": "SPEC-005 v0.6.9 \u00a75.6/\u00a711.7/\u00a713.2 MoneyTable-A price-change invariants: I1 billing integrity (parity \u2192 snapshot commit \u2192 publish; every request row linked to a published snapshot), I2 one economics critical section switching request table + snapshot id and the served signed card, I3 path-scoped propagation (\u2264600 s gateway + one client cache; informational), I4 disk pair with two bounded mixed intervals, I5 history never re-priced. CODE_BUG: wholesale statements currently price a whole period at the current in-memory table and zero a model-month above 10M tokens (\u00a711.7 now normative per-generation, uncapped arbitrary-precision gross, overflow fails closed); the economics publication lock does not exist yet. Mapped selectors are the existing parity, snapshot, and wholesale surfaces the slices extend. Planned tests (plan v20 Tests): billing.RateTableDigest equality across snapshot insert/validator/record; applied-config record fields on boot and SIGHUP, unchanged on reject; reload transition table (0/1 snapshot rows, nothing published on reject); every provider-bound request row links to a published id; economics-lock barrier, phase-2 new/new vs old/old, release-reader lock order, -race; W1 old\u2192forward\u2192rolled-back generations, multiplier split, unrelated-HUP invariance, legacy NULL-attempt linkage, conflicting identities fail closed, free alias $0, single-generation \u226410M byte-identical regression, WholesaleGross == ComputeCredits property, >10M groupings never zero, int64 overflow fails closed. Live evidence journey: forward activation of a reviewed correction with billing_snapshot_id rate_card_json digest == expected and a strict-pin request whose ledger rates and identity link match. Pending, not conformant: specified on branch feat/1693-pricing-content-lane (S0); implementation lands in later slices of the same PR, no live coordinator-host evidence has been captured, and the change is not yet merged or deployed."
+        "rationale": "SPEC-005 v0.6.9 \u00a75.6/\u00a711.7/\u00a713.2 MoneyTable-A price-change invariants: I1 billing integrity (parity \u2192 snapshot commit \u2192 publish; every request row linked to a published snapshot), I2 one economics critical section switching request table + snapshot id and the served signed card, I3 path-scoped propagation (informational), I4 disk pair with two bounded mixed intervals, I5 history never re-priced. Implementation and local tests landed on branch feat/1693-pricing-content-lane: the economics publication, rate-table digest, reload transition table, and \u00a711.7 wholesale statements priced per generation with uncapped arbitrary-precision group gross and int64 overflow failing closed. Wholesale identity rule: the identity at the persisted attempt ordinal and the identity at the hot path's re-derived ordinal are resolved independently, a NULL config_snapshot_id counts as absent; exactly one non-null id prices the row; two non-null ids must resolve to the same (rate row, global_multiplier_ppm) or the statement fails closed with ErrWholesaleConflictingGenerations; with neither, the snapshot in effect at ts_utc prices the row. Pending, not conformant: only live coordinator-host deployment evidence is outstanding (forward activation of a reviewed correction with billing_snapshot_id rate_card_json digest == expected and a strict-pin request whose ledger rates and identity link match); the change is not yet merged or deployed."
       }
     },
     {
@@ -5133,7 +5178,8 @@
       "tests": [
         "phase5-gateway/internal/router/public_feeds_test.go:TestPublicFeedsUnauthenticatedExactBytes",
         "phase5-gateway/internal/router/public_feeds_test.go:TestPublicFeedsDoNotExposePartnerStatsRoutes",
-        "phase5-gateway/internal/router/public_feeds_test.go:TestPublicFeedsRateCardAndSigCacheTogether"
+        "phase5-gateway/internal/router/public_feeds_test.go:TestPublicFeedsRateCardAndSigCacheTogether",
+        "phase5-gateway/internal/router/public_feeds_test.go:TestPublicRateCardCacheBoundIsFiveMinutes"
       ],
       "journeys": [],
       "evidence": [],
@@ -5141,7 +5187,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Unauthenticated public rate-card and stats overview on the buyer host (\u00a72.2, \u00a74.2). Mapped to existing public-feeds tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234). v0.9.33 (#1693) pins the public rate-card staleness bound: gateway rate-card/.sig pair cache at most 300 s, refreshed as one unit, coordinator Cache-Control public, max-age=300 forwarded (gateway half of SPEC-005-R013 I3). TestPublicFeedsRateCardAndSigCacheTogether covers the paired cache; a gateway test asserting the 300 s TTL expiry and the forwarded max-age=300 is planned in the #1693 PR."
+        "rationale": "Unauthenticated public rate-card and stats overview on the buyer host (\u00a72.2, \u00a74.2). Mapped to existing public-feeds tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234). v0.9.33 (#1693) pins the public rate-card staleness bound: gateway rate-card/.sig pair cache at most 300 s, refreshed as one unit, coordinator Cache-Control public, max-age=300 forwarded (gateway half of SPEC-005-R013 I3). Implementation and local tests landed: TestPublicFeedsRateCardAndSigCacheTogether covers the paired cache and TestPublicRateCardCacheBoundIsFiveMinutes the 300 s bound. Pending: only live deployment evidence is outstanding."
       }
     },
     {

@@ -59,6 +59,10 @@ UNIT = ENV.get("MACPROVIDER_COORDINATOR_UNIT", "macprovider-coordinator")
 BUYER_URL = ENV.get("MACPROVIDER_COORDINATOR_URL", "http://127.0.0.1:8443")
 BOOT_ID_FILE = ENV.get("MACPROVIDER_BOOT_ID_FILE", "/proc/sys/kernel/random/boot_id")
 REQUIRED_UID = int(ENV.get("MACPROVIDER_REQUIRED_UID", "0"))
+# Lock ownership, as coordinator-deploy-recover.sh and the shared guard
+# (scripts/lib/coordinator_config_guard.py) require it.
+LOCK_REQUIRED_UID = int(ENV.get("MACPROVIDER_DEPLOY_LOCK_REQUIRED_UID", "0"))
+LOCK_REQUIRED_GID = int(ENV.get("MACPROVIDER_DEPLOY_LOCK_REQUIRED_GID", "0"))
 
 JOURNAL_NAME = ".pricing-txn"
 JOURNAL = os.path.join(ROOT, JOURNAL_NAME)
@@ -383,6 +387,13 @@ class Journal:
     def set_phase(self, phase: str) -> None:
         if phase not in PHASES:
             raise Refused(f"unknown phase {phase}")
+        # Terminal phases are monotonic: out of a durable `verified` or
+        # `rolled-back` the only step is finalize (a verified price is never
+        # rolled back). Re-setting the same phase is an idempotent no-op.
+        if self.phase in TERMINAL:
+            if phase == self.phase:
+                return
+            raise Refused(f"journal is {self.phase} (terminal); only finalize {TERMINAL[self.phase]} is allowed, not phase {phase}")
         self.txn["phase"] = phase
         self.txn.setdefault("history", []).append({"phase": phase, "at": now_iso()})
         self.write_txn()
@@ -472,6 +483,8 @@ def check_state(j: Journal, side: str, verifier: str | None = None) -> None:
 def restore_disk(j: Journal) -> None:
     """CAS each item back to prior, in order yaml, current, window: candidate
     -> prior, prior -> skip, anything else -> Mismatch (nothing further done)."""
+    if j.phase in TERMINAL:
+        raise Refused(f"journal is {j.phase} (terminal); not restoring")
     prior, cand = j.txn["prior"], j.txn["candidate"]
     got = disk_state()
     if got["overlay"] != j.txn["overlay"]:
@@ -612,13 +625,51 @@ def hup_and_verify(j: Journal, side: str, snapshot_after: int, seconds: float) -
 # ---------------------------------------------------------------------------
 # Locks.
 # ---------------------------------------------------------------------------
+def open_lock(path: str) -> int:
+    """Open one lock of the set exactly as the shared guard's acquire_lock does
+    (scripts/lib/coordinator_config_guard.py; this helper is installed
+    standalone, so the checks are replicated and a parity test pins them):
+    create 0600 when absent, never follow a symlink, then require a regular
+    root-owned (or LOCK_REQUIRED_UID/GID) 0600 file with one link. Refused
+    when unsafe."""
+    if not NOFOLLOW:
+        raise Refused("this platform cannot open locks without following symlinks")
+    flags = os.O_RDWR | os.O_CLOEXEC | NOFOLLOW
+    try:
+        fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        try:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            raise Refused(f"unsafe coordinator config lock {path}: cannot open safely: {exc}") from exc
+    except OSError as exc:
+        raise Refused(f"unsafe coordinator config lock {path}: cannot open safely: {exc}") from exc
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != LOCK_REQUIRED_UID
+        or info.st_gid != LOCK_REQUIRED_GID
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+    ):
+        os.close(fd)
+        raise Refused(f"unsafe coordinator config lock {path}")
+    return fd
+
+
 def take_locks(wait_seconds: float) -> list[int] | None:
     """The lane lock set (updater lock, then coordinator-deploy lock), in
-    lease order. None when not acquired within wait_seconds (0 = -n)."""
+    lease order. None when a safely validated lock is not acquired within
+    wait_seconds (0 = -n); Refused (fail closed) when a lock is unsafe."""
     fds: list[int] = []
     deadline = time.monotonic() + wait_seconds
     for path in (GLOBAL_LOCK, DEPLOY_LOCK):
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | NOFOLLOW, 0o600)
+        try:
+            fd = open_lock(path)
+        except BaseException:
+            for f in fds:
+                os.close(f)
+            raise
         fds.append(fd)
         while True:
             try:

@@ -14,6 +14,12 @@ import (
 // config snapshot and no snapshot was in effect at its timestamp.
 var ErrWholesaleNoGeneration = errors.New("wholesale row has no billing config generation")
 
+// ErrWholesaleConflictingGenerations fails a statement closed when the
+// identity at a row's persisted attempt ordinal and the identity at its
+// hot-path-derived ordinal link generations that price the row differently
+// (SPEC-005 §11.7).
+var ErrWholesaleConflictingGenerations = errors.New("wholesale row links conflicting billing config generations")
+
 // wholesaleRate is the list price of one row at one generation: the resolved
 // rate-card row and the generation's global multiplier. The cache-hit rate is
 // not part of list price (SPEC-005 §11.7).
@@ -63,14 +69,12 @@ type wholesaleLineSums struct {
 // row, multiplier); a group's gross is WholesaleGross over its summed
 // persisted tokens and a model's gross is the sum of its groups.
 func (s *Store) wholesaleLineTotals(ctx context.Context, accountID, startText, endText string) ([]wholesaleLineTotal, error) {
-	// The identity row is keyed by the attempt ordinal its writer used. The
-	// identity at the persisted request_log ordinal (exact key) wins. Only
-	// when none exists, and the hot path re-derived a larger id ordinal for an
-	// ambiguous attempt (hotpath.go), is the identity at that ordinal used.
-	// With neither, or when the chosen identity carries no snapshot id, the
-	// snapshot in effect at ts_utc prices the row.
-	// UNIQUE(request_id, attempt_n, provider_assigned_id) makes each lookup
-	// return at most one identity, so a row links at most one generation.
+	// The identity row is keyed by the attempt ordinal its writer used: the
+	// persisted request_log ordinal (exact key) or, for an ambiguous attempt,
+	// the larger id ordinal the hot path re-derived (hotpath.go). Both are
+	// looked up independently; an identity with a NULL config_snapshot_id
+	// counts as absent. UNIQUE(request_id, attempt_n, provider_assigned_id)
+	// makes each lookup return at most one identity.
 	identityAt := func(ordinal string) string {
 		return `FROM ledger_provider_identity_snapshots lpis
          WHERE lpis.request_id = r.request_id
@@ -89,12 +93,11 @@ SELECT rl.id, rl.request_id, rl.provider_assigned_id, rl.model, rl.ts_utc, rl.pr
    AND julianday(rl.ts_utc) < julianday(?)
 )
 SELECT r.model, r.ts_utc, r.prompt_tokens, r.completion_tokens,
+       (SELECT lpis.config_snapshot_id `+identityAt("attempt_ordinal")+`) AS exact_snapshot_id,
        CASE
-         WHEN EXISTS (SELECT 1 `+identityAt("attempt_ordinal")+`)
-           THEN (SELECT lpis.config_snapshot_id `+identityAt("attempt_ordinal")+`)
          WHEN r.id_ordinal > r.attempt_ordinal
            THEN (SELECT lpis.config_snapshot_id `+identityAt("id_ordinal")+`)
-       END AS linked_snapshot_id
+       END AS derived_snapshot_id
   FROM r
  ORDER BY r.id`, accountID, startText, endText)
 	if err != nil {
@@ -105,12 +108,13 @@ SELECT r.model, r.ts_utc, r.prompt_tokens, r.completion_tokens,
 		tsText     string
 		prompt     sql.NullInt64
 		completion sql.NullInt64
-		linked     sql.NullInt64
+		exact      sql.NullInt64
+		derived    sql.NullInt64
 	}
 	var scan []scanned
 	for rows.Next() {
 		var r scanned
-		if err := rows.Scan(&r.model, &r.tsText, &r.prompt, &r.completion, &r.linked); err != nil {
+		if err := rows.Scan(&r.model, &r.tsText, &r.prompt, &r.completion, &r.exact, &r.derived); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -138,7 +142,7 @@ SELECT r.model, r.ts_utc, r.prompt_tokens, r.completion_tokens,
 
 	lines := map[string]*wholesaleLineSums{}
 	for _, r := range scan {
-		rate, err := s.wholesaleRowRate(ctx, r.model, r.tsText, r.linked, generation)
+		rate, err := s.wholesaleRowRate(ctx, r.model, r.tsText, r.exact, r.derived, generation)
 		if err != nil {
 			return nil, err
 		}
@@ -190,15 +194,37 @@ SELECT r.model, r.ts_utc, r.prompt_tokens, r.completion_tokens,
 	return out, nil
 }
 
-// wholesaleRowRate resolves one row's list price: its linked
-// config_snapshot_id, else the snapshot in effect at ts_utc.
-func (s *Store) wholesaleRowRate(ctx context.Context, model, tsText string, linked sql.NullInt64, generation func(int64) (wholesaleGeneration, error)) (wholesaleRate, error) {
-	if linked.Valid {
-		g, err := generation(linked.Int64)
+// wholesaleRowRate resolves one row's list price. Exactly one non-null
+// linked config_snapshot_id prices the row at that generation. Two non-null
+// ids must resolve to the same (rate row, multiplier) or the statement fails
+// closed with ErrWholesaleConflictingGenerations. With neither, the snapshot
+// in effect at ts_utc prices the row.
+func (s *Store) wholesaleRowRate(ctx context.Context, model, tsText string, exact, derived sql.NullInt64, generation func(int64) (wholesaleGeneration, error)) (wholesaleRate, error) {
+	rateAt := func(id int64) (wholesaleRate, error) {
+		g, err := generation(id)
 		if err != nil {
 			return wholesaleRate{}, err
 		}
 		return g.rateFor(model), nil
+	}
+	switch {
+	case exact.Valid && derived.Valid:
+		exactRate, err := rateAt(exact.Int64)
+		if err != nil {
+			return wholesaleRate{}, err
+		}
+		derivedRate, err := rateAt(derived.Int64)
+		if err != nil {
+			return wholesaleRate{}, err
+		}
+		if exactRate != derivedRate {
+			return wholesaleRate{}, fmt.Errorf("model %q at %s: snapshots %d and %d: %w", model, tsText, exact.Int64, derived.Int64, ErrWholesaleConflictingGenerations)
+		}
+		return exactRate, nil
+	case exact.Valid:
+		return rateAt(exact.Int64)
+	case derived.Valid:
+		return rateAt(derived.Int64)
 	}
 	ts, err := time.Parse(time.RFC3339Nano, tsText)
 	if err != nil {

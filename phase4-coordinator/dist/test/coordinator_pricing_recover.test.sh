@@ -30,7 +30,9 @@ export MACPROVIDER_ROOT="$T/opt/macprovider" MACPROVIDER_ETC_ROOT="$T/etc/macpro
   MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE="$T/run/lock/macprovider-pearl-updater.lock" \
   MACPROVIDER_DEPLOY_LOCK_FILE="$T/opt/macprovider/.coordinator-deploy.lock" \
   MACPROVIDER_SYSTEMCTL="$T/bin/systemctl" MACPROVIDER_COORDINATOR_URL="http://127.0.0.1:$PORT" \
-  MACPROVIDER_BOOT_ID_FILE="$T/boot_id" MACPROVIDER_REQUIRED_UID="$(id -u)" CTL="$T/ctl"
+  MACPROVIDER_BOOT_ID_FILE="$T/boot_id" MACPROVIDER_REQUIRED_UID="$(id -u)" CTL="$T/ctl" \
+  MACPROVIDER_DEPLOY_LOCK_REQUIRED_UID="$(id -u)" \
+  MACPROVIDER_DEPLOY_LOCK_REQUIRED_GID="$(python3 -c 'import os,sys;print(os.stat(sys.argv[1]).st_gid)' "$T")"
 R="$MACPROVIDER_ROOT"; A="$R/autotune"
 
 mkdir -p "$T/bin" "$CTL"
@@ -279,6 +281,24 @@ stop_coordinator; h --pre-start
 [ "$(readlink "$A/current")" = releases/new ] || fail "pre-start must not roll back a verified transaction"
 note "pre-start finalizes a verified journal by bytes only"
 
+# Terminal phases are monotonic: out of `verified` (and `rolled-back`) only
+# finalize is allowed; `phase rolling-back` and `restore-disk` are refused and
+# recovery finalizes the candidate without rolling back.
+setup; forward_until 5; h phase hup-intent; kill -HUP "$(cat "$CTL/pid")"; h phase verifying; h phase verified
+for step in "phase rolling-back" "phase verifying" "phase rolled-back" "restore-disk"; do
+  rc=0; h $step 2>"$T/err" || rc=$?
+  [ "$rc" = 1 ] && grep -q 'terminal' "$T/err" || fail "$step after verified must be refused (rc=$rc): $(cat "$T/err")"
+  [ "$(phase)" = verified ] || fail "$step after verified must not change the phase"
+done
+h phase verified || fail "re-marking verified must be an idempotent no-op"
+[ "$(sha "$R/coordinator.yaml")" = "$(sha "$T/stage/candidate.yaml")" ] || fail "a refused transition must not restore the yaml"
+h recover --wait-seconds 2 || fail "recovery of a verified journal must finalize the candidate"
+[ ! -e "$R/.pricing-txn" ] && [ "$(readlink "$A/current")" = releases/new ] || fail "recovery must finalize, never roll back, a verified journal"
+setup; forward_until 5; h phase rolling-back; h restore-disk; h phase rolled-back
+rc=0; h phase rolling-back 2>"$T/err" || rc=$?
+[ "$rc" = 1 ] && [ "$(phase)" = rolled-back ] || fail "phase rolling-back after rolled-back must be refused (rc=$rc)"
+note "terminal phases are monotonic: only finalize leaves verified / rolled-back"
+
 # CAS refusal: a third-party yaml edit during the transaction blocks start.
 setup; forward_until 3; printf '# foreign edit\n' >>"$R/coordinator.yaml"; stop_coordinator
 rc=0; h --pre-start 2>"$T/err" || rc=$?
@@ -295,6 +315,85 @@ h --pre-start
 [ "$(phase)" = mutating ] || fail "pre-start must not touch a journal whose lock set is held"
 kill "$LOCKER"; wait "$LOCKER" 2>/dev/null || true; rm -f "$T/locked"
 note "pre-start skips while a live holder has the lock set"
+
+# An UNSAFE lock (wrong owner, wrong mode, symlink, hard link) fails closed:
+# pre-start and the closer exit non-zero (start blocked), journal untouched.
+unsafe_lock_case() { # <label> <setup command...>
+  local label="$1"; shift
+  setup; forward_until 3; stop_coordinator
+  rm -f "$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE"
+  "$@"
+  local rc=0
+  h --pre-start 2>"$T/err" || rc=$?
+  [ "$rc" -ne 0 ] && grep -q 'unsafe coordinator config lock' "$T/err" || fail "pre-start with a $label lock must fail closed (rc=$rc): $(cat "$T/err")"
+  [ "$(phase)" = mutating ] || fail "pre-start with a $label lock must not touch the journal"
+  [ "$(sha "$R/coordinator.yaml")" = "$(sha "$T/stage/candidate.yaml")" ] || fail "pre-start with a $label lock must not restore"
+}
+lock_wrong_mode() { touch "$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE"; chmod 0644 "$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE"; }
+lock_symlink() { touch "$T/run/lock/target"; chmod 0600 "$T/run/lock/target"; ln -s "$T/run/lock/target" "$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE"; }
+lock_hardlink() { touch "$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE"; chmod 0600 "$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE"; ln "$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE" "$T/run/lock/second-link"; }
+lock_wrong_owner() { touch "$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE"; chmod 0600 "$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE"; }
+unsafe_lock_case "mode 0644" lock_wrong_mode
+unsafe_lock_case "symlinked" lock_symlink
+unsafe_lock_case "hard-linked" lock_hardlink
+MACPROVIDER_DEPLOY_LOCK_REQUIRED_UID="$(( $(id -u) + 1 ))" unsafe_lock_case "wrong-owner" lock_wrong_owner
+# The coordinator-deploy lock is validated too.
+setup; forward_until 3; stop_coordinator
+touch "$MACPROVIDER_DEPLOY_LOCK_FILE"; chmod 0640 "$MACPROVIDER_DEPLOY_LOCK_FILE"
+rc=0; h --pre-start 2>"$T/err" || rc=$?
+[ "$rc" -ne 0 ] && grep -q "unsafe coordinator config lock $MACPROVIDER_DEPLOY_LOCK_FILE" "$T/err" || fail "an unsafe deploy lock must fail closed (rc=$rc)"
+[ "$(phase)" = mutating ] || fail "an unsafe deploy lock must not touch the journal"
+# The closer of a restored-unverified journal fails closed on an unsafe lock.
+setup; forward_until 3; stop_coordinator; h --pre-start
+chmod 0644 "$MACPROVIDER_DEPLOY_LOCK_FILE"
+rc=0; h --close-restored --lock-wait-seconds 1 --wait-seconds 1 2>"$T/err" || rc=$?
+[ "$rc" -ne 0 ] && grep -q 'unsafe coordinator config lock' "$T/err" || fail "the closer with an unsafe lock must fail closed (rc=$rc)"
+[ "$(phase)" = restored-unverified ] || fail "the closer with an unsafe lock must not touch the journal"
+note "unsafe lock (wrong owner, mode, symlink, hard link; either lock) fails pre-start and the closer closed"
+
+# Parity: the helper's replicated lock validation accepts and rejects exactly
+# what the shared guard's acquire_lock does.
+python3 - "$HELPER" "$REPO_ROOT/scripts/lib/coordinator_config_guard.py" "$T/parity" <<'PY' || fail "helper lock validation diverges from the shared guard"
+import importlib.machinery, importlib.util, os, sys
+helper_path, guard_path, d = sys.argv[1:]
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, path)
+    spec = importlib.util.spec_from_loader(name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+guard = load("guard", guard_path)
+os.makedirs(d, exist_ok=True)
+gid = os.stat(d).st_gid
+def fresh(name):
+    p = os.path.join(d, name)
+    open(p, "w").close(); os.chmod(p, 0o600)
+    return p
+cases = {}
+cases["ok"] = (fresh("ok"), os.getuid())
+cases["absent"] = (os.path.join(d, "absent"), os.getuid())
+p = fresh("mode"); os.chmod(p, 0o644); cases["mode"] = (p, os.getuid())
+p = fresh("owner"); cases["owner"] = (p, os.getuid() + 1)
+t = fresh("target"); os.symlink(t, os.path.join(d, "symlink")); cases["symlink"] = (os.path.join(d, "symlink"), os.getuid())
+p = fresh("hard"); os.link(p, os.path.join(d, "hard2")); cases["hardlink"] = (p, os.getuid())
+os.mkdir(os.path.join(d, "dir")); cases["directory"] = (os.path.join(d, "dir"), os.getuid())
+for name, (path, uid) in cases.items():
+    os.environ["MACPROVIDER_DEPLOY_LOCK_REQUIRED_UID"] = str(uid)
+    os.environ["MACPROVIDER_DEPLOY_LOCK_REQUIRED_GID"] = str(gid)
+    helper = load("helper_" + name, helper_path)
+    try:
+        os.close(helper.open_lock(path)); h_ok = True
+    except helper.Refused:
+        h_ok = False
+    if name == "absent":
+        os.unlink(path)
+    try:
+        os.close(guard.acquire_lock(path, required_uid=uid, required_gid=gid)); g_ok = True
+    except guard.GuardLockError:
+        g_ok = False
+    assert h_ok == g_ok == (name in ("ok", "absent")), (name, h_ok, g_ok)
+PY
+note "helper lock validation matches the shared guard (ok, absent, mode, owner, symlink, hard link, directory)"
 
 # ---------------------------------------------------------------------------
 # Operator recovery.

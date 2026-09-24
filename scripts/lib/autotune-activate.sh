@@ -862,6 +862,16 @@ LOCK
 # compare-and-swap), prove S == prior, then one re-HUP. The controller proves
 # the prior pair live before it finalizes the journal.
 ptx=/opt/macprovider/coordinator-pricing-recover
+# A durable `verified` is terminal: a verified price is never rolled back.
+# Validate the on-disk pair against the journal's candidate and finalize it.
+ptx_phase="$(python3 -I "$ptx" status | python3 -I -c 'import json,sys; v=json.load(sys.stdin); print(v["phase"] if v else "")')" \
+  || { echo "rollback: cannot read the pricing journal phase; not mutating" >&2; exit 1; }
+if [ "$ptx_phase" = verified ]; then
+  python3 -I "$ptx" finalize candidate \
+    || { echo "rollback: pricing journal verified but the candidate did not validate/finalize; journal kept, not rolled back" >&2; exit 1; }
+  echo "rollback: pricing journal verified; candidate finalized, not rolled back"
+  exit 0
+fi
 python3 -I "$ptx" phase rolling-back || { echo "rollback: no pricing journal to roll back from; not mutating" >&2; exit 1; }
 python3 -I "$ptx" restore-disk || { echo "rollback: pricing restore refused (state differs from the journal); journal kept" >&2; exit 1; }
 pid="$(systemctl show -p MainPID --value "$unit")"

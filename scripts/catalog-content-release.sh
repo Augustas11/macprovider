@@ -32,7 +32,8 @@
 # the effective-price diff over every served model name (catalog keys, table
 # rows, and the request_log model names of the last 30 days, pinned in the
 # verdict), dry-loads the candidate with the live binary, and prints the diff
-# plus `pricing.pricing_diff_sha256`. --deploy then requires
+# (including the names the binary resolved) plus `pricing.pricing_diff_sha256`,
+# the digest of that complete acknowledged object. --deploy then requires
 # --pricing-diff-sha256 equal to that digest (the operator's acknowledgement of
 # the shown price table); --preflight-verdict <file> (the saved preflight
 # stdout) reuses its pinned name set, so a name that left the 30-day window
@@ -48,7 +49,9 @@
 #   1   usage, environment or operational error (no activation, or before it)
 #   3   preflight NO_GO (nothing was mutated)
 #   4   deploy activated, evidence failed, rolled back to the prior release
-#   5   rollback incomplete: follow docs/runbooks/catalog-release-decision-tree.md §rollback-failed
+#   5   rollback incomplete: follow docs/runbooks/catalog-release-decision-tree.md §rollback-failed;
+#       or (pricing) the journal could not be marked verified: it is kept in
+#       `verifying` and --recover-pricing-txn rolls it back (§pricing-txn)
 #   6   Pearl lease lost after activation may have started: state unknown, NOT
 #       rolled back; follow docs/runbooks/catalog-release-decision-tree.md §lease-lost
 #   71  interrupted, or lease lost before activation (rolled back first,
@@ -218,6 +221,11 @@ REMOTE_SCRATCH=""
 # 0 = nothing sent; maybe = the publish was (possibly) sent; 1 = activated.
 CCR_ACTIVATED=0
 CCR_DONE=0
+# #1693: 1 once the pricing journal's `verified` phase is durable (terminal:
+# never rolled back); 1 in CCR_PRICING_KEEP when marking it failed (journal
+# kept in `verifying` for --recover-pricing-txn, no in-lane rollback).
+PRICING_VERIFIED=0
+CCR_PRICING_KEEP=0
 CCR_ROLLED_BACK=0
 CCR_CANARY_TOUCHED=0
 CCR_PASSED_AB=0
@@ -251,7 +259,14 @@ ccr_cleanup() {
   # the rollback short; channel loss is detected by aa_lease_run itself.
   trap '' HUP INT TERM
   set +e
-  if [ "$CCR_ACTIVATED" != 0 ] && [ "$CCR_DONE" = 0 ] && [ "$CCR_ROLLED_BACK" = 0 ] && ! aa_lease_lost; then
+  if [ "$PRICING" = 1 ] && [ "$PRICING_VERIFIED" = 1 ] && [ "$CCR_DONE" = 0 ] && [ "$CCR_ROLLED_BACK" = 0 ] && ! aa_lease_lost; then
+    # A verified price is never rolled back: only validate + finalize it.
+    log "run ended (rc=$rc) after the pricing journal was verified; finalizing the candidate (never rolled back)"
+    aa_lease_sh "{ [ ! -e '$PRICING_JOURNAL' ] && [ ! -L '$PRICING_JOURNAL' ]; } || python3 -I '$PRICING_HELPER' finalize candidate" >&3 2>&1 ||
+      log "ALERT: the verified pricing journal could not be finalized; the candidate is live. Run scripts/catalog-content-release.sh --recover-pricing-txn ($RUNBOOK_PRICING_TXN)"
+  elif [ "$CCR_PRICING_KEEP" = 1 ]; then
+    log "pricing: the journal at $PRICING_JOURNAL is kept in phase verifying; run scripts/catalog-content-release.sh --recover-pricing-txn, which rolls it back ($RUNBOOK_PRICING_TXN)"
+  elif [ "$CCR_ACTIVATED" != 0 ] && [ "$CCR_DONE" = 0 ] && [ "$CCR_ROLLED_BACK" = 0 ] && ! aa_lease_lost; then
     probe=0
     if [ "$CCR_ACTIVATED" = maybe ]; then
       # Interrupted while the publish may be running on Pearl: ask the lease
@@ -991,13 +1006,16 @@ PY
 }
 
 # #1693: the on-host pricing results: the splice digests, the effective-price
-# diff (fetched: the acknowledged object), the pinned names, and the live
-# binary's verdict digests and name resolutions.
+# diff, the pinned names, and the live binary's verdict digests and name
+# resolutions. pricing-diff.json is the acknowledged object (effective diff +
+# the binary's resolutions of the digested names outside the key grammar).
 pf_pricing_stage_results() {
   local out
-  out="$(python3 - "$WORK/stage.out" "$WORK/dryload.json" "$PRICING_DIR" "$CONFIG_DISK_SHA" "$(sha256_file "$REL/rate-card.json")" <<'PY'
-import base64, hashlib, json, os, re, sys
-stage, dryload, pdir, live_sha, card_sha = sys.argv[1:]
+  out="$(python3 - "$WORK/stage.out" "$WORK/dryload.json" "$PRICING_DIR" "$CONFIG_DISK_SHA" "$(sha256_file "$REL/rate-card.json")" \
+      "$SCRIPT_DIR/catalog-release.py" <<'PY'
+import base64, hashlib, json, os, re, runpy, sys
+stage, dryload, pdir, live_sha, card_sha, cr_path = sys.argv[1:]
+cr = runpy.run_path(cr_path)
 vals = {}
 for line in open(stage, encoding="utf-8", errors="replace"):
     k, _, v = line.rstrip("\n").partition("=")
@@ -1020,8 +1038,7 @@ if splice.get("live_config_sha256") != live_sha:
 cand = splice.get("output_sha256", "")
 if not hexre.fullmatch(cand):
     bad("the splice returned no candidate digest")
-diff_sha = hashlib.sha256(diff).hexdigest()
-if diff_out.get("pricing_diff_sha256") != diff_sha:
+if diff_out.get("pricing_diff_sha256") != hashlib.sha256(diff).hexdigest():
     bad("the fetched pricing-diff.json is not the bytes pricing-effective-diff digested")
 problems = []
 if vals.get("PRICING_DIFF_RC") != "0" or diff_out.get("ok") is not True:
@@ -1046,17 +1063,26 @@ for r in resolutions:
     old, new = (r.get("old") or {}).get("row_key"), (r.get("new") or {}).get("row_key")
     if old != new and (r.get("name"), old, new) not in acks:
         problems.append("served name %r moves %s -> %s (resolved by the live binary) without an acknowledgement" % (esc(r.get("name", "")), old, new))
-open(os.path.join(pdir, "pricing-diff.json"), "wb").write(diff)
 open(os.path.join(pdir, "pinned-names.json"), "wb").write(pinned)
+# The acknowledged object: the effective diff plus the live binary
+# resolutions of every digested name outside the Python key grammar. Its
+# digest is what the operator acks and what the lease re-derives.
+try:
+    acknowledged = cr["pricing_acknowledged_object"](d, resolutions)
+except cr["CatalogError"] as exc:
+    problems.append("cannot build the acknowledged pricing object: %s" % exc)
+if problems:
+    bad("; ".join(problems))
+data = cr["pricing_canonical_bytes"](acknowledged)
+diff_sha = hashlib.sha256(data).hexdigest()
+open(os.path.join(pdir, "pricing-diff.json"), "wb").write(data)
 summary = {
     "candidate_config_sha256": cand, "pricing_diff_sha256": diff_sha, "expected_rate_table_sha256": rate,
     "expected_signed_rate_card_sha256": signed, "pinned_names_sha256": d.get("pinned_names_sha256"),
     "rows": d.get("rows"), "models": d.get("models"), "unresolved_names": d.get("unresolved_names"),
-    "model_resolutions": [dict(r, name=esc(r.get("name", ""))) for r in resolutions],
+    "model_resolutions": acknowledged["model_resolutions"],
 }
 json.dump(summary, open(os.path.join(pdir, "stage-summary.json"), "w"), sort_keys=True)
-if problems:
-    bad("; ".join(problems))
 print("%s %s %s %s" % (cand, diff_sha, rate, signed))
 PY
 )" || { record pricing_effective_diff 0 "$out"; record coordinator_dry_load 0 "pricing stage refused: $out"; return 1; }
@@ -1077,9 +1103,11 @@ fmt = lambda r: "%s / %s / %s" % (r["prompt_rate_per_mtok"], r["prompt_cache_hit
 for m in s.get("models") or []:
     move = " (row %s -> %s)" % (m["old_row"], m["new_row"]) if m.get("move") else ""
     print("[catalog-content]   %s: %s -> %s%s" % (m["model"], fmt(m["old"]), fmt(m["new"]), move))
+gofmt = lambda r: "%s / %s / %s" % (r["prompt_credits_per_mtok"], r["prompt_cache_hit_credits_per_mtok"], r["completion_credits_per_mtok"])
 for r in s.get("model_resolutions") or []:
     if r["old"] != r["new"]:
-        print("[catalog-content]   %s (resolved by the live binary): row %s -> %s" % (r["name"], r["old"]["row_key"], r["new"]["row_key"]))
+        move = " (row %s -> %s)" % (r["old"]["row_key"], r["new"]["row_key"]) if r["old"]["row_key"] != r["new"]["row_key"] else ""
+        print("[catalog-content]   %s (resolved by the live binary): %s -> %s%s" % (r["name"], gofmt(r["old"]), gofmt(r["new"]), move))
 print("[catalog-content] pricing: acknowledge with --pricing-diff-sha256 %s" % s["pricing_diff_sha256"])
 PY
 }
@@ -1580,13 +1608,21 @@ ccr_evidence() {
   return 0
 }
 
-# #1693: after every evidence step passed, the journal becomes `verified` and
-# is finalized. A verified correct price is never rolled back: a failure here
-# leaves a `verified` journal that --recover-pricing-txn finalizes.
+# #1693: after every evidence step passed, the journal becomes `verified`
+# (durable, terminal) and then is finalized, as two separate steps. If marking
+# verified fails the lane does NOT report success: the journal stays in
+# `verifying` and --recover-pricing-txn rolls it back. Once verified, a
+# correct price is never rolled back: a finalize failure is an ALERT and
+# --recover-pricing-txn finalizes the candidate.
 pricing_finalize() {
-  aa_lease_sh "python3 -I '$PRICING_HELPER' phase verified && python3 -I '$PRICING_HELPER' finalize candidate" >&3 2>&1 && return 0
-  log "ALERT: the pricing journal could not be marked verified/finalized; the candidate is live. Run scripts/catalog-content-release.sh --recover-pricing-txn ($RUNBOOK_PRICING_TXN)"
-  return 1
+  if ! aa_lease_sh "python3 -I '$PRICING_HELPER' phase verified" >&3 2>&1; then
+    log "ALERT: the pricing journal could not be marked verified; it stays in phase verifying and this run does NOT succeed. Run scripts/catalog-content-release.sh --recover-pricing-txn, which rolls the unverified transaction back ($RUNBOOK_PRICING_TXN)"
+    return 1
+  fi
+  PRICING_VERIFIED=1
+  aa_lease_sh "python3 -I '$PRICING_HELPER' finalize candidate" >&3 2>&1 && return 0
+  log "ALERT: the pricing journal is verified but could not be finalized; the candidate is live and is never rolled back. Run scripts/catalog-content-release.sh --recover-pricing-txn to finalize it ($RUNBOOK_PRICING_TXN)"
+  return 0
 }
 
 # #1693 I3: the gateway serves the public card from a 300 s cache; convergence
@@ -1610,6 +1646,15 @@ gateway_convergence() {
 # Runs inside aa_rollback after the remote rollback returned.
 ccr_after_rollback() {
   CCR_ROLLED_BACK=1
+  case "$AA_ROLLBACK_OUT" in
+    *"pricing journal verified; candidate finalized, not rolled back"*)
+      # The journal became verified before the rollback ran: terminal, the
+      # candidate stays live (a verified price is never rolled back).
+      PRICING_VERIFIED=1
+      log "ALERT: the pricing journal was already verified; the candidate stays live and was finalized, not rolled back"
+      return 0
+      ;;
+  esac
   CCR_FATAL_RC=4
   case "$AA_ROLLBACK_OUT" in
     *"rolled back to "*) ;;
@@ -1980,7 +2025,11 @@ ccr_evidence_hook() {
   return 1
 }
 aa_post_activation_evidence ccr_evidence_hook
-if [ "$PRICING" = 1 ]; then pricing_finalize || true; fi
+if [ "$PRICING" = 1 ] && ! pricing_finalize; then
+  CCR_PRICING_KEEP=1
+  CCR_FATAL_RC=5
+  fatal "pricing journal not marked verified; journal kept in phase verifying"
+fi
 CCR_DONE=1
 log "DONE: $REL_ID live via the catalog-content lane; evidence (a)-(d) passed; (e) not required (buyer-serving set adds or re-hashes nothing)"
 if [ "$PRICING" = 1 ]; then
