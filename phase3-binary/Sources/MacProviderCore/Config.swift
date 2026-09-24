@@ -162,6 +162,11 @@ public struct AppConfig: Equatable, Sendable {
     // milliseconds. Unset ⇒ the scheduler's 30s default. A request still
     // queued when it expires is rejected pre-admission, non-settling.
     public var continuousBatchQueueWaitTimeoutMS: Int?
+    // MLX buffer-cache ceiling in MiB. MLX defaults it to its memory limit, so
+    // freed GPU buffers accumulate for the life of the process (Studio live
+    // provider 2026-09-24: 50 GB fresh -> ~130 GB under traffic -> kernel
+    // memory kill). Unset keeps MLX's default; 0 disables the cache.
+    public var mlxCacheLimitMB: Int?
 
     // SPEC-038 FR-CB10: per-tuple acceptance coverage. Descriptor membership
     // alone is not support; a tuple may only batch when the operator has
@@ -241,6 +246,7 @@ public struct AppConfig: Equatable, Sendable {
             continuousBatching: .off,
             continuousBatchQueueLimit: nil,
             continuousBatchQueueWaitTimeoutMS: nil,
+            mlxCacheLimitMB: nil,
             continuousBatchingAcceptedTuples: [],
             kvDiskCache: .defaults(),
             pagedKV: .defaults()
@@ -585,6 +591,7 @@ public enum ConfigLoader {
             key: "continuous_batch_queue_wait_timeout_ms",
             expected: "integer >= 1"
         )
+        try assign(&config.mlxCacheLimitMB, from: dict, key: "mlx_cache_limit_mb", expected: "integer >= 0")
         if let rawTuples = dict["continuous_batching_accepted_tuples"] {
             config.continuousBatchingAcceptedTuples = try parseContinuousBatchingAcceptedTuples(rawTuples)
         }
@@ -749,6 +756,7 @@ public enum ConfigLoader {
             env: "MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS",
             expected: "integer >= 1"
         )
+        try assign(&config.mlxCacheLimitMB, from: environment, env: "MACPROVIDER_MLX_CACHE_LIMIT_MB", expected: "integer >= 0")
         return config
     }
 

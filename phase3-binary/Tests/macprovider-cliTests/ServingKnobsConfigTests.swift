@@ -290,6 +290,43 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(config.continuousBatchQueueWaitTimeoutMS, 9_000)
     }
 
+    func testMLXCacheLimitReadsYAMLAndEnvironmentOverridesIt() throws {
+        let fromYAML = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "mlx_cache_limit_mb: 4096\n" }
+        )
+        XCTAssertEqual(fromYAML.mlxCacheLimitMB, 4096)
+        let fromEnvironment = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_MLX_CACHE_LIMIT_MB": "0"],
+            fileExists: { _ in true },
+            readFile: { _ in "mlx_cache_limit_mb: 4096\n" }
+        )
+        XCTAssertEqual(fromEnvironment.mlxCacheLimitMB, 0, "0 is valid: it disables the MLX cache")
+        let unset = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "" }
+        )
+        XCTAssertNil(unset.mlxCacheLimitMB, "unset keeps MLX's own default")
+    }
+
+    func testApplyMLXCacheLimitIgnoresUnsetOrNegative() {
+        XCTAssertNil(ModelRuntime.applyMLXCacheLimit(megabytes: nil))
+        XCTAssertNil(ModelRuntime.applyMLXCacheLimit(megabytes: -1))
+    }
+
+    func testApplyMLXCacheLimitConvertsMegabytes() throws {
+        // Setting the limit initializes the Metal device.
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+        XCTAssertEqual(ModelRuntime.applyMLXCacheLimit(megabytes: 2), 2 * 1024 * 1024)
+    }
+
     func testContinuousBatchQueueWaitTimeoutEnvironmentOverridesYAML() throws {
         let config = try ConfigLoader.load(
             cli: CLIOverrides(),

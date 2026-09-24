@@ -1752,6 +1752,17 @@ actor ModelRuntime: ModelRuntimeServing {
         return last
     }
 
+    /// Bounds MLX's buffer cache. Must run before the model loads; see
+    /// `AppConfig.mlxCacheLimitMB`. Returns the applied byte limit.
+    @discardableResult
+    nonisolated static func applyMLXCacheLimit(megabytes: Int?) -> Int? {
+        guard let megabytes, megabytes >= 0 else { return nil }
+        let (bytes, overflow) = megabytes.multipliedReportingOverflow(by: 1024 * 1024)
+        guard !overflow else { return nil }
+        Memory.cacheLimit = bytes
+        return bytes
+    }
+
     private static let pagedKVUnavailableCacheClass = "unavailable"
 
     private static func pagedKVRuntimeCacheClass(

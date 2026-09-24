@@ -670,6 +670,10 @@ struct ServeCommand: AsyncParsableCommand {
                 ).utf8))
                 throw ExitCode(2)
             }
+            if let cacheLimitMB = resolved.mlxCacheLimitMB, cacheLimitMB < 0 {
+                FileHandle.standardError.write(Data("mlx_cache_limit_mb \(cacheLimitMB) must be >= 0\n".utf8))
+                throw ExitCode(2)
+            }
             if let queueWaitTimeoutMS = resolved.continuousBatchQueueWaitTimeoutMS, queueWaitTimeoutMS < 1 {
                 FileHandle.standardError.write(Data((
                     "--continuous-batch-queue-wait-timeout-ms \(queueWaitTimeoutMS) must be >= 1\n"
@@ -1979,6 +1983,9 @@ struct ServeCommand: AsyncParsableCommand {
                 )
             } else {
                 helloRuntimeSource = nil
+                if let applied = ModelRuntime.applyMLXCacheLimit(megabytes: resolved.mlxCacheLimitMB) {
+                    FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
+                }
                 modelRuntime = try await ModelRuntime(
                     modelID: resolved.model,
                     modelLoadPath: resolved.modelArtifactPath,
