@@ -15,3 +15,18 @@ codes without logging the original (fixed `db762e12`); no runnable regression
 test for the ragged-row fix `309b8a85` (carried: MLX kernels cannot run under
 `swift test` on this host; proof is the Studio serial-vs-batched evidence in
 `docs/runbooks/data/cb-frpkv13-m3-2026-09-24/`).
+
+## Round 3 — after folding #1731 (Qwen3.6 hybrid-cache CB) and the probe-pair fix
+
+| Lane | Result |
+| --- | --- |
+| Code | PASS, 0/0/0 (3 LOW) |
+| Security / money path | PASS, 0/0/0 |
+| Architecture | PASS, 0/0/0 (1 LOW) |
+
+LOWs: `event=batching_admitted` (and the other batching telemetry writes) used
+the aborting `FileHandle.write(_:)`; fixed. The isolation probe-pair loop had
+no regression test; extracted into `firstDistinguishingIsolationProbe` and
+pinned by `IsolationProbePairSelectionTests`. Hybrid Mamba leave/join packing
+tests are Metal-gated and skip here; carried, with Studio isolation-probe and
+serial-vs-batched evidence as proof.

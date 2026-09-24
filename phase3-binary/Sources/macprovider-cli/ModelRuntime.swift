@@ -1694,28 +1694,29 @@ actor ModelRuntime: ModelRuntimeServing {
         let layerCount = await container.perform { context in
             context.model.newCache(parameters: nil).count
         }
-        var moeProbe: PagedKVRuntimeMoEProbeResult?
-        for (pairIndex, pair) in Self.pagedKVRuntimeIsolationProbePromptPairs.enumerated() {
+        let pairs = Self.pagedKVRuntimeIsolationProbePromptPairs
+        let prober = pagedKVRuntimeProber
+        let blockSizeTokens = pagedKVConfig.blockSizeTokens
+        let maxPhysicalBlocks = pagedKVConfig.maxPhysicalBlocks
+        let moeProbe = await Self.firstDistinguishingIsolationProbe(pairCount: pairs.count) { pairIndex in
+            let pair = pairs[pairIndex]
             let promptA = await container.perform { context in
                 context.tokenizer.encode(text: pair.0, addSpecialTokens: true)
             }
             let promptB = await container.perform { context in
                 context.tokenizer.encode(text: pair.1, addSpecialTokens: true)
             }
-            let attempt = await pagedKVRuntimeProber.moe(
+            return await prober.moe(
                 container,
-                pagedKVConfig.blockSizeTokens,
-                pagedKVConfig.maxPhysicalBlocks,
+                blockSizeTokens,
+                maxPhysicalBlocks,
                 1,
                 layerCount,
                 promptA,
                 promptB,
                 cacheKinds
             )
-            moeProbe = attempt
-            // Only an indistinguishable challenge moves on to the next pair; a
-            // distinguishing pair's verdict (proven or a real divergence) is final.
-            if attempt.challengeDistinguishing { break }
+        } onIndistinguishable: { pairIndex in
             PagedKVRuntimeDiagnostics.log(
                 "batched-isolation model=\(modelID) challenge pair \(pairIndex) not distinguishing; trying next"
             )
@@ -1730,6 +1731,25 @@ actor ModelRuntime: ModelRuntimeServing {
             "batched-isolation model=\(modelID) requiresMoE=\(modelCapabilities.requiresMoEDispatch) proven=\(m.proven) rowsDecoded=\(m.rowsDecodedInSharedForward) rowFailures=\(m.rowFailures) crossRowDivergences=\(m.crossRowDivergences) challengeDistinguishing=\(m.challengeDistinguishing)"
         )
         return (parityProbe, moeProbe)
+    }
+
+    /// Runs challenge pairs in order and returns the first distinguishing
+    /// pair's result; that verdict (proven or a real divergence) is final and no
+    /// later pair runs. If no pair distinguishes, the last result is returned,
+    /// which is never `proven`, so the attach gate fails closed.
+    static func firstDistinguishingIsolationProbe(
+        pairCount: Int,
+        attempt: (Int) async -> PagedKVRuntimeMoEProbeResult,
+        onIndistinguishable: (Int) -> Void = { _ in }
+    ) async -> PagedKVRuntimeMoEProbeResult? {
+        var last: PagedKVRuntimeMoEProbeResult?
+        for pairIndex in 0 ..< pairCount {
+            let result = await attempt(pairIndex)
+            last = result
+            if result.challengeDistinguishing { return result }
+            onIndistinguishable(pairIndex)
+        }
+        return last
     }
 
     private static let pagedKVUnavailableCacheClass = "unavailable"

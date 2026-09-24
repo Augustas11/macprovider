@@ -390,7 +390,8 @@ enum ContinuousBatchingPolicy {
 
     static func logSerialRouteIfNeeded(_ capability: ContinuousBatchingCapability) {
         guard let line = serialRouteTelemetryLine(capability) else { return }
-        FileHandle.standardError.write(Data(line.utf8))
+        // write(contentsOf:) fails recoverably on a closed stderr; write(_:) aborts.
+        try? FileHandle.standardError.write(contentsOf: Data(line.utf8))
     }
 
     static func serialRouteTelemetryLine(_ capability: ContinuousBatchingCapability) -> String? {
@@ -404,11 +405,11 @@ enum ContinuousBatchingPolicy {
     /// an opaque 503. Never include the error's localized description: MLX
     /// dumps can carry prompt tokens.
     static func logPrefillFailed(_ error: Error) {
-        FileHandle.standardError.write(Data(prefillFailureTelemetryLine(error).utf8))
+        try? FileHandle.standardError.write(contentsOf: Data(prefillFailureTelemetryLine(error).utf8))
     }
 
     static func logForwardFailed(_ error: Error) {
-        FileHandle.standardError.write(Data(forwardFailureTelemetryLine(error).utf8))
+        try? FileHandle.standardError.write(contentsOf: Data(forwardFailureTelemetryLine(error).utf8))
     }
 
     static func prefillFailureTelemetryLine(_ error: Error) -> String {
