@@ -1975,6 +1975,7 @@ actor ContinuousBatchScheduler {
                 }
                 record(.promptHeadroomReserved)
                 record(.accepted)
+                FileHandle.standardError.write(Data("event=batching_admitted action=scheduler_admitted\n".utf8))
                 activePrompt[request.id] = Row(
                     request: request,
                     handle: handle,

@@ -240,6 +240,23 @@ extension ModelRuntimeServing {
     }
 }
 
+public struct RuntimeContinuousBatchingSchedulerSnapshot: Sendable, Equatable {
+    public let activeDecodeRows: Int
+    public let waitingCount: Int
+    public let maxObservedBatchDepth: Int
+    public let slotsTotal: Int
+    public let slotsFree: Int
+}
+
+public struct RuntimeContinuousBatchingSnapshot: Sendable, Equatable {
+    public let mode: ContinuousBatchingMode
+    public let active: Bool
+    public let unsupportedReason: String?
+    public let pagedKVDecision: String
+    public let cacheClass: String
+    public let scheduler: RuntimeContinuousBatchingSchedulerSnapshot?
+}
+
 public struct RuntimeSnapshot: @unchecked Sendable {
     public let state: SwapState
     public let container: ModelContainer?
@@ -254,6 +271,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     public let numDraftTokens: Int?
     public let templateSupportsThinkingToggle: Bool
     public let specDecodeGeneration: Int
+    public let continuousBatching: RuntimeContinuousBatchingSnapshot?
 
     init(
         state: SwapState,
@@ -268,7 +286,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         draftContainer: ModelContainer? = nil,
         numDraftTokens: Int? = nil,
         templateSupportsThinkingToggle: Bool = false,
-        specDecodeGeneration: Int = 0
+        specDecodeGeneration: Int = 0,
+        continuousBatching: RuntimeContinuousBatchingSnapshot? = nil
     ) {
         self.state = state
         self.container = container
@@ -285,6 +304,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         self.numDraftTokens = numDraftTokens
         self.templateSupportsThinkingToggle = templateSupportsThinkingToggle
         self.specDecodeGeneration = specDecodeGeneration
+        self.continuousBatching = continuousBatching
     }
 
     var hasTargetCompatibleDraft: Bool {
@@ -370,6 +390,13 @@ enum ModelRuntimeAdoptionError: Error, CustomStringConvertible, Equatable {
 struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     let modelFamily: String
     let requiresMoEDispatch: Bool
+    let hybridDecoderArchitectureVerified: Bool
+
+    init(modelFamily: String, requiresMoEDispatch: Bool, hybridDecoderArchitectureVerified: Bool = false) {
+        self.modelFamily = modelFamily
+        self.requiresMoEDispatch = requiresMoEDispatch
+        self.hybridDecoderArchitectureVerified = hybridDecoderArchitectureVerified
+    }
 }
 
 struct PagedKVRuntimeMeasurementEnvironment: Sendable {
@@ -412,7 +439,8 @@ struct PagedKVRuntimeProber: Sendable {
         _ poolEpoch: Int,
         _ layerCount: Int,
         _ promptA: [Int],
-        _ promptB: [Int]
+        _ promptB: [Int],
+        _ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) async -> PagedKVRuntimeMoEProbeResult
 
     static let live = PagedKVRuntimeProber(
@@ -426,7 +454,7 @@ struct PagedKVRuntimeProber: Sendable {
                 nNew: nNew
             )
         },
-        moe: { container, blockSizeTokens, maxPhysicalBlocks, poolEpoch, layerCount, promptA, promptB in
+        moe: { container, blockSizeTokens, maxPhysicalBlocks, poolEpoch, layerCount, promptA, promptB, cacheKinds in
             await PagedKVRuntimeParityProbe.runMoEInputIsolationProbe(
                 container: container,
                 blockSizeTokens: blockSizeTokens,
@@ -434,7 +462,8 @@ struct PagedKVRuntimeProber: Sendable {
                 poolEpoch: poolEpoch,
                 layerCount: layerCount,
                 promptA: promptA,
-                promptB: promptB
+                promptB: promptB,
+                cacheKinds: cacheKinds
             )
         }
     )
@@ -1295,6 +1324,7 @@ actor ModelRuntime: ModelRuntimeServing {
             chatTemplateSHA256: chatTemplateSHA256,
             modelFamily: capabilities.modelFamily,
             requiresMoEDispatch: capabilities.requiresMoEDispatch,
+            hybridDecoderArchitectureVerified: capabilities.hybridDecoderArchitectureVerified,
             gates: modelHash?.isEmpty == false ? gates : .closed
         )
     }
@@ -1589,10 +1619,20 @@ actor ModelRuntime: ModelRuntimeServing {
         guard pagedKVConfig.effectiveEnabled,
               kvBitsOverride == nil,
               PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily),
-              PagedKVAttachGate.allowedCacheClasses.contains(runtimeCacheClass)
+              PagedKVAttachGate.supportsCacheClass(
+                  runtimeCacheClass,
+                  hybridDecoderArchitectureVerified: modelCapabilities.hybridDecoderArchitectureVerified
+              )
         else {
             return (nil, nil)
         }
+        let cacheKinds = await container.perform { context in
+            Self.pagedKVCacheKinds(model: context.model)
+        }
+        guard let cacheKinds,
+              runtimeCacheClass != "mixed"
+                || (cacheKinds.contains(.recurrentMamba) && cacheKinds.contains(.pagedAttention))
+        else { return (nil, nil) }
         let promptTokens = await container.perform { context in
             context.tokenizer.encode(text: Self.pagedKVRuntimeParityProbePrompt, addSpecialTokens: true)
         }
@@ -1628,7 +1668,8 @@ actor ModelRuntime: ModelRuntimeServing {
             1,
             layerCount,
             promptA,
-            promptB
+            promptB,
+            cacheKinds
         )
         let p = parityProbe
         PagedKVRuntimeDiagnostics.log(
@@ -1688,6 +1729,24 @@ actor ModelRuntime: ModelRuntimeServing {
         return firstClass
     }
 
+    private nonisolated static func pagedKVCacheKinds(
+        model: any LanguageModel
+    ) -> [PagedKVSharedForwardBackend.CacheKind]? {
+        let caches = model.newCache(parameters: nil)
+        guard !caches.isEmpty else { return nil }
+        var kinds: [PagedKVSharedForwardBackend.CacheKind] = []
+        for cache in caches {
+            if cache is KVCacheSimple {
+                kinds.append(.pagedAttention)
+            } else if cache is MambaCache {
+                kinds.append(.recurrentMamba)
+            } else {
+                return nil
+            }
+        }
+        return kinds.contains(.pagedAttention) ? kinds : nil
+    }
+
     nonisolated static func pagedKVModelFamily(_ modelID: String?) -> String {
         let lower = modelID?.lowercased() ?? ""
         if lower.contains("qwen") { return "qwen" }
@@ -1734,10 +1793,19 @@ actor ModelRuntime: ModelRuntimeServing {
         modelID: String?,
         configJSONData: Data?
     ) -> PagedKVRuntimeModelCapabilities {
-        PagedKVRuntimeModelCapabilities(
+        let architectureVerified: Bool = {
+            guard modelID?.lowercased() == "qwen/qwen3.6-27b",
+                  let configJSONData,
+                  let object = try? JSONSerialization.jsonObject(with: configJSONData) as? [String: Any],
+                  let architectures = object["architectures"] as? [String]
+            else { return false }
+            return architectures.contains("Qwen3_5ForConditionalGeneration")
+        }()
+        return PagedKVRuntimeModelCapabilities(
             modelFamily: Self.pagedKVModelFamily(modelID: modelID, configJSONData: configJSONData),
             requiresMoEDispatch: (configJSONData.flatMap(Self.pagedKVConfigRequiresMoE) ?? false)
-                || Self.pagedKVModelIDLooksLikeExpertModel(modelID)
+                || Self.pagedKVModelIDLooksLikeExpertModel(modelID),
+            hybridDecoderArchitectureVerified: architectureVerified
         )
     }
 
@@ -2252,7 +2320,16 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func currentSnapshot() async -> RuntimeSnapshot {
-        RuntimeSnapshot(
+        let capability = continuousBatchingCapability(draftConfigured: currentDraftModelID != nil)
+        let schedulerMetrics = await continuousBatchScheduler?.metrics()
+        let decisionLabel: String
+        switch pagedKVAttachDecision {
+        case .disabled: decisionLabel = "disabled"
+        case .attached: decisionLabel = "attached"
+        case .fallback(let reason): decisionLabel = "fallback_\(reason.rawValue)"
+        case .rejected(let reason): decisionLabel = "rejected_\(reason.rawValue)"
+        }
+        return RuntimeSnapshot(
             state: state,
             container: currentContainer,
             modelID: currentModelID,
@@ -2264,7 +2341,25 @@ actor ModelRuntime: ModelRuntimeServing {
             draftContainer: currentDraftContainer,
             numDraftTokens: currentDraftModelID == nil ? nil : numDraftTokens,
             templateSupportsThinkingToggle: currentTemplateSupportsThinkingToggle,
-            specDecodeGeneration: currentSpecDecodeGeneration
+            specDecodeGeneration: currentSpecDecodeGeneration,
+            continuousBatching: RuntimeContinuousBatchingSnapshot(
+                mode: continuousBatchingMode,
+                active: continuousBatchingMode != .off
+                    && capability.unsupportedReason == nil
+                    && continuousBatchScheduler != nil,
+                unsupportedReason: capability.unsupportedReason?.rawValue,
+                pagedKVDecision: decisionLabel,
+                cacheClass: pagedKVRuntimeCacheClass,
+                scheduler: schedulerMetrics.map {
+                    RuntimeContinuousBatchingSchedulerSnapshot(
+                        activeDecodeRows: $0.activeDecodeRows,
+                        waitingCount: $0.waitingCount,
+                        maxObservedBatchDepth: $0.maxObservedBatchDepth,
+                        slotsTotal: $0.slotsTotal,
+                        slotsFree: $0.slotsFree
+                    )
+                }
+            )
         )
     }
 
@@ -2988,25 +3083,24 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         guard case .attached(let descriptor) = decision,
               let container,
-              let layerCount = await pagedKVLayerCount(
-                  container: container,
-                  maxContextTokens: maxContextTokens,
-                  kvBitsOverride: kvBitsOverride,
-                  prefillStepSize: prefillStepSize
-              )
+              let cacheKinds = await pagedKVCacheKinds(container: container)
         else {
             return nil
         }
-        let contiguousCacheBridge = PagedKVRuntimeContiguousCacheBridge()
+        // Retained cross-turn KV cannot restore Qwen3.6's recurrent state.
+        // Mixed-cache batching is first-turn-only until that handoff exists.
+        let isHybrid = cacheKinds.contains(.recurrentMamba)
+        let contiguousCacheBridge = isHybrid ? nil : PagedKVRuntimeContiguousCacheBridge()
         return makeContinuousBatchScheduler(
             decision: decision,
             tuple: tuple,
             backend: PagedKVSharedForwardBackend(
                 container: container,
                 descriptor: descriptor,
-                layerCount: layerCount,
+                layerCount: cacheKinds.count,
+                cacheKinds: cacheKinds,
                 contiguousCacheBridge: contiguousCacheBridge,
-                compiledDecode: true
+                compiledDecode: !isHybrid
             ),
             maxBatch: maxBatch,
             queueLimit: queueLimit,
@@ -3020,23 +3114,11 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
-    private static func pagedKVLayerCount(
-        container: ModelContainer,
-        maxContextTokens: Int,
-        kvBitsOverride: Int?,
-        prefillStepSize: Int
-    ) async -> Int? {
+    private static func pagedKVCacheKinds(
+        container: ModelContainer
+    ) async -> [PagedKVSharedForwardBackend.CacheKind]? {
         await container.perform { context in
-            let parameters = Self.makeServeGenerateParameters(
-                maxTokens: 1,
-                maxContextTokens: maxContextTokens,
-                kvBitsOverride: kvBitsOverride,
-                prefillStepSize: prefillStepSize,
-                temperature: 0,
-                topP: 1
-            )
-            let layerCount = context.model.newCache(parameters: Self.cacheParameters(parameters, forceSimpleKV: true)).count
-            return layerCount > 0 ? layerCount : nil
+            return Self.pagedKVCacheKinds(model: context.model)
         }
     }
 

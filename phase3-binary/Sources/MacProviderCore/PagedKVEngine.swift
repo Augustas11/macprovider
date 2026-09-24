@@ -347,6 +347,16 @@ public enum PagedKVAttachGate {
     public static let allowedCacheClasses = ["KVCacheSimple"]
     public static let recognizedModelFamilies = ["gpt_oss", "llama", "qwen"]
 
+    /// The Qwen3.6 text decoder is a measured hybrid: its linear layers retain
+    /// row-local Mamba state while only its attention layers use paged KV.
+    public static func supportsCacheClass(
+        _ runtimeCacheClass: String,
+        hybridDecoderArchitectureVerified: Bool = false
+    ) -> Bool {
+        if allowedCacheClasses.contains(runtimeCacheClass) { return true }
+        return runtimeCacheClass == "mixed" && hybridDecoderArchitectureVerified
+    }
+
     public static func decide(
         config: PagedKVConfig,
         runtimeCacheClass: String,
@@ -357,6 +367,7 @@ public enum PagedKVAttachGate {
         chatTemplateSHA256: String?,
         modelFamily: String,
         requiresMoEDispatch: Bool,
+        hybridDecoderArchitectureVerified: Bool = false,
         gates: PagedKVGates
     ) -> PagedKVAttachDecision {
         guard config.effectiveEnabled else { return .disabled }
@@ -375,7 +386,10 @@ public enum PagedKVAttachGate {
         guard kvBits == nil else { return fail(.quantized) }
         guard recognizedModelFamilies.contains(modelFamily) else { return fail(.identity) }
         guard gates.identityAvailable else { return fail(.identity) }
-        guard allowedCacheClasses.contains(runtimeCacheClass) else { return fail(.cacheClass) }
+        guard supportsCacheClass(
+            runtimeCacheClass,
+            hybridDecoderArchitectureVerified: hybridDecoderArchitectureVerified
+        ) else { return fail(.cacheClass) }
         guard gates.metallibAvailable else { return fail(.metallib) }
         guard gates.kernelRegistered else { return fail(.kernel) }
         guard gates.parityEstablished else { return fail(.parity) }
@@ -414,7 +428,7 @@ public enum PagedKVAttachGate {
             tokenizerSHA256: tokenizerSHA256,
             chatTemplateSHA256: chatTemplateSHA256,
             supportedModelFamilies: [modelFamily],
-            allowedCacheClasses: allowedCacheClasses,
+            allowedCacheClasses: [runtimeCacheClass],
             kvDType: .fp16,
             supportsMoEDispatch: observedIdentity.moeDispatchProven,
             hardwareClass: observedIdentity.hardwareClass,
