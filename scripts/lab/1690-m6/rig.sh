@@ -15,8 +15,10 @@
 # reads ~/.config/macprovider, and never contacts a production host. The lab
 # CLI runs through cli.sh, which redirects every home-derived path into $LAB.
 # A process is signalled only after pidguard.sh re-verifies the identity it
-# recorded at start. Swift builds run in an exported copy of HEAD under
-# $LAB/src*; the worktree is never modified.
+# recorded at start. Every lab binary (coordinator, gateway, labtool, CLI) and
+# the signing tool build from one exported copy of HEAD under $LAB/src*; build
+# and up refuse a worktree with uncommitted tracked changes, and the worktree
+# is never modified.
 set -euo pipefail
 LAB="${LAB:-/Users/a1/lab-1690-m6}"
 WT="${WT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
@@ -45,25 +47,31 @@ start_bg() { # name cmd...
   pg_record "$pidf" $!
 }
 stop_pid() { pg_stop "$LAB/run/$1.pid" 20 0.5; }
-# prep_src DIR: export HEAD's phase3-binary into $LAB/DIR with the lab static
-# release compiled in. Refuses a dirty phase3-binary, because the lab CLI
-# would silently not contain those edits. SwiftPM's .build cache is kept;
-# extracted files get fresh mtimes so every source recompiles.
-prep_src() {
+# require_clean: refuse when any tracked file differs from HEAD. The lab builds
+# from HEAD and runs its helpers from this worktree, so edits would either be
+# silently missing from the binaries or produce evidence for code HEAD lacks.
+require_clean() {
   local dirty
-  dirty=$(git -C "$WT" status --porcelain -- phase3-binary ':(exclude)phase3-binary/Package.resolved')
+  dirty=$(git -C "$WT" status --porcelain --untracked-files=no -- . ':(exclude)phase3-binary/Package.resolved')
   if [[ -n "$dirty" ]]; then
-    printf 'refusing: phase3-binary has uncommitted changes; the lab CLI builds from HEAD only\n%s\n' "$dirty" >&2
+    printf 'refusing: the worktree has uncommitted changes; the lab builds and runs HEAD only\n%s\n' "$dirty" >&2
     exit 1
   fi
-  SRC="$LAB/$1/phase3-binary"
+}
+# prep_src DIR: export all of HEAD into $LAB/DIR (SRC_ROOT; SRC is its
+# phase3-binary). SwiftPM's .build cache is kept; extracted files get fresh
+# mtimes so every source recompiles.
+prep_src() {
+  require_clean
+  SRC_ROOT="$LAB/$1"
+  SRC="$SRC_ROOT/phase3-binary"
   if [[ -d "$SRC/.build" ]]; then mv "$SRC/.build" "$LAB/$1.build-cache"; fi
   rm -rf "${LAB:?}/$1"
-  mkdir -p "$LAB/$1"
-  git -C "$WT" archive HEAD phase3-binary | tar -xm -C "$LAB/$1"
+  mkdir -p "$SRC_ROOT"
+  git -C "$WT" archive HEAD | tar -xm -C "$SRC_ROOT"
   if [[ -d "$LAB/$1.build-cache" ]]; then mv "$LAB/$1.build-cache" "$SRC/.build"; fi
-  cp "$LAB/static/AutotuneCatalog.generated.swift" "$SRC/Sources/macprovider-cli/AutotuneCatalog.generated.swift"
 }
+static_swift() { cp "$LAB/static/AutotuneCatalog.generated.swift" "$SRC/Sources/macprovider-cli/AutotuneCatalog.generated.swift"; }
 wait_http() { for _ in $(seq 1 60); do curl -fs "$1" >/dev/null 2>&1 && return 0; sleep 0.5; done; echo "timeout waiting for $1" >&2; return 1; }
 
 cmd_model() {
@@ -74,13 +82,15 @@ cmd_model() {
 }
 
 cmd_build() {
-  (cd "$WT/phase4-coordinator" && go build -o "$LAB/bin/coordinator" ./cmd/coordinator && go build -o "$LAB/bin/coordinator-cli" ./cmd/coordinator-cli)
-  (cd "$WT/phase5-gateway" && go build -o "$LAB/bin/gateway" ./cmd/gateway)
-  printf '{"Replace":{"%s/cmd/lab1690m6/main.go":"%s"}}' "$WT/phase4-coordinator" "$HERE/labtool/main.go" >"$LAB/run/overlay.json"
-  (cd "$WT/phase4-coordinator" && go build -overlay "$LAB/run/overlay.json" -o "$LAB/bin/labtool" ./cmd/lab1690m6)
+  # Every artifact builds from one export of HEAD, never from the worktree.
+  prep_src src
+  (cd "$SRC_ROOT/phase4-coordinator" && go build -o "$LAB/bin/coordinator" ./cmd/coordinator && go build -o "$LAB/bin/coordinator-cli" ./cmd/coordinator-cli)
+  (cd "$SRC_ROOT/phase5-gateway" && go build -o "$LAB/bin/gateway" ./cmd/gateway)
+  printf '{"Replace":{"%s/cmd/lab1690m6/main.go":"%s"}}' "$SRC_ROOT/phase4-coordinator" "$SRC_ROOT/scripts/lab/1690-m6/labtool/main.go" >"$LAB/run/overlay.json"
+  (cd "$SRC_ROOT/phase4-coordinator" && go build -overlay "$LAB/run/overlay.json" -o "$LAB/bin/labtool" ./cmd/lab1690m6)
   cmd_static
   # The lab CLI is the branch CLI (HEAD) with the lab static release compiled in.
-  prep_src src
+  static_swift
   (cd "$SRC" && swift build -c release --product macprovider-cli)
   cp "$SRC/.build/release/macprovider-cli" "$LAB/bin/macprovider-cli-lab"
   cp "$METALLIB" "$LAB/bin/mlx.metallib"
@@ -92,6 +102,7 @@ cmd_build_spoof() {
   # applied only to its own exported tree ($LAB/src-spoof), never the
   # worktree; the binary lives only in $LAB/bin.
   prep_src src-spoof
+  static_swift
   python3 - "$SRC/Sources/macprovider-cli/CoordinatorClient.swift" <<'PY'
 import sys
 p = sys.argv[1]
@@ -122,7 +133,7 @@ cmd_static() {
     --mlx-model-id "$MLX_ID" --mlx-revision "$MLX_REV" --mlx-sha256 "$mlx_sha" \
     --gguf-sha256 "$GGUF_SHA" --gguf-size "$(stat -f %z "$LAB/models/$GGUF_FILE")" --gguf-repo "$GGUF_REPO" \
     --gguf-revision "$GGUF_REV" --gguf-file "$GGUF_FILE" --swift-out "$LAB/static/AutotuneCatalog.generated.swift"
-  local sc="$WT/scripts/sign-catalog.go"
+  local sc="$SRC_ROOT/scripts/sign-catalog.go"
   [[ -f "$LAB/keys/tier2.priv" ]] || go run "$sc" keygen -public-out "$LAB/keys/tier2.pub" -private-out "$LAB/keys/tier2.priv"
   chmod 600 "$LAB/keys/tier2.priv"
   cat >"$LAB/static/tier2-unsigned.json" <<EOF
@@ -132,6 +143,7 @@ EOF
 }
 
 cmd_up() {
+  require_clean
   python3 "$HERE/write_configs.py"
   start_bg coordinator "$LAB/bin/coordinator" -config "$LAB/run/coordinator.yaml"
   wait_http http://127.0.0.1:19101/healthz

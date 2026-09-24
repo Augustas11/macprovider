@@ -37,6 +37,10 @@ type Store struct {
 	// trusted pools are disabled: pool_operator_attested is never derived).
 	poolAttestationMu sync.RWMutex
 	poolAttestation   PoolOperatorAttestationAuthority
+	// poolSweep is the expiry sweeper's keyset cursor and per-verdict
+	// failure backoff, carried across passes (pool_settlement_expiry_sweep.go).
+	poolSweepMu sync.Mutex
+	poolSweep   poolSettlementSweepState
 	// SPEC-005 v0.4 §13.2 — billing.quarantine_resolution_force_void_enabled
 	// route-layer flag. Held as atomic.Bool so the handler reads it on
 	// every request (no re-wire of the HTTP handler on reload).
