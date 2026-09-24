@@ -219,6 +219,15 @@ SPEC-022-R012 (R-12.8) is normative; this is the operator sequence.
 
 Rollout, in this order:
 
+0. Drain ledger recovery on the OLD coordinator immediately before step 1:
+   let the startup/nightly ledger recovery run to completion (or trigger it)
+   and confirm no request is missing its ledger row. Provider identity rows
+   written before this release carry no recorded `runtime_source`, so the new
+   coordinator's recovery treats a still-missing ledger row as possibly
+   loopback and fails closed: 0 credit, quarantined as
+   `loopback_runtime_not_settlement_eligible`. A native row caught this way is
+   released with `force_credit` after review. Draining first keeps that window
+   empty.
 1. Pause every pool, deploy the coordinator that implements SPEC-022 v0.2.0
    (the `pool_operator_attested` usage source), confirm `/healthz` reports it
    and the updater transaction committed, then resume the pools.
