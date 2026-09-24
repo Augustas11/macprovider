@@ -78,6 +78,11 @@ type Server struct {
 	catalogRecheckPendingHook func()
 	cfg                       config.Config
 	minProviderThroughputBits atomic.Uint64
+
+	// catalogMaterialRoutingGate is the buyer router's SPEC-022 R-2.7 verdict
+	// (true = excluded), injected at wiring time because ws cannot import buyer.
+	catalogMaterialRoutingGate atomic.Pointer[func(pool.Provider) bool]
+
 	proofOfWeightsAdmissionMu sync.RWMutex
 	proofOfWeightsMu          sync.RWMutex
 	proofOfWeights            config.ProofOfWeightsConfig
@@ -1417,10 +1422,30 @@ func (s *Server) providerMeetsDispatchThroughputFloor(p pool.Provider) bool {
 
 // publicRoutingEligible is the /poolz.routing_eligible predicate: request-
 // independent buyer-serving gates plus the optional public-dispatch
-// throughput skip. FR-CAN22 last-provider protection uses canaryBuyerServing
-// without this skip so a below-floor admitted session is not canary-degraded.
+// throughput skip and the buyer router's SPEC-022 R-2.7 catalog-material
+// gate. FR-CAN22 last-provider protection uses canaryBuyerServing without
+// either so a below-floor admitted session is not canary-degraded.
 func (s *Server) publicRoutingEligible(p pool.Provider) bool {
-	return s.canaryBuyerServing(p) && s.providerMeetsDispatchThroughputFloor(p)
+	if !s.canaryBuyerServing(p) || !s.providerMeetsDispatchThroughputFloor(p) {
+		return false
+	}
+	if gate := s.catalogMaterialRoutingGate.Load(); gate != nil && (*gate)(p) {
+		return false
+	}
+	return true
+}
+
+// SetCatalogMaterialRoutingGate injects the buyer router's request-independent
+// SPEC-022 R-2.7 verdict (enforce mode and no Tier-2 route-snapshot material
+// => excluded) so /poolz.routing_eligible agrees with buyer routing. Like the
+// throughput floor it applies to the public projection only; the FR-CAN22
+// last-provider floor (canaryBuyerServing) does not consult it. nil clears it.
+func (s *Server) SetCatalogMaterialRoutingGate(excluded func(pool.Provider) bool) {
+	if excluded == nil {
+		s.catalogMaterialRoutingGate.Store(nil)
+		return
+	}
+	s.catalogMaterialRoutingGate.Store(&excluded)
 }
 
 func (s *Server) proofOfWeightsConfig() config.ProofOfWeightsConfig {
@@ -2770,6 +2795,7 @@ func (s *Server) handleV2Conn(conn net.Conn, connectionAuth providerAuth, payloa
 	}
 	entry.EncryptedLeg = true
 	entry.TrustedPoolV1 = initial.Tier2Capabilities.TrustedPoolV1
+	entry.CatalogMaterialHoldV1 = initial.Tier2Capabilities.CatalogMaterialHoldV1
 	entry.AttestationStatus = attestationStatus
 	if attestResult.SEResult != nil {
 		entry.SEPublicKey = append([]byte(nil), attestResult.SEResult.SEPublicKey...)

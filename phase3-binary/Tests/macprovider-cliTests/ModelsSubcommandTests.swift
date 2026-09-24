@@ -948,7 +948,8 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertNoThrow(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
             recommendation: parsed,
             row: fixture.catalogRow(modelID: fixture.targetModelID),
-            artifact: artifact
+            artifact: artifact,
+            draftModel: nil
         ))
     }
 
@@ -979,7 +980,8 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertNoThrow(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
             recommendation: valid,
             row: row,
-            artifact: artifact
+            artifact: artifact,
+            draftModel: nil
         ))
 
         let inflated = Self.parsedAdoption(
@@ -990,10 +992,235 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertThrowsError(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
             recommendation: inflated,
             row: row,
-            artifact: artifact
+            artifact: artifact,
+            draftModel: nil
         )) { error in
             XCTAssertTrue(String(describing: error).contains("context authority"))
         }
+    }
+
+    func testAdoptRecommendationContextAuthorityAppliesTheDraftCap() throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: fixture.artifact)
+        let artifact = VerifiedModelArtifact(
+            modelArgument: fixture.artifact.path,
+            sha256: fixture.artifactSHA256,
+            configJSONData: inspection.configJSONData,
+            configSHA256: inspection.configSHA256
+        )
+        let row = CandidateCatalog.Row(
+            modelID: fixture.targetModelID,
+            modelRevision: String(repeating: "1", count: 40),
+            modelSHA256: fixture.artifactSHA256,
+            minRAMGB: 1,
+            minBandwidthTier: .c,
+            benchGate: CandidateCatalog.BenchGate(minSustainedTPS: 1, max4KTTFTMS: 1_000),
+            runtimeStatus: "recommendable",
+            notes: nil
+        )
+        let undrafted = AutotuneRecommendHardware(
+            machine: nil,
+            chip: "",
+            memoryGB: 16,
+            bandwidthTier: .c,
+            osVersion: "",
+            binaryVersion: "",
+            diversificationID: "",
+            hardwareIdentityHash: ""
+        ).recommendedMaxContext(
+            modelID: row.modelID,
+            verifiedConfigJSONData: artifact.configJSONData,
+            verifiedConfigSHA256: artifact.configSHA256,
+            catalogMinRAMGB: row.minRAMGB,
+            draftModel: nil
+        )
+        let draftCap = ProviderCapacity.draftContextCap(forPhysicalMemoryGB: 16)
+        XCTAssertGreaterThan(undrafted, draftCap, "precondition: the draft term binds on this fixture")
+
+        func validate(maxContext: Int, draftModel: String?) throws {
+            try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
+                recommendation: Self.parsedAdoption(fixture: fixture, maxContext: maxContext, hardwareMemoryGB: 16),
+                row: row,
+                artifact: artifact,
+                draftModel: draftModel
+            )
+        }
+        XCTAssertNoThrow(try validate(maxContext: undrafted, draftModel: nil))
+        XCTAssertNoThrow(try validate(maxContext: draftCap, draftModel: "d"))
+        XCTAssertThrowsError(
+            try validate(maxContext: undrafted, draftModel: "d"),
+            "a recommendation above the draft cap would stop serve from starting"
+        )
+    }
+
+    /// #1689 M1: serve refuses more than one slot with a draft model, so an
+    /// adoption must refuse a multi-slot recommendation where the context
+    /// check refuses an oversized context, before anything is written.
+    func testAdoptRecommendationRefusesMultipleSlotsWhenTheAdoptingConfigHasADraftModel() throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        // A model whose declared maximum (8,192) is already below the 256 GB
+        // draft cap, so only the slot term can make serve refuse the result.
+        try Data("""
+        {
+          "max_position_embeddings": 8192,
+          "hidden_size": 128,
+          "num_attention_heads": 4,
+          "num_key_value_heads": 1,
+          "num_hidden_layers": 1
+        }
+        """.utf8).write(to: fixture.artifact.appendingPathComponent("config.json"))
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: fixture.artifact)
+        let artifact = VerifiedModelArtifact(
+            modelArgument: fixture.artifact.path,
+            sha256: fixture.artifactSHA256,
+            configJSONData: inspection.configJSONData,
+            configSHA256: inspection.configSHA256
+        )
+        let row = fixture.catalogRow(modelID: fixture.targetModelID)
+        let context = AutotuneRecommendHardware(
+            machine: nil,
+            chip: "Apple M4 Max",
+            memoryGB: 256,
+            bandwidthTier: .c,
+            osVersion: "",
+            binaryVersion: "",
+            diversificationID: "",
+            hardwareIdentityHash: ""
+        ).recommendedMaxContext(
+            modelID: row.modelID,
+            verifiedConfigJSONData: artifact.configJSONData,
+            verifiedConfigSHA256: artifact.configSHA256,
+            catalogMinRAMGB: row.minRAMGB,
+            draftModel: "d"
+        )
+        XCTAssertLessThanOrEqual(context, 8_192, "precondition: the model bound is at or below the draft cap")
+
+        func validate(maxBatch: Int) throws {
+            try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
+                recommendation: Self.parsedAdoption(fixture: fixture, maxContext: context, hardwareMemoryGB: 256, maxBatch: maxBatch),
+                row: row,
+                artifact: artifact,
+                draftModel: "d"
+            )
+        }
+        XCTAssertThrowsError(try validate(maxBatch: 8), "eight slots with a draft model: serve would exit draft_model_capacity_shortfall") { error in
+            XCTAssertTrue(String(describing: error).contains("draft_model_capacity_shortfall"), "\(error)")
+        }
+        XCTAssertNoThrow(try validate(maxBatch: 1))
+
+        // The accepted one-slot recommendation, written to a config with the
+        // draft model, is one serve starts with.
+        try "model: old-model\ndraft_model: d\n".write(to: fixture.config, atomically: true, encoding: .utf8)
+        _ = try ConfigApplier(configPath: fixture.config).apply(
+            recommendation: Self.parsedAdoption(fixture: fixture, maxContext: context, hardwareMemoryGB: 256, maxBatch: 1).core,
+            now: Date(),
+            physicalMemoryGB: 256
+        )
+        var applied = try ConfigLoader.load(cli: CLIOverrides(configPath: fixture.config.path), environment: [:])
+        XCTAssertEqual(applied.maxConcurrencyOverride, 1)
+        XCTAssertNoThrow(try ServeCommand.runSpecDecodeCapacityPreflight(&applied, physicalMemoryGB: 256))
+    }
+
+    /// SPEC-023-R018 item 9: a signed recommendation whose context and slot
+    /// count jointly exceed the memory envelope is refused, not rewritten;
+    /// one at or below the memory-fit slot cap at its context is accepted.
+    func testAdoptRecommendationRefusesSlotsThatDoNotFitMemoryAtTheSignedContext() throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        let geometry = try XCTUnwrap(AutotuneRecommendTests.signedCandidateConfigGeometry["z-ai/glm-4.5-air"])
+        try Data(geometry.json.utf8).write(to: fixture.artifact.appendingPathComponent("config.json"))
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: fixture.artifact)
+        let artifact = VerifiedModelArtifact(
+            modelArgument: fixture.artifact.path,
+            sha256: fixture.artifactSHA256,
+            configJSONData: inspection.configJSONData,
+            configSHA256: inspection.configSHA256
+        )
+        let row = fixture.catalogRow(modelID: fixture.targetModelID, minRAMGB: 80)
+        func validate(maxBatch: Int) throws {
+            try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
+                recommendation: Self.parsedAdoption(fixture: fixture, maxContext: 131_072, hardwareMemoryGB: 256, maxBatch: maxBatch),
+                row: row,
+                artifact: artifact,
+                draftModel: nil
+            )
+        }
+        XCTAssertNoThrow(try validate(maxBatch: 5))
+        XCTAssertNoThrow(try validate(maxBatch: 1))
+        for oversized in [6, 8] {
+            XCTAssertThrowsError(try validate(maxBatch: oversized), "\(oversized) slots of 131,072 tokens exceed 256 GB") { error in
+                XCTAssertTrue(String(describing: error).contains("memory-fit"), "\(error)")
+            }
+        }
+    }
+
+    /// Without readable KV geometry the memory fit is unknown; a signed
+    /// recommendation may then carry at most the chip/RAM tier constant.
+    func testAdoptRecommendationWithUnknownGeometryAcceptsAtMostTheTierSlots() throws {
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        try Data(#"{"max_position_embeddings": 8192}"#.utf8).write(to: fixture.artifact.appendingPathComponent("config.json"))
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: fixture.artifact)
+        let artifact = VerifiedModelArtifact(
+            modelArgument: fixture.artifact.path,
+            sha256: fixture.artifactSHA256,
+            configJSONData: inspection.configJSONData,
+            configSHA256: inspection.configSHA256
+        )
+        let row = fixture.catalogRow(modelID: fixture.targetModelID)
+        func validate(maxBatch: Int) throws {
+            try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
+                recommendation: Self.parsedAdoption(fixture: fixture, maxContext: 8_192, hardwareMemoryGB: 64, maxBatch: maxBatch),
+                row: row,
+                artifact: artifact,
+                draftModel: nil
+            )
+        }
+        // Apple M4 Max with 64 GB: tier constant 2.
+        XCTAssertNoThrow(try validate(maxBatch: 2))
+        XCTAssertThrowsError(try validate(maxBatch: 3)) { error in
+            XCTAssertTrue(String(describing: error).contains("tier"), "\(error)")
+        }
+    }
+
+    func testAdoptRecommendationRefusesMultipleSlotsWithADraftModelBeforeAnyWriteOrSwap() async throws {
+        let socketPath = try makeSocketPath()
+        let fixture = try AdoptionFixture(current: "old-model", target: "new-model")
+        try Data((try String(contentsOf: fixture.config) + "\ndraft_model: d\n").utf8).write(to: fixture.config)
+        try mutateRecommendationFixture(fixture) {
+            $0.replacingOccurrences(of: #""max_concurrency_override": 1"#, with: #""max_concurrency_override": 8"#)
+        }
+        let before = try String(contentsOf: fixture.config)
+        let runtime = makeRuntime(
+            modelID: "old-model",
+            targetAuthority: fixture.targetAuthority
+        ) { target in (target, fixture.artifactSHA256) }
+        let server = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: runtime,
+            supportedModels: ["old-model", "new-model"]
+        )
+        try await server.start()
+        let command = try ModelsAdoptRecommendationCommand.parse([
+            "--json",
+            "--config", fixture.config.path,
+            "--recommendation-json", fixture.recommendation.path,
+            "--ctl-socket-path", socketPath.path,
+            "--switch-state-path", makeStatePath().path,
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+        await server.stop()
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        let events = try decodeAdoptionEvents(capture.stdout)
+        XCTAssertFalse(events.contains { $0.type == "accepted" }, "refused before the runtime is asked to prepare")
+        let terminal = try XCTUnwrap(events.last)
+        XCTAssertEqual(terminal.type, "failed")
+        XCTAssertEqual(terminal.reason, "draft_model_capacity_shortfall")
+        XCTAssertEqual(try String(contentsOf: fixture.config), before)
+        let backups = try FileManager.default.contentsOfDirectory(atPath: fixture.dir.path).filter { $0.contains(".bak-") }
+        XCTAssertEqual(backups, [], "nothing written, not even a backup")
+        let loadedModelID = await runtime.loadedModelID
+        XCTAssertEqual(loadedModelID, "old-model")
     }
 
     func testAdoptRecommendationContextAuthorityAcceptsCalibratedLowerContext() throws {
@@ -1016,7 +1243,8 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertNoThrow(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
             recommendation: calibrated,
             row: row,
-            artifact: artifact
+            artifact: artifact,
+            draftModel: nil
         ))
     }
 
@@ -1040,7 +1268,8 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertThrowsError(try ModelsAdoptRecommendationCommand.validateSignedContextAuthority(
             recommendation: mismatch,
             row: row,
-            artifact: artifact
+            artifact: artifact,
+            draftModel: nil
         )) { error in
             XCTAssertTrue(String(describing: error).contains("context"))
         }
@@ -1952,18 +2181,117 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertTrue(try String(contentsOf: fixture.config).contains("model: old-model\n"), file: file, line: line)
     }
 
+    /// #1689 F7: adoption checks the signed context, slots, and draft terms
+    /// against the bytes where they are, and only then adopts them into the
+    /// durable store: an over-cap recommendation leaves the store untouched.
+    func testAdoptionValidatesSignedSlotsBeforeAdoptingHFBytes() throws {
+        let root = URL(fileURLWithPath: "/tmp")
+            .appendingPathComponent("mpm-adopt-order-\(getpid())-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let durableRoot = root.appendingPathComponent("durable", isDirectory: true)
+        let resolver = CachedModelArtifactResolver(hubRoot: root.appendingPathComponent("hub", isDirectory: true), durableRoot: durableRoot)
+        let modelID = "namespace/big-kv"
+        let revision = String(repeating: "1", count: 40)
+        let snapshot = resolver.snapshotURL(modelID: modelID, revision: revision)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("""
+        {
+          "max_position_embeddings": 32768,
+          "hidden_size": 8192,
+          "num_attention_heads": 64,
+          "num_key_value_heads": 8,
+          "num_hidden_layers": 80
+        }
+        """.utf8).write(to: snapshot.appendingPathComponent("config.json"))
+        try Data("weights".utf8).write(to: snapshot.appendingPathComponent("model.safetensors"))
+        let sha = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
+        let row = CandidateCatalog.Row(
+            modelID: modelID,
+            modelRevision: revision,
+            modelSHA256: sha,
+            minRAMGB: 1,
+            minBandwidthTier: .c,
+            benchGate: CandidateCatalog.BenchGate(minSustainedTPS: 1, max4KTTFTMS: 1_000),
+            runtimeStatus: "recommendable",
+            notes: nil
+        )
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(directory: snapshot)
+        let context = AutotuneRecommendHardware(
+            machine: nil,
+            chip: "Apple M4 Max",
+            memoryGB: 16,
+            bandwidthTier: .c,
+            osVersion: "",
+            binaryVersion: "",
+            diversificationID: "",
+            hardwareIdentityHash: ""
+        ).recommendedMaxContext(
+            modelID: modelID,
+            verifiedConfigJSONData: inspection.configJSONData,
+            verifiedConfigSHA256: inspection.configSHA256,
+            catalogMinRAMGB: row.minRAMGB,
+            draftModel: nil
+        )
+        func recommendation(maxBatch: Int) -> ParsedRecommendationAdoption {
+            ParsedRecommendationAdoption(
+                targetModelID: modelID,
+                core: RecommendationCore(
+                    model: modelID,
+                    targetContext: context,
+                    knobs: WinningKnobs(kvBits: nil, maxBatch: maxBatch, maxContext: context),
+                    tpsMedian: 0,
+                    ttftP95MS: 0,
+                    replicates: 0,
+                    modelArtifactPath: snapshot.path,
+                    modelArtifactSHA256: sha,
+                    modelCatalogKey: modelID,
+                    modelCatalogModelID: modelID,
+                    modelCatalogRevision: revision,
+                    modelCatalogSHA256: sha,
+                    modelCatalogVersion: "test-catalog",
+                    modelCatalogHash: String(repeating: "2", count: 64)
+                ),
+                contextCalibration: nil,
+                donorMode: false,
+                draftModel: nil,
+                draftModelArtifactSHA256: nil,
+                warnings: [],
+                recommendationSHA256: String(repeating: "3", count: 64),
+                rateCardVersion: "test-catalog",
+                demandRankVersion: "test-catalog",
+                candidateCatalogVersion: "test-catalog",
+                hardwareChip: "Apple M4 Max",
+                hardwareMemoryGB: 16,
+                hardwareBinaryVersion: "1.8.90"
+            )
+        }
+
+        XCTAssertThrowsError(try ModelsAdoptRecommendationCommand.validatedAdoptionArtifact(
+            recommendation: recommendation(maxBatch: 8), row: row, resolver: resolver, draftModel: nil
+        )) { error in
+            XCTAssertTrue(String(describing: error).contains("memory-fit cap"), "\(error)")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: durableRoot.path), "a refused adoption never populates the durable store")
+
+        let adopted = try ModelsAdoptRecommendationCommand.validatedAdoptionArtifact(
+            recommendation: recommendation(maxBatch: 1), row: row, resolver: resolver, draftModel: nil
+        )
+        XCTAssertTrue(adopted.modelArgument.hasPrefix(durableRoot.standardizedFileURL.path), adopted.modelArgument)
+    }
+
     private static func parsedAdoption(
         fixture: AdoptionFixture,
         maxContext: Int,
         hardwareMemoryGB: Int,
-        contextCalibration: AutotuneContextCalibrationResult? = nil
+        contextCalibration: AutotuneContextCalibrationResult? = nil,
+        maxBatch: Int = 1
     ) -> ParsedRecommendationAdoption {
         ParsedRecommendationAdoption(
             targetModelID: fixture.targetModelID,
             core: RecommendationCore(
                 model: fixture.targetModelID,
                 targetContext: maxContext,
-                knobs: WinningKnobs(kvBits: nil, maxBatch: 1, maxContext: maxContext),
+                knobs: WinningKnobs(kvBits: nil, maxBatch: maxBatch, maxContext: maxContext),
                 tpsMedian: 0,
                 ttftP95MS: 0,
                 replicates: 0,

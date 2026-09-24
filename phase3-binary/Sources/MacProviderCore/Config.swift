@@ -55,6 +55,95 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
     }
 }
 
+/// Where the effective serve context cap came from (#1689, SPEC-001 FR-17
+/// `capacity.max_context_source`). Recorded where the value is resolved;
+/// `nil` on `AppConfig` means nothing overrode the RAM-tier default.
+public enum MaxContextSource: String, Sendable {
+    case operatorConfig = "operator_config"
+    case environment
+    case cliFlag = "cli_flag"
+    case ramTierDefault = "ram_tier_default"
+    case draftClamp = "draft_clamp"
+    case recommendationAdoption = "recommendation_adoption"
+    /// Config `max_context_override` written by `autotune --recommend --apply`
+    /// (or a recommendation adoption), per its `max_context_override_provenance`.
+    case recommendationApply = "recommendation_apply"
+}
+
+/// Which recommendation generated `max_context_override` (#1689, SPEC-001
+/// FR-20b). It lives in config.yaml itself, as the one-line mapping
+/// `max_context_override_provenance: {…}`, so the config lock, atomic write,
+/// `.bak-` backups, rollback, and the adoption journal carry it together with
+/// the value. Older CLIs ignore the unknown key.
+///
+/// The binding is field-scoped: the config value is generated iff the record
+/// says `source: recommendation_apply`, names a model, and records exactly
+/// the current `max_context_override`. Edits to other keys do not change
+/// ownership. `provider context set` removes the record in the same write, and
+/// a hand edit to a different value no longer matches it. Accepted trade-off:
+/// a hand edit to exactly the generated number stays generated, so a later
+/// model switch recomputes it. An absent, malformed, or mismatched record
+/// leaves the value operator-owned; it never fails the config load.
+public struct MaxContextProvenance: Equatable, Sendable {
+    public static let configKey = "max_context_override_provenance"
+
+    public var source: String
+    public var value: Int
+    /// The model the value was generated for; required.
+    public var model: String
+    public var benchmarkID: String?
+    public var generatedAt: String?
+
+    public init(source: String, value: Int, model: String, benchmarkID: String?, generatedAt: String?) {
+        self.source = source
+        self.value = value
+        self.model = model
+        self.benchmarkID = benchmarkID
+        self.generatedAt = generatedAt
+    }
+
+    /// Tolerant: anything other than a mapping with a string `source`, an
+    /// integer `value`, and a string `model` is no record.
+    public static func parse(_ raw: Any?) -> MaxContextProvenance? {
+        guard let map = raw as? [String: Any],
+              let source = map["source"] as? String,
+              let value = map["value"] as? Int,
+              let model = map["model"] as? String
+        else { return nil }
+        return MaxContextProvenance(
+            source: source,
+            value: value,
+            model: model,
+            benchmarkID: map["benchmark_id"] as? String,
+            generatedAt: map["generated_at"] as? String
+        )
+    }
+
+    /// True when this record marks `value` as generated.
+    public func generatedMaxContext(_ value: Int?) -> Bool {
+        guard let value else { return false }
+        return source == MaxContextSource.recommendationApply.rawValue
+            && !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && self.value == value
+    }
+
+    /// The single-line YAML flow mapping written after the key. Strings are
+    /// always double-quoted so YAML never reads a model id or timestamp as
+    /// another type.
+    public var yamlFlowValue: String {
+        var fields = ["source: \(Self.quoted(source))", "value: \(value)", "model: \(Self.quoted(model))"]
+        if let benchmarkID { fields.append("benchmark_id: \(Self.quoted(benchmarkID))") }
+        if let generatedAt { fields.append("generated_at: \(Self.quoted(generatedAt))") }
+        return "{" + fields.joined(separator: ", ") + "}"
+    }
+
+    private static func quoted(_ value: String) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        return (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) } ?? "\"\""
+    }
+}
+
 public enum ProviderCredentialStoreKind: String, Sendable {
     case keychain
     case protectedFile = "protected_file"
@@ -100,6 +189,10 @@ public struct AppConfig: Equatable, Sendable {
     public var logFormat: LogFormat
     public var logFile: String?
     public var maxContextOverride: Int?
+    public var maxContextSource: MaxContextSource? = nil
+    /// Set only when it marks `maxContextOverride` generated (source
+    /// `recommendationApply`).
+    public var maxContextProvenance: MaxContextProvenance? = nil
     public var maxConcurrencyOverride: Int?
     // SPEC-013 (autoresearch serving knobs): KV-cache quantization bits
     // forwarded to mlx-swift `GenerateParameters.kvBits`. nil ⇒ no
@@ -519,6 +612,15 @@ public enum ConfigLoader {
         try assign(&config.logFormat, from: dict, key: "log_format", expected: "json or text")
         try assign(&config.logFile, from: dict, key: "log_file", expected: "string")
         try assign(&config.maxContextOverride, from: dict, key: "max_context_override", expected: "integer")
+        if let value = dict["max_context_override"], !(value is NSNull) {
+            let provenance = MaxContextProvenance.parse(dict[MaxContextProvenance.configKey])
+            if provenance?.generatedMaxContext(config.maxContextOverride) == true {
+                config.maxContextSource = .recommendationApply
+                config.maxContextProvenance = provenance
+            } else {
+                config.maxContextSource = .operatorConfig
+            }
+        }
         try assign(&config.maxConcurrencyOverride, from: dict, key: "max_concurrency_override", expected: "integer")
         try assign(&config.kvBitsOverride, from: dict, key: "kv_bits", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: dict, key: "drain_timeout_s", expected: "integer")
@@ -690,6 +792,10 @@ public enum ConfigLoader {
         try assign(&config.logFormat, from: environment, env: "MACPROVIDER_LOG_FORMAT", expected: "json or text")
         try assign(&config.logFile, from: environment, env: "MACPROVIDER_LOG_FILE", expected: "string")
         try assign(&config.maxContextOverride, from: environment, env: "MACPROVIDER_MAX_CONTEXT_OVERRIDE", expected: "integer")
+        if environment["MACPROVIDER_MAX_CONTEXT_OVERRIDE"] != nil {
+            config.maxContextSource = .environment
+            config.maxContextProvenance = nil
+        }
         try assign(&config.maxConcurrencyOverride, from: environment, env: "MACPROVIDER_MAX_CONCURRENCY_OVERRIDE", expected: "integer")
         try assign(&config.kvBitsOverride, from: environment, env: "MACPROVIDER_KV_BITS", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: environment, env: "MACPROVIDER_DRAIN_TIMEOUT_S", expected: "integer")
@@ -863,6 +969,8 @@ public enum ConfigLoader {
         }
         if let maxContext = cli.maxContext {
             config.maxContextOverride = maxContext
+            config.maxContextSource = .cliFlag
+            config.maxContextProvenance = nil
         }
         if let maxBatch = cli.maxBatch {
             config.maxConcurrencyOverride = maxBatch

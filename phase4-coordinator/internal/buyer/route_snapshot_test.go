@@ -1751,6 +1751,87 @@ func TestRouteSnapshotEnforceFailsClosedWithoutValidReceiptKey(t *testing.T) {
 	}
 }
 
+// SPEC-022-R002 R-2.7 (#1689): under enforce, a catalog session whose served
+// model has no Tier-2 route-snapshot material used to be selected and then
+// failed pre-dispatch (500 route_snapshot_failed). Routing now excludes it
+// (503 no_provider_available, retryable, no charge); observe mode and a
+// catalog that carries the material still dispatch.
+func TestRouteSnapshotEnforceExcludesSessionWithoutCatalogMaterial(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		mode        string
+		material    bool
+		wantStatus  int
+		wantReached bool
+	}{
+		{name: "enforce without material", mode: billing.RouteSnapshotModeEnforce, wantStatus: http.StatusServiceUnavailable},
+		{name: "observe without material", mode: billing.RouteSnapshotModeObserve, wantStatus: http.StatusOK, wantReached: true},
+		{name: "enforce with material", mode: billing.RouteSnapshotModeEnforce, material: true, wantStatus: http.StatusOK, wantReached: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tier2.ResetForTest()
+			t.Cleanup(tier2.ResetForTest)
+			if tc.material {
+				raw, pubkey := routeSnapshotCatalogFixture(t, "catalog-material-gate", time.Now().UTC().Add(time.Hour))
+				if err := tier2.Configure(config.Tier2Config{
+					ObserveEnabled:      true,
+					CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+					CatalogPublicKey:    pubkey,
+					RequireHashVerified: true,
+				}, zerolog.Nop()); err != nil {
+					t.Fatalf("tier2.Configure: %v", err)
+				}
+			}
+			reqLog, dbPath := openBuyerRequestLog(t)
+			t.Cleanup(func() { _ = reqLog.Close() })
+			billingStore, err := billing.NewStore(reqLog.DB())
+			if err != nil {
+				t.Fatalf("billing.NewStore: %v", err)
+			}
+			setSettlementModeForTest(billingStore, tc.mode)
+			cfg := config.Default().Rewards
+			snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+			if err != nil {
+				t.Fatalf("InsertConfigSnapshot: %v", err)
+			}
+			var reached bool
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				writeProviderOK(w)
+			}))
+			defer upstream.Close()
+			registry := pool.NewRegistry(nil)
+			registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 30, bytes.Repeat([]byte{0x77}, 32))
+			server := buyer.NewServer(
+				registry,
+				zerolog.Nop(),
+				time.Unix(1716768000, 0),
+				buyer.WithRequestLog(reqLog),
+				buyer.WithBilling(billingStore, cfg),
+				buyer.WithBillingSnapshotID(snapshotID),
+			)
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), nil)
+			if rr.Code != tc.wantStatus {
+				t.Fatalf("status=%d body=%s, want %d", rr.Code, rr.Body.String(), tc.wantStatus)
+			}
+			if reached != tc.wantReached {
+				t.Fatalf("provider reached=%v, want %v", reached, tc.wantReached)
+			}
+			if tc.wantStatus == http.StatusServiceUnavailable {
+				if !strings.Contains(rr.Body.String(), "no_provider_available") {
+					t.Fatalf("body=%s, want no_provider_available", rr.Body.String())
+				}
+				if got := routeSnapshotCount(t, dbPath); got != 0 {
+					t.Fatalf("route snapshots=%d want 0", got)
+				}
+				if got := ledgerCreditCount(t, dbPath); got != 0 {
+					t.Fatalf("ledger credits=%d want 0", got)
+				}
+			}
+		})
+	}
+}
+
 func TestMalformedNonStreamingOutputPersistsUnavailableEvidence(t *testing.T) {
 	tier2.ResetForTest()
 	t.Cleanup(tier2.ResetForTest)

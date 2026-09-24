@@ -220,16 +220,13 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     // SPEC. `buyer_serving_hold_v1` (#1616) gates `buyer_serving_hold`, which
     // MUST be null unless `network_state` is `not_buyer_serving` and MUST NOT
     // be synthesised locally; it is advisory diagnostics with no buyer-serving
-    // authority. Promoting that MUST into SPEC-001 needs a version bump, and
-    // the bump is blocked: SPEC-001's version is pinned by the cross-spec lock
-    // in scripts/tests/test_byom_contract_lock.py, whose BYOMContractLockTests
-    // class is commit-attested evidence for SPEC-046-R001/R008 conformance.
-    // Editing it invalidates that attestation, and re-attesting needs a fresh
-    // signed BYOM discovery journey. Tracked on #1616.
+    // authority (SPEC-001 v1.9.21 "Buyer-serving holds").
     static let localStatusCapabilities = [
         "buyer_serving_authority_v1",
         "buyer_serving_hold_v1",
+        "capacity_provenance_v1",
         "catalog_status_v1",
+        "coordinator_origin_v1",
         "compatibility_set_v1",
         "credential_status_v1",
         "admission_identity_v1",
@@ -1662,6 +1659,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "lifecycle": lifecycleStateStatus(lifecycleStateInspection),
             "lifecycle_lease": lifecycleLeaseStatus(lifecycleLeaseInspection),
             "provider_id": jsonNullable(providerID),
+            // coordinator_origin_v1 (#1689): the coordinator this serve joined,
+            // as scheme://host[:port], so `provider verify` checks the public
+            // feed of that coordinator rather than the invoking shell's.
+            "coordinator_origin": jsonNullable(ProviderVerifier.coordinatorOrigin(coordinatorURL)),
             "status": snapshot.status.rawValue,
             "model": effectiveModelID ?? NSNull(),
             "model_loaded": effectiveModelLoaded,
@@ -1698,6 +1699,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "max_context_tokens": snapshot.capacity.maxContextTokens,
                 "max_concurrency": snapshot.capacity.maxConcurrency,
                 "throughput_tps_estimate": snapshot.capacity.throughputTPSEstimate,
+                // capacity_provenance_v1 (#1689): local diagnostics only; the
+                // coordinator wire still carries just the estimate above.
+                "max_context_source": snapshot.capacity.maxContextSource.rawValue,
+                "throughput_source": snapshot.capacity.throughputProbe == nil ? "none" : "startup_probe",
+                "throughput_probe_max_tokens": snapshot.capacity.throughputProbe.map { $0.maxTokens as Any } ?? NSNull(),
+                "throughput_probe_model": jsonNullable(snapshot.capacity.throughputProbe?.modelID),
             ],
             "coordinator": [
                 "connected": snapshot.coordinatorConnected,

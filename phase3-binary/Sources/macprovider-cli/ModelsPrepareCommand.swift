@@ -262,31 +262,56 @@ final class Build1LaneAPrepareEventEmitter: @unchecked Sendable {
 struct ModelsPrepareCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "prepare",
-        abstract: "Prepare the Build 1 Lane A model under staging-only guards."
+        abstract: "Prepare a signed catalog model (--profile catalog) or the Build 1 Lane A model.",
+        discussion: "--profile catalog (implied by --repair-cache) downloads the signed catalog row's pinned "
+            + "snapshot with the serve/autotune downloader, verifies its canonical hash, and prints one final "
+            + "state: ready (verified), downloaded but hash mismatch (see verify-artifact), or incomplete "
+            + "(retry: <command>). The default build1-lane-a profile is the JSON-only staging transaction."
     )
 
-    @Argument(help: "Lane A catalog key. Only the approved Build 1 Llama 3B tuple is accepted.")
+    @Argument(help: "Catalog key or model id. The build1-lane-a profile accepts only the approved Build 1 Llama 3B tuple.")
     var catalogKey: String
 
-    @Flag(name: .customLong("json"), help: "Emit model_catalog_transaction_event.v1 frames on stdout.")
+    @Flag(name: .customLong("json"), help: "Emit model_catalog_transaction_event.v1 frames (build1-lane-a) or one model_prepare_result.v1 object (catalog) on stdout.")
     var emitJSON = false
 
-    @Flag(help: "Confirm a staging-only preparation attempt after reviewing models catalog-economics --json.")
+    @Flag(help: "build1-lane-a only: confirm a staging-only preparation attempt after reviewing models catalog-economics --json.")
     var yes = false
 
-    @Option(help: "Preparation profile. The only accepted value is build1-lane-a.")
-    var profile: String = Build1LaneAPrepareProfile.profile
+    @Option(help: "Preparation profile: build1-lane-a (default) or catalog.")
+    var profile: String?
 
-    @Option(help: "Explicit staging coordinator URL. Only loopback and approved staging hosts are accepted.")
+    @Flag(help: "Catalog profile: remove only this model's interrupted-download leftovers and an unverifiable pinned cache snapshot, then download again. Implies --profile catalog.")
+    var repairCache = false
+
+    @Option(help: "build1-lane-a only: explicit staging coordinator URL. Only loopback and approved staging hosts are accepted.")
     var coordinatorURL: String?
 
     @Option(help: "YAML config path used to resolve model_artifact_root. Overrides MACPROVIDER_CONFIG.")
     var config: String?
 
-    @Option(help: "Abort staging after this many seconds and report timed_out. Unset means no deadline.")
+    @Option(help: "build1-lane-a only: abort staging after this many seconds and report timed_out. Unset means no deadline.")
     var timeoutSeconds: Int?
 
     func run() async throws {
+        if profile == ModelsCatalogPrepareRunner.profile || (profile == nil && repairCache) {
+            let laneAOnly = [
+                yes ? "--yes" : nil,
+                coordinatorURL == nil ? nil : "--coordinator-url",
+                timeoutSeconds == nil ? nil : "--timeout-seconds",
+            ].compactMap { $0 }
+            guard laneAOnly.isEmpty else {
+                writePrepareStderr("models prepare refused: \(laneAOnly.joined(separator: ", ")) applies only to --profile \(Build1LaneAPrepareProfile.profile), not --profile \(ModelsCatalogPrepareRunner.profile)")
+                throw ExitCode(2)
+            }
+            try await ModelsCatalogPrepareRunner.run(
+                key: catalogKey,
+                repairCache: repairCache,
+                emitJSON: emitJSON,
+                config: config
+            )
+            return
+        }
         guard emitJSON else {
             writePrepareStderr("models prepare is JSON-only in this release; pass --json")
             throw ExitCode(2)
@@ -307,7 +332,7 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
         guard yes else {
             try fail(reason: "confirmation_required", modelKey: normalizedModelKey())
         }
-        guard profile == Build1LaneAPrepareProfile.profile else {
+        guard (profile ?? Build1LaneAPrepareProfile.profile) == Build1LaneAPrepareProfile.profile, !repairCache else {
             try fail(reason: "unsupported_profile", modelKey: normalizedModelKey())
         }
         guard Build1LaneAPrepareProfile.isApprovedCatalogKey(catalogKey) else {

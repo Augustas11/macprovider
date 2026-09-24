@@ -174,7 +174,7 @@ final class AutotuneACOutputTests: XCTestCase {
     }
 
     private func nonOwnedLines(_ text: String) -> [String] {
-        let owned = ["model:", "kv_bits:", "max_context_override:", "max_concurrency_override:"]
+        let owned = ["model:", "kv_bits:", "max_context_override:", "max_concurrency_override:", "max_context_override_provenance:"]
         return text.split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
             .filter { line in !owned.contains { line.hasPrefix($0) } }
