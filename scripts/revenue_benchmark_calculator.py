@@ -12,6 +12,7 @@ not produce an autotune recommendation.
 import argparse
 import importlib.util
 import json
+import sqlite3
 import sys
 from collections import Counter
 from contextlib import ExitStack, closing
@@ -50,7 +51,11 @@ def round_half_even(numerator, denominator):
 
 
 def expected_credits(credit, cache_hit_rate):
-    """Recompute SPEC-005 gross/provider credits from the ledger row's own terms."""
+    """Recompute SPEC-005 gross/provider credits from the ledger row's own terms.
+
+    Mirrors billing.ComputeCreditsWithCache (phase4-coordinator/internal/billing/formula.go)
+    for provider_reported rows; its worked examples are pinned in the calculator tests.
+    """
     prompt = credit["prompt_tokens"]
     cached = credit["cached_prompt_tokens"] or 0
     base = ((prompt - cached) * credit["prompt_rate_per_mtok"]
@@ -70,6 +75,16 @@ def usdc_per_day(credits, window_seconds):
     return usdc(Decimal(credits) * SECONDS_PER_DAY / Decimal(str(window_seconds)))
 
 
+def is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def request_times(coordinator, account_id, request_id):
+    return [classifier.parse_utc(r["ts_utc"]) for r in coordinator.execute(
+        "SELECT ts_utc FROM request_log WHERE account_id = ? AND external_request_id = ?",
+        (account_id, request_id))]
+
+
 def ledger_credit(coordinator, receipt_scope, attempt):
     return coordinator.execute(
         """SELECT model, prompt_tokens, cached_prompt_tokens, completion_tokens, usage_source, fault_flag,
@@ -82,10 +97,12 @@ def ledger_credit(coordinator, receipt_scope, attempt):
     ).fetchone()
 
 
-def evaluate_row(candidate, case, evidence, coordinator, receipt_scope):
+def evaluate_row(candidate, case, evidence, coordinator, receipt_scope, times):
     """Return (reasons, economics). Empty reasons means the row counts toward revenue."""
     if evidence["classification"] != "complete":
         return [evidence["classification"]], None
+    if not times or any(t < candidate["started"] or t > candidate["finished"] for t in times):
+        return ["outside_candidate_window"], None
     if len(evidence["attempts"]) != 1:
         return ["multiple_attempts"], None
     credit = ledger_credit(coordinator, receipt_scope, evidence["attempts"][0])
@@ -124,18 +141,23 @@ def validate_manifest(manifest, doc):
         raise ValueError("manifest schema must be " + RUN_SCHEMA)
     if manifest.get("workload") != workload_lib.identity(doc):
         raise ValueError("manifest workload does not match the pinned workload identity")
-    run_id = manifest.get("run_id", "")
-    if not workload_lib.RUN_ID_RE.match(run_id):
+    run_id = manifest.get("run_id")
+    if not isinstance(run_id, str) or not workload_lib.RUN_ID_RE.match(run_id):
         raise ValueError("manifest run_id is invalid")
-    if not manifest.get("account_id"):
+    if not isinstance(manifest.get("account_id"), str) or not manifest["account_id"].strip():
         raise ValueError("manifest account_id is required")
+    repetitions = manifest.get("repetitions")
+    if not is_int(repetitions) or repetitions < 1:
+        raise ValueError("manifest repetitions must be a positive integer")
+    if not isinstance(manifest.get("candidates"), list) or not isinstance(manifest.get("requests"), list):
+        raise ValueError("manifest candidates and requests must be lists")
     candidates = {}
-    for candidate in manifest.get("candidates") or []:
-        cid = candidate.get("candidate_id")
-        if cid in candidates or not workload_lib.SLUG_RE.match(cid or ""):
+    for candidate in manifest["candidates"]:
+        cid = candidate.get("candidate_id") if isinstance(candidate, dict) else None
+        if not isinstance(cid, str) or cid in candidates or not workload_lib.SLUG_RE.match(cid):
             raise ValueError("candidate ids must be unique slugs")
         for key in ("model", "expected_provider_id", "started_at", "finished_at"):
-            if not candidate.get(key):
+            if not isinstance(candidate.get(key), str) or not candidate[key]:
                 raise ValueError("candidate {} missing {}".format(cid, key))
         started = classifier.parse_utc(candidate["started_at"])
         finished = classifier.parse_utc(candidate["finished_at"])
@@ -144,27 +166,35 @@ def validate_manifest(manifest, doc):
         rate = candidate.get("prompt_cache_hit_rate_per_mtok")
         if rate is not None and (not isinstance(rate, int) or isinstance(rate, bool) or rate < 0):
             raise ValueError("candidate {} prompt_cache_hit_rate_per_mtok must be a non-negative integer".format(cid))
-        candidates[cid] = dict(candidate, window_seconds=(finished - started).total_seconds())
+        candidates[cid] = dict(candidate, started=started, finished=finished,
+                               window_seconds=(finished - started).total_seconds())
     if not candidates:
         raise ValueError("manifest has no candidates")
     cases = workload_lib.cases_by_id(doc)
     seen = set()
-    for row in manifest.get("requests") or []:
+    for row in manifest["requests"]:
+        if not isinstance(row, dict):
+            raise ValueError("manifest requests must be objects")
         cid, case_id, rep, rid = row.get("candidate_id"), row.get("case_id"), row.get("repetition"), row.get("request_id")
-        if cid not in candidates or case_id not in cases or not isinstance(rep, int) or rep < 0:
+        if (not isinstance(cid, str) or cid not in candidates or not isinstance(case_id, str)
+                or case_id not in cases or not is_int(rep) or not 0 <= rep < repetitions):
             raise ValueError("request {} has unknown candidate, case, or repetition".format(rid))
         if rid != workload_lib.request_id(doc, run_id, cid, case_id, rep):
             raise ValueError("request {} is not the planned run-scoped request id".format(rid))
-        if rid in seen:
+        if (cid, case_id, rep) in seen:
             raise ValueError("request {} appears more than once".format(rid))
-        seen.add(rid)
-    if not seen:
-        raise ValueError("manifest has no requests")
+        seen.add((cid, case_id, rep))
+    # Failed requests stay in the manifest as zero-revenue rows; omitting them
+    # would hide the failure rate.
+    missing = len(candidates) * len(cases) * repetitions - len(seen)
+    if missing:
+        raise ValueError("manifest omits {} planned request(s); list every planned request".format(missing))
     return candidates, cases
 
 
 def calculate(manifest, coordinator, gateway, journal=None, now=None, doc=None):
-    doc = doc or workload_lib.load(manifest.get("workload", {}).get("version", 1))
+    workload = manifest.get("workload")
+    doc = doc or workload_lib.load(workload.get("version") if isinstance(workload, dict) else None)
     candidates, cases = validate_manifest(manifest, doc)
     _, receipt_scope = classifier.evidence_scopes(manifest["account_id"])
     totals = {cid: {"attempted": 0, "counted": 0, "excluded": Counter(), "prompt_tokens": 0,
@@ -177,9 +207,17 @@ def calculate(manifest, coordinator, gateway, journal=None, now=None, doc=None):
         try:
             evidence = classifier.classify(coordinator, gateway, manifest["account_id"], row["request_id"],
                                            journal, now=now, expected_provider_id=candidate["expected_provider_id"])
-        except ValueError:
-            evidence = {"classification": "no_successful_provider_request", "missing": [], "pending": []}
-        reasons, economics = evaluate_row(candidate, case, evidence, coordinator, receipt_scope)
+            times = request_times(coordinator, manifest["account_id"], row["request_id"])
+        except ValueError as exc:
+            if not str(exc).startswith("no successful provider-bound request"):
+                evidence = {"classification": "evidence_unreadable:" + type(exc).__name__, "missing": [], "pending": []}
+            else:
+                evidence = {"classification": "no_successful_provider_request", "missing": [], "pending": []}
+            times = []
+        except (TypeError, KeyError, sqlite3.Error) as exc:
+            evidence = {"classification": "evidence_unreadable:" + type(exc).__name__, "missing": [], "pending": []}
+            times = []
+        reasons, economics = evaluate_row(candidate, case, evidence, coordinator, receipt_scope, times)
         bucket = totals[row["candidate_id"]]
         bucket["attempted"] += 1
         if reasons:
@@ -213,6 +251,7 @@ def calculate(manifest, coordinator, gateway, journal=None, now=None, doc=None):
             "candidate_id": cid,
             "model": candidate["model"],
             "expected_provider_id": candidate["expected_provider_id"],
+            "declared_prompt_cache_hit_rate_per_mtok": candidate.get("prompt_cache_hit_rate_per_mtok"),
             "attempted_rows": bucket["attempted"],
             "counted_rows": bucket["counted"],
             "excluded_rows_by_reason": dict(sorted(bucket["excluded"].items())),
@@ -230,10 +269,6 @@ def calculate(manifest, coordinator, gateway, journal=None, now=None, doc=None):
         })
 
     blockers = []
-    attempted = {cid: Counter((r["case_id"], r["repetition"]) for r in manifest["requests"] if r["candidate_id"] == cid)
-                 for cid in candidates}
-    if len({frozenset(c.items()) for c in attempted.values()}) > 1:
-        blockers.append("candidates_attempted_different_case_sets")
     if len(all_terms) > 1:
         blockers.append("payout_terms_changed_during_run")
     for entry in report_candidates:

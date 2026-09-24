@@ -175,7 +175,7 @@ class RevenueCalculatorFixtureTests(unittest.TestCase):
         case_by_request = {r["request_id"]: r["case_id"] for r in self.manifest["requests"]}
         rows = copy.deepcopy(self.evidence["rows"])
         for row in rows:
-            row.update(state="complete", age_seconds=900)
+            row.update(state="complete", age_seconds=1200)
             row["completion_tokens"] = max(row["completion_tokens"], cases[case_by_request[row["request_id"]]]["min_completion_tokens"])
             cache_rate = 25000 if row["cached_prompt_tokens"] else 0
             row["gross_credits"], row["provider_credits"] = calculator.expected_credits(row, cache_rate)
@@ -194,27 +194,90 @@ class RevenueCalculatorFixtureTests(unittest.TestCase):
             self.assertEqual(entry["attempted_rows"], 9)
             self.assertEqual(entry["counted_rows"], 9)
 
-    def test_dropping_workload_cases_blocks_comparison(self):
-        self.reseed_all_complete()
-        manifest = copy.deepcopy(self.manifest)
-        manifest["requests"] = [r for r in manifest["requests"] if r["case_id"] != "harden-bash-release-script"]
-        report = self.report(manifest)
-        self.assertFalse(report["comparable"])
-        for entry in report["candidates"]:
-            self.assertEqual(entry["cases_without_counted_rows"], ["harden-bash-release-script"])
-
     def test_pending_row_turns_incomplete_after_deadline_and_never_counts(self):
         report = calculator.calculate(self.manifest, self.coord, self.gateway, now=self.now + timedelta(hours=1))
         incumbent = self.candidate(report, "incumbent-qwen-coder")
         self.assertEqual(incumbent["excluded_rows_by_reason"], {"incomplete": 2})
         self.assertEqual(incumbent["provider_credits"], 2509)
 
-    def test_different_case_sets_block_comparison(self):
+    def test_manifest_must_list_every_planned_request(self):
         manifest = copy.deepcopy(self.manifest)
         manifest["requests"] = [r for r in manifest["requests"]
                                 if not (r["candidate_id"] == "challenger-qwen35-a3b"
                                         and r["case_id"] == "review-sql-migration-backfill")]
-        self.assertIn("candidates_attempted_different_case_sets", self.report(manifest)["comparison_blockers"])
+        with self.assertRaisesRegex(ValueError, "omits 1 planned request"):
+            self.report(manifest)
+
+    def test_rows_outside_candidate_window_are_excluded(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["candidates"][0].update(started_at="2020-01-01T00:00:00Z", finished_at="2020-01-01T00:00:01Z")
+        incumbent = self.candidate(self.report(manifest), "incumbent-qwen-coder")
+        self.assertEqual(incumbent["counted_rows"], 0)
+        self.assertEqual(incumbent["provider_usdc_per_day_over_window"], "0.000000")
+        self.assertEqual(incumbent["excluded_rows_by_reason"]["outside_candidate_window"], 7)
+
+    def test_window_narrower_than_evidence_excludes_rows_outside_it(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["candidates"][0].update(started_at="2026-09-24T11:50:00Z")
+        incumbent = self.candidate(self.report(manifest), "incumbent-qwen-coder")
+        self.assertEqual(incumbent["counted_rows"], 0)
+        self.assertEqual(incumbent["excluded_rows_by_reason"]["outside_candidate_window"], 7)
+
+    def test_retried_request_is_excluded_even_when_every_attempt_is_complete(self):
+        tables = {
+            "request_log": "request_id, 1, ts_utc, status, provider_assigned_id, provider_header, account_id, external_request_id, model",
+            "settlement_route_snapshots": "account_scope, request_id, 1, provider_id, pending_deadline_seconds, request_start_ts_unix_ms, route_snapshot_digest, provider_reported_model_hash, expected_catalog_model_hash, model_id, spec008_hash_status",
+            "settlement_attempt_outputs": "account_scope, request_id, 1, provider_id, terminal_state, usage_canonical_json",
+            "settlement_receipt_verdicts": "account_scope_hash, request_id, 1, provider_id, settlement_outcome, closed, reason, pending_deadline_unix_ms, route_snapshot_digest",
+        }
+        for table, columns in tables.items():
+            target = columns.replace(", 1,", ", attempt_n,")
+            self.coord.execute("INSERT INTO {0}({1}) SELECT {2} FROM {0} WHERE request_id='int-0-00'".format(table, target, columns))
+        self.coord.execute("INSERT INTO ledger_request_credits(request_id, attempt_n, provider_id, provider_assigned_id, model,"
+                           " prompt_tokens, cached_prompt_tokens, completion_tokens, usage_source, fault_flag,"
+                           " prompt_rate_per_mtok, completion_rate_per_mtok, global_multiplier_ppm, gross_credits,"
+                           " provider_share_bps, provider_credits, quarantine_reason, quarantined, settlement_policy_mode,"
+                           " settlement_account_scope_hash) SELECT request_id, 1, provider_id, provider_assigned_id, model,"
+                           " prompt_tokens, cached_prompt_tokens, completion_tokens, usage_source, fault_flag,"
+                           " prompt_rate_per_mtok, completion_rate_per_mtok, global_multiplier_ppm, gross_credits,"
+                           " provider_share_bps, provider_credits, quarantine_reason, quarantined, settlement_policy_mode,"
+                           " settlement_account_scope_hash FROM ledger_request_credits WHERE request_id='int-0-00'")
+        report = self.report()
+        row = next(r for r in report["rows"] if r["request_id"] == self.manifest["requests"][0]["request_id"])
+        self.assertEqual(row["classification"], "complete")
+        self.assertEqual(row["excluded_reasons"], ["multiple_attempts"])
+        self.assertEqual(self.candidate(report, "incumbent-qwen-coder")["provider_credits"], 2509 - 92)
+
+    def test_ledger_tokens_must_match_gateway_usage(self):
+        self.coord.execute("UPDATE ledger_request_credits SET completion_tokens=completion_tokens+1 WHERE request_id='int-0-00'")
+        incumbent = self.candidate(self.report(), "incumbent-qwen-coder")
+        self.assertEqual(incumbent["excluded_rows_by_reason"]["ledger_gateway_usage_mismatch"], 1)
+        self.assertEqual(incumbent["provider_credits"], 2509 - 92)
+
+    def test_unreadable_evidence_is_excluded_not_fatal(self):
+        self.coord.execute("UPDATE settlement_attempt_outputs SET usage_canonical_json='{' WHERE request_id='int-0-00'")
+        self.coord.execute("UPDATE settlement_attempt_outputs SET usage_canonical_json='{}' WHERE request_id='int-0-01'")
+        incumbent = self.candidate(self.report(), "incumbent-qwen-coder")
+        self.assertEqual(incumbent["excluded_rows_by_reason"]["evidence_unreadable:JSONDecodeError"], 1)
+        self.assertEqual(incumbent["excluded_rows_by_reason"]["evidence_unreadable:KeyError"], 1)
+        self.assertEqual(incumbent["provider_credits"], 2509 - 92 - 262)
+
+    def test_manifest_rejects_bool_repetition_and_non_string_ids(self):
+        manifest = copy.deepcopy(self.manifest)
+        first = manifest["requests"][0]
+        first["repetition"] = False
+        first["request_id"] = calculator.workload_lib.request_id(
+            calculator.workload_lib.load(1), manifest["run_id"], first["candidate_id"], first["case_id"], False)
+        with self.assertRaisesRegex(ValueError, "unknown candidate, case, or repetition"):
+            self.report(manifest)
+        manifest = copy.deepcopy(self.manifest)
+        manifest["candidates"][0]["candidate_id"] = 5
+        with self.assertRaisesRegex(ValueError, "unique slugs"):
+            self.report(manifest)
+        manifest = copy.deepcopy(self.manifest)
+        manifest["account_id"] = 7
+        with self.assertRaisesRegex(ValueError, "account_id"):
+            self.report(manifest)
 
     def test_payout_terms_change_blocks_comparison(self):
         self.coord.execute("UPDATE ledger_request_credits SET provider_share_bps=7000,"
@@ -258,6 +321,18 @@ class RevenueCalculatorFixtureTests(unittest.TestCase):
         manifest["workload"]["sha256"] = "0" * 64
         with self.assertRaisesRegex(ValueError, "pinned workload identity"):
             self.report(manifest)
+
+    def test_formula_mirror_matches_go_worked_examples(self):
+        # Vectors from phase4-coordinator/internal/billing/formula_test.go
+        # (TestComputeCredits_WorkedExamples, TestComputeCreditsWithCachePricesOnlyCachedPromptAtCacheRate).
+        def row(prompt, cached, completion, prompt_rate, completion_rate):
+            return {"prompt_tokens": prompt, "cached_prompt_tokens": cached, "completion_tokens": completion,
+                    "prompt_rate_per_mtok": prompt_rate, "completion_rate_per_mtok": completion_rate,
+                    "global_multiplier_ppm": 1_000_000, "provider_share_bps": 9000}
+        self.assertEqual(calculator.expected_credits(row(1000, None, 2000, 1_000_000, 2_000_000), 0), (5000, 4500))
+        self.assertEqual(calculator.expected_credits(row(1000, None, 0, 1_000_000, 2_000_000), 0), (1000, 900))
+        self.assertEqual(calculator.expected_credits(row(1000, None, 500, 500_000, 1_000_000), 0), (1000, 900))
+        self.assertEqual(calculator.expected_credits(row(1000, 400, 100, 1_000_000, 2_000_000), 250_000), (900, 810))
 
     def test_round_half_even_matches_billing_formula(self):
         self.assertEqual(calculator.round_half_even(5, 2), 2)

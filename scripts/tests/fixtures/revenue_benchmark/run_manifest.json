@@ -7,20 +7,21 @@
     "sha256": "9cba901e1fa3d8972ec97019c91e6505016589e13b0512dc5ad7d809dc46141c"
   },
   "account_id": "acct-bench-fixture",
+  "repetitions": 1,
   "candidates": [
     {
       "candidate_id": "incumbent-qwen-coder",
       "model": "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit",
       "expected_provider_id": "prov-incumbent",
-      "started_at": "2026-09-24T10:00:00Z",
-      "finished_at": "2026-09-24T11:00:00Z"
+      "started_at": "2026-09-24T11:00:00Z",
+      "finished_at": "2026-09-24T12:00:00Z"
     },
     {
       "candidate_id": "challenger-qwen35-a3b",
       "model": "qwen/qwen3.5-35b-a3b",
       "expected_provider_id": "prov-challenger",
-      "started_at": "2026-09-24T11:00:00Z",
-      "finished_at": "2026-09-24T11:30:00Z",
+      "started_at": "2026-09-24T11:20:00Z",
+      "finished_at": "2026-09-24T11:50:00Z",
       "prompt_cache_hit_rate_per_mtok": 25000
     }
   ],
