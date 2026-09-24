@@ -1273,8 +1273,16 @@ private struct PagedKVSharedLayerBatch {
 private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
     private let rowCaches: [PagedKVCache]
     private var preparedLengths: [Int]?
+    /// `[B, H, capacity, D]` batch buffers; only `[..<length]` is logical. Rows
+    /// shorter than `length` are zero past their own stored tokens, exactly
+    /// the padding `concatenatePadded` produced.
     private var keys: MLXArray?
     private var values: MLXArray?
+    private var length = 0
+    /// Each row's `mutationCount` right after this batch last wrote it. The
+    /// in-place ragged path is used only while every row still matches, so a
+    /// row changed elsewhere (bridge trim, state writeback) forces a rebuild.
+    private var rowMutationCounts: [Int]?
     /// Live lockstep sequence length. When set, `update` concatenates on the
     /// batch tensors instead of looping per row (required for `MLX.compile()`).
     private var batchedOffset: Int?
@@ -1298,7 +1306,7 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
 
     func innerState() -> [MLXArray] {
         guard let keys, let values else { return [] }
-        return [keys, values]
+        return [Self.prefix(keys, length), Self.prefix(values, length)]
     }
 
     func syncRowsFromBatch() {
@@ -1310,8 +1318,11 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         // batch-max length and fail the next window with
         // `paged_kv_block_table_mismatch` (Studio, 2+ concurrent rows).
         guard batchedOffset != nil else { return }
-        guard let keys, let values,
-              keys.ndim == 4,
+        let state = innerState()
+        guard state.count == 2 else { return }
+        let keys = state[0]
+        let values = state[1]
+        guard keys.ndim == 4,
               values.ndim == 4,
               keys.dim(0) == rowCaches.count,
               values.dim(0) == rowCaches.count
@@ -1349,21 +1360,33 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         if allowsLockstepConcat,
            let existingKeys = keys,
            let existingValues = values,
-           existingKeys.dim(2) == offset
+           length == offset
         {
-            let newKeys = concatenated([existingKeys, incomingKeys], axis: 2)
-            let newValues = concatenated([existingValues, incomingValues], axis: 2)
+            let start = length
+            let newKeys = Self.write(incomingKeys, into: existingKeys, rowStarts: nil, stored: start, maxTokens: maxSize)
+                ?? concatenated([Self.prefix(existingKeys, start), incomingKeys], axis: 2)
+            let newValues = Self.write(incomingValues, into: existingValues, rowStarts: nil, stored: start, maxTokens: maxSize)
+                ?? concatenated([Self.prefix(existingValues, start), incomingValues], axis: 2)
             keys = newKeys
             values = newValues
+            length = start + incomingKeys.dim(2)
+            rowMutationCounts = nil
             batchedOffset = (batchedOffset ?? offset) + incomingKeys.dim(2)
-            return (newKeys, newValues)
+            return (Self.prefix(newKeys, length), Self.prefix(newValues, length))
         }
         if allowsLockstepConcat, keys == nil, values == nil {
-            keys = incomingKeys
-            values = incomingValues
+            keys = Self.prefix(incomingKeys, incomingKeys.dim(2))
+            values = Self.prefix(incomingValues, incomingValues.dim(2))
+            length = incomingKeys.dim(2)
+            rowMutationCounts = nil
             batchedOffset = incomingKeys.dim(2)
             return (incomingKeys, incomingValues)
         }
+        if let updated = updateRaggedInPlace(keys: incomingKeys, values: incomingValues) {
+            batchedOffset = nil
+            return updated
+        }
+        let countsBefore = rowCaches.map(\.mutationCount)
         var updatedKeys: [MLXArray] = []
         var updatedValues: [MLXArray] = []
         updatedKeys.reserveCapacity(rowCaches.count)
@@ -1377,9 +1400,106 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         }
         let mergedKeys = Self.concatenatePadded(updatedKeys, fallback: incomingKeys)
         let mergedValues = Self.concatenatePadded(updatedValues, fallback: incomingValues)
-        keys = mergedKeys
-        values = mergedValues
+        length = mergedKeys.dim(2)
+        keys = Self.prefix(mergedKeys, length)
+        values = Self.prefix(mergedValues, length)
+        // The buffer mirrors the rows only if every row accepted the update;
+        // a rejected row contributed its raw input instead of its history.
+        let countsAfter = rowCaches.map(\.mutationCount)
+        rowMutationCounts = zip(countsBefore, countsAfter).allSatisfy { $0 != $1 } ? countsAfter : nil
         batchedOffset = nil
+        return (mergedKeys, mergedValues)
+    }
+
+    /// Ragged per-row step without re-padding the whole batch: each row's
+    /// cache appends in place, and the same tokens are written into the batch
+    /// buffer at that row's own stored length. Returns nil (caller takes the
+    /// rebuild path) unless the buffer provably mirrors every row: rows
+    /// unchanged since this batch last wrote them, matching dims and dtype,
+    /// and every row accepting the update. The gather-parity path always
+    /// rebuilds so the probe's gather output is what reaches attention.
+    private func updateRaggedInPlace(keys incomingKeys: MLXArray, values incomingValues: MLXArray) -> (MLXArray, MLXArray)? {
+        guard let existingKeys = keys,
+              let existingValues = values,
+              let expectedCounts = rowMutationCounts,
+              rowCaches.allSatisfy({ !$0.reconstructViaGather }),
+              rowCaches.map(\.mutationCount) == expectedCounts,
+              existingKeys.ndim == 4,
+              existingValues.ndim == 4,
+              Self.canWrite(incomingKeys, into: existingKeys),
+              Self.canWrite(incomingValues, into: existingValues),
+              incomingKeys.dim(2) == incomingValues.dim(2)
+        else {
+            return nil
+        }
+        let starts = rowCaches.map(\.storedTokens)
+        guard starts.max() == length else { return nil }
+        let n = incomingKeys.dim(2)
+        for (rowIndex, cache) in rowCaches.enumerated() {
+            let before = cache.mutationCount
+            _ = cache.update(
+                keys: incomingKeys[rowIndex ..< rowIndex + 1, 0..., 0..., 0...],
+                values: incomingValues[rowIndex ..< rowIndex + 1, 0..., 0..., 0...]
+            )
+            guard cache.mutationCount != before, cache.storedTokens == starts[rowIndex] + n else {
+                // A row rejected the update (capacity/overflow guard). Its
+                // store is unchanged, but earlier rows already appended, so
+                // drop the buffer and return what the rebuild path would.
+                return rebuildAfterPartialRaggedUpdate(
+                    failedRow: rowIndex,
+                    keys: incomingKeys,
+                    values: incomingValues
+                )
+            }
+        }
+        let newLength = (starts.map { $0 + n }.max()) ?? length
+        guard let newKeys = Self.write(incomingKeys, into: existingKeys, rowStarts: starts, stored: length, maxTokens: maxSize),
+              let newValues = Self.write(incomingValues, into: existingValues, rowStarts: starts, stored: length, maxTokens: maxSize)
+        else {
+            // Unreachable: `canWrite` was checked above for both.
+            return rebuildAfterPartialRaggedUpdate(failedRow: rowCaches.count, keys: incomingKeys, values: incomingValues)
+        }
+        keys = newKeys
+        values = newValues
+        length = newLength
+        rowMutationCounts = rowCaches.map(\.mutationCount)
+        return (Self.prefix(newKeys, newLength), Self.prefix(newValues, newLength))
+    }
+
+    /// Finishes a ragged step that a row rejected partway: rows before
+    /// `failedRow` already appended, the failed row returned its input
+    /// unchanged, later rows still get their update. The result matches the
+    /// per-row rebuild path exactly.
+    private func rebuildAfterPartialRaggedUpdate(
+        failedRow: Int,
+        keys incomingKeys: MLXArray,
+        values incomingValues: MLXArray
+    ) -> (MLXArray, MLXArray) {
+        var updatedKeys: [MLXArray] = []
+        var updatedValues: [MLXArray] = []
+        for (rowIndex, cache) in rowCaches.enumerated() {
+            let keySlice = incomingKeys[rowIndex ..< rowIndex + 1, 0..., 0..., 0...]
+            let valueSlice = incomingValues[rowIndex ..< rowIndex + 1, 0..., 0..., 0...]
+            if rowIndex < failedRow {
+                // Already appended; its state is what its `update` returned.
+                let state = cache.state
+                updatedKeys.append(state.count == 2 ? state[0] : keySlice)
+                updatedValues.append(state.count == 2 ? state[1] : valueSlice)
+            } else if rowIndex == failedRow {
+                updatedKeys.append(keySlice)
+                updatedValues.append(valueSlice)
+            } else {
+                let updated = cache.update(keys: keySlice, values: valueSlice)
+                updatedKeys.append(updated.0)
+                updatedValues.append(updated.1)
+            }
+        }
+        let mergedKeys = Self.concatenatePadded(updatedKeys, fallback: incomingKeys)
+        let mergedValues = Self.concatenatePadded(updatedValues, fallback: incomingValues)
+        length = mergedKeys.dim(2)
+        keys = Self.prefix(mergedKeys, length)
+        values = Self.prefix(mergedValues, length)
+        rowMutationCounts = nil
         return (mergedKeys, mergedValues)
     }
 
@@ -1387,8 +1507,10 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         get { innerState() }
         set {
             guard newValue.count == 2 else { return }
-            keys = newValue[0]
-            values = newValue[1]
+            length = newValue[0].dim(2)
+            keys = Self.prefix(newValue[0], length)
+            values = Self.prefix(newValue[1], newValue[1].dim(2))
+            rowMutationCounts = nil
             batchedOffset = newValue[0].dim(2)
         }
     }
@@ -1493,11 +1615,16 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         else {
             keys = nil
             values = nil
+            length = 0
+            rowMutationCounts = nil
             batchedOffset = nil
             return
         }
-        keys = Self.concatenatePadded(keyArrays, fallback: firstKey)
+        let packedKeys = Self.concatenatePadded(keyArrays, fallback: firstKey)
+        keys = packedKeys
         values = Self.concatenatePadded(valueArrays, fallback: firstValue)
+        length = packedKeys.dim(2)
+        rowMutationCounts = rowCaches.map(\.mutationCount)
         // `batchedOffset` asserts every row is at the same length (the
         // lockstep invariant). Setting it to the minimum for ragged rows made
         // the first step of every rebuilt batch treat all rows as that length:
@@ -1506,6 +1633,65 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         // concurrent greedy rows diverged from serial or emitted EOS first.
         let offsets = rowCaches.map(\.offset)
         batchedOffset = Set(offsets).count == 1 ? offsets.first : nil
+    }
+
+    /// Always a new slice; see `PagedKVCache.prefix` (in-place slice writes).
+    /// Every array this cache adopts or hands out goes through it, so only
+    /// objects this cache created are ever written in place.
+    private static func prefix(_ buffer: MLXArray, _ tokens: Int) -> MLXArray {
+        buffer[.ellipsis, ..<tokens, 0...]
+    }
+
+    /// In-place writes need identical batch/head/dim sizes and dtype; slice
+    /// assignment would otherwise broadcast or cast where concatenation
+    /// promoted, changing what reaches attention.
+    private static func canWrite(_ incoming: MLXArray, into buffer: MLXArray) -> Bool {
+        incoming.ndim == 4
+            && buffer.ndim == 4
+            && buffer.dim(0) == incoming.dim(0)
+            && buffer.dim(1) == incoming.dim(1)
+            && buffer.dim(3) == incoming.dim(3)
+            && buffer.dtype == incoming.dtype
+    }
+
+    /// Writes `incoming` into the batch buffer in place, growing it like
+    /// `KVCacheSimple` when full. `rowStarts == nil` writes every row at
+    /// `stored` (lockstep); otherwise row `r` lands at `rowStarts[r]`. New
+    /// capacity is zero-filled, so rows stay zero past their own length.
+    /// Returns nil when `canWrite` fails.
+    private static func write(
+        _ incoming: MLXArray,
+        into buffer: MLXArray,
+        rowStarts: [Int]?,
+        stored: Int,
+        maxTokens: Int?
+    ) -> MLXArray? {
+        guard canWrite(incoming, into: buffer) else { return nil }
+        let n = incoming.dim(2)
+        let needed = (rowStarts?.max() ?? stored) + n
+        var target = buffer
+        if buffer.dim(2) < needed {
+            let capacity = PagedKVBlockLayout.grownCapacity(
+                stored: stored,
+                needed: needed,
+                maxTokens: maxTokens ?? Int.max
+            )
+            let extra = MLXArray.zeros(
+                [buffer.dim(0), buffer.dim(1), capacity - stored, buffer.dim(3)],
+                dtype: buffer.dtype
+            )
+            target = concatenated([prefix(buffer, stored), extra], axis: 2)
+        }
+        guard n > 0 else { return target }
+        if let rowStarts {
+            for (rowIndex, start) in rowStarts.enumerated() {
+                target[rowIndex ..< rowIndex + 1, 0..., start ..< start + n, 0...] =
+                    incoming[rowIndex ..< rowIndex + 1, 0..., 0..., 0...]
+            }
+        } else {
+            target[.ellipsis, stored ..< stored + n, 0...] = incoming
+        }
+        return target
     }
 
     private static func concatenatePadded(_ arrays: [MLXArray], fallback: MLXArray) -> MLXArray {
