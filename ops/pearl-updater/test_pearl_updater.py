@@ -5202,6 +5202,10 @@ class PearlUpdaterTests(unittest.TestCase):
             "stats-hardware-verifier": {"loaded": False, "enabled": False, "active": False},
         }
         self.updater._stats_timer_state = lambda sidecar: dict(self.timer_states[sidecar])
+        self.service_load_states = {}
+        self.updater._service_properties = lambda unit, _properties: {
+            "LoadState": self.service_load_states.get(unit, "loaded")
+        }
         self.updater.systemctl = mock.Mock()
         self.updater.assert_unit_quiescent = mock.Mock()
         self.updater.prepare_config_update(release)
@@ -5520,6 +5524,78 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertTrue(self.updater.installed_operator_artifacts_are_coherent(release))
         stats.chmod(0o700)
         self.assertFalse(self.updater.installed_operator_artifacts_are_coherent(release))
+
+    def test_signed_inventory_promotion_releases_parity_hold_and_rollback_restores_it(self):
+        self.make_bundle(runtime_only=True, stats_sidecars=True)
+        release = self.stage(self.verify())
+        install, _stats = self.operator_artifact_install_fixture(release)
+        marker = install / updater_module.STATS_INVENTORY_PARITY_MARKER_NAME
+        marker.write_text("")
+        marker.chmod(0o644)
+        self.timer_states["stats-inventory-sync"] = {"loaded": True, "enabled": False, "active": False}
+        tx = self.updater.snapshot(release)
+        rows = json.loads((tx / "stats-sidecar-holds.json").read_text())
+        self.assertEqual([row["parity_marker"] for row in rows], [True, False, False])
+
+        self.updater.install_release(release)
+        self.assertFalse(marker.exists())
+
+        self.updater.validate_transaction(tx)
+        self.updater._restore_binaries(tx)
+        self.assertTrue(marker.exists())
+        self.assertEqual(marker.stat().st_mode & 0o7777, 0o644)
+        restored = [tuple(call.args) for call in self.updater.systemctl.call_args_list]
+        self.assertNotIn(("enable", "stats-inventory-sync.timer"), restored)
+
+    def test_committed_success_reconcile_keeps_changed_sidecars_held(self):
+        self.make_bundle(runtime_only=True, stats_sidecars=True)
+        release = self.stage(self.verify())
+        self.operator_artifact_install_fixture(release)
+        tx = self.updater.snapshot(release)
+        self.updater.install_release(release)
+        # Simulate a fresh --reconcile process after a crash past persist_success.
+        self.updater.stats_sidecar_holds = []
+        self.updater.stats_sidecar_holds_applied = False
+        self.updater.transaction = tx
+        self.updater.systemctl.reset_mock()
+        self.updater.committed_release = mock.Mock(return_value=release)
+        coherent = mock.Mock()
+        coherent.is_coherent_with.return_value = True
+        self.updater.installed_release = mock.Mock(return_value=coherent)
+        self.updater.installed_catalog_is_coherent = mock.Mock(return_value=True)
+        self.updater.previous_auxiliary_units = {unit: True for unit in updater_module.AUXILIARY_UNITS}
+
+        def verify_rollout(_release):
+            self.updater.restore_auxiliary_services()
+            self.updater.restore_auxiliary_timers()
+
+        self.updater.verify_rollout = verify_rollout
+        self.updater.reconcile_committed_success({"release": {}})
+
+        calls = [tuple(call.args) for call in self.updater.systemctl.call_args_list]
+        self.assertNotIn(("start", "stats-billing-mirror.service"), calls)
+        self.assertNotIn(("start", "stats-billing-mirror.timer"), calls)
+        self.assertIn(("start", "macprovider-archive-rotate.timer"), calls)
+
+    def test_hold_skips_sidecar_units_the_deploy_has_not_installed(self):
+        self.make_bundle(runtime_only=True, stats_sidecars=True)
+        release = self.stage(self.verify())
+        self.operator_artifact_install_fixture(release)
+        self.service_load_states["stats-hardware-verifier.service"] = "not-found"
+        self.updater.snapshot(release)
+        self.updater.install_release(release)
+        calls = [tuple(call.args) for call in self.updater.systemctl.call_args_list]
+        self.assertNotIn(("stop", "stats-hardware-verifier.service"), calls)
+        self.assertIn(("stop", "stats-inventory-sync.service"), calls)
+
+    def test_snapshot_refuses_installed_artifact_with_special_mode_before_mutation(self):
+        self.make_bundle(runtime_only=True, stats_sidecars=True)
+        release = self.stage(self.verify())
+        install, _stats = self.operator_artifact_install_fixture(release)
+        (install / "coordinator-cli").chmod(0o2750)
+        with self.assertRaisesRegex(updater_module.UpdateError, "special mode bits"):
+            self.updater.snapshot(release)
+        self.updater.systemctl.assert_not_called()
 
     def test_cli_or_sidecar_drift_turns_already_current_into_repair(self):
         self.make_bundle(stats_sidecars=True)

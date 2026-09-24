@@ -49,6 +49,7 @@ CATALOG_CANARY_PROOF = Path("/usr/local/share/macprovider/catalog-canary-proof.p
 CONFIG_PATH = Path("/etc/macprovider/pearl-updater.conf")
 INSTALL_ROOT = Path("/opt/macprovider")
 STATS_INSTALL_ROOT = Path("/opt/macprovider-stats")
+STATS_INVENTORY_PARITY_MARKER_NAME = ".coordinator-deploy-sidecar-parity-required"
 STATE_ROOT = Path("/var/lib/macprovider-pearl-updater")
 AUDIT_PATH = Path("/var/lib/macprovider-pearl-updater/audit.jsonl")
 LOCK_PATH = Path("/run/lock/macprovider-pearl-updater.lock")
@@ -4267,6 +4268,8 @@ class Updater:
                 manifest.append({"destination": str(destination), "existed": False})
             else:
                 entry = self._trusted_regular_file(destination, f"installed {artifact.installed_name} binary")
+                if stat.S_IMODE(entry.st_mode) & ~0o755:
+                    raise UpdateError(f"installed {artifact.installed_name} has special mode bits; rollback could not restore it")
                 self._durable_copy(destination, snapshot_dir / artifact.installed_name)
                 manifest.append(
                     {
@@ -4283,7 +4286,16 @@ class Updater:
                 artifact.root_kind == "stats"
                 and (manifest[-1]["existed"] is False or manifest[-1]["sha256"] != artifact.sha256)
             ):
-                holds.append({"sidecar": artifact.installed_name, **self._stats_timer_state(artifact.installed_name)})
+                holds.append(
+                    {
+                        "sidecar": artifact.installed_name,
+                        **self._stats_timer_state(artifact.installed_name),
+                        "parity_marker": (
+                            artifact.installed_name == "stats-inventory-sync"
+                            and _path_entry_exists(self._stats_inventory_parity_marker)
+                        ),
+                    }
+                )
         _fsync_directory(snapshot_dir)
         self._write_json(tx / "operator-artifact-manifest.json", manifest)
         self._write_json(tx / "stats-sidecar-holds.json", holds)
@@ -4296,7 +4308,7 @@ class Updater:
         )
         return {
             "loaded": properties.get("LoadState") not in ("", "not-found"),
-            "enabled": properties.get("UnitFileState") == "enabled",
+            "enabled": properties.get("UnitFileState", "").startswith(("enabled", "linked")),
             "active": properties.get("ActiveState") in ("active", "activating", "reloading"),
         }
 
@@ -4312,13 +4324,54 @@ class Updater:
             self.systemctl("disable", timer)
             self.systemctl("stop", timer)
             self.assert_unit_quiescent(timer)
-        self.systemctl("stop", service)
-        self.assert_unit_quiescent(service)
+        # A host bootstrapping sidecars may not have their units yet; the full
+        # deploy installs them after the updater provides the binaries.
+        if self._service_properties(service, ("LoadState",)).get("LoadState") not in ("", "not-found"):
+            self.systemctl("stop", service)
+            self.assert_unit_quiescent(service)
+
+    @property
+    def _stats_inventory_parity_marker(self) -> Path:
+        return self.install_root / STATS_INVENTORY_PARITY_MARKER_NAME
+
+    def release_stats_inventory_parity_hold(self) -> None:
+        # beta/DECISION_CRITERIA.md Entry 187 holds the pre-migration-019
+        # inventory binary until a signed matching-binary promotion; this
+        # install is that promotion. The timer stays held here, so the full
+        # deploy's parity-absent path migrates, runs the new binary once, and
+        # re-holds on failure.
+        marker = self._stats_inventory_parity_marker
+        if not _path_entry_exists(marker):
+            return
+        self._trusted_regular_file(marker, "stats inventory parity marker")
+        self._journal_transition(
+            "stats_parity_marker_remove_pending",
+            pending_action={"kind": "parity_marker_remove", "destination": str(marker)},
+        )
+        marker.unlink(missing_ok=True)
+        _fsync_directory(marker.parent)
+        self._journal_transition("stats_parity_marker_removed", pending_action=None)
+
+    def _restore_stats_inventory_parity_marker(self) -> None:
+        marker = self._stats_inventory_parity_marker
+        if _path_entry_exists(marker):
+            self._trusted_regular_file(marker, "stats inventory parity marker")
+            return
+        descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+        try:
+            os.fchown(descriptor, self.trusted_uid, -1)
+            os.fchmod(descriptor, 0o644)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _fsync_directory(marker.parent)
 
     def _restore_stats_sidecar_holds(self, tx: Path) -> None:
         if not _path_entry_exists(tx / "stats-sidecar-holds.json"):
             return
         for row in self._stats_sidecar_hold_rows(tx):
+            if row["parity_marker"]:
+                self._restore_stats_inventory_parity_marker()
             if not row["loaded"]:
                 continue
             timer = f"{row['sidecar']}.timer"
@@ -4337,9 +4390,10 @@ class Updater:
         for row in rows:
             if (
                 not isinstance(row, dict)
-                or set(row) != {"sidecar", "loaded", "enabled", "active"}
+                or set(row) != {"sidecar", "loaded", "enabled", "active", "parity_marker"}
                 or row["sidecar"] not in allowed
-                or any(type(row[field]) is not bool for field in ("loaded", "enabled", "active"))
+                or any(type(row[field]) is not bool for field in ("loaded", "enabled", "active", "parity_marker"))
+                or (row["parity_marker"] and row["sidecar"] != "stats-inventory-sync")
             ):
                 raise UpdateError("rollback stats sidecar hold row is invalid")
         return rows
@@ -4665,6 +4719,8 @@ class Updater:
                 component=artifact.installed_name,
                 sha256=artifact.sha256,
             )
+        if "stats-inventory-sync" in self.stats_sidecar_holds:
+            self.release_stats_inventory_parity_hold()
         if release.catalog is not None:
             self.install_catalog(release)
         installed_config_targets = []
@@ -6423,6 +6479,11 @@ class Updater:
         release = self.committed_release(payload.get("release"))
         if not self.installed_release().is_coherent_with(release) or not self.installed_catalog_is_coherent(release):
             raise UpdateError("committed candidate state or installed release pair is incoherent")
+        if self.transaction is not None and _path_entry_exists(self.transaction / "stats-sidecar-holds.json"):
+            # A committed rollout keeps its changed sidecars held until the full
+            # deploy; the in-memory hold list did not survive the crash.
+            self.stats_sidecar_holds = [row["sidecar"] for row in self._stats_sidecar_hold_rows(self.transaction)]
+            self.stats_sidecar_holds_applied = bool(self.stats_sidecar_holds)
         self.verify_rollout(release)
         self._journal_transition("committed_success_reverified")
 

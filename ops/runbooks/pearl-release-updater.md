@@ -342,8 +342,16 @@ applies (`coordinator stats-migrate`, SPEC-033 / issue #582 ordering). The
 updater therefore disables and stops a changed sidecar's timer and service
 before swapping its bytes and leaves them held after a successful rollout
 (audit event `stats_sidecar_held`); a rollback restores the previous bytes and
-timer state. Run the full deploy for the same tag next: it migrates first and
-then re-enables the sidecar timers. Sidecars are ELF- and checksum-verified but
+timer state. Run the full deploy for the same tag next. With onboarding
+enabled it runs `coordinator stats-migrate` before re-enabling the sidecar
+timers; without onboarding it does not migrate, so apply any stats migration
+the sidecars need out of band first, or the deploy's initial sidecar run fails
+closed. Stats freshness alarms (for example the billing mirror) can fire while
+the sidecars are held. Installing a changed `stats-inventory-sync` is the
+signed matching-binary promotion that releases a pre-existing
+`/opt/macprovider/.coordinator-deploy-sidecar-parity-required` hold (Entry 247
+in `beta/DECISION_CRITERIA.md`); the timer stays held, and a rollback restores
+the marker. Sidecars are ELF- and checksum-verified but
 not executed by the updater, so a sidecar runtime fault surfaces on the
 deploy's initial sidecar run, not as an updater rollback.
 
