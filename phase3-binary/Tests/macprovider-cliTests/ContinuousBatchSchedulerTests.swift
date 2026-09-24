@@ -2179,6 +2179,48 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     // the durable replay claim taken at submit is released. A client that
     // honours `retryable: true` and re-sends the same `X-Request-ID` must be
     // able to run, not collect a 409 for work that never happened.
+    // SPEC-038 AC-25: an overdue request must never be admitted, even when its
+    // timeout task has not run yet. The hook cancels the timer but keeps the
+    // absolute deadline, so admission itself has to expire the request.
+    func testAC25OverdueRequestIsExpiredAtAdmissionEvenIfItsTimerHasNotRun() async throws {
+        let gate = AsyncGate()
+        let backend = ScriptedBackend(
+            scripts: ["held": [1], "late": [2]],
+            prefillGate: gate
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            queueLimit: 4,
+            queueWaitTimeoutNanoseconds: 150_000_000,
+            backend: backend
+        )
+        let held = Task {
+            try await scheduler.submit(.init(id: "held", conversationKey: "", promptTokens: [1, 11], maxOutputTokens: 1))
+        }
+        try await eventually { await backend.prefillCallCount() == 1 }
+        let late = Task {
+            try await scheduler.submit(.init(id: "late", conversationKey: "", promptTokens: [2, 22], maxOutputTokens: 1))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+
+        await scheduler.cancelQueueWaitTimerForTest(requestID: "late")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let queued = await scheduler.metrics().waitingCount
+        XCTAssertEqual(queued, 1, "with its timer cancelled, `late` is still queued and now overdue")
+
+        // Freeing the slot sends the pump to admission with `late` overdue.
+        await gate.open()
+        _ = try await held.value
+        do {
+            _ = try await late.value
+            XCTFail("an overdue request must not be admitted")
+        } catch ContinuousBatchSchedulerError.queueWaitTimedOut {
+            // expected
+        }
+        let prefills = await backend.prefillCallCount()
+        XCTAssertEqual(prefills, 1, "`late` must never reach prefill")
+    }
+
     func testAC25QueueWaitTimeoutReleasesTheReplayClaimSoTheSameIDCanRetry() async throws {
         let gate = AsyncGate()
         let authority = TestReplayAuthority()

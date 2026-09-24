@@ -1615,6 +1615,13 @@ actor ContinuousBatchScheduler {
         queueWaitTimeoutTasks.removeValue(forKey: requestID)?.cancel()
     }
 
+    /// Test hook: cancels a queued request's timeout task but keeps its
+    /// absolute deadline, reproducing "deadline passed, timer not yet run"
+    /// deterministically. Production code never calls it.
+    func cancelQueueWaitTimerForTest(requestID: String) {
+        suspendQueueWaitTimeout(requestID: requestID)
+    }
+
     private func endQueueWait(requestID: String) {
         queueWaitTimeoutTasks.removeValue(forKey: requestID)?.cancel()
         queueWaitDeadlines.removeValue(forKey: requestID)
