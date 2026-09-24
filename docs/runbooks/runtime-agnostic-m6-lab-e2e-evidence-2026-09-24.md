@@ -33,6 +33,87 @@ gateway fix, the buyer debit of every pool request stays held forever.
 The table is the second, from-scratch run (`$LAB/fresh`, fresh lab keys, all
 fixes in). Run 1 found the defects and staged the same cases; its numbers match.
 
+## Run 3 (combined code, 45d0702c)
+
+Branch `bench/1690-loopback-vs-native` at `45d0702c`. This is the combined
+tree: the M6-fix CLI commits, the final-audit fixes `35fb3767` and `88824c71`,
+and the legacy HTTP disconnect fix `45d0702c`. The final audit replaced the
+rig's own gateway `pool_operator_attested` / schema v14 change, which was not
+merged. Coordinator, coordinator-cli, gateway, labtool, the lab CLI, and the
+spoof CLI were all rebuilt from that tree on the Studio, with `mlx.metallib`
+from `/Users/a1/bench-1690/run/`. The run started from scratch in
+`/Users/a1/lab-1690-m6/run3`, with fresh lab keys, static release, Tier-2
+catalog, provider token, buyer key, and pools. It used the same
+127.0.0.1:19101-19131 ports. Every lab process was stopped at the end
+(`rig.sh down`, no 191xx listener left).
+
+`cases.py` gained three cases for the final-audit behavior, and case 5 was
+rebuilt around them. Routing now uses the ACTIVE policy window, so accepting
+a v2 whose window starts in the future no longer changes anything mid-flight.
+The old case 5 staging became `future_manifest`. `disputed` now crosses a
+real window boundary.
+
+| Case | Result | Key evidence |
+|---|---|---|
+| 1. Paid path, non-streaming + streaming | PASS | 4/4: snapshot `pool_id`, `runtime_source=llamacpp_loopback`, `pool_generation=7`, `pool_operator_account_id`; receipt `4`/`valid`/`verified`; `pool_operator_attested`; credit 46-51; finality `pool_operator_attested` |
+| 1a. Attested usage equals llama-server usage | PASS | attested `[(45,32),(46,32),(50,32),(50,32)]` == upstream tap, same list |
+| 1b. llama-server omits usage | PASS (fail-closed) | `byte_estimated`, billable `(0,0)`, `missing_receipt`, ledger `null_error` credit 0; non-stream 502 `upstream_provider_error`, stream ended with no finish chunk |
+| 2. Global route | PASS | 503 `byom_non_settlement_unavailable` ×2; no snapshot, no upstream call |
+| 3. v1 / empty v2 / non-allowlisted | PASS | pools B, C, E: 503 ×6, no dispatch |
+| 4. Spoofed hello | PASS | hello `ollama_loopback` and hello with no source: 503 on A, C, and global; no dispatch |
+| 5. Disputed label (active manifest changes mid-flight) | PASS | pool G v1 window 45 s, v2 accepted at once; stream routed on v1 crossed the boundary: `label_disputed`, `byte_estimated`, `(0,0)`, `quarantined`, credit 0; buyer still got 200 with a full stream (134 tokens) |
+| 5a. Generation bump only | PASS | generation 8, label `verified`, `pool_operator_attested` |
+| 6. Streaming + non-streaming; 12 streams at concurrency 4 | PASS | 12/12 intact; buyer (content sha, usage) set == llama-server set, 12 of 12; 12/12 valid attested receipts |
+| NEW: future-window v2 does not take effect early (`future_manifest`) | PASS | pool F: v2 (window starts in 30 days) accepted while a stream was in flight. That stream and a request after it both stayed manifest 1, `verified`, `pool_operator_attested`, credited |
+| NEW: routing uses the active window (`active_window`) | PASS | pool D: v1 `["llamacpp_loopback"]` for 90 s, v2 `[]` accepted at once. Right after acceptance: 200 ×2, manifest 1, `verified`, attested. After v1 ends: 503 ×2 `byom_non_settlement_unavailable`, no snapshot, no upstream call |
+| NEW: gateway schema v14 settles the buyer reservation | PASS | gateway `schema_migrations` max 14; `quota_reservations`: 21 `settled`, 19 `refunded`, 0 held; `usage_events` `(pool_operator_attested, spec022_verified)` = 21; zero `not settlement-capable` log lines |
+| NEW: `coordinator pool-rollback-preflight` | PASS, with a finding | exit 3 during the run (`open_pool_verdicts: 4`, 8 snapshots); exit 3 still after the 300 s deadline (3 open); exit 0 once finality closed those 3 (`open_pool_verdicts: 0`, 26 snapshots) |
+| NEW: legacy HTTP disconnect (`45d0702c`) | PASS | lab serve :19120, direct streaming request, client closed after 2 s: in-flight released 0.12 s after the close, `errors_total` 4 → 4, `requests_total` 26 → 27 |
+
+Key lines:
+
+```
+paid (75a02f08…, stream): snapshot pool_id=Hf4G9uodj6kNiTjtbMroxg manifest_version=1
+  runtime_source=llamacpp_loopback pool_generation=7 artifact_id=gguf-q4-k-m
+  attempt usage_source=pool_operator_attested billable=(46,32) terminal=normal_done
+  verdict receipt_version=4 valid verified verified_settlement pool_label_status=verified
+  ledger provider_credits=50 quarantined=0
+  finality closed=true outcome=verified token_source=pool_operator_attested (46,32)
+disputed (pool G): snapshot manifest_version=1 -> label_disputed byte_estimated
+  settlement_outcome=quarantined ledger provider_credits=0 quarantined=1
+active_window (pool D): t+3 s 200,200 (v1 verified attested); t+95 s 503,503
+preflight: {"pool_route_snapshots":8,"open_pool_verdicts":4,...,"rollback_blocked":true} exit=3
+           {"pool_route_snapshots":26,"open_pool_verdicts":0,...,"rollback_blocked":false} exit=0
+```
+
+Run 3 findings:
+
+- **The rollback gate can stay at exit 3 with no time bound** (in contract, an
+  operational gap). The non-streaming 1b request got a 502. The gateway
+  retried it 3 times (`coord retry … attempts=3`), so the coordinator made 3
+  attempts under 3 request ids. The gateway refunded its reservation at once
+  and never asks finality for those ids. Their `missing_receipt` verdicts
+  stayed `pending`/`closed=0` long after `pending_deadline_unix_ms`, because
+  the deadline quarantine is applied only when something re-reads the verdict.
+  The streaming attempt, which the gateway reconciler did query, closed at the
+  deadline. SPEC-022 R-12.8 says the gate exits 0 only for closed verdicts or
+  past-deadline attempts with *no* verdict. So exit 3 is correct, and "wait and
+  re-run" would never clear in the lab (`settlement.job_enabled: false`). One
+  finality read per request id closed all three
+  (`missing_receipt_deadline_elapsed`) and the gate went to exit 0. The case
+  now does the same. Before a rollback, an operator has to close open,
+  past-deadline pool verdicts the same way. Whether the nightly reconcile
+  (`job_enabled`) closes them was not verified here.
+- Resolved from the earlier findings: 4, with `45d0702c` (legacy HTTP
+  disconnect; the XCTest runs in CI only); 5, active-window routing
+  (`future_manifest`, `active_window`); and the reconciler's
+  `pool_operator_attested` settlement at schema v14.
+- Harness flake, seen once: the first `pool_setup.py create F` exited 1 after
+  the coordinator had applied every event through `promote`, and before the
+  script wrote `pool_id`. The error text was lost because stderr was
+  captured. The pool (`kdDER_2bE_4ULjoK_VEO-Q`, active, member and buyer
+  present) was reused as F. Pools G, D, and H were created cleanly.
+
 ## Rig design
 
 Everything binds `127.0.0.1` on 19101-19131, every key is a lab key generated

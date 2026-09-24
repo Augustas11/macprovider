@@ -5,7 +5,10 @@
 
 Each case prints PASS or FAIL lines with the observed values and writes its
 sanitized captures to LAB/captures/. Cases: paid, omitted_usage, global,
-fail_closed_pools, spoof, disputed, generation_bump, concurrency, reconcile.
+fail_closed_pools, spoof, future_manifest, disputed, active_window,
+generation_bump, concurrency, reconcile. omitted_usage and reconcile also run
+`coordinator pool-rollback-preflight` (exit 3 while a pool attempt can still
+settle, 0 once every pool verdict is closed).
 `spoof` needs a lab-only CLI that honours LAB_SPOOF_RUNTIME_SOURCE (see the
 evidence doc); it is skipped without --spoof-binary. It restarts serve for the
 spoof runs and restores the normal lab CLI afterwards.
@@ -130,6 +133,12 @@ def case_paid():
           "stream and non-stream served", [(x["stream"], x["status"], x.get("finish_reason")) for x in served])
 
 
+def rollback_preflight():
+    proc = subprocess.run([str(LAB / "bin" / "coordinator"), "pool-rollback-preflight", "--config", str(LAB / "run" / "coordinator.yaml")],
+                          capture_output=True, text=True)
+    return proc.returncode, json.loads(proc.stdout) if proc.stdout.strip() else proc.stderr.strip()
+
+
 def case_omitted_usage():
     flag = LAB / "run" / "strip-usage"
     flag.touch()
@@ -143,6 +152,9 @@ def case_omitted_usage():
         check("omitted_usage", r["usage_source"] != "pool_operator_attested" and r["billable"] == (0, 0)
               and (r["ledger"] or {}).get("provider_credits", 0) == 0,
               "upstream without usage is not billable", (r["usage_source"], r["billable"], r["terminal_state"], r["reason"], r["ledger"]))
+    code, doc = rollback_preflight()
+    save("rollback_preflight_inflight", {"exit": code, "result": doc})
+    check("omitted_usage", code == 3, "pool-rollback-preflight blocks while a pool attempt can still settle", {"exit": code, "result": doc})
 
 
 def case_global():
@@ -211,16 +223,63 @@ def inflight_then(pool_name, action):
     return [json.loads(line) for line in out.splitlines() if line.strip()]
 
 
-def case_disputed():
+def case_future_manifest():
+    # The final-audit fix: routing and settlement use the policy window that is
+    # active now, not the highest accepted one. Manifest v2 on pool F starts
+    # when v1 ends (30 days out), so accepting it mid-flight changes nothing.
     ensure_pool("F", "--encoding", "2", "--runtime-allowlist", "llamacpp_loopback")
     served = inflight_then("F", lambda: pool("F", "manifest", "F", "--encoding", "2", "--runtime-allowlist", "llamacpp_loopback"))
+    served += buyer("--pool", "F", "--n", "1")
+    rows = wait_settled(2)
+    save("future_manifest", {"buyer": served, "attempts": rows})
+    for r in rows:
+        check("future_manifest", r["snapshot"]["manifest_version"] == 1 and r["pool_label_status"] == "verified"
+              and r["usage_source"] == "pool_operator_attested" and (r["ledger"] or {}).get("provider_credits", 0) > 0,
+              "accepted v2 with a future window does not take effect early",
+              (r["snapshot"]["manifest_version"], r["pool_label_status"], r["usage_source"], r["settlement_outcome"]))
+
+
+def case_disputed():
+    # Pool G's v1 window is 45 s and v2 (same allowlist) starts when it ends.
+    # A ~30 s slowed stream started 12 s before the boundary crosses it.
+    window = 45
+    t0 = time.time()
+    ensure_pool("G", "--encoding", "2", "--runtime-allowlist", "llamacpp_loopback", "--window-seconds", str(window))
+    pool("G", "manifest", "G", "--encoding", "2", "--runtime-allowlist", "llamacpp_loopback", "--window-seconds", "3600")
+    time.sleep(max(0, t0 + window - 12 - 4 - time.time()))
+    served = inflight_then("G", lambda: None)
     time.sleep(3)
     rows = last_attempts(1)
     save("disputed", {"buyer": served, "attempts": rows, "finality": finality(rows[0]["request_id"])})
     r = rows[0]
     check("disputed", r["pool_label_status"] == "label_disputed" and r["usage_source"] == "byte_estimated" and r["billable"] == (0, 0)
           and (r["ledger"] or {}).get("provider_credits", 0) == 0,
-          "manifest bumped mid-flight -> byte_estimated, zero billable", (r["snapshot"]["manifest_version"], r["pool_label_status"], r["usage_source"], r["settlement_outcome"], r["ledger"]))
+          "active manifest changed mid-flight -> byte_estimated, zero billable",
+          (r["snapshot"]["manifest_version"], r["pool_label_status"], r["usage_source"], r["settlement_outcome"], r["ledger"]))
+
+
+def case_active_window():
+    # Pool D: v1 allowlists llamacpp_loopback for 90 s; v2 with an empty
+    # allowlist is accepted at once but starts when v1 ends. v1 keeps serving
+    # until its window ends; afterwards v2 fails closed.
+    window = 90
+    t0 = time.time()
+    ensure_pool("D", "--encoding", "2", "--runtime-allowlist", "llamacpp_loopback", "--window-seconds", str(window))
+    pool("D", "manifest", "D", "--encoding", "2", "--window-seconds", "3600")
+    time.sleep(2)
+    early = buyer("--pool", "D", "--n", "1") + buyer("--pool", "D", "--stream", "--n", "1")
+    rows = wait_settled(2)
+    early_elapsed = round(time.time() - t0, 1)
+    time.sleep(max(0, t0 + window + 5 - time.time()))
+    before, snaps = len(upstream_lines()), snapshots_count()
+    late = buyer("--pool", "D", "--n", "1") + buyer("--pool", "D", "--stream", "--n", "1")
+    save("active_window", {"early": early, "early_attempts": rows, "late": late, "early_elapsed_s": early_elapsed})
+    check("active_window", all(x["status"] == 200 for x in early) and all(r["snapshot"]["manifest_version"] == 1
+          and r["usage_source"] == "pool_operator_attested" and r["pool_label_status"] == "verified" for r in rows),
+          f"v1 still active {early_elapsed}s after v2 (future window) was accepted: serves attested",
+          [(r["snapshot"]["manifest_version"], r["pool_label_status"], r["usage_source"]) for r in rows])
+    check("active_window", all(x["status"] == 503 for x in late) and len(upstream_lines()) == before and snapshots_count() == snaps,
+          "after v1 ends, active v2 (empty allowlist) fails closed", [(x["status"], x.get("error")) for x in late])
 
 
 def case_generation_bump():
@@ -264,6 +323,19 @@ def case_reconcile():
     save("reconcile", {"held_active": held, "usage_events": sources})
     check("reconcile", held == 0 and any(s[0] == "pool_operator_attested" for s in sources),
           "gateway settled pool_operator_attested finality (no stuck holds)", {"held_active": held, "usage_events": sources})
+    before_code, before_doc = rollback_preflight()
+    # A gateway retry of a 502 opens a new coordinator attempt that the gateway
+    # refunds at once and never asks finality for, so its pending verdict stays
+    # open until something re-reads it. Ask finality for every open pool
+    # verdict past its deadline, as the gateway reconciler does for held ones.
+    open_ids = [r[0] for r in db().execute(
+        "SELECT request_id FROM settlement_receipt_verdicts WHERE pool_id IS NOT NULL AND pool_id != '' AND closed != 1 "
+        "AND pending_deadline_unix_ms < ?", (int(time.time() * 1000),))]
+    closed = [finality(rid).get("closed") for rid in open_ids]
+    code, doc = rollback_preflight()
+    save("rollback_preflight_after", {"before_finality": {"exit": before_code, "result": before_doc},
+                                      "finality_closed": closed, "exit": code, "result": doc})
+    check("reconcile", code == 0, "pool-rollback-preflight clears once every pool verdict is closed", {"exit": code, "result": doc})
 
 
 def main():
@@ -272,7 +344,8 @@ def main():
     p.add_argument("--spoof-binary")
     a = p.parse_args()
     cases = {"paid": case_paid, "omitted_usage": case_omitted_usage, "global": case_global, "fail_closed_pools": case_fail_closed_pools,
-             "spoof": lambda: case_spoof(a.spoof_binary), "disputed": case_disputed, "generation_bump": case_generation_bump,
+             "spoof": lambda: case_spoof(a.spoof_binary), "future_manifest": case_future_manifest, "disputed": case_disputed,
+             "active_window": case_active_window, "generation_bump": case_generation_bump,
              "concurrency": case_concurrency, "reconcile": case_reconcile}
     for name, fn in cases.items():
         if not a.only or name in a.only:
