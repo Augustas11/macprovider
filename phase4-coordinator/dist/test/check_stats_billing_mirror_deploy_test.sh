@@ -23,7 +23,7 @@ for f in "$DEPLOY_SH" "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$BOOTSTRAP_SQL" "$MIGR
   [ -f "$f" ] || fail "missing required file: $f"
 done
 
-grep -qF 'STATS_BILLING_MIRROR_BINARY="$DIST_DIR/stats-billing-mirror-linux-amd64"' "$DEPLOY_SH" ||
+grep -qF 'STATS_BILLING_MIRROR_BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/stats-billing-mirror-linux-amd64"' "$DEPLOY_SH" ||
   fail "deploy script missing billing mirror binary variable"
 grep -qF 'STATS_BILLING_MIRROR_SERVICE="$PINNED_DIST_DIR/stats-billing-mirror.service"' "$DEPLOY_SH" ||
   fail "deploy script missing billing mirror service variable"

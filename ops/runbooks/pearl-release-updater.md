@@ -19,7 +19,10 @@ Pearl has four separate release/config sources of truth:
   `tier2.catalog_path` and feed state for this lane. The protected runtime
   workflow publishes this lane as a GitHub prerelease with `make_latest=false`,
   so it never takes over the provider-app stable `/releases/latest` authority
-  and is applied only by explicit tag.
+  and is applied only by explicit tag. The runtime workflow also signs
+  `stats-inventory-sync-linux-amd64`, `stats-billing-mirror-linux-amd64`, and
+  `stats-hardware-verifier-linux-amd64` and binds them in
+  `pearl-release.json` `operator_artifacts` (issue #1721).
 - **Provider app release**: the signed Mac provider CLI, Malibu.app package,
   standalone tarball, and provider artifact index. Release verification for
   this lane proves the standalone CLI and Malibu-embedded CLI byte identity;
@@ -323,8 +326,53 @@ sudo /usr/local/sbin/macprovider-pearl-update --plan --tag vX.Y.Z
 sudo /usr/local/sbin/macprovider-pearl-update --apply --tag vX.Y.Z
 ```
 
+The updater installs every operator artifact it verifies, inside the same
+rollback transaction as the pair: the coordinator CLI at
+`/opt/macprovider/coordinator-cli` (`root:macprovider 0750`) and, when the
+release binds them, the three stats sidecars under `/opt/macprovider-stats/`
+(`root:macprovider-stats 0750`). Stats sidecars are bound all-or-none; a
+release that binds only some, or publishes sidecar assets its signed metadata
+does not bind, is rejected. A rollback restores the prior bytes, or removes an
+artifact that did not exist before the transaction. A same-version release is
+`already_current` only when these installed artifacts match it too; otherwise
+the updater plans `repair_pair`.
+
+A changed stats sidecar can need stats migrations that only the full deploy
+applies (`coordinator stats-migrate`, SPEC-033 / issue #582 ordering). The
+updater therefore disables and stops a changed sidecar's timer and service
+before swapping its bytes and leaves them held after a successful rollout
+(audit event `stats_sidecar_held`); a rollback restores the previous bytes and
+timer state. Run the full deploy for the same tag next. With onboarding
+enabled it runs `coordinator stats-migrate` before re-enabling the sidecar
+timers; without onboarding it does not migrate, so apply any stats migration
+the sidecars need out of band first, or the deploy's initial sidecar run fails
+closed. Stats freshness alarms (for example the billing mirror) can fire while
+the sidecars are held. Installing a changed `stats-inventory-sync` is the
+signed matching-binary promotion that releases a pre-existing
+`/opt/macprovider/.coordinator-deploy-sidecar-parity-required` hold (Entry 247
+in `beta/DECISION_CRITERIA.md`); the timer stays held, and a rollback restores
+the marker. If a later full deploy leaves the marker behind (a failed initial
+inventory run or an armed abort on the onboarding path), re-run
+`macprovider-pearl-update --apply --tag vX.Y.Z` for the same runtime release.
+The marker makes the release not `already_current`, so the resulting
+`repair_pair` clears it, and the next full deploy retries activation. Sidecars are ELF- and checksum-verified but
+not executed by the updater, so a sidecar runtime fault surfaces on the
+deploy's initial sidecar run, not as an updater rollback.
+
+Only the Pearl runtime workflow signs the stats sidecars. Provider-app
+catalog-lane releases (`release.yml`) still bind only the coordinator CLI: the
+updater applies them and leaves the sidecars untouched, but the full deploy
+refuses such a tag at preflight. Cut a Pearl runtime release for any tag that
+must be full-deployed.
+
 After the signed coordinator/gateway pair is live, resume the direct deploy
-with `CONFIG_MODE=preserve-live`. That deploy may reconcile reviewed Pearl
+with `CONFIG_MODE=preserve-live`. The deploy never installs different
+coordinator, coordinator-cli, or stats sidecar bytes. It downloads them from
+the same verified release
+(`verify-pearl-runtime-release.sh --deploy-artifacts-dir`) and requires Pearl's
+live copies to be byte-identical, so no local `dist/` staging is needed. A
+release that does not sign the stats sidecars fails this preflight before any
+SSH mutation; cut a Pearl runtime release instead of staging binaries by hand. That deploy may reconcile reviewed Pearl
 config ownership, but it must not be used to replace only one runtime binary or
 to smuggle a catalog/feed change into the runtime lane.
 
