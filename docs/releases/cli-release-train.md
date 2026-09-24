@@ -42,9 +42,9 @@ replacement Pearl runtime `v1.8.190` was consumed in turn. `v1.8.191` @
 since 2026-09-24 05:23Z (coordinator + gateway healthz report v1.8.191;
 `pearl-runtime-release` run
 [35958041007](https://github.com/Augustas11/macprovider/actions/runs/35958041007)).
-`v1.8.192` is reserved for the Studio-only CLI candidate from #1716 (see
-Active candidate below), so the next Pearl coordinator/gateway runtime tag
-must be `v1.8.193` or later. None of these tags is a provider CLI candidate,
+`v1.8.192` is the Studio-only CLI candidate from #1716, live on the Studio
+since 2026-09-24 10:08Z (see Active candidate below), so the next Pearl
+coordinator/gateway runtime tag must be `v1.8.193` or later. None of these tags is a provider CLI candidate,
 and none changes `binaryVersion` or the fleet recommendation from 1.8.123.
 
 ## Current promoted stable
@@ -58,14 +58,16 @@ and none changes `binaryVersion` or the fleet recommendation from 1.8.123.
 ## Next CLI — net changes vs 1.8.123
 
 Candidates through `v1.8.176` are old or off-train for promotion. The Studio
-serving canary is signed private candidate **186**, which includes #1700 and
-still reports `binaryVersion` **1.8.123**. It replaced private candidate 181
+serving canary is signed private candidate **192** (live since 2026-09-24
+10:08Z, continuous batching on), which reports `binaryVersion` **1.8.123**.
+It replaced signed private candidate **186** (includes #1700), which had
+replaced private candidate 181
 (two runs tagged `v1.8.181`: run 91 @ `32ea1bd0`, run 92 @ `710255f4`) only on
 the Studio; it is not a public stable tag and must not be promoted to the
 fleet. Pearl runtime tags `v1.8.189` and `v1.8.190` are already consumed; the
 coordinator/gateway runtime **live** on Pearl is `v1.8.191` @ `98e3e4af`
-(includes #1728). `v1.8.192` is reserved for the Studio-only CLI candidate
-from #1716. Fleet recommendation stays at **1.8.123**.
+(includes #1728). `v1.8.192` is the Studio-only CLI candidate from #1716,
+now live on the Studio. Fleet recommendation stays at **1.8.123**.
 
 
 | Net change in CLI / Malibu / installer | Status | PR |
@@ -207,13 +209,13 @@ and silently never matching.
 
 | Field | Value |
 |---|---|
-| Last built candidate | Signed private candidate **186**, including #1700; it reports `binaryVersion` 1.8.123 and is installed only on the Studio. |
-| Mac Studio serving canary | Signed private candidate **186** — live, coordinator-connected, serving Qwen3.6-27B with the expected catalog hash and context 200000. The 2026-09-24 honest-batching session reduced advertised seats from eight to **one** (`max_concurrency_override: 1`, continuous batching off); the eight-seat soak in Track D below is historical, not the current live state. |
+| Last built candidate | Signed private candidate **192**: compat id `Augustas11/macprovider:v1.8.192@9e00f8e04ae0c5494ea8ea29e80f977d83a4fd4c`, cut from the #1716 branch (`campaign/ac25-m2-api-lifecycle`) after merging `main` at `d58502d6`, so it carries 186's content plus #1707, #1714, #1713 and #1716. Run [35981077889](https://github.com/Augustas11/macprovider/actions/runs/35981077889); binary SHA-256 `b48320b2da9e4e3fade15ca0f0b7459f495d5a168ae599a6334ec8d1ac1eecbd`. It reports `binaryVersion` 1.8.123 and is installed only on the Studio. |
+| Mac Studio serving canary | Signed private candidate **192**, live since 2026-09-24 10:08Z: coordinator-connected, `serving_buyers`, catalog `live_verified`, serving Qwen3.6-27B at context 200000 with **8 seats** and **continuous batching on**. Settings: `continuous_batching: canary`, `max_concurrency_override: 8`, `continuous_batch_queue_limit: 16`, `mlx_cache_limit_mb: 2048`, `paged_kv.enabled: true`, and one accepted tuple (`qwen/qwen3.6-27b` @ `518ef47c…`, `mixed`, fp16, non-MoE, M3 Ultra 256 GB, metallib `84e48718…`, kernel `macprovider_paged_kv_gather_v1`). The startup parity and batched-isolation probes pass, and `/v1/status` shows CB `active`, paged KV `attached`. Live check: 4 concurrent requests ran 1.9× faster batched than serial (37.8 vs 19.9 tok/s) with identical tokens, and the footprint is 16 GB. Pearl `accepted_ids` gained 192 (backup `coordinator.yaml.bak-accept-192-20260924T100223Z`). Installed as a manual swap of the signed tarball into `~/macprovider` (backup `~/macprovider.bak-186-20260924T100727Z`). Rollback: `~/.config/macprovider/operator-tools/rollback-192.sh 20260924T100727Z`. Evidence: `docs/runbooks/continuous-batching-qwen36-evidence-2026-09-24.md` on the #1716 branch. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` @ `eb30981c` (BYOM #1576 `cdbb0257` + #1591 + #1590 + #1593); CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
-| Status | **Do not promote.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 186 is the Studio-only serving canary while the settlement-complete rerun finishes. |
-| Next candidate | **`v1.8.192` is reserved** for the Studio-only successor to 186. It is cut as a signed private candidate from the #1716 branch (`campaign/ac25-m2-api-lifecycle`) after the Codex three-lane audit and green CI. It carries 186's content plus #1714 and #1716: batched-output fixes, the Qwen3.6 hybrid cache (#1731), the AC-25 lifecycle and the MLX cache limit, and per the #1716 session agreement also carries #1713. On the Studio it enables `continuous_batching: canary` for the exact Qwen3.6 M3 Ultra 256 GB tuple with 8 seats and `mlx_cache_limit_mb: 2048`. `binaryVersion` stays 1.8.123. Do not promote to the fleet. `v1.8.191` is the live Pearl coordinator/gateway runtime tag (consumed); the next Pearl runtime tag is `v1.8.193` or later. |
-| Merged after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — rides in `v1.8.192` per the #1716 session agreement). Coordinator/gateway settlement recovery continued separately through #1728, now live in Pearl runtime `v1.8.191`. |
+| Status | **Do not promote.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 192 is the Studio-only serving canary. The settlement-complete rerun that 186 was waiting for now runs on 192. |
+| Next candidate | None reserved. `v1.8.192` is consumed by the live Studio candidate above, and the next Pearl runtime tag is `v1.8.193` or later. Any later Studio successor must keep `binaryVersion` 1.8.123 unless the fleet is explicitly promoted, and must re-declare the accepted tuple from its own `[paged-kv] runtime-identity` line, because acceptance binds the metallib and kernel (SPEC-038 v0.2.5). |
+| Merged after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`). Coordinator/gateway settlement recovery continued separately through #1728, now live in Pearl runtime `v1.8.191`. |
 | Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build (soak proof; live seats since reduced to one — see Mac Studio serving canary above). |
 
 ## E2E tracks (independent gates)
