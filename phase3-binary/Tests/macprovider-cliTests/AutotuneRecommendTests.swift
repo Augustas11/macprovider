@@ -4092,6 +4092,46 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(diagnostic.contains("hash mismatch"))
     }
 
+    // Malibu.app onboarding (CLIInstallRunner.ActivityMonitor.autotuneStepDetail)
+    // parses these per-model stderr lines; keep the format stable.
+    func testSweepProgressLinesKeepTheFormatOnboardingParses() async throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        let row = try XCTUnwrap(request.candidateCatalog.rows[modelKey])
+        let hub = try tempDir()
+        let snapshot = hub
+            .appendingPathComponent("models--mlx-community--Qwen3-Coder-30B-A3B-Instruct-4bit", isDirectory: true)
+            .appendingPathComponent("snapshots", isDirectory: true)
+            .appendingPathComponent(try XCTUnwrap(row.modelRevision), isDirectory: true)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try Data("corrupt".utf8).write(to: snapshot.appendingPathComponent("weights.bin"))
+        request.benchmarks = [:]
+        final class Lines: @unchecked Sendable { var all: [String] = [] }
+        let lines = Lines()
+        var benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(
+                hubRoot: hub,
+                downloader: HuggingFaceSnapshotDownloader(
+                    fetch: { _ in throw AutotuneRecommendError.invalidArtifact("test network unavailable") },
+                    download: { _ in throw AutotuneRecommendError.invalidArtifact("test network unavailable") }
+                )
+            ),
+            runnerFactory: { throw AutotuneRecommendError.invalidStaticJSON("runner should not start") }
+        )
+        benchmarker.progress = { lines.all.append($0) }
+
+        _ = try await benchmarker.benchmarks(request: request, targetContext: 4_000, gateTTFTMS: 3_000, replicates: 1, port: 18080)
+
+        let pattern = try NSRegularExpression(
+            pattern: #"^paid-yield: \[\d+/\d+\] (downloading\+benchmarking|done|reused cached probe for|skipped) mlx-community/\S+"#
+        )
+        let perModel = lines.all.filter { $0.hasPrefix("paid-yield: [") }
+        XCTAssertFalse(perModel.isEmpty, "\(lines.all)")
+        for line in perModel {
+            XCTAssertNotNil(pattern.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)), line)
+        }
+    }
+
     func testBenchmarkRecommendContinuesWhenUnrelatedRowHasArtifactMismatch() async throws {
         let badKey = "meta-llama/llama-3.1-8b-instruct"
         let goodKey = "qwen3-coder-30b-a3b-instruct"
