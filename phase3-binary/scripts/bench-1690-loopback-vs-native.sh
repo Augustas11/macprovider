@@ -110,19 +110,29 @@ for c in $CONCURRENCY; do
     --output "$OUT/native-rows$rows.json" 2> "$OUT/native-rows$rows.err"
 done
 
-# --no-mmap keeps the weights in anonymous memory so the server's phys
-# footprint is comparable to native (mmapped file pages are not counted).
+# --load-mode none (no mmap) keeps the weights in anonymous memory so the
+# server's phys footprint is comparable to native (mmapped file pages are not
+# counted). Older llama.cpp builds spelled this --no-mmap.
 for g in $GGUFS; do
   tag=$(basename "$g" .gguf)
   "$LLAMA_DIR/llama-server" -m "$g" --host 127.0.0.1 --port "$PORT" \
-    -np "$max_c" -c $(( slot_ctx * max_c )) -ngl 999 -fa on --no-mmap --no-webui \
+    -np "$max_c" -c $(( slot_ctx * max_c )) -ngl 999 -fa on --load-mode none --no-webui \
     > "$OUT/llama-server-$tag.log" 2>&1 &
   server_pid=$!
   trap 'kill "$server_pid" 2>/dev/null || true; [[ -n "${PAUSE_PROVIDER_SOCKET:-}" ]] && provider_control resume_request >&2' EXIT
+  healthy=0
   for _ in $(seq 1 300); do
-    curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && break
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      echo "bench-1690: llama-server exited during startup; see llama-server-$tag.log" >&2
+      exit 5
+    fi
+    curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && { healthy=1; break; }
     sleep 1
   done
+  if (( healthy == 0 )); then
+    echo "bench-1690: llama-server not healthy after 300s" >&2
+    exit 5
+  fi
   # shellcheck disable=SC2086
   "$CLI" msb-loopback --endpoint "http://127.0.0.1:$PORT" --server-pid "$server_pid" \
     --concurrency $CONCURRENCY --prompt-tokens "$PROMPT_TOKENS" --decode-tokens "$DECODE_TOKENS" \
