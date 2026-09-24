@@ -151,7 +151,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.32",
+      "version": "0.9.33",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -5011,7 +5011,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Public GET /v1/models and tier-1 disclosure (\u00a75.3). Mapped to existing models tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Public GET /v1/models and tier-1 disclosure (\u00a75.3). Mapped to existing models tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234). Issue #1697 removes internal hostnames and spec document IDs from the buyer disclosure strings. Row stays pending."
       }
     },
     {
@@ -5030,7 +5030,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
-        "rationale": "Authenticated GET /v1/usage (\u00a75.5). Mapped to existing usage disclosure tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+        "rationale": "Authenticated GET /v1/usage (\u00a75.5). Mapped to existing usage disclosure tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234). Issue #1697 removes internal hostnames and spec document IDs from settlement_disclosure. Row stays pending."
       }
     },
     {
@@ -5695,7 +5695,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "PR 1630 (SPEC-006-R012) adds prefixCache field to makeTier1Disclosure, changing the disclosure selector. The existing signed journey evidence (captured at 160d0e2f) is no longer selector-valid because the function body changed. A fresh JOURNEY-BUYER-PAID-PATH signed evidence envelope at HEAD must be captured and consumed to restore conformant status. Implementation and tests remain as local coverage."
+        "rationale": "PR 1630 (SPEC-006-R012) adds prefixCache field to makeTier1Disclosure, changing the disclosure selector. The existing signed journey evidence (captured at 160d0e2f) is no longer selector-valid because the function body changed. A fresh JOURNEY-BUYER-PAID-PATH signed evidence envelope at HEAD must be captured and consumed to restore conformant status. Implementation and tests remain as local coverage. Issue #1697 changes buyer-facing disclosure strings in makeVerifiedModelSettlementDisclosure. Row stays pending."
       }
     },
     {

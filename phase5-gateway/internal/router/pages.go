@@ -31,11 +31,11 @@ var tier1DisclosureText = []disclosureItem{
 	},
 	{
 		Key:  "hardware_attestation",
-		Text: "There is no hardware attestation or runtime integrity check on providers. The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 does NOT cryptographically verify this.",
+		Text: "There is no hardware attestation or runtime integrity check on providers. The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; this API does NOT cryptographically verify this.",
 	},
 	{
 		Key:  "model_identity",
-		Text: "Model identity is provider-reported. `/v1/models` distinguishes provider-reported model IDs, catalog-known hash status, and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately. Mixed pools are not described as fully verified.",
+		Text: "Model identity is provider-reported. `/v1/models` distinguishes provider-reported model IDs, catalog-known hash status, and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded paths are legacy direct provider tunnels and the coordinator buyer listener that bypass the gateway paid ledger, unless those paths are separately disabled or migrated behind the gateway paid ledger. Mixed pools are not described as fully verified.",
 	},
 	{
 		Key:  "model_verification_limit",

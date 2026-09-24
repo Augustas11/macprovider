@@ -1,7 +1,12 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.32 (2026-09-22, slot reservation release + 10s queue)
+**Version:** 0.9.33 (2026-09-24, buyer disclosure copy)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.33 (2026-09-24, issue #1697 — buyer disclosure copy):**
+- Authenticated `GET /v1/models` `tier1_disclosure`, authenticated `GET /v1/usage` `settlement_disclosure`, `/docs`, `/account`, and the front-door console MUST describe excluded paid paths as legacy direct provider tunnels and the coordinator buyer listener that bypass the gateway paid ledger. They MUST NOT name provider hostnames, internal coordinator URLs, or spec document IDs.
+- Verified-model settlement and compute-integrity behavior is unchanged: enforce mode is still receipt-bound for covered paid entrypoints, observe mode is still disclosure-only, and buyer-visible compute-integrity settlement effect stays unavailable until live policy activation. The legacy direct-tunnel paths are not retired.
+- Amends the buyer copy under `SPEC-006-R004` and `SPEC-006-R005`. No new requirement. Not promoted. The relay-blind disclosure version token is unchanged.
 
 **Change log v0.9.32 (2026-09-22, issue #1669 — accept-release + one-decode queue):**
 - Coordinator-local reservation of advertised `slots_free` MUST be released once the selected provider has accepted the request (successful WS relay start, or HTTP response headers). In-flight occupancy after accept is the provider heartbeat, not a second coordinator lease held for the rest of the stream. Failover/retry still MUST release before selecting the next route.
@@ -274,8 +279,8 @@ changing them:
   (`error.code` / `error.retryable`, §5.2, §17).
 - `SPEC-006-R003` — quota reservation, settlement, and refund on the chat
   path (§7, §17.7).
-- `SPEC-006-R004` — `GET /v1/models` and tier-1 disclosure (§5.3).
-- `SPEC-006-R005` — authenticated `GET /v1/usage` (§5.5).
+- `SPEC-006-R004` — `GET /v1/models` and tier-1 disclosure (§5.3). Buyer copy names no internal host and no spec document ID (v0.9.33).
+- `SPEC-006-R005` — authenticated `GET /v1/usage` (§5.5), including `settlement_disclosure` with the same buyer-copy limit (v0.9.33).
 - `SPEC-006-R006` — public `GET /v1/status` (§5.6).
 - `SPEC-006-R007` — gateway kill switches (§2.7).
 - `SPEC-006-R008` — unauthenticated public rate-card and stats overview
@@ -480,10 +485,10 @@ Cross-spec audit cycles MAY propose coordinated patches across multiple specs. W
 SPEC-006 is a Tier 1 cooperative inference product. The following properties hold:
 
 1. **Buyer prompts and provider responses are processed as plaintext on provider hardware.** Providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee.
-2. **There is no hardware attestation or runtime integrity check on providers.** The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 does NOT cryptographically verify this.
-3. **Model identity is provider-reported.** `/v1/models` distinguishes provider-reported model IDs, catalog-known hash status, and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately. Mixed pools are not described as fully verified.
+2. **There is no hardware attestation or runtime integrity check on providers.** The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; this API does NOT cryptographically verify this.
+3. **Model identity is provider-reported.** `/v1/models` distinguishes provider-reported model IDs, catalog-known hash status, and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded paths are legacy direct provider tunnels and the coordinator buyer listener that bypass the gateway paid ledger, unless those paths are separately disabled or migrated behind the gateway paid ledger. Mixed pools are not described as fully verified.
 4. **v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot.** They do not detect a provider falsifying its own loaded-model hash measurement.
-5. **Settlement-integrity labels are receipt-bound for covered paid entrypoints under SPEC-022 enforce mode: a settlement-capable receipt must match the route-time catalog snapshot before buyer debit or provider settlement can finalize.** In observe mode, this label is disclosure-only and does not change buyer debit or provider payout. SPEC-036 compute integrity is a sampled, overt distribution-drift gate with observe, warn-only, and enforce-mode logic; buyer-visible compute-integrity settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available. Do not describe settlement-integrity labels as proof of honest computation, hardware integrity, binary integrity, private inference, or malicious-provider resistance.
+5. **Settlement-integrity labels are receipt-bound for covered paid entrypoints while verified-model settlement is in enforce mode: a settlement-capable receipt must match the route-time catalog snapshot before buyer debit or provider settlement can finalize.** In observe mode, this label is disclosure-only and does not change buyer debit or provider payout. Compute integrity is a sampled, overt distribution-drift gate with observe, warn-only, and enforce-mode logic; buyer-visible compute-integrity settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available. Do not describe settlement-integrity labels as proof of honest computation, hardware integrity, binary integrity, private inference, or malicious-provider resistance.
 6. **Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.** Enforce mode may settle only covered paid entrypoints listed in this disclosure whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified.
 7. **Pending means quota or balance can remain reserved while receipt verification is incomplete.** Non-verified terminal outcomes release or refund that reservation. pending: receipt verification is still incomplete and the reservation is not final usage. verified: a settlement-capable receipt matched the route-time catalog snapshot and can finalize buyer debit and provider settlement. quarantined: not charged because model-integrity or receipt verification failed; this is not labeled as buyer fault. zero_settled: not charged because no billable verified work was produced; this is not labeled as buyer fault.
 8. **Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage.** Streaming failover is transparent only before response bytes are committed. After the first buyer-visible SSE event, a provider disconnect terminates the stream with `provider_disconnected` and the buyer may retry as a new request. That retry is a separate billable request with its own reservation and settlement; cross-request overlapping output is not deduplicated. Settlement remains limited to delivered, receipt-verified output prefixes and must not double-charge overlapping output if a future resume or failover protocol spans multiple provider attempts; verified here means receipt-bound under the provider-reported-hash caveat above.
@@ -544,6 +549,8 @@ The d-inference source is clean-room for SPEC-006.
 SPEC-006 authors and implementers MUST NOT inspect d-inference source while drafting or implementing this gateway.
 
 Buyer-facing responses MUST NOT include provider hostnames, internal coordinator URLs, operator keys, signing keys, stable provider IDs, or any other buyer-visible secret.
+
+Buyer-facing disclosure prose on `/v1/models` `tier1_disclosure`, `/v1/usage` `settlement_disclosure`, `/docs`, `/account`, and the front-door console MUST NOT name provider hostnames, internal coordinator URLs, or spec document IDs. Describe excluded legacy direct-tunnel paths, verified-model settlement, and compute integrity in plain language. Spec document IDs remain in implementer comments and in non-buyer sections of this spec. This amendment does not rename the pre-existing relay-blind compatibility token `spec-041-v0.1`.
 
 The gateway MUST be horizontally scalable from day 1.
 
@@ -1286,14 +1293,14 @@ Response shape:
     "verified_model_settlement": {
       "included_paid_entrypoints": ["POST /v1/chat/completions"],
       "excluded_paid_entrypoints": [
-        "legacy direct-tunnel buyer paths at coordinator.malibu.tech, m4.malibu.tech, and m1.malibu.tech unless separately disabled or migrated behind the gateway paid ledger"
+        "legacy direct provider tunnels and the coordinator buyer listener that bypass the gateway paid ledger, unless those paths are separately disabled or migrated behind the gateway paid ledger"
       ],
-      "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
+      "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are described separately.",
       "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
       "settlement_integrity": {
         "schema_version": "buyer_settlement_integrity_disclosure_v1",
-        "receipt_binding": "Settlement-integrity labels are receipt-bound for covered paid entrypoints under SPEC-022 enforce mode: a settlement-capable receipt must match the route-time catalog snapshot before buyer debit or provider settlement can finalize. In observe mode, this label is disclosure-only and does not change buyer debit or provider payout.",
-        "compute_integrity": "SPEC-036 compute integrity is a sampled, overt distribution-drift gate with observe, warn-only, and enforce-mode logic; buyer-visible compute-integrity settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available.",
+        "receipt_binding": "Settlement-integrity labels are receipt-bound for covered paid entrypoints while verified-model settlement is in enforce mode: a settlement-capable receipt must match the route-time catalog snapshot before buyer debit or provider settlement can finalize. In observe mode, this label is disclosure-only and does not change buyer debit or provider payout.",
+        "compute_integrity": "Compute integrity is a sampled, overt distribution-drift gate with observe, warn-only, and enforce-mode logic; buyer-visible compute-integrity settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available.",
         "claim_limit": "Do not describe settlement-integrity labels as proof of honest computation, hardware integrity, binary integrity, private inference, or malicious-provider resistance."
       },
       "observe_mode": "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.",
@@ -1320,12 +1327,12 @@ Response shape:
         "unavailable": "no live sanitized telemetry currently backs buyer-visible per-model compute-integrity status",
         "observing": "live telemetry is sampled/overt observation only and does not affect settlement",
         "warn_only": "live telemetry reports warn readiness without blocking paid admission",
-        "enforcing": "policy-backed live telemetry may affect covered SPEC-022 settlement/admission gates",
+        "enforcing": "policy-backed live telemetry may affect covered verified-model settlement and admission gates",
         "quarantined": "live telemetry/adjudication marked compute drift or a related adverse state",
         "blocked": "covered paid admission is blocked for the affected compute-integrity scope",
         "stale_expired": "previous live telemetry is stale or expired and needs fresh evidence"
       },
-      "disclosure": "SPEC-036 compute-integrity is sampled/overt distribution-drift readiness telemetry against approved references. It is unavailable here until live sanitized telemetry backs the per-model status. It is not proof of honest computation, hardware integrity, runtime binary integrity, private inference, or malicious-provider resistance."
+      "disclosure": "Compute integrity is sampled/overt distribution-drift readiness telemetry against approved references. It is unavailable here until live sanitized telemetry backs the per-model status. It is not proof of honest computation, hardware integrity, runtime binary integrity, private inference, or malicious-provider resistance."
     },
     "sticky_affinity": {
       "enabled": false,
@@ -1349,7 +1356,7 @@ Response shape:
         "settlement_effect": "not_evaluated",
         "live_telemetry_available": false,
         "reason": "live_status_source_unavailable",
-        "disclosure": "SPEC-036 v0.1 is an overt distribution-drift readiness signal against approved references. It is not cryptographic proof of honest computation, not hardware integrity, not runtime binary integrity, and not covert attestation. Per-model buyer status is unavailable until live sanitized telemetry is wired; this field is not derived from static spec/package availability."
+        "disclosure": "Compute integrity is an overt distribution-drift readiness signal against approved references. It is not cryptographic proof of honest computation, not hardware integrity, not runtime binary integrity, and not covert attestation. Per-model buyer status is unavailable until live sanitized telemetry is wired; this field is not derived from static specification text or package availability."
       },
       "degraded": false
     }
@@ -1363,7 +1370,7 @@ The gateway MUST preserve the canonical model ID spelling returned by the coordi
 
 The `id` field returned by `/v1/models` reflects the model identifier as advertised by the serving provider binary. `/v1/models` may also expose catalog-known hash status and settlement-enforced receipt matching for covered enforce-mode traffic. Buyers SHOULD treat `id` as provider-reported and SHOULD NOT treat catalog or settlement fields as hardware attestation, runtime binary attestation, malicious-output prevention, private inference, or detection of a provider falsifying its own loaded-model hash measurement.
 
-Each model entry MUST include `compute_integrity`. Until live sanitized compute-integrity telemetry backs the buyer models surface, implementations MUST return `status: "unavailable"`, `mode: "unavailable"`, `live_telemetry_available: false`, and `settlement_effect: "not_evaluated"`. Implementations MUST NOT derive observing, warn-only, enforcing, quarantined, blocked, stale, or expired buyer-visible status from static SPEC text, package availability, binary presence, or configured intent alone. When a future live source is wired, labels MUST preserve the distinction between sampled/overt observation, warn-only telemetry, enforcement that can affect covered SPEC-022 settlement/admission gates, quarantined/blocked states, and stale/expired evidence.
+Each model entry MUST include `compute_integrity`. Until live sanitized compute-integrity telemetry backs the buyer models surface, implementations MUST return `status: "unavailable"`, `mode: "unavailable"`, `live_telemetry_available: false`, and `settlement_effect: "not_evaluated"`. Implementations MUST NOT derive observing, warn-only, enforcing, quarantined, blocked, stale, or expired buyer-visible status from static SPEC text, package availability, binary presence, or configured intent alone. When a future live source is wired, labels MUST preserve the distinction between sampled/overt observation, warn-only telemetry, enforcement that can affect covered verified-model settlement and admission gates, quarantined/blocked states, and stale/expired evidence.
 
 Gateways MUST allowlist public model-entry fields and MUST replace upstream per-model `compute_integrity` with the gateway-approved unavailable object until a trusted live status source exists. A coordinator or cached snapshot MUST NOT be able to inject provider identifiers, raw prompt/output material, false live-telemetry flags, enforcement labels, or prohibited proof/attestation/private-inference claims into buyer-visible model entries.
 
@@ -1402,14 +1409,14 @@ compatibility requirements MUST carry their own schema/version fields.
   "verified_model_settlement": {
     "included_paid_entrypoints": ["POST /v1/chat/completions"],
     "excluded_paid_entrypoints": [
-      "legacy direct-tunnel buyer paths at coordinator.malibu.tech, m4.malibu.tech, and m1.malibu.tech unless separately disabled or migrated behind the gateway paid ledger"
+      "legacy direct provider tunnels and the coordinator buyer listener that bypass the gateway paid ledger, unless those paths are separately disabled or migrated behind the gateway paid ledger"
     ],
-    "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
+    "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are described separately.",
     "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
     "settlement_integrity": {
       "schema_version": "buyer_settlement_integrity_disclosure_v1",
-      "receipt_binding": "Settlement-integrity labels are receipt-bound for covered paid entrypoints under SPEC-022 enforce mode: a settlement-capable receipt must match the route-time catalog snapshot before buyer debit or provider settlement can finalize. In observe mode, this label is disclosure-only and does not change buyer debit or provider payout.",
-      "compute_integrity": "SPEC-036 compute integrity is a sampled, overt distribution-drift gate with observe, warn-only, and enforce-mode logic; buyer-visible compute-integrity settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available.",
+      "receipt_binding": "Settlement-integrity labels are receipt-bound for covered paid entrypoints while verified-model settlement is in enforce mode: a settlement-capable receipt must match the route-time catalog snapshot before buyer debit or provider settlement can finalize. In observe mode, this label is disclosure-only and does not change buyer debit or provider payout.",
+      "compute_integrity": "Compute integrity is a sampled, overt distribution-drift gate with observe, warn-only, and enforce-mode logic; buyer-visible compute-integrity settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available.",
       "claim_limit": "Do not describe settlement-integrity labels as proof of honest computation, hardware integrity, binary integrity, private inference, or malicious-provider resistance."
     },
     "observe_mode": "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.",
@@ -1436,12 +1443,12 @@ compatibility requirements MUST carry their own schema/version fields.
       "unavailable": "no live sanitized telemetry currently backs buyer-visible per-model compute-integrity status",
       "observing": "live telemetry is sampled/overt observation only and does not affect settlement",
       "warn_only": "live telemetry reports warn readiness without blocking paid admission",
-      "enforcing": "policy-backed live telemetry may affect covered SPEC-022 settlement/admission gates",
+      "enforcing": "policy-backed live telemetry may affect covered verified-model settlement and admission gates",
       "quarantined": "live telemetry/adjudication marked compute drift or a related adverse state",
       "blocked": "covered paid admission is blocked for the affected compute-integrity scope",
       "stale_expired": "previous live telemetry is stale or expired and needs fresh evidence"
     },
-    "disclosure": "SPEC-036 compute-integrity is sampled/overt distribution-drift readiness telemetry against approved references. It is unavailable here until live sanitized telemetry backs the per-model status. It is not proof of honest computation, hardware integrity, runtime binary integrity, private inference, or malicious-provider resistance."
+    "disclosure": "Compute integrity is sampled/overt distribution-drift readiness telemetry against approved references. It is unavailable here until live sanitized telemetry backs the per-model status. It is not proof of honest computation, hardware integrity, runtime binary integrity, private inference, or malicious-provider resistance."
   },
   "sticky_affinity": {
     "enabled": false,
@@ -1461,7 +1468,7 @@ Gateway implementations MUST set this field automatically.
 
 Operator override is forbidden; there MUST be no config opt-out.
 
-The `compute_integrity` sub-object MUST be present in `tier1_disclosure`. Its label glossary MUST distinguish `unavailable`, `observing`, `warn_only`, `enforcing`, `quarantined`, `blocked`, and `stale_expired` states. Until a live sanitized telemetry source backs per-model buyer status, `current_status` and `current_mode` MUST be `unavailable`, `status_source` MUST be `live_telemetry_unavailable`, `live_telemetry_available` MUST be `false`, and `settlement_effect` MUST be `not_evaluated`. The disclosure MUST describe SPEC-036 as sampled/overt distribution-drift readiness telemetry and MUST NOT claim proof of honest computation, hardware integrity, runtime binary integrity, private inference, or malicious-provider resistance.
+The `compute_integrity` sub-object MUST be present in `tier1_disclosure`. Its label glossary MUST distinguish `unavailable`, `observing`, `warn_only`, `enforcing`, `quarantined`, `blocked`, and `stale_expired` states. Until a live sanitized telemetry source backs per-model buyer status, `current_status` and `current_mode` MUST be `unavailable`, `status_source` MUST be `live_telemetry_unavailable`, `live_telemetry_available` MUST be `false`, and `settlement_effect` MUST be `not_evaluated`. The disclosure MUST describe compute integrity as sampled/overt distribution-drift readiness telemetry and MUST NOT claim proof of honest computation, hardware integrity, runtime binary integrity, private inference, or malicious-provider resistance.
 
 Gateway-owned disclosure and per-model status values are authoritative for this unavailable phase. The gateway MUST overwrite hostile, stale, or same-named upstream fields rather than forwarding them verbatim.
 
@@ -1852,14 +1859,14 @@ Response shape:
   "settlement_disclosure": {
     "included_paid_entrypoints": ["POST /v1/chat/completions"],
     "excluded_paid_entrypoints": [
-      "legacy direct-tunnel buyer paths at coordinator.malibu.tech, m4.malibu.tech, and m1.malibu.tech unless separately disabled or migrated behind the gateway paid ledger"
+      "legacy direct provider tunnels and the coordinator buyer listener that bypass the gateway paid ledger, unless those paths are separately disabled or migrated behind the gateway paid ledger"
     ],
-    "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately.",
+    "model_identity": "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are described separately.",
     "model_identity_caveat": "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement.",
     "settlement_integrity": {
       "schema_version": "buyer_settlement_integrity_disclosure_v1",
-      "receipt_binding": "Settlement-integrity labels are receipt-bound for covered paid entrypoints under SPEC-022 enforce mode: a settlement-capable receipt must match the route-time catalog snapshot before buyer debit or provider settlement can finalize. In observe mode, this label is disclosure-only and does not change buyer debit or provider payout.",
-      "compute_integrity": "SPEC-036 compute integrity is a sampled, overt distribution-drift gate with observe, warn-only, and enforce-mode logic; buyer-visible compute-integrity settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available.",
+      "receipt_binding": "Settlement-integrity labels are receipt-bound for covered paid entrypoints while verified-model settlement is in enforce mode: a settlement-capable receipt must match the route-time catalog snapshot before buyer debit or provider settlement can finalize. In observe mode, this label is disclosure-only and does not change buyer debit or provider payout.",
+      "compute_integrity": "Compute integrity is a sampled, overt distribution-drift gate with observe, warn-only, and enforce-mode logic; buyer-visible compute-integrity settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available.",
       "claim_limit": "Do not describe settlement-integrity labels as proof of honest computation, hardware integrity, binary integrity, private inference, or malicious-provider resistance."
     },
     "observe_mode": "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout.",
@@ -2974,7 +2981,7 @@ settlement-integrity boundary, in substantively equivalent language:
 The same pre-key disclosure MUST also state, in substantively equivalent
 language:
 
-> Settlement-integrity labels are receipt-bound for covered paid entrypoints under SPEC-022 enforce mode: a settlement-capable receipt must match the route-time catalog snapshot before buyer debit or provider settlement can finalize. In observe mode, this label is disclosure-only and does not change buyer debit or provider payout. SPEC-036 compute integrity is a sampled, overt distribution-drift gate with observe, warn-only, and enforce-mode logic; buyer-visible compute-integrity settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available. Settlement-integrity labels are not proof of honest computation, hardware integrity, binary integrity, private inference, or malicious-provider resistance.
+> Settlement-integrity labels are receipt-bound for covered paid entrypoints while verified-model settlement is in enforce mode: a settlement-capable receipt must match the route-time catalog snapshot before buyer debit or provider settlement can finalize. In observe mode, this label is disclosure-only and does not change buyer debit or provider payout. Compute integrity is a sampled, overt distribution-drift gate with observe, warn-only, and enforce-mode logic; buyer-visible compute-integrity settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available. Settlement-integrity labels are not proof of honest computation, hardware integrity, binary integrity, private inference, or malicious-provider resistance.
 
 The signup flow MUST require this disclosure to be visible before key issuance.
 
@@ -3062,7 +3069,7 @@ Docs MUST map:
 
 ### 13.5 Tier 1 and model identity caveats
 
-The single-page docs MUST include a "Tier 1 disclosure" subsection explaining that buyer prompts and provider responses are processed as plaintext on provider hardware; providers can technically observe prompts and outputs routed through their machine; hardware attestation is not performed; model identity is provider-reported; verified settlement language is constrained by the provider-reported-hash caveat; settlement-integrity labels are receipt-bound for covered paid entrypoints under SPEC-022 enforce mode and disclosure-only in observe mode; SPEC-036 compute integrity is sampled distribution-drift gate logic whose buyer-visible settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available; and Tier 1 makes no private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, provider-falsified-model-measurement detection, honest-computation-proof, hardware-integrity-proof, or binary-integrity-proof claims.
+The single-page docs MUST include a "Tier 1 disclosure" subsection explaining that buyer prompts and provider responses are processed as plaintext on provider hardware; providers can technically observe prompts and outputs routed through their machine; hardware attestation is not performed; model identity is provider-reported; verified settlement language is constrained by the provider-reported-hash caveat; settlement-integrity labels are receipt-bound for covered paid entrypoints while verified-model settlement is in enforce mode and disclosure-only in observe mode; compute integrity is sampled distribution-drift gate logic whose buyer-visible settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available; and Tier 1 makes no private-inference, hardware-attestation, runtime-binary-attestation, provider-private-prompt, untrusted-provider, malicious-output-prevention, provider-falsified-model-measurement detection, honest-computation-proof, hardware-integrity-proof, or binary-integrity-proof claims.
 
 When `routing.sticky_enabled: true`, the single-page docs MUST include a "Sticky affinity" subsection explaining `X-MacProvider-Conversation`, `DELETE /v1/sticky`, the configured `sticky_ttl_s`, and the privacy tradeoff that related requests may be preferentially routed to the same provider during the TTL. When `routing.sticky_enabled: false`, this subsection is optional and, if present, MUST clearly state sticky affinity is disabled.
 

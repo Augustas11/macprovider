@@ -312,11 +312,16 @@ func (m coordinatorBehavioralSafetyMetadata) toDisclosure() behavioralSafetyDisc
 
 const routingMetaTTL = 5 * time.Second
 
+// Buyer-visible disclosure copy for authenticated GET /v1/models
+// tier1_disclosure and GET /v1/usage settlement_disclosure. SPEC-022 is
+// verified-model settlement, SPEC-036 is sampled compute integrity, and
+// SPEC-006 is this buyer API. Those document IDs stay in comments; the
+// strings below are serialized to buyers and must not name internal hosts.
 const modelVerificationLimitDisclosure = "v0.4 settlement receipts verify the provider-reported request-start model hash against the route-time catalog snapshot. They do not detect a provider falsifying its own loaded-model hash measurement."
-const settlementModelIdentityDisclosure = "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are named separately."
+const settlementModelIdentityDisclosure = "/v1/models distinguishes provider-reported model IDs from catalog-known hash status and settlement-enforced receipt matching. Settlement enforcement applies only to included paid entrypoints in enforce mode after a receipt matches the route-time catalog snapshot; excluded legacy/direct paths are described separately."
 const settlementModelIdentityCaveatDisclosure = "Verified model settlement means the provider-reported request-start model hash matched the route-time catalog snapshot and settlement receipt. It does not provide hardware attestation, runtime binary attestation, private prompts, malicious-output prevention, or detection of a provider falsifying its own loaded-model hash measurement."
-const settlementIntegrityReceiptBindingDisclosure = "Settlement-integrity labels are receipt-bound for covered paid entrypoints under SPEC-022 enforce mode: a settlement-capable receipt must match the route-time catalog snapshot before buyer debit or provider settlement can finalize. In observe mode, this label is disclosure-only and does not change buyer debit or provider payout."
-const settlementIntegrityComputeDisclosure = "SPEC-036 compute integrity is a sampled, overt distribution-drift gate with observe, warn-only, and enforce-mode logic; buyer-visible compute-integrity settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available."
+const settlementIntegrityReceiptBindingDisclosure = "Settlement-integrity labels are receipt-bound for covered paid entrypoints while verified-model settlement is in enforce mode: a settlement-capable receipt must match the route-time catalog snapshot before buyer debit or provider settlement can finalize. In observe mode, this label is disclosure-only and does not change buyer debit or provider payout."
+const settlementIntegrityComputeDisclosure = "Compute integrity is a sampled, overt distribution-drift gate with observe, warn-only, and enforce-mode logic; buyer-visible compute-integrity settlement effect remains unavailable until live policy activation, conformance reconciliation, and production verification explicitly make it available."
 const settlementIntegrityClaimLimitDisclosure = "Do not describe settlement-integrity labels as proof of honest computation, hardware integrity, binary integrity, private inference, or malicious-provider resistance."
 const settlementObserveModeDisclosure = "Observe mode may record receipt and model-hash diagnostics, but it cannot claim verified model integrity and it does not change buyer debit or provider payout."
 const settlementEnforceModeDisclosure = "Enforce mode may settle only covered paid entrypoints listed in this disclosure whose settlement-capable receipt reaches verified finality; mixed pools are not described as fully verified."
@@ -328,8 +333,8 @@ const settlementZeroSettledOutcomeDisclosure = "zero_settled: not charged becaus
 const settlementPartialChargeDisclosure = "Buyer cancel, gateway timeout, provider error, or upstream disconnect can create a partial charge only when a settlement-capable receipt binds the delivered output prefix and partial usage."
 const settlementStreamingFailoverDisclosure = "Streaming failover is transparent only before response bytes are committed. After the first buyer-visible SSE event, a provider disconnect terminates the stream with provider_disconnected and the buyer may retry as a new request. That retry is a separate billable request with its own reservation and settlement; cross-request overlapping output is not deduplicated. Settlement remains limited to delivered, receipt-verified output prefixes and must not double-charge overlapping output if a future resume or failover protocol spans multiple provider attempts; verified here means receipt-bound under the provider-reported-hash caveat above."
 const settlementBuyerReceiptStatusDisclosure = "Buyer receipt and status surfaces expose pending, verified, quarantined, and zero_settled labels without raw prompts or raw outputs."
-const computeIntegrityDisclosureCopy = "SPEC-036 compute-integrity is sampled/overt distribution-drift readiness telemetry against approved references. It is unavailable here until live sanitized telemetry backs the per-model status. It is not proof of honest computation, hardware integrity, runtime binary integrity, private inference, or malicious-provider resistance."
-const modelComputeIntegrityUnavailableDisclosure = "SPEC-036 v0.1 is an overt distribution-drift readiness signal against approved references. It is not cryptographic proof of honest computation, not hardware integrity, not runtime binary integrity, and not covert attestation. Per-model buyer status is unavailable until live sanitized telemetry is wired; this field is not derived from static spec/package availability."
+const computeIntegrityDisclosureCopy = "Compute integrity is sampled/overt distribution-drift readiness telemetry against approved references. It is unavailable here until live sanitized telemetry backs the per-model status. It is not proof of honest computation, hardware integrity, runtime binary integrity, private inference, or malicious-provider resistance."
+const modelComputeIntegrityUnavailableDisclosure = "Compute integrity is an overt distribution-drift readiness signal against approved references. It is not cryptographic proof of honest computation, not hardware integrity, not runtime binary integrity, and not covert attestation. Per-model buyer status is unavailable until live sanitized telemetry is wired; this field is not derived from static specification text or package availability."
 
 func makeModelComputeIntegrityUnavailableStatus() modelComputeIntegrityStatus {
 	return modelComputeIntegrityStatus{
@@ -355,7 +360,7 @@ func makeComputeIntegrityDisclosure() computeIntegrityDisclosure {
 			Unavailable:  "no live sanitized telemetry currently backs buyer-visible per-model compute-integrity status",
 			Observing:    "live telemetry is sampled/overt observation only and does not affect settlement",
 			WarnOnly:     "live telemetry reports warn readiness without blocking paid admission",
-			Enforcing:    "policy-backed live telemetry may affect covered SPEC-022 settlement/admission gates",
+			Enforcing:    "policy-backed live telemetry may affect covered verified-model settlement and admission gates",
 			Quarantined:  "live telemetry/adjudication marked compute drift or a related adverse state",
 			Blocked:      "covered paid admission is blocked for the affected compute-integrity scope",
 			StaleExpired: "previous live telemetry is stale or expired and needs fresh evidence",
@@ -379,7 +384,7 @@ func makeVerifiedModelSettlementDisclosure(includeResponses, includeAnthropicMes
 	return verifiedModelSettlementDisclosure{
 		IncludedPaidEntrypoints: included,
 		ExcludedPaidEntrypoints: []string{
-			"legacy direct-tunnel buyer paths at coordinator.malibu.tech, m4.malibu.tech, and m1.malibu.tech unless separately disabled or migrated behind the gateway paid ledger",
+			"legacy direct provider tunnels and the coordinator buyer listener that bypass the gateway paid ledger, unless those paths are separately disabled or migrated behind the gateway paid ledger",
 		},
 		ModelIdentity:       settlementModelIdentityDisclosure,
 		ModelIdentityCaveat: settlementModelIdentityCaveatDisclosure,
@@ -497,6 +502,8 @@ func (s *Server) applyRelayBlindDisclosure(disclosure *tier1Disclosure) {
 
 func relayBlindDisclosureUnavailable() *relayBlindRequestEncryptionDisclosure {
 	return &relayBlindRequestEncryptionDisclosure{
+		// spec-041-v0.1 is the existing compatibility token for this object.
+		// This copy fix does not rename it. SPEC-008 stays out of Description.
 		Version: "spec-041-v0.1",
 		Scope:   relayBlindScope,
 		EndpointFamilies: map[string]relayBlindEndpointDisclosure{
@@ -508,7 +515,9 @@ func relayBlindDisclosureUnavailable() *relayBlindRequestEncryptionDisclosure {
 			VerifiedModelSettlement: "unavailable_for_relay_blind_request",
 			UsageSettlement:         "standard_usage_settlement_and_clear_cap_enforcement_still_apply",
 		},
-		Description: "Relay-blind request encryption is default-off and unavailable until fresh provider-signed key evidence exists. When available, it prevents the gateway and coordinator from reading request content; it does not hide prompts from the selected provider and is separate from SPEC-008 coordinator-to-provider encryption.",
+		// SPEC-008 is the separate coordinator-to-provider encryption milestone.
+		// Keep that document ID out of this serialized buyer description.
+		Description: "Relay-blind request encryption is default-off and unavailable until fresh provider-signed key evidence exists. When available, it prevents the gateway and coordinator from reading request content; it does not hide prompts from the selected provider and is separate from coordinator-to-provider encryption.",
 	}
 }
 
