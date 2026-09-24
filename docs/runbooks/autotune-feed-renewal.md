@@ -108,7 +108,11 @@ dry-run):
    - takes `.renew.lock` (no concurrent autotune publishes);
    - **content-continuity guard**: compares the new feed (dates stripped) against
      the live feed and ABORTS on any model/gate/rate-card-row difference — a real
-     catalog change must go through a reviewed release, never this cron;
+     catalog change must go through a reviewed release, never this cron. A
+     rows-only price correction ships through the catalog-content lane's
+     pricing path; a `usd_per_million_credits`, `provider_share_bps`, or
+     `global_multiplier_ppm` change needs a runtime release
+     (`docs/runbooks/catalog-release-decision-tree.md`, SPEC-023-R016/R018);
    - rsyncs the signed dir into `releases/`;
    - holds the same Pearl deploy locks as `deploy-pearl-vps.sh`
      (`/run/lock/macprovider-pearl-updater.lock` then
@@ -166,8 +170,11 @@ not block boot; a ninth line or a malformed line does.
 
 Keep in it every signed document a shipped CLI bakes and that providers still
 run: at minimum the baked catalog of each CLI version at or above the fleet
-floor. After adding or removing a line, `SIGHUP` the coordinator. Remove a line
-once no connected provider advertises that release.
+floor. After adding or removing a line, `SIGHUP` the coordinator, unless a
+pricing transaction journal exists (`test -e /opt/macprovider/.pricing-txn`):
+then resolve it first (`docs/runbooks/catalog-release-decision-tree.md`
+§pricing-txn). Remove a line once no connected provider advertises that
+release.
 
 One-time Pearl step for the 2026-09-23 recurrence. The v1.8.123 CLI bakes
 `published-2026-09-02-gpt-oss-120b-v1`:
