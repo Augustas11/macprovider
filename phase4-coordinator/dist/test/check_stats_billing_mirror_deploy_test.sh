@@ -120,6 +120,11 @@ done
 if grep -qF 'GRANT EXECUTE ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN, TEXT, BOOLEAN) TO stats_billing_mirror_writer' "$BOOTSTRAP_SQL" "$MIGRATION_SQL"; then
   fail "bootstrap/migration must not grant the legacy 16-argument mirror upsert"
 fi
+LEGACY_16_WRITER_REVOKE='REVOKE ALL ON FUNCTION stats_billing_mirror_upsert_request_credit(BIGINT, TEXT, INTEGER, TEXT, TIMESTAMPTZ, TIMESTAMPTZ, TIMESTAMPTZ, BIGINT, BIGINT, BIGINT, TEXT, BIGINT, TEXT, BOOLEAN, TEXT, BOOLEAN) FROM stats_billing_mirror_writer'
+for source in "$BOOTSTRAP_SQL" "$MIGRATION_SQL" "$MIRROR_GO"; do
+  grep -qF "$LEGACY_16_WRITER_REVOKE" "$source" ||
+    fail "$source must revoke the legacy 16-argument SECURITY DEFINER function from the mirror writer"
+done
 
 if ! BOOTSTRAP_SQL="$BOOTSTRAP_SQL" MIGRATION_SQL="$MIGRATION_SQL" MIRROR_GO="$MIRROR_GO" python3 <<'PY'
 import os
@@ -139,7 +144,9 @@ expected = [
 def signature(path):
     text = open(path, encoding="utf-8").read()
     matches = re.findall(
-        r"CREATE OR REPLACE FUNCTION stats_billing_mirror_upsert_request_credit\(\s*(.*?)\s*\)\s*RETURNS void",
+        r"CREATE OR REPLACE FUNCTION stats_billing_mirror_upsert_request_credit\(\s*(.*?)\s*\)\s*"
+        r"RETURNS void\s*LANGUAGE plpgsql\s*SECURITY DEFINER\s*"
+        r"SET search_path = pg_catalog, public, pg_temp",
         text,
         flags=re.S,
     )
