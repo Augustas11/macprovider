@@ -151,11 +151,22 @@ keeps one evidence class (Phase A build) for the whole bundle.
 Proven on the packaged-shape lab build (direct HTTP): cases 1 (backpressure
 half), 2, 3, 5a (API attach), 5b, 5c, 5d, 7a, 7b, 9 (usage half).
 
+Case 1's retry-guidance half on the coordinator relay (`2c488c19`): the relay
+used to send CB queue pressure as `error_internal`, a non-rerouted 502 under
+SPEC-002 FR-P14.1. It now sends `error_queue_full` (SPEC-001 v1.9.20 FR-27,
+SPEC-038 v0.2.4): the coordinator re-routes to the next candidate, otherwise
+returns 503 `no_provider_available`, which the gateway marks retryable with
+`Retry-After: 1`. No coordinator or gateway change. Proven by composition:
+`InferenceRelayQueuePressureTests` (real `asAPIError()` codes →
+`error_queue_full`; post-token delivery backpressure stays `error_internal`)
+plus the existing coordinator `*QueueFull*` tests (fallback, busy marking,
+capacity shedding, quota refund, unsettled leg). The earlier plan item "three Go
+forwarding gates must widen" was the wrong framing: the buyer-visible code
+and retry signal come from the existing capacity status, not new codes.
+
 Open, AC-25 does **not** close:
 
 - Case 6, reconnect/replay through the relay with settlement disposition.
-- Case 1's `:614` retry guidance to the buyer through the gateway: the provider
-  emits it; the three Go forwarding gates still drop it.
 - 5a / 9 settlement halves: single owner and receipt parity need the relay path.
 - Cases 8a / 8b: fixture-only by decision (no fault-injection hook).
 - Case 10: warm-swap drain.
