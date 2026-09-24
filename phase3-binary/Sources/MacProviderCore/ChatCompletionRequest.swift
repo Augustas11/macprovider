@@ -36,6 +36,16 @@ public struct ChatCompletionRequest: Sendable {
     // to `.unknown` (non-persisting) at parse; each boundary stamps its own.
     public let ingestProvenance: KVIngestProvenance
 
+    /// The ingest byte cap on a raw chat-completions body (4 MiB). Loopback
+    /// proxies size their upstream request bound from it.
+    public static let rawBodyByteCap = RequestValidation.rawBodyByteCap
+
+    /// Whether a tool-call id has the shape this ingest boundary accepts
+    /// back on a follow-up turn (`call_` + 16-64 ASCII alphanumerics).
+    public static func isAcceptedToolCallID(_ value: String) -> Bool {
+        RequestValidation.isRequestAcceptedToolCallID(value)
+    }
+
     /// Serial agent turns (omitted/`false`) stop after the first complete tool.
     public var stopsAfterFirstCompleteToolCall: Bool {
         parallelToolCalls != true

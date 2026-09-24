@@ -818,9 +818,10 @@ struct ServeCommand: AsyncParsableCommand {
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
         persistConfigMigration: Bool = false
     ) async throws -> CatalogRuntimeTrust? {
-        // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569): an
-        // `ollama_loopback` model carries a `macprovider.gguf-file.v1` identity
-        // resolved from the local Ollama store at serve time, not a catalog
+        // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569, #1690): an
+        // `ollama_loopback` / `llamacpp_loopback` model carries a
+        // `macprovider.gguf-file.v1` identity resolved from the local GGUF
+        // file at serve time, not a catalog
         // artifact SHA. It is intentionally uncatalogued and non-earning, so it
         // neither requires nor runs the MLX catalog-artifact preflight. Returning
         // nil (no catalog trust) lets the daemon stay connected instead of
@@ -831,7 +832,7 @@ struct ServeCommand: AsyncParsableCommand {
         // `ReasonBYOMNonSettlement`) excludes it. That money-path gate, not the
         // SPEC-032 hello-gate ceiling flag (which is set only when the gate is
         // ON), is what holds in the gate-off E2E posture (SPEC-047-R003/R005).
-        if OllamaLoopbackServeModel.isOllamaLoopbackRef(resolved.model ?? "") {
+        if LoopbackServeSelection.select(resolved.model) != nil {
             return nil
         }
         var artifactResolver = artifactResolver
@@ -1941,17 +1942,31 @@ struct ServeCommand: AsyncParsableCommand {
         // execution and advertised heartbeat capability until the tagged fix and
         // cache-wrap parity gate are green.
         do {
-            if let ollamaServedRef = resolved.model, OllamaLoopbackServeModel.isOllamaLoopbackRef(ollamaServedRef) {
-                // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569):
-                // proxy inference to the validated loopback Ollama origin. ONE
-                // process, ONE model — no MLX weights are loaded. Non-earning:
-                // relay-blind and signed receipts are disabled on this path.
-                helloRuntimeSource = OllamaLoopbackServeModel.runtimeSource
-                modelRuntime = try OllamaLoopbackRuntime(
-                    servedModelRef: ollamaServedRef,
-                    origin: OllamaLoopbackServeModel.resolveOrigin(),
-                    catalogModelIDAlias: catalogModelIDAlias
-                )
+            if let loopbackServedRef = resolved.model, let loopback = LoopbackServeSelection.select(loopbackServedRef) {
+                // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569,
+                // #1690 M2): proxy inference to the validated loopback
+                // OpenAI-compatible origin. ONE process, ONE model — no MLX
+                // weights are loaded. Non-earning: relay-blind and signed
+                // receipts are disabled on this path.
+                helloRuntimeSource = loopback.runtimeSource
+                switch loopback {
+                case .ollama:
+                    modelRuntime = try OpenAICompatibleLoopbackRuntime(
+                        servedModelRef: loopbackServedRef,
+                        origin: OllamaLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
+                        catalogModelIDAlias: catalogModelIDAlias
+                    )
+                case .llamaCpp:
+                    // The GGUF file llama.cpp serves is named by the operator
+                    // (MACPROVIDER_LLAMACPP_MODEL_ROOT / _PATH, as for
+                    // `models discover`), never by the runtime.
+                    modelRuntime = try await OpenAICompatibleLoopbackRuntime.llamaCpp(
+                        servedModelRef: loopbackServedRef,
+                        origin: LlamaCppLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
+                        selector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: nil, cliPath: nil),
+                        catalogModelIDAlias: catalogModelIDAlias
+                    )
+                }
             } else {
                 helloRuntimeSource = nil
                 modelRuntime = try await ModelRuntime(

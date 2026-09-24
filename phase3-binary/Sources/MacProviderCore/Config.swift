@@ -175,6 +175,13 @@ public struct AppConfig: Equatable, Sendable {
     // populated, never a partial enable).
     public var pagedKV: PagedKVConfig
 
+    // SPEC-046-R002 loopback serving (#1690 M2): origin of the loopback
+    // runtime a `--model ollama:<tag>` / `llamacpp:<stem>` serve proxies to.
+    // yaml key `loopback_origin`, env `MACPROVIDER_LOOPBACK_ORIGIN`. nil keeps
+    // the per-runtime default (and `MACPROVIDER_OLLAMA_ORIGIN`, which still
+    // wins for Ollama). Loopback-validated when the runtime is constructed.
+    public var loopbackOrigin: String? = nil
+
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
     public static func defaults(configPath: String = defaultConfigPath) -> AppConfig {
@@ -506,6 +513,7 @@ public enum ConfigLoader {
         try assign(&config.modelCatalogVersion, from: dict, key: "model_catalog_version", expected: "string")
         try assign(&config.modelCatalogHash, from: dict, key: "model_catalog_hash", expected: "string")
         try assign(&config.modelArtifactRoot, from: dict, key: "model_artifact_root", expected: "string")
+        try assign(&config.loopbackOrigin, from: dict, key: "loopback_origin", expected: "string")
         try assign(&config.coordinatorURL, from: dict, key: "coordinator_url", expected: "string")
         try assign(&config.providerID, from: dict, key: "provider_id", expected: "string")
         try assign(&config.endpointURL, from: dict, key: "endpoint_url", expected: "string")
@@ -686,6 +694,7 @@ public enum ConfigLoader {
         try assign(&config.autoupdateEnabled, from: environment, env: "MACPROVIDER_AUTOUPDATE", expected: "boolean")
         try assign(&config.autoUpdateAcceptProvisional, from: environment, env: "MACPROVIDER_AUTO_UPDATE_ACCEPT_PROVISIONAL", expected: "boolean")
         try assign(&config.modelArtifactRoot, from: environment, env: "MACPROVIDER_MODEL_ARTIFACT_ROOT", expected: "string")
+        try assign(&config.loopbackOrigin, from: environment, env: "MACPROVIDER_LOOPBACK_ORIGIN", expected: "string")
         try assign(&config.logLevel, from: environment, env: "MACPROVIDER_LOG_LEVEL", expected: "valid log level")
         try assign(&config.logFormat, from: environment, env: "MACPROVIDER_LOG_FORMAT", expected: "json or text")
         try assign(&config.logFile, from: environment, env: "MACPROVIDER_LOG_FILE", expected: "string")

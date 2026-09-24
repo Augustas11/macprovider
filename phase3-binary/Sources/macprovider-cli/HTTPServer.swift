@@ -952,7 +952,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
                 let toolCallOpenEmitted = StreamedFlag()
                 let streamedToolArgs = StreamedToolCallArgs()
-                let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { false }) { chunk in
+                // A buyer that disconnects mid-stream cancels generation
+                // (the runtime stops; a loopback runtime cancels upstream).
+                let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { !writer.isClientConnected }) { chunk in
                     switch chunk {
                     case .content(let text):
                         writer.writeSSEJSON(
@@ -2058,6 +2060,19 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
 private struct ResponseWriter: @unchecked Sendable {
     let context: ChannelHandlerContext
+    /// Captured on the event loop at construction: `context.channel` must not
+    /// be read off-loop, but `Channel.isActive` itself is thread-safe.
+    private let channel: Channel
+
+    init(context: ChannelHandlerContext) {
+        self.context = context
+        self.channel = context.channel
+    }
+
+    /// False once the peer has gone away.
+    var isClientConnected: Bool {
+        channel.isActive
+    }
 
     func writeJSON(
         status: HTTPResponseStatus,
