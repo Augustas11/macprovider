@@ -969,14 +969,18 @@ func TestSettlementReconcileNudgeRetriesPendingCoordinatorFinality(t *testing.T)
 	}); err != nil {
 		t.Fatalf("ReserveQuota: %v", err)
 	}
-	if err := store.MarkReservationSettlementHold(context.Background(), accountID, requestID); err != nil {
-		t.Fatalf("MarkReservationSettlementHold: %v", err)
-	}
-	seedBoundSettlementCandidate(t, store, accountID, requestID, internalRequestID, createdAt, 32, "")
 	server := New(cfg, store, fakeOAuth{}, WithHTTPClient(coordinator.Client()), WithNow(func() time.Time { return createdAt }))
-	server.nudgeSettlementReconciler(storage.ActiveReservation{
-		AccountID: accountID, RequestID: requestID, WindowDate: createdAt.UTC().Format("2006-01-02"), ReservedTokens: 32, CreatedAt: createdAt,
-	})
+	h := settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "pending", "inconclusive", "false", "receipt_verdict_pending")
+	h.Set(coordinatorInternalRequestIDHeader, internalRequestID)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req = req.WithContext(context.WithValue(req.Context(), requestIDKey{}, requestID))
+	resp := httptest.NewRecorder()
+	if !server.settleBeforeResponseWithCoordinatorFinality(resp, req, usageSubject{
+		AccountID:            accountID,
+		ReservationCreatedAt: createdAt,
+	}, 7, 5, 32, "provider_reported", "ok", h) {
+		t.Fatalf("settleBeforeResponseWithCoordinatorFinality status=%d body=%s", resp.Code, resp.Body.String())
+	}
 
 	deadline := time.After(3 * time.Second)
 	for {

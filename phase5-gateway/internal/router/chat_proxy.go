@@ -2366,6 +2366,21 @@ func (s *Server) settleBeforeStreamingResponseWithCoordinatorFinality(w http.Res
 	return s.settleBeforeResponseWithCoordinatorFinalityPolicy(w, r, subject, prompt, completion, maxTotal, source, outcome, h, true)
 }
 
+func (s *Server) nudgeBoundSettlementReconciler(r *http.Request, subject usageSubject, maxTotal int64, h http.Header, candidateSaved bool) {
+	if !candidateSaved || strings.TrimSpace(h.Get(coordinatorInternalRequestIDHeader)) == "" {
+		return
+	}
+	s.nudgeSettlementReconciler(storage.ActiveReservation{
+		AccountID:       subject.AccountID,
+		RequestID:       requestID(r),
+		WalletSessionID: subject.WalletSessionID,
+		WindowDate:      subject.ReservationCreatedAt.UTC().Format("2006-01-02"),
+		ReservedTokens:  maxTotal,
+		CreatedAt:       subject.ReservationCreatedAt,
+		RelayBlind:      relayBlindMetadataFor(r),
+	})
+}
+
 func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string, h http.Header, boundHold bool) bool {
 	finality := coordinatorSettlementFinalityFromHeaders(h)
 	switch finality.Action {
@@ -2387,17 +2402,7 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 			"settlement_reason", finality.Reason,
 			"settlement_hold_bound", boundHold,
 		)
-		if candidateSaved && strings.TrimSpace(h.Get(coordinatorInternalRequestIDHeader)) != "" {
-			s.nudgeSettlementReconciler(storage.ActiveReservation{
-				AccountID:       subject.AccountID,
-				RequestID:       requestID(r),
-				WalletSessionID: subject.WalletSessionID,
-				WindowDate:      subject.ReservationCreatedAt.UTC().Format("2006-01-02"),
-				ReservedTokens:  maxTotal,
-				CreatedAt:       subject.ReservationCreatedAt,
-				RelayBlind:      relayBlindMetadataFor(r),
-			})
-		}
+		s.nudgeBoundSettlementReconciler(r, subject, maxTotal, h, candidateSaved)
 		return true
 	case settlementFinalityRefund:
 		if err := s.refundWalletAwareReservation(subject, requestID(r)); err != nil && !errors.Is(err, storage.ErrReservationNotFound) {
@@ -2415,8 +2420,9 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 	case settlementFinalityHold:
 		holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if !s.boundStreamingSettlementHoldWithCandidate(holdCtx, r, subject, finality, h,
-			prompt, completion, maxTotal, source, outcome, "") {
+		holdBoundForReconcile, candidateSaved := s.boundStreamingSettlementHoldWithCandidateState(holdCtx, r, subject, finality, h,
+			prompt, completion, maxTotal, source, outcome, "")
+		if !holdBoundForReconcile {
 			writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
 			return false
 		}
@@ -2427,6 +2433,7 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 			"settlement_reason", finality.Reason,
 			"settlement_hold_bound", boundHold,
 		)
+		s.nudgeBoundSettlementReconciler(r, subject, maxTotal, h, candidateSaved)
 		return true
 	default:
 		return s.settleBeforeResponse(w, r, subject, prompt, completion, maxTotal, source, outcome)
