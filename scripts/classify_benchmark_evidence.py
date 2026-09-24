@@ -59,7 +59,9 @@ def classify(coordinator, gateway, account_id, external_request_id, journal=None
     attempts = []
     for request in requests:
         internal_id, attempt_n = request["request_id"], request["attempt_n"]
-        credit = one(coordinator, """SELECT provider_id, provider_assigned_id, quarantine_reason, quarantined
+        credit = one(coordinator, """SELECT provider_id, provider_assigned_id, quarantine_reason, quarantined,
+                                              prompt_tokens, charged_prompt_tokens,
+                                              provider_reported_prompt_tokens, completion_tokens
                                       FROM ledger_request_credits
                                      WHERE settlement_account_scope_hash = ? AND request_id = ? AND attempt_n = ?
                                      ORDER BY id DESC LIMIT 1""", (receipt_scope, internal_id, attempt_n))
@@ -68,6 +70,7 @@ def classify(coordinator, gateway, account_id, external_request_id, journal=None
                                             WHERE settlement_account_scope_hash = ? AND request_id = ? AND attempt_n = ?""", (receipt_scope, internal_id, attempt_n))["providers"]
         age = age_seconds(request["ts_utc"], now)
         reasons, pending = [], []
+        usage_accounting_split = None
         provider_id = credit["provider_id"] if credit else ""
         key = (internal_id, attempt_n, provider_id)
         if not credit:
@@ -132,11 +135,31 @@ def classify(coordinator, gateway, account_id, external_request_id, journal=None
                 reasons.append("settlement_attempt_output_missing")
         elif output["terminal_state"] != "normal_done":
             reasons.append("settlement_output_not_successful")
-        elif usage:
+        elif credit:
             settled_usage = json.loads(output["usage_canonical_json"])
-            if (settled_usage["billable_input_tokens"] != usage["prompt_tokens"] or
-                    settled_usage["billable_output_tokens"] != usage["completion_tokens"]):
+            charged_prompt = credit["charged_prompt_tokens"]
+            if charged_prompt is None:
+                charged_prompt = credit["prompt_tokens"]
+            charged_completion = credit["completion_tokens"]
+            observed_prompt = credit["provider_reported_prompt_tokens"]
+            if observed_prompt is None:
+                observed_prompt = charged_prompt
+            if charged_prompt is None or charged_completion is None:
+                reasons.append("charged_usage_missing")
+            elif usage and (charged_prompt != usage["prompt_tokens"] or
+                            charged_completion != usage["completion_tokens"]):
                 reasons.append("gateway_coordinator_usage_mismatch")
+            if observed_prompt is None or charged_completion is None:
+                reasons.append("provider_observed_usage_missing")
+            elif (settled_usage["billable_input_tokens"] != observed_prompt or
+                  settled_usage["billable_output_tokens"] != charged_completion):
+                reasons.append("receipt_observed_usage_mismatch")
+            elif charged_prompt != observed_prompt:
+                usage_accounting_split = {
+                    "provider_observed_prompt_tokens": observed_prompt,
+                    "charged_prompt_tokens": charged_prompt,
+                    "reason": "bounded_prompt_billing",
+                }
         if verdict:
             if route and verdict["route_snapshot_digest"] != route["route_snapshot_digest"]:
                 reasons.append("receipt_route_digest_mismatch")
@@ -159,6 +182,7 @@ def classify(coordinator, gateway, account_id, external_request_id, journal=None
             "settlement_output": bool(output),
             "receipt_verdict": verdict["settlement_outcome"] if verdict else None,
             "receipt_audit_outbox": "poisoned" if audit["poisoned"] else "pending" if audit["pending"] else "drained" if audit["rows"] else "none",
+            "usage_accounting_split": usage_accounting_split,
             "missing": sorted(set(reasons)),
             "pending": sorted(set(pending)),
         })
