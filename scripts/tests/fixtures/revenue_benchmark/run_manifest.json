@@ -1,0 +1,137 @@
+{
+  "schema": "malibu.revenue_benchmark_run.v1",
+  "run_id": "rb-fixture-20260924",
+  "workload": {
+    "workload_id": "coding-agent-revenue",
+    "version": 1,
+    "sha256": "9cba901e1fa3d8972ec97019c91e6505016589e13b0512dc5ad7d809dc46141c"
+  },
+  "account_id": "acct-bench-fixture",
+  "candidates": [
+    {
+      "candidate_id": "incumbent-qwen-coder",
+      "model": "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit",
+      "expected_provider_id": "prov-incumbent",
+      "started_at": "2026-09-24T10:00:00Z",
+      "finished_at": "2026-09-24T11:00:00Z"
+    },
+    {
+      "candidate_id": "challenger-qwen35-a3b",
+      "model": "qwen/qwen3.5-35b-a3b",
+      "expected_provider_id": "prov-challenger",
+      "started_at": "2026-09-24T11:00:00Z",
+      "finished_at": "2026-09-24T11:30:00Z",
+      "prompt_cache_hit_rate_per_mtok": 25000
+    }
+  ],
+  "requests": [
+    {
+      "candidate_id": "incumbent-qwen-coder",
+      "case_id": "debug-python-pagination-off-by-one",
+      "repetition": 0,
+      "request_id": "21f8a73c-c937-519b-883f-fdba87a9faac"
+    },
+    {
+      "candidate_id": "incumbent-qwen-coder",
+      "case_id": "debug-go-data-race-worker-pool",
+      "repetition": 0,
+      "request_id": "79b8c32a-8b97-57a5-ae84-a3b523a19c99"
+    },
+    {
+      "candidate_id": "incumbent-qwen-coder",
+      "case_id": "write-tests-token-bucket-limiter",
+      "repetition": 0,
+      "request_id": "f252ce4d-9eef-5ac0-b99d-42d7e1006c60"
+    },
+    {
+      "candidate_id": "incumbent-qwen-coder",
+      "case_id": "implement-ttl-lru-cache-typescript",
+      "repetition": 0,
+      "request_id": "cfc9a716-1d6c-5363-bbef-14ea0ba149aa"
+    },
+    {
+      "candidate_id": "incumbent-qwen-coder",
+      "case_id": "harden-bash-release-script",
+      "repetition": 0,
+      "request_id": "b9074111-ba12-5e56-b7e0-dd98c74f47e7"
+    },
+    {
+      "candidate_id": "incumbent-qwen-coder",
+      "case_id": "review-sql-migration-backfill",
+      "repetition": 0,
+      "request_id": "5c1164ec-f832-5dc2-8e7c-7ffa26ac7a55"
+    },
+    {
+      "candidate_id": "incumbent-qwen-coder",
+      "case_id": "explain-swift-actor-reentrancy-crash",
+      "repetition": 0,
+      "request_id": "1d6b1e53-c86f-552d-9364-40767a735b37"
+    },
+    {
+      "candidate_id": "incumbent-qwen-coder",
+      "case_id": "fix-failing-ci-node-stream-parser",
+      "repetition": 0,
+      "request_id": "d2b0cee9-065c-547d-9c83-ad624c68d807"
+    },
+    {
+      "candidate_id": "incumbent-qwen-coder",
+      "case_id": "agent-loop-multi-file-inventory-fix",
+      "repetition": 0,
+      "request_id": "4661b1c2-8832-5e4b-a639-2afefe85f5f5"
+    },
+    {
+      "candidate_id": "challenger-qwen35-a3b",
+      "case_id": "debug-python-pagination-off-by-one",
+      "repetition": 0,
+      "request_id": "67d113f3-626b-51ab-9021-2b9e5d98772e"
+    },
+    {
+      "candidate_id": "challenger-qwen35-a3b",
+      "case_id": "debug-go-data-race-worker-pool",
+      "repetition": 0,
+      "request_id": "29da78c4-c281-5b8e-b6dd-be39c1a220ff"
+    },
+    {
+      "candidate_id": "challenger-qwen35-a3b",
+      "case_id": "write-tests-token-bucket-limiter",
+      "repetition": 0,
+      "request_id": "175eac2a-46d6-5949-9ebc-0f550574d972"
+    },
+    {
+      "candidate_id": "challenger-qwen35-a3b",
+      "case_id": "implement-ttl-lru-cache-typescript",
+      "repetition": 0,
+      "request_id": "f77900f2-6152-57e6-bd9b-0d4f4d08550d"
+    },
+    {
+      "candidate_id": "challenger-qwen35-a3b",
+      "case_id": "harden-bash-release-script",
+      "repetition": 0,
+      "request_id": "ff83c4ef-07bb-5dec-8d54-65f981a9854a"
+    },
+    {
+      "candidate_id": "challenger-qwen35-a3b",
+      "case_id": "review-sql-migration-backfill",
+      "repetition": 0,
+      "request_id": "b920d992-7876-5047-89a0-e19806f4872a"
+    },
+    {
+      "candidate_id": "challenger-qwen35-a3b",
+      "case_id": "explain-swift-actor-reentrancy-crash",
+      "repetition": 0,
+      "request_id": "03c11e20-6a01-53d2-8d4f-b4bd6b5ffcde"
+    },
+    {
+      "candidate_id": "challenger-qwen35-a3b",
+      "case_id": "fix-failing-ci-node-stream-parser",
+      "repetition": 0,
+      "request_id": "dbdd66c9-ea41-5c68-8be7-eb54ea668656"
+    },
+    {
+      "candidate_id": "challenger-qwen35-a3b",
+      "case_id": "agent-loop-multi-file-inventory-fix",
+      "repetition": 0,
+      "request_id": "d04117bb-1792-5aba-9132-fc7efa368aa9"
+    }
+  ]
+}
