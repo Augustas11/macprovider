@@ -795,3 +795,144 @@ private final class LlamaCppStubClient: BYOMDiscoveryHTTPClient, @unchecked Send
         }
     }
 }
+
+// #1690 freeze audit R1 CODE-3/4/5.
+extension OpenAICompatibleLoopbackRuntimeTests {
+    func testLineSplitterTreatsLoneCRAsATerminator() {
+        XCTAssertEqual(LoopbackLineSplitter.lines(of: Data("data: a\rdata: b\r\n\rdata: c\n".utf8)), ["data: a", "data: b", "", "data: c"])
+        XCTAssertEqual(LoopbackLineSplitter.lines(of: Data("a\r\r\nb".utf8)), ["a", "", "b"])
+    }
+
+    func testSSEParserStripsOnlyTheFieldSeparatorColon() {
+        var parser = LoopbackSSEParser()
+        XCTAssertEqual(parser.consume(line: "data::value"), [])
+        XCTAssertEqual(parser.consume(line: "data:  two"), [])
+        XCTAssertEqual(parser.consume(line: ""), [.data(":value\n two")])
+    }
+
+    func testStreamAccumulatorRejectsATruncatedStream() throws {
+        var accumulator = OpenAICompatibleStreamAccumulator()
+        for line in [#"data: {"choices":[{"delta":{"content":"par"}}]}"#, ""] {
+            _ = try accumulator.consume(line: line)
+        }
+        XCTAssertFalse(accumulator.isDone)
+        XCTAssertThrowsError(try accumulator.finish(), "a clean EOF before [DONE] is truncation")
+    }
+
+    func testStreamAccumulatorRejectsMalformedDataObjects() {
+        for payload in ["{}", #"{"choices":[]}"#, #"{"usage":{"prompt_tokens":1,"completion_tokens":1}}"#, #"{"choices":{}}"#] {
+            var accumulator = OpenAICompatibleStreamAccumulator()
+            XCTAssertNoThrow(try accumulator.consume(line: "data: " + payload))
+            XCTAssertThrowsError(try accumulator.consume(line: ""), payload)
+        }
+        var usageOnly = OpenAICompatibleStreamAccumulator()
+        XCTAssertNoThrow(try usageOnly.consume(line: #"data: {"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1}}"#))
+        XCTAssertNoThrow(try usageOnly.consume(line: ""))
+    }
+
+    func testTruncatedUpstreamStreamIsAnUpstreamErrorNotASuccess() async throws {
+        let store = try makeStore()
+        let sse = Data("""
+        data: {"choices":[{"delta":{"content":"a"}}]}
+
+        data: {"choices":[{"delta":{"content":"b"}}]}
+
+        """.utf8)
+        let runtime = try makeRuntime(httpClient: StubLoopbackHTTPClient(responseBody: sse), store: store)
+        let request = try makeRequest(model: "ollama:gemma3:270m")
+        do {
+            _ = try await runtime.complete(request, shouldCancel: { false })
+            XCTFail("a truncated stream must not complete")
+        } catch let error as APIError {
+            XCTAssertEqual(error.status, 502)
+            XCTAssertEqual(error.code, "upstream_error")
+        }
+    }
+
+    func testTransportTimeoutMapsLikeTheWatchdog() async throws {
+        let store = try makeStore()
+        for failure in [ScriptedLoopbackClient.Failure.openTimesOut, .streamTimesOut] {
+            let runtime = try makeRuntime(httpClient: ScriptedLoopbackClient(failure: failure), store: store)
+            let request = try makeRequest(model: "ollama:gemma3:270m")
+            do {
+                _ = try await runtime.complete(request, shouldCancel: { false })
+                XCTFail("\(failure) must not complete")
+            } catch let error as APIError {
+                XCTAssertEqual(error.status, 504, "\(failure)")
+                XCTAssertEqual(error.code, "provider_timeout", "\(failure)")
+            }
+        }
+        XCTAssertGreaterThan(
+            LoopbackServeHTTPClient.backstopSlackSeconds, 0,
+            "URLSession backstops fire strictly after the watchdog deadlines"
+        )
+    }
+
+    func testNon2xxBodyReadFailureKeepsTheStatusMapping() async throws {
+        let store = try makeStore()
+        let runtime = try makeRuntime(httpClient: ScriptedLoopbackClient(failure: .errorBodyBreaks(status: 400)), store: store)
+        let request = try makeRequest(model: "ollama:gemma3:270m")
+        do {
+            _ = try await runtime.complete(request, shouldCancel: { false })
+            XCTFail("an upstream 400 must not complete")
+        } catch let error as APIError {
+            XCTAssertEqual(error.status, 400)
+            XCTAssertEqual(error.code, "invalid_request")
+        }
+    }
+}
+
+private final class ScriptedLoopbackClient: BYOMLoopbackStreamingHTTPClient, @unchecked Sendable {
+    enum Failure: CustomStringConvertible {
+        case openTimesOut
+        case streamTimesOut
+        case errorBodyBreaks(status: Int)
+
+        var description: String {
+            switch self {
+            case .openTimesOut: return "openTimesOut"
+            case .streamTimesOut: return "streamTimesOut"
+            case .errorBodyBreaks(let status): return "errorBodyBreaks(\(status))"
+            }
+        }
+    }
+
+    let failure: Failure
+
+    init(failure: Failure) {
+        self.failure = failure
+    }
+
+    func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        throw BYOMDiscoveryAdapterError.rejectedNonLoopback
+    }
+
+    func post(_ url: URL, jsonBody: Data, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        throw BYOMDiscoveryAdapterError.rejectedNonLoopback
+    }
+
+    func postLines(
+        _ url: URL,
+        jsonBody: Data,
+        maxHeaderBytes: Int,
+        maxLineBytes: Int,
+        maxTotalBytes: Int,
+        timeouts: LoopbackGenerationTimeouts
+    ) async throws -> BYOMLoopbackLineResponse {
+        switch failure {
+        case .openTimesOut:
+            throw URLError(.timedOut)
+        case .streamTimesOut:
+            return BYOMLoopbackLineResponse(statusCode: 200, lines: AsyncThrowingStream { continuation in
+                continuation.yield(#"data: {"choices":[{"delta":{"content":"a"}}]}"#)
+                continuation.yield("")
+                continuation.finish(throwing: URLError(.timedOut))
+            })
+        case .errorBodyBreaks(let status):
+            return BYOMLoopbackLineResponse(statusCode: status, lines: AsyncThrowingStream { continuation in
+                continuation.yield(#"{"error":{"message":"bad"#)
+                continuation.finish(throwing: URLError(.networkConnectionLost))
+            })
+        }
+    }
+}

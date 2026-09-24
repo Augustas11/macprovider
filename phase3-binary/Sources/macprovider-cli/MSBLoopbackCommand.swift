@@ -70,16 +70,21 @@ struct MSBLoopbackCommand: AsyncParsableCommand {
     var outputDir: String = "state/perf"
 
     func run() async throws {
-        guard promptTokens >= 2, decodeTokens >= 1, runs >= 1,
-              !concurrency.isEmpty, concurrency.allSatisfy({ $0 >= 1 }) else {
-            FileHandle.standardError.write(Data(
-                "msb-loopback: --prompt-tokens>=2, --decode-tokens>=1, --runs>=1, --concurrency values>=1 required\n".utf8
-            ))
+        guard (2...MSBLoopbackBounds.maxPromptTokens).contains(promptTokens),
+              (1...MSBLoopbackBounds.maxDecodeTokens).contains(decodeTokens),
+              (1...MSBLoopbackBounds.maxRuns).contains(runs),
+              !concurrency.isEmpty,
+              concurrency.allSatisfy({ (1...MSBLoopbackBounds.maxConcurrency).contains($0) }) else {
+            FileHandle.standardError.write(Data((
+                "msb-loopback: --prompt-tokens 2...\(MSBLoopbackBounds.maxPromptTokens), " +
+                "--decode-tokens 1...\(MSBLoopbackBounds.maxDecodeTokens), --runs 1...\(MSBLoopbackBounds.maxRuns), " +
+                "--concurrency values 1...\(MSBLoopbackBounds.maxConcurrency) required\n"
+            ).utf8))
             throw ExitCode(2)
         }
         guard let base = msbLoopbackEndpointURL(endpoint) else {
             FileHandle.standardError.write(Data(
-                "msb-loopback: --endpoint must be http://127.0.0.1, localhost, or [::1]\n".utf8
+                "msb-loopback: --endpoint must be an http origin on 127.0.0.1 or [::1] with a port, e.g. http://127.0.0.1:8181\n".utf8
             ))
             throw ExitCode(2)
         }
@@ -224,17 +229,33 @@ struct MSBLoopbackCommand: AsyncParsableCommand {
 
 // MARK: - Loopback client
 
-/// Accepts only http loopback endpoints so the harness cannot be pointed at a
-/// remote runtime (#1690 non-goal).
+/// Accepts only an http origin on a loopback literal (127.0.0.0/8 or ::1)
+/// with an explicit port, so the harness cannot be pointed at a remote
+/// runtime (#1690 non-goal). No hostname (`localhost` resolves through DNS
+/// and hosts files), path, query, fragment, or credentials.
 func msbLoopbackEndpointURL(_ raw: String) -> URL? {
-    guard let components = URLComponents(string: raw),
-          components.scheme == "http",
-          let host = components.host?.lowercased(),
-          ["127.0.0.1", "localhost", "::1", "[::1]"].contains(host),
-          let url = components.url else {
+    guard let url = URL(string: raw),
+          BYOMLoopbackOriginValidator.isSafeLoopbackHTTPURL(url),
+          let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+          components.path.isEmpty || components.path == "/" else {
         return nil
     }
-    return url
+    var origin = URLComponents()
+    origin.scheme = "http"
+    origin.percentEncodedHost = components.percentEncodedHost
+    origin.port = components.port
+    return origin.url
+}
+
+/// SECURITY LOW 8: bounds on what the harness reads and sends.
+enum MSBLoopbackBounds {
+    static let maxJSONResponseBytes = 32 * 1024 * 1024
+    static let maxStreamLineBytes = 1024 * 1024
+    static let maxStreamTotalBytes = 256 * 1024 * 1024
+    static let maxPromptTokens = 262_144
+    static let maxDecodeTokens = 131_072
+    static let maxConcurrency = 256
+    static let maxRuns = 1_000
 }
 
 struct MSBLoopbackServerProps: Sendable, Equatable {
@@ -301,7 +322,11 @@ struct MSBLoopbackClient: Sendable {
         config.timeoutIntervalForRequest = 600
         config.timeoutIntervalForResource = 3600
         config.httpMaximumConnectionsPerHost = 64
-        self.session = URLSession(configuration: config)
+        config.connectionProxyDictionary = [:]
+        config.urlCache = nil
+        config.httpCookieStorage = nil
+        // A redirect is refused, so its 3xx fails the 200 status check.
+        self.session = URLSession(configuration: config, delegate: NoRedirectURLSessionDelegate(), delegateQueue: nil)
     }
 
     func props() async throws -> MSBLoopbackServerProps {
@@ -339,17 +364,22 @@ struct MSBLoopbackClient: Sendable {
         var firstTokenAt: Date?
         var streamedTokens = 0
         var final: (predicted: Int?, prompt: Int?)?
-        for try await line in bytes.lines {
+        var splitter = LoopbackLineSplitter(
+            maxLineBytes: MSBLoopbackBounds.maxStreamLineBytes,
+            maxTotalBytes: MSBLoopbackBounds.maxStreamTotalBytes
+        )
+        streaming: for try await byte in bytes {
+            guard let line = try splitter.append(byte) else { continue }
             switch try msbLoopbackParseStreamLine(line) {
             case .token:
                 if firstTokenAt == nil { firstTokenAt = Date() }
                 streamedTokens += 1
             case .final(let predicted, let prompt):
                 final = (predicted, prompt)
+                break streaming
             case nil:
                 continue
             }
-            if final != nil { break }
         }
         let endedAt = Date()
         guard let final, let firstTokenAt else {
@@ -365,8 +395,19 @@ struct MSBLoopbackClient: Sendable {
     }
 
     private func getJSON(_ path: String) async throws -> [String: Any] {
-        let (data, response) = try await session.data(from: base.appendingPathComponent(path))
+        try await boundedJSON(URLRequest(url: base.appendingPathComponent(path)), path: path)
+    }
+
+    private func boundedJSON(_ request: URLRequest, path: String) async throws -> [String: Any] {
+        let (bytes, response) = try await session.bytes(for: request)
         try Self.checkStatus(response, path: "/" + path)
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < MSBLoopbackBounds.maxJSONResponseBytes else {
+                throw MSBLoopbackError.malformed("\(path) response (over \(MSBLoopbackBounds.maxJSONResponseBytes) bytes)")
+            }
+            data.append(byte)
+        }
         return try Self.decodeObject(data, what: path)
     }
 
@@ -375,9 +416,7 @@ struct MSBLoopbackClient: Sendable {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await session.data(for: request)
-        try Self.checkStatus(response, path: "/" + path)
-        return try Self.decodeObject(data, what: path)
+        return try await boundedJSON(request, path: path)
     }
 
     private static func checkStatus(_ response: URLResponse, path: String) throws {

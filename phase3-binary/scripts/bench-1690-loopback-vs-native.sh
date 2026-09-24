@@ -3,10 +3,13 @@
 # Runs on a DRAINED lab Mac only. It refuses to start while another
 # llama-server or any unpaused macprovider-cli serve process is running,
 # because contention invalidates the numbers and must never degrade a live
-# provider. With PAUSE_PROVIDER_SOCKET and PAUSE_PROVIDER_PORT set, the script
-# drains one live provider through its control socket (operator pause: the
-# provider drains in-flight work, the coordinator stops routing to it, the
-# watchdog leaves it alone) and always resumes it on exit.
+# provider. Pausing is strictly opt-in: only with PAUSE_PROVIDER=1 plus
+# PAUSE_PROVIDER_SOCKET and PAUSE_PROVIDER_PORT does the script drain one live
+# provider through its control socket (operator pause: the provider drains
+# in-flight work, the coordinator stops routing to it, the watchdog leaves it
+# alone). The resume handler is installed before the pause is sent, retries,
+# and verifies the provider reports unpaused; on failure it says so loudly and
+# the script exits non-zero. PPL_ONLY=1 never pauses anything.
 #
 # Usage:
 #   CLI=/path/to/run/macprovider-cli   # release build with mlx.metallib beside it
@@ -47,18 +50,83 @@ sys.exit(0 if ack.get("accepted") is True else 1)
 PY
 }
 
-provider_paused() {
-  curl -fsS --max-time 5 "http://127.0.0.1:$1/v1/status" | python3 -c 'import json,sys; l=json.load(sys.stdin).get("lifecycle") or {}; sys.exit(0 if l.get("operator_paused") is True else 1)'
+# Prints paused, running, or unknown (status endpoint unreachable/garbled).
+provider_pause_state() {
+  local body
+  body=$(curl -fsS --max-time 5 "http://127.0.0.1:$1/v1/status" 2>/dev/null) || { echo unknown; return 0; }
+  printf '%s' "$body" | python3 -c 'import json,sys
+try:
+    l = json.load(sys.stdin).get("lifecycle") or {}
+except Exception:
+    print("unknown")
+else:
+    print("paused" if l.get("operator_paused") is True else "running")' 2>/dev/null || echo unknown
 }
 
-if [[ -n "${PAUSE_PROVIDER_SOCKET:-}" ]]; then
-  : "${PAUSE_PROVIDER_PORT:?PAUSE_PROVIDER_PORT is required with PAUSE_PROVIDER_SOCKET}"
+provider_paused() {
+  [[ "$(provider_pause_state "$1")" == "paused" ]]
+}
+
+# Set before the pause is sent, so every exit path after that point resumes.
+pause_sent=0
+server_pid=""
+
+resume_provider() {
+  local attempt
+  for attempt in $(seq 1 "${RESUME_ATTEMPTS:-10}"); do
+    # A refused resume is fine when the provider was never paused; only a
+    # status that positively reads running counts as resumed.
+    provider_control resume_request >&2 || true
+    if [[ "$(provider_pause_state "$PAUSE_PROVIDER_PORT")" == "running" ]]; then
+      echo "bench-1690: provider on port $PAUSE_PROVIDER_PORT resumed" >&2
+      return 0
+    fi
+    sleep "${RESUME_RETRY_SECONDS:-5}"
+  done
+  return 1
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT INT TERM HUP
+  if [[ -n "$server_pid" ]]; then
+    kill "$server_pid" 2>/dev/null || true
+    wait "$server_pid" 2>/dev/null || true
+  fi
+  if (( pause_sent == 1 )); then
+    if ! resume_provider; then
+      echo "bench-1690: !!! RESUME FAILED: the provider on port $PAUSE_PROVIDER_PORT may still be PAUSED." >&2
+      echo "bench-1690: !!! Resume it by hand now (resume_request on $PAUSE_PROVIDER_SOCKET)." >&2
+      (( status == 0 )) && status=6
+    fi
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+if [[ -n "${PAUSE_PROVIDER_SOCKET:-}${PAUSE_PROVIDER_PORT:-}" && "${PAUSE_PROVIDER:-0}" != "1" ]]; then
+  echo "bench-1690: PAUSE_PROVIDER_SOCKET/PAUSE_PROVIDER_PORT are set but PAUSE_PROVIDER=1 is not; refusing to pause a live provider implicitly" >&2
+  exit 2
+fi
+if [[ "${PAUSE_PROVIDER:-0}" == "1" && "${PPL_ONLY:-0}" == "1" ]]; then
+  echo "bench-1690: PPL_ONLY=1 never pauses a provider; unset PAUSE_PROVIDER" >&2
+  exit 2
+fi
+
+if [[ "${PAUSE_PROVIDER:-0}" == "1" ]]; then
+  : "${PAUSE_PROVIDER_SOCKET:?PAUSE_PROVIDER_SOCKET is required with PAUSE_PROVIDER=1}"
+  : "${PAUSE_PROVIDER_PORT:?PAUSE_PROVIDER_PORT is required with PAUSE_PROVIDER=1}"
+  echo "bench-1690: !!! PAUSING the live provider on port $PAUSE_PROVIDER_PORT (socket $PAUSE_PROVIDER_SOCKET); it is resumed on exit" >&2
   # The provider refuses a pause when in-flight work outlasts its drain
   # timeout (drain_timeout_s, default 30s); long buyer generations make that
   # common, so retry until one attempt lands in a gap. A refused attempt only
   # holds new work for one drain window, then the provider serves normally.
   pause_attempts="${PAUSE_ATTEMPTS:-10}"
   for attempt in $(seq 1 "$pause_attempts"); do
+    pause_sent=1
     provider_control pause_request >&2 && break
     if (( attempt == pause_attempts )); then
       echo "bench-1690: provider refused pause $pause_attempts times; not running" >&2
@@ -66,10 +134,10 @@ if [[ -n "${PAUSE_PROVIDER_SOCKET:-}" ]]; then
     fi
     sleep "${PAUSE_RETRY_SECONDS:-90}"
   done
-  trap 'provider_control resume_request >&2 || echo "bench-1690: RESUME FAILED; resume the provider by hand" >&2' EXIT
 fi
 
-serve_count=$(pgrep -f "macprovider-cli serve" | wc -l | tr -d " ")
+# pgrep exits 1 when nothing matches, the normal case on a clean lab Mac.
+serve_count=$({ pgrep -f "macprovider-cli serve" || true; } | wc -l | tr -d " ")
 # Perplexity is contention-independent and never pauses a provider, so a
 # live serving provider does not block PPL_ONLY runs; a stray llama-server does.
 if [[ "${PPL_ONLY:-0}" == "1" ]]; then
@@ -140,7 +208,6 @@ for g in $GGUFS; do
     -np "$max_c" -c $(( slot_ctx * max_c )) -ngl 999 -fa on --load-mode none --no-webui \
     > "$OUT/llama-server-$tag.log" 2>&1 &
   server_pid=$!
-  trap 'kill "$server_pid" 2>/dev/null || true; [[ -n "${PAUSE_PROVIDER_SOCKET:-}" ]] && provider_control resume_request >&2' EXIT
   healthy=0
   for _ in $(seq 1 300); do
     if ! kill -0 "$server_pid" 2>/dev/null; then
@@ -160,11 +227,7 @@ for g in $GGUFS; do
     --runs "$RUNS" --label "$tag" --output "$OUT/loopback-$tag.json" 2> "$OUT/loopback-$tag.err"
   kill "$server_pid"
   wait "$server_pid" 2>/dev/null || true
-  if [[ -n "${PAUSE_PROVIDER_SOCKET:-}" ]]; then
-    trap 'provider_control resume_request >&2 || echo "bench-1690: RESUME FAILED; resume the provider by hand" >&2' EXIT
-  else
-    trap - EXIT
-  fi
+  server_pid=""
 
   chunk_args=()
   [[ -n "$PPL_CHUNKS" ]] && chunk_args=(--chunks "$PPL_CHUNKS")

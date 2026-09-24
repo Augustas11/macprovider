@@ -197,6 +197,8 @@ struct LoopbackGenerationTimeouts: Equatable, Sendable {
 final class LoopbackServeHTTPClient: BYOMLoopbackStreamingHTTPClient, @unchecked Sendable {
     static let allowedPOSTPaths: Set<String> = ["/v1/chat/completions", "/apply-template", "/tokenize"]
     static let allowedGETPaths: Set<String> = ["/props"]
+    /// How much later than the runtime watchdog the URLSession timers fire.
+    static let backstopSlackSeconds: TimeInterval = 30
 
     private let requestTimeout: TimeInterval
     private let resourceTimeout: TimeInterval
@@ -257,9 +259,12 @@ final class LoopbackServeHTTPClient: BYOMLoopbackStreamingHTTPClient, @unchecked
         request.setValue("text/event-stream, application/json", forHTTPHeaderField: "accept")
         request.httpBody = jsonBody
         // URLSession's request timeout is an inactivity timer; the runtime's
-        // own watchdog enforces the tighter first-byte/idle/overall deadlines.
-        // These are backstops only.
-        let session = Self.makeSession(requestTimeout: timeouts.firstByte, resourceTimeout: timeouts.overall + 30)
+        // own watchdog enforces the first-byte/idle/overall deadlines and is
+        // the only timeout mapper. These backstops fire strictly later.
+        let session = Self.makeSession(
+            requestTimeout: max(timeouts.firstByte, timeouts.idle) + Self.backstopSlackSeconds,
+            resourceTimeout: timeouts.overall + Self.backstopSlackSeconds
+        )
         let opened: (URLSession.AsyncBytes, URLResponse)
         do {
             opened = try await session.bytes(for: request)
@@ -353,14 +358,16 @@ final class LoopbackServeHTTPClient: BYOMLoopbackStreamingHTTPClient, @unchecked
     }
 }
 
-/// Byte-to-line splitter for a streamed body: `\n` terminates a line, a
-/// trailing `\r` is dropped, blank lines are kept (SSE event boundaries), and
+/// Byte-to-line splitter for a streamed body: `\n`, `\r\n` and a lone `\r`
+/// each terminate a line, blank lines are kept (SSE event boundaries), and
 /// both a single line and the whole body are bounded.
 struct LoopbackLineSplitter {
     let maxLineBytes: Int
     let maxTotalBytes: Int
     private var buffer: [UInt8] = []
     private var total = 0
+    /// The previous byte was a CR, so an LF right after it closes nothing.
+    private var afterCR = false
 
     init(maxLineBytes: Int, maxTotalBytes: Int) {
         self.maxLineBytes = maxLineBytes
@@ -370,7 +377,12 @@ struct LoopbackLineSplitter {
     mutating func append(_ byte: UInt8) throws -> String? {
         total += 1
         guard total <= maxTotalBytes else { throw BYOMDiscoveryAdapterError.truncated }
+        let followsCR = afterCR
+        afterCR = byte == 0x0D
         if byte == 0x0A {
+            return followsCR ? nil : takeLine()
+        }
+        if byte == 0x0D {
             return takeLine()
         }
         guard buffer.count < maxLineBytes else { throw BYOMDiscoveryAdapterError.truncated }
@@ -383,7 +395,6 @@ struct LoopbackLineSplitter {
     }
 
     private mutating func takeLine() -> String {
-        if buffer.last == 0x0D { buffer.removeLast() }
         let line = String(decoding: buffer, as: UTF8.self)
         buffer.removeAll(keepingCapacity: true)
         return line
@@ -499,6 +510,10 @@ struct OpenAICompatibleStreamAccumulator {
             }
             return (result, late)
         }
+        // A clean EOF before the terminal event is a truncated stream.
+        guard isDone else {
+            throw OpenAICompatibleLoopbackRuntimeError.malformedUpstreamResponse
+        }
         let calls = toolCalls.map { ToolCall(id: $0.id, functionName: $0.name, arguments: $0.arguments) }
         let generated = completionTokens ?? deltaEvents
         let result = CompletionResult(
@@ -542,12 +557,21 @@ struct OpenAICompatibleStreamAccumulator {
         if let error = root["error"], error != .null {
             throw OpenAICompatibleLoopbackRuntimeError.upstreamStatus(500)
         }
+        var hasUsage = false
         if case .object(let usage)? = root["usage"] {
+            hasUsage = true
             promptTokens = OpenAICompatibleLoopbackRuntime.intValue(usage["prompt_tokens"]) ?? promptTokens
             completionTokens = OpenAICompatibleLoopbackRuntime.intValue(usage["completion_tokens"]) ?? completionTokens
         }
-        guard case .array(let choices)? = root["choices"], case .object(let choice)? = choices.first else {
-            // Usage-only (`choices: []`) or keep-alive chunk.
+        // Keep-alives are SSE comments, never data. A data object is a
+        // choices chunk or a usage-only chunk (`choices: []` plus `usage`).
+        guard case .array(let choices)? = root["choices"] else {
+            throw OpenAICompatibleLoopbackRuntimeError.malformedUpstreamResponse
+        }
+        guard case .object(let choice)? = choices.first else {
+            guard choices.isEmpty, hasUsage else {
+                throw OpenAICompatibleLoopbackRuntimeError.malformedUpstreamResponse
+            }
             return []
         }
         if case .string(let reason)? = choice["finish_reason"], !reason.isEmpty {
@@ -955,15 +979,23 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
                     response = try await Self.openLines(client, url: url, body: body, timeouts: timeouts)
                 } catch is CancellationError {
                     throw CancellationError()
+                } catch let error as URLError where error.code == .timedOut {
+                    throw Self.upstreamTimeoutError
                 } catch {
                     throw APIError(status: 502, message: "Upstream loopback error", type: "server_error", code: "upstream_unavailable")
                 }
                 guard (200...299).contains(response.statusCode) else {
+                    // The status decides the mapping; a failed or cut-off
+                    // error body only loses detail.
                     var errorBody = Data()
-                    for try await line in response.lines {
-                        guard errorBody.count < 64 * 1024 else { break }
-                        errorBody.append(contentsOf: Array((line + "\n").utf8))
-                    }
+                    do {
+                        for try await line in response.lines {
+                            guard errorBody.count < 64 * 1024 else { break }
+                            errorBody.append(contentsOf: Array((line + "\n").utf8))
+                        }
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {}
                     throw Self.mapUpstreamError(status: response.statusCode, body: errorBody)
                 }
                 var accumulator = OpenAICompatibleStreamAccumulator()
@@ -984,6 +1016,8 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
                     throw CancellationError()
                 } catch let error as APIError {
                     throw error
+                } catch let error as URLError where error.code == .timedOut {
+                    throw Self.upstreamTimeoutError
                 } catch {
                     // A malformed/truncated upstream body is an upstream fault,
                     // surfaced as 502 rather than a generic 500.
@@ -999,7 +1033,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
                     try await Task.sleep(nanoseconds: 100_000_000)
                     if shouldCancel() { throw CancellationError() }
                     if clock.hasExpired(timeouts) {
-                        throw APIError(status: 504, message: "Upstream loopback timed out", type: "server_error", code: "provider_timeout")
+                        throw Self.upstreamTimeoutError
                     }
                 }
             }
@@ -1010,6 +1044,14 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             throw APIError(status: 502, message: "Upstream loopback error", type: "server_error", code: "upstream_unavailable")
         }
     }
+
+    /// The one mapping for every upstream deadline, whichever timer fires.
+    static let upstreamTimeoutError = APIError(
+        status: 504,
+        message: "Upstream loopback timed out",
+        type: "server_error",
+        code: "provider_timeout"
+    )
 
     private static func openLines(
         _ client: any BYOMDiscoveryHTTPClient,

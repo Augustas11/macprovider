@@ -1696,3 +1696,88 @@ extension HTTPServerReceiptTests {
         XCTAssertEqual(decision.omitted, .nonSettlingReplay)
     }
 }
+
+// #1690 freeze audit R1 CODE-1/CODE-2: a buyer that disconnects mid-stream
+// cancels generation. Like the relay's `cancelled` status, that is not a
+// provider failure, and no receipt is issued for output nobody received.
+extension HTTPServerReceiptTests {
+    func testHTTPStreamingClientDisconnectIsBuyerCancelNotProviderFailure() async throws {
+        let capture = ReceiptAuditCapture()
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let modelHash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let metadata = httpSettlementMetadataHeader(
+            receiptKeyID: httpReceiptKeyID(key.publicKey.rawRepresentation),
+            expectedModelHash: modelHash
+        )
+        let disconnected = HTTPDisconnectFlag()
+        let runtime = ModelRuntime(
+            modelID: "fixture-model",
+            modelHash: modelHash,
+            warmSwapEnabled: true,
+            loader: { _ in throw HTTPReceiptFixtureError.inferenceFailed },
+            testCompletion: { _, _ in
+                // Generation outlives the buyer, then observes the cancel.
+                while !disconnected.isSet {
+                    try await Task.sleep(nanoseconds: 10_000_000)
+                }
+                try await Task.sleep(nanoseconds: 300_000_000)
+                throw CancellationError()
+            }
+        )
+        let status = ProviderStatus(
+            modelID: "fixture-model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        try await ReceiptAudit.withSink({ record in capture.append(record) }) {
+            try await withReceiptHTTPServer(
+                runtime: runtime,
+                providerStatus: status,
+                providerID: "provider-a",
+                receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+                warmSwapEnabled: true
+            ) { port in
+                let response = try rawChatCompletionRoundTrip(
+                    port: port,
+                    body: [
+                        "model": "fixture-model",
+                        "stream": true,
+                        "messages": [["role": "user", "content": "hello"]],
+                    ],
+                    headerOnly: true,
+                    requestID: "req-http-receipt",
+                    requestHeaders: [(RouterHandler.settlementMetadataHeaderName, metadata)]
+                )
+                XCTAssertEqual(response.status, .ok)
+                // The round trip closed the client socket on return.
+                disconnected.set()
+                for _ in 0..<500 where (try? capture.events().isEmpty) ?? true {
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
+            }
+        }
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.requestsTotal, 1)
+        XCTAssertEqual(snapshot.errorsTotal, 0, "a buyer disconnect is not a provider failure")
+        let event = try capture.singleEvent()
+        XCTAssertEqual(event["event"] as? String, "receipt_omitted")
+        XCTAssertEqual(event["reason"] as? String, "write_failed")
+    }
+}
+
+private final class HTTPDisconnectFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
+    }
+}

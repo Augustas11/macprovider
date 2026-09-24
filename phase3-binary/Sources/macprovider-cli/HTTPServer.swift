@@ -1087,6 +1087,17 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
                 }
                 await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
+                // The buyer left after generation finished: the relay's
+                // cancelled-after-completion case. The tokens were generated,
+                // but nothing (usage, [DONE], receipt) can reach the buyer, so
+                // no completion telemetry and no receipt.
+                guard !disconnect.isDisconnected else {
+                    if settlementMetadata != nil {
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                    }
+                    writer.close()
+                    return
+                }
                 KVCacheTelemetry.emitRequestCompleted(
                     providerID: providerID,
                     requestID: requestID,
@@ -1136,6 +1147,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
                 let unixTsSeconds = Int64(Date().timeIntervalSince1970)
                 var trailers: [(String, String)] = []
+                var receiptDelivery: (@Sendable (Bool) -> Void)?
                 if settlementMetadata != nil {
                     let modelHashSource = Self.resolveModelHashSource(
                         warmSwapEnabled: warmSwapEnabled,
@@ -1165,12 +1177,22 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     switch receipt {
                     case .issued(let header):
                         trailers = Self.receiptExtraHeaders(header: header, settlementMetadata: settlementMetadata, terminalStateTSUnixMS: terminalStateTSUnixMS)
-                        ReceiptAudit.emitIssued(providerID: providerID, requestID: requestID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: ttftMs, unixTs: unixTsSeconds)
+                        // Issued only once the terminal write (usage, [DONE],
+                        // trailers) is confirmed, as the non-streaming path does.
+                        let modelID = request.model
+                        let tokensOut = Int64(completion.generatedCompletionTokens)
+                        receiptDelivery = { delivered in
+                            if delivered {
+                                ReceiptAudit.emitIssued(providerID: providerID, requestID: requestID, modelID: modelID, tokensOut: tokensOut, ttftMs: ttftMs, unixTs: unixTsSeconds)
+                            } else {
+                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                            }
+                        }
                     case .omitted(let reason):
                         ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: reason)
                     }
                 }
-                writer.writeSSEDone(trailers: trailers)
+                writer.writeSSEDone(trailers: trailers, completion: receiptDelivery)
             } catch let error as APIError {
                 if providerRequestStarted {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
@@ -1193,22 +1215,37 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     writer.writeAPIError(error)
                 }
             } catch is CancellationError {
-                // SPEC-038 AC-25 (`:620-621`): the buyer closed the
-                // connection. `stream` has already returned, so no further
-                // token can be emitted; this branch writes exactly one
-                // terminal outcome and nothing after it. Non-settling either
-                // side of the first-token boundary — no receipt is built and
-                // no trailer is written.
+                // SPEC-038 AC-25 (`:620-621`) and #1690: a buyer cancel, as
+                // on the relay's `cancelled` status, never a provider failure.
+                // `stream` has already returned, so no further token can be
+                // emitted. Non-settling either side of the first-token
+                // boundary: no receipt is built and no trailer is written.
                 if providerRequestStarted {
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false)
                 }
-                let cancelError = Self.buyerCancelledError(inferenceRan: emittedBuyerToken.get())
-                if sseStarted {
-                    writer.writeSSEJSON(cancelError.envelope)
-                    writer.writeSSEDone()
+                if disconnect.isDisconnected {
+                    // Nothing can reach a closed connection. A receipt that
+                    // was due is recorded as undeliverable.
+                    if sseStarted, settlementMetadata != nil {
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                    } else if !sseStarted {
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .preTokenCancel)
+                    }
+                    writer.close()
                 } else {
-                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .preTokenCancel)
-                    writer.writeAPIError(cancelError)
+                    // Still connected: exactly one terminal outcome and
+                    // nothing after it.
+                    let cancelError = Self.buyerCancelledError(inferenceRan: emittedBuyerToken.get())
+                    if sseStarted {
+                        if settlementMetadata != nil {
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                        }
+                        writer.writeSSEJSON(cancelError.envelope)
+                        writer.writeSSEDone()
+                    } else {
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .preTokenCancel)
+                        writer.writeAPIError(cancelError)
+                    }
                 }
             } catch is DrainCancelledError {
                 if providerRequestStarted {
@@ -2385,7 +2422,9 @@ private struct ResponseWriter: @unchecked Sendable {
         }
     }
 
-    func writeSSEDone(trailers: [(String, String)] = []) {
+    /// `completion` reports whether the terminal part (and so every earlier
+    /// write on this ordered channel) reached the socket.
+    func writeSSEDone(trailers: [(String, String)] = [], completion: (@Sendable (Bool) -> Void)? = nil) {
         writeSSEData("[DONE]")
         context.eventLoop.execute {
             var headers: HTTPHeaders?
@@ -2396,9 +2435,20 @@ private struct ResponseWriter: @unchecked Sendable {
                 }
                 headers = trailerHeaders
             }
-            context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(headers))).whenComplete { _ in
+            context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(headers))).whenComplete { result in
+                if case .success = result {
+                    completion?(true)
+                } else {
+                    completion?(false)
+                }
                 context.close(promise: nil)
             }
+        }
+    }
+
+    func close() {
+        context.eventLoop.execute {
+            context.close(promise: nil)
         }
     }
 

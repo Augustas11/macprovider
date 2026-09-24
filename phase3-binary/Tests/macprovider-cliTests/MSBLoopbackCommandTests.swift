@@ -5,9 +5,16 @@ import XCTest
 /// llama-server run is lab evidence, not a unit test.
 final class MSBLoopbackCommandTests: XCTestCase {
     func testEndpointAcceptsOnlyHTTPLoopback() {
-        XCTAssertNotNil(msbLoopbackEndpointURL("http://127.0.0.1:8181"))
-        XCTAssertNotNil(msbLoopbackEndpointURL("http://localhost:8181"))
+        XCTAssertEqual(msbLoopbackEndpointURL("http://127.0.0.1:8181")?.absoluteString, "http://127.0.0.1:8181")
+        XCTAssertEqual(msbLoopbackEndpointURL("http://127.0.0.1:8181/")?.absoluteString, "http://127.0.0.1:8181")
         XCTAssertNotNil(msbLoopbackEndpointURL("http://[::1]:8181"))
+        // Loopback literals only, origin only (#1690 freeze audit R1 SEC-6).
+        XCTAssertNil(msbLoopbackEndpointURL("http://localhost:8181"))
+        XCTAssertNil(msbLoopbackEndpointURL("http://127.0.0.1"))
+        XCTAssertNil(msbLoopbackEndpointURL("http://127.0.0.1:8181/v1"))
+        XCTAssertNil(msbLoopbackEndpointURL("http://127.0.0.1:8181?x=1"))
+        XCTAssertNil(msbLoopbackEndpointURL("http://127.0.0.1:8181#frag"))
+        XCTAssertNil(msbLoopbackEndpointURL("http://user:pw@127.0.0.1:8181"))
         XCTAssertNil(msbLoopbackEndpointURL("http://10.0.0.5:8181"))
         XCTAssertNil(msbLoopbackEndpointURL("http://127.0.0.1.example.com:8181"))
         XCTAssertNil(msbLoopbackEndpointURL("https://127.0.0.1:8181"))

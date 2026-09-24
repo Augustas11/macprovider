@@ -4431,7 +4431,7 @@ MUST NOT sign, except for one request at a time when the coordinator's
 route metadata for that request authorizes it. The SPEC-046 loopback
 runtimes are such runtimes
 (`OpenAICompatibleLoopbackRuntime.isSettlementReceiptEligible == false`,
-`phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:778`).
+`phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:802`).
 The provider decides per request, not from a per-runtime constant.
 
 1. **Authorization member.** The coordinator's v0.4 settlement metadata for
