@@ -4173,9 +4173,28 @@ $SSH 'set -e
   systemctl daemon-reload
   systemctl enable macprovider-coordinator
   systemctl restart macprovider-coordinator
-  sleep 3
-  systemctl is-active macprovider-coordinator
-  ss -tlnp | grep -E ":8443|:8444"
+  # coordinator-restart-readiness-begin
+  coordinator_listener_ready() {
+    ss -H -ltn "sport = :$1" | grep -q .
+  }
+  coordinator_ready_deadline=$(( $(date +%s) + 60 ))
+  while :; do
+    if systemctl is-active --quiet macprovider-coordinator &&
+       coordinator_listener_ready 8443 &&
+       coordinator_listener_ready 8444 &&
+       curl --noproxy "*" -fsS --max-time 2 --max-filesize 65536 http://127.0.0.1:8444/healthz >/dev/null; then
+      systemctl is-active macprovider-coordinator
+      ss -tlnp | grep -E ":8443|:8444"
+      break
+    fi
+    if [ "$(date +%s)" -ge "$coordinator_ready_deadline" ]; then
+      echo "coordinator did not become ready on ports 8443 and 8444 within 60 seconds" >&2
+      systemctl status --no-pager macprovider-coordinator >&2 || true
+      exit 1
+    fi
+    sleep 1
+  done
+  # coordinator-restart-readiness-end
 '
 
 log "step 8/9: verify public endpoints"
