@@ -20,7 +20,8 @@ SHA-1 the tree reports). The sibling set and the tree's file set must match.
 
 Read-only: no catalog write, no signing, no key material. Exit 0 when every row
 matches, 1 on any mismatch, 3 when any row could not be recomputed (2 stays
-argparse's usage error).
+argparse's usage error). 3 wins over 1: an incomplete sweep is never "clean
+except for mismatches", so read the per-row status.
 """
 
 from __future__ import annotations

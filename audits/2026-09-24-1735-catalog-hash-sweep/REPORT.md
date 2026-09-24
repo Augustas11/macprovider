@@ -51,7 +51,8 @@ The script also reports the hash without `.gitattributes`, to help classify
 where a bad row value came from.
 
 Exit codes: 0 means all rows match, 1 means at least one mismatch, 3 means at
-least one row could not be recomputed (2 is argparse's usage error). An error in
+least one row could not be recomputed (2 is argparse's usage error). 3 takes
+precedence over 1, so read the per-row status for mismatches in a partial run. An error in
 one row is recorded and the sweep continues. The optional `HF_TOKEN` is sent as
 an unredirected header, so it never follows a redirect to the CDN, and tree
 pagination may not leave `huggingface.co`.
