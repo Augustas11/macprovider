@@ -155,14 +155,14 @@ struct MLXSnapshotIdentity: Equatable, Sendable {
     /// added, or removed file fails closed (SPEC-010-R009(a)).
     static func compute(directory: URL, deadline: Date? = nil) throws -> MLXSnapshotIdentity {
         let resolved = directory.resolvingSymlinksInPath().standardizedFileURL
-        let before = try stamps(of: resolved)
+        let before = try stamps(of: resolved, deadline: deadline)
         var manifest = ""
         for stamp in before {
             try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
             let sha = try hashFile(root: resolved, stamp: stamp, deadline: deadline)
             manifest += "\(stamp.relativePath)\n\(stamp.size)\n\(sha)\n"
         }
-        guard try stamps(of: resolved) == before else {
+        guard try stamps(of: resolved, deadline: deadline) == before else {
             throw MLXSnapshotIdentityError.changedWhileHashing
         }
         let digest = Data(SHA256.hash(data: Data(manifest.utf8))).map { String(format: "%02x", $0) }.joined()
@@ -197,15 +197,26 @@ struct MLXSnapshotIdentity: Equatable, Sendable {
         return Data(hasher.finalize()).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Wall-clock budget for one per-request revalidation (`isCurrent`).
+    static let revalidationBudgetSeconds: TimeInterval = 5
+    /// Upper bound on the regular files one snapshot may hold; a larger tree
+    /// is refused rather than walked without end.
+    static let maxSnapshotFiles = 100_000
+
     /// True while every file still has the identity it had when hashed, and
-    /// no file was added or removed.
-    func isCurrent() -> Bool {
-        (try? Self.stamps(of: directory)) == files
+    /// no file was added or removed. Bounded: the walk stops, and the answer
+    /// is false (fail closed), once it passes `deadline` or sees more regular
+    /// files than were hashed.
+    func isCurrent(deadline: Date = Date().addingTimeInterval(MLXSnapshotIdentity.revalidationBudgetSeconds)) -> Bool {
+        (try? Self.stamps(of: directory, deadline: deadline, maxFiles: files.count)) == files
     }
 
     /// Every regular file under `root`, sorted by relative path. Symlinks,
-    /// hardlinks and other file types fail, as in the canonical hash.
-    static func stamps(of root: URL) throws -> [FileStamp] {
+    /// hardlinks and other file types fail, as in the canonical hash. The walk
+    /// checks `deadline` at every entry and once more at the end, and fails
+    /// when it sees more than `maxFiles` regular files.
+    static func stamps(of root: URL, deadline: Date?, maxFiles: Int = maxSnapshotFiles) throws -> [FileStamp] {
+        try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
         var rootInfo = stat()
         guard lstat(root.path, &rootInfo) == 0, (rootInfo.st_mode & S_IFMT) == S_IFDIR else {
             throw MLXSnapshotIdentityError.unreadable("root is not a directory")
@@ -216,6 +227,7 @@ struct MLXSnapshotIdentity: Equatable, Sendable {
         let base = root.path
         var out: [FileStamp] = []
         for case let url as URL in enumerator {
+            try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
             let path = url.standardizedFileURL.path
             guard path.hasPrefix(base + "/") else {
                 throw MLXSnapshotIdentityError.unreadable("path escape")
@@ -230,11 +242,15 @@ struct MLXSnapshotIdentity: Equatable, Sendable {
             case S_IFREG where info.st_nlink <= 1:
                 let relative = String(path.dropFirst(base.count + 1))
                 try ModelArtifactRelativePathPolicy.validate(relative)
+                guard out.count < maxFiles else {
+                    throw MLXSnapshotIdentityError.unreadable("more than \(maxFiles) files")
+                }
                 out.append(FileStamp(relativePath: relative, info: info))
             default:
                 throw MLXSnapshotIdentityError.unreadable("not a regular single-link file")
             }
         }
+        try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
         return out.sorted { $0.relativePath < $1.relativePath }
     }
 }

@@ -329,3 +329,42 @@ private final class MLXLMRecordingClient: BYOMDiscoveryHTTPClient, @unchecked Se
         return BYOMHTTPResponse(statusCode: 200, headers: [], body: Data(reply.utf8))
     }
 }
+
+// #1690 M8 audit R2 CODE M1: every snapshot walk is bounded by the deadline
+// and a file-count cap, and fails closed on overrun.
+final class MLXLMLoopbackAuditR2Tests: XCTestCase {
+    private func makeTree(files: Int) throws -> URL {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("mlxlm-r2-\(UUID().uuidString)")
+        for i in 0..<files {
+            let dir = root.appendingPathComponent("d\(i % 16)")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try Data("\(i)".utf8).write(to: dir.appendingPathComponent("f\(i).json"))
+        }
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        return root.resolvingSymlinksInPath().standardizedFileURL
+    }
+
+    func testExpiredDeadlineFailsTheScanClosed() throws {
+        let root = try makeTree(files: 8)
+        let past = Date().addingTimeInterval(-1)
+        XCTAssertThrowsError(try MLXSnapshotIdentity.stamps(of: root, deadline: past)) { error in
+            XCTAssertEqual(error as? AutotuneContextCalibrationError, .deadlineExceeded)
+        }
+        XCTAssertThrowsError(try MLXSnapshotIdentity.compute(directory: root, deadline: past)) { error in
+            XCTAssertEqual(error as? AutotuneContextCalibrationError, .deadlineExceeded)
+        }
+        let identity = try MLXSnapshotIdentity.compute(directory: root)
+        XCTAssertTrue(identity.isCurrent())
+        XCTAssertFalse(identity.isCurrent(deadline: past), "an overrun revalidation fails closed")
+    }
+
+    func testLargeTreeIsWalkedAndTheFileCapFailsClosed() throws {
+        let root = try makeTree(files: 2000)
+        let identity = try MLXSnapshotIdentity.compute(directory: root, deadline: Date().addingTimeInterval(120))
+        XCTAssertEqual(identity.files.count, 2000)
+        XCTAssertTrue(identity.isCurrent())
+        XCTAssertThrowsError(try MLXSnapshotIdentity.stamps(of: root, deadline: nil, maxFiles: 1999))
+        try Data("x".utf8).write(to: root.appendingPathComponent("d0/extra.json"))
+        XCTAssertFalse(identity.isCurrent(), "one file past the hashed set stops the walk and fails closed")
+    }
+}
