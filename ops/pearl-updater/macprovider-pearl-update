@@ -48,6 +48,8 @@ TIER2_COORDINATOR_CONFIG = Path("/opt/macprovider/coordinator.yaml")
 CATALOG_CANARY_PROOF = Path("/usr/local/share/macprovider/catalog-canary-proof.py")
 CONFIG_PATH = Path("/etc/macprovider/pearl-updater.conf")
 INSTALL_ROOT = Path("/opt/macprovider")
+STATS_INSTALL_ROOT = Path("/opt/macprovider-stats")
+STATS_INVENTORY_PARITY_MARKER_NAME = ".coordinator-deploy-sidecar-parity-required"
 STATE_ROOT = Path("/var/lib/macprovider-pearl-updater")
 AUDIT_PATH = Path("/var/lib/macprovider-pearl-updater/audit.jsonl")
 LOCK_PATH = Path("/run/lock/macprovider-pearl-updater.lock")
@@ -64,6 +66,8 @@ CATALOG_SERVICE_ACCOUNT = "macprovider"
 CATALOG_SERVICE_GROUP = "macprovider"
 INDEPENDENT_ALERT_ACCOUNT = "macprovider"
 INDEPENDENT_ALERT_GROUP = "macprovider"
+STATS_SERVICE_ACCOUNT = "macprovider-stats"
+STATS_SERVICE_GROUP = "macprovider-stats"
 GATED_SERVICE_UNITS = (
     "macprovider-coordinator.service",
     "macprovider-gateway.service",
@@ -110,6 +114,22 @@ RUNTIME_ASSETS = (
     COORDINATOR_CLI_ASSET,
     GATEWAY_ASSET,
 )
+STATS_INVENTORY_SYNC_ASSET = "stats-inventory-sync-linux-amd64"
+STATS_BILLING_MIRROR_ASSET = "stats-billing-mirror-linux-amd64"
+STATS_HARDWARE_VERIFIER_ASSET = "stats-hardware-verifier-linux-amd64"
+# Issue #1721: deploy-pearl-vps.sh refuses to proceed unless the live
+# coordinator-cli and stats sidecars are byte-identical to the release, and it
+# never installs them itself, so the updater is their only installer. Rows are
+# (metadata key, release asset, installed name, install root kind). The CLI is
+# bound by every signed Pearl release; the stats sidecars are bound all-or-none.
+OPERATOR_ARTIFACT_CLI = ("coordinator_cli", COORDINATOR_CLI_ASSET, "coordinator-cli", "backend")
+STATS_OPERATOR_ARTIFACTS = (
+    ("stats_inventory_sync", STATS_INVENTORY_SYNC_ASSET, "stats-inventory-sync", "stats"),
+    ("stats_billing_mirror", STATS_BILLING_MIRROR_ASSET, "stats-billing-mirror", "stats"),
+    ("stats_hardware_verifier", STATS_HARDWARE_VERIFIER_ASSET, "stats-hardware-verifier", "stats"),
+)
+STATS_SIDECAR_ASSETS = tuple(row[1] for row in STATS_OPERATOR_ARTIFACTS)
+OPERATOR_ARTIFACT_KEYS = frozenset(row[0] for row in (OPERATOR_ARTIFACT_CLI, *STATS_OPERATOR_ARTIFACTS))
 RELEASE_LANE_RUNTIME = "pearl_runtime"
 RELEASE_LANE_RUNTIME_WITH_CATALOG = "pearl_runtime_catalog"
 SEMVER_RE = re.compile(r"^(?:v)?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
@@ -226,6 +246,13 @@ def resolve_service_group_gid(account_name: str, group_name: str) -> int:
     return group.gr_gid
 
 
+def metadata_binds_stats_sidecars(metadata: object) -> bool:
+    if not isinstance(metadata, dict):
+        return False
+    rows = metadata.get("operator_artifacts")
+    return isinstance(rows, dict) and any(row[0] in rows for row in STATS_OPERATOR_ARTIFACTS)
+
+
 @dataclasses.dataclass(frozen=True, order=True)
 class SemVer:
     major: int
@@ -282,6 +309,15 @@ class Component:
 
 
 @dataclasses.dataclass(frozen=True)
+class OperatorArtifact:
+    key: str
+    asset: str
+    sha256: str
+    installed_name: str
+    root_kind: str
+
+
+@dataclasses.dataclass(frozen=True)
 class CatalogRelease:
     release_id: str
     policy_version: str
@@ -315,6 +351,7 @@ class Release:
     provider_admission_rollout: ProviderAdmissionRollout
     directory: Path
     release_lane: str = RELEASE_LANE_RUNTIME_WITH_CATALOG
+    operator_artifacts: tuple[OperatorArtifact, ...] = ()
 
     @property
     def has_catalog(self) -> bool:
@@ -823,6 +860,7 @@ class Updater:
         *,
         public_key: Path = PINNED_PUBLIC_KEY,
         install_root: Path = INSTALL_ROOT,
+        stats_install_root: Path = STATS_INSTALL_ROOT,
         state_root: Path = STATE_ROOT,
         audit_path: Path = AUDIT_PATH,
         lock_path: Path = LOCK_PATH,
@@ -836,6 +874,7 @@ class Updater:
         backend_gid: int | None = None,
         catalog_gid: int | None = None,
         independent_alert_gid: int | None = None,
+        stats_gid: int | None = None,
         isolate_candidate_network: bool = False,
         catalog_verifier: Path = CATALOG_RELEASE_VERIFIER,
         autotune_window_module: Path = AUTOTUNE_WINDOW_MODULE,
@@ -847,6 +886,7 @@ class Updater:
         self.config = config
         self.public_key = public_key
         self.install_root = install_root
+        self.stats_install_root = stats_install_root
         self.state_root = state_root
         self.audit_path = audit_path
         self.lock_path = lock_path
@@ -862,6 +902,11 @@ class Updater:
         self.independent_alert_gid = (
             self.candidate_gid if independent_alert_gid is None else independent_alert_gid
         )
+        # None means the macprovider-stats group is unavailable on this host; a
+        # release that binds stats sidecars then fails before live mutation.
+        self.stats_gid = stats_gid
+        self.stats_sidecar_holds: list[str] = []
+        self.stats_sidecar_holds_applied = False
         self.isolate_candidate_network = isolate_candidate_network
         self.catalog_verifier = catalog_verifier
         self.autotune_window_module = autotune_window_module
@@ -1259,7 +1304,7 @@ class Updater:
 
     def acquire_release(self, work: Path, source_dir: Path | None, requested_tag: str | None) -> Release:
         if source_dir is not None:
-            for asset in (*CONTROL_ASSETS, *RUNTIME_ASSETS, *CATALOG_ASSETS):
+            for asset in (*CONTROL_ASSETS, *RUNTIME_ASSETS, *STATS_SIDECAR_ASSETS, *CATALOG_ASSETS):
                 source = source_dir / asset
                 if asset in (*CONTROL_ASSETS, *RUNTIME_ASSETS) and not source.is_file():
                     raise UpdateError(f"test source missing asset: {asset}")
@@ -1293,6 +1338,9 @@ class Updater:
             if isinstance(metadata, dict) and isinstance(metadata.get("catalog"), dict):
                 for asset in CATALOG_ASSETS:
                     self.download(f"{base}/{asset}", candidate / asset)
+            if metadata_binds_stats_sidecars(metadata):
+                for asset in STATS_SIDECAR_ASSETS:
+                    self.download(f"{base}/{asset}", candidate / asset)
             release = self.verify_release(candidate, tag)
             if requested_tag is None and release.release_lane == RELEASE_LANE_RUNTIME:
                 self.audit("release_skipped", "runtime_only_requires_explicit_tag", candidate=tag)
@@ -1322,17 +1370,10 @@ class Updater:
         except (ValueError, OSError) as exc:
             raise UpdateError("release metadata is invalid JSON") from exc
         release = self.parse_metadata(metadata, directory)
-        operator_artifacts = metadata.get("operator_artifacts")
-        coordinator_cli = operator_artifacts.get("coordinator_cli") if isinstance(operator_artifacts, dict) else None
-        if not isinstance(coordinator_cli, dict):
-            raise UpdateError("release metadata coordinator CLI artifact is missing")
-        coordinator_cli_sha = coordinator_cli.get("sha256")
-        if coordinator_cli.get("asset") != COORDINATOR_CLI_ASSET:
-            raise UpdateError("release metadata coordinator CLI asset mismatch")
-        if not isinstance(coordinator_cli_sha, str) or not SHA256_RE.fullmatch(coordinator_cli_sha):
-            raise UpdateError("release metadata coordinator CLI checksum invalid")
-        if coordinator_cli_sha != checksums[COORDINATOR_CLI_ASSET]:
-            raise UpdateError("metadata/checksums disagreement for coordinator-cli-linux-amd64")
+        release = dataclasses.replace(
+            release,
+            operator_artifacts=self.parse_operator_artifacts(metadata, checksums, directory),
+        )
         if release.catalog is not None:
             for name in CATALOG_ASSETS:
                 if name not in checksums:
@@ -1353,14 +1394,15 @@ class Updater:
                 asset=component.asset,
                 sha256=component.sha256,
             )
-        validate_elf_amd64(directory / COORDINATOR_CLI_ASSET)
-        self.audit(
-            "release_component_verified",
-            "static_success",
-            candidate=release.tag,
-            asset=COORDINATOR_CLI_ASSET,
-            sha256=coordinator_cli_sha,
-        )
+        for artifact in release.operator_artifacts:
+            validate_elf_amd64(directory / artifact.asset)
+            self.audit(
+                "release_component_verified",
+                "static_success",
+                candidate=release.tag,
+                asset=artifact.asset,
+                sha256=artifact.sha256,
+            )
         if release.catalog is not None:
             self.verify_catalog_release(release)
         self.audit(
@@ -1372,6 +1414,52 @@ class Updater:
             release_lane=release.release_lane,
         )
         return release
+
+    @staticmethod
+    def parse_operator_artifacts(
+        metadata: dict[str, Any],
+        checksums: dict[str, str],
+        directory: Path,
+    ) -> tuple[OperatorArtifact, ...]:
+        rows = metadata.get("operator_artifacts")
+        if not isinstance(rows, dict) or not isinstance(rows.get("coordinator_cli"), dict):
+            raise UpdateError("release metadata coordinator CLI artifact is missing")
+        unknown = sorted(set(rows) - OPERATOR_ARTIFACT_KEYS)
+        if unknown:
+            raise UpdateError(f"release metadata binds unknown operator artifacts: {', '.join(unknown)}")
+        bound_stats = [row for row in STATS_OPERATOR_ARTIFACTS if row[0] in rows]
+        if bound_stats and len(bound_stats) != len(STATS_OPERATOR_ARTIFACTS):
+            raise UpdateError("release metadata binds an incomplete stats sidecar set")
+        if not bound_stats:
+            stray = sorted(asset for asset in STATS_SIDECAR_ASSETS if asset in checksums)
+            if stray:
+                raise UpdateError(
+                    f"signed checksums carry stats sidecar assets the metadata does not bind: {', '.join(stray)}"
+                )
+        artifacts = []
+        for key, asset, installed_name, root_kind in (OPERATOR_ARTIFACT_CLI, *bound_stats):
+            row = rows[key]
+            if not isinstance(row, dict):
+                raise UpdateError(f"release metadata operator artifact {key} is invalid")
+            digest = row.get("sha256")
+            if key == "coordinator_cli":
+                if row.get("asset") != asset:
+                    raise UpdateError("release metadata coordinator CLI asset mismatch")
+                if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+                    raise UpdateError("release metadata coordinator CLI checksum invalid")
+            else:
+                if row.get("asset") != asset:
+                    raise UpdateError(f"release metadata {key} asset mismatch")
+                if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+                    raise UpdateError(f"release metadata {key} checksum invalid")
+                if asset not in checksums:
+                    raise UpdateError(f"signed checksums omit required Pearl runtime asset: {asset}")
+                if sha256_file(directory / asset) != checksums[asset]:
+                    raise UpdateError(f"checksum mismatch for {asset}")
+            if digest != checksums[asset]:
+                raise UpdateError(f"metadata/checksums disagreement for {asset}")
+            artifacts.append(OperatorArtifact(key, asset, digest, installed_name, root_kind))
+        return tuple(artifacts)
 
     def verify_catalog_release(self, release: Release) -> None:
         if release.catalog is None:
@@ -1542,6 +1630,24 @@ class Updater:
             self._assert_candidate_validation_file(destination, executable=True)
             if sha256_file(destination) != component.sha256:
                 raise UpdateError(f"candidate staging checksum mismatch: {component.asset}")
+        # Operator artifacts are never executed by the candidate validator; they
+        # travel with the pair so install_release reads one pinned directory.
+        for artifact in release.operator_artifacts:
+            source = release.directory / artifact.asset
+            self._trusted_regular_file(source, f"verified {artifact.asset}")
+            if sha256_file(source) != artifact.sha256:
+                raise UpdateError(f"verified candidate changed before staging: {artifact.asset}")
+            destination = validation / artifact.asset
+            self.atomic_replace(
+                source,
+                destination,
+                uid=self.trusted_uid,
+                gid=self.candidate_gid,
+                mode=0o550,
+            )
+            self._assert_candidate_validation_file(destination, executable=True)
+            if sha256_file(destination) != artifact.sha256:
+                raise UpdateError(f"candidate staging checksum mismatch: {artifact.asset}")
         if release.catalog is not None:
             for name in CATALOG_ASSETS:
                 source = release.directory / name
@@ -1796,7 +1902,11 @@ class Updater:
             )
             return current, "upgrade"
         if release.version == current:
-            if installed.is_coherent_with(release) and self.installed_catalog_is_coherent(release):
+            if (
+                installed.is_coherent_with(release)
+                and self.installed_catalog_is_coherent(release)
+                and self.installed_operator_artifacts_are_coherent(release)
+            ):
                 self.audit("release_eligibility", "already_current", candidate=release.tag, current=str(current))
                 return current, "already_current"
             self.audit(
@@ -1815,6 +1925,11 @@ class Updater:
         return current, "upgrade"
 
     def assess_candidate(self, release: Release) -> tuple[SemVer, str]:
+        if self.stats_gid is None and any(artifact.root_kind == "stats" for artifact in release.operator_artifacts):
+            self.audit("release_eligibility", "rejected_missing_stats_group", candidate=release.tag)
+            raise UpdateError(
+                f"{STATS_SERVICE_GROUP} service group is unavailable; cannot install signed stats sidecars"
+            )
         current, decision = self.eligibility(release)
         if release.catalog is not None:
             self._preflight_legacy_tier2_cutover()
@@ -3927,6 +4042,7 @@ class Updater:
             self._trusted_regular_file(source, f"installed {name} binary")
             self._durable_copy(source, tx / name)
             component_manifest[name] = sha256_file(tx / name)
+        self._snapshot_operator_artifacts(release, tx)
         if sha256_file(self.config_update.target) != self.config_update.original_sha256:
             raise UpdateError("coordinator advertised-version config changed after candidate validation")
         if (
@@ -4114,6 +4230,244 @@ class Updater:
             raise UpdateError(
                 f"installed {destination.name} ownership, mode, or checksum is invalid"
             )
+
+    def _operator_artifact_destination(self, installed_name: str, root_kind: str) -> tuple[Path, int]:
+        if root_kind == "backend":
+            return self.install_root / installed_name, self.backend_gid
+        if root_kind == "stats":
+            if self.stats_gid is None:
+                raise UpdateError(
+                    f"{STATS_SERVICE_GROUP} service group is unavailable; cannot install signed stats sidecars"
+                )
+            return self.stats_install_root / installed_name, self.stats_gid
+        raise UpdateError(f"unknown operator artifact install root: {root_kind}")
+
+    def _expected_operator_destinations(self) -> dict[str, tuple[str, str]]:
+        return {
+            str((self.install_root if kind == "backend" else self.stats_install_root) / name): (name, kind)
+            for _key, _asset, name, kind in (OPERATOR_ARTIFACT_CLI, *STATS_OPERATOR_ARTIFACTS)
+        }
+
+    def _snapshot_operator_artifacts(self, release: Release, tx: Path) -> None:
+        snapshot_dir = tx / "operator-artifacts"
+        snapshot_dir.mkdir(mode=0o700)
+        manifest: list[dict[str, Any]] = []
+        holds: list[dict[str, Any]] = []
+        for artifact in release.operator_artifacts:
+            destination, _gid = self._operator_artifact_destination(artifact.installed_name, artifact.root_kind)
+            if _path_entry_exists(destination.parent):
+                _trusted_directory(
+                    destination.parent,
+                    f"{artifact.installed_name} install directory",
+                    trusted_uid=self.trusted_uid,
+                    mode=None,
+                )
+            elif artifact.root_kind == "backend":
+                raise UpdateError(f"{artifact.installed_name} install directory is missing: {destination.parent}")
+            if not _path_entry_exists(destination):
+                manifest.append({"destination": str(destination), "existed": False})
+            else:
+                entry = self._trusted_regular_file(destination, f"installed {artifact.installed_name} binary")
+                if stat.S_IMODE(entry.st_mode) & ~0o755:
+                    raise UpdateError(f"installed {artifact.installed_name} has special mode bits; rollback could not restore it")
+                self._durable_copy(destination, snapshot_dir / artifact.installed_name)
+                manifest.append(
+                    {
+                        "destination": str(destination),
+                        "existed": True,
+                        "snapshot": artifact.installed_name,
+                        "uid": entry.st_uid,
+                        "gid": entry.st_gid,
+                        "mode": stat.S_IMODE(entry.st_mode),
+                        "sha256": sha256_file(snapshot_dir / artifact.installed_name),
+                    }
+                )
+            parity_held = artifact.installed_name == "stats-inventory-sync" and _path_entry_exists(
+                self._stats_inventory_parity_marker
+            )
+            if parity_held:
+                # Prove the marker is removable before any live mutation.
+                self._trusted_regular_file(self._stats_inventory_parity_marker, "stats inventory parity marker")
+            if artifact.root_kind == "stats" and (
+                manifest[-1]["existed"] is False or manifest[-1]["sha256"] != artifact.sha256 or parity_held
+            ):
+                holds.append(
+                    {
+                        "sidecar": artifact.installed_name,
+                        **self._stats_timer_state(artifact.installed_name),
+                        "parity_marker": parity_held,
+                    }
+                )
+        _fsync_directory(snapshot_dir)
+        self._write_json(tx / "operator-artifact-manifest.json", manifest)
+        self._write_json(tx / "stats-sidecar-holds.json", holds)
+        self.stats_sidecar_holds = [row["sidecar"] for row in holds]
+
+    def _stats_timer_state(self, sidecar: str) -> dict[str, bool]:
+        properties = self._service_properties(
+            f"{sidecar}.timer",
+            ("LoadState", "UnitFileState", "ActiveState"),
+        )
+        return {
+            "loaded": properties.get("LoadState") not in ("", "not-found"),
+            "enabled": properties.get("UnitFileState", "").startswith(("enabled", "linked")),
+            "active": properties.get("ActiveState") in ("active", "activating", "reloading"),
+        }
+
+    def hold_stats_sidecar(self, sidecar: str) -> None:
+        # SPEC-033 / issue #582 ordering: a changed sidecar may need stats
+        # migrations that only deploy-pearl-vps.sh applies (stats-migrate). Keep
+        # its timer disabled and its service stopped from before the byte swap
+        # until that deploy re-enables it after migrating; the rollback restores
+        # the captured timer state together with the previous bytes.
+        timer = f"{sidecar}.timer"
+        service = f"{sidecar}.service"
+        if self._stats_timer_state(sidecar)["loaded"]:
+            self.systemctl("disable", timer)
+            self.systemctl("stop", timer)
+            self.assert_unit_quiescent(timer)
+        # A host bootstrapping sidecars may not have their units yet; the full
+        # deploy installs them after the updater provides the binaries.
+        if self._service_properties(service, ("LoadState",)).get("LoadState") not in ("", "not-found"):
+            self.systemctl("stop", service)
+            self.assert_unit_quiescent(service)
+
+    @property
+    def _stats_inventory_parity_marker(self) -> Path:
+        return self.install_root / STATS_INVENTORY_PARITY_MARKER_NAME
+
+    def release_stats_inventory_parity_hold(self) -> None:
+        # beta/DECISION_CRITERIA.md Entry 187 holds the pre-migration-019
+        # inventory binary until a signed matching-binary promotion; this
+        # install is that promotion. The timer stays held here, so the full
+        # deploy's parity-absent path migrates, runs the new binary once, and
+        # re-holds on failure.
+        marker = self._stats_inventory_parity_marker
+        if not _path_entry_exists(marker):
+            return
+        self._trusted_regular_file(marker, "stats inventory parity marker")
+        self._journal_transition(
+            "stats_parity_marker_remove_pending",
+            pending_action={"kind": "parity_marker_remove", "destination": str(marker)},
+        )
+        marker.unlink(missing_ok=True)
+        _fsync_directory(marker.parent)
+        self._journal_transition("stats_parity_marker_removed", pending_action=None)
+
+    def _restore_stats_inventory_parity_marker(self) -> None:
+        marker = self._stats_inventory_parity_marker
+        if _path_entry_exists(marker):
+            # Any existing marker already restores the hold; never block rollback.
+            return
+        descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+        try:
+            os.fchown(descriptor, self.trusted_uid, -1)
+            os.fchmod(descriptor, 0o644)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _fsync_directory(marker.parent)
+
+    def _restore_stats_sidecar_holds(self, tx: Path) -> None:
+        if not _path_entry_exists(tx / "stats-sidecar-holds.json"):
+            return
+        for row in self._stats_sidecar_hold_rows(tx):
+            if row["parity_marker"]:
+                self._restore_stats_inventory_parity_marker()
+            if not row["loaded"]:
+                continue
+            timer = f"{row['sidecar']}.timer"
+            if row["enabled"]:
+                self.systemctl("enable", timer)
+            # stats-billing-mirror.timer is an auxiliary unit whose active state
+            # the auxiliary_timers rollback step restores after serving is proven.
+            if row["active"] and timer not in AUXILIARY_UNITS:
+                self.systemctl("start", timer)
+
+    def _stats_sidecar_hold_rows(self, tx: Path) -> list[dict[str, Any]]:
+        rows = self._transaction_json(tx, "stats-sidecar-holds.json")
+        allowed = {row[2] for row in STATS_OPERATOR_ARTIFACTS}
+        if not isinstance(rows, list):
+            raise UpdateError("rollback stats sidecar hold manifest is invalid")
+        for row in rows:
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"sidecar", "loaded", "enabled", "active", "parity_marker"}
+                or row["sidecar"] not in allowed
+                or any(type(row[field]) is not bool for field in ("loaded", "enabled", "active", "parity_marker"))
+                or (row["parity_marker"] and row["sidecar"] != "stats-inventory-sync")
+            ):
+                raise UpdateError("rollback stats sidecar hold row is invalid")
+        return rows
+
+    def install_operator_artifact(self, release: Release, artifact: OperatorArtifact) -> None:
+        source = release.directory / artifact.asset
+        destination, gid = self._operator_artifact_destination(artifact.installed_name, artifact.root_kind)
+        if not _path_entry_exists(destination.parent):
+            if artifact.root_kind != "stats":
+                raise UpdateError(f"{artifact.installed_name} install directory is missing: {destination.parent}")
+            destination.parent.mkdir(mode=0o700)
+            os.chown(destination.parent, self.trusted_uid, gid, follow_symlinks=False)
+            os.chmod(destination.parent, 0o750, follow_symlinks=False)
+            _fsync_directory(destination.parent.parent)
+        _trusted_directory(
+            destination.parent,
+            f"{artifact.installed_name} install directory",
+            trusted_uid=self.trusted_uid,
+            mode=None,
+        )
+        if artifact.root_kind == "stats" and not self._stats_install_root_is_coherent():
+            # Converge to the deploy's root:macprovider-stats 0750 layout (also
+            # repairs a directory left 0700 by an interrupted creation).
+            os.chown(destination.parent, self.trusted_uid, gid, follow_symlinks=False)
+            os.chmod(destination.parent, 0o750, follow_symlinks=False)
+        if _path_entry_exists(destination):
+            self._trusted_regular_file(destination, f"installed {artifact.installed_name} binary")
+        self.atomic_replace(source, destination, uid=self.trusted_uid, gid=gid, mode=0o750)
+        installed = self._trusted_regular_file(destination, f"installed {artifact.installed_name} binary")
+        if (
+            installed.st_gid != gid
+            or stat.S_IMODE(installed.st_mode) != 0o750
+            or sha256_file(destination) != artifact.sha256
+        ):
+            raise UpdateError(f"installed {artifact.installed_name} ownership, mode, or checksum is invalid")
+
+    def _stats_install_root_is_coherent(self) -> bool:
+        try:
+            entry = self.stats_install_root.lstat()
+        except OSError:
+            return False
+        return (
+            stat.S_ISDIR(entry.st_mode)
+            and entry.st_uid == self.trusted_uid
+            and entry.st_gid == self.stats_gid
+            and stat.S_IMODE(entry.st_mode) == 0o750
+        )
+
+    def installed_operator_artifacts_are_coherent(self, release: Release) -> bool:
+        if any(artifact.root_kind == "stats" for artifact in release.operator_artifacts) and not (
+            self._stats_install_root_is_coherent()
+        ):
+            return False
+        # A parity hold left by a failed deploy activation is released only by
+        # re-applying the signed sidecar (repair_pair), never by the deploy.
+        if any(artifact.installed_name == "stats-inventory-sync" for artifact in release.operator_artifacts) and (
+            _path_entry_exists(self._stats_inventory_parity_marker)
+        ):
+            return False
+        for artifact in release.operator_artifacts:
+            try:
+                destination, gid = self._operator_artifact_destination(artifact.installed_name, artifact.root_kind)
+                entry = self._trusted_regular_file(destination, f"installed {artifact.installed_name} binary")
+            except UpdateError:
+                return False
+            if (
+                entry.st_gid != gid
+                or stat.S_IMODE(entry.st_mode) != 0o750
+                or sha256_file(destination) != artifact.sha256
+            ):
+                return False
+        return True
 
     @staticmethod
     def _validate_catalog_target(target: str) -> None:
@@ -4340,6 +4694,11 @@ class Updater:
             self._trusted_regular_file(candidate, f"staged {component_name} binary")
             if sha256_file(candidate) != component.sha256:
                 raise UpdateError(f"staged {component_name} binary changed after signature verification")
+        for artifact in release.operator_artifacts:
+            candidate = release.directory / artifact.asset
+            self._trusted_regular_file(candidate, f"staged {artifact.installed_name} binary")
+            if sha256_file(candidate) != artifact.sha256:
+                raise UpdateError(f"staged {artifact.installed_name} binary changed after signature verification")
         self._trusted_config_file(self.config_update.target)
         if sha256_file(self.config_update.target) != self.config_update.original_sha256:
             raise UpdateError("coordinator advertised-version config changed after snapshot")
@@ -4354,6 +4713,22 @@ class Updater:
         self.audit("release_component_installed", "success", candidate=release.tag, component="coordinator")
         self.atomic_install(release.directory / release.gateway.asset, self.install_root / "gateway")
         self.audit("release_component_installed", "success", candidate=release.tag, component="gateway")
+        if self.stats_sidecar_holds:
+            self.stats_sidecar_holds_applied = True
+        for sidecar in self.stats_sidecar_holds:
+            self.hold_stats_sidecar(sidecar)
+            self.audit("stats_sidecar_held", "until_full_deploy", candidate=release.tag, sidecar=sidecar)
+        for artifact in release.operator_artifacts:
+            self.install_operator_artifact(release, artifact)
+            self.audit(
+                "release_component_installed",
+                "success",
+                candidate=release.tag,
+                component=artifact.installed_name,
+                sha256=artifact.sha256,
+            )
+        if "stats-inventory-sync" in self.stats_sidecar_holds:
+            self.release_stats_inventory_parity_hold()
         if release.catalog is not None:
             self.install_catalog(release)
         installed_config_targets = []
@@ -5439,6 +5814,9 @@ class Updater:
             self._trusted_regular_file(snapshot, f"rollback {name} snapshot", private=True)
             if component_manifest[name] != sha256_file(snapshot):
                 raise UpdateError(f"rollback {name} snapshot checksum mismatch")
+        self._validate_operator_artifact_manifest(tx)
+        if _path_entry_exists(tx / "stats-sidecar-holds.json"):
+            self._stats_sidecar_hold_rows(tx)
         for manifest_name, directory_name in (
             ("configuration-manifest.json", "configurations"),
             ("database-manifest.json", "databases"),
@@ -5649,6 +6027,68 @@ class Updater:
     def _restore_binaries(self, tx: Path) -> None:
         for name in ("coordinator", "gateway"):
             self.atomic_install(tx / name, self.install_root / name)
+        # Same rollback step as the pair so journals from earlier updaters keep
+        # their step sequence; both restores are idempotent on reconcile.
+        self._restore_operator_artifacts(tx)
+        self._restore_stats_sidecar_holds(tx)
+
+    def _operator_artifact_manifest(self, tx: Path) -> list[dict[str, Any]]:
+        # Transactions written before issue #1721 carry no operator artifacts.
+        if not _path_entry_exists(tx / "operator-artifact-manifest.json"):
+            return []
+        rows = self._transaction_json(tx, "operator-artifact-manifest.json")
+        if not isinstance(rows, list):
+            raise UpdateError("rollback operator artifact manifest is invalid")
+        return rows
+
+    def _validate_operator_artifact_manifest(self, tx: Path) -> None:
+        expected = self._expected_operator_destinations()
+        seen: set[str] = set()
+        for row in self._operator_artifact_manifest(tx):
+            if not isinstance(row, dict) or not isinstance(row.get("destination"), str):
+                raise UpdateError("rollback operator artifact row is invalid")
+            destination = row["destination"]
+            if destination not in expected or destination in seen:
+                raise UpdateError(f"rollback operator artifact destination is not allowed: {destination}")
+            seen.add(destination)
+            if row.get("existed") is False:
+                if set(row) != {"destination", "existed"}:
+                    raise UpdateError("rollback absent operator artifact row is invalid")
+                continue
+            name, _kind = expected[destination]
+            if (
+                row.get("existed") is not True
+                or row.get("snapshot") != name
+                or any(type(row.get(field)) is not int for field in ("uid", "gid", "mode"))
+                or row["uid"] != self.trusted_uid
+                or row["mode"] & ~0o755
+            ):
+                raise UpdateError("rollback operator artifact row is invalid")
+            snapshot = tx / "operator-artifacts" / name
+            self._trusted_regular_file(snapshot, f"rollback {name} snapshot", private=True)
+            if row.get("sha256") != sha256_file(snapshot):
+                raise UpdateError(f"rollback {name} snapshot checksum mismatch")
+
+    def _restore_operator_artifacts(self, tx: Path) -> None:
+        for row in self._operator_artifact_manifest(tx):
+            destination = Path(row["destination"])
+            if row["existed"] is True:
+                self.atomic_replace(
+                    tx / "operator-artifacts" / row["snapshot"],
+                    destination,
+                    uid=int(row["uid"]),
+                    gid=int(row["gid"]),
+                    mode=int(row["mode"]),
+                )
+            else:
+                self._journal_transition(
+                    "operator_artifact_remove_pending",
+                    pending_action={"kind": "operator_artifact_remove", "destination": str(destination)},
+                )
+                destination.unlink(missing_ok=True)
+                if _path_entry_exists(destination.parent):
+                    _fsync_directory(destination.parent)
+                self._journal_transition("operator_artifact_removed", pending_action=None)
 
     def _restore_configurations(self, tx: Path) -> None:
         config_manifest = self._transaction_json(tx, "configuration-manifest.json")
@@ -5805,11 +6245,19 @@ class Updater:
             legacy_rollback_version=advertised,
         )
 
+    def _held_auxiliary_unit(self, unit: str) -> bool:
+        # Only a rollout moving forward keeps a changed sidecar held; a rollback
+        # restores the previous bytes, so their previous run state is safe.
+        return self.stats_sidecar_holds_applied and unit.rsplit(".", 1)[0] in self.stats_sidecar_holds
+
     def restore_auxiliary_services(self) -> None:
         for unit in ("macprovider-archive-rotate.service", "stats-billing-mirror.service"):
             desired = self.previous_auxiliary_units.get(unit)
             if type(desired) is not bool:
                 raise UpdateError(f"previous auxiliary state unavailable for {unit}")
+            if self._held_auxiliary_unit(unit):
+                self.assert_unit_quiescent(unit)
+                continue
             if desired:
                 child_permit = None
                 if unit == "macprovider-archive-rotate.service":
@@ -5827,6 +6275,10 @@ class Updater:
             desired = self.previous_auxiliary_units.get(unit)
             if type(desired) is not bool:
                 raise UpdateError(f"previous auxiliary state unavailable for {unit}")
+            if self._held_auxiliary_unit(unit):
+                self.systemctl("stop", unit)
+                self.assert_unit_quiescent(unit)
+                continue
             if desired:
                 self.systemctl("start", unit)
             else:
@@ -5881,6 +6333,7 @@ class Updater:
             raise UpdateError("rollback transaction is unavailable")
         tx = self.transaction
         self.validate_transaction(tx)
+        self.stats_sidecar_holds_applied = False
         self._journal_transition(
             "rollback_in_progress",
             rollback_in_progress=True,
@@ -6034,6 +6487,11 @@ class Updater:
         release = self.committed_release(payload.get("release"))
         if not self.installed_release().is_coherent_with(release) or not self.installed_catalog_is_coherent(release):
             raise UpdateError("committed candidate state or installed release pair is incoherent")
+        if self.transaction is not None and _path_entry_exists(self.transaction / "stats-sidecar-holds.json"):
+            # A committed rollout keeps its changed sidecars held until the full
+            # deploy; the in-memory hold list did not survive the crash.
+            self.stats_sidecar_holds = [row["sidecar"] for row in self._stats_sidecar_hold_rows(self.transaction)]
+            self.stats_sidecar_holds_applied = bool(self.stats_sidecar_holds)
         self.verify_rollout(release)
         self._journal_transition("committed_success_reverified")
 
@@ -6387,6 +6845,7 @@ def main(argv: list[str]) -> int:
         backend_gid = candidate_gid
         catalog_gid = candidate_gid
         independent_alert_gid = candidate_gid
+        stats_gid: int | None = candidate_gid
     else:
         try:
             account = pwd.getpwnam(VALIDATOR_ACCOUNT)
@@ -6408,10 +6867,15 @@ def main(argv: list[str]) -> int:
             INDEPENDENT_ALERT_ACCOUNT,
             INDEPENDENT_ALERT_GROUP,
         )
+        try:
+            stats_gid = resolve_service_group_gid(STATS_SERVICE_ACCOUNT, STATS_SERVICE_GROUP)
+        except UpdateError:
+            stats_gid = None
     updater = Updater(
         config,
         public_key=test_path(PINNED_PUBLIC_KEY, "PEARL_UPDATER_TEST_PUBLIC_KEY", testing),
         install_root=test_path(INSTALL_ROOT, "PEARL_UPDATER_TEST_INSTALL_ROOT", testing),
+        stats_install_root=test_path(STATS_INSTALL_ROOT, "PEARL_UPDATER_TEST_STATS_ROOT", testing),
         state_root=test_path(STATE_ROOT, "PEARL_UPDATER_TEST_STATE_ROOT", testing),
         audit_path=test_path(AUDIT_PATH, "PEARL_UPDATER_TEST_AUDIT_PATH", testing),
         lock_path=test_path(LOCK_PATH, "PEARL_UPDATER_TEST_LOCK_PATH", testing),
@@ -6426,6 +6890,7 @@ def main(argv: list[str]) -> int:
         backend_gid=backend_gid,
         catalog_gid=catalog_gid,
         independent_alert_gid=independent_alert_gid,
+        stats_gid=stats_gid,
         isolate_candidate_network=not testing,
     )
     lock_uid = trusted_uid

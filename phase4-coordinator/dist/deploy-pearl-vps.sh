@@ -490,11 +490,6 @@ if [ "$DRY_RUN_LOCAL" != "1" ]; then
   COORDINATOR_RELEASE_VERSION="${COORDINATOR_RELEASE_IDENTITY%% *}"
   COORDINATOR_RELEASE_COMMIT="${COORDINATOR_RELEASE_IDENTITY#* }"
   echo "  release tag OK: $COORDINATOR_RELEASE_VERSION @ $COORDINATOR_RELEASE_COMMIT"
-  GH_HOST=github.com bash "$REPO_ROOT/scripts/verify-pearl-runtime-release.sh" \
-    --tag "$COORDINATOR_RELEASE_VERSION" \
-    --expected-commit "$COORDINATOR_RELEASE_COMMIT" \
-    --repository "Augustas11/macprovider" \
-    --remote "origin"
 fi
 
 # #1688: scripts/catalog-verifier-bundle.txt is the one list of files every
@@ -530,6 +525,7 @@ _parse_catalog_verifier_bundle() {
 PINNED_DEPLOY_INPUT_DIR=""
 PINNED_REPOSITORY_DIR=""
 PINNED_DIST_DIR="$DIST_DIR"
+PINNED_RUNTIME_ARTIFACT_DIR="$DIST_DIR"
 PINNED_STATIC_FEEDS_DIR="$DIST_DIR/../../phase3-binary/dist/static"
 PINNED_AUTOTUNE_DIR="$DIST_DIR/../../phase3-binary/catalog/autotune"
 PINNED_SCRIPTS_DIR="$DIST_DIR/../../scripts"
@@ -557,6 +553,18 @@ if [ "$DRY_RUN_LOCAL" != "1" ]; then
   GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" archive --format=tar "$COORDINATOR_RELEASE_COMMIT" \
     | tar -xf - -C "$PINNED_REPOSITORY_DIR"
   PINNED_DIST_DIR="$PINNED_DEPLOY_INPUT_DIR/phase4-coordinator/dist"
+  # Issue #1721: the exact-copy gates below compare Pearl's live coordinator,
+  # coordinator-cli, and stats sidecars with these bytes and never install
+  # different ones. Take them from the verified signed Pearl runtime release
+  # that macprovider-pearl-update installs, never from a local dist/ build.
+  PINNED_RUNTIME_ARTIFACT_DIR="$PINNED_DEPLOY_INPUT_DIR/pearl-runtime-release"
+  install -d -m 0700 "$PINNED_RUNTIME_ARTIFACT_DIR"
+  GH_HOST=github.com bash "$REPO_ROOT/scripts/verify-pearl-runtime-release.sh" \
+    --tag "$COORDINATOR_RELEASE_VERSION" \
+    --expected-commit "$COORDINATOR_RELEASE_COMMIT" \
+    --repository "Augustas11/macprovider" \
+    --remote "origin" \
+    --deploy-artifacts-dir "$PINNED_RUNTIME_ARTIFACT_DIR"
   PINNED_STATIC_FEEDS_DIR="$PINNED_DEPLOY_INPUT_DIR/phase3-binary/dist/static"
   PINNED_AUTOTUNE_DIR="$PINNED_DEPLOY_INPUT_DIR/phase3-binary/catalog/autotune"
   PINNED_SCRIPTS_DIR="$PINNED_DEPLOY_INPUT_DIR/scripts"
@@ -615,11 +623,11 @@ if [ "${STATS_DOMAIN:-stats.malibu.tech}" != "stats.malibu.tech" ]; then
   exit 1
 fi
 
-BINARY="$DIST_DIR/coordinator-linux-amd64"
-CLI_BINARY="$DIST_DIR/coordinator-cli-linux-amd64"
-STATS_INVENTORY_BINARY="$DIST_DIR/stats-inventory-sync-linux-amd64"
-STATS_BILLING_MIRROR_BINARY="$DIST_DIR/stats-billing-mirror-linux-amd64"
-STATS_HARDWARE_VERIFIER_BINARY="$DIST_DIR/stats-hardware-verifier-linux-amd64"
+BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/coordinator-linux-amd64"
+CLI_BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/coordinator-cli-linux-amd64"
+STATS_INVENTORY_BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/stats-inventory-sync-linux-amd64"
+STATS_BILLING_MIRROR_BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/stats-billing-mirror-linux-amd64"
+STATS_HARDWARE_VERIFIER_BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/stats-hardware-verifier-linux-amd64"
 CONFIG="$PINNED_DIST_DIR/coordinator.yaml"
 DEPLOY_CONFIG="$CONFIG"
 SERVICE="$PINNED_DIST_DIR/macprovider-coordinator.service"
@@ -850,9 +858,10 @@ _append_catalog_window_override() {
 # coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
 # FR-C9.4 strict-reject path still requires `coordinator-cli
 # revoke-token` for the used-token-persist-failure case; routine
-# prune-tokens / list-tokens also belong on Pearl). If absent, the
-# operator forgot to run build-linux.sh after the M2 update that
-# extended it. Fail closed — do NOT silently deploy with a stale CLI.
+# prune-tokens / list-tokens also belong on Pearl). Production deploys
+# stage it and the stats sidecars from the verified signed release above;
+# DRY_RUN_LOCAL reads dist/. Fail closed — do NOT silently deploy with a
+# stale CLI.
 for f in "$BINARY" "$CLI_BINARY" "$STATS_INVENTORY_BINARY" "$STATS_BILLING_MIRROR_BINARY" "$STATS_HARDWARE_VERIFIER_BINARY" \
          "$CONFIG" "$SERVICE" "$DEPLOY_RECOVER" "$DEPLOY_GUARD" "$DEPLOY_RECOVERY_SERVICE" "$DEPLOY_WATCHDOG_SERVICE" "$STATS_INVENTORY_SERVICE" "$STATS_INVENTORY_TIMER" \
          "$STATS_BILLING_MIRROR_SERVICE" "$STATS_BILLING_MIRROR_TIMER" \
@@ -2062,7 +2071,9 @@ fi
 # in-flight reconciliation run drains before we return; disabling the .timer
 # stops a scheduled fire (or a daemon-reload/reboot) from re-launching the old
 # binary during the migrate->install window. The NEW 3-col binary is installed
-# in step 4 and the timer is re-enabled in step 9. This quiesce runs BEFORE the
+# by macprovider-pearl-update from the signed release (issue #1721), which holds
+# its timer disabled until this deploy; step 4 only proves byte parity and step 9
+# re-enables the timer after the migration. This quiesce runs BEFORE the
 # rollback transaction is armed, so its inactive state is what the step-4
 # snapshot records: a rollback restores the pre-019 binary but deliberately
 # leaves the sidecar stopped (see coordinator-deploy-recover.sh) so the old
@@ -3539,6 +3550,7 @@ $SSH "set -e
   # and therefore has an exact durable snapshot like the daemon binary.
   if [ ! -x /opt/macprovider/coordinator-cli ] || ! cmp -s $DEPLOY_TMP/coordinator-cli-linux-amd64 /opt/macprovider/coordinator-cli; then
     echo 'refusing coordinator-cli replacement from direct deploy: install the signed matching Pearl runtime release first' >&2
+    echo '  macprovider-pearl-update --apply --tag $COORDINATOR_RELEASE_VERSION installs the signed coordinator-cli and stats sidecars' >&2
     exit 1
   fi
   install -o root -g macprovider -m 0750 $DEPLOY_TMP/coordinator-cli-linux-amd64 /opt/macprovider/coordinator-cli

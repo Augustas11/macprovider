@@ -240,6 +240,23 @@ extension ModelRuntimeServing {
     }
 }
 
+public struct RuntimeContinuousBatchingSchedulerSnapshot: Sendable, Equatable {
+    public let activeDecodeRows: Int
+    public let waitingCount: Int
+    public let maxObservedBatchDepth: Int
+    public let slotsTotal: Int
+    public let slotsFree: Int
+}
+
+public struct RuntimeContinuousBatchingSnapshot: Sendable, Equatable {
+    public let mode: ContinuousBatchingMode
+    public let active: Bool
+    public let unsupportedReason: String?
+    public let pagedKVDecision: String
+    public let cacheClass: String
+    public let scheduler: RuntimeContinuousBatchingSchedulerSnapshot?
+}
+
 public struct RuntimeSnapshot: @unchecked Sendable {
     public let state: SwapState
     public let container: ModelContainer?
@@ -254,6 +271,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     public let numDraftTokens: Int?
     public let templateSupportsThinkingToggle: Bool
     public let specDecodeGeneration: Int
+    public let continuousBatching: RuntimeContinuousBatchingSnapshot?
 
     init(
         state: SwapState,
@@ -268,7 +286,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         draftContainer: ModelContainer? = nil,
         numDraftTokens: Int? = nil,
         templateSupportsThinkingToggle: Bool = false,
-        specDecodeGeneration: Int = 0
+        specDecodeGeneration: Int = 0,
+        continuousBatching: RuntimeContinuousBatchingSnapshot? = nil
     ) {
         self.state = state
         self.container = container
@@ -285,6 +304,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         self.numDraftTokens = numDraftTokens
         self.templateSupportsThinkingToggle = templateSupportsThinkingToggle
         self.specDecodeGeneration = specDecodeGeneration
+        self.continuousBatching = continuousBatching
     }
 
     var hasTargetCompatibleDraft: Bool {
@@ -372,6 +392,13 @@ enum ModelRuntimeAdoptionError: Error, CustomStringConvertible, Equatable {
 struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     let modelFamily: String
     let requiresMoEDispatch: Bool
+    let hybridDecoderArchitectureVerified: Bool
+
+    init(modelFamily: String, requiresMoEDispatch: Bool, hybridDecoderArchitectureVerified: Bool = false) {
+        self.modelFamily = modelFamily
+        self.requiresMoEDispatch = requiresMoEDispatch
+        self.hybridDecoderArchitectureVerified = hybridDecoderArchitectureVerified
+    }
 }
 
 struct PagedKVRuntimeMeasurementEnvironment: Sendable {
@@ -414,7 +441,8 @@ struct PagedKVRuntimeProber: Sendable {
         _ poolEpoch: Int,
         _ layerCount: Int,
         _ promptA: [Int],
-        _ promptB: [Int]
+        _ promptB: [Int],
+        _ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) async -> PagedKVRuntimeMoEProbeResult
 
     static let live = PagedKVRuntimeProber(
@@ -428,7 +456,7 @@ struct PagedKVRuntimeProber: Sendable {
                 nNew: nNew
             )
         },
-        moe: { container, blockSizeTokens, maxPhysicalBlocks, poolEpoch, layerCount, promptA, promptB in
+        moe: { container, blockSizeTokens, maxPhysicalBlocks, poolEpoch, layerCount, promptA, promptB, cacheKinds in
             await PagedKVRuntimeParityProbe.runMoEInputIsolationProbe(
                 container: container,
                 blockSizeTokens: blockSizeTokens,
@@ -436,7 +464,8 @@ struct PagedKVRuntimeProber: Sendable {
                 poolEpoch: poolEpoch,
                 layerCount: layerCount,
                 promptA: promptA,
-                promptB: promptB
+                promptB: promptB,
+                cacheKinds: cacheKinds
             )
         }
     )
@@ -582,6 +611,30 @@ final class ContinuousBatchRuntimeReplayAuthority: ContinuousBatchSchedulerRepla
         }
         fingerprintsByRequestIDHash[requestIDHash] = key.fingerprintSHA256
         return .claimed
+    }
+
+    /// SPEC-038 AC-25: drop a claim whose request never reached admission.
+    /// Fingerprint-guarded so a concurrent re-claim of the same ID with a
+    /// different body is left alone, and best-effort on the durable tier — a
+    /// store error leaves the claim in place, which fails toward the
+    /// pre-existing 409 rather than toward permitting a second execution.
+    func release(_ key: ContinuousBatchSchedulerReplayKey) {
+        let requestIDHash = Self.requestIDHash(key.requestID)
+        lock.lock()
+        defer { lock.unlock() }
+        if let storeURL {
+            try? Self.withStoreLock(for: storeURL) {
+                let claimURL = try Self.claimURL(for: requestIDHash, in: storeURL)
+                guard let existing = try? readClaim(at: claimURL, requestIDHash: requestIDHash),
+                      existing == key.fingerprintSHA256 else { return }
+                try FileManager.default.removeItem(at: claimURL)
+                try Self.syncDirectory(claimURL.deletingLastPathComponent())
+                fingerprintsByRequestIDHash.removeValue(forKey: requestIDHash)
+            }
+            return
+        }
+        guard fingerprintsByRequestIDHash[requestIDHash] == key.fingerprintSHA256 else { return }
+        fingerprintsByRequestIDHash.removeValue(forKey: requestIDHash)
     }
 
     private static func defaultStoreURL(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
@@ -1189,6 +1242,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private var maxBatch: Int
     private let continuousBatchingMode: ContinuousBatchingMode
     private let continuousBatchQueueLimit: Int?
+    /// SPEC-038 AC-25 bounded admission wait, in milliseconds. Nil ⇒ the
+    /// scheduler configuration default.
+    private let continuousBatchQueueWaitTimeoutMS: Int?
     /// SPEC-038 FR-CB10 operator-declared per-tuple acceptance coverage.
     private let continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage
     private let warmSwapEnabled: Bool
@@ -1310,6 +1366,7 @@ actor ModelRuntime: ModelRuntimeServing {
             chatTemplateSHA256: chatTemplateSHA256,
             modelFamily: capabilities.modelFamily,
             requiresMoEDispatch: capabilities.requiresMoEDispatch,
+            hybridDecoderArchitectureVerified: capabilities.hybridDecoderArchitectureVerified,
             gates: modelHash?.isEmpty == false ? gates : .closed
         )
     }
@@ -1547,6 +1604,9 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         PagedKVRuntimeDiagnostics.log("measure OK: runtime measurement complete, paged-KV attach eligible for model=\(modelID)")
+        // The runtime-revision fields an operator copies into
+        // `continuous_batching_accepted_tuples` after this build passes acceptance.
+        PagedKVRuntimeDiagnostics.log("runtime-identity model=\(modelID) model_sha256=\(modelSHA256) hardware_class=\(hardwareClass) metallib_sha256=\(metallibSHA256) kernel_identifier=\(kernelIdentifier)")
         return PagedKVRuntimeMeasurement(
             observedRuntimeIdentity: observedIdentity,
             hardwareSizingProof: proof
@@ -1585,6 +1645,18 @@ actor ModelRuntime: ModelRuntimeServing {
     private static let pagedKVRuntimeMoEProbePromptA = "Draft a short summary of today's shipping forecast."
     private static let pagedKVRuntimeMoEProbePromptB = "List three ingredients commonly used in a simple tomato soup."
 
+    /// Ordered challenge pairs for the isolation probe. The proof needs the two
+    /// rows' serial greedy tokens to differ at every checked step, or a leak
+    /// could hide behind identical references. Raw-prose prompts can share a
+    /// first token (Studio 2026-09-24: Qwen3.6-27B), so later pairs force
+    /// different continuations. Each pair is still checked against its own
+    /// serial references, so trying another pair cannot weaken the proof.
+    private static let pagedKVRuntimeIsolationProbePromptPairs: [(String, String)] = [
+        (pagedKVRuntimeMoEProbePromptA, pagedKVRuntimeMoEProbePromptB),
+        ("Count upward in words: one, two, three,", "The first letters of the alphabet are A, B, C,"),
+        ("def add(a, b):\n    return", "<html>\n  <head>\n    <title>"),
+    ]
+
     /// Runs the SPEC-039 on-device self-measurement probes (parity, and MoE input
     /// isolation when the resident model requires MoE dispatch) against `container`.
     /// Returns `(nil, nil)` immediately, without touching the model, unless paged KV is
@@ -1604,10 +1676,20 @@ actor ModelRuntime: ModelRuntimeServing {
         guard pagedKVConfig.effectiveEnabled,
               kvBitsOverride == nil,
               PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily),
-              PagedKVAttachGate.allowedCacheClasses.contains(runtimeCacheClass)
+              PagedKVAttachGate.supportsCacheClass(
+                  runtimeCacheClass,
+                  hybridDecoderArchitectureVerified: modelCapabilities.hybridDecoderArchitectureVerified
+              )
         else {
             return (nil, nil)
         }
+        let cacheKinds = await container.perform { context in
+            Self.pagedKVCacheKinds(model: context.model)
+        }
+        guard let cacheKinds,
+              runtimeCacheClass != "mixed"
+                || (cacheKinds.contains(.recurrentMamba) && cacheKinds.contains(.pagedAttention))
+        else { return (nil, nil) }
         let promptTokens = await container.perform { context in
             context.tokenizer.encode(text: Self.pagedKVRuntimeParityProbePrompt, addSpecialTokens: true)
         }
@@ -1630,21 +1712,34 @@ actor ModelRuntime: ModelRuntimeServing {
         let layerCount = await container.perform { context in
             context.model.newCache(parameters: nil).count
         }
-        let promptA = await container.perform { context in
-            context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptA, addSpecialTokens: true)
+        let pairs = Self.pagedKVRuntimeIsolationProbePromptPairs
+        let prober = pagedKVRuntimeProber
+        let blockSizeTokens = pagedKVConfig.blockSizeTokens
+        let maxPhysicalBlocks = pagedKVConfig.maxPhysicalBlocks
+        let moeProbe = await Self.firstDistinguishingIsolationProbe(pairCount: pairs.count) { pairIndex in
+            let pair = pairs[pairIndex]
+            let promptA = await container.perform { context in
+                context.tokenizer.encode(text: pair.0, addSpecialTokens: true)
+            }
+            let promptB = await container.perform { context in
+                context.tokenizer.encode(text: pair.1, addSpecialTokens: true)
+            }
+            return await prober.moe(
+                container,
+                blockSizeTokens,
+                maxPhysicalBlocks,
+                1,
+                layerCount,
+                promptA,
+                promptB,
+                cacheKinds
+            )
+        } onIndistinguishable: { pairIndex in
+            PagedKVRuntimeDiagnostics.log(
+                "batched-isolation model=\(modelID) challenge pair \(pairIndex) not distinguishing; trying next"
+            )
         }
-        let promptB = await container.perform { context in
-            context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptB, addSpecialTokens: true)
-        }
-        let moeProbe = await pagedKVRuntimeProber.moe(
-            container,
-            pagedKVConfig.blockSizeTokens,
-            pagedKVConfig.maxPhysicalBlocks,
-            1,
-            layerCount,
-            promptA,
-            promptB
-        )
+        guard let moeProbe else { return (nil, nil) }
         let p = parityProbe
         PagedKVRuntimeDiagnostics.log(
             "parity model=\(modelID) established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) gatherKernelCalls=\(p.gatherKernelCalls) expectCalls=\(p.nLayers * p.nNew * 2) maxLogicalBlocks=\(p.maxLogicalBlocks) nonIdentityPermutation=\(p.nonIdentityPermutation)"
@@ -1654,6 +1749,57 @@ actor ModelRuntime: ModelRuntimeServing {
             "batched-isolation model=\(modelID) requiresMoE=\(modelCapabilities.requiresMoEDispatch) proven=\(m.proven) rowsDecoded=\(m.rowsDecodedInSharedForward) rowFailures=\(m.rowFailures) crossRowDivergences=\(m.crossRowDivergences) challengeDistinguishing=\(m.challengeDistinguishing)"
         )
         return (parityProbe, moeProbe)
+    }
+
+    /// Runs challenge pairs in order and returns the first verdict. Only a
+    /// clean indistinguishable run (both rows decoded, no row failure, no
+    /// divergence, serial references merely identical) moves on to the next
+    /// pair. Anything else — a distinguishing pass, a real divergence, a probe
+    /// failure or exception (`.failClosed`), an incomplete decode — is final,
+    /// so a failure can never be retried away by a later passing pair. If no
+    /// pair distinguishes, the last result is returned, which is never
+    /// `proven`, so the attach gate fails closed.
+    static func firstDistinguishingIsolationProbe(
+        pairCount: Int,
+        attempt: (Int) async -> PagedKVRuntimeMoEProbeResult,
+        onIndistinguishable: (Int) -> Void = { _ in }
+    ) async -> PagedKVRuntimeMoEProbeResult? {
+        var last: PagedKVRuntimeMoEProbeResult?
+        for pairIndex in 0 ..< pairCount {
+            let result = await attempt(pairIndex)
+            last = result
+            guard isCleanIndistinguishableIsolationRun(result) else { return result }
+            onIndistinguishable(pairIndex)
+        }
+        return last
+    }
+
+    private static func isCleanIndistinguishableIsolationRun(_ result: PagedKVRuntimeMoEProbeResult) -> Bool {
+        !result.challengeDistinguishing
+            && !result.proven
+            && result.rowsDecodedInSharedForward == 2
+            && result.rowFailures == 0
+            && result.crossRowDivergences == 0
+    }
+
+    /// Upper bound for `mlx_cache_limit_mb` (1 TiB). Far above any Mac's
+    /// unified memory, and small enough that the byte conversion cannot overflow.
+    nonisolated static let maximumMLXCacheLimitMB = 1_048_576
+
+    nonisolated static func isValidMLXCacheLimitMB(_ megabytes: Int) -> Bool {
+        (0 ... maximumMLXCacheLimitMB).contains(megabytes)
+    }
+
+    /// Bounds MLX's buffer cache. Must run before the model loads; see
+    /// `AppConfig.mlxCacheLimitMB`. Serve startup rejects an out-of-range value
+    /// first (`isValidMLXCacheLimitMB`), so `nil` here only means "not set".
+    /// Returns the applied byte limit.
+    @discardableResult
+    nonisolated static func applyMLXCacheLimit(megabytes: Int?) -> Int? {
+        guard let megabytes, isValidMLXCacheLimitMB(megabytes) else { return nil }
+        let bytes = megabytes * 1024 * 1024
+        Memory.cacheLimit = bytes
+        return bytes
     }
 
     private static let pagedKVUnavailableCacheClass = "unavailable"
@@ -1703,6 +1849,24 @@ actor ModelRuntime: ModelRuntimeServing {
         return firstClass
     }
 
+    private nonisolated static func pagedKVCacheKinds(
+        model: any LanguageModel
+    ) -> [PagedKVSharedForwardBackend.CacheKind]? {
+        let caches = model.newCache(parameters: nil)
+        guard !caches.isEmpty else { return nil }
+        var kinds: [PagedKVSharedForwardBackend.CacheKind] = []
+        for cache in caches {
+            if cache is KVCacheSimple {
+                kinds.append(.pagedAttention)
+            } else if cache is MambaCache {
+                kinds.append(.recurrentMamba)
+            } else {
+                return nil
+            }
+        }
+        return kinds.contains(.pagedAttention) ? kinds : nil
+    }
+
     nonisolated static func pagedKVModelFamily(_ modelID: String?) -> String {
         let lower = modelID?.lowercased() ?? ""
         if lower.contains("qwen") { return "qwen" }
@@ -1749,10 +1913,19 @@ actor ModelRuntime: ModelRuntimeServing {
         modelID: String?,
         configJSONData: Data?
     ) -> PagedKVRuntimeModelCapabilities {
-        PagedKVRuntimeModelCapabilities(
+        let architectureVerified: Bool = {
+            guard modelID?.lowercased() == "qwen/qwen3.6-27b",
+                  let configJSONData,
+                  let object = try? JSONSerialization.jsonObject(with: configJSONData) as? [String: Any],
+                  let architectures = object["architectures"] as? [String]
+            else { return false }
+            return architectures.contains("Qwen3_5ForConditionalGeneration")
+        }()
+        return PagedKVRuntimeModelCapabilities(
             modelFamily: Self.pagedKVModelFamily(modelID: modelID, configJSONData: configJSONData),
             requiresMoEDispatch: (configJSONData.flatMap(Self.pagedKVConfigRequiresMoE) ?? false)
-                || Self.pagedKVModelIDLooksLikeExpertModel(modelID)
+                || Self.pagedKVModelIDLooksLikeExpertModel(modelID),
+            hybridDecoderArchitectureVerified: architectureVerified
         )
     }
 
@@ -1860,6 +2033,7 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch: Int = 1,
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
+        continuousBatchQueueWaitTimeoutMS: Int? = nil,
         continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage = .empty,
         continuousBatchingDurableReplayAuthorityAvailable: Bool = false,
         warmSwapEnabled: Bool = false,
@@ -1915,6 +2089,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
+        self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingDurableReplayAuthorityAvailable = false
         self.warmSwapEnabled = warmSwapEnabled
@@ -2038,6 +2213,7 @@ actor ModelRuntime: ModelRuntimeServing {
             backendOverride: self.testContinuousBatchingBackend,
             maxBatch: self.maxBatch,
             queueLimit: self.continuousBatchQueueLimit,
+            queueWaitTimeoutMS: self.continuousBatchQueueWaitTimeoutMS,
             maxContextTokens: self.maxContextTokens,
             modelID: modelID,
             modelSHA256: self.currentModelHash,
@@ -2115,6 +2291,7 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch: Int = 1,
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
+        continuousBatchQueueWaitTimeoutMS: Int? = nil,
         // Test-only init: mirrors `ContinuousBatchRuntimeReplayAuthority
         // .inMemoryForTests` — coverage is unrestricted unless a test asserts
         // on the FR-CB10 gate itself.
@@ -2244,6 +2421,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
+        self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingDurableReplayAuthorityAvailable = false
         self.warmSwapEnabled = warmSwapEnabled
@@ -2260,6 +2438,7 @@ actor ModelRuntime: ModelRuntimeServing {
             backend: continuousBatchingBackend,
             maxBatch: boundedMaxBatch,
             queueLimit: continuousBatchQueueLimit,
+            queueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
             maxContextTokens: self.maxContextTokens,
             modelID: modelID,
             modelSHA256: modelHash,
@@ -2281,7 +2460,16 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func currentSnapshot() async -> RuntimeSnapshot {
-        RuntimeSnapshot(
+        let capability = continuousBatchingCapability(draftConfigured: currentDraftModelID != nil)
+        let schedulerMetrics = await continuousBatchScheduler?.metrics()
+        let decisionLabel: String
+        switch pagedKVAttachDecision {
+        case .disabled: decisionLabel = "disabled"
+        case .attached: decisionLabel = "attached"
+        case .fallback(let reason): decisionLabel = "fallback_\(reason.rawValue)"
+        case .rejected(let reason): decisionLabel = "rejected_\(reason.rawValue)"
+        }
+        return RuntimeSnapshot(
             state: state,
             container: currentContainer,
             modelID: currentModelID,
@@ -2293,7 +2481,25 @@ actor ModelRuntime: ModelRuntimeServing {
             draftContainer: currentDraftContainer,
             numDraftTokens: currentDraftModelID == nil ? nil : numDraftTokens,
             templateSupportsThinkingToggle: currentTemplateSupportsThinkingToggle,
-            specDecodeGeneration: currentSpecDecodeGeneration
+            specDecodeGeneration: currentSpecDecodeGeneration,
+            continuousBatching: RuntimeContinuousBatchingSnapshot(
+                mode: continuousBatchingMode,
+                active: continuousBatchingMode != .off
+                    && capability.unsupportedReason == nil
+                    && continuousBatchScheduler != nil,
+                unsupportedReason: capability.unsupportedReason?.rawValue,
+                pagedKVDecision: decisionLabel,
+                cacheClass: pagedKVRuntimeCacheClass,
+                scheduler: schedulerMetrics.map {
+                    RuntimeContinuousBatchingSchedulerSnapshot(
+                        activeDecodeRows: $0.activeDecodeRows,
+                        waitingCount: $0.waitingCount,
+                        maxObservedBatchDepth: $0.maxObservedBatchDepth,
+                        slotsTotal: $0.slotsTotal,
+                        slotsFree: $0.slotsFree
+                    )
+                }
+            )
         )
     }
 
@@ -2961,12 +3167,26 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    /// Milliseconds → nanoseconds for the bounded admission wait. Absent or
+    /// non-positive falls back to the scheduler default rather than disabling
+    /// the bound: an unbounded serve-path queue wait is the defect AC-25 names.
+    private nonisolated static func queueWaitTimeoutNanoseconds(_ milliseconds: Int?) -> UInt64 {
+        guard let milliseconds, milliseconds > 0 else {
+            return ContinuousBatchSchedulerConfiguration.defaultQueueWaitTimeoutNanoseconds
+        }
+        // Serve startup rejects values above the maximum; clamp anyway so no
+        // path can turn an oversized value into an effectively unbounded wait.
+        let bounded = min(milliseconds, ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS)
+        return UInt64(bounded) * 1_000_000
+    }
+
     private nonisolated static func makeContinuousBatchScheduler(
         decision: PagedKVAttachDecision,
         tuple: ContinuousBatchingRequestedTuple?,
         backend: (any ContinuousBatchSchedulerBackend)?,
         maxBatch: Int,
         queueLimit: Int?,
+        queueWaitTimeoutMS: Int?,
         maxContextTokens: Int,
         modelID: String?,
         modelSHA256: String?,
@@ -3001,6 +3221,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 decodeHeadroomTokens: 1,
                 maxPromptChunkTokens: max(1, prefillStepSize),
                 tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
+                queueWaitTimeoutNanoseconds: Self.queueWaitTimeoutNanoseconds(queueWaitTimeoutMS),
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: modelID,
                     modelSHA256: modelSHA256,
@@ -3022,6 +3243,7 @@ actor ModelRuntime: ModelRuntimeServing {
         backendOverride: (any ContinuousBatchSchedulerBackend)?,
         maxBatch: Int,
         queueLimit: Int?,
+        queueWaitTimeoutMS: Int?,
         maxContextTokens: Int,
         modelID: String?,
         modelSHA256: String?,
@@ -3037,6 +3259,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 backend: backendOverride,
                 maxBatch: maxBatch,
                 queueLimit: queueLimit,
+                queueWaitTimeoutMS: queueWaitTimeoutMS,
                 maxContextTokens: maxContextTokens,
                 modelID: modelID,
                 modelSHA256: modelSHA256,
@@ -3047,28 +3270,37 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         guard case .attached(let descriptor) = decision,
               let container,
-              let layerCount = await pagedKVLayerCount(
-                  container: container,
-                  maxContextTokens: maxContextTokens,
-                  kvBitsOverride: kvBitsOverride,
-                  prefillStepSize: prefillStepSize
-              )
+              let cacheKinds = await pagedKVCacheKinds(container: container)
         else {
             return nil
         }
-        let contiguousCacheBridge = PagedKVRuntimeContiguousCacheBridge()
+        // Retained cross-turn KV cannot restore Qwen3.6's recurrent state.
+        // Mixed-cache batching is first-turn-only until that handoff exists.
+        let isHybrid = cacheKinds.contains(.recurrentMamba)
+        let contiguousCacheBridge = isHybrid ? nil : PagedKVRuntimeContiguousCacheBridge()
         return makeContinuousBatchScheduler(
             decision: decision,
             tuple: tuple,
             backend: PagedKVSharedForwardBackend(
                 container: container,
                 descriptor: descriptor,
-                layerCount: layerCount,
+                layerCount: cacheKinds.count,
+                cacheKinds: cacheKinds,
                 contiguousCacheBridge: contiguousCacheBridge,
-                compiledDecode: true
+                // Off on the serve path. A replayed `MLX.compile` step never
+                // re-runs `KVCacheSimple.update`'s Swift offset/grow logic, so
+                // every step after the trace writes the same KV slot at the
+                // same RoPE position: greedy rows loop on the prompt within a
+                // few tokens and fail `continuous_batching_invalid_cache_layout`
+                // once the traced buffer (seed + 256) is full. Measured on
+                // Studio 2026-09-24: signed 176, 181 and main all degenerate
+                // with this on and are coherent with it off. Applies to
+                // hybrid (Qwen3.6) and KV-only layouts alike.
+                compiledDecode: false
             ),
             maxBatch: maxBatch,
             queueLimit: queueLimit,
+            queueWaitTimeoutMS: queueWaitTimeoutMS,
             maxContextTokens: maxContextTokens,
             modelID: modelID,
             modelSHA256: modelSHA256,
@@ -3079,23 +3311,11 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
-    private static func pagedKVLayerCount(
-        container: ModelContainer,
-        maxContextTokens: Int,
-        kvBitsOverride: Int?,
-        prefillStepSize: Int
-    ) async -> Int? {
+    private static func pagedKVCacheKinds(
+        container: ModelContainer
+    ) async -> [PagedKVSharedForwardBackend.CacheKind]? {
         await container.perform { context in
-            let parameters = Self.makeServeGenerateParameters(
-                maxTokens: 1,
-                maxContextTokens: maxContextTokens,
-                kvBitsOverride: kvBitsOverride,
-                prefillStepSize: prefillStepSize,
-                temperature: 0,
-                topP: 1
-            )
-            let layerCount = context.model.newCache(parameters: Self.cacheParameters(parameters, forceSimpleKV: true)).count
-            return layerCount > 0 ? layerCount : nil
+            return Self.pagedKVCacheKinds(model: context.model)
         }
     }
 
@@ -3107,6 +3327,7 @@ actor ModelRuntime: ModelRuntimeServing {
             backendOverride: testContinuousBatchingBackend,
             maxBatch: maxBatch,
             queueLimit: continuousBatchQueueLimit,
+            queueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
             maxContextTokens: maxContextTokens,
             modelID: currentModelID,
             modelSHA256: currentModelHash,
@@ -3624,6 +3845,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private struct ContinuousBatchPreparedRequest: Sendable {
         let promptTokens: [Int]
         let stopTokenSequences: [[Int]]
+        let modelStopTokenIDs: Set<Int>
     }
 
     /// Tokenizer decode for CB streaming. Must not take `ModelContainer`:
@@ -3741,6 +3963,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxContextTokens = maxContextTokens
         let stopTokenFilter = stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
+        CBTrace.log(schedulerRequestID, "rt_cb_prepare")
         let prepared = try await container.perform { context -> ContinuousBatchPreparedRequest in
             try drainCancelled.check()
             try Task.checkCancellation()
@@ -3751,12 +3974,16 @@ actor ModelRuntime: ModelRuntimeServing {
             let lmInput = try await context.processor.prepare(input: input)
             let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
             try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
-            let stopTokenSequences = request.stop.map {
-                context.tokenizer.encode(text: $0, addSpecialTokens: false)
-            }.filter { !$0.isEmpty }
+            let stopTokenSequences = Self.continuousBatchStopTokenSequences(
+                requestStops: request.stop,
+                context: context
+            )
             return ContinuousBatchPreparedRequest(
                 promptTokens: promptTokens,
-                stopTokenSequences: stopTokenSequences
+                stopTokenSequences: stopTokenSequences,
+                modelStopTokenIDs: Self.generationStopTokenIDs(
+                    for: Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
+                )
             )
         }
 
@@ -3776,11 +4003,13 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBits: batchKVBits,
             allowRetainedPagedKVHandoff: true
         )
+        CBTrace.log(schedulerRequestID, "rt_cb_lease cached=\(lease?.cachedPromptTokens ?? -1)")
         if try await serialRouteCanaryCachedHitMissingRetainedHandoff(lease, capability: capability) {
             return nil
         }
         let result: ContinuousBatchSchedulerResult
         do {
+            CBTrace.log(schedulerRequestID, "rt_cb_submit")
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
                 try await scheduler.submit(ContinuousBatchSchedulerRequest(
                     id: schedulerRequestID,
@@ -3800,16 +4029,31 @@ actor ModelRuntime: ModelRuntimeServing {
             if let lease {
                 await conversationCache.abort(lease)
             }
-            throw error
+            // SPEC-038 AC-25: one shared scheduler-error map, so the
+            // non-streaming and streaming paths cannot drift.
+            CBTrace.log(schedulerRequestID, "rt_cb_threw \(type(of: error))")
+            throw (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error
         }
+        CBTrace.log(schedulerRequestID, "rt_cb_returned status=\(result.terminalStatus)")
         do {
             try drainCancelled.check()
             try Task.checkCancellation()
             if shouldCancel() { throw CancellationError() }
             guard result.terminalStatus == .stop || result.terminalStatus == .length else {
-                throw Self.attachedPagedKVUnavailableError(code: result.errorCode ?? "continuous_batching_request_failed")
+                throw Self.terminalFailureError(code: result.errorCode ?? "continuous_batching_request_failed")
             }
             let completionEndedAt = Date()
+            // The serial path discards the model's end-of-generation token
+            // before counting it; bill and cache the batched row the same way.
+            // Harmony `<|return|>`/`<|call|>` are excluded from this set, as
+            // they are from the serial stop set: the parser reads and counts them.
+            let generatedTokens = Self.droppingTrailingModelStop(
+                result.generatedTokens,
+                terminalStatus: result.terminalStatus,
+                modelStopTokenIDs: prepared.modelStopTokenIDs
+            )
+            let completionTokenCount = result.completionTokens
+                - (result.generatedTokens.count - generatedTokens.count)
             let completion = try await container.perform { context in
                 let decoded = context.tokenizer.decode(tokenIds: result.outputTokens)
                 guard decoded.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
@@ -3832,11 +4076,11 @@ actor ModelRuntime: ModelRuntimeServing {
                     : (filtered.hitStop ? "request_stop" : "stop")
                 let parsed = try Self.parseGeneratedOutput(
                     filteredText: filtered.text,
-                    generatedTokenIDs: result.generatedTokens,
+                    generatedTokenIDs: generatedTokens,
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     request: request,
                     mode: .complete(finishReason: parserFinishReason),
-                    defaultCompletionTokens: result.completionTokens,
+                    defaultCompletionTokens: completionTokenCount,
                     stopTokenFilter: stopTokenFilter,
                     requestStops: request.stop,
                     globalHitStop: filtered.hitStop
@@ -3879,7 +4123,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             await scheduler.discardRetainedCache(retained, conversationKey: key)
                         }
                     ),
-                    fullTokens: preparedPromptTokenIDs + result.generatedTokens.map(Int32.init)
+                    fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
                 await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
             } else if let retainedCache = result.retainedCache {
@@ -3951,14 +4195,18 @@ actor ModelRuntime: ModelRuntimeServing {
             let lmInput = try await context.processor.prepare(input: input)
             let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
             try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
-            let stopTokenSequences = requestStops.map {
-                context.tokenizer.encode(text: $0, addSpecialTokens: false)
-            }.filter { !$0.isEmpty }
+            let stopTokenSequences = Self.continuousBatchStopTokenSequences(
+                requestStops: requestStops,
+                context: context
+            )
             let tokenizer = context.tokenizer
             return (
                 ContinuousBatchPreparedRequest(
                     promptTokens: promptTokens,
-                    stopTokenSequences: stopTokenSequences
+                    stopTokenSequences: stopTokenSequences,
+                    modelStopTokenIDs: Self.generationStopTokenIDs(
+                    for: Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
+                )
                 ),
                 StreamingDetokenizer { tokenizer.decode(tokenIds: $0) }
             )
@@ -4018,22 +4266,13 @@ actor ModelRuntime: ModelRuntimeServing {
                     onChunk(.content(delta))
                 })
             }
-        } catch ContinuousBatchSchedulerError.backpressure {
-            if let lease {
-                await conversationCache.abort(lease)
-            }
-            throw APIError(
-                status: 503,
-                message: "Inference engine unavailable",
-                type: "server_error",
-                code: "continuous_batching_stream_backpressure",
-                inferenceRan: true
-            )
         } catch {
             if let lease {
                 await conversationCache.abort(lease)
             }
-            throw error
+            // SPEC-038 AC-25: one shared scheduler-error map, so the
+            // streaming and non-streaming paths cannot drift.
+            throw (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error
         }
         do {
             if let error = streamState.error() {
@@ -4043,9 +4282,20 @@ actor ModelRuntime: ModelRuntimeServing {
             try Task.checkCancellation()
             if shouldCancel() { throw CancellationError() }
             guard result.terminalStatus == .stop || result.terminalStatus == .length else {
-                throw Self.attachedPagedKVUnavailableError(code: result.errorCode ?? "continuous_batching_request_failed")
+                throw Self.terminalFailureError(code: result.errorCode ?? "continuous_batching_request_failed")
             }
             let completionEndedAt = Date()
+            // The serial path discards the model's end-of-generation token
+            // before counting it; bill and cache the batched row the same way.
+            // Harmony `<|return|>`/`<|call|>` are excluded from this set, as
+            // they are from the serial stop set: the parser reads and counts them.
+            let generatedTokens = Self.droppingTrailingModelStop(
+                result.generatedTokens,
+                terminalStatus: result.terminalStatus,
+                modelStopTokenIDs: prepared.modelStopTokenIDs
+            )
+            let completionTokenCount = result.completionTokens
+                - (result.generatedTokens.count - generatedTokens.count)
             let completion = try await container.perform { context in
                 let decoded = context.tokenizer.decode(tokenIds: result.outputTokens)
                 guard decoded.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
@@ -4068,11 +4318,11 @@ actor ModelRuntime: ModelRuntimeServing {
                     : (filtered.hitStop ? "request_stop" : "stop")
                 let parsed = try Self.parseGeneratedOutput(
                     filteredText: filtered.text,
-                    generatedTokenIDs: result.generatedTokens,
+                    generatedTokenIDs: generatedTokens,
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     request: request,
                     mode: .complete(finishReason: parserFinishReason),
-                    defaultCompletionTokens: result.completionTokens,
+                    defaultCompletionTokens: completionTokenCount,
                     stopTokenFilter: stopTokenFilter,
                     requestStops: requestStops,
                     globalHitStop: filtered.hitStop
@@ -4120,7 +4370,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             await scheduler.discardRetainedCache(retained, conversationKey: key)
                         }
                     ),
-                    fullTokens: preparedPromptTokenIDs + result.generatedTokens.map(Int32.init)
+                    fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
                 await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
             } else if let retainedCache = result.retainedCache {
@@ -4144,6 +4394,20 @@ actor ModelRuntime: ModelRuntimeServing {
             }
             throw error
         }
+    }
+
+    /// SPEC-038 AC-25: a non-terminal scheduler *result*, as distinct from a
+    /// thrown scheduler error. Most carried codes are pre-inference, so they
+    /// take the `inferenceRan: false` shape. The one that is not is
+    /// post-token delivery backpressure — the row was decoding and the buyer
+    /// may already hold partial output — so it reuses the single
+    /// `.deliveryBackpressure` mapping rather than a second, divergent copy.
+    private nonisolated static func terminalFailureError(code: String) -> APIError {
+        if code == ContinuousBatchSchedulerError.deliveryBackpressureCode,
+           let mapped = ContinuousBatchSchedulerError.deliveryBackpressure.asAPIError() {
+            return mapped
+        }
+        return attachedPagedKVUnavailableError(code: code)
     }
 
     private nonisolated static func attachedPagedKVUnavailableError(code: String) -> APIError {
@@ -4316,6 +4580,7 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try drainCancelled.check()
+        CBTrace.log(request.requestID, "rt_complete_enter")
         if let completion = try await attachedContinuousBatchCompletion(
             request: request,
             snapshot: snapshot,
@@ -4326,6 +4591,7 @@ actor ModelRuntime: ModelRuntimeServing {
         ) {
             return (completion, snapshot)
         }
+        CBTrace.log(request.requestID, "rt_serial_path")
         if speculativeCacheWrapValidated,
            let testSpeculativeCompletion,
            Self.speculativeRoute(
@@ -4755,6 +5021,35 @@ actor ModelRuntime: ModelRuntimeServing {
         } catch {
             throw SpeculativeGenerationFailure(reason: "generation_threw")
         }
+    }
+
+    /// Stop sequences for a batched row: the model's end-of-generation
+    /// tokens plus the buyer's `stop` strings. The scheduler stops a row only
+    /// on these, so omitting the model EOS set made every batched row run to
+    /// `max_tokens` and emit text past the end of the answer, where the serial
+    /// path stops on `generationStopTokenIDs`.
+    static func continuousBatchStopTokenSequences(
+        requestStops: [String],
+        context: ModelContext
+    ) -> [[Int]] {
+        let modelStops = generationStopTokenIDs(for: context).sorted().map { [$0] }
+        let buyerStops = requestStops.map {
+            context.tokenizer.encode(text: $0, addSpecialTokens: false)
+        }.filter { !$0.isEmpty }
+        return modelStops + buyerStops
+    }
+
+    static func droppingTrailingModelStop(
+        _ generatedTokens: [Int],
+        terminalStatus: ContinuousBatchSchedulerTerminalStatus,
+        modelStopTokenIDs: Set<Int>
+    ) -> [Int] {
+        guard terminalStatus == .stop,
+              let last = generatedTokens.last,
+              modelStopTokenIDs.contains(last) else {
+            return generatedTokens
+        }
+        return Array(generatedTokens.dropLast())
     }
 
     private static func generationStopTokenIDs(for context: ModelContext) -> Set<Int> {

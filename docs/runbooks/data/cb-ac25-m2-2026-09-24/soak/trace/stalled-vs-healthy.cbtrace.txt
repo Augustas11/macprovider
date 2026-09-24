@@ -1,0 +1,37 @@
+cbtrace t=439649307 rid=ac25-1d336001-c5d-fill6 ev=http_task_start
+cbtrace t=439649307 rid=ac25-1d336001-c5d-fill6 ev=http_handle
+cbtrace t=439649307 rid=ac25-1d336001-c5d-fill6 ev=http_provider_admitted
+cbtrace t=439649307 rid=ac25-1d336001-c5d-fill6 ev=http_runtime_call
+cbtrace t=439649307 rid=ac25-1d336001-c5d-fill6 ev=rt_complete_enter
+cbtrace t=439649307 rid=ac25-1d336001-c5d-fill6 ev=rt_cb_prepare
+cbtrace t=439649307 rid=ac25-1d336001-c5d-fill6 ev=rt_cb_lease cached=-1
+cbtrace t=439649307 rid=ac25-1d336001-c5d-fill6 ev=rt_cb_submit
+cbtrace t=439649307 rid=ac25-1d336001-c5d-fill6 ev=sch_submit seq=770 cur=770 active=0
+cbtrace t=439649307 rid=ac25-1d336001-c5d-fill6 ev=sch_bindings
+cbtrace t=439649307 rid=ac25-1d336001-c5d-fill6 ev=sch_turn
+cbtrace t=439649308 rid=ac25-1d336001-c5d-fill6 ev=sch_enqueued waiting=1 active=0
+cbtrace t=439649338 rid=ac25-1d336001-c5d-fill6 ev=sch_active
+cbtrace t=439649381 rid=ac25-1d336001-c5d-fill6 ev=sch_active
+cbtrace t=439649381 rid=ac25-1d336001-c5d-fill6 ev=sch_active
+cbtrace t=439649381 rid=ac25-1d336001-c5d-fill6 ev=sch_complete status=stop waiters=1 stopping=false
+cbtrace t=439649381 rid=ac25-1d336001-c5d-fill6 ev=sch_ftd delivered=true remaining=0
+cbtrace t=439649382 rid=ac25-1d336001-c5d-fill6 ev=sch_resumed
+cbtrace t=439649382 rid=ac25-1d336001-c5d-fill6 ev=rt_cb_returned status=stop
+cbtrace t=439649382 rid=ac25-1d336001-c5d-fill6 ev=http_runtime_returned
+cbtrace t=439649382 rid=ac25-1d336001-c5d-fill7 ev=http_task_start
+cbtrace t=439649382 rid=ac25-1d336001-c5d-fill7 ev=http_handle
+cbtrace t=439649382 rid=ac25-1d336001-c5d-fill7 ev=http_provider_admitted
+cbtrace t=439649382 rid=ac25-1d336001-c5d-fill7 ev=http_runtime_call
+cbtrace t=439649382 rid=ac25-1d336001-c5d-fill7 ev=rt_complete_enter
+cbtrace t=439649382 rid=ac25-1d336001-c5d-fill7 ev=rt_cb_prepare
+cbtrace t=439649382 rid=ac25-1d336001-c5d-fill7 ev=rt_cb_lease cached=-1
+cbtrace t=439649382 rid=ac25-1d336001-c5d-fill7 ev=rt_cb_submit
+cbtrace t=439649382 rid=ac25-1d336001-c5d-fill7 ev=sch_submit seq=771 cur=771 active=0
+cbtrace t=439649382 rid=ac25-1d336001-c5d-fill7 ev=sch_bindings
+cbtrace t=439649382 rid=ac25-1d336001-c5d-fill7 ev=sch_turn
+cbtrace t=439649383 rid=ac25-1d336001-c5d-fill7 ev=sch_enqueued waiting=1 active=0
+cbtrace t=439649413 rid=ac25-1d336001-c5d-fill7 ev=sch_active
+cbtrace t=439649456 rid=ac25-1d336001-c5d-fill7 ev=sch_active
+cbtrace t=439649456 rid=ac25-1d336001-c5d-fill7 ev=sch_active
+cbtrace t=439649456 rid=ac25-1d336001-c5d-fill7 ev=sch_active
+cbtrace t=439649456 rid=ac25-1d336001-c5d-fill7 ev=sch_complete status=stop waiters=1 stopping=false

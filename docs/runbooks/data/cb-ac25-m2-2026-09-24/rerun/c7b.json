@@ -1,0 +1,27 @@
+{
+ "case": "c7b",
+ "run": "37aa1805",
+ "result": {
+  "disconnect": {
+   "rid": "ac25-37aa1805-c7b",
+   "bytes_before_close": 1373,
+   "saw_visible_token_before_close": true,
+   "closed_after_s": 0.435
+  },
+  "probe": {
+   "rid": "ac25-37aa1805-c7b-probe",
+   "status": 200,
+   "stream": false,
+   "elapsed_s": 0.164,
+   "headers_present": [],
+   "retry_after_header": null,
+   "finish_reason": "length",
+   "content_len": 8,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 8
+   },
+   "response_id": "chatcmpl-36ed8480fe01492fbaa1e27d5660f9c6"
+  }
+ }
+}

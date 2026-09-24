@@ -1,0 +1,55 @@
+{
+ "case": "c12n",
+ "run": "3113f1a8",
+ "result": [
+  {
+   "rid": "ac25-3113f1a8-c12n-A",
+   "status": 200,
+   "stream": false,
+   "elapsed_s": 18.604,
+   "headers_present": [],
+   "retry_after_header": null,
+   "finish_reason": "length",
+   "content_len": 1024,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 1024
+   },
+   "response_id": "chatcmpl-34aff2ffbf7f47a99da110f767aab1b0"
+  },
+  {
+   "rid": "ac25-3113f1a8-c12n-B",
+   "status": 503,
+   "stream": false,
+   "elapsed_s": 3.149,
+   "headers_present": [
+    "retry-after"
+   ],
+   "retry_after_header": "3",
+   "error": {
+    "code": "continuous_batching_queue_wait_timeout",
+    "type": "server_error",
+    "retryable": true,
+    "inference_ran": false,
+    "settlement_ran": false
+   }
+  },
+  {
+   "rid": "ac25-3113f1a8-c12n-C",
+   "status": 503,
+   "stream": false,
+   "elapsed_s": 0.023,
+   "headers_present": [
+    "retry-after"
+   ],
+   "retry_after_header": "3",
+   "error": {
+    "code": "continuous_batching_stream_backpressure",
+    "type": "server_error",
+    "retryable": true,
+    "inference_ran": false,
+    "settlement_ran": false
+   }
+  }
+ ]
+}

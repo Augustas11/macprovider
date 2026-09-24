@@ -65,6 +65,10 @@ for value in (
 ):
     if value not in build:
         raise SystemExit(f"candidate Pearl Go parity guard is incomplete: {value}")
+if 'bash control/scripts/verify-app-build-inputs.sh "$CANDIDATE_COMMIT" candidate' not in build:
+    raise SystemExit("candidate dependency pins must be checked by the main-owned verifier")
+if re.search(r'(^|[\s"\'/])candidate/scripts/verify-', workflow, re.M):
+    raise SystemExit("acceptance workflow executes a candidate-owned verifier as a guard")
 if "environment: production-release" not in protected:
     raise SystemExit("protected signer lacks the production-release environment gate")
 permissions = protected.split("    steps:\n", 1)[0]

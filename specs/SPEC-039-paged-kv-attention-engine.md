@@ -1,7 +1,12 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.3
-Status: draft (normative design). v0.1.3 clarifies that gather-feeds-SDPA is
+Version: v0.1.5
+Status: draft (normative design). v0.1.5 names how the FR-PKV13 overhead
+ceiling gates real traffic: through SPEC-038 FR-CB10 acceptance coverage bound
+to the measured runtime revision. v0.1.4 admits only the measured Qwen3.6
+mixed layout for first-turn batching: recurrent Mamba state remains row-local
+and only full-attention KV is paged. It does not authorize sliding-window
+attention or retained hybrid cross-turn state. v0.1.3 clarifies that gather-feeds-SDPA is
 the parity/correctness scaffold and default fail-safe proof path, not by
 itself a production-throughput claim for continuous batching; real serving
 enablement must pass the FR-PKV13 overhead ceiling and SPEC-038 real-serving
@@ -535,9 +540,19 @@ all runtime measurement gates pass.
 At model attach, the engine MUST inspect the runtime `newCache()` class and the
 `kv_bits` setting against a **paged allowlist**. The v1 allowlist is:
 **non-rotating contiguous `KVCacheSimple`-equivalent, fp16, `kv_bits` unset.**
+The sole mixed-layout exception requires the exact `qwen/qwen3.6-27b` serving
+identity, `Qwen3_5ForConditionalGeneration` in the artifact's `config.json`
+architectures, and a runtime cache topology measured as `MambaCache` on
+recurrent layers and `KVCacheSimple` on full-attention layers. The engine MUST preserve each row's
+Mamba convolution and delta state independently, page only attention KV, and
+pass token-parity and multi-step batched row-isolation gates, including row
+leave and join, before advertising
+the exact tuple. This exception covers first-turn/cache-miss requests only;
+retained or positive-cache-credit hybrid requests MUST stay on the serial path
+until recurrent-state handoff has its own reviewed proof.
 A model whose runtime cache class is **not** on the allowlist — enumerated
 non-allowlisted classes include `RotatingKVCache` (sliding-window),
-`CacheList` (hybrid), and `QuantizedKVCache` — MUST **fail safe to the stock
+`CacheList` (unproven hybrid), and `QuantizedKVCache` — MUST **fail safe to the stock
 contiguous path** with an **observable reason code** (`paged_fallback_cache_class`,
 FR-PKV7), logged **once at attach**. Paged mode MUST NOT be advertised in the
 FR-PKV11 descriptor for a non-allowlisted class.
@@ -600,6 +615,17 @@ the values are IMPL-set**, exactly as FR-PKV2's capacity bound is:
 These are normative define-and-record obligations; the specific byte and
 percentage values are chosen by the IMPL against real evidence and recorded in
 diagnostics and acceptance fixtures.
+
+The overhead ceiling is enforced per tuple through SPEC-038 FR-CB10 acceptance
+coverage, not by a startup micro-benchmark. A throughput measurement at
+process start is too short and too noisy to gate on, and a false failure would
+turn batching off at random. The ceiling MUST be measured on the packaged
+build, serial versus batched in the same window on the same hardware, before
+the operator records acceptance for that tuple. Acceptance coverage binds the
+runtime revision (Metal library SHA-256 and paged-KV kernel identifier). A path
+that has not met the ceiling on that revision has no acceptance, so it
+serial-routes in canary and fails closed in strict `on`. A new runtime revision
+must re-measure before it can serve batched traffic.
 
 ### FR-PKV14 — operator configuration surface (SPEC-039-R014)
 
@@ -748,8 +774,9 @@ The implementation PR for this SPEC MUST include fixtures that prove:
 - No attention-time peak-memory-reduction claim from the v0.1
   gather-feeds-SDPA path (it materializes a transient contiguous copy per op).
 - No serving a non-allowlisted cache class (`RotatingKVCache`/sliding-window,
-  `CacheList`/hybrid, `QuantizedKVCache`) in paged mode; attach fails safe to
-  stock contiguous.
+  `CacheList`/unproven hybrid, `QuantizedKVCache`) in paged mode; attach fails
+  safe to stock contiguous. The measured Qwen3.6 first-turn exception in
+  FR-PKV12 does not authorize retained recurrent state or other hybrids.
 - No global, cross-conversation, or buyer-visible KV block sharing
   (same-conversation retain/reattach is in scope, FR-PKV10).
 - No salted-prefix, cross-buyer, cross-account, or content-addressed prefix
@@ -770,8 +797,9 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   `mlx-swift-lm` fork.
 - Paged quantized KV remains a future numerical surface if the provider later
   enables `kvBits` in production.
-- Sliding-window/hybrid cache support remains future work; v0.1 admits only
-  full-context, non-rotating `KVCacheSimple`-equivalent fp16 caches. The
+- Sliding-window and general hybrid cache support remain future work; v0.1.4
+  admits only full-context, non-rotating `KVCacheSimple`-equivalent fp16 caches
+  plus the narrow measured Qwen3.6 first-turn exception in FR-PKV12. The
   existing uncapped attach probe prevents false rejection of full-context
   models capped for memory, but it does not authorize genuine sliding-window
   paged attention.

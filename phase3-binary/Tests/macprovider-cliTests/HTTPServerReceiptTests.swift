@@ -190,11 +190,15 @@ final class HTTPServerReceiptTests: XCTestCase {
         let parsed = try parseReceiptHeader(receipt, publicKey: key.publicKey)
 
         XCTAssertEqual(response.status, .ok, response.body)
+        // `Retry-After` is declared on every SSE head (SPEC-038 `:614`): a
+        // stream can end in a queue-pressure error long after the head is
+        // committed, and an undeclared trailer is one a reader may drop.
         XCTAssertEqual(response.headers.first(name: "trailer"), [
             RouterHandler.receiptHeaderName,
             RouterHandler.receiptTerminalStateTSHeaderName,
             RouterHandler.receiptPendingDeadlineHeaderName,
             RouterHandler.lateReceiptSettlementHeaderName,
+            "Retry-After",
         ].joined(separator: ", "))
         XCTAssertTrue(response.body.contains("data: [DONE]"), response.body)
         XCTAssertEqual(parsed.tuple["receipt_version"] as? String, "4")

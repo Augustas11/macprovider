@@ -1,0 +1,71 @@
+{
+ "case": "c12s",
+ "run": "a6116076",
+ "result": [
+  {
+   "rid": "ac25-a6116076-c12s-A",
+   "status": 200,
+   "stream": true,
+   "elapsed_s": 18.509,
+   "headers_present": [],
+   "retry_after_header": null,
+   "sse_frames": 1028,
+   "done": true,
+   "content_frames": 1024,
+   "error_frames": [],
+   "finish_reasons": [
+    "length"
+   ],
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 1024
+   }
+  },
+  {
+   "rid": "ac25-a6116076-c12s-B",
+   "status": 200,
+   "stream": true,
+   "elapsed_s": 3.224,
+   "headers_present": [],
+   "retry_after_header": null,
+   "sse_frames": 3,
+   "done": true,
+   "content_frames": 0,
+   "error_frames": [
+    {
+     "code": "continuous_batching_queue_wait_timeout",
+     "type": "server_error",
+     "retryable": true,
+     "retry_after": 3,
+     "inference_ran": false,
+     "settlement_ran": false
+    }
+   ],
+   "finish_reasons": [],
+   "usage": null
+  },
+  {
+   "rid": "ac25-a6116076-c12s-C",
+   "status": 200,
+   "stream": true,
+   "elapsed_s": 0.053,
+   "headers_present": [],
+   "retry_after_header": null,
+   "sse_frames": 3,
+   "done": true,
+   "content_frames": 0,
+   "error_frames": [
+    {
+     "code": "continuous_batching_stream_backpressure",
+     "type": "server_error",
+     "retryable": true,
+     "retry_after": 3,
+     "inference_ran": false,
+     "settlement_ran": false
+    }
+   ],
+   "finish_reasons": [],
+   "usage": null
+  }
+ ]
+}

@@ -1,0 +1,6 @@
+source_commit=9352703823dad9f16af4a733a68b3c6d38c07a0d
+binary_sha256=4a61ac362e8702d53aeff816aebb2fa4d248dc3c4a97caa3c0e5e0bc514b6e2d
+metallib_sha256=84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf
+host=Apple M3 Ultra ram_bytes=274877906944 macos=26.4.1
+started_utc=2026-09-23T23:34:15Z
+finished_utc=2026-09-23T23:36:52Z

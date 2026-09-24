@@ -1,0 +1,36 @@
+{
+ "case": "c5b",
+ "run": "01f52a1c",
+ "result": [
+  {
+   "rid": "ac25-01f52a1c-c5b",
+   "status": 200,
+   "stream": false,
+   "elapsed_s": 0.431,
+   "headers_present": [],
+   "retry_after_header": null,
+   "finish_reason": "length",
+   "content_len": 16,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 16
+   },
+   "response_id": "chatcmpl-6a32c16c39274885acf487a1ee04d7a7"
+  },
+  {
+   "rid": "ac25-01f52a1c-c5b",
+   "status": 409,
+   "stream": false,
+   "elapsed_s": 0.001,
+   "headers_present": [],
+   "retry_after_header": null,
+   "error": {
+    "code": "continuous_batching_duplicate_request_mismatch",
+    "type": "invalid_request_error",
+    "retryable": false,
+    "inference_ran": false,
+    "settlement_ran": false
+   }
+  }
+ ]
+}

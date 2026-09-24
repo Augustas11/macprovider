@@ -396,6 +396,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Bounded continuous-batching waiting queue limit. Default 2 * active slots. Overrides MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT and config key continuous_batch_queue_limit.")
     var continuousBatchQueueLimit: Int?
 
+    @Option(help: "Bounded continuous-batching admission wait in milliseconds. Default 30000. A request still queued when it expires is rejected pre-admission and never settles. Overrides MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS and config key continuous_batch_queue_wait_timeout_ms.")
+    var continuousBatchQueueWaitTimeoutMS: Int?
+
     // SPEC-037 FR-KVP11 — encrypted KV survival disk-tier CLI flags (MEDIUM-5). Each is
     // an Optional so absence defers to the environment / YAML / default; the resolver
     // (KVDiskCacheConfigResolver) applies CLI-wins precedence and fails closed on any
@@ -669,6 +672,23 @@ struct ServeCommand: AsyncParsableCommand {
                 ).utf8))
                 throw ExitCode(2)
             }
+        }
+        // Validated whether or not batching is on: a supplied value that cannot
+        // be applied must stop startup, never fall back to MLX's unbounded
+        // default cache or an effectively unbounded admission wait.
+        if let cacheLimitMB = resolved.mlxCacheLimitMB,
+           !ModelRuntime.isValidMLXCacheLimitMB(cacheLimitMB) {
+            FileHandle.standardError.write(Data((
+                "mlx_cache_limit_mb \(cacheLimitMB) must be in 0...\(ModelRuntime.maximumMLXCacheLimitMB)\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
+        if let queueWaitTimeoutMS = resolved.continuousBatchQueueWaitTimeoutMS,
+           !(1 ... ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS).contains(queueWaitTimeoutMS) {
+            FileHandle.standardError.write(Data((
+                "--continuous-batch-queue-wait-timeout-ms \(queueWaitTimeoutMS) must be in 1...\(ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS)\n"
+            ).utf8))
+            throw ExitCode(2)
         }
         if let draftModel = resolved.draftModel,
            draftModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1559,6 +1579,21 @@ struct ServeCommand: AsyncParsableCommand {
         isolateLifecycle && isLoopbackCoordinatorURL(coordinatorURL)
     }
 
+    /// The isolated lab join skips the catalog preflight (`relaxesJoinAdmissionForLab`),
+    /// so it can never present the catalog envelope the buyer-serving
+    /// readiness gate requires. Waive only that gate, only for that join.
+    static func waivesLabLoopbackCatalogReadiness(
+        isolateLifecycle: Bool,
+        credentialStore: ProviderCredentialStoreKind,
+        coordinatorURL: String?,
+        hasCatalogTrust: Bool
+    ) -> Bool {
+        isolateLifecycle
+            && credentialStore == .protectedFile
+            && relaxesJoinAdmissionForLab(isolateLifecycle: isolateLifecycle, coordinatorURL: coordinatorURL)
+            && !hasCatalogTrust
+    }
+
     static func isLoopbackCoordinatorURL(_ raw: String?) -> Bool {
         guard let raw, let url = URL(string: raw), let host = url.host?.lowercased(), !host.isEmpty else {
             return false
@@ -1611,6 +1646,7 @@ struct ServeCommand: AsyncParsableCommand {
                 kvDiskCache: kvDiskCacheCLIOverrides,
                 continuousBatching: continuousBatching,
                 continuousBatchQueueLimit: continuousBatchQueueLimit,
+                continuousBatchQueueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
                 pagedKV: pagedKVCLIOverrides
             )
         )
@@ -2066,6 +2102,9 @@ struct ServeCommand: AsyncParsableCommand {
                 )
             } else {
                 helloRuntimeSource = nil
+                if let applied = ModelRuntime.applyMLXCacheLimit(megabytes: resolved.mlxCacheLimitMB) {
+                    FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
+                }
                 modelRuntime = try await ModelRuntime(
                     modelID: resolved.model,
                     modelLoadPath: resolved.modelArtifactPath,
@@ -2080,6 +2119,7 @@ struct ServeCommand: AsyncParsableCommand {
                     maxBatch: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
                     continuousBatchingMode: resolved.continuousBatching,
                     continuousBatchQueueLimit: resolved.continuousBatchQueueLimit,
+                    continuousBatchQueueWaitTimeoutMS: resolved.continuousBatchQueueWaitTimeoutMS,
                     continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage(
                         acceptedTuples: resolved.continuousBatchingAcceptedTuples
                     ),
@@ -2464,6 +2504,12 @@ struct ServeCommand: AsyncParsableCommand {
                 providerAdmissionRecovery: providerAdmissionRecovery,
                 commitAdmissionIdentityPublicKey: commitAdmissionIdentityPublicKey,
                 receiptBuilder: receiptRuntime.builder,
+                labLoopbackCatalogReadinessWaived: Self.waivesLabLoopbackCatalogReadiness(
+                    isolateLifecycle: isolateLifecycle,
+                    credentialStore: resolved.credentialStore,
+                    coordinatorURL: resolved.coordinatorURL,
+                    hasCatalogTrust: startupPreflight.catalogTrust != nil
+                ),
                 catalogReleaseID: startupPreflight.catalogTrust?.releaseID,
                 catalogPolicyVersion: startupPreflight.catalogTrust?.policyVersion,
                 catalogCandidateSHA256: startupPreflight.catalogTrust?.digest,
@@ -3664,6 +3710,7 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  max_batch: \(config.maxConcurrencyOverride.map(String.init) ?? "1")")
     print("  continuous_batching: \(config.continuousBatching.rawValue)")
     print("  continuous_batch_queue_limit: \(config.continuousBatchQueueLimit.map(String.init) ?? "<unset, 2 * max_batch>")")
+    print("  continuous_batch_queue_wait_timeout_ms: \(config.continuousBatchQueueWaitTimeoutMS.map(String.init) ?? "<unset, 30000>")")
     print("  enable_receipts: \(config.enableReceipts)")
     print("  relay_blind_enabled: \(config.relayBlindEnabled)")
     print("  idle_prewarm.enabled: \(config.idlePrewarmEnabled)")

@@ -1,0 +1,35 @@
+{
+ "case": "c4",
+ "result": [
+  {
+   "rid": "ac25-96c18c11-c4-temp",
+   "trigger": "temperature_0.7",
+   "status": 200,
+   "finish_reason": "length",
+   "usage": {
+    "prompt_tokens": 13,
+    "completion_tokens": 32
+   }
+  },
+  {
+   "rid": null,
+   "trigger": "no_request_id",
+   "status": 200,
+   "finish_reason": "length",
+   "usage": {
+    "prompt_tokens": 13,
+    "completion_tokens": 32
+   }
+  },
+  {
+   "rid": "ac25-96c18c11-c4-batched",
+   "trigger": "keyed_greedy_control",
+   "status": 200,
+   "finish_reason": "length",
+   "usage": {
+    "prompt_tokens": 13,
+    "completion_tokens": 32
+   }
+  }
+ ]
+}

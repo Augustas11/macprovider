@@ -314,3 +314,25 @@ func (s *Store) TpmTimeseries(ctx context.Context) ([]TimeseriesRow, error) {
 	}
 	return out, rows.Err()
 }
+
+func (s *Store) DailyTimeseries(ctx context.Context) ([]TimeseriesRow, error) {
+	const q = `
+        SELECT day_start, requests, input_tokens, output_tokens
+          FROM stats_timeseries_daily
+         ORDER BY day_start
+    `
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("daily select: %w", err)
+	}
+	defer rows.Close()
+	var out []TimeseriesRow
+	for rows.Next() {
+		var t TimeseriesRow
+		if err := rows.Scan(&t.Bucket, &t.Value, &t.InTok, &t.OutTok); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}

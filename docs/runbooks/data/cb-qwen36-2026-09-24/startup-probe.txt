@@ -1,0 +1,5 @@
+[paged-kv] batched-isolation model=qwen/qwen3.6-27b challenge pair 0 not distinguishing; trying next
+[paged-kv] batched-isolation model=qwen/qwen3.6-27b challenge pair 1 not distinguishing; trying next
+[paged-kv] parity model=qwen/qwen3.6-27b established=true nLayers=16 nNew=32 gatherKernelCalls=1024 expectCalls=1024 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-27b requiresMoE=false proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=qwen/qwen3.6-27b

@@ -117,8 +117,9 @@ type overviewCapacityEstimateSources struct {
 }
 
 type overviewTimeseries struct {
-	Rpm30m timeseriesRpm `json:"rpm_30m"`
-	Tpm30m timeseriesTpm `json:"tpm_30m"`
+	Rpm30m   timeseriesRpm   `json:"rpm_30m"`
+	Tpm30m   timeseriesTpm   `json:"tpm_30m"`
+	Daily90d timeseriesDaily `json:"daily_90d"`
 }
 
 type overviewIdlePrewarmSummary struct {
@@ -155,6 +156,18 @@ type tpmPoint struct {
 	OutputTokens *int64 `json:"output_tokens"`
 }
 
+type timeseriesDaily struct {
+	Bucket string       `json:"bucket"`
+	Points []dailyPoint `json:"points"`
+}
+
+type dailyPoint struct {
+	T            string `json:"t"`
+	Requests     int64  `json:"requests"`
+	InputTokens  int64  `json:"input_tokens"`
+	OutputTokens int64  `json:"output_tokens"`
+}
+
 // handleOverview implements §5.1.
 //
 // The stale-503 check has already passed in the mux's
@@ -178,6 +191,11 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request, ar auth
 	tpm, err := h.Store.TpmTimeseries(ctx)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, codeInternal, "tpm read failed", now, nil)
+		return
+	}
+	daily, err := h.Store.DailyTimeseries(ctx)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "daily read failed", now, nil)
 		return
 	}
 
@@ -236,6 +254,10 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request, ar auth
 				BucketSeconds: 60,
 				Points:        alignTpmPoints(tpm, ov.GeneratedAt),
 			},
+			Daily90d: timeseriesDaily{
+				Bucket: "1d",
+				Points: dailyPoints(daily),
+			},
 		},
 		IdlePrewarm: overviewIdlePrewarmSummary{
 			PoolPctWithB1Active: ov.IdlePrewarm.PoolPctWithB1Active,
@@ -247,6 +269,19 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request, ar auth
 		"public, max-age=30, s-maxage=30, stale-while-revalidate=60",
 		varyForPublic(),
 		ar)
+}
+
+func dailyPoints(rows []store.TimeseriesRow) []dailyPoint {
+	out := make([]dailyPoint, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, dailyPoint{
+			T:            row.Bucket.UTC().Format("2006-01-02"),
+			Requests:     row.Value,
+			InputTokens:  row.InTok,
+			OutputTokens: row.OutTok,
+		})
+	}
+	return out
 }
 
 // alignRpmPoints builds the 30-element timestamped points array
