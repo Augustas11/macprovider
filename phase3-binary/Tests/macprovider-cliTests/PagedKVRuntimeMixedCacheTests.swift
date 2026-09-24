@@ -253,6 +253,32 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         XCTAssertNil(noneSerial)
     }
 
+    /// Pure layout gate for a hybrid checkpoint install; needs no Metal.
+    func testRecurrentCheckpointLayoutValidationRejectsMalformedState() {
+        typealias Slot = RecurrentStateSlotLayout
+        let conv = Slot(shape: [1, 3, 64], dtype: .bfloat16)
+        let ssm = Slot(shape: [1, 4, 16, 16], dtype: .float32)
+        let recurrent = [0, 2]
+        func valid(_ layouts: [Int: [Slot]]) -> Bool {
+            PagedKVSharedForwardBackend.recurrentCheckpointLayoutIsValid(layouts, recurrentLayerIndices: recurrent)
+        }
+        XCTAssertTrue(valid([0: [conv, ssm], 2: [conv, ssm]]))
+        XCTAssertFalse(valid([0: [conv], 2: [conv]]), "slot count below MambaCache's")
+        XCTAssertFalse(valid([0: [conv, ssm, ssm], 2: [conv, ssm, ssm]]), "slot count above MambaCache's")
+        XCTAssertFalse(valid([0: [Slot(shape: [3], dtype: .float32), ssm], 2: [Slot(shape: [3], dtype: .float32), ssm]]), "rank below 2")
+        XCTAssertFalse(valid([0: [Slot(shape: [2, 3, 64], dtype: .bfloat16), ssm], 2: [Slot(shape: [2, 3, 64], dtype: .bfloat16), ssm]]), "batch dimension must be 1")
+        XCTAssertFalse(valid([0: [Slot(shape: [1, 0, 64], dtype: .bfloat16), ssm], 2: [Slot(shape: [1, 0, 64], dtype: .bfloat16), ssm]]), "empty dimension")
+        for dtype in [DType.int32, .uint8, .bool, .complex64] {
+            let bad = Slot(shape: [1, 3, 64], dtype: dtype)
+            XCTAssertFalse(valid([0: [bad, ssm], 2: [bad, ssm]]), "dtype \(dtype)")
+        }
+        XCTAssertFalse(valid([0: [conv, ssm], 2: [Slot(shape: [1, 3, 32], dtype: .bfloat16), ssm]]), "shape differs across recurrent layers")
+        XCTAssertFalse(valid([0: [conv, ssm], 2: [Slot(shape: [1, 3, 64], dtype: .float16), ssm]]), "dtype differs across recurrent layers")
+        XCTAssertFalse(valid([0: [conv, ssm]]), "a recurrent layer is missing")
+        XCTAssertFalse(valid([0: [conv, ssm], 1: [conv, ssm], 2: [conv, ssm]]), "state for a non-recurrent layer")
+        XCTAssertFalse(PagedKVSharedForwardBackend.recurrentCheckpointLayoutIsValid([:], recurrentLayerIndices: []))
+    }
+
     /// SPEC-038 AC-26 hybrid cached turn: a retained handoff installs its paged
     /// attention layers plus recurrent layers restored from the checkpoint at
     /// exactly the handoff length, and refuses anything else.
@@ -306,7 +332,15 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         let handoff = try bridge.reattachPagedKVCache(handle: reattached, table: binding.currentTable)
         XCTAssertEqual(handoff.logicalTokenCount, 3)
 
-        for invalid in [nil, RecurrentStateCheckpoint(tokenCount: 2, states: checkpoint.states)] {
+        let slots = try XCTUnwrap(checkpoint.states[0])
+        let malformed: [RecurrentStateCheckpoint?] = [
+            nil,
+            RecurrentStateCheckpoint(tokenCount: 2, states: checkpoint.states),
+            RecurrentStateCheckpoint(tokenCount: 3, states: [0: [slots[0]]]),
+            RecurrentStateCheckpoint(tokenCount: 3, states: [0: slots.map { MLXArray.zeros([2] + Array($0.shape.dropFirst())) }]),
+            RecurrentStateCheckpoint(tokenCount: 3, states: [0: slots.map { $0.asType(.int32) }]),
+        ]
+        for invalid in malformed {
             do {
                 try await backend.installRetainedPagedKVCache(
                     requestID: "turn-2", handoff: handoff, binding: binding, recurrentCheckpoint: invalid)
@@ -314,6 +348,8 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
             } catch ContinuousBatchSchedulerError.unsupported(let reason) {
                 XCTAssertEqual(reason, "continuous_batching_retained_hybrid_cache_unavailable")
             }
+            let installed = await backend.snapshotRecurrentState(requestID: "turn-2", tokenCount: 3)
+            XCTAssertNil(installed, "a rejected checkpoint installs no row state")
         }
 
         try await backend.installRetainedPagedKVCache(

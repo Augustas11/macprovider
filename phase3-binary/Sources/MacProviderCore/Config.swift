@@ -43,6 +43,11 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
     /// overhead ceiling) and re-accepted, not inherit this entry.
     public let metallibSHA256: String
     public let kernelIdentifier: String
+    /// SPEC-038 AC-26: the operator recorded the packaged gateway/relay proof
+    /// for positive-cached turns on exactly this tuple and runtime revision.
+    /// Only then may `continuous_batching_cached_turns` batch such turns here.
+    /// Optional in config; absent means false.
+    public let cachedTurnsAccepted: Bool
 
     public init(
         modelID: String,
@@ -52,7 +57,8 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
         requiresMoE: Bool,
         hardwareClass: String,
         metallibSHA256: String,
-        kernelIdentifier: String
+        kernelIdentifier: String,
+        cachedTurnsAccepted: Bool = false
     ) {
         self.modelID = modelID
         self.modelSHA256 = modelSHA256
@@ -62,6 +68,7 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
         self.hardwareClass = hardwareClass
         self.metallibSHA256 = metallibSHA256
         self.kernelIdentifier = kernelIdentifier
+        self.cachedTurnsAccepted = cachedTurnsAccepted
     }
 }
 
@@ -749,7 +756,7 @@ public enum ConfigLoader {
                 throw ConfigError.invalidValue(
                     key: entryKey,
                     value: String(describing: entry),
-                    expected: "map with model_id, model_sha256, cache_class, kv_dtype, requires_moe, hardware_class, metallib_sha256, kernel_identifier"
+                    expected: "map with model_id, model_sha256, cache_class, kv_dtype, requires_moe, hardware_class, metallib_sha256, kernel_identifier, optional cached_turns_accepted"
                 )
             }
             // Coverage matching in `ContinuousBatchingAcceptanceCoverage.covers(_:)`
@@ -806,6 +813,19 @@ public enum ConfigLoader {
                     expected: "boolean"
                 )
             }
+            // Optional, but a present value must be a real boolean: a quoted
+            // "true" or a typo must not silently grant (or drop) the grant.
+            var cachedTurnsAccepted = false
+            if let rawCachedTurns = fields["cached_turns_accepted"] {
+                guard let value = rawCachedTurns as? Bool else {
+                    throw ConfigError.invalidValue(
+                        key: "\(entryKey).cached_turns_accepted",
+                        value: String(describing: rawCachedTurns),
+                        expected: "boolean"
+                    )
+                }
+                cachedTurnsAccepted = value
+            }
             return ContinuousBatchingAcceptedTuple(
                 modelID: try requiredString("model_id"),
                 modelSHA256: try requiredSHA256("model_sha256"),
@@ -814,7 +834,8 @@ public enum ConfigLoader {
                 requiresMoE: requiresMoE,
                 hardwareClass: try requiredString("hardware_class"),
                 metallibSHA256: try requiredSHA256("metallib_sha256"),
-                kernelIdentifier: try requiredString("kernel_identifier")
+                kernelIdentifier: try requiredString("kernel_identifier"),
+                cachedTurnsAccepted: cachedTurnsAccepted
             )
         }
     }

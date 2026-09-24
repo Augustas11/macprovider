@@ -1,6 +1,6 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2.8
+Version: v0.2.9
 Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
@@ -12,6 +12,19 @@ clarifies the API-visible admission/replay/terminal contract, records
 decode-first scheduling as a conservative v0.2 choice rather than a claim of
 vLLM/SGLang-style unified-token scheduling, and tightens the real-serving
 evidence gate for retained paged-KV reuse.
+
+**Change log v0.2.9 (2026-09-24, per-tuple cached-turn acceptance):** AC-26
+is satisfied per tuple and per runtime revision. The FR-CB10 accepted-tuple
+entry gains an optional boolean `cached_turns_accepted` (default false). A
+positive-`cached_prompt_tokens` turn enters the scheduler only when
+`continuous_batching_cached_turns` is on, the lease carries a usable retained
+handoff, AND the accepted tuple covering the requested runtime tuple records
+`cached_turns_accepted: true`. Without that grant the fence holds with reason
+`cached_turns_not_accepted`: canary serial-routes and `on` fails closed. The
+operator records the grant only after the AC-26 packaged proof on that exact
+revision. A hybrid retained install also validates the checkpoint's state
+layout (slot count, rank, batch 1, floating-point dtype, identical across
+recurrent layers) and fails closed before installing anything.
 
 **Change log v0.2.8 (2026-09-24, opt-in cached-turn batching):** A new
 provider config flag `continuous_batching_cached_turns` (default off; env
@@ -352,9 +365,12 @@ enter the scheduler only when the provider flag
 `continuous_batching_cached_turns` is on (default off) AND its lease carries a
 usable retained handoff. A usable handoff is a retained FR-PKV10 paged-KV
 sequence and, for a hybrid model, the recurrent checkpoint the lease resumes
-from. Any other positive-cached turn MUST keep the AC-26 fence: canary
-serial-routes with `sticky_cache_handoff_unavailable`, and `on` fails closed
-(FR-CB8). With the flag off, behaviour MUST be identical to v0.2.7 for every
+from. **(v0.2.9)** It additionally requires AC-26 acceptance for the tuple:
+the FR-CB10 accepted-tuple entry covering the requested runtime tuple MUST
+record `cached_turns_accepted: true`. Any other positive-cached turn MUST keep
+the AC-26 fence: canary serial-routes and `on` fails closed (FR-CB8), with
+reason `cached_turns_not_accepted` when only the acceptance grant is missing
+and `sticky_cache_handoff_unavailable` otherwise. With the flag off, behaviour MUST be identical to v0.2.7 for every
 model. With the flag on, for a hybrid model:
 - A conversation-keyed row that reached at least one checkpoint MUST, at a
   normal terminal, retain its paged attention KV through FR-PKV10 together with
@@ -369,7 +385,11 @@ model. With the flag on, for a hybrid model:
   backend MUST install the paged attention layers from the handoff and restore
   every recurrent layer from the checkpoint at exactly C. It MUST fail closed
   when that checkpoint is missing, has another length, or lacks a recurrent
-  layer; it MUST NOT install a zero recurrent state. Prefill resumes at C.
+  layer, and (v0.2.9) when any recurrent layer's state has the wrong slot
+  count, a rank below 2, a batch dimension other than 1, a non-floating-point
+  dtype, or a shape or dtype that differs from the other recurrent layers. The
+  check runs before any row state is installed. It MUST NOT install a zero
+  recurrent state. Prefill resumes at C.
 - Stored checkpoints below C that fall on the new prompt's checkpoint
   positions carry forward into the row's checkpoints; the row snapshots the
   rest itself and retains again at terminal, so the conversation keeps
@@ -534,6 +554,13 @@ exact runtime revision has met the SPEC-039 FR-PKV13 overhead ceiling on the
 packaged build. Acceptance coverage is therefore the per-tuple gate that keeps
 a path over the ceiling from serving real traffic. Derived or per-boot
 descriptor fields (parity label, pool epoch) remain the descriptor's job.
+
+**(v0.2.9)** An accepted-tuple entry MAY carry `cached_turns_accepted`
+(boolean, default false; any non-boolean value MUST be rejected at
+configuration load). It is the per-tuple, revision-bound AC-26 grant for
+positive-`cached_prompt_tokens` batching (FR-CB4). An operator MUST NOT set it
+until the AC-26 packaged proof has been recorded on that exact tuple and
+runtime revision. A grant on a different revision MUST NOT carry over.
 
 ### FR-CB11 - Entry 110 capacity mapping (SPEC-038-R011)
 
@@ -994,10 +1021,13 @@ hardware-capability run or a static-review obligation. Every
   this AC is satisfied. A keyless loopback 200 is not proof that Pearl-routed
   keyed traffic entered the batch. The v0.2.8 `continuous_batching_cached_turns`
   flag (FR-CB4) implements the admission path, but it does not satisfy this AC.
-  An operator MUST NOT enable the flag on a live provider until this packaged
-  proof, covering the relay path and the usage, receipt and settlement fields,
-  has been recorded for the tuple. Hybrid tuples need the proof too, including a
-  checkpoint-resumed turn.
+  **(v0.2.9)** This AC is satisfied per tuple and per runtime revision by the
+  FR-CB10 accepted-tuple field `cached_turns_accepted: true`. The operator
+  records it only after this packaged proof, covering the relay path and the
+  usage, receipt and settlement fields, passes on that exact tuple and
+  revision. A hybrid tuple's proof MUST include a checkpoint-resumed turn. The
+  runtime admits positive-cached turns only where the grant is present, so the
+  flag alone never lets such a turn into canary.
 
 ## 8. Go/no-go gates
 

@@ -716,26 +716,93 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNoThrow(try ServeCommand.runContinuousBatchingPreflight(config))
     }
 
-    // SPEC-038 AC-26: `continuous_batching_cached_turns` lifts the fence only
-    // for a lease that carries a usable retained handoff; off keeps it exactly.
-    func testCachedTurnsFlagLiftsFenceOnlyForUsableRetainedHandoff() {
+    // SPEC-038 AC-26: a positive cached hit batches only with the flag on, a
+    // usable retained handoff, AND `cached_turns_accepted` on the covering
+    // accepted tuple. Every other combination keeps the fence, with a reason
+    // that says which condition failed.
+    func testCachedTurnsFenceNeedsFlagHandoffAndAcceptedTuple() {
         for mode in [ContinuousBatchingMode.canary, .on] {
+            func reason(handoff: Bool, flag: Bool, accepted: Bool, cached: Int = 32) -> ContinuousBatchingUnsupportedReason? {
+                ModelRuntime.cachedHitFenceReason(
+                    mode: mode, cachedPromptTokens: cached, hasRetainedPagedKVHandoff: handoff,
+                    cachedTurnsEnabled: flag, cachedTurnsAccepted: accepted)
+            }
+            XCTAssertNil(reason(handoff: true, flag: true, accepted: true), "flag on + accepted tuple admits in \(mode)")
+            XCTAssertEqual(reason(handoff: true, flag: true, accepted: false), .cachedTurnsNotAccepted,
+                           "flag on but tuple not accepted stays fenced in \(mode)")
+            XCTAssertEqual(reason(handoff: true, flag: false, accepted: true), .stickyCacheHandoffUnavailable,
+                           "tuple accepted but flag off stays fenced in \(mode)")
+            XCTAssertEqual(reason(handoff: false, flag: true, accepted: true), .stickyCacheHandoffUnavailable,
+                           "no usable handoff stays fenced in \(mode)")
+            XCTAssertNil(reason(handoff: false, flag: false, accepted: false, cached: 0))
             XCTAssertTrue(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
-                mode: mode, cachedPromptTokens: 32, hasRetainedPagedKVHandoff: true, cachedTurnsEnabled: false
-            ), "flag off: fence unchanged in \(mode)")
-            XCTAssertFalse(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
                 mode: mode, cachedPromptTokens: 32, hasRetainedPagedKVHandoff: true, cachedTurnsEnabled: true
-            ), "flag on + usable handoff batches in \(mode)")
-            XCTAssertTrue(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
-                mode: mode, cachedPromptTokens: 32, hasRetainedPagedKVHandoff: false, cachedTurnsEnabled: true
-            ), "flag on without a usable handoff: serial route (canary) / fail closed (on)")
-            XCTAssertFalse(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
-                mode: mode, cachedPromptTokens: 0, hasRetainedPagedKVHandoff: false, cachedTurnsEnabled: true
-            ))
+            ), "the accepted-tuple grant defaults to absent")
         }
-        XCTAssertFalse(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
-            mode: .off, cachedPromptTokens: 32, hasRetainedPagedKVHandoff: false, cachedTurnsEnabled: true
-        ))
+        XCTAssertNil(ModelRuntime.cachedHitFenceReason(
+            mode: .off, cachedPromptTokens: 32, hasRetainedPagedKVHandoff: false,
+            cachedTurnsEnabled: false, cachedTurnsAccepted: false))
+
+        let notAccepted = ContinuousBatchingCapability(
+            mode: .canary, maxActiveRows: 2, queueLimit: 4, descriptor: nil,
+            unsupportedReason: .cachedTurnsNotAccepted)
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.serialRouteTelemetryLine(notAccepted),
+            "event=batching_unsupported action=serial_routed reason=cached_turns_not_accepted\n")
+        let strict = ContinuousBatchingCapability(
+            mode: .on, maxActiveRows: 2, queueLimit: 4, descriptor: nil,
+            unsupportedReason: .cachedTurnsNotAccepted)
+        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(strict)) { error in
+            XCTAssertEqual((error as? APIError)?.code, "continuous_batching_cached_turns_not_accepted")
+        }
+    }
+
+    func testCachedTurnsAcceptanceIsPerTupleAndRevisionBound() {
+        let tuple = Self.continuousBatchingTuple()
+        func accepted(metallib: String, grant: Bool) -> ContinuousBatchingAcceptedTuple {
+            ContinuousBatchingAcceptedTuple(
+                modelID: tuple.modelID, modelSHA256: tuple.modelSHA256, cacheClass: tuple.cacheClass,
+                kvDType: tuple.kvDType, requiresMoE: tuple.requiresMoE, hardwareClass: tuple.hardwareClass,
+                metallibSHA256: metallib, kernelIdentifier: tuple.kernelIdentifier, cachedTurnsAccepted: grant)
+        }
+        let granted = ContinuousBatchingAcceptanceCoverage(acceptedTuples: [accepted(metallib: tuple.metallibSHA256, grant: true)])
+        XCTAssertTrue(granted.covers(tuple))
+        XCTAssertTrue(granted.coversCachedTurns(tuple))
+        let firstTurnOnly = ContinuousBatchingAcceptanceCoverage(acceptedTuples: [accepted(metallib: tuple.metallibSHA256, grant: false)])
+        XCTAssertTrue(firstTurnOnly.covers(tuple))
+        XCTAssertFalse(firstTurnOnly.coversCachedTurns(tuple))
+        let otherRevision = ContinuousBatchingAcceptanceCoverage(acceptedTuples: [
+            accepted(metallib: String(repeating: "e", count: 64), grant: true),
+            accepted(metallib: tuple.metallibSHA256, grant: false),
+        ])
+        XCTAssertFalse(otherRevision.coversCachedTurns(tuple), "a grant on another runtime revision does not carry over")
+        XCTAssertFalse(ContinuousBatchingAcceptanceCoverage.empty.coversCachedTurns(tuple))
+    }
+
+    func testConfigLoaderParsesOptionalCachedTurnsAccepted() throws {
+        func yaml(_ extra: String) -> String {
+            """
+            continuous_batching_accepted_tuples:
+              - model_id: mlx-community/Qwen-Test
+                model_sha256: \(String(repeating: "a", count: 64))
+                cache_class: KVCacheSimple
+                kv_dtype: fp16
+                requires_moe: false
+                hardware_class: apple-silicon-test
+                metallib_sha256: \(String(repeating: "b", count: 64))
+                kernel_identifier: macprovider_paged_kv_gather_v1
+            \(extra)
+            """
+        }
+        func load(_ extra: String) throws -> AppConfig {
+            try ConfigLoader.load(cli: CLIOverrides(), environment: [:], fileExists: { _ in true }, readFile: { _ in yaml(extra) })
+        }
+        XCTAssertEqual(try load("").continuousBatchingAcceptedTuples.first?.cachedTurnsAccepted, false, "absent means false")
+        XCTAssertEqual(try load("    cached_turns_accepted: true").continuousBatchingAcceptedTuples.first?.cachedTurnsAccepted, true)
+        XCTAssertEqual(try load("    cached_turns_accepted: false").continuousBatchingAcceptedTuples.first?.cachedTurnsAccepted, false)
+        for invalid in ["    cached_turns_accepted: \"true\"", "    cached_turns_accepted: yes please", "    cached_turns_accepted: 1"] {
+            XCTAssertThrowsError(try load(invalid), invalid)
+        }
     }
 
     func testUsableRetainedHandoffRequiresCheckpointAtCachedLengthOnHybridModels() async throws {

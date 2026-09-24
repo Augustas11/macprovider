@@ -1,7 +1,10 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.5
-Status: draft (normative design). v0.1.5 names how the FR-PKV13 overhead
+Version: v0.1.6
+Status: draft (normative design). v0.1.6 lets a retained or positive-cache-credit
+hybrid request batch only where the SPEC-038 FR-CB10 accepted tuple covering it
+records `cached_turns_accepted` (the SPEC-038 AC-26 recurrent-handoff proof).
+v0.1.5 names how the FR-PKV13 overhead
 ceiling gates real traffic: through SPEC-038 FR-CB10 acceptance coverage bound
 to the measured runtime revision. v0.1.4 admits only the measured Qwen3.6
 mixed layout for first-turn batching: recurrent Mamba state remains row-local
@@ -549,7 +552,10 @@ pass token-parity and multi-step batched row-isolation gates, including row
 leave and join, before advertising
 the exact tuple. This exception covers first-turn/cache-miss requests only;
 retained or positive-cache-credit hybrid requests MUST stay on the serial path
-until recurrent-state handoff has its own reviewed proof.
+unless the SPEC-038 FR-CB10 accepted tuple covering the requested runtime tuple
+records `cached_turns_accepted: true`. That grant is the recurrent-state
+handoff's reviewed proof: the SPEC-038 AC-26 packaged proof, including a
+checkpoint-resumed turn, on that exact tuple and runtime revision.
 A model whose runtime cache class is **not** on the allowlist — enumerated
 non-allowlisted classes include `RotatingKVCache` (sliding-window),
 `CacheList` (unproven hybrid), and `QuantizedKVCache` — MUST **fail safe to the stock

@@ -434,7 +434,41 @@ extension PagedKVRuntimeContiguousCacheBridge: ContinuousBatchRetainedCacheBridg
 ///
 /// This backend is installable only after the attach gate has separately
 /// measured the runtime identity and validated the model's cache topology.
+/// Shape and dtype of one recurrent-state slot, checked without reading
+/// tensor data.
+struct RecurrentStateSlotLayout: Equatable, Sendable {
+    let shape: [Int]
+    let dtype: DType
+}
+
 final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unchecked Sendable {
+    /// `MambaCache` holds exactly two slots (conv state, SSM state).
+    static let mambaCacheSlotCount = 2
+
+    /// SPEC-038 AC-26: a checkpoint is installable only if it covers exactly the
+    /// model's recurrent layers, each with the `MambaCache` slot count, and every
+    /// slot is a single-row (batch 1) floating-point tensor of rank >= 2. All
+    /// recurrent layers of one model share one state layout, so every layer
+    /// must match the first; a layer that differs is corrupt or from another
+    /// model.
+    static func recurrentCheckpointLayoutIsValid(
+        _ layouts: [Int: [RecurrentStateSlotLayout]],
+        recurrentLayerIndices: [Int]
+    ) -> Bool {
+        guard let first = recurrentLayerIndices.first,
+              Set(layouts.keys) == Set(recurrentLayerIndices),
+              let reference = layouts[first],
+              reference.count == mambaCacheSlotCount
+        else { return false }
+        let slotsValid = reference.allSatisfy { slot in
+            slot.shape.count >= 2
+                && slot.shape[0] == 1
+                && slot.shape.allSatisfy { $0 > 0 }
+                && [DType.float16, .bfloat16, .float32].contains(slot.dtype)
+        }
+        return slotsValid && layouts.values.allSatisfy { $0 == reference }
+    }
+
     enum CacheKind: Equatable, Sendable {
         case pagedAttention
         case recurrentMamba
@@ -643,6 +677,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         guard let recurrentCheckpoint,
               recurrentCheckpoint.tokenCount == handoff.logicalTokenCount
         else {
+            throw unavailable
+        }
+        // Validate every recurrent layer's state shape before anything is
+        // installed, so a malformed checkpoint fails admission (which releases
+        // the reattached blocks) instead of resuming prefill on invalid state.
+        let recurrentIndices = cacheKinds.indices.filter { cacheKinds[$0] == .recurrentMamba }
+        let layouts = recurrentCheckpoint.states.mapValues { slots in
+            slots.map { RecurrentStateSlotLayout(shape: $0.shape, dtype: $0.dtype) }
+        }
+        guard Self.recurrentCheckpointLayoutIsValid(layouts, recurrentLayerIndices: recurrentIndices) else {
             throw unavailable
         }
         var attention = handoff.caches.makeIterator()

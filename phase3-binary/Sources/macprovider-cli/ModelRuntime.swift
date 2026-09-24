@@ -3941,14 +3941,18 @@ actor ModelRuntime: ModelRuntimeServing {
         modelHasRecurrentLayers: Bool
     ) async throws -> Bool {
         guard let lease,
-              Self.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+              let reason = Self.cachedHitFenceReason(
                   mode: capability.mode,
                   cachedPromptTokens: lease.cachedPromptTokens,
                   hasRetainedPagedKVHandoff: Self.leaseHasUsableRetainedHandoff(
                       lease,
                       modelHasRecurrentLayers: modelHasRecurrentLayers
                   ),
-                  cachedTurnsEnabled: continuousBatchingCachedTurns
+                  cachedTurnsEnabled: continuousBatchingCachedTurns,
+                  cachedTurnsAccepted: continuousBatchingCachedTurns
+                      && continuousBatchingRequestedTuple().map {
+                          continuousBatchingAcceptanceCoverage.coversCachedTurns($0)
+                      } == true
               )
         else {
             return false
@@ -3962,7 +3966,7 @@ actor ModelRuntime: ModelRuntimeServing {
             maxActiveRows: capability.maxActiveRows,
             queueLimit: capability.queueLimit,
             descriptor: capability.descriptor,
-            unsupportedReason: .stickyCacheHandoffUnavailable
+            unsupportedReason: reason
         )
         // Strict `.on` must fail closed with the named reason (FR-CB8). Canary
         // serial-routes the same AC-26 fence with reason-coded telemetry.
@@ -3975,14 +3979,34 @@ actor ModelRuntime: ModelRuntimeServing {
         mode: ContinuousBatchingMode,
         cachedPromptTokens: Int,
         hasRetainedPagedKVHandoff: Bool,
-        cachedTurnsEnabled: Bool = false
+        cachedTurnsEnabled: Bool = false,
+        cachedTurnsAccepted: Bool = false
     ) -> Bool {
-        // AC-26: a positive cached-token hit stays out of the scheduler unless
-        // the operator opted into `continuous_batching_cached_turns` AND the
-        // lease carries a usable retained handoff. A retained paged-KV handoff
-        // alone is capability, not authorization.
-        guard mode != .off, cachedPromptTokens > 0 else { return false }
-        return !(cachedTurnsEnabled && hasRetainedPagedKVHandoff)
+        cachedHitFenceReason(
+            mode: mode,
+            cachedPromptTokens: cachedPromptTokens,
+            hasRetainedPagedKVHandoff: hasRetainedPagedKVHandoff,
+            cachedTurnsEnabled: cachedTurnsEnabled,
+            cachedTurnsAccepted: cachedTurnsAccepted
+        ) != nil
+    }
+
+    /// AC-26 fence for a positive cached-token hit. It stays out of the
+    /// scheduler unless the operator opted into `continuous_batching_cached_turns`,
+    /// the lease carries a usable retained handoff, AND the accepted tuple
+    /// covering this runtime records `cached_turns_accepted` (the per-tuple,
+    /// revision-bound packaged proof). A retained handoff alone is capability,
+    /// not authorization. Nil means the request may enter the scheduler.
+    static func cachedHitFenceReason(
+        mode: ContinuousBatchingMode,
+        cachedPromptTokens: Int,
+        hasRetainedPagedKVHandoff: Bool,
+        cachedTurnsEnabled: Bool,
+        cachedTurnsAccepted: Bool
+    ) -> ContinuousBatchingUnsupportedReason? {
+        guard mode != .off, cachedPromptTokens > 0 else { return nil }
+        guard cachedTurnsEnabled, hasRetainedPagedKVHandoff else { return .stickyCacheHandoffUnavailable }
+        return cachedTurnsAccepted ? nil : .cachedTurnsNotAccepted
     }
 
     /// A hybrid retained delivery is resumable only from a recurrent checkpoint;

@@ -541,7 +541,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             mode: .canary,
             cachedPromptTokens: lease.cachedPromptTokens,
             hasRetainedPagedKVHandoff: ModelRuntime.leaseHasUsableRetainedHandoff(lease, modelHasRecurrentLayers: true),
-            cachedTurnsEnabled: true
+            cachedTurnsEnabled: true,
+            cachedTurnsAccepted: true
         ))
 
         let second = try await scheduler.submit(.init(
@@ -640,7 +641,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             cachedTurnsEnabled: false))
         XCTAssertFalse(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
             mode: .canary, cachedPromptTokens: lease.cachedPromptTokens, hasRetainedPagedKVHandoff: usable,
-            cachedTurnsEnabled: true))
+            cachedTurnsEnabled: true, cachedTurnsAccepted: true))
         XCTAssertTrue(ModelRuntime.retainedRecurrentCheckpoints(for: lease).isEmpty)
 
         let second = try await scheduler.submit(.init(
