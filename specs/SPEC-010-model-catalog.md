@@ -1217,9 +1217,9 @@ algorithm.
   the identity lift is not a settlement lift for loopback runtimes.
   SPEC-047-R003(iv) v0.1.10 keeps every loopback `runtime_source` out of
   `settlement_capable` until a trusted usage source exists, and implementing
-  the runtime path does not change that. (v1.10: still true for global
+  the runtime path does not change that. (v1.11: still true for global
   admission; (f) states the only exception.)
-  (f) **Pool-scoped settlement (v1.10, #1690).** A member whose
+  (f) **Pool-scoped settlement (v1.11, #1690).** A member whose
   `runtime_format` is `gguf`, served by a loopback `runtime_source`, MAY
   bind a SPEC-022 route-time settlement snapshot only at route time, on a
   SPEC-042 Trusted Pool route whose signed v2 policy core allowlists that
@@ -1228,12 +1228,12 @@ algorithm.
   member never settles on a global route. (a)–(d) apply to it unchanged: the
   CLI recomputes the complete-file digest, the pair matches one member
   exactly, and the route snapshot carries the six (d) values.
-  (g) **GGUF source kinds (v1.10).** A GGUF member MAY be published with
+  (g) **GGUF source kinds (v1.11).** A GGUF member MAY be published with
   `source_ref.kind` `ollama_library_tag` or `huggingface_revision` (SPEC-023
   v0.16.0 §3.7.4). The source kind describes where the bytes come from and
   never changes identity: the pair is always `macprovider.gguf-file.v1`
   over the complete file bytes the CLI holds, per (a).
-  (h) **Deferred MLX-snapshot leg (v1.10).** No loopback `runtime_source` may
+  (h) **Deferred MLX-snapshot leg (v1.11).** No loopback `runtime_source` may
   bind an `mlx_safetensors` member: the SPEC-023 matrix keeps that format to
   `mlx_cache`. An external runtime that serves MLX safetensors (oMLX,
   `mlx_lm.server`) has no identity leg until a later amendment defines how

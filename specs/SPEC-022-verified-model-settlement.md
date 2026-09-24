@@ -20,6 +20,9 @@ R-3.4.2 makes it the single, bounded exception to R-3.4.1. It still needs a
 verified v0.4 receipt with an exact usage match, and SPEC-005 arithmetic and
 ceilings are unchanged. A disputed pool label or a global route gets zero
 billable. No v0.4 receipt tuple change; SPEC-008 `attestation_tier` unchanged.
+R-12.8 fixes the rollout order (coordinator, then CLI, then v2 allowlists) and
+makes a downgrade to a pre-v0.2.0 coordinator fail closed behind the
+`coordinator pool-rollback-preflight` gate.
 
 ### v0.1.9
 
@@ -870,8 +873,11 @@ coordinator verified as both pool creator and provider owner at routing).
 Both are digested only when `runtime_source` is non-empty, so no other digest
 changes. Settlement re-evaluates R-12.3 from these values and the durable,
 append-only records they name (SPEC-042-R006), never from live state.
-Current state (pending implementation): `RouteSnapshot` has none of these
-members (`phase4-coordinator/internal/billing/route_snapshot.go:50-110`).
+Implementation state (#1690 M4): `RouteSnapshot` carries these members and
+digests them only when `runtime_source` is non-empty
+(`phase4-coordinator/internal/billing/route_snapshot.go`, `RouteSnapshot.Value`).
+SPEC-022-R012 stays pending until the signed enforce-mode pool journey (#1690
+M6) evidences it.
 
 R-12.2. Usage-source vocabulary. The settlement-attempt usage source is the
 closed set `coordinator_observed`, `byte_estimated`, and
@@ -880,8 +886,9 @@ closed set `coordinator_observed`, `byte_estimated`, and
 disclosed as `coordinator_observed`, and buyer and provider surfaces MUST NOT
 describe its usage or served weights as coordinator-verified. They MUST
 describe them as attested by the pool operator under the pool's signed policy.
-Current state: the vocabulary is `coordinator_observed` and `byte_estimated`
-(`phase4-coordinator/internal/billing/settlement_output.go:22-23`).
+Implementation state (#1690 M4): all three values are defined in
+`phase4-coordinator/internal/billing/settlement_output.go`, and the
+`settlement_attempt_outputs.usage_source` CHECK is widened to them (R-12.6a).
 
 R-12.3. Eligibility. An attempt MAY be recorded `pool_operator_attested`
 only when every SPEC-042-R006 condition holds. In short: a pool route whose
@@ -906,15 +913,18 @@ unchanged. The completion-byte clamp and the prompt bound (SPEC-005;
 `phase4-coordinator/internal/billing/formula.go:322-362`,
 `phase4-coordinator/internal/billing/hotpath.go:280-298`) remain ceilings on
 the credited amount and are not a trust source. The v0.4 tuple and wire are
-unchanged, but the coordinator verifier's usage-source handling MUST change.
-Today `tupleUsageMatchesLedger` rejects every source except
-`coordinator_observed`
-(`phase4-coordinator/internal/billing/settlement_verifier.go:340-346`), and
-receipt ingestion marks only that source cross-checked
-(`phase4-coordinator/internal/billing/settlement_receipts.go:182`). Both MUST
-also accept `pool_operator_attested`, but only when the attempt's persisted
-route snapshot satisfies R-12.3 as re-evaluated at settlement. Every other
-source stays rejected.
+unchanged; only the coordinator verifier's usage-source handling changes.
+`tupleUsageMatchesLedger` and receipt ingestion MUST accept
+`coordinator_observed`, and `pool_operator_attested` only when the attempt's
+persisted route snapshot satisfies R-12.3 as re-evaluated at settlement.
+Every other source stays rejected. Implementation state (#1690 M4):
+`tupleUsageMatchesLedger`
+(`phase4-coordinator/internal/billing/settlement_verifier.go`) rejects every
+other source, and only `IngestPoolSettlementReceipt`
+(`phase4-coordinator/internal/billing/settlement_receipts.go`) marks a
+`pool_operator_attested` attempt cross-checked, after re-evaluating R-12.3
+against the persisted snapshot digest. The generic ingestion path still marks
+only `coordinator_observed`.
 
 R-12.5. Disputed labels. An attempt whose SPEC-042-R006 pool label is
 `label_disputed` when it is recorded MUST be recorded `byte_estimated`, with
@@ -938,9 +948,9 @@ persisted in `settlement_attempt_outputs.usage_source`, whose CHECK constraint
 the R-12.2 vocabulary without rewriting existing rows. Receipt ingestion and
 the verifier read it from that row (R-12.4). Every later report MUST derive
 from the persisted per-attempt values and MUST NOT substitute a constant.
-Request finality today hardcodes `coordinator_observed` for every verified
-result (`phase4-coordinator/internal/billing/settlement_finality.go:283-304`).
-Its `token_source` MUST instead be `coordinator_observed` when every verified
+Request finality (`finalityTokenSource`,
+`phase4-coordinator/internal/billing/settlement_finality.go`; implemented in
+#1690 M4) derives its `token_source` from the persisted sources: it MUST be `coordinator_observed` when every verified
 attempt of the request persisted `coordinator_observed`, and
 `pool_operator_attested` when any verified attempt persisted
 `pool_operator_attested`. The weaker provenance governs a request that mixes
@@ -951,6 +961,36 @@ group by the persisted source.
 R-12.7. Scope. R-12 adds no receipt tuple field, no receipt-less settlement
 path, and no SPEC-016 payout path. It does not change SPEC-008
 `attestation_tier`, and it changes no native-session settlement.
+
+R-12.8. Rollout and downgrade. A coordinator that predates v0.2.0 rejects
+`pool_operator_attested` and recomputes a pool route-snapshot digest without
+the R-12.1 members and the SPEC-042-R006 labels. It would leave any pool
+attempt it still has to settle unverifiable, `pending`, or `quarantined`. It
+never records a new `pool_operator_attested` attempt, so the hazard is only
+the pool attempts recorded before a downgrade.
+
+- Rollout order: deploy the v0.2.0 coordinator first, then the provider CLI
+  that signs pool-authorized receipts (SPEC-015-R006), and only then accept a
+  v2 policy core with a non-empty `runtime_allowlist` (SPEC-042-R001). The
+  gateway needs no change. Pool traffic MUST stay paused while the v0.2.0
+  coordinator deploy can still roll back automatically, because v0.2.0
+  writes the new labels on every pool route, native pools included, and an
+  automatic rollback runs no gate. An old CLI against a new coordinator, and a new
+  CLI against an old coordinator, both fail closed: no pool-authorized
+  receipt is signed and no provider credit is created.
+- Downgrade gate: a rollback to a coordinator that predates v0.2.0 is in
+  contract only when `coordinator pool-rollback-preflight --config <path>`,
+  run with the current binary against the live database after new pool
+  traffic is stopped (every pool paused, or the trusted-pool feature
+  disabled), exits 0. It exits 0 only when every pool route snapshot either
+  has a closed verdict, which is final because credit syncs inside the
+  verdict transaction, or has no verdict and is past its pending deadline.
+  It exits 3 while any pool attempt can still reach receipt ingestion or a
+  verdict update
+  (`phase4-coordinator/internal/billing/pool_rollback_preflight.go`,
+  `CheckPoolRollbackPreflight`). An operator MUST NOT roll back while it
+  exits non-zero; the fix is to roll forward. A rollback between two
+  coordinators that both implement v0.2.0 is not affected.
 
 ## Acceptance criteria
 

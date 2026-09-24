@@ -829,3 +829,49 @@ func assertAdminErrorCode(t *testing.T, rec *httptest.ResponseRecorder, want str
 		t.Fatalf("admin error code=%q, want %q body=%s", body.Error.Code, want, rec.Body.String())
 	}
 }
+
+// A replaced on-call record that shortens the gate must republish the routing
+// registry immediately, not wait for the next refresh tick.
+func TestAdminHandler_OnCallReadinessUpdateRepublishesRouteGate(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	t.Setenv("MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256", trustpool.OnCallAuthorityKeySHA256(priv.Public().(ed25519.PublicKey)))
+
+	db := openTrustPoolDB(t)
+	store := newProductionActivationStore(t, db)
+	registry := trustpool.NewRegistry()
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    registry,
+		OperatorKey: "operator-secret",
+	})
+	root := seedProductionPromotablePool(t, store)
+	long, err := trustpool.SignOnCallReadiness(priv, validOnCallReadiness("op-oncall-long", "production"))
+	if err != nil {
+		t.Fatalf("SignOnCallReadiness: %v", err)
+	}
+	postAdminOnCall(t, handler, "operator-secret", long, http.StatusOK)
+	upsertProductionArtifactLifecycle(t, handler, "operator-secret", root.poolID, "op-lifecycle-republish")
+	postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote-republish", http.StatusAccepted)
+	before := registry.Snapshot(root.poolID)
+	if !before.Routeable || !before.RouteableUntilUTC.After(time.Now().UTC().Add(2*time.Hour)) {
+		t.Fatalf("before shortening: routeable=%v until=%s, want routeable beyond 2h", before.Routeable, before.RouteableUntilUTC)
+	}
+
+	short := validOnCallReadiness("op-oncall-short", "production")
+	short.ConfirmationTTLSeconds = int64(time.Hour / time.Second)
+	short, err = trustpool.SignOnCallReadiness(priv, short)
+	if err != nil {
+		t.Fatalf("SignOnCallReadiness short: %v", err)
+	}
+	postAdminOnCall(t, handler, "operator-secret", short, http.StatusOK)
+	after := registry.Snapshot(root.poolID)
+	if after.RouteableUntilUTC.IsZero() || after.RouteableUntilUTC.After(time.Now().UTC().Add(time.Hour)) {
+		t.Fatalf("after shortening: until=%s, want the shortened on-call gate (<= 1h)", after.RouteableUntilUTC)
+	}
+	if after.Revision != before.Revision {
+		t.Fatalf("revision changed %d -> %d; on-call is a same-revision route-gate input", before.Revision, after.Revision)
+	}
+}

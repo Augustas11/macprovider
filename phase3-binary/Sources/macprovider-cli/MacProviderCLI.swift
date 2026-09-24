@@ -2112,8 +2112,11 @@ struct ServeCommand: AsyncParsableCommand {
                 // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569,
                 // #1690 M2): proxy inference to the validated loopback
                 // OpenAI-compatible origin. ONE process, ONE model — no MLX
-                // weights are loaded. Non-earning: relay-blind and signed
-                // receipts are disabled on this path.
+                // weights are loaded. Relay-blind is disabled on this path, and
+                // signed receipts are disabled outside the authorized pool
+                // path: a receipt is signed only for a request whose
+                // coordinator-issued pool runtime authorization matches
+                // (SPEC-015-R006, #1690 M5); global traffic stays non-earning.
                 helloRuntimeSource = loopback.runtimeSource
                 switch loopback {
                 case .ollama:

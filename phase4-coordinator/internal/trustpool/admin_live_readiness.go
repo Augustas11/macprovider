@@ -82,6 +82,10 @@ func (h *adminHandler) handleOnCallReadiness(w http.ResponseWriter, r *http.Requ
 			h.writeMutationError(w, err)
 			return
 		}
+		if err := h.republishRouteGates(r.Context()); err != nil {
+			writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
+			return
+		}
 		writeAdminJSON(w, http.StatusOK, map[string]any{
 			"on_call_readiness": stored,
 		})

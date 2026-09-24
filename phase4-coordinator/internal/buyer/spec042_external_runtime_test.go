@@ -227,7 +227,7 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 		delegated = []string{"p1"}
 	}
 	trustPools := trustpool.NewRegistry()
-	loadTrustedPoolLayer2Snapshot(t, trustPools, 1, trustpool.RouteableSnapshot{
+	loadTrustedPoolLayer2Snapshot(t, trustPools, 0, trustpool.RouteableSnapshot{
 		PoolID:             poolID,
 		CreatorAccountID:   externalRuntimeCreator,
 		Members:            members,

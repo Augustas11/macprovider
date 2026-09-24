@@ -56,7 +56,7 @@ func newSpec042LabelHarness(t *testing.T, launchEnvironment string, productionCo
 	providerRegistry := pool.NewRegistry(nil)
 	registerTrustedPoolLayer2Provider(providerRegistry, providerID, "session-member", provider.URL, []byte(strings.Repeat("r", 32)))
 	trustPools := trustpool.NewRegistry()
-	loadTrustedPoolLayer2Snapshot(t, trustPools, 1, trustpool.RouteableSnapshot{
+	loadTrustedPoolLayer2Snapshot(t, trustPools, 0, trustpool.RouteableSnapshot{
 		PoolID:             poolID,
 		Members:            []string{providerID},
 		BuyerAccounts:      []string{buyerAccountID},

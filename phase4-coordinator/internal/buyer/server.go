@@ -1127,20 +1127,26 @@ func (s *Server) disableTrustPoolsOnMalformedDurableState(err error) {
 	}
 }
 
-func (s *Server) verifyTrustPoolDurableStateForRouting(ctx context.Context) error {
+// authorizeTrustPoolFromDurableState replays durable pool state and authorizes
+// the buyer only from a registry proven to hold that replay's revision (the
+// registry republishes a newer replay, and the fence and read share one
+// lock), so a delayed or failed mutation publication can never let routing
+// authorize revoked or superseded pool state.
+func (s *Server) authorizeTrustPoolFromDurableState(ctx context.Context, poolID, accountID string) (trustpool.Snapshot, bool, error) {
 	if s == nil || s.trustPoolStatusStore == nil {
 		if s != nil && s.trustPools != nil {
 			s.trustPools.Disable()
 		}
-		return trustpool.ErrStoreClosed
+		return trustpool.Snapshot{}, false, trustpool.ErrStoreClosed
 	}
-	if _, err := s.trustPoolStatusStore.Reconstruct(ctx); err != nil {
+	state, err := s.trustPoolStatusStore.Reconstruct(ctx)
+	if err != nil {
 		if s.trustPools != nil {
 			s.trustPools.Disable()
 		}
-		return err
+		return trustpool.Snapshot{}, false, err
 	}
-	return nil
+	return s.trustPools.AuthorizeAtDurableRevision(state.Revision, state.RouteableSnapshots(), poolID, accountID)
 }
 
 func (s *Server) handleStreamingMetrics(w http.ResponseWriter, r *http.Request) {
@@ -2391,8 +2397,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// SPEC-042 R002: honor the authorized pool selection header only when the
 	// pool feature and durable store are configured, the request carries an
 	// authenticated (gateway-context) account, durable replay verifies cleanly,
-	// and the reconstructed pool registry authorizes that account for the
-	// selected pool. Defense in depth:
+	// and the registry, fenced to that replay's revision under the same lock
+	// as the read, authorizes that account for the selected pool. Defense in depth:
 	// X-MacProvider-Pool is also in hasInternalRoutingHeader, so an unauthorized
 	// buyer-port request carrying it is rejected before routing. A non-empty
 	// authenticated pool header with no registry MUST fail closed here, not be
@@ -2417,13 +2423,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rawPoolHeader != "" {
-		if err := s.verifyTrustPoolDurableStateForRouting(r.Context()); err != nil {
+		snap, authorized, err := s.authorizeTrustPoolFromDurableState(r.Context(), poolHeader, accountID)
+		if err != nil {
 			s.log.Warn().Err(err).Str("pool_id", poolHeader).Msg("trusted pool routing durable verification failed")
 			rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
 			s.writePoolUnavailable(w, startedAt)
 			return
 		}
-		snap, authorized := s.trustPools.AuthorizeAndSnapshot(poolHeader, accountID)
 		if !authorized || !snap.Exists {
 			rec.logBuyerFailure(http.StatusServiceUnavailable, "Pool unavailable")
 			s.writePoolUnavailable(w, startedAt)

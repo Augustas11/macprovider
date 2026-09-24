@@ -87,7 +87,11 @@ Signing happens in CI so the private key never reaches an operator shell.
 
 Missing or expired on-call fail-closes operator production promote
 (`on_call_readiness_rejected`, 409). Re-confirm on every on-call rotation change;
-the record expires at `last_confirmed_at + confirmation_ttl`.
+the record expires at `last_confirmed_at + confirmation_ttl`. An upsert
+republishes the routing registry immediately, so a shortened or replaced record
+takes effect on the next request (a failed republish returns
+`registry_refresh_failed` and disables pool routing until the refresher
+succeeds).
 
 ## 3. Enable production activation config
 
@@ -208,6 +212,50 @@ the promotion event (`get-pool` shows it as `root_custody_class`).
   `trust-pool-admin set-lifecycle` to `paused` fails buyer chat closed without
   touching global traffic; `revoke-provider`, `upsert-creator` (suspend), and
   the root-compromise freeze remain available.
+
+## 9. External-runtime pools (#1690): rollout and rollback order
+
+SPEC-022-R012 (R-12.8) is normative; this is the operator sequence.
+
+Rollout, in this order:
+
+1. Pause every pool, deploy the coordinator that implements SPEC-022 v0.2.0
+   (the `pool_operator_attested` usage source), confirm `/healthz` reports it
+   and the updater transaction committed, then resume the pools.
+2. Ship the provider CLI that signs pool-authorized loopback receipts
+   (SPEC-015 0.4.10).
+3. Only then accept a v2 policy core with a non-empty `runtime_allowlist`.
+
+An old CLI against the new coordinator, or the new CLI against an old
+coordinator, fails closed: no pool-authorized receipt is signed and no
+provider credit is created. The gateway is unchanged.
+
+Rollback to a coordinator that predates SPEC-022 v0.2.0, once any pool route
+has run on the new coordinator:
+
+1. Stop new pool traffic: `trust-pool-admin set-lifecycle` every pool to
+   `paused` (or disable the trusted-pool feature).
+2. Run the gate with the **current** binary against the live database:
+
+   ```bash
+   coordinator pool-rollback-preflight --config /etc/macprovider/coordinator.yaml
+   ```
+
+   Exit 0 means every pool route snapshot has a closed verdict or is past its
+   pending deadline with no verdict. Exit 3 means a pool attempt can still
+   reach receipt ingestion or a verdict update; the JSON line shows
+   `open_pool_verdicts`, `in_window_pool_attempts_without_verdict`, and, when
+   only in-window attempts block, `earliest_safe_unix_ms`.
+3. Do not roll back while the gate exits non-zero. Wait and re-run, or roll
+   forward instead. The old coordinator would leave those attempts
+   unverifiable, pending, or quarantined.
+
+A rollback between two coordinators that both implement SPEC-022 v0.2.0 needs
+no gate. The Pearl updater's automatic rollback does not run this gate, and the
+v0.2.0 coordinator writes the new route-snapshot labels on every pool route,
+native MLX pools included. Keep every pool `paused` while the v0.2.0 coordinator
+deploy runs, and resume pools only after the updater transaction has committed,
+so an automatic rollback cannot strand a pool attempt.
 
 ## Still open after this runbook (do not skip)
 

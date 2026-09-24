@@ -107,6 +107,8 @@ func main() {
 			os.Exit(runBackfillAttemptN(os.Args[2:]))
 		case "stats-migrate":
 			os.Exit(runStatsMigrate(os.Args[2:]))
+		case "pool-rollback-preflight":
+			os.Exit(runPoolRollbackPreflight(os.Args[2:]))
 		}
 		// Round-1 CODE H1 fix: a non-flag first positional that
 		// is NEITHER a known daemon flag NOR a known CLI verb is
@@ -126,6 +128,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "  coordinator migrate-indexes --config <path> [--config-overlay <path>]  (one-shot operator migration)")
 			fmt.Fprintln(os.Stderr, "  coordinator backfill-attempt-n --config <path>  (one-shot attempt_n backfill)")
 			fmt.Fprintln(os.Stderr, "  coordinator stats-migrate [--admin-dsn DSN] [--check]  (SPEC-017 stats/rewards migrations)")
+			fmt.Fprintln(os.Stderr, "  coordinator pool-rollback-preflight --config <path>  (SPEC-022 v0.2.0 downgrade gate; exit 3 = blocked)")
 			os.Exit(2)
 		}
 	}

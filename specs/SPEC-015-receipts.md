@@ -4023,8 +4023,9 @@ it. An attempt without any of them digests exactly the object listed above
   `artifact_candidate_catalog_sha256` (SPEC-047-R003, SPEC-010-R007(d));
 - `pool_id`, `manifest_version`, `manifest_core_digest` (SPEC-042-R006);
 - `runtime_source`, `pool_generation`, `pool_operator_account_id`
-  (SPEC-022-R012, v0.2.0). These are pending implementation: `RouteSnapshot.Value`
-  does not emit them yet.
+  (SPEC-022-R012, v0.2.0). `RouteSnapshot.Value` emits them only when
+  `runtime_source` is non-empty (implemented, #1690 M4); SPEC-015-R006 stays
+  pending until the signed enforce-mode pool journey (#1690 M6).
 
 The provider signs `route_snapshot_digest` as the coordinator delivers it and
 never reconstructs the object, so these members bind into the receipt with

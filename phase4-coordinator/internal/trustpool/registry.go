@@ -14,6 +14,7 @@
 package trustpool
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -618,39 +619,87 @@ func (r *Registry) ActivePoolDeliveries(poolID string) uint64 {
 }
 
 func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []RouteableSnapshot, enforceRevision bool, allowSameRevisionRefresh bool) (bool, error) {
+	next, err := buildRouteablePoolStates(snapshots)
+	if err != nil {
+		return false, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.applyRouteablePoolStatesLocked(revision, next, enforceRevision, allowSameRevisionRefresh)
+}
+
+// AuthorizeAtDurableRevision authorizes the buyer only when the registry holds
+// exactly the durable revision routing just replayed, fenced under ONE
+// registry lock. A registry behind the replay (mutation publication delayed
+// or failed) is first republished from the replayed snapshots, which already
+// carry the current production and on-call route gates; a registry ahead of
+// the replay (a concurrent mutation published first) fails closed with
+// ErrRegistryRevisionMismatch. Same-revision route-gate inputs (on-call
+// readiness) are republished synchronously by their admin writer.
+func (r *Registry) AuthorizeAtDurableRevision(revision uint64, snapshots []RouteableSnapshot, poolID, buyerAccountID string) (Snapshot, bool, error) {
+	empty := Snapshot{PoolID: poolID, Members: map[string]bool{}}
+	if r == nil || poolID == "" || buyerAccountID == "" {
+		return empty, false, ErrRegistryRevisionMismatch
+	}
+	next, err := buildRouteablePoolStates(snapshots)
+	if err != nil {
+		return empty, false, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch {
+	case revision > r.revision:
+		if _, err := r.applyRouteablePoolStatesLocked(revision, next, true, false); err != nil {
+			return empty, false, err
+		}
+	case revision < r.revision:
+		return empty, false, ErrRegistryRevisionMismatch
+	}
+	if r.revision != revision {
+		return empty, false, ErrRegistryRevisionMismatch
+	}
+	snap, authorized := r.authorizeAndSnapshotLocked(poolID, buyerAccountID)
+	return snap, authorized, nil
+}
+
+// ErrRegistryRevisionMismatch means the routing registry could not be proven
+// to hold exactly the durable revision routing just replayed.
+var ErrRegistryRevisionMismatch = errors.New("trustpool: registry revision does not match durable replay")
+
+func buildRouteablePoolStates(snapshots []RouteableSnapshot) (map[string]*poolState, error) {
 	next := make(map[string]*poolState, len(snapshots))
 	for _, s := range snapshots {
 		if s.PoolID == "" {
-			return false, fmt.Errorf("trustpool: routeable snapshot pool id is required")
+			return nil, fmt.Errorf("trustpool: routeable snapshot pool id is required")
 		}
 		if _, exists := next[s.PoolID]; exists {
-			return false, fmt.Errorf("trustpool: duplicate routeable snapshot for pool %q", s.PoolID)
+			return nil, fmt.Errorf("trustpool: duplicate routeable snapshot for pool %q", s.PoolID)
 		}
 		if s.MinBinaryVersion != "" && !versionfloor.Valid(s.MinBinaryVersion) {
-			return false, fmt.Errorf("trustpool: invalid pool min binary version %q for pool %q", s.MinBinaryVersion, s.PoolID)
+			return nil, fmt.Errorf("trustpool: invalid pool min binary version %q for pool %q", s.MinBinaryVersion, s.PoolID)
 		}
 		if !validPoolSettlementMode(s.SettlementMode) {
-			return false, fmt.Errorf("trustpool: routeable snapshot for pool %q has invalid settlement mode %q", s.PoolID, s.SettlementMode)
+			return nil, fmt.Errorf("trustpool: routeable snapshot for pool %q has invalid settlement mode %q", s.PoolID, s.SettlementMode)
 		}
 		modelAllowlist, err := normalizeModelAllowlist(s.PoolID, s.ModelAllowlist)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 		runtimeAllowlist, err := normalizeRuntimeAllowlist(s.PoolID, s.RuntimeAllowlist)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
 		members := make(map[string]struct{}, len(s.Members))
 		for _, id := range s.Members {
 			if id == "" {
-				return false, fmt.Errorf("trustpool: routeable snapshot for pool %q contains empty member id", s.PoolID)
+				return nil, fmt.Errorf("trustpool: routeable snapshot for pool %q contains empty member id", s.PoolID)
 			}
 			members[id] = struct{}{}
 		}
 		revoked := make(map[string]struct{}, len(s.Revoked))
 		for _, id := range s.Revoked {
 			if id == "" {
-				return false, fmt.Errorf("trustpool: routeable snapshot for pool %q contains empty revoked id", s.PoolID)
+				return nil, fmt.Errorf("trustpool: routeable snapshot for pool %q contains empty revoked id", s.PoolID)
 			}
 			revoked[id] = struct{}{}
 			delete(members, id)
@@ -658,7 +707,7 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 		buyers := make(map[string]struct{}, len(s.BuyerAccounts))
 		for _, id := range s.BuyerAccounts {
 			if id == "" {
-				return false, fmt.Errorf("trustpool: routeable snapshot for pool %q contains empty buyer account id", s.PoolID)
+				return nil, fmt.Errorf("trustpool: routeable snapshot for pool %q contains empty buyer account id", s.PoolID)
 			}
 			buyers[id] = struct{}{}
 		}
@@ -689,9 +738,10 @@ func (r *Registry) loadRouteableSnapshots(revision uint64, snapshots []Routeable
 			launchEnvironment:       s.LaunchEnvironment,
 		}
 	}
+	return next, nil
+}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (r *Registry) applyRouteablePoolStatesLocked(revision uint64, next map[string]*poolState, enforceRevision bool, allowSameRevisionRefresh bool) (bool, error) {
 	for _, ps := range next {
 		if r.candidateLaunchBlockedLocked(ps.launchEnvironment) {
 			ps.routeable = false
@@ -1045,6 +1095,10 @@ func (r *Registry) AuthorizeAndSnapshot(poolID, buyerAccountID string) (Snapshot
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.authorizeAndSnapshotLocked(poolID, buyerAccountID)
+}
+
+func (r *Registry) authorizeAndSnapshotLocked(poolID, buyerAccountID string) (Snapshot, bool) {
 	ps := r.pools[poolID]
 	if ps == nil {
 		return Snapshot{PoolID: poolID, Exists: false, Members: map[string]bool{}, Revision: r.revision}, false
