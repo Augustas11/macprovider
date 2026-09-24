@@ -103,7 +103,15 @@ continuous_batching_accepted_tuples:
     kv_dtype: fp16
     requires_moe: false
     hardware_class: "apple-silicon:Apple M3 Ultra:ram-256gb"
+    model_sha256: <from the serve-start runtime-identity line>
+    metallib_sha256: <from the signed candidate's runtime-identity line>
+    kernel_identifier: <from the signed candidate's runtime-identity line>
 ```
+
+From SPEC-038 v0.2.5 the entry binds the runtime revision it was measured on,
+so it is filled in from the signed candidate's own `[paged-kv]
+runtime-identity` line. It is declared only after that candidate meets the
+FR-PKV13 ceiling on the Studio.
 
 This goes on the live provider only after #1716 merges and the signed CLI
 containing it is installed. Verification uses real traffic: `/v1/status`

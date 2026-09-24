@@ -670,16 +670,23 @@ struct ServeCommand: AsyncParsableCommand {
                 ).utf8))
                 throw ExitCode(2)
             }
-            if let cacheLimitMB = resolved.mlxCacheLimitMB, cacheLimitMB < 0 {
-                FileHandle.standardError.write(Data("mlx_cache_limit_mb \(cacheLimitMB) must be >= 0\n".utf8))
-                throw ExitCode(2)
-            }
-            if let queueWaitTimeoutMS = resolved.continuousBatchQueueWaitTimeoutMS, queueWaitTimeoutMS < 1 {
-                FileHandle.standardError.write(Data((
-                    "--continuous-batch-queue-wait-timeout-ms \(queueWaitTimeoutMS) must be >= 1\n"
-                ).utf8))
-                throw ExitCode(2)
-            }
+        }
+        // Validated whether or not batching is on: a supplied value that cannot
+        // be applied must stop startup, never fall back to MLX's unbounded
+        // default cache or an effectively unbounded admission wait.
+        if let cacheLimitMB = resolved.mlxCacheLimitMB,
+           !ModelRuntime.isValidMLXCacheLimitMB(cacheLimitMB) {
+            FileHandle.standardError.write(Data((
+                "mlx_cache_limit_mb \(cacheLimitMB) must be in 0...\(ModelRuntime.maximumMLXCacheLimitMB)\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
+        if let queueWaitTimeoutMS = resolved.continuousBatchQueueWaitTimeoutMS,
+           !(1 ... ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS).contains(queueWaitTimeoutMS) {
+            FileHandle.standardError.write(Data((
+                "--continuous-batch-queue-wait-timeout-ms \(queueWaitTimeoutMS) must be in 1...\(ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS)\n"
+            ).utf8))
+            throw ExitCode(2)
         }
         if let draftModel = resolved.draftModel,
            draftModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

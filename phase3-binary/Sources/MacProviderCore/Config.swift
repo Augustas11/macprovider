@@ -37,6 +37,12 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
     public let kvDType: PagedKVDType
     public let requiresMoE: Bool
     public let hardwareClass: String
+    /// The runtime revision the acceptance evidence was measured on. A new
+    /// build with a different Metal library or paged-KV kernel is a different
+    /// runtime: it must be re-measured (including the SPEC-039 FR-PKV13
+    /// overhead ceiling) and re-accepted, not inherit this entry.
+    public let metallibSHA256: String
+    public let kernelIdentifier: String
 
     public init(
         modelID: String,
@@ -44,7 +50,9 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
         cacheClass: String,
         kvDType: PagedKVDType,
         requiresMoE: Bool,
-        hardwareClass: String
+        hardwareClass: String,
+        metallibSHA256: String,
+        kernelIdentifier: String
     ) {
         self.modelID = modelID
         self.modelSHA256 = modelSHA256
@@ -52,6 +60,8 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
         self.kvDType = kvDType
         self.requiresMoE = requiresMoE
         self.hardwareClass = hardwareClass
+        self.metallibSHA256 = metallibSHA256
+        self.kernelIdentifier = kernelIdentifier
     }
 }
 
@@ -619,7 +629,7 @@ public enum ConfigLoader {
                 throw ConfigError.invalidValue(
                     key: entryKey,
                     value: String(describing: entry),
-                    expected: "map with model_id, model_sha256, cache_class, kv_dtype, requires_moe, hardware_class"
+                    expected: "map with model_id, model_sha256, cache_class, kv_dtype, requires_moe, hardware_class, metallib_sha256, kernel_identifier"
                 )
             }
             // Coverage matching in `ContinuousBatchingAcceptanceCoverage.covers(_:)`
@@ -682,7 +692,9 @@ public enum ConfigLoader {
                 cacheClass: try requiredString("cache_class"),
                 kvDType: kvDType,
                 requiresMoE: requiresMoE,
-                hardwareClass: try requiredString("hardware_class")
+                hardwareClass: try requiredString("hardware_class"),
+                metallibSHA256: try requiredSHA256("metallib_sha256"),
+                kernelIdentifier: try requiredString("kernel_identifier")
             )
         }
     }

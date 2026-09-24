@@ -110,11 +110,14 @@ struct ContinuousBatchingRequestedTuple: Sendable, Equatable {
 /// Compiling a global "evidence available" constant into the binary is not
 /// per-tuple coverage: every Mac taking that binary would inherit it.
 ///
-/// Coverage deliberately keys on the stable identity of the *evidence*:
-/// hardware class, model id + SHA, cache class, KV dtype, and MoE requirement.
-/// `metallibSHA256`, `kernelIdentifier`, `parityLabel`, and `poolEpoch` stay
-/// the SPEC-039 descriptor's job (`isAdmitted(by:)`), which runs first — this
-/// is not a weakened match, it is the other half of the FR-CB10 conjunction.
+/// Coverage keys on the identity the *evidence* was measured on: hardware
+/// class, model id + SHA, cache class, KV dtype, MoE requirement, and the
+/// runtime revision (Metal library SHA + paged-KV kernel identifier). Binding
+/// the runtime revision means a new build re-earns acceptance on its own
+/// measurements (including the SPEC-039 FR-PKV13 overhead ceiling) instead of
+/// inheriting an entry recorded on a different kernel. `parityLabel` is derived
+/// from these fields plus the pool shape, and `poolEpoch` is per-boot; both stay
+/// the SPEC-039 descriptor's job (`isAdmitted(by:)`), which runs first.
 struct ContinuousBatchingAcceptanceCoverage: Sendable, Equatable {
     let acceptedTuples: [ContinuousBatchingAcceptedTuple]
     private let unrestricted: Bool
@@ -147,6 +150,8 @@ struct ContinuousBatchingAcceptanceCoverage: Sendable, Equatable {
                 && accepted.kvDType == tuple.kvDType
                 && accepted.requiresMoE == tuple.requiresMoE
                 && accepted.hardwareClass == tuple.hardwareClass
+                && accepted.metallibSHA256 == tuple.metallibSHA256
+                && accepted.kernelIdentifier == tuple.kernelIdentifier
         }
     }
 }

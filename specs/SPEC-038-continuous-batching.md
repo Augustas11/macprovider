@@ -1,6 +1,6 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2.4
+Version: v0.2.5
 Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
@@ -12,6 +12,14 @@ clarifies the API-visible admission/replay/terminal contract, records
 decode-first scheduling as a conservative v0.2 choice rather than a claim of
 vLLM/SGLang-style unified-token scheduling, and tightens the real-serving
 evidence gate for retained paged-KV reuse.
+
+**Change log v0.2.5 (2026-09-24, runtime-revision-bound acceptance):** FR-CB10
+acceptance coverage now binds the runtime revision the evidence was measured
+on (Metal library SHA-256 and paged-KV kernel identifier) in addition to model,
+cache, KV dtype, MoE and hardware identity. A build with a different metallib
+or kernel does not inherit an earlier acceptance entry; it must be re-measured,
+including the SPEC-039 FR-PKV13 overhead ceiling, and re-accepted. This is how
+the FR-PKV13 ceiling is enforced for real traffic.
 
 **Change log v0.2.4 (2026-09-24, relay backpressure surface):** Names the
 existing client-visible surface for the queue-full and queue-wait-timeout rows
@@ -424,6 +432,17 @@ local capability; permissive/canary modes MAY route to serial only with
 explicit operator policy and reason-coded telemetry. The activation reason
 MUST reference the local capability and MUST NOT cite a missing upstream pin
 as the path to success.
+
+Acceptance coverage MUST bind the runtime revision the acceptance evidence was
+measured on: the Metal library SHA-256 and the paged-KV kernel identifier, as
+well as model id and SHA, cache class, KV dtype, MoE requirement and hardware
+class. An entry missing any of these fields MUST be rejected at configuration
+load, and an entry recorded on a different runtime revision MUST NOT cover the
+requested tuple. An operator MUST NOT record acceptance for a tuple until that
+exact runtime revision has met the SPEC-039 FR-PKV13 overhead ceiling on the
+packaged build. Acceptance coverage is therefore the per-tuple gate that keeps
+a path over the ceiling from serving real traffic. Derived or per-boot
+descriptor fields (parity label, pool epoch) remain the descriptor's job.
 
 ### FR-CB11 - Entry 110 capacity mapping (SPEC-038-R011)
 

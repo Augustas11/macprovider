@@ -314,9 +314,25 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNil(unset.mlxCacheLimitMB, "unset keeps MLX's own default")
     }
 
-    func testApplyMLXCacheLimitIgnoresUnsetOrNegative() {
+    func testApplyMLXCacheLimitIgnoresUnsetOrOutOfRange() {
         XCTAssertNil(ModelRuntime.applyMLXCacheLimit(megabytes: nil))
         XCTAssertNil(ModelRuntime.applyMLXCacheLimit(megabytes: -1))
+        XCTAssertNil(ModelRuntime.applyMLXCacheLimit(megabytes: Int.max), "an overflowing value must not be converted")
+    }
+
+    func testMLXCacheLimitPreflightRejectsOutOfRangeWhateverTheBatchingMode() throws {
+        for mode in [ContinuousBatchingMode.off, .canary] {
+            var config = AppConfig.defaults()
+            config.continuousBatching = mode
+            for invalid in [-1, ModelRuntime.maximumMLXCacheLimitMB + 1, Int.max] {
+                config.mlxCacheLimitMB = invalid
+                XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config), "mode=\(mode) value=\(invalid)")
+            }
+            for valid in [0, 2048, ModelRuntime.maximumMLXCacheLimitMB] {
+                config.mlxCacheLimitMB = valid
+                XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config), "mode=\(mode) value=\(valid)")
+            }
+        }
     }
 
     func testApplyMLXCacheLimitConvertsMegabytes() throws {
@@ -348,14 +364,20 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNil(AppConfig.defaults().continuousBatchQueueWaitTimeoutMS)
     }
 
-    func testContinuousBatchQueueWaitTimeoutPreflightRejectsZero() throws {
-        var config = AppConfig.defaults()
-        config.continuousBatching = .canary
-        config.continuousBatchQueueWaitTimeoutMS = 0
-        XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config))
-
-        config.continuousBatching = .off
-        XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config))
+    func testContinuousBatchQueueWaitTimeoutPreflightRejectsOutOfRangeWhateverTheBatchingMode() throws {
+        let maximum = ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS
+        for mode in [ContinuousBatchingMode.off, .canary] {
+            var config = AppConfig.defaults()
+            config.continuousBatching = mode
+            for invalid in [0, -1, maximum + 1, Int.max] {
+                config.continuousBatchQueueWaitTimeoutMS = invalid
+                XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config), "mode=\(mode) value=\(invalid)")
+            }
+            for valid in [1, 600_000, maximum] {
+                config.continuousBatchQueueWaitTimeoutMS = valid
+                XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config), "mode=\(mode) value=\(valid)")
+            }
+        }
     }
 
     func testContinuousBatchingPlainYAMLOnAndOffPreserveRawThreeStateMode() throws {
@@ -1465,7 +1487,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: tuple.cacheClass,
                 kvDType: tuple.kvDType,
                 requiresMoE: tuple.requiresMoE,
-                hardwareClass: tuple.hardwareClass
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
             )),
             ("model_sha256", ContinuousBatchingAcceptedTuple(
                 modelID: tuple.modelID,
@@ -1473,7 +1497,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: tuple.cacheClass,
                 kvDType: tuple.kvDType,
                 requiresMoE: tuple.requiresMoE,
-                hardwareClass: tuple.hardwareClass
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
             )),
             ("cache_class", ContinuousBatchingAcceptedTuple(
                 modelID: tuple.modelID,
@@ -1481,7 +1507,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: "KVCacheQuantized",
                 kvDType: tuple.kvDType,
                 requiresMoE: tuple.requiresMoE,
-                hardwareClass: tuple.hardwareClass
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
             )),
             ("kv_dtype", ContinuousBatchingAcceptedTuple(
                 modelID: tuple.modelID,
@@ -1489,7 +1517,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: tuple.cacheClass,
                 kvDType: .bf16,
                 requiresMoE: tuple.requiresMoE,
-                hardwareClass: tuple.hardwareClass
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
             )),
             ("requires_moe", ContinuousBatchingAcceptedTuple(
                 modelID: tuple.modelID,
@@ -1497,7 +1527,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: tuple.cacheClass,
                 kvDType: tuple.kvDType,
                 requiresMoE: !tuple.requiresMoE,
-                hardwareClass: tuple.hardwareClass
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
             )),
             ("hardware_class", ContinuousBatchingAcceptedTuple(
                 modelID: tuple.modelID,
@@ -1505,7 +1537,29 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: tuple.cacheClass,
                 kvDType: tuple.kvDType,
                 requiresMoE: tuple.requiresMoE,
-                hardwareClass: "apple-silicon-other"
+                hardwareClass: "apple-silicon-other",
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
+            )),
+            ("metallib_sha256", ContinuousBatchingAcceptedTuple(
+                modelID: tuple.modelID,
+                modelSHA256: tuple.modelSHA256,
+                cacheClass: tuple.cacheClass,
+                kvDType: tuple.kvDType,
+                requiresMoE: tuple.requiresMoE,
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: String(repeating: "c", count: 64),
+                kernelIdentifier: tuple.kernelIdentifier
+            )),
+            ("kernel_identifier", ContinuousBatchingAcceptedTuple(
+                modelID: tuple.modelID,
+                modelSHA256: tuple.modelSHA256,
+                cacheClass: tuple.cacheClass,
+                kvDType: tuple.kvDType,
+                requiresMoE: tuple.requiresMoE,
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: "macprovider_paged_kv_gather_v2"
             ))
         ]
         for (field, accepted) in mutations {
@@ -1662,6 +1716,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             kv_dtype: fp16
             requires_moe: false
             hardware_class: apple-silicon-test
+            metallib_sha256: \(String(repeating: "b", count: 64))
+            kernel_identifier: macprovider_paged_kv_gather_v1
         """
         let config = try ConfigLoader.load(
             cli: CLIOverrides(),
@@ -1675,7 +1731,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: "KVCacheSimple",
                 kvDType: .fp16,
                 requiresMoE: false,
-                hardwareClass: "apple-silicon-test"
+                hardwareClass: "apple-silicon-test",
+                metallibSHA256: String(repeating: "b", count: 64),
+                kernelIdentifier: "macprovider_paged_kv_gather_v1"
             )
         ])
     }
@@ -1689,6 +1747,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             kv_dtype: int4
             requires_moe: false
             hardware_class: apple-silicon-test
+            metallib_sha256: \(String(repeating: "b", count: 64))
+            kernel_identifier: macprovider_paged_kv_gather_v1
         """
         XCTAssertThrowsError(try ConfigLoader.load(
             cli: CLIOverrides(),
@@ -1725,6 +1785,8 @@ final class ServingKnobsConfigTests: XCTestCase {
                 kv_dtype: fp16
                 requires_moe: false
                 hardware_class: apple-silicon-test
+                metallib_sha256: \(String(repeating: "b", count: 64))
+                kernel_identifier: macprovider_paged_kv_gather_v1
             """
         }
         for sha in [
@@ -1755,12 +1817,39 @@ final class ServingKnobsConfigTests: XCTestCase {
             kv_dtype: fp16
             requires_moe: false
             hardware_class: "apple-silicon-test "
+            metallib_sha256: \(String(repeating: "b", count: 64))
+            kernel_identifier: macprovider_paged_kv_gather_v1
         """
         XCTAssertThrowsError(try ConfigLoader.load(
             cli: CLIOverrides(),
             environment: [:],
             fileExists: { _ in true },
             readFile: { _ in yaml }))
+    }
+
+    /// Acceptance evidence is bound to the runtime revision it was measured
+    /// on; an entry that omits it must not load as if it covered every build.
+    func testConfigLoaderRequiresAcceptedTupleRuntimeRevision() throws {
+        let base = """
+        continuous_batching_accepted_tuples:
+          - model_id: mlx-community/Qwen-Test
+            model_sha256: \(String(repeating: "a", count: 64))
+            cache_class: KVCacheSimple
+            kv_dtype: fp16
+            requires_moe: false
+            hardware_class: apple-silicon-test
+        """
+        for yaml in [
+            base + "\n    kernel_identifier: macprovider_paged_kv_gather_v1\n",
+            base + "\n    metallib_sha256: \(String(repeating: "b", count: 64))\n",
+            base + "\n    metallib_sha256: \(String(repeating: "B", count: 64))\n    kernel_identifier: macprovider_paged_kv_gather_v1\n"
+        ] {
+            XCTAssertThrowsError(try ConfigLoader.load(
+                cli: CLIOverrides(),
+                environment: [:],
+                fileExists: { _ in true },
+                readFile: { _ in yaml }))
+        }
     }
 
     func testConfigLoaderDefaultsAcceptedTuplesToEmpty() throws {
@@ -2130,7 +2219,7 @@ final class ServingKnobsConfigTests: XCTestCase {
         )
     }
 
-    /// FR-CB10 coverage that exactly matches `tuple` on the six evidence
+    /// FR-CB10 coverage that exactly matches `tuple` on the eight evidence
     /// fields, so a gating test proves the descriptor gate rather than the
     /// acceptance gate.
     private static func acceptanceCoverage(
@@ -2143,7 +2232,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: tuple.cacheClass,
                 kvDType: tuple.kvDType,
                 requiresMoE: tuple.requiresMoE,
-                hardwareClass: tuple.hardwareClass
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
             )
         ])
     }

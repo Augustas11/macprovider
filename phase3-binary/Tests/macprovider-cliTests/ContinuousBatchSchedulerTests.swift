@@ -3356,6 +3356,25 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
     }
 
+    func testOversizedQueueWaitIsClampedNotTurnedIntoAnUnboundedWait() {
+        let configuration = ContinuousBatchSchedulerConfiguration(
+            descriptor: Self.descriptor(),
+            tuple: Self.tuple(),
+            maxActiveRows: 1,
+            decodeHeadroomTokens: 1,
+            queueWaitTimeoutNanoseconds: UInt64.max,
+            snapshot: ContinuousBatchSchedulerSnapshot(
+                modelID: Self.modelID,
+                modelSHA256: Self.modelSHA,
+                weightsGeneration: 3
+            )
+        )
+        XCTAssertEqual(
+            configuration.queueWaitTimeoutNanoseconds,
+            ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutNanoseconds
+        )
+    }
+
     private static func configuration(
         descriptor: PagedKVDescriptor = descriptor(),
         tuple: ContinuousBatchingRequestedTuple = tuple(),

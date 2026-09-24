@@ -1,7 +1,9 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.4
-Status: draft (normative design). v0.1.4 admits only the measured Qwen3.6
+Version: v0.1.5
+Status: draft (normative design). v0.1.5 names how the FR-PKV13 overhead
+ceiling gates real traffic: through SPEC-038 FR-CB10 acceptance coverage bound
+to the measured runtime revision. v0.1.4 admits only the measured Qwen3.6
 mixed layout for first-turn batching: recurrent Mamba state remains row-local
 and only full-attention KV is paged. It does not authorize sliding-window
 attention or retained hybrid cross-turn state. v0.1.3 clarifies that gather-feeds-SDPA is
@@ -613,6 +615,17 @@ the values are IMPL-set**, exactly as FR-PKV2's capacity bound is:
 These are normative define-and-record obligations; the specific byte and
 percentage values are chosen by the IMPL against real evidence and recorded in
 diagnostics and acceptance fixtures.
+
+The overhead ceiling is enforced per tuple through SPEC-038 FR-CB10 acceptance
+coverage, not by a startup micro-benchmark. A throughput measurement at
+process start is too short and too noisy to gate on, and a false failure would
+turn batching off at random. The ceiling MUST be measured on the packaged
+build, serial versus batched in the same window on the same hardware, before
+the operator records acceptance for that tuple. Acceptance coverage binds the
+runtime revision (Metal library SHA-256 and paged-KV kernel identifier). A path
+that has not met the ceiling on that revision has no acceptance, so it
+serial-routes in canary and fails closed in strict `on`. A new runtime revision
+must re-measure before it can serve batched traffic.
 
 ### FR-PKV14 — operator configuration surface (SPEC-039-R014)
 

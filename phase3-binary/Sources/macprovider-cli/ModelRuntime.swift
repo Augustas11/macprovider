@@ -1589,6 +1589,9 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         PagedKVRuntimeDiagnostics.log("measure OK: runtime measurement complete, paged-KV attach eligible for model=\(modelID)")
+        // The runtime-revision fields an operator copies into
+        // `continuous_batching_accepted_tuples` after this build passes acceptance.
+        PagedKVRuntimeDiagnostics.log("runtime-identity model=\(modelID) model_sha256=\(modelSHA256) hardware_class=\(hardwareClass) metallib_sha256=\(metallibSHA256) kernel_identifier=\(kernelIdentifier)")
         return PagedKVRuntimeMeasurement(
             observedRuntimeIdentity: observedIdentity,
             hardwareSizingProof: proof
@@ -1733,10 +1736,14 @@ actor ModelRuntime: ModelRuntimeServing {
         return (parityProbe, moeProbe)
     }
 
-    /// Runs challenge pairs in order and returns the first distinguishing
-    /// pair's result; that verdict (proven or a real divergence) is final and no
-    /// later pair runs. If no pair distinguishes, the last result is returned,
-    /// which is never `proven`, so the attach gate fails closed.
+    /// Runs challenge pairs in order and returns the first verdict. Only a
+    /// clean indistinguishable run (both rows decoded, no row failure, no
+    /// divergence, serial references merely identical) moves on to the next
+    /// pair. Anything else — a distinguishing pass, a real divergence, a probe
+    /// failure or exception (`.failClosed`), an incomplete decode — is final,
+    /// so a failure can never be retried away by a later passing pair. If no
+    /// pair distinguishes, the last result is returned, which is never
+    /// `proven`, so the attach gate fails closed.
     static func firstDistinguishingIsolationProbe(
         pairCount: Int,
         attempt: (Int) async -> PagedKVRuntimeMoEProbeResult,
@@ -1746,19 +1753,36 @@ actor ModelRuntime: ModelRuntimeServing {
         for pairIndex in 0 ..< pairCount {
             let result = await attempt(pairIndex)
             last = result
-            if result.challengeDistinguishing { return result }
+            guard isCleanIndistinguishableIsolationRun(result) else { return result }
             onIndistinguishable(pairIndex)
         }
         return last
     }
 
+    private static func isCleanIndistinguishableIsolationRun(_ result: PagedKVRuntimeMoEProbeResult) -> Bool {
+        !result.challengeDistinguishing
+            && !result.proven
+            && result.rowsDecodedInSharedForward == 2
+            && result.rowFailures == 0
+            && result.crossRowDivergences == 0
+    }
+
+    /// Upper bound for `mlx_cache_limit_mb` (1 TiB). Far above any Mac's
+    /// unified memory, and small enough that the byte conversion cannot overflow.
+    nonisolated static let maximumMLXCacheLimitMB = 1_048_576
+
+    nonisolated static func isValidMLXCacheLimitMB(_ megabytes: Int) -> Bool {
+        (0 ... maximumMLXCacheLimitMB).contains(megabytes)
+    }
+
     /// Bounds MLX's buffer cache. Must run before the model loads; see
-    /// `AppConfig.mlxCacheLimitMB`. Returns the applied byte limit.
+    /// `AppConfig.mlxCacheLimitMB`. Serve startup rejects an out-of-range value
+    /// first (`isValidMLXCacheLimitMB`), so `nil` here only means "not set".
+    /// Returns the applied byte limit.
     @discardableResult
     nonisolated static func applyMLXCacheLimit(megabytes: Int?) -> Int? {
-        guard let megabytes, megabytes >= 0 else { return nil }
-        let (bytes, overflow) = megabytes.multipliedReportingOverflow(by: 1024 * 1024)
-        guard !overflow else { return nil }
+        guard let megabytes, isValidMLXCacheLimitMB(megabytes) else { return nil }
+        let bytes = megabytes * 1024 * 1024
         Memory.cacheLimit = bytes
         return bytes
     }
@@ -3091,8 +3115,10 @@ actor ModelRuntime: ModelRuntimeServing {
         guard let milliseconds, milliseconds > 0 else {
             return ContinuousBatchSchedulerConfiguration.defaultQueueWaitTimeoutNanoseconds
         }
-        let (nanoseconds, overflow) = UInt64(milliseconds).multipliedReportingOverflow(by: 1_000_000)
-        return overflow ? UInt64.max : nanoseconds
+        // Serve startup rejects values above the maximum; clamp anyway so no
+        // path can turn an oversized value into an effectively unbounded wait.
+        let bounded = min(milliseconds, ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS)
+        return UInt64(bounded) * 1_000_000
     }
 
     private nonisolated static func makeContinuousBatchScheduler(

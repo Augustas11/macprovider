@@ -137,7 +137,10 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
             min(64, tokenDeliveryTaskLimit ?? (deliveryLimitOverflow ? 64 : scaledDeliveryLimit))
         )
         self.tokenDeliveryTimeoutNanoseconds = tokenDeliveryTimeoutNanoseconds
-        self.queueWaitTimeoutNanoseconds = queueWaitTimeoutNanoseconds
+        self.queueWaitTimeoutNanoseconds = min(
+            queueWaitTimeoutNanoseconds,
+            ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutNanoseconds
+        )
         self.diagnosticLimit = max(1, diagnosticLimit)
         self.vocabularySize = max(1, vocabularySize)
         self.maxRequestIDBytes = max(1, maxRequestIDBytes)
@@ -165,6 +168,11 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// API-visible terminal outcome at all, so the serve path defaults to 30s
     /// unless the operator sets `continuous_batch_queue_wait_timeout_ms`.
     static let defaultQueueWaitTimeoutNanoseconds: UInt64 = 30_000_000_000
+
+    /// Upper bound (1 hour) for `continuous_batch_queue_wait_timeout_ms`. A
+    /// longer wait is not a bounded admission outcome in any useful sense.
+    static let maximumQueueWaitTimeoutMS = 3_600_000
+    static let maximumQueueWaitTimeoutNanoseconds = UInt64(maximumQueueWaitTimeoutMS) * 1_000_000
 }
 
 struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
