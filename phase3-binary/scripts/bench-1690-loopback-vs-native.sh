@@ -70,6 +70,11 @@ if [[ -n "${PAUSE_PROVIDER_SOCKET:-}" ]]; then
 fi
 
 serve_count=$(pgrep -f "macprovider-cli serve" | wc -l | tr -d " ")
+# Perplexity is contention-independent and never pauses a provider, so a
+# live serving provider does not block PPL_ONLY runs; a stray llama-server does.
+if [[ "${PPL_ONLY:-0}" == "1" ]]; then
+  serve_count=0
+fi
 if pgrep -x llama-server >/dev/null || {
      [[ "$serve_count" -gt 0 ]] && ! {
        [[ "$serve_count" -eq 1 && -n "${PAUSE_PROVIDER_PORT:-}" ]] && provider_paused "$PAUSE_PROVIDER_PORT"
@@ -99,6 +104,22 @@ slot_ctx=$(( PROMPT_TOKENS + DECODE_TOKENS + 64 ))
   echo "paused_provider_port=${PAUSE_PROVIDER_PORT:-none}"
   echo "prompt_tokens=$PROMPT_TOKENS decode_tokens=$DECODE_TOKENS runs=$RUNS concurrency=$CONCURRENCY ppl_ctx=$PPL_CTX"
 } > "$OUT/env.txt"
+
+if [[ "${PPL_ONLY:-0}" == "1" ]]; then
+  for g in $GGUFS; do
+    tag=$(basename "$g" .gguf)
+    chunk_args=()
+    [[ -n "$PPL_CHUNKS" ]] && chunk_args=(--chunks "$PPL_CHUNKS")
+    "$LLAMA_DIR/llama-perplexity" -m "$g" -f "$TEXT" -c "$PPL_CTX" -ngl 999 ${chunk_args[@]+"${chunk_args[@]}"} \
+      > "$OUT/ppl-$tag.log" 2>&1
+  done
+  native_chunk_args=()
+  [[ -n "$PPL_CHUNKS" ]] && native_chunk_args=(--max-chunks "$PPL_CHUNKS")
+  "$CLI" msb-perplexity --model "$MLX_MODEL" --text-file "$TEXT" --ctx "$PPL_CTX" \
+    ${native_chunk_args[@]+"${native_chunk_args[@]}"} --output "$OUT/ppl-native.json" > /dev/null 2> "$OUT/ppl-native.err"
+  echo "bench-1690: perplexity-only run done; results in $OUT" >&2
+  exit 0
+fi
 
 # Native: msb-throughput reports production serial (the c=1 native number and
 # the serial-serve rate at any concurrency) plus contiguous batched aggregate
@@ -147,13 +168,13 @@ for g in $GGUFS; do
 
   chunk_args=()
   [[ -n "$PPL_CHUNKS" ]] && chunk_args=(--chunks "$PPL_CHUNKS")
-  "$LLAMA_DIR/llama-perplexity" -m "$g" -f "$TEXT" -c "$PPL_CTX" -ngl 999 "${chunk_args[@]}" \
+  "$LLAMA_DIR/llama-perplexity" -m "$g" -f "$TEXT" -c "$PPL_CTX" -ngl 999 ${chunk_args[@]+"${chunk_args[@]}"} \
     > "$OUT/ppl-$tag.log" 2>&1
 done
 
 native_chunk_args=()
 [[ -n "$PPL_CHUNKS" ]] && native_chunk_args=(--max-chunks "$PPL_CHUNKS")
 "$CLI" msb-perplexity --model "$MLX_MODEL" --text-file "$TEXT" --ctx "$PPL_CTX" \
-  "${native_chunk_args[@]}" --output "$OUT/ppl-native.json" > /dev/null 2> "$OUT/ppl-native.err"
+  ${native_chunk_args[@]+"${native_chunk_args[@]}"} --output "$OUT/ppl-native.json" > /dev/null 2> "$OUT/ppl-native.err"
 
 echo "bench-1690: done; results in $OUT" >&2
