@@ -53,7 +53,19 @@ provider_paused() {
 
 if [[ -n "${PAUSE_PROVIDER_SOCKET:-}" ]]; then
   : "${PAUSE_PROVIDER_PORT:?PAUSE_PROVIDER_PORT is required with PAUSE_PROVIDER_SOCKET}"
-  provider_control pause_request >&2
+  # The provider refuses a pause when in-flight work outlasts its drain
+  # timeout (drain_timeout_s, default 30s); long buyer generations make that
+  # common, so retry until one attempt lands in a gap. A refused attempt only
+  # holds new work for one drain window, then the provider serves normally.
+  pause_attempts="${PAUSE_ATTEMPTS:-10}"
+  for attempt in $(seq 1 "$pause_attempts"); do
+    provider_control pause_request >&2 && break
+    if (( attempt == pause_attempts )); then
+      echo "bench-1690: provider refused pause $pause_attempts times; not running" >&2
+      exit 4
+    fi
+    sleep "${PAUSE_RETRY_SECONDS:-90}"
+  done
   trap 'provider_control resume_request >&2 || echo "bench-1690: RESUME FAILED; resume the provider by hand" >&2' EXIT
 fi
 
