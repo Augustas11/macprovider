@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
@@ -456,6 +457,17 @@ func (h *handler) wholesaleStatements(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 			case errors.Is(err, errWholesaleStatementIssued):
 				writeError(w, http.StatusConflict, "conflict", "wholesale statement already issued")
+			case errors.Is(err, ErrWholesaleConflictingGenerations), errors.Is(err, ErrWholesaleNoGeneration),
+				errors.Is(err, ErrWholesaleGrossOverflow), errors.Is(err, ErrWholesaleGrossNegative):
+				// Fail closed, but name the data problem so an operator can tell it
+				// from a store outage (SPEC-005 §11.7).
+				slog.Error("wholesale statement refused",
+					"event", "wholesale_statement_refused",
+					"account_id", req.AccountID,
+					"period", req.Period,
+					"error", err.Error(),
+				)
+				writeError(w, http.StatusUnprocessableEntity, "wholesale_statement_refused", err.Error())
 			default:
 				writeError(w, http.StatusInternalServerError, "internal_error", "could not generate wholesale statement")
 			}
