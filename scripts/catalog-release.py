@@ -107,6 +107,13 @@ ARTIFACT_IDENTITY_MATRIX = {
     })),
 }
 ARTIFACT_VERIFICATION_STATUSES = frozenset({"declared", "verified", "blocked"})
+# SPEC-023 v0.17.1 rollout gate: the oldest SPEC-023 consumer (provider CLI
+# and coordinator) that must read every feed this generator emits. A tuple
+# introduced by a later revision is refused at generation until this floor is
+# raised, in a reviewed change, after every consumer implements it.
+ARTIFACT_FEED_CONSUMER_FLOOR = (0, 16, 0)
+# allowed_runtime_sources value -> the SPEC-023 revision that made it legal.
+ARTIFACT_RUNTIME_SOURCE_MIN_CONSUMER = {"mlxlm_loopback": (0, 17, 0)}
 # SPEC-005 §5.5 NormalizeModelKey parity (phase4-coordinator/internal/billing/formula.go).
 KNOWN_MODEL_NAMESPACES = frozenset({"mlx-community", "openai", "google", "meta-llama", "nvidia", "qwen"})
 TIER2_HASH_SCOPES = {
@@ -1671,7 +1678,23 @@ def build_artifact_feed(source_obj: dict, candidate: bytes, candidate_obj: dict)
     }
     feed = canonical_sorted_bytes(value)
     validate_artifact_feed(feed, candidate, candidate_obj)
+    require_feed_consumer_floor(value["models"])
     return feed
+
+
+def require_feed_consumer_floor(models: dict, floor: tuple = None) -> None:
+    """SPEC-023 v0.17.1: refuse to emit a tuple the consumer floor cannot read."""
+    floor = ARTIFACT_FEED_CONSUMER_FLOOR if floor is None else floor
+    for key, model in sorted(models.items()):
+        for artifact_id, entry in sorted(model["artifacts"].items()):
+            for source in entry["allowed_runtime_sources"]:
+                needed = ARTIFACT_RUNTIME_SOURCE_MIN_CONSUMER.get(source)
+                if needed is not None and floor < needed:
+                    fail(
+                        f"models.{key}.artifacts.{artifact_id}: allowed_runtime_sources {source!r} needs every "
+                        f"consumer at SPEC-023 v{'.'.join(map(str, needed))}; the generator consumer floor is "
+                        f"v{'.'.join(map(str, floor))} (raise ARTIFACT_FEED_CONSUMER_FLOOR only after the rollout)"
+                    )
 
 
 def validate_artifact_feed(
@@ -4697,6 +4720,8 @@ def verify_directory(
     if artifact_path.exists():
         artifacts = artifact_path.read_bytes()
         artifact_obj = validate_artifact_feed(artifacts, candidate, candidate_obj)
+        # SPEC-023 v0.17.1: an assembled release is held to the same floor.
+        require_feed_consumer_floor(artifact_obj["models"])
         if artifacts != canonical_sorted_bytes(artifact_obj):
             fail("release directory artifact feed is not deterministic canonical bytes")
         require_recommendable_rate_rows(candidate_obj, rate_card_obj)

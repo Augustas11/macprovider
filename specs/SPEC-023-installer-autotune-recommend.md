@@ -1,12 +1,20 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.17.0
+version: v0.17.1
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-09-23
 lockstep: SPEC-005 v0.6.7 (SPEC-005-R011 money-table owner). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.17.1 (2026-09-25)** — The v0.17.0 rollout rule is mechanical (#1690 M8
+  audit R1). The release generator carries a consumer floor
+  (`ARTIFACT_FEED_CONSUMER_FLOOR` in `scripts/catalog-release.py`, v0.16.0)
+  and refuses to emit an artifact that allows `mlxlm_loopback` while the
+  floor is below v0.17.0. The floor is raised in a reviewed change only
+  after every consumer implements v0.17.0. Consumers keep accepting the
+  tuple. No schema or consumer change.
 
 - **v0.17.0 (2026-09-24)** — `mlxlm_loopback` on `mlx_safetensors`
   artifacts (#1690 M8, SPEC-010 1.12 R009). §3.7.4: the adapter enum gains
@@ -1057,6 +1065,8 @@ The release generator MUST apply these same closed field sets before signing, so
   | `gguf` | `macprovider.gguf-file.v1` | `ollama_library_tag` or (v0.16.0) `huggingface_revision` with `file_path` | `{ollama_loopback, llamacpp_loopback, lmstudio_loopback, openai_compatible_loopback}` |
 
   Every artifact entry MUST match exactly one row of this table on all four fields. **Any other tuple is `catalog_artifact_feed_integrity_failure`**, rejected by the release generator before signing and by the consumer before any artifact from that feed binds anything — including, specifically, a `gguf` artifact declaring `macprovider.snapshot-manifest.v1`, an `mlx_safetensors` artifact declaring `macprovider.gguf-file.v1`, an `mlx_safetensors` artifact carrying `ollama_library_tag`, a `huggingface_revision` reference whose `file_path` presence does not match its format (present on `mlx_safetensors`, absent on `gguf`), an `mlx_safetensors` artifact allowing any loopback source other than `mlxlm_loopback`, and a `gguf` artifact allowing `mlx_cache` or `mlxlm_loopback`. The matrix is closed in both directions: adding a runtime format, a hash algorithm, a source-reference kind, or a format/source pairing is a SPEC-023 revision plus a generator and consumer release, exactly as §3.7.3 requires of the schema itself. The two independent constraints stated elsewhere in this section — that an `mlx_safetensors` artifact MUST allow only `mlx_cache` and `mlxlm_loopback`, and that a `verified` artifact MUST NOT allow `openai_compatible_loopback` (an opaque OpenAI-compatible endpoint supplies no artifact bytes to hash) — are restatements of and additions to this matrix, not exceptions to it: the second means the fourth column's `openai_compatible_loopback` entry is reachable only by a `declared` artifact.
+
+  **Rollout of the v0.17.0 tuple (enforced, v0.17.1).** The release generator MUST refuse to emit an artifact whose `allowed_runtime_sources` contains `mlxlm_loopback` while its consumer floor (`ARTIFACT_FEED_CONSUMER_FLOOR`, `scripts/catalog-release.py`) is below v0.17.0. The floor MUST be raised only in a reviewed change, after every provider CLI and coordinator that reads the release implements v0.17.0. A consumer older than v0.17.0 rejects such a feed as `catalog_artifact_feed_integrity_failure`, which fails closed for artifact-derived use only.
 
   **Rollout of the v0.16.0 tuple.** Current consumers accept a `gguf` artifact only with `ollama_library_tag` (`phase4-coordinator/internal/buyer/catalog_artifacts_feed.go:41-56`; the generator's matrix in `scripts/catalog-release.py` likewise). Because the feed schema is closed, a consumer older than v0.16.0 rejects a whole feed that carries a `huggingface_revision` GGUF artifact as `catalog_artifact_feed_integrity_failure`. That fails closed for artifact-derived use only (§3.7.6 rule 6). A release MUST NOT publish such an artifact until the generator and every consumer that reads that release implement v0.16.0.
 

@@ -1082,6 +1082,14 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         onChunk: (@Sendable (StreamChunk) -> Void)?
     ) async throws -> CompletionResult {
         if shouldCancel() { throw CancellationError() }
+        // The last check before any byte goes upstream, for streaming and
+        // non-streaming alike: the bound artifact identity is unchanged and,
+        // for mlxlm_loopback, the runtime still lists the bound snapshot
+        // (SPEC-010-R007(a) / R009(a)(b)).
+        guard identityIsValid() else {
+            throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
+        }
+        try await requireMLXLMServesBoundSnapshot()
         let body = try Self.encodeUpstreamRequest(request, upstreamModelName: upstreamModelName)
         let clock = LoopbackProgressClock()
         let timeouts = LoopbackGenerationTimeouts.forGeneration(maxTokens: request.maxTokens, contextWindow: contextWindow)

@@ -328,6 +328,17 @@ class ArtifactFeedValidationTest(unittest.TestCase):
 
     # --- AC-CAT-16: closed identity matrix + GGUF digest binding ---------------
 
+    def test_generator_refuses_mlxlm_loopback_below_the_consumer_floor(self):
+        # SPEC-023 v0.17.1 rollout gate (#1690 M8 audit R1 ARCH M1).
+        models = {"qwen3-8b": {"artifacts": {"mlx-4bit": {"allowed_runtime_sources": ["mlx_cache", "mlxlm_loopback"]}}}}
+        with self.assertRaises(catalog_release.CatalogError) as caught:
+            catalog_release.require_feed_consumer_floor(models)
+        self.assertIn("consumer floor", str(caught.exception))
+        catalog_release.require_feed_consumer_floor(models, floor=(0, 17, 0))
+        native = {"qwen3-8b": {"artifacts": {"mlx-4bit": {"allowed_runtime_sources": ["mlx_cache"]}}}}
+        catalog_release.require_feed_consumer_floor(native)
+        self.assertEqual(catalog_release.ARTIFACT_FEED_CONSUMER_FLOOR, (0, 16, 0))
+
     def test_mlx_artifact_may_allow_mlxlm_loopback(self):
         # SPEC-023 v0.17.0 / SPEC-010-R009 (#1690 M8).
         feed = feed_from(artifact_source())

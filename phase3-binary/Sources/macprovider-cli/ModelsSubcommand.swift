@@ -84,7 +84,7 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
         )
-        let document = await BYOMDiscoveryRunner(environment: environment).discover()
+        let document = await BYOMDiscoveryRunner(environment: environment).discoverIncludingMLXLM()
         for warning in document.warnings.sorted() {
             writeStderr("models discover warning: \(warning)")
         }
@@ -154,7 +154,7 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
         )
-        let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluate()
+        let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluateIncludingMLXLM()
         for warning in document.warnings.sorted() {
             writeStderr("models evaluate warning: \(warning)")
         }
@@ -274,9 +274,11 @@ struct ModelsOfferCommand: AsyncParsableCommand {
                 identityStore: ProviderCredentialStoreFactory.receiptKeyStore(for: resolved.config),
                 client: client
             )
-            // SPEC-046 v0.3.0: an `mlxlm:` target is offered through the
-            // mlxlm_loopback adapter and its snapshot-manifest leg.
-            let status = MLXLMLoopbackServeModel.isMLXLMLoopbackRef(candidate)
+            // SPEC-046 v0.3.0: a target that names an mlxlm_loopback
+            // candidate (by id, served ref, or display name) is offered
+            // through the mlxlm adapter and its snapshot-manifest leg.
+            let isMLXLMCandidate = await runtime.mlxlmCandidate(target: candidate) != nil
+            let status = isMLXLMCandidate
                 ? try await runtime.submitMLXLMOffer(
                     providerID: resolved.providerID,
                     target: candidate,

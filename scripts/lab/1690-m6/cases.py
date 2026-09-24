@@ -338,6 +338,56 @@ def case_mlxlm_identity_mismatch():
           (decision.get("admission_state"), served[0]["status"], rows[0]["usage_source"], rows[0]["settlement_outcome"]))
 
 
+def mlxlm_reoffer_and_price():
+    offer = json.loads(subprocess.run([str(HERE / "cli.sh"), "models", "offer", "mlxlm:Qwen2.5-0.5B-Instruct-4bit", "--yes", "--json",
+                                       "--config", str(LAB / "provider" / "config.yaml"), "--coordinator-url", "http://127.0.0.1:19102",
+                                       "--mlx-cache-dir", str(LAB / "home" / "hf"), "--skip-ollama", "--skip-lmstudio",
+                                       "--skip-openai-compatible", "--skip-llamacpp"],
+                                      check=True, capture_output=True, text=True).stdout)
+    body = {"schema": "model_admission_decision_request.v1", "provider_id": offer["provider_id"], "candidate_id": offer["candidate_id"],
+            "next_state": "catalog_priced", "reason_code": "operator_lab_pool_priced",
+            "expected_coordinator_event_id": offer["coordinator_event_id"], "idempotency_key": f"lab-1690-m8-repriced-{int(time.time())}"}
+    req = urllib.request.Request("http://127.0.0.1:19102/admin/model-admission/decisions", data=json.dumps(body).encode(),
+                                 headers={"Authorization": f"Bearer {secret('operator_lab_a')}", "Content-Type": "application/json"})
+    return json.load(urllib.request.urlopen(req))
+
+
+def case_mlxlm_stream_after_change():
+    # #1690 M8 audit R1 (CODE H3 / SECURITY M1): a snapshot file rewritten in
+    # place while serve runs withdraws the identity; a streaming request then
+    # fails closed in the CLI before any byte reaches mlx_lm.server.
+    readme = pathlib.Path(os.environ.get("MLXLM_SNAPSHOT", str(LAB / "models" / "mlx" / "Qwen2.5-0.5B-Instruct-4bit"))) / "README.md"
+    original = readme.read_bytes()
+    before, snaps = len(upstream_lines()), snapshots_count()
+    try:
+        readme.write_bytes(original + b" ")
+        served = buyer("--pool", "M", "--engine", "mlxlm", "--stream", "--n", "1")
+    finally:
+        readme.write_bytes(original)
+    save("mlxlm_stream_after_change", {"buyer": served, "upstream_calls": len(upstream_lines()) - before})
+    check("mlxlm_stream_after_change", served[0]["status"] != 200 and len(upstream_lines()) == before,
+          "stream after an in-place snapshot rewrite fails closed; nothing reached mlx_lm.server",
+          {"status": served[0]["status"], "error": served[0].get("error"), "upstream_calls": len(upstream_lines()) - before,
+           "new_snapshots": snapshots_count() - snaps})
+    # The restored bytes still carry a new ctime, so the running session stays
+    # withdrawn; a restart re-hashes the (catalog) snapshot.
+    serve_restart(str(LAB / "bin" / "macprovider-cli-lab"), {"ENGINE": "mlxlm"})
+    time.sleep(8)
+    served = buyer("--pool", "M", "--engine", "mlxlm", "--stream", "--n", "1")
+    decision = None
+    if served[0]["status"] != 200:
+        decision = mlxlm_reoffer_and_price()
+        serve_restart(str(LAB / "bin" / "macprovider-cli-lab"), {"ENGINE": "mlxlm"})
+        time.sleep(8)
+        served = buyer("--pool", "M", "--engine", "mlxlm", "--stream", "--n", "1")
+    rows = wait_settled(1)
+    save("mlxlm_stream_after_change_restore", {"reoffered": decision is not None, "buyer": served, "attempts": rows})
+    check("mlxlm_stream_after_change", served[0]["status"] == 200 and rows[0]["usage_source"] == "pool_operator_attested"
+          and rows[0]["settlement_outcome"] == "verified",
+          "restart on the restored catalog snapshot streams and settles again",
+          {"reoffered": decision is not None, "status": served[0]["status"], "usage_source": rows[0]["usage_source"]})
+
+
 def case_ollama_paid():
     engine_paid("ollama_paid", "O", "ollama", "ollama_loopback", "Ollama")
     member = [p for p in poolz() if p.get("runtime_source") == "ollama_loopback"]
@@ -575,8 +625,9 @@ def main():
              "engine_absent": case_engine_absent, "engine_invalid": case_engine_invalid,
              "mlxlm_paid": case_mlxlm_paid, "mlxlm_refused": case_mlxlm_refused,
              "mlxlm_identity_mismatch": case_mlxlm_identity_mismatch,
+             "mlxlm_stream_after_change": case_mlxlm_stream_after_change,
              "ollama_paid": case_ollama_paid, "ollama_refused": case_ollama_refused}
-    m8 = {"mlxlm_paid", "mlxlm_refused", "mlxlm_identity_mismatch", "ollama_paid", "ollama_refused"}
+    m8 = {"mlxlm_paid", "mlxlm_refused", "mlxlm_identity_mismatch", "mlxlm_stream_after_change", "ollama_paid", "ollama_refused"}
     for name, fn in cases.items():
         # The M8 cases need their own rig ENGINE and run only when named.
         if (not a.only and name not in m8) or (a.only and name in a.only):

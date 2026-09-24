@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import MacProviderCore
 
@@ -119,6 +120,22 @@ struct MLXSnapshotIdentity: Equatable, Sendable {
         let inode: UInt64
         let modifiedSeconds: Int
         let modifiedNanoseconds: Int
+        /// The inode change time: any write updates it and no caller can set
+        /// it, so an in-place rewrite that restores size and mtime still
+        /// changes the stamp.
+        let changedSeconds: Int
+        let changedNanoseconds: Int
+
+        init(relativePath: String, info: stat) {
+            self.relativePath = relativePath
+            self.size = Int64(info.st_size)
+            self.device = Int64(info.st_dev)
+            self.inode = UInt64(info.st_ino)
+            self.modifiedSeconds = info.st_mtimespec.tv_sec
+            self.modifiedNanoseconds = info.st_mtimespec.tv_nsec
+            self.changedSeconds = info.st_ctimespec.tv_sec
+            self.changedNanoseconds = info.st_ctimespec.tv_nsec
+        }
     }
 
     /// Resolved, standardized snapshot directory.
@@ -129,16 +146,55 @@ struct MLXSnapshotIdentity: Equatable, Sendable {
 
     var algorithm: String { ModelArtifactIdentity.snapshotManifestV1 }
 
-    /// Hashes the complete snapshot with the native algorithm, bracketed by
-    /// two file-identity reads that must agree.
+    /// Hashes the complete snapshot into the native `snapshot-manifest.v1`
+    /// digest (the `ModelArtifactVerifier.canonicalArtifactHash` format:
+    /// sorted `path\nsize\nsha256\n` lines). Each file is hashed over one
+    /// descriptor opened with O_NOFOLLOW whose stamp (size, inode, mtime,
+    /// ctime) must equal the directory listing's before and after the read,
+    /// and the whole listing is re-read after hashing. A replaced, rewritten,
+    /// added, or removed file fails closed (SPEC-010-R009(a)).
     static func compute(directory: URL, deadline: Date? = nil) throws -> MLXSnapshotIdentity {
         let resolved = directory.resolvingSymlinksInPath().standardizedFileURL
         let before = try stamps(of: resolved)
-        let digest = try ModelArtifactVerifier.canonicalArtifactHash(directory: resolved, deadline: deadline)
+        var manifest = ""
+        for stamp in before {
+            try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
+            let sha = try hashFile(root: resolved, stamp: stamp, deadline: deadline)
+            manifest += "\(stamp.relativePath)\n\(stamp.size)\n\(sha)\n"
+        }
         guard try stamps(of: resolved) == before else {
             throw MLXSnapshotIdentityError.changedWhileHashing
         }
+        let digest = Data(SHA256.hash(data: Data(manifest.utf8))).map { String(format: "%02x", $0) }.joined()
         return MLXSnapshotIdentity(directory: resolved, digest: digest, files: before)
+    }
+
+    private static func hashFile(root: URL, stamp: FileStamp, deadline: Date?) throws -> String {
+        let path = root.path + "/" + stamp.relativePath
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw MLXSnapshotIdentityError.unreadable("open failed") }
+        defer { close(fd) }
+        func current() throws -> FileStamp {
+            var info = stat()
+            guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_nlink <= 1 else {
+                throw MLXSnapshotIdentityError.unreadable("not a regular single-link file")
+            }
+            return FileStamp(relativePath: stamp.relativePath, info: info)
+        }
+        guard try current() == stamp else { throw MLXSnapshotIdentityError.changedWhileHashing }
+        var hasher = SHA256()
+        var buffer = [UInt8](repeating: 0, count: 4 * 1024 * 1024)
+        var total: Int64 = 0
+        while true {
+            try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
+            let count = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+            guard count >= 0 else { throw MLXSnapshotIdentityError.unreadable("read failed") }
+            if count == 0 { break }
+            buffer.withUnsafeBytes { hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: $0[0..<count])) }
+            total += Int64(count)
+        }
+        guard total == stamp.size, try current() == stamp else { throw MLXSnapshotIdentityError.changedWhileHashing }
+        return Data(hasher.finalize()).map { String(format: "%02x", $0) }.joined()
     }
 
     /// True while every file still has the identity it had when hashed, and
@@ -172,14 +228,9 @@ struct MLXSnapshotIdentity: Equatable, Sendable {
             case S_IFDIR:
                 continue
             case S_IFREG where info.st_nlink <= 1:
-                out.append(FileStamp(
-                    relativePath: String(path.dropFirst(base.count + 1)),
-                    size: Int64(info.st_size),
-                    device: Int64(info.st_dev),
-                    inode: UInt64(info.st_ino),
-                    modifiedSeconds: info.st_mtimespec.tv_sec,
-                    modifiedNanoseconds: info.st_mtimespec.tv_nsec
-                ))
+                let relative = String(path.dropFirst(base.count + 1))
+                try ModelArtifactRelativePathPolicy.validate(relative)
+                out.append(FileStamp(relativePath: relative, info: info))
             default:
                 throw MLXSnapshotIdentityError.unreadable("not a regular single-link file")
             }
@@ -189,6 +240,23 @@ struct MLXSnapshotIdentity: Equatable, Sendable {
 }
 
 extension BYOMModelAdmissionRuntime {
+    /// The `mlxlm_loopback` candidate `target` names (candidate id, served ref,
+    /// or display name), when the operator configured the adapter. `models
+    /// offer` dispatches on it, so every target form of an mlxlm candidate
+    /// reaches `submitMLXLMOffer` and its snapshot-manifest leg.
+    func mlxlmCandidate(target: String) async -> BYOMDiscoveryWire.Candidate? {
+        guard let origin = environment.mlxlmOrigin, let directory = environment.mlxlmModelPath else { return nil }
+        let namespace = BYOMDiscoveryNamespaceStore().readNamespace(at: environment.namespaceURL)
+        let discovery = await BYOMMLXLMDiscovery(
+            origin: origin,
+            snapshotDirectory: directory,
+            namespace: namespace.bytes,
+            namespaceWarnings: namespace.warnings,
+            httpClient: httpClient
+        ).discover()
+        return Self.selectCandidate(target: target, candidates: discovery.candidates)
+    }
+
     /// SPEC-010-R009 / SPEC-046 v0.3.0 offer for an `mlxlm:` candidate (#1690
     /// M8; closes the #1486 gap for this runtime). The candidate comes from the
     /// `mlxlm_loopback` adapter only, and the offer always carries the

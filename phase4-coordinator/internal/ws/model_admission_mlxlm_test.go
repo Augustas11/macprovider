@@ -186,3 +186,48 @@ func TestSPEC010R009MLXLMClaimServingGGUFFailsClosed(t *testing.T) {
 		t.Fatal("mlxlm_loopback must be a loopback runtime (global paid routing stays closed)")
 	}
 }
+
+// #1690 M8 audit R1 CODE L5: a non-primary MLX feed member (another
+// snapshot of the row) binds for mlxlm_loopback on the pool route only when
+// its release-bound artifact allows mlxlm_loopback, and carries all six values.
+func TestSPEC010R009PoolRouteDerivesMLXLMFeedMember(t *testing.T) {
+	hash := strings.Repeat("d", 64)
+	member := artifactidentity.Member{
+		ModelKey: "small", ModelID: "model-a", ArtifactID: "mlx-8bit", HashAlgorithm: modelidentity.SnapshotManifestV1,
+		Hash: hash, RuntimeStatus: "recommendable", AllowedRuntimeSources: "mlx_cache,mlxlm_loopback",
+	}
+	session := func(m artifactidentity.Member) pool.Provider {
+		return pool.Provider{
+			HashStatus: pool.HashStatusVerified, ArtifactIdentity: &artifactidentity.Binding{Member: m},
+			IdentityPin: &pool.IdentityPin{Member: m}, RuntimeSource: "mlxlm_loopback",
+		}
+	}
+	event, predicate := poolRouteFixture()
+	event.RuntimeSource = "mlxlm_loopback"
+	event.CatalogMembers = []ModelAdmissionCatalogMember{
+		{Source: modelAdmissionMemberSourceArtifactFeed, HashAlgorithm: member.HashAlgorithm, Hash: hash, ArtifactID: member.ArtifactID},
+	}
+	got, ok := PoolRouteSessionBoundMember(session(member), event)
+	if !ok || got.Source != modelAdmissionMemberSourceArtifactFeed || got.ArtifactID != "mlx-8bit" {
+		t.Fatalf("mlxlm must bind an allowing MLX feed member: %+v %v", got, ok)
+	}
+	nativeOnly := member
+	nativeOnly.AllowedRuntimeSources = "mlx_cache"
+	if _, ok := PoolRouteSessionBoundMember(session(nativeOnly), event); ok {
+		t.Fatal("an MLX feed member that does not allow mlxlm_loopback must not bind")
+	}
+	gguf := event
+	gguf.RuntimeSource = "llamacpp_loopback"
+	if _, ok := PoolRouteSessionBoundMember(session(member), gguf); ok {
+		t.Fatal("a GGUF loopback class must never bind an MLX feed member")
+	}
+	predicate.ExpectedCatalogModelHash, predicate.ExpectedCatalogModelHashAlgorithm = hash, modelidentity.SnapshotManifestV1
+	predicate.ArtifactID, predicate.ArtifactHash, predicate.ArtifactHashAlgorithm = "mlx-8bit", hash, modelidentity.SnapshotManifestV1
+	if binding, ok := ModelAdmissionPoolSettlementBindingForRouteSnapshot(event, predicate); !ok || !binding.ArtifactDerived() {
+		t.Fatalf("mlxlm feed member must settle with all six values: %+v %v", binding, ok)
+	}
+	predicate.ArtifactFeedSignerKeyID = ""
+	if _, ok := ModelAdmissionPoolSettlementBindingForRouteSnapshot(event, predicate); ok {
+		t.Fatal("partial six values must fail closed")
+	}
+}

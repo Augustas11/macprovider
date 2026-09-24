@@ -157,3 +157,175 @@ private final class MLXLMStubClient: BYOMDiscoveryHTTPClient, @unchecked Sendabl
         BYOMHTTPResponse(statusCode: 500, headers: [], body: Data())
     }
 }
+
+// #1690 M8 audit R1: offer pipeline, request-path identity, descriptor-bound
+// hashing (CODE H1-H3/M4/L5, SECURITY M1).
+final class MLXLMLoopbackAuditR1Tests: XCTestCase {
+    private func makeSnapshot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("mlxlm-r1-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        try Data(#"{"model_type":"qwen2"}"#.utf8).write(to: root.appendingPathComponent("config.json"))
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        try Data(repeating: 0x42, count: 8192).write(to: root.appendingPathComponent("sub/model.safetensors"))
+        return root.resolvingSymlinksInPath().standardizedFileURL
+    }
+
+    private func makeRequest(model: String, stream: Bool = false) throws -> ChatCompletionRequest {
+        let body: [String: Any] = ["model": model, "messages": [["role": "user", "content": "hi"]], "max_tokens": 4, "stream": stream]
+        return try ChatCompletionRequest.parse(data: try JSONSerialization.data(withJSONObject: body))
+    }
+
+    func testDescriptorBoundDigestEqualsTheNativeCanonicalHash() throws {
+        let snapshot = try makeSnapshot()
+        let identity = try MLXSnapshotIdentity.compute(directory: snapshot)
+        XCTAssertEqual(identity.digest, try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot))
+        XCTAssertTrue(identity.isCurrent())
+    }
+
+    func testSnapshotRejectsLinksAndDetectsAddRemoveAndInPlaceRewrites() throws {
+        let symlinked = try makeSnapshot()
+        try FileManager.default.createSymbolicLink(at: symlinked.appendingPathComponent("link.json"), withDestinationURL: symlinked.appendingPathComponent("config.json"))
+        XCTAssertThrowsError(try MLXSnapshotIdentity.compute(directory: symlinked))
+
+        let hardlinked = try makeSnapshot()
+        try FileManager.default.linkItem(at: hardlinked.appendingPathComponent("config.json"), to: hardlinked.appendingPathComponent("config-copy.json"))
+        XCTAssertThrowsError(try MLXSnapshotIdentity.compute(directory: hardlinked))
+
+        let snapshot = try makeSnapshot()
+        let identity = try MLXSnapshotIdentity.compute(directory: snapshot)
+        let extra = snapshot.appendingPathComponent("extra.txt")
+        try Data("x".utf8).write(to: extra)
+        XCTAssertFalse(identity.isCurrent(), "an added file withdraws the identity")
+        try FileManager.default.removeItem(at: extra)
+        XCTAssertTrue(identity.isCurrent())
+        try FileManager.default.removeItem(at: snapshot.appendingPathComponent("config.json"))
+        XCTAssertFalse(identity.isCurrent(), "a removed file withdraws the identity")
+
+        // Same size, restored mtime: only the ctime shows the rewrite.
+        let rewritten = try makeSnapshot()
+        let weights = rewritten.appendingPathComponent("sub/model.safetensors")
+        let before = try MLXSnapshotIdentity.compute(directory: rewritten)
+        let attributes = try FileManager.default.attributesOfItem(atPath: weights.path)
+        let handle = try FileHandle(forWritingTo: weights)
+        try handle.write(contentsOf: Data([0x43]))
+        try handle.close()
+        try FileManager.default.setAttributes([.modificationDate: attributes[.modificationDate] as Any], ofItemAtPath: weights.path)
+        XCTAssertFalse(before.isCurrent(), "a metadata-preserving in-place write withdraws the identity")
+    }
+
+    func testStreamingRevalidatesIdentityImmediatelyBeforeProxying() async throws {
+        let snapshot = try makeSnapshot()
+        let client = MLXLMRecordingClient(listed: [snapshot.path])
+        let ref = "mlxlm:" + snapshot.lastPathComponent
+        let runtime = try await OpenAICompatibleLoopbackRuntime.mlxLM(
+            servedModelRef: ref, origin: "http://127.0.0.1:9191", snapshotDirectory: snapshot, httpClient: client
+        )
+        let request = try makeRequest(model: ref, stream: true)
+        let handle = try await runtime.acquireRequestHandle(request)
+        try await runtime.preflight(request, with: handle)
+        // The snapshot changes after handle acquisition and preflight.
+        try Data(repeating: 0x44, count: 8192).write(to: snapshot.appendingPathComponent("sub/model.safetensors"))
+        do {
+            _ = try await runtime.stream(request, with: handle, onChunk: { _ in })
+            XCTFail("a stream after a snapshot change must fail closed")
+        } catch let error as APIError {
+            XCTAssertEqual(error.code, "model_not_loaded")
+        }
+        XCTAssertEqual(client.chatBodies.count, 0, "nothing reached the runtime")
+
+        // A runtime that stops listing the snapshot after preflight also fails closed.
+        let fresh = try makeSnapshot()
+        let client2 = MLXLMRecordingClient(listed: [fresh.path])
+        let runtime2 = try await OpenAICompatibleLoopbackRuntime.mlxLM(
+            servedModelRef: ref, origin: "http://127.0.0.1:9191", snapshotDirectory: fresh, httpClient: client2
+        )
+        let handle2 = try await runtime2.acquireRequestHandle(request)
+        try await runtime2.preflight(request, with: handle2)
+        client2.setListed([])
+        do {
+            _ = try await runtime2.stream(request, with: handle2, onChunk: { _ in })
+            XCTFail("a stream to a runtime that no longer lists the snapshot must fail closed")
+        } catch let error as APIError {
+            XCTAssertEqual(error.code, "model_not_loaded")
+        }
+        XCTAssertEqual(client2.chatBodies.count, 0)
+    }
+
+    func testChatRequestNamesDefaultModel() async throws {
+        let snapshot = try makeSnapshot()
+        let client = MLXLMRecordingClient(listed: [snapshot.path])
+        let ref = "mlxlm:" + snapshot.lastPathComponent
+        let runtime = try await OpenAICompatibleLoopbackRuntime.mlxLM(
+            servedModelRef: ref, origin: "http://127.0.0.1:9191", snapshotDirectory: snapshot, httpClient: client
+        )
+        _ = try await runtime.complete(try makeRequest(model: ref))
+        let body = try XCTUnwrap(client.chatBodies.first)
+        let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(object["model"] as? String, "default_model")
+    }
+
+    func testRunnerDryRunAndOfferTargetFormsSeeTheMLXLMCandidate() async throws {
+        let snapshot = try makeSnapshot()
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("mlxlm-r1-home-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: home) }
+        let environment = BYOMDiscoveryEnvironment(
+            namespaceURL: home.appendingPathComponent("byom/local_discovery_namespace"),
+            mlxCacheRoot: home.appendingPathComponent("hf"),
+            ollamaOrigin: nil,
+            mlxlmOrigin: "http://127.0.0.1:9191",
+            mlxlmModelPath: snapshot,
+            artifactDigestCacheURL: home.appendingPathComponent("digests.json")
+        )
+        BYOMDiscoveryNamespaceStore().provisionNamespaceIfMissing(at: environment.namespaceURL)
+        let client = MLXLMRecordingClient(listed: [snapshot.path])
+        let ref = "mlxlm:" + snapshot.lastPathComponent
+
+        let plain = await BYOMDiscoveryRunner(environment: environment, httpClient: client).discover()
+        XCTAssertFalse(plain.candidates.contains { $0.runtimeSource == "mlxlm_loopback" }, "discover() itself is unchanged")
+        let all = await BYOMDiscoveryRunner(environment: environment, httpClient: client).discoverIncludingMLXLM()
+        let candidate = try XCTUnwrap(all.candidates.first { $0.runtimeSource == "mlxlm_loopback" })
+        XCTAssertEqual(candidate.servedModelRef, ref)
+        XCTAssertTrue(all.adapters.contains { $0.runtimeSource == "mlxlm_loopback" && $0.status == "ok" })
+
+        let dryRun = await BYOMOfferDryRunRunner(target: ref, environment: environment, httpClient: client).dryRun()
+        XCTAssertEqual(dryRun.servedModelRef, ref)
+
+        let runtime = BYOMModelAdmissionRuntime(environment: environment, client: nil, httpClient: client)
+        for target in [candidate.candidateID, ref, candidate.displayName] {
+            let resolved = await runtime.mlxlmCandidate(target: target)
+            XCTAssertEqual(resolved?.candidateID, candidate.candidateID, "target form \(target)")
+        }
+        let other = await runtime.mlxlmCandidate(target: "ollama:qwen2.5:0.5b")
+        XCTAssertNil(other)
+    }
+}
+
+private final class MLXLMRecordingClient: BYOMDiscoveryHTTPClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private var listed: [String]
+    private var bodies: [Data] = []
+
+    init(listed: [String]) { self.listed = listed }
+
+    func setListed(_ ids: [String]) { lock.lock(); listed = ids; lock.unlock() }
+    var chatBodies: [Data] { lock.lock(); defer { lock.unlock() }; return bodies }
+
+    func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        guard url.path == "/v1/models" else { return BYOMHTTPResponse(statusCode: 404, headers: [], body: Data()) }
+        lock.lock()
+        let ids = listed
+        lock.unlock()
+        let body: [String: Any] = ["object": "list", "data": ids.map { ["id": $0, "object": "model"] }]
+        return BYOMHTTPResponse(statusCode: 200, headers: [], body: try JSONSerialization.data(withJSONObject: body))
+    }
+
+    func post(_ url: URL, jsonBody: Data, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        lock.lock()
+        bodies.append(jsonBody)
+        lock.unlock()
+        let reply = #"{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}"#
+        return BYOMHTTPResponse(statusCode: 200, headers: [], body: Data(reply.utf8))
+    }
+}

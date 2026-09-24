@@ -3104,7 +3104,7 @@ struct BYOMOfferDryRunRunner: Sendable {
         let discovery = await BYOMDiscoveryRunner(
             environment: environment,
             httpClient: httpClient
-        ).discover()
+        ).discoverIncludingMLXLM()
         guard let candidate = selectLocalOfferCandidate(from: discovery.candidates) else {
             let reason = "candidate_not_found"
             let warnings = discovery.warnings.sorted()
@@ -4370,6 +4370,82 @@ struct BYOMLlamaCppDiscovery: Sendable {
         case .unknown:
             return "unknown"
         }
+    }
+}
+
+extension BYOMDiscoveryRunner {
+    /// `discover()` plus the SPEC-046 v0.3.0 `mlxlm_loopback` adapter (#1690
+    /// M8), attempted only when the operator names both its origin and the
+    /// snapshot directory. The rows merge with the same ordering `discover()`
+    /// uses. `discover()` itself is unchanged.
+    func discoverIncludingMLXLM() async -> BYOMDiscoveryWire {
+        let base = await discover()
+        guard let origin = environment.mlxlmOrigin, let directory = environment.mlxlmModelPath else {
+            return base
+        }
+        let namespace = BYOMDiscoveryNamespaceStore(fileManager: fileManager).readNamespace(at: environment.namespaceURL)
+        let mlxlm = await BYOMMLXLMDiscovery(
+            origin: origin,
+            snapshotDirectory: directory,
+            namespace: namespace.bytes,
+            namespaceWarnings: namespace.warnings,
+            httpClient: httpClient
+        ).discover()
+        var warnings = Set(base.warnings)
+        warnings.formUnion(mlxlm.adapter.warningCodes)
+        for candidate in mlxlm.candidates {
+            warnings.formUnion(candidate.warningCodes)
+        }
+        let candidates = (base.candidates + mlxlm.candidates).sorted {
+            $0.runtimeSource == $1.runtimeSource ? $0.servedModelRef < $1.servedModelRef : $0.runtimeSource < $1.runtimeSource
+        }
+        let adapters = (base.adapters + [mlxlm.adapter]).sorted { $0.runtimeSource < $1.runtimeSource }
+        return BYOMDiscoveryWire(adapters: adapters, candidates: candidates, warnings: Array(warnings).sorted())
+    }
+}
+
+extension BYOMEvaluationRunner {
+    /// `evaluate()` for an `mlxlm_loopback` target (#1690 M8): the candidate
+    /// comes from the mlxlm adapter and the bounded chat probe names
+    /// `default_model`, so mlx_lm.server never loads a model by name. Every
+    /// other target is `evaluate()` unchanged.
+    func evaluateIncludingMLXLM() async -> BYOMEvaluationWire {
+        guard let origin = environment.mlxlmOrigin, let directory = environment.mlxlmModelPath,
+              let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin)
+        else {
+            return await evaluate()
+        }
+        BYOMDiscoveryNamespaceStore().provisionNamespaceIfMissing(at: environment.namespaceURL)
+        let namespace = BYOMDiscoveryNamespaceStore().readNamespace(at: environment.namespaceURL)
+        let mlxlm = await BYOMMLXLMDiscovery(
+            origin: origin,
+            snapshotDirectory: directory,
+            namespace: namespace.bytes,
+            namespaceWarnings: namespace.warnings,
+            httpClient: httpClient
+        ).discover()
+        guard let candidate = selectLocalEvaluationCandidate(from: mlxlm.candidates) else {
+            return await evaluate()
+        }
+        guard candidate.candidateID.hasPrefix("byom_"),
+              !candidate.candidateID.hasPrefix("byom_unstable_"),
+              !candidate.warningCodes.contains(BYOMDiscoveryWarning.candidateIDUnstable.rawValue),
+              !candidate.warningCodes.contains(BYOMDiscoveryWarning.namespacePermissionInvalid.rawValue)
+        else {
+            let warnings = mergedWarnings(candidate, adding: [.candidateIDUnstable])
+            return failureDocument(for: candidate, healthResult: "blocked", responseBody: nil, warnings: warnings,
+                                   guidance: evaluationGuidance(health: "blocked", warnings: Set(warnings)))
+        }
+        guard candidate.readinessState == "ready", candidate.fitState != "does_not_fit" else {
+            let warnings = mergedWarnings(candidate, adding: [.requiresPreparation])
+            return failureDocument(for: candidate, healthResult: "blocked", responseBody: nil, warnings: warnings,
+                                   guidance: evaluationGuidance(health: "blocked", warnings: Set(warnings)))
+        }
+        return await evaluateOpenAICompatible(
+            candidate: candidate,
+            runtimeModel: MLXLMLoopbackServeModel.upstreamModelName,
+            baseURL: baseURL
+        )
     }
 }
 

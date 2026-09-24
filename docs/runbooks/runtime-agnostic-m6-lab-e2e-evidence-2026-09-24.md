@@ -521,3 +521,23 @@ SPEC-046-R009).
 re-verified identity. No `lab-1690-m6/m8`, `mlx_lm.server`, `ollama serve`,
 or 191xx listener was left. The live provider (PID 811,
 `/Users/a1/macprovider/`) was not touched.
+
+### M8 audit R1 re-run (main worktree `bench/1690-loopback-vs-native`)
+
+The lab binaries were rebuilt from the R1 fix commit, in the same
+`/Users/a1/lab-1690-m6/m8` lab, and run with `ENGINE=mlxlm`. The first
+`mlxlm_paid` attempt returned 503 because of lab state: the mlxlm candidate
+had been revoked (`runtime_identity_drift`) when the same provider later
+served Ollama and llama.cpp in run 5. The rig reuses an existing offer file.
+The `mlxlm_identity_mismatch` case re-offered the candidate, and the
+re-run then passed.
+
+| Case | Result | Key evidence |
+|---|---|---|
+| `mlxlm_paid` | PASS | 4/4 served, attested `[(44,32),(45,32),(49,32),(50,10)]` == mlx_lm.server usage, receipts `verified`, `pool_operator_attested` |
+| `mlxlm_refused` | PASS | pools A and O and global: 503 (`engine_unavailable` with the selector), 0 upstream calls |
+| `mlxlm_stream_after_change` (new) | PASS (fails closed) | README.md of the served snapshot rewritten in place while serve ran. The streaming `engine=mlxlm` request got 502 `upstream_provider_error`, with 0 upstream calls to mlx_lm.server. The coordinator's 3 attempts left route snapshots with no attempt output and no ledger credit (zero billable). After the bytes were restored and serve restarted, a stream served 200, `pool_operator_attested`, `verified` |
+| `mlxlm_identity_mismatch` | PASS | unchanged from run 5: `hash_mismatch`, refused, revoked, restored only by a fresh offer |
+
+Teardown: `rig.sh down`. No lab process or 191xx listener was left, and the
+live provider (PID 811) was not touched.
