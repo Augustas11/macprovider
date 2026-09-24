@@ -196,6 +196,41 @@ Needs the enabling coordinator runtime release (the one that carries #1693)
 live on Pearl, with its recovery helper, units, and guard-bearing writers
 installed. Without it, `pricing_host_state` is NO_GO.
 
+### Enabling rollout (once)
+
+A full coordinator deploy alone does not enable pricing: it installs the
+coordinator binary, the recovery helper, the closer unit and the shell guard,
+but not the Pearl updater, the Tier-2 enforcement watchdog or the Python guard
+module, and preflight hashes all of them against the commit
+(`scripts/pricing-lane-installed-writers.txt`). Do these steps in order, all
+from a clean checkout of the same signed tag on `main`:
+
+1. **Updater bundle first.** Run `ops/pearl-updater/install-pearl-updater.sh`
+   from the tag. This installs the guard-bearing `macprovider-pearl-update`,
+   `macprovider-tier2-enforcement-watchdog` and
+   `/usr/local/share/macprovider/scripts/coordinator_config_guard.py`. It is a
+   prerequisite here, not deferred maintenance.
+2. **Full coordinator deploy** with `phase4-coordinator/dist/deploy-pearl-vps.sh`
+   (never a binary swap). This installs the coordinator carrying #1693, the
+   applied-config record fields, `coordinator-pricing-recover`, the recovery
+   unit with both `ExecStart=` lines, the closer unit, the guard drop-in with
+   `Wants=`, and `/opt/macprovider/coordinator-config-guard.sh`.
+3. **Verify the host.** `/healthz` reports the tag;
+   `systemctl show -p Requires,Wants macprovider-coordinator` lists the recovery
+   and closer units; `systemctl show -p LoadState --value macprovider-pearl-updater-alert@macprovider-coordinator-pricing-close.service.service`
+   is `loaded` (the closer's `OnFailure=` instance); `/run/macprovider/coordinator-applied-config.json` carries
+   `rate_table_sha256`, `signed_rate_card_sha256`, `autotune_release_id` and
+   `billing_snapshot_id`; and every line of
+   `scripts/pricing-lane-installed-writers.txt` hashes equal on the host and at
+   the tag.
+4. **Clean preflight.** `scripts/catalog-content-release.sh --preflight --commit
+   <tag commit>` must reach GO on a no-op or content release before the first
+   pricing correction. Any `pricing_host_state` NO_GO names the step above that
+   was skipped.
+
+If a later tag changes any file in the installed-writers list, repeat step 1
+from that tag before the next pricing correction.
+
 ### Author the PR
 
 One PR, reviewed by CODEOWNERS, carrying all of:
