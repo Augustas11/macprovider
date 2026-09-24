@@ -1,7 +1,12 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.34 (2026-09-24, buyer engine selection)
+**Version:** 0.9.35 (2026-09-24, `mlxlm` engine)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.35 (2026-09-24, issue #1690 M8 — more engines):**
+- §5.4.2: the closed selector vocabulary gains `mlxlm`, mapped to the runtime class `mlxlm_loopback` (`mlx_lm.server`, SPEC-046-R009, SPEC-010-R009). Like `llamacpp` and `ollama`, it is non-native: 503 `engine_unavailable` without a Trusted Pool, and on a pool route only where the active allowlist has the class (SPEC-042-R014).
+- §8.3: `X-MacProvider-Engine` is also forwarded when its value is byte-exactly `mlxlm_loopback`.
+- `SPEC-006-R016` stays pending. Pricing is unchanged.
 
 **Change log v0.9.34 (2026-09-24, issue #1690 M7 — buyer engine selection):**
 - New §5.4.2: a buyer MAY name the inference engine with the request header `X-MacProvider-Engine-Select`, closed vocabulary `native | llamacpp | ollama`, mapped to the SPEC-046-R002 runtime classes `mlx_cache`, `llamacpp_loopback`, `ollama_loopback`. Exact match only; there is no prefer mode. Absent means today's behavior.
@@ -1761,8 +1766,9 @@ The documented response-pass-through allowlist is:
   negotiation.
 - `X-MacProvider-Engine` (v0.9.34, §5.4.2), the coordinator-recorded
   runtime class of the serving provider. The gateway MUST forward it only
-  when its value is byte-exactly `mlx_cache`, `llamacpp_loopback`, or
-  `ollama_loopback`, and MUST drop any other value.
+  when its value is byte-exactly `mlx_cache`, `llamacpp_loopback`,
+  `mlxlm_loopback` (v0.9.35), or `ollama_loopback`, and MUST drop any other
+  value.
 
 The gateway MUST return 503 when no provider slot is available after
 any allowed bounded pre-dispatch slot queue expires.
@@ -1833,13 +1839,14 @@ The vocabulary is closed. After trimming surrounding ASCII whitespace, the value
 |---|---|
 | `native` | `mlx_cache` |
 | `llamacpp` | `llamacpp_loopback` |
+| `mlxlm` (v0.9.35) | `mlxlm_loopback` |
 | `ollama` | `ollama_loopback` |
 
 Semantics are exact match only; there is no prefer mode. A request that names an engine is served by that runtime class or refused, and it MUST NOT be silently served by another engine.
 
 1. **Absent or empty.** Today's behavior, unchanged: any engine the route allows (native only on a global route; SPEC-042-R004 on a pool route). Nothing is emitted upstream.
 2. **Invalid.** An unknown value, a value in another case, or two distinct non-empty values MUST be rejected before quota reservation and dispatch with HTTP 400, `type: "invalid_request_error"`, `code: "invalid_engine_selection"`.
-3. **Non-native without a pool.** `llamacpp` or `ollama` on a request that selects no Trusted Pool (a global route, including demo and wallet-session traffic, which cannot select a pool) MUST be rejected before quota reservation with HTTP 503, `type: "service_unavailable"`, `code: "engine_unavailable"`. Global routes stay native-only (SPEC-042-R013).
+3. **Non-native without a pool.** `llamacpp`, `mlxlm`, or `ollama` on a request that selects no Trusted Pool (a global route, including demo and wallet-session traffic, which cannot select a pool) MUST be rejected before quota reservation with HTTP 503, `type: "service_unavailable"`, `code: "engine_unavailable"`. Global routes stay native-only (SPEC-042-R013).
 4. **Pool route.** The coordinator applies the SPEC-042-R014 engine filter. A non-native class outside the pool's active runtime allowlist, a pinned provider of another class, or no provider for the requested model with the selected class fails with 503 `engine_unavailable`. `native` on a pool route excludes every external-runtime member session.
 5. **Ordering.** The pool selection (SPEC-042-R002/R010) is resolved first, so an unknown or unauthorized pool still gets the generic `pool_unavailable`. A pool-route `engine_unavailable` therefore reaches only a caller already authorized for that pool; on a global route it reveals nothing about any pool.
 6. **Relay-blind.** A relay-blind request (SPEC-041) carrying a non-empty engine selector MUST be rejected with the existing `relay_blind_downgrade_rejected`, the same way a pool selector is.
@@ -1849,12 +1856,12 @@ Both codes are `retryable: false` (§5.2).
 Internal transport:
 
 - The gateway MUST NOT forward the buyer header. For an authenticated account context it emits the mapped runtime class as `X-MacProvider-Internal-Engine`, next to `X-MacProvider-Account` under the gateway service-token bearer, and only when the buyer selected an engine.
-- The coordinator honors `X-MacProvider-Internal-Engine` only on a gateway-authenticated request. A buyer-port request carrying any `X-MacProvider-Internal-*` header without the service-token bearer is rejected by the existing internal-routing rule. An internal value outside the three runtime classes is 400 `invalid_engine_selection`.
+- The coordinator honors `X-MacProvider-Internal-Engine` only on a gateway-authenticated request. A buyer-port request carrying any `X-MacProvider-Internal-*` header without the service-token bearer is rejected by the existing internal-routing rule. An internal value outside the four runtime classes is 400 `invalid_engine_selection`.
 - The coordinator re-applies rule 3 itself, so a request that reaches it with a non-native class and no pool fails closed even if the gateway did not reject it.
 
 Disclosure:
 
-- Every coordinator response that names its serving provider carries `X-MacProvider-Engine`, set to that provider's coordinator-recorded runtime class (SPEC-042-R004), whether or not the buyer selected an engine. The gateway forwards it only when the value is byte-exactly `mlx_cache`, `llamacpp_loopback`, or `ollama_loopback`, and drops any other value (§8.3).
+- Every coordinator response that names its serving provider carries `X-MacProvider-Engine`, set to that provider's coordinator-recorded runtime class (SPEC-042-R004), whether or not the buyer selected an engine. The gateway forwards it only when the value is byte-exactly `mlx_cache`, `llamacpp_loopback`, `mlxlm_loopback`, or `ollama_loopback`, and drops any other value (§8.3).
 - For a pool attempt served by an external runtime, the settlement route snapshot records the same class as `runtime_source`, together with the served artifact identity (SPEC-022-R012). The header and the snapshot name the same class.
 - The header discloses the declared, coordinator-recorded runtime identity. It is not an attestation of the executing process (SPEC-042-R004 administrative trust).
 
@@ -2657,8 +2664,9 @@ The documented response-pass-through allowlist is:
   negotiation.
 - `X-MacProvider-Engine` (v0.9.34, §5.4.2), the coordinator-recorded
   runtime class of the serving provider. The gateway MUST forward it only
-  when its value is byte-exactly `mlx_cache`, `llamacpp_loopback`, or
-  `ollama_loopback`, and MUST drop any other value.
+  when its value is byte-exactly `mlx_cache`, `llamacpp_loopback`,
+  `mlxlm_loopback` (v0.9.35), or `ollama_loopback`, and MUST drop any other
+  value.
 
 The inbound `X-MacProvider-Engine-Select` buyer header (§5.4.2) is read by
 the gateway and never forwarded verbatim; the gateway emits the internal

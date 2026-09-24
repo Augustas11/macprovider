@@ -1,7 +1,8 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.11
-**Status:** v1.11 GGUF `huggingface_revision` source and pool-scoped
+**Version:** 1.12
+**Status:** v1.12 MLX-snapshot identity leg for `mlxlm_loopback` (R009, #1690
+M8, 2026-09-24) over v1.11 GGUF `huggingface_revision` source and pool-scoped
 settlement scope for R007 (#1690, 2026-09-24) over v1.10 operator artifact
 diagnostics (#1689 part 4, 2026-09-23) over v1.9 row-continuity
 admission clarification (#1615, 2026-09-20) over v1.8 R004 composite-proof clarification (BYOM v0.2 epic #1453,
@@ -42,6 +43,21 @@ SPEC-023 owns candidate-catalog `bench_gate` provenance, including
   artifact-derived identity across a scheduled catalog re-stamp by resolving
   in its own release's set (slice-4 implementation). Bounded
   `model-catalog-identity` amendment.
+
+**Change log v1.12 (issue #1690 M8 — MLX-snapshot identity leg):**
+- New **SPEC-010-R009**: an external MLX runtime, `mlx_lm.server` served
+  through `mlxlm_loopback` (SPEC-046-R009 `mlxlm:`), binds a catalog MLX
+  row by the same `macprovider.snapshot-manifest.v1` pair the native
+  `mlx_cache` path reports, computed by the CLI over the operator-declared
+  snapshot directory. The pair is valid for `mlxlm_loopback` only when the
+  release-bound artifact the pair names allows that runtime (SPEC-023
+  v0.17.0), and it settles only as R007(f) allows a GGUF member: at route
+  time on an allowlisting SPEC-042 Trusted Pool route. R007(h) is
+  superseded for this one runtime.
+- oMLX, mlx-serve, and LM Studio stay without an identity leg: oMLX and
+  mlx-serve need their own proof that the process serves the declared
+  snapshot, and LM Studio is a GUI app with no serving-time binding to the
+  file it loads. Each needs its own amendment.
 
 **Change log v1.11 (issue #1690 M3 — external runtimes on Trusted Pools):**
 - R007(f): a GGUF member served by a loopback runtime MAY settle only at
@@ -1233,12 +1249,52 @@ algorithm.
   v0.16.0 §3.7.4). The source kind describes where the bytes come from and
   never changes identity: the pair is always `macprovider.gguf-file.v1`
   over the complete file bytes the CLI holds, per (a).
-  (h) **Deferred MLX-snapshot leg (v1.11).** No loopback `runtime_source` may
-  bind an `mlx_safetensors` member: the SPEC-023 matrix keeps that format to
-  `mlx_cache`. An external runtime that serves MLX safetensors (oMLX,
-  `mlx_lm.server`) has no identity leg until a later amendment defines how
-  the CLI binds that runtime process to a snapshot manifest. That amendment
-  waits until a runtime needs it.
+  (h) **Deferred MLX-snapshot leg (v1.11; superseded for `mlxlm_loopback`
+  by R009 in v1.12).** No loopback `runtime_source` other than
+  `mlxlm_loopback` may bind an `mlx_safetensors` member. `mlxlm_loopback`
+  binds one only under R009. Every other external runtime that serves MLX
+  safetensors (oMLX, mlx-serve) has no identity leg until an amendment
+  defines how the CLI binds that runtime process to a snapshot manifest.
+
+- **SPEC-010-R009 — MLX-snapshot identity leg for `mlxlm_loopback` (v1.12,
+  #1690 M8).** An `mlx_lm.server` process served through the SPEC-046-R009
+  `mlxlm:<ref>` selector reports and binds an MLX identity as follows.
+  (a) **Identity.** The reported pair is `macprovider.snapshot-manifest.v1`
+  (R001/R002), computed by the CLI over the complete bytes of the snapshot
+  directory the operator declares (`MACPROVIDER_MLXLM_MODEL_PATH`), with the
+  same algorithm and the same path policy the native `mlx_cache` path uses
+  (regular files only; no symlink, hardlink, or path escape). It is never a
+  runtime-reported value. The CLI records every file's relative path, size,
+  inode, and modification time when it hashes, and re-checks them before
+  every identity-binding report and every request; any change fails closed
+  (the R007(a) rule, applied to a directory).
+  (b) **Runtime binding.** At startup and before every request the CLI
+  requires the runtime's `GET /v1/models` to list the declared snapshot's
+  resolved path, the model the process was started with. Chat requests name
+  the model `default_model`, so the runtime never loads another model by
+  name on the CLI's behalf. The process's weights are administrative trust
+  (SPEC-042-R004), exactly as for a GGUF loopback runtime.
+  (c) **Binding.** The pair binds exactly as a native pair does: the
+  primary-row path, when it equals the row's `model_sha256`, or a
+  non-primary verified `mlx_safetensors` feed member. In both cases it is
+  admissible for `mlxlm_loopback` only when the release-bound SPEC-023 §3.7
+  artifact carrying that pair (the row's primary artifact for the
+  primary-row path) lists `mlxlm_loopback` in `allowed_runtime_sources`.
+  A missing, stale, or integrity-failed feed admits nothing for
+  `mlxlm_loopback`. A GGUF member is never valid for `mlxlm_loopback`, and a
+  snapshot-manifest pair served by `mlxlm_loopback` is valid only for an
+  offer whose signed `runtime_source` is `mlxlm_loopback` (the SPEC-042-R004
+  derived class).
+  (d) **Settlement.** As R007(f) for a GGUF member: only at route time on a
+  SPEC-042 Trusted Pool route whose signed v2 policy core allowlists
+  `mlxlm_loopback`, under the SPEC-047-R003(iv) pool route-time clause and
+  SPEC-022-R012. The candidate never reaches `settlement_capable`, and the
+  session never settles on a global route. A primary-row binding carries no
+  R007(d) six values (the primary exemption); a feed-member binding carries
+  all six.
+  (e) **Scope.** `mlx_cache` is unchanged. oMLX, mlx-serve, and LM Studio
+  (`lmstudio_loopback`) have no identity leg and are not selectable for
+  serving; each needs its own amendment.
 
 ### 3.8 Operator artifact diagnostics (v1.10 amendment)
 
