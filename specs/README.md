@@ -18,20 +18,20 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5.1 | normative | pending | pending corpus migration | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
 | SPEC-008 | Tier-2 Trust Layer | 0.7.0 | normative | pending | pending: 4 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
 | SPEC-009 | MacProvider Console v2 | 0.1 | normative | pending | pending corpus migration | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
-| SPEC-010 | Provider Model Catalog | 1.10 | normative | pending | conformant: 4, pending: 4 | [SPEC-010-model-catalog.md](SPEC-010-model-catalog.md) |
+| SPEC-010 | Provider Model Catalog | 1.11 | normative | pending | conformant: 4, pending: 4 | [SPEC-010-model-catalog.md](SPEC-010-model-catalog.md) |
 | SPEC-011 | Operator-Pushed Warm Swap | 0.5 | normative | pending | pending corpus migration | [SPEC-011-operator-pushed-warm-swap.md](SPEC-011-operator-pushed-warm-swap.md) |
 | SPEC-012 | Coordinator Demand-Pull Model Swap and Buyer Cold-Model Visibility | 0.3 | draft | pending | pending corpus migration | [SPEC-012-coordinator-demand-pull.md](SPEC-012-coordinator-demand-pull.md) |
 | SPEC-013 | `malibu-cli autotune` subcommand | 0.3.1 | normative | pending | pending corpus migration | [SPEC-013-cli-autotune.md](SPEC-013-cli-autotune.md) |
 | SPEC-014 | Provider Portal (seller-facing web surface) | 0.10 | draft | pending | pending: 2 | [SPEC-014-provider-portal.md](SPEC-014-provider-portal.md) |
-| SPEC-015 | Verifiable inference receipts | 0.4.9 | normative | complete | conformant: 1, pending: 4 | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
+| SPEC-015 | Verifiable inference receipts | 0.4.10 | normative | complete | conformant: 1, pending: 5 | [SPEC-015-receipts.md](SPEC-015-receipts.md) |
 | SPEC-016 | Provider payout pipeline (USDC on Base) | 0.1.26 | draft | pending | pending: 11 | [SPEC-016-payout-pipeline.md](SPEC-016-payout-pipeline.md) |
 | SPEC-017 | Network Stats API | 0.2.1 | normative | pending | pending: 2 | [SPEC-017-network-stats-api.md](SPEC-017-network-stats-api.md) |
 | SPEC-018 | Agentic tool calling (provider-side response synthesis) | 0.2.9 | normative | pending | pending: 4 | [SPEC-018-agentic-tool-calling.md](SPEC-018-agentic-tool-calling.md) |
 | SPEC-019 | Structured output (`response_format: json_schema`) | 0.2.5 | normative | pending | pending corpus migration | [SPEC-019-structured-output.md](SPEC-019-structured-output.md) |
 | SPEC-020 | Provider autoupdate | v0.1.19 | normative | pending | pending: 5 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU rewards emission ledger | 0.4.0 | draft | complete | pending: 10 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
-| SPEC-022 | Verified model settlement | v0.1.9 | draft | complete | conformant: 4, pending: 7 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
-| SPEC-023 | Installer-Integrated Autotune Recommend | v0.15.2 | normative | pending | conformant: 2, pending: 15 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
+| SPEC-022 | Verified model settlement | v0.2.0 | draft | complete | conformant: 4, pending: 8 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
+| SPEC-023 | Installer-Integrated Autotune Recommend | v0.16.0 | normative | pending | conformant: 2, pending: 15 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.6 | normative | pending | pending: 2 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.29 | draft | pending | pending corpus migration | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
 | SPEC-026 | Browserless Provider Onboarding (one-click Launch Provider) | v0.29 | draft | pending | pending corpus migration | [SPEC-026-browserless-provider-onboarding.md](SPEC-026-browserless-provider-onboarding.md) |
@@ -40,7 +40,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-029 | Sweep Workload-Class Stratification | 0.1-draft | draft | pending | pending corpus migration | [SPEC-029-sweep-workload-class-stratification.md](SPEC-029-sweep-workload-class-stratification.md) |
 | SPEC-030 | Losslessness Probe | v0.1 | draft | pending | pending corpus migration | [SPEC-030-losslessness-probe.md](SPEC-030-losslessness-probe.md) |
 | SPEC-031 | Canary Probe, Degrade & Sanction Lifecycle | v0.2 | draft | pending | pending corpus migration | [SPEC-031-canary-degrade-sanctions.md](SPEC-031-canary-degrade-sanctions.md) |
-| SPEC-032 | Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary | v0.2.6 | draft | complete | conformant: 2, pending: 1 | [SPEC-032-proof-of-weights-hello-gate.md](SPEC-032-proof-of-weights-hello-gate.md) |
+| SPEC-032 | Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary | v0.3.0 | draft | complete | conformant: 2, pending: 2 | [SPEC-032-proof-of-weights-hello-gate.md](SPEC-032-proof-of-weights-hello-gate.md) |
 | SPEC-033 | Hardware-Evidence Verifier (`hardware-verifier.v2`) | v0.6.3 | draft | pending | conformant: 1 | [SPEC-033-hardware-verifier.md](SPEC-033-hardware-verifier.md) |
 | SPEC-034 | Referral admission, provider invites, and advocacy rewards | v0.4.7 | normative | pending | conformant: 1 | [SPEC-034-referral-gated-prebeta.md](SPEC-034-referral-gated-prebeta.md) |
 | SPEC-035 | Provider connection diagnostics and failure history | v0.4.3 | draft | complete | pending: 13 | [SPEC-035-provider-connection-diagnostics.md](SPEC-035-provider-connection-diagnostics.md) |
@@ -50,12 +50,12 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-039 | Paged KV / paged-attention engine | v0.1.6 | draft | complete | pending: 14 | [SPEC-039-paged-kv-attention-engine.md](SPEC-039-paged-kv-attention-engine.md) |
 | SPEC-040 | Wallet-Native Buyer Sessions | 0.1.9 | draft | complete | pending: 10 | [SPEC-040-wallet-native-buyer-sessions.md](SPEC-040-wallet-native-buyer-sessions.md) |
 | SPEC-041 | Relay-Blind Request Encryption | 0.2.0 | draft | complete | pending: 8 | [SPEC-041-relay-blind-request-encryption.md](SPEC-041-relay-blind-request-encryption.md) |
-| SPEC-042 | Pool Control Plane and Trusted-Pool Manifest | 0.0.31 | draft | complete | pending: 12 | [SPEC-042-pool-control-plane.md](SPEC-042-pool-control-plane.md) |
-| SPEC-043 | Trusted Pool Creator Onboarding MVP | 0.1.0 | normative | complete | pending: 12 | [SPEC-043-trusted-pool-creator-onboarding.md](SPEC-043-trusted-pool-creator-onboarding.md) |
+| SPEC-042 | Pool Control Plane and Trusted-Pool Manifest | 0.0.32 | draft | complete | pending: 13 | [SPEC-042-pool-control-plane.md](SPEC-042-pool-control-plane.md) |
+| SPEC-043 | Trusted Pool Creator Onboarding MVP | 0.2.0 | normative | complete | pending: 13 | [SPEC-043-trusted-pool-creator-onboarding.md](SPEC-043-trusted-pool-creator-onboarding.md) |
 | SPEC-044 | Malibu Model Catalog Economics | 0.2.10 | draft | complete | pending: 12 | [SPEC-044-malibu-model-catalog-economics.md](SPEC-044-malibu-model-catalog-economics.md) |
 | SPEC-045 | Local Consumer Endpoint Mode | 0.1.0 | draft | complete | conformant: 4, pending: 4 | [SPEC-045-local-consumer-endpoint-mode.md](SPEC-045-local-consumer-endpoint-mode.md) |
-| SPEC-046 | Provider BYOM Discovery | 0.1.5 | draft | complete | conformant: 6, pending: 2 | [SPEC-046-provider-byom-discovery.md](SPEC-046-provider-byom-discovery.md) |
-| SPEC-047 | Network Model Admission | 0.1.10 | draft | complete | conformant: 7, pending: 2 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |
+| SPEC-046 | Provider BYOM Discovery | 0.2.0 | draft | complete | conformant: 6, pending: 3 | [SPEC-046-provider-byom-discovery.md](SPEC-046-provider-byom-discovery.md) |
+| SPEC-047 | Network Model Admission | 0.2.0 | draft | complete | conformant: 7, pending: 2 | [SPEC-047-network-model-admission.md](SPEC-047-network-model-admission.md) |
 <!-- AUTOGEN:spec-index END -->
 
 **Version of record is each spec's own `**Version:**` header, not this table.**

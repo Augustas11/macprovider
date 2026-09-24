@@ -1,11 +1,25 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.1.9
+Version: v0.2.0
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
-Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016
+Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.2.0
+
+Pool-aware settlement eligibility (#1690 M3; normative text only). Adds
+requirement group R-12 (`SPEC-022-R012`). A route snapshot gains a
+`runtime_source` member, bound into the digest only when non-empty (the
+`pool_id` pattern), so global and native-pool digests stay byte-identical.
+Adds the settlement usage source `pool_operator_attested`, distinct from
+`coordinator_observed`, for an attempt served by an allowlisted external
+runtime on a SPEC-042 Trusted Pool route under the SPEC-042-R006 conditions.
+R-3.4.2 makes it the single, bounded exception to R-3.4.1. It still needs a
+verified v0.4 receipt with an exact usage match, and SPEC-005 arithmetic and
+ceilings are unchanged. A disputed pool label or a global route gets zero
+billable. No v0.4 receipt tuple change; SPEC-008 `attestation_tier` unchanged.
 
 ### v0.1.9
 
@@ -41,7 +55,7 @@ overlapping output. No settlement runtime behavior changes.
 ### v0.1.6
 
 Editorial, non-normative: registers the conformance-unit requirement IDs
-`SPEC-022-R001`..`SPEC-022-R011` (one per normative requirement group R-1..R-11)
+`SPEC-022-R001`..`SPEC-022-R011` (one per normative requirement group R-1..R-11; v0.2.0 adds `SPEC-022-R012` for R-12)
 in `specs/CONFORMANCE.json` and anchors each ID in the corresponding `### R-N`
 requirement-group header under `## Normative requirements`. No requirement text, obligation, or
 observable contract changes; this only migrates SPEC-022 out of the
@@ -343,6 +357,13 @@ captured when a request attempt is admitted to a provider. It contains at least:
 - SPEC-008 hash status at route time;
 - route decision timestamp.
 
+Owner specs extend this minimum with members that exist only when non-empty
+and enter the snapshot digest only then: SPEC-042-R006 pool labels
+(`pool_id`, `manifest_version`, `manifest_core_digest`), SPEC-047-R003
+admission and artifact values, and (v0.2.0) the R-12 `runtime_source`. A
+snapshot that carries none of them has the same digest as before those
+extensions existed (`phase4-coordinator/internal/billing/route_snapshot.go:121-184`).
+
 Settlement MUST verify against this snapshot, not against an unspecified
 current catalog at settlement time.
 
@@ -390,8 +411,8 @@ state and terminal-state timestamp.
 
 ## Normative requirements
 
-Requirement IDs `SPEC-022-R001`..`SPEC-022-R011` are the conformance units and
-map one-to-one to the top-level requirement groups R-1..R-11 below; the `R-N.M`
+Requirement IDs `SPEC-022-R001`..`SPEC-022-R012` are the conformance units and
+map one-to-one to the top-level requirement groups R-1..R-12 below; the `R-N.M`
 sub-clauses are the normative obligations within each group. The IDs are
 registered in `specs/CONFORMANCE.json`.
 
@@ -516,6 +537,13 @@ derived from or cross-checked against coordinator/gateway-observed canonical
 request and output state under the applicable SPEC-005 settlement rules.
 Provider-signed usage fields alone are not sufficient for positive settlement.
 
+R-3.4.2. (v0.2.0) The single exception to R-3.4.1 is an attempt that
+satisfies R-12 and carries usage source `pool_operator_attested`. Its usage
+is the pool operator's own reported usage, which the serving provider signs
+in its v0.4 receipt, trusted administratively under the SPEC-042 pool policy.
+The SPEC-005 ceilings still bound it (R-12.4). No other attempt may rely on
+this exception.
+
 R-3.5. Settlement MUST compare receipt `prompt_hash` and `output_hash` against
 persisted canonical hashes for the exact request attempt: the buyer request
 payload as normalized by the coordinator/gateway, and the delivered response or
@@ -596,7 +624,10 @@ become quarantined with buyer reservation released and no provider credit.
 Partial usage used for buyer debit or provider settlement MUST be derived from
 or cross-checked against the coordinator/gateway-observed delivered prefix and
 the settlement usage rules. Provider-signed usage fields alone are not
-sufficient for partial-output settlement.
+sufficient for partial-output settlement. (v0.2.0) The R-3.4.2 exception
+applies here too: for an attempt that satisfies R-12, the partial usage is the
+`pool_operator_attested` usage the receipt signs, which MUST equal the recorded
+expected usage exactly and stays bounded by the SPEC-005 ceilings.
 
 R-5.7. Synchronous buyer response completion and asynchronous receipt
 verification MAY be decoupled. Until verification returns `verified`, buyer
@@ -818,6 +849,109 @@ R-11.4. Recovery/backfill paths MUST either populate every required audit field
 from persisted state or mark the row outside SPEC-022 enforcement. They MUST
 NOT synthesize missing route snapshots after the fact.
 
+### R-12. Pool-scoped settlement eligibility (SPEC-022-R012)
+
+R-12.1. `runtime_source` on the route snapshot. For an attempt whose route
+carries a SPEC-042 `pool_id` and whose selected session reports a SPEC-046-R002
+loopback `runtime_source`, the route-time snapshot MUST carry that session's
+coordinator-derived runtime class as `runtime_source`, captured at selection. For every other attempt
+(global routes, and native sessions in a pool) the member MUST be empty. It
+enters the canonical digest only when non-empty, exactly as `pool_id` does,
+so global and native-pool digests are byte-identical to v0.1.8. A non-empty
+`runtime_source` with an empty `pool_id`, `manifest_version`, or
+`manifest_core_digest` is an invalid snapshot and MUST fail closed before
+dispatch. The recorded value is the coordinator-derived runtime class of
+SPEC-042-R004, never the hello value alone. Its `expected_catalog_model_hash`
+is the GGUF member derived at route time by the SPEC-047-R003(iv) pool
+route-time member derivation. A snapshot with a non-empty
+`runtime_source` MUST also carry `pool_generation` (the fenced pool
+generation of the selection) and `pool_operator_account_id` (the account the
+coordinator verified as both pool creator and provider owner at routing).
+Both are digested only when `runtime_source` is non-empty, so no other digest
+changes. Settlement re-evaluates R-12.3 from these values and the durable,
+append-only records they name (SPEC-042-R006), never from live state.
+Current state (pending implementation): `RouteSnapshot` has none of these
+members (`phase4-coordinator/internal/billing/route_snapshot.go:50-110`).
+
+R-12.2. Usage-source vocabulary. The settlement-attempt usage source is the
+closed set `coordinator_observed`, `byte_estimated`, and
+`pool_operator_attested`. `pool_operator_attested` is distinct from
+`coordinator_observed`. It MUST NOT be recorded, aggregated, reported, or
+disclosed as `coordinator_observed`, and buyer and provider surfaces MUST NOT
+describe its usage or served weights as coordinator-verified. They MUST
+describe them as attested by the pool operator under the pool's signed policy.
+Current state: the vocabulary is `coordinator_observed` and `byte_estimated`
+(`phase4-coordinator/internal/billing/settlement_output.go:22-23`).
+
+R-12.3. Eligibility. An attempt MAY be recorded `pool_operator_attested`
+only when every SPEC-042-R006 condition holds. In short: a pool route whose
+snapshot carries `pool_id`, `manifest_version`, `manifest_core_digest`, and
+`runtime_source`; a current coordinator-recorded member at the fenced
+generation; a durable v2 policy core for that digest that declares
+`enforce` and allowlists that `runtime_source`; a serving provider whose
+account is the pool creator; and a pool label that is not disputed when the
+attempt is recorded. The coordinator MUST derive the source only from the
+snapshot's digested values and the durable policy history they name, never
+from the live registry, the provider hello, or the receipt. It MUST also
+require that the snapshot's `route_snapshot_mode` is `enforce`.
+
+R-12.4. Settlement. A `pool_operator_attested` attempt is settlement-capable
+only through a verified v0.4 receipt. Every R-3, R-4, and R-7 check applies,
+and the receipt's usage MUST equal the coordinator's expected usage exactly
+(`tupleUsageMatchesLedger`,
+`phase4-coordinator/internal/billing/settlement_verifier.go:340`). A missing
+receipt stays `pending` and then `quarantined` under R-7.6; there is no
+receipt-less settlement. Buyer debit and provider credit follow SPEC-005
+unchanged. The completion-byte clamp and the prompt bound (SPEC-005;
+`phase4-coordinator/internal/billing/formula.go:322-362`,
+`phase4-coordinator/internal/billing/hotpath.go:280-298`) remain ceilings on
+the credited amount and are not a trust source. The v0.4 tuple and wire are
+unchanged, but the coordinator verifier's usage-source handling MUST change.
+Today `tupleUsageMatchesLedger` rejects every source except
+`coordinator_observed`
+(`phase4-coordinator/internal/billing/settlement_verifier.go:340-346`), and
+receipt ingestion marks only that source cross-checked
+(`phase4-coordinator/internal/billing/settlement_receipts.go:182`). Both MUST
+also accept `pool_operator_attested`, but only when the attempt's persisted
+route snapshot satisfies R-12.3 as re-evaluated at settlement. Every other
+source stays rejected.
+
+R-12.5. Disputed labels. An attempt whose SPEC-042-R006 pool label is
+`label_disputed` when it is recorded MUST be recorded `byte_estimated`, with
+zero billable usage. If a later settlement-time comparison marks a
+`pool_operator_attested` attempt `label_disputed`, the attempt MUST map to
+`quarantined` and MUST NOT create buyer-final debit, provider credit, or
+payout readiness.
+
+R-12.6. Global routes. An attempt served by a loopback `runtime_source`
+session on a route without a `pool_id` MUST be recorded `byte_estimated`
+with zero billable usage, whether or not the provider is a member of any
+pool (SPEC-047-R003(iv)). Such a session MUST NOT be selected for paid
+global traffic.
+
+R-12.6a. Usage-source provenance end to end. The source is set once, per
+attempt, when the attempt is recorded
+(`recordSettlementAttemptOutput`,
+`phase4-coordinator/internal/buyer/billing_recorder.go:747-757`). It is
+persisted in `settlement_attempt_outputs.usage_source`, whose CHECK constraint
+(`phase4-coordinator/internal/billing/store.go:365`) a migration MUST widen to
+the R-12.2 vocabulary without rewriting existing rows. Receipt ingestion and
+the verifier read it from that row (R-12.4). Every later report MUST derive
+from the persisted per-attempt values and MUST NOT substitute a constant.
+Request finality today hardcodes `coordinator_observed` for every verified
+result (`phase4-coordinator/internal/billing/settlement_finality.go:283-304`).
+Its `token_source` MUST instead be `coordinator_observed` when every verified
+attempt of the request persisted `coordinator_observed`, and
+`pool_operator_attested` when any verified attempt persisted
+`pool_operator_attested`. The weaker provenance governs a request that mixes
+native and pool-attested verified attempts. The same rule applies to the
+overlap-blocked terminal result. Aggregates and disclosure surfaces MUST
+group by the persisted source.
+
+R-12.7. Scope. R-12 adds no receipt tuple field, no receipt-less settlement
+path, and no SPEC-016 payout path. It does not change SPEC-008
+`attestation_tier`, and it changes no native-session settlement.
+
 ## Acceptance criteria
 
 - **AC-022-1:** With enforce mode enabled, a provider/model pair whose
@@ -1006,7 +1140,8 @@ NOT synthesize missing route snapshots after the fact.
   the provider or re-debit the buyer.
 - **AC-022-54:** Partial-output settlement usage is derived from or
   cross-checked against the coordinator/gateway-observed delivered prefix and
-  cannot rely solely on provider-signed usage fields.
+  cannot rely solely on provider-signed usage fields, except for an R-12
+  `pool_operator_attested` attempt, which R-5.6 and AC-022-66 govern.
 - **AC-022-55:** Buyer-facing surfaces co-locate any use of "verified" model
   language with the provider-reported-hash caveat in the same view.
 - **AC-022-56:** Buyer-facing quota and usage surfaces explain that a completed
@@ -1039,7 +1174,8 @@ NOT synthesize missing route snapshots after the fact.
 - **AC-022-63:** Normal-completion usage used for buyer debit and provider
   settlement is derived from or cross-checked against coordinator/gateway
   canonical request and output state under the settlement usage rules and cannot
-  rely solely on provider-signed usage fields.
+  rely solely on provider-signed usage fields, except for an R-12 attempt
+  (AC-022-66).
 - **AC-022-64:** Provider-facing onboarding or operating docs state that receipts
   arriving after `pending_deadline_seconds` are non-settling and non-recoverable
   unless a future operator-review spec defines an exception.
@@ -1051,12 +1187,23 @@ NOT synthesize missing route snapshots after the fact.
   `buyer_serving: false` with `buyer_serving_hold: catalog_material_missing` to a
   `catalog_material_hold_v1` session while keeping the legacy verdict for any
   other session. Observe mode is unchanged.
+- **AC-022-66 (v0.2.0):** For a normal and a partial completion served by an
+  allowlisted external runtime on a pool route that satisfies R-12, a verified
+  receipt whose usage equals the recorded `pool_operator_attested` usage settles
+  under SPEC-005 with the byte and prompt ceilings applied. The same completion
+  on a global route, with a disputed label, with a non-creator provider, or with
+  a snapshot missing any R-12.1 member is `byte_estimated`, or `quarantined`,
+  with zero buyer debit and zero provider credit. The settled request's
+  finality reports `token_source: pool_operator_attested`. A request whose
+  verified attempts mix a native attempt and a pool-attested attempt also
+  reports `pool_operator_attested`. An all-native request still reports
+  `coordinator_observed` (R-12.6a).
 
 ## Implementation sequencing
 
 1. Receipt-profile spec: lock SPEC-015 v0.4 or successor with the
    settlement-capable profile for non-streaming and streaming requests.
-2. Gap audit: map current code against AC-022-1 through AC-022-65.
+2. Gap audit: map current code against AC-022-1 through AC-022-66.
 3. Policy surface: implement authoritative `verified_model_settlement` policy
    and service propagation.
 4. Route snapshots: persist route-time verification snapshots for covered
@@ -1181,3 +1328,10 @@ spec or the SPEC-022 implementation prompt, not in the locked settlement gate.
   aggregate multiple provider attempts for UX, but SPEC-022 money movement is
   per attempt. Only verified per-attempt prefixes can become buyer-final or
   provider-creditable.
+- **D-022-9: Pool operator attestation is bounded administrative trust
+  (v0.2.0, #1690).** D-022-4 still holds for the network. Inside a
+  single-operator Trusted Pool whose signed policy allowlists an external
+  runtime, the operator that reports the usage is the operator that set the
+  policy and receives the credit. There, a verified receipt of the operator's
+  own usage, under SPEC-005 ceilings, is the trusted usage source (R-12). It
+  is never used for global traffic or third-party supply.

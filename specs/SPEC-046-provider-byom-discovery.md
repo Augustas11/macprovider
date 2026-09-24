@@ -1,18 +1,18 @@
 # SPEC-046 - Provider BYOM Discovery
 
-**Version:** 0.1.5
+**Version:** 0.2.0
 
 ```json
 {
   "spec_id": "SPEC-046",
   "title": "Provider BYOM Discovery",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "path": "specs/SPEC-046-provider-byom-discovery.md",
   "status": "draft",
   "owner": "@Augustas11",
   "authority_domains": ["provider-byom-discovery"],
   "supersedes": [],
-  "depends_on": ["SPEC-001", "SPEC-010", "SPEC-011", "SPEC-013", "SPEC-018", "SPEC-019", "SPEC-023", "SPEC-032", "SPEC-033", "SPEC-045", "SPEC-047"],
+  "depends_on": ["SPEC-001", "SPEC-010", "SPEC-011", "SPEC-013", "SPEC-018", "SPEC-019", "SPEC-023", "SPEC-032", "SPEC-033", "SPEC-042", "SPEC-045", "SPEC-047"],
   "implementation_status": "pending-reconciliation",
   "production_status": "not-deployed",
   "last_reconciled_commit": null,
@@ -148,6 +148,8 @@ The R008 automated-test gate for this mapping MUST cover absent/null, safe, with
 
 **SPEC-046-R008 - Release evidence.** Promotion beyond draft MUST include automated tests for adapter allowlisting, loopback rejection, bounded HTTP parsing, malformed adapter responses, candidate schema validation, local-state ladder meaning and next-action projection, advisory capability nullability, catalog-match labeling, read-only discovery, evaluation timeouts and byte caps, no production config mutation, path/token redaction, unevaluated copy restrictions, command-taxonomy separation from legacy `models list`/`models browse`, and SPEC-047 state consumption. Before any provider-visible human discovery/evaluation rendering ships, tests MUST reject forbidden earning-copy meanings with parity to SPEC-044-R004/R009, including claims that a discovered, evaluated, offered, or non-settlement candidate earns, is higher-paying, is buyer-routable by default, is verified, is catalog-priced, or is settlement-capable. For `settlement_capable`, every shipped localization and accessibility fixture MUST preserve **Eligible to earn on qualifying settled requests** as conditional eligibility and reject current-income, current-serving, guaranteed-demand, and guaranteed-settlement meanings. For `local_only`, fixtures MUST cover `needs_weights`, `needs_runtime`, `requires_preparation`, `unreachable`, fit failure, adapter rejection, and policy block; they MUST reject any prepared, installed, ready, reachable, or usable claim unless independent candidate readiness/runtime evidence in the same validated projection proves that exact claim. Every shipped localization and accessibility fixture MUST preserve the exact source-aware meanings above for `local_only`, `local_default:not_offered`, and `coordinator:not_offered`, and MUST reject any offer-history assertion for `local_default:not_offered`. Production promotion MUST include a signed journey result covering at least one MLX-cache candidate, one loopback runtime candidate, one opaque endpoint candidate, one adapter failure, one evaluated-but-not-network-admitted candidate, and local `local_only`/`offerable`/`not_offered` state-ladder evidence.
 
+**SPEC-046-R009 - Loopback serving selectors (v0.2.0, #1690).** `macprovider-cli serve` MUST recognize a loopback serving selector only by an explicit served-model prefix. v0.2.0 defines exactly two: `llamacpp:<ref>` serves through `llamacpp_loopback`, and `ollama:<ref>` serves through `ollama_loopback` (`LoopbackServeSelection.select`, `phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:93-109`; wired in `phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:1945-1970`). The selected adapter's `runtime_source` is the value the hello reports. The upstream origin comes from the operator's `loopback_origin` config key or its environment override, else the adapter's well-known loopback default, and is loopback-validated exactly as R002 requires. For `llamacpp_loopback`, the GGUF file whose SPEC-010-R007(a) digest the CLI reports is the file the operator names (`MACPROVIDER_LLAMACPP_MODEL_ROOT` / `_PATH`), never one the runtime reports. `llamacpp_loopback` is the first external runtime for buyer serving and the reference runtime for SPEC-042 Trusted Pool allowlists; `ollama_loopback` is the second. No serving selector exists for `lmstudio_loopback` or `openai_compatible_loopback`, and `lmstudio:` or `openai:` MUST NOT be added until that runtime has a serving-time identity leg. `openai_compatible_loopback` has no GGUF leg at all (`phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:2224-2229` excludes it), and `lmstudio_loopback` has a discovery-time leg but no serving-time binding to the file its server loads. A selector grants no money-path authority. A loopback serving session is sandboxed for global traffic (SPEC-032 FR-HG8) and earns only inside a SPEC-042 Trusted Pool whose signed policy allowlists its `runtime_source` (SPEC-042-R001/R013, SPEC-047-R003(iv)).
+
 ## 4. Implementation, tests, and journeys
 
 The intended implementation is a CLI-first projection:
@@ -166,6 +168,7 @@ The first journey id is `JOURNEY-PROVIDER-BYOM-DISCOVERY`.
 | Requirement/domain | Verdict | Owner | Issue | Evidence needed |
 |---|---|---|---|---|
 | `SPEC-046-R001..R008` | `DECISION_REQUIRED` | `@Augustas11` | `#1240` | Product approval of adapter list, CLI schema, privacy posture, evaluation harness scope, and signed discovery journey. |
+| `SPEC-046-R009` | `DECISION_REQUIRED` | `@Augustas11` | `#1690` | Selector tests for `llamacpp:`/`ollama:` recognition, hello `runtime_source`, loopback-origin validation and operator-named GGUF identity, plus the SPEC-042-R013 pool journey. |
 | `provider-byom-discovery` | `DECISION_REQUIRED` | `@Augustas11` | `#1240` | Authority acceptance that local discovery is provider-side inventory only and cannot imply network earning or trust. |
 
 ## 6. Evidence
@@ -174,10 +177,16 @@ No implementation or production evidence exists yet.
 
 ## 7. Current contract notes
 
-The core invariant is that local discovery is deliberately cheap and broad because it has no money-path authority. Any implementation that wants to route buyer traffic, show trusted provider economics, or create positive provider credit must leave SPEC-046 and satisfy SPEC-047 plus the settlement owner specs.
+The core invariant is that local discovery is deliberately cheap and broad because it has no money-path authority. Any implementation that wants to route buyer traffic, show trusted provider economics, or create positive provider credit must leave SPEC-046 and satisfy SPEC-047 plus the settlement owner specs. For a loopback runtime that is possible only inside a SPEC-042 Trusted Pool (R009).
 
 ## 8. Changelog and history
 
+- v0.2.0 - Adds R009 loopback serving selectors (#1690 M3). `llamacpp:` and
+  `ollama:` are the only selectors, and `llamacpp_loopback` is the first
+  external runtime for buyer serving. `lmstudio:` and `openai:` are deferred
+  until each has a serving-time identity leg. Selectors grant no money-path
+  authority: earning is possible only inside an allowlisting SPEC-042
+  Trusted Pool.
 - v0.1.5 - Freezes the exact `local_only` English source meaning and distinct
   source-aware meanings for local-default and coordinator-backed `not_offered`.
   Local-default rendering cannot assert offer history; readiness and usability
