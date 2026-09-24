@@ -156,8 +156,16 @@ func TestPromotePool_ProductionRequiresOnCallAndRecordsCustodyClass(t *testing.T
 func TestProductionActivationGate_RequiresApprovedCustodyClass(t *testing.T) {
 	t.Parallel()
 	hash := hexDigest("custody")
+	// An unmapped hash (a partially migrated config) still starts; a pool
+	// whose root uses it can neither promote nor route (freeze audit M7).
+	if _, err := trustpool.NewStore(openTrustPoolDB(t), trustpool.WithProductionActivationGate(trustpool.ProductionActivationGate{
+		AllowedLaunchEnvironments: []string{"production"},
+		RootCustodyHashes:         []string{hash},
+		EvidenceSHA256:            strings.Repeat("b", 64),
+	})); err != nil {
+		t.Fatalf("unmapped custody hash: NewStore err=%v, want startup to succeed", err)
+	}
 	for name, classes := range map[string]map[string]string{
-		"missing":    nil,
 		"software":   {hash: trustpool.RootCustodyClassSoftware},
 		"unknown":    {hash: "vault"},
 		"extra hash": {hash: trustpool.RootCustodyClassHSM, strings.Repeat("c", 64): trustpool.RootCustodyClassMPC},

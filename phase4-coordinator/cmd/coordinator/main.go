@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1494,6 +1495,8 @@ func main() {
 		Msg("coordinator config applied")
 	recordAppliedConfig(logger, "boot", *configPath, *configOverlay, bootConfigDigests, bootConfigLoadedAt)
 
+	startupProductionActivation := cfg.TrustedPools.ProductionActivation
+	reloadStartupTrustedPoolsProductionActivation.Store(&startupProductionActivation)
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	for {
@@ -3665,6 +3668,40 @@ func candidateAutotuneFeedsForRuntimeParity(buyerServer *buyer.Server, haveReloa
 	return buyerServer.CurrentAutotuneFeeds()
 }
 
+// reloadStartupTrustedPoolsProductionActivation holds the boot-time
+// trusted_pools.production_activation. The trust-pool store builds its
+// production gate once at startup, so a SIGHUP that changes it would report a
+// config as applied that is not in force; such a reload is rejected instead.
+// Nil (tests, or before boot finishes) skips the check.
+var reloadStartupTrustedPoolsProductionActivation atomic.Pointer[config.TrustedPoolsProductionActivationConfig]
+
+// trustedPoolsProductionActivationChanged compares two production activation
+// configs by their normalized content, so whitespace or ordering differences
+// in a list are not a change.
+func trustedPoolsProductionActivationChanged(startup, next config.TrustedPoolsProductionActivationConfig) bool {
+	norm := func(values []string) []string {
+		out := make([]string, 0, len(values))
+		for _, v := range values {
+			if v = strings.TrimSpace(v); v != "" {
+				out = append(out, v)
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	normMap := func(values map[string]string) map[string]string {
+		out := make(map[string]string, len(values))
+		for k, v := range values {
+			out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+		return out
+	}
+	return strings.TrimSpace(startup.EvidenceSHA256) != strings.TrimSpace(next.EvidenceSHA256) ||
+		!reflect.DeepEqual(norm(startup.AllowedLaunchEnvironments), norm(next.AllowedLaunchEnvironments)) ||
+		!reflect.DeepEqual(norm(startup.RootCustodyHashes), norm(next.RootCustodyHashes)) ||
+		!reflect.DeepEqual(normMap(startup.RootCustodyClasses), normMap(next.RootCustodyClasses))
+}
+
 func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, billingStores ...*billing.Store) {
 	reloadCoordinatorConfig(configPath, "", startupTier2, logger, wsServer, buyerServer, autotuneCatalog, nil, nil, billingStores...)
 }
@@ -3733,6 +3770,13 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	}
 	if tier2StartupFieldsChangedWithLogger(startupTier2, cfg.Tier2, logger) {
 		logger.Error().Msg("tier2 config reload rejected: startup-only tier2 fields require restart")
+		return
+	}
+	if startup := reloadStartupTrustedPoolsProductionActivation.Load(); startup != nil &&
+		trustedPoolsProductionActivationChanged(*startup, cfg.TrustedPools.ProductionActivation) {
+		logger.Error().
+			Str("field", "trusted_pools.production_activation").
+			Msg("config reload rejected: trusted_pools.production_activation is startup-only and requires a restart")
 		return
 	}
 	if err := validateAutotuneRuntimeEconomics(candidateAutotuneFeedsForRuntimeParity(buyerServer, haveReloadedAutotune, reloadedAutotuneFeeds), cfg); err != nil {

@@ -37,7 +37,11 @@ type SettlementPoolLabelRecord struct {
 	ManifestVersion    uint64
 	ManifestCoreDigest string
 	RouteSnapshotHash  string
-	Status             string
+	// VerdictRouteSnapshotDigest is the digest the verdict row was written
+	// against. It differs from RouteSnapshotHash only when the stored verdict
+	// and the loaded route snapshot disagree, which is recorded disputed.
+	VerdictRouteSnapshotDigest string
+	Status                     string
 }
 
 // settlementPoolLabelStatus returns "" for global traffic, which leaves global
@@ -50,6 +54,14 @@ func settlementPoolLabelStatus(route RouteSnapshot, routeHash string, labels *Se
 		return ""
 	}
 	if labels == nil {
+		return PoolLabelStatusUnverified
+	}
+	if labels.PoolID != route.PoolID {
+		return PoolLabelStatusDisputed
+	}
+	// A legacy pool_id-only snapshot carries no routing-time manifest labels,
+	// so settlement cannot prove the label: it is never verified.
+	if route.ManifestVersion == 0 || route.ManifestCoreDigest == "" {
 		return PoolLabelStatusUnverified
 	}
 	if labels.PoolID != route.PoolID ||
@@ -92,20 +104,24 @@ func (s *Store) RecordSettlementPoolLabels(ctx context.Context, id SettlementRec
 		if route.ManifestVersion != 0 {
 			manifestVersion = sql.NullInt64{Int64: int64(route.ManifestVersion), Valid: true}
 		}
-		var recorded string
+		// The row is addressed by settlement identity alone. A verdict written
+		// against a different route snapshot digest than the one loaded here
+		// is itself a label mismatch and is stamped disputed, never skipped.
+		var recorded, verdictDigest string
 		err = conn.QueryRowContext(ctx, `
 UPDATE settlement_receipt_verdicts
    SET pool_id = ?,
        pool_manifest_version = ?,
        pool_manifest_core_digest = ?,
-       pool_label_status = CASE WHEN pool_label_status = 'label_disputed' THEN 'label_disputed' ELSE ? END
+       pool_label_status = CASE
+           WHEN pool_label_status = 'label_disputed' THEN 'label_disputed'
+           WHEN route_snapshot_digest IS NOT ? THEN 'label_disputed'
+           ELSE ? END
  WHERE account_scope_hash = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
-   AND route_snapshot_digest = ?
-RETURNING pool_label_status`,
-			poolID, manifestVersion, nullString(route.ManifestCoreDigest), status,
+RETURNING pool_label_status, COALESCE(route_snapshot_digest, '')`,
+			poolID, manifestVersion, nullString(route.ManifestCoreDigest), routeHash, status,
 			redactedAccountScopeHash(id.AccountScope), id.RequestID, id.AttemptN, id.ProviderID,
-			routeHash,
-		).Scan(&recorded)
+		).Scan(&recorded, &verdictDigest)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -113,11 +129,12 @@ RETURNING pool_label_status`,
 			return err
 		}
 		out = SettlementPoolLabelRecord{
-			PoolID:             poolID,
-			ManifestVersion:    route.ManifestVersion,
-			ManifestCoreDigest: route.ManifestCoreDigest,
-			RouteSnapshotHash:  routeHash,
-			Status:             recorded,
+			PoolID:                     poolID,
+			ManifestVersion:            route.ManifestVersion,
+			ManifestCoreDigest:         route.ManifestCoreDigest,
+			RouteSnapshotHash:          routeHash,
+			VerdictRouteSnapshotDigest: verdictDigest,
+			Status:                     recorded,
 		}
 		return nil
 	})

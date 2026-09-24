@@ -394,9 +394,9 @@ func normalizeProductionActivationGate(g ProductionActivationGate) (productionAc
 		}
 		out.rootCustodyClasses[hash] = class
 	}
-	if len(out.rootCustodyClasses) != len(out.rootCustodyHashes) {
-		return productionActivationGate{}, fmt.Errorf("%w: production activation custody class", ErrPromotionPreconditionFailed)
-	}
+	// A custody hash without a class mapping (a partially migrated config) is
+	// accepted at startup; validateProductionPromotionGate then refuses to
+	// promote or route any pool whose root uses it.
 	return out, nil
 }
 
@@ -2607,12 +2607,79 @@ func (s *Store) Reconstruct(ctx context.Context) (*ReconstructedState, error) {
 			return err
 		}
 		state, err = reconstructEventsWithApprovalsAndPublicAnnouncements(events, approvals, publicAnnouncements, reviewedArtifacts, time.Now().UTC())
-		return err
+		if err != nil {
+			return err
+		}
+		onCall, err := onCallReadinessFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		state.applyProductionRouteGates(s.productionActivationGate, onCall)
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return state, nil
+}
+
+// ApplyRouteGates re-checks every active production pool of a reconstructed
+// state against this coordinator's CURRENT production activation gate and the
+// CURRENT on-call readiness of its launch environment, before the state is
+// published to the routing registry. Promotion checked both once; a gate that
+// tightens later, or an on-call record that lapses, must stop routing too.
+func (s *Store) ApplyRouteGates(ctx context.Context, state *ReconstructedState) error {
+	if s == nil || s.db == nil || state == nil {
+		return nil
+	}
+	var onCall map[string]OnCallReadiness
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var err error
+		onCall, err = onCallReadinessFromQueryer(ctx, conn)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	state.applyProductionRouteGates(s.productionActivationGate, onCall)
+	return nil
+}
+
+// applyProductionRouteGates is idempotent: a pool already gated keeps its
+// first reason. Candidate roots are left to the registry's sticky
+// candidate-on-production rejection.
+func (s *ReconstructedState) applyProductionRouteGates(gate productionActivationGate, onCall map[string]OnCallReadiness) {
+	if s == nil {
+		return
+	}
+	at := s.RouteGateCheckedAt
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	for _, p := range s.Pools {
+		if p == nil || p.RootIssuer == nil || p.Lifecycle != LifecycleActive || p.ProductionGateReason != "" {
+			continue
+		}
+		environment := p.RootIssuer.LaunchEnvironment
+		if environment == promotionLaunchEnvironmentCandidate {
+			continue
+		}
+		reason := ""
+		if err := validateProductionPromotionGate(p.RootIssuer, gate); err != nil {
+			var precondition PromotionPreconditionError
+			reason = "production_gate_unsatisfied"
+			if errors.As(err, &precondition) && precondition.Reason != "" {
+				reason = precondition.Reason
+			}
+		} else if rec, ok := onCall[environment]; !ok {
+			reason = "oncall_readiness_missing"
+		} else if rec.Expired(at) {
+			reason = "oncall_readiness_expired"
+		} else {
+			p.OnCallReadinessExpiresAtUTC = rec.LastConfirmedAtUTC.UTC().Add(rec.ttl())
+		}
+		p.ProductionGateReason = reason
+	}
 }
 
 // ReconstructedState is the coordinator's query/admin view after durable replay.
@@ -2672,6 +2739,14 @@ type ReconstructedPoolState struct {
 	LastEventAtUTC               time.Time
 	CreatorGateReason            string
 	CreatorGateExpiresAtUTC      time.Time
+	// OnCallReadinessExpiresAtUTC is when the launch environment's current
+	// on-call readiness lapses for an active production pool; routing stops
+	// at that instant (SPEC-043-R008/R011).
+	OnCallReadinessExpiresAtUTC time.Time
+	// ProductionGateReason is set when an active production pool no longer
+	// satisfies the current production activation gate or on-call readiness;
+	// it removes the pool from routing only.
+	ProductionGateReason string
 }
 
 type ReconstructedRootIssuer struct {
@@ -3429,7 +3504,7 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			SettlementMode:            routeablePoolSettlementMode(p.ManifestSettlementMode),
 			Routeable:                 routeable,
 			Generation:                p.RouteableSnapshotGeneration(),
-			RouteableUntilUTC:         p.CreatorGateExpiresAtUTC,
+			RouteableUntilUTC:         earliestDeadline(p.CreatorGateExpiresAtUTC, p.OnCallReadinessExpiresAtUTC),
 			RouteableExpired:          routeabilityReason == "creator_agreement_expired",
 			ManifestVersion:           p.ManifestVersion,
 			ManifestCoreDigest:        p.ManifestCoreDigest,
@@ -3437,6 +3512,20 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		})
 	}
 	return out
+}
+
+// earliestDeadline returns the earlier non-zero instant, or zero if both are.
+func earliestDeadline(a, b time.Time) time.Time {
+	switch {
+	case a.IsZero():
+		return b
+	case b.IsZero():
+		return a
+	case b.Before(a):
+		return b
+	default:
+		return a
+	}
 }
 
 func (p *ReconstructedPoolState) EffectiveGeneration() uint64 {

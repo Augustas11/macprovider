@@ -48,6 +48,28 @@ type HotPathInput struct {
 	// runtime_source. A SPEC-046 loopback source relays usage from an
 	// operator-controlled runtime, so it is never coordinator_observed.
 	ProviderRuntimeSource string
+	// PoolOperatorAttested is set only for an attempt the recorder derived as
+	// SPEC-022-R012 pool_operator_attested. It is the single case in which a
+	// loopback-served attempt may carry ledger credit; settlement still has
+	// to verify a receipt before that credit becomes payable.
+	PoolOperatorAttested bool
+}
+
+// LoopbackRuntimeNotSettlementEligible is the ledger quarantine reason for an
+// attempt served by a SPEC-046 loopback runtime outside an authorizing
+// SPEC-042 pool route (SPEC-047-R003(iv), SPEC-022-R012.6).
+const LoopbackRuntimeNotSettlementEligible = "loopback_runtime_not_settlement_eligible"
+
+// IsLoopbackRuntimeSource reports whether a hello runtime_source is a SPEC-046
+// loopback adapter: an operator-controlled external process whose reported
+// usage is provider-only (SPEC-015 §N.6).
+func IsLoopbackRuntimeSource(value string) bool {
+	switch value {
+	case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback":
+		return true
+	default:
+		return false
+	}
 }
 
 type CacheBillingRoutingDecision struct {
@@ -183,6 +205,28 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		// just persisted by InsertExec (v1.5.2 always writes a non-NULL
 		// value); the in.AttemptN was already aligned to the persisted
 		// value by the post-INSERT COUNT-1 derivation above.
+		// SPEC-047-R003(iv) / SPEC-022-R012.6 at the ledger boundary: a
+		// loopback-served attempt earns nothing and bills nothing unless the
+		// recorder derived it pool_operator_attested. This holds whatever
+		// routing decided, so a routing regression can never pay loopback
+		// usage.
+		if IsLoopbackRuntimeSource(in.ProviderRuntimeSource) && !in.PoolOperatorAttested {
+			result := zeroCredits(ComputeCredits(
+				in.PromptTokens,
+				in.CompletionTokens,
+				in.EstimatedCompTokens,
+				usageFor(in.ErrorCode, in.EstimatedCompTokens),
+				in.FaultFlag,
+				hotPathRateEntry(in),
+				in.MultiplierPPM,
+				in.ProviderShareBps,
+			))
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			if _, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, true, LoopbackRuntimeNotSettlementEligible); err != nil {
+				return err
+			}
+			return insertProviderIdentitySnapshotTx(ctx, conn, in, now)
+		}
 		if in.AttemptN == 1 && reqRow.Retried == 0 {
 			result := ComputeCredits(
 				in.PromptTokens,

@@ -3011,14 +3011,19 @@ func validateTrustedPoolsProductionActivation(c TrustedPoolsConfig) error {
 			return fmt.Errorf("trusted_pools.production_activation.root_custody_hashes must be unique")
 		}
 		seenCustody[value] = true
-		switch gate.RootCustodyClasses[value] {
+	}
+	// A hash without a class is accepted so a partially migrated config still
+	// starts; the store refuses to promote or route a pool whose root uses an
+	// unmapped hash. A class that is present must be valid and name a hash.
+	for hash, class := range gate.RootCustodyClasses {
+		if !seenCustody[strings.TrimSpace(hash)] {
+			return fmt.Errorf("trusted_pools.production_activation.root_custody_classes must only name root_custody_hashes entries")
+		}
+		switch strings.TrimSpace(class) {
 		case "hsm", "mpc", "other":
 		default:
-			return fmt.Errorf("trusted_pools.production_activation.root_custody_classes must map every root_custody_hashes entry to hsm, mpc, or other")
+			return fmt.Errorf("trusted_pools.production_activation.root_custody_classes values must be hsm, mpc, or other")
 		}
-	}
-	if len(gate.RootCustodyClasses) != len(seenCustody) {
-		return fmt.Errorf("trusted_pools.production_activation.root_custody_classes must only name root_custody_hashes entries")
 	}
 	return nil
 }

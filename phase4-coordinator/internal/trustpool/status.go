@@ -477,6 +477,9 @@ func poolRouteability(p *ReconstructedPoolState) (bool, string) {
 	if p.Lifecycle != LifecycleActive {
 		return false, "lifecycle_" + p.Lifecycle
 	}
+	if p.ProductionGateReason != "" {
+		return false, p.ProductionGateReason
+	}
 	if nonRevokedMemberCount(p) < policyMinEligibleMembers(p) {
 		return false, "min_eligible_members_unmet"
 	}

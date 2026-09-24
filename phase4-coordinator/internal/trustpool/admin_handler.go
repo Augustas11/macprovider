@@ -1771,6 +1771,12 @@ func (h *adminHandler) refreshRegistryIfAhead(w http.ResponseWriter, state *Reco
 	if h.deps.Registry == nil || state == nil || state.Revision <= h.deps.Registry.Revision() {
 		return true
 	}
+	// Publication re-checks the current production gate and on-call
+	// readiness, whichever store path produced this state.
+	if err := h.deps.Store.ApplyRouteGates(context.Background(), state); err != nil {
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
+		return false
+	}
 	if err := h.deps.Registry.LoadRouteableSnapshotsAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
 		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
 		return false

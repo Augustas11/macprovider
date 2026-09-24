@@ -60,13 +60,28 @@ func (s *Server) persistSettlementReceipt(ctx context.Context, store *billing.St
 // is durable. A failure only leaves the label unrecorded, which already keeps
 // the request out of pool-scoped accounting; it never fails settlement.
 func (s *Server) recordSettlementPoolLabels(ctx context.Context, store *billing.Store, input settlementReceiptRecoveryInput) {
-	rec, err := store.RecordSettlementPoolLabels(ctx, input.identity, input.poolLabels)
+	var rec billing.SettlementPoolLabelRecord
+	var err error
+	// A transient store failure is retried; a persistent one is logged as a
+	// terminal, operator-visible event. Either way the request stays out of
+	// pool-scoped accounting, because only a verified label counts there.
+	for attempt := 1; attempt <= settlementPoolLabelAttempts; attempt++ {
+		rec, err = store.RecordSettlementPoolLabels(ctx, input.identity, input.poolLabels)
+		if err == nil || ctx.Err() != nil {
+			break
+		}
+		if attempt < settlementPoolLabelAttempts {
+			time.Sleep(time.Duration(attempt) * settlementPoolLabelRetryBackoff)
+		}
+	}
 	if err != nil {
-		s.log.Warn().Err(err).
+		s.log.Error().Err(err).
+			Str("event", "trusted_pool_label_unrecorded").
 			Str("pool_id", input.poolLabels.PoolID).
 			Str("request_id", input.identity.RequestID).
+			Int64("attempt_n", input.identity.AttemptN).
 			Str("provider_id", input.identity.ProviderID).
-			Msg("trusted pool settlement label not recorded; request excluded from pool-scoped accounting")
+			Msg("trusted pool settlement label not recorded after retries; request excluded from pool-scoped accounting")
 		return
 	}
 	if rec.Status != billing.PoolLabelStatusDisputed {
@@ -82,6 +97,7 @@ func (s *Server) recordSettlementPoolLabels(ctx context.Context, store *billing.
 		Uint64("settlement_manifest_version", input.poolLabels.ManifestVersion).
 		Str("settlement_manifest_core_digest", input.poolLabels.ManifestCoreDigest).
 		Str("route_snapshot_hash", rec.RouteSnapshotHash).
+		Str("verdict_route_snapshot_digest", rec.VerdictRouteSnapshotDigest).
 		Str("request_id", input.identity.RequestID).
 		Int64("attempt_n", input.identity.AttemptN).
 		Str("provider_id", input.identity.ProviderID).
@@ -107,6 +123,11 @@ func (b *billingRecorder) settlementPoolLabels() *billing.SettlementPoolLabels {
 	}
 	return labels
 }
+
+const (
+	settlementPoolLabelAttempts     = 3
+	settlementPoolLabelRetryBackoff = 50 * time.Millisecond
+)
 
 func settlementReceiptRecoveryKey(input settlementReceiptRecoveryInput) string {
 	digest := sha256.Sum256([]byte(input.header))
