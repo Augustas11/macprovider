@@ -5196,6 +5196,14 @@ class PearlUpdaterTests(unittest.TestCase):
             return_value=updater_module.CoordinatorRuntime(base, None, {})
         )
         self.updater.previous_versions = {"coordinator": "1.8.26", "gateway": "1.8.26"}
+        self.timer_states = {
+            "stats-inventory-sync": {"loaded": True, "enabled": True, "active": True},
+            "stats-billing-mirror": {"loaded": True, "enabled": True, "active": False},
+            "stats-hardware-verifier": {"loaded": False, "enabled": False, "active": False},
+        }
+        self.updater._stats_timer_state = lambda sidecar: dict(self.timer_states[sidecar])
+        self.updater.systemctl = mock.Mock()
+        self.updater.assert_unit_quiescent = mock.Mock()
         self.updater.prepare_config_update(release)
         return install, stats
 
@@ -5383,6 +5391,135 @@ class PearlUpdaterTests(unittest.TestCase):
         manifest_path.chmod(0o600)
         with self.assertRaisesRegex(updater_module.UpdateError, "destination is not allowed"):
             self.updater.validate_transaction(tx)
+        rows[0]["destination"] = str(self.updater.install_root / "coordinator-cli")
+        manifest_path.write_text(json.dumps(rows) + "\n")
+        self.updater.validate_transaction(tx)
+        for field, value in (("mode", 0o4750), ("mode", 0o770), ("uid", self.updater.trusted_uid + 1)):
+            tampered = [dict(row) for row in rows]
+            tampered[0][field] = value
+            manifest_path.write_text(json.dumps(tampered) + "\n")
+            manifest_path.chmod(0o600)
+            with self.assertRaisesRegex(updater_module.UpdateError, "operator artifact row is invalid"):
+                self.updater.validate_transaction(tx)
+
+    def test_changed_stats_sidecars_are_held_until_full_deploy(self):
+        self.make_bundle(runtime_only=True, stats_sidecars=True)
+        release = self.stage(self.verify())
+        _install, stats = self.operator_artifact_install_fixture(release)
+        tx = self.updater.snapshot(release)
+        holds = json.loads((tx / "stats-sidecar-holds.json").read_text())
+        self.assertEqual(
+            [row["sidecar"] for row in holds],
+            ["stats-inventory-sync", "stats-billing-mirror", "stats-hardware-verifier"],
+        )
+        previous_inventory = (stats / "stats-inventory-sync").read_bytes()
+        bytes_at_hold = []
+        self.updater.systemctl.side_effect = lambda *_args: bytes_at_hold.append(
+            (stats / "stats-inventory-sync").read_bytes()
+        )
+
+        self.updater.install_release(release)
+
+        # Every hold lands before any sidecar byte swap.
+        self.assertTrue(bytes_at_hold)
+        self.assertEqual(set(bytes_at_hold), {previous_inventory})
+        calls = [tuple(call.args) for call in self.updater.systemctl.call_args_list]
+        for sidecar in ("stats-inventory-sync", "stats-billing-mirror"):
+            self.assertIn(("disable", f"{sidecar}.timer"), calls)
+            self.assertIn(("stop", f"{sidecar}.timer"), calls)
+        self.assertNotIn(("disable", "stats-hardware-verifier.timer"), calls)
+        self.assertIn(("stop", "stats-hardware-verifier.service"), calls)
+        self.assertTrue(all(action in ("disable", "stop") for action, _unit in calls))
+        self.assertEqual(
+            updater_module.sha256_file(stats / "stats-inventory-sync"),
+            release.operator_artifacts[1].sha256,
+        )
+
+        self.updater.systemctl.reset_mock()
+        self.updater.systemctl.side_effect = None
+        self.updater.previous_auxiliary_units = {unit: True for unit in updater_module.AUXILIARY_UNITS}
+        self.updater.restore_auxiliary_services = updater_module.Updater.restore_auxiliary_services.__get__(self.updater)
+        self.updater.restore_auxiliary_timers()
+        self.updater.restore_auxiliary_services()
+        calls = [tuple(call.args) for call in self.updater.systemctl.call_args_list]
+        self.assertIn(("start", "macprovider-archive-rotate.timer"), calls)
+        self.assertIn(("stop", "stats-billing-mirror.timer"), calls)
+        self.assertNotIn(("start", "stats-billing-mirror.timer"), calls)
+        self.assertNotIn(("start", "stats-billing-mirror.service"), calls)
+
+    def test_unchanged_stats_sidecars_are_not_held(self):
+        self.make_bundle(runtime_only=True, stats_sidecars=True)
+        release = self.stage(self.verify())
+        self.operator_artifact_install_fixture(release)
+        self.install_operator_artifacts(release)
+        tx = self.updater.snapshot(release)
+        self.assertEqual(json.loads((tx / "stats-sidecar-holds.json").read_text()), [])
+        self.updater.install_release(release)
+        self.updater.systemctl.assert_not_called()
+
+    def test_rollback_restores_held_stats_sidecar_timer_state(self):
+        self.make_bundle(runtime_only=True, stats_sidecars=True)
+        release = self.stage(self.verify())
+        self.operator_artifact_install_fixture(release)
+        tx = self.updater.snapshot(release)
+        self.updater.install_release(release)
+        self.updater.systemctl.reset_mock()
+
+        self.updater.validate_transaction(tx)
+        self.updater._restore_binaries(tx)
+
+        calls = [tuple(call.args) for call in self.updater.systemctl.call_args_list]
+        self.assertEqual(
+            calls,
+            [
+                ("enable", "stats-inventory-sync.timer"),
+                ("start", "stats-inventory-sync.timer"),
+                ("enable", "stats-billing-mirror.timer"),
+            ],
+        )
+
+    def test_rollback_of_transaction_from_previous_updater_skips_operator_artifacts(self):
+        self.make_bundle(runtime_only=True, stats_sidecars=True)
+        release = self.stage(self.verify())
+        install, _stats = self.operator_artifact_install_fixture(release)
+        tx = self.updater.snapshot(release)
+        (tx / "operator-artifact-manifest.json").unlink()
+        (tx / "stats-sidecar-holds.json").unlink()
+        shutil.rmtree(tx / "operator-artifacts")
+        self.updater.install_release(release)
+        self.updater.systemctl.reset_mock()
+
+        self.updater.validate_transaction(tx)
+        self.updater._restore_binaries(tx)
+
+        self.assertEqual((install / "coordinator").read_bytes(), fake_elf("installed-coordinator"))
+        self.assertEqual((install / "gateway").read_bytes(), fake_elf("installed-gateway"))
+        self.assertEqual(
+            updater_module.sha256_file(install / "coordinator-cli"),
+            release.operator_artifacts[0].sha256,
+        )
+        self.updater.systemctl.assert_not_called()
+
+    def test_stats_sidecar_release_is_refused_at_planning_without_stats_group(self):
+        self.make_bundle(stats_sidecars=True)
+        release = self.verify()
+        self.updater.stats_gid = None
+        self.updater.eligibility = mock.Mock()
+        with self.assertRaisesRegex(updater_module.UpdateError, "macprovider-stats service group is unavailable"):
+            self.updater.assess_candidate(release)
+        self.updater.eligibility.assert_not_called()
+
+    def test_install_converges_stats_directory_mode(self):
+        self.make_bundle(runtime_only=True, stats_sidecars=True)
+        release = self.stage(self.verify())
+        _install, stats = self.operator_artifact_install_fixture(release)
+        stats.chmod(0o700)
+        self.updater.snapshot(release)
+        self.updater.install_release(release)
+        self.assertEqual(stats.stat().st_mode & 0o7777, 0o750)
+        self.assertTrue(self.updater.installed_operator_artifacts_are_coherent(release))
+        stats.chmod(0o700)
+        self.assertFalse(self.updater.installed_operator_artifacts_are_coherent(release))
 
     def test_cli_or_sidecar_drift_turns_already_current_into_repair(self):
         self.make_bundle(stats_sidecars=True)

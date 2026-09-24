@@ -904,6 +904,8 @@ class Updater:
         # None means the macprovider-stats group is unavailable on this host; a
         # release that binds stats sidecars then fails before live mutation.
         self.stats_gid = stats_gid
+        self.stats_sidecar_holds: list[str] = []
+        self.stats_sidecar_holds_applied = False
         self.isolate_candidate_network = isolate_candidate_network
         self.catalog_verifier = catalog_verifier
         self.autotune_window_module = autotune_window_module
@@ -1922,6 +1924,11 @@ class Updater:
         return current, "upgrade"
 
     def assess_candidate(self, release: Release) -> tuple[SemVer, str]:
+        if self.stats_gid is None and any(artifact.root_kind == "stats" for artifact in release.operator_artifacts):
+            self.audit("release_eligibility", "rejected_missing_stats_group", candidate=release.tag)
+            raise UpdateError(
+                f"{STATS_SERVICE_GROUP} service group is unavailable; cannot install signed stats sidecars"
+            )
         current, decision = self.eligibility(release)
         if release.catalog is not None:
             self._preflight_legacy_tier2_cutover()
@@ -4243,7 +4250,8 @@ class Updater:
     def _snapshot_operator_artifacts(self, release: Release, tx: Path) -> None:
         snapshot_dir = tx / "operator-artifacts"
         snapshot_dir.mkdir(mode=0o700)
-        manifest = []
+        manifest: list[dict[str, Any]] = []
+        holds: list[dict[str, Any]] = []
         for artifact in release.operator_artifacts:
             destination, _gid = self._operator_artifact_destination(artifact.installed_name, artifact.root_kind)
             if _path_entry_exists(destination.parent):
@@ -4257,22 +4265,84 @@ class Updater:
                 raise UpdateError(f"{artifact.installed_name} install directory is missing: {destination.parent}")
             if not _path_entry_exists(destination):
                 manifest.append({"destination": str(destination), "existed": False})
-                continue
-            entry = self._trusted_regular_file(destination, f"installed {artifact.installed_name} binary")
-            self._durable_copy(destination, snapshot_dir / artifact.installed_name)
-            manifest.append(
-                {
-                    "destination": str(destination),
-                    "existed": True,
-                    "snapshot": artifact.installed_name,
-                    "uid": entry.st_uid,
-                    "gid": entry.st_gid,
-                    "mode": stat.S_IMODE(entry.st_mode),
-                    "sha256": sha256_file(snapshot_dir / artifact.installed_name),
-                }
-            )
+            else:
+                entry = self._trusted_regular_file(destination, f"installed {artifact.installed_name} binary")
+                self._durable_copy(destination, snapshot_dir / artifact.installed_name)
+                manifest.append(
+                    {
+                        "destination": str(destination),
+                        "existed": True,
+                        "snapshot": artifact.installed_name,
+                        "uid": entry.st_uid,
+                        "gid": entry.st_gid,
+                        "mode": stat.S_IMODE(entry.st_mode),
+                        "sha256": sha256_file(snapshot_dir / artifact.installed_name),
+                    }
+                )
+            if (
+                artifact.root_kind == "stats"
+                and (manifest[-1]["existed"] is False or manifest[-1]["sha256"] != artifact.sha256)
+            ):
+                holds.append({"sidecar": artifact.installed_name, **self._stats_timer_state(artifact.installed_name)})
         _fsync_directory(snapshot_dir)
         self._write_json(tx / "operator-artifact-manifest.json", manifest)
+        self._write_json(tx / "stats-sidecar-holds.json", holds)
+        self.stats_sidecar_holds = [row["sidecar"] for row in holds]
+
+    def _stats_timer_state(self, sidecar: str) -> dict[str, bool]:
+        properties = self._service_properties(
+            f"{sidecar}.timer",
+            ("LoadState", "UnitFileState", "ActiveState"),
+        )
+        return {
+            "loaded": properties.get("LoadState") not in ("", "not-found"),
+            "enabled": properties.get("UnitFileState") == "enabled",
+            "active": properties.get("ActiveState") in ("active", "activating", "reloading"),
+        }
+
+    def hold_stats_sidecar(self, sidecar: str) -> None:
+        # SPEC-033 / issue #582 ordering: a changed sidecar may need stats
+        # migrations that only deploy-pearl-vps.sh applies (stats-migrate). Keep
+        # its timer disabled and its service stopped from before the byte swap
+        # until that deploy re-enables it after migrating; the rollback restores
+        # the captured timer state together with the previous bytes.
+        timer = f"{sidecar}.timer"
+        service = f"{sidecar}.service"
+        if self._stats_timer_state(sidecar)["loaded"]:
+            self.systemctl("disable", timer)
+            self.systemctl("stop", timer)
+            self.assert_unit_quiescent(timer)
+        self.systemctl("stop", service)
+        self.assert_unit_quiescent(service)
+
+    def _restore_stats_sidecar_holds(self, tx: Path) -> None:
+        if not _path_entry_exists(tx / "stats-sidecar-holds.json"):
+            return
+        for row in self._stats_sidecar_hold_rows(tx):
+            if not row["loaded"]:
+                continue
+            timer = f"{row['sidecar']}.timer"
+            if row["enabled"]:
+                self.systemctl("enable", timer)
+            # stats-billing-mirror.timer is an auxiliary unit whose active state
+            # the auxiliary_timers rollback step restores after serving is proven.
+            if row["active"] and timer not in AUXILIARY_UNITS:
+                self.systemctl("start", timer)
+
+    def _stats_sidecar_hold_rows(self, tx: Path) -> list[dict[str, Any]]:
+        rows = self._transaction_json(tx, "stats-sidecar-holds.json")
+        allowed = {row[2] for row in STATS_OPERATOR_ARTIFACTS}
+        if not isinstance(rows, list):
+            raise UpdateError("rollback stats sidecar hold manifest is invalid")
+        for row in rows:
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"sidecar", "loaded", "enabled", "active"}
+                or row["sidecar"] not in allowed
+                or any(type(row[field]) is not bool for field in ("loaded", "enabled", "active"))
+            ):
+                raise UpdateError("rollback stats sidecar hold row is invalid")
+        return rows
 
     def install_operator_artifact(self, release: Release, artifact: OperatorArtifact) -> None:
         source = release.directory / artifact.asset
@@ -4290,6 +4360,11 @@ class Updater:
             trusted_uid=self.trusted_uid,
             mode=None,
         )
+        if artifact.root_kind == "stats" and not self._stats_install_root_is_coherent():
+            # Converge to the deploy's root:macprovider-stats 0750 layout (also
+            # repairs a directory left 0700 by an interrupted creation).
+            os.chown(destination.parent, self.trusted_uid, gid, follow_symlinks=False)
+            os.chmod(destination.parent, 0o750, follow_symlinks=False)
         if _path_entry_exists(destination):
             self._trusted_regular_file(destination, f"installed {artifact.installed_name} binary")
         self.atomic_replace(source, destination, uid=self.trusted_uid, gid=gid, mode=0o750)
@@ -4301,7 +4376,23 @@ class Updater:
         ):
             raise UpdateError(f"installed {artifact.installed_name} ownership, mode, or checksum is invalid")
 
+    def _stats_install_root_is_coherent(self) -> bool:
+        try:
+            entry = self.stats_install_root.lstat()
+        except OSError:
+            return False
+        return (
+            stat.S_ISDIR(entry.st_mode)
+            and entry.st_uid == self.trusted_uid
+            and entry.st_gid == self.stats_gid
+            and stat.S_IMODE(entry.st_mode) == 0o750
+        )
+
     def installed_operator_artifacts_are_coherent(self, release: Release) -> bool:
+        if any(artifact.root_kind == "stats" for artifact in release.operator_artifacts) and not (
+            self._stats_install_root_is_coherent()
+        ):
+            return False
         for artifact in release.operator_artifacts:
             try:
                 destination, gid = self._operator_artifact_destination(artifact.installed_name, artifact.root_kind)
@@ -4560,6 +4651,11 @@ class Updater:
         self.audit("release_component_installed", "success", candidate=release.tag, component="coordinator")
         self.atomic_install(release.directory / release.gateway.asset, self.install_root / "gateway")
         self.audit("release_component_installed", "success", candidate=release.tag, component="gateway")
+        if self.stats_sidecar_holds:
+            self.stats_sidecar_holds_applied = True
+        for sidecar in self.stats_sidecar_holds:
+            self.hold_stats_sidecar(sidecar)
+            self.audit("stats_sidecar_held", "until_full_deploy", candidate=release.tag, sidecar=sidecar)
         for artifact in release.operator_artifacts:
             self.install_operator_artifact(release, artifact)
             self.audit(
@@ -5655,6 +5751,8 @@ class Updater:
             if component_manifest[name] != sha256_file(snapshot):
                 raise UpdateError(f"rollback {name} snapshot checksum mismatch")
         self._validate_operator_artifact_manifest(tx)
+        if _path_entry_exists(tx / "stats-sidecar-holds.json"):
+            self._stats_sidecar_hold_rows(tx)
         for manifest_name, directory_name in (
             ("configuration-manifest.json", "configurations"),
             ("database-manifest.json", "databases"),
@@ -5868,6 +5966,7 @@ class Updater:
         # Same rollback step as the pair so journals from earlier updaters keep
         # their step sequence; both restores are idempotent on reconcile.
         self._restore_operator_artifacts(tx)
+        self._restore_stats_sidecar_holds(tx)
 
     def _operator_artifact_manifest(self, tx: Path) -> list[dict[str, Any]]:
         # Transactions written before issue #1721 carry no operator artifacts.
@@ -5897,6 +5996,8 @@ class Updater:
                 row.get("existed") is not True
                 or row.get("snapshot") != name
                 or any(type(row.get(field)) is not int for field in ("uid", "gid", "mode"))
+                or row["uid"] != self.trusted_uid
+                or row["mode"] & ~0o755
             ):
                 raise UpdateError("rollback operator artifact row is invalid")
             snapshot = tx / "operator-artifacts" / name
@@ -6080,11 +6181,19 @@ class Updater:
             legacy_rollback_version=advertised,
         )
 
+    def _held_auxiliary_unit(self, unit: str) -> bool:
+        # Only a rollout moving forward keeps a changed sidecar held; a rollback
+        # restores the previous bytes, so their previous run state is safe.
+        return self.stats_sidecar_holds_applied and unit.rsplit(".", 1)[0] in self.stats_sidecar_holds
+
     def restore_auxiliary_services(self) -> None:
         for unit in ("macprovider-archive-rotate.service", "stats-billing-mirror.service"):
             desired = self.previous_auxiliary_units.get(unit)
             if type(desired) is not bool:
                 raise UpdateError(f"previous auxiliary state unavailable for {unit}")
+            if self._held_auxiliary_unit(unit):
+                self.assert_unit_quiescent(unit)
+                continue
             if desired:
                 child_permit = None
                 if unit == "macprovider-archive-rotate.service":
@@ -6102,6 +6211,10 @@ class Updater:
             desired = self.previous_auxiliary_units.get(unit)
             if type(desired) is not bool:
                 raise UpdateError(f"previous auxiliary state unavailable for {unit}")
+            if self._held_auxiliary_unit(unit):
+                self.systemctl("stop", unit)
+                self.assert_unit_quiescent(unit)
+                continue
             if desired:
                 self.systemctl("start", unit)
             else:
@@ -6156,6 +6269,7 @@ class Updater:
             raise UpdateError("rollback transaction is unavailable")
         tx = self.transaction
         self.validate_transaction(tx)
+        self.stats_sidecar_holds_applied = False
         self._journal_transition(
             "rollback_in_progress",
             rollback_in_progress=True,

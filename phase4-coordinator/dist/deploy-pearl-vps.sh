@@ -2071,7 +2071,9 @@ fi
 # in-flight reconciliation run drains before we return; disabling the .timer
 # stops a scheduled fire (or a daemon-reload/reboot) from re-launching the old
 # binary during the migrate->install window. The NEW 3-col binary is installed
-# in step 4 and the timer is re-enabled in step 9. This quiesce runs BEFORE the
+# by macprovider-pearl-update from the signed release (issue #1721), which holds
+# its timer disabled until this deploy; step 4 only proves byte parity and step 9
+# re-enables the timer after the migration. This quiesce runs BEFORE the
 # rollback transaction is armed, so its inactive state is what the step-4
 # snapshot records: a rollback restores the pre-019 binary but deliberately
 # leaves the sidecar stopped (see coordinator-deploy-recover.sh) so the old

@@ -337,6 +337,22 @@ artifact that did not exist before the transaction. A same-version release is
 `already_current` only when these installed artifacts match it too; otherwise
 the updater plans `repair_pair`.
 
+A changed stats sidecar can need stats migrations that only the full deploy
+applies (`coordinator stats-migrate`, SPEC-033 / issue #582 ordering). The
+updater therefore disables and stops a changed sidecar's timer and service
+before swapping its bytes and leaves them held after a successful rollout
+(audit event `stats_sidecar_held`); a rollback restores the previous bytes and
+timer state. Run the full deploy for the same tag next: it migrates first and
+then re-enables the sidecar timers. Sidecars are ELF- and checksum-verified but
+not executed by the updater, so a sidecar runtime fault surfaces on the
+deploy's initial sidecar run, not as an updater rollback.
+
+Only the Pearl runtime workflow signs the stats sidecars. Provider-app
+catalog-lane releases (`release.yml`) still bind only the coordinator CLI: the
+updater applies them and leaves the sidecars untouched, but the full deploy
+refuses such a tag at preflight. Cut a Pearl runtime release for any tag that
+must be full-deployed.
+
 After the signed coordinator/gateway pair is live, resume the direct deploy
 with `CONFIG_MODE=preserve-live`. The deploy never installs different
 coordinator, coordinator-cli, or stats sidecar bytes. It downloads them from
