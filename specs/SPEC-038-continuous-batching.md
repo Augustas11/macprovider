@@ -1,6 +1,6 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2.6
+Version: v0.2.7
 Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
@@ -12,6 +12,14 @@ clarifies the API-visible admission/replay/terminal contract, records
 decode-first scheduling as a conservative v0.2 choice rather than a claim of
 vLLM/SGLang-style unified-token scheduling, and tightens the real-serving
 evidence gate for retained paged-KV reuse.
+
+**Change log v0.2.7 (2026-09-24, hybrid first-turn conversation cache):**
+FR-CB4 now covers hybrid models (attention plus recurrent layers, e.g.
+Qwen3.6). A keyed batched first turn snapshots its own recurrent state at the
+SPEC-024 FR-CI2 checkpoint positions during prefill. At a normal terminal it
+commits a serial-format conversation-cache entry. Keyless, cancelled and
+failed rows commit nothing. A positive-`cached_prompt_tokens` follow-up still
+serial-routes until AC-26 and reuses that entry on the serial path.
 
 **Change log v0.2.6 (2026-09-24, sampled batched rows):** FR-CB6 and AC-6b
 admit sampled (non-greedy) requests into the shared forward. Each row samples
@@ -311,6 +319,19 @@ FR-PKV11). Per-request extraction back into standalone conversation-cache state
 MUST use the SPEC-039 **cache-extraction / same-conversation retention
 primitive** (SPEC-039 FR-PKV10) and MUST preserve exact SPEC-024 LCP/trim
 semantics (including a mid-block LCP boundary).
+
+For a hybrid model (paged attention plus recurrent layers), whose recurrent
+state cannot be retained or trimmed as paged KV, a conversation-keyed batched
+row with zero cached tokens MUST end a prefill chunk exactly on each SPEC-024
+FR-CI2 recurrent checkpoint position (at most two) and snapshot only its own
+recurrent-layer state there. At a normal terminal (stop or length), before
+releasing its blocks, it MUST commit a serial-format conversation-cache entry:
+its attention KV materialized through FR-PKV10 into contiguous caches covering
+a prefix of the canonical token list (prompt plus generated tokens, trailing
+model stop dropped), and the snapshots as that entry's recurrent checkpoints.
+Keyless, cancelled and failed rows MUST commit nothing and MUST release every
+block and snapshot they hold. A later turn with positive
+`cached_prompt_tokens` still serial-routes until AC-26.
 
 ### FR-CB5 - dynamic insertion and removal between decode steps (SPEC-038-R005)
 

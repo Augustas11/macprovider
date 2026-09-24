@@ -1,5 +1,6 @@
 import Foundation
 import MLX
+import MLXLMCommon
 @testable import MacProviderCore
 @testable import macprovider_cli
 import XCTest
@@ -122,6 +123,159 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(result.outputTokens, [7])
         XCTAssertEqual(prefillCalls, 1)
         XCTAssertEqual(decodeCalls, 1)
+    }
+
+    func testKeyedHybridRowSplitsPrefillAtCheckpointsAndDeliversSerialCache() async throws {
+        let backend = ScriptedBackend(scripts: ["hybrid": [7, 8]], recurrentCheckpointBackend: true)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 4,
+            backend: backend,
+            allocator: allocator
+        )
+        let request = ContinuousBatchSchedulerRequest(
+            id: "hybrid",
+            conversationKey: "conv:hybrid",
+            promptTokens: Array(1...12),
+            maxOutputTokens: 2,
+            temperature: 0.0,
+            recurrentCheckpointPositions: [5, 9]
+        )
+
+        let result = try await scheduler.submit(request)
+
+        let events = await backend.events().filter { !$0.hasPrefix("decode:") }
+        XCTAssertEqual(events, [
+            "prefill:hybrid:4",
+            "prefill:hybrid:1",
+            "snapshot:hybrid:5",
+            "prefill:hybrid:4",
+            "snapshot:hybrid:9",
+            "prefill:hybrid:2",
+        ], "chunks end exactly on each checkpoint and the snapshot follows that chunk")
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertEqual(result.generatedTokens, [7, 8])
+        XCTAssertNil(result.retainedCache)
+        let serialCache = try XCTUnwrap(result.serialConversationCache)
+        XCTAssertEqual(serialCache.recurrentCheckpoints.map(\.tokenCount), [5, 9])
+        XCTAssertEqual(serialCache.tokenCount, 13, "prompt + generated - the last sampled token, never fed back")
+        let materialized = await backend.serialMaterializations()
+        XCTAssertEqual(materialized["hybrid"], [13, 13], "materialized once, before the row's blocks are released")
+        try await eventually { await allocator.freeBlockCount() == 16 }
+
+        let replay = try await scheduler.submit(request)
+        XCTAssertEqual(replay.settlementDisposition, .nonSettlingReplay)
+        XCTAssertNil(replay.serialConversationCache, "only the settlement owner receives the cache")
+    }
+
+    func testKeylessOrPositionlessHybridRowCapturesNothing() async throws {
+        let backend = ScriptedBackend(
+            scripts: ["keyless": [7], "positionless": [7]],
+            recurrentCheckpointBackend: true
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 4,
+            backend: backend,
+            allocator: allocator
+        )
+
+        let keyless = try await scheduler.submit(.init(
+            id: "keyless",
+            conversationKey: "",
+            promptTokens: Array(1...12),
+            maxOutputTokens: 1,
+            temperature: 0.0,
+            recurrentCheckpointPositions: [5, 9]
+        ))
+        let positionless = try await scheduler.submit(.init(
+            id: "positionless",
+            conversationKey: "conv:hybrid",
+            promptTokens: Array(1...12),
+            maxOutputTokens: 1,
+            temperature: 0.0
+        ))
+
+        let events = await backend.events().filter { !$0.hasPrefix("decode:") }
+        XCTAssertEqual(events, [
+            "prefill:keyless:4", "prefill:keyless:4", "prefill:keyless:3",
+            "prefill:positionless:4", "prefill:positionless:4", "prefill:positionless:3",
+        ])
+        XCTAssertNil(keyless.serialConversationCache)
+        XCTAssertNil(positionless.serialConversationCache)
+        let materialized = await backend.serialMaterializations()
+        XCTAssertTrue(materialized.isEmpty)
+        try await eventually { await allocator.freeBlockCount() == 16 }
+    }
+
+    func testCancelledHybridRowDeliversNoSerialCacheAndReleasesBlocks() async throws {
+        let decodeGate = AsyncGate()
+        let backend = ScriptedBackend(
+            scripts: ["hybrid": [7, 8, 9]],
+            decodeGate: decodeGate,
+            recurrentCheckpointBackend: true
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 4,
+            backend: backend,
+            allocator: allocator
+        )
+        let task = Task {
+            try await scheduler.submit(.init(
+                id: "hybrid",
+                conversationKey: "conv:hybrid",
+                promptTokens: Array(1...12),
+                maxOutputTokens: 3,
+                temperature: 0.0,
+                recurrentCheckpointPositions: [5, 9]
+            ))
+        }
+        try await eventually { await backend.decodeCallCount() == 1 }
+        await scheduler.cancel(requestID: "hybrid")
+        await decodeGate.open()
+
+        let result = try await task.value
+        XCTAssertEqual(result.terminalStatus, .cancelled)
+        XCTAssertNil(result.serialConversationCache)
+        let snapshots = await backend.recurrentSnapshots()
+        XCTAssertEqual(snapshots["hybrid"], [5, 9])
+        let materialized = await backend.serialMaterializations()
+        XCTAssertTrue(materialized.isEmpty)
+        try await eventually { await allocator.freeBlockCount() == 16 }
+    }
+
+    func testFailedHybridRowDeliversNoSerialCacheAndReleasesBlocks() async throws {
+        let backend = ScriptedBackend(
+            scripts: ["hybrid": [7, 8]],
+            failDecodeCall: 1,
+            recurrentCheckpointBackend: true
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 4,
+            backend: backend,
+            allocator: allocator
+        )
+
+        let result = try await scheduler.submit(.init(
+            id: "hybrid",
+            conversationKey: "conv:hybrid",
+            promptTokens: Array(1...12),
+            maxOutputTokens: 2,
+            temperature: 0.0,
+            recurrentCheckpointPositions: [5, 9]
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .batchFailed)
+        XCTAssertNil(result.serialConversationCache)
+        let materialized = await backend.serialMaterializations()
+        XCTAssertTrue(materialized.isEmpty)
+        try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
     func testPrefillBackendFailureFailsClosedWithReasonCodedTelemetry() async throws {
@@ -3784,6 +3938,10 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private let retainedInstallGates: [String: AsyncGate]
     /// Per-request install failure, raised on every attempt for that request.
     private let retainedInstallErrors: [String: any Error]
+    /// Acts as a hybrid backend: snapshots and materializes the serial cache.
+    private let recurrentCheckpointBackend: Bool
+    private var recurrentSnapshotLog: [String: [Int]] = [:]
+    private var serialMaterializeLog: [String: [Int]] = [:]
     private var retainedInstallAttemptLog: [String: Int] = [:]
     private var prefillRowsLog: [[String]] = []
     private var decodeRowsLog: [[String]] = []
@@ -3811,8 +3969,10 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         terminalCommitBridge: PagedKVRuntimeContiguousCacheBridge? = nil,
         terminalCommitCaches: [PagedKVCache] = [],
         retainedInstallGates: [String: AsyncGate] = [:],
-        retainedInstallErrors: [String: any Error] = [:]
+        retainedInstallErrors: [String: any Error] = [:],
+        recurrentCheckpointBackend: Bool = false
     ) {
+        self.recurrentCheckpointBackend = recurrentCheckpointBackend
         self.scripts = scripts
         self.prefillGate = prefillGate
         self.decodeGate = decodeGate
@@ -3918,11 +4078,35 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         try terminalCommitBridge.record(caches: terminalCommitCaches, binding: input.binding)
     }
 
+    func snapshotRecurrentState(requestID: String, tokenCount: Int) async -> RecurrentStateCheckpoint? {
+        guard recurrentCheckpointBackend else { return nil }
+        recurrentSnapshotLog[requestID, default: []].append(tokenCount)
+        eventLog.append("snapshot:\(requestID):\(tokenCount)")
+        return RecurrentStateCheckpoint(tokenCount: tokenCount, states: [1: []])
+    }
+
+    func materializeSerialConversationCache(
+        requestID: String,
+        binding: PagedKVStorageBinding,
+        tokenCount: Int,
+        recurrentCheckpoints: [RecurrentStateCheckpoint]
+    ) async throws -> ContinuousBatchSerialConversationCache? {
+        guard recurrentCheckpointBackend else { return nil }
+        serialMaterializeLog[requestID] = [tokenCount, binding.currentTable.logicalTokenCount]
+        return ContinuousBatchSerialConversationCache(
+            layers: [KVCacheSimple(), MambaCache()],
+            recurrentCheckpoints: recurrentCheckpoints,
+            tokenCount: tokenCount
+        )
+    }
+
     func cancelInFlight() async {
         await prefillGate?.open()
         await decodeGate?.open()
     }
 
+    func recurrentSnapshots() -> [String: [Int]] { recurrentSnapshotLog }
+    func serialMaterializations() -> [String: [Int]] { serialMaterializeLog }
     func prefillCallCount() -> Int { prefillRowsLog.count }
     func decodeCallCount() -> Int { decodeCalls }
     func decodeBatches() -> [[String]] { decodeRowsLog }

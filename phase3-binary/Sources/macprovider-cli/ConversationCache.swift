@@ -7,7 +7,9 @@ import MacProviderCore
 /// Recurrent (`ArraysCache`/`MambaCache`) layer states captured right after the
 /// prompt was prefilled to exactly `tokenCount` tokens. Recurrent state cannot be
 /// trimmed, so a hybrid entry is reusable only from one of these (SPEC-024 FR-CI2).
-struct RecurrentStateCheckpoint {
+/// `@unchecked Sendable` for the same reason `ConversationCacheLayers` is: the
+/// batched scheduler hands it across actors and nothing mutates the arrays.
+struct RecurrentStateCheckpoint: @unchecked Sendable {
     let tokenCount: Int
     /// Layer index → that layer's `state` arrays. MLX arrays are immutable values
     /// and `ArraysCache` replaces (never mutates) its slots, so holding the

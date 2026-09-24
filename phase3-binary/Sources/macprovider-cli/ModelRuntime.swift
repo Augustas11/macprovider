@@ -3843,6 +3843,33 @@ actor ModelRuntime: ModelRuntimeServing {
         let promptTokens: [Int]
         let stopTokenSequences: [[Int]]
         let modelStopTokenIDs: Set<Int>
+        let recurrentCheckpointPositions: [Int]
+    }
+
+    /// Keyed hybrid requests only: where the batched row snapshots recurrent
+    /// state, identical to the serial path's `prefillRecurrentCheckpoints`.
+    private nonisolated static func continuousBatchRecurrentCheckpointPositions(
+        promptTokens: [Int],
+        conversationKey: String?,
+        context: ModelContext
+    ) -> [Int] {
+        guard nonEmpty(conversationKey) != nil else { return [] }
+        return ConversationCache.recurrentCheckpointPositions(
+            promptTokenIds: promptTokens.map(Int32.init),
+            imStartTokenID: context.tokenizer.convertTokenToId("<|im_start|>").map(Int32.init),
+            hybrid: ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil)),
+            decode: { context.tokenizer.decode(tokenIds: $0) })
+    }
+
+    /// The tokens a batched hybrid entry commits: the canonical list cut to the
+    /// length its attention layers cover, so `begin`'s trim lands exactly on a
+    /// checkpoint. Nil if the canonical list is shorter (never expected).
+    nonisolated static func serialConversationCacheCommitTokens(
+        canonicalTokens: [Int32],
+        coveredTokenCount: Int
+    ) -> [Int32]? {
+        guard coveredTokenCount <= canonicalTokens.count else { return nil }
+        return Array(canonicalTokens.prefix(coveredTokenCount))
     }
 
     /// Tokenizer decode for CB streaming. Must not take `ModelContainer`:
@@ -3980,6 +4007,11 @@ actor ModelRuntime: ModelRuntimeServing {
                 stopTokenSequences: stopTokenSequences,
                 modelStopTokenIDs: Self.generationStopTokenIDs(
                     for: Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
+                ),
+                recurrentCheckpointPositions: Self.continuousBatchRecurrentCheckpointPositions(
+                    promptTokens: promptTokens,
+                    conversationKey: request.conversationKey,
+                    context: context
                 )
             )
         }
@@ -4020,7 +4052,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     presencePenalty: request.presencePenalty,
                     frequencyPenalty: request.frequencyPenalty,
                     cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
-                    retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence
+                    retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
+                    recurrentCheckpointPositions: prepared.recurrentCheckpointPositions
                 ))
             }
         } catch {
@@ -4124,6 +4157,21 @@ actor ModelRuntime: ModelRuntimeServing {
                     fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
                 await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
+            } else if let lease, let serialCache = result.serialConversationCache,
+                      let fullTokens = Self.serialConversationCacheCommitTokens(
+                          canonicalTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init),
+                          coveredTokenCount: serialCache.tokenCount
+                      ) {
+                // SPEC-038 FR-CB4 hybrid first turn: the next keyed turn serial-
+                // routes (AC-26) and reuses this entry from its checkpoints.
+                await conversationCache.commit(
+                    lease,
+                    cache: ConversationCacheLayers(
+                        serialCache.layers,
+                        recurrentCheckpoints: serialCache.recurrentCheckpoints
+                    ),
+                    fullTokens: fullTokens
+                )
             } else if let retainedCache = result.retainedCache {
                 await scheduler.cancelRetainedCacheDelivery(
                     retainedCache,
@@ -4204,7 +4252,12 @@ actor ModelRuntime: ModelRuntimeServing {
                     stopTokenSequences: stopTokenSequences,
                     modelStopTokenIDs: Self.generationStopTokenIDs(
                     for: Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
-                )
+                ),
+                    recurrentCheckpointPositions: Self.continuousBatchRecurrentCheckpointPositions(
+                        promptTokens: promptTokens,
+                        conversationKey: request.conversationKey,
+                        context: context
+                    )
                 ),
                 StreamingDetokenizer { tokenizer.decode(tokenIds: $0) }
             )
@@ -4245,7 +4298,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     presencePenalty: request.presencePenalty,
                     frequencyPenalty: request.frequencyPenalty,
                     cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
-                    retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence
+                    retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
+                    recurrentCheckpointPositions: prepared.recurrentCheckpointPositions
                 ), tokenSink: { event in
                     let eventTokens = event.replayTokens ?? [event.token]
                     guard !eventTokens.isEmpty else { return }
@@ -4372,6 +4426,21 @@ actor ModelRuntime: ModelRuntimeServing {
                     fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
                 await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
+            } else if let lease, let serialCache = result.serialConversationCache,
+                      let fullTokens = Self.serialConversationCacheCommitTokens(
+                          canonicalTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init),
+                          coveredTokenCount: serialCache.tokenCount
+                      ) {
+                // SPEC-038 FR-CB4 hybrid first turn: the next keyed turn serial-
+                // routes (AC-26) and reuses this entry from its checkpoints.
+                await conversationCache.commit(
+                    lease,
+                    cache: ConversationCacheLayers(
+                        serialCache.layers,
+                        recurrentCheckpoints: serialCache.recurrentCheckpoints
+                    ),
+                    fullTokens: fullTokens
+                )
             } else if let retainedCache = result.retainedCache {
                 await scheduler.cancelRetainedCacheDelivery(
                     retainedCache,

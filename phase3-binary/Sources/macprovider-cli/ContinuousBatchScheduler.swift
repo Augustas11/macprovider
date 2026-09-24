@@ -188,6 +188,10 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     let frequencyPenalty: Double
     let cachedPromptTokens: Int
     let retainedPagedKVSequence: PagedKVRetainedSequence?
+    /// Prompt positions (`ConversationCache.recurrentCheckpointPositions`) at which
+    /// a keyed hybrid row snapshots its recurrent state during prefill. Derived
+    /// from `promptTokens`, so it stays out of the idempotency fingerprint.
+    let recurrentCheckpointPositions: [Int]
 
     init(
         id: String,
@@ -201,7 +205,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         presencePenalty: Double = 0.0,
         frequencyPenalty: Double = 0.0,
         cachedPromptTokens: Int = 0,
-        retainedPagedKVSequence: PagedKVRetainedSequence? = nil
+        retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
+        recurrentCheckpointPositions: [Int] = []
     ) {
         self.id = id
         self.conversationKey = conversationKey
@@ -215,6 +220,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.frequencyPenalty = frequencyPenalty
         self.cachedPromptTokens = max(0, cachedPromptTokens)
         self.retainedPagedKVSequence = retainedPagedKVSequence
+        self.recurrentCheckpointPositions = recurrentCheckpointPositions
     }
 
     enum CodingKeys: String, CodingKey {
@@ -253,6 +259,9 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
     let snapshot: ContinuousBatchSchedulerSnapshot?
     let settlementDisposition: ContinuousBatchSettlementDisposition
     let retainedCache: ContinuousBatchRetainedCache?
+    /// Keyed hybrid rows only: the row's cache in the serial conversation-cache
+    /// format, delivered to the settlement owner like `retainedCache`.
+    var serialConversationCache: ContinuousBatchSerialConversationCache? = nil
 
     func withSettlementDisposition(
         _ disposition: ContinuousBatchSettlementDisposition
@@ -270,7 +279,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             errorCode: errorCode,
             snapshot: snapshot,
             settlementDisposition: disposition,
-            retainedCache: disposition == .eligibleOwner ? retainedCache : nil
+            retainedCache: disposition == .eligibleOwner ? retainedCache : nil,
+            serialConversationCache: disposition == .eligibleOwner ? serialConversationCache : nil
         )
     }
 
@@ -288,7 +298,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             errorCode: errorCode,
             snapshot: snapshot,
             settlementDisposition: settlementDisposition,
-            retainedCache: cache
+            retainedCache: cache,
+            serialConversationCache: serialConversationCache
         )
     }
 
@@ -326,6 +337,22 @@ final class ContinuousBatchRetainedCache: @unchecked Sendable {
             layers: layers,
             deliveryID: deliveryID
         )
+    }
+}
+
+/// SPEC-038 FR-CB4: a keyed hybrid row's cache in the serial conversation-cache
+/// format. Attention layers are contiguous `KVCacheSimple` covering the first
+/// `tokenCount` canonical tokens; recurrent layers are empty `MambaCache`s,
+/// because reuse always restores one of `recurrentCheckpoints` (SPEC-024 FR-CI2).
+final class ContinuousBatchSerialConversationCache: @unchecked Sendable {
+    let layers: [KVCache]
+    let recurrentCheckpoints: [RecurrentStateCheckpoint]
+    let tokenCount: Int
+
+    init(layers: [KVCache], recurrentCheckpoints: [RecurrentStateCheckpoint], tokenCount: Int) {
+        self.layers = layers
+        self.recurrentCheckpoints = recurrentCheckpoints
+        self.tokenCount = tokenCount
     }
 }
 
@@ -473,6 +500,18 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     /// stops immediately after sampling it. Retention happens after this step so
     /// canonical prompt history and retained paged-KV length agree.
     func commitTerminalKV(_ input: ContinuousBatchTerminalKVCommitInput) async throws
+    /// Snapshot the row's own recurrent-layer state right after prefill reached
+    /// `tokenCount` prompt tokens. Nil when the backend has no recurrent layers.
+    func snapshotRecurrentState(requestID: String, tokenCount: Int) async -> RecurrentStateCheckpoint?
+    /// Build the row's serial-format conversation cache at a normal terminal,
+    /// before its blocks are released: attention KV materialized from `binding`
+    /// and trimmed to `tokenCount`. Nil when the backend has no recurrent layers.
+    func materializeSerialConversationCache(
+        requestID: String,
+        binding: PagedKVStorageBinding,
+        tokenCount: Int,
+        recurrentCheckpoints: [RecurrentStateCheckpoint]
+    ) async throws -> ContinuousBatchSerialConversationCache?
     /// Row-local cleanup hook for backend state that is not owned by the
     /// scheduler/allocator. Called after the scheduler has reached a terminal
     /// result for the request. Implementations that keep no row-local state can
@@ -564,6 +603,19 @@ extension ContinuousBatchSchedulerBackend {
 
     func commitTerminalKV(_ input: ContinuousBatchTerminalKVCommitInput) async throws {
         throw ContinuousBatchSchedulerError.unsupported("continuous_batching_terminal_kv_commit_unavailable")
+    }
+
+    func snapshotRecurrentState(requestID: String, tokenCount: Int) async -> RecurrentStateCheckpoint? {
+        nil
+    }
+
+    func materializeSerialConversationCache(
+        requestID: String,
+        binding: PagedKVStorageBinding,
+        tokenCount: Int,
+        recurrentCheckpoints: [RecurrentStateCheckpoint]
+    ) async throws -> ContinuousBatchSerialConversationCache? {
+        nil
     }
 
     func finish(requestID: String) {}
@@ -1052,6 +1104,8 @@ actor ContinuousBatchScheduler {
         var pendingOutputTokens: [Int]
         var prefillCursor: Int
         var snapshot: ContinuousBatchSchedulerSnapshot
+        /// Keyed hybrid rows: recurrent state at each reached checkpoint (<= 2).
+        var recurrentCheckpoints: [RecurrentStateCheckpoint] = []
 
         var retainedLogicalTokenCount: Int {
             request.promptTokens.count + generatedTokens.count
@@ -2183,10 +2237,11 @@ actor ContinuousBatchScheduler {
             ) {
                 finish(row, status: terminalStatus, errorCode: nil, retainedCache: retainedCache)
             } else {
+                let serialCache = await materializeSerialConversationCache(for: row)
                 let released = await release(row.handle)
                 finish(row, status: released ? terminalStatus : .requestFailed, errorCode: released
                     ? nil
-                    : "continuous_batching_cleanup_failed")
+                    : "continuous_batching_cleanup_failed", serialConversationCache: serialCache)
             }
         }
     }
@@ -2394,7 +2449,12 @@ actor ContinuousBatchScheduler {
                 if cleanupFailedClosed { return true }
                 continue
             }
-            let end = min(prefixTokenCount, row.prefillCursor + configuration.maxPromptChunkTokens)
+            var end = min(prefixTokenCount, row.prefillCursor + configuration.maxPromptChunkTokens)
+            // A chunk ends exactly on the next recurrent checkpoint so its state
+            // can be snapshotted there.
+            if let checkpoint = pendingRecurrentCheckpointPositions(for: row).first(where: { $0 > row.prefillCursor }) {
+                end = min(end, checkpoint)
+            }
             let chunk = Array(row.request.promptTokens[row.prefillCursor..<end])
             do {
                 _ = try await allocator.extend(row.handle, by: chunk.count)
@@ -2481,6 +2541,12 @@ actor ContinuousBatchScheduler {
                 continue
             }
             row.prefillCursor += item.chunkCount
+            if pendingRecurrentCheckpointPositions(for: row).contains(row.prefillCursor) {
+                if let checkpoint = await backend.snapshotRecurrentState(requestID: id, tokenCount: row.prefillCursor) {
+                    row.recurrentCheckpoints.append(checkpoint)
+                }
+                guard activePrompt[id] != nil else { continue }
+            }
             if row.prefillCursor == row.request.promptTokens.count - 1 {
                 activePrompt[id] = row
                 await transitionPrefilledRow(row)
@@ -2501,10 +2567,11 @@ actor ContinuousBatchScheduler {
             ) {
                 finish(row, status: .length, errorCode: nil, retainedCache: retainedCache)
             } else {
+                let serialCache = await materializeSerialConversationCache(for: row)
                 let released = await release(row.handle)
                 finish(row, status: released ? .length : .requestFailed, errorCode: released
                     ? nil
-                    : "continuous_batching_cleanup_failed")
+                    : "continuous_batching_cleanup_failed", serialConversationCache: serialCache)
             }
         } else {
             activeDecode[row.request.id] = row
@@ -2579,7 +2646,8 @@ actor ContinuousBatchScheduler {
     private func finish(
         _ row: Row,
         status: ContinuousBatchSchedulerTerminalStatus,
-        errorCode: String?
+        errorCode: String?,
+        serialConversationCache: ContinuousBatchSerialConversationCache? = nil
     ) {
         record(status == .cancelled ? .cancelled : .stopped)
         let isSuccessful = status == .stop || status == .length
@@ -2597,7 +2665,8 @@ actor ContinuousBatchScheduler {
             errorCode: errorCode,
             snapshot: row.snapshot,
             settlementDisposition: isSuccessful ? .eligibleOwner : .notEligible,
-            retainedCache: nil
+            retainedCache: nil,
+            serialConversationCache: isSuccessful ? serialConversationCache : nil
         )
         complete(requestID: row.request.id, result: result)
     }
@@ -2883,6 +2952,43 @@ actor ContinuousBatchScheduler {
                     record(.cleanupFailed)
                 }
             }
+            return nil
+        }
+    }
+
+    /// Checkpoint positions this row still captures: keyed rows only, inside the
+    /// prefilled prefix, at most two.
+    private func pendingRecurrentCheckpointPositions(for row: Row) -> [Int] {
+        guard row.recurrentCheckpoints.count < 2,
+              !row.request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return [] }
+        let prefixTokenCount = row.request.promptTokens.count - 1
+        return row.request.recurrentCheckpointPositions.filter { position in
+            position > 0 && position <= prefixTokenCount
+                && !row.recurrentCheckpoints.contains { $0.tokenCount == position }
+        }.sorted()
+    }
+
+    /// SPEC-038 FR-CB4 hybrid first turn: at a normal terminal, before the row's
+    /// blocks are released, hand back its cache in the serial conversation-cache
+    /// format. The row's KV covers the prompt and every sampled token except the
+    /// last (never fed back), which is a prefix of the canonical token list the
+    /// runtime commits. Best effort: any failure commits nothing.
+    private func materializeSerialConversationCache(for row: Row) async -> ContinuousBatchSerialConversationCache? {
+        guard !row.recurrentCheckpoints.isEmpty,
+              !row.request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        let tokenCount = row.request.promptTokens.count - 1 + row.generatedTokens.count
+        do {
+            let binding = try await allocator.binding(for: row.handle)
+            guard tokenCount <= binding.currentTable.logicalTokenCount else { return nil }
+            return try await backend.materializeSerialConversationCache(
+                requestID: row.request.id,
+                binding: binding,
+                tokenCount: tokenCount,
+                recurrentCheckpoints: row.recurrentCheckpoints
+            )
+        } catch {
             return nil
         }
     }

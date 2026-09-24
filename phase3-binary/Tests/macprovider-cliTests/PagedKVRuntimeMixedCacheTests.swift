@@ -178,6 +178,81 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         )
     }
 
+    func testHybridRowSnapshotsRecurrentStateAndMaterializesSerialCache() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
+            model: MixedCacheFakeModel(recorder: MixedCacheRecorder(), nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention]
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let handle = try await allocator.allocate(conversationKey: "row-a", maxTokens: 8)
+
+        func prefill(_ tokens: [Int], from offset: Int) async throws {
+            _ = try await allocator.extend(handle, by: tokens.count)
+            let binding = try await allocator.binding(for: handle)
+            _ = try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+                requestID: "row-a",
+                promptTokens: tokens,
+                binding: binding,
+                promptTokenOffset: offset,
+                committedKVTokenCount: offset,
+                targetKVTokenCount: offset + tokens.count,
+                isFinalChunk: false
+            )])
+        }
+
+        try await prefill([1, 2, 3], from: 0)
+        let snapshot = await backend.snapshotRecurrentState(requestID: "row-a", tokenCount: 3)
+        let checkpoint = try XCTUnwrap(snapshot)
+        try await prefill([4, 5], from: 3)
+
+        XCTAssertEqual(checkpoint.tokenCount, 3)
+        XCTAssertEqual(Array(checkpoint.states.keys), [0], "only the recurrent layer is snapshotted")
+        XCTAssertEqual(checkpoint.states[0]?.first?.asArray(Float.self), [201, 202, 203], "later prefill must not alias the snapshot")
+
+        let binding = try await allocator.binding(for: handle)
+        let materialized = try await backend.materializeSerialConversationCache(
+            requestID: "row-a",
+            binding: binding,
+            tokenCount: 4,
+            recurrentCheckpoints: [checkpoint]
+        )
+        let serial = try XCTUnwrap(materialized)
+        XCTAssertEqual(serial.tokenCount, 4)
+        XCTAssertEqual(serial.recurrentCheckpoints.map(\.tokenCount), [3])
+        XCTAssertTrue(serial.layers[0] is MambaCache)
+        XCTAssertTrue(serial.layers[0].state.isEmpty, "reuse always restores a checkpoint")
+        let attention = try XCTUnwrap(serial.layers[1] as? KVCacheSimple)
+        XCTAssertEqual(attention.offset, 4, "trimmed to the covered token count")
+        XCTAssertEqual(attention.state[0].asType(.float32).asArray(Float.self), [1, 2, 3, 4])
+
+        let pagedOnly = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2
+        )
+        let none = await pagedOnly.snapshotRecurrentState(requestID: "row-a", tokenCount: 3)
+        XCTAssertNil(none)
+        let noneSerial = try await pagedOnly.materializeSerialConversationCache(
+            requestID: "row-a", binding: binding, tokenCount: 4, recurrentCheckpoints: [checkpoint])
+        XCTAssertNil(noneSerial)
+    }
+
     private func decodeInput(
         requestID: String,
         currentToken: Int,
@@ -219,10 +294,12 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
     private let recorder: MixedCacheRecorder
     private let nextTokenByInput: [Int: Int]
     private let vocabularySize = 32
+    private let attentionDType: DType
 
-    init(recorder: MixedCacheRecorder, nextTokenByInput: [Int: Int]) {
+    init(recorder: MixedCacheRecorder, nextTokenByInput: [Int: Int], attentionDType: DType = .float32) {
         self.recorder = recorder
         self.nextTokenByInput = nextTokenByInput
+        self.attentionDType = attentionDType
         super.init()
     }
 
@@ -251,8 +328,8 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
             }
 
             if cache.count > 1 {
-                let keys = MLXArray(flatTokens.map(Float.init), [batch, 1, sequenceLength, 1])
-                let values = MLXArray(flatTokens.map { Float($0 + 100) }, [batch, 1, sequenceLength, 1])
+                let keys = MLXArray(flatTokens.map(Float.init), [batch, 1, sequenceLength, 1]).asType(attentionDType)
+                let values = MLXArray(flatTokens.map { Float($0 + 100) }, [batch, 1, sequenceLength, 1]).asType(attentionDType)
                 let updated = cache[1].update(keys: keys, values: values)
                 eval(updated.0, updated.1)
                 recorder.recordPagedAttentionBatch(updated.0.dim(0))

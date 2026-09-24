@@ -659,6 +659,66 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    func snapshotRecurrentState(requestID: String, tokenCount: Int) async -> RecurrentStateCheckpoint? {
+        guard cacheKinds.contains(.recurrentMamba), beginOperation() else { return nil }
+        defer { endOperation() }
+        return await container.perform { _ in
+            let row = self.existingRowState(for: requestID)
+            guard let row else { return nil }
+            var states: [Int: [MLXArray]] = [:]
+            for (index, kind) in self.cacheKinds.enumerated() where kind == .recurrentMamba {
+                guard row.caches.indices.contains(index) else { return nil }
+                let state = row.caches[index].state
+                guard !state.isEmpty else { return nil }
+                states[index] = state
+            }
+            eval(states.values.flatMap { $0 })
+            return RecurrentStateCheckpoint(tokenCount: tokenCount, states: states)
+        }
+    }
+
+    /// Reuses the FR-PKV10 materialize path on a throwaway bridge that records
+    /// only this row's paged caches, so nothing outlives the call.
+    func materializeSerialConversationCache(
+        requestID: String,
+        binding: PagedKVStorageBinding,
+        tokenCount: Int,
+        recurrentCheckpoints: [RecurrentStateCheckpoint]
+    ) async throws -> ContinuousBatchSerialConversationCache? {
+        guard cacheKinds.contains(.recurrentMamba), !recurrentCheckpoints.isEmpty else { return nil }
+        guard beginOperation() else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
+        }
+        defer { endOperation() }
+        return try await container.perform { _ in
+            self.invalidateDecodeSession(containing: requestID)
+            let row = self.existingRowState(for: requestID)
+            guard let row, row.caches.count == self.cacheKinds.count else { return nil }
+            let bridge = PagedKVRuntimeContiguousCacheBridge()
+            try bridge.record(caches: Self.pagedAttentionCaches(in: row.caches), binding: binding)
+            var handoff = try bridge.materializeContiguousKVCache(handle: binding.handle, table: binding.currentTable)
+            try handoff.trim(toLogicalTokens: tokenCount)
+            var attention = handoff.caches.makeIterator()
+            var layers: [KVCache] = []
+            for kind in self.cacheKinds {
+                switch kind {
+                case .pagedAttention:
+                    guard let cache = attention.next() else {
+                        throw PagedKVContiguousCacheBridgeError.blockTableMismatch
+                    }
+                    layers.append(cache)
+                case .recurrentMamba:
+                    layers.append(MambaCache())
+                }
+            }
+            return ContinuousBatchSerialConversationCache(
+                layers: layers,
+                recurrentCheckpoints: recurrentCheckpoints,
+                tokenCount: tokenCount
+            )
+        }
+    }
+
     func cancelInFlight() async {
         await withCheckedContinuation { continuation in
             lock.lock()
@@ -730,6 +790,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             },
             state: nil
         )
+    }
+
+    private func existingRowState(for requestID: String) -> RowState? {
+        lock.lock()
+        defer { lock.unlock() }
+        return rows[requestID]
     }
 
     private func setRowState(

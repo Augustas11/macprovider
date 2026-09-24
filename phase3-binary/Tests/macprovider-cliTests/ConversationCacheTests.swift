@@ -839,6 +839,35 @@ final class ConversationCacheTests: XCTestCase {
         await cache.abort(hit!)
     }
 
+    func testSerialConversationCacheCommitTokensCutToCoveredLength() {
+        let canonical = int32Range(0..<90)
+        XCTAssertEqual(ModelRuntime.serialConversationCacheCommitTokens(canonicalTokens: canonical, coveredTokenCount: 89), int32Range(0..<89))
+        XCTAssertEqual(ModelRuntime.serialConversationCacheCommitTokens(canonicalTokens: canonical, coveredTokenCount: 90), canonical)
+        XCTAssertNil(ModelRuntime.serialConversationCacheCommitTokens(canonicalTokens: canonical, coveredTokenCount: 91))
+    }
+
+    /// A batched hybrid first turn commits attention covering all but the last
+    /// sampled token, empty recurrent layers and its checkpoints; `begin` must
+    /// trim the attention layers exactly onto the checkpoint.
+    func testBatchedHybridEntryTrimsAttentionOntoCheckpoint() async {
+        let cache = ConversationCache(config: .init(maxConversations: 8, maxTokens: 200_000, ttlSeconds: 900))
+        let canonical = int32Range(0..<90)
+        let seed = await cache.begin(conversationKey: "conv:batched", incomingTokens: int32Range(0..<80), modelID: "hybrid", kvBits: nil)
+        let attention = trimmableCache(offset: 89)
+        let fullTokens = ModelRuntime.serialConversationCacheCommitTokens(canonicalTokens: canonical, coveredTokenCount: 89)!
+        await cache.commit(
+            seed!,
+            cache: ConversationCacheLayers([attention, MambaCache()], recurrentCheckpoints: [40, 70].map {
+                RecurrentStateCheckpoint(tokenCount: $0, states: [1: []])
+            }),
+            fullTokens: fullTokens)
+
+        let hit = await cache.begin(conversationKey: "conv:batched", incomingTokens: int32Range(0..<85) + [999], modelID: "hybrid", kvBits: nil)
+        XCTAssertEqual(hit?.cachedPromptTokens, 70)
+        XCTAssertEqual(attention.offset, 70)
+        await cache.abort(hit!)
+    }
+
     private func trimmableCache(offset: Int) -> KVCacheSimple {
         let cache = KVCacheSimple()
         cache.offset = offset
