@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Send lab buyer requests through the lab gateway (127.0.0.1:19110).
 
-  buyer.py [--pool NAME] [--stream] [--n N] [--concurrency C] [--max-tokens M]
+  buyer.py [--pool NAME] [--engine SEL] [--stream] [--n N] [--concurrency C] [--max-tokens M]
 
 --pool NAME selects LAB/pools/NAME via X-MacProvider-Pool-Select; without it
-the request is a global route. Prints one sanitized JSON line per request:
+the request is a global route. --engine SEL sends X-MacProvider-Engine-Select
+(SPEC-006-R016); the served X-MacProvider-Engine is reported as "engine". Prints one sanitized JSON line per request:
 HTTP status, error code, content length and sha256 (never the text), the
 usage the buyer saw, and for streams whether the chunk sequence was intact.
 """
@@ -30,20 +31,24 @@ def one(i, a):
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     if a.pool:
         headers["X-MacProvider-Pool-Select"] = (LAB / "pools" / a.pool / "pool_id").read_text().strip()
+    if a.engine:
+        headers["X-MacProvider-Engine-Select"] = a.engine
     body = {"model": MODEL, "messages": [{"role": "user", "content": f"{PROMPTS[i % len(PROMPTS)]} (lab ref {uuid.uuid4().hex[:8]})"}], "max_tokens": a.max_tokens}
     if a.stream:
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}
     req = urllib.request.Request("http://127.0.0.1:19110/v1/chat/completions", data=json.dumps(body).encode(), headers=headers)
-    out = {"i": i, "pool": a.pool, "stream": a.stream}
+    out = {"i": i, "pool": a.pool, "stream": a.stream, "engine_select": a.engine}
     t0 = time.time()
     try:
         with urllib.request.urlopen(req, timeout=600) as resp:
             out["status"] = resp.status
             out["provider"] = resp.headers.get("X-Provider-Id")
+            out["engine"] = resp.headers.get("X-MacProvider-Engine")
             raw = resp.read()
     except urllib.error.HTTPError as err:
         out["status"] = err.code
+        out["engine"] = err.headers.get("X-MacProvider-Engine")
         raw = err.read()
     out["elapsed_s"] = round(time.time() - t0, 2)
     text, usage, intact, finish = "", None, None, None
@@ -81,6 +86,7 @@ def one(i, a):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--pool")
+    p.add_argument("--engine")
     p.add_argument("--stream", action="store_true")
     p.add_argument("--n", type=int, default=1)
     p.add_argument("--concurrency", type=int, default=1)

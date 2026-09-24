@@ -6,7 +6,9 @@
 Each case prints PASS or FAIL lines with the observed values and writes its
 sanitized captures to LAB/captures/. Cases: paid, omitted_usage, global,
 fail_closed_pools, spoof, future_manifest, disputed, active_window,
-generation_bump, concurrency, reconcile. omitted_usage and reconcile also run
+generation_bump, concurrency, reconcile, and the #1690 M7 engine-selection cases
+engine_llamacpp_pool, engine_llamacpp_global, engine_native_pool,
+engine_ollama_pool, engine_absent, engine_invalid. omitted_usage and reconcile also run
 `coordinator pool-rollback-preflight` (exit 3 while a pool attempt can still
 settle, 0 once every pool verdict is closed).
 `spoof` needs a lab-only CLI that honours LAB_SPOOF_RUNTIME_SOURCE (see the
@@ -131,6 +133,85 @@ def case_paid():
     check("paid", [tuple(x) for x in attested] == up, "attested usage == llama-server usage", {"attested": attested, "upstream": up})
     check("paid", all(x["status"] == 200 for x in served) and all(x.get("stream_intact", True) is not False for x in served),
           "stream and non-stream served", [(x["stream"], x["status"], x.get("finish_reason")) for x in served])
+
+
+def engine_refused(case, served, before, snaps, status, code, what):
+    check(case, all(x["status"] == status and x.get("error") == code for x in served)
+          and len(upstream_lines()) == before and snapshots_count() == snaps,
+          what, {"buyer": [(x["stream"], x["status"], x.get("error"), x.get("engine")) for x in served],
+                 "upstream_calls": len(upstream_lines()) - before, "new_snapshots": snapshots_count() - snaps})
+
+
+def case_engine_llamacpp_pool():
+    # SPEC-006-R016 / SPEC-042-R014: engine=llamacpp on pool A (v2 allowlist
+    # llamacpp_loopback) is served by the llama.cpp member, discloses the
+    # class, and settles exactly like an unselected pool request.
+    before = len(upstream_lines())
+    served = buyer("--pool", "A", "--engine", "llamacpp", "--n", "1") + buyer("--pool", "A", "--engine", "llamacpp", "--stream", "--n", "1")
+    rows = wait_settled(2)
+    upstream = upstream_lines()[before:]
+    save("engine_llamacpp_pool", {"buyer": served, "attempts": rows, "upstream": upstream, "finality": [finality(r["request_id"]) for r in rows]})
+    check("engine_llamacpp_pool", all(x["status"] == 200 and x.get("engine") == "llamacpp_loopback" and x.get("stream_intact", True) is not False for x in served),
+          "served, X-MacProvider-Engine disclosed", [(x["stream"], x["status"], x.get("engine"), x.get("finish_reason")) for x in served])
+    for r in rows:
+        check("engine_llamacpp_pool", r["snapshot"]["runtime_source"] == "llamacpp_loopback" and r["snapshot"]["pool_id"],
+              "route snapshot runtime_source", r["snapshot"])
+        check("engine_llamacpp_pool", r["usage_source"] == "pool_operator_attested" and r["receipt_result"] == "valid"
+              and r["settlement_outcome"] == "verified" and (r["ledger"] or {}).get("provider_credits", 0) > 0,
+              "pool_operator_attested, verified receipt, ledger credit",
+              (r["usage_source"], r["receipt_result"], r["settlement_outcome"], r["billable"], (r["ledger"] or {}).get("provider_credits")))
+        check("engine_llamacpp_pool", finality(r["request_id"]).get("token_source") == "pool_operator_attested", "finality token_source",
+              finality(r["request_id"]).get("token_source"))
+    up = sorted((u["usage"]["prompt_tokens"], u["usage"]["completion_tokens"]) for u in upstream if u.get("usage"))
+    check("engine_llamacpp_pool", sorted(tuple(r["billable"]) for r in rows) == [tuple(x) for x in up],
+          "attested usage == llama-server usage", {"attested": sorted(r["billable"] for r in rows), "upstream": up})
+
+
+def case_engine_llamacpp_global():
+    before, snaps = len(upstream_lines()), snapshots_count()
+    served = buyer("--engine", "llamacpp", "--n", "1") + buyer("--engine", "llamacpp", "--stream", "--n", "1")
+    save("engine_llamacpp_global", {"buyer": served})
+    engine_refused("engine_llamacpp_global", served, before, snaps, 503, "engine_unavailable",
+                   "engine=llamacpp on a global route refused before dispatch")
+
+
+def case_engine_native_pool():
+    before, snaps = len(upstream_lines()), snapshots_count()
+    served = buyer("--pool", "A", "--engine", "native", "--n", "1") + buyer("--pool", "A", "--engine", "native", "--stream", "--n", "1")
+    save("engine_native_pool", {"buyer": served})
+    engine_refused("engine_native_pool", served, before, snaps, 503, "engine_unavailable",
+                   "engine=native on a pool whose only member is llama.cpp refused, not served by llama.cpp")
+
+
+def case_engine_ollama_pool():
+    before, snaps = len(upstream_lines()), snapshots_count()
+    served = buyer("--pool", "A", "--engine", "ollama", "--n", "1") + buyer("--pool", "A", "--engine", "ollama", "--stream", "--n", "1")
+    save("engine_ollama_pool", {"buyer": served})
+    engine_refused("engine_ollama_pool", served, before, snaps, 503, "engine_unavailable",
+                   "engine=ollama on a pool that allowlists only llamacpp refused")
+
+
+def case_engine_absent():
+    before, snaps = len(upstream_lines()), snapshots_count()
+    pool_served = buyer("--pool", "A", "--n", "1")
+    rows = wait_settled(1)
+    mid, mid_snaps = len(upstream_lines()), snapshots_count()
+    global_served = buyer("--n", "1")
+    save("engine_absent", {"pool": pool_served, "attempts": rows, "global": global_served})
+    check("engine_absent", pool_served[0]["status"] == 200 and pool_served[0].get("engine") == "llamacpp_loopback"
+          and rows[0]["usage_source"] == "pool_operator_attested" and mid == before + 1 and mid_snaps == snaps + 1,
+          "no header on pool A: served as before, class still disclosed",
+          (pool_served[0]["status"], pool_served[0].get("engine"), rows[0]["usage_source"], rows[0]["settlement_outcome"]))
+    check("engine_absent", global_served[0]["status"] == 503 and global_served[0].get("error") == "byom_non_settlement_unavailable"
+          and len(upstream_lines()) == mid and snapshots_count() == mid_snaps,
+          "no header on a global route: unchanged M6 case 2 refusal", (global_served[0]["status"], global_served[0].get("error")))
+
+
+def case_engine_invalid():
+    before, snaps = len(upstream_lines()), snapshots_count()
+    served = buyer("--pool", "A", "--engine", "LLAMACPP", "--n", "1") + buyer("--pool", "A", "--engine", "vllm", "--n", "1")
+    save("engine_invalid", {"buyer": served})
+    engine_refused("engine_invalid", served, before, snaps, 400, "invalid_engine_selection", "unknown selector rejected")
 
 
 def rollback_preflight():
@@ -349,7 +430,10 @@ def main():
     cases = {"paid": case_paid, "omitted_usage": case_omitted_usage, "global": case_global, "fail_closed_pools": case_fail_closed_pools,
              "spoof": lambda: case_spoof(a.spoof_binary), "future_manifest": case_future_manifest, "disputed": case_disputed,
              "active_window": case_active_window, "generation_bump": case_generation_bump,
-             "concurrency": case_concurrency, "reconcile": case_reconcile}
+             "concurrency": case_concurrency, "reconcile": case_reconcile,
+             "engine_llamacpp_pool": case_engine_llamacpp_pool, "engine_llamacpp_global": case_engine_llamacpp_global,
+             "engine_native_pool": case_engine_native_pool, "engine_ollama_pool": case_engine_ollama_pool,
+             "engine_absent": case_engine_absent, "engine_invalid": case_engine_invalid}
     for name, fn in cases.items():
         if not a.only or name in a.only:
             fn()

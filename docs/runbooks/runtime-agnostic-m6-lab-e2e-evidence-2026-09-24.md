@@ -383,3 +383,49 @@ concurrent non-streaming requests all served.
   routable. Pool buyers name the row's `model_id`.
 - The coordinator logs a harmless `mkdir /run: read-only file system` warning
   for its applied-config record outside Linux.
+
+## M7: buyer engine selection (run 4, 71b8b8b2)
+
+**Branch:** `wip/1690-m7` at `71b8b8b2` (M7a `20f606c9` SPEC-006 0.9.34 /
+SPEC-042 0.0.33, M7b gateway + coordinator). Coordinator, coordinator-cli,
+gateway, labtool, and the lab CLI were rebuilt from that tree on the Studio
+(`rig.sh build`). The run started from scratch in `/Users/a1/lab-1690-m6/m7`
+with fresh lab keys, static release, Tier-2 catalog, provider token, buyer
+key, and pool A (v2, `runtime_allowlist = ["llamacpp_loopback"]`), on the
+same 127.0.0.1:19101-19131 ports. The only member of pool A is the
+llama-server member; there is no native member in the rig.
+
+`buyer.py` gained `--engine SEL`, which sends `X-MacProvider-Engine-Select`
+and reports the response's `X-MacProvider-Engine`. `cases.py` gained six
+cases. Command:
+`cases.py --only paid global engine_llamacpp_pool engine_llamacpp_global engine_native_pool engine_ollama_pool engine_absent engine_invalid`.
+Every check passed. The M6 `paid` and `global` cases were re-run first as the
+baseline.
+
+| Case | Result | Key evidence |
+|---|---|---|
+| `engine=llamacpp` on pool A | PASS | 2/2 served (non-stream + stream), `X-MacProvider-Engine: llamacpp_loopback`; snapshot `runtime_source=llamacpp_loopback`, `pool_generation=7`, `pool_operator_account_id`; receipt `valid`/`verified`; `pool_operator_attested`; credit 46 and 49; finality `pool_operator_attested`; attested `[(43,32),(44,32)]` == llama-server usage |
+| `engine=llamacpp` on a global route | PASS (refused) | 2/2 503 `engine_unavailable` from the gateway before reservation; 0 upstream calls, 0 route snapshots |
+| `engine=native` on pool A (only a llama member) | PASS (refused) | 2/2 503 `engine_unavailable` from the coordinator (no session of class `mlx_cache` in scope); 0 upstream calls, 0 snapshots; never served by llama.cpp |
+| `engine=ollama` on pool A (allowlist `llamacpp_loopback` only) | PASS (refused) | 2/2 503 `engine_unavailable` (class outside the active allowlist); 0 upstream calls, 0 snapshots |
+| No header | PASS (unchanged) | pool A: 200, attested, `verified`, and the served class is still disclosed (`llamacpp_loopback`); global: 503 `byom_non_settlement_unavailable`, the unchanged M6 case 2 refusal |
+| Unknown selector (`LLAMACPP`, `vllm`) | PASS (refused) | 2/2 400 `invalid_engine_selection`; 0 upstream calls |
+
+**Coordinator enforces independently of the gateway.** A direct request to the
+coordinator buyer port (service-token bearer, lab account, no pool) with
+`X-MacProvider-Internal-Engine: llamacpp_loopback` got 503
+`engine_unavailable`. With the selector name `native` instead of a runtime
+class it got 400 `invalid_engine_selection`.
+
+**Baseline.** `paid`: 4/4 attested, verified, with a ledger credit, and
+attested usage equal to llama-server usage `[(46,32),(46,32),(47,32),(48,23)]`.
+`global`: 2/2 503 `byom_non_settlement_unavailable`.
+
+**Not staged.** A native member and a llama member in the same pool, where
+each selection picks its own class (covered by the coordinator test
+`TestSPEC042R014MixedPoolHonoursEachSelection`); pinned and slot-queue
+engine refusals (unit tests); Ollama serving (M8).
+
+**Teardown.** Each lab PID's command line was checked against
+`/Users/a1/lab-1690-m6/m7` (or `usage_tap.py` on 1913x) before a TERM. The
+live provider (PID 811) was not touched, and no 191xx listener was left.
