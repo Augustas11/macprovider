@@ -322,6 +322,7 @@ struct ContinuousBatchSchedulerTokenEvent: Sendable, Equatable {
 typealias ContinuousBatchSchedulerTokenSink = @Sendable (ContinuousBatchSchedulerTokenEvent) async -> Void
 
 struct ContinuousBatchSchedulerMetrics: Sendable, Equatable {
+    let accepting: Bool
     let slotsTotal: Int
     let slotsFree: Int
     let waitingCount: Int
@@ -895,6 +896,8 @@ actor ContinuousBatchScheduler {
     private var cancelledIDs: Set<String> = []
     private var draining = false
     private var cleanupFailedClosed = false
+    private var failureReported = false
+    private var failureHandler: (@Sendable () async -> Void)?
     private var backendCancellationPending = false
     private var pumpRestartRequested = false
     private var pumpRunning = false
@@ -993,7 +996,7 @@ actor ContinuousBatchScheduler {
             throw ContinuousBatchSchedulerError.backpressure
         }
         guard nextAdmissionSequence < UInt64.max else {
-            cleanupFailedClosed = true
+            markFailedClosed()
             await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_admission_sequence_exhausted")
         }
@@ -1083,10 +1086,10 @@ actor ContinuousBatchScheduler {
             let now = DispatchTime.now().uptimeNanoseconds
             if now >= deadline {
                 if forcedCancellation {
-                    cleanupFailedClosed = true
+                    markFailedClosed()
                     throw ContinuousBatchSchedulerError.drainTimedOut
                 }
-                cleanupFailedClosed = true
+                markFailedClosed()
                 record(.forcedDrainStarted)
                 forcedCancellation = true
                 cancelledIDs.formUnion(admittingRequests.keys)
@@ -1106,7 +1109,7 @@ actor ContinuousBatchScheduler {
             }
         }
         if forcedCancellation {
-            cleanupFailedClosed = true
+            markFailedClosed()
             throw ContinuousBatchSchedulerError.drainTimedOut
         }
         guard !cleanupFailedClosed else {
@@ -1151,6 +1154,7 @@ actor ContinuousBatchScheduler {
 
     func metrics() -> ContinuousBatchSchedulerMetrics {
         ContinuousBatchSchedulerMetrics(
+            accepting: !cleanupFailedClosed,
             slotsTotal: configuration.maxActiveRows,
             slotsFree: max(0, configuration.maxActiveRows - occupiedSlots),
             waitingCount: waiting.count + pendingBindingChecks,
@@ -1168,6 +1172,25 @@ actor ContinuousBatchScheduler {
             retainedDiagnostics: diagnostics.count,
             diagnostics: diagnostics
         )
+    }
+
+    func setFailureHandler(_ handler: @escaping @Sendable () async -> Void) {
+        failureHandler = handler
+        if cleanupFailedClosed {
+            Task { await reportFailedClosed() }
+        }
+    }
+
+    private func markFailedClosed() {
+        guard !cleanupFailedClosed else { return }
+        cleanupFailedClosed = true
+        Task { await reportFailedClosed() }
+    }
+
+    private func reportFailedClosed() async {
+        guard !failureReported, let failureHandler else { return }
+        failureReported = true
+        await failureHandler()
     }
 
     private func enqueue(
@@ -1975,6 +1998,7 @@ actor ContinuousBatchScheduler {
                 }
                 record(.promptHeadroomReserved)
                 record(.accepted)
+                FileHandle.standardError.write(Data("event=batching_admitted action=scheduler_accepted\n".utf8))
                 activePrompt[request.id] = Row(
                     request: request,
                     handle: handle,
@@ -2158,6 +2182,7 @@ actor ContinuousBatchScheduler {
     }
 
     private func failRemainingAfterCleanupFailure() async {
+        await reportFailedClosed()
         while !waiting.isEmpty {
             await finishQueued(
                 waiting.removeFirst(),
@@ -2444,7 +2469,7 @@ actor ContinuousBatchScheduler {
             try await allocator.release(handle)
             return true
         } catch {
-            cleanupFailedClosed = true
+            markFailedClosed()
             record(.cleanupFailed)
             return false
         }
@@ -2456,7 +2481,7 @@ actor ContinuousBatchScheduler {
             try await allocator.endDecodeStep(handle)
             return true
         } catch {
-            cleanupFailedClosed = true
+            markFailedClosed()
             record(.cleanupFailed)
             return false
         }
@@ -2513,7 +2538,7 @@ actor ContinuousBatchScheduler {
                 do {
                     _ = try await allocator.reattach(retainedSequence, conversationKey: trimmedKey)
                 } catch {
-                    cleanupFailedClosed = true
+                    markFailedClosed()
                     record(.cleanupFailed)
                 }
             }
@@ -2527,7 +2552,7 @@ actor ContinuousBatchScheduler {
         } catch PagedKVAllocatorError.unknownHandle {
             return
         } catch {
-            cleanupFailedClosed = true
+            markFailedClosed()
             record(.cleanupFailed)
         }
     }
@@ -2538,7 +2563,7 @@ actor ContinuousBatchScheduler {
         } catch PagedKVAllocatorError.unknownHandle {
             return
         } catch {
-            cleanupFailedClosed = true
+            markFailedClosed()
             record(.cleanupFailed)
         }
     }

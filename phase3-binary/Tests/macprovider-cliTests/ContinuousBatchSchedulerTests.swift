@@ -2001,6 +2001,14 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             backend: backend,
             replayAuthority: TestReplayAuthority()
         )
+        let providerStatus = ProviderStatus(
+            modelID: "model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 8)
+        )
+        await scheduler.setFailureHandler {
+            await providerStatus.markBatchSchedulerFailedClosed()
+        }
         let active = Task {
             try await scheduler.submit(.init(
                 id: "active",
@@ -2020,6 +2028,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         }
 
         let result = try await active.value
+        try await eventually { await providerStatus.snapshot().status == .unavailable }
         let freeBlocks = await allocator.freeBlockCount()
         XCTAssertEqual(result.terminalStatus, .cancelled)
         XCTAssertEqual(result.snapshot?.modelSHA256, Self.modelSHA)
@@ -2476,6 +2485,14 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             backend: backend,
             replayAuthority: TestReplayAuthority()
         )
+        let providerStatus = ProviderStatus(
+            modelID: "model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 8)
+        )
+        await scheduler.setFailureHandler {
+            await providerStatus.markBatchSchedulerFailedClosed()
+        }
 
         let result = try await scheduler.submit(.init(
             id: "cleanup",
@@ -2487,6 +2504,13 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(result.errorCode, "continuous_batching_cleanup_failed")
         XCTAssertEqual(result.outputTokens, [])
         XCTAssertEqual(result.snapshot?.modelSHA256, Self.modelSHA)
+        let metrics = await scheduler.metrics()
+        let status = await providerStatus.snapshot()
+        XCTAssertFalse(metrics.accepting)
+        XCTAssertEqual(status.status, .unavailable)
+        XCTAssertEqual(status.capacity.maxConcurrency, 1)
+        XCTAssertEqual(status.slotsTotal, 1)
+        XCTAssertEqual(status.slotsFree, 0)
 
         do {
             _ = try await scheduler.submit(.init(

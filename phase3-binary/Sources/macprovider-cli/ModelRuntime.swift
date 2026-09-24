@@ -48,6 +48,18 @@ protocol ModelRuntimeServing: Actor {
     nonisolated var isSettlementReceiptEligible: Bool { get }
 }
 
+struct ContinuousBatchingRuntimeStatus: Sendable {
+    let mode: ContinuousBatchingMode
+    let active: Bool
+    let unsupportedReason: String?
+    let pagedKVDecision: String
+    let cacheClass: String
+    let activeDecodeRows: Int
+    let waitingCount: Int
+    let maxObservedBatchDepth: Int
+    let slotsTotal: Int
+}
+
 struct RelayBlindPreparedRequest: @unchecked Sendable {
     let handle: RequestHandle
     let inputTokens: Int
@@ -1961,14 +1973,12 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentChatTemplateSHA256 = tokenizerHashes.template
         self.configuredTemplateSupportsThinkingToggle = Self.chatTemplateSupportsThinkingToggle(in: directory)
         self.currentTemplateSupportsThinkingToggle = self.configuredTemplateSupportsThinkingToggle
-        let runtimeCacheClass = self.pagedKVConfig.effectiveEnabled
-            ? await Self.pagedKVRuntimeCacheClass(
+        let runtimeCacheClass = await Self.pagedKVRuntimeCacheClass(
                 container: container,
                 maxContextTokens: self.maxContextTokens,
                 kvBitsOverride: self.kvBitsOverride,
                 prefillStepSize: self.prefillStepSize
             )
-            : Self.pagedKVUnavailableCacheClass
         let modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: directory)
         self.pagedKVRuntimeCacheClass = runtimeCacheClass
         self.currentPagedKVModelCapabilities = modelCapabilities
@@ -2243,8 +2253,20 @@ actor ModelRuntime: ModelRuntimeServing {
             continuousBatchScheduler != nil && replayAuthority.durableAvailable
     }
 
-    func setProviderStatus(_ providerStatus: ProviderStatus) {
+    func setProviderStatus(_ providerStatus: ProviderStatus) async {
         self.providerStatus = providerStatus
+        if let scheduler = continuousBatchScheduler {
+            let schedulerID = ObjectIdentifier(scheduler)
+            await scheduler.setFailureHandler { [weak self] in
+                await self?.batchSchedulerFailedClosed(schedulerID: schedulerID)
+            }
+        }
+    }
+
+    private func batchSchedulerFailedClosed(schedulerID: ObjectIdentifier) async {
+        guard let scheduler = continuousBatchScheduler,
+              ObjectIdentifier(scheduler) == schedulerID else { return }
+        await providerStatus?.markBatchSchedulerFailedClosed()
     }
 
     func authorizedSwitchModelIDList() -> [String] {
@@ -2813,6 +2835,35 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    func continuousBatchingStatus() async -> ContinuousBatchingRuntimeStatus {
+        let capability = continuousBatchingCapability(draftConfigured: currentDraftModelID != nil)
+        let schedulerMetrics = await continuousBatchScheduler?.metrics()
+        let active = !capability.shouldUseSerialPath
+            && capability.unsupportedReason == nil
+            && schedulerMetrics?.accepting == true
+        let metrics = active ? schedulerMetrics : nil
+        let decision: String
+        switch pagedKVAttachDecision {
+        case .disabled: decision = "disabled"
+        case .attached: decision = "attached"
+        case .fallback(let reason): decision = reason.rawValue
+        case .rejected(let reason): decision = reason.rawValue
+        }
+        return ContinuousBatchingRuntimeStatus(
+            mode: continuousBatchingMode,
+            active: active,
+            unsupportedReason: schedulerMetrics?.accepting == false
+                ? "continuous_batching_scheduler_failed_closed"
+                : capability.unsupportedReason?.rawValue,
+            pagedKVDecision: decision,
+            cacheClass: pagedKVRuntimeCacheClass,
+            activeDecodeRows: metrics?.activeDecodeRows ?? 0,
+            waitingCount: metrics?.waitingCount ?? 0,
+            maxObservedBatchDepth: metrics?.maxObservedBatchDepth ?? 0,
+            slotsTotal: active ? (metrics?.slotsTotal ?? 1) : 1
+        )
+    }
+
     private func continuousBatchingCapability(
         draftConfigured: Bool,
         requestHasStableRequestID: Bool = true,
@@ -3058,6 +3109,12 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         continuousBatchingDurableReplayAuthorityAvailable =
             continuousBatchScheduler != nil && continuousBatchReplayAuthority.durableAvailable
+        if let scheduler = continuousBatchScheduler {
+            let schedulerID = ObjectIdentifier(scheduler)
+            await scheduler.setFailureHandler { [weak self] in
+                await self?.batchSchedulerFailedClosed(schedulerID: schedulerID)
+            }
+        }
     }
 
     /// A request is representable by the batched shared-forward contract only if
@@ -3255,14 +3312,12 @@ actor ModelRuntime: ModelRuntimeServing {
         currentWeightsManifestSHA256 = weightsManifestSHA256
         currentTokenizerConfigSHA256 = tokenizerConfigSHA256
         currentChatTemplateSHA256 = chatTemplateSHA256
-        let runtimeCacheClass = pagedKVConfig.effectiveEnabled
-            ? await Self.pagedKVRuntimeCacheClass(
+        let runtimeCacheClass = await Self.pagedKVRuntimeCacheClass(
                 container: container,
                 maxContextTokens: maxContextTokens,
                 kvBitsOverride: kvBitsOverride,
                 prefillStepSize: prefillStepSize
             )
-            : Self.pagedKVUnavailableCacheClass
         pagedKVRuntimeCacheClass = runtimeCacheClass
         currentPagedKVModelCapabilities = modelCapabilities
         pagedKVObservedRuntimeIdentity = nil
@@ -3347,7 +3402,7 @@ actor ModelRuntime: ModelRuntimeServing {
             modelHashAlgorithm: currentModelHashAlgorithm,
             weightsManifestSHA256: weightsManifestSHA256,
             maxContextTokens: adoptionKnobs?.maxContext,
-            maxConcurrency: adoptionKnobs?.maxBatch,
+            maxConcurrency: (await continuousBatchingStatus()).slotsTotal,
             specDecodeDraftModelID: speculativeCacheWrapValidated ? draftModelID : nil,
             specDecodeNumDraftTokens: speculativeCacheWrapValidated && draftModelID != nil ? numDraftTokens : nil
         )

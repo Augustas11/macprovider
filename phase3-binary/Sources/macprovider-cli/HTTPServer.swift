@@ -483,6 +483,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 assignedID: checkedAssignedID
             )
             let runtimeSnapshot = warmSwapEnabled ? await modelRuntime.currentSnapshot() : nil
+            let batchingStatus = await (modelRuntime as? ModelRuntime)?.continuousBatchingStatus()
             let telemetryMatchesRuntime = runtimeSnapshot.map { $0.specDecodeGeneration == snapshot.specDecodeGeneration } ?? true
             let telemetryRuntimeEligible = runtimeSnapshot.map { $0.state == .ready && $0.hasTargetCompatibleDraft } ?? true
             let readiness = await latestReadiness
@@ -503,6 +504,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     providerID: providerID,
                     coordinatorURL: coordinatorURL,
                     runtimeSnapshot: runtimeSnapshot,
+                    batchingStatus: batchingStatus,
                     specDecodeTelemetryMatchesRuntime: telemetryMatchesRuntime,
                     specDecodeTelemetryRuntimeEligible: telemetryRuntimeEligible,
                     catalogStatus: catalogStatus,
@@ -1609,6 +1611,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         providerID: String?,
         coordinatorURL: String?,
         runtimeSnapshot: RuntimeSnapshot? = nil,
+        batchingStatus: ContinuousBatchingRuntimeStatus? = nil,
         specDecodeTelemetryMatchesRuntime: Bool = true,
         specDecodeTelemetryRuntimeEligible: Bool = true,
         catalogStatus: ProviderCatalogStatusContext? = nil,
@@ -1685,6 +1688,16 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "output_tokens_all_time": snapshot.outputTokensAllTime,
             "requests_in_flight": snapshot.requestsInFlight,
             "requests_queued": snapshot.requestsQueued,
+            "continuous_batching": [
+                "mode": batchingStatus?.mode.rawValue ?? "off",
+                "active": batchingStatus?.active ?? false,
+                "unsupported_reason": batchingStatus?.unsupportedReason as Any? ?? NSNull(),
+                "paged_kv_decision": batchingStatus?.pagedKVDecision ?? "unavailable",
+                "cache_class": batchingStatus?.cacheClass ?? "unavailable",
+                "active_decode_rows": batchingStatus?.activeDecodeRows ?? 0,
+                "waiting_count": batchingStatus?.waitingCount ?? 0,
+                "max_observed_batch_depth": batchingStatus?.maxObservedBatchDepth ?? 0,
+            ],
             "active_request_id_count": snapshot.activeRequestIDCount,
             "errors_total": snapshot.errorsTotal,
             "restart_count": snapshot.restartCount,

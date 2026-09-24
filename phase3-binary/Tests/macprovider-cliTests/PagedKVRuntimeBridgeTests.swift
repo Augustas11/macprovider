@@ -571,6 +571,84 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertNotNil(noBackendCapability.unsupportedReason)
     }
 
+    func testAdvertisedSlotsFollowLoadedBatchingCapability() async throws {
+        let modelID = "mlx-community/Qwen-Test"
+        let modelSHA = String(repeating: "a", count: 64)
+        let proof = Self.sizingProof(modelID: modelID, modelSHA: modelSHA)
+        let observedIdentity = Self.observedIdentity(from: proof)
+        let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
+        let mixed = ModelRuntime(
+            modelID: modelID,
+            modelHash: modelSHA,
+            pagedKVConfig: config,
+            maxBatch: 8,
+            continuousBatchingMode: .canary,
+            continuousBatchingDurableReplayAuthorityAvailable: true,
+            warmSwapEnabled: false,
+            pagedKVObservedRuntimeIdentity: observedIdentity,
+            pagedKVHardwareSizingProof: proof,
+            pagedKVRuntimeCacheClass: "mixed",
+            pagedKVSchedulerBackendInstalled: true,
+            continuousBatchingBackend: RuntimeBridgeScriptedBackend(scripts: [:]),
+            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
+        )
+        let mixedStatus = await mixed.continuousBatchingStatus()
+        XCTAssertFalse(mixedStatus.active)
+        XCTAssertEqual(mixedStatus.slotsTotal, 1)
+        XCTAssertEqual(mixedStatus.unsupportedReason, "paged_kv_capability_unavailable")
+        XCTAssertEqual(mixedStatus.cacheClass, "mixed")
+        let mixedCapacity = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: mixedStatus.slotsTotal)
+        XCTAssertEqual(mixedCapacity.maxConcurrency, 1)
+        let providerStatus = ProviderStatus(modelID: modelID, modelLoaded: true, capacity: mixedCapacity)
+        let response = RouterHandler.statusResponse(
+            await providerStatus.snapshot(),
+            providerID: nil,
+            coordinatorURL: nil,
+            batchingStatus: mixedStatus
+        )
+        let batching = try XCTUnwrap(response["continuous_batching"] as? [String: Any])
+        XCTAssertEqual(batching["active"] as? Bool, false)
+        XCTAssertEqual(batching["unsupported_reason"] as? String, "paged_kv_capability_unavailable")
+        XCTAssertEqual(batching["cache_class"] as? String, "mixed")
+
+        let disabled = ModelRuntime(
+            modelID: modelID,
+            modelHash: modelSHA,
+            pagedKVConfig: .defaults(),
+            maxBatch: 8,
+            continuousBatchingMode: .canary,
+            warmSwapEnabled: false,
+            pagedKVRuntimeCacheClass: "mixed",
+            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
+        )
+        let disabledStatus = await disabled.continuousBatchingStatus()
+        XCTAssertFalse(disabledStatus.active)
+        XCTAssertEqual(disabledStatus.slotsTotal, 1)
+        XCTAssertEqual(disabledStatus.unsupportedReason, "paged_kv_disabled")
+
+        let batched = ModelRuntime(
+            modelID: modelID,
+            modelHash: modelSHA,
+            pagedKVConfig: config,
+            maxBatch: 8,
+            continuousBatchingMode: .canary,
+            continuousBatchingDurableReplayAuthorityAvailable: true,
+            warmSwapEnabled: false,
+            pagedKVObservedRuntimeIdentity: observedIdentity,
+            pagedKVHardwareSizingProof: proof,
+            pagedKVRuntimeCacheClass: "KVCacheSimple",
+            pagedKVSchedulerBackendInstalled: true,
+            continuousBatchingBackend: RuntimeBridgeScriptedBackend(scripts: [:]),
+            loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
+        )
+        let batchedStatus = await batched.continuousBatchingStatus()
+        XCTAssertTrue(batchedStatus.active)
+        XCTAssertEqual(batchedStatus.slotsTotal, 8)
+        XCTAssertNil(batchedStatus.unsupportedReason)
+        let batchedCapacity = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: batchedStatus.slotsTotal)
+        XCTAssertEqual(batchedCapacity.maxConcurrency, 8)
+    }
+
     func testSharedForwardGreedyMatchesSerialLoneAndFullBatchWithUsageAndStops() async throws {
         let gate = RuntimeBridgeTestGate()
         let scripts = [

@@ -1,6 +1,6 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2.3
+Version: v0.2.4
 Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
@@ -12,6 +12,13 @@ clarifies the API-visible admission/replay/terminal contract, records
 decode-first scheduling as a conservative v0.2 choice rather than a claim of
 vLLM/SGLang-style unified-token scheduling, and tightens the real-serving
 evidence gate for retained paged-KV reuse.
+
+**Change log v0.2.4 (2026-09-24, truthful execution capacity):**
+- The persisted Entry 110 value remains the scheduler row ceiling. When no
+  eligible scheduler is active, the provider advertises one executable slot
+  and reports admitted requests waiting behind serial generation as queued.
+- Local status reports the batching mode, active decision, fallback reason,
+  paged-KV decision, cache class, and scheduler row and queue counters.
 
 **Change log v0.2.3 (2026-09-21, keyed first-turn canary):**
 - A conversation key alone MUST NOT keep a request out of canary/`on`
@@ -423,14 +430,17 @@ as the path to success.
 
 The scheduler's maximum active decode rows MUST equal the persisted Entry 110
 `max_concurrency_override` for the detected hardware class; it MUST NOT
-synthesize new tiers or advertise capacity above it. The three quantities -
-advertised slots, active batch rows, and waiting-queue depth - MUST remain
-distinct: `slots_total` equals the validated persisted Entry 110 concurrency,
-active accepted/runnable work MUST be `<= slots_total`, and queued work MUST
-NOT inflate `slots_total`. `slots_free` MUST be derived from validated active
-capacity minus active accepted/runnable work. Internal prompt-batch,
-decode-batch, microbatch, paged-engine, and queue limits MAY differ but MUST
-NOT change `slots_total`.
+synthesize new tiers or advertise capacity above it. Advertised slots, active
+batch rows, and waiting-queue depth MUST remain distinct. When a qualified
+scheduler is active, `slots_total` equals its row count, bounded by the
+persisted value. Otherwise `slots_total` and advertised `max_concurrency`
+MUST equal one because serial generation holds one exclusive model lock.
+Waiting requests MUST NOT inflate `slots_total`; `requests_queued` MUST include
+admitted requests waiting behind the one active serial generation.
+`slots_free` MUST be derived from executable capacity minus in-flight work.
+Thermal throttling MAY reduce `slots_free` but MUST NOT change `slots_total`.
+A scheduler that fails closed MUST mark the provider unavailable and publish
+zero free slots; its configured row count MUST NOT remain buyer-advertised.
 
 ### FR-CB12 - SPEC-028 mutual exclusion (SPEC-038-R012)
 
@@ -648,8 +658,8 @@ the A5 production-economics conditions (FR-CB15, §8).
 
 ## 6. Capacity, telemetry, and OPoI boundary
 
-- `slots_total` MUST publish the validated persisted Entry 110
-  recommendation; `slots_free` is derived from validated active capacity minus
+- `slots_total` MUST publish the executable capacity under FR-CB11, bounded by
+  the validated persisted Entry 110 recommendation; `slots_free` is derived from active capacity minus
   active work; queued work is reported separately and never inflates capacity
   (FR-CB11).
 - Heartbeat MAY add diagnostic fields (scheduler mode, active prompt rows,
@@ -719,11 +729,11 @@ hardware-capability run or a static-review obligation. Every
   reason code; none silently downgrade KV quantization, reinterpret a
   quantized cache as ordinary KV, cite a missing upstream pin, or silently
   run serial.
-- **AC-8 Entry 110 capacity mapping (FR-CB11):** `slots_total` equals the
-  persisted `max_concurrency_override` across each hardware tier fixture;
-  active rows never exceed it; a scheduler with `slots_total` active rows and
-  a full waiting queue still advertises `slots_total`, not
-  `slots_total + queue`.
+- **AC-8 Entry 110 capacity mapping (FR-CB11):** a qualified scheduler
+  advertises the persisted `max_concurrency_override` row count and active
+  rows never exceed it. An unsupported or disabled scheduler advertises one
+  slot even when the persisted limit is higher, and counts any second admitted
+  request as queued. A full waiting queue never inflates `slots_total`.
 - **AC-9 SPEC-028 exclusion (FR-CB12):** a draft-enabled provider keeps
   `effective_max_batch = 1`; an explicit `max_concurrency_override > 1` with a
   draft model fails preflight `draft_model_capacity_shortfall`; a

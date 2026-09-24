@@ -296,7 +296,7 @@ struct ProviderSnapshot: Sendable {
     let transitionReason: String
 
     var slotsFree: Int {
-        if thermallyThrottled { return 0 }
+        if thermallyThrottled || status == .unavailable || status == .draining { return 0 }
         return max(0, capacity.maxConcurrency - requestsInFlight)
     }
 
@@ -641,6 +641,20 @@ actor ProviderStatus {
 
     func setState(_ newState: ProviderHealthState, reason: String = "state_update") {
         transition(to: newState, reason: reason)
+    }
+
+    func markBatchSchedulerFailedClosed() {
+        capacity = ProviderCapacity(
+            maxContextOverride: capacity.maxContextTokens,
+            maxConcurrencyOverride: 1,
+            throughputTPSEstimate: capacity.throughputTPSEstimate
+        )
+        transition(to: .unavailable, reason: "continuous_batching_scheduler_failed_closed")
+        requestCapacityChangeHandler?(requestCapacityTransitionSnapshot(
+            state: .unavailable,
+            reason: "continuous_batching_scheduler_failed_closed",
+            slotsFree: 0
+        ))
     }
 
     func applyCoordinatorBuyerServing(

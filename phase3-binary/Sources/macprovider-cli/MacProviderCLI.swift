@@ -2041,13 +2041,17 @@ struct ServeCommand: AsyncParsableCommand {
             }
         }
 
-        // The serve runtime defaults `--max-batch` to 1 (the prior
-        // single-slot behavior). Operators opting in via --max-batch >1
-        // own the safety check; we surface the configured value in
-        // capacity so the coordinator's view stays consistent.
+        // Advertise execution capacity after the loaded runtime has established
+        // whether a scheduler can actually accept this model and tuple.
+        let executionSlots: Int
+        if let mlxRuntime = modelRuntime as? ModelRuntime {
+            executionSlots = await mlxRuntime.continuousBatchingStatus().slotsTotal
+        } else {
+            executionSlots = 1
+        }
         let capacityDefaults = ProviderCapacity(
             maxContextOverride: resolved.maxContextOverride,
-            maxConcurrencyOverride: resolved.maxConcurrencyOverride ?? 1
+            maxConcurrencyOverride: executionSlots
         )
         let throughputEstimate = await Self.startupThroughputEstimate(
             autotuneCandidate: autotuneCandidate,
