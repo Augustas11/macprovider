@@ -1074,27 +1074,19 @@ final class ServingKnobsConfigTests: XCTestCase {
     }
 
     func testRequestStateRepresentableGateOnParsedRequests() throws {
-        // Defaults are not enough for Increment 1 attach: the shared-forward proof
-        // only covers explicitly greedy rows.
-        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([:])))
+        // SPEC-038 AC-6b: sampled rows batch with the serial path's sampler and a
+        // row-local seed, so plain sampling parameters no longer force serial.
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([:])))
 
         let greedy: [String: Any] = ["temperature": 0, "top_p": 1.0]
-
-        // Explicit greedy request → representable.
         XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest(greedy)))
-
-        // Non-greedy sampling / penalties → not representable by this increment.
-        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
-            "temperature": 0.2, "top_p": 1.0
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0.7, "top_p": 0.9
         ])))
-        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
-            "temperature": 0, "top_p": 0.9
-        ])))
-        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
-            "temperature": 0, "top_p": 1.0, "presence_penalty": 0.1
-        ])))
-        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
-            "temperature": 0, "top_p": 1.0, "frequency_penalty": 0.1
+        // The serial path ignores presence/frequency penalties, so they do not
+        // change what a batched row must represent.
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0.7, "presence_penalty": 0.5, "frequency_penalty": 0.5
         ])))
 
         // Structured output (json_schema) → not representable.
@@ -1989,7 +1981,10 @@ final class ServingKnobsConfigTests: XCTestCase {
         } catch let error as APIError {
             await runtime.unregisterInFlight(handle.registrationID)
             XCTAssertNotEqual(error.code, "continuous_batching_conversation_key_rollout_unavailable")
-            XCTAssertEqual(error.status, 400)
+            // A default (sampled) request is representable since SPEC-038 AC-6b,
+            // so strict `on` now fails closed on the missing local capability
+            // (503) rather than on request representability (400).
+            XCTAssertEqual(error.status, 503)
         }
     }
 

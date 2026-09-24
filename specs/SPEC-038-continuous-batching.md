@@ -1,6 +1,6 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2.5
+Version: v0.2.6
 Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
@@ -12,6 +12,15 @@ clarifies the API-visible admission/replay/terminal contract, records
 decode-first scheduling as a conservative v0.2 choice rather than a claim of
 vLLM/SGLang-style unified-token scheduling, and tightens the real-serving
 evidence gate for retained paged-KV reuse.
+
+**Change log v0.2.6 (2026-09-24, sampled batched rows):** FR-CB6 and AC-6b
+admit sampled (non-greedy) requests into the shared forward. Each row samples
+from its own logits with the serial path's sampler for its temperature and
+top_p, using row-local randomness seeded from its request identity and step. No
+random state is shared across rows or carried between steps. Presence and
+frequency penalties are ignored because the serial path ignores them.
+Increment 1's greedy-only admission is lifted. Tool-bearing, structured-output,
+logit-bias and logprob requests still serial-route.
 
 **Change log v0.2.5 (2026-09-24, runtime-revision-bound acceptance):** FR-CB10
 acceptance coverage now binds the runtime revision the evidence was measured
@@ -345,6 +354,20 @@ non-receipt diagnostic telemetry (FR-CB14) and MUST NOT alter buyer-visible
 token accounting. Deterministic (temperature-0) output for a request under
 batching MUST match its serial-path output within the accepted numerical
 tolerance.
+
+A sampled (non-greedy) request MAY batch. Its row MUST select each token with
+exactly the sampling algorithm the serial path uses for the same request
+parameters (temperature, top_p), applied only to that row's own logits. The
+row's randomness MUST be row-local:
+- it is derived from that request's identity and the step index;
+- it is never shared with another row;
+- it is never carried in hidden cross-step state.
+
+Sampled output is therefore equal in distribution to the serial path, not
+token-identical to a particular serial run (the serial path is not seeded). A
+replay of the same request identity reproduces the same draws. Parameters the
+serial path ignores (presence and frequency penalties) MUST be ignored on the
+batched path too, so batching never changes what a request asks for.
 
 The accepted numerical tolerance recognizes that a shared batched forward and
 a serial forward differ only in floating-point ACCUMULATION ORDER (batched
@@ -736,6 +759,15 @@ hardware-capability run or a static-review obligation. Every
   decoding the sampled token sequence MUST be identical (byte/token-identical);
   a numerical tolerance applies only where the fixture explicitly compares raw
   logits, and then the exact threshold MUST be stated in the fixture.
+- **AC-6b sampled-row equivalence and isolation (FR-CB6):** a unit fixture
+  shows three things. With identical logits, parameters and seed, a batched
+  row's token equals the serial sampler's token (same algorithm). A row's token
+  is unchanged by its batch neighbours. A nucleus small enough to keep only the
+  argmax yields the greedy token.
+  On hardware, a sampled request near-deterministic under its parameters (for
+  example a tiny top_p) matches its greedy serial output as a lone row and
+  among concurrent sampled rows, with no cross-row leak signal. Distinct
+  concurrent requests MUST NOT share a sampler seed.
 - **AC-7 unsupported cache/`kv_bits`/local capability rejection (FR-CB8,
   FR-CB10):** a `newCache`-overriding model family, an unsupported
   `SPEC-039` tuple, an unsupported MoE expert-dispatch surface, and an

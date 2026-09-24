@@ -3362,17 +3362,14 @@ actor ModelRuntime: ModelRuntimeServing {
         if isActiveJSONValue(request.promptSource.logitBias) { return false }
         if isRequestedLogprobs(request.promptSource.logprobs) { return false }
         if isActiveJSONValue(request.promptSource.topLogprobs) { return false }
-        // Increment 1 proves exact greedy shared-forward parity only. Keep
-        // non-greedy or penalty-shaped requests on the existing serial path
-        // until a later sampler-isolated batching increment carries them.
-        guard request.temperature == 0.0,
-              request.topP == 1.0,
-              request.presencePenalty == 0.0,
-              request.frequencyPenalty == 0.0
-        else {
-            return false
-        }
-        return true
+        // SPEC-038 AC-6b: each batched row samples with the serial path's own
+        // sampler for its temperature/top_p and a row-local seed
+        // (`ContinuousBatchRowSampler`). The serial path ignores presence and
+        // frequency penalties, so they do not change what a row can represent.
+        return ContinuousBatchRowSampler.supports(
+            temperature: request.temperature,
+            topP: request.topP
+        )
     }
 
     nonisolated static func requestHasStableRequestID(_ request: ChatCompletionRequest) -> Bool {
@@ -4017,6 +4014,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     promptTokens: prepared.promptTokens,
                     maxOutputTokens: maxOutputTokens,
                     stopTokenSequences: prepared.stopTokenSequences,
+                    samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: schedulerRequestID),
                     temperature: request.temperature,
                     topP: request.topP,
                     presencePenalty: request.presencePenalty,
@@ -4241,6 +4239,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     promptTokens: prepared.promptTokens,
                     maxOutputTokens: maxOutputTokens,
                     stopTokenSequences: prepared.stopTokenSequences,
+                    samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: schedulerRequestID),
                     temperature: request.temperature,
                     topP: request.topP,
                     presencePenalty: request.presencePenalty,

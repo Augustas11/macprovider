@@ -549,7 +549,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
         }
         defer { endOperation() }
-        let supportedInputs = inputs.filter(Self.supportsGreedySampling)
+        let supportedInputs = inputs.filter(Self.supportsRowSampling)
         var rowFailures = Set(inputs.map(\.requestID)).subtracting(supportedInputs.map(\.requestID))
         guard !supportedInputs.isEmpty else {
             return inputs.map { .rowFailure(requestID: $0.requestID) }
@@ -577,7 +577,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
-    /// Greedy lockstep decode of `steps` tokens inside one `container.perform`.
+    /// Lockstep decode of `steps` tokens inside one `container.perform`; each
+    /// row samples with its own parameters (`ContinuousBatchRowSampler`).
     /// Returns every sampled token in generation order so the scheduler can
     /// apply stop/stream/receipt without dropping intermediates. The throughput
     /// harness uses the same seam.
@@ -591,7 +592,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
         }
         defer { endOperation() }
-        let supportedInputs = inputs.filter(Self.supportsGreedySampling)
+        let supportedInputs = inputs.filter(Self.supportsRowSampling)
         var rowFailures = Set(inputs.map(\.requestID)).subtracting(supportedInputs.map(\.requestID))
         guard !supportedInputs.isEmpty else {
             return inputs.map { .rowFailure(requestID: $0.requestID) }
@@ -831,9 +832,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             var current = MLXArray(supportedInputs.map { Int32($0.currentToken) }).reshaped([supportedInputs.count, 1])
             eval(current)
             var collected: [[Int]] = supportedInputs.map { _ in [] }
-            for _ in 0 ..< decodeSteps {
+            for stepIndex in 0 ..< decodeSteps {
                 let logits = step.step(current)
-                current = argMax(logits[0..., -1, 0...], axis: -1).reshaped([supportedInputs.count, 1])
+                current = ContinuousBatchRowSampler.sample(
+                    logits: logits[0..., -1, 0...],
+                    rows: Self.samplerRows(supportedInputs, step: stepIndex)
+                ).reshaped([supportedInputs.count, 1])
                 eval(current)
                 let stepTokens = current.asArray(Int.self)
                 guard stepTokens.count == supportedInputs.count else {
@@ -856,14 +860,17 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             session?.compiledStep = nil
             var currentTokens = supportedInputs.map(\.currentToken)
             var collected: [[Int]] = supportedInputs.map { _ in [] }
-            for _ in 0 ..< decodeSteps {
+            for stepIndex in 0 ..< decodeSteps {
                 let tokenInput = MLXArray(currentTokens.map(Int32.init)).reshaped([supportedInputs.count, 1])
                 let text = LMInput.Text(tokens: tokenInput)
                 let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
                     model(text, cache: cachesAsKV, state: supportedInputs.count == 1 ? rowStates[0].state : nil)
                 }
                 try batchedCaches.forEach { try $0.validateBatchState() }
-                let stepSampled = argMax(output.logits[0..., -1, 0...], axis: -1).asArray(Int.self)
+                let stepSampled = ContinuousBatchRowSampler.sample(
+                    logits: output.logits[0..., -1, 0...],
+                    rows: Self.samplerRows(supportedInputs, step: stepIndex)
+                ).asArray(Int.self)
                 guard stepSampled.count == supportedInputs.count else {
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
                 }
@@ -951,11 +958,22 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return session.batchedCaches.allSatisfy { !$0.innerState().isEmpty }
     }
 
-    private static func supportsGreedySampling(_ input: ContinuousBatchDecodeInput) -> Bool {
-        input.temperature == 0.0
-            && input.topP == 1.0
-            && input.presencePenalty == 0.0
-            && input.frequencyPenalty == 0.0
+    private static func supportsRowSampling(_ input: ContinuousBatchDecodeInput) -> Bool {
+        ContinuousBatchRowSampler.supports(temperature: input.temperature, topP: input.topP)
+    }
+
+    private static func samplerRows(
+        _ inputs: [ContinuousBatchDecodeInput],
+        step: Int
+    ) -> [ContinuousBatchRowSampler.Row] {
+        inputs.map {
+            ContinuousBatchRowSampler.Row(
+                temperature: $0.temperature,
+                topP: $0.topP,
+                samplerSeed: $0.samplerSeed,
+                samplerStep: $0.samplerStep + step
+            )
+        }
     }
 
     private func makeBatchedCaches(from rowCaches: [[KVCache]]) throws -> [PagedKVSharedLayerBatch] {
