@@ -76,11 +76,12 @@ Probed 2026-09-24 (`/healthz` and read-only host checks).
 
 | Field | Value |
 |---|---|
-| Coordinator | **v1.8.190** @ `0a63ddab`, live and healthy on 2026-09-24 |
-| Gateway | **v1.8.190** |
-| Release | [Pearl runtime v1.8.190](https://github.com/Augustas11/macprovider/releases/tag/v1.8.190), 2026-09-24 01:19Z |
+| Coordinator | **v1.8.193** @ `9e5aac90`, live and healthy since 2026-09-24 10:40Z (signed updater: `serving_gates_completed`, `rollout_completed: success`) |
+| Gateway | **v1.8.193** |
+| Release | [Pearl runtime v1.8.193](https://github.com/Augustas11/macprovider/releases/tag/v1.8.193), run [35986691378](https://github.com/Augustas11/macprovider/actions/runs/35986691378), applied 2026-09-24 10:40Z |
 | `recommended_binary_version` | 1.8.123 (CLI train owns this) |
-| Includes | Everything on `main` through the v1.8.190 tag, including #1714, #1715, #1688 follow-up, and #1718 |
+| Includes | Everything on `main` through `9e5aac90`: v1.8.191's #1728 plus #1713 (#1689 coordinator side: SPEC-022 R-2.7 catalog-material gate, `catalog_material_hold_v1`) and `fe4b4a0c` (stats billing mirror schema parity) |
+| nginx | `/v1/stats/routability` route added on Pearl 2026-09-24 10:24Z, additively and verbatim from `phase4-coordinator/dist` (backups `*.bak-routability-20260924T102404Z`). Pearl's nginx still lags the repo on `/v1/catalog-artifacts`, `/v1/portal/session` and `/v1/provider/malibu-reward-audit`, and carries a hand-deployed `/v1/provider/model-admission/` (BYOM) route the repo lacks, so **do not copy the repo site file over it**. |
 
 Signed prerelease `v1.8.189` at `0ac51afa` exists and is immutable, but it was
 **not applied**. Its full deploy failed closed before any Pearl mutation because
@@ -93,6 +94,8 @@ as `v1.8.191` for the post-v1.8.190 changes listed below.
 
 | Tag | Commit | Head PR |
 |---|---|---|
+| v1.8.193 | `9e5aac90` | #1713 (#1689) coordinator side; `fe4b4a0c` |
+| v1.8.191 | `98e3e4af` | #1728 settlement-hold recovery |
 | v1.8.190 | `0a63ddab` | #1718 deploy-boundary replacement; also includes #1714/#1715 and the feed-bundle fix |
 | v1.8.188 | `57022da8` | #1711 WAL maintenance no longer starves completed buyer work |
 | v1.8.187 | `afbee248` | #1710 recover held settlements after transient finality failures |
@@ -131,7 +134,7 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 | Stop buyer-facing disclosure from naming internal hosts and specification identifiers in gateway responses and pages. | merged `761e5f0c` | #1720 |
 | Wait for coordinator readiness before the deploy rollback boundary, so a slow healthy restart does not trigger an unnecessary rollback. This changes the full-deploy tooling. | merged `b401e9af` | #1722 |
 | Recover every persisted settlement-hold path promptly through the authenticated, request-scoped reconciler. This closes the live non-stream pending-finality hold reproduced during the Studio soak; requires a signed runtime and a fresh strict-pinned settlement-complete rerun. Cut owner: Studio settlement recovery. **Reserved tag: `v1.8.191`.** | merged `258c78c2` | #1728 (#1727/#1680) |
-| Node operator status, safe context changes, model diagnostics | in progress | #1713 (#1689) |
+| Node operator status, safe context changes, model diagnostics | **live in v1.8.193** (merged `57686a84`) | #1713 (#1689, closed) |
 | Build 1 Lane A orchestrated PR | in progress | #1658 (#1642) |
 | Pricing corrections through the catalog-content lane (SPEC-005-R013, SPEC-023-R018, SPEC-006-R008 amended). Coordinator: request billing table and served signed rate card switch under one economics lock (release lock → economics lock → feed lock), prices resolved once before the billing write context; `--validate-autotune-release` gains `--expect-base-equivalent` and `--resolve-model-names` plus `rate_table_sha256` / `signed_rate_card_sha256` verdict fields; applied-config record gains `rate_table_sha256`, `signed_rate_card_sha256`, `autotune_release_id`, `billing_snapshot_id`. **Wholesale statements change**: each request is priced at the generation it was recorded under (uncapped aggregate math), so a model-month above 10M tokens is no longer zeroed — affected partner statements go **up**; a period with no billing snapshot now fails closed. Lane tooling that deploy ships: `scripts/catalog-release.py` (splice / extract / effective-price diff / gate), new `acknowledged-pricing-moves.json`; still to land in the same PR: journal + pre-start recovery + post-start closer units, the one-writer guard on every live-config writer, lane preflight/evidence/rollback. **Enabling rollout is two steps from the same tag, in order**: (1) reinstall the Pearl updater bundle (`install-pearl-updater.sh`: guard-bearing updater, Tier-2 watchdog, Python guard module), then (2) a full `deploy-pearl-vps.sh` (new units, recovery helper, shell guard, verifier bundle) — never a binary swap. Pricing preflight hashes every installed writer against the commit, so a deploy without step 1 stays NO_GO. Procedure: `catalog-release-decision-tree.md` §Enabling rollout. Afterwards rows-only pricing needs no coordinator release. Plan (approved 0C/0H/0M): [#1693 comment](https://github.com/Augustas11/macprovider/issues/1693#issuecomment-5800624020) | in progress (draft; merge gated on the e2e fake-Pearl run) | #1732 (#1693) |
 
