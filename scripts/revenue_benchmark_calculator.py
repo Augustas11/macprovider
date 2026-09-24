@@ -16,6 +16,7 @@ import sqlite3
 import sys
 from collections import Counter
 from contextlib import ExitStack, closing
+from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -80,7 +81,8 @@ def is_int(value):
 
 
 def request_log_rows(coordinator, account_id, request_id):
-    """Return [(ts_utc, latency_seconds)] for every coordinator attempt of one buyer request."""
+    """Return [(started_at, latency_seconds)] for every coordinator attempt of one buyer
+    request, failed attempts included; request_log.ts_utc is the attempt start."""
     return [(classifier.parse_utc(r["ts_utc"]), max(0.0, float(r["latency_ms"])) / 1000) for r in coordinator.execute(
         "SELECT ts_utc, latency_ms FROM request_log WHERE account_id = ? AND external_request_id = ?",
         (account_id, request_id))]
@@ -102,7 +104,8 @@ def evaluate_row(candidate, case, evidence, coordinator, receipt_scope, log_rows
     """Return (reasons, economics). Empty reasons means the row counts toward revenue."""
     if evidence["classification"] != "complete":
         return [evidence["classification"]], None
-    if not log_rows or any(t < candidate["started"] or t > candidate["finished"] for t, _ in log_rows):
+    if not log_rows or any(t < candidate["started"] or t + timedelta(seconds=latency) > candidate["finished"]
+                           for t, latency in log_rows):
         return ["outside_candidate_window"], None
     if len(evidence["attempts"]) != 1:
         return ["multiple_attempts"], None
@@ -205,19 +208,25 @@ def calculate(manifest, coordinator, gateway, journal=None, now=None, doc=None):
     rows = []
     for row in manifest["requests"]:
         candidate, case = candidates[row["candidate_id"]], cases[row["case_id"]]
+        # Read attempt timing independently of classification so failed and
+        # unreadable requests still count as busy, zero-revenue time.
+        log_error = None
+        try:
+            log_rows = request_log_rows(coordinator, manifest["account_id"], row["request_id"])
+        except (ValueError, TypeError, sqlite3.Error) as exc:
+            log_rows, log_error = [], exc
         try:
             evidence = classifier.classify(coordinator, gateway, manifest["account_id"], row["request_id"],
                                            journal, now=now, expected_provider_id=candidate["expected_provider_id"])
-            log_rows = request_log_rows(coordinator, manifest["account_id"], row["request_id"])
         except ValueError as exc:
             if not str(exc).startswith("no successful provider-bound request"):
                 evidence = {"classification": "evidence_unreadable:" + type(exc).__name__, "missing": [], "pending": []}
             else:
                 evidence = {"classification": "no_successful_provider_request", "missing": [], "pending": []}
-            log_rows = []
         except (TypeError, KeyError, sqlite3.Error) as exc:
             evidence = {"classification": "evidence_unreadable:" + type(exc).__name__, "missing": [], "pending": []}
-            log_rows = []
+        if log_error is not None and evidence["classification"] == "complete":
+            evidence = {"classification": "evidence_unreadable:" + type(log_error).__name__, "missing": [], "pending": []}
         reasons, economics = evaluate_row(candidate, case, evidence, coordinator, receipt_scope, log_rows)
         bucket = totals[row["candidate_id"]]
         bucket["attempted"] += 1

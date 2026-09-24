@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import unittest
 from datetime import timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 
 
@@ -51,6 +52,10 @@ CREATE TABLE quota_reservations (account_id TEXT, request_id TEXT,
 def load_fixture(name):
     with open(FIXTURES / name, encoding="utf-8") as f:
         return json.load(f)
+
+
+def usdc_per_day_text(credits, seconds):
+    return str((Decimal(credits) * 86400 / Decimal(seconds) / Decimal(1_000_000)).quantize(Decimal("0.000001")))
 
 
 def coordinator_time_text(when):
@@ -345,17 +350,48 @@ class RevenueCalculatorFixtureTests(unittest.TestCase):
         self.assertEqual(incumbent["busy_seconds"], 180.0)
         manifest = copy.deepcopy(self.manifest)
         manifest["candidates"][0].update(started_at="2026-09-24T11:40:00Z", finished_at="2026-09-24T11:59:00.000001Z")
-        manifest["candidates"][1].update(started_at="2026-09-24T11:40:00Z", finished_at="2026-09-24T11:40:00.000001Z")
+        manifest["candidates"][1].update(started_at="2026-09-24T11:40:00Z", finished_at="2026-09-24T11:40:20Z")
         report = self.report(manifest)
         incumbent = self.candidate(report, "incumbent-qwen-coder")
         challenger = self.candidate(report, "challenger-qwen35-a3b")
         self.assertEqual(incumbent["counted_rows"], 7)
         self.assertEqual(challenger["counted_rows"], 6)
-        # 1550 credits over 8 logged requests x 20s busy time, not over 1 microsecond.
+        # 1550 credits over 8 logged requests x 20s busy time, not over the 20s declared window.
         self.assertEqual(challenger["busy_seconds"], 160.0)
         self.assertEqual(challenger["provider_usdc_per_day_over_window"], "0.837000")
         self.assertIn("declared_window_shorter_than_busy_time:challenger-qwen35-a3b", report["comparison_blockers"])
         self.assertNotIn("declared_window_shorter_than_busy_time:incumbent-qwen-coder", report["comparison_blockers"])
+
+    def test_failed_attempt_time_counts_as_busy_time(self):
+        no_request = next(r for r in self.evidence["rows"] if r["state"] == "no_request")
+        self.coord.execute(
+            "INSERT INTO request_log(request_id, attempt_n, ts_utc, latency_ms, status, provider_assigned_id,"
+            " provider_header, account_id, external_request_id, model) VALUES ('failed', 0, ?, 300000, 502, NULL,"
+            " NULL, ?, ?, ?)",
+            (coordinator_time_text(self.now - timedelta(minutes=35)), self.manifest["account_id"],
+             no_request["request_id"], no_request["model"]))
+        report = self.report()
+        challenger = self.candidate(report, "challenger-qwen35-a3b")
+        self.assertEqual(challenger["excluded_rows_by_reason"]["no_successful_provider_request"], 1)
+        self.assertEqual(challenger["busy_seconds"], 460.0)
+        manifest = copy.deepcopy(self.manifest)
+        manifest["candidates"][1].update(started_at="2026-09-24T11:40:00Z", finished_at="2026-09-24T11:40:20Z")
+        challenger = self.candidate(self.report(manifest), "challenger-qwen35-a3b")
+        self.assertEqual(challenger["provider_usdc_per_day_over_window"], usdc_per_day_text(1550, 460))
+
+    def test_window_must_contain_attempt_end(self):
+        manifest = copy.deepcopy(self.manifest)
+        manifest["candidates"][1].update(started_at="2026-09-24T11:40:00Z", finished_at="2026-09-24T11:40:19Z")
+        challenger = self.candidate(self.report(manifest), "challenger-qwen35-a3b")
+        self.assertEqual(challenger["counted_rows"], 0)
+        self.assertEqual(challenger["excluded_rows_by_reason"]["outside_candidate_window"], 8)
+
+    def test_non_positive_latency_adds_no_busy_time(self):
+        self.coord.execute("UPDATE request_log SET latency_ms=-5000 WHERE request_id='int-1-00'")
+        self.coord.execute("UPDATE request_log SET latency_ms=0 WHERE request_id='int-1-01'")
+        challenger = self.candidate(self.report(), "challenger-qwen35-a3b")
+        self.assertEqual(challenger["busy_seconds"], 120.0)
+        self.assertEqual(challenger["counted_rows"], 6)
 
     def test_round_half_even_matches_billing_formula(self):
         self.assertEqual(calculator.round_half_even(5, 2), 2)

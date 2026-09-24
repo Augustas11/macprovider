@@ -49,8 +49,8 @@ row earns zero and is counted under its exclusion reason:
 
 - `classify_benchmark_evidence.py` marks it `complete` against the candidate's
   expected provider.
-- Its `request_log` timestamps fall inside the candidate's declared
-  `started_at`..`finished_at` window.
+- Every coordinator attempt starts at or after `started_at` and ends, at
+  start plus `latency_ms`, at or before `finished_at`.
 - It has exactly one attempt.
 - The ledger model matches the candidate model.
 - Usage is `provider_reported`, has no fault, and is not quarantined.
@@ -81,8 +81,8 @@ window.
 
 USDC per day is serial benchmark throughput scaled to a day, not a demand
 forecast. Its denominator is the larger of two values: the declared window, or
-the candidate's busy time (the sum of `request_log.latency_ms` over its
-requests). Squeezing the window therefore cannot inflate the figure.
+the candidate's busy time (the sum of `request_log.latency_ms` over every
+attempt of its requests, failed attempts included). Squeezing the window therefore cannot inflate the figure.
 
 `comparable` is false when any of these holds:
 
