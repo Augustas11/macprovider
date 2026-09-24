@@ -350,6 +350,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     // in seconds. Derived from the configured admission wait so the hint the
     // buyer is handed is the bound this provider actually enforces.
     private let queueWaitRetryAfterSeconds: Int
+    // Makes the peer's EOF observable so `channelInactive` can mark
+    // `inflightDisconnects`; see `PeerCloseMonitor`.
+    private let peerCloseMonitor = PeerCloseMonitor()
 
     init(
         modelID: String?,
@@ -389,6 +392,23 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         self.lifecycleLeaseStore = lifecycleLeaseStore
     }
 
+    func handlerAdded(context: ChannelHandlerContext) {
+        // Installed here rather than by the bootstrap so every pipeline that
+        // carries this router detects a buyer disconnect. Only a pipeline with
+        // `HTTPServerPipelineHandler` withholds reads while a response is in
+        // flight; without it reads continue, the peer's EOF already reaches
+        // `channelInactive`, and pipelined requests must still reach this
+        // router, so the monitor is not installed.
+        guard (try? context.pipeline.syncOperations.handler(type: HTTPServerPipelineHandler.self)) != nil else {
+            return
+        }
+        do {
+            try context.pipeline.syncOperations.addHandler(peerCloseMonitor, position: .first)
+        } catch {
+            context.close(promise: nil)
+        }
+    }
+
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let part = unwrapInboundIn(data)
 
@@ -410,6 +430,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             bodyBuffer?.writeBuffer(&chunk)
         case .end:
+            peerCloseMonitor.watchForPeerClose()
             handleRequest(context: context)
             requestHead = nil
             bodyBuffer = nil
@@ -2373,6 +2394,55 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
     private func path(from uri: String) -> String {
         String(uri.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)[0])
+    }
+}
+
+/// `HTTPServerPipelineHandler` withholds socket reads while a response is in
+/// flight, so a buyer that closes its connection during generation is never
+/// observed until a write fails, and a stream that writes nothing for a while
+/// cannot see the disconnect at all. Every response here is `connection:
+/// close`, so bytes arriving after a request's end can never be served. Placed
+/// ahead of the HTTP decoder, this handler keeps reading the socket once the
+/// request has ended and discards what arrives; the peer's EOF or reset then
+/// closes the channel, and `RouterHandler.channelInactive` marks every
+/// in-flight `ClientDisconnectState` (SPEC-038 AC-25): a buyer cancel, the
+/// relay's `cancelled`, never a provider failure. It is a read pump only; the
+/// disconnect signal itself is `ClientDisconnectState`. NIO on Darwin does not
+/// deliver an early EOF without a read (`isEarlyEOFDeliveryWorkingOnThisOS`),
+/// so without this pump a buyer that closes after the request's read burst is
+/// not seen until a write fails, and never by a stream that writes nothing.
+private final class PeerCloseMonitor: ChannelInboundHandler {
+    typealias InboundIn = ByteBuffer
+    typealias InboundOut = ByteBuffer
+
+    private var context: ChannelHandlerContext?
+    private var requestEnded = false
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        self.context = context
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        self.context = nil
+    }
+
+    /// Event-loop only: called once the request's end has been decoded.
+    func watchForPeerClose() {
+        guard let context, !requestEnded else { return }
+        requestEnded = true
+        context.read()
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        guard !requestEnded else { return }
+        context.fireChannelRead(data)
+    }
+
+    func channelReadComplete(context: ChannelHandlerContext) {
+        context.fireChannelReadComplete()
+        if requestEnded {
+            context.read()
+        }
     }
 }
 
