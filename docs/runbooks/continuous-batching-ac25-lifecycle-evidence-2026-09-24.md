@@ -5,10 +5,12 @@ Phase B of [`continuous-batching-ac25-m2-plan.md`](continuous-batching-ac25-m2-p
 Raw, sanitized JSON: [`data/cb-ac25-m2-2026-09-24/`](data/cb-ac25-m2-2026-09-24/)
 (final pass at the top level, the confirming second pass under `rerun/`).
 
-**Headline: the batched serve path produces wrong output.** Three defects from
-two root causes, all fixed on this branch, all present in the binaries tested:
-signed 176 (which served CB canary on this tuple), candidate 181 and `main` @
-`57022da8`. Earlier canary binaries (172, 175) were not tested.
+**Headline: the batched serve path produces wrong output and occasionally
+hangs.** Four defects from three root causes, all fixed on this branch. D-1..D-3
+were confirmed in the binaries tested: signed 176 (which served CB canary on
+this tuple), candidate 181 and `main` @ `57022da8`; earlier canary binaries
+(172, 175) were not tested. D-4 is in `main`'s delivery code, which Phase A did
+not touch.
 The lifecycle cases below were collected on the fixed build. The earlier
 CB throughput and exact-token evidence is invalidated; see "What this
 invalidates".
@@ -99,19 +101,40 @@ path; the old decision does not carry over.
 | 7b | Cancel after first token | **pass** | Reset right after the first visible token. Probe on the single slot served in 0.17 s. |
 | 9 | Usage finalization | **pass (usage)** | Stop-terminated and length-terminated rows report the same `prompt_tokens` / `completion_tokens` / `macprovider_model_hash_observed` as serial. Receipt half not evidenced (no receipts on direct HTTP). |
 
-## Open anomaly — one request hung (freeze blocker)
+## D-4 — batched requests hung when a token raced the drain exit (fixed)
 
-In the final pass, one batched request (`quality` probe, "capital of France",
-`max_tokens` 60, issued right after the case suite) got no response for 600 s,
-the client timeout. It logged nothing: no completion, no error, no serial route.
-The 3 s queue-wait deadline did not fire, and later requests on the single slot
-were served normally, so it stalled outside the scheduler slot, in HTTP
-handling, prompt preparation or delivery. That violates "exactly one terminal
-event". Not reproduced in about 45 further batched requests across three
-targeted replays (the same sequence, serial/batched interleave, a fresh instance
-through the full suite), nor in a second complete pass on the same binary
-(`rerun/`: every case outcome identical, quality probe answered). Must be
-explained or reproduced before the campaign freezes.
+The final pass had one batched request with no response for 600 s and no log
+line. A dedicated soak reproduced it, and a lab-only lifecycle trace
+(`MACPROVIDER_CB_TRACE=1`) located it:
+
+| Soak (same workload, fresh request ids per iteration) | Binary | Requests | Stalls |
+| --- | --- | --- | --- |
+| Treatment, untraced | `4a61ac36` | 1040 | **4** (all after ~700 requests) |
+| Treatment, traced | `6b3ecffd` | 1040 | **1** |
+| Fixed, untraced | `c33c1748` (`c05a7217`) | 2015 | **0** |
+
+The stalled request's trace stops at `sch_complete status=stop waiters=1`
+with no terminal-delivery step; the healthy request before it continues
+`sch_ftd delivered=true` → `sch_resumed` → `http_runtime_returned`
+(`soak/trace/stalled-vs-healthy.cbtrace.txt`).
+
+Cause: `ContinuousBatchTokenDelivery`'s drain task saw an empty queue and
+released the lock before clearing `draining`. An `offer()` in that gap appended
+the next token and started no drain, because `draining` was still true. The
+terminal `finish(afterDraining:)` then waited on a drain that never ran, and its
+timeout could not fire because `drainGeneration` was already nil. The request
+got no response, and the slot was already free. Fix: `finishDrain` re-checks the queue
+under the same lock that clears `draining`. The regression test
+`testOfferRacingDrainExitIsDeliveredAndTerminalCompletes` lands the offer in
+that gap through a test seam: it fails on the old code (completion never fires,
+racing token stranded) and passes on the fix. At the pre-fix rate (0.38%), zero
+stalls in 2015 requests has probability ≈ 5 × 10⁻⁴.
+
+A control arm (`main` + D-1..D-3 fix, no Phase A) was started for attribution
+and stopped: its first long row spent the run CPU-bound in
+`PagedKVCache.physicalLayerBlocks` host-side KV recording and never exercised
+the hang. D-4 is attributed from the code instead: the delivery class is
+unchanged by Phase A.
 
 ## Lane L
 
@@ -136,7 +159,6 @@ Open, AC-25 does **not** close:
 - 5a / 9 settlement halves: single owner and receipt parity need the relay path.
 - Cases 8a / 8b: fixture-only by decision (no fault-injection hook).
 - Case 10: warm-swap drain.
-- The hang above.
 
 The enable-gate API lifecycle row stays unchecked.
 
