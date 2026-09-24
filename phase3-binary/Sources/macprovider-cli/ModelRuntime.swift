@@ -1627,6 +1627,18 @@ actor ModelRuntime: ModelRuntimeServing {
     private static let pagedKVRuntimeMoEProbePromptA = "Draft a short summary of today's shipping forecast."
     private static let pagedKVRuntimeMoEProbePromptB = "List three ingredients commonly used in a simple tomato soup."
 
+    /// Ordered challenge pairs for the isolation probe. The proof needs the two
+    /// rows' serial greedy tokens to differ at every checked step, or a leak
+    /// could hide behind identical references. Raw-prose prompts can share a
+    /// first token (Studio 2026-09-24: Qwen3.6-27B), so later pairs force
+    /// different continuations. Each pair is still checked against its own
+    /// serial references, so trying another pair cannot weaken the proof.
+    private static let pagedKVRuntimeIsolationProbePromptPairs: [(String, String)] = [
+        (pagedKVRuntimeMoEProbePromptA, pagedKVRuntimeMoEProbePromptB),
+        ("Count upward in words: one, two, three,", "The first letters of the alphabet are A, B, C,"),
+        ("def add(a, b):\n    return", "<html>\n  <head>\n    <title>"),
+    ]
+
     /// Runs the SPEC-039 on-device self-measurement probes (parity, and MoE input
     /// isolation when the resident model requires MoE dispatch) against `container`.
     /// Returns `(nil, nil)` immediately, without touching the model, unless paged KV is
@@ -1682,22 +1694,33 @@ actor ModelRuntime: ModelRuntimeServing {
         let layerCount = await container.perform { context in
             context.model.newCache(parameters: nil).count
         }
-        let promptA = await container.perform { context in
-            context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptA, addSpecialTokens: true)
+        var moeProbe: PagedKVRuntimeMoEProbeResult?
+        for (pairIndex, pair) in Self.pagedKVRuntimeIsolationProbePromptPairs.enumerated() {
+            let promptA = await container.perform { context in
+                context.tokenizer.encode(text: pair.0, addSpecialTokens: true)
+            }
+            let promptB = await container.perform { context in
+                context.tokenizer.encode(text: pair.1, addSpecialTokens: true)
+            }
+            let attempt = await pagedKVRuntimeProber.moe(
+                container,
+                pagedKVConfig.blockSizeTokens,
+                pagedKVConfig.maxPhysicalBlocks,
+                1,
+                layerCount,
+                promptA,
+                promptB,
+                cacheKinds
+            )
+            moeProbe = attempt
+            // Only an indistinguishable challenge moves on to the next pair; a
+            // distinguishing pair's verdict (proven or a real divergence) is final.
+            if attempt.challengeDistinguishing { break }
+            PagedKVRuntimeDiagnostics.log(
+                "batched-isolation model=\(modelID) challenge pair \(pairIndex) not distinguishing; trying next"
+            )
         }
-        let promptB = await container.perform { context in
-            context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptB, addSpecialTokens: true)
-        }
-        let moeProbe = await pagedKVRuntimeProber.moe(
-            container,
-            pagedKVConfig.blockSizeTokens,
-            pagedKVConfig.maxPhysicalBlocks,
-            1,
-            layerCount,
-            promptA,
-            promptB,
-            cacheKinds
-        )
+        guard let moeProbe else { return (nil, nil) }
         let p = parityProbe
         PagedKVRuntimeDiagnostics.log(
             "parity model=\(modelID) established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) gatherKernelCalls=\(p.gatherKernelCalls) expectCalls=\(p.nLayers * p.nNew * 2) maxLogicalBlocks=\(p.maxLogicalBlocks) nonIdentityPermutation=\(p.nonIdentityPermutation)"
