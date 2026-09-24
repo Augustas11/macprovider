@@ -30,7 +30,7 @@ from pathlib import Path
 
 DEFAULT_MODEL = "mlx-community/Llama-3.2-3B-Instruct-4bit"
 DEFAULT_PROMPT = "OpenRouter provider readiness smoke. Reply with OK."
-# Benchmark/saturation need enough completion tokens that decode time, not the
+# Benchmark/capacity gates need enough completion tokens that decode time, not the
 # one-token "OK" stop, dominates generated-token throughput. Llama 3B 4bit on
 # the current fleet is a few to tens of tokens/s; a 1-token reply over a ~1s
 # post-TTFT usage flush reports ~1 tok/s and fails the OpenRouter 10 tok/s gate.
@@ -40,7 +40,7 @@ BENCHMARK_PROMPT = (
     "Do not stop until you reach 200."
 )
 MAX_BENCHMARK_REQUESTS = 200
-MAX_BENCHMARK_CONCURRENCY = 8
+MAX_BENCHMARK_CONCURRENCY = 16
 DEFAULT_MIN_SUCCESS_RATIO = 0.95
 DEFAULT_MAX_TTFT_P95_MS = 5000
 DEFAULT_MIN_OUTPUT_TOKENS_PER_SECOND = 10.0
@@ -49,7 +49,8 @@ DEFAULT_LOAD_LADDER_VALUES = (1, 2, 4, 8)
 RETRYABLE_IDLE_ERROR_CODES = frozenset({"benchmark_timeout", "ProbeError"})
 DEFAULT_LOAD_LADDER = ",".join(str(value) for value in DEFAULT_LOAD_LADDER_VALUES)
 DEFAULT_BENCHMARK_CONCURRENCY = 4
-DEFAULT_SATURATION_CONCURRENCY = 8
+DEFAULT_EXACT_CAPACITY_CONCURRENCY = 0
+DEFAULT_OVERLOAD_CONCURRENCY = 16
 DEFAULT_IDLE_LATENCY_REQUESTS = 16
 PRODUCTION_BASE_URL = "https://api.malibu.tech"
 PRODUCTION_ADMIN_URL = "https://coordinator.malibu.tech"
@@ -1080,7 +1081,7 @@ def classify_benchmark_evidence(evidence: dict, *, require_429: bool = False, mi
             return "client_or_network_exception"
         return "non_capacity_failure"
     if require_429 and int(evidence.get("shed_429", 0) or 0) < 1:
-        return "saturation_did_not_shed"
+        return "overload_did_not_shed"
     if min_success_ratio > 0 and float(evidence.get("success_ratio", 0.0) or 0.0) < min_success_ratio:
         if int(evidence.get("shed_429", 0) or 0) > 0:
             return "capacity_shed_below_success_ratio"
@@ -1088,6 +1089,111 @@ def classify_benchmark_evidence(evidence: dict, *, require_429: bool = False, mi
     if int(evidence.get("shed_429", 0) or 0) > 0:
         return "clean_capacity_shed"
     return "passed"
+
+
+def advertised_model_concurrency(models_check: dict, model: str) -> int:
+    capacities = models_check.get("capacities") if isinstance(models_check, dict) else None
+    model_capacity = capacities.get(resolve_probe_model(model)) if isinstance(capacities, dict) else None
+    root_capacity = model_capacity.get("root") if isinstance(model_capacity, dict) else None
+    concurrency = root_capacity.get("concurrency") if isinstance(root_capacity, dict) else None
+    if not is_positive_int(concurrency):
+        raise ProbeError("models check missing positive requested-model concurrency")
+    return concurrency
+
+
+def run_exact_capacity_gate(
+    base_url: str,
+    token: str,
+    model: str,
+    requests: int,
+    concurrency: int,
+    max_tokens: int,
+    min_success_ratio: float,
+    max_ttft_p95_ms: int,
+    advertised_concurrency: int,
+) -> dict:
+    effective_concurrency = concurrency or advertised_concurrency
+    if effective_concurrency > advertised_concurrency:
+        raise EvidenceProbeError(
+            "exact-capacity concurrency exceeds the advertised model capacity",
+            {
+                "classification": "exact_capacity_above_advertised",
+                "configured_concurrency": effective_concurrency,
+                "advertised_concurrency": advertised_concurrency,
+            },
+        )
+    if requests < effective_concurrency:
+        raise EvidenceProbeError(
+            "exact-capacity requests must cover the selected concurrency",
+            {
+                "classification": "exact_capacity_request_count_too_small",
+                "requests": requests,
+                "configured_concurrency": effective_concurrency,
+                "advertised_concurrency": advertised_concurrency,
+            },
+        )
+    evidence = run_benchmark(
+        base_url,
+        token,
+        model,
+        requests,
+        effective_concurrency,
+        max_tokens,
+        min_success_ratio,
+        max_ttft_p95_ms,
+        0.0,
+        False,
+        enforce_latency=False,
+    )
+    evidence["advertised_concurrency"] = advertised_concurrency
+    evidence["classification"] = "exact_capacity_passed"
+    return evidence
+
+
+def run_overload_shedding_gate(
+    base_url: str,
+    token: str,
+    model: str,
+    requests: int,
+    concurrency: int,
+    max_tokens: int,
+    max_ttft_p95_ms: int,
+    advertised_concurrency: int,
+) -> dict:
+    if concurrency <= advertised_concurrency:
+        raise EvidenceProbeError(
+            "overload concurrency must exceed the advertised model capacity",
+            {
+                "classification": "overload_not_above_advertised",
+                "configured_concurrency": concurrency,
+                "advertised_concurrency": advertised_concurrency,
+            },
+        )
+    if requests < concurrency:
+        raise EvidenceProbeError(
+            "overload requests must cover the selected concurrency",
+            {
+                "classification": "overload_request_count_too_small",
+                "requests": requests,
+                "configured_concurrency": concurrency,
+                "advertised_concurrency": advertised_concurrency,
+            },
+        )
+    evidence = run_benchmark(
+        base_url,
+        token,
+        model,
+        requests,
+        concurrency,
+        max_tokens,
+        0.0,
+        max_ttft_p95_ms,
+        0.0,
+        True,
+    )
+    evidence["advertised_concurrency"] = advertised_concurrency
+    evidence["classification"] = "overload_shed_observed"
+    return evidence
 
 
 def benchmark_failure(
@@ -1317,7 +1423,7 @@ def run_benchmark(
         )
     if require_429 and shed_count < 1:
         raise benchmark_failure(
-            "saturation benchmark did not observe an early HTTP 429",
+            "overload benchmark did not observe an early HTTP 429",
             requests,
             results,
             statuses,
@@ -1845,13 +1951,37 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--min-success-ratio", type=float, default=DEFAULT_MIN_SUCCESS_RATIO)
     parser.add_argument("--max-ttft-p95-ms", type=int, default=DEFAULT_MAX_TTFT_P95_MS)
     parser.add_argument("--min-output-tokens-per-second", type=float, default=DEFAULT_MIN_OUTPUT_TOKENS_PER_SECOND)
-    parser.add_argument("--saturation-requests", type=int, default=0)
-    parser.add_argument("--saturation-concurrency", type=int, default=DEFAULT_SATURATION_CONCURRENCY)
     parser.add_argument(
-        "--saturation-max-tokens",
+        "--exact-capacity-requests",
+        "--saturation-requests",
+        dest="exact_capacity_requests",
         type=int,
         default=0,
-        help="max_tokens for the saturation burst only; 0 uses --max-tokens, or 128 in --filing-mode",
+        help="requests for the at-or-below-advertised-capacity gate",
+    )
+    parser.add_argument(
+        "--exact-capacity-concurrency",
+        "--saturation-concurrency",
+        dest="exact_capacity_concurrency",
+        type=int,
+        default=DEFAULT_EXACT_CAPACITY_CONCURRENCY,
+        help="concurrency for the exact-capacity gate; 0 derives the paid row's advertised concurrency",
+    )
+    parser.add_argument(
+        "--exact-capacity-max-tokens",
+        "--saturation-max-tokens",
+        dest="exact_capacity_max_tokens",
+        type=int,
+        default=0,
+        help="max_tokens for the exact-capacity gate; 0 uses --max-tokens, or 128 in --filing-mode",
+    )
+    parser.add_argument("--overload-requests", type=int, default=0)
+    parser.add_argument("--overload-concurrency", type=int, default=DEFAULT_OVERLOAD_CONCURRENCY)
+    parser.add_argument(
+        "--overload-max-tokens",
+        type=int,
+        default=0,
+        help="max_tokens for the over-capacity shedding gate; 0 uses the exact-capacity max_tokens",
     )
     parser.add_argument("--admin-url", default="")
     parser.add_argument("--operator-key-env", default="OPERATOR_KEY")
@@ -1876,6 +2006,18 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--output", default="", help="write the JSON report to this path")
     args = parser.parse_args(argv)
     args.model = resolve_probe_model(args.model)
+    if args.exact_capacity_requests < 0:
+        raise SystemExit("--exact-capacity-requests must be non-negative")
+    if args.exact_capacity_concurrency < 0 or args.exact_capacity_concurrency > MAX_BENCHMARK_CONCURRENCY:
+        raise SystemExit(f"--exact-capacity-concurrency must be in [0,{MAX_BENCHMARK_CONCURRENCY}]")
+    if args.exact_capacity_concurrency > 0 and args.exact_capacity_requests < args.exact_capacity_concurrency:
+        raise SystemExit("--exact-capacity-requests must cover --exact-capacity-concurrency")
+    if args.overload_requests < 0:
+        raise SystemExit("--overload-requests must be non-negative")
+    if args.overload_concurrency < 1 or args.overload_concurrency > MAX_BENCHMARK_CONCURRENCY:
+        raise SystemExit(f"--overload-concurrency must be in [1,{MAX_BENCHMARK_CONCURRENCY}]")
+    if args.overload_requests > 0 and args.overload_requests < args.overload_concurrency:
+        raise SystemExit("--overload-requests must cover --overload-concurrency")
     if not math.isfinite(args.min_success_ratio) or args.min_success_ratio < 0 or args.min_success_ratio > 1:
         raise SystemExit("--min-success-ratio must be in [0,1]")
     if not math.isfinite(args.min_output_tokens_per_second) or args.min_output_tokens_per_second < 0:
@@ -1897,12 +2039,10 @@ def main(argv: list[str]) -> int:
             raise SystemExit(f"--filing-mode requires --benchmark-concurrency >= {DEFAULT_BENCHMARK_CONCURRENCY}")
         if args.max_tokens < 16:
             raise SystemExit("--filing-mode requires --max-tokens >= 16")
-        if args.saturation_requests < 1:
-            raise SystemExit("--filing-mode requires --saturation-requests > 0")
-        if args.saturation_concurrency < DEFAULT_SATURATION_CONCURRENCY:
-            raise SystemExit(f"--filing-mode requires --saturation-concurrency >= {DEFAULT_SATURATION_CONCURRENCY}")
-        if args.saturation_requests < args.saturation_concurrency:
-            raise SystemExit("--filing-mode requires --saturation-requests >= --saturation-concurrency")
+        if args.exact_capacity_requests < 1:
+            raise SystemExit("--filing-mode requires --exact-capacity-requests > 0")
+        if args.overload_requests < 1:
+            raise SystemExit("--filing-mode requires --overload-requests > 0")
         if not (args.admin_url and args.statement_account_id and args.statement_period):
             raise SystemExit("--filing-mode requires --admin-url, --statement-account-id, and --statement-period")
         if args.min_success_ratio < DEFAULT_MIN_SUCCESS_RATIO:
@@ -1914,17 +2054,25 @@ def main(argv: list[str]) -> int:
                 f"--filing-mode requires --min-output-tokens-per-second >= {DEFAULT_MIN_OUTPUT_TOKENS_PER_SECOND}"
             )
         args.catalog_chat = True
-    if args.saturation_max_tokens < 0:
-        raise SystemExit("--saturation-max-tokens must be >= 0")
-    if args.saturation_max_tokens == 0:
+    if args.exact_capacity_max_tokens < 0:
+        raise SystemExit("--exact-capacity-max-tokens must be >= 0")
+    if args.exact_capacity_max_tokens == 0:
         if args.filing_mode:
-            args.saturation_max_tokens = max(args.max_tokens, DEFAULT_SATURATION_MAX_TOKENS)
+            args.exact_capacity_max_tokens = max(args.max_tokens, DEFAULT_SATURATION_MAX_TOKENS)
         else:
-            args.saturation_max_tokens = args.max_tokens
-    if args.saturation_max_tokens < 1 or args.saturation_max_tokens > 128:
-        raise SystemExit("--saturation-max-tokens must be in [1,128]")
-    if args.filing_mode and args.saturation_max_tokens < DEFAULT_SATURATION_MAX_TOKENS:
-        raise SystemExit(f"--filing-mode requires --saturation-max-tokens >= {DEFAULT_SATURATION_MAX_TOKENS}")
+            args.exact_capacity_max_tokens = args.max_tokens
+    if args.exact_capacity_max_tokens < 1 or args.exact_capacity_max_tokens > 128:
+        raise SystemExit("--exact-capacity-max-tokens must be in [1,128]")
+    if args.filing_mode and args.exact_capacity_max_tokens < DEFAULT_SATURATION_MAX_TOKENS:
+        raise SystemExit(
+            f"--filing-mode requires --exact-capacity-max-tokens >= {DEFAULT_SATURATION_MAX_TOKENS}"
+        )
+    if args.overload_max_tokens < 0:
+        raise SystemExit("--overload-max-tokens must be >= 0")
+    if args.overload_max_tokens == 0:
+        args.overload_max_tokens = args.exact_capacity_max_tokens
+    if args.overload_max_tokens < 1 or args.overload_max_tokens > 128:
+        raise SystemExit("--overload-max-tokens must be in [1,128]")
     if args.load_ladder_requests_per_step < 1:
         raise SystemExit("--load-ladder-requests-per-step must be positive")
     if args.filing_mode and args.load_ladder_requests_per_step < 8:
@@ -2011,7 +2159,13 @@ def main(argv: list[str]) -> int:
         else:
             token_error = "" if token else missing_token_error(args.api_key_env, args.api_key_file, "API key")
         if token_error and (
-            args.api_key_file or args.filing_mode or args.diagnostic_mode or args.catalog_chat or args.benchmark_requests > 0 or args.saturation_requests > 0
+            args.api_key_file
+            or args.filing_mode
+            or args.diagnostic_mode
+            or args.catalog_chat
+            or args.benchmark_requests > 0
+            or args.exact_capacity_requests > 0
+            or args.overload_requests > 0
         ):
             report["checks"]["api_key"] = {"ok": False, "error": token_error}
             report["checks"]["chat"] = {"ok": False, "error": token_error}
@@ -2022,7 +2176,8 @@ def main(argv: list[str]) -> int:
             report["checks"]["benchmark"] = {"ok": False, "error": token_error}
             if load_ladder_concurrencies:
                 report["checks"]["load_ladder"] = {"ok": False, "error": token_error}
-            report["checks"]["saturation"] = {"ok": False, "error": token_error}
+            report["checks"]["exact_capacity"] = {"ok": False, "error": token_error}
+            report["checks"]["overload_shedding"] = {"ok": False, "error": token_error}
             errors.append(f"api_key: {token_error}")
             if not continue_after_error:
                 raise ProbeError(token_error)
@@ -2079,24 +2234,37 @@ def main(argv: list[str]) -> int:
                         args.max_ttft_p95_ms,
                     ),
                 )
-            if args.saturation_requests > 0:
+            if args.exact_capacity_requests > 0:
                 record_check(
-                    "saturation",
-                    lambda: run_benchmark(
+                    "exact_capacity",
+                    lambda: run_exact_capacity_gate(
                         args.base_url,
                         token,
                         args.model,
-                        args.saturation_requests,
-                        args.saturation_concurrency,
-                        args.saturation_max_tokens,
-                        0.0,
+                        args.exact_capacity_requests,
+                        args.exact_capacity_concurrency,
+                        args.exact_capacity_max_tokens,
+                        args.min_success_ratio,
                         args.max_ttft_p95_ms,
-                        0.0,
-                        True,
+                        advertised_model_concurrency(report["checks"].get("models", {}), args.model),
+                    ),
+                )
+            if args.overload_requests > 0:
+                record_check(
+                    "overload_shedding",
+                    lambda: run_overload_shedding_gate(
+                        args.base_url,
+                        token,
+                        args.model,
+                        args.overload_requests,
+                        args.overload_concurrency,
+                        args.overload_max_tokens,
+                        args.max_ttft_p95_ms,
+                        advertised_model_concurrency(report["checks"].get("models", {}), args.model),
                     ),
                 )
         else:
-            for name in ("chat", "benchmark", "saturation"):
+            for name in ("chat", "benchmark", "exact_capacity", "overload_shedding"):
                 if name not in report["checks"]:
                     report["checks"][name] = {"skipped": "missing API key"}
             if args.filing_mode and "chat_free" not in report["checks"]:

@@ -19,8 +19,9 @@ MACPROVIDER_SPEC015_API_KEY="$OPENROUTER_WHOLESALE_MP_KEY" \
     --expected-healthz-version "$EXPECTED_GATEWAY_VERSION" \
     --benchmark-requests 100 \
     --benchmark-concurrency 4 \
-    --saturation-requests 16 \
-    --saturation-concurrency 8 \
+    --exact-capacity-requests 16 \
+    --overload-requests 16 \
+    --overload-concurrency 16 \
     --output "$HOME/.local/state/macprovider/openrouter-readiness/openrouter-readiness-$(date -u +%Y%m%dT%H%M%SZ)-$$.json"
 ```
 
@@ -38,9 +39,12 @@ The probe validates:
   the paid model
 - bounded TTFT and generated-output-token throughput evidence for
   OpenRouter-like streaming requests
-- early provider-capacity shedding as `no_provider_available` HTTP 429 in the
-  explicit saturation pass; account/quota/rate-limit 429s do not satisfy this
-  check
+- an exact-capacity pass at or below the paid row's advertised concurrency,
+  derived from `/v1/openrouter/models` when no explicit concurrency is given;
+  an all-200 batch is valid and the configured success ratio still applies
+- a separate over-capacity pass above the paid row's advertised concurrency,
+  which requires early provider-capacity shedding as `no_provider_available`
+  HTTP 429; account/quota/rate-limit 429s do not satisfy this check
 - `/privacy` retaining the plaintext/no-ZDR/no-training disclosure and the
   default 90-day request-log retention statement
 
@@ -98,7 +102,8 @@ OPERATOR_KEY="$OPERATOR_KEY" \
     --filing-mode \
     --benchmark-requests 100 \
     --benchmark-concurrency 4 \
-    --saturation-requests 16 \
-    --saturation-concurrency 8 \
+    --exact-capacity-requests 16 \
+    --overload-requests 16 \
+    --overload-concurrency 16 \
     --output "$HOME/.local/state/macprovider/openrouter-readiness/openrouter-readiness-$(date -u +%Y%m%dT%H%M%SZ)-$$.json"
 ```

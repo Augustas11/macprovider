@@ -178,6 +178,15 @@ def with_catalog_paid_rows(doc: dict) -> dict:
     return doc
 
 
+def with_model_concurrency(doc: dict, concurrency: int) -> dict:
+    row = doc["data"][0]
+    for capacity in row["capacity"]:
+        if capacity.get("type") == "concurrency":
+            capacity["value"] = concurrency
+            return doc
+    raise AssertionError("fixture is missing root concurrency capacity")
+
+
 def valid_filing_doc():
     doc = with_catalog_paid_rows(valid_doc())
     free = copy.deepcopy(doc["data"][0])
@@ -900,6 +909,53 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
         with mock.patch.object(probe, "chat_once", side_effect=[result, result]):
             with self.assertRaisesRegex(probe.ProbeError, "did not observe"):
                 probe.run_benchmark("https://api.example.test", "secret", "model", 2, 2, 16, 0.0, 5000, 0.0, True)
+
+    def test_exact_capacity_accepts_all_200_at_advertised_capacity(self):
+        all_ok = {
+            "requests": 16,
+            "requests_sent": 16,
+            "concurrency": 8,
+            "statuses": {"200": 16},
+            "ok": 16,
+            "shed_429": 0,
+            "success_ratio": 1.0,
+        }
+        with mock.patch.object(probe, "run_benchmark", return_value=all_ok) as run:
+            got = probe.run_exact_capacity_gate(
+                "https://api.example.test", "secret", "model", 16, 0, 128, 0.95, 5000, 8
+            )
+        self.assertEqual(got["classification"], "exact_capacity_passed")
+        self.assertEqual(got["advertised_concurrency"], 8)
+        self.assertEqual(run.call_args.args[4], 8)
+        self.assertFalse(run.call_args.args[9])
+        self.assertFalse(run.call_args.kwargs["enforce_latency"])
+
+    def test_overload_requires_concurrency_above_advertised_capacity(self):
+        with mock.patch.object(probe, "run_benchmark") as run:
+            with self.assertRaisesRegex(probe.EvidenceProbeError, "must exceed") as raised:
+                probe.run_overload_shedding_gate(
+                    "https://api.example.test", "secret", "model", 16, 8, 128, 5000, 8
+                )
+        run.assert_not_called()
+        self.assertEqual(raised.exception.evidence["classification"], "overload_not_above_advertised")
+
+    def test_overload_reports_distinct_clean_shedding_classification(self):
+        shed = {
+            "requests": 16,
+            "requests_sent": 9,
+            "concurrency": 16,
+            "statuses": {"200": 8, "429": 1},
+            "ok": 8,
+            "shed_429": 1,
+            "success_ratio": 0.889,
+        }
+        with mock.patch.object(probe, "run_benchmark", return_value=shed) as run:
+            got = probe.run_overload_shedding_gate(
+                "https://api.example.test", "secret", "model", 16, 16, 128, 5000, 8
+            )
+        self.assertEqual(got["classification"], "overload_shed_observed")
+        self.assertEqual(got["advertised_concurrency"], 8)
+        self.assertTrue(run.call_args.args[9])
 
     def test_saturation_stops_after_first_capacity_shed_batch(self):
         ok = {
@@ -1658,8 +1714,10 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 "--continue-on-error",
                 "--benchmark-requests",
                 "100",
-                "--saturation-requests",
+                "--exact-capacity-requests",
                 "8",
+                "--overload-requests",
+                "16",
                 "--output",
                 str(output),
             ]
@@ -1683,6 +1741,49 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             self.assertIn("operator key file is not readable", report["checks"]["pool_topology"]["error"])
             self.assertTrue(any("wholesale_statement" in error for error in report["errors"]))
 
+    def test_main_reports_exact_capacity_and_overload_as_separate_checks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "report.json"
+            argv = [
+                "--base-url",
+                "https://api.example.test",
+                "--api-key-env",
+                "MACPROVIDER_TEST_API_KEY",
+                "--exact-capacity-requests",
+                "16",
+                "--exact-capacity-concurrency",
+                "8",
+                "--overload-requests",
+                "16",
+                "--overload-concurrency",
+                "16",
+                "--output",
+                str(output),
+            ]
+            models = with_model_concurrency(with_catalog_paid_rows(valid_doc()), 8)
+            exact = {"classification": "exact_capacity_passed", "ok": 16, "shed_429": 0}
+            overload = {"classification": "overload_shed_observed", "ok": 8, "shed_429": 1}
+            with mock.patch.dict(
+                os.environ, {"MACPROVIDER_TEST_API_KEY": "buyer-secret"}, clear=False
+            ), mock.patch.object(
+                probe, "read_json", return_value=(models, 200)
+            ), mock.patch.object(
+                probe, "check_healthz", return_value={"http_status": 200, "status": "ok"}
+            ), mock.patch.object(
+                probe, "check_privacy", return_value={"http_status": 200}
+            ), mock.patch.object(
+                probe, "check_chat", return_value={"ok": True}
+            ), mock.patch.object(
+                probe, "run_exact_capacity_gate", return_value=exact
+            ), mock.patch.object(
+                probe, "run_overload_shedding_gate", return_value=overload
+            ):
+                code = probe.main(argv)
+            self.assertEqual(code, 0)
+            report = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(report["checks"]["exact_capacity"]["classification"], "exact_capacity_passed")
+            self.assertEqual(report["checks"]["overload_shedding"]["classification"], "overload_shed_observed")
+
     def test_filing_mode_requires_expected_healthz_version(self):
         argv = [
             "--base-url",
@@ -1696,8 +1797,10 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             "--filing-mode",
             "--benchmark-requests",
             "100",
-            "--saturation-requests",
+            "--exact-capacity-requests",
             "8",
+            "--overload-requests",
+            "16",
         ]
         with self.assertRaisesRegex(SystemExit, "expected-healthz-version"):
             probe.main(argv)
@@ -1717,8 +1820,10 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             "--filing-mode",
             "--benchmark-requests",
             "100",
-            "--saturation-requests",
+            "--exact-capacity-requests",
             "8",
+            "--overload-requests",
+            "16",
         ]
         with self.assertRaisesRegex(SystemExit, "min-success-ratio"):
             probe.main(base + ["--min-success-ratio", "0"])
@@ -1732,10 +1837,12 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             probe.main(base + ["--min-output-tokens-per-second", "nan"])
         with self.assertRaisesRegex(SystemExit, "benchmark-concurrency"):
             probe.main(base + ["--benchmark-concurrency", "1"])
-        with self.assertRaisesRegex(SystemExit, "saturation-concurrency"):
-            probe.main(base + ["--saturation-concurrency", "1"])
-        with self.assertRaisesRegex(SystemExit, "saturation-requests"):
-            probe.main(base + ["--saturation-requests", "1"])
+        with self.assertRaisesRegex(SystemExit, "exact-capacity-concurrency"):
+            probe.main(base + ["--exact-capacity-concurrency", "17"])
+        with self.assertRaisesRegex(SystemExit, "exact-capacity-requests"):
+            probe.main(base + ["--exact-capacity-requests", "0"])
+        with self.assertRaisesRegex(SystemExit, "overload-requests"):
+            probe.main(base + ["--overload-requests", "1"])
         with self.assertRaisesRegex(SystemExit, "max-tokens"):
             probe.main(base + ["--max-tokens", "1"])
         with self.assertRaisesRegex(SystemExit, "load-ladder"):
@@ -1754,8 +1861,8 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             probe.main(loopback_admin)
         with self.assertRaisesRegex(SystemExit, "load-ladder-requests-per-step"):
             probe.main(base + ["--load-ladder-requests-per-step", "1"])
-        with self.assertRaisesRegex(SystemExit, "saturation-max-tokens"):
-            probe.main(base + ["--saturation-max-tokens", "16"])
+        with self.assertRaisesRegex(SystemExit, "exact-capacity-max-tokens"):
+            probe.main(base + ["--exact-capacity-max-tokens", "16"])
 
     def test_filing_mode_records_absent_secret_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1778,8 +1885,10 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 "--filing-mode",
                 "--benchmark-requests",
                 "100",
-                "--saturation-requests",
+                "--exact-capacity-requests",
                 "8",
+                "--overload-requests",
+                "16",
                 "--output",
                 str(output),
             ]
@@ -1860,8 +1969,10 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 "--filing-mode",
                 "--benchmark-requests",
                 "100",
-                "--saturation-requests",
+                "--exact-capacity-requests",
                 "8",
+                "--overload-requests",
+                "16",
                 "--output",
                 str(output),
             ]
@@ -1877,7 +1988,15 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 code = probe.main(argv)
             self.assertEqual(code, 1)
             report = json.loads(output.read_text(encoding="utf-8"))
-            for name in ("chat", "chat_free", "catalog_chat", "benchmark", "load_ladder", "saturation"):
+            for name in (
+                "chat",
+                "chat_free",
+                "catalog_chat",
+                "benchmark",
+                "load_ladder",
+                "exact_capacity",
+                "overload_shedding",
+            ):
                 self.assertFalse(report["checks"][name]["ok"])
                 self.assertIn("API key file is not readable", report["checks"][name]["error"])
             self.assertTrue(any("api_key" in error for error in report["errors"]))
@@ -1930,8 +2049,10 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
                 "--filing-mode",
                 "--benchmark-requests",
                 "100",
-                "--saturation-requests",
+                "--exact-capacity-requests",
                 "8",
+                "--overload-requests",
+                "16",
                 "--output",
                 str(output),
             ]
@@ -1967,7 +2088,8 @@ class OpenRouterReadinessProbeTests(unittest.TestCase):
             report = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(report["checks"]["benchmark"]["classification"], "upstream_provider_error")
             self.assertIn("catalog_chat", report["checks"])
-            self.assertIn("saturation", report["checks"])
+            self.assertIn("exact_capacity", report["checks"])
+            self.assertIn("overload_shedding", report["checks"])
             self.assertIn("load_ladder", report["checks"])
             self.assertIn("admin_healthz", report["checks"])
             self.assertIn("pool_topology", report["checks"])
