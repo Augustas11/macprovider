@@ -193,7 +193,7 @@ tmp_uninstall="$(mktemp "${TMPDIR:-/tmp}/macprovider-uninstall.XXXXXX")"
 chmod 600 "$tmp_uninstall"
 curl -fsSL --proto '=https' --tlsv1.2 --remove-on-error https://get.malibu.tech/uninstall.sh -o "$tmp_uninstall"
 uninstall_sha="$(shasum -a 256 "$tmp_uninstall" | awk '{print $1}')"
-sed -n '1,220p' "$tmp_uninstall"
+cat "$tmp_uninstall"
 MACPROVIDER_NO_PROMPT=1 bash "$tmp_uninstall" --dry-run
 ```
 
@@ -209,11 +209,17 @@ bash "$tmp_uninstall"
 rm -f "$tmp_uninstall"
 ```
 
-The public uninstaller removes launchd services, installed binary/symlink,
-install prefix, watchdog files, and logs recorded in the install manifest. It
-does not remove `~/.cache/macprovider`, Hugging Face caches, or files outside
-the listed locations. Treat identity/config retention as sensitive; do not
-print it.
+The public uninstaller first runs the installed CLI's `uninstall --yes` (and
+stops if it refuses), and refuses while an installer is still running. It
+removes launchd services (including the install-recovery job), the installed
+binary/symlink, install prefix, watchdog files, and logs recorded in the
+install manifest; Application Support contents except the lifecycle
+"uninstalled" record; autoupdate residue; the CLI's URL cache and HTTP
+storage; and leftover installer files in `$TMPDIR` and `/tmp` (the
+referral-code handoff file and installer staging directories). It keeps the
+provider identity and config (`~/.config/macprovider`, Keychain credential),
+`~/.cache/macprovider`, Hugging Face model caches, and Malibu.app settings.
+Treat identity/config retention as sensitive; do not print it.
 
 ## Buyer API Essentials
 

@@ -248,6 +248,7 @@ test-dist:
 	bash phase3-binary/dist/test/install_coordinator_url.test.sh
 	bash phase3-binary/dist/test/install_prefix.test.sh
 	bash phase3-binary/dist/test/uninstall_path_safety.test.sh
+	bash phase3-binary/dist/test/uninstall_residue.test.sh
 	bash scripts/test-watchdog-inline-drift.sh
 	bash phase3-binary/dist/test/watchdog_health_scope.test.sh
 	bash phase3-binary/dist/test/watchdog_rollback_paths.test.sh
