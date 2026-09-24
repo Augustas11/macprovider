@@ -5189,7 +5189,8 @@ class PearlUpdaterTests(unittest.TestCase):
         (install / "coordinator-cli").write_bytes(fake_elf("previous-coordinator-cli"))
         (install / "coordinator-cli").chmod(0o750)
         stats = self.updater.stats_install_root
-        stats.mkdir(mode=0o750)
+        stats.mkdir(mode=0o750, exist_ok=True)
+        stats.chmod(0o750)
         (stats / "stats-inventory-sync").write_bytes(fake_elf("previous-stats-inventory-sync"))
         (stats / "stats-inventory-sync").chmod(0o750)
         self.updater.coordinator_runtime = mock.Mock(
@@ -5546,6 +5547,32 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(marker.stat().st_mode & 0o7777, 0o644)
         restored = [tuple(call.args) for call in self.updater.systemctl.call_args_list]
         self.assertNotIn(("enable", "stats-inventory-sync.timer"), restored)
+
+    def test_reapplying_current_sidecars_releases_a_leftover_parity_hold(self):
+        self.make_bundle(stats_sidecars=True)
+        release = self.verify()
+        self.install_coherent_pair(release)
+        marker = self.updater.install_root / updater_module.STATS_INVENTORY_PARITY_MARKER_NAME
+        marker.write_text("")
+        self.assertEqual(self.updater.eligibility(release)[1], "repair_pair")
+        marker.unlink()
+        self.assertEqual(self.updater.eligibility(release)[1], "already_current")
+
+    def test_reapplying_unchanged_inventory_sidecar_clears_the_parity_marker(self):
+        marker = self.updater.install_root / updater_module.STATS_INVENTORY_PARITY_MARKER_NAME
+        self.make_bundle(runtime_only=True, stats_sidecars=True)
+        runtime = self.stage(self.verify())
+        self.operator_artifact_install_fixture(runtime)
+        self.install_operator_artifacts(runtime)
+        marker.write_text("")
+        tx = self.updater.snapshot(runtime)
+        rows = json.loads((tx / "stats-sidecar-holds.json").read_text())
+        self.assertEqual([(row["sidecar"], row["parity_marker"]) for row in rows], [("stats-inventory-sync", True)])
+        self.updater.install_release(runtime)
+        self.assertFalse(marker.exists())
+        calls = [tuple(call.args) for call in self.updater.systemctl.call_args_list]
+        self.assertIn(("disable", "stats-inventory-sync.timer"), calls)
+        self.assertNotIn(("disable", "stats-billing-mirror.timer"), calls)
 
     def test_committed_success_reconcile_keeps_changed_sidecars_held(self):
         self.make_bundle(runtime_only=True, stats_sidecars=True)

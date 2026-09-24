@@ -351,7 +351,11 @@ the sidecars are held. Installing a changed `stats-inventory-sync` is the
 signed matching-binary promotion that releases a pre-existing
 `/opt/macprovider/.coordinator-deploy-sidecar-parity-required` hold (Entry 247
 in `beta/DECISION_CRITERIA.md`); the timer stays held, and a rollback restores
-the marker. Sidecars are ELF- and checksum-verified but
+the marker. If a later full deploy leaves the marker behind (a failed initial
+inventory run or an armed abort on the onboarding path), re-run
+`macprovider-pearl-update --apply --tag vX.Y.Z` for the same runtime release.
+The marker makes the release not `already_current`, so the resulting
+`repair_pair` clears it, and the next full deploy retries activation. Sidecars are ELF- and checksum-verified but
 not executed by the updater, so a sidecar runtime fault surfaces on the
 deploy's initial sidecar run, not as an updater rollback.
 

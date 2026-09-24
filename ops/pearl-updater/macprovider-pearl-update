@@ -4282,18 +4282,20 @@ class Updater:
                         "sha256": sha256_file(snapshot_dir / artifact.installed_name),
                     }
                 )
-            if (
-                artifact.root_kind == "stats"
-                and (manifest[-1]["existed"] is False or manifest[-1]["sha256"] != artifact.sha256)
+            parity_held = artifact.installed_name == "stats-inventory-sync" and _path_entry_exists(
+                self._stats_inventory_parity_marker
+            )
+            if parity_held:
+                # Prove the marker is removable before any live mutation.
+                self._trusted_regular_file(self._stats_inventory_parity_marker, "stats inventory parity marker")
+            if artifact.root_kind == "stats" and (
+                manifest[-1]["existed"] is False or manifest[-1]["sha256"] != artifact.sha256 or parity_held
             ):
                 holds.append(
                     {
                         "sidecar": artifact.installed_name,
                         **self._stats_timer_state(artifact.installed_name),
-                        "parity_marker": (
-                            artifact.installed_name == "stats-inventory-sync"
-                            and _path_entry_exists(self._stats_inventory_parity_marker)
-                        ),
+                        "parity_marker": parity_held,
                     }
                 )
         _fsync_directory(snapshot_dir)
@@ -4355,7 +4357,7 @@ class Updater:
     def _restore_stats_inventory_parity_marker(self) -> None:
         marker = self._stats_inventory_parity_marker
         if _path_entry_exists(marker):
-            self._trusted_regular_file(marker, "stats inventory parity marker")
+            # Any existing marker already restores the hold; never block rollback.
             return
         descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
         try:
@@ -4445,6 +4447,12 @@ class Updater:
     def installed_operator_artifacts_are_coherent(self, release: Release) -> bool:
         if any(artifact.root_kind == "stats" for artifact in release.operator_artifacts) and not (
             self._stats_install_root_is_coherent()
+        ):
+            return False
+        # A parity hold left by a failed deploy activation is released only by
+        # re-applying the signed sidecar (repair_pair), never by the deploy.
+        if any(artifact.installed_name == "stats-inventory-sync" for artifact in release.operator_artifacts) and (
+            _path_entry_exists(self._stats_inventory_parity_marker)
         ):
             return False
         for artifact in release.operator_artifacts:
