@@ -420,6 +420,12 @@ actor CoordinatorClient {
     private let catalogModelSHA256: String?
     private let catalogArtifactIdentity: CatalogArtifactIdentity
     private let coordinatorReadiness: CoordinatorReadiness
+    /// Isolated lab join only (`--isolate-lifecycle` + protected-file + a
+    /// literal loopback coordinator URL): that relaxation skips the catalog
+    /// preflight, so there is never a catalog envelope and the buyer-serving
+    /// readiness gate would fail closed on every connect. Never set for a
+    /// non-loopback coordinator.
+    private let labLoopbackCatalogReadinessWaived: Bool
     private let coordinatorReadinessAttempts: Int
     private let coordinatorReadinessRetryNanoseconds: UInt64
     private let admissionPendingReadinessPollNanoseconds: UInt64
@@ -475,6 +481,7 @@ actor CoordinatorClient {
         providerAdmissionRecovery: Bool = false,
         commitAdmissionIdentityPublicKey: (@Sendable (Data, Date?) throws -> Void)? = nil,
         receiptBuilder: ReceiptBuilder? = nil,
+        labLoopbackCatalogReadinessWaived: Bool = false,
         catalogReleaseID: String? = nil,
         catalogPolicyVersion: String? = nil,
         catalogCandidateSHA256: String? = nil,
@@ -671,6 +678,7 @@ actor CoordinatorClient {
             }
             return try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
         }
+        self.labLoopbackCatalogReadinessWaived = labLoopbackCatalogReadinessWaived
         self.coordinatorReadiness = coordinatorReadiness ?? { providerID, assignedProviderID, expected in
             await CoordinatorReadinessClient.fetchReadiness(
                 coordinatorURL: config.coordinatorURL,
@@ -3968,6 +3976,10 @@ actor CoordinatorClient {
 
     private func waitForCoordinatorServingCapabilityOutcome() async -> ServingCapabilityOutcome {
         guard let (assignedProviderID, expected) = acceptedReadinessEnvelope() else {
+            if labLoopbackCatalogReadinessWaived {
+                print("WARN lab_loopback_readiness_waived isolated lab join has no catalog envelope; treating loopback coordinator buyer-serving readiness as confirmed")
+                return .confirmed
+            }
             return .unconfirmed
         }
         for attempt in 0 ..< coordinatorReadinessAttempts {

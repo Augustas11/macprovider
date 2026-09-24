@@ -1,0 +1,2 @@
+WARN lab_loopback_readiness_waived isolated lab join has no catalog envelope; treating loopback coordinator buyer-serving readiness as confirmed
+86cb97089906680160e7e5c1fe02a0e305fdba17a64f5594875d08ddd726f29a  /Users/a1/lab-ac25-m2/rig/prov/macprovider-cli

@@ -136,6 +136,43 @@ and stopped: its first long row spent the run CPU-bound in
 the hang. D-4 is attributed from the code instead: the delivery class is
 unchanged by Phase A.
 
+## Case 6 — reconnect/replay through the coordinator relay
+
+Rig (`case6-relay/`): throwaway loopback coordinator built from this branch;
+lab provider (`86cb9708`, same serve path as `4a61ac36` plus the lab waiver
+below) joined with `--isolate-lifecycle`, its own provider id, token, receipt
+key and credential root (the live store is untouched); a WebSocket proxy
+between them that, when armed, drops the connection instead of forwarding the
+next `inference_response_end`.
+
+| Request | Provider (trace) | Buyer | Coordinator request_log / ledger |
+| --- | --- | --- | --- |
+| Baseline | batched, `sch_complete status=stop` | 200, 7 tokens, `stop` | 200; credits 15 |
+| End frame dropped | batched, row completed and resumed; **no second submit of the same relay id** | 502 `provider_disconnected`, `retryable: true` | 502; credits **0**, `breaker_qualifying` |
+
+What this settles: the coordinator mints a fresh relay `request_id` per buyer
+request (an `Idempotency-Key` resend is answered 409 by the coordinator and never
+dispatched), and after a mid-flight disconnect it answers the buyer rather
+than re-dispatching the same id. The lost attempt is non-settling, and nothing
+settles twice. The provider-side replay of a finished row by the same id is
+unreachable through the relay in this topology; its no-double-settlement
+property rests on the scheduler contract (`nonSettlingReplay` omits the
+receipt) with direct-HTTP evidence in case 5c.
+
+Not settled here: the rig runs `legacy` settlement (no tier-2 catalog), so no
+receipt was issued and receipt verdicts were not exercised; and the retry
+topology with a second eligible provider was not driven.
+
+**Lab tooling fix found on the way.** `--isolate-lifecycle` against a loopback
+coordinator could never hold a session. The lab relaxation skips the catalog
+preflight, so there is no catalog envelope, and the buyer-serving readiness
+gate then failed closed on every connect. `waivesLabLoopbackCatalogReadiness`
+now waives only that gate, only when all of `--isolate-lifecycle`,
+protected-file custody, a literal loopback coordinator URL, and absent catalog
+trust hold, and it logs `WARN lab_loopback_readiness_waived`. A production
+coordinator URL never takes this path
+(`testLabLoopbackReadinessWaiverRequiresEveryIsolatedLabCondition`).
+
 ## Lane L
 
 Not run. The plan put cases 4 and 9 on live 8080 because they need no Phase A
@@ -166,7 +203,8 @@ and retry signal come from the existing capacity status, not new codes.
 
 Open, AC-25 does **not** close:
 
-- Case 6, reconnect/replay through the relay with settlement disposition.
+- Case 6 receipt half: receipt verdicts under a tier-2/settlement-enabled
+  coordinator (the rig ran `legacy`).
 - 5a / 9 settlement halves: single owner and receipt parity need the relay path.
 - Cases 8a / 8b: fixture-only by decision (no fault-injection hook).
 - Case 10: warm-swap drain.

@@ -1528,6 +1528,21 @@ struct ServeCommand: AsyncParsableCommand {
         isolateLifecycle && isLoopbackCoordinatorURL(coordinatorURL)
     }
 
+    /// The isolated lab join skips the catalog preflight (`relaxesJoinAdmissionForLab`),
+    /// so it can never present the catalog envelope the buyer-serving
+    /// readiness gate requires. Waive only that gate, only for that join.
+    static func waivesLabLoopbackCatalogReadiness(
+        isolateLifecycle: Bool,
+        credentialStore: ProviderCredentialStoreKind,
+        coordinatorURL: String?,
+        hasCatalogTrust: Bool
+    ) -> Bool {
+        isolateLifecycle
+            && credentialStore == .protectedFile
+            && relaxesJoinAdmissionForLab(isolateLifecycle: isolateLifecycle, coordinatorURL: coordinatorURL)
+            && !hasCatalogTrust
+    }
+
     static func isLoopbackCoordinatorURL(_ raw: String?) -> Bool {
         guard let raw, let url = URL(string: raw), let host = url.host?.lowercased(), !host.isEmpty else {
             return false
@@ -2348,6 +2363,12 @@ struct ServeCommand: AsyncParsableCommand {
                 providerAdmissionRecovery: providerAdmissionRecovery,
                 commitAdmissionIdentityPublicKey: commitAdmissionIdentityPublicKey,
                 receiptBuilder: receiptRuntime.builder,
+                labLoopbackCatalogReadinessWaived: Self.waivesLabLoopbackCatalogReadiness(
+                    isolateLifecycle: isolateLifecycle,
+                    credentialStore: resolved.credentialStore,
+                    coordinatorURL: resolved.coordinatorURL,
+                    hasCatalogTrust: startupPreflight.catalogTrust != nil
+                ),
                 catalogReleaseID: startupPreflight.catalogTrust?.releaseID,
                 catalogPolicyVersion: startupPreflight.catalogTrust?.policyVersion,
                 catalogCandidateSHA256: startupPreflight.catalogTrust?.digest,
