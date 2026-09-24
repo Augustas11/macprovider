@@ -12,6 +12,10 @@ set -euo pipefail
 . "$(dirname "$0")/../env.sh"
 [ "${E2E_NO_GATE_WORKAROUND:-0}" != 1 ] || exit 0
 cd "$E2E_REPO"
+# Both bugs are fixed in tree (#1693 E2): the lane ships the commit's
+# coordinator.yaml as tier2-trust-root.yaml and puts the candidate in its own
+# service-readable dir. Nothing to work around then.
+if grep -q 'tier2-trust-root.yaml' scripts/catalog-content-release.sh; then echo "fixed in tree; no workaround"; exit 0; fi
 [ -z "$(git status --porcelain)" ] || e2e_die dirty
 git checkout -q main
 grep -q 'E2E WORKAROUND' scripts/catalog-content-release.sh && { echo "already applied"; exit 0; }

@@ -5632,6 +5632,15 @@ def load_pricing_move_acks(data: bytes, label: str) -> set[tuple[str, str, str]]
     return acks
 
 
+def pricing_move_is_own_row(name: str, old_row: str, new_row: str) -> bool:
+    """SPEC-023-R018 rule 2 (v0.16.1): a served name that resolved to `default`
+    and now resolves to an added row whose key is exactly that name is the
+    intended effect of adding the row, not an unreviewed move. Every other move
+    (a removal, a row capturing a different or normalized name, a move between
+    two non-default rows) still needs an acknowledgement."""
+    return old_row == "default" and new_row != "default" and new_row == name
+
+
 def release_model_names(directory: pathlib.Path) -> set[str]:
     """Every catalog key and served `model_id` of a release directory."""
     obj = strict_json((directory / "autotune-candidates.json").read_bytes(), f"{directory}/autotune-candidates.json")
@@ -5664,7 +5673,7 @@ def pricing_model_moves(live: dict, candidate: dict, names: set[str], acks: set[
             "new": candidate[new_row],
             "move": move,
         })
-        if move and (name, old_row, new_row) not in acks:
+        if move and (name, old_row, new_row) not in acks and not pricing_move_is_own_row(name, old_row, new_row):
             unacknowledged.append(escape_model_name(name))
     return {"models": models, "unresolved_names": unresolved, "unacknowledged_moves": unacknowledged}
 
@@ -5897,7 +5906,8 @@ def _content_gate_pricing(
         for name in diff["unacknowledged_moves"]:
             reasons.append(f"pricing-diff.json lists unacknowledged move {name!r}")
         for entry in models:
-            if entry["old_row"] != entry["new_row"] and (entry["model"], entry["old_row"], entry["new_row"]) not in escaped_acks:
+            if (entry["old_row"] != entry["new_row"] and (entry["model"], entry["old_row"], entry["new_row"]) not in escaped_acks
+                    and not pricing_move_is_own_row(entry["model"], entry["old_row"], entry["new_row"])):
                 reasons.append(f"pricing-diff.json move {entry['model']!r} is not acknowledged")
         # The coordinator-resolved names: exactly the digested unresolved names,
         # each in the validator's shape, every row move acknowledged.
@@ -5910,7 +5920,7 @@ def _content_gate_pricing(
         for entry in checked:
             if entry["old"]["row_key"] != entry["new"]["row_key"] and (
                 entry["name"], entry["old"]["row_key"], entry["new"]["row_key"]
-            ) not in escaped_acks:
+            ) not in escaped_acks and not pricing_move_is_own_row(entry["name"], entry["old"]["row_key"], entry["new"]["row_key"]):
                 reasons.append(f"pricing-diff.json coordinator-resolved move {entry['name']!r} is not acknowledged")
     except (CatalogError, KeyError, TypeError) as exc:
         reasons.append(f"pricing-diff.json malformed: {exc}")
@@ -5944,13 +5954,20 @@ def content_gate(
     ack_data: bytes | None = None,
     pricing_diff: bytes | None = None,
     pricing_diff_sha256: str | None = None,
+    tier2_coordinator_config: pathlib.Path | None = None,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     by_lane: dict[str, list[str]] = {lane: [] for lane in CONTENT_GATE_LANE_ORDER}
     try:
         # stdout carries exactly one JSON verdict; verify-directory's progress lines go to stderr.
         with contextlib.redirect_stdout(sys.stderr):
-            verify_directory(release)
+            # An explicit Tier-2 trust root (#1693): a shipped verifier bundle
+            # has no repository coordinator.yaml beside it, so the lane passes
+            # the reviewed commit's bytes (sha-pinned) instead.
+            if tier2_coordinator_config is None:
+                verify_directory(release)
+            else:
+                verify_directory(release, tier2_coordinator_config=tier2_coordinator_config)
     except CatalogError as exc:
         by_lane["invalid-release"].append(f"verify-directory: {exc}")
     manifest_obj = _load_release_manifest(release)
@@ -6063,6 +6080,7 @@ def cmd_content_gate(
     ack_path: pathlib.Path | None = None,
     pricing_diff_path: pathlib.Path | None = None,
     pricing_diff_sha256: str | None = None,
+    tier2_coordinator_config: pathlib.Path | None = None,
 ) -> int:
     if (pricing_diff_path is None) != (pricing_diff_sha256 is None):
         fail("content-gate: --pricing-diff and --pricing-diff-sha256 go together")
@@ -6078,7 +6096,7 @@ def cmd_content_gate(
             release, live, ledger, commit=commit, now=now, tier2_index_path=tier2_index_path,
             ack_data=None if ack_path is None else ack_path.read_bytes(),
             pricing_diff=None if pricing_diff_path is None else pricing_diff_path.read_bytes(),
-            pricing_diff_sha256=pricing_diff_sha256,
+            pricing_diff_sha256=pricing_diff_sha256, tier2_coordinator_config=tier2_coordinator_config,
         )
     except (KeyError, TypeError, ValueError, AttributeError, OSError) as exc:
         fail(f"content-gate: malformed release input: {exc!r}")
@@ -6452,6 +6470,14 @@ def main() -> int:
     )
     gate_parser.add_argument("--pricing-diff", type=pathlib.Path, help="pricing-effective-diff output to bind (#1693)")
     gate_parser.add_argument("--pricing-diff-sha256", help="sha256 of --pricing-diff the operator acknowledged")
+    gate_parser.add_argument(
+        "--tier2-coordinator-config",
+        type=pathlib.Path,
+        help=(
+            "coordinator.yaml whose tier2.catalog_public_key authenticates --release's tier2-catalog.json "
+            "(default: the repository phase4-coordinator/dist/coordinator.yaml)"
+        ),
+    )
     splice_parser = sub.add_parser(
         "splice-coordinator-rate-card",
         help=(
@@ -6560,7 +6586,7 @@ def main() -> int:
         elif args.command == "content-gate":
             return cmd_content_gate(
                 args.release, args.live, args.ledger, args.commit, args.now, args.tier2_content_index,
-                args.acknowledged_moves, args.pricing_diff, args.pricing_diff_sha256,
+                args.acknowledged_moves, args.pricing_diff, args.pricing_diff_sha256, args.tier2_coordinator_config,
             )
         elif args.command == "splice-coordinator-rate-card":
             cmd_splice_coordinator_rate_card(args.live_config, args.block, args.output)

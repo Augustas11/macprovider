@@ -4,10 +4,10 @@
 # them under $E2E_WORK/bins/<tag>/. e2e_checkout_tag (lib/common.sh) restores
 # the right set into the checkout before a deploy.
 #
-# Known pre-existing repo issue (not #1693): build-linux.sh emits
-# phase4-coordinator/dist/stats-hardware-verifier-linux-amd64, which .gitignore
-# does not list, so the deploy's clean-checkout check fails right after a
-# build. The scratch clone excludes it via .git/info/exclude (local only).
+# build-linux.sh emits phase4-coordinator/dist/stats-hardware-verifier-linux-amd64,
+# which older trees' .gitignore does not list (fixed in tree), so the deploy's
+# clean-checkout check would fail right after a build at the pre-#1693 tag. The
+# scratch clone excludes it via .git/info/exclude (local only).
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 cd "$E2E_REPO"

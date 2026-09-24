@@ -39,9 +39,15 @@ file fsync + rename + parent fsync with explicit owner/group/mode.
 
 Standard library only; run as `python3 -I`. Exit codes: 0 ok / nothing to do,
 1 usage or refusal before any change, 3 state differs from the journal
-(compare-and-swap refused; nothing further changed), 5 stopped with the
-journal kept (follow docs/runbooks/catalog-release-decision-tree.md
-§pricing-txn).
+(compare-and-swap refused; nothing further changed), 4 the coordinator is
+down or still booting (not serving /healthz), so the pair could not be proven
+yet (journal kept; not a foreign write), 5 stopped with the journal kept
+(follow docs/runbooks/catalog-release-decision-tree.md §pricing-txn).
+
+SIGHUP is only ever sent to a READY coordinator: its unit is active, its
+MainPID is stable and it answers /healthz. The coordinator installs its
+SIGHUP handler before its listeners start, so a ready coordinator never dies
+of the signal; a booting one is waited for (bounded), never signalled.
 """
 
 from __future__ import annotations
@@ -71,6 +77,8 @@ DEPLOY_LOCK = ENV.get("MACPROVIDER_DEPLOY_LOCK_FILE", os.path.join(ROOT, ".coord
 SYSTEMCTL = ENV.get("MACPROVIDER_SYSTEMCTL", "systemctl")
 UNIT = ENV.get("MACPROVIDER_COORDINATOR_UNIT", "macprovider-coordinator")
 BUYER_URL = ENV.get("MACPROVIDER_COORDINATOR_URL", "http://127.0.0.1:8443")
+HEALTHZ_URL = ENV.get("MACPROVIDER_COORDINATOR_HEALTHZ_URL", "http://127.0.0.1:8444/healthz")
+ALERT_UNIT = "macprovider-pearl-updater-alert@macprovider-coordinator-pricing-close.service.service"
 BOOT_ID_FILE = ENV.get("MACPROVIDER_BOOT_ID_FILE", "/proc/sys/kernel/random/boot_id")
 REQUIRED_UID = int(ENV.get("MACPROVIDER_REQUIRED_UID", "0"))
 SYSTEMD_ROOT = ENV.get("MACPROVIDER_SYSTEMD_ROOT", "/etc/systemd/system")
@@ -130,6 +138,10 @@ class Refused(Exception):
 
 class Mismatch(Exception):
     """exit 3: on-disk state is neither side the journal expects."""
+
+
+class NotReady(Exception):
+    """exit 4: the coordinator is down or still booting; the journal is kept."""
 
 
 class Stop(Exception):
@@ -684,10 +696,35 @@ def wait_live(j: Journal, side: str, since: float, source: str | None, snapshot_
         time.sleep(1)
 
 
-def hup_and_verify(j: Journal, side: str, snapshot_after: int, seconds: float) -> str | None:
-    pid = coordinator_pid()
+def healthz_ok() -> bool:
+    try:
+        with urllib.request.urlopen(HEALTHZ_URL, timeout=5) as resp:
+            return resp.status == 200
+    except OSError:
+        return False
+
+
+def ready_pid(wait_seconds: float) -> tuple[int, str]:
+    """(MainPID, "") once the coordinator is ready for a SIGHUP: unit active,
+    MainPID stable across a /healthz 200. Waits (bounded) while it boots.
+    (0, why) when it is not running, or still booting at the deadline."""
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        state, pid = systemctl_show("ActiveState"), coordinator_pid()
+        if state not in ("active", "activating", "reloading") or not pid:
+            return 0, f"{UNIT} is not running (ActiveState={state or '?'})"
+        if healthz_ok() and coordinator_pid() == pid:
+            return pid, ""
+        why = f"{UNIT} (pid {pid}) is still booting: {HEALTHZ_URL} does not answer 200"
+        if time.monotonic() >= deadline:
+            return 0, why
+        time.sleep(2)
+
+
+def hup_and_verify(j: Journal, side: str, snapshot_after: int, seconds: float, ready_seconds: float) -> str | None:
+    pid, why = ready_pid(ready_seconds)
     if not pid:
-        return "coordinator is not running"
+        raise NotReady(f"SIGHUP not sent: {why}")
     since = time.time()
     os.kill(pid, signal.SIGHUP)
     log(f"sent SIGHUP to {UNIT} (pid {pid})")
@@ -949,6 +986,7 @@ def cmd_recover(args: dict) -> int:
         return 0
     verifier = args.get("--verifier")
     wait = float(args.get("--wait-seconds", "60"))
+    ready_wait = float(args.get("--ready-seconds", "900"))
     prior_snap = j.txn["verdict"]["prior_billing_snapshot_id"]
     log(f"journal {j.txn['id']} phase {j.phase}")
     if j.phase in TERMINAL:
@@ -961,7 +999,14 @@ def cmd_recover(args: dict) -> int:
         restore = j.txn.get("restore") or {}
         why = live_matches(j, "prior", float(restore.get("wall", 0)), "boot", prior_snap)
         if why is not None:
-            why = hup_and_verify(j, "prior", prior_snap, wait)
+            # A coordinator still booting proves the restore with its own boot
+            # record; one already up gets exactly one SIGHUP.
+            pid, not_ready = ready_pid(ready_wait)
+            if not pid:
+                raise NotReady(f"prior pair restored on disk; {not_ready}")
+            why = live_matches(j, "prior", float(restore.get("wall", 0)), "boot", prior_snap)
+            if why is not None:
+                why = hup_and_verify(j, "prior", prior_snap, wait, ready_wait)
         if why is not None:
             raise Stop(f"prior pair restored on disk but not proven live: {why}")
         j.set_phase("rolled-back")
@@ -975,7 +1020,7 @@ def cmd_recover(args: dict) -> int:
         j.set_phase("restored-unverified")
         raise Stop("prior pair restored on disk; the coordinator is not running, so its boot must prove it "
                    "(macprovider-coordinator-pricing-close.service)")
-    why = hup_and_verify(j, "prior", prior_snap, wait)
+    why = hup_and_verify(j, "prior", prior_snap, wait, ready_wait)
     if why is not None:
         raise Stop(f"prior pair restored on disk and re-HUPed but not proven live: {why}")
     j.set_phase("rolled-back")
@@ -1027,18 +1072,10 @@ def cmd_close_restored(args: dict) -> int:
     j = load_journal()
     if j is None or j.phase != "restored-unverified":
         return 0
-    nonce = (j.txn.get("restore") or {}).get("nonce")
-    j.close()
-    fds = take_locks(float(args.get("--lock-wait-seconds", "300")))
-    if fds is None:
-        raise Stop("could not take the lane lock set to close the restored pricing journal")
+    restore = j.txn.get("restore") or {}
+    nonce = restore.get("nonce")
+    snap = j.txn["verdict"]["prior_billing_snapshot_id"]
     try:
-        j = load_journal()
-        if j is None or j.phase != "restored-unverified":
-            return 0
-        restore = j.txn.get("restore") or {}
-        if restore.get("nonce") != nonce:
-            raise Stop("the restored pricing journal changed while waiting for the lock set")
         boot_id = ""
         try:
             boot_id = open(BOOT_ID_FILE).read().strip()
@@ -1054,9 +1091,48 @@ def cmd_close_restored(args: dict) -> int:
                 return f"{UNIT} has not started since the restore (ActiveEnterTimestampMonotonic={raw or '?'})"
             return None
 
-        why = wait_live(j, "prior", float(restore.get("wall", 0)), "boot",
-                        j.txn["verdict"]["prior_billing_snapshot_id"],
-                        float(args.get("--wait-seconds", "120")), started_after_restore)
+        def ready_since_restore() -> str | None:
+            why = started_after_restore()
+            if why is None:
+                pid, not_ready = ready_pid(0)
+                why = None if pid else not_ready
+            return why
+
+        # Read-only, WITHOUT the lane lock set (an operator can still run
+        # --recover-pricing-txn meanwhile): wait for the coordinator to be up
+        # and its boot record to prove the prior pair. A slow boot (SQLite WAL
+        # recovery after an unclean shutdown can take minutes) is waited for in
+        # windows; each window that ends unproven raises the alert and keeps
+        # waiting, so the journal closes itself once the coordinator is up.
+        # After the last window the closer stops (OnFailure alerts again; the
+        # next boot's pre-start + closer, or --recover-pricing-txn, retry).
+        window = float(args.get("--wait-seconds", "900"))
+        windows = int(args.get("--windows", "8"))
+        why = None
+        for attempt in range(1, windows + 1):
+            why = wait_live(j, "prior", float(restore.get("wall", 0)), "boot", snap, window, ready_since_restore)
+            if why is None:
+                break
+            log(f"ALERT: window {attempt}/{windows}: the coordinator boot has not proved the restored prior "
+                f"pair yet ({why}); still waiting")
+            if attempt < windows:
+                subprocess.run([SYSTEMCTL, "start", "--no-block", ALERT_UNIT], capture_output=True)
+        if why is not None:
+            raise Stop(f"the coordinator boot did not prove the restored prior pair: {why}")
+    finally:
+        j.close()
+    fds = take_locks(float(args.get("--lock-wait-seconds", "300")))
+    if fds is None:
+        raise Stop("could not take the lane lock set to close the restored pricing journal")
+    try:
+        j = load_journal()
+        if j is None or j.phase != "restored-unverified":
+            return 0
+        restore = j.txn.get("restore") or {}
+        if restore.get("nonce") != nonce:
+            raise Stop("the restored pricing journal changed while waiting for the lock set")
+        # Re-prove under the locks: nothing may have moved since.
+        why = wait_live(j, "prior", float(restore.get("wall", 0)), "boot", snap, 30, started_after_restore)
         if why is not None:
             raise Stop(f"the coordinator boot did not prove the restored prior pair: {why}")
         j.set_phase("rolled-back")
@@ -1319,9 +1395,9 @@ def main(argv: list[str]) -> int:
             raise Refused("--resolve-deploy-conflict takes no arguments")
         return cmd_resolve_deploy_conflict()
     if cmd == "--close-restored":
-        return cmd_close_restored(parse(rest, ("--wait-seconds", "--lock-wait-seconds")))
+        return cmd_close_restored(parse(rest, ("--wait-seconds", "--windows", "--lock-wait-seconds")))
     if cmd in ("recover", "--recover"):
-        return cmd_recover(parse(rest, ("--verifier", "--wait-seconds")))
+        return cmd_recover(parse(rest, ("--verifier", "--wait-seconds", "--ready-seconds")))
     if cmd == "begin":
         a = parse(rest, ("--candidate-yaml", "--new-current", "--prior-current", "--candidate-window", "--verdict"))
         if len(a) != 5:
@@ -1350,11 +1426,17 @@ def main(argv: list[str]) -> int:
         elif cmd == "restore-disk" and not rest:
             restore_disk(j)
         elif cmd == "verify-live" and rest and rest[0] in ("prior", "candidate"):
-            a = parse(rest[1:], ("--since", "--source", "--snapshot-after", "--wait-seconds"))
+            a = parse(rest[1:], ("--since", "--source", "--snapshot-after", "--wait-seconds", "--ready-seconds"))
+            # A booting coordinator writes its record only once up: wait for
+            # readiness first (bounded), then for the record.
+            ready_pid(float(a.get("--ready-seconds", "0")))
             why = wait_live(j, rest[0], float(a.get("--since", "0")), a.get("--source"),
                             int(a.get("--snapshot-after", j.txn["verdict"]["prior_billing_snapshot_id"])),
                             float(a.get("--wait-seconds", "30")))
             if why is not None:
+                pid, not_ready = ready_pid(0)
+                if not pid:
+                    raise NotReady(f"{rest[0]} pair not proven live yet: {why}; {not_ready}")
                 raise Mismatch(f"{rest[0]} pair not proven live: {why}")
         elif cmd == "finalize" and len(rest) == 1 and rest[0] in ("prior", "candidate"):
             want = "verified" if rest[0] == "candidate" else "rolled-back"
@@ -1378,6 +1460,10 @@ if __name__ == "__main__":
     except Mismatch as exc:
         log(f"state mismatch: {exc}; journal kept; follow {RUNBOOK}")
         sys.exit(3)
+    except NotReady as exc:
+        log(f"coordinator not ready: {exc}; journal kept (not a foreign write): once {UNIT} serves /healthz run "
+            f"scripts/catalog-content-release.sh --recover-pricing-txn; follow {RUNBOOK}")
+        sys.exit(4)
     except Stop as exc:
         log(f"STOP: {exc}; journal kept; follow {RUNBOOK}")
         sys.exit(5)

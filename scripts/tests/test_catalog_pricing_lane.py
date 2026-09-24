@@ -272,10 +272,15 @@ class EffectiveDiffTests(unittest.TestCase):
         candidate["some-new-model"] = dict(self.live["qwen3-8b"])
         served = "mlx-community/Some-New-Model-4bit"
         diff, _ = self.diff(candidate, pinned={served})
-        self.assertEqual(diff["unacknowledged_moves"], [served, "some-new-model"])
+        # SPEC-023-R018 rule 2 (v0.16.1): the added row's own key moving off
+        # `default` is the addition itself (listed, no ack); a normalized name
+        # it captures is a move that needs one.
+        self.assertEqual(diff["unacknowledged_moves"], [served])
+        own = next(e for e in diff["models"] if e["model"] == "some-new-model")
+        self.assertEqual((own["old_row"], own["new_row"], own["move"]), ("default", "some-new-model", True))
         entry = next(e for e in diff["models"] if e["model"] == served)
         self.assertEqual((entry["old_row"], entry["new_row"]), ("default", "some-new-model"))
-        ack = acks((served, "default", "some-new-model"), ("some-new-model", "default", "some-new-model"))
+        ack = acks((served, "default", "some-new-model"))
         self.assertEqual(self.diff(candidate, pinned={served}, ack=ack)[0]["unacknowledged_moves"], [])
         # An exact-key row added under a name that used to normalize elsewhere captures it.
         candidate = copy.deepcopy(self.live)
@@ -539,16 +544,25 @@ class GatePricingScopeTests(unittest.TestCase):
         self.assertLess(order.index("stale-or-future"), order.index("pricing-globals"))
         self.assertLess(order.index("pricing-globals"), order.index("pricing-unacked-move"))
 
-    def test_row_addition_needs_acknowledgement(self) -> None:
+    def test_row_addition_capturing_only_its_own_key_needs_no_acknowledgement(self) -> None:
         def add(o: dict) -> None:
             o["rows"]["zz-new-model"] = dict(o["rows"]["qwen3-8b"])
 
         self.rate_card(add)
         result = self.gate()
-        self.assertLane(result, "pricing-unacked-move")
+        self.assertTrue(result["ok"], result)
         self.assertEqual(result["pricing"]["added"][0]["row"], "zz-new-model")
+        # A self acknowledgement stays accepted (older reviewed files carry it).
         result = self.gate(ack_data=acks(("zz-new-model", "default", "zz-new-model")))
         self.assertTrue(result["ok"], result)
+
+    def test_own_row_exemption_is_exact(self) -> None:
+        own = cr.pricing_move_is_own_row
+        self.assertTrue(own("zz-new-model", "default", "zz-new-model"))
+        self.assertFalse(own("Zz-New-Model", "default", "zz-new-model"))  # captured through normalization
+        self.assertFalse(own("zz-new-model", "qwen3-8b", "zz-new-model"))  # moved off another row
+        self.assertFalse(own("zz-new-model", "zz-new-model", "default"))  # a removal
+        self.assertFalse(own("default", "default", "default"))
 
     def test_supplied_pricing_diff_is_bound(self) -> None:
         self.rate_card(lambda o: o["rows"]["qwen3-8b"].update(completion_rate_per_mtok=27001))
@@ -595,6 +609,13 @@ class GatePricingScopeTests(unittest.TestCase):
         acked = cr.pricing_canonical_bytes(obj)
         result = self.gate(ack_data=ack, pricing_diff=acked, pricing_diff_sha256=cr.sha256(acked))
         self.assertTrue(result["ok"], result)
+        # A coordinator-resolved name captured by an added row of exactly its
+        # own name needs no acknowledgement; any other destination does.
+        diff, _ = cr.pricing_effective_diff(live_rows, release_rows, set(), {"bad name"}, EMPTY_ACKS)
+        own_obj = cr.pricing_acknowledged_object(diff, go_resolutions("bad name"))
+        own_obj["model_resolutions"][0]["new"]["row_key"] = "bad name"
+        own_bytes = cr.pricing_canonical_bytes(own_obj)
+        self.assertTrue(self.gate(pricing_diff=own_bytes, pricing_diff_sha256=cr.sha256(own_bytes))["ok"])
         # Resolutions must cover exactly the digested unresolved names.
         obj["model_resolutions"] = []
         uncovered = cr.pricing_canonical_bytes(obj)

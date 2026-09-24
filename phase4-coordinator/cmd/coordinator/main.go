@@ -163,6 +163,10 @@ func main() {
 		}))
 	}
 
+	// #1693 E2 V8: catch SIGHUP before any slow boot work; the main signal
+	// loop takes it over (handOff) once it is registered.
+	bootSIGHUP := installBootSIGHUPGuard(zerolog.New(os.Stdout).With().Timestamp().Logger())
+
 	cfg, bootConfigDigests, err := config.LoadWithOverlayDigests(*configPath, *configOverlay)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
@@ -215,6 +219,7 @@ func main() {
 	providerhttp.Init(cfg.ProviderHTTP.TimeoutS)
 
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	checkPricingRecoveryWiring(logger, filepath.Dir(*configPath))
 	compatibilityPolicyMode := "unconfigured"
 	if cfg.Coordinator.CompatibilitySet.Configured() {
 		compatibilityPolicyMode = "configured"
@@ -1484,6 +1489,13 @@ func main() {
 	startGitHubAuthStatePruner(shutdownCtx, tokenStore, logger)
 	startPayoutNoncePruner(shutdownCtx, payoutAddresses, logger)
 
+	// The main loop owns SIGHUP before the listeners start: a coordinator that
+	// answers /healthz always reloads on SIGHUP (release lanes signal only
+	// then). A SIGHUP queued here is handled once boot is recorded below.
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	bootSIGHUP.handOff()
+
 	go func() {
 		logger.Info().Str("addr", providerAddr).Msg("provider websocket server listening")
 		errs <- providerHTTP.ListenAndServe()
@@ -1506,12 +1518,11 @@ func main() {
 		Msg("coordinator config applied")
 	recordAppliedConfig(logger, "boot", *configPath, *configOverlay, bootConfigDigests, bootConfigLoadedAt, buyerServer.AppliedEconomics())
 
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	for {
 		select {
 		case sig := <-signals:
 			if sig == syscall.SIGHUP {
+				checkPricingRecoveryWiring(logger, filepath.Dir(*configPath))
 				reloadCoordinatorConfig(*configPath, *configOverlay, cfg.Tier2, logger, wsServer, buyerServer, autotuneCatalog, autotuneEvidenceStore, trustPoolAdminReloader, billingStore)
 				continue
 			}

@@ -203,18 +203,34 @@ coordinator binary, the recovery helper, the closer unit and the shell guard,
 but not the Pearl updater, the Tier-2 enforcement watchdog or the Python guard
 module, and preflight hashes all of them against the commit
 (`scripts/pricing-lane-installed-writers.txt`). Do these steps in order, all
-from a clean checkout of the same signed tag on `main`:
+from the same signed tag `<tag>` on `main`:
 
-1. **Updater bundle first.** Run `ops/pearl-updater/install-pearl-updater.sh`
-   from the tag. This installs the guard-bearing `macprovider-pearl-update`,
+1. **Updater bundle first, as root on Pearl.** On Pearl, beside a checkout of
+   `<tag>` (`git -C <checkout> checkout <tag>`, clean), run
+   `sudo ops/pearl-updater/install-pearl-updater.sh` from that checkout. This
+   installs the guard-bearing `macprovider-pearl-update`,
    `macprovider-tier2-enforcement-watchdog` and
    `/usr/local/share/macprovider/scripts/coordinator_config_guard.py`. It is a
    prerequisite here, not deferred maintenance.
-2. **Full coordinator deploy** with `phase4-coordinator/dist/deploy-pearl-vps.sh`
-   (never a binary swap). This installs the coordinator carrying #1693, the
-   applied-config record fields, `coordinator-pricing-recover`, the recovery
-   unit with both `ExecStart=` lines, the closer unit, the guard drop-in with
-   `Wants=`, and `/opt/macprovider/coordinator-config-guard.sh`.
+2. **Runtime pair, then the full coordinator deploy.**
+   - On Pearl, install the signed coordinator/gateway pair of `<tag>` with the
+     updater ([Pearl release updater](../../ops/runbooks/pearl-release-updater.md)):
+     `sudo /usr/local/sbin/macprovider-pearl-update --plan --tag <tag>`, then
+     `sudo /usr/local/sbin/macprovider-pearl-update --apply --tag <tag>`.
+     `deploy-pearl-vps.sh` never replaces the coordinator binary by itself
+     (`refusing coordinator-only replacement`).
+   - From the operator machine, on a clean checkout of `<tag>`, run the full
+     deploy `phase4-coordinator/dist/deploy-pearl-vps.sh` with
+     `CONFIG_MODE=preserve-live` (never a binary swap). This installs the
+     applied-config record fields, `coordinator-pricing-recover`, the recovery
+     unit with both `ExecStart=` lines, the closer unit, the guard drop-in with
+     `Wants=`, and `/opt/macprovider/coordinator-config-guard.sh`.
+   - **Connected providers.** Pearl normally has connected providers, so the
+     deploy refuses early (`Refusing EARLY (pre-scp)`, exit 4). Run the enabling
+     deploy in the low-traffic window with `FORCE_RESTART=1`: the restart drops
+     every provider session once (providers reconnect on their own) and the
+     override is written to `/var/lib/macprovider/last-deploy-bypass.json`.
+     Record the bypass in the rollout issue. Do not drain providers by hand.
 3. **Verify the host.** `/healthz` reports the tag;
    `systemctl show -p Requires,Wants macprovider-coordinator` lists the recovery
    and closer units; `systemctl show -p LoadState --value macprovider-pearl-updater-alert@macprovider-coordinator-pricing-close.service.service`
@@ -223,10 +239,17 @@ from a clean checkout of the same signed tag on `main`:
    `billing_snapshot_id`; and every line of
    `scripts/pricing-lane-installed-writers.txt` hashes equal on the host and at
    the tag.
-4. **Clean preflight.** `scripts/catalog-content-release.sh --preflight --commit
-   <tag commit>` must reach GO on a no-op or content release before the first
-   pricing correction. Any `pricing_host_state` NO_GO names the step above that
-   was skipped.
+4. **Host check.** From the operator machine, on the clean `<tag>` checkout:
+   ```bash
+   scripts/catalog-content-release.sh --host-check --commit <tag commit>
+   ```
+   It is read-only and needs no release: it runs `pricing_host_state` (plus
+   commit, tooling, lock, journal and applied-config checks) against `<tag>` and
+   prints one JSON verdict. Exit 0 = Pearl is ready for a pricing correction;
+   any failing check names the step above that was skipped (the detail leads
+   with the operator hint). A `--preflight` of the live release itself cannot
+   pass (`rollback_preconditions: ... already exists on Pearl`), and a
+   non-pricing preflight never runs `pricing_host_state`.
 
 If a later tag changes any file in the installed-writers list, repeat step 1
 from that tag before the next pricing correction.
@@ -236,6 +259,13 @@ from that tag before the next pricing correction.
 is the minimum: never deploy, restore, or update to a coordinator older than
 it ([Pricing runtime floor](#pricing-runtime-floor)). Treat step 2's tag as
 that floor from the moment you run the first correction.
+
+**Window slots.** Every pricing correction mints a new release id and takes
+one of the three `.previous-target` slots, exactly like a renewal
+([Window semantics](#window-semantics)). Providers that never restart keep
+advertising older releases; a fourth activation in a row can make
+`window_coverage` NO_GO. Restart (or wait out) such providers, or use a logged
+`CATALOG_WINDOW_OVERRIDE_REASON`.
 
 ### Author the PR
 
@@ -259,10 +289,15 @@ One PR, reviewed by CODEOWNERS, carrying all of:
   `{"model": "<served name>", "from_row": "<old row key>", "to_row": "<new row key>"}`
   for every served model that resolves to a different row after the change
   (a removed row drops it to `default`; an added row can capture names that
-  resolved to `default` or to another row before). A pure price change inside
-  the same row needs no entry. The file is read from the reviewed commit, so
-  a move you missed shows up as a `pricing_effective_diff` NO_GO after merge
-  and needs a follow-up PR.
+  resolved to `default` or to another row before). Two cases need no entry: a
+  pure price change inside the same row, and an added row's own key moving
+  from `default` onto that row (the name exactly equal to the new row key;
+  the effect of adding the row). Every other capture by an added row (a
+  normalized spelling such as `mlx-community/<Model>-4bit` or `Org/Model`, or a
+  name that resolved to another row) needs its entry. The file is read from
+  the reviewed commit, so a move you missed shows up as a
+  `pricing_effective_diff` / `content_gate` NO_GO (`pricing-unacked-move`)
+  after merge and needs a follow-up PR.
 
 Before deploying, check the overlay: `/etc/macprovider/coordinator.pearl-overlays.yaml`
 must carry no `rate_card`, `provider_share`, `global_multiplier`, or
@@ -282,7 +317,8 @@ computes the effective-price diff. The pricing checks:
 | --- | --- |
 | `pricing_txn_absent` | a journal exists: [Pricing txn](#pricing-txn) first |
 | `pricing_release` | the commit lacks `coordinator.yaml` or `acknowledged-pricing-moves.json`, or its `rate_card` block does not match the release rows |
-| `pricing_host_state` | foreign recovery state (deploy snapshot, updater or Tier-2 transaction, live journal temp dir); pricing keys in the overlay; the installed helper, units, or guard-bearing writers differ from the commit; served card, on-disk `current` card, and applied-config record disagree (prior not settled); or the coordinator lacks the #1693 applied-config fields |
+| `pricing_host_state` | foreign recovery state (deploy snapshot, updater or Tier-2 transaction, live journal temp dir); pricing keys in the overlay; the installed helper, units, or guard-bearing writers differ from the commit; served card, on-disk `current` card, and applied-config record disagree (prior not settled); the coordinator lacks the #1693 applied-config fields (`pricing needs the #1693 enabling runtime release`: [Enabling rollout](#enabling-rollout-once)); or the recovery unit lacks the pricing pre-start (`pricing recovery DISABLED`: a pre-#1693 deploy script ran; re-run the enabling deploy, [Pricing runtime floor](#pricing-runtime-floor)). Operator hints lead the detail |
+| `pricing_effective_diff` (request log) | `cannot locate the request_log: storage.db_path ...`: the request_log is read from the coordinator's effective `storage.db_path` (overlay over base, else `coordinator.db`, relative to `/opt/macprovider`); the named database does not exist |
 | `pricing_effective_diff` | a served name moves rows without an acknowledgement, or the splice/dry-load disagrees with the applied config |
 | `pricing_gate` | the content gate, rerun against the fetched diff, refused (`pricing-globals`, `pricing-unacked-move`, or a digest mismatch) |
 
@@ -327,6 +363,19 @@ scripts/catalog-content-release.sh --deploy --commit <same sha> \
   the candidate yaml, swaps `current` and the window, sends one SIGHUP, and
   collects evidence. Any failure rolls yaml, `current`, and the window back
   together and re-HUPs (exit 4).
+- Every SIGHUP (publish, rollback, recovery) goes only to a READY coordinator:
+  unit active and answering `http://127.0.0.1:8444/healthz` with a stable
+  MainPID. A booting coordinator is waited for up to
+  `CATALOG_COORDINATOR_READY_SECONDS` (default 900); a stopped one is never
+  signalled. When the rollback's re-HUP cannot be proven, the lane restarts the
+  coordinator (controlled) and waits for it to be ready (same bound) before it
+  judges the boot record, so a slow boot is not a failed rollback.
+
+**After rolling back a pricing PR** (exit 4, or a recovered journal), `main`
+still carries the reviewed-but-not-live rate card. Revert the pricing PR on
+`main` (or re-ship it) before the next Wednesday renewal or content release:
+otherwise renewal fails `content drift vs live feed in rate-card.json` and any
+content release cut from `main` silently becomes a pricing release.
 
 ### Evidence and alerts
 
@@ -560,7 +609,9 @@ sudo cat /opt/macprovider/.pricing-txn/txn.json
 
 The helper's own exit codes: 0 ok or nothing to do; 1 refused before changing
 anything; 3 state mismatch (compare-and-swap refused, nothing further
-changed); 5 stopped with the journal kept.
+changed); 4 the coordinator is down or still booting, so nothing could be
+proven yet (journal kept; not a foreign write); 5 stopped with the journal
+kept.
 
 ### Recover an abandoned journal
 
@@ -584,11 +635,13 @@ journal only:
 - `restored-unverified`: repeats the prior restore (idempotent), accepts a
   matching boot record or sends one SIGHUP, and finalizes on proof.
 - Any other phase: rolls back to the prior pair by compare-and-swap (yaml,
-  then `current`, then window). If the coordinator runs, it sends one SIGHUP
-  and finalizes only when an applied-config record loaded after it has the
-  prior config, rate-table, and signed-card digests and the coordinator serves
-  the prior card bytes. Recovery never rolls forward: rerun the pricing
-  release afterwards.
+  then `current`, then window). If the coordinator runs, it waits for it to be
+  ready (active + `/healthz`, up to `CATALOG_COORDINATOR_READY_SECONDS`), sends
+  one SIGHUP, and finalizes only when an applied-config record loaded after it
+  has the prior config, rate-table, and signed-card digests and the
+  coordinator serves the prior card bytes. It never signals a booting
+  coordinator (a SIGHUP before its handler is installed would kill it).
+  Recovery never rolls forward: rerun the pricing release afterwards.
 - Coordinator not running: restores the disk, sets `restored-unverified`, and
   stops (exit 5). Start the coordinator; the closer finalizes.
 
@@ -598,13 +651,16 @@ log line says why:
 | Line | Meaning | Action |
 | --- | --- | --- |
 | `coordinator-pricing-recover: refused: ...` | refused before changing anything | fix the named cause, rerun |
+| `coordinator-pricing-recover: coordinator not ready: ...` (helper exit 4; the lane logs `recovery WAITING`) | the coordinator is stopped or still booting (e.g. SQLite WAL recovery after a crash takes minutes). Nothing is wrong on disk | get it running; once `curl -fsS http://127.0.0.1:8444/healthz` answers, rerun `--recover-pricing-txn` |
 | `coordinator-pricing-recover: state mismatch: ...` | yaml, `current`, window, or overlay is neither the journal's prior nor candidate | [State mismatch](#state-mismatch) |
 | `coordinator-pricing-recover: STOP: ...` | restored on disk but not proven live, or a journal file is missing or corrupt | read the reason; get the coordinator running; rerun |
 
 ### State mismatch
 
 Something wrote outside the guard (a pre-#1693 deploy tag, a hand edit, an
-overlay edit). Nothing further was changed.
+overlay edit). Nothing further was changed. A coordinator that is still booting
+is never reported here: that is `coordinator not ready` (exit 4) above, and
+needs no repair.
 
 1. Freeze writers as in [Rollback failed](#rollback-failed) step 1.
 2. Compare each item with `txn.json`: `sha256sum /opt/macprovider/coordinator.yaml`
@@ -719,17 +775,22 @@ hand.
 
 `macprovider-coordinator-pricing-close.service` runs after every coordinator
 start (the coordinator's guard drop-in `Wants=` it) and is a no-op unless the
-journal is `restored-unverified`. It waits up to 300 s for the lock set, then
-up to 120 s for a `source=boot` applied-config record of this boot (bound to
-the boot id and the restore nonce, from a coordinator start later than the
-restore) with the prior config, rate-table, and signed-card digests and the
-prior served card bytes. Then it finalizes.
+journal is `restored-unverified`. Without holding the lock set it waits for a
+coordinator started after the restore (in this boot) to answer `/healthz` and
+to write a `source=boot` applied-config record (bound to the boot id and the
+restore nonce) with the prior config, rate-table, and signed-card digests and
+the prior served card bytes. It waits in 8 windows of 900 s: a boot slower
+than one window (after an unclean shutdown SQLite WAL recovery can take many
+minutes) raises the alert unit once per window and keeps waiting, so the
+journal closes itself when the coordinator is up. Then it takes the lock set
+(up to 300 s), re-proves the pair and finalizes.
 
-On failure `OnFailure=` starts
-`macprovider-pearl-updater-alert@macprovider-coordinator-pricing-close.service.service`.
-Causes: the coordinator did not boot or was slow; the lock set stayed held;
-the restore was made in an earlier boot; or the
-boot record does not match the prior. Action:
+After the last window it fails and `OnFailure=` starts
+`macprovider-pearl-updater-alert@macprovider-coordinator-pricing-close.service.service`
+(the same unit it starts after each window). Causes: the coordinator did not
+boot; the lock set stayed held; the restore was made in an earlier boot; or
+the boot record does not match the prior. It retries by itself on the next
+boot (pre-start re-stamps the restore, the closer runs again). Action:
 `journalctl -u macprovider-coordinator-pricing-close -u macprovider-coordinator`,
 get the coordinator running, then run `--recover-pricing-txn`.
 
@@ -815,3 +876,17 @@ only guard: before a deploy from any tag older than the enabling release, run
 it if the marker exists. Pre-#1693 tags also lack the journal check, the
 writer guard and the pricing recovery units; never run one while a journal
 exists either.
+
+**If a pre-#1693 deploy script ran anyway** (even one that aborted, e.g. on
+connected providers): its step 1 has already reinstalled its own
+`macprovider-coordinator-deploy-recovery.service` (no
+`coordinator-pricing-recover --pre-start` line), `coordinator-deploy-recover`
+and guard drop-in (no `Wants=` of the closer). Pricing recovery is then
+silently disabled: an abandoned journal would no longer be restored before
+boot or closed after it. Detection: the next pricing preflight or
+`--host-check` is NO_GO `pricing_host_state` with `pricing recovery
+DISABLED: ...`, and a #1693 coordinator logs `"event":"pricing_recovery_wiring_missing"`
+at ERROR on every boot and SIGHUP while the floor marker exists. Fix: re-run
+the enabling deploy (step 2 of [Enabling rollout](#enabling-rollout-once),
+from the enabling or a later tag), then `--host-check` until it passes. Do
+not run a pricing correction, and avoid coordinator restarts, until then.

@@ -8,9 +8,28 @@ abort_pre_mutation() {
   exit 2
 }
 trap 'if [ "$mutated" -eq 1 ]; then exit 1; else rm -rf "$incoming_path" >/dev/null 2>&1 || true; exit 2; fi' ERR
-# Resolve the reload target BEFORE mutating anything, so a dead daemon aborts clean.
-pid="$(systemctl show -p MainPID --value "$unit")"
-[ -n "$pid" ] && [ "$pid" != "0" ] || abort_pre_mutation "coordinator MainPID unavailable; not mutating"
+coord_ready_pid() { # <unit>
+  local deadline=$(( $(date +%s) + 900 )) state pid
+  while :; do
+    state="$(systemctl show -p ActiveState --value "$1" 2>/dev/null || true)"
+    pid="$(systemctl show -p MainPID --value "$1" 2>/dev/null || true)"
+    case "$state" in active|activating|reloading) ;; *) echo "$1 is not running (ActiveState=${state:-?})" >&2; return 1 ;; esac
+    case "$pid" in ""|0|*[!0-9]*) echo "$1 has no MainPID" >&2; return 1 ;; esac
+    if curl --noproxy '*' -fsS --max-time 5 --max-filesize 65536 -o /dev/null http://127.0.0.1:8444/healthz 2>/dev/null &&
+       [ "$(systemctl show -p MainPID --value "$1" 2>/dev/null || true)" = "$pid" ]; then
+      echo "$pid"
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "$1 (pid $pid) is still booting: /healthz does not answer 200" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+# Resolve the reload target BEFORE mutating anything, so a dead or still
+# booting daemon aborts clean.
+pid="$(coord_ready_pid "$unit")" || abort_pre_mutation "coordinator is not running and ready (active, serving /healthz); not mutating"
 python3 "$helper" validate || abort_pre_mutation "Pearl deploy lock files failed validation; not mutating"
 exec 8</run/lock/macprovider-pearl-updater.lock || abort_pre_mutation "cannot open /run/lock/macprovider-pearl-updater.lock; not mutating"
 flock -n 8 || abort_pre_mutation "Pearl updater lock held; not mutating"
@@ -112,5 +131,7 @@ ln -sfn "releases/$final" "$root/.current.next"
 mv -Tf "$root/.current.next" "$root/current"
 echo "retargeted current -> releases/$final (previous-target=$prev)"
 # SIGHUP the running coordinator: in-process config reload (#1268), NOT a restart.
+# Only a ready one (a restart since the pre-mutation check re-waits, bounded).
+pid="$(coord_ready_pid "$unit")" || { echo "coordinator not ready for the SIGHUP after mutating; rolling back" >&2; exit 1; }
 kill -HUP "$pid"
 echo "sent SIGHUP to $unit (pid $pid)"

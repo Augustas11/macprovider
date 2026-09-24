@@ -1,12 +1,19 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.16.0
+version: v0.16.1
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-09-24
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.16.1 (2026-09-24)** — `SPEC-023-R018` rule 2 clarified after the #1693
+  fake-Pearl end-to-end run: a served name that resolved to `default` and
+  now resolves to an added row whose key is exactly that name is the intended
+  effect of adding the row and needs no acknowledgement; every other move (a
+  removal, a capture of a normalized or differently spelled name, a move off a
+  non-`default` row) still does. AC-CAT-28 follows. No other normative change.
 
 - **v0.16.0 (2026-09-24)** — Pricing corrections through the catalog-content
   lane (#1693). New §3.7.10 registers `SPEC-023-R018`: a committed release
@@ -1359,7 +1366,10 @@ continuity, and every `SPEC-023-R017` rule not amended here apply unchanged.
    `pricing-unacked-move` unless m is listed in
    `phase3-binary/catalog/autotune/acknowledged-pricing-moves.json`, read from
    the reviewed commit (CODEOWNERS-covered) and included in the shipped byte
-   manifest. Under the lease the diff is recomputed over the pinned set plus
+   manifest. One move is exempt (v0.16.1): m resolved to `default` in the live
+   table and resolves in the candidate to an added row whose key is exactly m
+   (byte-equal, not normalized). That is the effect of adding the row; it is
+   still listed in the diff. Under the lease the diff is recomputed over the pinned set plus
    newly seen names; only a new name with an unacknowledged move refuses, and
    a name leaving the 30-day window never invalidates the acknowledgement.
    `request_log.model` is buyer-controlled: control characters (C0, C1, DEL)
@@ -2274,8 +2284,11 @@ row is `catalog-content` with a `pricing` object; removing `default` is
 `invalid-release`; a `usd_per_million_credits`, `provider_share_bps`, or
 `global_multiplier_ppm` change is `pricing-globals`; a `policy_version` or
 schema change is `full-provider-app`; a removal that moves a served model onto
-`default`, or an added row that captures a served model, is
-`pricing-unacked-move` unless acknowledged in the reviewed file; a commit
+`default`, or an added row that captures a served model other than its own
+key moving off `default` (v0.16.1), is
+`pricing-unacked-move` unless acknowledged in the reviewed file; an added row
+whose only capture is its own key is `catalog-content` with no
+acknowledgement; a commit
 block whose rows differ from the signed rows is refused. The splice refuses
 every rule-5 malformation and preserves bytes outside the block; the
 base-equivalence proof rejects any non-rate-card node, tag, style, or order

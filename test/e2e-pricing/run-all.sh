@@ -10,11 +10,12 @@
 # rollout per the runbook -> scenarios V1 V2 V4 V5 V6(+V7) V10 V3 V8 V11 V12.
 # Results: $E2E_WORK/evidence/results.jsonl (one JSON line per assertion);
 # logs: $E2E_WORK/logs/. Nothing touches production; see env.sh and bin/.
-# Reproduce the reported product bugs instead of testing past them:
-#   E2E_NO_GATE_WORKAROUND=1   skip lib/workaround-gate-trust-root.sh: every --deploy
-#                              aborts under the lease (V1 fails "remote publish aborted")
-#   E2E_NO_CANARY_WORKAROUND=1 (set before 01) every deploy-pearl-vps.sh fails its
-#                              step-8 exact-byte canary (rate-card files omitted)
+# Workarounds for bugs found by the first E2 run (fixed in tree; each script
+# detects the fix and does nothing on a fixed tree):
+#   E2E_NO_GATE_WORKAROUND=1   never apply lib/workaround-gate-trust-root.sh
+#   E2E_NO_CANARY_WORKAROUND=1 (set before 01) never patch the step-8 canary
+#                              comparator, not even on the pre-#1693 base
+# V1R is a re-runnable happy path for an existing world (V1's spec is one-shot).
 set -uo pipefail
 H="$(cd "$(dirname "$0")" && pwd -P)"
 . "$H/env.sh"
@@ -29,6 +30,7 @@ fi
 for v in "$@"; do
   case "$v" in
     V1) step scenarios/v01-happy-path.sh ;;
+    V1R) step scenarios/v01r-rerun-happy-path.sh ;;
     V2) step scenarios/v02-preflight-nogo.sh; step scenarios/v02b-request-log-names.sh ;;
     V3) step scenarios/v03-ack-and-new-names.sh ;;
     V4) step scenarios/v04-kill-lane.sh ;;

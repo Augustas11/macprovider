@@ -110,6 +110,45 @@ class ContentGateTests(unittest.TestCase):
         self.assertEqual(len(proc.stdout.splitlines()), 1, proc.stdout)
         self.assertEqual(json.loads(proc.stdout)["lane"], "freshness-or-noop")
 
+    def test_shipped_verifier_bundle_needs_the_explicit_tier2_trust_root(self) -> None:
+        """#1693 E2 V1: under the Pearl lock the gate runs from the shipped
+        verifier bundle, which has no repository coordinator.yaml beside it.
+        Without --tier2-coordinator-config verify-directory cannot find the
+        Tier-2 trust root (lane invalid-release, every deploy aborted); with the
+        reviewed coordinator.yaml passed explicitly it verifies as it does in
+        the repository."""
+        bundle = self.tmp / "bundle"
+        (bundle / "scripts").mkdir(parents=True)
+        (bundle / "phase3-binary" / "catalog" / "autotune").mkdir(parents=True)
+        repo = SCRIPT.parents[1]
+        for line in (repo / "scripts" / "catalog-verifier-bundle.txt").read_text().splitlines():
+            if line and not line.startswith("#"):
+                shutil.copy(repo / line, bundle / line)
+        for name in ("release-ledger.json", "not-buyer-serving.json"):
+            shutil.copy(repo / "phase3-binary" / "catalog" / "autotune" / name, bundle / "phase3-binary" / "catalog" / "autotune" / name)
+        base = [sys.executable, "-I", str(bundle / "scripts" / "catalog-release.py"), "content-gate", "--release", str(self.release),
+                "--live", str(self.live), "--ledger", str(bundle / "phase3-binary" / "catalog" / "autotune" / "release-ledger.json")]
+        proc = subprocess.run(base, capture_output=True, text=True, check=False)
+        verdict = json.loads(proc.stdout)
+        self.assertEqual(verdict["lane"], "invalid-release", verdict)
+        self.assertIn("Tier-2 public key source", " ".join(verdict["reasons"]))
+        root = repo / "phase4-coordinator" / "dist" / "coordinator.yaml"
+        proc = subprocess.run(base + ["--tier2-coordinator-config", str(root)], capture_output=True, text=True, check=False)
+        self.assertEqual(json.loads(proc.stdout)["lane"], "freshness-or-noop", proc.stdout + proc.stderr)
+
+    def test_explicit_tier2_trust_root_is_the_one_verified(self) -> None:
+        with mock.patch.object(cr, "COORDINATOR_YAML_PATH", self.tmp / "absent.yaml"):
+            result = self.gate(verify=True)
+            self.assertLane(result, "invalid-release")
+            self.assertIn("cannot be inspected", result["reasons"][0])
+            root = SCRIPT.parents[1] / "phase4-coordinator" / "dist" / "coordinator.yaml"
+            self.assertLane(self.gate(verify=True, tier2_coordinator_config=root), "freshness-or-noop")
+            # A trust root with a different key does not authenticate the committed catalog.
+            other = self.tmp / "other.yaml"
+            other.write_text("tier2:\n  catalog_public_key: " + "A" * 43 + "\n")
+            result = self.gate(verify=True, tier2_coordinator_config=other)
+            self.assertLane(result, "invalid-release")
+
     def test_unsigned_content_change_is_invalid_release(self) -> None:
         correct_hash(self.release)
         result = self.gate(verify=True)

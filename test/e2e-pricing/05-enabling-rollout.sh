@@ -6,7 +6,9 @@
 #   1. updater bundle first (ops/pearl-updater/install-pearl-updater.sh, as root on Pearl)
 #   2. full coordinator deploy (deploy-pearl-vps.sh)
 #   3. verify the host (healthz tag, Requires/Wants, alert unit, applied record, writer hashes)
-#   4. clean preflight on a no-op (the tag commit) and on a content release
+#   4. host check: scripts/catalog-content-release.sh --host-check (read-only
+#      pricing_host_state at the tag); a no-op --preflight cannot pass by
+#      construction (the live release already exists on Pearl)
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 . "$E2E_HARNESS/lib/common.sh"
@@ -76,9 +78,13 @@ grep -qx 'RECORD=rate_table_sha256,signed_rate_card_sha256,autotune_release_id,b
 if [ -z "$problems" ]; then e2e_result "$S" PASS "step 3 host checks: $(tr '\n' ' ' <<<"$out")"
 else e2e_result "$S" FAIL "step 3 host checks:$problems ($(tr '\n' ' ' <<<"$out"))"; fi
 
-# ---- step 4: clean preflight ------------------------------------------------------
+# ---- step 4: host check (older trees: the no-op preflight) -------------------------
 rc=0
-e2e_run_logged 1200 "$E2E_LOGS/$S-step4-noop.log" e2e_lane --preflight --commit "$TAG_COMMIT" || rc=$?
+if git -C "$E2E_REPO" show "$E2E_TAG_ENABLE:scripts/catalog-content-release.sh" | grep -q -- '--host-check'; then
+  e2e_run_logged 1200 "$E2E_LOGS/$S-step4-noop.log" e2e_lane --host-check --commit "$TAG_COMMIT" || rc=$?
+else
+  e2e_run_logged 1200 "$E2E_LOGS/$S-step4-noop.log" e2e_lane --preflight --commit "$TAG_COMMIT" || rc=$?
+fi
 verdict="$(grep -E '^\{"checks"' "$E2E_LOGS/$S-step4-noop.log" | tail -n 1)"
 printf '%s\n' "$verdict" >"$E2E_EVIDENCE/$S-noop-verdict.json"
 failed="$(python3 -c 'import json,sys;v=json.loads(sys.stdin.read() or "{}");print(" ".join("%s(%s)"%(c["name"],c["detail"][:120]) for c in v.get("checks",[]) if not c["ok"]))' <<<"$verdict")"

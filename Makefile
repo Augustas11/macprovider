@@ -201,6 +201,7 @@ test-dist:
 	bash phase4-coordinator/dist/test/coordinator_deploy_recovery.test.sh
 	bash phase4-coordinator/dist/test/coordinator_pricing_recover.test.sh
 	bash phase4-coordinator/dist/test/deploy_pricing_runtime_floor.test.sh
+	bash phase4-coordinator/dist/test/deploy_canary_byte_proof_names.test.sh
 	bash phase4-coordinator/dist/test/coordinator_archive_rotate.test.sh
 	bash phase4-coordinator/dist/test/coordinator_sqlite_relief.test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_smoke_probe.test.sh

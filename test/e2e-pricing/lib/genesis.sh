@@ -31,20 +31,23 @@ open(path, "w").write(s)
 PY
 done
 
-# WORKAROUND for a pre-existing deploy-pearl-vps.sh bug (reported, NOT a
-# #1693 change; present at v1.8.191, origin/main and the branch): the step-8
-# exact-byte canary proof hashes rate-card.json + rate-card.json.sig from the
-# canary install dir, but the comparator's expected set omits
-# $STATIC_RATE_CARD_JSON/$STATIC_RATE_CARD_SIG, so every deploy fails with
-# "canary catalog byte mismatch: missing=[] extra=['rate-card.json',
-# 'rate-card.json.sig']" and rolls back. Set E2E_NO_CANARY_WORKAROUND=1 to
-# reproduce it (the as-written deploy then fails at step 8).
+# WORKAROUND for a deploy-pearl-vps.sh bug present at v1.8.191 and before the
+# #1693 E2 fix: the step-8 exact-byte canary proof hashes rate-card.json +
+# rate-card.json.sig from the canary install dir, but the comparator's expected
+# set omitted $STATIC_RATE_CARD_JSON/$STATIC_RATE_CARD_SIG, so every deploy
+# failed "canary catalog byte mismatch: missing=[] extra=['rate-card.json',
+# 'rate-card.json.sig']" and rolled back. Fixed in tree (the fixed script
+# carries these exact lines; phase4-coordinator/dist/test/
+# deploy_canary_byte_proof_names.test.sh): applied only to a tree that still
+# has the bug (the pre-#1693 base). E2E_NO_CANARY_WORKAROUND=1 never applies it.
 if [ "${E2E_NO_CANARY_WORKAROUND:-0}" != 1 ]; then
   python3 - phase4-coordinator/dist/deploy-pearl-vps.sh <<'PY'
 import sys
 p = sys.argv[1]; s = open(p).read()
 old = '  "$STATIC_DEMAND_SIG" \\\n  "$AUTOTUNE_TIER2_JSON" <<\'PY\'\n'
 new = '  "$STATIC_DEMAND_SIG" \\\n  "$STATIC_RATE_CARD_JSON" \\\n  "$STATIC_RATE_CARD_SIG" \\\n  "$AUTOTUNE_TIER2_JSON" <<\'PY\'\n'
+if s.count(new) == 1:
+    raise SystemExit(0)  # fixed in tree
 assert s.count(old) == 1, "canary comparator block not found exactly once"
 open(p, "w").write(s.replace(old, new))
 PY

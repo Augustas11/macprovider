@@ -64,8 +64,9 @@ for ph in $phases; do
   limactl start "$E2E_VM" --timeout 20m >"$E2E_LOGS/V5$ph-boot.log" 2>&1 || true
   wait_vm || { e2e_result "$S" FAIL "$ph: VM did not come back"; exit 1; }
   e2e_tunnel_up
-  # Give pre-start + coordinator boot + closer (<= 300 s lock wait + 120 s record wait) time.
-  for _ in $(seq 1 90); do
+  # Give pre-start + a slow coordinator boot (minutes of WAL recovery on TCG)
+  # + the closer (it waits for readiness, then the boot record) time.
+  for _ in $(seq 1 240); do
     [ "$(e2e_txn_phase)" = none ] && vm 'systemctl is-active --quiet macprovider-coordinator' && break
     sleep 5
   done

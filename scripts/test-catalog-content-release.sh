@@ -109,6 +109,7 @@ export MACPROVIDER_ROOT="$CCR_FAKE/opt/macprovider" MACPROVIDER_ETC_ROOT="$CCR_F
   MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE="$CCR_FAKE/run/lock/macprovider-pearl-updater.lock" \
   MACPROVIDER_DEPLOY_LOCK_FILE="$CCR_FAKE/opt/macprovider/.coordinator-deploy.lock" \
   MACPROVIDER_COORDINATOR_URL="http://127.0.0.1:$BUYER_PORT" MACPROVIDER_REQUIRED_UID="$CCR_UID" \
+  MACPROVIDER_COORDINATOR_HEALTHZ_URL="http://127.0.0.1:$PROVIDER_PORT/healthz" \
   MACPROVIDER_BOOT_ID_FILE="$CCR_FAKE/boot_id"
 case "$cmd" in
   "bash -s"*) pearl-rw | bash -c "$cmd" ;;
@@ -203,6 +204,7 @@ cat >"$T/bin/systemctl" <<'SYSTEMCTL'
 #!/usr/bin/env bash
 case "$*" in
   *"-p MainPID"*)
+    [ ! -e "$CCR_TEST_CTL/coord-stopped" ] || { echo 0; exit 0; }
     # The publish is the only caller with a staged .incoming-* release.
     if [ -e "$CCR_TEST_CTL/publish-slow" ] && ls -d "$CCR_FAKE"/opt/macprovider/autotune/releases/.incoming-* >/dev/null 2>&1; then
       rm -f "$CCR_TEST_CTL/publish-slow"; touch "$CCR_TEST_CTL/publish-started"; sleep 3
@@ -212,18 +214,46 @@ case "$*" in
   *"-p Requires"*) echo "system.slice macprovider-coordinator-deploy-recovery.service" ;;
   *"-p Wants"*) [ -e "$CCR_TEST_CTL/no-closer-want" ] || echo "network-online.target macprovider-coordinator-pricing-close.service" ;;
   *"-p LoadState"*) echo loaded ;;
+  *"-p ActiveState"*) if [ -e "$CCR_TEST_CTL/coord-stopped" ]; then echo inactive; else echo active; fi ;;
   restart*)
     [ ! -e "$CCR_TEST_CTL/restart-fails" ] || exit 1
+    rm -f "$CCR_TEST_CTL/coord-stopped"
     kill -USR1 "$(cat "$CCR_FAKE/coordinator.pid")"; sleep 1 ;;
   is-active*) exit 0 ;;
   *) echo "fake systemctl: unsupported $*" >&2; exit 1 ;;
 esac
 SYSTEMCTL
+# systemd-run: runs the command locally. As User=macprovider it enforces the
+# service user's access to the real /tmp paths it is handed (the lock helper
+# dir and the pricing candidate dir are root-owned on Pearl): every directory
+# on the literal path must be group/other-traversable and the file
+# group/other-readable, else "permission denied" (#1693 E2 V1).
 cat >"$T/bin/systemd-run" <<'RUN'
 #!/usr/bin/env bash
+user=""
 while [ $# -gt 0 ]; do
-  case "$1" in -p) shift 2 ;; -*) shift ;; *) break ;; esac
+  case "$1" in -p) case "$2" in User=*) user="${2#User=}" ;; esac; shift 2 ;; -*) shift ;; *) break ;; esac
 done
+if [ "$user" = macprovider ]; then
+  python3 - "$@" <<'PY' || exit 1
+import json, os, stat, sys
+denied = os.path.exists(os.path.join(os.environ.get("CCR_TEST_CTL", "/nonexistent"), "service-user-denied"))
+for arg in sys.argv[1:]:
+    if not arg.startswith("/tmp/"):
+        continue
+    parts = arg.split("/")[1:]
+    cur = ""
+    for i, part in enumerate(parts):
+        cur += "/" + part
+        if cur == "/tmp" or not os.path.exists(cur):
+            continue
+        mode = os.stat(cur).st_mode
+        need = 0o011 if stat.S_ISDIR(mode) else 0o044
+        if denied or not mode & need:
+            print(json.dumps({"ok": False, "errors": ["open %s: permission denied" % arg]}))
+            sys.exit(1)
+PY
+fi
 exec "$@"
 RUN
 cat >"$T/bin/journalctl" <<'JOURNAL'
@@ -359,6 +389,10 @@ def load(keep_rate_card=False):  # keeps the prior candidate bytes (stale serve)
                "signer": served["signer"]}, open(os.path.join(fake, "served.json"), "w"))
 
 def on_hup(*_):
+    if c("stop-on-hup"):  # the operator stops the coordinator instead (#1693 E2 V8)
+        os.remove(os.path.join(ctl, "stop-on-hup"))
+        open(os.path.join(ctl, "coord-stopped"), "w").close()
+        return
     target = json.load(open(os.path.join(current, "release.json")))["release_id"]
     reject = open(os.path.join(ctl, "reject-version")).read().strip() if c("reject-version") else ""
     if reject == target:
@@ -389,13 +423,24 @@ def on_hup(*_):
     journal({"level": "info", "message": "tier2/proof_of_weights config reloaded"})
 
 def on_restart(*_):
-    if not parity_ok():
-        journal({"level": "error", "message": "coordinator boot refused: rate-card parity"})
-        return
-    state["snap"] += 1
-    load()
-    applied("boot")
-    journal({"level": "info", "message": "coordinator started"})
+    # A slow boot: /healthz does not answer, and (like a coordinator before its
+    # handler is installed) a SIGHUP would kill the process.
+    delay = float(open(os.path.join(ctl, "restart-delay")).read()) if c("restart-delay") else 0
+    try:
+        if delay:
+            state["booting"] = True
+            signal.signal(signal.SIGHUP, signal.SIG_DFL)
+            time.sleep(delay)
+        if not parity_ok():
+            journal({"level": "error", "message": "coordinator boot refused: rate-card parity"})
+            return
+        state["snap"] += 1
+        load()
+        applied("boot")
+        journal({"level": "info", "message": "coordinator started"})
+    finally:
+        signal.signal(signal.SIGHUP, on_hup)
+        state["booting"] = False
 
 def canary():
     return json.load(open(os.path.join(ctl, "canary-state.json")))
@@ -436,6 +481,8 @@ class H(http.server.BaseHTTPRequestHandler):
             if not self.authed():
                 return self.send(401, b"{}")
             return self.send(200, json.dumps(pool()).encode())
+        if path == "/healthz":
+            return self.send(503 if state.get("booting") else 200, b"{}")
         with lock:
             files = dict(state["files"]); version = state["version"]
         if path == "/gateway/v1/rate-card":  # the gateway's (cached) public card
@@ -500,7 +547,8 @@ import collections, hashlib, json, os, pathlib, runpy, subprocess, sys
 # The pricing-lane pieces the lane (and its on-host stage) call by name.
 _REAL = runpy.run_path(os.environ["CCR_REAL_CR"])
 for _name in ("PRICING_RESOLVABLE_NAME", "release_model_names", "names_sha256",
-              "pricing_acknowledged_object", "pricing_canonical_bytes", "CatalogError"):
+              "pricing_acknowledged_object", "pricing_canonical_bytes", "CatalogError",
+              "pricing_move_is_own_row", "_yaml_block_value"):
     globals()[_name] = _REAL[_name]
 
 def main():
@@ -513,7 +561,24 @@ def main():
         sys.exit(1)
     def sha(path):
         return hashlib.sha256(open(path, "rb").read()).hexdigest()
+    here = os.path.dirname(os.path.abspath(__file__))
+    def tier2_root_error(path):
+        # The REAL trust-root resolution, from where this copy of the verifier
+        # sits (its default is <here>/../phase4-coordinator/dist/coordinator.yaml,
+        # absent beside a shipped bundle on Pearl).
+        load = _REAL["load_tier2_trusted_public_key"]
+        load.__globals__["COORDINATOR_YAML_PATH"] = pathlib.Path(here, "..", "phase4-coordinator", "dist", "coordinator.yaml")
+        try:
+            load(None, pathlib.Path(path) if path else None)
+        except _REAL["CatalogError"] as exc:
+            return "verify-directory: %s" % exc
+        return None
+    def commit_yaml_sha():
+        return hashlib.sha256(subprocess.run(["git", "-C", os.environ["CCR_R"], "show", os.environ["CCR_EXPECT_COMMIT"] + ":phase4-coordinator/dist/coordinator.yaml"],
+                                             capture_output=True, check=True).stdout).hexdigest()
     if cmd == "verify-directory":
+        if arg("--tier2-coordinator-config") and tier2_root_error(arg("--tier2-coordinator-config")):
+            sys.exit(1)
         sys.exit(1 if (ctl / "verify-fail").exists() else 0)
     if cmd == "check-tier2-binding":
         if (ctl / "closure-fail").exists():
@@ -570,8 +635,8 @@ def main():
                 refuse("preflight call must judge the assembled release against the fetched live release")
             stage = "preflight"
             check_index(arg("--tier2-content-index"), os.path.join(os.path.dirname(release), "gate", "tier2-content-index.json"), stage)
+            want_root = os.path.join(os.path.dirname(release), "gate", "tier2-trust-root.yaml")
         else:
-            here = os.path.dirname(os.path.abspath(__file__))
             catalog = os.path.normpath(os.path.join(here, "..", "phase3-binary", "catalog", "autotune"))
             want_live = os.path.join(os.environ["CCR_FAKE"], "opt/macprovider/autotune/current")
             releases = os.path.join(os.environ["CCR_FAKE"], "opt/macprovider/autotune/releases")
@@ -588,6 +653,17 @@ def main():
                 refuse("under-lock --release must be the staged incoming dir, got %r" % release)
             stage = "under-lock"
             check_index(arg("--tier2-content-index"), os.path.join(here, "..", "tier2-content-index.json"), stage)
+            want_root = os.path.join(here, "..", "tier2-trust-root.yaml")
+        # #1693 E2 V1: verify-directory's Tier-2 trust root, resolved for real.
+        why = tier2_root_error(arg("--tier2-coordinator-config"))
+        if why:
+            print(json.dumps({"ok": False, "lane": "invalid-release", "reasons": [why], "release_id": rel["release_id"],
+                              "live_release_id": live["release_id"], "changed": {}, "pricing": {}, "commit_block_sha256": None,
+                              "pricing_diff_sha256": None}))
+            sys.exit(3)
+        root_arg = arg("--tier2-coordinator-config")
+        if os.path.realpath(root_arg) != os.path.realpath(want_root) or sha(root_arg) != commit_yaml_sha():
+            refuse("%s --tier2-coordinator-config must be the commit's coordinator.yaml at %r, got %r" % (stage, want_root, root_arg))
         with open(ctl / "gate-calls.log", "a") as fh:
             fh.write(stage + " ok\n")
         lane = (ctl / "lane").read_text().strip() if (ctl / "lane").exists() else "catalog-content"
@@ -628,6 +704,18 @@ cp "$root/phase3-binary/catalog/autotune/"{release.json,trusted-keys.json,tier2-
 # release installs), the pricing helper/units and the guard-bearing writers
 # the L2 preflight hashes against their Pearl-installed copies.
 cp "$root/phase4-coordinator/dist/coordinator.yaml" "$root/phase4-coordinator/dist/coordinator-deploy-recover.sh" "$R/phase4-coordinator/dist/"
+# #1693 E2 V1: the request_log is wherever storage.db_path says (the tracked
+# template's coordinator.db, here inside the fake Pearl), never a fixed name.
+python3 - "$R/phase4-coordinator/dist/coordinator.yaml" "$T/env/fake/var/lib/macprovider/coordinator.db" <<'PY'
+import sys
+p, db = sys.argv[1:]
+s = open(p).read()
+old = '  db_path: "/var/lib/macprovider/coordinator.db"\n'
+assert s.count(old) == 1, "tracked storage.db_path moved"
+open(p, "w").write(s.replace(old, '  db_path: "%s"\n' % db))
+PY
+REQUEST_LOG="$T/env/fake/var/lib/macprovider/coordinator.db"
+export CCR_R="$R"
 cp "$root/phase4-coordinator/dist/systemd/macprovider-coordinator-deploy-recovery.service" \
    "$root/phase4-coordinator/dist/systemd/macprovider-coordinator-deploy-guard.conf" \
    "$root/phase4-coordinator/dist/systemd/macprovider-coordinator-pricing-close.service" "$R/phase4-coordinator/dist/systemd/"
@@ -710,7 +798,7 @@ PY
 # Pricing commits on top of COMMIT (same release id, rate-card rows changed):
 #   PRICE_COMMIT   qwen3-32b completion 220000 -> 230000 (card + tracked yaml)
 #   BADBLOCK_COMMIT the card changes but the tracked yaml block does not
-#   MOVE_COMMIT    adds row foo-model (acknowledged for the key itself only)
+#   MOVE_COMMIT    adds row foo-model (its own key needs no acknowledgement)
 price_commit() { # <label> <mode>
   python3 - "$R" "$2" <<'PY'
 import hashlib, json, pathlib, sys
@@ -730,9 +818,11 @@ elif mode == "move":
     card["rows"]["foo-model"] = row
     yaml = yaml.replace("    default:\n", "    foo-model:\n      prompt_credits_per_mtok: 70000\n"
                         "      prompt_cache_hit_credits_per_mtok: 17500\n      completion_credits_per_mtok: 140000\n    default:\n", 1)
+    # SPEC-023-R018 rule 2 (v0.16.1): an added row capturing exactly its own
+    # key from `default` needs no acknowledgement (no self-ack entry here).
     ack_p = r / "phase3-binary/catalog/autotune/acknowledged-pricing-moves.json"
     ack = json.loads(ack_p.read_bytes())
-    ack["moves"] = [{"model": "foo-model", "from_row": "default", "to_row": "foo-model"}]
+    ack["moves"] = []
     ack_p.write_text(json.dumps(ack, indent=2) + "\n")
 import os, runpy
 card["version"] = runpy.run_path(os.environ["CCR_REAL_CR"])["rate_card_projection_hash"](card)
@@ -803,7 +893,7 @@ LIST
   done <"$R/scripts/pricing-lane-installed-writers.txt"
   chmod 0755 "$CCR_FAKE/opt/macprovider"
   mkdir -p "$CCR_FAKE/var/lib/macprovider" "$CCR_FAKE/var/lib/macprovider-pearl-updater"
-  python3 - "$CCR_FAKE/var/lib/macprovider/request-log.sqlite" <<'PY'
+  python3 - "$REQUEST_LOG" <<'PY'
 import datetime, sqlite3, sys
 con = sqlite3.connect(sys.argv[1])
 con.execute("CREATE TABLE request_log (id INTEGER PRIMARY KEY, ts_utc TEXT NOT NULL, model TEXT NOT NULL)")
@@ -916,7 +1006,7 @@ PY
     CATALOG_CANARY_SSH_KEY="$E/keys/canary" CATALOG_CANARY_AUTH_TOKEN="$OPKEY" \
     CATALOG_CANARY_AUTH_TOKEN_KEYCHAIN_SERVICE="" \
     CATALOG_EVIDENCE_WATCH_SECONDS=2 CATALOG_EVIDENCE_POLL_SECONDS=1 CATALOG_CANARY_RECOVERY_SECONDS=3 \
-    CATALOG_EVIDENCE_SETTLE_SECONDS=3
+    CATALOG_EVIDENCE_SETTLE_SECONDS=3 CATALOG_COORDINATOR_READY_SECONDS=20
   unset CATALOG_WINDOW_OVERRIDE_REASON
   A_ROOT="$A"
 }
@@ -1409,15 +1499,17 @@ kill -USR1 "$(cat "$CCR_FAKE/coordinator.pid")"; sleep 1
 pricing_no_go "pricing keys in the overlay" pricing_host_state
 setup_env; touch "$CCR_TEST_CTL/record-legacy"; kill -USR1 "$(cat "$CCR_FAKE/coordinator.pid")"; sleep 1
 pricing_no_go "pre-#1693 coordinator record" pricing_host_state
-grep -q 'pricing needs a coordinator' "$T/out" || fail "a legacy record must name the enabling release"
+grep -q '"detail": "pricing needs the #1693 enabling runtime release' "$T/out" || fail "a legacy record must lead with the enabling release hint: $(cat "$T/out")"
 setup_env; pricing_no_go "commit block does not bind the card" content_gate "$BADBLOCK_COMMIT"
 setup_env; touch "$CCR_TEST_CTL/dryload-parity-skew"; pricing_no_go "dry-load parity mismatch" coordinator_dry_load
-# An added row acknowledged for its own key is GO; the same move seen only
-# through a request_log name that normalizes onto it is not acknowledged.
+# An added row capturing only its own key (default -> the row) is GO with no
+# acknowledgement; the same move seen through a request_log name that
+# normalizes onto it still needs one.
 setup_env
 runc "$MOVE_COMMIT" --preflight
-[ "$RC" -eq 0 ] || fail "an acknowledged added row must be GO (rc=$RC): $(cat "$T/out")"
-python3 - "$CCR_FAKE/var/lib/macprovider/request-log.sqlite" <<'PY'
+[ "$RC" -eq 0 ] || fail "an added row capturing only its own key must be GO without an acknowledgement (rc=$RC): $(cat "$T/out")"
+grep -q 'foo-model: .* (row default -> foo-model)' "$T/err" || fail "the added row's own key must still be shown in the price table: $(tail -n 20 "$T/err")"
+python3 - "$REQUEST_LOG" <<'PY'
 import datetime, sqlite3, sys
 con = sqlite3.connect(sys.argv[1])
 con.execute("INSERT INTO request_log (ts_utc, model) VALUES (?, ?)",
@@ -1499,7 +1591,7 @@ note "ok: lease lost -> journal kept, every writer refuses, --recover-pricing-tx
 # A name pinned by the saved preflight verdict: a new request-log name after
 # preflight does not invalidate the acknowledgement (no new move).
 setup_env
-python3 - "$CCR_FAKE/var/lib/macprovider/request-log.sqlite" <<'PY'
+python3 - "$REQUEST_LOG" <<'PY'
 import datetime, sqlite3, sys
 con = sqlite3.connect(sys.argv[1])
 con.execute("INSERT INTO request_log (ts_utc, model) VALUES (?, ?)",
@@ -1513,5 +1605,105 @@ runc "$PRICE_COMMIT" --deploy --pricing-diff-sha256 "$PDIFF" --preflight-verdict
 grep -q 'reusing the .* model names pinned by the saved preflight verdict' "$T/out" || fail "the pinned names must be reused"
 note "ok: --preflight-verdict pins the name set; a new name without a move keeps the ack valid"
 git -C "$R" update-ref refs/remotes/origin/main "$COMMIT"
+
+# ---------------------------------------------------------------------------
+# #1693 E2 (fake-Pearl) regressions, each under the real condition.
+# ---------------------------------------------------------------------------
+# V1 bug 1: the under-lock content gate verifies with the SAME Tier-2 trust
+# root as the preflight (the commit's coordinator.yaml, shipped + sha-pinned);
+# a verifier copy on Pearl has no repository coordinator.yaml beside it.
+setup_env
+runc "$PRICE_COMMIT" --deploy --pricing-diff-sha256 "$PDIFF"
+[ "$RC" -eq 0 ] || fail "E2 V1: pricing deploy under the real trust-root resolution (rc=$RC): $(tail -n 30 "$T/out") $(tail -n 10 "$T/err")"
+[ "$(grep -c 'under-lock ok' "$CCR_TEST_CTL/gate-calls.log")" = 1 ] || fail "E2 V1: the under-lock gate must have passed once"
+# V1 bug 2: the candidate was read by the service user without widening the
+# helper dir, and its dedicated dir is cleaned up.
+ls -d /tmp/macprovider-pricing-candidate.* >/dev/null 2>&1 && fail "E2 V1: the pricing candidate dir must be removed after the run"
+note "ok: E2 V1 pricing deploy: trust root beside the verifier, service-readable candidate outside the 0700 helper dir"
+setup_env
+cat >>"$T/bin/rsync" <<'RSYNC'
+if [ -e "$CCR_TEST_CTL/tamper-trust-root" ]; then for f in /tmp/macprovider-autotune-lock.*/tier2-trust-root.yaml; do printf '# swapped\n' >>"$f"; done; fi
+RSYNC
+touch "$CCR_TEST_CTL/tamper-trust-root"
+run deploy
+[ "$RC" -eq 1 ] && grep -q 'the Tier-2 trust root beside the verifier is not the preflight one; not mutating' "$T/err" ||
+  fail "E2 V1: a Tier-2 trust root swapped under the lock must refuse pre-mutation (rc=$RC): $(tail -n 10 "$T/err")"
+live_unchanged "trust root swapped under the lock"
+note "ok: E2 V1 a trust root that differs from the preflight's refuses under the lock"
+setup_env; touch "$CCR_TEST_CTL/service-user-denied"
+runc "$PRICE_COMMIT" --deploy --pricing-diff-sha256 "$PDIFF"
+[ "$RC" -eq 1 ] && grep -q 'the coordinator service user cannot read the pricing candidate' "$T/err" ||
+  fail "E2 V1: an unreadable candidate must refuse pre-mutation (rc=$RC): $(tail -n 10 "$T/err")"
+prior_pair "unreadable pricing candidate"
+note "ok: E2 V1 a candidate the service user cannot read refuses before any mutation"
+
+# V1 bug 6: the request_log is found from the effective storage.db_path.
+setup_env
+mv "$REQUEST_LOG" "$CCR_FAKE/opt/macprovider/relative-request-log.db"
+printf 'storage:\n  db_path: "relative-request-log.db"\n' >"$CCR_FAKE/etc/macprovider/coordinator.pearl-overlays.yaml"
+kill -USR1 "$(cat "$CCR_FAKE/coordinator.pid")"; sleep 1
+runc "$PRICE_COMMIT" --preflight
+[ "$RC" -eq 0 ] || fail "E2 V1: an overlay storage.db_path relative to the working dir must be read (rc=$RC): $(cat "$T/out")"
+note "ok: E2 V1 request_log from the overlay's relative storage.db_path"
+setup_env; rm -f "$REQUEST_LOG"
+pricing_no_go "request_log database absent" pricing_effective_diff
+grep -q 'storage.db_path' "$T/out" || fail "E2 V1: a missing request_log must name storage.db_path: $(cat "$T/out")"
+
+# V10 bug 8/9: a pre-#1693 recovery unit (no pricing pre-start) is NO_GO, and
+# the operator hint leads the (long) detail.
+setup_env
+printf '[Unit]\nDescription=Recover interrupted Mac Provider coordinator deploy\nBefore=macprovider-coordinator.service\n\n[Service]\nType=oneshot\nExecStart=/opt/macprovider/coordinator-deploy-recover --pre-start\n' \
+  >"$CCR_FAKE/etc/systemd/system/macprovider-coordinator-deploy-recovery.service"
+rm -f "$CCR_FAKE/opt/macprovider/coordinator-config-guard.sh" "$CCR_FAKE/etc/systemd/system/macprovider-coordinator-pricing-close.service"
+pricing_no_go "pre-#1693 recovery unit (pricing pre-start missing)" pricing_host_state
+grep -q '"detail": "pricing recovery DISABLED: the recovery unit lacks the coordinator-pricing-recover --pre-start line' "$T/out" ||
+  fail "E2 V10: the disabled-recovery hint must lead the detail: $(cat "$T/out")"
+grep -q 'macprovider-coordinator-pricing-close.service is missing' "$T/out" || fail "E2 V10: the full problem list must survive (not cut at 600 chars): $(cat "$T/out")"
+
+# Enabling rollout step 4: --host-check proves pricing readiness read-only.
+setup_env
+runc "$PRICE_COMMIT" --host-check
+[ "$RC" -eq 0 ] && [ "$(verdict_check pricing_host_state)" = true ] || fail "--host-check on a pricing-ready host must pass (rc=$RC): $(cat "$T/out") $(tail -n 5 "$T/err")"
+[ "$(wc -l <"$T/out" | tr -d ' ')" = 1 ] || fail "--host-check prints exactly one JSON verdict"
+prior_pair "--host-check"
+setup_env; touch "$CCR_TEST_CTL/record-legacy"; kill -USR1 "$(cat "$CCR_FAKE/coordinator.pid")"; sleep 1
+runc "$PRICE_COMMIT" --host-check
+[ "$RC" -eq 3 ] && [ "$(verdict_check pricing_host_state)" = false ] || fail "--host-check against a pre-#1693 coordinator must fail (rc=$RC): $(cat "$T/out")"
+note "ok: --host-check exercises pricing_host_state read-only (ready -> 0, pre-#1693 coordinator -> 3)"
+
+# V8 bugs 3/5: the operator stops the coordinator instead of letting it apply
+# the HUP; the rollback does not signal a stopped coordinator, restarts it,
+# waits for a slow boot (longer than CATALOG_EVIDENCE_SETTLE_SECONDS) and proves
+# the prior pair from the boot record: exit 4, never "state mismatch".
+setup_env; touch "$CCR_TEST_CTL/stop-on-hup"; printf '6\n' >"$CCR_TEST_CTL/restart-delay"
+runc "$PRICE_COMMIT" --deploy --pricing-diff-sha256 "$PDIFF"
+[ "$RC" -eq 4 ] || fail "E2 V8: stop mid-verify must roll back completely after a slow restart (rc=$RC): $(tail -n 30 "$T/out") $(tail -n 10 "$T/err")"
+grep -q 'rollback: coordinator not ready; SIGHUP not sent' "$T/out" || fail "E2 V8: the rollback must not signal a stopped coordinator: $(tail -n 30 "$T/out")"
+grep -q 'state mismatch' "$T/out" "$T/err" && fail "E2 V8: a stopped/booting coordinator must never be diagnosed as a state mismatch"
+grep -q 'pricing journal rolled back and finalized' "$T/out" || fail "E2 V8: the journal must be finalized after the boot proof"
+prior_pair "stop mid-verify + slow restart"
+kill -0 "$STUB_PID" 2>/dev/null || fail "E2 V8: the coordinator died"
+note "ok: E2 V8 stop mid-verify: no SIGHUP to a stopped coordinator, the slow restart is waited for, exit 4"
+
+# V8 bug 3: --recover-pricing-txn against a coordinator still booting (its
+# SIGHUP handler not yet installed) waits for /healthz, never kills it.
+setup_env
+touch "$CCR_TEST_CTL/canary-stuck"
+git -C "$R" update-ref refs/remotes/origin/main "$PRICE_COMMIT"
+(cd "$R" && CCR_EXPECT_COMMIT="$PRICE_COMMIT" exec bash scripts/catalog-content-release.sh --deploy --commit "$PRICE_COMMIT" --pricing-diff-sha256 "$PDIFF") >"$T/out" 2>"$T/err" &
+deploy_pid=$!
+for _ in $(seq 1 600); do [ -e "$CCR_TEST_CTL/canary-restarts.log" ] && break; kill -0 "$deploy_pid" 2>/dev/null || break; sleep 0.1; done
+pkill -9 -f "$CCR_FAKE/tmp/macprovider-activation-lease" || fail "E2 V8 recover: no lease runner to kill"
+RC=0; wait "$deploy_pid" || RC=$?
+[ "$RC" -eq 6 ] || fail "E2 V8 recover: lease lost must exit 6 (rc=$RC)"
+rm -f "$CCR_TEST_CTL/canary-stuck"
+printf '4\n' >"$CCR_TEST_CTL/restart-delay"
+kill -USR1 "$STUB_PID"; sleep 0.5
+RC=0; (cd "$R" && bash scripts/catalog-content-release.sh --recover-pricing-txn) >"$T/out" 2>"$T/err" || RC=$?
+kill -0 "$STUB_PID" 2>/dev/null || fail "E2 V8 recover: the booting coordinator was SIGHUPed to death"
+[ "$RC" -eq 0 ] || fail "E2 V8 recover: recovery must wait for readiness, then re-HUP and finalize (rc=$RC): $(tail -n 20 "$T/out") $(tail -n 10 "$T/err")"
+prior_pair "recover against a booting coordinator"
+git -C "$R" update-ref refs/remotes/origin/main "$COMMIT"
+note "ok: E2 V8 --recover-pricing-txn waits for a booting coordinator instead of killing it"
 
 printf '[test-catalog-content-release] ok: preflight, deploy, evidence rollback (a-d), HUP-rejected restart, interrupt/lease-lost, lease refusal, pricing lane (#1693)\n'

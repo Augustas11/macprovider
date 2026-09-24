@@ -484,7 +484,10 @@ grep -q 'value.get("catalog_evidence_source") != "provider_reported"' "$DEPLOY_S
 grep -q 'value.get("catalog_admission_mode") != "current"' "$DEPLOY_SH" ||
   fail "deploy canary must reject legacy and previous catalog admissions"
 
-grep -A1 -F '  "$STATIC_DEMAND_SIG" \' "$DEPLOY_SH" |
+# The expected-byte set is the proof's full file set (rate card included,
+# phase4-coordinator/dist/test/deploy_canary_byte_proof_names.test.sh), ending
+# with the release-bound Tier-2 catalog.
+grep -A3 -F '  "$STATIC_DEMAND_SIG" \' "$DEPLOY_SH" |
   grep -qF '  "$AUTOTUNE_TIER2_JSON" <<'"'"'PY'"'"'' ||
   fail "deploy canary expected-byte set must include the release-bound Tier-2 catalog"
 

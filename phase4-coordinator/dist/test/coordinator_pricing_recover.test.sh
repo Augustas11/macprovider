@@ -30,6 +30,7 @@ export MACPROVIDER_ROOT="$T/opt/macprovider" MACPROVIDER_ETC_ROOT="$T/etc/macpro
   MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE="$T/run/lock/macprovider-pearl-updater.lock" \
   MACPROVIDER_DEPLOY_LOCK_FILE="$T/opt/macprovider/.coordinator-deploy.lock" \
   MACPROVIDER_SYSTEMCTL="$T/bin/systemctl" MACPROVIDER_COORDINATOR_URL="http://127.0.0.1:$PORT" \
+  MACPROVIDER_COORDINATOR_HEALTHZ_URL="http://127.0.0.1:$PORT/healthz" \
   MACPROVIDER_BOOT_ID_FILE="$T/boot_id" MACPROVIDER_REQUIRED_UID="$(id -u)" CTL="$T/ctl" \
   MACPROVIDER_DEPLOY_LOCK_REQUIRED_UID="$(id -u)" \
   MACPROVIDER_DEPLOY_LOCK_REQUIRED_GID="$(python3 -c 'import os,sys;print(os.stat(sys.argv[1]).st_gid)' "$T")"
@@ -48,6 +49,7 @@ case "$*" in
   *"-p ActiveState --value macprovider-coordinator") if [ -e "$CTL/stopped" ]; then echo inactive; else echo active; fi ;;
   *"-p LoadState"*) echo not-found ;;
   daemon-reload|"try-reload-or-restart nginx") ;;
+  "start --no-block macprovider-pearl-updater-alert@"*) printf '%s\n' "$*" >>"$CTL/alerts" ;;
   start*|restart*) printf '%s\n' "$*" >>"$CTL/started"; exit 1 ;;
   *) exit 1 ;;
 esac
@@ -90,6 +92,8 @@ def apply(source):
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
+        if self.path == "/healthz":  # the real coordinator answers only once its SIGHUP handler is installed
+            self.send_response(200 if state.get("ready") else 503); self.end_headers(); return
         name = {"/v1/rate-card": "rate-card.json", "/v1/rate-card.sig": "rate-card.json.sig"}.get(self.path)
         body = state.get("served", {}).get(name)
         if body is None:
@@ -100,8 +104,15 @@ class S(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 threading.Thread(target=S(("127.0.0.1", int(sys.argv[1])), H).serve_forever, daemon=True).start()
 open(os.path.join(ctl, "active-enter"), "w").write(str(int(time.clock_gettime(time.CLOCK_MONOTONIC) * 1e6)))
+delay = os.path.join(ctl, "boot-delay")
+if os.path.exists(delay):
+    # A slow boot: MainPID exists, /healthz does not answer, and (like a
+    # coordinator before its handler is installed) a SIGHUP kills the process.
+    open(os.path.join(ctl, "pid"), "w").write(str(os.getpid()))
+    time.sleep(float(open(delay).read()))
 apply("boot")
 signal.signal(signal.SIGHUP, lambda *_: apply("sighup"))
+state["ready"] = True
 open(os.path.join(ctl, "pid"), "w").write(str(os.getpid()))
 while True:
     time.sleep(0.2)
@@ -265,7 +276,7 @@ note "restart while restored-unverified keeps the phase and re-restores idempote
 # The closer accepts only a coordinator started after the restore in this boot.
 setup; forward_until 5
 h --pre-start   # coordinator still running from BEFORE the restore
-rc=0; h --close-restored --wait-seconds 2 2>"$T/err" || rc=$?
+rc=0; h --close-restored --wait-seconds 2 --windows 1 2>"$T/err" || rc=$?
 [ "$rc" = 5 ] && grep -q 'has not started since the restore' "$T/err" || fail "closer must refuse a coordinator started before the restore (rc=$rc): $(cat "$T/err")"
 [ -e "$R/.pricing-txn" ] || fail "a refused close must keep the journal"
 echo boot-3 >"$T/boot_id"; start_coordinator
@@ -276,10 +287,25 @@ note "closer binds to boot_id + the coordinator's monotonic start, never wall cl
 # A coordinator that boots but rejects the restored pair: the closer fails (alert).
 setup; forward_until 5; stop_coordinator; h --pre-start
 touch "$CTL/reject"; start_coordinator
-rc=0; h --close-restored --wait-seconds 2 2>"$T/err" || rc=$?
+rc=0; h --close-restored --wait-seconds 1 --windows 2 2>"$T/err" || rc=$?
 [ "$rc" = 5 ] || fail "closer without a matching boot record must fail for the alert (rc=$rc)"
+[ "$(wc -l <"$CTL/alerts" | tr -d ' ')" = 1 ] || fail "closer must raise the alert after each unproven window but the last (OnFailure covers it)"
 [ "$(phase)" = restored-unverified ] || fail "failed close must keep restored-unverified"
 note "closer failure (no matching boot record) exits non-zero for OnFailure alerting"
+
+# #1693 E2 V5: a coordinator whose boot takes longer than one wait window (WAL
+# recovery after power loss). The closer alerts per window and keeps waiting,
+# without holding the lock set, then closes the journal itself.
+setup; forward_until 5; stop_coordinator; echo boot-2 >"$T/boot_id"; h --pre-start
+printf '3\n' >"$CTL/boot-delay"; rm -f "$CTL/alerts"
+start_coordinator
+python3 -c 'import fcntl,os,sys,time;fd=os.open(sys.argv[1],os.O_RDWR|os.O_CREAT,0o600);os.chmod(sys.argv[1],0o600)' "$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE"
+h --close-restored --wait-seconds 1 --windows 10 2>"$T/err" || fail "a slow boot must be waited out and closed: $(cat "$T/err")"
+[ ! -e "$R/.pricing-txn" ] || fail "the closer must finalize once the slow boot proves the prior pair"
+[ -s "$CTL/alerts" ] || fail "each window that ends unproven must raise the alert"
+grep -q 'window 1/10' "$T/err" || fail "the closer must say it keeps waiting: $(cat "$T/err")"
+rm -f "$CTL/boot-delay"
+note "slow boot: the closer alerts per window, keeps waiting unlocked, and closes the journal itself"
 
 # Terminal phases at pre-start: bytes-only check, then finalize.
 setup; forward_until 5; h phase hup-intent; kill -HUP "$(cat "$CTL/pid")"; h phase verifying; h phase verified
@@ -351,7 +377,7 @@ rc=0; h --pre-start 2>"$T/err" || rc=$?
 [ "$rc" -ne 0 ] && grep -q "unsafe coordinator config lock $MACPROVIDER_DEPLOY_LOCK_FILE" "$T/err" || fail "an unsafe deploy lock must fail closed (rc=$rc)"
 [ "$(phase)" = mutating ] || fail "an unsafe deploy lock must not touch the journal"
 # The closer of a restored-unverified journal fails closed on an unsafe lock.
-setup; forward_until 3; stop_coordinator; h --pre-start
+setup; forward_until 3; stop_coordinator; h --pre-start; start_coordinator
 chmod 0644 "$MACPROVIDER_DEPLOY_LOCK_FILE"
 rc=0; h --close-restored --lock-wait-seconds 1 --wait-seconds 1 2>"$T/err" || rc=$?
 [ "$rc" -ne 0 ] && grep -q 'unsafe coordinator config lock' "$T/err" || fail "the closer with an unsafe lock must fail closed (rc=$rc)"
@@ -434,6 +460,25 @@ start_coordinator
 h recover --wait-seconds 5 || fail "operator recovery must accept the boot record of restored-unverified"
 [ ! -e "$R/.pricing-txn" ] || fail "restored-unverified must finalize on a matching boot record"
 note "restored-unverified finalized only on a matching boot record"
+
+# #1693 E2 V8: recovery while the coordinator is still booting. A SIGHUP before
+# its handler is installed kills it (systemd treats that as a clean exit), so
+# the helper must wait for /healthz, never signal a booting coordinator.
+setup; forward_until 7
+printf '4\n' >"$CTL/boot-delay"; start_coordinator
+rc=0; h recover --wait-seconds 2 --ready-seconds 1 2>"$T/err" || rc=$?
+[ "$rc" = 4 ] && grep -q 'still booting' "$T/err" && grep -q 'not a foreign write' "$T/err" ||
+  fail "recovery against a booting coordinator must stop as not-ready (exit 4), not signal it (rc=$rc): $(cat "$T/err")"
+kill -0 "$STUB_PID" 2>/dev/null || fail "the booting coordinator must not have been signalled"
+[ -e "$R/.pricing-txn" ] || fail "a not-ready stop keeps the journal"
+rc=0; h verify-live prior --since 0 --source sighup --wait-seconds 1 2>"$T/err" || rc=$?
+[ "$rc" = 4 ] && ! grep -q 'state mismatch' "$T/err" || fail "verify-live against a booting coordinator is not-ready, never a state mismatch (rc=$rc): $(cat "$T/err")"
+h recover --wait-seconds 5 --ready-seconds 20 2>"$T/err" || fail "recovery must wait for readiness, then re-HUP and finalize: $(cat "$T/err")"
+kill -0 "$STUB_PID" 2>/dev/null || fail "the coordinator died: it was signalled before it was ready"
+[ ! -e "$R/.pricing-txn" ] || fail "recovery after readiness must finalize"
+prior_on_disk "recovery after waiting for a booting coordinator"
+rm -f "$CTL/boot-delay"
+note "recovery never SIGHUPs a booting coordinator: not-ready (exit 4) or waits for /healthz, then re-HUPs"
 
 # ---------------------------------------------------------------------------
 # deploy-recover --pre-start and the shared guard.
@@ -776,6 +821,13 @@ assert close[("Unit", "After")] == ["macprovider-coordinator.service"], close
 assert close[("Service", "Type")] == ["oneshot"], close
 assert close[("Unit", "OnFailure")] == ["macprovider-pearl-updater-alert@%n.service"], close
 assert close[("Service", "ExecStart")] == ["/usr/bin/python3 -I /opt/macprovider/coordinator-pricing-recover --close-restored"], close
+# 8 windows x 900 s + the 300 s lock wait must fit the start timeout.
+assert int(close[("Service", "TimeoutStartSec")][0]) >= 8 * 900 + 300, close
+svc = props(units + "/../macprovider-coordinator.service")
+# #1693 E2 V8: a SIGHUP death restarts the coordinator; a deliberate stop does not.
+assert svc[("Service", "Restart")] == ["on-failure"], svc
+assert svc[("Service", "RestartForceExitStatus")] == ["SIGHUP"], svc
+assert svc[("Service", "KillSignal")] == ["SIGTERM"], svc
 rec = props(units + "/macprovider-coordinator-deploy-recovery.service")
 assert rec[("Service", "ExecStart")] == ["/usr/bin/python3 -I /opt/macprovider/coordinator-pricing-recover --pre-start",
                                         "/opt/macprovider/coordinator-deploy-recover --pre-start"], rec

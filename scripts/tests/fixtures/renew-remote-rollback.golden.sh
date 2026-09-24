@@ -4,6 +4,25 @@ root="$1"; cur="$2"; prev_b64="$3"; unit="$4"; helper="$5"; expected="$6"; windo
 # unchanged, and an empty file makes it remove .previous-target.
 prior_window="$(dirname "$window")/prior-window"
 if [ "$prev_b64" = "__EMPTY__" ]; then : > "$prior_window"; else printf '%s' "$prev_b64" | base64 -d > "$prior_window"; fi
+coord_ready_pid() { # <unit>
+  local deadline=$(( $(date +%s) + 900 )) state pid
+  while :; do
+    state="$(systemctl show -p ActiveState --value "$1" 2>/dev/null || true)"
+    pid="$(systemctl show -p MainPID --value "$1" 2>/dev/null || true)"
+    case "$state" in active|activating|reloading) ;; *) echo "$1 is not running (ActiveState=${state:-?})" >&2; return 1 ;; esac
+    case "$pid" in ""|0|*[!0-9]*) echo "$1 has no MainPID" >&2; return 1 ;; esac
+    if curl --noproxy '*' -fsS --max-time 5 --max-filesize 65536 -o /dev/null http://127.0.0.1:8444/healthz 2>/dev/null &&
+       [ "$(systemctl show -p MainPID --value "$1" 2>/dev/null || true)" = "$pid" ]; then
+      echo "$pid"
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "$1 (pid $pid) is still booting: /healthz does not answer 200" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
 python3 "$helper" validate || { echo "rollback: lock validation failed; not mutating" >&2; exit 1; }
 exec 8</run/lock/macprovider-pearl-updater.lock || { echo "rollback: cannot open updater lock; not mutating" >&2; exit 1; }
 flock -n 8 || { echo "rollback: Pearl updater lock held; not mutating" >&2; exit 1; }
@@ -44,8 +63,7 @@ if [ "$live" = "$expected" ]; then
   mv -Tf "$root/.current.rollback" "$root/current"
   window_rc=0
   python3 -I "$window" restore --root "$root" --from-file "$prior_window" --expect-current "$cur" || window_rc=$?
-  pid="$(systemctl show -p MainPID --value "$unit")"
-  [ -n "$pid" ] && [ "$pid" != "0" ] && kill -HUP "$pid" || true
+  if pid="$(coord_ready_pid "$unit")"; then kill -HUP "$pid"; else echo "rollback: coordinator not ready; SIGHUP not sent" >&2; fi
   [ "$window_rc" -eq 0 ] || { echo "rollback: rolled back current to $cur but .previous-target restore failed" >&2; exit 1; }
   echo "rolled back to $cur"
 elif [ "$live" = "$cur" ]; then
