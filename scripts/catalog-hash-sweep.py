@@ -13,12 +13,13 @@ sorted by relative path.
 
 File set (mirrors `HuggingFaceSnapshotDownloader.downloadSnapshot`): every
 `siblings[].rfilename` of `/api/models/<repo>/revision/<rev>`, `.gitattributes`
-included. The manifest path is the form `URL.appendingPathComponent` produces
-on Apple platforms, not the raw Hub string: Unicode NFD per component, except
-the scalars Foundation does not decompose. Names Swift treats as equal
-(canonical equivalence, which is how APFS `removeItem` then `moveItem`
-collapses two siblings onto one directory entry) become one entry. The last
-sibling in revision-API order wins, and its stored URL form is the path.
+included. The manifest path is what `inspectCanonicalArtifact` reads back
+after `downloadSnapshot` on case-insensitive APFS. Each component uses the
+`URL.appendingPathComponent` form (Unicode NFD, except scalars Foundation
+does not decompose). `createDirectory` keeps the first spelling of a
+directory. `removeItem` then `moveItem` replaces the leaf, so the last
+sibling's leaf spelling and bytes win. Names collide when their NFD casefold
+is equal.
 Per-file size and SHA-256 come from the recursive tree API at the pinned
 revision: the LFS `oid` for LFS/Xet files, and a download-and-hash of the
 resolved bytes for plain git files (cross-checked against the git blob SHA-1
@@ -217,12 +218,52 @@ def _apple_nfd(component: str) -> str:
 
 
 def apple_relative_path(path: str) -> str:
-    """Path `inspectCanonicalArtifact` records after `appendingPathComponent`.
+    """One `appendingPathComponent` call: NFD each component, slashes stay.
 
-    Slashes stay. Each component is normalized on its own, which is what one
-    `appendingPathComponent` call does with a multi-segment `rfilename`.
+    This is the URL form, not the path a later enumerator reads back when a
+    parent directory was created under a different equivalent spelling.
     """
     return "/".join(_apple_nfd(part) for part in path.split("/"))
+
+
+def _collision_key(component: str) -> str:
+    """Identity of one APFS directory entry on a case-insensitive volume."""
+    return unicodedata.normalize("NFD", component).casefold()
+
+
+def apfs_manifest_names(siblings: list[str]) -> list[tuple[str, str]]:
+    """Return `(stored path, winning raw name)` in first-seen file order.
+
+    Directory components keep the spelling of the sibling that created them.
+    The leaf keeps the last sibling's URL form. Collision is NFD plus
+    casefold, measured against `removeItem` + `moveItem` on this Mac.
+    """
+    dir_spelling: dict[tuple[str, ...], str] = {}
+    files: dict[tuple[str, ...], tuple[str, str]] = {}
+    order: list[tuple[str, ...]] = []
+    for raw in siblings:
+        stored = apple_relative_path(raw)
+        validate_relative_path(stored)
+        parts = stored.split("/")
+        if any(part in ("", ".") for part in parts):
+            raise SweepError(f"path {raw!r} is not a git tree path")
+        keys: list[str] = []
+        built: list[str] = []
+        for component in parts[:-1]:
+            keys.append(_collision_key(component))
+            prefix = tuple(keys)
+            spelling = dir_spelling.get(prefix)
+            if spelling is None:
+                dir_spelling[prefix] = component
+                spelling = component
+            built.append(spelling)
+        leaf_key = tuple(keys + [_collision_key(parts[-1])])
+        full = "/".join(built + [parts[-1]])
+        validate_relative_path(full)
+        if leaf_key not in files:
+            order.append(leaf_key)
+        files[leaf_key] = (full, raw)
+    return [files[key] for key in order]
 
 
 def canonical_manifest_hash(entries: list[FileEntry]) -> str:
@@ -358,7 +399,7 @@ def _file_entry(
     item: dict,
     notes: list[str],
 ) -> FileEntry:
-    """One manifest line. `stored` is the Apple URL path; `raw` is the Hub name."""
+    """One manifest line. `stored` is the enumerated path; `raw` is the Hub name."""
     size = item.get("size")
     # bool is an int subclass; f"{True}" is "True", not the byte count Swift prints.
     if type(size) is not int:
@@ -402,21 +443,8 @@ def recompute(client: HuggingFaceClient, repo_id: str, revision: str) -> tuple[l
             "sibling/tree file sets differ: only-siblings="
             f"{sorted(sibling_set - tree_set)} only-tree={sorted(tree_set - sibling_set)}"
         )
-    # Revision-API order. APFS removeItem+moveItem keeps the last sibling
-    # when two raw names are canonically equivalent (café NFC/NFD, or
-    # U+212B and U+00C5). The manifest path is that sibling's URL form.
-    winners: dict[str, tuple[str, str]] = {}
-    order: list[str] = []
-    for raw in siblings:
-        stored = apple_relative_path(raw)
-        validate_relative_path(stored)
-        key = unicodedata.normalize("NFD", stored)
-        if key not in winners:
-            order.append(key)
-        winners[key] = (stored, raw)
     entries: list[FileEntry] = []
-    for key in order:
-        stored, raw = winners[key]
+    for stored, raw in apfs_manifest_names(siblings):
         entries.append(_file_entry(client, repo_id, revision, stored, raw, tree[raw], notes))
     return entries, notes
 

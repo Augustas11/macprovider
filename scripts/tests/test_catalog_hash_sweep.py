@@ -328,6 +328,52 @@ class SweepTests(unittest.TestCase):
 
 
 class ApplePathTests(unittest.TestCase):
+    def test_apfs_names_match_the_measured_enumerator(self) -> None:
+        # Recorded from removeItem + moveItem on case-insensitive APFS.
+        self.assertEqual(
+            sweep.apfs_manifest_names(["\u212b/a.txt", "\u00c5/a.txt"]),
+            [("\u212b/a.txt", "\u00c5/a.txt")],
+        )
+        self.assertEqual(
+            sweep.apfs_manifest_names(["foo/\u2126/bar", "foo/\u03a9/bar"]),
+            [("foo/\u2126/bar", "foo/\u03a9/bar")],
+        )
+        self.assertEqual(
+            sweep.apfs_manifest_names(["README.md", "readme.md"]),
+            [("readme.md", "readme.md")],
+        )
+        self.assertEqual(
+            sweep.apfs_manifest_names(["Dir/a.txt", "dir/b.txt"]),
+            [("Dir/a.txt", "Dir/a.txt"), ("Dir/b.txt", "dir/b.txt")],
+        )
+        self.assertEqual(
+            sweep.apfs_manifest_names(["Dir/a.txt", "dir/a.txt"]),
+            [("Dir/a.txt", "dir/a.txt")],
+        )
+
+    def test_empty_path_component_is_refused(self) -> None:
+        with self.assertRaises(sweep.SweepError):
+            sweep.apfs_manifest_names(["a//b.txt"])
+
+    def test_case_variant_leaf_is_one_manifest_line(self) -> None:
+        files = {"README.md": b"UP", "readme.md": b"LOW"}
+        digest = hashlib.sha256(b"LOW").hexdigest()
+        expected = hashlib.sha256(f"readme.md\n3\n{digest}\n".encode()).hexdigest()
+        code, row = self._sweep(files, ["README.md", "readme.md"], expected)
+        self.assertEqual(code, 0, row)
+        self.assertEqual(row["file_count"], 1)
+        self.assertEqual(row["recomputed_sha256"], expected)
+
+    def test_parent_directory_keeps_the_first_spelling(self) -> None:
+        first, second = "\u212b/a.txt", "\u00c5/a.txt"
+        files = {first: b"ANG", second: b"ARING"}
+        digest = hashlib.sha256(b"ARING").hexdigest()
+        expected = hashlib.sha256(f"{first}\n5\n{digest}\n".encode()).hexdigest()
+        code, row = self._sweep(files, [first, second], expected)
+        self.assertEqual(code, 0, row)
+        self.assertEqual(row["file_count"], 1)
+        self.assertEqual(row["recomputed_sha256"], expected)
+
     def test_foundation_url_vectors(self) -> None:
         # Scalars measured from URL.appendingPathComponent on this Mac.
         vectors = {
