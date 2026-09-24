@@ -12,6 +12,10 @@ export MACPROVIDER_CTL_SOCKET_PATH="$LAB/tmp/ctl.sock"
 export MACPROVIDER_SWITCH_STATE_PATH="$LAB/tmp/last-switch.ts"
 export MACPROVIDER_WATCHDOG_STATE_DIR="$LAB/home/watchdog"
 export MACPROVIDER_LLAMACPP_MODEL_PATH="$LAB/models/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+# #1690 M8: the mlx_lm.server snapshot and origin, and the lab Ollama store.
+export MACPROVIDER_MLXLM_MODEL_PATH="${MLXLM_SNAPSHOT:-$LAB/models/mlx/Qwen2.5-0.5B-Instruct-4bit}"
+export MACPROVIDER_MLXLM_ORIGIN=http://127.0.0.1:19131
+export OLLAMA_MODELS="$LAB/ollama-models"
 export MACPROVIDER_BYOM_ALLOW_INSECURE_LOOPBACK_COORDINATOR=1
 export MACPROVIDER_AUTO_UPDATE_ENABLED=false
 export MACPROVIDER_MAX_CONCURRENCY_OVERRIDE="${MACPROVIDER_MAX_CONCURRENCY_OVERRIDE:-4}"

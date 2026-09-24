@@ -154,6 +154,10 @@ func staticRelease(args []string) error {
 	ggufRevision := fs.String("gguf-revision", "", "GGUF Hugging Face revision (40 hex)")
 	ggufFile := fs.String("gguf-file", "", "GGUF repository-relative file_path")
 	swiftOut := fs.String("swift-out", "", "path for the lab AutotuneCatalog.generated.swift")
+	mlxSources := fs.String("mlx-runtime-sources", "mlx_cache", "csv allowed_runtime_sources of the MLX primary (#1690 M8: mlx_cache,mlxlm_loopback)")
+	ollamaTag := fs.String("ollama-tag", "", "optional Ollama library tag of a GGUF ollama_loopback artifact (#1690 M8)")
+	ollamaSHA := fs.String("ollama-gguf-sha256", "", "sha256 of that Ollama model blob (macprovider.gguf-file.v1)")
+	ollamaSize := fs.Int64("ollama-gguf-size", 0, "size in bytes of that Ollama model blob")
 	_ = fs.Parse(args)
 	for name, v := range map[string]string{"out-dir": *outDir, "key-file": *keyFile, "release": *release, "generated-at": *generatedAt,
 		"row-key": *rowKey, "mlx-model-id": *mlxModelID, "mlx-revision": *mlxRevision, "mlx-sha256": *mlxSHA,
@@ -189,7 +193,7 @@ func staticRelease(args []string) error {
 			"model_id":           *mlxModelID,
 			"model_revision":     *mlxRevision,
 			"model_sha256":       *mlxSHA,
-			"notes":              "lab-1690-m6: MLX primary is a lab placeholder digest; the GGUF sibling is the served, verified artifact.",
+			"notes":              "lab-1690-m6 rehearsal row: an MLX primary plus GGUF siblings for the loopback runtimes.",
 			"runtime_status":     "recommendable",
 		}},
 	}
@@ -240,7 +244,7 @@ func staticRelease(args []string) error {
 			"artifacts": map[string]any{
 				"mlx-4bit": map[string]any{
 					"runtime_format": "mlx_safetensors", "hash_algorithm": "macprovider.snapshot-manifest.v1", "hash": *mlxSHA,
-					"quantization": "4bit", "size_bytes": 1, "min_ram_gb": *minRAM, "allowed_runtime_sources": []string{"mlx_cache"},
+					"quantization": "4bit", "size_bytes": 1, "min_ram_gb": *minRAM, "allowed_runtime_sources": splitCSV(*mlxSources),
 					"source_ref":          map[string]any{"kind": "huggingface_revision", "repo_id": *mlxModelID, "revision": *mlxRevision},
 					"verification_status": "verified", "verified_at": verifiedAt,
 				},
@@ -252,6 +256,18 @@ func staticRelease(args []string) error {
 				},
 			},
 		}},
+	}
+	if *ollamaTag != "" {
+		if *ollamaSHA == "" || *ollamaSize <= 0 {
+			return fmt.Errorf("--ollama-tag needs --ollama-gguf-sha256 and --ollama-gguf-size")
+		}
+		model := artifacts["models"].(map[string]any)[*rowKey].(map[string]any)
+		model["artifacts"].(map[string]any)["gguf-ollama"] = map[string]any{
+			"runtime_format": "gguf", "hash_algorithm": "macprovider.gguf-file.v1", "hash": *ollamaSHA,
+			"quantization": "q4_k_m", "size_bytes": *ollamaSize, "min_ram_gb": *minRAM, "allowed_runtime_sources": []string{"ollama_loopback"},
+			"source_ref":          map[string]any{"kind": "ollama_library_tag", "library_tag": *ollamaTag, "digest": "sha256:" + *ollamaSHA},
+			"verification_status": "verified", "verified_at": verifiedAt,
+		}
 	}
 	artBytes, err := json.Marshal(artifacts)
 	if err != nil {

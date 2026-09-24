@@ -67,7 +67,9 @@ class Tap(BaseHTTPRequestHandler):
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()
             while True:
-                line = resp.fp.readline()
+                # resp.readline() decodes a chunked body (Ollama keeps the
+                # connection alive, so the raw socket never reaches EOF).
+                line = resp.readline()
                 if not line:
                     break
                 if line.startswith(b"data: ") and line.strip() != b"data: [DONE]":

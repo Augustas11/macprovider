@@ -7,7 +7,14 @@
 #   rig.sh build    build coordinator, coordinator-cli, gateway, labtool, lab CLI
 #   rig.sh build-spoof  build a lab-only CLI whose auth runtime_source can be
 #                   overridden by LAB_SPOOF_RUNTIME_SOURCE (a hostile client)
-#   rig.sh up       start everything, offer + price the candidate, create pool A
+#   rig.sh up       start everything, offer + price the candidate, create the
+#                   engine's pool (A llamacpp, M mlxlm, O ollama)
+#   rig.sh server-start | server-stop   start/stop only the ENGINE model server
+#
+# ENGINE=llamacpp (default, #1690 M6/M7) | mlxlm | ollama (#1690 M8) picks the
+# one model server behind the usage tap: llama-server, mlx_lm.server from
+# $LAB/venv serving MLXLM_SNAPSHOT, or Ollama's release binary in
+# $LAB/ollama with OLLAMA_MODELS under $LAB. Only one runs at a time.
 #   rig.sh down     stop every lab process (by recorded, verified identity only)
 #   rig.sh status   show lab processes and the coordinator's view of the member
 #
@@ -33,6 +40,12 @@ GGUF_SHA=74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db
 MLX_ID=mlx-community/Qwen2.5-0.5B-Instruct-4bit
 MLX_REV=a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3
 ROW_KEY=qwen2.5-0.5b-instruct
+ENGINE="${ENGINE:-llamacpp}"
+MLXLM_SNAPSHOT="${MLXLM_SNAPSHOT:-$LAB/models/mlx/Qwen2.5-0.5B-Instruct-4bit}"
+OLLAMA_TAG="${OLLAMA_TAG:-qwen2.5:0.5b}"
+export OLLAMA_MODELS="$LAB/ollama-models" OLLAMA_HOST=127.0.0.1:19130
+# mlx_lm.server scans only the lab Hugging Face home and never downloads.
+export HF_HOME="$LAB/home/hf" HF_HUB_OFFLINE=1
 export PATH="$GO_BIN:$PATH" GOTOOLCHAIN=local LAB
 # shellcheck source=pidguard.sh
 . "$HERE/pidguard.sh"
@@ -127,12 +140,17 @@ PY
 
 cmd_static() {
   [[ -f "$LAB/static/tier2-catalog.json" && -f "$LAB/static/AutotuneCatalog.generated.swift" ]] && return 0
-  local mlx_sha; mlx_sha=$(printf 'lab-1690-m6 placeholder mlx primary' | shasum -a 256 | cut -c1-64)
+  # MLX_SHA (#1690 M8): the real snapshot-manifest digest of MLXLM_SNAPSHOT,
+  # so mlx_lm.server can bind the row; else the M6 placeholder.
+  local mlx_sha="${MLX_SHA:-$(printf 'lab-1690-m6 placeholder mlx primary' | shasum -a 256 | cut -c1-64)}"
+  local extra=()
+  [[ -n "${MLX_RUNTIME_SOURCES:-}" ]] && extra+=(--mlx-runtime-sources "$MLX_RUNTIME_SOURCES")
+  [[ -n "${OLLAMA_GGUF_SHA:-}" ]] && extra+=(--ollama-tag "$OLLAMA_TAG" --ollama-gguf-sha256 "$OLLAMA_GGUF_SHA" --ollama-gguf-size "$OLLAMA_GGUF_SIZE")
   "$LAB/bin/labtool" static-release --out-dir "$LAB/static" --key-file "$LAB/keys/static-feed.ed25519" \
     --release lab-1690-m6-r1 --generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --row-key "$ROW_KEY" \
     --mlx-model-id "$MLX_ID" --mlx-revision "$MLX_REV" --mlx-sha256 "$mlx_sha" \
     --gguf-sha256 "$GGUF_SHA" --gguf-size "$(stat -f %z "$LAB/models/$GGUF_FILE")" --gguf-repo "$GGUF_REPO" \
-    --gguf-revision "$GGUF_REV" --gguf-file "$GGUF_FILE" --swift-out "$LAB/static/AutotuneCatalog.generated.swift"
+    --gguf-revision "$GGUF_REV" --gguf-file "$GGUF_FILE" --swift-out "$LAB/static/AutotuneCatalog.generated.swift" ${extra[@]+"${extra[@]}"}
   local sc="$SRC_ROOT/scripts/sign-catalog.go"
   [[ -f "$LAB/keys/tier2.priv" ]] || go run "$sc" keygen -public-out "$LAB/keys/tier2.pub" -private-out "$LAB/keys/tier2.priv"
   chmod 600 "$LAB/keys/tier2.priv"
@@ -153,9 +171,8 @@ cmd_up() {
   [[ -f "$LAB/keys/buyer-key-acct-lab-1690-buyer" ]] || python3 "$HERE/seed_gateway.py"
   start_bg gateway "$LAB/bin/gateway" -config "$LAB/run/gateway.yaml"
   wait_http http://127.0.0.1:19110/healthz
-  start_bg llama-server "$LLAMA_DIR/llama-server" -m "$LAB/models/$GGUF_FILE" --host 127.0.0.1 --port 19130 -c 8192 -np 4 -ngl 99
-  wait_http http://127.0.0.1:19130/health
-  start_bg usage-tap python3 "$HERE/usage_tap.py" 19131 19130 "$LAB/logs/upstream-usage.jsonl" "$LAB/run/strip-usage" "$LAB/run/slow-stream"
+  cmd_server_start
+  pg_verify "$LAB/run/usage-tap.pid" >/dev/null 2>&1 || start_bg usage-tap python3 "$HERE/usage_tap.py" 19131 19130 "$LAB/logs/upstream-usage.jsonl" "$LAB/run/strip-usage" "$LAB/run/slow-stream"
   if [[ ! -d "$LAB/provider/protected-credentials" ]]; then
     (umask 077; cat >"$LAB/provider/config.yaml" <<EOF
 coordinator_url: ws://127.0.0.1:19102/ws/provider
@@ -164,7 +181,7 @@ provider_token: $(grep '^token=' "$LAB/keys/provider-token.out" | cut -d= -f2)
 credential_store: protected_file
 enable_receipts: true
 port: 19120
-model: llamacpp:${GGUF_FILE%.gguf}
+model: $(engine_model_ref)
 model_catalog_key: $ROW_KEY
 model_catalog_model_id: $MLX_ID
 loopback_origin: http://127.0.0.1:19131
@@ -173,38 +190,87 @@ EOF
     )
     "$HERE/cli.sh" credentials import --config "$LAB/provider/config.yaml"
   fi
+  # One model line per engine; the protected credentials stay as imported.
+  python3 - "$LAB/provider/config.yaml" "$(engine_model_ref)" <<'EOF'
+import re, sys
+path, ref = sys.argv[1], sys.argv[2]
+text = open(path).read()
+open(path, "w").write(re.sub(r"(?m)^model: .*$", "model: " + ref, text, count=1))
+EOF
   "$HERE/serve.sh" start
-  if [[ ! -f "$LAB/logs/offer.json" ]]; then
-    "$HERE/cli.sh" models offer "llamacpp:${GGUF_FILE%.gguf}" --yes --json --config "$LAB/provider/config.yaml" \
-      --coordinator-url http://127.0.0.1:19102 --mlx-cache-dir "$LAB/home/hf" --skip-ollama --skip-lmstudio \
-      --skip-openai-compatible --llamacpp-origin http://127.0.0.1:19131 >"$LAB/logs/offer.json"
-    python3 - "$LAB" <<'EOF'
+  if [[ ! -f "$LAB/logs/$(offer_name)" ]]; then
+    "$HERE/cli.sh" models offer "$(engine_model_ref)" --yes --json --config "$LAB/provider/config.yaml" \
+      --coordinator-url http://127.0.0.1:19102 --mlx-cache-dir "$LAB/home/hf" $(engine_offer_flags) >"$LAB/logs/$(offer_name)"
+    python3 - "$LAB" "$(offer_name)" "$ENGINE" <<'EOF'
 import json, sys, urllib.request
-lab = sys.argv[1]
-offer = json.load(open(f"{lab}/logs/offer.json"))
+lab, name, engine = sys.argv[1], sys.argv[2], sys.argv[3]
+offer = json.load(open(f"{lab}/logs/{name}"))
 key = json.load(open(f"{lab}/keys/secrets.json"))["operator_lab_a"]
 body = {"schema": "model_admission_decision_request.v1", "provider_id": offer["provider_id"], "candidate_id": offer["candidate_id"],
         "next_state": "catalog_priced", "reason_code": "operator_lab_pool_priced",
-        "expected_coordinator_event_id": offer["coordinator_event_id"], "idempotency_key": "lab-1690-m6-priced-1"}
+        "expected_coordinator_event_id": offer["coordinator_event_id"],
+        "idempotency_key": "lab-1690-m6-priced-1" if engine == "llamacpp" else f"lab-1690-m8-priced-{engine}"}
 req = urllib.request.Request("http://127.0.0.1:19102/admin/model-admission/decisions", data=json.dumps(body).encode(),
                              headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
 doc = json.load(urllib.request.urlopen(req))
-open(f"{lab}/logs/decision-catalog-priced.json", "w").write(json.dumps(doc))
+open(f"{lab}/logs/decision-catalog-priced{'' if engine == 'llamacpp' else '-' + engine}.json", "w").write(json.dumps(doc))
 print("decision:", doc["admission_state"])
 EOF
   fi
-  [[ -d "$LAB/pools/A" ]] || python3 "$HERE/pool_setup.py" create A --encoding 2 --runtime-allowlist llamacpp_loopback
+  case "$ENGINE" in
+    llamacpp) [[ -d "$LAB/pools/A" ]] || python3 "$HERE/pool_setup.py" create A --encoding 2 --runtime-allowlist llamacpp_loopback ;;
+    mlxlm) [[ -d "$LAB/pools/M" ]] || python3 "$HERE/pool_setup.py" create M --encoding 2 --runtime-allowlist mlxlm_loopback ;;
+    ollama) [[ -d "$LAB/pools/O" ]] || python3 "$HERE/pool_setup.py" create O --encoding 2 --runtime-allowlist ollama_loopback ;;
+  esac
   echo "rig up"
 }
 
+engine_model_ref() {
+  case "$ENGINE" in
+    llamacpp) echo "llamacpp:${GGUF_FILE%.gguf}" ;;
+    mlxlm) echo "mlxlm:$(basename "$MLXLM_SNAPSHOT")" ;;
+    ollama) echo "ollama:$OLLAMA_TAG" ;;
+    *) echo "unknown ENGINE $ENGINE" >&2; exit 2 ;;
+  esac
+}
+offer_name() { if [[ "$ENGINE" == llamacpp ]]; then echo offer.json; else echo "offer-$ENGINE.json"; fi; }
+engine_offer_flags() {
+  case "$ENGINE" in
+    llamacpp) echo "--skip-ollama --skip-lmstudio --skip-openai-compatible --llamacpp-origin http://127.0.0.1:19131" ;;
+    mlxlm) echo "--skip-ollama --skip-lmstudio --skip-openai-compatible --skip-llamacpp" ;;
+    ollama) echo "--ollama-origin http://127.0.0.1:19131 --skip-lmstudio --skip-openai-compatible --skip-llamacpp" ;;
+  esac
+}
+
+# The one model server for ENGINE on 127.0.0.1:19130 (the tap is 19131).
+cmd_server_start() {
+  case "$ENGINE" in
+    llamacpp)
+      start_bg llama-server "$LLAMA_DIR/llama-server" -m "$LAB/models/$GGUF_FILE" --host 127.0.0.1 --port 19130 -c 8192 -np 4 -ngl 99
+      wait_http http://127.0.0.1:19130/health ;;
+    mlxlm)
+      # mlx_lm.server lists its Hugging Face cache and fails the listing when
+      # the cache directory does not exist.
+      mkdir -p "$HF_HOME/hub"
+      start_bg mlxlm-server "$LAB/venv/bin/python3" "$LAB/venv/bin/mlx_lm.server" \
+        --model "$MLXLM_SNAPSHOT" --host 127.0.0.1 --port 19130
+      wait_http http://127.0.0.1:19130/health ;;
+    ollama)
+      start_bg ollama "$LAB/ollama/ollama" serve
+      wait_http http://127.0.0.1:19130/api/version ;;
+  esac
+}
+
+cmd_server_stop() { for p in llama-server mlxlm-server ollama; do stop_pid "$p"; done; }
+
 cmd_down() {
   "$HERE/serve.sh" stop
-  for p in usage-tap llama-server gateway coordinator; do stop_pid "$p"; done
+  for p in usage-tap llama-server mlxlm-server ollama gateway coordinator; do stop_pid "$p"; done
   echo "rig down"
 }
 
 cmd_status() {
-  for p in serve usage-tap llama-server gateway coordinator; do
+  for p in serve usage-tap llama-server mlxlm-server ollama gateway coordinator; do
     if pid=$(pg_verify "$LAB/run/$p.pid"); then echo "$p: pid $pid"; elif [[ -f "$LAB/run/$p.pid" ]]; then echo "$p: stale pid file"; else echo "$p: stopped"; fi
   done
   if curl -fs http://127.0.0.1:19102/healthz >/dev/null 2>&1; then
@@ -222,5 +288,7 @@ case "${1:-}" in
   up) cmd_up ;;
   down) cmd_down ;;
   status) cmd_status ;;
-  *) echo "usage: rig.sh model|build|build-spoof|up|down|status" >&2; exit 2 ;;
+  server-start) cmd_server_start ;;
+  server-stop) cmd_server_stop ;;
+  *) echo "usage: rig.sh model|build|build-spoof|up|down|status|server-start|server-stop" >&2; exit 2 ;;
 esac

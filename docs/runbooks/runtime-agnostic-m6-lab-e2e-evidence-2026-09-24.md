@@ -429,3 +429,95 @@ engine refusals (unit tests); Ollama serving (M8).
 **Teardown.** Each lab PID's command line was checked against
 `/Users/a1/lab-1690-m6/m7` (or `usage_tap.py` on 1913x) before a TERM. The
 live provider (PID 811) was not touched, and no 191xx listener was left.
+
+## M8: more engines, mlx_lm.server and Ollama (run 5, f6b34f61)
+
+**Branch:** `wip/1690-m8` at `f6b34f61` (M8a `31e2db0a` SPEC-010 1.12 R009 /
+SPEC-023 v0.17.0 / SPEC-042 0.0.34 / SPEC-046 0.3.0 / SPEC-006 0.9.35 /
+SPEC-047 0.2.1 / SPEC-032 v0.3.1; M8b the CLI leg, coordinator and gateway).
+Everything ran on the Mac Studio. Coordinator, coordinator-cli, gateway,
+labtool, and the lab CLI were rebuilt from that tree (`rig.sh build`). The run
+started from scratch in `/Users/a1/lab-1690-m6/m8` with fresh lab keys, a
+fresh static release, Tier-2 catalog, provider token, and buyer key, on the
+same 127.0.0.1:19101-19131 ports. Only one model server ran at a time.
+
+**Lab release.** Row `qwen2.5-0.5b-instruct`, `model_id`
+`mlx-community/Qwen2.5-0.5B-Instruct-4bit`, `model_revision`
+`a5339a4131f135d0fdc6a5c8b5bbed2753bbe0f3`. The row's `model_sha256` is now
+the real snapshot-manifest digest of that snapshot
+(`1bbee07a0dea46fa6d970fe2f3cebac9da287ba614d02d3319c945e886c0f4ea`, the
+M6 placeholder is gone). Its primary artifact allows
+`["mlx_cache","mlxlm_loopback"]` (SPEC-023 v0.17.0). Two GGUF siblings: the
+M6 llama.cpp file (`huggingface_revision`, `llamacpp_loopback`), and the
+Ollama `qwen2.5:0.5b` model blob (`ollama_library_tag`, digest
+`sha256:c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515`,
+397807936 bytes, `ollama_loopback`). The coordinator loaded the feed without
+an integrity failure.
+
+**Engines.**
+
+- mlx_lm.server: `mlx-lm` 0.31.3 in `/Users/a1/lab-1690-m6/m8/venv`
+  (Python 3.12), serving the snapshot downloaded into
+  `$LAB/models/mlx/Qwen2.5-0.5B-Instruct-4bit` (`.cache` removed). `HF_HOME`
+  is `$LAB/home/hf`, and `HF_HUB_OFFLINE=1`.
+- Ollama: the macOS release binary, 0.34.4, in `$LAB/ollama`, with
+  `OLLAMA_MODELS=$LAB/ollama-models`. `qwen2.5:0.5b` was pulled with a
+  lab-only `ollama serve` on 19130, which was stopped by its recorded
+  identity. Nothing was installed system-wide.
+
+**Rig changes.** `ENGINE=llamacpp|mlxlm|ollama` picks the one server behind
+the usage tap, the served ref (`mlxlm:<snapshot dir name>` or
+`ollama:qwen2.5:0.5b`), the offer command, and the engine's pool (A
+llamacpp, M `mlxlm_loopback`, O `ollama_loopback`). The provider config's
+`model:` line changes per engine, and the protected credentials stay as
+imported. `rig.sh server-start|server-stop` restarts only the model server.
+labtool takes `--mlx-runtime-sources` and an optional Ollama artifact.
+`cli.sh` exports `MACPROVIDER_MLXLM_MODEL_PATH` (default is the catalog
+snapshot, overridable with `MLXLM_SNAPSHOT`), `MACPROVIDER_MLXLM_ORIGIN` (the
+tap), and `OLLAMA_MODELS`. Two rig fixes came out of the run:
+
+- mlx_lm.server answers `GET /v1/models` with a 200 header and an empty body
+  when its Hugging Face cache directory does not exist. The CLI then
+  correctly refused the origin (`loopback origin does not answer as
+  mlxlm_loopback`). The rig now creates `$HF_HOME/hub`.
+- Ollama keeps the upstream connection alive with a chunked body. The tap
+  read the raw socket to EOF, so it served the CLI but never logged usage.
+  It now reads the decoded body (`resp.readline()`). The llama.cpp paid case
+  was re-run on the fixed tap.
+
+**Commands.**
+`ENGINE=mlxlm rig.sh up`, then
+`cases.py --only mlxlm_paid mlxlm_refused mlxlm_identity_mismatch`
+(25/25 PASS), `rig.sh down`, then `ENGINE=ollama rig.sh up`, then
+`cases.py --only ollama_paid ollama_refused` (21/21 PASS). Last,
+`ENGINE=llamacpp rig.sh up` and `cases.py --only paid engine_llamacpp_pool`
+(26/26 PASS) confirmed that the rig default and the M6/M7 path are
+unchanged.
+
+| Case | Result | Key evidence |
+|---|---|---|
+| mlx_lm.server pool member, `engine=mlxlm` on pool M | PASS | 4/4 served (2 non-stream, 2 stream), `X-MacProvider-Engine: mlxlm_loopback`. Session `runtime_source=mlxlm_loopback`, `macprovider.snapshot-manifest.v1`, `hash_verified` (the row's own pair, through the SPEC-047 v0.2.1 `candidate_row` member). Snapshot `runtime_source=mlxlm_loopback`, `pool_generation`, `pool_operator_account_id`, enforce. Receipt v4 `valid`/`verified`, `pool_label_status=verified`; `pool_operator_attested`; credits 46/33/49/50; finality `pool_operator_attested`. Attested `[(44,32),(44,32),(50,16),(50,30)]` == mlx_lm.server usage |
+| mlxlm member on pools without `mlxlm_loopback` (A llamacpp, O ollama) and global | PASS (refused) | `engine=mlxlm`: 503 `engine_unavailable` on A, O, and global. No header: 503 `byom_non_settlement_unavailable` on A, O, and global. 0 upstream calls, 0 route snapshots |
+| MLX snapshot not in the catalog | PASS (fails closed) | mlx_lm.server restarted on a clone of the snapshot plus one extra file (manifest `29c1cd24...`). The CLI reported that pair and the session is `hash_mismatch`. Pool M refused both `engine=mlxlm` and no header with 503, 0 upstream calls, 0 snapshots. The coordinator appended `revoked` / `runtime_identity_drift` for the `catalog_priced` candidate (SPEC-047-R006). Restoring the catalog snapshot alone stayed refused. A fresh offer, priced again, restored the paid path: 200, `pool_operator_attested`, `verified` |
+| Ollama pool member, `engine=ollama` on pool O | PASS | 4/4 served, `X-MacProvider-Engine: ollama_loopback`. Session `ollama_loopback`, `macprovider.gguf-file.v1`, `hash_verified` (the `ollama_library_tag` member). Snapshot `runtime_source=ollama_loopback`, `pool_generation=20`. Receipt v4 `valid`/`verified`; `pool_operator_attested`; credits 33/48/49/50; finality `pool_operator_attested`. Attested `[(44,18),(44,32),(47,32),(50,32)]` == Ollama usage |
+| Ollama member on pools without `ollama_loopback` (A, M) and global | PASS (refused) | `engine=ollama`: 503 `engine_unavailable` on A, M, and global. No header: 503 `byom_non_settlement_unavailable`. 0 upstream calls, 0 snapshots |
+| llama.cpp regression on the M8 rig | PASS | `paid` 4/4 and `engine=llamacpp` 2/2 attested, `verified`, usage equal to llama-server |
+
+**Usage re-count guard.** `pool_usage_recount` was `consistent` for all 10
+mlxlm pool requests: the CLI re-counts with the tokenizer inside the served
+snapshot itself. For the GGUF runtimes it was `tokenizer_unavailable` (no
+cached sibling snapshot at the lab Hugging Face path). The guard is
+check-and-alert only, so settlement is unaffected either way.
+
+**Not staged.** A hello that claims `mlxlm_loopback` while its verified pair
+is a GGUF member is covered by the coordinator test
+`TestSPEC010R009MLXLMClaimServingGGUFFailsClosed` (no member binds), not the
+lab. The spoof binary was not rebuilt for M8. Pinned and slot-queue refusals
+for the new classes reuse the M7 code path and its unit tests. LM Studio and
+oMLX are not implemented: neither has an identity leg (SPEC-010-R009(e),
+SPEC-046-R009).
+
+**Teardown.** `rig.sh down` stopped every lab process by its recorded,
+re-verified identity. No `lab-1690-m6/m8`, `mlx_lm.server`, `ollama serve`,
+or 191xx listener was left. The live provider (PID 811,
+`/Users/a1/macprovider/`) was not touched.

@@ -8,7 +8,9 @@ sanitized captures to LAB/captures/. Cases: paid, omitted_usage, global,
 fail_closed_pools, spoof, future_manifest, disputed, active_window,
 generation_bump, concurrency, reconcile, and the #1690 M7 engine-selection cases
 engine_llamacpp_pool, engine_llamacpp_global, engine_native_pool,
-engine_ollama_pool, engine_absent, engine_invalid. omitted_usage and reconcile also run
+engine_ollama_pool, engine_absent, engine_invalid, and the #1690 M8 external-engine cases
+mlxlm_paid, mlxlm_refused, mlxlm_identity_mismatch (rig ENGINE=mlxlm) and
+ollama_paid, ollama_refused (rig ENGINE=ollama). omitted_usage and reconcile also run
 `coordinator pool-rollback-preflight` (exit 3 while a pool attempt can still
 settle, 0 once every pool verdict is closed).
 `spoof` needs a lab-only CLI that honours LAB_SPOOF_RUNTIME_SOURCE (see the
@@ -212,6 +214,143 @@ def case_engine_invalid():
     served = buyer("--pool", "A", "--engine", "LLAMACPP", "--n", "1") + buyer("--pool", "A", "--engine", "vllm", "--n", "1")
     save("engine_invalid", {"buyer": served})
     engine_refused("engine_invalid", served, before, snaps, 400, "invalid_engine_selection", "unknown selector rejected")
+
+
+def engine_paid(case, pool_name, selector, runtime_class, upstream_name):
+    # SPEC-010-R009 / SPEC-042-R014 (#1690 M8): an external engine that joined by
+    # one allowlist entry plus its identity leg serves a paid pool request with
+    # engine=<selector>, discloses its class, and settles exactly like llama.cpp.
+    before = len(upstream_lines())
+    served = buyer("--pool", pool_name, "--engine", selector, "--n", "2") + buyer("--pool", pool_name, "--engine", selector, "--stream", "--n", "2")
+    rows = wait_settled(4)
+    upstream = upstream_lines()[before:]
+    save(case, {"buyer": served, "attempts": rows, "upstream": upstream, "finality": [finality(r["request_id"]) for r in rows]})
+    check(case, all(x["status"] == 200 and x.get("engine") == runtime_class and x.get("stream_intact", True) is not False for x in served),
+          f"engine={selector} served on pool {pool_name}, X-MacProvider-Engine disclosed",
+          [(x["stream"], x["status"], x.get("engine"), x.get("finish_reason")) for x in served])
+    for r in rows:
+        s = r["snapshot"]
+        check(case, s["pool_id"] and s["runtime_source"] == runtime_class and s["pool_generation"] and s["pool_operator_account_id"],
+              "route snapshot R012 labels", s)
+        check(case, r["receipt_version"] == "4" and r["receipt_result"] == "valid" and r["settlement_outcome"] == "verified",
+              "CLI v0.4 receipt verified", (r["receipt_version"], r["receipt_result"], r["settlement_outcome"], r["pool_label_status"]))
+        check(case, r["usage_source"] == "pool_operator_attested" and (r["ledger"] or {}).get("provider_credits", 0) > 0,
+              "pool_operator_attested usage and ledger credit", (r["usage_source"], r["billable"], r["ledger"]))
+        f = finality(r["request_id"])
+        check(case, f.get("token_source") == "pool_operator_attested", "finality token_source", f.get("token_source"))
+    up = sorted((u["usage"]["prompt_tokens"], u["usage"]["completion_tokens"]) for u in upstream if u.get("usage"))
+    attested = sorted(tuple(r["billable"]) for r in rows)
+    check(case, attested == [tuple(x) for x in up], f"attested usage == {upstream_name} usage", {"attested": attested, "upstream": up})
+
+
+def engine_refusals(case, runtime_class, selector, other_pools):
+    # SPEC-042-R001/R004/R014: a pool whose allowlist lacks the member's class
+    # never selects it (no header: no eligible member; engine=<selector>:
+    # engine_unavailable), and a global route never does.
+    before, snaps = len(upstream_lines()), snapshots_count()
+    served = []
+    for p in other_pools:
+        served += buyer("--pool", p, "--engine", selector, "--n", "1")
+        served += buyer("--pool", p, "--n", "1")
+    served += buyer("--engine", selector, "--n", "1") + buyer("--n", "1")
+    save(case, {"buyer": served})
+    check(case, all(x["status"] == 503 for x in served) and len(upstream_lines()) == before and snapshots_count() == snaps,
+          f"{runtime_class} member refused on pools {other_pools} and on the global route, before dispatch",
+          [(x["pool"], x["engine_select"], x["status"], x.get("error")) for x in served])
+    check(case, all(x.get("error") == "engine_unavailable" for x in served if x["engine_select"]),
+          "every engine-selected refusal is engine_unavailable", [(x["pool"], x.get("error")) for x in served if x["engine_select"]])
+
+
+def case_mlxlm_paid():
+    engine_paid("mlxlm_paid", "M", "mlxlm", "mlxlm_loopback", "mlx_lm.server")
+    member = [p for p in poolz() if p.get("runtime_source") == "mlxlm_loopback"]
+    check("mlxlm_paid", member and member[0].get("model_hash_algorithm") == "macprovider.snapshot-manifest.v1" and member[0].get("hash_status") == "hash_verified",
+          "session reports the verified snapshot-manifest pair of the catalog row",
+          [{k: p.get(k) for k in ("runtime_source", "model_hash_algorithm", "hash_status")} for p in member])
+
+
+def case_mlxlm_refused():
+    ensure_pool("A", "--encoding", "2", "--runtime-allowlist", "llamacpp_loopback")
+    ensure_pool("O", "--encoding", "2", "--runtime-allowlist", "ollama_loopback")
+    time.sleep(2)
+    engine_refusals("mlxlm_refused", "mlxlm_loopback", "mlxlm", ["A", "O"])
+
+
+def rig(*args, env=None):
+    subprocess.run([str(HERE / "rig.sh"), *args], check=True, env=dict(os.environ, **(env or {})), capture_output=True, text=True)
+
+
+def case_mlxlm_identity_mismatch():
+    # SPEC-010-R009(c): mlx_lm.server serving a snapshot whose manifest is not
+    # the catalog row's (one extra file) binds nothing; pool M refuses it before
+    # dispatch. The lab restores the catalog snapshot afterwards.
+    tampered = os.environ["MLXLM_TAMPERED_SNAPSHOT"]
+    env = {"ENGINE": "mlxlm", "MLXLM_SNAPSHOT": tampered}
+    subprocess.run([str(HERE / "serve.sh"), "stop"], check=True, capture_output=True, text=True)
+    rig("server-stop", env=env)
+    rig("server-start", env=env)
+    serve_restart(str(LAB / "bin" / "macprovider-cli-lab"), env)
+    time.sleep(8)
+    try:
+        member = [p for p in poolz() if p.get("runtime_source") == "mlxlm_loopback"]
+        before, snaps = len(upstream_lines()), snapshots_count()
+        served = buyer("--pool", "M", "--engine", "mlxlm", "--n", "1") + buyer("--pool", "M", "--n", "1")
+        save("mlxlm_identity_mismatch", {"poolz": member, "buyer": served})
+        check("mlxlm_identity_mismatch", member and member[0].get("hash_status") != "hash_verified",
+              "a snapshot outside the catalog is not a verified identity",
+              [{k: p.get(k) for k in ("runtime_source", "model_hash_algorithm", "hash_status")} for p in member])
+        check("mlxlm_identity_mismatch", all(x["status"] == 503 for x in served) and len(upstream_lines()) == before and snapshots_count() == snaps,
+              "pool M refuses the mismatched mlxlm member before dispatch", [(x["engine_select"], x["status"], x.get("error")) for x in served])
+    finally:
+        restore = {"ENGINE": "mlxlm"}
+        subprocess.run([str(HERE / "serve.sh"), "stop"], check=True, capture_output=True, text=True)
+        rig("server-stop", env=restore)
+        rig("server-start", env=restore)
+        serve_restart(str(LAB / "bin" / "macprovider-cli-lab"), restore)
+        time.sleep(8)
+    # SPEC-047-R006: the mismatch revoked the catalog_priced candidate
+    # (runtime_identity_drift). Only a fresh offer, priced again by the
+    # operator, restores the paid path; the restored snapshot alone does not.
+    revoked = db().execute("SELECT COUNT(*) FROM model_admission_events WHERE state = 'revoked' AND reason_code = 'runtime_identity_drift'").fetchone()[0]
+    before_offer = buyer("--pool", "M", "--engine", "mlxlm", "--n", "1")
+    check("mlxlm_identity_mismatch", revoked >= 1 and before_offer[0]["status"] == 503,
+          "the mismatch revoked the candidate; the restored snapshot stays refused until re-offered",
+          {"revocations": revoked, "status": before_offer[0]["status"], "error": before_offer[0].get("error")})
+    offer = json.loads(subprocess.run([str(HERE / "cli.sh"), "models", "offer", "mlxlm:Qwen2.5-0.5B-Instruct-4bit", "--yes", "--json",
+                                       "--config", str(LAB / "provider" / "config.yaml"), "--coordinator-url", "http://127.0.0.1:19102",
+                                       "--mlx-cache-dir", str(LAB / "home" / "hf"), "--skip-ollama", "--skip-lmstudio",
+                                       "--skip-openai-compatible", "--skip-llamacpp"],
+                                      check=True, capture_output=True, text=True).stdout)
+    body = {"schema": "model_admission_decision_request.v1", "provider_id": offer["provider_id"], "candidate_id": offer["candidate_id"],
+            "next_state": "catalog_priced", "reason_code": "operator_lab_pool_priced",
+            "expected_coordinator_event_id": offer["coordinator_event_id"], "idempotency_key": f"lab-1690-m8-repriced-{int(time.time())}"}
+    req = urllib.request.Request("http://127.0.0.1:19102/admin/model-admission/decisions", data=json.dumps(body).encode(),
+                                 headers={"Authorization": f"Bearer {secret('operator_lab_a')}", "Content-Type": "application/json"})
+    decision = json.load(urllib.request.urlopen(req))
+    serve_restart(str(LAB / "bin" / "macprovider-cli-lab"), restore)
+    time.sleep(8)
+    served = buyer("--pool", "M", "--engine", "mlxlm", "--n", "1")
+    rows = wait_settled(1)
+    save("mlxlm_identity_restore", {"offer_state": offer.get("admission_state"), "decision": decision.get("admission_state"), "buyer": served, "attempts": rows})
+    check("mlxlm_identity_mismatch", decision.get("admission_state") == "catalog_priced" and served[0]["status"] == 200
+          and rows[0]["usage_source"] == "pool_operator_attested" and rows[0]["settlement_outcome"] == "verified",
+          "a fresh offer of the catalog snapshot restores the paid pool path",
+          (decision.get("admission_state"), served[0]["status"], rows[0]["usage_source"], rows[0]["settlement_outcome"]))
+
+
+def case_ollama_paid():
+    engine_paid("ollama_paid", "O", "ollama", "ollama_loopback", "Ollama")
+    member = [p for p in poolz() if p.get("runtime_source") == "ollama_loopback"]
+    check("ollama_paid", member and member[0].get("model_hash_algorithm") == "macprovider.gguf-file.v1" and member[0].get("hash_status") == "hash_verified",
+          "session reports the verified GGUF pair of the ollama_library_tag artifact",
+          [{k: p.get(k) for k in ("runtime_source", "model_hash_algorithm", "hash_status")} for p in member])
+
+
+def case_ollama_refused():
+    ensure_pool("A", "--encoding", "2", "--runtime-allowlist", "llamacpp_loopback")
+    ensure_pool("M", "--encoding", "2", "--runtime-allowlist", "mlxlm_loopback")
+    time.sleep(2)
+    engine_refusals("ollama_refused", "ollama_loopback", "ollama", ["A", "M"])
 
 
 def rollback_preflight():
@@ -433,9 +572,14 @@ def main():
              "concurrency": case_concurrency, "reconcile": case_reconcile,
              "engine_llamacpp_pool": case_engine_llamacpp_pool, "engine_llamacpp_global": case_engine_llamacpp_global,
              "engine_native_pool": case_engine_native_pool, "engine_ollama_pool": case_engine_ollama_pool,
-             "engine_absent": case_engine_absent, "engine_invalid": case_engine_invalid}
+             "engine_absent": case_engine_absent, "engine_invalid": case_engine_invalid,
+             "mlxlm_paid": case_mlxlm_paid, "mlxlm_refused": case_mlxlm_refused,
+             "mlxlm_identity_mismatch": case_mlxlm_identity_mismatch,
+             "ollama_paid": case_ollama_paid, "ollama_refused": case_ollama_refused}
+    m8 = {"mlxlm_paid", "mlxlm_refused", "mlxlm_identity_mismatch", "ollama_paid", "ollama_refused"}
     for name, fn in cases.items():
-        if not a.only or name in a.only:
+        # The M8 cases need their own rig ENGINE and run only when named.
+        if (not a.only and name not in m8) or (a.only and name in a.only):
             fn()
     CAPTURES.mkdir(parents=True, exist_ok=True)
     (CAPTURES / "results.txt").write_text("\n".join(RESULTS) + "\n")
