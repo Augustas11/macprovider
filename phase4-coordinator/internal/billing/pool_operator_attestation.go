@@ -62,6 +62,39 @@ func poolOperatorAttestationPermanent(err error) bool {
 
 var errPoolOperatorAttestationNotEnforce = errors.New("billing: pool_operator_attested requires an enforce-mode route snapshot")
 
+// SettlementPoolLabelSource returns the settlement-time SPEC-042 R006 labels of
+// a pool (its current manifest version and core digest), or false when the
+// pool is unknown.
+type SettlementPoolLabelSource func(poolID string) (manifestVersion uint64, manifestCoreDigest string, ok bool)
+
+// SetSettlementPoolLabelSource wires the settlement-time pool label view that
+// ledger recovery compares with a route snapshot's routing-time labels.
+func (s *Store) SetSettlementPoolLabelSource(source SettlementPoolLabelSource) {
+	if s == nil {
+		return
+	}
+	s.poolAttestationMu.Lock()
+	defer s.poolAttestationMu.Unlock()
+	s.poolLabelSource = source
+}
+
+func (s *Store) settlementPoolLabels(poolID, routeHash string) *SettlementPoolLabels {
+	if s == nil || poolID == "" {
+		return nil
+	}
+	s.poolAttestationMu.RLock()
+	source := s.poolLabelSource
+	s.poolAttestationMu.RUnlock()
+	if source == nil {
+		return nil
+	}
+	version, digest, ok := source(poolID)
+	if !ok {
+		return nil
+	}
+	return &SettlementPoolLabels{PoolID: poolID, ManifestVersion: version, ManifestCoreDigest: digest, RouteSnapshotHash: routeHash}
+}
+
 // SetPoolOperatorAttestationAuthority wires the durable pool authority.
 func (s *Store) SetPoolOperatorAttestationAuthority(authority PoolOperatorAttestationAuthority) {
 	if s == nil {

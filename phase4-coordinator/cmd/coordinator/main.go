@@ -1102,6 +1102,13 @@ func main() {
 			// SPEC-022-R012: settlement re-derives pool_operator_attested from
 			// the durable pool records only.
 			billingStore.SetPoolOperatorAttestationAuthority(trustPoolStore)
+			// Ledger recovery compares a route snapshot's routing-time pool
+			// labels with this settlement-time view (SPEC-042-R006).
+			registry := trustPoolRegistry
+			billingStore.SetSettlementPoolLabelSource(func(poolID string) (uint64, string, bool) {
+				snap := registry.Snapshot(poolID)
+				return snap.ManifestVersion, snap.ManifestCoreDigest, snap.Exists
+			})
 			buyerOpts = append(
 				buyerOpts,
 				buyer.WithPoolMembership(trustPoolRegistry),

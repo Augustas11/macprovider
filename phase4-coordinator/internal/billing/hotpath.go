@@ -64,6 +64,13 @@ const LoopbackRuntimeNotSettlementEligible = "loopback_runtime_not_settlement_el
 // IsLoopbackRuntimeSource reports whether a hello runtime_source is a SPEC-046
 // loopback adapter: an operator-controlled external process whose reported
 // usage is provider-only (SPEC-015 §N.6).
+// IsNativeRuntimeSource reports whether a runtime_source is the coordinator's
+// native MLX runtime: an empty value (pre-runtime_source sessions) or
+// mlx_cache. Every other value, recognised or not, is not native.
+func IsNativeRuntimeSource(value string) bool {
+	return value == "" || value == "mlx_cache"
+}
+
 func IsLoopbackRuntimeSource(value string) bool {
 	switch value {
 	case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback", "mlxlm_loopback":

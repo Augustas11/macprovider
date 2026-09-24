@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"strings"
 	"time"
 )
@@ -18,6 +19,12 @@ type RecoverInput struct {
 func (s *Store) RecoverLedger(ctx context.Context, in RecoverInput) (retErr error) {
 	if in.Source == "" {
 		in.Source = "startup_scan"
+	}
+	// SPEC-022-R012.3 and the R006 label are decided before the transaction
+	// opens: the durable pool authority reads this same database.
+	poolAttested, err := s.recoveryPoolAttestedRoutes(ctx, in)
+	if err != nil {
+		return err
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
@@ -367,7 +374,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 			RequestID:    requestID,
 			AttemptN:     int64(attemptN),
 			ProviderID:   providerID,
-		}, pp, cp) {
+		}, pp, cp, poolAttested) {
 			if _, err := insertRequestCreditTx(ctx, tx, input, zeroCredits(result), in.Source, now, true, LoopbackRuntimeNotSettlementEligible); err != nil {
 				return err
 			}
@@ -425,29 +432,106 @@ INSERT INTO ledger_reconciliation_runs (
 }
 
 // recoveredLoopbackAttemptBillable applies the hot path's loopback rule to a
-// ledger row recovery re-creates. A native attempt is billable as before. A
-// loopback attempt is billable only with the pool runtime's reported prompt
-// and completion tokens on a readable enforce-mode pool route snapshot that
-// carries every R-12.1 member for the same runtime; settlement still has to
-// verify a receipt before its credit is payable. An attempt whose runtime
-// was not recorded (a row written before runtime_source existed) might be
-// loopback, so it fails closed. The snapshot is read only for an attempt
-// that is or might be loopback, so native recovery reads nothing new.
-func recoveredLoopbackAttemptBillable(ctx context.Context, tx *sql.Tx, runtimeSource sql.NullString, id SettlementReceiptIdentity, prompt, completion *int64) bool {
-	if runtimeSource.Valid && !IsLoopbackRuntimeSource(runtimeSource.String) {
+// ledger row recovery re-creates, failing closed on every unknown:
+//   - a recorded native runtime ("" or mlx_cache) is billable as before;
+//   - a recorded loopback runtime is billable only with the runtime's reported
+//     prompt and completion tokens, when recoveryPoolAttestedRoutes verified
+//     SPEC-022-R012.3 and the R006 label for this attempt before the
+//     transaction and the route snapshot read here is still that digest;
+//   - anything else, including a row written before runtime_source existed
+//     (NULL) and an unrecognised runtime, is never billable.
+func recoveredLoopbackAttemptBillable(ctx context.Context, tx *sql.Tx, runtimeSource sql.NullString, id SettlementReceiptIdentity, prompt, completion *int64, poolAttested map[SettlementReceiptIdentity]string) bool {
+	if !runtimeSource.Valid {
+		return false
+	}
+	if IsNativeRuntimeSource(runtimeSource.String) {
 		return true
 	}
-	if prompt == nil || completion == nil {
+	if !IsLoopbackRuntimeSource(runtimeSource.String) || prompt == nil || completion == nil {
 		return false
 	}
-	route, _, err := loadSettlementRouteSnapshotConn(ctx, tx, id)
+	verifiedDigest, ok := poolAttested[id]
+	if !ok {
+		return false
+	}
+	route, routeHash, err := loadSettlementRouteSnapshotConn(ctx, tx, id)
+	if err != nil || routeHash != verifiedDigest || route.RuntimeSource != runtimeSource.String {
+		return false
+	}
+	return true
+}
+
+// recoveryPoolAttestedRoutes finds, outside any transaction, the loopback
+// attempts in the recovery window that have no ledger row and whose route
+// snapshot satisfies SPEC-022-R012: every R-12.1 member for the recorded
+// runtime, enforce mode, the durable pool authority (R-12.3), and a verified
+// R006 label against the settlement-time pool view. It returns the snapshot
+// digest each was verified against. Any attempt that cannot be verified is
+// left out, so recovery zero-bills it.
+func (s *Store) recoveryPoolAttestedRoutes(ctx context.Context, in RecoverInput) (map[SettlementReceiptIdentity]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT DISTINCT COALESCE(rl.account_id, ''), lpis.request_id, lpis.attempt_n, lpis.provider_id, lpis.runtime_source
+  FROM ledger_provider_identity_snapshots lpis
+  JOIN request_log rl
+    ON rl.request_id = lpis.request_id
+   AND rl.provider_assigned_id = lpis.provider_assigned_id
+ WHERE `+sqliteTimeRange("rl.ts_utc")+`
+   AND lpis.runtime_source IN ('ollama_loopback','lmstudio_loopback','llamacpp_loopback','openai_compatible_loopback','mlxlm_loopback')
+   AND NOT EXISTS (
+       SELECT 1 FROM ledger_request_credits lrc
+        WHERE lrc.request_id = lpis.request_id
+          AND lrc.attempt_n = lpis.attempt_n
+          AND lrc.provider_id = lpis.provider_id
+   )`,
+		sqliteTimeText(in.ScanFrom),
+		sqliteTimeText(in.ScanTo),
+	)
 	if err != nil {
-		return false
+		return nil, err
 	}
-	if runtimeSource.Valid && route.RuntimeSource != runtimeSource.String {
-		return false
+	type candidate struct {
+		id            SettlementReceiptIdentity
+		runtimeSource string
 	}
-	return route.RouteSnapshotMode == RouteSnapshotModeEnforce && poolOperatorAttestationSnapshotComplete(route)
+	var candidates []candidate
+	for rows.Next() {
+		var accountID string
+		var c candidate
+		if err := rows.Scan(&accountID, &c.id.RequestID, &c.id.AttemptN, &c.id.ProviderID, &c.runtimeSource); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		c.id.AccountScope = AccountScopeForSettlement(accountID)
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+	verified := make(map[SettlementReceiptIdentity]string, len(candidates))
+	for _, c := range candidates {
+		var route RouteSnapshot
+		var routeHash string
+		if err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+			var err error
+			route, routeHash, err = loadSettlementRouteSnapshotConn(ctx, conn, c.id)
+			return err
+		}); err != nil {
+			continue
+		}
+		if route.RuntimeSource != c.runtimeSource || route.RouteSnapshotMode != RouteSnapshotModeEnforce || !poolOperatorAttestationSnapshotComplete(route) {
+			continue
+		}
+		if err := s.PoolOperatorAttestationEligible(ctx, route); err != nil {
+			continue
+		}
+		if !PoolOperatorAttestedLabelVerified(route, routeHash, s.settlementPoolLabels(route.PoolID, routeHash)) {
+			continue
+		}
+		verified[c.id] = routeHash
+	}
+	return verified, nil
 }
 
 func (s *Store) StartStartupScan(ctx context.Context, cfg SettlementConfig, now time.Time) error {

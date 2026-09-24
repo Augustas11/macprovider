@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,10 @@ type recoveryLoopbackCase struct {
 	recordRuntime bool
 	byteEstimated bool
 	snapshot      func(RouteSnapshot) *RouteSnapshot
+	// authority is the durable R-12.3 pool authority (nil: none wired).
+	authority PoolOperatorAttestationAuthority
+	// labels is the settlement-time pool label view (nil: none wired).
+	labels SettlementPoolLabelSource
 }
 
 // recoverLoopbackFallbackRow writes what a failed hot path leaves behind (the
@@ -26,6 +31,12 @@ type recoveryLoopbackCase struct {
 func recoverLoopbackFallbackRow(t *testing.T, tc recoveryLoopbackCase) (gross, provider, quarantined int64, reason string, operatorRows int64) {
 	t.Helper()
 	reqStore, store := newRequestAndBillingStores(t)
+	if tc.authority != nil {
+		store.SetPoolOperatorAttestationAuthority(tc.authority)
+	}
+	if tc.labels != nil {
+		store.SetSettlementPoolLabelSource(tc.labels)
+	}
 	cfg := testRewards()
 	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(100, 0).UTC())
 	if err != nil {
@@ -94,24 +105,50 @@ func attestedPoolSnapshot(route RouteSnapshot) *RouteSnapshot {
 	return &route
 }
 
+func matchingPoolLabels(poolID string) (uint64, string, bool) {
+	return 2, strings.Repeat("d", 64), poolID == "pool-abc"
+}
+
+func movedPoolLabels(poolID string) (uint64, string, bool) {
+	return 3, strings.Repeat("e", 64), poolID == "pool-abc"
+}
+
 // Recovery re-creating a missing ledger row applies the hot-path loopback
-// rule (SPEC-047-R003(iv), SPEC-022-R012): only an attested pool attempt with
-// the runtime's reported usage is priced; every other loopback attempt, and
-// every attempt that might be loopback without a readable snapshot, is zero
-// credit, zero debit, quarantined. Native recovery is unchanged.
+// rule (SPEC-047-R003(iv), SPEC-022-R012) and fails closed on every unknown:
+// a loopback attempt is priced only with the runtime's reported usage on a
+// complete enforce-mode pool snapshot that the durable R-12.3 authority and
+// the settlement-time R006 label both still verify. Native recovery is
+// unchanged.
 func TestRecoverLedger_AppliesLoopbackZeroBillRule(t *testing.T) {
+	ok := &fakePoolAttestationAuthority{}
+	rejects := &fakePoolAttestationAuthority{err: fmt.Errorf("%w: revoked", ErrPoolOperatorAttestationRejected)}
+	attested := func(runtime string) recoveryLoopbackCase {
+		return recoveryLoopbackCase{runtimeSource: runtime, recordRuntime: true, snapshot: attestedPoolSnapshot, authority: ok, labels: matchingPoolLabels}
+	}
 	for name, tc := range map[string]struct {
 		recoveryLoopbackCase
 		wantPriced bool
 	}{
-		"native reported usage is priced":                  {recoveryLoopbackCase{runtimeSource: "", recordRuntime: true}, true},
-		"native mlx_cache byte estimate is priced":         {recoveryLoopbackCase{runtimeSource: "mlx_cache", recordRuntime: true, byteEstimated: true}, true},
-		"loopback on global route is zero":                 {recoveryLoopbackCase{runtimeSource: "llamacpp_loopback", recordRuntime: true, snapshot: func(r RouteSnapshot) *RouteSnapshot { return &r }}, false},
-		"loopback byte estimate on pool route is zero":     {recoveryLoopbackCase{runtimeSource: "llamacpp_loopback", recordRuntime: true, byteEstimated: true, snapshot: attestedPoolSnapshot}, false},
-		"loopback missing snapshot fails closed":           {recoveryLoopbackCase{runtimeSource: "llamacpp_loopback", recordRuntime: true}, false},
-		"loopback snapshot for another runtime is zero":    {recoveryLoopbackCase{runtimeSource: "ollama_loopback", recordRuntime: true, snapshot: attestedPoolSnapshot}, false},
+		"native reported usage is priced":          {recoveryLoopbackCase{runtimeSource: "", recordRuntime: true}, true},
+		"native mlx_cache byte estimate is priced": {recoveryLoopbackCase{runtimeSource: "mlx_cache", recordRuntime: true, byteEstimated: true}, true},
+		"attested pool usage stays attested":       {attested("llamacpp_loopback"), true},
+		"loopback on global route is zero": {recoveryLoopbackCase{runtimeSource: "llamacpp_loopback", recordRuntime: true, authority: ok, labels: matchingPoolLabels,
+			snapshot: func(r RouteSnapshot) *RouteSnapshot { return &r }}, false},
+		"loopback byte estimate on pool route is zero":     {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.byteEstimated = true; return c }(), false},
+		"loopback missing snapshot fails closed":           {recoveryLoopbackCase{runtimeSource: "llamacpp_loopback", recordRuntime: true, authority: ok, labels: matchingPoolLabels}, false},
+		"loopback snapshot for another runtime is zero":    {func() recoveryLoopbackCase { c := attested("ollama_loopback"); return c }(), false},
 		"unrecorded runtime missing snapshot fails closed": {recoveryLoopbackCase{runtimeSource: "llamacpp_loopback", recordRuntime: false}, false},
-		"attested pool usage stays attested":               {recoveryLoopbackCase{runtimeSource: "llamacpp_loopback", recordRuntime: true, snapshot: attestedPoolSnapshot}, true},
+		// Audit R1 ARCH HIGH: an unrecorded runtime fails closed even on a
+		// complete, verifiable pool snapshot.
+		"unrecorded runtime on attested snapshot fails closed": {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.recordRuntime = false; return c }(), false},
+		// Audit R1 CODE M3: an unrecognised runtime is neither native nor
+		// verifiable loopback.
+		"unrecognised runtime fails closed": {recoveryLoopbackCase{runtimeSource: "future_engine_loopback", recordRuntime: true}, false},
+		// Audit R1 SECURITY M2 / ARCH HIGH: durable R-12.3 and the R006 label.
+		"durable authority rejects is zero": {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.authority = rejects; return c }(), false},
+		"no durable authority is zero":      {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.authority = nil; return c }(), false},
+		"moved pool label is zero":          {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.labels = movedPoolLabels; return c }(), false},
+		"no label view is zero":             {func() recoveryLoopbackCase { c := attested("llamacpp_loopback"); c.labels = nil; return c }(), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			gross, provider, quarantined, reason, operatorRows := recoverLoopbackFallbackRow(t, tc.recoveryLoopbackCase)

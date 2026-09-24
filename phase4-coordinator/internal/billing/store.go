@@ -37,6 +37,9 @@ type Store struct {
 	// trusted pools are disabled: pool_operator_attested is never derived).
 	poolAttestationMu sync.RWMutex
 	poolAttestation   PoolOperatorAttestationAuthority
+	// poolLabelSource is the settlement-time pool label view ledger recovery
+	// checks (nil when trusted pools are off, so recovery zero-bills pools).
+	poolLabelSource SettlementPoolLabelSource
 	// poolSweep is the expiry sweeper's keyset cursor and per-verdict
 	// failure backoff, carried across passes (pool_settlement_expiry_sweep.go).
 	poolSweepMu sync.Mutex

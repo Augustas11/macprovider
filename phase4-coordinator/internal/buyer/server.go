@@ -3927,7 +3927,10 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			}
 			return true, wsForwardFailed
 		}
-		if err := settlementTracker.observeBlock([]byte(rewritten)); err != nil {
+		// Validate on a copy; the tracker records a block only once the
+		// buyer write accepted it (SPEC-015 delivered-prefix rule).
+		observed := settlementTracker.clone()
+		if err := observed.observeBlock([]byte(rewritten)); err != nil {
 			relay.Cancel("malformed_settlement_stream")
 			if s.streamingDowngrade != nil {
 				s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
@@ -3947,12 +3950,17 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			return true, wsForwardCancelled
 		}
 		commit()
-		if _, err := w.Write([]byte(rewritten)); err != nil {
+		if n, err := w.Write([]byte(rewritten)); err != nil {
+			// Only the complete SSE events the writer accepted reached the
+			// buyer; a torn event does not count.
+			settlementTracker.observeCompleteEvents([]byte(rewritten)[:n])
+			bytesEmitted += n
 			relay.Cancel("buyer_disconnected")
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
 			markProviderDone()
 			return true, wsForwardCancelled
 		}
+		*settlementTracker = *observed
 		bytesEmitted += len(rewritten)
 		if flusher != nil {
 			flusher.Flush()
@@ -4232,12 +4240,18 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 			writePhaseTimingTrailers(w.Header(), state, now)
 		}
 	}
+	// A buffered stream delivers nothing before it completes, so a buyer
+	// cancel binds the empty prefix to the provider's buyer_cancel terminal.
+	bufferedBuyerCancelledAttempt := func() requestLogAttempt {
+		attempt := requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone}
+		return awaitBuyerCancelTerminal(attempt, relay, newSettlementStreamOutputTracker(), started)
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			relay.Cancel("buyer_disconnected")
 			markProviderDone()
-			return wsForwardCancelled, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone}
+			return wsForwardCancelled, bufferedBuyerCancelledAttempt()
 		case chunk, ok := <-relay.Chunks:
 			if !ok {
 				continue
@@ -4284,7 +4298,12 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
 				}
 				markProviderDone()
-				return wsForwardFailed, requestLogAttempt{Status: wsEndHTTPStatus(end.Status), Error: requestLogEndErrorMessage(end), ErrorCode: spec001EndStatus(end.Status), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
+				attempt := requestLogAttempt{Status: wsEndHTTPStatus(end.Status), Error: requestLogEndErrorMessage(end), ErrorCode: spec001EndStatus(end.Status), FaultFlag: billing.FaultBreakerQualifying, SettlementOutput: settlementOutputUnavailableFor(billing.TerminalStateProviderError)}
+				if end.Status == "cancelled" {
+					// Nothing of a buffered stream reached the buyer.
+					attempt = withProviderCancelTerminal(attempt, end, newSettlementStreamOutputTracker(), started)
+				}
+				return wsForwardFailed, attempt
 			}
 			if !toolFinal.finalCloseOK() {
 				if s.streamingDowngrade != nil {
@@ -4334,9 +4353,14 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 				return wsForwardCancelled, requestLogAttempt{}
 			}
 			w.WriteHeader(http.StatusOK)
-			if _, err := w.Write(out); err != nil {
+			if n, err := w.Write(out); err != nil {
 				relay.Cancel("buyer_disconnected")
-				return wsForwardCancelled, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone}
+				// The provider completed, but only the complete events the
+				// writer accepted reached the buyer: a buyer_cancel over that
+				// prefix, never the provider's normal_done receipt.
+				delivered := newSettlementStreamOutputTracker()
+				delivered.observeCompleteEvents(out[:n])
+				return wsForwardCancelled, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone, SettlementOutput: delivered.output(billing.TerminalStateBuyerCancel)}
 			}
 			if flusher, ok := w.(http.Flusher); ok {
 				flusher.Flush()
@@ -4349,6 +4373,9 @@ func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Reque
 			markProviderDone()
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws buffered streaming relay failed")
 			if r.Context().Err() != nil {
+				if errors.Is(err, providerws.ErrRelayClosed) {
+					return wsForwardCancelled, bufferedBuyerCancelledAttempt()
+				}
 				return wsForwardCancelled, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone}
 			}
 			if toolFinal.toolOpened && s.streamingDowngrade != nil {
@@ -10018,15 +10045,11 @@ func trustedProviderTerminalStateTSInt(ts int64, requestStartedAt, observedAt ti
 	return ts, true
 }
 
-// providerCancelTerminalGrace bounds how long a buyer-cancelled WS attempt
-// waits for the provider's "cancelled" terminal frame and its receipt.
-const providerCancelTerminalGrace = 2 * time.Second
-
 // awaitBuyerCancelTerminal waits, after relay.Cancel, for the provider's
 // "cancelled" terminal frame and binds attempt to it. Without one the attempt
 // stays as recorded and its receipt is missing (SPEC-015 §N.7).
 func awaitBuyerCancelTerminal(attempt requestLogAttempt, relay *providerws.RelayStream, delivered *settlementStreamOutputTracker, started time.Time) requestLogAttempt {
-	end, ok := relay.AwaitCancelTerminal(providerCancelTerminalGrace)
+	end, ok := relay.AwaitCancelTerminal(providerws.CancelTerminalWait)
 	if !ok {
 		return attempt
 	}

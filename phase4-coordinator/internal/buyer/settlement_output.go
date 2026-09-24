@@ -273,6 +273,32 @@ func settlementSSEDataValue(line string) (string, bool) {
 	return value, true
 }
 
+// clone returns an independent copy of the tracker.
+func (t *settlementStreamOutputTracker) clone() *settlementStreamOutputTracker {
+	out := *t
+	out.toolCalls = make(map[int]*settlementStreamToolCall, len(t.toolCalls))
+	for index, call := range t.toolCalls {
+		copied := *call
+		out.toolCalls[index] = &copied
+	}
+	if t.finishReason != nil {
+		value := *t.finishReason
+		out.finishReason = &value
+	}
+	return &out
+}
+
+// observeCompleteEvents records only the SSE events of prefix that end with
+// their blank-line terminator. It is used for a partially written block, whose
+// torn last event never reached the buyer whole. A malformed event stops it.
+func (t *settlementStreamOutputTracker) observeCompleteEvents(prefix []byte) {
+	end := bytes.LastIndex(prefix, []byte("\n\n"))
+	if end < 0 {
+		return
+	}
+	_ = t.observeBlock(prefix[:end+2])
+}
+
 func (t *settlementStreamOutputTracker) observeBlock(block []byte) error {
 	for _, line := range bytes.SplitAfter(block, []byte("\n")) {
 		if len(line) == 0 {

@@ -35,6 +35,14 @@ var (
 )
 
 const retiredRelayRequestTTL = 5 * time.Minute
+
+// CancelTerminalWait bounds how long a buyer handler waits for the provider's
+// "cancelled" terminal frame after a buyer_disconnected cancel_request.
+const CancelTerminalWait = 2 * time.Second
+
+// cancelTerminalRekeyHold keeps a Tier-2 rekey from starting while a cancel
+// terminal is still owed under the current key, so the late frame decrypts.
+const cancelTerminalRekeyHold = CancelTerminalWait + time.Second
 const providerDispatchWriteProbeTimeout = 500 * time.Millisecond
 
 // Bound sparse p2c sequence gaps so multiplexed responses can arrive out of
@@ -54,7 +62,10 @@ type RelayStream struct {
 	// buyer_disconnected cancel_request. The frame arrives after the request is
 	// retired, and it carries the provider's buyer_cancel receipt.
 	CancelTerminal <-chan InferenceResponseEnd
-	cancel         func(string)
+	// noCancelTerminal is closed when the request ended any other way, so no
+	// cancel terminal can follow and AwaitCancelTerminal returns at once.
+	noCancelTerminal <-chan struct{}
+	cancel           func(string)
 }
 
 func (r *RelayStream) Cancel(reason string) {
@@ -74,6 +85,8 @@ func (r *RelayStream) AwaitCancelTerminal(timeout time.Duration) (InferenceRespo
 	select {
 	case end := <-r.CancelTerminal:
 		return end, true
+	case <-r.noCancelTerminal:
+		return InferenceResponseEnd{}, false
 	case <-timer.C:
 		return InferenceResponseEnd{}, false
 	}
@@ -98,6 +111,7 @@ type relayActive struct {
 	requestID           string
 	stream              bool
 	cancelTerminal      chan InferenceResponseEnd
+	noCancelTerminal    chan struct{}
 	bufferMu            sync.Mutex
 	bufferedBytes       int64
 	chunks              chan InferenceResponseChunk
@@ -457,27 +471,44 @@ func (ps *providerSession) addActive(requestID string, maxConcurrency int, strea
 		return nil, ErrRelayBackpressure
 	}
 	active := &relayActive{
-		requestID:      requestID,
-		stream:         stream,
-		cancelTerminal: make(chan InferenceResponseEnd, 1),
-		chunks:         make(chan InferenceResponseChunk, 256),
-		done:           make(chan InferenceResponseEnd, 1),
-		errs:           make(chan error, 1),
-		validations:    make(chan RelayBlindValidation, 2),
+		requestID:        requestID,
+		stream:           stream,
+		cancelTerminal:   make(chan InferenceResponseEnd, 1),
+		noCancelTerminal: make(chan struct{}),
+		chunks:           make(chan InferenceResponseChunk, 256),
+		done:             make(chan InferenceResponseEnd, 1),
+		errs:             make(chan error, 1),
+		validations:      make(chan RelayBlindValidation, 2),
 	}
 	ps.active[requestID] = active
 	return active, nil
 }
 
 func (ps *providerSession) removeActive(requestID string) (*relayActive, bool) {
+	return ps.retireActive(requestID, false)
+}
+
+// retireActive removes and retires an active request in one critical
+// section. armCancel keeps a one-shot slot for the provider's "cancelled"
+// terminal on the retired entry, so no frame can arrive in between; any other
+// retirement signals that no cancel terminal will follow.
+func (ps *providerSession) retireActive(requestID string, armCancel bool) (*relayActive, bool) {
 	ps.activeMu.Lock()
 	active, ok := ps.active[requestID]
 	if ok {
 		delete(ps.active, requestID)
 		ps.markRetiredLocked(active, time.Now())
+		if armCancel {
+			retired := ps.retired[requestID]
+			retired.cancelTerminal = active.cancelTerminal
+			ps.retired[requestID] = retired
+		}
 	}
 	ps.activeMu.Unlock()
 	if ok {
+		if !armCancel && active.noCancelTerminal != nil {
+			close(active.noCancelTerminal)
+		}
 		ps.signalActiveChanged()
 	}
 	return active, ok
@@ -538,14 +569,11 @@ func (ps *providerSession) failActiveOrAll(requestID string, err error) {
 }
 
 func (ps *providerSession) cancelActive(requestID string, reason string, err error) bool {
-	active, ok := ps.removeActive(requestID)
+	// A buyer_disconnected cancel is armed in the same critical section that
+	// retires the request, before the cancel_request is sent.
+	active, ok := ps.retireActive(requestID, reason == "buyer_disconnected")
 	if !ok {
 		return false
-	}
-	if reason == "buyer_disconnected" {
-		// Armed before the cancel_request is sent, so the provider's answer
-		// cannot arrive first.
-		ps.armCancelTerminal(active)
 	}
 	b, _ := json.Marshal(CancelRequest{Type: "cancel_request", RequestID: requestID, Reason: reason})
 	_ = ps.send(b)
@@ -559,15 +587,17 @@ func (ps *providerSession) cancelActive(requestID string, reason string, err err
 	return true
 }
 
-func (ps *providerSession) armCancelTerminal(active *relayActive) {
+// hasPendingCancelTerminal reports whether a retired request still waits for
+// its cancel terminal, which the provider encrypts under the current key.
+func (ps *providerSession) hasPendingCancelTerminal() bool {
 	ps.activeMu.Lock()
 	defer ps.activeMu.Unlock()
-	retired, ok := ps.retired[active.requestID]
-	if !ok {
-		return
+	for _, retired := range ps.retired {
+		if retired.cancelTerminal != nil && time.Since(retired.retiredAt) < cancelTerminalRekeyHold {
+			return true
+		}
 	}
-	retired.cancelTerminal = active.cancelTerminal
-	ps.retired[active.requestID] = retired
+	return false
 }
 
 // deliverCancelTerminal hands a retired request's "cancelled" terminal frame
@@ -591,6 +621,7 @@ func (ps *providerSession) deliverCancelTerminal(end InferenceResponseEnd) bool 
 	case ch <- end:
 	default:
 	}
+	ps.signalActiveChanged()
 	return true
 }
 
@@ -619,6 +650,9 @@ func (ps *providerSession) failAll(err error) {
 		ps.signalActiveChanged()
 	}
 	for _, a := range active {
+		if a.noCancelTerminal != nil {
+			close(a.noCancelTerminal)
+		}
 		select {
 		case a.errs <- err:
 		default:
@@ -1077,7 +1111,7 @@ func (s *Server) beginTier2RekeyIfDue(session *providerSession, providerID, assi
 func (s *Server) runTier2Rekey(session *providerSession, providerID, assignedID string, exchange *tier2RekeyExchange) {
 	barrierPoll := time.NewTicker(25 * time.Millisecond)
 	defer barrierPoll.Stop()
-	for session.hasActive() || s.losslessnessProviderHasPending(providerID, assignedID) {
+	for session.hasActive() || session.hasPendingCancelTerminal() || s.losslessnessProviderHasPending(providerID, assignedID) {
 		select {
 		case <-session.activeChanged:
 		case <-barrierPoll.C:
@@ -1483,13 +1517,14 @@ func (s *Server) dispatchInference(ctx context.Context, provider pool.Provider, 
 	}()
 	chunks, done := active.delivered(ctx)
 	return &RelayStream{
-		RequestID:      requestID,
-		Chunks:         chunks,
-		Done:           done,
-		Errors:         active.errs,
-		Validations:    active.validations,
-		CancelTerminal: active.cancelTerminal,
-		cancel:         cancel,
+		RequestID:        requestID,
+		Chunks:           chunks,
+		Done:             done,
+		Errors:           active.errs,
+		Validations:      active.validations,
+		CancelTerminal:   active.cancelTerminal,
+		noCancelTerminal: active.noCancelTerminal,
+		cancel:           cancel,
 	}, nil
 }
 
