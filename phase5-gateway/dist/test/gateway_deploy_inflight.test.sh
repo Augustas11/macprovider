@@ -55,6 +55,18 @@ INSERT INTO quota_reservations VALUES ('a', 'expired', 'active', 0, '$past');
 INSERT INTO quota_reservations VALUES ('a', 'settled', 'settled', 0, '$future');
 INSERT INTO quota_reservations VALUES ('a', 'refunded', 'refunded', 0, '$future');"
 
+# An RFC3339Nano expiry half a second after "now" is still in flight: a
+# lexical compare with whole-second text sorts "...SS.5Z" below "...SSZ"
+# and undercounts it. Pin "now" in the script's own SQL to test that.
+q="'"
+pinned_sql="${INFLIGHT_SQL//${q}now${q}/${q}2000-01-01T00:00:00Z${q}}"
+[ "$pinned_sql" != "$INFLIGHT_SQL" ] || fail "INFLIGHT_SQL does not compare against 'now'"
+sqlite3 "$db" "INSERT INTO quota_reservations VALUES ('a', 'in-flight-frac', 'active', 0, '2000-01-01T00:00:00.5Z');
+INSERT INTO quota_reservations VALUES ('a', 'expired-frac', 'active', 0, '1999-12-31T23:59:59.5Z');"
+got="$(sqlite3 -readonly "$db" "$pinned_sql")"
+[ "$got" = "3" ] || fail "pinned in-flight count=$got, want 3: a fractional-second expiry after now was undercounted"
+sqlite3 "$db" "DELETE FROM quota_reservations WHERE request_id IN ('in-flight-frac', 'expired-frac');"
+
 got="$(sqlite3 -readonly "$db" "$INFLIGHT_SQL")"
 [ "$got" = "2" ] || fail "in-flight count=$got, want 2 (active, unheld, unexpired only)"
 
