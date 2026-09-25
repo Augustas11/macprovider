@@ -217,18 +217,10 @@ the promotion event (`get-pool` shows it as `root_custody_class`).
 
 SPEC-022-R012 (R-12.8) is normative; this is the operator sequence.
 
-Rollout, in this order:
+Rollout, in this order (the R-12.8 order: coordinator, gateway, CLI, then v2
+allowlists):
 
-0. Deploy the gateway first: gateway schema v14 accepts `pool_operator_attested`
-   finality and reads the settlement outcome of non-streaming responses from
-   declared HTTP trailers (delivered-only billing records success only after
-   the buyer write, so the outcome can no longer ride on the response headers).
-   Against the still-old coordinator, which sends no trailers, the new gateway
-   holds those settlements as `missing_settlement_finality_trailer` until the
-   reconciler resolves them from coordinator finality. Keep the gap between
-   this step and step 2 short. An older gateway refuses a v14 database, so a
-   gateway rollback restores the pre-deploy snapshot.
-1. Drain ledger recovery on the OLD coordinator immediately before step 2:
+0. Drain ledger recovery on the OLD coordinator immediately before step 1:
    let the startup/nightly ledger recovery run to completion (or trigger it)
    and confirm no request is missing its ledger row. Provider identity rows
    written before this release carry no recorded `runtime_source`, so the new
@@ -237,19 +229,50 @@ Rollout, in this order:
    `loopback_runtime_not_settlement_eligible`. A native row caught this way is
    released with `force_credit` after review. Draining first keeps that window
    empty.
-2. Pause every pool, deploy the coordinator that implements SPEC-022 v0.2.2
-   (the `pool_operator_attested` usage source, delivered-only billing and
-   settlement trailers), confirm `/healthz` reports it and the updater
-   transaction committed, then resume the pools.
+1. Pause every pool, deploy the coordinator that implements SPEC-022 v0.2.2
+   (the `pool_operator_attested` usage source and negotiated settlement
+   trailers), confirm `/healthz` reports it and the updater transaction
+   committed, then resume the pools. The still-old gateway does not advertise
+   `X-MacProvider-Internal-Settlement-Trailers`, so the new coordinator answers
+   it in the pre-#1690 order: non-streaming attempts are recorded before the
+   write and their finality travels in headers, which that gateway reads.
+2. Deploy the gateway (schema v14: accepts `pool_operator_attested` finality,
+   advertises settlement trailers, verifies the finality MAC). From here the
+   coordinator records non-streaming successes only after the buyer write and
+   sends their finality as MAC'd trailers. On Pearl the gateway reaches the
+   coordinator directly at `http://127.0.0.1:8443`; trailers cross no proxy.
+   If a proxy is ever put on that hop and drops trailers, the gateway holds
+   those settlements as `missing_settlement_finality_trailer` (fail closed)
+   instead of debiting; watch for that log reason after the deploy.
 3. Ship the provider CLI that signs pool-authorized loopback receipts
    (SPEC-015 0.4.10).
 4. Only then accept a v2 policy core with a non-empty `runtime_allowlist`.
+
+Mixed versions are safe in both directions during steps 1-2 and during a
+rollback, because the trailer order is negotiated per request:
+
+- Old gateway, new coordinator: the gateway never advertises, so the
+  coordinator keeps header finality recorded before the write. The old
+  gateway never meets trailer-only finality it would ignore.
+- New gateway, old coordinator: the old coordinator declares no trailers and
+  sends header finality before the write; the new gateway reads it as before.
+- The finality MAC key is the gateway service token, the bearer the gateway
+  already sends. Rotate it on both sides together, as for the bearer itself.
 
 An old CLI against the new coordinator, or the new CLI against an old
 coordinator, fails closed: no pool-authorized receipt is signed and no
 provider credit is created. A coordinator from this release on also refuses a database whose
 `billing_compat_floor` is above its own contract, so a later downgrade onto a
 binary that cannot read newer settlement rows fails closed at startup.
+
+Rollback runs in the reverse order: withdraw v2 allowlists (a policy core with
+an empty `runtime_allowlist`), then the CLI, then the gateway, then the
+coordinator. A gateway older than this release (`maxKnownSchemaVersion` 13)
+refuses a v14 database at open, so a gateway rollback restores the pre-deploy
+database snapshot (`deploy-pearl-vps.sh` step 5b). Settlements the new gateway
+already holds are resolved by the reconciler before or after the rollback;
+the older gateway reads coordinator header finality again, which a v0.2.2
+coordinator sends to any caller that does not advertise trailers.
 
 Rollback to a coordinator that predates SPEC-022 v0.2.0, once any pool route
 has run on the new coordinator:

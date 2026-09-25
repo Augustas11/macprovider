@@ -9,16 +9,26 @@ Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011
 
 ### v0.2.2
 
-Delivered-only recording note (#1690); no requirement text changes. Under
-R-5.6 and AC-022-54/63, a buyer is debited, and a provider credited, only for
-output confirmed delivered to the buyer. The coordinator records a
-non-streaming success, its usage, and its bytes only after the buyer write
-succeeded; a failed or cancelled write records a `buyer_cancel` over an empty
-prefix. A non-streaming body is usable only whole, so a native (catalog MLX)
-non-streaming buyer disconnect now bills nothing, where it previously billed a
-byte estimate. That is the intended delivered-only outcome, not a regression.
-A non-streaming success therefore carries its settlement outcome as HTTP
-trailers, which the gateway reads with the body.
+Delivered-only recording for negotiated gateways (#1690); adds the R-12.8
+settlement-trailer negotiation bullet. Under R-5.6 and AC-022-54/63, a buyer
+is debited, and a provider credited, only for output confirmed delivered to
+the buyer. A gateway advertises on the service-token-authenticated
+gateway-to-coordinator hop that it reads non-streaming finality from trailers
+(`X-MacProvider-Internal-Settlement-Trailers: 1`). For that gateway the
+coordinator records a non-streaming success, its usage, and its bytes only
+after the buyer write succeeded; a failed or cancelled write records a
+`buyer_cancel` over an empty prefix. A non-streaming body is usable only
+whole, so a native (catalog MLX) non-streaming buyer disconnect then bills
+nothing, where it previously billed a byte estimate. That is the intended
+delivered-only outcome, not a regression. The settlement outcome travels as
+declared HTTP trailers with an HMAC-SHA256 trailer
+(`X-MacProvider-Settlement-Finality-Mac`) keyed by the gateway service token
+over the account, the request id, and the finality tuple. The gateway holds
+declared trailer finality that is missing, unsigned, or fails the MAC as
+`missing_settlement_finality_trailer`; it never debits it locally. A failed
+post-delivery record sends an explicit open `pending` tuple. A caller that did
+not advertise keeps the pre-v0.2.2 order (record before the write, finality in
+headers), so each mixed gateway/coordinator version pairing stays safe.
 
 ### v0.2.1
 
@@ -996,9 +1006,11 @@ the pool attempts recorded before a downgrade.
   accepts `pool_operator_attested` request finality (gateway schema v14,
   `usage_events.token_source`), then the provider CLI that signs
   pool-authorized receipts (SPEC-015-R006), and only then accept a v2 policy
-  core with a non-empty `runtime_allowlist` (SPEC-042-R001). An older gateway
-  refuses a v14 database at open (its schema-version gate), so a gateway
-  rollback restores the pre-deploy snapshot. Pool traffic MUST stay paused while the v0.2.0
+  core with a non-empty `runtime_allowlist` (SPEC-042-R001). A gateway that
+  predates v14 (`maxKnownSchemaVersion` 13) refuses a v14 database at open
+  (its schema-version gate), so a gateway rollback restores the pre-deploy
+  snapshot. Roll back in the reverse order: v2 allowlists, CLI, gateway,
+  coordinator. Pool traffic MUST stay paused while the v0.2.0
   coordinator deploy can still roll back automatically, because v0.2.0
   writes the new labels on every pool route, native pools included, and an
   automatic rollback runs no gate. An old CLI against a new coordinator, and a new
@@ -1035,6 +1047,27 @@ the pool attempts recorded before a downgrade.
   onto a binary that cannot read newer rows fails closed at startup. A
   coordinator that predates the floor cannot read it; the preflight gate above
   is what governs a downgrade to one.
+- Non-streaming settlement trailers (v0.2.2): the coordinator uses the
+  delivered-only order and trailer finality for a non-streaming attempt only
+  when the gateway advertised `X-MacProvider-Internal-Settlement-Trailers: 1`
+  under the gateway service token. The header is in the internal namespace, so
+  a buyer-port request carrying it without that token is refused, and the
+  gateway never forwards a buyer-supplied copy. Every other caller gets the
+  pre-v0.2.2 order: the attempt is recorded before the write and its finality
+  travels in headers. The negotiation keeps each version pairing safe. An
+  older gateway never advertises, so a v0.2.2 coordinator answers it exactly
+  as before and it never sees trailer-only finality it would ignore. A v0.2.2
+  gateway reads trailer finality only when the response declares it; an older
+  coordinator declares none and sends header finality, which the gateway still
+  reads. In trailer mode the gateway accepts the tuple only with a valid MAC
+  trailer bound to the account and request id it sent, and holds a missing,
+  unsigned, tampered, or replayed tuple as `missing_settlement_finality_trailer`
+  (resolved by the reconciler; an observe-mode attempt resolves through the
+  coordinator's request-scoped finality lookup). Loopback and
+  `pool_operator_attested` credit are unaffected by the order: in both orders
+  the ledger write credits a loopback attempt only when a receipt signed by
+  the pinned key backs its usage, and otherwise records it byte-estimated with
+  zero billable.
 - A pool-authority read that cannot decide (a store or authority error) is
   not an eligibility verdict. Receipt ingestion returns a retryable error and
   keeps the receipt's first-observed arrival time for the retry; only a
