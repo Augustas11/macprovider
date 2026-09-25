@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"golang.org/x/text/unicode/norm"
+
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
 const (
@@ -405,19 +407,14 @@ func (s *Store) InsertSettlementAttemptOutput(ctx context.Context, attempt Settl
 		return "", err
 	}
 	now := time.Now().UTC()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return "", err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
-	var overlapCount int
-	if attempt.OutputAvailable {
-		if err := tx.QueryRowContext(ctx, `
+	// BEGIN IMMEDIATE (the money-path pattern): the overlap read and the
+	// insert share one write lock taken up front, so a writer on another
+	// handle to this file (routeSnapshotDB) waits in busy_timeout instead of
+	// failing the deferred read-to-write upgrade with SQLITE_BUSY_SNAPSHOT.
+	err = sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var overlapCount int
+		if attempt.OutputAvailable {
+			if err := conn.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM settlement_attempt_outputs
 WHERE account_scope = ?
@@ -429,16 +426,16 @@ WHERE account_scope = ?
       OR (attempt_n < ? AND output_prefix_start_byte > ?)
       OR (attempt_n > ? AND output_prefix_start_byte < ?)
   )`,
-			attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
-			attempt.Output.OutputPrefixStartByte, attempt.Output.OutputPrefixEndByte, outputHash,
-			attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
-			attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
-		).Scan(&overlapCount); err != nil {
-			return "", err
+				attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
+				attempt.Output.OutputPrefixStartByte, attempt.Output.OutputPrefixEndByte, outputHash,
+				attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
+				attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
+			).Scan(&overlapCount); err != nil {
+				return err
+			}
 		}
-	}
-	overlap := attempt.OverlappingOrDuplicate || overlapCount > 0
-	res, err := tx.ExecContext(ctx, `
+		overlap := attempt.OverlappingOrDuplicate || overlapCount > 0
+		res, err := conn.ExecContext(ctx, `
 INSERT INTO settlement_attempt_outputs (
     account_scope, request_id, attempt_n, provider_id, terminal_state, terminal_state_ts_unix_ms, output_available,
     output_prefix_start_byte, output_prefix_end_byte, output_hash,
@@ -446,28 +443,28 @@ INSERT INTO settlement_attempt_outputs (
     usage_source, overlapping_or_duplicate, created_at_utc
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(account_scope, request_id, attempt_n, provider_id) DO NOTHING`,
-		attempt.AccountScope,
-		attempt.RequestID,
-		attempt.AttemptN,
-		attempt.ProviderID,
-		attempt.Output.TerminalState,
-		attempt.TerminalStateTSUnixMS,
-		boolInt(attempt.OutputAvailable),
-		attempt.Output.OutputPrefixStartByte,
-		attempt.Output.OutputPrefixEndByte,
-		nullableOutputString(outputHash, attempt.OutputAvailable),
-		nil,
-		usageHash,
-		string(usageCanonical),
-		attempt.UsageSource,
-		boolInt(overlap),
-		now.Format(time.RFC3339Nano),
-	)
-	if err != nil {
-		return "", err
-	}
-	if overlap {
-		if _, err := tx.ExecContext(ctx, `
+			attempt.AccountScope,
+			attempt.RequestID,
+			attempt.AttemptN,
+			attempt.ProviderID,
+			attempt.Output.TerminalState,
+			attempt.TerminalStateTSUnixMS,
+			boolInt(attempt.OutputAvailable),
+			attempt.Output.OutputPrefixStartByte,
+			attempt.Output.OutputPrefixEndByte,
+			nullableOutputString(outputHash, attempt.OutputAvailable),
+			nil,
+			usageHash,
+			string(usageCanonical),
+			attempt.UsageSource,
+			boolInt(overlap),
+			now.Format(time.RFC3339Nano),
+		)
+		if err != nil {
+			return err
+		}
+		if overlap {
+			if _, err := conn.ExecContext(ctx, `
 UPDATE settlement_attempt_outputs
 SET overlapping_or_duplicate = 1
 WHERE account_scope = ?
@@ -480,69 +477,70 @@ WHERE account_scope = ?
       OR (attempt_n < ? AND output_prefix_start_byte > ?)
       OR (attempt_n > ? AND output_prefix_start_byte < ?)
   )`,
-			attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
-			attempt.Output.OutputPrefixStartByte, attempt.Output.OutputPrefixEndByte, outputHash,
-			attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
-			attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
-		); err != nil {
-			return "", err
+				attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
+				attempt.Output.OutputPrefixStartByte, attempt.Output.OutputPrefixEndByte, outputHash,
+				attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
+				attempt.AttemptN, attempt.Output.OutputPrefixStartByte,
+			); err != nil {
+				return err
+			}
 		}
-	}
-	if rows, err := res.RowsAffected(); err == nil && rows == 0 {
-		var existing struct {
-			TerminalState         string
-			TerminalStateTSUnixMS int64
-			OutputAvailable       int
-			Start                 int64
-			End                   int64
-			OutputHash            sql.NullString
-			UsageHash             string
-			UsageCanonical        string
-			UsageSource           string
-			Overlap               int
-		}
-		err := tx.QueryRowContext(ctx, `
+		if rows, err := res.RowsAffected(); err == nil && rows == 0 {
+			var existing struct {
+				TerminalState         string
+				TerminalStateTSUnixMS int64
+				OutputAvailable       int
+				Start                 int64
+				End                   int64
+				OutputHash            sql.NullString
+				UsageHash             string
+				UsageCanonical        string
+				UsageSource           string
+				Overlap               int
+			}
+			err := conn.QueryRowContext(ctx, `
 SELECT terminal_state, terminal_state_ts_unix_ms, output_available, output_prefix_start_byte,
        output_prefix_end_byte, output_hash,
        usage_hash, usage_canonical_json, usage_source, overlapping_or_duplicate
 FROM settlement_attempt_outputs
 WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
-			attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
-		).Scan(
-			&existing.TerminalState,
-			&existing.TerminalStateTSUnixMS,
-			&existing.OutputAvailable,
-			&existing.Start,
-			&existing.End,
-			&existing.OutputHash,
-			&existing.UsageHash,
-			&existing.UsageCanonical,
-			&existing.UsageSource,
-			&existing.Overlap,
-		)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				return "", fmt.Errorf("settlement attempt output immutable conflict")
+				attempt.AccountScope, attempt.RequestID, attempt.AttemptN, attempt.ProviderID,
+			).Scan(
+				&existing.TerminalState,
+				&existing.TerminalStateTSUnixMS,
+				&existing.OutputAvailable,
+				&existing.Start,
+				&existing.End,
+				&existing.OutputHash,
+				&existing.UsageHash,
+				&existing.UsageCanonical,
+				&existing.UsageSource,
+				&existing.Overlap,
+			)
+			if err != nil {
+				if err == sql.ErrNoRows {
+					return fmt.Errorf("settlement attempt output immutable conflict")
+				}
+				return err
 			}
-			return "", err
+			if existing.TerminalState != attempt.Output.TerminalState ||
+				existing.TerminalStateTSUnixMS != attempt.TerminalStateTSUnixMS ||
+				existing.OutputAvailable != boolInt(attempt.OutputAvailable) ||
+				existing.Start != attempt.Output.OutputPrefixStartByte ||
+				existing.End != attempt.Output.OutputPrefixEndByte ||
+				existing.OutputHash.Valid != attempt.OutputAvailable ||
+				existing.OutputHash.String != outputHash ||
+				existing.UsageHash != usageHash ||
+				existing.UsageCanonical != string(usageCanonical) ||
+				existing.UsageSource != attempt.UsageSource ||
+				existing.Overlap != boolInt(overlap) {
+				return fmt.Errorf("settlement attempt output immutable conflict")
+			}
 		}
-		if existing.TerminalState != attempt.Output.TerminalState ||
-			existing.TerminalStateTSUnixMS != attempt.TerminalStateTSUnixMS ||
-			existing.OutputAvailable != boolInt(attempt.OutputAvailable) ||
-			existing.Start != attempt.Output.OutputPrefixStartByte ||
-			existing.End != attempt.Output.OutputPrefixEndByte ||
-			existing.OutputHash.Valid != attempt.OutputAvailable ||
-			existing.OutputHash.String != outputHash ||
-			existing.UsageHash != usageHash ||
-			existing.UsageCanonical != string(usageCanonical) ||
-			existing.UsageSource != attempt.UsageSource ||
-			existing.Overlap != boolInt(overlap) {
-			return "", fmt.Errorf("settlement attempt output immutable conflict")
-		}
-	}
-	if err := tx.Commit(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return "", err
 	}
-	committed = true
 	return outputHash, nil
 }
