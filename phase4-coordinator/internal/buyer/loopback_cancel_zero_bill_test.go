@@ -33,7 +33,7 @@ func TestLoopbackPoolStreamCancelledWithoutReceiptIsZeroBilled(t *testing.T) {
 	defer cancel()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		bytes.NewReader([]byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}]}`))).WithContext(ctx)
-	for k, values := range trustedPoolLayer2Headers(externalRuntimePoolAccount, h.poolID) {
+	for k, values := range externalRuntimePoolHeaders(h.poolID) {
 		for _, v := range values {
 			req.Header.Add(k, v)
 		}

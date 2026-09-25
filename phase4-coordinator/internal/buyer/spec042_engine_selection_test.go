@@ -22,7 +22,7 @@ func withEngine(h http.Header, values ...string) http.Header {
 // pool_operator_attested exactly as an unselected pool request does.
 func TestSPEC042R014LlamacppOnAllowlistingPoolServedAndDisclosed(t *testing.T) {
 	h := newExternalRuntimeHarness(t, defaultExternalRuntimeFixture())
-	rec := postChat(t, h.server, externalRuntimeBody, withEngine(trustedPoolLayer2Headers(externalRuntimePoolAccount, h.poolID), "llamacpp_loopback"))
+	rec := postChat(t, h.server, externalRuntimeBody, withEngine(externalRuntimePoolHeaders(h.poolID), "llamacpp_loopback"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -41,7 +41,7 @@ func TestSPEC042R014LlamacppOnAllowlistingPoolServedAndDisclosed(t *testing.T) {
 // No selection: routing is unchanged, and the served class is still disclosed.
 func TestSPEC042R014AbsentSelectionUnchangedAndDisclosed(t *testing.T) {
 	h := newExternalRuntimeHarness(t, defaultExternalRuntimeFixture())
-	rec := postChat(t, h.server, externalRuntimeBody, trustedPoolLayer2Headers(externalRuntimePoolAccount, h.poolID))
+	rec := postChat(t, h.server, externalRuntimeBody, externalRuntimePoolHeaders(h.poolID))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -57,7 +57,7 @@ func TestSPEC042R014MixedPoolHonoursEachSelection(t *testing.T) {
 		fx := defaultExternalRuntimeFixture()
 		fx.nativeMember = true
 		h := newExternalRuntimeHarness(t, fx)
-		rec := postChat(t, h.server, externalRuntimeBody, withEngine(trustedPoolLayer2Headers(externalRuntimePoolAccount, h.poolID), class))
+		rec := postChat(t, h.server, externalRuntimeBody, withEngine(externalRuntimePoolHeaders(h.poolID), class))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s: status=%d body=%s", class, rec.Code, rec.Body.String())
 		}
@@ -80,13 +80,13 @@ func TestSPEC042R014EngineFailClosedSet(t *testing.T) {
 	}{
 		"native on a pool whose only member is llama.cpp": {
 			headers: func(p string) http.Header {
-				return withEngine(trustedPoolLayer2Headers(externalRuntimePoolAccount, p), "mlx_cache")
+				return withEngine(externalRuntimePoolHeaders(p), "mlx_cache")
 			},
 			status: http.StatusServiceUnavailable, code: "engine_unavailable",
 		},
 		"ollama on a pool that allowlists only llamacpp": {
 			headers: func(p string) http.Header {
-				return withEngine(trustedPoolLayer2Headers(externalRuntimePoolAccount, p), "ollama_loopback")
+				return withEngine(externalRuntimePoolHeaders(p), "ollama_loopback")
 			},
 			status: http.StatusServiceUnavailable, code: "engine_unavailable",
 		},
@@ -96,13 +96,13 @@ func TestSPEC042R014EngineFailClosedSet(t *testing.T) {
 		},
 		"selector name instead of a runtime class": {
 			headers: func(p string) http.Header {
-				return withEngine(trustedPoolLayer2Headers(externalRuntimePoolAccount, p), "llamacpp")
+				return withEngine(externalRuntimePoolHeaders(p), "llamacpp")
 			},
 			status: http.StatusBadRequest, code: "invalid_engine_selection",
 		},
 		"conflicting internal values": {
 			headers: func(p string) http.Header {
-				return withEngine(trustedPoolLayer2Headers(externalRuntimePoolAccount, p), "llamacpp_loopback", "mlx_cache")
+				return withEngine(externalRuntimePoolHeaders(p), "llamacpp_loopback", "mlx_cache")
 			},
 			status: http.StatusBadRequest, code: "invalid_engine_selection",
 		},

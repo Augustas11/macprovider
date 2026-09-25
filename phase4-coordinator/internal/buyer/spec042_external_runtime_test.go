@@ -319,6 +319,15 @@ func newExternalRuntimeHarness(t *testing.T, fx externalRuntimeFixture) *externa
 
 var externalRuntimeBody = []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`)
 
+// externalRuntimePoolHeaders are a pool route's headers from a gateway that
+// negotiated signed settlement finality, which an external-runtime member
+// requires (SPEC-022 R-12.8, E2E-F10).
+func externalRuntimePoolHeaders(poolID string) http.Header {
+	h := trustedPoolLayer2Headers(externalRuntimePoolAccount, poolID)
+	h.Set(settlementTrailersCapabilityHeader, "1")
+	return h
+}
+
 func globalRouteHeaders() http.Header {
 	return http.Header{
 		"Authorization":         {"Bearer gateway-secret"},
@@ -332,7 +341,7 @@ func globalRouteHeaders() http.Header {
 // the provider receives the §N.12 authorization bound to that attempt.
 func TestSPEC042ExternalRuntimePoolRouteDerivesMemberAndSnapshot(t *testing.T) {
 	h := newExternalRuntimeHarness(t, defaultExternalRuntimeFixture())
-	rec := postChat(t, h.server, externalRuntimeBody, trustedPoolLayer2Headers(externalRuntimePoolAccount, h.poolID))
+	rec := postChat(t, h.server, externalRuntimeBody, externalRuntimePoolHeaders(h.poolID))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("pool route status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -433,7 +442,7 @@ func TestSPEC042ExternalRuntimeFailClosedSet(t *testing.T) {
 				tc.mutate(&fx)
 			}
 			h := newExternalRuntimeHarness(t, fx)
-			headers := trustedPoolLayer2Headers(externalRuntimePoolAccount, h.poolID)
+			headers := externalRuntimePoolHeaders(h.poolID)
 			if tc.global {
 				headers = globalRouteHeaders()
 			}
@@ -462,7 +471,7 @@ func TestSPEC042ExternalRuntimeRecordedByteEstimatedWhenDurableRecordsReject(t *
 	fx := defaultExternalRuntimeFixture()
 	fx.authorityErr = errors.New("durable records reject")
 	h := newExternalRuntimeHarness(t, fx)
-	rec := postChat(t, h.server, externalRuntimeBody, trustedPoolLayer2Headers(externalRuntimePoolAccount, h.poolID))
+	rec := postChat(t, h.server, externalRuntimeBody, externalRuntimePoolHeaders(h.poolID))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("pool route status=%d body=%s", rec.Code, rec.Body.String())
 	}
@@ -532,7 +541,7 @@ func TestSPEC042ExternalRuntimeUsageWithoutBoundReceiptIsZeroBilled(t *testing.T
 			fx := defaultExternalRuntimeFixture()
 			fx.receipt = mode
 			h := newExternalRuntimeHarness(t, fx)
-			rec := postChat(t, h.server, externalRuntimeBody, trustedPoolLayer2Headers(externalRuntimePoolAccount, h.poolID))
+			rec := postChat(t, h.server, externalRuntimeBody, externalRuntimePoolHeaders(h.poolID))
 			if rec.Code != http.StatusOK {
 				t.Fatalf("pool route status=%d body=%s", rec.Code, rec.Body.String())
 			}

@@ -2352,6 +2352,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// semantics for what used to be captured outer-scope variables.
 	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID, externalRequestID, accountID, authenticatedAccount, hasAuthenticatedAccount)
 	rec.settlementTrailersNegotiated = s.gatewayNegotiatedSettlementTrailers(r.Header) && rec.accountID != ""
+	state.settlementTrailersNegotiated = rec.settlementTrailersNegotiated
 	// Runs before net/http sends the trailers (settlement_trailers.go).
 	defer finalizeNegotiatedSettlementFinality(w.Header(), rec)
 	// #766 single-terminal-wins arbiter (observe-only). Deferred here so the
@@ -7043,6 +7044,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	var poolModelAllowlist []string
 	var poolRequiresSettlementEnforce bool
 	var poolRuntimeAllowlist []string
+	poolRuntimeAllowlistWithheld := false
 	var poolCreatorAccountID string
 	var poolCreatorOwned map[string]bool
 	poolActive := s.trustPools != nil && req.poolID != ""
@@ -7074,6 +7076,18 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 		poolMin = snap.MinBinaryVersion
 		poolModelAllowlist = snap.ModelAllowlist
 		poolRuntimeAllowlist = snap.RuntimeAllowlist
+		// SPEC-022 R-12.8 (E2E-F10): an external-runtime member settles
+		// pool_operator_attested, and only a gateway that negotiated
+		// signed settlement finality can settle that; an older gateway
+		// rejects the token source and holds the buyer forever while the
+		// provider credit is payable. Without the negotiation the pool's
+		// runtime allowlist is withheld for this request, so no loopback
+		// member is selectable and the request fails closed before
+		// dispatch.
+		if len(poolRuntimeAllowlist) > 0 && (state == nil || !state.settlementTrailersNegotiated) {
+			poolRuntimeAllowlist = nil
+			poolRuntimeAllowlistWithheld = true
+		}
 		poolCreatorAccountID = snap.CreatorAccountID
 		poolCreatorOwned = snap.CreatorOwnedMembers
 		if state != nil {
@@ -7085,7 +7099,7 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			state.poolRequiresSettlementEnforce = poolRequiresSettlementEnforce
 			state.poolManifestVersion = snap.ManifestVersion
 			state.poolManifestCoreDigest = snap.ManifestCoreDigest
-			state.poolRuntimeAllowlist = append([]string(nil), snap.RuntimeAllowlist...)
+			state.poolRuntimeAllowlist = append([]string(nil), poolRuntimeAllowlist...)
 			state.poolCreatorAccountID = snap.CreatorAccountID
 			state.poolCreatorOwnedMembers = snap.CreatorOwnedMembers
 			state.poolGenSet = true
@@ -7095,6 +7109,9 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 	// allowlist (the snapshot captured above) contains it. Re-checked on every
 	// selection attempt, failover included.
 	engineClass := req.engineClass
+	if poolRuntimeAllowlistWithheld && engineClass != "" && engineClass != engineClassNative {
+		return pool.Provider{}, engineUnavailableRouteError(externalRuntimeNeedsSignedFinalityMessage)
+	}
 	if routeErr := engineRouteError(engineClass, poolActive, poolRuntimeAllowlist); routeErr != nil {
 		return pool.Provider{}, routeErr
 	}
@@ -7314,7 +7331,16 @@ func (s *Server) selectProviderExcluding(ctx context.Context, requestID string, 
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "pool_no_eligible_member", message: "No eligible member is available for the selected pool"}
 		}
 		if result.Counts[routing.ReasonBYOMNonSettlement] > 0 {
-			return pool.Provider{}, byomNonSettlementRouteError(req.Model)
+			routeErr := byomNonSettlementRouteError(req.Model)
+			if poolRuntimeAllowlistWithheld {
+				routeErr.message = externalRuntimeNeedsSignedFinalityMessage
+			}
+			return pool.Provider{}, routeErr
+		}
+		if poolRuntimeAllowlistWithheld && poolHasExternalRuntimeMember(providers, poolMembers) {
+			routeErr := byomNonSettlementRouteError(req.Model)
+			routeErr.message = externalRuntimeNeedsSignedFinalityMessage
+			return pool.Provider{}, routeErr
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + req.Model}
 	}

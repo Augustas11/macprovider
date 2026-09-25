@@ -59,6 +59,11 @@ func providerEngineClass(p pool.Provider) string {
 	return engineClassNative
 }
 
+// externalRuntimeNeedsSignedFinalityMessage names why a pool route withheld
+// its external-runtime members: the caller did not negotiate signed
+// settlement finality (SPEC-022 R-12.8, E2E-F10).
+const externalRuntimeNeedsSignedFinalityMessage = "External-runtime pool members serve only through a gateway that negotiates signed settlement finality"
+
 func engineUnavailableRouteError(message string) *routeError {
 	return &routeError{status: http.StatusServiceUnavailable, code: "engine_unavailable", message: message}
 }

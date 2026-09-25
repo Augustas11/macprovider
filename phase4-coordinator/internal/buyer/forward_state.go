@@ -71,6 +71,11 @@ type forwardState struct {
 	poolRuntimeAllowlist    []string
 	poolCreatorAccountID    string
 	poolCreatorOwnedMembers map[string]bool
+	// settlementTrailersNegotiated mirrors the recorder: the gateway
+	// advertised signed settlement finality under the service token. A pool
+	// route selects an external-runtime member only when it is set
+	// (SPEC-022 R-12.8, E2E-F10).
+	settlementTrailersNegotiated bool
 	// engineClass is the SPEC-042-R014 buyer engine selection, captured at
 	// selection so the slot-queue poll re-applies it. "" means none.
 	engineClass string

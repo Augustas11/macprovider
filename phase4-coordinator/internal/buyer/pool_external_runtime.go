@@ -64,6 +64,17 @@ func (v poolRouteView) externalRuntimeCandidate(p pool.Provider) bool {
 		v.allowsRuntime(p.RuntimeSource)
 }
 
+// poolHasExternalRuntimeMember reports whether any session in scope is a
+// pool member served by a SPEC-046 loopback runtime.
+func poolHasExternalRuntimeMember(providers []pool.Provider, members map[string]bool) bool {
+	for _, p := range providers {
+		if members[p.ProviderID] && providerws.IsBYOMLoopbackRuntimeSource(p.RuntimeSource) {
+			return true
+		}
+	}
+	return false
+}
+
 // routingEligibleForRoute is SPEC-042-R005 site (2): RoutingEligible keeps its
 // global answer (a sandboxed session is excluded), and a separate pool-scoped
 // predicate lets a pool route select a sandboxed external-runtime member
