@@ -9,7 +9,7 @@ M4 Air; Qwen2.5-Coder-7B-Instruct-4bit on air5).
 
 The first numeric points on the network's TTFT + streaming-TPS +
 wall-time curves. Use these to calibrate the v0.1 thresholds in
-[SPEC-NETWORK-BENCHMARK-v0.1.md](./SPEC-NETWORK-BENCHMARK-v0.1.md).
+[SPEC-NETWORK-BENCHMARK-v0.1.md](../notes/SPEC-NETWORK-BENCHMARK-v0.1.md).
 Future runs compare against these values via the regression-report
 mechanism described in § 3.4 of the spec.
 

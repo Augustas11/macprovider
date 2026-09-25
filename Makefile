@@ -89,6 +89,7 @@ test-dist:
 	bash scripts/test-pearl-runtime-release.sh
 	bash scripts/test-live-coordinator-release-gate.sh
 	bash scripts/test-release-security-posture.sh
+	bash scripts/test-h1-undercredit-probe.sh
 	bash scripts/test-malibu-bootstrap-bridge.sh
 	bash scripts/test-recover-malibu-publication.sh
 	bash scripts/test-acceptance-candidate-security.sh
@@ -123,6 +124,7 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_pricing_receipt
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_catalog_propose
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_fetch_health
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_hash_sweep
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_classify_benchmark_evidence
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_revenue_benchmark_workload
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_revenue_benchmark_calculator

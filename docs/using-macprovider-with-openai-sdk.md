@@ -62,7 +62,7 @@ Server-Sent Events, OpenAI-compatible chunks. No MacProvider-specific handling n
 
 ## Tool calling
 
-MacProvider ships OpenAI-shape `tools` + `tool_choice` per [SPEC-018](../specs/SPEC-018-*.md). Multi-turn tool loops, streamed tool-call deltas, and `tool_call_id` back-references all work.
+MacProvider ships OpenAI-shape `tools` + `tool_choice` per [SPEC-018](../specs/SPEC-018-agentic-tool-calling.md). Multi-turn tool loops, streamed tool-call deltas, and `tool_call_id` back-references all work.
 
 ```python
 resp = client.chat.completions.create(
@@ -94,7 +94,7 @@ A complete multi-turn tool demo lives at [`examples/tool_calling_demo.py`](../ex
 
 ## Structured output (JSON schema)
 
-Grammar-constrained sampling via [SPEC-019](../specs/SPEC-019-*.md). Works in both streaming and non-streaming.
+Grammar-constrained sampling via [SPEC-019](../specs/SPEC-019-structured-output.md). Works in both streaming and non-streaming.
 
 ```python
 resp = client.chat.completions.create(
@@ -299,7 +299,7 @@ Any framework built on `openai-python` or `openai-node` works out of the box. Te
 - **LlamaIndex.** `OpenAI(base_url=..., api_key=...)` — same story.
 - **Instructor.** Structured output via `response_format` works; Instructor's `patch()` layer sees MacProvider as plain OpenAI.
 - **Aider.** Point `OPENAI_API_BASE` at `https://api.malibu.tech/v1`; existing config keys work.
-- **Cline / Continue.** Per [SPEC-018 v0.2.4](../specs/SPEC-018-*.md) MacProvider is a Cline drop-in target — set the OpenAI-compatible endpoint to `https://api.malibu.tech/v1`.
+- **Cline / Continue.** Per [SPEC-018 v0.2.4](../specs/SPEC-018-agentic-tool-calling.md) MacProvider is a Cline drop-in target — set the OpenAI-compatible endpoint to `https://api.malibu.tech/v1`.
 
 If you find a framework where the OpenAI SDK works but MacProvider doesn't, that's a wire-shape bug — file an issue with a minimal repro.
 

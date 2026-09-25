@@ -5,7 +5,7 @@
 **Audience:** Coordinator billing + Malibu app implementers  
 **Session:** **C** — new Cursor session; **money-path PR required** for all ledger changes.  
 **Spec:** `specs/SPEC-021-malibu-emission-ledger.md` (formerly `docs/notes/SPEC-MALIBU-EMISSION-LEDGER.md`; promoted to canonical SPEC-021 on 2026-07-10)  
-**Related:** [`mining-program-bootstrap.md`](./mining-program-bootstrap.md) (Session D), [`opoi-challenge-implementation.md`](./opoi-challenge-implementation.md) (Session A)
+**Related:** `mining-program-bootstrap.md` (not in this repository) (Session D), [`opoi-challenge-implementation.md`](./opoi-challenge-implementation.md) (Session A)
 
 ---
 
