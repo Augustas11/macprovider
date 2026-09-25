@@ -313,7 +313,9 @@ bound contains a transport, discovery MUST fail with `transport_absent`. The
 client MUST select the greatest well-formed sequence in that stopping page and
 require that release to be public, prerelease, and immutable, without falling
 back to a lower sequence. Pagination only widens where the unsigned locator
-looks; it confers no authority. It MUST require the selected transport tag
+looks; it confers no authority. The anonymous promotion and renewal verifier
+MUST walk the listing with the same page, byte, and stop rules so it proves the
+transport the client will actually select. It MUST require the selected transport tag
 sequence to equal the verified signed-head sequence. The unsigned listing,
 release timestamp, and GitHub ordering MUST NOT authorize a target, policy,
 downgrade, or mutation.
@@ -1547,7 +1549,9 @@ Deferred to v0.3.0 or later:
   is unsigned and only approximately newest-first, a higher transport on a
   later page is missed only as a fail-closed freeze bounded by head expiry. Immutability, prerelease,
   signature, transport-sequence binding, replay, equivocation, and expiry
-  checks are unchanged; the listing remains an unsigned locator.
+  checks are unchanged; the listing remains an unsigned locator. The anonymous
+  verifier walks the same pages, since a renewal transport inherits its
+  unchanged target commit's listing position and sinks below newer prereleases.
 - v0.1.19 (2026-09-08): Trust-table amendment: coordinator wire tier `trusted`
   is autoupdate-eligible on the same encrypted-leg, attestation, and token
   guards as `pinned`. Closes the production skip where MALIBU-verified
