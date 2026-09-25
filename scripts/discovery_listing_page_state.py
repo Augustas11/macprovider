@@ -10,6 +10,7 @@ Prints exactly one word:
   end        a short page without a transport; the listing ended
   next       a full page without a transport; fetch the next page
 Exit 1 (nothing printed) on an oversized or malformed page.
+`--max-pages` prints the page bound for the caller's walk.
 """
 
 from __future__ import annotations
@@ -23,9 +24,21 @@ PAGE_SIZE = 100
 MAX_PAGES = 10
 MAX_PAGE_BYTES = 16 * 1024 * 1024
 TRANSPORT_TAG = re.compile(r"release-discovery-v1-[1-9][0-9]*")
+UINT64_MAX = 2**64 - 1
+
+
+def is_transport(release: object) -> bool:
+    # Same grammar and UInt64 bound as SignedReleaseDiscoveryHead.transportSequence.
+    if not isinstance(release, dict):
+        return False
+    tag = str(release.get("tag_name", ""))
+    return bool(TRANSPORT_TAG.fullmatch(tag)) and int(tag.rsplit("-", 1)[1]) <= UINT64_MAX
 
 
 def main(argv: list[str]) -> int:
+    if argv == ["--max-pages"]:
+        print(MAX_PAGES)
+        return 0
     if len(argv) != 1:
         print("usage: discovery_listing_page_state.py PAGE_JSON", file=sys.stderr)
         return 1
@@ -41,11 +54,7 @@ def main(argv: list[str]) -> int:
     if not isinstance(releases, list):
         print("public discovery listing page is not an array", file=sys.stderr)
         return 1
-    if any(
-        isinstance(release, dict)
-        and TRANSPORT_TAG.fullmatch(str(release.get("tag_name", "")))
-        for release in releases
-    ):
+    if any(is_transport(release) for release in releases):
         print("transport")
     elif len(releases) < PAGE_SIZE:
         print("end")

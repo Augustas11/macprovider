@@ -304,9 +304,10 @@ under the pinned release trust root, not from mutable GitHub `latest` ordering.
 The client MAY use a bounded GitHub public-release listing only to locate
 append-only transports whose tags match
 `release-discovery-v1-<positive-decimal-sequence>`. The listing MUST be read in
-GitHub's default (creation-ordered, unsigned) order in explicitly numbered
-pages of at most 100 releases, at most 10 pages per discovery attempt, and
-MUST fail closed with `transport_listing_oversized` on any page larger than 16 MiB. The client MUST
+GitHub's default order (release `created_at`, which follows the target commit
+date and is unsigned) in explicitly numbered pages of at most 100 releases, at
+most 10 pages per discovery attempt, and MUST fail closed with
+`transport_listing_oversized` on any page larger than 16 MiB. The client MUST
 stop at the first page that contains a well-formed transport tag and MUST NOT
 request later pages; a short page ends the listing. When no page within the
 bound contains a transport, discovery MUST fail with `transport_absent`. The
@@ -315,8 +316,8 @@ require that release to be public, prerelease, and immutable, without falling
 back to a lower sequence. Pagination only widens where the unsigned locator
 looks; it confers no authority. The anonymous promotion and renewal verifier
 MUST walk the listing with the same page, byte, and stop rules so it proves the
-transport the client will actually select. It MUST require the selected transport tag
-sequence to equal the verified signed-head sequence. The unsigned listing,
+transport the client will actually select. It MUST require the selected
+transport tag sequence to equal the verified signed-head sequence. The unsigned listing,
 release timestamp, and GitHub ordering MUST NOT authorize a target, policy,
 downgrade, or mutation.
 The head MUST bind a schema version, monotonically increasing unsigned
