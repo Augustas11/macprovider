@@ -268,12 +268,14 @@ LIMIT 1`, accountScope, requestID, attemptN, providerID).Scan(&one)
 // MarkSettlementOutputMissing records that a credited request has no
 // settlement evidence. The credit amount is left unchanged and the row stays
 // unquarantined so a later evidence write can still settle it. Callers filter
-// on this reason when measuring provider revenue.
-func (s *Store) MarkSettlementOutputMissing(ctx context.Context, requestID string, attemptN int, providerID string) error {
+// on this reason when measuring provider revenue. It reports whether a
+// credited row was marked: an uncredited attempt (a 502, a zero credit) has
+// no credit whose evidence could be missing.
+func (s *Store) MarkSettlementOutputMissing(ctx context.Context, requestID string, attemptN int, providerID string) (bool, error) {
 	if s == nil || requestID == "" || providerID == "" || attemptN < 0 {
-		return nil
+		return false, nil
 	}
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 UPDATE ledger_request_credits
 SET quarantine_reason = 'settlement_attempt_output_missing'
 WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
@@ -282,7 +284,37 @@ WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
   AND quarantined = 0
   AND (quarantine_reason IS NULL OR quarantine_reason = '')`,
 		requestID, attemptN, providerID)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// QuarantineUndeliveredSettlementCredit quarantines an unsettled provider
+// credit whose settlement evidence failed after the buyer response was
+// delivered and the buyer reservation was refunded (SPEC-022 v0.2.2 enforce
+// mode). A quarantined row leaves spec022_payable_request_credits unless an
+// operator force-credits it. The credit amount is kept for that review. It
+// reports whether a row was quarantined.
+func (s *Store) QuarantineUndeliveredSettlementCredit(ctx context.Context, requestID string, attemptN int, providerID, reason string) (bool, error) {
+	if s == nil || requestID == "" || providerID == "" || attemptN < 0 || reason == "" {
+		return false, nil
+	}
+	res, err := s.db.ExecContext(ctx, `
+UPDATE ledger_request_credits
+   SET quarantined = 1,
+       quarantine_reason = CASE WHEN quarantine_reason IS NULL OR quarantine_reason = '' THEN ? ELSE quarantine_reason END,
+       updated_at_utc = ?
+ WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
+   AND quarantined = 0
+   AND settled = 0`,
+		reason, time.Now().UTC().Format(time.RFC3339Nano), requestID, attemptN, providerID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 func (s *Store) InsertSettlementAttemptOutput(ctx context.Context, attempt SettlementAttemptOutput) (string, error) {

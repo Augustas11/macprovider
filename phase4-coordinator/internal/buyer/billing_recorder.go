@@ -98,7 +98,16 @@ type billingRecorder struct {
 	// settlementFinalityMACActive: this response declared MAC'd finality
 	// trailers, so every finality tuple set on it is signed.
 	settlementFinalityMACActive bool
-	promptTokenUpperBound       *int64
+	// lastProviderAttemptN / lastProviderID name the ledger attempt of the
+	// last provider-bound recordRow, so a post-delivery evidence failure can
+	// quarantine that credit (settlement_trailers.go).
+	// settlementOutputMissingMarked: this attempt's credited row was marked
+	// settlement_attempt_output_missing (a credit whose evidence is gone).
+	settlementOutputMissingMarked bool
+	lastProviderAttemptN          int
+	lastProviderID                string
+	hasLastProviderAttempt        bool
+	promptTokenUpperBound         *int64
 
 	// attemptN is the running per-provider-attempt counter. Pre-refactor
 	// this was billingAttemptN, incremented via deferred closure on
@@ -385,6 +394,11 @@ func (b *billingRecorder) recordRow(
 	// Reset before any early return so a stale latch from a previous attempt
 	// can never be read by this attempt's ingestSettlementReceipt (#1578).
 	b.lastRecordedSettlementSubject = false
+	// Likewise the missing-evidence latches belong to one attempt: a
+	// failed-over attempt's latch must not skip the ingest of, or refund, the
+	// attempt that later succeeds.
+	b.settlementOutputMissingAfterCredit = false
+	b.settlementOutputMissingMarked = false
 	if s.reqLog == nil {
 		return nil
 	}
@@ -395,6 +409,7 @@ func (b *billingRecorder) recordRow(
 	}
 	attemptN := b.attemptN
 	if providerAssignedID != "" {
+		b.lastProviderAttemptN, b.lastProviderID, b.hasLastProviderAttempt = attemptN, providerID, true
 		defer func() {
 			b.attemptN++
 		}()
@@ -689,10 +704,17 @@ func (b *billingRecorder) persistSettlementAttemptOutput(store *billing.Store, i
 	}
 	markCtx, markCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 	defer markCancel()
-	if markErr := store.MarkSettlementOutputMissing(markCtx, in.RequestID, in.AttemptN, in.ProviderID); markErr != nil {
+	marked, markErr := store.MarkSettlementOutputMissing(markCtx, in.RequestID, in.AttemptN, in.ProviderID)
+	if markErr != nil {
 		b.server.log.Warn().Err(markErr).Str("request_id", b.requestID).Msg("settlement attempt output missing mark failed")
 	}
+	// The ingest skip covers every attempt whose evidence write failed this
+	// way (#1675); only a credited row whose evidence is now marked missing
+	// has a credit that negotiated finality must settle
+	// (setSettlementEvidenceFailedFinality). An uncredited attempt, such as a
+	// 502, has none.
 	b.settlementOutputMissingAfterCredit = true
+	b.settlementOutputMissingMarked = marked
 	b.server.log.Warn().
 		Err(err).
 		Str("request_id", b.requestID).

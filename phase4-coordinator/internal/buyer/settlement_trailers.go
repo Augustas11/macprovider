@@ -1,6 +1,7 @@
 package buyer
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,8 +27,8 @@ import (
 // stripped declaration or MAC:
 //   - non-streaming: declared trailers, always, with the attempt's tuple, a
 //     signed legacy tuple when there is none (no route snapshot, observe
-//     mode, a keyless provider), or a signed closed refund tuple when the
-//     post-delivery record failed;
+//     mode, a keyless provider), or, when post-delivery evidence failed, a
+//     signed closed refund (enforce) or the signed legacy tuple (otherwise);
 //   - streaming with a route snapshot: declared trailers with the tuple;
 //   - streaming without one: a signed legacy tuple in the headers, decided
 //     before the first byte, so a stream the gateway ends locally still
@@ -44,9 +45,8 @@ const (
 	// settlementLegacyMode marks a tuple the gateway settles with local
 	// (pre-SPEC-022) accounting, exactly as a response without finality.
 	settlementLegacyMode = "legacy"
-	// settlementRecordFailedAfterDeliveryReason is the reason on the closed
-	// refund tuple sent when the post-delivery record or receipt ingest
-	// fails.
+	// settlementRecordFailedAfterDeliveryReason names a post-delivery record
+	// or receipt ingest failure (setSettlementEvidenceFailedFinality).
 	settlementRecordFailedAfterDeliveryReason = "settlement_record_failed_after_delivery"
 	// settlementOutputMissingAfterCreditReason is the sibling reason when the
 	// credit row committed but the settlement evidence write failed
@@ -190,14 +190,16 @@ func setNonStreamingSettlementFinality(dst http.Header, rec *billingRecorder, st
 	if rec == nil || !rec.settlementFinalityMACActive {
 		return
 	}
-	if rec.settlementOutputMissingAfterCredit {
-		// The credit committed but its settlement evidence did not: no
-		// finality can ever verify the attempt, so a legacy debit would
-		// charge the buyer for an attempt whose provider evidence is
-		// missing. Refund, as for a failed record.
-		setSettlementRefundAfterDelivery(dst, rec, settlementOutputMissingAfterCreditReason)
+	if rec.settlementOutputMissingMarked {
+		// The credit committed but its settlement evidence did not, so no
+		// finality can ever verify the attempt.
+		setSettlementEvidenceFailedFinality(dst, rec, settlementOutputMissingAfterCreditReason)
 		return
 	}
+	setSignedLegacyTuple(dst, rec)
+}
+
+func setSignedLegacyTuple(dst http.Header, rec *billingRecorder) {
 	for _, name := range settlementOutcomeHeaderNames {
 		dst.Del(name)
 	}
@@ -205,15 +207,10 @@ func setNonStreamingSettlementFinality(dst http.Header, rec *billingRecorder, st
 	signSettlementFinality(dst, rec)
 }
 
-// setSettlementRecordFailedRefund sends a signed, closed refund tuple when
-// the post-delivery record or receipt ingest failed. The buyer already holds
-// the body, but no durable row backs a charge and there is no finality for a
-// reconciler to find, so the gateway releases the reservation at once: the
-// buyer is not charged, as with the pre-#1690 500 request_log_failed. Any
-// provider credit the failed write did land stays for operator review; the
-// error log line is the operator's signal.
-func setSettlementRecordFailedRefund(dst http.Header, rec *billingRecorder) {
-	setSettlementRefundAfterDelivery(dst, rec, settlementRecordFailedAfterDeliveryReason)
+// setSettlementRecordFailedFinality handles a post-delivery record or
+// receipt ingest failure (setSettlementEvidenceFailedFinality).
+func setSettlementRecordFailedFinality(dst http.Header, rec *billingRecorder) {
+	setSettlementEvidenceFailedFinality(dst, rec, settlementRecordFailedAfterDeliveryReason)
 }
 
 // finalizeNegotiatedSettlementFinality runs as the chat handler returns,
@@ -221,9 +218,8 @@ func setSettlementRecordFailedRefund(dst http.Header, rec *billingRecorder) {
 // signed trailers but set no tuple would otherwise hold at the gateway with
 // no coordinator finality to find (a 404 hold that never ends). For a
 // non-streaming response every path sets a tuple, so reaching here unset is
-// a failure this code did not anticipate: refund. A stream without a tuple
-// keeps its hold only while its evidence can still produce finality; one
-// whose evidence was marked missing is refunded too.
+// a failure this code did not anticipate. A stream without a tuple keeps its
+// hold only while its evidence can still produce finality.
 func finalizeNegotiatedSettlementFinality(dst http.Header, rec *billingRecorder) {
 	if rec == nil || !rec.settlementFinalityMACActive {
 		return
@@ -234,26 +230,57 @@ func finalizeNegotiatedSettlementFinality(dst http.Header, rec *billingRecorder)
 		}
 	}
 	switch {
-	case rec.settlementOutputMissingAfterCredit:
-		setSettlementRefundAfterDelivery(dst, rec, settlementOutputMissingAfterCreditReason)
+	case rec.settlementOutputMissingMarked:
+		setSettlementEvidenceFailedFinality(dst, rec, settlementOutputMissingAfterCreditReason)
 	case !rec.stream:
-		setSettlementRefundAfterDelivery(dst, rec, settlementFinalityUnsetReason)
+		setSettlementEvidenceFailedFinality(dst, rec, settlementFinalityUnsetReason)
 	}
 }
 
-// setSettlementRefundAfterDelivery sends the signed closed refund tuple with
-// reason and logs it for operator review.
-func setSettlementRefundAfterDelivery(dst http.Header, rec *billingRecorder, reason string) {
+// setSettlementEvidenceFailedFinality settles an attempt whose buyer
+// response was delivered but whose settlement evidence failed, so buyer and
+// provider agree without an operator:
+//   - enforce route snapshot: an enforce credit is payable only once a
+//     verified verdict and attempt output exist (spec022_payable_request_
+//     credits), which this attempt can no longer reach; the credit is also
+//     quarantined in case a late verdict would otherwise make it payable,
+//     and the buyer gets a signed closed refund. Neither side is paid.
+//   - observe mode or no route snapshot: the credit stays payable as every
+//     observe credit is, so the buyer gets the signed legacy tuple and is
+//     debited locally, the #1675 behaviour. Both sides are paid.
+//
+// Either way the error log names the attempt for operator review.
+func setSettlementEvidenceFailedFinality(dst http.Header, rec *billingRecorder, reason string) {
 	if rec == nil || !rec.settlementFinalityMACActive {
 		return
+	}
+	mode, _ := rec.settlementPolicyForLedger()
+	enforce := mode == billing.RouteSnapshotModeEnforce
+	quarantined := false
+	if enforce && rec.hasLastProviderAttempt && rec.server != nil {
+		if store, _, _ := rec.server.billingState(); store != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+			var err error
+			quarantined, err = store.QuarantineUndeliveredSettlementCredit(ctx, rec.requestID, rec.lastProviderAttemptN, rec.lastProviderID, reason)
+			cancel()
+			if err != nil {
+				rec.server.log.Error().Err(err).Str("request_id", rec.requestID).Msg("could not quarantine provider credit after settlement evidence failure")
+			}
+		}
 	}
 	if rec.server != nil {
 		rec.server.log.Error().
 			Str("event", reason).
 			Str("request_id", rec.requestID).
 			Str("account_id", rec.accountID).
-			Bool("settlement_output_missing_after_credit", rec.settlementOutputMissingAfterCredit).
-			Msg("post-delivery settlement evidence incomplete; buyer reservation released, review provider credit")
+			Str("settlement_mode", mode).
+			Bool("buyer_refunded", enforce).
+			Bool("provider_credit_quarantined", quarantined).
+			Msg("post-delivery settlement evidence failed")
+	}
+	if !enforce {
+		setSignedLegacyTuple(dst, rec)
+		return
 	}
 	dst.Del(settlementPendingUntilHeader)
 	setInternalSettlementOutcomeHeaders(dst, rec, billing.SettlementReceiptState{

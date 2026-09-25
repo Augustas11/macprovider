@@ -124,6 +124,16 @@ func TestHTTPNonStreamingBuyerWriteFailureRecordsNoSuccess(t *testing.T) {
 // provider that answers deliveredOnlyCompletion without a receipt.
 func newDeliveredOnlyHTTPServer(t *testing.T) (*buyer.Server, string) {
 	t.Helper()
+	return newEnforceHTTPServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(deliveredOnlyCompletion))
+	})
+}
+
+// newEnforceHTTPServer registers one HTTP provider per upstream handler
+// (p1, p2, ...), in routing preference order, on an enforce-mode coordinator.
+func newEnforceHTTPServer(t *testing.T, upstreams ...http.HandlerFunc) (*buyer.Server, string) {
+	t.Helper()
 	tier2.ResetForTest()
 	t.Cleanup(tier2.ResetForTest)
 	raw, pubkey := routeSnapshotCatalogFixture(t, "delivered-only-http-catalog", time.Now().UTC().Add(time.Hour))
@@ -147,22 +157,24 @@ func newDeliveredOnlyHTTPServer(t *testing.T) (*buyer.Server, string) {
 	if err != nil {
 		t.Fatalf("InsertConfigSnapshot: %v", err)
 	}
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(deliveredOnlyCompletion))
-	}))
 	registry := pool.NewRegistry(nil)
-	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 20, bytes.Repeat([]byte{0x71}, 32))
-	server := buyer.NewServer(
-		registry,
-		zerolog.Nop(),
-		time.Unix(1716768000, 0),
+	for i, handler := range upstreams {
+		upstream := httptest.NewServer(handler)
+		t.Cleanup(upstream.Close)
+		id := fmt.Sprintf("p%d", i+1)
+		registerSettlementProvider(registry, id, "session-"+id, upstream.URL, float64(40-10*i), bytes.Repeat([]byte{0x71 + byte(i)}, 32))
+	}
+	opts := []buyer.Option{
 		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithRequestLog(reqLog),
 		buyer.WithBilling(store, cfg),
 		buyer.WithBillingSnapshotID(snapshotID),
-	)
-	t.Cleanup(upstream.Close)
+	}
+	if len(upstreams) > 1 {
+		// One retry, so a failed first provider fails over to the next.
+		opts = append(opts, buyer.WithRoutingConfig(config.RoutingConfig{MaxRetries: 1, StickyTTLS: 1800, StickyMaxEntries: 10000}))
+	}
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), opts...)
 	return server, dbPath
 }
 
@@ -382,5 +394,105 @@ func TestBufferedToolCallContinuousUsageReceiptVerifies(t *testing.T) {
 	}
 	if !ev.ledgerPrompt.Valid || ev.ledgerPrompt.Int64 != 5 || !ev.ledgerCompletion.Valid || ev.ledgerCompletion.Int64 != 3 {
 		t.Fatalf("ledger prompt=%v completion=%v, want 5/3", ev.ledgerPrompt, ev.ledgerCompletion)
+	}
+}
+
+func postNegotiatedResponse(t *testing.T, server *buyer.Server) *http.Response {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	postDeliveredOnly(server, context.Background(), deliveredOnlyChatBody, rr)
+	resp := rr.Result()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want the delivered 200; body=%s", resp.StatusCode, body)
+	}
+	return resp
+}
+
+func assertEnforceRefundAndQuarantine(t *testing.T, resp *http.Response, dbPath, reason string) {
+	t.Helper()
+	tr := resp.Trailer
+	if tr.Get(settlementOutcomeNames[0]) != "quarantined" || tr.Get("X-MacProvider-Settlement-Closed") != "true" ||
+		tr.Get("X-MacProvider-Settlement-Reason") != reason || tr.Get("X-MacProvider-Settlement-Mode") != "enforce" {
+		t.Fatalf("trailers=%v, want the signed closed %s refund", tr, reason)
+	}
+	if got, want := tr.Get("X-MacProvider-Settlement-Finality-Mac"), independentFinalityMAC("operator-key", "acct_gateway", "ext-req-1", resp.Header.Get("X-MacProvider-Internal-Request-ID"), tr); got != want {
+		t.Fatalf("refund MAC=%q, want %q", got, want)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var credited, quarantined int
+	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(quarantined), 0) FROM ledger_request_credits WHERE status = 200 AND provider_credits > 0`).Scan(&credited, &quarantined); err != nil {
+		t.Fatal(err)
+	}
+	if credited != quarantined {
+		t.Fatalf("credited rows=%d quarantined=%d: a refunded buyer's provider credit is still payable", credited, quarantined)
+	}
+	var payable int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM spec022_payable_request_credits`).Scan(&payable); err != nil {
+		t.Fatal(err)
+	}
+	if payable != 0 {
+		t.Fatalf("payable credits=%d, want 0 after the buyer refund", payable)
+	}
+}
+
+// Review R3 MEDIUM-2 (enforce): a hard post-delivery evidence failure
+// refunds the buyer and leaves no payable provider credit.
+func TestHTTPEnforceRecordFailureRefundsAndQuarantinesCredit(t *testing.T) {
+	t.Cleanup(buyer.SetSettlementOutputWriteErrForTest(errors.New("settlement attempt output table missing")))
+	server, dbPath := newDeliveredOnlyHTTPServer(t)
+	assertEnforceRefundAndQuarantine(t, postNegotiatedResponse(t, server), dbPath, "settlement_record_failed_after_delivery")
+}
+
+// Review R3 MEDIUM-2 / Codex HIGH 2 (enforce): evidence lost transiently
+// after the credit refunds the buyer and quarantines the credit.
+func TestHTTPEnforceOutputMissingAfterCreditRefundsAndQuarantinesCredit(t *testing.T) {
+	t.Cleanup(buyer.CancelSettlementOutputWritesForTest(2))
+	server, dbPath := newDeliveredOnlyHTTPServer(t)
+	assertEnforceRefundAndQuarantine(t, postNegotiatedResponse(t, server), dbPath, "settlement_output_missing_after_credit")
+}
+
+// Review R3 MEDIUM-1: the missing-evidence latch is per attempt. Attempt 1
+// is a billable 502 whose evidence write fails transiently twice (nothing
+// credited, nothing marked); attempt 2 succeeds and must keep its own
+// finality, not the refund.
+func TestMissingEvidenceLatchDoesNotLeakIntoRetry(t *testing.T) {
+	t.Cleanup(buyer.CancelSettlementOutputWritesForTest(2))
+	server, _ := newEnforceHTTPServer(t,
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, `{"error":{"message":"upstream failed","type":"api_error","code":"provider_error"}}`)
+		},
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(deliveredOnlyCompletion))
+		},
+	)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(deliveredOnlyChatBody)))
+	req.Header.Set("Authorization", "Bearer operator-key")
+	req.Header.Set("X-MacProvider-Account", "acct_gateway")
+	req.Header.Set("X-Request-ID", "ext-req-1")
+	req.Header.Set("X-MacProvider-Retry", "1")
+	req.Header.Set(settlementTrailersCapabilityHeader, "1")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	resp := rr.Result()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want the retry's delivered 200; body=%s", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("X-MacProvider-Provider"); got != "p2" {
+		t.Fatalf("served by %q, want the retry on p2", got)
+	}
+	if reason := resp.Trailer.Get("X-MacProvider-Settlement-Reason"); reason == "settlement_output_missing_after_credit" {
+		t.Fatalf("the retry inherited attempt 1's missing-evidence latch: trailers=%v", resp.Trailer)
+	}
+	if resp.Trailer.Get(settlementOutcomeNames[0]) == "" {
+		t.Fatalf("the retry carries no finality tuple: trailers=%v", resp.Trailer)
 	}
 }

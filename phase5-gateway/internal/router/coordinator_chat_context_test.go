@@ -11,8 +11,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -20,31 +20,139 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/relayblind"
 )
 
-// Codex R2 MEDIUM 3: every gateway builder of a coordinator chat request
-// (the only coordinator route that returns a settleable 200) must stamp the
-// signed-finality context through setCoordinatorChatContext, or its 200s
-// are held under coordinator.require_settlement_trailers. This scans the
-// package source, so a new builder that skips the helper fails here.
+// Codex R2 MEDIUM 3 / review R3 LOW-4: every gateway request to the
+// coordinator's chat route (the only coordinator route that returns a
+// settleable 200) must stamp the signed-finality context through
+// setCoordinatorChatContext, or its 200s are held under
+// coordinator.require_settlement_trailers. The scan resolves the path of
+// every http.NewRequest* against the coordinator buyer URL: string literals
+// and constants directly, and a path parameter (relayBlindUpstream's) through
+// every call site of its function. A builder whose path cannot be resolved
+// fails, so a new builder cannot slip past by computing its path.
 func TestEveryCoordinatorChatBuilderNegotiatesSignedFinality(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	fset := token.NewFileSet()
-	builders := 0
+	var parsed []*ast.File
+	consts := map[string]string{}
+	funcs := map[string]*ast.FuncDecl{}
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		src, err := os.ReadFile(name)
+		file, err := parser.ParseFile(fset, name, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		file, err := parser.ParseFile(fset, name, src, 0)
-		if err != nil {
-			t.Fatal(err)
+		parsed = append(parsed, file)
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch d := n.(type) {
+			case *ast.GenDecl:
+				if d.Tok == token.CONST {
+					for _, spec := range d.Specs {
+						vs := spec.(*ast.ValueSpec)
+						for i, id := range vs.Names {
+							if i < len(vs.Values) {
+								if lit, ok := vs.Values[i].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+									consts[id.Name], _ = strconv.Unquote(lit.Value)
+								}
+							}
+						}
+					}
+				}
+			case *ast.FuncDecl:
+				funcs[d.Name.Name] = d
+			}
+			return true
+		})
+	}
+	const chatRoute = "chat/completions"
+	callsHelper := func(body ast.Node) bool {
+		found := false
+		ast.Inspect(body, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "setCoordinatorChatContext" {
+				found = true
+			}
+			return !found
+		})
+		return found
+	}
+	// urlParts splits a URL expression into its constant text, whether it
+	// targets the coordinator buyer URL, and any non-constant identifiers.
+	var urlParts func(e ast.Expr) (text string, buyer bool, idents []string, opaque bool)
+	urlParts = func(e ast.Expr) (string, bool, []string, bool) {
+		switch x := e.(type) {
+		case *ast.BasicLit:
+			v, _ := strconv.Unquote(x.Value)
+			return v, false, nil, false
+		case *ast.Ident:
+			if v, ok := consts[x.Name]; ok {
+				return v, false, nil, false
+			}
+			return "", false, []string{x.Name}, false
+		case *ast.ParenExpr:
+			return urlParts(x.X)
+		case *ast.BinaryExpr:
+			lt, lb, li, lo := urlParts(x.X)
+			rt, rb, ri, ro := urlParts(x.Y)
+			return lt + rt, lb || rb, append(li, ri...), lo || ro
+		case *ast.CallExpr:
+			buyer := false
+			ast.Inspect(x, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok && (sel.Sel.Name == "coordinatorBuyerURL" || sel.Sel.Name == "BuyerURL") {
+					buyer = true
+				}
+				return true
+			})
+			if buyer {
+				return "", true, nil, false
+			}
+			return "", false, nil, true
+		default:
+			return "", false, nil, true
 		}
-		// Innermost enclosing function body for each chat request builder.
+	}
+	paramIndex := func(fn *ast.FuncDecl, name string) int {
+		i := 0
+		for _, field := range fn.Type.Params.List {
+			for _, id := range field.Names {
+				if id.Name == name {
+					return i
+				}
+				i++
+			}
+		}
+		return -1
+	}
+	// callSiteArgs returns the constant text of argument idx at every call
+	// of fnName, and false if any is not constant.
+	callSiteArgs := func(fnName string, idx int) ([]string, bool) {
+		var out []string
+		ok := true
+		for _, file := range parsed {
+			ast.Inspect(file, func(n ast.Node) bool {
+				call, isCall := n.(*ast.CallExpr)
+				if !isCall {
+					return true
+				}
+				sel, isSel := call.Fun.(*ast.SelectorExpr)
+				if !isSel || sel.Sel.Name != fnName || idx >= len(call.Args) {
+					return true
+				}
+				text, _, idents, opaque := urlParts(call.Args[idx])
+				if len(idents) > 0 || opaque {
+					ok = false
+				}
+				out = append(out, text)
+				return true
+			})
+		}
+		return out, ok
+	}
+	chatBuilders := 0
+	for _, file := range parsed {
 		var stack []ast.Node
 		ast.Inspect(file, func(n ast.Node) bool {
 			if n == nil {
@@ -60,28 +168,65 @@ func TestEveryCoordinatorChatBuilderNegotiatesSignedFinality(t *testing.T) {
 			if !ok || (sel.Sel.Name != "NewRequest" && sel.Sel.Name != "NewRequestWithContext") {
 				return true
 			}
-			if !strings.Contains(string(src[fset.Position(call.Pos()).Offset:fset.Position(call.End()).Offset]), `"/v1/chat/completions"`) {
-				return true
+			urlArg := call.Args[1]
+			if sel.Sel.Name == "NewRequestWithContext" {
+				urlArg = call.Args[2]
 			}
-			builders++
+			pos := fset.Position(call.Pos())
 			var body ast.Node
-			for i := len(stack) - 1; i >= 0 && body == nil; i-- {
+			var decl *ast.FuncDecl
+			for i := len(stack) - 1; i >= 0; i-- {
 				switch fn := stack[i].(type) {
 				case *ast.FuncLit:
-					body = fn.Body
+					if body == nil {
+						body = fn.Body
+					}
 				case *ast.FuncDecl:
-					body = fn.Body
+					if body == nil {
+						body = fn.Body
+					}
+					decl = fn
 				}
 			}
-			text := string(src[fset.Position(body.Pos()).Offset:fset.Position(body.End()).Offset])
-			if !strings.Contains(text, "setCoordinatorChatContext(") {
-				t.Errorf("%s: coordinator chat request built without setCoordinatorChatContext", fset.Position(call.Pos()))
+			text, buyer, idents, opaque := urlParts(urlArg)
+			targetsChat := strings.Contains(text, chatRoute)
+			if buyer && (len(idents) > 0 || opaque) {
+				if opaque || decl == nil {
+					t.Errorf("%s: coordinator buyer request with an unresolvable path", pos)
+					return true
+				}
+				for _, id := range idents {
+					idx := paramIndex(decl, id)
+					if idx < 0 {
+						t.Errorf("%s: coordinator buyer path uses %q, which is neither a constant nor a parameter", pos, id)
+						continue
+					}
+					paths, resolved := callSiteArgs(decl.Name.Name, idx)
+					if !resolved {
+						t.Errorf("%s: a call of %s passes a non-constant %s", pos, decl.Name.Name, id)
+					}
+					for _, p := range paths {
+						if strings.Contains(p, chatRoute) {
+							targetsChat = true
+						}
+					}
+				}
+			}
+			if !buyer && targetsChat {
+				t.Errorf("%s: coordinator chat route built without the coordinator buyer URL", pos)
+				return true
+			}
+			if targetsChat {
+				chatBuilders++
+				if !callsHelper(body) {
+					t.Errorf("%s: coordinator chat request built without setCoordinatorChatContext", pos)
+				}
 			}
 			return true
 		})
 	}
-	if builders < 2 {
-		t.Fatalf("found %d coordinator chat builders, want at least the chat proxy and relay-blind ones", builders)
+	if chatBuilders < 2 {
+		t.Fatalf("found %d coordinator chat builders, want at least the chat proxy and relay-blind ones", chatBuilders)
 	}
 }
 

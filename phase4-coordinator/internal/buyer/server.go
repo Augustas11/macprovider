@@ -2351,7 +2351,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// preserving the pre-refactor closure's "latest value at fire time"
 	// semantics for what used to be captured outer-scope variables.
 	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID, externalRequestID, accountID, authenticatedAccount, hasAuthenticatedAccount)
-	rec.settlementTrailersNegotiated = s.gatewayNegotiatedSettlementTrailers(r.Header)
+	rec.settlementTrailersNegotiated = s.gatewayNegotiatedSettlementTrailers(r.Header) && rec.accountID != ""
 	// Runs before net/http sends the trailers (settlement_trailers.go).
 	defer finalizeNegotiatedSettlementFinality(w.Header(), rec)
 	// #766 single-terminal-wins arbiter (observe-only). Deferred here so the
@@ -2747,6 +2747,7 @@ func (s *Server) forwardStreamSequence(
 					receiptState, hasReceiptState, err := logAttemptWithReceiptState(state.provider, http.StatusOK, tr.attempt, state.explicitRetries)
 					if err != nil {
 						s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("committed streaming attempt log failed")
+						setSettlementRecordFailedFinality(w.Header(), rec)
 					} else if hasReceiptState {
 						setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
 					}
@@ -2755,6 +2756,7 @@ func (s *Server) forwardStreamSequence(
 				receiptState, hasReceiptState, err := logAttemptWithReceiptState(state.provider, http.StatusOK, tr.attempt, state.explicitRetries)
 				if err != nil {
 					s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("committed streaming attempt log failed")
+					setSettlementRecordFailedFinality(w.Header(), rec)
 				} else if hasReceiptState {
 					setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
 				}
@@ -2768,6 +2770,7 @@ func (s *Server) forwardStreamSequence(
 			receiptState, hasReceiptState, err := logAttemptWithReceiptState(state.provider, http.StatusOK, dispatched.tr.attempt, state.explicitRetries)
 			if err != nil {
 				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("streaming success attempt log failed")
+				setSettlementRecordFailedFinality(w.Header(), rec)
 				return
 			}
 			if hasReceiptState {
@@ -2909,10 +2912,10 @@ func (s *Server) forwardWSNonStreamSequence(
 				receiptState, hasReceiptState, err := logAttemptWithReceiptState(state.provider, http.StatusOK, attempt, state.explicitRetries)
 				if err != nil {
 					// After delivery (negotiated trailers) the buyer already
-					// has the body: send the signed closed refund tuple. A
-					// no-op in the record-before-write order, which answers
-					// 500 instead.
-					setSettlementRecordFailedRefund(w.Header(), rec)
+					// has the body: send the signed failure tuple (refund
+					// in enforce, legacy otherwise). A no-op in the
+					// record-before-write order, which answers 500 instead.
+					setSettlementRecordFailedFinality(w.Header(), rec)
 					return err
 				}
 				setNonStreamingSettlementFinality(w.Header(), rec, receiptState, hasReceiptState)
@@ -3312,13 +3315,13 @@ func (s *Server) forwardHTTPSequence(
 				}); err != nil {
 					cancelAttempt()
 					s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("non-streaming success log failed after delivery")
-					setSettlementRecordFailedRefund(w.Header(), rec)
+					setSettlementRecordFailedFinality(w.Header(), rec)
 					return dispatchedAttempt{}, false
 				}
 				receiptState, hasReceiptState, err := rec.ingestSettlementReceipt(state.provider, receiptValue)
 				if err != nil {
 					s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("non-streaming settlement receipt log failed after delivery")
-					setSettlementRecordFailedRefund(w.Header(), rec)
+					setSettlementRecordFailedFinality(w.Header(), rec)
 				} else {
 					setNonStreamingSettlementFinality(w.Header(), rec, receiptState, hasReceiptState)
 				}
@@ -3874,7 +3877,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			}
 			if logSuccess != nil {
 				if err := logSuccess(attempt); err != nil {
-					// logSuccess sent the signed refund trailers. The one
+					// logSuccess sent the signed failure trailers. The one
 					// durable write for this attempt was made and failed;
 					// Logged stops the terminal handler writing a second,
 					// provider-fault row for a delivered body.

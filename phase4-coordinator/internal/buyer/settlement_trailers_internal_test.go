@@ -73,6 +73,15 @@ func TestGatewayNegotiatedSettlementTrailersNeedsServiceToken(t *testing.T) {
 	}
 }
 
+// negotiatedTestRecorderMode is negotiatedTestRecorder whose attempt has a
+// route snapshot in mode.
+func negotiatedTestRecorderMode(mode string) *billingRecorder {
+	rec := negotiatedTestRecorder()
+	rec.hasSettlementAttemptN = true
+	rec.settlementPolicyMode = mode
+	return rec
+}
+
 func negotiatedTestRecorder() *billingRecorder {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	req.Header.Set("X-MacProvider-Account", "acct_1")
@@ -93,24 +102,34 @@ func finalityMACOf(dst http.Header) string {
 	return settlementFinalityMAC("service-token", "acct_1", "req-1", dst.Get(internalRequestIDHeader), values)
 }
 
-// Review R2 MEDIUM 1: a failed post-delivery record sends a signed, closed
-// refund tuple; nothing is sent before trailers are declared.
-func TestSettlementRecordFailedRefundIsSignedClosed(t *testing.T) {
-	rec := negotiatedTestRecorder()
+// Review R3 MEDIUM-2: a failed post-delivery record in enforce mode sends a
+// signed, closed refund tuple; in observe mode (and with no route snapshot)
+// the signed legacy tuple, so the buyer is debited as the provider credit is
+// payable. Nothing is sent before trailers are declared.
+func TestSettlementRecordFailedFinalityFollowsRouteMode(t *testing.T) {
+	rec := negotiatedTestRecorderMode(billing.RouteSnapshotModeEnforce)
 	dst := http.Header{internalRequestIDHeader: {"internal-1"}}
-	setSettlementRecordFailedRefund(dst, rec)
-	if dst.Get(settlementOutcomeHeader) != "" {
-		t.Fatalf("refund set before trailers were declared: %v", dst)
+	setSettlementRecordFailedFinality(dst, rec)
+	if dst.Get(settlementOutcomeHeader) != "" || dst.Get(settlementModeHeader) != "" {
+		t.Fatalf("tuple set before trailers were declared: %v", dst)
 	}
 	declareNonStreamingSettlementTrailers(dst, rec)
-	setSettlementRecordFailedRefund(dst, rec)
+	setSettlementRecordFailedFinality(dst, rec)
 	if dst.Get(settlementOutcomeHeader) != billing.SettlementOutcomeQuarantined || dst.Get(settlementReceiptResultHeader) != billing.SettlementReceiptResultInconclusive ||
 		dst.Get(settlementReasonHeader) != settlementRecordFailedAfterDeliveryReason || dst.Get(settlementClosedHeader) != "true" ||
 		dst.Get(settlementModeHeader) != billing.RouteSnapshotModeEnforce || dst.Get(settlementPolicyVersionHeader) != billing.RouteSnapshotPolicyVersion {
-		t.Fatalf("refund tuple=%v, want a closed enforce-mode quarantine", dst)
+		t.Fatalf("enforce tuple=%v, want a closed enforce-mode quarantine", dst)
 	}
 	if got, want := dst.Get(settlementFinalityMACHeader), finalityMACOf(dst); got != want {
 		t.Fatalf("refund MAC=%q, want %q", got, want)
+	}
+	for _, rec := range []*billingRecorder{negotiatedTestRecorderMode(billing.RouteSnapshotModeObserve), negotiatedTestRecorder()} {
+		dst := http.Header{internalRequestIDHeader: {"internal-1"}}
+		declareNonStreamingSettlementTrailers(dst, rec)
+		setSettlementRecordFailedFinality(dst, rec)
+		if dst.Get(settlementModeHeader) != settlementLegacyMode || dst.Get(settlementOutcomeHeader) != "" || dst.Get(settlementFinalityMACHeader) != finalityMACOf(dst) {
+			t.Fatalf("observe/no-snapshot tuple=%v, want the signed legacy tuple", dst)
+		}
 	}
 }
 
@@ -233,9 +252,11 @@ func TestHTTPNegotiatedNoSnapshotSendsSignedLegacyTrailersOverWire(t *testing.T)
 	assertWireFinalityMAC(t, resp)
 }
 
-// Review R2 MEDIUM 1 (HTTP), over the wire: the post-delivery record
-// failure arrives as a signed closed refund tuple.
-func TestHTTPNegotiatedRecordFailureSendsSignedRefundOverWire(t *testing.T) {
+// Review R2 MEDIUM 1 / R3 MEDIUM-2 (HTTP), over the wire: with no route
+// snapshot the post-delivery record failure arrives as the signed legacy
+// tuple (the enforce refund is covered by
+// TestHTTPEnforceRecordFailureRefundsAndQuarantinesCredit).
+func TestHTTPNegotiatedRecordFailureNoSnapshotSendsSignedLegacyOverWire(t *testing.T) {
 	prev := settlementOutputWriteErrForTest
 	settlementOutputWriteErrForTest = errors.New("settlement attempt output table missing")
 	t.Cleanup(func() { settlementOutputWriteErrForTest = prev })
@@ -243,9 +264,8 @@ func TestHTTPNegotiatedRecordFailureSendsSignedRefundOverWire(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want the delivered 200", resp.StatusCode)
 	}
-	if resp.Trailer.Get(settlementOutcomeHeader) != billing.SettlementOutcomeQuarantined || resp.Trailer.Get(settlementClosedHeader) != "true" ||
-		resp.Trailer.Get(settlementReasonHeader) != settlementRecordFailedAfterDeliveryReason || resp.Trailer.Get(settlementModeHeader) != billing.RouteSnapshotModeEnforce {
-		t.Fatalf("trailers=%v, want the signed closed refund tuple", resp.Trailer)
+	if resp.Trailer.Get(settlementModeHeader) != settlementLegacyMode || resp.Trailer.Get(settlementOutcomeHeader) != "" {
+		t.Fatalf("trailers=%v, want the signed legacy tuple", resp.Trailer)
 	}
 	assertWireFinalityMAC(t, resp)
 }
@@ -316,37 +336,43 @@ func forceTransientOutputLoss(t *testing.T) {
 	t.Cleanup(func() { settlementOutputWriteErrForTest, settlementOutputWriteContextForTest = prevErr, prevCtx })
 }
 
-func assertSignedRefund(t *testing.T, resp *http.Response, requestID, reason string) {
+// assertSignedLegacy checks a signed legacy tuple in the trailers: the
+// observe/no-snapshot outcome of a post-delivery evidence failure.
+func assertSignedLegacy(t *testing.T, resp *http.Response, requestID string) {
 	t.Helper()
 	tr := resp.Trailer
-	if tr.Get(settlementOutcomeHeader) != billing.SettlementOutcomeQuarantined || tr.Get(settlementReceiptResultHeader) != billing.SettlementReceiptResultInconclusive ||
-		tr.Get(settlementClosedHeader) != "true" || tr.Get(settlementReasonHeader) != reason || tr.Get(settlementModeHeader) != billing.RouteSnapshotModeEnforce {
-		t.Fatalf("trailers=%v, want the signed closed refund with reason %s", tr, reason)
+	if tr.Get(settlementModeHeader) != settlementLegacyMode || tr.Get(settlementOutcomeHeader) != "" {
+		t.Fatalf("trailers=%v, want the signed legacy tuple", tr)
 	}
 	values := make([]string, 0, len(settlementOutcomeHeaderNames))
 	for _, name := range settlementOutcomeHeaderNames {
 		values = append(values, tr.Get(name))
 	}
+	if requestID == "" {
+		t.Fatal("the MAC must be checked over a non-empty request id")
+	}
 	if want := settlementFinalityMAC(h4GatewayToken, "acct_h4", requestID, resp.Header.Get(internalRequestIDHeader), values); tr.Get(settlementFinalityMACHeader) != want {
-		t.Fatalf("refund MAC=%q, want %q", tr.Get(settlementFinalityMACHeader), want)
+		t.Fatalf("legacy MAC=%q, want %q", tr.Get(settlementFinalityMACHeader), want)
 	}
 }
 
-// Codex R2 HIGH 2 (HTTP): the credit committed, the evidence write failed
-// transiently and was marked missing. The negotiated 200 must not carry a
-// legacy tuple (a local buyer debit with unverifiable provider evidence):
-// it carries the signed closed refund.
-func TestHTTPNegotiatedOutputMissingAfterCreditRefundsOverWire(t *testing.T) {
+// Codex R2 HIGH 2 / R3 MEDIUM-2 (HTTP, no route snapshot): the credit
+// committed and its evidence write failed transiently. Without an enforce
+// snapshot the credit stays payable, so the buyer gets the signed legacy
+// tuple (#1675); the enforce refund is
+// TestHTTPEnforceOutputMissingAfterCreditRefundsAndQuarantinesCredit.
+func TestHTTPNegotiatedOutputMissingAfterCreditNoSnapshotSendsLegacyOverWire(t *testing.T) {
 	forceTransientOutputLoss(t)
 	resp := postNegotiatedOverWire(t, h4HTTPServer(t, h4HTTPCompletion))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want the delivered 200", resp.StatusCode)
 	}
-	assertSignedRefund(t, resp, "req-wire", settlementOutputMissingAfterCreditReason)
+	assertSignedLegacy(t, resp, "req-wire")
 }
 
-// Codex R2 HIGH 2 (WS non-streaming): same outcome on the WS path.
-func TestWSNegotiatedOutputMissingAfterCreditRefunds(t *testing.T) {
+// Codex R2 HIGH 2 / R3 MEDIUM-2 (WS non-streaming, no route snapshot):
+// same outcome on the WS path.
+func TestWSNegotiatedOutputMissingAfterCreditNoSnapshotSendsLegacy(t *testing.T) {
 	forceTransientOutputLoss(t)
 	reqLog, _ := h4OpenRequestLog(t)
 	var observed *requestTerminal
@@ -356,22 +382,29 @@ func TestWSNegotiatedOutputMissingAfterCreditRefunds(t *testing.T) {
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d, want the delivered 200", res.StatusCode)
 	}
-	assertSignedRefund(t, res, "", settlementOutputMissingAfterCreditReason)
+	assertSignedLegacy(t, res, h4RequestID)
 }
 
 // The handler-end finalizer: a negotiated non-streaming response with no
 // tuple is refunded, never left to a 404 hold; a stream keeps its
 // reconciler-resolvable hold unless its evidence was marked missing.
 func TestFinalizeNegotiatedSettlementFinality(t *testing.T) {
-	rec := negotiatedTestRecorder()
+	rec := negotiatedTestRecorderMode(billing.RouteSnapshotModeEnforce)
 	dst := http.Header{internalRequestIDHeader: {"internal-1"}}
 	declareNonStreamingSettlementTrailers(dst, rec)
 	finalizeNegotiatedSettlementFinality(dst, rec)
 	if dst.Get(settlementReasonHeader) != settlementFinalityUnsetReason || dst.Get(settlementClosedHeader) != "true" || dst.Get(settlementFinalityMACHeader) != finalityMACOf(dst) {
-		t.Fatalf("non-streaming unset tuple finalized to %v, want the signed refund", dst)
+		t.Fatalf("enforce non-streaming unset tuple finalized to %v, want the signed refund", dst)
+	}
+	observe := negotiatedTestRecorderMode(billing.RouteSnapshotModeObserve)
+	odst := http.Header{internalRequestIDHeader: {"internal-1"}}
+	declareNonStreamingSettlementTrailers(odst, observe)
+	finalizeNegotiatedSettlementFinality(odst, observe)
+	if odst.Get(settlementModeHeader) != settlementLegacyMode || odst.Get(settlementFinalityMACHeader) != finalityMACOf(odst) {
+		t.Fatalf("observe non-streaming unset tuple finalized to %v, want the signed legacy tuple", odst)
 	}
 
-	stream := negotiatedTestRecorder()
+	stream := negotiatedTestRecorderMode(billing.RouteSnapshotModeEnforce)
 	stream.stream = true
 	sdst := http.Header{internalRequestIDHeader: {"internal-1"}}
 	declareNonStreamingSettlementTrailers(sdst, stream)
@@ -379,7 +412,7 @@ func TestFinalizeNegotiatedSettlementFinality(t *testing.T) {
 	if sdst.Get(settlementOutcomeHeader) != "" || sdst.Get(settlementModeHeader) != "" {
 		t.Fatalf("a stream without a tuple was finalized: %v", sdst)
 	}
-	stream.settlementOutputMissingAfterCredit = true
+	stream.settlementOutputMissingAfterCredit, stream.settlementOutputMissingMarked = true, true
 	finalizeNegotiatedSettlementFinality(sdst, stream)
 	if sdst.Get(settlementReasonHeader) != settlementOutputMissingAfterCreditReason || sdst.Get(settlementFinalityMACHeader) != finalityMACOf(sdst) {
 		t.Fatalf("a stream whose evidence is missing finalized to %v, want the signed refund", sdst)
@@ -422,7 +455,33 @@ func TestWSNegotiatedNoSnapshotSendsSignedLegacyTrailers(t *testing.T) {
 	for _, name := range settlementOutcomeHeaderNames {
 		values = append(values, res.Trailer.Get(name))
 	}
-	if want := settlementFinalityMAC(h4GatewayToken, "acct_h4", "", res.Header.Get(internalRequestIDHeader), values); res.Trailer.Get(settlementFinalityMACHeader) != want {
+	if want := settlementFinalityMAC(h4GatewayToken, "acct_h4", h4RequestID, res.Header.Get(internalRequestIDHeader), values); res.Trailer.Get(settlementFinalityMACHeader) != want {
 		t.Fatalf("legacy MAC=%q, want %q", res.Trailer.Get(settlementFinalityMACHeader), want)
+	}
+}
+
+// failingFlushWriter accepts the body but fails its flush, like a buyer
+// connection that went away under a buffered write.
+type failingFlushWriter struct{ *httptest.ResponseRecorder }
+
+func (failingFlushWriter) FlushError() error { return errors.New("buyer connection reset") }
+
+// Review R3 LOW-2: the handler's writer wrappers pass a flush failure
+// through, so writeDelivered does not report an undelivered body as
+// delivered.
+func TestWriterWrappersPropagateFlushError(t *testing.T) {
+	inner := failingFlushWriter{httptest.NewRecorder()}
+	rec := &billingRecorder{}
+	for name, w := range map[string]http.ResponseWriter{
+		"phaseTiming":     &phaseTimingResponseWriter{ResponseWriter: inner, state: newForwardState(time.Now())},
+		"noPriorDispatch": &noPriorDispatchResponseWriter{ResponseWriter: inner, rec: rec},
+		"both":            &noPriorDispatchResponseWriter{ResponseWriter: &phaseTimingResponseWriter{ResponseWriter: inner, state: newForwardState(time.Now())}, rec: rec},
+	} {
+		if writeDelivered(w, []byte("body")) {
+			t.Fatalf("%s: a failed flush was reported delivered", name)
+		}
+	}
+	if !writeDelivered(&phaseTimingResponseWriter{ResponseWriter: httptest.NewRecorder(), state: newForwardState(time.Now())}, []byte("body")) {
+		t.Fatal("a healthy writer was reported undelivered")
 	}
 }
