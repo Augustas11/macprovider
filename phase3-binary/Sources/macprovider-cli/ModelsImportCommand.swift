@@ -174,7 +174,12 @@ enum ModelArtifactImporter {
     /// Copy every regular file under `source`, following symlinks (a Hugging
     /// Face cache snapshot links into blobs/) and skipping platform metadata.
     private static func copySnapshotDirectory(_ source: URL, to staging: URL) throws {
-        let root = source.resolvingSymlinksInPath().standardizedFileURL
+        // realpath, not resolvingSymlinksInPath: Foundation strips a leading
+        // /private, so /var/... and /private/var/... would never compare equal.
+        guard let rootPath = Self.canonicalPath(source.path) else {
+            throw AutotuneRecommendError.invalidArtifact("cannot resolve --from")
+        }
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true)
         guard let enumerator = FileManager.default.enumerator(
             at: root,
             includingPropertiesForKeys: nil,
@@ -190,10 +195,16 @@ enum ModelArtifactImporter {
                 }
                 continue
             }
-            guard url.path.hasPrefix(root.path + "/") else {
+            // Canonicalize the parent only: a file symlink (a cache snapshot
+            // into blobs/) keeps its snapshot-relative name, and a directory
+            // symlink is rejected below.
+            guard let parent = Self.canonicalPath(url.deletingLastPathComponent().path),
+                  parent == rootPath || parent.hasPrefix(rootPath + "/")
+            else {
                 throw AutotuneRecommendError.invalidArtifact("path escape \(url.lastPathComponent)")
             }
-            let relative = String(url.path.dropFirst(root.path.count + 1))
+            let relative = (parent == rootPath ? "" : String(parent.dropFirst(rootPath.count + 1)) + "/")
+                + url.lastPathComponent
             try ModelArtifactRelativePathPolicy.validate(relative, context: "unsafe path in --from")
             var info = stat()
             guard stat(url.path, &info) == 0 else {
@@ -212,6 +223,12 @@ enum ModelArtifactImporter {
                 throw AutotuneRecommendError.invalidArtifact("non-regular \(relative)")
             }
         }
+    }
+
+    static func canonicalPath(_ path: String) -> String? {
+        guard let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 
     /// Copies contents into a new regular file, so the staged tree never
