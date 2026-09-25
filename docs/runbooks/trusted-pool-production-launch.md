@@ -278,11 +278,15 @@ allowlists):
    The deploy's step 2c refuses a restart while buyer requests are in
    flight, counted from the live `gateway.db` (active, unheld, unexpired
    `quota_reservations`) when `/healthz` has no in-flight metric. That count
-   is a point-in-time snapshot: a request admitted after it and before the
-   restart is not guarded, and a reservation left by a crashed request
-   counts until it expires. For a guaranteed quiet window, stop buyer
-   traffic at nginx first (rollback step 1 shows how). `FORCE_RESTART=1`
-   bypasses the guard and leaves an audit tombstone.
+   is only a pre-check: buyer ingress stays open through the upload. A
+   request admitted after it is protected by the graceful restart: the
+   deploy restarts with `systemctl restart` (SIGTERM), the gateway refuses
+   new connections at once and drains in-flight requests for up to 40 s
+   (below the unit's `TimeoutStopSec=45`); only a request still running
+   after that is cut. A reservation left by a crashed request counts until
+   it expires. For a guaranteed quiet window, stop buyer traffic at nginx
+   first (rollback step 1 shows how). `FORCE_RESTART=1` bypasses the
+   pre-check and leaves an audit tombstone.
 2a. Once the step 1 coordinator and the step 2 gateway are both confirmed
    (`/healthz` versions, updater transactions committed), set
    `coordinator.require_settlement_trailers: true` in the gateway config and

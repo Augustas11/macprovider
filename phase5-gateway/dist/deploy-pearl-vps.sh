@@ -516,10 +516,16 @@ print('unknown')
 # buyer request that is being served now and that a restart would drop.
 # Held reservations wait for the reconciler and survive a restart. Any
 # failure (no DB, no sqlite3, query error) stays "unknown" and fails closed.
-# Caveat: this is a point-in-time count. A buyer request admitted after it
-# (between step 2c and the restart) is not guarded; a hard quiet window
-# needs buyer traffic stopped at nginx first. A reservation that outlived a
-# crashed request still counts until its expires_at passes.
+# This count is a PRE-CHECK only (it refuses a deploy into a busy gateway);
+# buyer ingress stays open through the upload. What protects a request
+# admitted after it is the graceful restart at step 6: `systemctl restart`
+# sends SIGTERM (unit KillSignal), and the gateway closes its listener at
+# once (a new connection is refused before any reservation exists) and
+# drains in-flight requests for up to 40 s (cmd/gateway
+# gracefulShutdownTimeout, below the unit's TimeoutStopSec=45). A request
+# still running after the drain is cut, as on any crash. A reservation that
+# outlived a crashed request still counts here until its expires_at passes.
+# For a hard quiet window, stop buyer traffic at nginx first.
 INFLIGHT_SQL="SELECT COUNT(*) FROM quota_reservations WHERE status = 'active' AND settlement_hold = 0 AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now');"
 if [ "$INFLIGHT" = "unknown" ]; then
   INFLIGHT=$($SSH "DB='$REMOTE_GATEWAY_DB_PATH'; test -f \"\$DB\" || exit 1; sudo -u macprovider sqlite3 -readonly \"\$DB\" \"$INFLIGHT_SQL\"" 2>/dev/null) || INFLIGHT="unknown"
@@ -731,6 +737,9 @@ $SSH "set -e
 # DB snapshot BEFORE binary swap). #290 R2 CODE+ARCH convergent HIGH.
 
 log "step 6/8: enable + start gateway service"
+# Graceful path only: `systemctl restart` stops with SIGTERM and waits up to
+# TimeoutStopSec while the old gateway drains its in-flight requests (see
+# the step 2c comment). Never kill the gateway here.
 $SSH 'set -e
   systemctl daemon-reload
   systemctl enable macprovider-gateway

@@ -27,6 +27,17 @@ fallback_line="$(grep -n 'sqlite3 -readonly' "$DEPLOY_SH" | head -n1 | cut -d: -
 grep -q 'INFLIGHT_SQL\\"" 2>/dev/null) || INFLIGHT="unknown"' "$DEPLOY_SH" ||
   fail "a failed gateway-DB query must stay unknown (fail closed)"
 
+# The in-flight count is a pre-check; the restart must take the graceful
+# SIGTERM drain path (the unit's KillSignal) and never kill the gateway.
+restart_block="$(awk '/^log "step 6\/8/{f=1} f&&/^log "step 7\/8/{f=0} f' "$DEPLOY_SH")"
+printf '%s\n' "$restart_block" | grep -q 'systemctl restart macprovider-gateway' ||
+  fail "step 6 does not restart the gateway through systemctl (graceful SIGTERM drain)"
+if printf '%s\n' "$restart_block" | grep -v "^[[:space:]]*#" | grep -Eq 'kill |SIGKILL|--signal|systemctl kill'; then
+  fail "step 6 kills the gateway instead of the graceful restart"
+fi
+UNIT="$SCRIPT_DIR/../macprovider-gateway.service"
+grep -qx 'KillSignal=SIGTERM' "$UNIT" || fail "gateway unit does not stop with SIGTERM"
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 db="$work/gateway.db"
