@@ -26,6 +26,11 @@ request:
   credit_implies_debit a payable provider credit means the buyer was debited
   no_undelivered_bill billed completion never exceeds what the engine
                       generated, and an aborted request bills nothing
+  disconnect_prefix_billed (#1690 M9) an external engine's partial stream
+                      after a buyer disconnect ends buyer_cancel with a valid
+                      receipt, pool_operator_attested usage, a payable credit,
+                      and a buyer debit above zero and within the verified
+                      delivered prefix (below max_tokens)
   delivered_not_free  a fully read 200 with output is debited
   buyer_usage_eq_debit the usage the buyer saw equals its debit
 and writes LAB/e2e/results/<label>.json plus PASS/FAIL lines. Prompts and
@@ -50,8 +55,15 @@ STATE = LAB / "e2e"
 REQS = STATE / "requests.jsonl"
 MODEL = os.environ.get("E2E_MODEL", "mlx-community/Qwen2.5-0.5B-Instruct-4bit")
 ACCOUNT = "acct-lab-1690-buyer"
-ENGINE_CLASS = {"native": "mlx_cache", "llamacpp": "llamacpp_loopback", "mlxlm": "mlxlm_loopback", "ollama": "ollama_loopback"}
-POOL_ALLOW = {"A": "llamacpp_loopback", "M": "mlxlm_loopback", "O": "ollama_loopback", "NO": "mlx_cache"}
+ENGINE_CLASS = {"native": "mlx_cache", "llamacpp": "llamacpp_loopback", "mlxlm": "mlxlm_loopback", "ollama": "ollama_loopback",
+                "lmstudio": "lmstudio_loopback", "omlx": "omlx_loopback"}
+POOL_ALLOW = {"A": "llamacpp_loopback", "M": "mlxlm_loopback", "O": "ollama_loopback", "L": "lmstudio_loopback",
+              "X": "omlx_loopback", "NO": "mlx_cache"}
+# The lab snapshot's tokenizer (the same Qwen2.5 vocabulary as the GGUF), for
+# the token count of what a disconnected buyer received. Counted in the lab
+# mlx_lm venv from stdin; the text itself is never written anywhere.
+TOKENIZER_DIR = LAB / "models" / "mlx" / "Qwen2.5-0.5B-Instruct-4bit"
+VENV_PY = LAB / "venv" / "bin" / "python3"
 TOOLS = [{"type": "function", "function": {"name": "get_weather", "description": "Get the current weather for a city.",
                                            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}]
 SHAPES = {
@@ -176,10 +188,26 @@ def one(label, engine, route, select, shape, stream, behaviour, extra_headers=No
     conn.close()
     out.update({"elapsed_s": round(time.time() - t0, 2), "finish_reason": finish, "done": done, "events": events,
                 "content_events": content_events, "content_len": len(text),
+                "received_tokens": token_count(text) if behaviour == "disconnect" else None,
                 "content_sha256": hashlib.sha256(text.encode()).hexdigest()[:16] if text else None,
                 "tool_calls": [{"name": v["name"], "args_valid_json": valid_json(v["args"])} for v in tool_calls.values()],
                 "usage": {k: usage.get(k) for k in ("prompt_tokens", "completion_tokens")} if usage else None})
     return out
+
+
+def token_count(text):
+    """Tokens in `text` by the lab tokenizer (no special tokens), or None."""
+    if not text or not VENV_PY.exists():
+        return None
+    import subprocess
+    code = ("import sys; from tokenizers import Tokenizer; "
+            "t = Tokenizer.from_file(sys.argv[1]); print(len(t.encode(sys.stdin.read(), add_special_tokens=False).ids))")
+    try:
+        done = subprocess.run([str(VENV_PY), "-c", code, str(TOKENIZER_DIR / "tokenizer.json")], input=text,
+                              capture_output=True, text=True, timeout=60)
+        return int(done.stdout.strip()) if done.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
 
 
 def valid_json(s):
@@ -245,7 +273,7 @@ def expected_selection(engine, route, select):
 
 
 def cmd_selection(a):
-    selectors = [None, "native", "llamacpp", "mlxlm", "ollama", "LLAMACPP", "vllm", ["native", "llamacpp"], ""]
+    selectors = [None, "native", "llamacpp", "mlxlm", "ollama", "lmstudio", "omlx", "LLAMACPP", "vllm", ["native", "llamacpp"], ""]
     routes = ["global"] + [f"pool:{p}" for p in a.pools.split(",") if (LAB / "pools" / p / "pool_id").exists()]
     results = []
     for route in routes:
@@ -357,7 +385,13 @@ def evaluate(rec, ev, expect_refund=False):
     else:
         want = (0, 0)
         basis = f"no 200 attempt (finality {fin})"
-    out.append(("debit_eq_settled", tuple(debit) == tuple(want), {"debit": debit, "settled": want, "basis": basis,
+    name, ok = "debit_eq_settled", tuple(debit) == tuple(want)
+    # SPEC-022 v0.2.2 R-5.6 (E2E-F4): a buyer that disconnected is debited the
+    # smaller of the verified completion and what the gateway delivered to it,
+    # with the verified prompt. Named so it is counted apart.
+    if not ok and rec["behaviour"] == "disconnect" and debit[0] == want[0] and 0 < debit[1] < want[1]:
+        name, ok = "debit_eq_settled[buyer-delivered-bound]", True
+    out.append((name, ok, {"debit": debit, "settled": want, "basis": basis,
                                                                   "gateway": {"status": (res or {}).get("status"), "token_source": (use or {}).get("token_source"), "outcome": (use or {}).get("outcome")}}))
     loop = {(s["request_id"], s["attempt_n"]): s.get("runtime_source") for s in ev["snapshots"]}
     bad = []
@@ -395,6 +429,9 @@ def evaluate(rec, ev, expect_refund=False):
         out.append(("delivered_not_free", sum(debit) > 0 or expect_refund, {"debit": debit, "finish": rec.get("finish_reason"), "expect_refund": expect_refund}))
     if rec["behaviour"] == "disconnect" and (rec.get("content_events") or 0) > 0:
         out.append(("delivered_not_free", sum(debit) > 0 or expect_refund, {"debit": debit, "received_events": rec.get("content_events"), "note": "partial stream"}))
+    if rec["behaviour"] == "disconnect" and rec["engine"] != "native" and rec["route"].startswith("pool:") and rec.get("status") == 200 \
+            and (rec.get("content_events") or 0) > 0:
+        out.append(("disconnect_prefix_billed", *disconnect_prefix(rec, ev, debit, payable)))
     if delivered and rec.get("usage"):
         seen = (rec["usage"]["prompt_tokens"], rec["usage"]["completion_tokens"])
         name = "buyer_usage_eq_debit"
@@ -406,6 +443,24 @@ def evaluate(rec, ev, expect_refund=False):
             name = "buyer_usage_eq_debit[F1-prompt-bound]"
         out.append((name, seen == tuple(debit) or expect_refund, {"buyer_saw": seen, "debit": debit}))
     return out
+
+
+def disconnect_prefix(rec, ev, debit, payable):
+    """#1690 M9 (E2E-F3 on every external engine): (ok, observed)."""
+    cancel = [a for a in ev["attempt_outputs"] if a["terminal_state"] == "buyer_cancel"]
+    att = cancel[-1] if cancel else None
+    key = (att["request_id"], att["attempt_n"]) if att else None
+    verdicts = [v for v in ev["verdicts"] if key and (v["request_id"], v["attempt_n"]) == key]
+    receipt_ok = any(v["closed"] == 1 and v["settlement_outcome"] == "verified" and v["receipt_result"] == "valid" for v in verdicts)
+    credit = [r for r in payable if key and (r["request_id"], r["attempt_n"]) == key]
+    prefix = att["billable"][1] if att else None
+    ok = bool(att) and att["usage_source"] == "pool_operator_attested" and receipt_ok and bool(credit) \
+        and prefix is not None and 0 < debit[1] <= prefix < rec["max_tokens"]
+    return ok, {"terminal_state": att and att["terminal_state"], "usage_source": att and att["usage_source"],
+                "receipt_verified": receipt_ok, "provider_credits": [r["provider_credits"] for r in credit],
+                "verified_prefix_billable": att and att["billable"], "delivered_output_bytes": att and att["delivered_output_bytes"],
+                "buyer_debit": debit, "buyer_received_events": rec.get("content_events"),
+                "buyer_received_tokens": rec.get("received_tokens"), "max_tokens": rec["max_tokens"]}
 
 
 def cmd_settle(a):
@@ -455,7 +510,7 @@ def main():
     e = sub.add_parser("selection")
     e.add_argument("--label", required=True)
     e.add_argument("--engine", required=True, choices=sorted(ENGINE_CLASS))
-    e.add_argument("--pools", default="A,M,O")
+    e.add_argument("--pools", default="A,M,O,L,X")
     t = sub.add_parser("settle")
     t.add_argument("--label", required=True)
     t.add_argument("--timeout", type=int, default=420)

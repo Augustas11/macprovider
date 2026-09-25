@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One complete #1690 e2e matrix pass (run it twice: full_run.sh r1, r2).
-#   1. every engine (native, llamacpp, mlxlm, ollama) x gateway pin off/on
+#   1. every engine (native, llamacpp, mlxlm, ollama, lmstudio, omlx) x gateway pin off/on
 #      (run_matrix.sh, enforce coordinator)
 #   2. fault cases on the llama.cpp member (faults.sh: proxy, rotate, kill)
 #   3. observe mode: coordinator verified_model_settlement_mode=observe;
@@ -19,7 +19,7 @@ lsof -nP -iTCP:8080 -sTCP:LISTEN | tail -1 | sed 's/^/live provider :8080 before
 for step in $STEPS; do
   case "$step" in
     engines)
-      for e in ${E2E_ENGINES:-native llamacpp mlxlm ollama}; do "$HERE/run_matrix.sh" "$RUN" "$e" "0 1" || echo "run_matrix $e exited $?"; done ;;
+      for e in ${E2E_ENGINES:-native llamacpp mlxlm ollama lmstudio omlx}; do "$HERE/run_matrix.sh" "$RUN" "$e" "0 1" || echo "run_matrix $e exited $?"; done ;;
     faults)
       "$RIG" down >/dev/null 2>&1 || true
       ENGINE=llamacpp "$RIG" up >/dev/null

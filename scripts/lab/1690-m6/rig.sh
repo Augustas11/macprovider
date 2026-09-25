@@ -11,10 +11,13 @@
 #                   engine's pool (A llamacpp, M mlxlm, O ollama)
 #   rig.sh server-start | server-stop   start/stop only the ENGINE model server
 #
-# ENGINE=llamacpp (default, #1690 M6/M7) | mlxlm | ollama (#1690 M8) picks the
-# one model server behind the usage tap: llama-server, mlx_lm.server from
-# $LAB/venv serving MLXLM_SNAPSHOT, or Ollama's release binary in
-# $LAB/ollama with OLLAMA_MODELS under $LAB. Only one runs at a time.
+# ENGINE=llamacpp (default, #1690 M6/M7) | mlxlm | ollama (#1690 M8) |
+# lmstudio | omlx (#1690 M9) picks the one model server behind the usage tap:
+# llama-server, mlx_lm.server from $LAB/venv serving MLXLM_SNAPSHOT, Ollama's
+# release binary in $LAB/ollama with OLLAMA_MODELS under $LAB, the headless
+# LM Studio daemon (llmster) in $LAB/lmshome, or oMLX from $LAB/omlx-venv
+# serving $LAB/omlx-models. Only one runs at a time.
+#   pools: A llamacpp, M mlxlm, O ollama, L lmstudio, X omlx
 #   rig.sh down     stop every lab process (by recorded, verified identity only)
 #
 # #1690 e2e (scripts/lab/1690-e2e): ENGINE=native serves the catalog MLX row
@@ -54,6 +57,9 @@ ENGINE="${ENGINE:-llamacpp}"
 MLXLM_SNAPSHOT="${MLXLM_SNAPSHOT:-$LAB/models/mlx/Qwen2.5-0.5B-Instruct-4bit}"
 OLLAMA_TAG="${OLLAMA_TAG:-qwen2.5:0.5b}"
 export OLLAMA_MODELS="$LAB/ollama-models" OLLAMA_HOST=127.0.0.1:19130
+# #1690 M9: the lab llmster home (its own HOME, see 1690-e2e/setup.sh) and oMLX.
+LMS_HOME="$LAB/lmshome"
+LMS_KEY=qwen2.5-0.5b-instruct
 # mlx_lm.server scans only the lab Hugging Face home and never downloads.
 export HF_HOME="$LAB/home/hf" HF_HUB_OFFLINE=1
 export PATH="$GO_BIN:$PATH" GOTOOLCHAIN=local LAB
@@ -196,6 +202,7 @@ cmd_static() {
   local extra=()
   [[ -n "${MLX_RUNTIME_SOURCES:-}" ]] && extra+=(--mlx-runtime-sources "$MLX_RUNTIME_SOURCES")
   [[ -n "${OLLAMA_GGUF_SHA:-}" ]] && extra+=(--ollama-tag "$OLLAMA_TAG" --ollama-gguf-sha256 "$OLLAMA_GGUF_SHA" --ollama-gguf-size "$OLLAMA_GGUF_SIZE")
+  [[ -n "${GGUF_RUNTIME_SOURCES:-}" ]] && extra+=(--gguf-runtime-sources "$GGUF_RUNTIME_SOURCES")
   "$LAB/bin/labtool" static-release --out-dir "$LAB/static" --key-file "$LAB/keys/static-feed.ed25519" \
     --release lab-1690-m6-r1 --generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --row-key "$ROW_KEY" \
     --mlx-model-id "$MLX_ID" --mlx-revision "$MLX_REV" --mlx-sha256 "$mlx_sha" \
@@ -321,6 +328,8 @@ EOF
     llamacpp|native) [[ -d "$LAB/pools/A" ]] || python3 "$HERE/pool_setup.py" create A --encoding 2 --runtime-allowlist llamacpp_loopback ;;
     mlxlm) [[ -d "$LAB/pools/M" ]] || python3 "$HERE/pool_setup.py" create M --encoding 2 --runtime-allowlist mlxlm_loopback ;;
     ollama) [[ -d "$LAB/pools/O" ]] || python3 "$HERE/pool_setup.py" create O --encoding 2 --runtime-allowlist ollama_loopback ;;
+    lmstudio) [[ -d "$LAB/pools/L" ]] || python3 "$HERE/pool_setup.py" create L --encoding 2 --runtime-allowlist lmstudio_loopback ;;
+    omlx) [[ -d "$LAB/pools/X" ]] || python3 "$HERE/pool_setup.py" create X --encoding 2 --runtime-allowlist omlx_loopback ;;
   esac
   echo "rig up"
 }
@@ -330,6 +339,8 @@ engine_model_ref() {
     llamacpp) echo "llamacpp:${GGUF_FILE%.gguf}" ;;
     mlxlm) echo "mlxlm:$(basename "$MLXLM_SNAPSHOT")" ;;
     ollama) echo "ollama:$OLLAMA_TAG" ;;
+    lmstudio) echo "lmstudio:$LMS_KEY" ;;
+    omlx) echo "omlx:Qwen2.5-0.5B-Instruct-4bit" ;;
     native) echo "$ROW_KEY" ;;
     *) echo "unknown ENGINE $ENGINE" >&2; exit 2 ;;
   esac
@@ -340,6 +351,8 @@ engine_offer_flags() {
     llamacpp) echo "--skip-ollama --skip-lmstudio --skip-openai-compatible --llamacpp-origin http://127.0.0.1:19131" ;;
     mlxlm) echo "--skip-ollama --skip-lmstudio --skip-openai-compatible --skip-llamacpp" ;;
     ollama) echo "--ollama-origin http://127.0.0.1:19131 --skip-lmstudio --skip-openai-compatible --skip-llamacpp" ;;
+    lmstudio) echo "--skip-ollama --lmstudio-origin http://127.0.0.1:19131 --skip-openai-compatible --skip-llamacpp" ;;
+    omlx) echo "--skip-ollama --skip-lmstudio --skip-openai-compatible --skip-llamacpp" ;;
   esac
 }
 
@@ -359,20 +372,52 @@ cmd_server_start() {
     ollama)
       start_bg ollama "$LAB/ollama/ollama" serve
       wait_http http://127.0.0.1:19130/api/version ;;
+    lmstudio)
+      # llmster daemonizes with the bare command line "llmster", which
+      # pidguard cannot verify, so it is driven only through its own lms
+      # CLI with HOME set to the lab install: nothing outside $LAB/lmshome
+      # is addressed. The model loads under its own key (no --identifier),
+      # which is the served ref the CLI resolves.
+      lms_lab daemon up >/dev/null
+      lms_lab server start --port 19130 --bind 127.0.0.1 >/dev/null
+      lms_lab load "$LMS_KEY" -c 8192 -y >/dev/null
+      wait_http http://127.0.0.1:19130/api/v1/models ;;
+    omlx)
+      # --no-cache keeps oMLX from writing an SSD cache; its settings and
+      # logs go to the lab HOME.
+      HOME="$LAB/omlxhome" HF_HUB_OFFLINE=1 start_bg omlx "$LAB/omlx-venv/bin/python3" "$LAB/omlx-venv/bin/omlx" serve \
+        --model-dir "$LAB/omlx-models" --host 127.0.0.1 --port 19130 --no-cache --sse-keepalive-mode comment
+      wait_http http://127.0.0.1:19130/health ;;
     native) ;;
   esac
 }
 
-cmd_server_stop() { for p in llama-server mlxlm-server ollama; do stop_pid "$p"; done; }
+# The lab llmster, addressed only through its own HOME.
+lms_lab() { HOME="$LMS_HOME" "$LMS_HOME/.lmstudio/bin/lms" "$@"; }
+lms_down() {
+  [[ -x "$LMS_HOME/.lmstudio/bin/lms" ]] || return 0
+  lms_lab unload --all >/dev/null 2>&1 || true
+  lms_lab server stop >/dev/null 2>&1 || true
+  lms_lab daemon down >/dev/null 2>&1 || true
+  # The daemon exits asynchronously; wait so the next engine never overlaps it.
+  for _ in $(seq 1 40); do
+    lms_lab daemon status 2>&1 | grep -q "not running" && return 0
+    sleep 0.5
+  done
+  echo "lab llmster still running after daemon down" >&2
+}
+
+cmd_server_stop() { for p in llama-server mlxlm-server ollama omlx; do stop_pid "$p"; done; lms_down; }
 
 cmd_down() {
   "$HERE/serve.sh" stop
-  for p in trailer-proxy usage-tap llama-server mlxlm-server ollama gateway coordinator; do stop_pid "$p"; done
+  for p in trailer-proxy usage-tap llama-server mlxlm-server ollama omlx gateway coordinator; do stop_pid "$p"; done
+  lms_down
   echo "rig down"
 }
 
 cmd_status() {
-  for p in serve trailer-proxy usage-tap llama-server mlxlm-server ollama gateway coordinator; do
+  for p in serve trailer-proxy usage-tap llama-server mlxlm-server ollama omlx gateway coordinator; do
     if pid=$(pg_verify "$LAB/run/$p.pid"); then echo "$p: pid $pid"; elif [[ -f "$LAB/run/$p.pid" ]]; then echo "$p: stale pid file"; else echo "$p: stopped"; fi
   done
   if curl -fs http://127.0.0.1:19102/healthz >/dev/null 2>&1; then

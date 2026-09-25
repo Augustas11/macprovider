@@ -16,6 +16,11 @@ export MACPROVIDER_LLAMACPP_MODEL_PATH="$LAB/models/qwen2.5-0.5b-instruct-q4_k_m
 export MACPROVIDER_MLXLM_MODEL_PATH="${MLXLM_SNAPSHOT:-$LAB/models/mlx/Qwen2.5-0.5B-Instruct-4bit}"
 export MACPROVIDER_MLXLM_ORIGIN=http://127.0.0.1:19131
 export OLLAMA_MODELS="$LAB/ollama-models"
+# #1690 M9: the LM Studio models root (the lab llmster home) and the oMLX
+# snapshot and origin.
+export MACPROVIDER_LMSTUDIO_MODELS_ROOT="$LAB/lmshome/.lmstudio/models"
+export MACPROVIDER_OMLX_MODEL_PATH="$LAB/omlx-models/Qwen2.5-0.5B-Instruct-4bit"
+export MACPROVIDER_OMLX_ORIGIN=http://127.0.0.1:19131
 export MACPROVIDER_BYOM_ALLOW_INSECURE_LOOPBACK_COORDINATOR=1
 export MACPROVIDER_AUTO_UPDATE_ENABLED=false
 export MACPROVIDER_MAX_CONCURRENCY_OVERRIDE="${MACPROVIDER_MAX_CONCURRENCY_OVERRIDE:-4}"
