@@ -1,11 +1,38 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.2.2
+Version: v0.2.3
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.2.3
+
+Delivered-only buyer debit on the gateway-to-coordinator hop and a bounded
+end for the holds it creates (#1690 fake-Pearl VM e2e F-1 and review). New
+normative text: R-5.6 (v0.2.3) and R-8.7.
+
+- A negotiated response whose body the gateway could not read in full
+  (`body_read_failed`: the hop broke after the body, before or while the
+  finality trailers were read) is held for coordinator finality, never
+  refunded locally. The buyer, who received an error and none of the
+  completion, is debited at most the verified prompt; the provider keeps the
+  credit for what reached the gateway.
+- The same delivered bound covers every gateway-ended response whose
+  candidate records what the gateway delivered: a stream the gateway ended
+  `stream_truncated` (the hop broke or a frame overflowed after part was
+  forwarded) or `provider_timeout` (a gateway stream timeout, or a
+  coordinator 504 with nothing delivered).
+- A `body_read_failed` hold whose coordinator keeps answering its own
+  "finality not found" for at least one hour, counted from the first such
+  answer, becomes a terminal `stale_held` with no buyer debit, for operator
+  review. A generic 404 never counts.
+- A `stale_held` wallet-session reservation still counts toward the wallet
+  session cap until an operator resolves it.
+
+No wire, receipt, or schema-version change: the gateway records the first
+not-found time in an additive column that older gateways ignore.
 
 ### v0.2.2
 
@@ -748,6 +775,24 @@ the smaller of the verified completion and its own delivered completion,
 with the verified prompt. Provider settlement stays the verified figure for
 the prefix delivered to the gateway, which the receipt binds; the difference
 is not billed to either party.
+(v0.2.3) The same bound applies wherever the gateway, not the buyer, ends
+the delivery short of the verified output, and its local record is what it
+delivered:
+- `body_read_failed`: the gateway could not read a negotiated response's
+  body in full (the gateway-to-coordinator hop broke after the body, before
+  or while its finality trailers were read). The gateway MUST NOT refund
+  locally, because the coordinator may already have recorded the attempt as
+  delivered and credited the provider; it MUST hold the reservation for
+  coordinator finality and answer the buyer an error. The buyer received none
+  of the completion, so its final debit is at most the verified prompt
+  (a refund when finality refunds).
+- `stream_truncated` and `provider_timeout`: the gateway ended a stream after
+  forwarding part of it because the hop broke, a frame exceeded its limit, or
+  a stream timed out, or the coordinator answered 504 with nothing delivered.
+  The buyer's final debit is the verified prompt plus the smaller of the
+  verified completion and the completion the gateway forwarded.
+In each case the provider settlement stays the verified figure for the prefix
+delivered to the gateway, and the difference is billed to neither party.
 
 R-5.7. Synchronous buyer response completion and asynchronous receipt
 verification MAY be decoupled. Until verification returns `verified`, buyer
@@ -869,6 +914,23 @@ concurrent covered requests, including reservation caps, admission behavior when
 many agentic requests are in flight, and release behavior after terminal
 outcomes. A terminal SPEC-022 row MUST NOT permanently reduce buyer available
 quota through a stale reservation.
+
+R-8.7. (v0.2.3) A `body_read_failed` hold (R-5.6) whose coordinator never
+recorded the attempt (it stopped between the buyer write and the record)
+would otherwise stay held forever. The gateway MUST move such a hold to the
+terminal `stale_held` state, with no buyer debit and an operator-visible
+record for review, once the coordinator's own "finality not found" answer for
+that request has persisted for at least one hour, measured from the first
+such answer the gateway recorded for the hold (not from the reservation's
+creation). Any other not-found answer (a wrong operator URL, an intermediary,
+a coordinator whose settlement store is unavailable) MUST NOT count toward
+that hour. A `stale_held` reservation releases the buyer's daily quota. A
+`stale_held` wallet-session reservation still counts toward that wallet
+session's reserved cap until an operator resolves it; this is the one
+bounded exception to the release rule of R-8.6, kept so an unresolved
+money-path ambiguity cannot be spent twice within the session. Holds on
+other paths keep their existing rules (carried: an unbounded hold outside
+this path is a known limitation).
 
 ### R-9. Rollout, migration, and rollback (SPEC-022-R009)
 
