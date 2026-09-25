@@ -10,7 +10,7 @@
       "model_id": "mlx-community/gemma-4-26b-a4b-it-4bit",
       "min_ram_gb": 28,
       "source": "operator_reviewed_tier2_catalog",
-      "sha256": "436ce68d2ac5a27dde3b54569736fb7a69dc3b7a175d2f633147c7802b3bc88a"
+      "sha256": "b245e39f1476907653e3fe1897bba36b0e2a90c471828a9e13b5fdf3e1b6db01"
     },
     {
       "artifact_kind": "mlx_weight_file",

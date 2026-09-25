@@ -263,8 +263,8 @@ private struct SignedRateCardFixture {
     // SPEC-045 mapped tests freeze 2026-09-02/03; shift past the baked rate-card so they are not a rollback.
     private static func freshnessAlignedClock(_ raw: String) -> String {
         switch raw {
-        case "2026-09-02T12:00:00Z": return "2026-09-23T12:00:00Z"
-        case "2026-09-03T00:00:00Z": return "2026-09-24T00:00:00Z"
+        case "2026-09-02T12:00:00Z": return "2026-09-25T12:00:00Z"
+        case "2026-09-03T00:00:00Z": return "2026-09-26T00:00:00Z"
         default: return raw
         }
     }
