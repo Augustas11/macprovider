@@ -349,6 +349,25 @@ final class ModelArtifactSourceTests: XCTestCase {
         XCTAssertEqual(try ModelArtifactVerifier.canonicalArtifactHash(directory: URL(fileURLWithPath: path)), expected)
     }
 
+    func testImportIgnoresHFLocalDirDownloadState() throws {
+        let hub = try tempDir()
+        let reference = try makeSnapshot(["config.json": "{}", "w.bin": "weights"])
+        let expected = try ModelArtifactVerifier.canonicalArtifactHash(directory: reference)
+        let localDir = try makeSnapshot(["config.json": "{}", "w.bin": "weights"])
+        let state = localDir.appendingPathComponent(".cache/huggingface/download", isDirectory: true)
+        try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
+        try Data("*\n".utf8).write(to: localDir.appendingPathComponent(".cache/huggingface/.gitignore"))
+        try Data("etag\n".utf8).write(to: state.appendingPathComponent("w.bin.metadata"))
+
+        let resolver = CachedModelArtifactResolver(hubRoot: hub)
+        let outcome = ModelArtifactImporter.importArtifact(row: row(sha256: expected), from: localDir, resolver: resolver)
+
+        guard case .adopted(_, let sha256) = outcome else {
+            return XCTFail("unexpected \(outcome)")
+        }
+        XCTAssertEqual(sha256, expected)
+    }
+
     func testImportFromMirrorTreeCopiesOnlyManifestFiles() throws {
         let hub = try tempDir()
         let reference = try makeSnapshot(["w.bin": "weights"])

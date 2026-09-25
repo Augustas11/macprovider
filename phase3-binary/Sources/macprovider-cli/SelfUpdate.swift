@@ -185,14 +185,25 @@ struct SelfUpdate {
         let head: SignedReleaseDiscoveryHead
         do {
             head = try await discoverSignedReleaseHead()
-        } catch {
-            guard Self.discoveryFailureAllowsCoordinatorFallback(error),
+        } catch let discoveryError {
+            guard Self.discoveryFailureAllowsCoordinatorFallback(discoveryError),
+                  !Task.isCancelled,
                   releaseMirrorEnabled,
                   coordinatorHealthzURL != nil
             else {
-                throw error
+                throw discoveryError
             }
-            let target = try await coordinatorAdvertisedReleaseVersion()
+            let target: String
+            do {
+                target = try await coordinatorAdvertisedReleaseVersion()
+            } catch {
+                // The coordinator was only a fallback; the GitHub failure is
+                // the cause the user can act on.
+                FileHandle.standardError.write(Data(
+                    "The coordinator-advertised release is also unavailable: \(error)\n".utf8
+                ))
+                throw discoveryError
+            }
             FileHandle.standardError.write(Data(
                 "GitHub release discovery is unreachable; using the coordinator-advertised release v\(target) from the release mirror.\n".utf8
             ))
@@ -206,8 +217,8 @@ struct SelfUpdate {
     /// replayed, equivocating, expired, or invalid discovery head is a
     /// security signal and is never bypassed.
     static func discoveryFailureAllowsCoordinatorFallback(_ error: Error) -> Bool {
-        if error is URLError {
-            return true
+        if let urlError = error as? URLError {
+            return urlError.code != .cancelled
         }
         if case UpdateError.httpStatus(let status) = error {
             return status != 404

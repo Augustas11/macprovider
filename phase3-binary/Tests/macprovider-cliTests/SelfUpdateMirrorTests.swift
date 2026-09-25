@@ -143,6 +143,7 @@ final class SelfUpdateMirrorTests: XCTestCase {
         XCTAssertTrue(SelfUpdate.discoveryFailureAllowsCoordinatorFallback(URLError(.cannotConnectToHost)))
         XCTAssertTrue(SelfUpdate.discoveryFailureAllowsCoordinatorFallback(UpdateError.httpStatus(503)))
         XCTAssertFalse(SelfUpdate.discoveryFailureAllowsCoordinatorFallback(UpdateError.httpStatus(404)))
+        XCTAssertFalse(SelfUpdate.discoveryFailureAllowsCoordinatorFallback(URLError(.cancelled)))
         XCTAssertFalse(SelfUpdate.discoveryFailureAllowsCoordinatorFallback(UpdateError.discoveryHeadReplay))
         XCTAssertFalse(SelfUpdate.discoveryFailureAllowsCoordinatorFallback(UpdateError.discoveryHeadEquivocation))
         XCTAssertFalse(SelfUpdate.discoveryFailureAllowsCoordinatorFallback(UpdateError.discoveryHeadInvalid("transport_absent")))

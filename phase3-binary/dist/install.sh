@@ -9984,6 +9984,23 @@ sys.stdout.write(version if version.startswith("v") else "v" + version)
     log "Ignoring the coordinator-advertised release $advertised: not an installable vMAJOR.MINOR.PATCH at or above $MACPROVIDER_MIN_SUPPORTED_VERSION." >&2
     return 1
   fi
+  # A rerun must never let a blocked GitHub turn into a silent downgrade: the
+  # advertisement can lag a provider that followed signed discovery ahead of
+  # the fleet. Only a pinned emergency rollback may go backwards.
+  if [ -x "$BINARY_PATH" ]; then
+    local installed_version installed_tag
+    installed_version="$("$BINARY_PATH" --version 2>/dev/null | tr -d '\r\n')"
+    case "$installed_version" in
+      v*) installed_tag="$installed_version" ;;
+      *) installed_tag="v$installed_version" ;;
+    esac
+    if [[ "$installed_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+        && [ "$installed_tag" != "$advertised" ] \
+        && version_at_least "$installed_tag" "$advertised"; then
+      log "Refusing the coordinator-advertised release $advertised: it would downgrade installed $installed_tag." >&2
+      return 1
+    fi
+  fi
   printf '%s' "$advertised"
 }
 

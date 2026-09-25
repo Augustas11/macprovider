@@ -6952,9 +6952,8 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		// `macprovider-cli doctor` can tell an operator WHY a build is being
 		// closed with 4004 without inventing a new coordinator endpoint
 		// (#767). Empty when no floor is configured. Like the recommendation
-		// above it is NOT capability-gated: /healthz is an operator/monitoring
-		// mirror, and no legacy CLI code path reads it to drive an autoupdate
-		// — a floor is a rejection reason, never an update target.
+		// above it is NOT capability-gated. A floor is a rejection reason,
+		// never an update target.
 		RequiredBinaryVersion string `json:"required_binary_version,omitempty"`
 		// TrustAuthorityDegraded is true when the hardware-trust revalidation
 		// sweep has failed to read the trust store for trustSweepDegradedThreshold
@@ -6968,14 +6967,14 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		UptimeS:  int64(s.now().Sub(s.started).Seconds()),
 		PoolSize: len(providers),
 		Version:  s.version,
-		// S-H1: NOT capability-gated. /healthz is a public operator/monitoring
-		// mirror, not a per-connection provider surface. No legacy CLI code
-		// path (verified against v1.8.30 sources: no `/healthz` reference in
-		// SelfUpdate/CoordinatorClient/AutoUpdater/HTTPServer) fetches this
-		// endpoint to drive an autoupdate — the autoupdater is fed exclusively
-		// by the WebSocket hello_ack / auth_response `recommended_binary_version`
-		// field, which IS gated above. Gating this monitoring value would blind
-		// operators with no security benefit.
+		// S-H1: NOT capability-gated, and it must stay that way. Legacy CLIs
+		// (v1.8.30 sources) never read /healthz to drive an update; their
+		// autoupdater is fed by the gated WebSocket hello_ack / auth_response
+		// field above. Since #1737 this field is also the release a Mac
+		// without GitHub installs (install.sh, SPEC-003-R003) or manually
+		// updates to (SPEC-020-R006), so gating, renaming, or authenticating
+		// it strands those Macs (SPEC-003-R004). Those CLIs still accept the
+		// bytes only through the signed release checks.
 		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
 		RequiredBinaryVersion:    strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion),
 		TrustAuthorityDegraded:   s.trustAuthorityDegraded.Load(),

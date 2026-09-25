@@ -35,7 +35,7 @@
     {
       "spec_id": "SPEC-002",
       "title": "Phase 4 Coordinator: Mac Provider Request Router",
-      "version": "1.6.2",
+      "version": "1.6.3",
       "path": "specs/SPEC-002-coordinator.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -2964,7 +2964,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1737",
-        "rationale": "SPEC-023 v0.18.0 (SPEC-023-R019): catalog bytes may come from huggingface.co, a content-addressed mirror, or an operator HF_ENDPOINT; the signed model_sha256 stays the only authority. Implemented and unit-tested; the China-simulation lab e2e (GitHub and Hugging Face hosts blocked) on the Studio has not run and models.malibu.tech is not yet serving."
+        "rationale": "SPEC-023 v0.18.0 (SPEC-023-R019): catalog bytes may come from huggingface.co, a content-addressed mirror, or an operator HF_ENDPOINT; the signed model_sha256 stays the only authority. Implemented and unit-tested; the China-simulation lab e2e on PR #1745 (GitHub and Hugging Face blocked in /etc/hosts) fetched a signed snapshot from a lab mirror path on download.malibu.tech and verified it (C5). models.malibu.tech is not yet serving, so this stays pending."
       }
     },
     {
@@ -2978,6 +2978,7 @@
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/ModelArtifactSourceTests.swift:testImportFollowsCacheSymlinksSkipsFinderFilesAndAdopts",
         "phase3-binary/Tests/macprovider-cliTests/ModelArtifactSourceTests.swift:testImportFromMirrorTreeCopiesOnlyManifestFiles",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactSourceTests.swift:testImportIgnoresHFLocalDirDownloadState",
         "phase3-binary/Tests/macprovider-cliTests/ModelArtifactSourceTests.swift:testImportReportsMismatchAndAdoptsNothing"
       ],
       "journeys": [],
@@ -6847,7 +6848,8 @@
         "scripts/test-install-version-pin.sh:m9-mirror-cannot-roll-back",
         "scripts/test-install-version-pin.sh:m12-rejects-",
         "scripts/test-install-version-pin.sh:m11-no-advertisement-fails-closed",
-        "scripts/test-install-version-pin.sh:m10-mirror-cannot-push-canary"
+        "scripts/test-install-version-pin.sh:m10-mirror-cannot-push-canary",
+        "scripts/test-install-version-pin.sh:m16-advertised-downgrade-refused"
       ],
       "journeys": [],
       "evidence": [],
@@ -6878,7 +6880,8 @@
         "scripts/test-publish-release-mirror.sh:upload-refuses-to-patch-published-release",
         "scripts/test-publish-release-mirror.sh:promote-unadvertised-refused",
         "ops/pearl-updater/test_pearl_updater.py::PearlUpdaterTests",
-        "phase4-coordinator/internal/config/seam_767_768_test.go:TestValidateRejectsMalformedVersionFloors"
+        "phase4-coordinator/internal/config/seam_767_768_test.go:TestValidateRejectsMalformedVersionFloors",
+        "phase4-coordinator/internal/ws/seam_767_version_floor_test.go:TestProviderHealthzPublishesRequiredBinaryVersion"
       ],
       "journeys": [],
       "evidence": [],
@@ -6886,7 +6889,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1737",
-        "rationale": "SPEC-003 v0.12.0 (SPEC-003-R004): scripts/publish-release-mirror.sh mirrors each stable release byte-identically with release.json and gates latest.json on the coordinator advertisement. Implemented and tested with gh/curl/ssh stubs; no production release has been mirrored yet."
+        "rationale": "SPEC-003 v0.12.0 (SPEC-003-R004): scripts/publish-release-mirror.sh mirrors each stable release byte-identically under releases/<tag>/, writes the updater index to releases/index/<tag>.json, and gates latest.json on the coordinator advertisement. Implemented and tested with gh/curl/ssh stubs; no production release has been mirrored yet."
       }
     },
     {

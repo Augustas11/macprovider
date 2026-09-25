@@ -422,8 +422,9 @@ transport, because its immutability check is a GitHub attestation the mirror
 cannot provide. When a manual `update` cannot reach that discovery at all (a
 transport failure or a non-404 status; never a replayed, equivocating,
 expired, or invalid head), it MUST take its target from the configured
-coordinator's `/healthz` `recommended_binary_version` over the coordinator's
-own TLS endpoint, apply the persisted signed policy floor and revocations,
+coordinator's `/healthz` `recommended_binary_version` (the SPEC-003-R004
+contract) over the coordinator's own TLS endpoint, install it only when it is
+newer than the installed release, apply the persisted signed policy floor and revocations,
 and install that tag through the path above.
 
 R-1.5. The provider MUST attempt at most one autoupdate per coordinator session

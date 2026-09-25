@@ -679,7 +679,7 @@ MUST NOT use the network for bytes. From a mirror tree (`manifest` plus
 `files/`) it copies exactly the files the manifest names, after checking the
 manifest against `model_sha256`. From any other directory it copies every
 regular file, following symlinks (a Hugging Face cache snapshot links into
-`blobs/`) and ignoring `.DS_Store` and `._*` platform metadata. Copies are
+`blobs/`) and ignoring `.DS_Store` and `._*` platform metadata and a top-level `.cache/` (the download state `hf download --local-dir` writes). Copies are
 new regular files in a staging directory outside the durable root. Only a
 staging tree whose canonical digest equals `model_sha256` is adopted into
 the durable store; a mismatch adopts nothing and exits 3. The command never

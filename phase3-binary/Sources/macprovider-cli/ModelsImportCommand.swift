@@ -14,7 +14,8 @@ struct ModelsImportCommand: AsyncParsableCommand {
         abstract: "Adopt a signed catalog model from a local directory, with no download.",
         discussion: "Copies the snapshot from --from into the durable model store and verifies it against the "
             + "signed catalog row's macprovider.snapshot-manifest.v1 hash. --from may be a snapshot directory "
-            + "(symlinks, as in a Hugging Face cache, are followed; .DS_Store and ._* files are ignored) or a "
+            + "(symlinks, as in a Hugging Face cache, are followed; .DS_Store, ._* files and a top-level .cache/ "
+            + "from `hf download --local-dir` are ignored) or a "
             + "mirror tree holding manifest plus files/. It never changes config or the active model. "
             + "Exit 0 = adopted, 3 = bytes do not match the signed hash, 2 = refused."
     )
@@ -188,6 +189,16 @@ enum ModelArtifactImporter {
             throw AutotuneRecommendError.invalidArtifact("cannot enumerate --from")
         }
         for case let url as URL in enumerator {
+            // `hf download --local-dir` keeps its download state in a
+            // top-level .cache/; it is never part of the snapshot (matches
+            // scripts/publish-model-mirror.py).
+            if url.lastPathComponent == ".cache",
+               let parent = Self.canonicalPath(url.deletingLastPathComponent().path),
+               parent == rootPath
+            {
+                enumerator.skipDescendants()
+                continue
+            }
             if isPlatformMetadata(url.lastPathComponent) {
                 var isDirectory = stat()
                 if lstat(url.path, &isDirectory) == 0, (isDirectory.st_mode & S_IFMT) == S_IFDIR {

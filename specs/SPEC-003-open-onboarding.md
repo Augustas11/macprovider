@@ -8,10 +8,11 @@ SPEC-003-R003: `install.sh` falls back to the byte-identical release mirror at
 `https://download.malibu.tech/releases/` for release discovery and every
 release asset, with the embedded-key `checksums.txt.sig` chain unchanged as the
 only authority; without GitHub, discovery installs exactly the coordinator's
-advertised release. SPEC-003-R004: the mirror layout (`<tag>/<asset>`,
+advertised release, never older than the installed binary. SPEC-003-R004: the mirror layout (`<tag>/<asset>`,
 `index/<tag>.json`) and its publication rules (byte identity against GitHub's
 asset digests, immutable tags, the Pearl updater never advertising an unmirrored
-release, `required_binary_version` never above `latest_binary_version`), owned
+release, `required_binary_version` never above `latest_binary_version`, and
+the coordinator `/healthz` `recommended_binary_version` field), owned
 here as the `release-mirror` authority domain. SPEC-003-R005: the pinned bootstrap python tarball has a
 `download.malibu.tech/python/` fallback under the same SHA-256 pin. The layout
 is the contract the provider self-updater consumes; SPEC-020 references it
@@ -1187,7 +1188,9 @@ Unpinned discovery MUST fall back, when the GitHub Releases API fails, to
 exactly the coordinator `/healthz` `recommended_binary_version` (the fleet's
 `latest_binary_version`, read over the coordinator's own TLS endpoint), used
 only if it is a canonical `vMAJOR.MINOR.PATCH` at or above the supported
-rollback floor; with no such advertisement the install MUST fail. The mirror's
+rollback floor and not older than an installed provider binary (only a pinned
+emergency rollback may go backwards); with no such advertisement the install
+MUST fail. The mirror's
 `latest.json` MUST NOT choose the tag: it is unsigned and mirror-controlled, and
 every public release, old or canary, carries a valid `checksums.txt.sig`. The
 embedded-key `checksums.txt.sig` verification, per-asset SHA-256, Gatekeeper,
@@ -1215,9 +1218,14 @@ coordinator MUST refuse a config whose `required_binary_version` exceeds
 installable and updatable from the mirror. `releases/latest.json`
 (`{"tag_name": "<tag>"}`) is an operator-facing hint that no installer or
 updater reads; it MUST move only to a stable tag the coordinator already
-advertises as `latest_binary_version` and MUST NOT move backwards. This
-section is the single owner of the `release-mirror` authority domain; SPEC-020
-consumes it.
+advertises as `latest_binary_version` and MUST NOT move backwards. The
+coordinator's unauthenticated `GET /healthz` field `recommended_binary_version`
+is part of this contract: it MUST equal `latest_binary_version`, MUST be served
+without authentication or capability gating, and is the release a Mac without
+GitHub installs (SPEC-003-R003) or updates to (SPEC-020-R006); renaming,
+gating, or removing it strands those Macs. This section is the single owner of
+the `release-mirror` authority domain; SPEC-020 and the SPEC-002 FR-O1 field
+list consume it.
 
 **SPEC-003-R005 — Bootstrap python mirror.** When the installer bootstraps the
 pinned python-build-standalone interpreter, it MUST fall back to

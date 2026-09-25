@@ -1290,6 +1290,37 @@ tag="$(resolve_release_tag 2>/dev/null)"
 report "m14-mirror-first-discovery" "v1.8.123" "$tag"
 report "m14-no-github-api" 0 "$(grep -c 'api.github.com' "$FETCH_LOG" | tr -d ' ')"
 
+# M16 — a rerun with GitHub down never downgrades: an advertisement older
+# than the installed binary is refused, while repair of the same release and
+# an upgrade still resolve (#1737 freeze audit SEC MEDIUM-1).
+reset_mocks
+MOCK_GITHUB_DOWN=1
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+write_installed_version "1.8.124"
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "m16-advertised-downgrade-refused" 3 "$rc"
+reset_mocks
+MOCK_GITHUB_DOWN=1
+RELEASE_MIRROR_FIRST=1
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+write_installed_version "1.8.124"
+tag="$(resolve_release_tag 2>/dev/null)" || tag=""
+report "m16-mirror-first-downgrade-refused" "" "$tag"
+reset_mocks
+MOCK_GITHUB_DOWN=1
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+write_installed_version "1.8.123"
+tag="$(resolve_release_tag 2>/dev/null)"
+report "m16-same-release-repair" "v1.8.123" "$tag"
+write_installed_version "1.8.100"
+tag="$(resolve_release_tag 2>/dev/null)"
+report "m16-upgrade-allowed" "v1.8.123" "$tag"
+rm -f "$BINARY_PATH"
+
 # M15 — MACPROVIDER_RELEASE_MIRROR accepts only 0/1 and only for the
 # mirrored repository.
 reset_mocks
