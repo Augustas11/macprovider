@@ -4766,9 +4766,19 @@ if [ "$STATS_ENABLED_LOCAL" = "true" ]; then
 
   echo "  GET https://$STATS_DOMAIN/v1/stats/overview?deploy_smoke=<nonce> with Malibu Origin -> expect 200 + CORS"
   STATS_HEADERS="$(mktemp -t macprovider-stats-headers.XXXXXX)"
-  if ! STATS_OVERVIEW_STATUS=$(curl -sS -D "$STATS_HEADERS" -o /dev/null -w '%{http_code}' --max-time 10 -H "Origin: https://www.malibu.tech" "https://$STATS_DOMAIN/v1/stats/overview?deploy_smoke=$STATS_SMOKE_NONCE" 2>/dev/null); then
-    STATS_OVERVIEW_STATUS="000"
-  fi
+  # A just-restarted coordinator serves 503 stats_stale until its first
+  # overview rollup lands, and the money-SQLite gate may defer that rollup
+  # for up to moneySQLiteMaintenanceMaxDeferral (2m) under buyer traffic.
+  # Retry 503 for a bounded window instead of rolling back a healthy deploy.
+  STATS_OVERVIEW_DEADLINE=$((SECONDS + ${STATS_OVERVIEW_FRESH_TIMEOUT_S:-360}))
+  while :; do
+    if ! STATS_OVERVIEW_STATUS=$(curl -sS -D "$STATS_HEADERS" -o /dev/null -w '%{http_code}' --max-time 10 -H "Origin: https://www.malibu.tech" "https://$STATS_DOMAIN/v1/stats/overview?deploy_smoke=$STATS_SMOKE_NONCE" 2>/dev/null); then
+      STATS_OVERVIEW_STATUS="000"
+    fi
+    [ "$STATS_OVERVIEW_STATUS" = "503" ] && [ "$SECONDS" -lt "$STATS_OVERVIEW_DEADLINE" ] || break
+    echo "  waiting for the first overview rollup after restart (status=503)" >&2
+    sleep 15
+  done
   if [ "$STATS_OVERVIEW_STATUS" != "200" ]; then
     echo "  ABORT: $STATS_DOMAIN /v1/stats/overview returned status=$STATS_OVERVIEW_STATUS (expected 200)" >&2
     rm -f "$STATS_HEADERS"
