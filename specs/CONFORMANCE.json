@@ -62,7 +62,7 @@
     {
       "spec_id": "SPEC-003",
       "title": "Open Onboarding: Distribution, Lifecycle & Onboarding UX",
-      "version": "0.11.3",
+      "version": "0.12.0",
       "path": "specs/SPEC-003-open-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -719,7 +719,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg` + menu bar wrapper)",
-      "version": "v0.29",
+      "version": "v0.30",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -2938,6 +2938,30 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1636",
         "rationale": "Pi reads OpenAI prompt_tokens_details.cached_tokens; auto-prefix ConversationCache hits were buyer-invisible and would ambiguous_cache whole-row-zero. Not promoted; no signed journey."
+      }
+    },
+    {
+      "requirement_id": "SPEC-025-R001",
+      "spec_id": "SPEC-025",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/dist/install.sh:verify_bundled_fresh_code_signature()",
+        "phase3-binary/dist/install.sh:a fresh install from MACPROVIDER_BUNDLED_APP requires MACPROVIDER_VERSION",
+        "phase3-binary/dist/install.sh:MALIBU_CLI_CODE_REQUIREMENT="
+      ],
+      "tests": [
+        "phase3-binary/dist/test/install_bundled_repair.test.sh:F1 \u2014 fresh without an explicit version pin",
+        "phase3-binary/dist/test/install_bundled_repair.test.sh:F2 \u2014 fresh with a pin and valid Developer ID",
+        "phase3-binary/dist/test/install_bundled_repair.test.sh:F3 \u2014 an app bundle that fails",
+        "phase3-binary/dist/test/install_bundled_repair.test.sh:R1 \u2014 repair keeps its existing trust model"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1737",
+        "rationale": "SPEC-025 v0.30 (SPEC-025-R001): install.sh accepts MACPROVIDER_BUNDLED_APP outside repair with a version pin and Developer ID verification of the app and staged CLI. Tested with a codesign stub on Linux; real codesign on a signed Malibu.app has not been exercised, and Malibu does not yet invoke this path."
       }
     },
     {
@@ -6544,6 +6568,81 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1401",
         "rationale": "Repo installer now warns when MACPROVIDER_COORDINATOR_HOST disagrees with the chosen URL and documents HOST as watchdog-only. Requirement remains pending until the curl-channel get.malibu.tech/install.sh is republished from a release that includes this warning."
+      }
+    },
+    {
+      "requirement_id": "SPEC-003-R003",
+      "spec_id": "SPEC-003",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/dist/install.sh:fetch_release_asset()",
+        "phase3-binary/dist/install.sh:discover_latest_release_tag()",
+        "phase3-binary/dist/install.sh:mirror_latest_release_tag()",
+        "phase3-binary/dist/install.sh:validate_release_mirror_mode()"
+      ],
+      "tests": [
+        "scripts/test-install-version-pin.sh:m1-github-down-pkg-from-mirror",
+        "scripts/test-install-version-pin.sh:m3-mirror-signature-mismatch-fails",
+        "scripts/test-install-version-pin.sh:m9-coordinator-outranks-stale-latest",
+        "scripts/test-install-version-pin.sh:m12-rejects-"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1737",
+        "rationale": "SPEC-003 v0.12.0 (SPEC-003-R003): install.sh falls back to download.malibu.tech/releases for discovery and every release asset with the checksums.txt.sig chain unchanged. Implemented and covered by hermetic curl-stub tests; no fresh install on a Mac with GitHub blocked has been captured, and the Pearl nginx /releases/ route is not yet confirmed serving."
+      }
+    },
+    {
+      "requirement_id": "SPEC-003-R004",
+      "spec_id": "SPEC-003",
+      "state": "pending",
+      "implementation": [
+        "scripts/publish-release-mirror.sh:GitHub reports no sha256 digest for",
+        "scripts/publish-release-mirror.sh:releases are immutable",
+        "scripts/publish-release-mirror.sh:advance latest_binary_version first",
+        ".github/workflows/release.yml:bash scripts/publish-release-mirror.sh",
+        ".github/workflows/promote-acceptance-candidate.yml:bash scripts/publish-release-mirror.sh"
+      ],
+      "tests": [
+        "scripts/test-publish-release-mirror.sh:release-json-contract",
+        "scripts/test-publish-release-mirror.sh:tampered-download-refused",
+        "scripts/test-publish-release-mirror.sh:upload-refuses-to-patch-published-release",
+        "scripts/test-publish-release-mirror.sh:promote-unadvertised-refused"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1737",
+        "rationale": "SPEC-003 v0.12.0 (SPEC-003-R004): scripts/publish-release-mirror.sh mirrors each stable release byte-identically with release.json and gates latest.json on the coordinator advertisement. Implemented and tested with gh/curl/ssh stubs; no production release has been mirrored yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-003-R005",
+      "spec_id": "SPEC-003",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/dist/install.sh:BOOTSTRAP_PYTHON_MIRROR_URL=",
+        "phase3-binary/dist/install.sh:download failed or SHA-256 mismatch from every source",
+        "scripts/publish-release-mirror.sh:does not match the install.sh SHA-256 pin"
+      ],
+      "tests": [
+        "phase3-binary/dist/test/install_python3_clt_guard.test.sh:M github-down-mirror",
+        "phase3-binary/dist/test/install_python3_clt_guard.test.sh:M bad-mirror-bytes-fall-back",
+        "phase3-binary/dist/test/install_python3_clt_guard.test.sh:M github-down-bad-mirror",
+        "scripts/test-publish-release-mirror.sh:python-pin-staged"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "UNKNOWN",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1737",
+        "rationale": "SPEC-003 v0.12.0 (SPEC-003-R005): the pinned python-build-standalone bootstrap falls back to download.malibu.tech/python/ under the same SHA-256 pin. Implemented and unit-tested; the tarball is not yet published to Pearl and no CLT-stub Mac with GitHub blocked has been exercised."
       }
     },
     {
