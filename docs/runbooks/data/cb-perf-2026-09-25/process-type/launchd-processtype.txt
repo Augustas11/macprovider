@@ -1,0 +1,9 @@
+Standard pri= 20 {"L": 32, "rows": 1, "mode": "serial", "steady_window_s": 20.3, "steady_aggregate_chunks_per_s": 37.8, "chunks_per_request": [768]}
+Interactive: no listener
+Adaptive pri=  4 {"L": 32, "rows": 1, "mode": "serial", "steady_window_s": 34.5, "steady_aggregate_chunks_per_s": 22.3, "chunks_per_request": [768]}
+LABPERF_DONE
+# Same release binary (v1.8.192, b48320b2da9e4e3f), same lab config, :18080 --no-join.
+# Shell launch, normal priority: 37.7 tok/s (L=32), 37.5 (L=1536).
+# Shell launch under `taskpolicy -b` (pri 4): 22.1 tok/s.
+# Live :8080 provider (launchd live.malibu.provider, ProcessType Adaptive, pri 4): 22.4 (L=1536 serial), 19.9 (L=1536 batched), 22.3 and 23.4 (L=32 serial).
+# Lab binary with max_context_override 200000 (shell launch): 37.7 (L=32), 37.4 (L=1536) -> context setting is not the cause.

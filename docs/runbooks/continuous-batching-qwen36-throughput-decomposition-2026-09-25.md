@@ -133,6 +133,37 @@ The levers that move it:
 - **Enough concurrency to fill 8 rows.**
 - **Prefill/decode fairness,** so prompts do not stall other rows.
 
+## Production decodes at 20.5 tok/s because launchd runs it at background priority
+
+Production v1.8.192 measures about 20.5 tok/s single-stream decode, while the
+campaign serve measures 36.4. Data:
+[`data/cb-perf-2026-09-25/process-type/`](data/cb-perf-2026-09-25/process-type/).
+
+| Process | Priority | Decode tok/s (768 tokens, serial) |
+| --- | --- | --- |
+| Live `:8080` (launchd, `ProcessType` `Adaptive`) | 4 | 22.3–23.4 |
+| v1.8.192 release binary, shell launch | normal | 37.7 |
+| Same binary under `taskpolicy -b` | 4 | 22.1 |
+| Same binary, launchd `ProcessType` `Adaptive` | 4 | 22.3 |
+| Same binary, launchd `ProcessType` `Standard` | 20 | **37.8** |
+| Lab binary with the live `max_context_override` of 200000 | normal | 37.7 |
+
+What this rules out, and what it shows:
+
+- **Not the binary, the config, the context setting or the measurement.** The
+  release binary at normal priority decodes as fast as the campaign build.
+- **The cause is launchd priority.** launchd leaves an `Adaptive` job at
+  background priority unless XPC activity boosts it, and a network daemon never
+  gets that boost. The `Background` value that SPEC-003 specified behaves the
+  same way.
+- **Why priority matters here.** Decode issues many small Metal command
+  buffers per token, and background QoS throttles the CPU threads that encode
+  and commit them.
+
+Fix, SPEC-003 v0.11.4: the provider LaunchAgent uses `ProcessType` `Standard`
+in all three sources: `install.sh`, `launchd-plist-template.plist` and the
+signed compatibility-set template that auto-update renders.
+
 ## Next
 
 Prefill scheduling:
