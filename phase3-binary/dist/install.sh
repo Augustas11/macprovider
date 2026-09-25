@@ -9997,7 +9997,7 @@ sys.stdout.write(version if version.startswith("v") else "v" + version)
     if [[ "$installed_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
         && [ "$installed_tag" != "$advertised" ] \
         && version_at_least "$installed_tag" "$advertised"; then
-      log "Refusing the coordinator-advertised release $advertised: it would downgrade installed $installed_tag." >&2
+      log "Refusing the coordinator-advertised release $advertised: it would downgrade installed $installed_tag. To repair the installed release, rerun with MACPROVIDER_VERSION=$installed_tag." >&2
       return 1
     fi
   fi

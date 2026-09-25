@@ -63,6 +63,7 @@
       "id": "release-mirror",
       "owner_spec": "SPEC-003",
       "consumers": [
+        "SPEC-002",
         "SPEC-020"
       ],
       "status": "declared",
