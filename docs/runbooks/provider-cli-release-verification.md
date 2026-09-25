@@ -193,8 +193,9 @@ transport: `checksums.txt.sig` stays the only authority, so a wrong mirror byte
 fails closed, but it also strands those Macs. Stable releases run
 `scripts/publish-release-mirror.sh --tag <tag>` as a non-blocking
 post-publication step in `release.yml` and `promote-acceptance-candidate.yml`.
-It refuses any asset whose SHA-256 differs from GitHub's asset digest, writes
-`release.json`, and re-downloads every served file to compare hashes.
+It refuses any asset whose SHA-256 differs from GitHub's asset digest, writes the
+updater index at `releases/index/<tag>.json` (outside the tag directory, which
+holds only GitHub assets, including one named `release.json`), and re-downloads every served file to compare hashes.
 
 1. Confirm the step passed in the release run. If it failed, rerun it:
    ```bash

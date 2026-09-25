@@ -9,7 +9,7 @@ SPEC-003-R003: `install.sh` falls back to the byte-identical release mirror at
 release asset, with the embedded-key `checksums.txt.sig` chain unchanged as the
 only authority; without GitHub, discovery installs exactly the coordinator's
 advertised release. SPEC-003-R004: the mirror layout (`<tag>/<asset>`,
-`<tag>/release.json`) and its publication rules (byte identity against GitHub's
+`index/<tag>.json`) and its publication rules (byte identity against GitHub's
 asset digests, immutable tags, the Pearl updater never advertising an unmirrored
 release, `required_binary_version` never above `latest_binary_version`), owned
 here as the `release-mirror` authority domain. SPEC-003-R005: the pinned bootstrap python tarball has a
@@ -1196,16 +1196,18 @@ bytes. A repository fork MUST NOT use the mirror.
 
 **SPEC-003-R004 — Release mirror layout and publication.** For every stable
 release, `https://download.malibu.tech/releases/<tag>/<asset>` MUST be a
-byte-identical copy of every GitHub release asset of `<tag>`, and
-`<tag>/release.json` MUST be `{"tag_name", "draft": false, "prerelease", "assets":
+byte-identical copy of every GitHub release asset of `<tag>`, whatever its
+name (v1.8.123 ships an asset named `release.json`), and the updater index
+`https://download.malibu.tech/releases/index/<tag>.json`, outside the tag
+directory, MUST be `{"tag_name", "draft": false, "prerelease", "assets":
 [{"name", "browser_download_url"}]}` listing exactly those assets at their mirror
 URLs. Publication (`scripts/publish-release-mirror.sh`) MUST refuse any byte
 whose SHA-256 differs from GitHub's asset digest, MUST NOT modify a published
-`<tag>/` directory, and MUST re-download the served bytes to confirm them.
+`<tag>/` directory or index, and MUST re-download the served bytes to confirm them.
 Every published provider release MUST be on the mirror, byte-identical, before
 it is advertised: the Pearl updater MUST refuse to move
 `coordinator_advertised_version.latest_binary_version` to a release unless
-`<tag>/release.json` names that tag, `<tag>/checksums.txt` verifies under the
+`index/<tag>.json` names that tag, `<tag>/checksums.txt` verifies under the
 pinned release key, and every checksummed asset is present with a matching
 SHA-256 (`PEARL_UPDATER_RELEASE_MIRROR_GATE=required`, the default), and the
 coordinator MUST refuse a config whose `required_binary_version` exceeds

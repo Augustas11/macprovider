@@ -6,7 +6,7 @@
 # self-updater fall back to this fixed layout:
 #
 #   /releases/<tag>/<asset>      byte-identical copy of every GitHub release asset
-#   /releases/<tag>/release.json GitHub-API-shaped listing of exactly those assets
+#   /releases/index/<tag>.json   updater index: GitHub-API-shaped listing of exactly those assets
 #   /releases/latest.json        {"tag_name": "<tag>"}, operator hint only (installers
 #                                use the coordinator advertisement); --promote-latest
 #   /python/<asset>              the python-build-standalone tarball pinned by
@@ -116,12 +116,11 @@ assets = release.get("assets")
 if not isinstance(assets, list) or not assets:
     raise SystemExit("GitHub release has no assets")
 safe = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,199}$")
-reserved = {"release.json", "latest.json"}
 rows = []
 for asset in assets:
     name = asset.get("name") if isinstance(asset, dict) else None
-    if not isinstance(name, str) or not safe.fullmatch(name) or ".." in name or name in reserved:
-        raise SystemExit(f"unsafe or reserved asset name: {name!r}")
+    if not isinstance(name, str) or not safe.fullmatch(name) or ".." in name:
+        raise SystemExit(f"unsafe asset name: {name!r}")
     digest = asset.get("digest")
     match = re.fullmatch(r"sha256:([0-9a-f]{64})", digest) if isinstance(digest, str) else None
     if match is None:
@@ -198,7 +197,12 @@ mkdir -p "$release_dir"
 while IFS=$'\t' read -r name _digest _size; do
   cp -p "$files_dir/$name" "$release_dir/$name"
 done < "$manifest"
-python3 - "$manifest" "$TAG" "$prerelease" "$MIRROR_ORIGIN" "$release_dir/release.json" <<'PY'
+# The updater index lives outside the tag directory: a GitHub release may carry
+# an asset of any name (v1.8.123 ships the autotune feed as release.json), so
+# /releases/<tag>/ holds only byte-identical GitHub assets.
+mkdir -p "$out/releases/index"
+index_path="$out/releases/index/$TAG.json"
+python3 - "$manifest" "$TAG" "$prerelease" "$MIRROR_ORIGIN" "$index_path" <<'PY'
 import json
 import sys
 
@@ -290,6 +294,8 @@ for path in "$release_dir"/*; do
   malibu_download_scp "$path" "$VPS_USER@$VPS_HOST:$remote_stage/$name" >/dev/null
   release_specs+=" '$name:$(sha256_file "$path")'"
 done
+malibu_download_scp "$index_path" "$VPS_USER@$VPS_HOST:$remote_stage/.index.json" >/dev/null
+index_sha="$(sha256_file "$index_path")"
 malibu_download_scp "$out/python/$python_asset" "$VPS_USER@$VPS_HOST:$remote_stage/.python-$python_asset" >/dev/null
 latest_sha=""
 if [[ -f "$out/releases/latest.json" ]]; then
@@ -306,9 +312,10 @@ malibu_download_ssh "set -euo pipefail
   python_asset='$python_asset'
   python_sha='$python_sha'
   latest_sha='$latest_sha'
+  index_sha='$index_sha'
   check() { [ \"\$(sha256sum \"\$1\" | awk '{print \$1}')\" = \"\$2\" ] || { echo \"sha256 mismatch: \$1\" >&2; exit 1; }; }
   [ -d \"\$webroot\" ] || { echo \"missing webroot \$webroot\" >&2; exit 1; }
-  install -d -o root -g root -m 0755 \"\$webroot/releases\" \"\$webroot/python\"
+  install -d -o root -g root -m 0755 \"\$webroot/releases\" \"\$webroot/releases/index\" \"\$webroot/python\"
   count=0
   for spec in$release_specs; do
     name=\"\${spec%%:*}\"
@@ -331,6 +338,13 @@ malibu_download_ssh "set -euo pipefail
     done
     mv -T -- \"\$tmp\" \"\$target\"
     echo \"[pearl] mirrored \$count files to \$target\"
+  fi
+  check \"\$stage/.index.json\" \"\$index_sha\"
+  if [ -e \"\$webroot/releases/index/\$tag.json\" ]; then
+    check \"\$webroot/releases/index/\$tag.json\" \"\$index_sha\"
+  else
+    install -o root -g root -m 0644 \"\$stage/.index.json\" \"\$webroot/releases/index/.\$tag.json.new\"
+    mv -f -- \"\$webroot/releases/index/.\$tag.json.new\" \"\$webroot/releases/index/\$tag.json\"
   fi
   check \"\$stage/.python-\$python_asset\" \"\$python_sha\"
   if [ -e \"\$webroot/python/\$python_asset\" ]; then
@@ -372,6 +386,7 @@ for path in "$release_dir"/*; do
   name="$(basename "$path")"
   verify_served "$MIRROR_ORIGIN/releases/$TAG/$name" "$(sha256_file "$path")"
 done
+verify_served "$MIRROR_ORIGIN/releases/index/$TAG.json" "$index_sha"
 verify_served "$MIRROR_ORIGIN/python/$python_asset" "$python_sha"
 [[ -z "$latest_sha" ]] || verify_served "$MIRROR_ORIGIN/releases/latest.json" "$latest_sha"
 log "ok: $MIRROR_ORIGIN/releases/$TAG/ serves every GitHub asset byte-identically$([[ -z "$latest_sha" ]] || printf '; latest.json -> %s' "$TAG")"

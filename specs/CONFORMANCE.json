@@ -2361,7 +2361,9 @@
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:private func releaseByTag(",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:private func mirroredReleaseByTag(",
         "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:static func releaseMirrorURL(",
-        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:private func validateDownloadURL("
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:private func validateDownloadURL(",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:static func discoveryFailureAllowsCoordinatorFallback(",
+        "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:func coordinatorAdvertisedReleaseVersion("
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testTagResolvesFromMirrorWhenGitHubIsUnreachable",
@@ -2370,7 +2372,12 @@
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testMirrorReleaseForAnotherTagIsRejected",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testMirrorDisabledKeepsGitHubOnlyBehavior",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testReleaseMirrorURLRejectsNonReleaseTags",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testCustomReleasesAPINeverFallsBackToTheMirror"
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testCustomReleasesAPINeverFallsBackToTheMirror",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testMirrorIndexLivesOutsideTheTagDirectory",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testMirrorListingMayIncludeAnAssetNamedReleaseJSON",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testOnlyTransportFailuresFallBackToTheCoordinatorAdvertisedRelease",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testCoordinatorAdvertisedReleaseComesFromTheConfiguredCoordinator",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testCoordinatorWithoutAnAdvertisementIsRefused"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
@@ -2380,7 +2387,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1737",
-        "rationale": "SPEC-020 v0.1.20 (SPEC-020-R006): coordinator-triggered autoupdate and update --tag resolve a release tag from the SPEC-003-R004 release mirror when GitHub cannot answer; all signature and identity checks are unchanged. Known gap: signed discovery (R001, used by a plain update, the Malibu Update button, and the R005 recovery rail) stays GitHub-only, so a GitHub-blocked node updates only through the coordinator trigger or update --tag. Implemented and unit-tested; no physical autoupdate with GitHub blocked has been captured and the mirror is not yet populated."
+        "rationale": "SPEC-020 v0.1.20 (SPEC-020-R006): coordinator-triggered autoupdate and update --tag resolve a release tag from the SPEC-003-R004 release mirror when GitHub cannot answer; all signature and identity checks are unchanged. Signed discovery (R001) stays GitHub-only; a manual update or the Malibu Update button whose discovery is unreachable installs the coordinator-advertised release through the mirror, and the R005 recovery rail remains GitHub-only. Implemented and unit-tested; no physical autoupdate with GitHub blocked has been captured and the mirror is not yet populated."
       }
     },
     {
@@ -6619,7 +6626,8 @@
         "phase4-coordinator/internal/config/config.go:func (c Config) validateAdvertisedVersions("
       ],
       "tests": [
-        "scripts/test-publish-release-mirror.sh:release-json-contract",
+        "scripts/test-publish-release-mirror.sh:updater-index-contract",
+        "scripts/test-publish-release-mirror.sh:release-json-asset-mirrored-verbatim",
         "scripts/test-publish-release-mirror.sh:tampered-download-refused",
         "scripts/test-publish-release-mirror.sh:upload-refuses-to-patch-published-release",
         "scripts/test-publish-release-mirror.sh:promote-unadvertised-refused",

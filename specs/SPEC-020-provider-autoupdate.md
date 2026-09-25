@@ -419,7 +419,12 @@ host is never an authority. A GitHub 404 stays authoritative
 (`target_release_not_found`); when the mirror also fails, the GitHub error is
 reported. Signed release discovery (SPEC-020-R001) keeps its GitHub-only
 transport, because its immutability check is a GitHub attestation the mirror
-cannot provide.
+cannot provide. When a manual `update` cannot reach that discovery at all (a
+transport failure or a non-404 status; never a replayed, equivocating,
+expired, or invalid head), it MUST take its target from the configured
+coordinator's `/healthz` `recommended_binary_version` over the coordinator's
+own TLS endpoint, apply the persisted signed policy floor and revocations,
+and install that tag through the path above.
 
 R-1.5. The provider MUST attempt at most one autoupdate per coordinator session
 per target version. A reconnect that repeats the same target version MUST honor
@@ -1543,9 +1548,10 @@ Deferred to v0.3.0 or later:
 
 - v0.1.20 (2026-09-25): SPEC-020-R006 release mirror for tag resolution
   (#1737). Providers in mainland China cannot reach api.github.com or
-  github.com release assets, so coordinator-triggered autoupdate and
-  `update --tag` fall back to the byte-identical
-  `download.malibu.tech/releases/<tag>/` mirror. The signature, checksum,
+  github.com release assets, so coordinator-triggered autoupdate falls back to
+  the byte-identical `download.malibu.tech/releases/<tag>/` mirror, and a
+  manual `update` (also Malibu's Update button) whose GitHub discovery cannot be
+  reached installs the configured coordinator's advertised release through it. The signature, checksum,
   artifact-index, version, and code-identity checks are unchanged and remain
   the only authority. Discovery (R001) stays GitHub-only.
 - v0.1.19 (2026-09-08): Trust-table amendment: coordinator wire tier `trusted`

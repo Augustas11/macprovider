@@ -7,7 +7,7 @@ import XCTest
 final class SelfUpdateMirrorTests: XCTestCase {
     private let latest = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
     private let vTag = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/tags/v1.9.0")!
-    private let mirror = URL(string: "https://download.malibu.tech/releases/v1.9.0/release.json")!
+    private let mirror = URL(string: "https://download.malibu.tech/releases/index/v1.9.0.json")!
 
     override func tearDown() {
         MirrorMockURLProtocol.reset()
@@ -116,6 +116,75 @@ final class SelfUpdateMirrorTests: XCTestCase {
             XCTAssertEqual((error as? URLError)?.code, .cannotConnectToHost)
         }
         XCTAssertFalse(MirrorMockURLProtocol.requested.contains(mirror))
+    }
+
+    func testMirrorIndexLivesOutsideTheTagDirectory() throws {
+        // A release may ship its own asset named release.json (v1.8.123 does),
+        // so the updater index cannot share /releases/<tag>/.
+        XCTAssertEqual(
+            try SelfUpdate.releaseMirrorIndexURL(tag: "v1.8.123").absoluteString,
+            "https://download.malibu.tech/releases/index/v1.8.123.json"
+        )
+        XCTAssertThrowsError(try SelfUpdate.releaseMirrorIndexURL(tag: "../v1.8.123"))
+    }
+
+    func testMirrorListingMayIncludeAnAssetNamedReleaseJSON() async throws {
+        MirrorMockURLProtocol.failures = [vTag: URLError(.cannotConnectToHost)]
+        MirrorMockURLProtocol.responses = [
+            mirror: (200, mirrorRelease(assetURL: "https://download.malibu.tech/releases/v1.9.0/checksums.txt")),
+        ]
+        let release = try await update().resolveReleaseByTags(normalizedTarget: "1.9.0")
+        XCTAssertEqual(release.tagName, "v1.9.0")
+    }
+
+    // MARK: - manual update without GitHub discovery
+
+    func testOnlyTransportFailuresFallBackToTheCoordinatorAdvertisedRelease() {
+        XCTAssertTrue(SelfUpdate.discoveryFailureAllowsCoordinatorFallback(URLError(.cannotConnectToHost)))
+        XCTAssertTrue(SelfUpdate.discoveryFailureAllowsCoordinatorFallback(UpdateError.httpStatus(503)))
+        XCTAssertFalse(SelfUpdate.discoveryFailureAllowsCoordinatorFallback(UpdateError.httpStatus(404)))
+        XCTAssertFalse(SelfUpdate.discoveryFailureAllowsCoordinatorFallback(UpdateError.discoveryHeadReplay))
+        XCTAssertFalse(SelfUpdate.discoveryFailureAllowsCoordinatorFallback(UpdateError.discoveryHeadEquivocation))
+        XCTAssertFalse(SelfUpdate.discoveryFailureAllowsCoordinatorFallback(UpdateError.discoveryHeadInvalid("transport_absent")))
+    }
+
+    func testCoordinatorAdvertisedReleaseComesFromTheConfiguredCoordinator() async throws {
+        let healthz = URL(string: "https://coordinator.example/healthz")!
+        MirrorMockURLProtocol.responses = [
+            healthz: (200, Data(#"{"status":"ok","recommended_binary_version":"1.9.0"}"#.utf8)),
+        ]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MirrorMockURLProtocol.self]
+        let update = SelfUpdate(
+            currentVersion: "1.8.0",
+            releasesAPIURL: nil,
+            coordinatorURL: "wss://coordinator.example/ws/provider",
+            session: URLSession(configuration: configuration)
+        )
+
+        let advertised = try await update.coordinatorAdvertisedReleaseVersion()
+
+        XCTAssertEqual(advertised, "1.9.0")
+        XCTAssertEqual(MirrorMockURLProtocol.requested, [healthz])
+    }
+
+    func testCoordinatorWithoutAnAdvertisementIsRefused() async throws {
+        let healthz = URL(string: "https://coordinator.example/healthz")!
+        MirrorMockURLProtocol.responses = [healthz: (200, Data(#"{"status":"ok"}"#.utf8))]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MirrorMockURLProtocol.self]
+        let update = SelfUpdate(
+            currentVersion: "1.8.0",
+            releasesAPIURL: nil,
+            coordinatorURL: "wss://coordinator.example/ws/provider",
+            session: URLSession(configuration: configuration)
+        )
+
+        do {
+            _ = try await update.coordinatorAdvertisedReleaseVersion()
+            XCTFail("an empty advertisement was accepted")
+        } catch UpdateError.invalidReleaseVersion(_) {
+        }
     }
 
     func testReleaseMirrorURLRejectsNonReleaseTags() {

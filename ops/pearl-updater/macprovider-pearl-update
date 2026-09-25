@@ -1308,7 +1308,9 @@ class Updater:
     def assert_release_mirrored(self, version: str) -> None:
         """Refuse to advertise a provider release the mirror cannot serve.
 
-        The mirror copy must carry release.json for exactly this tag and a
+        The mirror must carry the updater index releases/index/<tag>.json for
+        exactly this tag (outside the tag directory, because a release may
+        ship its own asset named release.json) and, in releases/<tag>/, a
         checksums.txt whose signature verifies under the pinned release key,
         and every checksummed asset must be present with a matching SHA-256.
         Files are verified from private copies so nothing is written into
@@ -1324,8 +1326,8 @@ class Updater:
         if directory.is_symlink() or not directory.is_dir():
             raise UpdateError(f"release mirror has no {tag} directory; run scripts/publish-release-mirror.sh --tag {tag}")
 
-        def private_copy(name: str, into: Path, limit: int | None = None) -> Path:
-            source = directory / name
+        def private_copy(name: str, into: Path, limit: int | None = None, source: Path | None = None) -> Path:
+            source = source if source is not None else directory / name
             if source.is_symlink() or not source.is_file():
                 raise UpdateError(f"release mirror {tag} is missing {name}")
             if limit is not None and source.stat().st_size > limit:
@@ -1336,16 +1338,21 @@ class Updater:
 
         with tempfile.TemporaryDirectory(prefix="pearl-release-mirror-") as tmp:
             scratch = Path(tmp)
-            release_json = private_copy("release.json", scratch, 256 * 1024)
+            release_json = private_copy(
+                "index.json",
+                scratch,
+                256 * 1024,
+                source=self.config.release_mirror_root / "index" / f"{tag}.json",
+            )
             try:
                 listing = json.loads(release_json.read_text(encoding="utf-8"))
             except (ValueError, OSError) as exc:
-                raise UpdateError(f"release mirror {tag} release.json is invalid") from exc
+                raise UpdateError(f"release mirror {tag} updater index is invalid") from exc
             if not isinstance(listing, dict) or listing.get("tag_name") != tag:
-                raise UpdateError(f"release mirror {tag} release.json names another tag")
+                raise UpdateError(f"release mirror {tag} updater index names another tag")
             assets = listing.get("assets")
             if not isinstance(assets, list):
-                raise UpdateError(f"release mirror {tag} release.json has no asset list")
+                raise UpdateError(f"release mirror {tag} updater index has no asset list")
             listed = {
                 asset["name"]
                 for asset in assets
@@ -1359,7 +1366,7 @@ class Updater:
                 raise UpdateError(f"release mirror {tag} checksums.txt is empty")
             for name, digest in expected.items():
                 if name not in listed:
-                    raise UpdateError(f"release mirror {tag} release.json does not list {name}")
+                    raise UpdateError(f"release mirror {tag} updater index does not list {name}")
                 source = directory / name
                 if source.is_symlink() or not source.is_file() or sha256_file(source) != digest:
                     raise UpdateError(f"release mirror {tag} {name} is missing or does not match checksums.txt")

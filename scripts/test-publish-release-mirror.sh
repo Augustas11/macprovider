@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Hermetic tests for scripts/publish-release-mirror.sh (issue #1737): the
-# release.json contract, byte identity against GitHub's asset digests, the
-# immutable/reserved-name guards, and --promote-latest gating. gh, curl, ssh,
+# updater index contract, byte identity against GitHub's asset digests, the
+# immutable and unsafe-name guards, and --promote-latest gating. gh, curl, ssh,
 # and scp are PATH stubs; nothing touches the network or Pearl.
 set -euo pipefail
 
@@ -42,6 +42,9 @@ write_asset "checksums.txt" "abc  macprovider-cli-$TAG-darwin-arm64.tar.gz"
 write_asset "checksums.txt.sig" "signature"
 write_asset "Malibu-$TAG.dmg" "dmg bytes"
 write_asset "compatibility-artifact-index.json" "{}"
+# Real releases ship an asset named release.json (the autotune feed, v1.8.123).
+# It must be mirrored verbatim, which is why the updater index lives elsewhere.
+write_asset "release.json" '{"feed": "autotune"}'
 
 # write_release_api [prerelease] [draft] [extra python edit]
 write_release_api() {
@@ -107,10 +110,11 @@ run_stage() { # <out-dir> [args...]
     bash "$FAKE_ROOT/scripts/publish-release-mirror.sh" --tag "$TAG" --stage-only "$dir" "$@"
 }
 
-# 1 — happy path: exact release.json contract and byte-identical assets.
+# 1 — happy path: exact updater index contract (outside the tag directory) and
+# byte-identical assets, including a GitHub asset that is itself named release.json.
 write_release_api false
 run_stage "$TMP/out1" >/dev/null
-python3 - "$TMP/out1/releases/$TAG/release.json" "$TAG" "$FIXTURE/assets" <<'PY' || fail "release.json contract"
+python3 - "$TMP/out1/releases/index/$TAG.json" "$TAG" "$FIXTURE/assets" <<'PY' || fail "release.json contract"
 import json, os, sys
 path, tag, assets_dir = sys.argv[1:]
 raw = open(path, encoding="utf-8").read()
@@ -123,9 +127,12 @@ expected = {
     "assets": [{"name": n, "browser_download_url": f"https://download.malibu.tech/releases/{tag}/{n}"} for n in names],
 }
 assert doc == expected, doc
-assert raw == json.dumps(expected, indent=2, sort_keys=True) + "\n", "release.json is not deterministic"
+assert raw == json.dumps(expected, indent=2, sort_keys=True) + "\n", "updater index is not deterministic"
 PY
-ok "release-json-contract"
+ok "updater-index-contract"
+cmp -s "$FIXTURE/assets/release.json" "$TMP/out1/releases/$TAG/release.json" ||
+  fail "the GitHub asset named release.json was not mirrored verbatim"
+ok "release-json-asset-mirrored-verbatim"
 for asset in "$FIXTURE/assets"/*; do
   cmp -s "$asset" "$TMP/out1/releases/$TAG/$(basename "$asset")" || fail "mirrored $(basename "$asset") differs"
 done
@@ -141,7 +148,7 @@ ok "no-latest-without-promotion"
 write_release_api true
 run_stage "$TMP/out2" >/dev/null
 python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["prerelease"] is True' \
-  "$TMP/out2/releases/$TAG/release.json" || fail "prerelease flag not preserved"
+  "$TMP/out2/releases/index/$TAG.json" || fail "prerelease flag not preserved"
 ok "prerelease-preserved"
 
 expect_refusal() { # <name> <out-dir> [env assignments...] -- [args...]
@@ -153,7 +160,7 @@ expect_refusal() { # <name> <out-dir> [env assignments...] -- [args...]
     bash "$FAKE_ROOT/scripts/publish-release-mirror.sh" --tag "$TAG" --stage-only "$dir" "$@" >/dev/null 2>&1; then
     fail "$name: expected refusal"
   fi
-  [ ! -e "$dir/releases/$TAG/release.json" ] || fail "$name: release.json written despite refusal"
+  [ ! -e "$dir/releases/index/$TAG.json" ] || fail "$name: updater index written despite refusal"
   ok "$name"
 }
 
@@ -162,15 +169,13 @@ write_release_api false
 expect_refusal "tampered-download-refused" "$TMP/out3" MOCK_DOWNLOAD_TAMPER="Malibu-$TAG.dmg"
 # 4 — the downloaded set must equal the release's asset list exactly.
 expect_refusal "extra-download-refused" "$TMP/out4" MOCK_DOWNLOAD_EXTRA="unlisted.bin"
-# 5 — drafts, missing digests, unsafe or reserved names are refused.
+# 5 — drafts, missing digests, and unsafe names are refused.
 write_release_api false true
 expect_refusal "draft-refused" "$TMP/out5"
 write_release_api false false 'release["assets"][0].pop("digest")'
 expect_refusal "missing-digest-refused" "$TMP/out6"
 write_release_api false false 'release["assets"][0]["name"] = "../escape"'
 expect_refusal "unsafe-name-refused" "$TMP/out7"
-write_release_api false false 'release["assets"][0]["name"] = "release.json"'
-expect_refusal "reserved-name-refused" "$TMP/out8"
 write_release_api false false 'release["tag_name"] = "v1.8.199"'
 expect_refusal "tag-mismatch-refused" "$TMP/out9"
 
@@ -273,7 +278,7 @@ run_upload --promote-latest >/dev/null || fail "upload publish failed"
 for asset in "$FIXTURE/assets"/*; do
   cmp -s "$asset" "$WEBROOT/releases/$TAG/$(basename "$asset")" || fail "published $(basename "$asset") differs"
 done
-[ -f "$WEBROOT/releases/$TAG/release.json" ] || fail "release.json not published"
+cmp -s "$TMP/out1/releases/index/$TAG.json" "$WEBROOT/releases/index/$TAG.json" || fail "updater index not published"
 [ "$(cat "$WEBROOT/releases/latest.json")" = '{"tag_name": "v1.8.200"}' ] || fail "latest.json not published"
 cmp -s "$PY_BYTES" "$WEBROOT/python/cpython-3.12.14+20260901-aarch64-apple-darwin-install_only_stripped.tar.gz" ||
   fail "python tarball not published"

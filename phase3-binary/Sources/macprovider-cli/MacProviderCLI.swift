@@ -3518,6 +3518,7 @@ struct UpdateCommand: AsyncParsableCommand {
         let updater = SelfUpdate(
             currentVersion: CoordinatorClient.binaryVersion,
             releasesAPIURL: releasesAPIURL,
+            coordinatorURL: resolvedConfig?.coordinatorURL,
             providerID: resolvedConfig?.providerID
         )
         if hasAcceptanceOptions {

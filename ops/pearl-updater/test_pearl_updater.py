@@ -1540,9 +1540,12 @@ class PearlUpdaterTests(unittest.TestCase):
     def seed_release_mirror(self, tag: str = "v1.8.27", *, tamper: bool = False, listing_tag: str | None = None) -> Path:
         directory = self.config.release_mirror_root / tag
         directory.mkdir(parents=True)
+        # Real releases ship an asset named release.json (the autotune feed),
+        # so the updater index lives at releases/index/<tag>.json instead.
         assets = {
             f"macprovider-cli-{tag}-darwin-arm64.tar.gz": b"tarball",
             f"Malibu-{tag}.dmg": b"dmg",
+            "release.json": b'{"feed": "autotune"}',
         }
         for name, payload in assets.items():
             (directory / name).write_bytes(payload)
@@ -1554,7 +1557,9 @@ class PearlUpdaterTests(unittest.TestCase):
             capture_output=True,
         )
         names = [*assets, "checksums.txt", "checksums.txt.sig"]
-        (directory / "release.json").write_text(json.dumps({
+        index = self.config.release_mirror_root / "index" / f"{tag}.json"
+        index.parent.mkdir(parents=True, exist_ok=True)
+        index.write_text(json.dumps({
             "tag_name": listing_tag or tag,
             "draft": False,
             "prerelease": False,
@@ -1579,6 +1584,20 @@ class PearlUpdaterTests(unittest.TestCase):
     def test_release_mirror_gate_refuses_a_missing_mirror_copy(self):
         self.with_release_mirror_gate()
         with self.assertRaisesRegex(updater_module.UpdateError, "no v1.8.27 directory"):
+            self.updater.assert_release_mirrored("1.8.27")
+
+    def test_release_mirror_gate_verifies_a_release_json_asset_like_any_other(self):
+        self.with_release_mirror_gate()
+        directory = self.seed_release_mirror()
+        (directory / "release.json").write_text('{"tag_name": "v1.8.27", "assets": []}')
+        with self.assertRaisesRegex(updater_module.UpdateError, "release.json is missing or does not match"):
+            self.updater.assert_release_mirrored("1.8.27")
+
+    def test_release_mirror_gate_refuses_a_missing_index(self):
+        self.with_release_mirror_gate()
+        self.seed_release_mirror()
+        (self.config.release_mirror_root / "index" / "v1.8.27.json").unlink()
+        with self.assertRaisesRegex(updater_module.UpdateError, "is missing index.json"):
             self.updater.assert_release_mirrored("1.8.27")
 
     def test_release_mirror_gate_refuses_a_tampered_asset(self):
@@ -6800,9 +6819,10 @@ class PearlUpdaterTests(unittest.TestCase):
     def test_release_mirror_gate_ignores_non_string_asset_names(self):
         self.with_release_mirror_gate()
         directory = self.seed_release_mirror()
-        listing = json.loads((directory / "release.json").read_text())
+        index = self.config.release_mirror_root / "index" / "v1.8.27.json"
+        listing = json.loads(index.read_text())
         listing["assets"].append({"name": ["not", "a", "name"]})
-        (directory / "release.json").write_text(json.dumps(listing))
+        index.write_text(json.dumps(listing))
         self.updater.assert_release_mirrored("1.8.27")
 
     def test_trusted_inputs_reject_symlinks_hardlinks_and_writable_files(self):
