@@ -112,8 +112,9 @@ All of these are captured, with timestamps, in `preconditions.json` (below).
     key, token, or account secret: account and provider ids are
     HMAC-SHA256 fingerprints keyed by a random per-run salt (recorded,
     non-secret, as `candidate_identity.fingerprint_salt`), completions are
-    sha256 digests, each `preconditions.*.observed` note is printable ASCII
-    of at most 200 characters, and the secret scan passes.
+    sha256 digests, each `preconditions.*.observed` is structured facts (no
+    free text), no capture path component is a symlink, and the secret scan
+    passes.
 
 ## Capture layout
 
@@ -124,7 +125,7 @@ SQL results use `sqlite3 -readonly -json` (an empty result is an empty file).
 ```
 capture/
   run.json                  # operator-authored identifiers (below)
-  preconditions.json        # {"P1": {"status": "pass", "observed": "...", "checked_at": "...Z"}, ... "P8", "payout-disabled"}
+  preconditions.json        # {"P1": {"status": "pass", "observed": {<facts>}, "checked_at": "...Z"}, ... "P8", "payout-disabled"}
   gateway-holds.json        # {"before": {"held_reservations": 0, "missing_trailer_log_count": 0}, "after": {...}}
   pool/get-pool.json        # coordinator-cli trust-pool-admin get-pool output
   pool/manifest-accepted.json  # the manifest_accepted event submitted (sign-manifest --out)
@@ -146,6 +147,13 @@ capture/
   controls/<name>/route_snapshots.json
   controls/<name>/ledger.json
 ```
+
+`observed` is 1-8 named facts, never free text: a name is a snake_case word
+that names no credential (`key`, `token`, `secret`, `auth`, ... are refused);
+a value is a boolean, a non-negative integer, or a short token with no
+whitespace and no hex/base64 run of 20 or more characters, for example
+`{"gateway_schema": 14, "gateway_version": "v1.8.200", "contains_commit": "747557cc"}`.
+Identities stay in `run.json` and reach evidence only as salted fingerprints.
 
 `run.json`:
 

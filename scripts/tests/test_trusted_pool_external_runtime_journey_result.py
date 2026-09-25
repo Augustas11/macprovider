@@ -93,7 +93,7 @@ def make_capture(root: Path) -> Path:
         "pool_operator_account_id": OPERATOR_ACCOUNT,
     })
     write(capture / "preconditions.json", {
-        key: {"status": "pass", "observed": f"{key} ok", "checked_at": "2026-09-26T00:00:00Z"}
+        key: {"status": "pass", "observed": {"passed": True, "gateway_schema": 14, "build": "v1.8.200", "contains_commit": "747557cc"}, "checked_at": "2026-09-26T00:00:00Z"}
         for key in ("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "payout-disabled")
     })
     write(capture / "gateway-holds.json", {
@@ -386,20 +386,6 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         path.write_text(path.read_text().replace("data: [DONE]\n\n", ""))
         self.assert_rejected("[DONE]")
 
-    def test_rejects_secret_in_free_text(self) -> None:
-        path = self.capture / "preconditions.json"
-        value = json.loads(path.read_text())
-        value["P1"]["observed"] = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123"
-        path.write_text(json.dumps(value))
-        self.assert_rejected("secret")
-
-    def test_rejects_raw_account_in_free_text(self) -> None:
-        path = self.capture / "preconditions.json"
-        value = json.loads(path.read_text())
-        value["P5"]["observed"] = f"buyer {BUYER} ready"
-        path.write_text(json.dumps(value))
-        self.assert_rejected("raw")
-
     def test_fingerprints_are_salted_per_run(self) -> None:
         # #1690 review LOW: a bare sha256 of a known id links runs and is
         # reversible by dictionary; fingerprints are HMAC-SHA256 under a
@@ -420,16 +406,55 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         del signed["candidate_identity"]["fingerprint_salt"]
         self.assertTrue(any("candidate_identity" in error for error in validate(signed)))
 
-    def test_rejects_unbounded_or_control_observed_text(self) -> None:
-        # #1690 review LOW: operator free text copied into signed evidence
-        # is bounded and printable ASCII.
-        for bad in ("x" * 201, "line one\nline two", "tab\there", "caf\u00e9"):
+    def set_observed(self, key: str, observed) -> None:
+        path = self.capture / "preconditions.json"
+        value = json.loads(path.read_text())
+        value[key]["observed"] = observed
+        path.write_text(json.dumps(value))
+
+    def test_rejects_free_text_observed(self) -> None:
+        # codex R1: observed is structured facts, never free text.
+        for bad in ("P1 ok", "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123", f"buyer {BUYER} ready", [], {}):
             with self.subTest(bad=bad):
-                path = self.capture / "preconditions.json"
-                value = json.loads(path.read_text())
-                value["P2"]["observed"] = bad
-                path.write_text(json.dumps(value))
+                self.set_observed("P1", bad)
+                self.assert_rejected("preconditions.P1.observed")
+
+    def test_rejects_credential_like_observed_facts(self) -> None:
+        # codex R1: OPERATOR_KEY=<64 hex>-style credentials, prompts and
+        # completions cannot ride in a fact name or value.
+        for bad in (
+            {"operator_key": "a" * 64},
+            {"value": "OPERATOR_KEY=" + "a" * 64},
+            {"value": "0123456789abcdef0123456789abcdef"},
+            {"value": "c2stbGl2ZS1BQkNERUZHSElKS0xNTk9Q"},
+            {"value": "Tell me a story about a dragon"},
+            {"bearer": True},
+            {"count": -1},
+            {"Value": 1},
+            {f"f{i}": 1 for i in range(9)},
+        ):
+            with self.subTest(bad=bad):
+                self.set_observed("P2", bad)
                 self.assert_rejected("preconditions.P2.observed")
+
+    def test_rejects_symlinked_capture_parent(self) -> None:
+        # codex R1: every component of the capture path is checked, not only
+        # the leaf directory.
+        real_parent = self.root / "real-parent"
+        real_parent.mkdir()
+        moved = real_parent / "capture"
+        self.capture.rename(moved)
+        link_parent = self.root / "link-parent"
+        link_parent.symlink_to(real_parent, target_is_directory=True)
+        self.capture = link_parent / "capture"
+        self.assert_rejected("symlinked path component")
+
+    def test_rejects_symlinked_capture_subdirectory(self) -> None:
+        requests = self.capture / "requests"
+        elsewhere = self.root / "elsewhere-requests"
+        requests.rename(elsewhere)
+        requests.symlink_to(elsewhere, target_is_directory=True)
+        self.assert_rejected("absent or unsafe")
 
     def test_builder_requirement_ids_are_bounded(self) -> None:
         evidence = {"requirement_ids": ["SPEC-022-R012", "SPEC-022-R007"]}
