@@ -18,6 +18,18 @@ import pathlib
 def classify(req, check, obs, ev=None):
     o = obs if isinstance(obs, dict) else {}
     reasons = {v.get("reason") for v in (ev or {}).get("verdicts", [])}
+    fin = (ev or {}).get("finality") or {}
+    # Post-fix (#1690 bench 97b22eb3) designed outcomes, counted apart:
+    # F4 fix bills a disconnected buyer only what reached it while finality
+    # keeps the gateway-delivered count; F5 fix closes a verified receipt on
+    # a quarantined credit as zero_settled and refunds both sides.
+    if check == "debit_eq_settled" and req["behaviour"] == "disconnect" and o.get("basis", "").startswith("finality") \
+            and (o.get("gateway") or {}).get("status") == "settled" and o["debit"][1] < o["settled"][1]:
+        return "E2E-F4-fixed(by-design gap)"
+    if fin.get("reason") == "verified_receipt_credit_quarantined" and check in ("delivered_not_free", "buyer_usage_eq_debit"):
+        return "E2E-F5-fixed(zero_settled refund)"
+    if "output_hash_mismatch" in reasons and req["engine"] == "native" and req["shape"] == "long" and check in ("delivered_not_free", "buyer_usage_eq_debit"):
+        return "E2E-F13(new: native long output_hash_mismatch)"
     if "rotate" in req["label"] and "missing_receipt_deadline_elapsed" in reasons and check in ("delivered_not_free", "buyer_usage_eq_debit"):
         return "E2E-F9"
     if "output_hash_mismatch" in reasons and check in ("delivered_not_free", "buyer_usage_eq_debit", "stream_complete"):
