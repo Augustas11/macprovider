@@ -430,6 +430,9 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
             {"value": "Tell me a story about a dragon"},
             {"bearer": True},
             {"count": -1},
+            {"count": 2**53 + 1},
+            {"value": "v1.8.200.1234567:89ab"},
+            {"value": "a.b.c.d.e.f.g.h.i.j.k"},
             {"Value": 1},
             {f"f{i}": 1 for i in range(9)},
         ):
@@ -455,6 +458,34 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         requests.rename(elsewhere)
         requests.symlink_to(elsewhere, target_is_directory=True)
         self.assert_rejected("absent or unsafe")
+
+    def test_observed_facts_accept_bounds(self) -> None:
+        # The largest exact integer and a 19-character token still pass.
+        self.set_observed("P3", {"count": 2**53, "version": "v1.8.200-rc.1:abcd1"})
+        self.build()
+
+    def test_payload_revalidates_committed_evidence(self) -> None:
+        # #1690 review L-6: payload signs committed evidence, which may have
+        # been edited after capture; it re-runs the redaction checks.
+        import inspect
+
+        self.assertIn("revalidate_committed_evidence(evidence)", inspect.getsource(BUILDER.build_payload))
+        evidence = self.build()
+        BUILDER.revalidate_committed_evidence(evidence)
+        for label, mutate in (
+            ("free text observed", lambda e: e["preconditions"]["P1"].__setitem__("observed", "OPERATOR_KEY=" + "a" * 64)),
+            ("credential fact", lambda e: e["preconditions"]["P2"].__setitem__("observed", {"token": "abc"})),
+            ("raw identity field", lambda e: e["pool"].__setitem__("buyer_account_id", BUYER)),
+            ("raw id as a fingerprint", lambda e: e["pool"].__setitem__("creator_account_fingerprint", OPERATOR_ACCOUNT)),
+            ("raw member", lambda e: e["pool"].__setitem__("member_fingerprints", [MEMBER])),
+            ("raw provider", lambda e: e["requests"]["nonstream"]["response"].__setitem__("provider_fingerprint", MEMBER)),
+        ):
+            with self.subTest(label=label):
+                bad = json.loads(json.dumps(evidence))
+                mutate(bad)
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+                    BUILDER.revalidate_committed_evidence(bad)
 
     def test_builder_requirement_ids_are_bounded(self) -> None:
         evidence = {"requirement_ids": ["SPEC-022-R012", "SPEC-022-R007"]}

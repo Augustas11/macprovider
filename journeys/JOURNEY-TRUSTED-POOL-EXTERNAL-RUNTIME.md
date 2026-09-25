@@ -150,10 +150,12 @@ capture/
 
 `observed` is 1-8 named facts, never free text: a name is a snake_case word
 that names no credential (`key`, `token`, `secret`, `auth`, ... are refused);
-a value is a boolean, a non-negative integer, or a short token with no
-whitespace and no hex/base64 run of 20 or more characters, for example
+a value is a boolean, an integer from 0 to 2^53, or a token of at most 19
+characters (letters, digits and `._:+-`, no whitespace), for example
 `{"gateway_schema": 14, "gateway_version": "v1.8.200", "contains_commit": "747557cc"}`.
 Identities stay in `run.json` and reach evidence only as salted fingerprints.
+The `payload` step re-checks the committed evidence the same way before it
+signs.
 
 `run.json`:
 
