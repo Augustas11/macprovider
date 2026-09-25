@@ -314,7 +314,7 @@ allowlists):
    credited.
    Record the first catalog release that publishes a gguf artifact with a
    `huggingface_revision` source (it carries `file_path`) or lists
-   `mlxlm_loopback` in an `allowed_runtime_sources`. From that release on, a
+   `mlxlm_loopback` or `omlx_loopback` in an `allowed_runtime_sources`. From that release on, a
    coordinator older than this release cannot start on the served feed; the
    coordinator rollback below has to replace the feed first.
 
@@ -380,7 +380,8 @@ settled, so traffic stops and holds drain first:
    this release strict-decodes the catalog artifact feed and exits at
    startup on `json: unknown field "file_path"` (a gguf artifact with a
    `huggingface_revision` source) or on `runtime_format "mlx_safetensors" may
-   not allow runtime source "mlxlm_loopback"`, which would leave no
+   not allow runtime source "mlxlm_loopback"` (or `"omlx_loopback"`), which
+   would leave no
    coordinator. The check fails closed: it parses the config (YAML or JSON,
    quoted or not) instead of matching text, and any error, a missing
    `python3`/`yaml`, a relative or unreadable path, or no `VERDICT` line
@@ -415,7 +416,7 @@ settled, so traffic stops and holds drain first:
            raise ValueError(f"catalog_artifacts_path is not a clean absolute path: {path!r}")
        with open(path, encoding="utf-8") as f:
            body = f.read()
-       hits = body.count('"file_path"') + body.count("mlxlm_loopback")
+       hits = body.count('"file_path"') + body.count("mlxlm_loopback") + body.count("omlx_loopback")
        print(f"feed: {path}")
        print(f"older-coordinator blockers: {hits}")
        print("VERDICT: " + ("clean" if hits == 0 else "replace-feed"))
@@ -428,7 +429,7 @@ settled, so traffic stops and holds drain first:
    echo "exit: $?"
    code=$(curl -sS -o /tmp/served-catalog-artifacts.json -w '%{http_code}' https://coordinator.malibu.tech/v1/catalog-artifacts) || code=error
    echo "served: $code"
-   [ "$code" != 200 ] || grep -c -e '"file_path"' -e mlxlm_loopback /tmp/served-catalog-artifacts.json
+   [ "$code" != 200 ] || grep -c -e '"file_path"' -e mlxlm_loopback -e omlx_loopback /tmp/served-catalog-artifacts.json
    ```
 
    Read it strictly; anything not listed here is STOP (do not roll back the
@@ -452,7 +453,8 @@ settled, so traffic stops and holds drain first:
       `phase3-binary/catalog/autotune/autotune-artifacts-source.json`: delete
       every `gguf` artifact whose `source_ref.kind` is `huggingface_revision`
       (and repoint any `primary_artifact_id` that named one), and remove
-      `mlxlm_loopback` from every `allowed_runtime_sources`. Leave
+      `mlxlm_loopback` and `omlx_loopback` from every
+      `allowed_runtime_sources`. Leave
       `ollama_library_tag` gguf artifacts and `mlx_cache` as they are; the
       older coordinator accepts both.
    2. Cut the release exactly as `docs/runbooks/catalog-artifact-feed-release.md`
@@ -464,7 +466,7 @@ settled, so traffic stops and holds drain first:
    3. Deploy that catalog release to Pearl through the normal catalog deploy
       and re-run the check above against the new
       `catalog_artifacts_path`; also confirm the served bytes:
-      `curl -s https://coordinator.malibu.tech/v1/catalog-artifacts | grep -c -e '"file_path"' -e mlxlm_loopback`
+      `curl -s https://coordinator.malibu.tech/v1/catalog-artifacts | grep -c -e '"file_path"' -e mlxlm_loopback -e omlx_loopback`
       prints `0`.
    Then roll back the coordinator binary and confirm it started (`/healthz`
    reports the older version and `/v1/catalog-artifacts` answers 200).
