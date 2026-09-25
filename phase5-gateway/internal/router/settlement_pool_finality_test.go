@@ -111,3 +111,70 @@ func TestFinalityTokenTotalsSettlementCapableSources(t *testing.T) {
 		}
 	}
 }
+
+// Review R4 LOW-2: when a delivered attempt's evidence failed and the
+// coordinator's refund trailer never reached the gateway, the coordinator
+// finality lookup reports the quarantined credit as closed quarantined, and
+// the reconciler refunds the held reservation instead of holding it forever.
+func TestSettlementReconcileRefundsUndeliveredEvidenceQuarantine(t *testing.T) {
+	const (
+		accountID         = "acct_undelivered_quarantine"
+		requestID         = "req_undelivered_quarantine"
+		internalRequestID = "internal_undelivered_quarantine"
+	)
+	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(coordinatorRequestSettlementFinality{
+			RequestID:                 requestID,
+			RequiredInternalRequestID: internalRequestID,
+			Mode:                      "enforce",
+			PolicyVersion:             settlementPolicyVersion,
+			Outcome:                   "quarantined",
+			ReceiptResult:             "inconclusive",
+			Reason:                    "settlement_record_failed_after_delivery",
+			Closed:                    true,
+			ModeScopeComplete:         true,
+			QuarantinedAttempts:       1,
+		})
+	}))
+	defer coordinator.Close()
+	h, store, dbPath, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = coordinator.URL
+		cfg.Coordinator.OperatorKey = "operator-key"
+		cfg.Coordinator.ServiceToken = "service-token"
+	}, WithHTTPClient(coordinator.Client()))
+	ctx := context.Background()
+	createdAt := fixedNow()
+	if err := store.CreateAccount(ctx, storage.Account{
+		AccountID: accountID, Status: "active", QuotaClass: "default", ConcurrencyClass: "default", CreatedAt: createdAt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	window := createdAt.UTC().Format("2006-01-02")
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: accountID, RequestID: requestID, WindowDate: window,
+		RequestedTokens: 10, DailyQuota: 100, CreatedAt: createdAt, ExpiresAt: createdAt.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkReservationSettlementHold(ctx, accountID, requestID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveSettlementFallbackCandidate(ctx, storage.SettlementFallbackCandidate{
+		AccountID: accountID, RequestID: requestID, RequiredInternalRequestID: internalRequestID,
+		ReservationCreatedAt: createdAt, WindowDate: window, PromptTokens: 2, CompletionTokens: 3,
+		MaxTotalTokens: 10, TokenSource: "gateway_estimated", Outcome: "ok",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/settlement/reconcile?limit=10", nil)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	got := gatewaySettlementSnapshot(t, dbPath, accountID)
+	if got.refundedRows != 1 || got.usageRows != 0 || got.activeRows != 0 {
+		t.Fatalf("snapshot=%+v, want the held reservation refunded", got)
+	}
+}

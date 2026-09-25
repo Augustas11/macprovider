@@ -50,11 +50,12 @@ const (
 	settlementRecordFailedAfterDeliveryReason = "settlement_record_failed_after_delivery"
 	// settlementOutputMissingAfterCreditReason is the sibling reason when the
 	// credit row committed but the settlement evidence write failed
-	// transiently and was marked missing: no finality can ever verify it.
+	// transiently (marked missing, or the mark itself failed): no finality
+	// can ever verify it.
 	settlementOutputMissingAfterCreditReason = "settlement_output_missing_after_credit"
-	// settlementFinalityUnsetReason is the reason on the refund
-	// finalizeNegotiatedSettlementFinality sends when a negotiated
-	// non-streaming response reached the end of the handler without a tuple.
+	// settlementFinalityUnsetReason names a negotiated 200, streaming or not,
+	// that reached the end of the handler without a tuple
+	// (finalizeNegotiatedSettlementFinality).
 	settlementFinalityUnsetReason = "settlement_finality_unset_after_delivery"
 	internalRequestIDHeader       = "X-MacProvider-Internal-Request-ID"
 )
@@ -190,7 +191,7 @@ func setNonStreamingSettlementFinality(dst http.Header, rec *billingRecorder, st
 	if rec == nil || !rec.settlementFinalityMACActive {
 		return
 	}
-	if rec.settlementOutputMissingMarked {
+	if rec.settlementOutputMissingAfterCredit {
 		// The credit committed but its settlement evidence did not, so no
 		// finality can ever verify the attempt.
 		setSettlementEvidenceFailedFinality(dst, rec, settlementOutputMissingAfterCreditReason)
@@ -224,12 +225,20 @@ func finalizeNegotiatedSettlementFinality(dst http.Header, rec *billingRecorder)
 	if rec == nil || !rec.settlementFinalityMACActive {
 		return
 	}
+	// Only a 200 carries settleable finality: the gateway settles a non-200
+	// from its headers and never reads its trailers, and a request whose
+	// earlier attempt billed a 502 must not gain a refund tuple here.
+	if rec.terminal != nil {
+		if claim, ok := rec.terminal.claimedBuyer(); ok && claim.Status != http.StatusOK {
+			return
+		}
+	}
 	for _, name := range settlementOutcomeHeaderNames {
 		if dst.Get(name) != "" {
 			return
 		}
 	}
-	if rec.settlementOutputMissingMarked {
+	if rec.settlementOutputMissingAfterCredit {
 		setSettlementEvidenceFailedFinality(dst, rec, settlementOutputMissingAfterCreditReason)
 		return
 	}
@@ -239,14 +248,17 @@ func finalizeNegotiatedSettlementFinality(dst http.Header, rec *billingRecorder)
 // setSettlementEvidenceFailedFinality settles an attempt whose buyer
 // response was delivered but whose settlement evidence failed, so buyer and
 // provider agree without an operator:
-//   - enforce route snapshot: an enforce credit is payable only once a
-//     verified verdict and attempt output exist (spec022_payable_request_
-//     credits), which this attempt can no longer reach; the credit is also
-//     quarantined in case a late verdict would otherwise make it payable,
-//     and the buyer gets a signed closed refund. Neither side is paid.
-//   - observe mode or no route snapshot: the credit stays payable as every
-//     observe credit is, so the buyer gets the signed legacy tuple and is
-//     debited locally, the #1675 behaviour. Both sides are paid.
+//   - enforce route mode (the attempt's snapshot, or the enforce policy when
+//     store pressure skipped the snapshot): an enforce credit is payable only
+//     once a verified verdict and attempt output exist
+//     (spec022_payable_request_credits), which this attempt can no longer
+//     reach; the credit is also quarantined, which the finality lookup then
+//     reports as closed quarantined, and the buyer gets a signed closed
+//     refund. Neither side is paid.
+//   - observe mode, or no snapshot and no enforce policy: the credit stays
+//     payable as every observe credit is, so the buyer gets the signed
+//     legacy tuple and is debited locally, the #1675 behaviour. Both sides
+//     are paid.
 //
 // Either way the error log names the attempt for operator review.
 func setSettlementEvidenceFailedFinality(dst http.Header, rec *billingRecorder, reason string) {

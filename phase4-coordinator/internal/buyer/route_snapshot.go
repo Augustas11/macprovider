@@ -71,6 +71,9 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	b.settlementPolicyVersion = ""
 	b.settlementRouteSnapshot = nil
 	b.settlementRouteSnapshotDigest = ""
+	// A new dispatch: the delivered attempt's own recordRow names the credit
+	// an evidence failure may quarantine, never an earlier attempt's.
+	b.hasLastProviderAttempt = false
 
 	reportedHash := strings.TrimSpace(provider.ModelHash)
 	expectedHash := strings.TrimSpace(provider.ExpectedModelHash)

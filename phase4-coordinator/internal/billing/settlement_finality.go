@@ -381,18 +381,37 @@ func (s *Store) requestSettlementAttemptsWithoutVerdict(ctx context.Context, acc
 	for _, verdict := range verdicts {
 		covered[attemptKey{attemptN: verdict.attemptN, providerID: verdict.providerID}] = struct{}{}
 	}
+	// An attempt with no attempt output has no finality to wait for, unless
+	// the coordinator quarantined its credit after a delivered response's
+	// evidence failed (UndeliveredSettlementQuarantineReasons, SPEC-022
+	// v0.2.2): that attempt is closed quarantined, so a gateway that never
+	// received the refund trailer refunds instead of holding forever.
 	rows, err := s.db.QueryContext(ctx, `
 SELECT rs.attempt_n, rs.provider_id,
-       sao.terminal_state_ts_unix_ms + (rs.pending_deadline_seconds * 1000),
-       rs.route_snapshot_policy_version, rs.route_snapshot_mode
+       COALESCE(sao.terminal_state_ts_unix_ms + (rs.pending_deadline_seconds * 1000), 0),
+       rs.route_snapshot_policy_version, rs.route_snapshot_mode,
+       sao.request_id IS NOT NULL,
+       COALESCE((
+           SELECT lrc.quarantine_reason
+             FROM ledger_request_credits lrc
+            WHERE lrc.request_id = rs.request_id
+              AND lrc.provider_id = rs.provider_id
+              AND lrc.settlement_account_scope_hash = ?
+              AND lrc.quarantined = 1
+              AND lrc.quarantine_reason IN (?, ?, ?)
+            ORDER BY lrc.attempt_n DESC
+            LIMIT 1), '')
   FROM settlement_route_snapshots rs
-  JOIN settlement_attempt_outputs sao
+  LEFT JOIN settlement_attempt_outputs sao
     ON sao.account_scope = rs.account_scope
    AND sao.request_id = rs.request_id
    AND sao.attempt_n = rs.attempt_n
    AND sao.provider_id = rs.provider_id
  WHERE rs.account_scope = ? AND rs.request_id = ?
- ORDER BY rs.attempt_n ASC, rs.provider_id ASC`, accountScope, requestID)
+ ORDER BY rs.attempt_n ASC, rs.provider_id ASC`,
+		SettlementAccountScopeHash(accountScope),
+		UndeliveredSettlementQuarantineReasons[0], UndeliveredSettlementQuarantineReasons[1], UndeliveredSettlementQuarantineReasons[2],
+		accountScope, requestID)
 	if err != nil {
 		return nil, err
 	}
@@ -400,15 +419,28 @@ SELECT rs.attempt_n, rs.provider_id,
 	var missing []requestSettlementVerdictRow
 	for rows.Next() {
 		var row requestSettlementVerdictRow
-		if err := rows.Scan(&row.attemptN, &row.providerID, &row.pendingDeadlineUnixMS, &row.policyVersion, &row.mode); err != nil {
+		var hasOutput bool
+		var quarantineReason string
+		if err := rows.Scan(&row.attemptN, &row.providerID, &row.pendingDeadlineUnixMS, &row.policyVersion, &row.mode, &hasOutput, &quarantineReason); err != nil {
 			return nil, err
 		}
 		if _, ok := covered[attemptKey{attemptN: row.attemptN, providerID: row.providerID}]; ok {
 			continue
 		}
-		row.receiptResult = SettlementReceiptResultInconclusive
-		row.settlementOutcome = SettlementOutcomePending
-		row.reason = "receipt_verdict_pending"
+		switch {
+		case hasOutput:
+			row.receiptResult = SettlementReceiptResultInconclusive
+			row.settlementOutcome = SettlementOutcomePending
+			row.reason = "receipt_verdict_pending"
+		case quarantineReason != "":
+			row.receiptResult = SettlementReceiptResultInconclusive
+			row.settlementOutcome = SettlementOutcomeQuarantined
+			row.reason = quarantineReason
+			row.closed = true
+			row.pendingDeadlineUnixMS = 0
+		default:
+			continue
+		}
 		missing = append(missing, row)
 	}
 	return missing, rows.Err()

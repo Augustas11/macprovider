@@ -69,6 +69,19 @@ func TestEveryCoordinatorChatBuilderNegotiatesSignedFinality(t *testing.T) {
 		})
 	}
 	const chatRoute = "chat/completions"
+	// Builders whose URL is computed rather than a literal or constant on the
+	// coordinator buyer URL. Each was checked by hand to target another
+	// coordinator route (receipts, settlement finality) or a non-coordinator
+	// host; a new computed URL fails until it is reviewed and listed here.
+	unresolvedAllowlist := map[string]bool{
+		"disclosure.go:coordinatorRoutingMetadataFresh":                     true, // GET operator /internal/routing
+		"public_feeds.go:fetchPublicFeed":                                   true, // GET public stats and rate-card feeds
+		"receipts.go:fetchCoordinatorBuyerReceipt":                          true, // GET /internal/settlement/receipts
+		"server.go:handleStickyDelete":                                      true, // DELETE operator /internal/sticky
+		"server.go:statusFromPoolz":                                         true, // GET operator /poolz
+		"settlement_reconcile.go:fetchCoordinatorRequestSettlementFinality": true, // GET /internal/settlement/finality
+	}
+	seenAllowlisted := map[string]bool{}
 	callsHelper := func(body ast.Node) bool {
 		found := false
 		ast.Inspect(body, func(n ast.Node) bool {
@@ -212,6 +225,16 @@ func TestEveryCoordinatorChatBuilderNegotiatesSignedFinality(t *testing.T) {
 					}
 				}
 			}
+			if !buyer && (len(idents) > 0 || opaque) {
+				key := filepath.Base(pos.Filename) + ":"
+				if decl != nil {
+					key += decl.Name.Name
+				}
+				if !unresolvedAllowlist[key] {
+					t.Errorf("%s: request URL is not a resolved constant (%s); review it and add it to the allowlist", pos, key)
+				}
+				seenAllowlisted[key] = true
+			}
 			if !buyer && targetsChat {
 				t.Errorf("%s: coordinator chat route built without the coordinator buyer URL", pos)
 				return true
@@ -224,6 +247,11 @@ func TestEveryCoordinatorChatBuilderNegotiatesSignedFinality(t *testing.T) {
 			}
 			return true
 		})
+	}
+	for key := range unresolvedAllowlist {
+		if !seenAllowlisted[key] {
+			t.Errorf("allowlisted builder %s no longer exists; remove it", key)
+		}
 	}
 	if chatBuilders < 2 {
 		t.Fatalf("found %d coordinator chat builders, want at least the chat proxy and relay-blind ones", chatBuilders)

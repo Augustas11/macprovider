@@ -16,6 +16,14 @@ func SetSettlementOutputWriteErrForTest(err error) (restore func()) {
 	return func() { settlementOutputWriteErrForTest = prev }
 }
 
+// SetMarkSettlementOutputMissingErrForTest makes the missing-output mark
+// fail.
+func SetMarkSettlementOutputMissingErrForTest(err error) (restore func()) {
+	prev := markSettlementOutputMissingErrForTest
+	markSettlementOutputMissingErrForTest = err
+	return func() { markSettlementOutputMissingErrForTest = prev }
+}
+
 // CancelSettlementOutputWritesForTest cancels the context of the first n
 // settlement-output write tries, a transient failure after the credit.
 func CancelSettlementOutputWritesForTest(n int) (restore func()) {

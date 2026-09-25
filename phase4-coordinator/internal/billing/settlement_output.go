@@ -267,10 +267,10 @@ LIMIT 1`, accountScope, requestID, attemptN, providerID).Scan(&one)
 
 // MarkSettlementOutputMissing records that a credited request has no
 // settlement evidence. The credit amount is left unchanged and the row stays
-// unquarantined so a later evidence write can still settle it. Callers filter
-// on this reason when measuring provider revenue. It reports whether a
-// credited row was marked: an uncredited attempt (a 502, a zero credit) has
-// no credit whose evidence could be missing.
+// unquarantined here; a negotiated enforce attempt's credit is quarantined
+// separately (QuarantineUndeliveredSettlementCredit). Callers filter on this
+// reason when measuring provider revenue. It reports whether a credited row
+// was marked: an uncredited attempt (a 502, a zero credit) has none.
 func (s *Store) MarkSettlementOutputMissing(ctx context.Context, requestID string, attemptN int, providerID string) (bool, error) {
 	if s == nil || requestID == "" || providerID == "" || attemptN < 0 {
 		return false, nil
@@ -295,8 +295,21 @@ WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
 // credit whose settlement evidence failed after the buyer response was
 // delivered and the buyer reservation was refunded (SPEC-022 v0.2.2 enforce
 // mode). A quarantined row leaves spec022_payable_request_credits unless an
-// operator force-credits it. The credit amount is kept for that review. It
+// operator force-credits it. The credit amount is kept for that review. The
+// reason replaces MarkSettlementOutputMissing's informational reason so the
+// finality lookup recognises it (UndeliveredSettlementQuarantineReasons). It
 // reports whether a row was quarantined.
+// UndeliveredSettlementQuarantineReasons are the coordinator reasons a
+// credit is quarantined with after a delivered attempt's settlement evidence
+// failed (SPEC-022 v0.2.2). The finality lookup reports such an attempt as
+// closed quarantined, so a gateway that never received the refund trailer
+// still refunds instead of holding.
+var UndeliveredSettlementQuarantineReasons = []string{
+	"settlement_record_failed_after_delivery",
+	"settlement_output_missing_after_credit",
+	"settlement_finality_unset_after_delivery",
+}
+
 func (s *Store) QuarantineUndeliveredSettlementCredit(ctx context.Context, requestID string, attemptN int, providerID, reason string) (bool, error) {
 	if s == nil || requestID == "" || providerID == "" || attemptN < 0 || reason == "" {
 		return false, nil
@@ -304,7 +317,9 @@ func (s *Store) QuarantineUndeliveredSettlementCredit(ctx context.Context, reque
 	res, err := s.db.ExecContext(ctx, `
 UPDATE ledger_request_credits
    SET quarantined = 1,
-       quarantine_reason = CASE WHEN quarantine_reason IS NULL OR quarantine_reason = '' THEN ? ELSE quarantine_reason END,
+       quarantine_reason = CASE
+           WHEN quarantine_reason IS NULL OR quarantine_reason IN ('', 'settlement_attempt_output_missing') THEN ?
+           ELSE quarantine_reason END,
        updated_at_utc = ?
  WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
    AND quarantined = 0

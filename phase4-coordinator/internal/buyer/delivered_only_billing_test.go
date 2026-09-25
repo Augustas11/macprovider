@@ -409,6 +409,27 @@ func postNegotiatedResponse(t *testing.T, server *buyer.Server) *http.Response {
 	return resp
 }
 
+// assertLookupClosedQuarantined checks the coordinator's internal finality
+// lookup for ext-req-1: a gateway that never received the refund trailer
+// finds a closed quarantine (a refund), not a 404 (review R4 LOW-2).
+func assertLookupClosedQuarantined(t *testing.T, server *buyer.Server, reason string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/internal/settlement/finality?account_id=acct_gateway&request_id=ext-req-1", nil)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	rr := httptest.NewRecorder()
+	server.InternalHandler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("finality lookup status=%d body=%s, want a closed quarantine", rr.Code, rr.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["outcome"] != "quarantined" || got["closed"] != true || got["reason"] != reason {
+		t.Fatalf("finality lookup=%s, want closed quarantined %s", rr.Body.String(), reason)
+	}
+}
+
 func assertEnforceRefundAndQuarantine(t *testing.T, resp *http.Response, dbPath, reason string) {
 	t.Helper()
 	tr := resp.Trailer
@@ -446,6 +467,7 @@ func TestHTTPEnforceRecordFailureRefundsAndQuarantinesCredit(t *testing.T) {
 	t.Cleanup(buyer.SetSettlementOutputWriteErrForTest(errors.New("settlement attempt output table missing")))
 	server, dbPath := newDeliveredOnlyHTTPServer(t)
 	assertEnforceRefundAndQuarantine(t, postNegotiatedResponse(t, server), dbPath, "settlement_record_failed_after_delivery")
+	assertLookupClosedQuarantined(t, server, "settlement_record_failed_after_delivery")
 }
 
 // Review R3 MEDIUM-2 / Codex HIGH 2 (enforce): evidence lost transiently
@@ -454,6 +476,19 @@ func TestHTTPEnforceOutputMissingAfterCreditRefundsAndQuarantinesCredit(t *testi
 	t.Cleanup(buyer.CancelSettlementOutputWritesForTest(2))
 	server, dbPath := newDeliveredOnlyHTTPServer(t)
 	assertEnforceRefundAndQuarantine(t, postNegotiatedResponse(t, server), dbPath, "settlement_output_missing_after_credit")
+	assertLookupClosedQuarantined(t, server, "settlement_output_missing_after_credit")
+}
+
+// Review R4 MEDIUM-A: the evidence write fails after the credit AND the
+// missing-output mark fails too. The evidence is still missing, so the
+// non-streaming enforce attempt refunds (as a stream does), never a legacy
+// debit of a credit that can never be paid.
+func TestHTTPEnforceOutputMissingWithFailedMarkRefundsAndQuarantinesCredit(t *testing.T) {
+	t.Cleanup(buyer.CancelSettlementOutputWritesForTest(2))
+	t.Cleanup(buyer.SetMarkSettlementOutputMissingErrForTest(errors.New("database is locked")))
+	server, dbPath := newDeliveredOnlyHTTPServer(t)
+	assertEnforceRefundAndQuarantine(t, postNegotiatedResponse(t, server), dbPath, "settlement_output_missing_after_credit")
+	assertLookupClosedQuarantined(t, server, "settlement_output_missing_after_credit")
 }
 
 // Review R3 MEDIUM-1: the missing-evidence latch is per attempt. Attempt 1
@@ -462,7 +497,7 @@ func TestHTTPEnforceOutputMissingAfterCreditRefundsAndQuarantinesCredit(t *testi
 // finality, not the refund.
 func TestMissingEvidenceLatchDoesNotLeakIntoRetry(t *testing.T) {
 	t.Cleanup(buyer.CancelSettlementOutputWritesForTest(2))
-	server, _ := newEnforceHTTPServer(t,
+	server, dbPath := newEnforceHTTPServer(t,
 		func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
@@ -495,6 +530,23 @@ func TestMissingEvidenceLatchDoesNotLeakIntoRetry(t *testing.T) {
 	if resp.Trailer.Get(settlementOutcomeNames[0]) == "" {
 		t.Fatalf("the retry carries no finality tuple: trailers=%v", resp.Trailer)
 	}
+	// Review R4 LOW-8: the retry keeps its own receipt outcome, not a refund,
+	// and its credit is not quarantined.
+	if outcome := resp.Trailer.Get(settlementOutcomeNames[0]); outcome != "pending" && outcome != "verified" {
+		t.Fatalf("retry outcome=%q (trailers=%v), want pending or verified", outcome, resp.Trailer)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var quarantined int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id = 'p2' AND quarantined = 1`).Scan(&quarantined); err != nil {
+		t.Fatal(err)
+	}
+	if quarantined != 0 {
+		t.Fatalf("the retry's credit was quarantined (%d rows)", quarantined)
+	}
 }
 
 // Codex SECURITY (537d397c): a HARD settlement-output failure after the
@@ -517,4 +569,5 @@ func TestHTTPStreamingEnforceHardOutputFailureRefundsAndQuarantines(t *testing.T
 		t.Fatalf("status=%d body=%s, want the delivered stream", resp.StatusCode, body)
 	}
 	assertEnforceRefundAndQuarantine(t, resp, dbPath, "settlement_record_failed_after_delivery")
+	assertLookupClosedQuarantined(t, server, "settlement_record_failed_after_delivery")
 }

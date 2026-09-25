@@ -416,7 +416,7 @@ func TestFinalizeNegotiatedSettlementFinality(t *testing.T) {
 	}
 	sdst := http.Header{internalRequestIDHeader: {"internal-1"}}
 	declareNonStreamingSettlementTrailers(sdst, stream)
-	stream.settlementOutputMissingAfterCredit, stream.settlementOutputMissingMarked = true, true
+	stream.settlementOutputMissingAfterCredit = true
 	finalizeNegotiatedSettlementFinality(sdst, stream)
 	if sdst.Get(settlementReasonHeader) != settlementOutputMissingAfterCreditReason || sdst.Get(settlementFinalityMACHeader) != finalityMACOf(sdst) {
 		t.Fatalf("a stream whose evidence is missing finalized to %v, want the signed refund", sdst)
@@ -487,5 +487,43 @@ func TestWriterWrappersPropagateFlushError(t *testing.T) {
 	}
 	if !writeDelivered(&phaseTimingResponseWriter{ResponseWriter: httptest.NewRecorder(), state: newForwardState(time.Now())}, []byte("body")) {
 		t.Fatal("a healthy writer was reported undelivered")
+	}
+}
+
+// Review R4 LOW-3: each dispatch forgets the previous attempt's credit, so
+// an evidence failure on a later attempt that recorded no row of its own
+// cannot quarantine an earlier attempt's credit.
+func TestRouteSnapshotDispatchForgetsPreviousProviderAttempt(t *testing.T) {
+	reqLog, _ := h4OpenRequestLog(t)
+	var observed *requestTerminal
+	s := h4Server(t, reqLog, h4RelaySuccess(), &observed)
+	rec := &billingRecorder{server: s, hasLastProviderAttempt: true, lastProviderAttemptN: 0, lastProviderID: "p1"}
+	_, _ = rec.recordRouteSnapshot([]byte(h4ChatBody), pool.Provider{ProviderID: "p2", AssignedID: "s2", ModelID: "model-a"})
+	if rec.hasLastProviderAttempt {
+		t.Fatal("a new dispatch kept the previous attempt's credit identity")
+	}
+}
+
+// Review R4 open question: the finalizer never adds a tuple to a non-200.
+// The gateway settles a non-200 from its headers; a request whose earlier
+// attempt billed a 502 must not gain a refund trailer on its final 503.
+func TestFinalizeSkipsNon200Responses(t *testing.T) {
+	rec := negotiatedTestRecorderMode(billing.RouteSnapshotModeEnforce)
+	rec.terminal = newRequestTerminal(nil, "req-1", "acct_1")
+	rec.terminal.claimBuyer(http.StatusServiceUnavailable)
+	dst := http.Header{internalRequestIDHeader: {"internal-1"}}
+	declareNonStreamingSettlementTrailers(dst, rec)
+	finalizeNegotiatedSettlementFinality(dst, rec)
+	if dst.Get(settlementOutcomeHeader) != "" || dst.Get(settlementModeHeader) != "" {
+		t.Fatalf("a 503 was finalized: %v", dst)
+	}
+	ok := negotiatedTestRecorderMode(billing.RouteSnapshotModeEnforce)
+	ok.terminal = newRequestTerminal(nil, "req-1", "acct_1")
+	ok.terminal.claimBuyer(http.StatusOK)
+	odst := http.Header{internalRequestIDHeader: {"internal-1"}}
+	declareNonStreamingSettlementTrailers(odst, ok)
+	finalizeNegotiatedSettlementFinality(odst, ok)
+	if odst.Get(settlementReasonHeader) != settlementFinalityUnsetReason {
+		t.Fatalf("a 200 without a tuple finalized to %v, want the refund", odst)
 	}
 }
