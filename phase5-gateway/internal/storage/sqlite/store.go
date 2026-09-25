@@ -288,6 +288,10 @@ func (s *Store) ensureSettlementReconcileNotFoundColumn(ctx context.Context) err
 			found = true
 		}
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	if err := rows.Close(); err != nil {
 		return err
 	}

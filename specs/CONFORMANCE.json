@@ -5781,14 +5781,16 @@
       "implementation": [
         "phase5-gateway/internal/router/chat_proxy.go:forwardStreamingChat",
         "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
-        "phase5-gateway/internal/router/settlement_reconcile.go:buyerDeliveredCompletionBound"
+        "phase5-gateway/internal/router/settlement_reconcile.go:buyerDeliveredCompletionBound",
+        "phase5-gateway/internal/router/chat_proxy.go:holdBodyReadFailure"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022StreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout",
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022StreamingPartialTerminalReceiptsCreateReceiptBoundSettlement",
         "phase5-gateway/internal/router/settlement_drop_after_body_test.go:TestDropAfterBodySettlesToCoordinatorFinality",
         "phase5-gateway/internal/router/settlement_delivered_bound_test.go:TestTruncatedStreamDebitIsBoundedByForwardedOutput",
-        "phase5-gateway/internal/router/settlement_delivered_bound_test.go:TestProviderTimeoutDebitIsBoundedByDeliveredOutput"
+        "phase5-gateway/internal/router/settlement_delivered_bound_test.go:TestProviderTimeoutDebitIsBoundedByDeliveredOutput",
+        "phase5-gateway/internal/router/settlement_body_read_unbound_test.go:TestBodyReadFailureWithoutResolvableCandidateRefunds"
       ],
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
@@ -5811,7 +5813,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "Relay-blind integration changes mapped implementation selectors. Local regression checks pass, but historical signed deployment journeys bind earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement. SPEC-022 v0.2.3 (#1690): the R-5.6 delivered bound now also covers body_read_failed, stream_truncated and provider_timeout; the new gateway tests are mapped, and the row stays pending for the same evidence reason."
+        "rationale": "Relay-blind integration changes mapped implementation selectors. Local regression checks pass, but historical signed deployment journeys bind earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement. SPEC-022 v0.2.3 (#1690): the R-5.6 delivered bound now also covers body_read_failed, stream_truncated and provider_timeout, and a body_read_failed response the gateway cannot bind for reconciliation is refunded with an error log; the new gateway tests are mapped, and the row stays pending for the same evidence reason."
       }
     },
     {
