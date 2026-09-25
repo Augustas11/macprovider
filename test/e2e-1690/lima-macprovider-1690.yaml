@@ -1,0 +1,27 @@
+# "Fake Pearl" VM for the #1690 settlement/trusted-pool e2e harness.
+# Same image and shape as test/e2e-pricing/lima-macprovider-1693.yaml
+# (x86_64 under qemu, so the linux-amd64 coordinator/gateway run as on Pearl).
+# Everything is BUILT inside this VM; the Mac host only runs limactl/ssh.
+vmType: qemu
+arch: x86_64
+cpus: 4
+memory: 6GiB
+disk: 30GiB
+images:
+- location: "https://cloud-images.ubuntu.com/releases/resolute/release-20260720/ubuntu-26.04-server-cloudimg-amd64.img"
+  arch: "x86_64"
+  digest: "sha256:117816726abbdefc5ef3e38902e81a76f1c76c3610e709999d0885f9d5d9b477"
+mounts: []
+containerd:
+  system: false
+  user: false
+param:
+  internal_netplanOptional: "true"
+portForwards:
+# nginx TLS (api.malibu.tech stand-in) so "verify from outside Pearl" is a real
+# outside-the-host curl.
+- guestPort: 443
+  hostIP: 127.0.0.1
+  hostPort: 28443
+- guestPortRange: [1, 65535]
+  ignore: true

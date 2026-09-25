@@ -1,0 +1,94 @@
+# #1690 e2e gateway config (fake-Pearl VM), from the #1693 harness. Shape of phase5-gateway/gateway.yaml.example;
+# secrets via /etc/macprovider/gateway.env; GitHub OAuth off (no network IdP).
+listen:
+  bind_address: 127.0.0.1
+  port: 9443
+proxy:
+  trusted_cidrs:
+    - 127.0.0.0/8
+    - ::1/128
+public:
+  base_url: https://api.malibu.tech
+  account_path: /account
+coordinator:
+  buyer_url: http://127.0.0.1:8443
+  operator_url: http://127.0.0.1:8444
+  operator_key: env:COORDINATOR_OPERATOR_KEY
+  service_token: env:COORDINATOR_SERVICE_TOKEN
+  poolz_poll_interval_s: 10
+storage:
+  driver: sqlite
+  db_path: /var/lib/macprovider/gateway.db
+auth:
+  key_prefix: mp_
+  key_hash: hmac_sha256
+  key_hash_secret: env:MACPROVIDER_KEY_HASH_SECRET
+  github_oauth_enabled: false
+  email_magic_link_enabled: false
+  oauth:
+    state_max_per_ip: 20
+    callback_allowlist:
+      - https://api.malibu.tech/auth/github/callback
+  demo:
+    signing_secret: env:MACPROVIDER_DEMO_SIGNING_SECRET
+  wholesale_account_ids: []
+quotas:
+  account_daily_tokens: 100000000
+  demo_daily_tokens_per_ip: 1000
+  demo_sessions_per_ip_per_hour: 10
+  account_concurrency: 32
+  wholesale_account_concurrency: 0
+  account_request_rate_per_second: 200
+  demo_concurrency: 2
+  signup_accounts_per_ip_per_day: 3
+  reaper_interval_hours: 1
+  reservation_max_age_hours: 24
+limits:
+  max_tokens_per_request: 4096
+  demo_max_tokens_per_request: 512
+  max_feedback_comment_bytes: 2000
+  max_feedback_body_bytes: 16384
+  feedback_requests_per_ip_per_hour: 10
+  request_body_bytes: 1048576
+kill_switch:
+  demo_only: false
+  all_public_api: false
+capacity:
+  monthly_budget_usd: 500
+  ready_provider_degraded_threshold: 1
+  projected_cost_tier1_percent: 80
+  tier_cooldown_seconds: 3600
+timeouts:
+  coordinator_request_seconds: 300
+  coordinator_header_timeout_seconds: 960
+  coordinator_connect_seconds: 60
+  coordinator_admission_seconds: 120
+  first_token_seconds: 0
+  stream_ceiling_floor_seconds: 60
+  stream_ceiling_per_token_ms: 250
+  stream_ceiling_max_seconds: 900
+  non_stream_request_seconds: 960
+  streaming_cancel_ms: 500
+  streaming_idle_ms: 10000
+retry_503:
+  enabled: true
+  retry_no_provider_available: false
+  max_attempts: 3
+  backoff_base_ms: 100
+  backoff_max_ms: 500
+settlement:
+  reconcile_enabled: true
+  reconcile_interval_s: 30
+  reconcile_batch_limit: 100
+  reconcile_request_timeout_s: 10
+routing:
+  sticky_enabled: false
+  sticky_ttl_s: 1800
+features:
+  anthropic_messages_enabled: false
+  responses_api_enabled: false
+cors:
+  allowed_origins:
+    - https://www.malibu.tech
+explorer:
+  enabled: false
