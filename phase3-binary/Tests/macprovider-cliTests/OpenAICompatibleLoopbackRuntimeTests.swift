@@ -664,6 +664,176 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         XCTAssertEqual(result.settlementDisposition, .usageUnattested)
     }
 
+    // #1690 M9 review L8: the two per-token sources never mix, in either order.
+    func testCancelledStreamRejectsMixedPerChunkCountSources() throws {
+        let timings = #","timings":"# + Self.llamaTimings(prompt: 3, cached: 0, predicted: 1) + "}"
+        let orders: [[String]] = [
+            [#"data: {"choices":[{"index":0,"delta":{"content":"Hel"}}]"# + timings,
+             #"data: {"choices":[{"index":0,"delta":{"content":"lo"},"logprobs":{"content":[{"token":"lo","logprob":-1}]}}]}"#],
+            [#"data: {"choices":[{"index":0,"delta":{"content":"Hel"},"logprobs":{"content":[{"token":"Hel","logprob":-1}]}}]}"#,
+             #"data: {"choices":[{"index":0,"delta":{"content":"lo"}}]"# + timings],
+        ]
+        for lines in orders {
+            var accumulator = OpenAICompatibleStreamAccumulator()
+            for line in lines {
+                _ = try accumulator.consume(line: line)
+                _ = try accumulator.consume(line: "")
+            }
+            XCTAssertFalse(accumulator.hasPerChunkCompletionCounts)
+            XCTAssertEqual(accumulator.cancelledResult(upstreamPromptTokens: 9).settlementDisposition, .usageUnattested)
+        }
+    }
+
+    // #1690 M9 review M1 / L8: the post-cancel usage work is bounded well
+    // under the coordinator's 2 s CancelTerminalWait. A prompt count that
+    // answers late leaves the cancel unattested (free), never late.
+    func testSlowPromptCountLeavesTheCancelUnattestedWithinTheBudget() async throws {
+        XCTAssertLessThan(OpenAICompatibleLoopbackRuntime.cancelUsageBudgetSeconds, 1.5)
+        let store = try makeStore()
+        let client = LogprobsStreamingLoopbackClient(promptTokens: 35, countDelaySeconds: 3)
+        let runtime = try makeRuntime(httpClient: client, store: store)
+        let request = try makeRequest(model: "ollama:gemma3:270m", maxTokens: 100_000)
+        let handle = try await runtime.acquireRequestHandle(request)
+        let cancel = CancelFlag()
+        let collector = ChunkCollector()
+        let cancelledAt = TimeBox()
+        let result = try await runtime.stream(request, with: handle, shouldCancel: { cancel.isSet }) { chunk in
+            collector.record(chunk)
+            if collector.contentChunks.count >= 3, !cancel.isSet {
+                cancelledAt.set(Date())
+                cancel.set()
+            }
+        }
+        let elapsed = Date().timeIntervalSince(cancelledAt.value ?? Date())
+        XCTAssertEqual(result.settlementDisposition, .usageUnattested, "a late prompt count never bills")
+        XCTAssertLessThan(elapsed, 1.9, "the cancelled result is ready inside the coordinator's wait")
+    }
+
+    func testBoundedReturnsNilAtTheDeadlineWithoutWaitingForTheWork() async {
+        let start = Date()
+        let value = await OpenAICompatibleLoopbackRuntime.bounded(until: start.addingTimeInterval(0.2)) { () async -> Int? in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            return 1
+        }
+        XCTAssertNil(value)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 1.0)
+        let fast = await OpenAICompatibleLoopbackRuntime.bounded(until: Date().addingTimeInterval(1)) { () async -> Int? in 7 }
+        XCTAssertEqual(fast, 7)
+    }
+
+    // #1690 M9 review M3: without per-chunk counts (an Ollama that ignores
+    // logprobs, LM Studio with tools) the delivered content is counted with
+    // the catalog sibling tokenizer when it is local, else unattested.
+    func testCancelWithoutPerChunkCountsFallsBackToTheSiblingTokenizer() async throws {
+        let store = try makeStore()
+        let sibling = FileManager.default.temporaryDirectory.appendingPathComponent("sibling-\(UUID().uuidString)")
+        for (directory, expectAttested) in [(sibling as URL?, true), (nil, false)] {
+            let client = LogprobsStreamingLoopbackClient(promptTokens: 35, logprobs: false)
+            let runtime = try OpenAICompatibleLoopbackRuntime(
+                servedModelRef: "ollama:gemma3:270m",
+                origin: "http://127.0.0.1:11434",
+                catalogModelIDAlias: "mlx-community/Gemma-3-270m-4bit",
+                httpClient: client,
+                digestResolver: makeResolver(store),
+                tokenCounter: { text, dir in dir == sibling ? text.count * 3 : nil },
+                siblingTokenizerDirectory: { _ in directory }
+            )
+            let request = try makeRequest(model: "ollama:gemma3:270m", maxTokens: 100_000)
+            let handle = try await runtime.acquireRequestHandle(request)
+            let cancel = CancelFlag()
+            let collector = ChunkCollector()
+            let result = try await runtime.stream(request, with: handle, shouldCancel: { cancel.isSet }) { chunk in
+                collector.record(chunk)
+                if collector.contentChunks.count >= 3 { cancel.set() }
+            }
+            if expectAttested {
+                XCTAssertEqual(result.settlementDisposition, .notEligible)
+                XCTAssertEqual(result.promptTokens, 35)
+                XCTAssertEqual(result.completionTokens, result.content.count * 3)
+                XCTAssertEqual(result.cancelledPrefixUsage(deliveredContent: result.content).completionTokens, result.content.count * 3)
+            } else {
+                XCTAssertEqual(result.settlementDisposition, .usageUnattested, "no local tokenizer: free")
+            }
+        }
+    }
+
+    // #1690 M9 review L8: the actor-level mlx_lm.server cancel counts the
+    // delivered content with the served snapshot's tokenizer (a fake here),
+    // and a tokenizer that answers late leaves the cancel unattested.
+    func testCancelledMLXLMStreamRecountsWithTheSnapshotTokenizer() async throws {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent("mlxlm-cancel-\(UUID().uuidString)")
+        let snapshotDirectory = parent.appendingPathComponent("mlxlm-snapshot")
+        try FileManager.default.createDirectory(at: snapshotDirectory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: parent) }
+        try Data(#"{"model_type":"qwen2"}"#.utf8).write(to: snapshotDirectory.appendingPathComponent("config.json"))
+        let snapshot = try MLXSnapshotIdentity.compute(directory: snapshotDirectory)
+        for slow in [false, true] {
+            let client = LogprobsStreamingLoopbackClient(promptTokens: 21, logprobs: false, listedModelPath: snapshot.directory.path)
+            let runtime = try OpenAICompatibleLoopbackRuntime(
+                servedModelRef: "mlxlm:mlxlm-snapshot",
+                origin: "http://127.0.0.1:9191",
+                runtimeSource: "mlxlm_loopback",
+                runtimeArtifactPath: snapshot.directory.path,
+                httpClient: client,
+                mlxSnapshot: snapshot,
+                tokenCounter: { text, dir in
+                    guard !text.isEmpty else { return 0 }
+                    if slow { try? await Task.sleep(nanoseconds: 3_000_000_000) }
+                    return dir == snapshot.directory ? text.count * 2 : nil
+                }
+            )
+            let request = try makeRequest(model: "mlxlm:mlxlm-snapshot", maxTokens: 100_000)
+            let handle = try await runtime.acquireRequestHandle(request)
+            let cancel = CancelFlag()
+            let collector = ChunkCollector()
+            let start = Date()
+            let result = try await runtime.stream(request, with: handle, shouldCancel: { cancel.isSet }) { chunk in
+                collector.record(chunk)
+                if collector.contentChunks.count >= 3 { cancel.set() }
+            }
+            if slow {
+                XCTAssertEqual(result.settlementDisposition, .usageUnattested)
+                XCTAssertLessThan(Date().timeIntervalSince(start), 3.0)
+            } else {
+                XCTAssertEqual(result.settlementDisposition, .notEligible)
+                XCTAssertEqual(result.promptTokens, 21)
+                XCTAssertEqual(result.completionTokens, result.content.count * 2)
+            }
+        }
+    }
+
+    // #1690 M9 review L6: tools stay in the count body (the template renders
+    // them into the prompt); a 4xx on a body with response_format is retried
+    // once without it.
+    func testPromptCountRetriesOnceWithoutResponseFormat() async throws {
+        let store = try makeStore()
+        let client = LogprobsStreamingLoopbackClient(promptTokens: 40, rejectResponseFormat: true)
+        let runtime = try makeRuntime(httpClient: client, store: store)
+        let body: [String: Any] = [
+            "model": "ollama:gemma3:270m",
+            "messages": [["role": "user", "content": "json please"]],
+            "max_tokens": 100_000,
+            "stream": true,
+            "response_format": ["type": "json_object"],
+            "tools": [["type": "function", "function": ["name": "f", "parameters": ["type": "object"]]]],
+        ]
+        let request = try ChatCompletionRequest.parse(data: try JSONSerialization.data(withJSONObject: body))
+        let handle = try await runtime.acquireRequestHandle(request)
+        let cancel = CancelFlag()
+        let collector = ChunkCollector()
+        let result = try await runtime.stream(request, with: handle, shouldCancel: { cancel.isSet }) { chunk in
+            collector.record(chunk)
+            if collector.contentChunks.count >= 3 { cancel.set() }
+        }
+        XCTAssertEqual(result.settlementDisposition, .notEligible)
+        XCTAssertEqual(result.promptTokens, 40)
+        let bodies = client.countBodies.compactMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        XCTAssertEqual(bodies.count, 2)
+        XCTAssertNotNil(bodies.first?["response_format"])
+        XCTAssertNil(bodies.last?["response_format"])
+        XCTAssertNotNil(bodies.last?["tools"], "tools are part of the prompt")
+    }
+
     func testNativeCompletionIsUnchangedByCancelledPrefixUsage() {
         let native = CompletionResult(
             content: "answer",
@@ -1040,6 +1210,13 @@ private final class IDSequence: @unchecked Sendable {
     }
 }
 
+private final class TimeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Date?
+    var value: Date? { lock.lock(); defer { lock.unlock() }; return stored }
+    func set(_ date: Date) { lock.lock(); stored = date; lock.unlock() }
+}
+
 private final class CancelFlag: @unchecked Sendable {
     private let lock = NSLock()
     private var value = false
@@ -1097,24 +1274,48 @@ private final class EndlessStreamingLoopbackClient: BYOMLoopbackStreamingHTTPCli
 private final class LogprobsStreamingLoopbackClient: BYOMLoopbackStreamingHTTPClient, @unchecked Sendable {
     private let lock = NSLock()
     private let promptTokens: Int?
+    private let logprobs: Bool
+    private let countDelaySeconds: Double
+    private let rejectResponseFormat: Bool
+    private let listedModelPath: String?
     private var _streamedBody: Data?
     private var _countBody: Data?
+    private var _countBodies: [Data] = []
 
-    init(promptTokens: Int?) {
+    /// `logprobs: false` streams plain chunks (mlx_lm.server, oMLX, LM Studio
+    /// with tools). `countDelaySeconds` delays the prompt-count answer, and
+    /// `rejectResponseFormat` answers 400 to a count body that carries one.
+    /// `listedModelPath` makes `GET /v1/models` list that path (mlx_lm.server).
+    init(promptTokens: Int?, logprobs: Bool = true, countDelaySeconds: Double = 0, rejectResponseFormat: Bool = false, listedModelPath: String? = nil) {
         self.promptTokens = promptTokens
+        self.logprobs = logprobs
+        self.countDelaySeconds = countDelaySeconds
+        self.rejectResponseFormat = rejectResponseFormat
+        self.listedModelPath = listedModelPath
     }
 
     var streamedBody: Data? { lock.lock(); defer { lock.unlock() }; return _streamedBody }
     var countBody: Data? { lock.lock(); defer { lock.unlock() }; return _countBody }
+    var countBodies: [Data] { lock.lock(); defer { lock.unlock() }; return _countBodies }
 
     func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
-        throw BYOMDiscoveryAdapterError.rejectedNonLoopback
+        guard url.path == "/v1/models", let listedModelPath else { throw BYOMDiscoveryAdapterError.rejectedNonLoopback }
+        let body = try JSONSerialization.data(withJSONObject: ["object": "list", "data": [["id": listedModelPath, "object": "model"]]])
+        return BYOMHTTPResponse(statusCode: 200, headers: [], body: body)
     }
 
     func post(_ url: URL, jsonBody: Data, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
         lock.lock()
         _countBody = jsonBody
+        _countBodies.append(jsonBody)
         lock.unlock()
+        if countDelaySeconds > 0 {
+            try? await Task.sleep(nanoseconds: UInt64(countDelaySeconds * 1_000_000_000))
+        }
+        if rejectResponseFormat,
+           let object = try? JSONSerialization.jsonObject(with: jsonBody) as? [String: Any], object["response_format"] != nil {
+            return BYOMHTTPResponse(statusCode: 400, headers: [], body: Data(#"{"error":{"message":"format"}}"#.utf8))
+        }
         guard let promptTokens else { return BYOMHTTPResponse(statusCode: 500, headers: [], body: Data()) }
         let body = #"{"choices":[{"index":0,"message":{"role":"assistant","content":"x"},"finish_reason":"length"}],"usage":{"prompt_tokens":"# +
             "\(promptTokens)" + #","completion_tokens":1,"total_tokens":"# + "\(promptTokens + 1)" + "}}"
@@ -1132,10 +1333,13 @@ private final class LogprobsStreamingLoopbackClient: BYOMLoopbackStreamingHTTPCl
         lock.lock()
         _streamedBody = jsonBody
         lock.unlock()
+        let logprobs = self.logprobs
         let lines = AsyncThrowingStream<String, Error> { continuation in
             let producer = Task {
                 while !Task.isCancelled {
-                    continuation.yield(#"data: {"choices":[{"index":0,"delta":{"content":"x"},"logprobs":{"content":[{"token":"x","logprob":-1},{"token":"","logprob":-1}]}}]}"#)
+                    continuation.yield(logprobs
+                        ? #"data: {"choices":[{"index":0,"delta":{"content":"x"},"logprobs":{"content":[{"token":"x","logprob":-1},{"token":"","logprob":-1}]}}]}"#
+                        : #"data: {"choices":[{"index":0,"delta":{"content":"x"}}]}"#)
                     continuation.yield("")
                     try? await Task.sleep(nanoseconds: 10_000_000)
                 }

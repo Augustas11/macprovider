@@ -1,9 +1,9 @@
 # SPEC-015 — Verifiable inference receipts
 
 **Version:** 0.4.11 (2026-09-25, cancelled loopback stream usage, #1690 M9; LOCKED v0.4 tuple unchanged)
-**Depends on:** SPEC-001 v1.9.24, SPEC-002 v1.6.2 (v1.5 `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.6.8 (settlement/accounting semantics), SPEC-006 v0.9.35, SPEC-008 v0.7.0 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.12 (v1.7 R007(d), v1.10 R007(f) and v1.11 pool-scoped settlement for §N.12), SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3.1, SPEC-022 v0.2.0 (hard — settlement-capable receipt profile consumer; R-12 for §N.12), SPEC-042 0.0.34 (pool runtime authorization for §N.12, v0.4.10)
+**Depends on:** SPEC-001 v1.9.24, SPEC-002 v1.6.2 (v1.5 `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.6.8 (settlement/accounting semantics), SPEC-006 v0.9.37, SPEC-008 v0.7.0 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.14 (v1.7 R007(d), v1.10 R007(f) and v1.11 pool-scoped settlement for §N.12; v1.13/v1.14 LM Studio and oMLX legs for §N.12 item 7), SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3.1, SPEC-022 v0.2.4 (hard — settlement-capable receipt profile consumer; R-5.6 and R-12 for §N.12), SPEC-042 0.0.36 (pool runtime authorization for §N.12, v0.4.10)
 
-**Change log v0.4.11 (2026-09-25, issue #1690 M9 — cancelled loopback stream usage):** Adds §N.12 item 7. When a buyer disconnects from a pool-authorized loopback stream, the `buyer_cancel` receipt signs usage that covers exactly the delivered content, derived per runtime: llama-server per-chunk timings (#1690 E2E-F3); for Ollama and (with SPEC-046 0.4.0) LM Studio, the per-chunk `logprobs` token list for the completion tokens and the upstream's own prompt count for the same request; for `mlx_lm.server` and oMLX, the served snapshot's tokenizer count of the delivered content and the upstream's own prompt count. Any usage the runtime cannot derive that way stays unattested: relayed empty and never signed, so the attempt is pending, then quarantined, and the partial stream is free. The LOCKED v0.4 tuple, the wire, and the coordinator verifier are unchanged; the signed usage still has to match the recorded expected usage exactly.
+**Change log v0.4.11 (2026-09-25, issue #1690 M9 — cancelled loopback stream usage):** Adds §N.12 item 7. When a buyer disconnects from a pool-authorized loopback stream, the `buyer_cancel` receipt signs usage that covers exactly the delivered content, derived per runtime: llama-server per-chunk timings (#1690 E2E-F3); for Ollama and (with SPEC-046 0.4.0) LM Studio, the per-chunk `logprobs` token list for the completion tokens and the upstream's own prompt count for the same request; for `mlx_lm.server` and oMLX, and for any runtime whose stream carries no per-chunk count, a local tokenizer's count of the delivered content (the served snapshot's, else the catalog sibling snapshot's) and the upstream's own prompt count. The post-cancel work is bounded to 1.25 s, inside the coordinator's 2 s wait, so a slow runtime makes the cancel free, never late. Any usage the runtime cannot derive that way stays unattested: relayed empty and never signed, so the attempt is pending, then quarantined, and the partial stream is free. The LOCKED v0.4 tuple, the wire, and the coordinator verifier are unchanged; the signed usage still has to match the recorded expected usage exactly.
 
 **Change log v0.4.10 (2026-09-24, issue #1690 M3 — per-request receipt eligibility on Trusted Pools):** Adds §N.12 and conformance unit `SPEC-015-R006`. A runtime that is not settlement eligible (a SPEC-046 loopback runtime) MAY sign a v0.4 receipt for one request only when the coordinator's settlement metadata for that request carries a `pool_runtime_authorization` whose `runtime_source` equals the runtime's own. The coordinator attaches it only for a SPEC-022-R012 pool attempt. The provider decides per request, not from a per-runtime constant. Outside an authorizing pool a loopback runtime never signs (#1695 preserved), and a provider older than this version never signs, which is fail-closed. §N.2 records the owner-defined conditional route-snapshot members already in the digest (reconciling the "exactly these fields" text with SPEC-010/SPEC-042/SPEC-047). §N.6 names `pool_operator_attested` as the single exception to the provider-only-usage rule. The LOCKED v0.4 tuple and wire are unchanged. The coordinator verifier's and receipt ingestion's usage-source handling MUST change to accept `pool_operator_attested` for R-12 attempts only (SPEC-022 R-12.4), and usage still has to match exactly through `tupleUsageMatchesLedger`. The buyer-side verify CLI is unchanged.
 
@@ -4497,33 +4497,55 @@ The provider decides per request, not from a per-runtime constant.
    moves no money.
 7. **Cancelled-stream usage (v0.4.11, #1690 M9).** When the buyer
    disconnects from a pool-authorized loopback stream, the provider ends
-   the attempt with a `buyer_cancel` receipt (§N.4, §N.5) only when it can state
-   the usage of exactly the delivered content, and signs that usage. It is
-   the pool operator's attested usage (SPEC-022 R-5.6, R-12), derived as
-   follows. `llamacpp_loopback`: the prompt tokens (processed plus cached)
-   and the completion tokens through the last delivered chunk, from
-   llama-server's per-chunk `timings_per_token`. `ollama_loopback` and
-   `lmstudio_loopback`: the completion tokens are the running length of the
-   per-chunk `logprobs.content` token list the runtime is asked to stream,
-   read at the last delivered chunk (LM Studio refuses `logprobs` together
-   with `tools` on a stream, so a `lmstudio_loopback` request with tools is
-   not asked for it and its cancel is unattested); the prompt tokens are the runtime's own
-   `usage.prompt_tokens` for the same request body, non-streamed and
-   capped at one completion token, asked once after the cancel.
-   `mlxlm_loopback` and `omlx_loopback`: the same prompt count, and the
-   completion tokens are
-   the count of the delivered content (no special tokens) by the tokenizer
-   in the served, hash-bound snapshot; it binds only when the delivered
-   content is all the content received and no tool call was streamed. In
-   every other case (a runtime with none of these sources, a chunk without
-   its source, a delivered length off a chunk boundary, unknown delivery, a
-   failed or timed-out prompt count, or a tokenizer that does not load) the
-   usage is unattested: it is relayed without token counts and never
-   signed, so the attempt stays `pending` and becomes `quarantined` with no
-   buyer debit and no provider credit (R-5.6). A provider MUST NOT fill a
-   missing count with an estimate. The count is an administrative
-   attestation like any pool usage, bounded by the SPEC-005 ceilings; it is
-   not a coordinator observation.
+   the attempt with a `buyer_cancel` receipt (§N.4, §N.5) only when it can
+   state the usage of exactly the delivered content, and signs that usage.
+   It is the pool operator's attested usage (SPEC-022 R-5.6, R-12), derived
+   as follows.
+   - **Prompt tokens.** `llamacpp_loopback`: processed plus cached, from
+     llama-server's per-chunk `timings_per_token`. Every other loopback
+     runtime: the runtime's own `usage.prompt_tokens` for the same request
+     body, non-streamed and capped at one completion token, asked once
+     after the cancel. `tools` and `tool_choice` stay in that body because
+     the chat template renders them into the prompt; a 4xx answer to a body
+     that carries `response_format` is retried once without it, because a
+     response format constrains sampling, not the templated prompt.
+   - **Completion tokens, upstream per-chunk count.** `llamacpp_loopback`:
+     `timings.predicted_n` at the last delivered chunk.
+     `ollama_loopback` and `lmstudio_loopback`: the running length of the
+     per-chunk `logprobs.content` token list the runtime is asked to
+     stream, read at the last delivered chunk. The count is every token the
+     runtime generated through that chunk, reasoning or tool-call tokens
+     included when the runtime streamed them before it, which is how the
+     runtime's own `completion_tokens` counts them. A stream must carry one
+     source on every content chunk; a chunk without it, or with the other
+     source, ends the per-chunk count. LM Studio refuses `logprobs`
+     together with `tools` on a stream, so a `lmstudio_loopback` request
+     with tools is not asked for it.
+   - **Completion tokens, tokenizer count.** When the stream carries no
+     per-chunk count (`mlxlm_loopback`, `omlx_loopback`, `lmstudio_loopback`
+     with tools, a runtime that ignored `logprobs`), the completion tokens
+     are the count of the delivered content (no special tokens) by a local
+     tokenizer: the one in the served, hash-bound snapshot for
+     `mlxlm_loopback` and `omlx_loopback`, else the tokenizer of the
+     catalog model id's local MLX snapshot (the SPEC-010 sibling of the
+     served GGUF, the same tokenizer item 5 re-counts with). It binds only
+     when the delivered content is all the content received and no tool
+     call was streamed, and only when that tokenizer is local; the CLI loads
+     it when serving starts.
+   - **Time bound.** The coordinator waits `CancelTerminalWait` (2 s) for
+     the cancelled terminal frame. The prompt count call and the tokenizer
+     count run concurrently within 1.25 s of the cancel, and a result that
+     is not ready then is dropped. A slow runtime therefore makes the
+     cancel free; it never makes it late or wrong.
+   In every other case (a runtime with none of these sources, a delivered
+   length off a chunk boundary, unknown delivery, a streamed tool call, a
+   failed or late prompt count, or no local tokenizer) the usage is
+   unattested: it is relayed without token counts and never signed, so the
+   attempt stays `pending` and becomes `quarantined` with no buyer debit
+   and no provider credit (R-5.6). A provider MUST NOT fill a missing count
+   with an estimate. The count is an administrative attestation like any
+   pool usage, bounded by the SPEC-005 ceilings; it is not a coordinator
+   observation.
 
 ---
 

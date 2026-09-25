@@ -594,6 +594,13 @@ struct OpenAICompatibleStreamAccumulator {
     /// usage is counted over).
     var receivedContent: String { content }
 
+    /// True when the upstream attested the completion tokens through every
+    /// content chunk so far (timings or `logprobs`).
+    var hasPerChunkCompletionCounts: Bool { prefixCompletionTokens != nil && prefixCountSource != nil }
+
+    /// True once a tool-call delta streamed; a content recount never covers it.
+    var streamedToolCall: Bool { !toolCalls.isEmpty }
+
     /// The result of a stream the buyer cancelled: the content received so
     /// far, and its per-prefix usage only when the upstream attested it for
     /// every content chunk (else unattested, so never signed).
@@ -818,6 +825,13 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// `lmstudio_loopback`: the `/api/v1/models` entry the runtime must keep
     /// listing for the bound file (SPEC-046-R009, #1690 M9).
     private let lmStudioBinding: LMStudioLoopbackServeModel.Binding?
+    /// #1690 M9: the tokenizer a cancelled stream's delivered content is
+    /// counted with when the upstream attests no per-chunk count: the served
+    /// snapshot (MLX runtimes) or, for a GGUF runtime, the catalog model id's
+    /// local Hugging Face snapshot. Nil when neither is available.
+    private let recountTokenizerDirectory: URL?
+    /// Counts `text` with the tokenizer in a directory (injected in tests).
+    private let tokenCounter: @Sendable (String, URL) async -> Int?
     private var providerStatus: ProviderStatus?
     private var registrationCounter: Int = 0
 
@@ -841,6 +855,10 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         mlxSnapshot: MLXSnapshotIdentity? = nil,
         lmStudioBinding: LMStudioLoopbackServeModel.Binding? = nil,
         upstreamModelID: String? = nil,
+        tokenCounter: @escaping @Sendable (String, URL) async -> Int? = { text, directory in
+            await PoolLoopbackUsageGuard.snapshotTokenCount(of: text, in: directory)
+        },
+        siblingTokenizerDirectory: (String) -> URL? = ModelRuntime.localHuggingFaceSnapshot(for:),
         deadline: Date? = nil
     ) throws {
         let trimmedRef = servedModelRef.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -873,6 +891,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             return trimmed.isEmpty ? nil : trimmed
         }
         self.httpClient = httpClient ?? LoopbackServeHTTPClient()
+        self.tokenCounter = tokenCounter
         // An LM Studio runtime is always bound to its `/api/v1/models` entry;
         // no other runtime has one.
         guard (lmStudioBinding != nil) == (runtimeSource == LMStudioLoopbackServeModel.runtimeSource) else {
@@ -886,7 +905,9 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
                 throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("an MLX snapshot is served only by mlxlm_loopback or omlx_loopback")
             }
             self.identity = .mlxSnapshot(mlxSnapshot)
+            self.recountTokenizerDirectory = mlxSnapshot.directory
         } else {
+            self.recountTokenizerDirectory = self.catalogModelIDAlias.flatMap(siblingTokenizerDirectory)
             guard !Self.servesMLXSnapshots(runtimeSource) else {
                 throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("\(runtimeSource) requires an MLX snapshot identity")
             }
@@ -905,6 +926,11 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             } catch {
                 throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(String(describing: error))
             }
+        }
+        // Load the recount tokenizer at serve start, so a cancel never pays
+        // the first load inside its short budget (#1690 M9).
+        if let directory = recountTokenizerDirectory {
+            Task.detached(priority: .utility) { _ = await tokenCounter("", directory) }
         }
     }
 
@@ -1463,53 +1489,100 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// #1690 M9: the usage of a cancelled stream. llama-server's per-chunk
     /// timings carry the whole count. Every other runtime's stream carries no
     /// prompt count, so the upstream counts the same request's prompt once
-    /// more (`countUpstreamPromptTokens`); Ollama and LM Studio attest the
-    /// completion tokens per chunk (`logprobs`), and `mlxlm_loopback` counts
-    /// the received content with the served snapshot's tokenizer. Anything
-    /// that fails leaves the usage unattested (relayed empty, never signed).
+    /// more (`countUpstreamPromptTokens`). The completion tokens are the
+    /// upstream's per-chunk `logprobs` count (Ollama, LM Studio) when the
+    /// stream carried one for every content chunk; otherwise (mlx_lm.server,
+    /// oMLX, LM Studio with tools, an upstream that ignored `logprobs`) the
+    /// delivered content is counted with `recountTokenizerDirectory`'s
+    /// tokenizer. Both run concurrently inside `cancelUsageBudgetSeconds`.
+    /// Anything that fails or runs late leaves the usage unattested (relayed
+    /// empty, never signed), so a slow engine makes the cancel free, never
+    /// wrongly billed.
     private func cancelledStreamResult(_ request: ChatCompletionRequest, stream: LoopbackStreamState) async -> CompletionResult {
         let content = stream.receivedContent
         guard !isLlamaCpp, !content.isEmpty else { return stream.cancelledResult() }
-        guard let prompt = await countUpstreamPromptTokens(request) else { return stream.cancelledResult() }
-        var recounted: Int?
-        if case .mlxSnapshot(let snapshot) = identity {
-            recounted = await PoolLoopbackUsageGuard.snapshotTokenCount(of: content, in: snapshot.directory)
-            guard recounted != nil else { return stream.cancelledResult() }
+        let deadline = Date().addingTimeInterval(Self.cancelUsageBudgetSeconds)
+        let needsRecount = !stream.hasPerChunkCompletionCounts
+        let recountDirectory = needsRecount ? recountTokenizerDirectory : nil
+        if needsRecount && (recountDirectory == nil || stream.streamedToolCall) {
+            return stream.cancelledResult()
         }
-        return stream.cancelledResult(upstreamPromptTokens: prompt, recountedCompletionTokens: recounted)
+        let counter = tokenCounter
+        async let prompt = countUpstreamPromptTokens(request, deadline: deadline)
+        async let recount: Int? = Self.bounded(until: deadline) { () async -> Int? in
+            guard let recountDirectory else { return nil }
+            return await counter(content, recountDirectory)
+        }
+        let (promptTokens, recounted) = await (prompt, recount)
+        guard let promptTokens else { return stream.cancelledResult() }
+        if needsRecount {
+            guard let recounted else { return stream.cancelledResult() }
+            return stream.cancelledResult(upstreamPromptTokens: promptTokens, recountedCompletionTokens: recounted)
+        }
+        return stream.cancelledResult(upstreamPromptTokens: promptTokens)
     }
 
     /// The upstream's `usage.prompt_tokens` for this request, from a
     /// non-streamed one-token completion of the same body. The template and
     /// tokenizer are the runtime's own, so it is the prompt count the
-    /// cancelled generation used. Nil on any failure or after
-    /// `promptCountTimeoutSeconds`.
-    private func countUpstreamPromptTokens(_ request: ChatCompletionRequest) async -> Int? {
+    /// cancelled generation used. `tools` and `tool_choice` stay in the body
+    /// because the chat template renders them into the prompt. A 4xx on a
+    /// body with `response_format` is retried once without it: it constrains
+    /// sampling, not the templated prompt, and some engines refuse a format
+    /// with a one-token cap. Nil on any failure or at `deadline`.
+    private func countUpstreamPromptTokens(_ request: ChatCompletionRequest, deadline: Date) async -> Int? {
         guard let body = try? Self.encodePromptCountRequest(request, upstreamModelName: upstreamModelName) else { return nil }
+        let retryBody = request.promptSource.responseFormat.map { $0 != .null } == true
+            ? try? Self.encodePromptCountRequest(request, upstreamModelName: upstreamModelName, dropResponseFormat: true)
+            : nil
         let client = httpClient
         let url = chatCompletionsURL
-        return await withTaskGroup(of: Int?.self) { group in
-            group.addTask {
+        return await Self.bounded(until: deadline) { () async -> Int? in
+            func count(_ body: Data) async -> (status: Int, tokens: Int?)? {
                 guard let response = try? await client.post(
                     url,
                     jsonBody: body,
                     maxHeaderBytes: Self.maxHeaderBytes,
                     maxBodyBytes: Self.maxResponseBodyBytes
-                ), response.statusCode == 200 else { return nil }
-                return Self.decodeUsagePromptTokens(response.body)
+                ) else { return nil }
+                return (response.statusCode, response.statusCode == 200 ? Self.decodeUsagePromptTokens(response.body) : nil)
             }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: UInt64(Self.promptCountTimeoutSeconds * 1_000_000_000))
-                return nil
-            }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
+            guard let first = await count(body) else { return nil }
+            if first.status == 200 { return first.tokens }
+            guard (400..<500).contains(first.status), let retryBody else { return nil }
+            return await count(retryBody)?.tokens
         }
     }
 
-    /// Bound on the post-cancel prompt count call.
-    static let promptCountTimeoutSeconds: Double = 15
+    /// Budget for the post-cancel usage work (the prompt count call and the
+    /// tokenizer recount, run concurrently). The coordinator waits
+    /// `CancelTerminalWait` (2 s, phase4-coordinator/internal/ws/relay.go)
+    /// for the cancelled frame after its cancel request; this budget plus the
+    /// cancel detection (at most one 100 ms watchdog tick) and the receipt
+    /// signing stays well inside it.
+    static let cancelUsageBudgetSeconds: Double = 1.25
+
+    /// Runs `work` and returns its value, or nil at `deadline` without
+    /// waiting for it: the work runs in an unstructured task, so a
+    /// non-cancellable step (a tokenizer encode, a stuck socket) can never
+    /// hold the caller past the deadline.
+    static func bounded<T: Sendable>(until deadline: Date, _ work: @escaping @Sendable () async -> T?) async -> T? {
+        let gate = LoopbackResumeOnce()
+        return await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+            let worker = Task {
+                let value = await work()
+                if gate.claim() { continuation.resume(returning: value) }
+            }
+            Task {
+                let wait = max(0, deadline.timeIntervalSinceNow)
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                if gate.claim() {
+                    worker.cancel()
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+    }
 
     /// Runtimes asked for a per-chunk `logprobs` list, whose entries count
     /// the completion tokens each chunk carries (#1690 M9). LM Studio refuses
@@ -1630,7 +1703,11 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// #1690 M9: the same request as `encodeUpstreamRequest`, non-streamed
     /// and capped at one completion token, so its usage reports the prompt
     /// tokens (`countUpstreamPromptTokens`).
-    static func encodePromptCountRequest(_ request: ChatCompletionRequest, upstreamModelName: String) throws -> Data {
+    static func encodePromptCountRequest(
+        _ request: ChatCompletionRequest,
+        upstreamModelName: String,
+        dropResponseFormat: Bool = false
+    ) throws -> Data {
         let streamed = try encodeUpstreamRequest(request, upstreamModelName: upstreamModelName)
         guard var payload = try JSONSerialization.jsonObject(with: streamed) as? [String: Any] else {
             throw OpenAICompatibleLoopbackRuntimeError.malformedUpstreamResponse
@@ -1638,6 +1715,9 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         payload["stream"] = false
         payload.removeValue(forKey: "stream_options")
         payload["max_tokens"] = 1
+        if dropResponseFormat {
+            payload.removeValue(forKey: "response_format")
+        }
         return try JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])
     }
 
@@ -1847,6 +1927,20 @@ enum LoopbackServedIdentity {
 /// The caller cancelled a loopback generation (buyer disconnect).
 private struct LoopbackCancelRequested: Error {}
 
+/// Resolves a race once: the first `claim()` wins.
+final class LoopbackResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !claimed else { return false }
+        claimed = true
+        return true
+    }
+}
+
 /// The stream accumulator shared by the reader and the cancel path.
 private final class LoopbackStreamState: @unchecked Sendable {
     private let lock = NSLock()
@@ -1874,6 +1968,18 @@ private final class LoopbackStreamState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return accumulator.receivedContent
+    }
+
+    var hasPerChunkCompletionCounts: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return accumulator.hasPerChunkCompletionCounts
+    }
+
+    var streamedToolCall: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return accumulator.streamedToolCall
     }
 
     func cancelledResult(upstreamPromptTokens: Int? = nil, recountedCompletionTokens: Int? = nil) -> CompletionResult {

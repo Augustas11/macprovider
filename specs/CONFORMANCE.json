@@ -5832,7 +5832,12 @@
         "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledLogprobsStreamBindsCompletionPerChunkAndNeedsTheUpstreamPromptCount",
         "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledStreamRecountBindsOnlyTheWholeReceivedContent",
         "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledOllamaStreamStaysUnattestedWhenThePromptCountFails",
-        "phase3-binary/Tests/macprovider-cliTests/LMStudioLoopbackTests.swift:testToolRequestsAskLMStudioForNoLogprobs"
+        "phase3-binary/Tests/macprovider-cliTests/LMStudioLoopbackTests.swift:testToolRequestsAskLMStudioForNoLogprobs",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testSlowPromptCountLeavesTheCancelUnattestedWithinTheBudget",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelWithoutPerChunkCountsFallsBackToTheSiblingTokenizer",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledMLXLMStreamRecountsWithTheSnapshotTokenizer",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testPromptCountRetriesOnceWithoutResponseFormat",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledStreamRejectsMixedPerChunkCountSources"
       ],
       "journeys": [],
       "evidence": [],
