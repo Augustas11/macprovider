@@ -1804,7 +1804,11 @@ func (h *adminHandler) republishRouteGates(ctx context.Context) error {
 		h.deps.Registry.Disable()
 		return err
 	}
-	if _, err := h.deps.Registry.RefreshRouteableSnapshotsAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
+	// A refresher or admin publish of a newer revision between the
+	// Reconstruct and this call already carries the current gates; the
+	// locked republish treats that as published, so only a real failure
+	// disables routing.
+	if err := h.deps.Registry.RepublishRouteGatesAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
 		h.deps.Registry.Disable()
 		return err
 	}
