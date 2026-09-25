@@ -57,7 +57,13 @@ final class LMStudioLoopbackTests: XCTestCase {
         }
         let loaded = LMStudioStubClient.modelsBody(size: 4100, instances: [8192, 4096])
         var result = try await state(loaded)
-        XCTAssertEqual(result, .bound(contextWindow: 4096), "the smallest loaded context")
+        XCTAssertEqual(result, .bound(contextWindow: 8192), "the context of the instance named by the key")
+        // #1690 M9 review L1: the key must be a loaded instance's id, and no
+        // other entry may expose an instance with that id.
+        result = try await state(LMStudioStubClient.modelsBody(size: 4100, instances: [8192], keyInstance: false))
+        XCTAssertEqual(result, .notBound, "loaded only under another identifier")
+        result = try await state(LMStudioStubClient.modelsBody(size: 4100, instances: [8192], otherExposesKey: true))
+        XCTAssertEqual(result, .notBound, "another model answers to the key")
         result = try await state(LMStudioStubClient.modelsBody(size: 4100, instances: []))
         XCTAssertEqual(result, .notBound, "not loaded")
         result = try await state(LMStudioStubClient.modelsBody(size: 4101, instances: [8192]))
@@ -193,9 +199,24 @@ private final class LMStudioStubClient: BYOMDiscoveryHTTPClient, @unchecked Send
     var chatPosts: Int { lock.lock(); defer { lock.unlock() }; return _chatPosts }
     func setBody(_ value: String) { lock.lock(); body = value; lock.unlock() }
 
-    static func modelsBody(size: Int, instances: [Int], publisher: String = "lmstudio-community", format: String = "gguf") -> String {
-        let loaded = instances.enumerated().map { #"{"id":"inst-\#($0.offset)","config":{"context_length":\#($0.element)}}"# }.joined(separator: ",")
-        return #"{"models":[{"type":"llm","publisher":"\#(publisher)","key":"tiny-1b-instruct","size_bytes":\#(size),"loaded_instances":[\#(loaded)],"format":"\#(format)"},{"type":"embedding","publisher":"nomic-ai","key":"text-embedding-nomic","size_bytes":10,"loaded_instances":[],"format":"gguf"}]}"#
+    /// The first loaded instance is named by the key unless `keyInstance` is
+    /// false; `otherExposesKey` gives another entry an instance with that id.
+    static func modelsBody(
+        size: Int,
+        instances: [Int],
+        publisher: String = "lmstudio-community",
+        format: String = "gguf",
+        keyInstance: Bool = true,
+        otherExposesKey: Bool = false
+    ) -> String {
+        let loaded = instances.enumerated().map { item -> String in
+            let id = item.offset == 0 && keyInstance ? "tiny-1b-instruct" : "inst-\(item.offset)"
+            return #"{"id":""# + id + #"","config":{"context_length":"# + "\(item.element)" + "}}"
+        }.joined(separator: ",")
+        let other = otherExposesKey ? #"{"id":"tiny-1b-instruct","config":{"context_length":64}}"# : ""
+        return #"{"models":[{"type":"llm","publisher":""# + publisher + #"","key":"tiny-1b-instruct","size_bytes":"# + "\(size)" +
+            #","loaded_instances":["# + loaded + #"],"format":""# + format + #""},{"type":"llm","publisher":"other","key":"other-model","size_bytes":10,"loaded_instances":["# +
+            other + #"],"format":"gguf"}]}"#
     }
 
     func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {

@@ -7,9 +7,11 @@ import MacProviderCore
 // digest of the one file `BYOMLMStudioModelStore` resolves for the model key
 // under the operator's LM Studio models root; the runtime never names it.
 // LM Studio's REST surface reports no file path, so the runtime is bound to
-// that file by its `GET /api/v1/models` entry for the key: a loaded `llm` of
-// format `gguf` whose publisher is the file's publisher directory and whose
-// size is the file's exact size. Chat requests name the key.
+// that file by its `GET /api/v1/models` entry for the key: an `llm` of format
+// `gguf` whose publisher is the file's publisher directory, whose size is the
+// file's exact size, and which has a loaded instance whose id is the key
+// itself, exposed by no other entry. Chat requests name the key, which is that
+// instance's id.
 
 /// Serve-time recognition of an `lmstudio_loopback` model ref
 /// (`lmstudio:<model key>`), the discovery vocabulary of `BYOMLMStudioDiscovery`.
@@ -60,10 +62,12 @@ enum LMStudioLoopbackServeModel {
         case bound(contextWindow: Int?)
     }
 
-    /// Bound when `GET /api/v1/models` lists exactly one entry with the key,
-    /// and it is an `llm` of format `gguf` with the binding's publisher and
-    /// exact size and at least one loaded instance. Throws when the runtime
-    /// is unreachable or the body is not an LM Studio model list.
+    /// Bound when `GET /api/v1/models` lists exactly one entry with the key;
+    /// it is an `llm` of format `gguf` with the binding's publisher and exact
+    /// size; it has a loaded instance whose id is the key (the name chat
+    /// requests use); and no other entry has a loaded instance with that id.
+    /// The context window is that instance's. Throws when the runtime is
+    /// unreachable or the body is not an LM Studio model list.
     static func bindingState(
         _ client: any BYOMDiscoveryHTTPClient,
         origin: URL,
@@ -81,9 +85,16 @@ enum LMStudioLoopbackServeModel {
         guard matching.count == 1, let model = matching.first,
               model.type == "llm", model.format == "gguf",
               model.publisher == binding.publisher, model.sizeBytes == binding.sizeBytes,
-              !model.loadedContextLengths.isEmpty
+              let instance = model.loadedInstances.first(where: { $0.id == binding.modelKey }),
+              model.loadedInstances.filter({ $0.id == binding.modelKey }).count == 1,
+              !models.contains(where: { $0.key != binding.modelKey && $0.loadedInstances.contains { $0.id == binding.modelKey } })
         else { return .notBound }
-        return .bound(contextWindow: model.loadedContextLengths.compactMap { $0 }.min())
+        return .bound(contextWindow: instance.contextLength)
+    }
+
+    struct LoadedInstance: Equatable {
+        let id: String
+        let contextLength: Int?
     }
 
     struct Model: Equatable {
@@ -92,8 +103,8 @@ enum LMStudioLoopbackServeModel {
         let format: String?
         let publisher: String?
         let sizeBytes: Int?
-        /// One entry per loaded instance: its `config.context_length`.
-        let loadedContextLengths: [Int?]
+        /// One entry per loaded instance: its id and `config.context_length`.
+        let loadedInstances: [LoadedInstance]
     }
 
     /// The `models[]` of LM Studio's native `GET /api/v1/models`, or nil when
@@ -106,15 +117,15 @@ enum LMStudioLoopbackServeModel {
         var models: [Model] = []
         for entry in entries {
             guard case .object(let object) = entry, case .string(let key)? = object["key"] else { return nil }
-            var loaded: [Int?] = []
+            var loaded: [LoadedInstance] = []
             if case .array(let instances)? = object["loaded_instances"] {
                 for instance in instances {
-                    guard case .object(let fields) = instance else { return nil }
+                    guard case .object(let fields) = instance, case .string(let id)? = fields["id"] else { return nil }
                     var context: Int?
                     if case .object(let config)? = fields["config"] {
                         context = OpenAICompatibleLoopbackRuntime.intValue(config["context_length"])
                     }
-                    loaded.append(context)
+                    loaded.append(LoadedInstance(id: id, contextLength: context))
                 }
             }
             models.append(Model(
@@ -123,7 +134,7 @@ enum LMStudioLoopbackServeModel {
                 format: string(object["format"]),
                 publisher: string(object["publisher"]),
                 sizeBytes: OpenAICompatibleLoopbackRuntime.intValue(object["size_bytes"]),
-                loadedContextLengths: loaded
+                loadedInstances: loaded
             ))
         }
         return models
