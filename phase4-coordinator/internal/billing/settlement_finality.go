@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -274,6 +275,23 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 		case SettlementOutcomeVerified:
 			if row.closed && row.receiptResult == SettlementReceiptResultValid {
 				usage, blocked, source, err := s.requestSettlementUsage(ctx, accountScope, requestID, row.attemptN, row.providerID)
+				if errors.Is(err, errVerifiedCreditQuarantined) {
+					// E2E-F5: the receipt verified but the ledger had
+					// already quarantined the attempt's credit at zero
+					// (a ledger-validity reason, not a receipt trust
+					// failure), so no provider credit is owed: a terminal
+					// zero_settled refund (R-7.5, R-8.4), never an error
+					// that holds the buyer reservation forever.
+					finality.ZeroSettledAttempts++
+					if firstTerminalRefund == nil {
+						refund := row
+						refund.settlementOutcome = SettlementOutcomeZeroSettled
+						refund.receiptResult = SettlementReceiptResultValid
+						refund.reason = VerifiedCreditQuarantinedReason
+						firstTerminalRefund = &refund
+					}
+					continue
+				}
 				if err != nil {
 					return RequestSettlementFinality{}, false, err
 				}
@@ -654,6 +672,13 @@ func (s *Store) requestSettlementUsage(ctx context.Context, accountScope, reques
 		SettlementAccountScopeHash(accountScope), accountScope, requestID, attemptN, providerID).Scan(&raw, &overlap, &source, &ledgerPrompt, &ledgerChargedPrompt, &ledgerCompletion)
 	if err != nil {
 		if err == sql.ErrNoRows {
+			quarantined, qErr := s.attemptCreditOnlyQuarantined(ctx, accountScope, requestID, attemptN, providerID)
+			if qErr != nil {
+				return SettlementUsage{}, false, "", qErr
+			}
+			if quarantined {
+				return SettlementUsage{}, false, "", errVerifiedCreditQuarantined
+			}
 			return SettlementUsage{}, false, "", fmt.Errorf("verified charged ledger usage missing for request %s attempt %d provider %s", requestID, attemptN, providerID)
 		}
 		return SettlementUsage{}, false, "", err
@@ -679,6 +704,28 @@ func (s *Store) requestSettlementUsage(ctx context.Context, accountScope, reques
 		return SettlementUsage{}, false, "", err
 	}
 	return out, overlap == 1, source, nil
+}
+
+// VerifiedCreditQuarantinedReason closes an attempt whose receipt verified
+// while its only ledger credit is quarantined (E2E-F5).
+const VerifiedCreditQuarantinedReason = "verified_receipt_credit_quarantined"
+
+var errVerifiedCreditQuarantined = errors.New("verified attempt credit is quarantined")
+
+// attemptCreditOnlyQuarantined reports whether the attempt has a ledger credit
+// and every one of its credits is quarantined.
+func (s *Store) attemptCreditOnlyQuarantined(ctx context.Context, accountScope, requestID string, attemptN int64, providerID string) (bool, error) {
+	var quarantined, unquarantined int64
+	err := s.db.QueryRowContext(ctx, `
+SELECT COALESCE(SUM(CASE WHEN quarantined = 1 THEN 1 ELSE 0 END), 0),
+       COALESCE(SUM(CASE WHEN quarantined = 0 THEN 1 ELSE 0 END), 0)
+  FROM ledger_request_credits
+ WHERE settlement_account_scope_hash = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?`,
+		SettlementAccountScopeHash(accountScope), requestID, attemptN, providerID).Scan(&quarantined, &unquarantined)
+	if err != nil {
+		return false, err
+	}
+	return quarantined > 0 && unquarantined == 0, nil
 }
 
 func chargedPromptTokensFromLedger(charged, prompt sql.NullInt64) int64 {
