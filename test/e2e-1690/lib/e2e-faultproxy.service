@@ -1,0 +1,12 @@
+# #1690 e2e fault injector between the gateway and the coordinator buyer mux
+# (test scaffolding). Mode file: /run/e2e-faultproxy/mode.
+[Unit]
+Description=E2E gateway->coordinator fault proxy
+
+[Service]
+Type=simple
+RuntimeDirectory=e2e-faultproxy
+RuntimeDirectoryPreserve=yes
+ExecStart=/opt/macprovider/e2e-faultproxy -listen 127.0.0.1:8453 -upstream http://127.0.0.1:8443 -mode-file /run/e2e-faultproxy/mode
+Restart=always
+RestartSec=1
