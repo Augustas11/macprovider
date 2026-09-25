@@ -79,7 +79,7 @@ func TestEveryCoordinatorChatBuilderNegotiatesSignedFinality(t *testing.T) {
 		"receipts.go:fetchCoordinatorBuyerReceipt":                          true, // GET /internal/settlement/receipts
 		"server.go:handleStickyDelete":                                      true, // DELETE operator /internal/sticky
 		"server.go:statusFromPoolz":                                         true, // GET operator /poolz
-		"settlement_reconcile.go:fetchCoordinatorRequestSettlementFinality": true, // GET /internal/settlement/finality
+		"settlement_reconcile.go:fetchCoordinatorRequestSettlementFinalityDetail": true, // GET /internal/settlement/finality
 	}
 	seenAllowlisted := map[string]bool{}
 	callsHelper := func(body ast.Node) bool {

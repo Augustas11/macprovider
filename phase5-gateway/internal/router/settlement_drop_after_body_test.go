@@ -101,38 +101,72 @@ func TestDropAfterBodySettlesToCoordinatorFinality(t *testing.T) {
 }
 
 // A body_read_failed hold whose coordinator never recorded the attempt (it
-// crashed between the write and the record) answers 404 forever. It stays
-// held while young and becomes a terminal stale_held, with no debit, once it
-// is older than bodyReadFailedCoordinator404StaleAge.
+// crashed between the write and the record) gets the coordinator's own
+// "Settlement finality not found" forever. It ages out to a terminal
+// stale_held, with no debit, only once such answers span
+// bodyReadFailedCoordinator404StaleAge from the FIRST one (#1690 review
+// L-1): not from the reservation's creation, and never on a generic 404.
 func TestDropAfterBodyCoordinator404HoldAgesOutToStaleHeld(t *testing.T) {
-	var clock atomic.Value
-	clock.Store(fixedNow())
-	now := func() time.Time { return clock.Load().(time.Time) }
-	coordinator := httptest.NewServer(dropAfterBodyCoordinator(t, false, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer coordinator.Close()
-	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
-		cfg.Coordinator.BuyerURL = coordinator.URL
-		cfg.Coordinator.OperatorURL = coordinator.URL
-		cfg.Coordinator.ServiceToken = testKey
-		cfg.Coordinator.RequireSettlementTrailers = true
-	}, WithHTTPClient(coordinator.Client()), WithNow(now))
-	accountID := "acct_drop_404_age"
-	fullKey := createAccountAndKey(t, store, cfg, accountID)
-	if resp := postChat(t, h, fullKey, dropAfterBodyChatBody(false), nil); resp.Code != http.StatusBadGateway {
-		t.Fatalf("status=%d body=%s, want 502", resp.Code, resp.Body.String())
+	authoritative := func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"code": "not_found", "message": "Settlement finality not found"}})
 	}
-	clock.Store(fixedNow().Add(bodyReadFailedCoordinator404StaleAge - time.Minute))
-	reconcileSettlementHolds(t, h)
-	if snap := gatewaySettlementSnapshot(t, dbPath, accountID); snap.heldRows != 1 || snap.staleHeldRows != 0 || snap.usageRows != 0 {
-		t.Fatalf("young 404 hold: %+v, want it still held", snap)
-	}
-	clock.Store(fixedNow().Add(bodyReadFailedCoordinator404StaleAge + time.Minute))
-	reconcileSettlementHolds(t, h)
-	snap := gatewaySettlementSnapshot(t, dbPath, accountID)
-	if snap.staleHeldRows != 1 || snap.activeRows != 0 || snap.usageRows != 0 || snap.settledRows != 0 {
-		t.Fatalf("aged 404 hold: %+v, want a terminal stale_held with no debit", snap)
+	for _, tc := range []struct {
+		name   string
+		lookup http.HandlerFunc
+		stale  bool
+	}{
+		{name: "authoritative not found", lookup: authoritative, stale: true},
+		{name: "generic 404", lookup: func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }},
+		{name: "billing store unavailable", lookup: func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"code": "not_found", "message": "Settlement finality is unavailable"}})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var clock atomic.Value
+			clock.Store(fixedNow())
+			now := func() time.Time { return clock.Load().(time.Time) }
+			coordinator := httptest.NewServer(dropAfterBodyCoordinator(t, false, tc.lookup))
+			defer coordinator.Close()
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = coordinator.URL
+				cfg.Coordinator.OperatorURL = coordinator.URL
+				cfg.Coordinator.ServiceToken = testKey
+				cfg.Coordinator.RequireSettlementTrailers = true
+				// No background nudge: only the explicit reconciles below
+				// observe 404s, at the clock times the test sets.
+				cfg.Settlement.ReconcileEnabled = false
+			}, WithHTTPClient(coordinator.Client()), WithNow(now))
+			accountID := "acct_drop_404_" + strings.ReplaceAll(tc.name, " ", "_")
+			fullKey := createAccountAndKey(t, store, cfg, accountID)
+			if resp := postChat(t, h, fullKey, dropAfterBodyChatBody(false), nil); resp.Code != http.StatusBadGateway {
+				t.Fatalf("status=%d body=%s, want 502", resp.Code, resp.Body.String())
+			}
+			held := func(when string) {
+				t.Helper()
+				if snap := gatewaySettlementSnapshot(t, dbPath, accountID); snap.heldRows != 1 || snap.staleHeldRows != 0 || snap.usageRows != 0 {
+					t.Fatalf("%s: %+v, want the hold kept", when, snap)
+				}
+			}
+			// The first 404 arrives on an already old reservation: that
+			// alone must not age it out.
+			firstLookup := fixedNow().Add(2 * time.Hour)
+			clock.Store(firstLookup)
+			reconcileSettlementHolds(t, h)
+			held("first 404 on a 2 h old reservation")
+			clock.Store(firstLookup.Add(bodyReadFailedCoordinator404StaleAge - time.Minute))
+			reconcileSettlementHolds(t, h)
+			held("404s spanning less than the stale age")
+			clock.Store(firstLookup.Add(bodyReadFailedCoordinator404StaleAge + time.Minute))
+			reconcileSettlementHolds(t, h)
+			snap := gatewaySettlementSnapshot(t, dbPath, accountID)
+			if !tc.stale {
+				held("non-authoritative 404s spanning the stale age")
+				return
+			}
+			if snap.staleHeldRows != 1 || snap.activeRows != 0 || snap.usageRows != 0 || snap.settledRows != 0 {
+				t.Fatalf("404s spanning the stale age: %+v, want a terminal stale_held with no debit", snap)
+			}
+		})
 	}
 }
 

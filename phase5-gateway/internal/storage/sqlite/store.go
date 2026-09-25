@@ -200,6 +200,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.ensureRelayBlindAccountingColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureSettlementReconcileNotFoundColumn(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureUsageEventsPoolOperatorAttestedSource(ctx); err != nil {
 		return err
 	}
@@ -257,6 +260,42 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// ensureSettlementReconcileNotFoundColumn adds
+// settlement_reconcile_attempts.first_not_found_at (#1690 review L-1), the
+// first authoritative coordinator "finality not found" for a
+// body_read_failed hold. It is an additive column with a default and no
+// schema version bump: a v14 binary never reads it (its REPLACE only
+// resets it, which postpones an age-out), so a gateway rollback stays
+// possible. Fresh installs take the same ALTER, keeping sqlite_master
+// identical on both paths.
+func (s *Store) ensureSettlementReconcileNotFoundColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(settlement_reconcile_attempts)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "first_not_found_at" {
+			found = true
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE settlement_reconcile_attempts ADD COLUMN first_not_found_at TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 // ensureUsageEventsPoolOperatorAttestedSource rebuilds a v13 usage_events

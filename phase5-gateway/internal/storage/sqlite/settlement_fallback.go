@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
@@ -33,12 +34,54 @@ func (s *Store) MarkSettlementReconcileAttempt(ctx context.Context, reservation 
 	}
 	// REPLACE intentionally allocates a new AUTOINCREMENT sequence, including
 	// retries in the same clock tick or after a process restart.
+	// first_not_found_at survives the REPLACE (the age-out of a
+	// body_read_failed hold counts from the first authoritative 404).
+	createdAt := encodeTime(reservation.CreatedAt.UTC())
 	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO settlement_reconcile_attempts
-		(account_id, request_id, reservation_created_at) VALUES(?, ?, ?)`,
-		reservation.AccountID, reservation.RequestID, encodeTime(reservation.CreatedAt.UTC())); err != nil {
+		(account_id, request_id, reservation_created_at, first_not_found_at)
+		VALUES(?, ?, ?, COALESCE((SELECT first_not_found_at FROM settlement_reconcile_attempts
+			WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?), ''))`,
+		reservation.AccountID, reservation.RequestID, createdAt,
+		reservation.AccountID, reservation.RequestID, createdAt); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// RecordSettlementFinalityNotFound sets first_not_found_at the first time
+// only and returns the stored value. The attempt row exists because
+// MarkSettlementReconcileAttempt runs before every lookup.
+func (s *Store) RecordSettlementFinalityNotFound(ctx context.Context, reservation storage.ActiveReservation, at time.Time) (time.Time, error) {
+	if reservation.CreatedAt.IsZero() {
+		return time.Time{}, storage.ErrReservationNotFound
+	}
+	createdAt := encodeTime(reservation.CreatedAt.UTC())
+	if _, err := s.db.ExecContext(ctx, `UPDATE settlement_reconcile_attempts SET first_not_found_at = ?
+		WHERE account_id = ? AND request_id = ? AND reservation_created_at = ? AND first_not_found_at = ''`,
+		encodeTime(at.UTC()), reservation.AccountID, reservation.RequestID, createdAt); err != nil {
+		return time.Time{}, err
+	}
+	var raw string
+	if err := s.db.QueryRowContext(ctx, `SELECT first_not_found_at FROM settlement_reconcile_attempts
+		WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?`,
+		reservation.AccountID, reservation.RequestID, createdAt).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return time.Time{}, storage.ErrReservationNotFound
+		}
+		return time.Time{}, err
+	}
+	first := decodeTime(raw)
+	if first.IsZero() {
+		return time.Time{}, fmt.Errorf("settlement reconcile attempt has an unreadable first_not_found_at")
+	}
+	return first, nil
+}
+
+func (s *Store) ClearSettlementFinalityNotFound(ctx context.Context, reservation storage.ActiveReservation) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE settlement_reconcile_attempts SET first_not_found_at = ''
+		WHERE account_id = ? AND request_id = ? AND reservation_created_at = ? AND first_not_found_at != ''`,
+		reservation.AccountID, reservation.RequestID, encodeTime(reservation.CreatedAt.UTC()))
+	return err
 }
 
 func (s *Store) SaveSettlementFallbackCandidate(ctx context.Context, candidate storage.SettlementFallbackCandidate) error {
