@@ -261,16 +261,29 @@ Feed-tuple requirements this satisfies: the closed identity matrix row
 `^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\.gguf$`; `(hash_algorithm, hash)` is
 unique in the feed; the artifact id is new, so no rebinding.
 
-Consumer floor: the generator's `ARTIFACT_FEED_CONSUMER_FLOOR` is `(0,16,0)`.
-A `llamacpp_loopback` GGUF on `huggingface_revision` needs v0.16.0, so the
-generator emits it. It does NOT need v0.17.0 (that is only
-`mlxlm_loopback`), so do not add `mlxlm_loopback` to the MLX primary in this
-release: the generator refuses it until the floor is raised after every
-consumer implements v0.17.0. Consumers older than v0.16.0 (every CLI before
-`747557cc`, including the live `1.8.192`/`1.8.195` candidates) reject the new
-feed as `catalog_artifact_feed_integrity_failure`, which fails closed for
-artifact-derived capabilities only; native paid serving is unaffected
-(§3.7.6 rule 6). A coordinator older than `v1.8.200` (the first deployable #1690 tag) cannot start on it
+Rollout state of this tuple (SPEC-023 v0.17.2), checked 2026-09-25:
+
+- coordinator: implemented (`buyer/catalog_artifacts_feed.go`,
+  `artifactIdentityMatrix`, since `747557cc`);
+- provider CLI: implemented by the B3a commit on
+  `feat/1690-m1-catalog-gguf` (`AutotuneArtifactFeed.swift` accepts the tuple
+  and resolves a llama.cpp GGUF by its file digest). Every CLI before it,
+  including `747557cc` and the live `1.8.192`/`1.8.195` candidates, rejects
+  the whole feed as `catalog_artifact_feed_integrity_failure`. That fails
+  closed for artifact-derived capabilities only; native paid serving is
+  unaffected (§3.7.6 rule 6);
+- release generator: NOT implemented. `ARTIFACT_IDENTITY_MATRIX` in
+  `scripts/catalog-release.py` maps `gguf` to `ollama_library_tag` only, so
+  `catalog-release.py status` stays NOT ACTIVATABLE on this entry. The
+  generator's `ARTIFACT_FEED_CONSUMER_FLOOR` `(0,16,0)` gates
+  `allowed_runtime_sources` only; it never made the generator emit this
+  tuple. The generator change (B3b) lands after #1732, which rewrites that
+  file.
+
+Do not add `mlxlm_loopback` to the MLX primary in this release either: the
+generator refuses it until the floor is raised to v0.17.0.
+
+A coordinator older than `v1.8.200` (the first deployable #1690 tag) cannot start on a feed carrying this tuple
 (E2E-F11): from this release on, a coordinator rollback needs §9 step 4a.
 
 ### 3.3 Catalog release (PR, then signed cut)
@@ -819,7 +832,7 @@ Harder stops, in order of reach:
 |---|---|---|---|
 | B1 | RESOLVED 2026-09-25: `v1.8.200` live (gateway schema 14, paid non-stream and stream proof settled `spec022_verified`); `v1.8.199` had rolled back on the quick_check stall | #1646 Pearl actor | done |
 | B2 | Gateway pin off (`require_settlement_trailers` absent) | Pearl actor | runbook §9 step 2a after P1/P2 |
-| B3 | No artifact feed in production; activation blocked on 17 unmeasured MLX `size_bytes` and a new `release_id`; nginx route absent | operator (PR + signed cut with `streamvc-autotune-static-v4`, operator-held) + Pearl actor (deploy) | §3.3 |
+| B3 | Generator does not emit the v0.16.0 GGUF tuple yet (B3b, after #1732; CLI side B3a done on `feat/1690-m1-catalog-gguf`); no artifact feed in production; activation blocked on 17 unmeasured MLX `size_bytes` and a new `release_id`; nginx route absent | operator (PR + signed cut with `streamvc-autotune-static-v4`, operator-held) + Pearl actor (deploy) | §3.3 |
 | B4 | No accepted CLI contains `747557cc`; the candidate must also bake the §3.3 release | operator (acceptance-candidate workflow, `production-release` secret) + Pearl actor (`accepted_ids`) | §3.5 |
 | B5 | Registration path for the second identity: does an operator-issued token clear the production hardware-trust / referral onboarding gates, or does it need a dual-control hardware-trust grant (SPEC-026 policy A+B)? | operator | confirm on a dry join; grant if `waiting_trust` |
 | B6 | RESOLVED: `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md`, `scripts/build-trusted-pool-external-runtime-journey-result.py` (`capture`, `payload`), `promote-signed-trusted-pool-external-runtime-journey.yml`, `check_spec_governance.py` validator, journey mapped on R012/R013/R014 (still `pending`) | repo | done; a real M1 capture is still needed |

@@ -26,6 +26,9 @@ struct ArtifactFeed: Equatable, Sendable {
         var revision: String?
         var libraryTag: String?
         var digest: String?
+        /// SPEC-023 v0.16.0: the repository-relative single-file GGUF path of a
+        /// `gguf` artifact sourced by `huggingface_revision`; nil otherwise.
+        var filePath: String? = nil
     }
 
     struct Artifact: Equatable, Sendable {
@@ -70,23 +73,27 @@ struct ArtifactFeed: Equatable, Sendable {
     static let verificationStatuses: Set<String> = ["declared", "verified", "blocked"]
 
     /// §3.7.4 closed artifact-identity matrix: runtime_format determines the only
-    /// legal hash_algorithm, source_ref.kind, and allowed_runtime_sources set.
+    /// legal hash_algorithm, the legal source_ref.kind set, and the
+    /// allowed_runtime_sources set.
     struct IdentityRow: Sendable {
         var hashAlgorithm: String
-        var sourceRefKind: String
+        var sourceRefKinds: Set<String>
         var runtimeSources: Set<String>
     }
 
     static let identityMatrix: [String: IdentityRow] = [
         "mlx_safetensors": IdentityRow(
             hashAlgorithm: "macprovider.snapshot-manifest.v1",
-            sourceRefKind: "huggingface_revision",
+            sourceRefKinds: ["huggingface_revision"],
             // SPEC-023 v0.17.0: mlx_lm.server serves the same snapshot.
             runtimeSources: ["mlx_cache", "mlxlm_loopback"]
         ),
         "gguf": IdentityRow(
             hashAlgorithm: "macprovider.gguf-file.v1",
-            sourceRefKind: "ollama_library_tag",
+            // SPEC-023 v0.16.0: a gguf artifact may also be sourced by
+            // huggingface_revision with a REQUIRED file_path (the coordinator's
+            // `artifactIdentityMatrix` in buyer/catalog_artifacts_feed.go).
+            sourceRefKinds: ["ollama_library_tag", "huggingface_revision"],
             runtimeSources: ["ollama_loopback", "llamacpp_loopback", "lmstudio_loopback", "openai_compatible_loopback"]
         ),
     ]
@@ -107,6 +114,16 @@ extension ArtifactFeed {
     private static let hex40Pattern = try! NSRegularExpression(pattern: "^[0-9a-f]{40}$")
     private static let repoIDPattern = try! NSRegularExpression(pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$")
     private static let fullDatePattern = try! NSRegularExpression(pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+    /// SPEC-023 v0.16.0 §3.7.3 `file_path` grammar (coordinator
+    /// `ggufFilePathPattern`).
+    private static let ggufFilePathPattern = try! NSRegularExpression(pattern: "^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\\.gguf$")
+
+    /// The full `file_path` rule: the grammar in full, at most 255 bytes, and no
+    /// `.` or `..` segment (coordinator `validGGUFFilePath`).
+    static func validGGUFFilePath(_ path: String) -> Bool {
+        guard path.utf8.count <= 255, matches(ggufFilePathPattern, path) else { return false }
+        return !path.split(separator: "/", omittingEmptySubsequences: false).contains { $0 == "." || $0 == ".." }
+    }
 
     /// Whole-string match. ICU's `$` also matches before a final line
     /// terminator, which Go's RE2 and Python's `fullmatch` do not; requiring the
@@ -312,12 +329,25 @@ extension ArtifactFeed {
             throw ArtifactFeedError.integrity("\(label): source_ref must be an object")
         }
         let kind = try string(rawRef, "kind", label: "\(label) source_ref")
-        guard kind == row.sourceRefKind else {
-            throw ArtifactFeedError.integrity("\(label): runtime_format \(runtimeFormat) requires source_ref.kind \(row.sourceRefKind)")
+        guard row.sourceRefKinds.contains(kind) else {
+            throw ArtifactFeedError.integrity("\(label): runtime_format \(runtimeFormat) may not use source_ref.kind \(kind)")
         }
         let sourceRef: SourceRef
         if kind == "huggingface_revision" {
-            try exactKeys(rawRef, allowed: ["kind", "repo_id", "revision"], required: ["kind", "repo_id", "revision"], label: "\(label) source_ref")
+            // SPEC-023 v0.16.0: file_path is REQUIRED for gguf and forbidden for
+            // mlx_safetensors; a gguf huggingface_revision carries no digest.
+            let hfKeys: Set<String> = runtimeFormat == "gguf"
+                ? ["kind", "repo_id", "revision", "file_path"]
+                : ["kind", "repo_id", "revision"]
+            try exactKeys(rawRef, allowed: hfKeys, required: hfKeys, label: "\(label) source_ref")
+            var filePath: String?
+            if runtimeFormat == "gguf" {
+                let path = try string(rawRef, "file_path", label: "\(label) source_ref")
+                guard validGGUFFilePath(path) else {
+                    throw ArtifactFeedError.integrity("\(label): gguf source_ref.file_path must be a repository-relative single-file .gguf path")
+                }
+                filePath = path
+            }
             let repoID = try string(rawRef, "repo_id", label: "\(label) source_ref")
             let revision = try string(rawRef, "revision", label: "\(label) source_ref")
             guard matches(repoIDPattern, repoID) else {
@@ -326,7 +356,7 @@ extension ArtifactFeed {
             guard matches(hex40Pattern, revision) else {
                 throw ArtifactFeedError.integrity("\(label): source_ref.revision must be an immutable lowercase 40-hex commit")
             }
-            sourceRef = SourceRef(kind: kind, repoID: repoID, revision: revision, libraryTag: nil, digest: nil)
+            sourceRef = SourceRef(kind: kind, repoID: repoID, revision: revision, libraryTag: nil, digest: nil, filePath: filePath)
         } else {
             try exactKeys(rawRef, allowed: ["kind", "library_tag", "digest"], required: ["kind", "library_tag", "digest"], label: "\(label) source_ref")
             let libraryTag = try string(rawRef, "library_tag", label: "\(label) source_ref")
@@ -464,8 +494,20 @@ extension ArtifactFeed {
         /// never identity (§3.7.4; SPEC-047 §R001: a runtime-reported label is
         /// not a catalog match). Until an adapter reports the GGUF layer digest
         /// (slice 3), no GGUF artifact matches at all.
+        ///
+        /// A `gguf` artifact sourced by `huggingface_revision` (SPEC-023
+        /// v0.16.0) has no layer digest and no runtime name to compare: the
+        /// loopback runtime reports a local file stem the operator chose. It
+        /// matches on the CLI-computed `macprovider.gguf-file.v1` digest of the
+        /// served file alone (`"sha256:" + hash`), which is exactly the
+        /// `(hash_algorithm, hash)` pair the coordinator resolves the member by
+        /// (SPEC-010-R007).
         func matches(_ normalizedReference: String, runtimeSource: String, revisions: Set<String>, digest: String?) -> Bool {
             guard verificationStatus == "verified", allowedRuntimeSources.contains(runtimeSource) else { return false }
+            if runtimeFormat == "gguf", sourceRef.filePath != nil {
+                guard hashAlgorithm == ModelArtifactIdentity.ggufFileV1, let digest else { return false }
+                return digest == "sha256:" + hash
+            }
             if let repoID = sourceRef.repoID, let revision = sourceRef.revision {
                 return BYOMCandidateIdentity.normalizedServedModelRef(repoID) == normalizedReference
                     && revisions.contains(revision)
