@@ -988,6 +988,19 @@ func (b *coord503PrefixErrBody) Close() error { return nil }
 func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted, priorProviderDispatch bool, window string) {
 	body, err := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 	if err != nil {
+		// A coordinator that declared finality trailers records a 200 after
+		// its body write (SPEC-022 R-5.6), so a hop that broke after the body
+		// or while its trailers were read can already hold a delivered,
+		// credited attempt. Hold for the reconciler, which settles to the
+		// coordinator's finality; a local refund would contradict it.
+		if resp.StatusCode == http.StatusOK && hasSettlementFinalityTrailerDeclaration(resp) {
+			finality := missingSettlementFinality(s.settlementFinalityBinding(r, subject), "body read failed")
+			if !s.settleBeforeResponseWithFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "upstream_error", finality, resp.Header, false) {
+				return
+			}
+			writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
+			return
+		}
 		s.refundWalletAwareReservation(subject, requestID(r))
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
