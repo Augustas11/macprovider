@@ -326,7 +326,13 @@ settled, so traffic stops and holds drain first:
    is rolled back.
 3. Set `coordinator.require_settlement_trailers: false` and restart the
    gateway. A coordinator older than this release signs nothing, so with the
-   pin on every one of its 200s would be held.
+   pin on every one of its 200s is held as
+   `missing_settlement_finality_trailer`. The reconciler's request-scoped
+   finality lookup then settles each hold to the older coordinator's
+   finality, normally within seconds (the #1690 VM e2e saw every such hold
+   terminate correctly), so this is not money loss. It does put every
+   request through a hold and a reconcile, and a reconciler outage would
+   leave them held, so turn the pin off before the coordinator rollback.
 4. Roll back in the reverse of the rollout order: withdraw v2 allowlists (a
    policy core with an empty `runtime_allowlist`), then the CLI, then the
    gateway only if it must go (below), then the coordinator. The coordinator
