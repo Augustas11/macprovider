@@ -98,8 +98,12 @@ struct SelfUpdate {
         rawValue: kSecCSSigningInformation
     )
     static let currentCodeValidityFlags = SecCSFlags(rawValue: kSecCSStrictValidate)
-    static let releaseDiscoveryPageSize = 20
-    static let maxReleaseDiscoveryListingBytes = 2 * 1_024 * 1_024
+    // Pearl prereleases ship several times a day and push transports off a
+    // single listing page, so discovery pages newest-first with a hard page
+    // bound and a per-page byte cap (SPEC-020-R001).
+    static let releaseDiscoveryPageSize = 100
+    static let maxReleaseDiscoveryPages = 10
+    static let maxReleaseDiscoveryListingBytes = 8 * 1_024 * 1_024
     static let maxReleaseDiscoveryHeadBytes = 64 * 1_024
     static let maxReleaseDiscoverySignatureBytes = 4 * 1_024
     static let checksumPublicKeyPEM = """
@@ -766,6 +770,9 @@ struct SelfUpdate {
         }
     }
 
+    /// Returns the well-formed transports from the first listing page that
+    /// contains any, or an empty array once the listing or page bound ends.
+    /// The listing is an unsigned locator only; the signed head decides.
     private func releaseDiscoveryTransports() async throws -> [GitHubRelease] {
         guard var components = URLComponents(string: releasesAPIURL) else {
             throw UpdateError.invalidURL(releasesAPIURL)
@@ -776,22 +783,37 @@ struct SelfUpdate {
             components.path = String(components.path.split(separator: "/").dropLast(2).joined(separator: "/"))
             if !components.path.hasPrefix("/") { components.path = "/" + components.path }
         }
-        components.queryItems = [URLQueryItem(name: "per_page", value: String(Self.releaseDiscoveryPageSize))]
-        guard let url = components.url else {
-            throw UpdateError.invalidURL(releasesAPIURL)
+        for page in 1 ... Self.maxReleaseDiscoveryPages {
+            components.queryItems = [
+                URLQueryItem(name: "per_page", value: String(Self.releaseDiscoveryPageSize)),
+                URLQueryItem(name: "page", value: String(page)),
+            ]
+            guard let url = components.url else {
+                throw UpdateError.invalidURL(releasesAPIURL)
+            }
+            try validateReleaseAPIURL(url)
+            var request = URLRequest(url: url)
+            request.addValue("application/vnd.github+json", forHTTPHeaderField: "accept")
+            request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
+            let (data, response) = try await session.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+                throw UpdateError.httpStatus(http.statusCode)
+            }
+            guard data.count <= Self.maxReleaseDiscoveryListingBytes else {
+                throw UpdateError.discoveryHeadInvalid("transport_listing_oversized")
+            }
+            let releases = try JSONDecoder().decode([GitHubRelease].self, from: data)
+            let transports = releases.filter {
+                SignedReleaseDiscoveryHead.transportSequence(from: $0.tagName) != nil
+            }
+            if !transports.isEmpty {
+                return transports
+            }
+            if releases.count < Self.releaseDiscoveryPageSize {
+                break
+            }
         }
-        try validateReleaseAPIURL(url)
-        var request = URLRequest(url: url)
-        request.addValue("application/vnd.github+json", forHTTPHeaderField: "accept")
-        request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
-        let (data, response) = try await session.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
-            throw UpdateError.httpStatus(http.statusCode)
-        }
-        guard data.count <= Self.maxReleaseDiscoveryListingBytes else {
-            throw UpdateError.discoveryHeadInvalid("transport_listing_oversized")
-        }
-        return try JSONDecoder().decode([GitHubRelease].self, from: data)
+        return []
     }
 
     private func releaseByTag(_ tag: String) async throws -> GitHubRelease {
