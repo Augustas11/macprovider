@@ -91,6 +91,48 @@ The remaining gap to 100 tok/s is prefill scheduling, not decode.
     which is the FR-CB6 accumulation-order tolerance.
 - **Failures:** 0 `batching_forward_failed` or `batching_prefill_failed` events.
 
+## MLX ceiling: the model-level harness (`msb-throughput`, same binary)
+
+This measures aggregate decode for N rows, with no scheduler, HTTP or prefill
+involved. Runs used 128 decode tokens. Data:
+[`data/cb-perf-2026-09-25/msb-scale/`](data/cb-perf-2026-09-25/msb-scale/).
+
+| Rows | Stock MLX contiguous KV, L=32 | Stock MLX, L=1.5k | Our paged engine, L=32 | Our paged engine, L=1.5k |
+| --- | --- | --- | --- | --- |
+| 1 | 37.2 | 38.0 | 34.2 | 34.5 |
+| 2 | 59.7 | 63.1 | 56.6 | 57.3 |
+| 4 | 70.6 | 72.6 | 66.4 | 68.0 |
+| 8 | 78.7 | 81.3 | 76.1 | 79.1 |
+
+- **Stock MLX peaks at about 80 tok/s at 8 rows** for this 4-bit 27B hybrid
+  model. The stock engine is a plain `KVCacheSimple` with a batch dimension,
+  compiled.
+- **Our paged engine is now within 3–6% of that ceiling.** The serve's
+  steady-state 64.0 tok/s at 1.5k × 4 is within about 6% of the harness figure
+  of 68.0.
+- **Where the limit comes from:** past about 4 rows, per-step cost grows almost
+  linearly with rows. This is a property of MLX's small-batch quantized matmul
+  and the gated-delta recurrent layers, not of our scheduler or cache.
+- **What 100 tok/s would need:** more than 8 rows, or kernel-level work in MLX.
+
+## Where the "15 tok/s" comes from
+
+Take a typical agent request: a ~1.5k-token prompt and ~150 output tokens.
+
+- Prefill takes about 5 s at the compute-bound ~300 tok/s.
+- Decode takes about 4 s.
+
+Per request that is about 16 output tok/s, which matches what buyers see. The
+dominant cost is prefill, and prefill is compute-bound: about 54 GFLOP per token
+× 300 tok/s ≈ 16 TFLOPS on the M3 Ultra.
+
+The levers that move it:
+
+- **Prefix and conversation reuse.** M4 turned a 76.6 s re-prefill into a 1.0 s
+  follow-up.
+- **Enough concurrency to fill 8 rows.**
+- **Prefill/decode fairness,** so prompts do not stall other rows.
+
 ## Next
 
 Prefill scheduling:

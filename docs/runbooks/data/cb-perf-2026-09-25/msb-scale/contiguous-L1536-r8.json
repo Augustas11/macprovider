@@ -1,0 +1,48 @@
+{
+  "aggregateCVPct" : 0,
+  "aggregateTPSRuns" : [
+    78.70485630069699
+  ],
+  "aggregateTPSp50" : 78.70485630069699,
+  "aggregateUpliftVsPagedSingleRow" : 2.1072297053997073,
+  "aggregateVsProductionSerial" : 2.112214518636884,
+  "blockSizeTokens" : 16,
+  "compiled" : true,
+  "decodeTokensPerRow" : 128,
+  "engine" : "contiguous",
+  "layerCount" : 16,
+  "maxPhysicalBlocks" : 1024,
+  "mlxSwiftLMPin" : "mlxlm-3.31.4",
+  "modelID" : "\/Users\/a1\/.cache\/huggingface\/hub\/models--mlx-community--Qwen3.6-27B-4bit\/snapshots\/c000ac2c2057d94be3fa931000c31723aac53282",
+  "modelTag" : "c000ac2c2057d94be3fa931000c31723aac53282",
+  "pagedSingleRowCVPct" : 0,
+  "pagedSingleRowTPSRuns" : [
+    37.349917808684246
+  ],
+  "pagedSingleRowTPSp50" : 37.349917808684246,
+  "peakRSSMB" : 30083,
+  "perRowFractionOfPagedSingleRow" : 0.2634037131749634,
+  "perRowTPSp50" : 9.838107037587124,
+  "productionSerialCVPct" : 0,
+  "productionSerialPromptTokens" : 1536,
+  "productionSerialTPSRuns" : [
+    37.26177223300648
+  ],
+  "productionSerialTPSp50" : 37.26177223300648,
+  "promptTokenLengths" : [
+    1536,
+    1536,
+    1536,
+    1536,
+    1536,
+    1536,
+    1536,
+    1536
+  ],
+  "promptTokensPerRow" : 1536,
+  "rows" : 8,
+  "runs" : 1,
+  "scenario" : "throughput",
+  "schemaVersion" : 4,
+  "timestamp" : "2026-09-25T00:18:38Z"
+}
