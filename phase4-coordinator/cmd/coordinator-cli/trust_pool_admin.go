@@ -70,6 +70,12 @@ func trustPoolAdmin(args []string, getenv func(string) string, stdin io.Reader, 
 		return trustPoolAdminGETPool(args[1:], "export-audit", "/audit", getenv, stdout)
 	case "export-distribution":
 		return trustPoolAdminGETPool(args[1:], "export-distribution", "/distribution", getenv, stdout)
+	case "keygen":
+		return trustPoolAdminKeygen(args[1:], stdout)
+	case "sign-root":
+		return trustPoolAdminSignRoot(args[1:], stdout)
+	case "sign-manifest":
+		return trustPoolAdminSignManifest(args[1:], stdout)
 	case "rotate-signer-set":
 		return fmt.Errorf("rotate-signer-set is not implemented in the SPEC-043 candidate surface; submit a signed SPEC-042 authority-log event through append-event after signer-set support lands")
 	default:

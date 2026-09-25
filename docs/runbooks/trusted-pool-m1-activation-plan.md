@@ -335,62 +335,74 @@ native provider is not updated by this; it keeps its own candidate.
 
 ### 4.1 Signing tool and keys
 
-There is no reviewed production tool that builds `root_issuer_registered` /
-`manifest_accepted` events. The only builder is
-`scripts/lab/1690-m6/labtool` (`pool-keygen`, `pool-root`, `pool-manifest`),
-which hardcodes key ids `lab-manifest-root-1` / `lab-policy-signer-1` /
-`lab-root-key-1`, lab custody/display hashes, `launch_environment:
-candidate`, `MinAttestationTier: hardware`, `SignerSetVersion: 1`, 1-of-1
-policy signer. For a `candidate` M1 pool those hardcoded values are all
-accepted (`validateProductionPromotionGate` is not reached for `candidate`),
-so M1 uses labtool built from the `v1.8.200` tree, unmodified. The lab key-id
-names and placeholder custody hash will appear in the production pool's
-durable history; record that in the journey evidence. Before any external
-creator pool, promote labtool's three commands into a reviewed tool with
-explicit key ids, environment and custody hash (blocker B7).
+The reviewed tool is `coordinator-cli trust-pool-admin keygen`, `sign-root`
+and `sign-manifest` (`phase4-coordinator/cmd/coordinator-cli/trust_pool_sign.go`,
+B7). It replaces the lab-only `scripts/lab/1690-m6/labtool` pool commands:
+every key id, the launch environment, the custody disclosure and class, the
+signer-set version, the attestation tier, the retention policy, the member
+floor and the policy window are required flags with no defaults. Private keys
+are PKCS#8 PEM files that the tool creates `0600` in a new `0700` directory,
+and it reads them only when they are regular, owner-only files owned by the
+invoking user. Nothing it prints or writes contains private key material.
+Before writing, each command checks its own output with the coordinator's
+verifiers (`VerifyRootIssuerRegistrationEvent`,
+`VerifyNewestPolicyAcceptance`, `VerifyManifestAcceptedEvent`). It never uses
+the network; the Pearl actor submits the JSON events it writes.
 
-Three keys, all generated fresh by the operator on an offline Mac, kept in
-operator custody (mode 0600, never in the repo, never on Pearl, never
-printed):
-
-| Key | Algorithm | Signs | File |
-|---|---|---|---|
-| root issuer | ECDSA P-256 | `root_issuer_registered` proof, every `manifest_accepted` event | in `keys.json` from `pool-keygen` |
-| manifest authority root | Ed25519 | genesis authority-log entry (policy signer set 1-of-1); its key id derives `pool_id` | same file |
-| policy signer | Ed25519 | the policy core, `policy-core-sig/v2 ‖ manifest_core_digest` | same file |
-
-Build labtool exactly as the rig does (read-only for Pearl; on the operator
-Mac):
+The tool is not in `v1.8.200`. Build `coordinator-cli` on the operator Mac
+from the first `main` commit that contains it:
 
 ```bash
-git worktree add ../mp-m1-pooltool v1.8.200 --detach && cd ../mp-m1-pooltool
-printf '{"Replace":{"%s/phase4-coordinator/cmd/lab1690m6/main.go":"%s/scripts/lab/1690-m6/labtool/main.go"}}' "$PWD" "$PWD" > /tmp/m1-overlay.json
-(cd phase4-coordinator && GOTOOLCHAIN=local go build -overlay /tmp/m1-overlay.json -o "$M1/bin/labtool" ./cmd/lab1690m6)
+git worktree add ../mp-m1-pooltool <commit-with-trust_pool_sign.go> --detach && cd ../mp-m1-pooltool
+(cd phase4-coordinator && GOTOOLCHAIN=local go build -o "$M1/bin/coordinator-cli" ./cmd/coordinator-cli)
 ```
 
 `$M1` is an operator directory, mode 0700, e.g. on an encrypted volume.
+Submission on Pearl still uses the deployed `/opt/macprovider/coordinator-cli`
+(`append-event` and `submit-policy` are unchanged).
 
-### 4.2 Exact v2 policy-core fields (what `pool-manifest` produces)
+Three keys, all generated fresh by `keygen` on the offline operator Mac, kept
+in operator custody (never in the repo, never on Pearl, never printed):
+
+| Key | Algorithm | Signs | File in `$M1/keys` |
+|---|---|---|---|
+| root issuer | ECDSA P-256 | `root_issuer_registered` proof, every `manifest_accepted` event | `root-issuer-key.pem` |
+| manifest authority root | Ed25519 | genesis authority-log entry (policy signer set 1-of-1); its key id derives `pool_id` | `manifest-authority-key.pem` |
+| policy signer | Ed25519 | the policy core, `policy-core-sig/v2 ‖ manifest_core_digest` | `policy-signer-key.pem` |
+
+`keygen` also writes `pool-identity.json` (public: `pool_id`, genesis nonce,
+key ids, public keys, root fingerprint), which `sign-root` and
+`sign-manifest` read.
+
+M1 key ids and custody (recorded in the pool's durable history, so pick them
+once): `m1-manifest-authority-1`, `m1-policy-signer-1`, `m1-root-issuer-1`;
+custody disclosure `$M1/custody-m1.json` =
+`{"class":"software","description":"<operator Mac, encrypted volume, owner-only files>"}`
+with `--custody-class software` (allowed for a `candidate` pool,
+SPEC-043-R002). The event carries the sha256 of that file's exact bytes, so
+keep the file.
+
+### 4.2 Exact v2 policy-core fields (what `sign-manifest` produces)
 
 | Field | M1 value |
 |---|---|
 | `Encoding` | `2` (tag `macprovider/spec042/policy-core/v2`) |
-| `PoolID` | from `pool-keygen` |
+| `PoolID` | from `keygen` |
 | `ManifestVersion` | `1` |
 | `PrevManifestCoreHash` | 32 zero bytes (genesis) |
-| `SignerSetVersion` | `1` |
+| `SignerSetVersion` | `1` (`--signer-set-version 1`) |
 | `ModelAllowlist` | `["mlx-community/Llama-3.2-3B-Instruct-4bit"]` (the row's `model_id`; buyers name it) |
 | `MinBinaryVersion` | `1.8.123` (every candidate CLI reports the shared `binaryVersion` `1.8.123`; a higher floor would exclude the member) |
-| `MinAttestationTier` | `hardware` (labtool fixed value) |
-| `RequireEncryptedLeg` | `false` (labtool leaves it unset) |
+| `MinAttestationTier` | `hardware` (`--min-attestation-tier hardware`) |
+| `RequireEncryptedLeg` | `false` (the tool does not set it) |
 | `SettlementMode` | `enforce` (required: a non-empty allowlist in `observe` is `errRuntimeAllowlistObserve`) |
-| `RevenueSplitBps` | `0` (labtool leaves it unset) |
+| `RevenueSplitBps` | `0` (the tool does not set it) |
 | `SplitExecutionStatus` | `declared_not_executed` |
-| `RetentionPolicyID` | `standard` |
-| `MinEligibleMembers` | `1` |
+| `RetentionPolicyID` | `standard` (`--retention-policy-id standard`) |
+| `MinEligibleMembers` | `1` (`--min-eligible-members 1`) |
 | `PrivacyMode` / `RelayBlindCapable` / `ReceiptContract` | `none` / `false` / `""` |
 | `MetadataVisible` / `DowngradePolicy` / `StickyRoutingAllowed` | `standard` / `reject` / `false` |
-| `NotBeforeUnix` / `ExpiresAtUnix` | `now-60` / `now + 30 days` (`--window-seconds 2592000`) |
+| `NotBeforeUnix` / `ExpiresAtUnix` | `now-60` / `now + 30 days` (`--not-before` / `--expires-at`, RFC3339) |
 | `RuntimeAllowlist` | `["llamacpp_loopback"]` (strictly ascending, no `mlx_cache`) |
 | `Extensions` | `[]` |
 
@@ -422,8 +434,14 @@ only.
    agreement expiry/grace 30/31 days out, the hash fields computed with
    `sha256` over the operator's own text (same keys as
    `scripts/lab/1690-m6/pool_setup.py:ensure_creator`).
-2. Keys and pool id (operator Mac): `labtool pool-keygen --out "$M1/keys.json"`
-   prints `POOL_ID`.
+2. Keys and pool id (operator Mac):
+
+   ```bash
+   "$M1/bin/coordinator-cli" trust-pool-admin keygen --out-dir "$M1/keys" \
+     --manifest-authority-key-id m1-manifest-authority-1 --policy-signer-key-id m1-policy-signer-1
+   ```
+
+   prints `pool_id=` (`POOL_ID`) and the root fingerprint.
 3. Root nonce (Pearl):
 
    ```bash
@@ -442,18 +460,27 @@ only.
 5. Root registration (operator Mac signs, Pearl submits):
 
    ```bash
-   labtool pool-root --keys "$M1/keys.json" --op m1-root-1 --creator acct-malibu-ops-m1 \
-     --approval approval-m1-v1 --approval-version approval-version-1 \
-     --nonce <nonce> --nonce-expiry <expires_at_utc> > root-m1.json
+   "$M1/bin/coordinator-cli" trust-pool-admin sign-root --identity "$M1/keys/pool-identity.json" \
+     --root-issuer-key "$M1/keys/root-issuer-key.pem" --root-issuer-key-id m1-root-issuer-1 \
+     --operation-id m1-root-1 --creator-account-id acct-malibu-ops-m1 \
+     --approval-record-id approval-m1-v1 --approval-version approval-version-1 \
+     --launch-environment candidate --custody-disclosure "$M1/custody-m1.json" --custody-class software \
+     --display-name "Malibu M1 operator pool" \
+     --nonce <nonce> --nonce-expiry <expires_at_utc> --out root-m1.json
    coordinator-cli trust-pool-admin append-event --admin-url http://127.0.0.1:8444 --input root-m1.json
    ```
 6. Manifest v1 (encoding 2):
 
    ```bash
-   labtool pool-manifest --keys "$M1/keys.json" --op m1-manifest-1 --encoding 2 \
-     --settlement-mode enforce --runtime-allowlist llamacpp_loopback \
+   NB=$(date -u -v-60S +%Y-%m-%dT%H:%M:%SZ); EXP=$(date -u -v+30d -v-60S +%Y-%m-%dT%H:%M:%SZ)
+   "$M1/bin/coordinator-cli" trust-pool-admin sign-manifest --identity "$M1/keys/pool-identity.json" \
+     --root-issuer-key "$M1/keys/root-issuer-key.pem" --root-issuer-key-id m1-root-issuer-1 \
+     --manifest-authority-key "$M1/keys/manifest-authority-key.pem" \
+     --policy-signer-key "$M1/keys/policy-signer-key.pem" --operation-id m1-manifest-1 \
+     --encoding 2 --signer-set-version 1 --settlement-mode enforce --runtime-allowlist llamacpp_loopback \
      --models mlx-community/Llama-3.2-3B-Instruct-4bit --min-binary-version 1.8.123 \
-     --window-seconds 2592000 > manifest-m1-v1.json
+     --min-attestation-tier hardware --retention-policy-id standard --min-eligible-members 1 \
+     --not-before "$NB" --expires-at "$EXP" --out manifest-m1-v1.json
    coordinator-cli trust-pool-admin submit-policy --admin-url http://127.0.0.1:8444 --input manifest-m1-v1.json
    ```
 7. Member and buyer (after §5 has the member connected and priced):
@@ -775,10 +802,11 @@ Harder stops, in order of reach:
 - `revoke-provider --pool-id … --provider-id $M1_PROVIDER_ID` (member out; a
   generation bump; in-flight stays on its snapshot).
 - `set-lifecycle --lifecycle retired` (terminal for M1).
-- Withdraw the allowlist: a manifest v2 with `runtime_allowlist: []`. Note
-  `labtool --prev` starts the new window when the current one ends, and
-  routing uses the ACTIVE window, so this does not take effect immediately.
-  Pause first.
+- Withdraw the allowlist: a manifest v2 with `runtime_allowlist: []`
+  (`sign-manifest --prev manifest-m1-v1.json`, no `--manifest-authority-key`).
+  `sign-manifest` refuses a `--not-before` earlier than the current window's
+  end, and routing uses the ACTIVE window, so this does not take effect
+  immediately. Pause first.
 - Stop the member process (by recorded PID) and llama-server. Live provider
   untouched.
 - Full #1690 rollback: runbook §9 rollback order, including step 4a (the
@@ -795,7 +823,7 @@ Harder stops, in order of reach:
 | B4 | No accepted CLI contains `747557cc`; the candidate must also bake the §3.3 release | operator (acceptance-candidate workflow, `production-release` secret) + Pearl actor (`accepted_ids`) | §3.5 |
 | B5 | Registration path for the second identity: does an operator-issued token clear the production hardware-trust / referral onboarding gates, or does it need a dual-control hardware-trust grant (SPEC-026 policy A+B)? | operator | confirm on a dry join; grant if `waiting_trust` |
 | B6 | RESOLVED: `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md`, `scripts/build-trusted-pool-external-runtime-journey-result.py` (`capture`, `payload`), `promote-signed-trusted-pool-external-runtime-journey.yml`, `check_spec_governance.py` validator, journey mapped on R012/R013/R014 (still `pending`) | repo | done; a real M1 capture is still needed |
-| B7 | No reviewed pool-signing tool; M1 uses lab labtool with lab key ids and placeholder custody hash | repo | acceptable for a `candidate` operator pool; required before any external creator |
+| B7 | RESOLVED: reviewed offline signer `coordinator-cli trust-pool-admin keygen` / `sign-root` / `sign-manifest` with explicit key ids, environment, custody disclosure and class, signer-set version and attestation tier (§4.1, §4.3) | repo | done; build it from `main` (not in `v1.8.200`) |
 | B8 | Trusted pools disabled on coordinator and gateway | Pearl actor | §4.3 step 0 |
 | B9 | `catalog_priced` decision is dual-control on Pearl | two operator key holders | §3.4 |
 
