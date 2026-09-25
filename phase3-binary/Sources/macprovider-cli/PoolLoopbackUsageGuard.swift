@@ -95,6 +95,15 @@ enum PoolLoopbackUsageGuard {
         return status
     }
 
+    /// #1690 M9: the token count of `text` with the tokenizer in `directory`
+    /// (no special tokens), or nil when it cannot load. `mlxlm_loopback` uses
+    /// it for the completion tokens of a cancelled stream, since
+    /// mlx_lm.server reports no per-chunk usage.
+    static func snapshotTokenCount(of text: String, in directory: URL) async -> Int? {
+        guard let tokenizer = await TokenizerCache.shared.tokenizer(at: directory) else { return nil }
+        return tokenizer.encode(text: text, addSpecialTokens: false).count
+    }
+
     static func isDivergent(reported: Int64, recounted: Int64) -> Bool {
         let relative = Int64((Double(max(reported, 0)) * relativeTolerance).rounded(.up))
         return abs(reported - recounted) > max(absoluteTolerance, relative)

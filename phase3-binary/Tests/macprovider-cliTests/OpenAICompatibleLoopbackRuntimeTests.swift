@@ -477,7 +477,8 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
     }
 
     func testCancelledStreamWithoutPerTokenUsageIsUnattested() throws {
-        // Ollama / mlx_lm.server: no per-chunk usage.
+        // A stream with neither timings nor logprobs (mlx_lm.server, or an
+        // Ollama that ignores `logprobs`) and no external count.
         let plain = try Self.cancelledStream([("Hel", nil), ("lo", nil)])
         XCTAssertEqual(plain.settlementDisposition, .usageUnattested)
         XCTAssertEqual(plain.cancelledPrefixUsage(deliveredContent: "Hel").settlementDisposition, .usageUnattested)
@@ -488,6 +489,178 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         ])
         XCTAssertEqual(gap.settlementDisposition, .usageUnattested)
         XCTAssertEqual(gap.cancelledPrefixUsage(deliveredContent: "Hel").settlementDisposition, .usageUnattested)
+    }
+
+    // #1690 M9: Ollama and LM Studio list each streamed token in
+    // `choices[0].logprobs.content`, so the running list length is the
+    // completion tokens through each chunk. They report no prompt count
+    // until the end, so the prefix stays unattested until the upstream's own
+    // prompt count for the same request is supplied.
+    private static func cancelledLogprobsStream(
+        _ chunks: [(text: String, tokens: [String])],
+        upstreamPromptTokens: Int?
+    ) throws -> CompletionResult {
+        var accumulator = OpenAICompatibleStreamAccumulator()
+        for chunk in chunks {
+            let entries = chunk.tokens.map { #"{"token":""# + $0 + #"","logprob":-0.5}"# }.joined(separator: ",")
+            let content = chunk.text.isEmpty ? "" : #""content":""# + chunk.text + #"""#
+            _ = try accumulator.consume(line: #"data: {"choices":[{"index":0,"delta":{"# + content + #"},"logprobs":{"content":["# + entries + "]}}]}")
+            _ = try accumulator.consume(line: "")
+        }
+        return accumulator.cancelledResult(upstreamPromptTokens: upstreamPromptTokens)
+    }
+
+    func testCancelledLogprobsStreamBindsCompletionPerChunkAndNeedsTheUpstreamPromptCount() throws {
+        // "Hello" arrives as one chunk of two tokens; a chunk with a token
+        // but no text (a held-back byte) counts toward the next chunk.
+        let chunks: [(text: String, tokens: [String])] = [("Hello", ["Hel", "lo"]), ("", ["\u{e3}"]), (" wor", ["x", " wor"])]
+        let noPrompt = try Self.cancelledLogprobsStream(chunks, upstreamPromptTokens: nil)
+        XCTAssertEqual(noPrompt.settlementDisposition, .usageUnattested, "no prompt count: never signed")
+        XCTAssertNil(InferenceRelay.usage(noPrompt.cancelledPrefixUsage(deliveredContent: "Hello"))["completion_tokens"])
+
+        let result = try Self.cancelledLogprobsStream(chunks, upstreamPromptTokens: 35)
+        XCTAssertEqual(result.settlementDisposition, .notEligible)
+        XCTAssertEqual(result.promptTokens, 35)
+        XCTAssertEqual(result.completionTokens, 5)
+        let prefix = result.cancelledPrefixUsage(deliveredContent: "Hello")
+        XCTAssertEqual(prefix.promptTokens, 35)
+        XCTAssertEqual(prefix.completionTokens, 2)
+        XCTAssertEqual(prefix.settlementDisposition, .notEligible)
+        XCTAssertEqual(result.cancelledPrefixUsage(deliveredContent: "").completionTokens, 0)
+        XCTAssertEqual(result.cancelledPrefixUsage(deliveredContent: "Hel").settlementDisposition, .usageUnattested, "off a chunk boundary")
+
+        // A content chunk without a list breaks the chain.
+        var gap = OpenAICompatibleStreamAccumulator()
+        for line in [
+            #"data: {"choices":[{"index":0,"delta":{"content":"Hel"},"logprobs":{"content":[{"token":"Hel","logprob":-1}]}}]}"#, "",
+            #"data: {"choices":[{"index":0,"delta":{"content":"lo"}}]}"#, "",
+        ] {
+            _ = try gap.consume(line: line)
+        }
+        XCTAssertEqual(gap.cancelledResult(upstreamPromptTokens: 9).settlementDisposition, .usageUnattested)
+
+        // The two per-token sources never mix within one stream.
+        var mixed = OpenAICompatibleStreamAccumulator()
+        for line in [
+            #"data: {"choices":[{"index":0,"delta":{"content":"Hel"}}],"timings":"# + Self.llamaTimings(prompt: 3, cached: 0, predicted: 1) + "}", "",
+            #"data: {"choices":[{"index":0,"delta":{"content":"lo"},"logprobs":{"content":[{"token":"lo","logprob":-1}]}}]}"#, "",
+        ] {
+            _ = try mixed.consume(line: line)
+        }
+        XCTAssertEqual(mixed.cancelledResult(upstreamPromptTokens: 9).settlementDisposition, .usageUnattested)
+    }
+
+    // #1690 M9: mlx_lm.server reports no per-chunk usage, so the cancelled
+    // stream's completion tokens are the served snapshot tokenizer's count of
+    // the whole received content, bound to that content only.
+    func testCancelledStreamRecountBindsOnlyTheWholeReceivedContent() throws {
+        var accumulator = OpenAICompatibleStreamAccumulator()
+        for line in [#"data: {"choices":[{"index":0,"delta":{"content":"Hel"}}]}"#, "", #"data: {"choices":[{"index":0,"delta":{"content":"lo"}}]}"#, ""] {
+            _ = try accumulator.consume(line: line)
+        }
+        XCTAssertEqual(accumulator.receivedContent, "Hello")
+        XCTAssertEqual(accumulator.cancelledResult(recountedCompletionTokens: 2).settlementDisposition, .usageUnattested, "a recount alone has no prompt count")
+        let result = accumulator.cancelledResult(upstreamPromptTokens: 12, recountedCompletionTokens: 2)
+        XCTAssertEqual(result.settlementDisposition, .notEligible)
+        XCTAssertEqual(result.promptTokens, 12)
+        XCTAssertEqual(result.completionTokens, 2)
+        XCTAssertEqual(result.cancelledPrefixUsage(deliveredContent: "Hello").completionTokens, 2)
+        XCTAssertEqual(result.cancelledPrefixUsage(deliveredContent: "Hel").settlementDisposition, .usageUnattested)
+        XCTAssertEqual(result.cancelledPrefixUsage(deliveredContent: "").completionTokens, 0)
+
+        // A streamed tool call is not covered by a content recount.
+        var tool = OpenAICompatibleStreamAccumulator()
+        for line in [
+            #"data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}"#, "",
+            #"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}"#, "",
+        ] {
+            _ = try tool.consume(line: line)
+        }
+        XCTAssertEqual(tool.cancelledResult(upstreamPromptTokens: 12, recountedCompletionTokens: 1).settlementDisposition, .usageUnattested)
+    }
+
+    func testSnapshotTokenCountIsNilWithoutATokenizer() async {
+        let missing = FileManager.default.temporaryDirectory.appendingPathComponent("no-tokenizer-\(UUID().uuidString)")
+        let count = await PoolLoopbackUsageGuard.snapshotTokenCount(of: "Hello", in: missing)
+        XCTAssertNil(count)
+    }
+
+    func testUpstreamRequestAsksOllamaForPerTokenLogprobsOnly() throws {
+        XCTAssertTrue(OpenAICompatibleLoopbackRuntime.streamsPerTokenLogprobs("ollama_loopback"))
+        XCTAssertFalse(OpenAICompatibleLoopbackRuntime.streamsPerTokenLogprobs("llamacpp_loopback"))
+        XCTAssertFalse(OpenAICompatibleLoopbackRuntime.streamsPerTokenLogprobs("mlxlm_loopback"))
+        let request = try makeRequest(model: "ollama:gemma3:270m")
+        let ollama = try JSONSerialization.jsonObject(with: OpenAICompatibleLoopbackRuntime.encodeUpstreamRequest(
+            request, upstreamModelName: "gemma3:270m", logprobsPerToken: true
+        )) as? [String: Any]
+        XCTAssertEqual(ollama?["logprobs"] as? Bool, true)
+        XCTAssertNil(ollama?["timings_per_token"])
+        let plain = try JSONSerialization.jsonObject(with: OpenAICompatibleLoopbackRuntime.encodeUpstreamRequest(
+            request, upstreamModelName: "gemma3:270m"
+        )) as? [String: Any]
+        XCTAssertNil(plain?["logprobs"])
+    }
+
+    func testPromptCountRequestIsTheSameRequestNonStreamedForOneToken() throws {
+        let request = try makeRequest(model: "ollama:gemma3:270m", content: "count me", maxTokens: 700)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: OpenAICompatibleLoopbackRuntime.encodePromptCountRequest(
+            request, upstreamModelName: "gemma3:270m"
+        )) as? [String: Any])
+        XCTAssertEqual(body["stream"] as? Bool, false)
+        XCTAssertEqual(body["max_tokens"] as? Int, 1)
+        XCTAssertNil(body["stream_options"])
+        XCTAssertNil(body["logprobs"])
+        XCTAssertEqual(body["model"] as? String, "gemma3:270m")
+        let messages = try XCTUnwrap(body["messages"] as? [[String: Any]])
+        XCTAssertEqual(messages.first?["content"] as? String, "count me")
+        XCTAssertEqual(OpenAICompatibleLoopbackRuntime.decodeUsagePromptTokens(Self.completionJSON(content: "B", completionTokens: 1, promptTokens: 35)), 35)
+        XCTAssertNil(OpenAICompatibleLoopbackRuntime.decodeUsagePromptTokens(Data(#"{"choices":[]}"#.utf8)))
+    }
+
+    // #1690 M9 regression (E2E-F3 on Ollama): a buyer that disconnects
+    // mid-stream on Ollama is billed the delivered prefix. Before the fix the
+    // cancelled result was unattested, so no buyer_cancel receipt was signed
+    // and the partial stream was free.
+    func testCancelledOllamaStreamBindsTheUpstreamPromptCountAndPerChunkTokens() async throws {
+        let store = try makeStore()
+        let client = LogprobsStreamingLoopbackClient(promptTokens: 35)
+        let runtime = try makeRuntime(httpClient: client, store: store)
+        let request = try makeRequest(model: "ollama:gemma3:270m", maxTokens: 100_000)
+        let handle = try await runtime.acquireRequestHandle(request)
+        let cancel = CancelFlag()
+        let collector = ChunkCollector()
+        let result = try await runtime.stream(request, with: handle, shouldCancel: { cancel.isSet }) { chunk in
+            collector.record(chunk)
+            if collector.contentChunks.count >= 3 { cancel.set() }
+        }
+        XCTAssertEqual(result.finishReason, "")
+        XCTAssertEqual(result.settlementDisposition, .notEligible, "a cancelled Ollama stream is attested")
+        XCTAssertEqual(result.promptTokens, 35)
+        // Every streamed chunk carries two tokens.
+        XCTAssertEqual(result.completionTokens, 2 * result.content.count)
+        let delivered = result.cancelledPrefixUsage(deliveredContent: result.content)
+        XCTAssertEqual(InferenceRelay.usage(delivered)["prompt_tokens"] as? Int, 35)
+        XCTAssertEqual(InferenceRelay.usage(delivered)["completion_tokens"] as? Int, 2 * result.content.count)
+        let streamed = try XCTUnwrap(client.streamedBody.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        XCTAssertEqual(streamed["logprobs"] as? Bool, true)
+        let counted = try XCTUnwrap(client.countBody.flatMap { try JSONSerialization.jsonObject(with: $0) as? [String: Any] })
+        XCTAssertEqual(counted["stream"] as? Bool, false)
+        XCTAssertEqual(counted["max_tokens"] as? Int, 1)
+    }
+
+    func testCancelledOllamaStreamStaysUnattestedWhenThePromptCountFails() async throws {
+        let store = try makeStore()
+        let client = LogprobsStreamingLoopbackClient(promptTokens: nil)
+        let runtime = try makeRuntime(httpClient: client, store: store)
+        let request = try makeRequest(model: "ollama:gemma3:270m", maxTokens: 100_000)
+        let handle = try await runtime.acquireRequestHandle(request)
+        let cancel = CancelFlag()
+        let collector = ChunkCollector()
+        let result = try await runtime.stream(request, with: handle, shouldCancel: { cancel.isSet }) { chunk in
+            collector.record(chunk)
+            if collector.contentChunks.count >= 3 { cancel.set() }
+        }
+        XCTAssertEqual(result.settlementDisposition, .usageUnattested)
     }
 
     func testNativeCompletionIsUnchangedByCancelledPrefixUsage() {
@@ -910,6 +1083,62 @@ private final class EndlessStreamingLoopbackClient: BYOMLoopbackStreamingHTTPCli
                 self.terminated = true
                 self.lock.unlock()
             }
+        }
+        return BYOMLoopbackLineResponse(statusCode: 200, lines: lines)
+    }
+}
+
+/// #1690 M9: an Ollama-like upstream. The stream never finishes on its own
+/// and every content chunk lists two tokens in `logprobs`; a non-streamed
+/// post is the prompt-count call and answers `promptTokens` (a 500 when nil).
+private final class LogprobsStreamingLoopbackClient: BYOMLoopbackStreamingHTTPClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private let promptTokens: Int?
+    private var _streamedBody: Data?
+    private var _countBody: Data?
+
+    init(promptTokens: Int?) {
+        self.promptTokens = promptTokens
+    }
+
+    var streamedBody: Data? { lock.lock(); defer { lock.unlock() }; return _streamedBody }
+    var countBody: Data? { lock.lock(); defer { lock.unlock() }; return _countBody }
+
+    func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        throw BYOMDiscoveryAdapterError.rejectedNonLoopback
+    }
+
+    func post(_ url: URL, jsonBody: Data, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
+        lock.lock()
+        _countBody = jsonBody
+        lock.unlock()
+        guard let promptTokens else { return BYOMHTTPResponse(statusCode: 500, headers: [], body: Data()) }
+        let body = #"{"choices":[{"index":0,"message":{"role":"assistant","content":"x"},"finish_reason":"length"}],"usage":{"prompt_tokens":"# +
+            "\(promptTokens)" + #","completion_tokens":1,"total_tokens":"# + "\(promptTokens + 1)" + "}}"
+        return BYOMHTTPResponse(statusCode: 200, headers: [], body: Data(body.utf8))
+    }
+
+    func postLines(
+        _ url: URL,
+        jsonBody: Data,
+        maxHeaderBytes: Int,
+        maxLineBytes: Int,
+        maxTotalBytes: Int,
+        timeouts: LoopbackGenerationTimeouts
+    ) async throws -> BYOMLoopbackLineResponse {
+        lock.lock()
+        _streamedBody = jsonBody
+        lock.unlock()
+        let lines = AsyncThrowingStream<String, Error> { continuation in
+            let producer = Task {
+                while !Task.isCancelled {
+                    continuation.yield(#"data: {"choices":[{"index":0,"delta":{"content":"x"},"logprobs":{"content":[{"token":"x","logprob":-1},{"token":"","logprob":-1}]}}]}"#)
+                    continuation.yield("")
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in producer.cancel() }
         }
         return BYOMLoopbackLineResponse(statusCode: 200, lines: lines)
     }

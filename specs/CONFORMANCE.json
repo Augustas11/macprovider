@@ -395,7 +395,7 @@
     {
       "spec_id": "SPEC-015",
       "title": "Verifiable inference receipts",
-      "version": "0.4.10",
+      "version": "0.4.11",
       "path": "specs/SPEC-015-receipts.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -5801,7 +5801,8 @@
         "phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:SettlementReceiptEligibility",
         "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:buildReceiptHeader",
         "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:receiptHeaderResult",
-        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:RelayStreamBatcher"
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:RelayStreamBatcher",
+        "phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:cancelledStreamResult"
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/spec042_external_runtime_test.go:TestSPEC042ExternalRuntimePoolRouteDerivesMemberAndSnapshot",
@@ -5810,7 +5811,11 @@
         "phase3-binary/Tests/macprovider-cliTests/PoolRuntimeAuthorizationTests.swift:testAbsentOrMalformedAuthorizationParsesAsNotAuthorized",
         "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testStreamAccumulatorMissingOrPartialUpstreamUsageIsUnattested",
         "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testStreamAccumulatorUsageIsChunkBoundaryInvariant",
-        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testDecodeUpstreamResponseWithoutCompleteUsageIsUnattested"
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testDecodeUpstreamResponseWithoutCompleteUsageIsUnattested",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledOllamaStreamBindsTheUpstreamPromptCountAndPerChunkTokens",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledLogprobsStreamBindsCompletionPerChunkAndNeedsTheUpstreamPromptCount",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledStreamRecountBindsOnlyTheWholeReceivedContent",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledOllamaStreamStaysUnattestedWhenThePromptCountFails"
       ],
       "journeys": [],
       "evidence": [],
@@ -5818,7 +5823,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-015 0.4.10 (#1690 M3) adds per-request receipt eligibility for a pool-authorized loopback runtime. The #1690 M4 coordinator side is implemented: pool_runtime_authorization is attached only to a SPEC-022-R012 pool attempt, bound to request_id, attempt_n, provider_id, and route_snapshot_digest, and the verifier accepts pool_operator_attested only through IngestPoolSettlementReceipt. The #1690 M5 CLI side is implemented too: SettlementReceiptEligibility decides per request, and a loopback runtime signs only when the coordinator-issued PoolRuntimeAuthorization matches every bound field (mapped above). Pending until AC-12b and the signed SPEC-042-R013 enforce-mode pool journey (#1690 M6) pass."
+        "rationale": "SPEC-015 0.4.10 (#1690 M3) adds per-request receipt eligibility for a pool-authorized loopback runtime. The #1690 M4 coordinator side is implemented: pool_runtime_authorization is attached only to a SPEC-022-R012 pool attempt, bound to request_id, attempt_n, provider_id, and route_snapshot_digest, and the verifier accepts pool_operator_attested only through IngestPoolSettlementReceipt. The #1690 M5 CLI side is implemented too: SettlementReceiptEligibility decides per request, and a loopback runtime signs only when the coordinator-issued PoolRuntimeAuthorization matches every bound field (mapped above). Pending until AC-12b and the signed SPEC-042-R013 enforce-mode pool journey (#1690 M6) pass. SPEC-015 0.4.11 (#1690 M9) adds section N.12 item 7, the per-runtime usage of a cancelled loopback stream (cancelledStreamResult, mapped above)."
       }
     },
     {

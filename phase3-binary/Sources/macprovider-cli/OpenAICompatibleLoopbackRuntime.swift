@@ -27,7 +27,8 @@ import MacProviderCore
 // (#1695), independent of coordinator buyer-serving state, except for one
 // request whose settlement metadata carries a matching SPEC-015 §N.12
 // `pool_runtime_authorization` (#1690 M5). Usage is copied from the
-// upstream runtime.
+// upstream runtime; a cancelled stream's usage covers exactly the content
+// received (SPEC-015 §N.12 item 7, #1690 E2E-F3 / M9).
 
 /// Serve-time recognition and normalization of an `ollama_loopback` model ref.
 enum OllamaLoopbackServeModel {
@@ -493,11 +494,22 @@ struct OpenAICompatibleStreamAccumulator {
     private var promptTokens: Int?
     private var completionTokens: Int?
     private var deltaEvents = 0
-    /// #1690 E2E-F3: llama-server `timings_per_token` usage at each content
-    /// chunk (content UTF-8 bytes -> completion tokens through them) and the
-    /// prompt tokens it reports; nil once a content chunk arrives without it.
+    /// #1690 E2E-F3: the upstream's per-token usage at each content chunk
+    /// (content UTF-8 bytes -> completion tokens through them); nil once a
+    /// content chunk arrives without it. llama-server `timings_per_token`
+    /// also reports the prompt tokens; a per-chunk `logprobs` list (Ollama,
+    /// LM Studio; #1690 M9) counts only the completion tokens.
     private var prefixCompletionTokens: [Int: Int]? = [0: 0]
     private var prefixPromptTokens: Int?
+    private var prefixCountSource: PrefixCountSource?
+    /// Completion tokens the upstream listed in `logprobs` so far, on any
+    /// chunk (content, tool call, or none).
+    private var logprobTokens = 0
+
+    private enum PrefixCountSource {
+        case timings
+        case logprobs
+    }
     private var sawSSEData = false
     private var nonSSEBody = ""
     private(set) var isDone = false
@@ -563,22 +575,38 @@ struct OpenAICompatibleStreamAccumulator {
         return (result, late)
     }
 
+    /// The content received so far (#1690 M9: what a cancelled stream's
+    /// usage is counted over).
+    var receivedContent: String { content }
+
     /// The result of a stream the buyer cancelled: the content received so
     /// far, and its per-prefix usage only when the upstream attested it for
     /// every content chunk (else unattested, so never signed).
-    func cancelledResult() -> CompletionResult {
+    ///
+    /// #1690 M9: a runtime whose stream carries no prompt count passes the
+    /// upstream's own prompt count for the same request
+    /// (`upstreamPromptTokens`). `recountedCompletionTokens` is the
+    /// `mlxlm_loopback` count of the whole received content with the served
+    /// snapshot's tokenizer; it binds only that content (and the empty
+    /// prefix), and only when no tool call was streamed.
+    func cancelledResult(upstreamPromptTokens: Int? = nil, recountedCompletionTokens: Int? = nil) -> CompletionResult {
         let calls = toolCalls.map { ToolCall(id: $0.id, functionName: $0.name, arguments: $0.arguments) }
-        let attested = prefixCompletionTokens != nil && prefixPromptTokens != nil
-        let generated = prefixCompletionTokens?[content.utf8.count] ?? deltaEvents
+        var table = prefixCompletionTokens
+        if let recountedCompletionTokens {
+            table = calls.isEmpty ? [0: 0, content.utf8.count: recountedCompletionTokens] : nil
+        }
+        let prompt = prefixPromptTokens ?? upstreamPromptTokens
+        let attested = table != nil && prompt != nil
+        let generated = table?[content.utf8.count] ?? deltaEvents
         return CompletionResult(
             content: content,
             finishReason: "",
-            promptTokens: prefixPromptTokens ?? 0,
+            promptTokens: prompt ?? 0,
             completionTokens: generated,
             generatedCompletionTokens: generated,
             toolCalls: calls.isEmpty ? nil : calls,
             settlementDisposition: attested ? .notEligible : .usageUnattested,
-            loopbackPrefixCompletionTokens: attested ? prefixCompletionTokens : [:]
+            loopbackPrefixCompletionTokens: attested ? table : [:]
         )
     }
 
@@ -640,6 +668,14 @@ struct OpenAICompatibleStreamAccumulator {
         if case .string(let reason)? = choice["finish_reason"], !reason.isEmpty {
             finishReason = reason
         }
+        // #1690 M9: a per-chunk `logprobs.content` list names each token the
+        // chunk carries, so its running length is the completion tokens
+        // generated through the chunk.
+        var chunkLogprobTokens: Int?
+        if case .object(let logprobs)? = choice["logprobs"], case .array(let entries)? = logprobs["content"] {
+            logprobTokens += entries.count
+            chunkLogprobTokens = logprobTokens
+        }
         guard case .object(let delta)? = choice["delta"] else { return [] }
         var chunks: [StreamChunk] = []
         if case .string(let text)? = delta["content"], !text.isEmpty {
@@ -648,9 +684,17 @@ struct OpenAICompatibleStreamAccumulator {
             }
             content += text
             deltaEvents += 1
-            if let chunkTimings, prefixCompletionTokens != nil {
-                prefixCompletionTokens?[content.utf8.count] = chunkTimings.completion
-                prefixPromptTokens = chunkTimings.prompt
+            // One source per stream: a chunk without it, or with the other
+            // one, leaves every later prefix unattested.
+            let source: PrefixCountSource? = chunkTimings != nil ? .timings : (chunkLogprobTokens != nil ? .logprobs : nil)
+            if prefixCompletionTokens != nil, let source, prefixCountSource == nil || prefixCountSource == source {
+                prefixCountSource = source
+                if let chunkTimings {
+                    prefixCompletionTokens?[content.utf8.count] = chunkTimings.completion
+                    prefixPromptTokens = chunkTimings.prompt
+                } else if let chunkLogprobTokens {
+                    prefixCompletionTokens?[content.utf8.count] = chunkLogprobTokens
+                }
             } else {
                 prefixCompletionTokens = nil
             }
@@ -1137,7 +1181,8 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         let body = try Self.encodeUpstreamRequest(
             request,
             upstreamModelName: upstreamModelName,
-            timingsPerToken: runtimeSource == LlamaCppLoopbackServeModel.runtimeSource
+            timingsPerToken: runtimeSource == LlamaCppLoopbackServeModel.runtimeSource,
+            logprobsPerToken: Self.streamsPerTokenLogprobs(runtimeSource)
         )
         let clock = LoopbackProgressClock()
         let timeouts = LoopbackGenerationTimeouts.forGeneration(maxTokens: request.maxTokens, contextWindow: contextWindow)
@@ -1229,8 +1274,65 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             // buyer_cancel receipt over the delivered prefix. The group has
             // finished, so the stream state is final.
             guard onChunk != nil else { throw CancellationError() }
-            return stream.cancelledResult()
+            return await cancelledStreamResult(request, stream: stream)
         }
+    }
+
+    /// #1690 M9: the usage of a cancelled stream. llama-server's per-chunk
+    /// timings carry the whole count. Every other runtime's stream carries no
+    /// prompt count, so the upstream counts the same request's prompt once
+    /// more (`countUpstreamPromptTokens`); Ollama and LM Studio attest the
+    /// completion tokens per chunk (`logprobs`), and `mlxlm_loopback` counts
+    /// the received content with the served snapshot's tokenizer. Anything
+    /// that fails leaves the usage unattested (relayed empty, never signed).
+    private func cancelledStreamResult(_ request: ChatCompletionRequest, stream: LoopbackStreamState) async -> CompletionResult {
+        let content = stream.receivedContent
+        guard !isLlamaCpp, !content.isEmpty else { return stream.cancelledResult() }
+        guard let prompt = await countUpstreamPromptTokens(request) else { return stream.cancelledResult() }
+        var recounted: Int?
+        if case .mlxSnapshot(let snapshot) = identity {
+            recounted = await PoolLoopbackUsageGuard.snapshotTokenCount(of: content, in: snapshot.directory)
+            guard recounted != nil else { return stream.cancelledResult() }
+        }
+        return stream.cancelledResult(upstreamPromptTokens: prompt, recountedCompletionTokens: recounted)
+    }
+
+    /// The upstream's `usage.prompt_tokens` for this request, from a
+    /// non-streamed one-token completion of the same body. The template and
+    /// tokenizer are the runtime's own, so it is the prompt count the
+    /// cancelled generation used. Nil on any failure or after
+    /// `promptCountTimeoutSeconds`.
+    private func countUpstreamPromptTokens(_ request: ChatCompletionRequest) async -> Int? {
+        guard let body = try? Self.encodePromptCountRequest(request, upstreamModelName: upstreamModelName) else { return nil }
+        let client = httpClient
+        let url = chatCompletionsURL
+        return await withTaskGroup(of: Int?.self) { group in
+            group.addTask {
+                guard let response = try? await client.post(
+                    url,
+                    jsonBody: body,
+                    maxHeaderBytes: Self.maxHeaderBytes,
+                    maxBodyBytes: Self.maxResponseBodyBytes
+                ), response.statusCode == 200 else { return nil }
+                return Self.decodeUsagePromptTokens(response.body)
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(Self.promptCountTimeoutSeconds * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// Bound on the post-cancel prompt count call.
+    static let promptCountTimeoutSeconds: Double = 15
+
+    /// Runtimes asked for a per-chunk `logprobs` list, whose entries count
+    /// the completion tokens each chunk carries (#1690 M9).
+    static func streamsPerTokenLogprobs(_ runtimeSource: String) -> Bool {
+        runtimeSource == OllamaLoopbackServeModel.runtimeSource
     }
 
     /// The one mapping for every upstream deadline, whichever timer fires.
@@ -1281,7 +1383,8 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     static func encodeUpstreamRequest(
         _ request: ChatCompletionRequest,
         upstreamModelName: String,
-        timingsPerToken: Bool = false
+        timingsPerToken: Bool = false,
+        logprobsPerToken: Bool = false
     ) throws -> Data {
         let source = request.promptSource
         var payload: [String: Any] = [
@@ -1320,11 +1423,39 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         if timingsPerToken {
             payload["timings_per_token"] = true
         }
+        // #1690 M9: Ollama and LM Studio list each streamed token in the
+        // chunk that carries it. The list is never relayed.
+        if logprobsPerToken {
+            payload["logprobs"] = true
+        }
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])
         guard data.count <= maxRequestBodyBytes else {
             throw APIError(status: 413, message: "Request body exceeds 4 MiB", code: "request_body_too_large")
         }
         return data
+    }
+
+    /// #1690 M9: the same request as `encodeUpstreamRequest`, non-streamed
+    /// and capped at one completion token, so its usage reports the prompt
+    /// tokens (`countUpstreamPromptTokens`).
+    static func encodePromptCountRequest(_ request: ChatCompletionRequest, upstreamModelName: String) throws -> Data {
+        let streamed = try encodeUpstreamRequest(request, upstreamModelName: upstreamModelName)
+        guard var payload = try JSONSerialization.jsonObject(with: streamed) as? [String: Any] else {
+            throw OpenAICompatibleLoopbackRuntimeError.malformedUpstreamResponse
+        }
+        payload["stream"] = false
+        payload.removeValue(forKey: "stream_options")
+        payload["max_tokens"] = 1
+        return try JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])
+    }
+
+    /// `usage.prompt_tokens` of a non-streamed completion body.
+    static func decodeUsagePromptTokens(_ data: Data) -> Int? {
+        guard data.count <= maxResponseBodyBytes,
+              let text = String(data: data, encoding: .utf8),
+              case .object(let root)? = try? StrictJSONParser.parse(text),
+              case .object(let usage)? = root["usage"] else { return nil }
+        return intValue(usage["prompt_tokens"])
     }
 
     /// Context gate in the MLX runtime's vocabulary (413
@@ -1547,9 +1678,18 @@ private final class LoopbackStreamState: @unchecked Sendable {
         return try accumulator.finish()
     }
 
-    func cancelledResult() -> CompletionResult {
+    var receivedContent: String {
         lock.lock()
         defer { lock.unlock() }
-        return accumulator.cancelledResult()
+        return accumulator.receivedContent
+    }
+
+    func cancelledResult(upstreamPromptTokens: Int? = nil, recountedCompletionTokens: Int? = nil) -> CompletionResult {
+        lock.lock()
+        defer { lock.unlock() }
+        return accumulator.cancelledResult(
+            upstreamPromptTokens: upstreamPromptTokens,
+            recountedCompletionTokens: recountedCompletionTokens
+        )
     }
 }
