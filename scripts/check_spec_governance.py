@@ -215,6 +215,55 @@ TRUSTED_POOL_CREATOR_MVP_STEP_IDS = set(TRUSTED_POOL_CREATOR_MVP_STEP_ID_ORDER)
 TRUSTED_POOL_CREATOR_MVP_EVIDENCE_REQUIREMENT_IDS = {
     f"SPEC-043-R{index:03d}" for index in range(1, 13)
 }
+TRUSTED_POOL_EXTERNAL_RUNTIME_JOURNEY_ID = "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"
+TRUSTED_POOL_EXTERNAL_RUNTIME_EXECUTION_MODE = "production-operator-internal-pool"
+TRUSTED_POOL_EXTERNAL_RUNTIME_ARTIFACT_ID = "redacted-trusted-pool-external-runtime"
+# Step ids are the normative list in journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md.
+TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_ID_ORDER = (
+    "step-01-preconditions",
+    "step-02-pool-policy",
+    "step-03-nonstream-request",
+    "step-04-stream-request",
+    "step-05-route-snapshots",
+    "step-06-receipts-and-attempts",
+    "step-07-ledger-and-finality",
+    "step-08-gateway-debit",
+    "step-09-negative-controls",
+    "step-10-gateway-holds",
+    "step-11-redaction",
+)
+TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_IDS = set(TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_ID_ORDER)
+TRUSTED_POOL_EXTERNAL_RUNTIME_PROMOTABLE_REQUIREMENT_IDS = {
+    "SPEC-022-R012",
+    "SPEC-042-R013",
+    "SPEC-042-R014",
+}
+TRUSTED_POOL_EXTERNAL_RUNTIME_FIXED_OBSERVATIONS = {
+    "settlement_mode": "enforce",
+    "enforce_activated": True,
+    "enforce_scope": "pool",
+    "production_coordinator": True,
+    "launch_environment": "candidate",
+    "payout_ready_mutated": False,
+    "raw_prompt_output_redacted": True,
+    "bearer_tokens_redacted": True,
+}
+TRUSTED_POOL_EXTERNAL_RUNTIME_OBSERVATION_KEYS = set(TRUSTED_POOL_EXTERNAL_RUNTIME_FIXED_OBSERVATIONS) | {
+    "buyer_visible_usage_equals_debit",
+}
+TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS = {
+    "coordinator_version",
+    "accepted_id",
+    "member_cli_sha256",
+    "llama_server_build",
+    "gguf_sha256",
+    "gguf_artifact_id",
+    "model_id",
+    "pool_id",
+    "manifest_version",
+    "manifest_core_digest",
+    "runtime_source",
+}
 LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID = "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
 LOCAL_CONSUMER_ENDPOINT_EVIDENCE_CONTROL_IMPLEMENTATION_MAPPINGS = frozenset(
     {
@@ -2067,6 +2116,100 @@ def _validate_buyer_enforce_journey_result(
     _validate_named_journey_steps(steps, BUYER_ENFORCE_STEP_IDS, location, result, "enforce")
 
 
+def _validate_trusted_pool_external_runtime_journey_result(
+    signed: dict[str, Any],
+    requirement_id: str,
+    journeys: list[str],
+    artifacts: list[Any],
+    steps: list[Any],
+    location: str,
+    result: ValidationResult,
+) -> None:
+    label = "trusted-pool external-runtime"
+    if signed.get("journey_id") != TRUSTED_POOL_EXTERNAL_RUNTIME_JOURNEY_ID:
+        result.error(f"{location}.signed.journey_id", f"must equal {TRUSTED_POOL_EXTERNAL_RUNTIME_JOURNEY_ID!r}")
+    if TRUSTED_POOL_EXTERNAL_RUNTIME_JOURNEY_ID not in journeys:
+        result.error(location, f"{label} requirement journeys must include {TRUSTED_POOL_EXTERNAL_RUNTIME_JOURNEY_ID!r}")
+    if signed.get("execution_mode") != TRUSTED_POOL_EXTERNAL_RUNTIME_EXECUTION_MODE:
+        result.error(f"{location}.signed.execution_mode", f"must equal {TRUSTED_POOL_EXTERNAL_RUNTIME_EXECUTION_MODE!r}")
+    environment = signed.get("environment")
+    if isinstance(environment, dict) and environment.get("class") != TRUSTED_POOL_EXTERNAL_RUNTIME_EXECUTION_MODE:
+        result.error(f"{location}.signed.environment.class", f"must equal {TRUSTED_POOL_EXTERNAL_RUNTIME_EXECUTION_MODE!r}")
+
+    observations = signed.get("observations")
+    if _expect_object(observations, f"{location}.signed.observations", result):
+        _expect_keys(
+            observations,
+            TRUSTED_POOL_EXTERNAL_RUNTIME_OBSERVATION_KEYS,
+            TRUSTED_POOL_EXTERNAL_RUNTIME_OBSERVATION_KEYS,
+            f"{location}.signed.observations",
+            result,
+        )
+        for field_name, expected in TRUSTED_POOL_EXTERNAL_RUNTIME_FIXED_OBSERVATIONS.items():
+            value = observations.get(field_name)
+            if value != expected or type(value) is not type(expected):
+                result.error(f"{location}.signed.observations.{field_name}", f"must equal {expected!r}")
+        if not isinstance(observations.get("buyer_visible_usage_equals_debit"), bool):
+            result.error(f"{location}.signed.observations.buyer_visible_usage_equals_debit", "must be a boolean")
+
+    identity = signed.get("candidate_identity")
+    if _expect_object(identity, f"{location}.signed.candidate_identity", result):
+        _expect_keys(
+            identity,
+            TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS,
+            TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS,
+            f"{location}.signed.candidate_identity",
+            result,
+        )
+        for field_name in ("member_cli_sha256", "gguf_sha256", "manifest_core_digest"):
+            value = identity.get(field_name)
+            if not isinstance(value, str) or not SHA256_HEX_RE.fullmatch(value):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a 64-char hex fingerprint")
+        for field_name in ("coordinator_version", "accepted_id", "llama_server_build", "gguf_artifact_id", "model_id", "pool_id"):
+            if not isinstance(identity.get(field_name), str) or not identity.get(field_name):
+                result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a non-empty string")
+        if identity.get("runtime_source") != "llamacpp_loopback":
+            result.error(f"{location}.signed.candidate_identity.runtime_source", "must equal 'llamacpp_loopback'")
+        version = identity.get("manifest_version")
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            result.error(f"{location}.signed.candidate_identity.manifest_version", "must be a positive integer")
+
+    for index, artifact in enumerate(artifacts):
+        if isinstance(artifact, dict) and artifact.get("id") != TRUSTED_POOL_EXTERNAL_RUNTIME_ARTIFACT_ID:
+            result.error(f"{location}.signed.artifacts[{index}].id", f"must equal {TRUSTED_POOL_EXTERNAL_RUNTIME_ARTIFACT_ID!r}")
+    if len([artifact for artifact in artifacts if isinstance(artifact, dict)]) != 1:
+        result.error(f"{location}.signed.artifacts", f"{label} journey-result must contain exactly one redacted evidence artifact")
+    for index, step in enumerate(steps):
+        if isinstance(step, dict) and step.get("artifacts") != [TRUSTED_POOL_EXTERNAL_RUNTIME_ARTIFACT_ID]:
+            result.error(
+                f"{location}.signed.steps[{index}].artifacts",
+                f"must equal [{TRUSTED_POOL_EXTERNAL_RUNTIME_ARTIFACT_ID!r}]",
+            )
+
+    signed_requirement_ids = signed.get("requirement_ids")
+    if not isinstance(signed_requirement_ids, list) or requirement_id not in signed_requirement_ids:
+        result.error(f"{location}.signed.requirement_ids", f"must include the requirement being promoted: {requirement_id}")
+    unexpected = [
+        item
+        for item in (signed_requirement_ids if isinstance(signed_requirement_ids, list) else [])
+        if not isinstance(item, str) or item not in TRUSTED_POOL_EXTERNAL_RUNTIME_PROMOTABLE_REQUIREMENT_IDS
+    ]
+    if unexpected:
+        result.error(
+            f"{location}.signed.requirement_ids",
+            f"{label} journey-result cannot promote " + ", ".join(sorted(str(item) for item in unexpected)),
+        )
+    if requirement_id not in TRUSTED_POOL_EXTERNAL_RUNTIME_PROMOTABLE_REQUIREMENT_IDS:
+        result.error(f"{location}.signed.requirement_ids", f"{label} journey-result cannot promote {requirement_id}")
+    _validate_named_journey_steps(steps, TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_IDS, location, result, label)
+    ordered_step_ids = [step.get("id") for step in steps if isinstance(step, dict)]
+    if ordered_step_ids != list(TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_ID_ORDER):
+        result.error(
+            f"{location}.signed.steps",
+            f"{label} physical steps must be ordered as {list(TRUSTED_POOL_EXTERNAL_RUNTIME_STEP_ID_ORDER)}",
+        )
+
+
 def _validate_trusted_pool_layer2_no_overclaim_text(value: Any, location: str, result: ValidationResult) -> None:
     if isinstance(value, str) and TRUSTED_POOL_LAYER2_FORBIDDEN_OVERCLAIM_RE.search(value):
         result.error(location, "must not claim Privacy Pool unlinkability, coordinator blindness, or provider/operator blindness")
@@ -3837,6 +3980,16 @@ def _validate_signed_journey_result(
         )
     if journey_id == TRUSTED_POOL_CREATOR_MVP_JOURNEY_ID:
         _validate_trusted_pool_creator_mvp_journey_result(
+            signed,
+            requirement_id,
+            [item for item in journeys if isinstance(item, str)],
+            artifact_records,
+            steps,
+            location,
+            result,
+        )
+    if journey_id == TRUSTED_POOL_EXTERNAL_RUNTIME_JOURNEY_ID:
+        _validate_trusted_pool_external_runtime_journey_result(
             signed,
             requirement_id,
             [item for item in journeys if isinstance(item, str)],

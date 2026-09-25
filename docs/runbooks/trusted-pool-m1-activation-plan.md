@@ -467,10 +467,12 @@ only.
 
    No `delegation_id`: a delegated member is disqualified from
    `pool_operator_attested` (`pool_operator_attestation.go:60-111`).
-8. R013 disclosure check (runbook §4 step 5): `get-pool` shows
-   `runtime_allowlist: ["llamacpp_loopback"]`, `settlement_mode: enforce`,
-   the one member admitted without delegation. No distribution artifact is
-   published for M1.
+8. R013 disclosure check (runbook §4 step 5): `get-pool` shows the one
+   member and a `manifest_core_digest` equal to `manifest-m1-v1.json`'s.
+   `get-pool` does not print `runtime_allowlist` or `settlement_mode`; the
+   digest binds them (§4.2), and the journey's route snapshots show them in
+   force. The pool's `trustpool_events` have no `delegation_granted`. No
+   distribution artifact is published for M1.
 9. Activate:
 
    ```bash
@@ -721,9 +723,15 @@ JOURNEY-BUYER-PAID-PATH pattern:
   and an `evidence[]` entry `{artifact: "sha256:<envelope>", source:
   "journeys/evidence/<file>", captured_at, expires_at}`.
 
-No pool/R012 journey definition, builder or promote workflow exists yet (B6).
-Capture now, into an operator-local directory, so the envelope can be built
-once the tooling lands:
+The journey is `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md` (B6). It
+maps SPEC-022-R012, SPEC-042-R013 and SPEC-042-R014 (all still `pending`) and
+fixes the capture layout: file names, the `-json` form of the SQL above, and
+`run.json` / `preconditions.json` / `gateway-holds.json`.
+`scripts/build-trusted-pool-external-runtime-journey-result.py capture` checks
+every pass criterion above and writes the redacted evidence;
+`.github/workflows/promote-signed-trusted-pool-external-runtime-journey.yml`
+builds (`payload`), signs and promotes it. Capture into an operator-local
+directory in that layout:
 
 1. P1-P8 outputs with timestamps; deployed commit; `accepted_ids` entry;
    member CLI binary sha256; llama-server build (`b11149`) and GGUF sha256.
@@ -786,7 +794,7 @@ Harder stops, in order of reach:
 | B3 | No artifact feed in production; activation blocked on 17 unmeasured MLX `size_bytes` and a new `release_id`; nginx route absent | operator (PR + signed cut with `streamvc-autotune-static-v4`, operator-held) + Pearl actor (deploy) | §3.3 |
 | B4 | No accepted CLI contains `747557cc`; the candidate must also bake the §3.3 release | operator (acceptance-candidate workflow, `production-release` secret) + Pearl actor (`accepted_ids`) | §3.5 |
 | B5 | Registration path for the second identity: does an operator-issued token clear the production hardware-trust / referral onboarding gates, or does it need a dual-control hardware-trust grant (SPEC-026 policy A+B)? | operator | confirm on a dry join; grant if `waiting_trust` |
-| B6 | No JOURNEY definition / builder / promote workflow for the pool journey | repo (PR: `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md`, `scripts/build-trusted-pool-external-runtime-journey-result.py`, `promote-signed-…` workflow, `check_spec_governance.py` ids) | before promoting R012 |
+| B6 | RESOLVED: `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md`, `scripts/build-trusted-pool-external-runtime-journey-result.py` (`capture`, `payload`), `promote-signed-trusted-pool-external-runtime-journey.yml`, `check_spec_governance.py` validator, journey mapped on R012/R013/R014 (still `pending`) | repo | done; a real M1 capture is still needed |
 | B7 | No reviewed pool-signing tool; M1 uses lab labtool with lab key ids and placeholder custody hash | repo | acceptable for a `candidate` operator pool; required before any external creator |
 | B8 | Trusted pools disabled on coordinator and gateway | Pearl actor | §4.3 step 0 |
 | B9 | `catalog_priced` decision is dual-control on Pearl | two operator key holders | §3.4 |
