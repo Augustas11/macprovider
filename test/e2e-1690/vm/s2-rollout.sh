@@ -22,7 +22,7 @@ if [ "$missing" = 0 ]; then result S2-step0-drain-recovery PASS "no 200 request_
 else result S2-step0-drain-recovery FAIL "$missing request_log 200 rows lack a ledger row after the startup scan"; fi
 
 # --- step 1: pause pools, deploy the new coordinator, resume -------------------
-pools="$(curl -fsS -H "Authorization: Bearer $(opkey)" http://127.0.0.1:8444/admin/trust-pools/pools 2>/dev/null | head -c 300 || echo 'n/a')"
+pools="$(curl_bearer "$(opkey)" -fsS http://127.0.0.1:8444/admin/trust-pools/pools 2>/dev/null | head -c 300 || echo 'n/a')"
 result S2-step1-pools INFO "pools before the coordinator deploy (none expected on the baseline): $pools"
 since="$(mark)"
 coord_install new
