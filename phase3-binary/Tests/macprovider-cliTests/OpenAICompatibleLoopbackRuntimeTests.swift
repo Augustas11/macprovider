@@ -419,6 +419,103 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         XCTAssertEqual(whole.settlementDisposition, split.settlementDisposition)
     }
 
+    // #1690 E2E-F3: a buyer that disconnects mid-stream is billed the
+    // delivered prefix. llama-server `timings_per_token` attests usage on
+    // every chunk, so the buyer_cancel usage is the upstream's prompt tokens
+    // (processed + cached) and the completion tokens through exactly the
+    // delivered content; anything else is unattested (relayed empty, unsigned).
+    private static func cancelledStream(_ chunks: [(text: String, timings: String?)]) throws -> CompletionResult {
+        var accumulator = OpenAICompatibleStreamAccumulator()
+        _ = try accumulator.consume(line: #"data: {"choices":[{"index":0,"delta":{"role":"assistant","content":null}}]}"#)
+        _ = try accumulator.consume(line: "")
+        for chunk in chunks {
+            let timings = chunk.timings.map { #","timings":"# + $0 } ?? ""
+            _ = try accumulator.consume(line: #"data: {"choices":[{"index":0,"delta":{"content":""# + chunk.text + #""}}]"# + timings + "}")
+            _ = try accumulator.consume(line: "")
+        }
+        return accumulator.cancelledResult()
+    }
+
+    private static func llamaTimings(prompt: Int, cached: Int, predicted: Int) -> String {
+        #"{"cache_n":"# + "\(cached)" + #","prompt_n":"# + "\(prompt)" + #","predicted_n":"# + "\(predicted)" + "}"
+    }
+
+    func testCancelledLlamaStreamBindsUsageToDeliveredPrefix() throws {
+        let result = try Self.cancelledStream([
+            ("Hel", Self.llamaTimings(prompt: 1, cached: 36, predicted: 1)),
+            ("lo", Self.llamaTimings(prompt: 1, cached: 36, predicted: 2)),
+            (" wor", Self.llamaTimings(prompt: 1, cached: 36, predicted: 4)),
+        ])
+        XCTAssertEqual(result.settlementDisposition, .notEligible)
+        XCTAssertEqual(result.content, "Hello wor")
+
+        let prefix = result.cancelledPrefixUsage(deliveredContent: "Hello")
+        XCTAssertEqual(prefix.content, "Hello")
+        XCTAssertEqual(prefix.promptTokens, 37)
+        XCTAssertEqual(prefix.completionTokens, 2)
+        XCTAssertEqual(prefix.generatedCompletionTokens, 2)
+        XCTAssertEqual(prefix.settlementDisposition, .notEligible)
+        let frameUsage = InferenceRelay.usage(prefix)
+        XCTAssertEqual(frameUsage["prompt_tokens"] as? Int, 37)
+        XCTAssertEqual(frameUsage["completion_tokens"] as? Int, 2)
+
+        let whole = result.cancelledPrefixUsage(deliveredContent: "Hello wor")
+        XCTAssertEqual(whole.completionTokens, 4)
+        XCTAssertEqual(whole.settlementDisposition, .notEligible)
+
+        let empty = result.cancelledPrefixUsage(deliveredContent: "")
+        XCTAssertEqual(empty.completionTokens, 0)
+        XCTAssertEqual(empty.promptTokens, 37)
+        XCTAssertEqual(empty.settlementDisposition, .notEligible)
+
+        // Not on a chunk boundary, not a prefix, or unknown delivery: unattested.
+        for delivered in ["Hell", "Help", nil] as [String?] {
+            let unbound = result.cancelledPrefixUsage(deliveredContent: delivered)
+            XCTAssertEqual(unbound.settlementDisposition, .usageUnattested, delivered ?? "unknown")
+            XCTAssertNil(InferenceRelay.usage(unbound)["completion_tokens"], delivered ?? "unknown")
+        }
+    }
+
+    func testCancelledStreamWithoutPerTokenUsageIsUnattested() throws {
+        // Ollama / mlx_lm.server: no per-chunk usage.
+        let plain = try Self.cancelledStream([("Hel", nil), ("lo", nil)])
+        XCTAssertEqual(plain.settlementDisposition, .usageUnattested)
+        XCTAssertEqual(plain.cancelledPrefixUsage(deliveredContent: "Hel").settlementDisposition, .usageUnattested)
+        // One content chunk without timings breaks the whole chain.
+        let gap = try Self.cancelledStream([
+            ("Hel", Self.llamaTimings(prompt: 5, cached: 0, predicted: 1)),
+            ("lo", nil),
+        ])
+        XCTAssertEqual(gap.settlementDisposition, .usageUnattested)
+        XCTAssertEqual(gap.cancelledPrefixUsage(deliveredContent: "Hel").settlementDisposition, .usageUnattested)
+    }
+
+    func testNativeCompletionIsUnchangedByCancelledPrefixUsage() {
+        let native = CompletionResult(
+            content: "answer",
+            finishReason: "stop",
+            promptTokens: 5,
+            completionTokens: 2,
+            settlementDisposition: .eligibleOwner
+        )
+        let same = native.cancelledPrefixUsage(deliveredContent: "ans")
+        XCTAssertEqual(same.content, "answer")
+        XCTAssertEqual(same.completionTokens, 2)
+        XCTAssertEqual(same.settlementDisposition, .eligibleOwner)
+    }
+
+    func testUpstreamRequestAsksLlamaServerForPerTokenUsageOnly() throws {
+        let request = try makeRequest(model: "llamacpp:qwen")
+        let llama = try JSONSerialization.jsonObject(with: OpenAICompatibleLoopbackRuntime.encodeUpstreamRequest(
+            request, upstreamModelName: "qwen", timingsPerToken: true
+        )) as? [String: Any]
+        XCTAssertEqual(llama?["timings_per_token"] as? Bool, true)
+        let other = try JSONSerialization.jsonObject(with: OpenAICompatibleLoopbackRuntime.encodeUpstreamRequest(
+            request, upstreamModelName: "qwen"
+        )) as? [String: Any]
+        XCTAssertNil(other?["timings_per_token"])
+    }
+
     func testDecodeUpstreamResponseWithoutCompleteUsageIsUnattested() throws {
         let noUsage = Data(#"{"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#.utf8)
         XCTAssertEqual(try OpenAICompatibleLoopbackRuntime.decodeUpstreamResponse(noUsage).settlementDisposition, .usageUnattested)

@@ -493,6 +493,11 @@ struct OpenAICompatibleStreamAccumulator {
     private var promptTokens: Int?
     private var completionTokens: Int?
     private var deltaEvents = 0
+    /// #1690 E2E-F3: llama-server `timings_per_token` usage at each content
+    /// chunk (content UTF-8 bytes -> completion tokens through them) and the
+    /// prompt tokens it reports; nil once a content chunk arrives without it.
+    private var prefixCompletionTokens: [Int: Int]? = [0: 0]
+    private var prefixPromptTokens: Int?
     private var sawSSEData = false
     private var nonSSEBody = ""
     private(set) var isDone = false
@@ -552,9 +557,29 @@ struct OpenAICompatibleStreamAccumulator {
             completionTokens: generated,
             generatedCompletionTokens: generated,
             toolCalls: calls.isEmpty ? nil : calls,
-            settlementDisposition: promptTokens != nil && completionTokens != nil ? .notEligible : .usageUnattested
+            settlementDisposition: promptTokens != nil && completionTokens != nil ? .notEligible : .usageUnattested,
+            loopbackPrefixCompletionTokens: prefixCompletionTokens ?? [:]
         )
         return (result, late)
+    }
+
+    /// The result of a stream the buyer cancelled: the content received so
+    /// far, and its per-prefix usage only when the upstream attested it for
+    /// every content chunk (else unattested, so never signed).
+    func cancelledResult() -> CompletionResult {
+        let calls = toolCalls.map { ToolCall(id: $0.id, functionName: $0.name, arguments: $0.arguments) }
+        let attested = prefixCompletionTokens != nil && prefixPromptTokens != nil
+        let generated = prefixCompletionTokens?[content.utf8.count] ?? deltaEvents
+        return CompletionResult(
+            content: content,
+            finishReason: "",
+            promptTokens: prefixPromptTokens ?? 0,
+            completionTokens: generated,
+            generatedCompletionTokens: generated,
+            toolCalls: calls.isEmpty ? nil : calls,
+            settlementDisposition: attested ? .notEligible : .usageUnattested,
+            loopbackPrefixCompletionTokens: attested ? prefixCompletionTokens : [:]
+        )
     }
 
     private mutating func handle(_ events: [LoopbackSSEParser.Event]) throws -> [StreamChunk] {
@@ -592,6 +617,15 @@ struct OpenAICompatibleStreamAccumulator {
             promptTokens = OpenAICompatibleLoopbackRuntime.intValue(usage["prompt_tokens"]) ?? promptTokens
             completionTokens = OpenAICompatibleLoopbackRuntime.intValue(usage["completion_tokens"]) ?? completionTokens
         }
+        // llama-server `timings_per_token`: prompt tokens are the processed
+        // plus the cached ones (its `usage.prompt_tokens`).
+        var chunkTimings: (prompt: Int, completion: Int)?
+        if case .object(let timings)? = root["timings"],
+           let promptN = OpenAICompatibleLoopbackRuntime.intValue(timings["prompt_n"]),
+           let cacheN = OpenAICompatibleLoopbackRuntime.intValue(timings["cache_n"]),
+           let predictedN = OpenAICompatibleLoopbackRuntime.intValue(timings["predicted_n"]) {
+            chunkTimings = (promptN + cacheN, predictedN)
+        }
         // Keep-alives are SSE comments, never data. A data object is a
         // choices chunk or a usage-only chunk (`choices: []` plus `usage`).
         guard case .array(let choices)? = root["choices"] else {
@@ -614,6 +648,12 @@ struct OpenAICompatibleStreamAccumulator {
             }
             content += text
             deltaEvents += 1
+            if let chunkTimings, prefixCompletionTokens != nil {
+                prefixCompletionTokens?[content.utf8.count] = chunkTimings.completion
+                prefixPromptTokens = chunkTimings.prompt
+            } else {
+                prefixCompletionTokens = nil
+            }
             chunks.append(.content(text))
         }
         if case .array(let calls)? = delta["tool_calls"] {
@@ -1094,83 +1134,102 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
         try await requireMLXLMServesBoundSnapshot()
-        let body = try Self.encodeUpstreamRequest(request, upstreamModelName: upstreamModelName)
+        let body = try Self.encodeUpstreamRequest(
+            request,
+            upstreamModelName: upstreamModelName,
+            timingsPerToken: runtimeSource == LlamaCppLoopbackServeModel.runtimeSource
+        )
         let clock = LoopbackProgressClock()
         let timeouts = LoopbackGenerationTimeouts.forGeneration(maxTokens: request.maxTokens, contextWindow: contextWindow)
             .withByteProgress(clock)
         let client = httpClient
         let url = chatCompletionsURL
+        let stream = LoopbackStreamState()
 
-        return try await withThrowingTaskGroup(of: CompletionResult?.self) { group in
-            group.addTask {
-                let response: BYOMLoopbackLineResponse
-                do {
-                    response = try await Self.openLines(client, url: url, body: body, timeouts: timeouts)
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch let error as URLError where error.code == .timedOut {
-                    throw Self.upstreamTimeoutError
-                } catch {
-                    throw APIError(status: 502, message: "Upstream loopback error", type: "server_error", code: "upstream_unavailable")
-                }
-                guard (200...299).contains(response.statusCode) else {
-                    // The status decides the mapping; a failed or cut-off
-                    // error body only loses detail.
-                    var errorBody = Data()
+        do {
+            return try await withThrowingTaskGroup(of: CompletionResult?.self) { group in
+                group.addTask {
+                    let response: BYOMLoopbackLineResponse
                     do {
-                        for try await line in response.lines {
-                            guard errorBody.count < 64 * 1024 else { break }
-                            errorBody.append(contentsOf: Array((line + "\n").utf8))
-                        }
+                        response = try await Self.openLines(client, url: url, body: body, timeouts: timeouts)
                     } catch is CancellationError {
                         throw CancellationError()
-                    } catch {}
-                    throw Self.mapUpstreamError(status: response.statusCode, body: errorBody)
-                }
-                var accumulator = OpenAICompatibleStreamAccumulator()
-                do {
-                    for try await line in response.lines {
-                        clock.touch()
-                        for chunk in try accumulator.consume(line: line) {
+                    } catch let error as URLError where error.code == .timedOut {
+                        throw Self.upstreamTimeoutError
+                    } catch {
+                        throw APIError(status: 502, message: "Upstream loopback error", type: "server_error", code: "upstream_unavailable")
+                    }
+                    guard (200...299).contains(response.statusCode) else {
+                        // The status decides the mapping; a failed or cut-off
+                        // error body only loses detail.
+                        var errorBody = Data()
+                        do {
+                            for try await line in response.lines {
+                                guard errorBody.count < 64 * 1024 else { break }
+                                errorBody.append(contentsOf: Array((line + "\n").utf8))
+                            }
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch {}
+                        throw Self.mapUpstreamError(status: response.statusCode, body: errorBody)
+                    }
+                    do {
+                        for try await line in response.lines {
+                            clock.touch()
+                            // Like the native runtime, check per token: a
+                            // chunk emitted after the cancel would be dropped
+                            // by the relay and make the delivery unknown.
+                            if shouldCancel() { throw LoopbackCancelRequested() }
+                            for chunk in try stream.consume(line: line) {
+                                onChunk?(chunk)
+                            }
+                            if stream.isDone { break }
+                        }
+                        let (result, late) = try stream.finish()
+                        for chunk in late {
                             onChunk?(chunk)
                         }
-                        if accumulator.isDone { break }
-                    }
-                    let (result, late) = try accumulator.finish()
-                    for chunk in late {
-                        onChunk?(chunk)
-                    }
-                    return result
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch let error as APIError {
-                    throw error
-                } catch let error as URLError where error.code == .timedOut {
-                    throw Self.upstreamTimeoutError
-                } catch {
-                    // A malformed/truncated upstream body is an upstream fault,
-                    // surfaced as 502 rather than a generic 500.
-                    throw APIError(status: 502, message: "Upstream loopback response malformed", type: "server_error", code: "upstream_error")
-                }
-            }
-            group.addTask {
-                // Watchdog: honour caller cancellation and the generation
-                // deadlines. Throwing here cancels the reader task, which
-                // cancels the upstream HTTP request (the runtime stops
-                // generating when its client goes away).
-                while true {
-                    try await Task.sleep(nanoseconds: 100_000_000)
-                    if shouldCancel() { throw CancellationError() }
-                    if clock.hasExpired(timeouts) {
+                        return result
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch let error as LoopbackCancelRequested {
+                        throw error
+                    } catch let error as APIError {
+                        throw error
+                    } catch let error as URLError where error.code == .timedOut {
                         throw Self.upstreamTimeoutError
+                    } catch {
+                        // A malformed/truncated upstream body is an upstream fault,
+                        // surfaced as 502 rather than a generic 500.
+                        throw APIError(status: 502, message: "Upstream loopback response malformed", type: "server_error", code: "upstream_error")
                     }
                 }
+                group.addTask {
+                    // Watchdog: honour caller cancellation and the generation
+                    // deadlines. Throwing here cancels the reader task, which
+                    // cancels the upstream HTTP request (the runtime stops
+                    // generating when its client goes away).
+                    while true {
+                        try await Task.sleep(nanoseconds: 100_000_000)
+                        if shouldCancel() { throw LoopbackCancelRequested() }
+                        if clock.hasExpired(timeouts) {
+                            throw Self.upstreamTimeoutError
+                        }
+                    }
+                }
+                defer { group.cancelAll() }
+                while let next = try await group.next() {
+                    if let result = next { return result }
+                }
+                throw APIError(status: 502, message: "Upstream loopback error", type: "server_error", code: "upstream_unavailable")
             }
-            defer { group.cancelAll() }
-            while let next = try await group.next() {
-                if let result = next { return result }
-            }
-            throw APIError(status: 502, message: "Upstream loopback error", type: "server_error", code: "upstream_unavailable")
+        } catch is LoopbackCancelRequested {
+            // #1690 E2E-F3: like the native runtime, a cancelled stream
+            // returns what it generated so the relay can end it with a
+            // buyer_cancel receipt over the delivered prefix. The group has
+            // finished, so the stream state is final.
+            guard onChunk != nil else { throw CancellationError() }
+            return stream.cancelledResult()
         }
     }
 
@@ -1219,7 +1278,11 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// Messages are forwarded as received (content parts, `name`,
     /// `tool_calls`, `tool_call_id`), and every sampling / structured-output
     /// field the ingest boundary validated is carried through.
-    static func encodeUpstreamRequest(_ request: ChatCompletionRequest, upstreamModelName: String) throws -> Data {
+    static func encodeUpstreamRequest(
+        _ request: ChatCompletionRequest,
+        upstreamModelName: String,
+        timingsPerToken: Bool = false
+    ) throws -> Data {
         let source = request.promptSource
         var payload: [String: Any] = [
             "model": upstreamModelName,
@@ -1251,6 +1314,11 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         }
         if let parallelToolCalls = request.parallelToolCalls {
             payload["parallel_tool_calls"] = parallelToolCalls
+        }
+        // #1690 E2E-F3: llama-server reports usage on every chunk, so a
+        // cancelled stream can bind usage to its delivered prefix.
+        if timingsPerToken {
+            payload["timings_per_token"] = true
         }
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])
         guard data.count <= maxRequestBodyBytes else {
@@ -1450,5 +1518,38 @@ enum LoopbackServedIdentity {
         case .ggufFile(let evidence, _): return evidence.algorithm
         case .mlxSnapshot(let snapshot): return snapshot.algorithm
         }
+    }
+}
+
+/// The caller cancelled a loopback generation (buyer disconnect).
+private struct LoopbackCancelRequested: Error {}
+
+/// The stream accumulator shared by the reader and the cancel path.
+private final class LoopbackStreamState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var accumulator = OpenAICompatibleStreamAccumulator()
+
+    var isDone: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return accumulator.isDone
+    }
+
+    func consume(line: String) throws -> [StreamChunk] {
+        lock.lock()
+        defer { lock.unlock() }
+        return try accumulator.consume(line: line)
+    }
+
+    func finish() throws -> (result: CompletionResult, lateChunks: [StreamChunk]) {
+        lock.lock()
+        defer { lock.unlock() }
+        return try accumulator.finish()
+    }
+
+    func cancelledResult() -> CompletionResult {
+        lock.lock()
+        defer { lock.unlock() }
+        return accumulator.cancelledResult()
     }
 }

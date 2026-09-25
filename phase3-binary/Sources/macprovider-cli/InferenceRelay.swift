@@ -1095,6 +1095,9 @@ actor InferenceRelay {
                 // frame carrying generated output was accepted and sent, and
                 // it binds the content those frames carried.
                 let deliveredContent = consumerSent.flatMap { batcher.deliveredContent(sent: $0) }
+                // A loopback runtime reports usage for the delivered prefix
+                // only (#1690 E2E-F3); native completions are unchanged.
+                let cancelled = completion.cancelledPrefixUsage(deliveredContent: deliveredContent)
                 if state.markTerminalSent() {
                     let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
                     let modelHashSource = RouterHandler.resolveModelHashSource(
@@ -1106,7 +1109,7 @@ actor InferenceRelay {
                         receiptBuilder: receiptBuilder,
                         providerID: receiptProviderID,
                         request: request,
-                        completion: completion,
+                        completion: cancelled,
                         ttftMs: 0,
                         unixTsSeconds: Int64(Date().timeIntervalSince1970),
                         requestID: requestID,
@@ -1124,7 +1127,7 @@ actor InferenceRelay {
                         "request_id": requestID,
                         "status": "cancelled",
                         "chunks_sent": chunksSent,
-                        "usage": usage(completion),
+                        "usage": usage(cancelled),
                         "terminal_state_ts_unix_ms": terminalStateTSUnixMS,
                     ]
                     if let receiptHeader {
@@ -1138,7 +1141,7 @@ actor InferenceRelay {
                         &endFrame, evidence: relayBlindEvidence, runtime: relayBlindRuntime, claim: relayBlindClaim
                     )
                     let issued = receiptHeader.map { _ in
-                        ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: 0, unixTs: Int64(Date().timeIntervalSince1970))
+                        ReceiptIssuedAudit(providerID: receiptProviderID, modelID: request.model, tokensOut: Int64(cancelled.generatedCompletionTokens), ttftMs: 0, unixTs: Int64(Date().timeIntervalSince1970))
                     }
                     try await sendReceiptEndFrame(endFrame, issued: issued, requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
                 }

@@ -7653,6 +7653,11 @@ struct CompletionResult: Sendable {
     let specDecodeDraftedTokens: Int
     let specDecodeAcceptedTokens: Int
     let specDecodeGeneration: Int?
+    /// #1690 E2E-F3: set on every loopback stream result, nil otherwise.
+    /// Maps each content UTF-8 byte length at an upstream chunk boundary to
+    /// the completion tokens generated through it, as the upstream attested
+    /// them per token; empty when it did not.
+    let loopbackPrefixCompletionTokens: [Int: Int]?
 
     init(
         content: String,
@@ -7669,8 +7674,10 @@ struct CompletionResult: Sendable {
         settlementDisposition: ContinuousBatchSettlementDisposition,
         specDecodeDraftedTokens: Int = 0,
         specDecodeAcceptedTokens: Int = 0,
-        specDecodeGeneration: Int? = nil
+        specDecodeGeneration: Int? = nil,
+        loopbackPrefixCompletionTokens: [Int: Int]? = nil
     ) {
+        self.loopbackPrefixCompletionTokens = loopbackPrefixCompletionTokens
         self.content = content
         self.finishReason = finishReason
         self.promptTokens = promptTokens
@@ -7706,6 +7713,37 @@ struct CompletionResult: Sendable {
             toolCalls: toolCalls,
             modelHashObserved: observed,
             settlementDisposition: settlementDisposition,
+            specDecodeDraftedTokens: specDecodeDraftedTokens,
+            specDecodeAcceptedTokens: specDecodeAcceptedTokens,
+            specDecodeGeneration: specDecodeGeneration,
+            loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens
+        )
+    }
+
+    /// #1690 E2E-F3: the usage a buyer_cancel end frame and receipt carry for
+    /// a cancelled loopback stream: the upstream's prompt tokens and the
+    /// completion tokens generated through exactly the delivered content.
+    /// Without an attested count for that prefix the usage is unattested, so
+    /// it is relayed empty and never signed. A native completion, or a
+    /// loopback one whose whole content was delivered, is returned unchanged.
+    func cancelledPrefixUsage(deliveredContent: String?) -> CompletionResult {
+        guard let table = loopbackPrefixCompletionTokens, deliveredContent != content else { return self }
+        let tokens = deliveredContent.flatMap { delivered in
+            content.utf8.starts(with: delivered.utf8) ? table[delivered.utf8.count] : nil
+        }
+        return CompletionResult(
+            content: deliveredContent ?? content,
+            finishReason: finishReason,
+            promptTokens: promptTokens,
+            cachedPromptTokens: cachedPromptTokens,
+            kvCacheBytesReused: kvCacheBytesReused,
+            completionTokens: tokens ?? completionTokens,
+            generatedCompletionTokens: tokens ?? generatedCompletionTokens,
+            ttftMilliseconds: ttftMilliseconds,
+            generationMilliseconds: generationMilliseconds,
+            toolCalls: toolCalls,
+            modelHashObserved: modelHashObserved,
+            settlementDisposition: tokens == nil ? .usageUnattested : settlementDisposition,
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration
