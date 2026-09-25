@@ -181,18 +181,18 @@ type billingRecorder struct {
 type pendingSettlementReceipt struct {
 	header     string
 	providerID string
-	// pubkeys are the provider's receipt keys: the current one and, within
-	// the SPEC-015 rotation grace window, the previous one.
-	pubkeys [][]byte
+	// pubkey is the provider's current receipt key, the one the route
+	// snapshot pins and receipt ingestion, recovery and the settlement
+	// verifier check. SPEC-022 R-4.4.1 quarantines any other key, the
+	// SPEC-015 rotation-grace previous key included: that grace serves buyer
+	// verification only, and a provider signs every receipt after a
+	// rotation with the new key (SPEC-015 section 7.5 step 7).
+	pubkey []byte
 }
 
 // withPendingReceipt runs a ledger write with the attempt's receipt in view.
 func (b *billingRecorder) withPendingReceipt(provider pool.Provider, header string, write func() error) error {
-	pubkeys := [][]byte{provider.ReceiptPubkey}
-	if prev := provider.ActiveReceiptPubkeyPrev(time.Now()); prev != nil {
-		pubkeys = append(pubkeys, prev.Pubkey)
-	}
-	b.pendingReceipt = pendingSettlementReceipt{header: normalizeReceiptHeaderValue(header), providerID: provider.ProviderID, pubkeys: pubkeys}
+	b.pendingReceipt = pendingSettlementReceipt{header: normalizeReceiptHeaderValue(header), providerID: provider.ProviderID, pubkey: provider.ReceiptPubkey}
 	defer func() { b.pendingReceipt = pendingSettlementReceipt{} }()
 	return write()
 }
@@ -827,10 +827,11 @@ func (b *billingRecorder) poolOperatorAttestation(ctx context.Context, store *bi
 }
 
 // pendingReceiptBacksUsage reports whether the attempt's receipt is a v0.4
-// receipt bound to this attempt, signed by the provider's current or
-// rotation-grace receipt key, whose billable usage equals the usage being
-// recorded. The v0.4 tuple signs no cached count, so a cached count is bound
-// as a part of the receipted prompt: it must lie within [0, prompt].
+// receipt bound to this attempt, signed by the provider's current receipt
+// key (the one the final verifier pins), whose billable usage equals the
+// usage being recorded. The v0.4 tuple signs no cached count, so a cached
+// count is bound as a part of the receipted prompt: it must lie within
+// [0, prompt].
 func (b *billingRecorder) pendingReceiptBacksUsage(providerID string, promptTok, cachedPromptTok, completionTok *int64) bool {
 	receipt := b.pendingReceipt
 	if promptTok == nil || completionTok == nil || receipt.header == "" || receipt.providerID != providerID {
@@ -845,13 +846,8 @@ func (b *billingRecorder) pendingReceiptBacksUsage(providerID string, promptTok,
 		AttemptN:     int64(b.settlementAttemptN),
 		ProviderID:   providerID,
 	}
-	for _, pubkey := range receipt.pubkeys {
-		billableInput, billableOutput, ok := billing.BoundSettlementReceiptUsage(receipt.header, pubkey, id, b.settlementRouteSnapshotDigest)
-		if ok {
-			return billableInput == *promptTok && billableOutput == *completionTok
-		}
-	}
-	return false
+	billableInput, billableOutput, ok := billing.BoundSettlementReceiptUsage(receipt.header, receipt.pubkey, id, b.settlementRouteSnapshotDigest)
+	return ok && billableInput == *promptTok && billableOutput == *completionTok
 }
 
 func (b *billingRecorder) recordSettlementAttemptOutput(ctx context.Context, store *billing.Store, in billing.HotPathInput, output *billing.SettlementOutput) error {

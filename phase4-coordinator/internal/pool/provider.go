@@ -1118,12 +1118,6 @@ func (r *Registry) stageReceiptPublicationLocked(existing, incoming *Provider, n
 	return RegisterRefusalNone
 }
 
-// ActiveReceiptPubkeyPrev is the previous receipt key while its SPEC-015
-// rotation grace window is still open, else nil.
-func (p Provider) ActiveReceiptPubkeyPrev(now time.Time) *ReceiptPubkeyPrevious {
-	return activeReceiptPubkeyPrev(&p, now)
-}
-
 func activeReceiptPubkeyPrev(p *Provider, now time.Time) *ReceiptPubkeyPrevious {
 	if p == nil || p.ReceiptPubkeyPrev == nil || !now.Before(p.ReceiptPubkeyPrev.ExpiresAt) {
 		return nil
