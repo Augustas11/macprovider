@@ -28,17 +28,21 @@ non-streaming 200 always declares the tuple and MAC as trailers; an attempt
 without receipt state (no route snapshot, observe mode, a keyless provider)
 carries a signed `legacy` tuple, settled with local accounting exactly as a
 response without finality. A stream with a route snapshot declares signed
-trailers; one without carries the signed `legacy` tuple in its headers. A
-failed post-delivery record or receipt ingest sends a signed closed refund
-tuple (`quarantined`, `inconclusive`,
-`settlement_record_failed_after_delivery`); the same tuple, with reason
-`settlement_output_missing_after_credit`, follows a credit whose settlement
-evidence write failed and was marked missing, and, with reason
-`settlement_finality_unset_after_delivery`, any negotiated non-streaming
-response that reaches the end of the handler without a tuple. The gateway
-releases the reservation at once, the buyer is not charged, as with the pre-v0.2.2 500, and
-the coordinator logs `settlement_record_failed_after_delivery` for operator
-review of any provider credit the failed write landed. The gateway holds
+trailers; one without carries the signed `legacy` tuple in its headers.
+When the buyer response was delivered but the attempt's settlement evidence
+failed (the post-delivery record or receipt ingest, including a stream's
+post-stream record, `settlement_record_failed_after_delivery`; a credit whose
+evidence write failed and was marked missing,
+`settlement_output_missing_after_credit`; or a non-streaming response that
+reaches the end of the handler without a tuple,
+`settlement_finality_unset_after_delivery`), buyer and provider are settled
+alike. Under an enforce route snapshot the provider credit can never become
+payable (enforce payability needs a verified verdict and attempt output) and
+is also quarantined, and the buyer gets a signed closed refund tuple
+(`quarantined`, `inconclusive`); neither side is paid. In observe mode or
+without a route snapshot the credit stays payable, so the buyer gets the
+signed `legacy` tuple and is debited locally, the #1675 behaviour; both
+sides are paid. The coordinator logs the reason for operator review. The gateway holds
 declared finality that is missing, unsigned, or fails the MAC as
 `missing_settlement_finality_trailer`; it never debits it locally. A caller
 that did not advertise keeps the pre-v0.2.2 order (record before the write,
@@ -48,8 +52,9 @@ pairing stays safe. The gateway pin `coordinator.require_settlement_trailers`
 no signed finality, closing the strip-everything downgrade; because a
 negotiating coordinator signs every 200, the pin holds only a stripped
 declaration or MAC. A rollback stops buyer traffic, drains gateway
-settlement holds, turns the pin off, rolls back the coordinator (and the
-gateway if needed), then resumes traffic.
+settlement holds, turns the pin off, rolls back in the reverse of the
+rollout order (v2 allowlists, CLI, the gateway if it must go, then the
+coordinator), then resumes traffic.
 
 ### v0.2.1
 
@@ -1084,20 +1089,24 @@ the pool attempts recorded before a downgrade.
   tuple: declared trailers on a non-streaming 200 and on a stream with a route
   snapshot, a signed `legacy` header tuple on a stream without one, a signed
   `legacy` tuple for a non-streaming attempt without receipt state, and a
-  signed closed refund tuple when the post-delivery record fails, when the
-  credit committed but its settlement evidence was marked missing, or when a
-  non-streaming response would otherwise end without a tuple (no attempt is
-  left to a hold the reconciler cannot resolve). Every gateway builder of a
+  tuple for a delivered attempt whose settlement evidence failed (the
+  post-delivery record or ingest, a credit whose evidence was marked missing,
+  or a non-streaming response that would otherwise end without a tuple): a
+  signed closed refund with the provider credit quarantined under an enforce
+  route snapshot, else the signed `legacy` tuple with the payable credit
+  kept, so buyer and provider agree without an operator. Every gateway builder of a
   coordinator chat request, relay-blind included, advertises the capability
   with the bearer, account and request id the MAC binds. Once both
   are deployed, the gateway pin `coordinator.require_settlement_trailers:
   true` holds any coordinator 200 (streaming or non-streaming) without signed
   finality as `missing_settlement_finality_trailer`, so stripping the whole
   declaration cannot downgrade settlement to header or legacy mode. A
-  rollback MUST stop buyer traffic, drain gateway settlement holds to zero,
-  turn the pin off, roll back the coordinator (and the gateway if needed),
-  and only then resume traffic; turning the pin off under live traffic would
-  let stripped or unsigned responses settle from headers or legacy mode. The gateway accepts a tuple only
+  rollback MUST stop buyer traffic (keeping the gateway and its reconciler
+  up), drain gateway settlement holds to zero, turn the pin off, roll back in
+  the reverse of the rollout order (v2 allowlists, CLI, the gateway if it
+  must go, then the coordinator), and only then resume traffic; turning the
+  pin off under live traffic would let stripped or unsigned responses settle
+  from headers or legacy mode. The gateway accepts a tuple only
   with a valid MAC bound to the account and request id it sent and the
   coordinator's internal request id, and holds a missing, unsigned, tampered,
   or replayed tuple as `missing_settlement_finality_trailer` (resolved by the

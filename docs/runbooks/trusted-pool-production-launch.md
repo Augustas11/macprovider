@@ -253,9 +253,11 @@ allowlists):
    or legacy mode, so stripping the trailer declaration on the hop can no
    longer downgrade settlement. The coordinator signs every 200 it sends this
    gateway, including a `legacy` tuple for an attempt without a route
-   snapshot (observe mode, a keyless provider), so those settle as before;
-   a hold after the restart means a stripped declaration or MAC. Watch the
-   `missing_settlement_finality_trailer` log reason and the hold count.
+   snapshot (observe mode, a keyless provider), so those settle as before.
+   A `missing_settlement_finality_trailer` hold after the restart means a
+   stripped declaration or MAC; a stream whose receipt verdict is still open
+   holds with its coordinator reason until the reconciler closes it. Watch
+   both and the hold count.
 3. Ship the provider CLI that signs pool-authorized loopback receipts
    (SPEC-015 0.4.10).
 4. Only then accept a v2 policy core with a non-empty `runtime_allowlist`.
@@ -282,9 +284,17 @@ let a stripped or unsigned response fall back to header or legacy
 settlement, and a gateway database restore erases whatever it has not
 settled, so traffic stops and holds drain first:
 
-1. Stop buyer traffic to the gateway, so no new reservation opens.
-2. Drain settlement holds to zero with the reconciler
-   (`POST /admin/settlement/reconcile` with the operator key, repeated) until
+1. Stop buyer traffic at nginx while the gateway stays up. In every nginx
+   server block that proxies buyer routes to the gateway (`grep -l 9443
+   /etc/nginx/sites-enabled/*`: `api.malibu.tech`, and any alias such as
+   `api.streamvc.live`), replace the `location /v1/` and `location /auth/`
+   bodies with `return 503;` (keep `/healthz`), then `sudo nginx -t && sudo
+   systemctl reload nginx`. The gateway keeps running on `127.0.0.1:9443`, so
+   the reconciler and the operator endpoints stay reachable from Pearl
+   itself (nginx never exposes `/admin/` publicly).
+2. Drain settlement holds to zero with the reconciler, from Pearl:
+   `curl -X POST -H "Authorization: Bearer $OPERATOR_KEY"
+   http://127.0.0.1:9443/admin/settlement/reconcile`, repeated, until
    `SELECT COUNT(*) FROM quota_reservations WHERE status = 'active' AND
    settlement_hold = 1` returns 0. A hold the reconciler cannot resolve
    (`coordinator_404_held`) needs an operator decision here, before anything
@@ -297,7 +307,7 @@ settled, so traffic stops and holds drain first:
    gateway only if it must go (below), then the coordinator. The coordinator
    rollback needs nothing more from the gateway: a v0.2.2 gateway reads an
    older coordinator's header finality.
-5. Resume buyer traffic.
+5. Resume buyer traffic: restore the nginx `location` bodies and reload.
 
 Prefer rolling the gateway forward: v14 only widens the
 `usage_events.token_source` CHECK. A gateway older than this release
@@ -308,12 +318,15 @@ of the run, only prints a rollback recipe: every restore command in its
 "Rollback:" block (script lines 761-797) is an `echo`, so the script itself
 never restores. The printed recipe, run by an operator, stops the gateway,
 reinstalls `/opt/macprovider/gateway.prev`, deletes `gateway.db-wal` and
-`gateway.db-shm`, and installs the snapshot over `gateway.db`. That discards
-every gateway write since the snapshot, including anything only in the WAL:
-accounts and API keys issued, quota reservations and their settlement holds,
-usage (debit) rows, demo usage, and wallet-session state. A gateway rollback
-therefore runs inside step 4 above, after traffic stopped and holds drained,
-and only as:
+`gateway.db-shm`, installs the snapshot over `gateway.db`, and then runs
+`systemctl start macprovider-gateway` and a `/healthz` check. The restore
+discards every gateway write since the snapshot, including anything only in
+the WAL: accounts and API keys issued, quota reservations and their
+settlement holds, usage (debit) rows, demo usage, and wallet-session state.
+The gateway cannot run with its reconciler off (`settlement.reconcile_enabled:
+false` fails config validation), so it must stay stopped until the lost rows
+are back. A gateway rollback therefore runs inside step 4 above, after
+traffic stopped and holds drained, and only as:
 
 1. Export every row written after the snapshot timestamp from `accounts`,
    `account_identities`, `api_keys`, `api_key_events`, `quota_reservations`,
@@ -321,11 +334,14 @@ and only as:
    (their `created_at`, `settled_at` or equivalent timestamp is after the
    snapshot's). These are the buyer debits and account state the restore
    would lose. Export before running any part of the printed recipe.
-2. Run the printed recipe (binary, WAL/SHM removal, snapshot install), but do
-   not start traffic.
-3. Re-apply the exported rows to the restored database, reconcile daily quota
-   totals for the affected accounts, then start the older gateway. Skipping
-   this is only acceptable when step 1 exported nothing.
+2. Run the printed recipe up to and including the snapshot install and its
+   `PRAGMA integrity_check`, but leave out its final `systemctl start
+   macprovider-gateway` and `/healthz` lines: the gateway stays stopped.
+3. Re-apply the exported rows to the restored database with `sqlite3`,
+   reconcile daily quota totals for the affected accounts, then start the
+   older gateway and check `/healthz`. Buyer traffic stays blocked at nginx
+   until step 5 of the rollback. Skipping the re-apply is only acceptable
+   when step 1 exported nothing.
 
 Rollback to a coordinator that predates SPEC-022 v0.2.0, once any pool route
 has run on the new coordinator:
