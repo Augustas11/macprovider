@@ -73,15 +73,15 @@ A coordinator deploy compares the tag's catalog with live (`compare-live`):
 
 ## Live on Pearl
 
-Probed 2026-09-24 (`/healthz` and read-only host checks).
+Probed 2026-09-25 about 10:20Z (`/healthz`, catalog routes and read-only host checks).
 
 | Field | Value |
 |---|---|
-| Coordinator | **v1.8.193** @ `9e5aac90`, live and healthy since 2026-09-24 10:40Z (signed updater: `serving_gates_completed`, `rollout_completed: success`) |
-| Gateway | **v1.8.193** |
-| Release | [Pearl runtime v1.8.193](https://github.com/Augustas11/macprovider/releases/tag/v1.8.193), run [35986691378](https://github.com/Augustas11/macprovider/actions/runs/35986691378), applied 2026-09-24 10:40Z |
+| Coordinator | **v1.8.200** @ `ca809589`. Applied 2026-09-25 about 10:03Z by the signed updater, then the full `deploy-pearl-vps.sh` (DEPLOY_EXIT 0, exact-byte canary OK) |
+| Gateway | **v1.8.200** (`gateway.db` schema 14 from #1719; `coordinator.require_settlement_trailers` off) |
+| Release | [Pearl runtime v1.8.200](https://github.com/Augustas11/macprovider/releases/tag/v1.8.200), run [36120742231](https://github.com/Augustas11/macprovider/actions/runs/36120742231); updater transaction `1790330246291811116-v1.8.200` |
 | `recommended_binary_version` | 1.8.123 (CLI train owns this) |
-| Includes | Everything on `main` through `9e5aac90`: v1.8.191's #1728 plus #1713 (#1689 coordinator side: SPEC-022 R-2.7 catalog-material gate, `catalog_material_hold_v1`) and `fe4b4a0c` (stats billing mirror schema parity) |
+| Includes | Everything on `main` through `ca809589`: #1738 (90-day stats overview), #1741 (#1721: CLI and stats sidecars from the release), #1744 (#1735 catalog), #1719 (#1690 engine-agnostic Trusted Pools), and the 2026-09-25 deploy-tooling fixes: #1746, `c6c32692`, `ee061fc3`, `4936a062`, `ca809589` (see the note below) |
 | nginx | `/v1/stats/routability` route added on Pearl 2026-09-24 10:24Z, additively and verbatim from `phase4-coordinator/dist` (backups `*.bak-routability-20260924T102404Z`). Pearl's nginx still lags the repo on `/v1/catalog-artifacts`, `/v1/portal/session` and `/v1/provider/malibu-reward-audit`, and carries a hand-deployed `/v1/provider/model-admission/` (BYOM) route the repo lacks, so **do not copy the repo site file over it**. |
 
 Signed prerelease `v1.8.189` at `0ac51afa` exists and is immutable, but it was
@@ -93,10 +93,24 @@ as `v1.8.191` for the post-v1.8.190 changes listed below.
 
 **2026-09-25 v1.8.194 apply (partial).** The signed updater applied the v1.8.194 binary pair at 03:05Z (`rollout_completed success`; updater reinstalled from the tag first). The full `deploy-pearl-vps.sh` at 03:22Z reached `compare-live` = `descends` with 0 uncovered providers, then failed its SPEC-023 exact-byte canary and **rolled back** at about 03:35Z. There was about 30 s of public 502 during the rollback restart. Why: the canary Mac `mp-26592d…` runs CLI 1.8.123. Its `~/macprovider/catalog-release` holds the Sep 8 baked `published-2026-09-02-gpt-oss-120b-v1` files, and only a signed CLI payload writes that directory, so no restart can make it byte-equal to the new release. Live now: coordinator/gateway v1.8.194 binary, catalog still `published-2026-09-23-tier2-buyer-closure-v1`. `stats-inventory-sync` is left stopped by the rollback: #1738 migration 030 is applied and the old sidecar is held. Recover per the coordinator-deploy-recover runbook. #1735 catalog activation still needs a canary whose installed CLI payload carries `published-2026-09-25-artifact-hash-correction-v1`. Fleet impact of the attempt: the new catalog was live 03:31:04–03:35:11Z. Coordinator-sourced providers picked it up, and after the rollback the Studio mp-5aad… was closed 3 times with `4001 catalog_incompatible` (03:35:51–03:37:27Z) until it refetched the old release. No closes after 03:37:40Z. By 03:45Z all 5 providers were back and `current` on `published-2026-09-23-tier2-buyer-closure-v1`, with no model-admission revocations. A rolled-back activation therefore briefly kicks every provider that fetched the new release. Providers load the coordinator's live signed catalog, and a baked catalog is only a fallback, so a CLI carrying a newer baked catalog advertises whatever Pearl serves.
 
+**2026-09-25 catalog deploy, v1.8.196–v1.8.200.** Taken over from the #1735 session. The #1735 catalog went live only with v1.8.200. Each earlier attempt hit a separate deploy-tooling defect:
+- **v1.8.196.** The exact-byte canary built its expected set from 7 of the 9 files the Mac proof hashes, missing the rate card and its sidecar, so it could never pass. Fixed by #1746.
+- **v1.8.196 retry.** The canary passed, but the new `stats-billing-mirror` unit read the empty `/var/lib/macprovider/request-log.sqlite`, and its initial run aborted the deploy. Fixed by `c6c32692`, which reads `coordinator.db`.
+- **v1.8.197.** Codex R1 found that the unit also listed `coordinator.db` in `InaccessiblePaths`. Fixed by `ee061fc3`; R2 passed.
+- **v1.8.198.** The root disk was 100% full because the updater keeps every transaction snapshot. Staging vanished, and the watchdog restore failed with ENOSPC; it recovered after space was freed. On retry the canary passed, but the stats smoke hit the post-restart `stats_stale` 503. Fixed by `4936a062` (bounded 360 s retry).
+- **v1.8.199.** #1719's billing migration ran a whole-DB `PRAGMA quick_check` (4.8 GB) before listening, and the updater health window rolled it back, with about 8 min of coordinator downtime. Fixed by `ca809589` (schema-only verification).
+- **v1.8.200.** Applied with the updater health timeout temporarily at 300 s, then restored to 60. The deploy completed.
+
+The canary Mac mp-26592d… now runs signed CLI candidate v1.8.195, whose payload `catalog-release/` is byte-identical to this release. Pearl `accepted_ids` carries `v1.8.195@03627cda…` in place of v1.8.172 (backup `coordinator.yaml.bak-accept-195-20260925T054520Z`).
+
 ### Recent coordinator releases
 
 | Tag | Commit | Head PR |
 |---|---|---|
+| v1.8.200 | `ca809589` | #1719 (#1690) with the quick_check fix; #1738, #1741, #1744 catalog, #1746 and the deploy fixes — **live** |
+| v1.8.199 | `4936a062` | #1719; binary rolled back by the updater (startup quick_check), never live |
+| v1.8.196–v1.8.198 | `1148185e`, `c6c32692`, `ee061fc3` | binaries applied by the updater; each full catalog deploy rolled back (see note above) |
+| v1.8.194 | `98ff77ca` | #1744 (#1735) binaries only; full deploy rolled back on the canary |
 | v1.8.193 | `9e5aac90` | #1713 (#1689) coordinator side; `fe4b4a0c` |
 | v1.8.191 | `98e3e4af` | #1728 settlement-hold recovery |
 | v1.8.190 | `0a63ddab` | #1718 deploy-boundary replacement; also includes #1714/#1715 and the feed-bundle fix |
@@ -114,11 +128,11 @@ as `v1.8.191` for the post-v1.8.190 changes listed below.
 
 | Field | Value |
 |---|---|
-| `autotune/current` | `published-2026-09-23-tier2-buyer-closure-v1` |
-| Tier-2 catalog | `macprovider-tier2-model-catalog-2026-09-23-buyer-closure-v1`, 17 models, expires **2026-12-23** |
-| Retained window | 3 entries: `…2026-09-22-qwen36-27b-hash-fix-v1`, `…2026-09-19-openrouter-priced-v1`, `…2026-09-19-openrouter-listed-v1` |
+| `autotune/current` | `published-2026-09-25-artifact-hash-correction-v1` (activated 2026-09-25 about 10:13Z) |
+| Tier-2 catalog | `macprovider-tier2-model-catalog-2026-09-25-artifact-hash-correction-v1`, 17 models, expires **2026-12-25** |
+| Retained window | `…2026-09-23-tier2-buyer-closure-v1`, `…2026-09-22-qwen36-27b-hash-fix-v1`, `…2026-09-19-openrouter-priced-v1` |
 
-Renew the Tier-2 catalog before 2026-12-23. An expiry-only re-sign stays in
+Renew the Tier-2 catalog before 2026-12-25. An expiry-only re-sign stays in
 the freshness lane.
 
 The scheduled feed renewal on 2026-09-23 **failed closed**, with no mutation. The
@@ -130,17 +144,16 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 16:00 UTC), or earlier with a manual dispatch of
 `renew-autotune-static-feed-signed.yml`.
 
-## Next coordinator release — net changes vs v1.8.193
+## Next coordinator release — net changes vs v1.8.200
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
-| `/v1/stats/overview` publishes 90 complete UTC days (daily rollup table, stats migration `030_stats_timeseries_daily`). | merged `5793b844` | #1738 |
-| Full deploy installs the signed coordinator CLI and stats sidecars from the Pearl release; Pearl updater learns the same. Changes `deploy-pearl-vps.sh` and `ops/pearl-updater/`, so apply with the full deploy, not a binary swap. | merged `60f91b5c` | #1741 (#1721) |
-| Catalog release `published-2026-09-25-artifact-hash-correction-v1` + Tier-2 `macprovider-tier2-model-catalog-2026-09-25-artifact-hash-correction-v1`: corrects `model_sha256` for the 8 rows the #1739 sweep found wrong (gemma-4-26b, gpt-oss-120b, qwen3-30b-a3b-2507, qwen3.5-27b, qwen3.5-35b-a3b, qwen3.6-35b-a3b, qwen3.8-27b, glm-4.5-air). Re-hashed buyer-serving rows are a content-lane (e) NO_GO, so this ships on this train (deploy `compare-live` = `descends`). Provider impact: at 2026-09-25T01:02Z `/v1/stats/routability` showed 5 providers serving only Llama-3.2-3B and Qwen3.6-27B (both unchanged rows), none on the 8 re-hashed rows; `.row-continuity-target` already lists the 1.8.123 baked `published-2026-09-02-gpt-oss-120b-v1`. **Apply evidence beyond the checklist**: (1) no `catalog_incompatible` spike for providers on unchanged rows, and the providers routable before the deploy are routable after it; (2) the new Tier-2 `catalog_id` makes the release sweep revoke every decided model-admission candidate bound to the old Tier-2 material (`release_sweep_tier2_material`, `ws/model_admission_binding.go`), even on unchanged rows. Count those revocations in the journal and confirm each affected provider re-offers and is re-admitted; any that is not is an open action here; (3) on the Studio, `models prepare --profile catalog z-ai/glm-4.5-air` ends `ready (verified)` and `models verify-artifact` reports `match` against the corrected hash; (4) a strict-pinned buyer request to the corrected GLM row, with its settlement row (the evidence the content lane cannot produce). The other seven re-hashed rows have no provider today, so none of them has a buyer path to break. Their corrected hash is proven by the HF recompute (`audits/2026-09-24-1735-catalog-hash-sweep/sweep.json`), and each needs the same (3)+(4) evidence from the first provider that serves it. That per-row evidence is tracked on #1735, which stays open until all eight have it. A provider that reconnects later advertising an old hash is fenced (`catalog_incompatible`) as SPEC-023-R010 intends. It recovers by restarting onto the coordinator catalog, which re-materializes and re-verifies the artifact. For 7 days after apply, check the journal for rejections keyed to the pre-#1735 candidate sha. **Tag `v1.8.194` signed on `98ff77ca`; release run 36088126621 dispatched 2026-09-25; apply owner: #1735 session.** | merged `98ff77ca`, cutting v1.8.194 | #1744 (#1735) |
 | Build 1 Lane A orchestrated PR | in progress | #1658 (#1642) |
 | Pricing corrections through the catalog-content lane (SPEC-005-R013, SPEC-023-R018, SPEC-006-R008 amended). Coordinator: request billing table and served signed rate card switch under one economics lock (release lock → economics lock → feed lock), prices resolved once before the billing write context; `--validate-autotune-release` gains `--expect-base-equivalent` and `--resolve-model-names` plus `rate_table_sha256` / `signed_rate_card_sha256` verdict fields; applied-config record gains `rate_table_sha256`, `signed_rate_card_sha256`, `autotune_release_id`, `billing_snapshot_id`. **Wholesale statements change**: each request is priced at the generation it was recorded under (uncapped aggregate math), so a model-month above 10M tokens is no longer zeroed — affected partner statements go **up**; a period with no billing snapshot now fails closed. Lane tooling that deploy ships: `scripts/catalog-release.py` (splice / extract / effective-price diff / gate), new `acknowledged-pricing-moves.json`; still to land in the same PR: journal + pre-start recovery + post-start closer units, the one-writer guard on every live-config writer, lane preflight/evidence/rollback. **Enabling rollout is two steps from the same tag, in order**: (1) reinstall the Pearl updater bundle (`install-pearl-updater.sh`: guard-bearing updater, Tier-2 watchdog, Python guard module), then (2) a full `deploy-pearl-vps.sh` (new units, recovery helper, shell guard, verifier bundle) — never a binary swap. Pricing preflight hashes every installed writer against the commit, so a deploy without step 1 stays NO_GO. Procedure: `catalog-release-decision-tree.md` §Enabling rollout. Afterwards rows-only pricing needs no coordinator release. Plan (approved 0C/0H/0M): [#1693 comment](https://github.com/Augustas11/macprovider/issues/1693#issuecomment-5800624020) | in progress (draft; merge gated on the e2e fake-Pearl run) | #1732 (#1693) |
 
 ## Open Pearl actions (not new code)
+
+- **Pearl updater snapshot retention (2026-09-25).** `macprovider-pearl-update` keeps every transaction snapshot under `/var/lib/macprovider-pearl-updater/transactions` (about 6 GB each, a DB copy) with no retention. It filled `/` to 100%. 29 old snapshots were removed at about 09:03Z, and v1.8.197 onwards remain. Each apply also stops the coordinator for about 6 min while it copies the DB. Both need an updater change: retention, plus a snapshot that doesn't block serving.
 
 These came with #1706 but are not active on Pearl, because the recent releases
 were applied as binary swaps. Evidence: the live unit file is dated 2026-07-23,
