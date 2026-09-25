@@ -3602,6 +3602,11 @@ struct HuggingFaceSnapshotDownloader {
         try await HuggingFaceSnapshotDownloader.guardedSession.data(for: request, delegate: HFRedirectGuard())
     }
     var download: @Sendable (URLRequest, Date?) async throws -> (URL, URLResponse)
+    /// Byte sources tried in order after huggingface.co fails. The signed
+    /// row hash stays the only authority, so none of these hosts is trusted
+    /// (SPEC-023 §3.2 artifact byte sources, #1737). Test initializers leave
+    /// this empty so a failure keeps its original error.
+    var fallbackSources: [ModelArtifactSource] = []
 
     init() {
         fetch = {
@@ -3610,6 +3615,9 @@ struct HuggingFaceSnapshotDownloader {
         download = {
             try await HuggingFaceSnapshotDownloader.defaultDownload($0, deadline: $1)
         }
+        fallbackSources = ModelArtifactSource.productionFallbacks(
+            environment: ProcessInfo.processInfo.environment
+        )
     }
 
     init(
@@ -3729,38 +3737,220 @@ struct HuggingFaceSnapshotDownloader {
     }
 
     func downloadSnapshot(modelID: String, revision: String, to snapshot: URL, deadline: Date? = nil) async throws {
+        try await downloadSnapshot(
+            modelID: modelID,
+            revision: revision,
+            expectedSHA256: nil,
+            to: snapshot,
+            deadline: deadline
+        )
+    }
+
+    /// Fetch the pinned snapshot from huggingface.co, then from each fallback
+    /// source in order. Content-addressed mirrors need `expectedSHA256` (the
+    /// signed row's snapshot-manifest.v1 hash) and are skipped without it.
+    /// Deadline and cancellation stop the walk; any other source failure moves
+    /// to the next source. With no fallback sources the Hugging Face error is
+    /// rethrown unchanged.
+    func downloadSnapshot(
+        modelID: String,
+        revision: String,
+        expectedSHA256: String?,
+        to snapshot: URL,
+        deadline: Date? = nil
+    ) async throws {
         try Self.assertDeadlineActive(deadline)
-        let siblings = try await modelSiblings(modelID: modelID, revision: revision, deadline: deadline)
+        var failures: [String] = []
+        do {
+            try await downloadHuggingFaceSnapshot(
+                endpoint: Self.huggingFaceOrigin,
+                modelID: modelID,
+                revision: revision,
+                to: snapshot,
+                deadline: deadline
+            )
+            return
+        } catch {
+            if fallbackSources.isEmpty || Self.stopsSourceWalk(error) {
+                throw error
+            }
+            failures.append("huggingface.co: \(Self.sourceFailureSummary(error))")
+        }
+        for source in fallbackSources {
+            try Self.assertDeadlineActive(deadline)
+            do {
+                switch source {
+                case .contentAddressed(let base):
+                    guard let expectedSHA256 else {
+                        failures.append("\(source.label): skipped, no signed artifact hash")
+                        continue
+                    }
+                    try await downloadContentAddressedSnapshot(
+                        base: base,
+                        expectedSHA256: expectedSHA256,
+                        revision: revision,
+                        to: snapshot,
+                        deadline: deadline
+                    )
+                case .huggingFaceCompatible(let endpoint):
+                    try await downloadHuggingFaceSnapshot(
+                        endpoint: endpoint,
+                        modelID: modelID,
+                        revision: revision,
+                        to: snapshot,
+                        deadline: deadline
+                    )
+                }
+                return
+            } catch {
+                if Self.stopsSourceWalk(error) {
+                    throw error
+                }
+                failures.append("\(source.label): \(Self.sourceFailureSummary(error))")
+            }
+        }
+        throw AutotuneRecommendError.invalidArtifact(
+            "no artifact source delivered \(modelID)@\(revision): " + failures.joined(separator: "; ")
+        )
+    }
+
+    static let huggingFaceOrigin = URL(string: "https://huggingface.co")!
+
+    static func stopsSourceWalk(_ error: Error) -> Bool {
+        if error is CancellationError || Task.isCancelled {
+            return true
+        }
+        if let calibration = error as? AutotuneContextCalibrationError, calibration == .deadlineExceeded {
+            return true
+        }
+        return false
+    }
+
+    static func sourceFailureSummary(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            return "transport error (URLError code \(urlError.code.rawValue))"
+        }
+        return String(describing: error)
+    }
+
+    private func downloadHuggingFaceSnapshot(
+        endpoint: URL,
+        modelID: String,
+        revision: String,
+        to snapshot: URL,
+        deadline: Date?
+    ) async throws {
+        // Only the real Hugging Face origin may receive HF_TOKEN.
+        let sendToken = endpoint == Self.huggingFaceOrigin
+        let siblings = try await modelSiblings(
+            endpoint: endpoint,
+            sendToken: sendToken,
+            modelID: modelID,
+            revision: revision,
+            deadline: deadline
+        )
         try Self.assertDeadlineActive(deadline)
         guard !siblings.isEmpty else {
             throw AutotuneRecommendError.invalidArtifact("empty HuggingFace snapshot \(modelID)@\(revision)")
         }
+        try await populateStaging(revision: revision, snapshot: snapshot) { staging in
+            for sibling in siblings {
+                try Self.assertDeadlineActive(deadline)
+                try validateRelativeHFPath(sibling.rfilename)
+                var request = URLRequest(
+                    url: resolveURL(endpoint: endpoint, modelID: modelID, revision: revision, filename: sibling.rfilename)
+                )
+                request.timeoutInterval = try Self.boundedInterval(60, deadline: deadline)
+                if sendToken {
+                    addTokenHeader(&request)
+                }
+                let downloaded = try await downloadFile(request, deadline: deadline)
+                guard (downloaded.response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true else {
+                    throw AutotuneRecommendError.invalidArtifact("download failed \(sibling.rfilename)")
+                }
+                try place(downloaded.url, at: sibling.rfilename, in: staging)
+            }
+        }
+    }
+
+    /// Content-addressed mirror layout: `<base>/<model_sha256>/manifest` holds
+    /// the exact snapshot-manifest.v1 bytes (`path\nsize\nsha256\n` per file,
+    /// sorted), and `<base>/<model_sha256>/files/<path>` holds each file. The
+    /// manifest must hash to the signed row hash before any file is fetched,
+    /// and every file must match its manifest size and sha256.
+    private func downloadContentAddressedSnapshot(
+        base: URL,
+        expectedSHA256: String,
+        revision: String,
+        to snapshot: URL,
+        deadline: Date?
+    ) async throws {
+        let manifest = try await fetchContentAddressedManifest(
+            base: base,
+            expectedSHA256: expectedSHA256,
+            deadline: deadline
+        )
+        try await populateStaging(revision: revision, snapshot: snapshot) { staging in
+            for entry in manifest {
+                try Self.assertDeadlineActive(deadline)
+                var request = URLRequest(
+                    url: ModelArtifactSource.contentAddressedFileURL(base: base, sha256: expectedSHA256, path: entry.path)
+                )
+                request.timeoutInterval = try Self.boundedInterval(60, deadline: deadline)
+                let downloaded = try await downloadFile(request, deadline: deadline)
+                guard (downloaded.response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true else {
+                    try? FileManager.default.removeItem(at: downloaded.url)
+                    throw AutotuneRecommendError.invalidArtifact("mirror download failed \(entry.path)")
+                }
+                let actual: (size: UInt64, sha256: String)
+                do {
+                    actual = try ModelArtifactVerifier.sizeAndSHA256(of: downloaded.url, deadline: deadline)
+                } catch {
+                    try? FileManager.default.removeItem(at: downloaded.url)
+                    throw error
+                }
+                guard actual.size == entry.size, actual.sha256 == entry.sha256 else {
+                    try? FileManager.default.removeItem(at: downloaded.url)
+                    throw AutotuneRecommendError.invalidArtifact("mirror file does not match its manifest \(entry.path)")
+                }
+                try place(downloaded.url, at: entry.path, in: staging)
+            }
+        }
+    }
+
+    private func fetchContentAddressedManifest(
+        base: URL,
+        expectedSHA256: String,
+        deadline: Date?
+    ) async throws -> [ContentAddressedManifest.Entry] {
+        guard ContentAddressedManifest.isSHA256Hex(expectedSHA256) else {
+            throw AutotuneRecommendError.invalidArtifact("signed artifact hash is not a sha256 digest")
+        }
+        var request = URLRequest(url: ModelArtifactSource.contentAddressedManifestURL(base: base, sha256: expectedSHA256))
+        request.timeoutInterval = try Self.boundedInterval(30, deadline: deadline)
+        let manifestRequest = request
+        let fetch = self.fetch
+        let result = try await Self.withDeadline(deadline) {
+            let (data, response) = try await fetch(manifestRequest)
+            return FetchResponseBox(data: data, response: response)
+        }
+        try Self.assertDeadlineActive(deadline)
+        guard let http = result.response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw AutotuneRecommendError.invalidArtifact("mirror manifest unavailable")
+        }
+        return try ContentAddressedManifest.parse(result.data, expectedSHA256: expectedSHA256)
+    }
+
+    private func populateStaging(
+        revision: String,
+        snapshot: URL,
+        _ fill: (URL) async throws -> Void
+    ) async throws {
         let staging = snapshot.deletingLastPathComponent()
             .appendingPathComponent(".download-\(revision)-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         do {
-            for sibling in siblings {
-                try Self.assertDeadlineActive(deadline)
-                try validateRelativeHFPath(sibling.rfilename)
-                let destination = staging.appendingPathComponent(sibling.rfilename, isDirectory: false)
-                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-                var request = URLRequest(url: resolveURL(modelID: modelID, revision: revision, filename: sibling.rfilename))
-                request.timeoutInterval = try Self.boundedInterval(60, deadline: deadline)
-                addTokenHeader(&request)
-                let downloadRequest = request
-                let download = self.download
-                let result = try await Self.withDeadline(deadline) {
-                    let (temporary, response) = try await download(downloadRequest, deadline)
-                    return DownloadResponseBox(url: temporary, response: response)
-                }
-                try Self.assertDeadlineActive(deadline)
-                guard (result.response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true else {
-                    throw AutotuneRecommendError.invalidArtifact("download failed \(sibling.rfilename)")
-                }
-                try? FileManager.default.removeItem(at: destination)
-                try FileManager.default.moveItem(at: result.url, to: destination)
-                _ = chmod(destination.path, 0o600)
-            }
+            try await fill(staging)
             try FileManager.default.createDirectory(at: snapshot.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? FileManager.default.removeItem(at: snapshot)
             try FileManager.default.moveItem(at: staging, to: snapshot)
@@ -3770,11 +3960,37 @@ struct HuggingFaceSnapshotDownloader {
         }
     }
 
-    private func modelSiblings(modelID: String, revision: String, deadline: Date?) async throws -> [Sibling] {
+    private func downloadFile(_ request: URLRequest, deadline: Date?) async throws -> DownloadResponseBox {
+        let download = self.download
+        let result = try await Self.withDeadline(deadline) {
+            let (temporary, response) = try await download(request, deadline)
+            return DownloadResponseBox(url: temporary, response: response)
+        }
         try Self.assertDeadlineActive(deadline)
-        var request = URLRequest(url: apiURL(modelID: modelID, revision: revision))
+        return result
+    }
+
+    private func place(_ temporary: URL, at relativePath: String, in staging: URL) throws {
+        let destination = staging.appendingPathComponent(relativePath, isDirectory: false)
+        try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        _ = chmod(destination.path, 0o600)
+    }
+
+    private func modelSiblings(
+        endpoint: URL,
+        sendToken: Bool,
+        modelID: String,
+        revision: String,
+        deadline: Date?
+    ) async throws -> [Sibling] {
+        try Self.assertDeadlineActive(deadline)
+        var request = URLRequest(url: apiURL(endpoint: endpoint, modelID: modelID, revision: revision))
         request.timeoutInterval = try Self.boundedInterval(30, deadline: deadline)
-        addTokenHeader(&request)
+        if sendToken {
+            addTokenHeader(&request)
+        }
         let metadataRequest = request
         let fetch = self.fetch
         let result = try await Self.withDeadline(deadline) {
@@ -3840,21 +4056,30 @@ struct HuggingFaceSnapshotDownloader {
         }
     }
 
-    private func apiURL(modelID: String, revision: String) -> URL {
-        var components = URLComponents()
-        components.scheme = "https"
-        components.host = "huggingface.co"
-        components.path = "/api/models/\(modelID)/revision/\(revision)"
+    private func apiURL(endpoint: URL, modelID: String, revision: String) -> URL {
+        var components = Self.endpointComponents(endpoint)
+        components.path += "/api/models/\(modelID)/revision/\(revision)"
         components.queryItems = [URLQueryItem(name: "blobs", value: "true")]
         return components.url!
     }
 
-    private func resolveURL(modelID: String, revision: String, filename: String) -> URL {
+    private func resolveURL(endpoint: URL, modelID: String, revision: String, filename: String) -> URL {
+        var components = Self.endpointComponents(endpoint)
+        components.path += "/\(modelID)/resolve/\(revision)/\(filename)"
+        return components.url!
+    }
+
+    private static func endpointComponents(_ endpoint: URL) -> URLComponents {
         var components = URLComponents()
         components.scheme = "https"
-        components.host = "huggingface.co"
-        components.path = "/\(modelID)/resolve/\(revision)/\(filename)"
-        return components.url!
+        components.host = endpoint.host
+        components.port = endpoint.port
+        var path = endpoint.path
+        while path.hasSuffix("/") {
+            path.removeLast()
+        }
+        components.path = path
+        return components
     }
 
     private func addTokenHeader(_ request: inout URLRequest) {
@@ -3901,7 +4126,11 @@ final class HFAssetRedirectGuard: NSObject, URLSessionTaskDelegate {
             completionHandler(request)
             return
         }
-        guard originalHost == "huggingface.co", Self.allowedAssetHost(newHost) else {
+        // A Hugging Face origin may hop only to its own CDN. A fallback
+        // mirror may hop to any HTTPS host (for example CDN to object
+        // storage): its bytes are checked against the signed hash, and it
+        // is never sent a token.
+        guard originalHost != "huggingface.co" || Self.allowedAssetHost(newHost) else {
             completionHandler(nil)
             return
         }
@@ -3964,8 +4193,21 @@ struct CachedModelArtifactResolver {
 
     func verifiedArtifact(for row: CandidateCatalog.Row, deadline: Date? = nil) async throws -> VerifiedModelArtifact {
         try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
-        guard let revision = row.modelRevision, row.modelSHA256 != nil else {
+        guard let revision = row.modelRevision, let expectedSHA256 = row.modelSHA256 else {
             throw AutotuneRecommendError.invalidArtifact("missing revision/hash")
+        }
+        // A verified durable copy is what serve loads; it needs no Hugging
+        // Face cache snapshot and no download (#1737). A failing durable copy
+        // falls through and is overwritten on the next verified adopt.
+        let durable = try durableStore.artifactURL(modelID: row.modelID, revision: revision, sha256: expectedSHA256)
+        var durableInfo = stat()
+        if lstat(durable.path, &durableInfo) == 0, (durableInfo.st_mode & S_IFMT) == S_IFDIR {
+            _ = try durableStore.validatedContainedDirectory(durable.path)
+            do {
+                return try verifiedExistingArtifact(for: row, at: durable, deadline: deadline)
+            } catch let error as AutotuneRecommendError {
+                guard case .invalidArtifact = error else { throw error }
+            }
         }
         let snapshot = snapshotURL(modelID: row.modelID, revision: revision)
         var st = stat()
@@ -3979,32 +4221,86 @@ struct CachedModelArtifactResolver {
                 // A snapshot directory can survive a catalog republish with
                 // an old manifest, or be left corrupted by an interrupted
                 // external cache operation. Do not keep rejecting it forever:
-                // invalidate only this pinned revision and rebuild it through
-                // the downloader's staging-directory/atomic-move path.
+                // move only this pinned revision aside and rebuild it through
+                // the downloader's staging-directory/atomic-move path. The
+                // bytes are kept in one bounded quarantine slot per model, not
+                // deleted, because a host that cannot reach any source would
+                // otherwise lose the only copy it has (#1737).
                 do {
-                    try FileManager.default.removeItem(at: snapshot)
+                    try quarantineSnapshot(snapshot, modelID: row.modelID)
                 } catch {
                     throw AutotuneRecommendError.invalidArtifact(
-                        message + "; automatic repair could not remove cached snapshot: " + String(describing: error)
+                        message + "; automatic repair could not move cached snapshot aside: " + String(describing: error)
                     )
                 }
 
                 do {
-                    try await downloader.downloadSnapshot(modelID: row.modelID, revision: revision, to: snapshot, deadline: deadline)
-                } catch AutotuneContextCalibrationError.deadlineExceeded {
-                    throw AutotuneContextCalibrationError.deadlineExceeded
+                    try await downloader.downloadSnapshot(
+                        modelID: row.modelID,
+                        revision: revision,
+                        expectedSHA256: expectedSHA256,
+                        to: snapshot,
+                        deadline: deadline
+                    )
                 } catch {
+                    if HuggingFaceSnapshotDownloader.stopsSourceWalk(error) {
+                        throw error
+                    }
                     throw AutotuneRecommendError.invalidArtifact(
                         message + "; automatic repair failed: " + String(describing: error)
                     )
                 }
 
-                return try verifiedExistingArtifact(for: row, deadline: deadline)
+                let verified = try verifiedExistingArtifact(for: row, deadline: deadline)
+                try? FileManager.default.removeItem(at: quarantineURL(modelID: row.modelID))
+                return verified
             }
         }
 
-        try await downloader.downloadSnapshot(modelID: row.modelID, revision: revision, to: snapshot, deadline: deadline)
+        do {
+            try await downloader.downloadSnapshot(
+                modelID: row.modelID,
+                revision: revision,
+                expectedSHA256: expectedSHA256,
+                to: snapshot,
+                deadline: deadline
+            )
+        } catch {
+            // A source that cannot be reached makes this one candidate
+            // unavailable; recommend skips it instead of failing the whole
+            // run (#1737). Deadline and cancellation still stop the run.
+            if HuggingFaceSnapshotDownloader.stopsSourceWalk(error) {
+                throw error
+            }
+            if let recommendError = error as? AutotuneRecommendError {
+                throw recommendError
+            }
+            throw AutotuneRecommendError.invalidArtifact(
+                "artifact download failed \(row.modelID)@\(revision): "
+                    + HuggingFaceSnapshotDownloader.sourceFailureSummary(error)
+            )
+        }
         return try verifiedExistingArtifact(for: row, deadline: deadline)
+    }
+
+    /// One slot per model repository. A newer quarantine replaces the older.
+    func quarantineURL(modelID: String) -> URL {
+        snapshotURL(modelID: modelID, revision: "unused")
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("macprovider-quarantine", isDirectory: true)
+    }
+
+    private func quarantineSnapshot(_ snapshot: URL, modelID: String) throws {
+        let slot = quarantineURL(modelID: modelID)
+        if FileManager.default.fileExists(atPath: slot.path) {
+            try FileManager.default.removeItem(at: slot)
+        }
+        try FileManager.default.createDirectory(at: slot, withIntermediateDirectories: true)
+        try FileManager.default.moveItem(
+            at: snapshot,
+            to: slot.appendingPathComponent(snapshot.lastPathComponent, isDirectory: true)
+        )
     }
 
     /// Acquire a signed artifact without deleting or replacing the incumbent
@@ -4044,7 +4340,12 @@ struct CachedModelArtifactResolver {
         }
 
         do {
-            try await downloader.downloadSnapshot(modelID: row.modelID, revision: revision, to: prefetched)
+            try await downloader.downloadSnapshot(
+                modelID: row.modelID,
+                revision: revision,
+                expectedSHA256: expectedSHA256,
+                to: prefetched
+            )
         } catch {
             throw AutotuneRecommendError.invalidArtifact(
                 "isolated artifact prefetch failed: " + String(describing: error)
