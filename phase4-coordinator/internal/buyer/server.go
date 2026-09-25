@@ -2687,7 +2687,10 @@ func (s *Server) forwardStreamSequence(
 				writeRouteSnapshotError(w, rec, err)
 				return dispatchedAttempt{}, false
 			}
-			if settlementMetadata != nil {
+			// A negotiating gateway gets signed finality on every stream
+			// (settlement_trailers.go); any other caller keeps the
+			// unsigned trailers of an attempt with a route snapshot.
+			if !prepareStreamingSettlementFinality(w.Header(), rec, settlementMetadata != nil) && settlementMetadata != nil {
 				declareInternalSettlementOutcomeTrailers(w.Header(), rec)
 			}
 			endPoolDelivery, ok := s.beginPoolDelivery(state)
@@ -2904,14 +2907,13 @@ func (s *Server) forwardWSNonStreamSequence(
 				receiptState, hasReceiptState, err := logAttemptWithReceiptState(state.provider, http.StatusOK, attempt, state.explicitRetries)
 				if err != nil {
 					// After delivery (negotiated trailers) the buyer already
-					// has the body: send the explicit hold. A no-op in the
-					// record-before-write order, which answers 500 instead.
-					setSettlementRecordFailedHold(w.Header(), rec)
+					// has the body: send the signed closed refund tuple. A
+					// no-op in the record-before-write order, which answers
+					// 500 instead.
+					setSettlementRecordFailedRefund(w.Header(), rec)
 					return err
 				}
-				if hasReceiptState {
-					setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
-				}
+				setNonStreamingSettlementFinality(w.Header(), rec, receiptState, hasReceiptState)
 				return nil
 			}
 			endPoolDelivery, ok := s.beginPoolDelivery(state)
@@ -2933,9 +2935,7 @@ func (s *Server) forwardWSNonStreamSequence(
 			var declareTrailers func(http.Header)
 			if rec.settlementTrailersNegotiated {
 				declareTrailers = func(h http.Header) {
-					if settlementMetadata != nil {
-						declareNonStreamingSettlementTrailers(h, rec)
-					}
+					declareNonStreamingSettlementTrailers(h, rec)
 				}
 			}
 			result, attempt := s.forwardWS(w, r, requestID, dispatchBody, state.provider, false, s.attemptTimeout(r), logSuccess, declareTrailers, settlementMetadata, state, rec.attemptN)
@@ -3290,10 +3290,9 @@ func (s *Server) forwardHTTPSequence(
 				}
 				// Delivered-only (SPEC-022 R-5.6): the attempt is recorded
 				// only once the body reached the buyer, so its settlement
-				// outcome travels as MAC'd trailers.
-				if settlementMetadata != nil {
-					declareNonStreamingSettlementTrailers(w.Header(), rec)
-				}
+				// outcome travels as MAC'd trailers, declared on every
+				// negotiated 200 (settlement_trailers.go).
+				declareNonStreamingSettlementTrailers(w.Header(), rec)
 				w.WriteHeader(http.StatusOK)
 				if !writeDelivered(w, respBody) {
 					cancelAttempt()
@@ -3311,15 +3310,15 @@ func (s *Server) forwardHTTPSequence(
 				}); err != nil {
 					cancelAttempt()
 					s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("non-streaming success log failed after delivery")
-					setSettlementRecordFailedHold(w.Header(), rec)
+					setSettlementRecordFailedRefund(w.Header(), rec)
 					return dispatchedAttempt{}, false
 				}
 				receiptState, hasReceiptState, err := rec.ingestSettlementReceipt(state.provider, receiptValue)
 				if err != nil {
 					s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("non-streaming settlement receipt log failed after delivery")
-					setSettlementRecordFailedHold(w.Header(), rec)
-				} else if hasReceiptState {
-					setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
+					setSettlementRecordFailedRefund(w.Header(), rec)
+				} else {
+					setNonStreamingSettlementFinality(w.Header(), rec, receiptState, hasReceiptState)
 				}
 				cancelAttempt()
 				// Signal to the core: this attempt was handled in
@@ -3873,7 +3872,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			}
 			if logSuccess != nil {
 				if err := logSuccess(attempt); err != nil {
-					// logSuccess sent the explicit hold trailers. The one
+					// logSuccess sent the signed refund trailers. The one
 					// durable write for this attempt was made and failed;
 					// Logged stops the terminal handler writing a second,
 					// provider-fault row for a delivered body.

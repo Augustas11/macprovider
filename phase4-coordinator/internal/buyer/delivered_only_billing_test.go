@@ -178,8 +178,8 @@ var settlementOutcomeNames = []string{
 }
 
 // independentFinalityMAC re-derives the finality MAC outside the package.
-func independentFinalityMAC(key, account, requestID string, h http.Header) string {
-	fields := []string{"macprovider-settlement-finality-trailers-v1", account, requestID}
+func independentFinalityMAC(key, account, requestID, internalRequestID string, h http.Header) string {
+	fields := []string{"macprovider-settlement-finality-trailers-v1", account, requestID, internalRequestID}
 	for _, name := range settlementOutcomeNames {
 		fields = append(fields, h.Get(name))
 	}
@@ -210,7 +210,7 @@ func TestHTTPNonStreamingNegotiatedCallerGetsMACdTrailerFinality(t *testing.T) {
 		t.Fatalf("no finality outcome trailer: trailers=%v", resp.Trailer)
 	}
 	mac := resp.Trailer.Get("X-MacProvider-Settlement-Finality-Mac")
-	if want := independentFinalityMAC("operator-key", "acct_gateway", "ext-req-1", resp.Trailer); mac == "" || !hmac.Equal([]byte(mac), []byte(want)) {
+	if want := independentFinalityMAC("operator-key", "acct_gateway", "ext-req-1", resp.Header.Get("X-MacProvider-Internal-Request-ID"), resp.Trailer); mac == "" || !hmac.Equal([]byte(mac), []byte(want)) {
 		t.Fatalf("finality MAC=%q, want %q", mac, want)
 	}
 }

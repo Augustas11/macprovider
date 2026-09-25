@@ -402,6 +402,21 @@ func TestSeamH4_WSNonStreamingCreditFollowsDeliveredBodyNegotiated(t *testing.T)
 	if rr.Code != http.StatusOK || strings.Contains(rr.Body.String(), "request_log_failed") {
 		t.Fatalf("buyer status = %d, want the delivered 200 body; body=%s", rr.Code, rr.Body.String())
 	}
+	// Review R2 MEDIUM 1: the failed evidence write reaches the gateway as a
+	// signed, closed refund tuple in the trailers.
+	res := rr.Result()
+	trailer := res.Trailer
+	if trailer.Get(settlementOutcomeHeader) != billing.SettlementOutcomeQuarantined || trailer.Get(settlementClosedHeader) != "true" ||
+		trailer.Get(settlementReasonHeader) != settlementRecordFailedAfterDeliveryReason {
+		t.Fatalf("trailers=%v, want the signed closed refund tuple", trailer)
+	}
+	values := make([]string, 0, len(settlementOutcomeHeaderNames))
+	for _, name := range settlementOutcomeHeaderNames {
+		values = append(values, trailer.Get(name))
+	}
+	if want := settlementFinalityMAC(h4GatewayToken, "acct_h4", "", res.Header.Get(internalRequestIDHeader), values); trailer.Get(settlementFinalityMACHeader) != want {
+		t.Fatalf("refund MAC=%q, want %q", trailer.Get(settlementFinalityMACHeader), want)
+	}
 	if statuses := h4RequestLogStatuses(t, dbPath); len(statuses) != 1 || statuses[0] != http.StatusOK {
 		t.Fatalf("request_log statuses = %v, want exactly [200] (the provider WAS credited)", statuses)
 	}

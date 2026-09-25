@@ -62,11 +62,11 @@ type CoordinatorConfig struct {
 	// Validate() now requires ServiceToken non-empty.
 	ServiceToken      string `yaml:"service_token"`
 	PoolzPollInterval int    `yaml:"poolz_poll_interval_s"`
-	// RequireSettlementTrailers pins trailer finality (SPEC-022 R-12.8):
-	// when true, a coordinator 200 (non-streaming or streaming) that
-	// declares no settlement trailers is held as
+	// RequireSettlementTrailers pins signed finality (SPEC-022 R-12.8):
+	// when true, a coordinator 200 (non-streaming or streaming) that carries
+	// no finality signed with the service-token MAC is held as
 	// missing_settlement_finality_trailer instead of settling from headers
-	// or legacy mode. Default false; set it only once the coordinator and
+	// or legacy mode. A negotiating coordinator signs every 200. Default false; set it only once the coordinator and
 	// gateway that negotiate MAC'd trailers are both deployed, and turn it
 	// off before rolling the coordinator back.
 	RequireSettlementTrailers bool `yaml:"require_settlement_trailers"`

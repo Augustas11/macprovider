@@ -674,10 +674,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if subject.AccountID != "" {
 			upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
 			upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
-			// SPEC-022 R-12.8: advertise that this gateway reads
-			// non-streaming finality from MAC'd trailers. The MAC key is
-			// the bearer, so advertise only when one is configured.
-			if s.cfg.Coordinator.UpstreamCoordinatorBearer() != "" {
+			// SPEC-022 R-12.8: advertise that this gateway reads signed
+			// finality. The MAC key is the bearer, so advertise only when
+			// one is configured.
+			if strings.TrimSpace(s.cfg.Coordinator.UpstreamCoordinatorBearer()) != "" {
 				upReq.Header.Set(settlementTrailersCapabilityHeader, "1")
 			}
 			if s.isWholesaleAccount(subject.AccountID) {
@@ -1051,7 +1051,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	// the finality of a 200 arrives as MAC'd trailers, read with the body
 	// above. Missing or unauthenticated trailer finality holds; it never
 	// falls back to a local debit.
-	finality := coordinatorNonStreamingSettlementFinality(resp, s.cfg.Coordinator.UpstreamCoordinatorBearer(), subject.AccountID, requestID(r), s.cfg.Coordinator.RequireSettlementTrailers)
+	finality := coordinatorNonStreamingSettlementFinality(resp, s.settlementFinalityBinding(r, subject))
 	settleWithFinality := func(prompt, completion int64, source, outcome string) bool {
 		if finality.Reason == missingSettlementFinalityTrailer && s.settleMissingFinalityTrailerAsObserve(r, subject, prompt, completion, maxUsageTokens, source, outcome, window, resp) {
 			return true
@@ -1326,7 +1326,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		// This is a gateway-authored terminal SSE error. The gateway cancels
 		// the coordinator stream before EOF, so declared settlement trailers
 		// may be unavailable and must not rewrite the buyer-visible outcome.
-		if s.cfg.Coordinator.RequireSettlementTrailers || hasSettlementFinalityTrailerDeclaration(resp) || coordinatorSettlementFinalityFromHeaders(resp.Header).Action != settlementFinalityLegacy {
+		if streamingLocalTerminalMustHold(resp, s.settlementFinalityBinding(r, subject)) {
 			holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if !s.boundStreamingSettlementHoldWithCandidate(holdCtx, r, subject, coordinatorSettlementFinality{
@@ -1354,7 +1354,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		if estimateTokensFromBytes(emitted) > maxStreamingCompletionTokens(maxTokens) {
 			outcome = "stream_output_exceeded"
 		}
-		if s.cfg.Coordinator.RequireSettlementTrailers || hasSettlementFinalityTrailerDeclaration(resp) || coordinatorSettlementFinalityFromHeaders(resp.Header).Action != settlementFinalityLegacy {
+		if streamingLocalTerminalMustHold(resp, s.settlementFinalityBinding(r, subject)) {
 			holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if !s.boundStreamingSettlementHoldWithCandidate(holdCtx, r, subject, coordinatorSettlementFinality{
@@ -2476,7 +2476,7 @@ func (s *Server) settleBeforeResponseWithFinality(w http.ResponseWriter, r *http
 }
 
 func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string, resp *http.Response) {
-	finality := coordinatorStreamingSettlementFinality(resp, s.cfg.Coordinator.RequireSettlementTrailers)
+	finality := coordinatorStreamingSettlementFinality(resp, s.settlementFinalityBinding(r, subject))
 	if finality.Reason == missingSettlementFinalityTrailer {
 		fallbackOutcome := outcome
 		if fallbackOutcome == "ok" {
@@ -2769,32 +2769,14 @@ func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Reque
 	return true
 }
 
-// coordinatorStreamingSettlementFinality reads a streaming 200's finality.
-// requireTrailers (coordinator.require_settlement_trailers) holds a stream
-// that declared no trailers instead of reading header or legacy finality.
-func coordinatorStreamingSettlementFinality(resp *http.Response, requireTrailers bool) coordinatorSettlementFinality {
-	missing := coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: missingSettlementFinalityTrailer}
-	if resp == nil {
-		if requireTrailers {
-			return missing
-		}
-		return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
-	}
-	if hasAnySettlementFinalityHeader(resp.Trailer) {
-		return coordinatorSettlementFinalityFromHeaders(resp.Trailer)
-	}
-	if requireTrailers || hasSettlementFinalityTrailerDeclaration(resp) {
-		return missing
-	}
-	return coordinatorSettlementFinalityFromHeaders(resp.Header)
-}
-
 func coordinatorSettlementFinalityFromHeaders(h http.Header) coordinatorSettlementFinality {
 	if !hasAnySettlementFinalityHeader(h) {
 		return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
 	}
 	mode := strings.TrimSpace(h.Get(settlementModeHeader))
-	if mode == "observe" {
+	// "legacy" is a negotiating coordinator's signed tuple for an attempt
+	// with no route snapshot: local accounting, as for observe mode.
+	if mode == "observe" || mode == "legacy" {
 		return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
 	}
 	if mode != "enforce" {
