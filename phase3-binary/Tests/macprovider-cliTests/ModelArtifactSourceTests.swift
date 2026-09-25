@@ -38,7 +38,7 @@ final class ModelArtifactSourceTests: XCTestCase {
 
     func testManifestParsesOnlyWhenItHashesToTheSignedHash() throws {
         let manifest = Data("a.bin\n1\n\(sha("a"))\n".utf8)
-        let expected = Data(SHA256.hash(data: manifest)).hexLower
+        let expected = ContentAddressedManifest.sha256Hex(manifest)
         XCTAssertEqual(
             try ContentAddressedManifest.parse(manifest, expectedSHA256: expected),
             [ContentAddressedManifest.Entry(path: "a.bin", size: 1, sha256: sha("a"))]
@@ -50,14 +50,14 @@ final class ModelArtifactSourceTests: XCTestCase {
 
     func testManifestRejectsUnsafePathEvenWhenHashMatches() {
         let manifest = Data("../escape\n1\n\(sha("a"))\n".utf8)
-        let expected = Data(SHA256.hash(data: manifest)).hexLower
+        let expected = ContentAddressedManifest.sha256Hex(manifest)
         XCTAssertThrowsError(try ContentAddressedManifest.parse(manifest, expectedSHA256: expected))
     }
 
     func testMirrorManifestIsTheCanonicalSnapshotManifest() throws {
         let snapshot = try makeSnapshot(["config.json": "{}", ".gitattributes": "*.bin lfs", "sub/w.bin": "weights"])
         let (manifest, expected) = try canonicalManifest(of: snapshot)
-        XCTAssertEqual(Data(SHA256.hash(data: manifest)).hexLower, expected)
+        XCTAssertEqual(ContentAddressedManifest.sha256Hex(manifest), expected)
         XCTAssertEqual(try ContentAddressedManifest.parse(manifest, expectedSHA256: expected).count, 3)
     }
 
@@ -399,7 +399,7 @@ final class ModelArtifactSourceTests: XCTestCase {
     }
 
     private func sha(_ text: String) -> String {
-        Data(SHA256.hash(data: Data(text.utf8))).hexLower
+        ContentAddressedManifest.sha256Hex(Data(text.utf8))
     }
 
     private func makeSnapshot(_ files: [String: String]) throws -> URL {
@@ -427,7 +427,7 @@ final class ModelArtifactSourceTests: XCTestCase {
         let text = entries.sorted { $0.0 < $1.0 }.map { "\($0.0)\n\($0.1)\n\($0.2)\n" }.joined()
         let data = Data(text.utf8)
         let expected = try ModelArtifactVerifier.canonicalArtifactHash(directory: snapshot)
-        XCTAssertEqual(Data(SHA256.hash(data: data)).hexLower, expected)
+        XCTAssertEqual(ContentAddressedManifest.sha256Hex(data), expected)
         return (data, expected)
     }
 

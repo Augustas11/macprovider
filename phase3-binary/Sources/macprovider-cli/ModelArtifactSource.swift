@@ -102,6 +102,14 @@ enum ContentAddressedManifest {
 
     static let maxManifestBytes = 8 * 1024 * 1024
 
+    static func hex(_ bytes: some Sequence<UInt8>) -> String {
+        bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func sha256Hex(_ data: Data) -> String {
+        hex(SHA256.hash(data: data))
+    }
+
     static func isSHA256Hex(_ value: String) -> Bool {
         value.utf8.count == 64 && value.utf8.allSatisfy {
             (UInt8(ascii: "0")...UInt8(ascii: "9")).contains($0) || (UInt8(ascii: "a")...UInt8(ascii: "f")).contains($0)
@@ -114,7 +122,7 @@ enum ContentAddressedManifest {
         guard data.count <= maxManifestBytes else {
             throw AutotuneRecommendError.invalidArtifact("mirror manifest too large")
         }
-        guard Data(SHA256.hash(data: data)).hexLower == expectedSHA256 else {
+        guard sha256Hex(data) == expectedSHA256 else {
             throw AutotuneRecommendError.invalidArtifact("mirror manifest does not match the signed artifact hash")
         }
         guard let text = String(data: data, encoding: .utf8), text.hasSuffix("\n") else {
@@ -159,6 +167,6 @@ extension ModelArtifactVerifier {
             hasher.update(data: chunk)
             size += UInt64(chunk.count)
         }
-        return (size, Data(hasher.finalize()).hexLower)
+        return (size, ContentAddressedManifest.hex(hasher.finalize()))
     }
 }
