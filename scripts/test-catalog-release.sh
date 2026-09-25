@@ -247,6 +247,8 @@ expected_history = {
     # Superseded by the Tier-2 buyer-serving closure cut; retained by the
     # append-only ledger even though the candidate rows are unchanged.
     "published-2026-09-22-qwen36-27b-hash-fix-v1",
+    # Superseded by the #1735 eight-row artifact-hash correction cut.
+    "published-2026-09-23-tier2-buyer-closure-v1",
     release_id,
 }
 if set(ledger["releases"]) != expected_history:

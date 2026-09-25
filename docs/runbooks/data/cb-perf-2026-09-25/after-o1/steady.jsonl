@@ -1,0 +1,6 @@
+{"L": 32, "rows": 4, "mode": "batched", "steady_window_s": 45.3, "steady_aggregate_chunks_per_s": 67.6, "chunks_per_request": [768, 768, 768, 768]}
+{"L": 1536, "rows": 2, "mode": "batched", "steady_window_s": 27.9, "steady_aggregate_chunks_per_s": 54.7, "chunks_per_request": [768, 768]}
+{"L": 1536, "rows": 4, "mode": "batched", "steady_window_s": 46.3, "steady_aggregate_chunks_per_s": 64.0, "chunks_per_request": [768, 768, 768, 768]}
+{"L": 4096, "rows": 4, "mode": "batched", "steady_window_s": -16.4, "steady_aggregate_chunks_per_s": null, "chunks_per_request": [768, 768, 768, 768]}
+{"L": 8192, "rows": 4, "mode": "batched", "steady_window_s": -144.3, "steady_aggregate_chunks_per_s": null, "chunks_per_request": [768, 768, 768, 768]}
+{"L": 4096, "rows": 1, "mode": "serial", "steady_window_s": 21.1, "steady_aggregate_chunks_per_s": 36.4, "chunks_per_request": [768]}

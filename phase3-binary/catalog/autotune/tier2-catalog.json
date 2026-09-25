@@ -1,7 +1,7 @@
 {
-  "catalog_id": "macprovider-tier2-model-catalog-2026-09-23-buyer-closure-v1",
-  "expires_at": "2026-12-23T00:00:00Z",
-  "issued_at": "2026-09-23T00:00:00Z",
+  "catalog_id": "macprovider-tier2-model-catalog-2026-09-25-artifact-hash-correction-v1",
+  "expires_at": "2026-12-25T00:00:00Z",
+  "issued_at": "2026-09-25T00:00:00Z",
   "models": [
     {
       "artifact_kind": "mlx_weight_file",
@@ -9,7 +9,7 @@
       "model_id": "mlx-community/gemma-4-26b-a4b-it-4bit",
       "min_ram_gb": 28,
       "notes": "google-gemma-4-26b-a4b-it",
-      "sha256": "436ce68d2ac5a27dde3b54569736fb7a69dc3b7a175d2f633147c7802b3bc88a",
+      "sha256": "b245e39f1476907653e3fe1897bba36b0e2a90c471828a9e13b5fdf3e1b6db01",
       "source": "operator-curated"
     },
     {
@@ -18,7 +18,7 @@
       "model_id": "mlx-community/GLM-4.5-Air-4bit",
       "min_ram_gb": 80,
       "notes": "Buyer-serving candidate z-ai/glm-4.5-air; identity from signed SPEC-023 row.",
-      "sha256": "350c018e8a3397a753bcb7c22c839a5c5a24041e6dee014bb42c2d766d6db57d",
+      "sha256": "7fbf8e5005fbdadbf1d345a04b7d283ad20aec959ee001bc4b0dc902ea7f11ed",
       "source": "operator-curated"
     },
     {
@@ -27,7 +27,7 @@
       "model_id": "mlx-community/gpt-oss-120b-4bit",
       "min_ram_gb": 90,
       "notes": "Buyer-serving candidate openai/gpt-oss-120b; identity from signed SPEC-023 row.",
-      "sha256": "5003c9196bd6664b22227d687472ba2eb50c2c4daa224b36c230edbbe36b18fb",
+      "sha256": "c8b99b694c6730ebcb86a8b2277f8c441c99c6275d4bedf9d3913b7e9d2b6156",
       "source": "operator-curated"
     },
     {
@@ -81,7 +81,7 @@
       "model_id": "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
       "min_ram_gb": 28,
       "notes": "Buyer-serving candidate qwen/qwen3-30b-a3b-instruct-2507; identity from signed SPEC-023 row.",
-      "sha256": "6ed599e763ccfcf2731b2c383e81e6638375f62359ccb8bf730e1f17f583e3e7",
+      "sha256": "a0ca3d59f301f08ae4c4c2010b07f80b890d35f4e8562c213b1d01aed8328e42",
       "source": "operator-curated"
     },
     {
@@ -117,7 +117,7 @@
       "model_id": "mlx-community/Qwen3.5-27B-4bit",
       "min_ram_gb": 24,
       "notes": "Buyer-serving candidate qwen/qwen3.5-27b; identity from signed SPEC-023 row.",
-      "sha256": "01b20ff61b8f635d25515287bd6d2ac26877eab0de2fb2056b3d8b314ab4e2a3",
+      "sha256": "7777cf15fbd096d66ccec5f0f76ec915eb4800f4f3e8dd899d1b4ae3041387ae",
       "source": "operator-curated"
     },
     {
@@ -126,7 +126,7 @@
       "model_id": "mlx-community/Qwen3.5-35B-A3B-4bit",
       "min_ram_gb": 28,
       "notes": "Buyer-serving candidate qwen/qwen3.5-35b-a3b; identity from signed SPEC-023 row.",
-      "sha256": "58f00ca2bc7bb007b69145143d8a3fee90a3e5839a5a06e6443e8a7ef3906ad2",
+      "sha256": "893c5fd5a4f6adf19a97faeff19d67f2b7a5d8c29e81cd857bd5949ce0b31e43",
       "source": "operator-curated"
     },
     {
@@ -144,7 +144,7 @@
       "model_id": "mlx-community/Qwen3.6-35B-A3B-4bit",
       "min_ram_gb": 28,
       "notes": "Buyer-serving candidate qwen/qwen3.6-35b-a3b; identity from signed SPEC-023 row.",
-      "sha256": "c4d82befa782da05bea1bdc4000ab9422a7173d9cd96bab739374d28d9ad4827",
+      "sha256": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
       "source": "operator-curated"
     },
     {
@@ -153,14 +153,14 @@
       "model_id": "mlx-community/Qwen3.8-27B-4bit",
       "min_ram_gb": 24,
       "notes": "Buyer-serving candidate qwen/qwen3.8-27b; identity from signed SPEC-023 row.",
-      "sha256": "1a955b957b75d2e3264bd914600048cc8047b7cfc08117e82fa4c8272e7e8086",
+      "sha256": "8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05",
       "source": "operator-curated"
     }
   ],
   "signature": {
     "alg": "Ed25519",
     "key_id": "catalog-key-2026q2",
-    "sig": "Zx8TBd_W_ufm3-EtfNg6g3XaJFzBYXjNgvZXrsZKZxmkdklS-nLgRjrkU9aRNtw3nDPrZsO6r1_otzUU_oMoBg"
+    "sig": "oCbCHpwXwatLoWx826AvHQnk1NQ5KPuW0EzcBZ3e6UZc6n-3RJQGGLfhzRG6MQfPFKGLTv35NHfxl3DCoZ79DQ"
   },
   "version": 1
 }

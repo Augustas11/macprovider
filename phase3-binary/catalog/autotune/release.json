@@ -1,32 +1,32 @@
 {
   "feeds": {
     "autotune-candidates.json": {
-      "bytes": 14667,
-      "sha256": "5c24348a1d26a6308d1a3b1a24c848458ae43bcc4499d8de0a8bccb8ffe51729",
+      "bytes": 15744,
+      "sha256": "f4977d19a0e09f488f9bb9f7f0f34b919aee76d0421b9a2ea4f289ce7c7510ab",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-09-23-tier2-buyer-closure-v1"
+      "version": "published-2026-09-25-artifact-hash-correction-v1"
     },
     "demand-rank.json": {
-      "bytes": 1990,
-      "sha256": "c764c7963d4f7a96838fba4c593e78b458a6072b6c86984b8fc61dd3121e868a",
+      "bytes": 1995,
+      "sha256": "a60273212954fd07108a044d2093dea740ba494a6fd584e0d6b2b105fa664fa3",
       "signer_key_id": "streamvc-autotune-static-v4",
-      "version": "published-2026-09-23-tier2-buyer-closure-v1"
+      "version": "published-2026-09-25-artifact-hash-correction-v1"
     },
     "rate-card.json": {
       "bytes": 3690,
-      "sha256": "5808dc939c7646a095184c7cd44dff2d955e2b9730d1bcbc7329daed92e94546",
+      "sha256": "20d62a3d8c934560566ca94a861a6c7a203472e38c7f7d9db85959ae5d661173",
       "signer_key_id": "streamvc-autotune-static-v4",
       "version": "bab7acfb9d1b40b7bbfc3da90bb40689ab8e7c7f6c53065c07143c1e5ed32bd4"
     },
     "tier2-catalog.json": {
-      "bytes": 6849,
-      "sha256": "abe2b289156e632cc1395302575d3ac69bc7e46e6ff6e912873f1a78932f9dd8",
+      "bytes": 6860,
+      "sha256": "5e5dbf2b9c3584d6382a03675e6936c18db6cc589c988f25b2caa2f55cf31009",
       "signer_key_id": "tier2-coordinator-key:707a860299e6a37f",
-      "version": "macprovider-tier2-model-catalog-2026-09-23-buyer-closure-v1"
+      "version": "macprovider-tier2-model-catalog-2026-09-25-artifact-hash-correction-v1"
     }
   },
-  "generated_at": "2026-09-23T02:11:36Z",
+  "generated_at": "2026-09-25T00:54:00Z",
   "policy_version": "autotune-policy-v1",
-  "release_id": "published-2026-09-23-tier2-buyer-closure-v1",
+  "release_id": "published-2026-09-25-artifact-hash-correction-v1",
   "schema_version": "macprovider.autotune-release.v1"
 }

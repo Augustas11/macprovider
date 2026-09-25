@@ -1,0 +1,7 @@
+[paged-kv] batched-isolation model=qwen/qwen3.6-27b challenge pair 0 not distinguishing; trying next
+[paged-kv] batched-isolation model=qwen/qwen3.6-27b challenge pair 1 not distinguishing; trying next
+[paged-kv] parity model=qwen/qwen3.6-27b established=true nLayers=16 nNew=32 gatherKernelCalls=1024 expectCalls=1024 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen/qwen3.6-27b requiresMoE=false proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=qwen/qwen3.6-27b
+[paged-kv] runtime-identity model=qwen/qwen3.6-27b model_sha256=518ef47c298783d8547b50406e84548e5bf7705b82355a38f9eaef1368817931 hardware_class=apple-silicon:Apple M3 Ultra:ram-256gb metallib_sha256=84e487182336648a826132e50e7a4cd2cae0bc77ac6eafa89cc72f3a964fdbaf kernel_identifier=macprovider_paged_kv_gather_v1
+cb {'mode': 'canary', 'active': True, 'unsupported_reason': None, 'cache_class': 'mixed', 'paged_kv_decision': 'attached', 'scheduler': {'waiting_count': 0, 'slots_free': 8, 'active_decode_rows': 0, 'max_observed_batch_depth': 0, 'slots_total': 8}}

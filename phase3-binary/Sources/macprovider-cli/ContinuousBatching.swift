@@ -23,6 +23,10 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
     case stableRequestIDUnavailable = "stable_request_id_unavailable"
     case moePromotionEvidenceUnavailable = "moe_promotion_evidence_unavailable"
     case requestStateUnrepresented = "request_local_state_unrepresented"
+    /// SPEC-038 AC-26: `continuous_batching_cached_turns` is on and the lease
+    /// has a usable retained handoff, but the covering accepted tuple does not
+    /// record `cached_turns_accepted`.
+    case cachedTurnsNotAccepted = "cached_turns_not_accepted"
 
     var apiCode: String {
         switch self {
@@ -44,6 +48,8 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
             return "continuous_batching_request_state_unsupported"
         case .tupleAcceptanceCoverageUnavailable:
             return "continuous_batching_tuple_acceptance_coverage_unavailable"
+        case .cachedTurnsNotAccepted:
+            return "continuous_batching_cached_turns_not_accepted"
         case .localCapabilityUnavailable, .pagedKVDisabled,
              .pagedKVCapabilityUnavailable, .tupleNotAdvertised:
             return "continuous_batching_local_capability_unavailable"
@@ -59,7 +65,8 @@ enum ContinuousBatchingUnsupportedReason: String, Sendable, Equatable {
              .moePromotionEvidenceUnavailable,
              .requestStateUnrepresented,
              .tupleNotAdvertised,
-             .tupleAcceptanceCoverageUnavailable:
+             .tupleAcceptanceCoverageUnavailable,
+             .cachedTurnsNotAccepted:
             return 400
         case .localCapabilityUnavailable, .pagedKVDisabled,
              .pagedKVCapabilityUnavailable,
@@ -143,16 +150,29 @@ struct ContinuousBatchingAcceptanceCoverage: Sendable, Equatable {
 
     func covers(_ tuple: ContinuousBatchingRequestedTuple) -> Bool {
         if unrestricted { return true }
-        return acceptedTuples.contains { accepted in
-            accepted.modelID == tuple.modelID
-                && accepted.modelSHA256 == tuple.modelSHA256
-                && accepted.cacheClass == tuple.cacheClass
-                && accepted.kvDType == tuple.kvDType
-                && accepted.requiresMoE == tuple.requiresMoE
-                && accepted.hardwareClass == tuple.hardwareClass
-                && accepted.metallibSHA256 == tuple.metallibSHA256
-                && accepted.kernelIdentifier == tuple.kernelIdentifier
-        }
+        return acceptedTuples.contains { Self.matches($0, tuple) }
+    }
+
+    /// SPEC-038 AC-26: an accepted tuple covering `tuple` also records
+    /// `cached_turns_accepted` (the per-tuple, revision-bound proof gate for
+    /// positive-cached batched turns).
+    func coversCachedTurns(_ tuple: ContinuousBatchingRequestedTuple) -> Bool {
+        if unrestricted { return true }
+        return acceptedTuples.contains { $0.cachedTurnsAccepted && Self.matches($0, tuple) }
+    }
+
+    private static func matches(
+        _ accepted: ContinuousBatchingAcceptedTuple,
+        _ tuple: ContinuousBatchingRequestedTuple
+    ) -> Bool {
+        accepted.modelID == tuple.modelID
+            && accepted.modelSHA256 == tuple.modelSHA256
+            && accepted.cacheClass == tuple.cacheClass
+            && accepted.kvDType == tuple.kvDType
+            && accepted.requiresMoE == tuple.requiresMoE
+            && accepted.hardwareClass == tuple.hardwareClass
+            && accepted.metallibSHA256 == tuple.metallibSHA256
+            && accepted.kernelIdentifier == tuple.kernelIdentifier
     }
 }
 
@@ -390,6 +410,8 @@ enum ContinuousBatchingPolicy {
             return "continuous batching requires the representative MoE correctness fixture and live MSB-04 promotion evidence"
         case .requestStateUnrepresented:
             return "continuous batching does not support requests requiring row-local generation state (structured output or tool-constrained decoding) in this release"
+        case .cachedTurnsNotAccepted:
+            return "continuous batching of cached turns requires cached_turns_accepted on the accepted tuple covering this runtime (SPEC-038 AC-26 packaged proof)"
         }
     }
 

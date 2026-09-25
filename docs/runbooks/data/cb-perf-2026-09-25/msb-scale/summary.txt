@@ -1,0 +1,35 @@
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=1 block=16 serial_tps_p50=37.7 engine_1row_tps_p50=37.3 aggregate_tps_p50=37.2 uplift_vs_1row=1.00x aggregate_vs_serial=0.99x peak_rss_mb=30078
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=2 block=16 serial_tps_p50=37.8 engine_1row_tps_p50=35.6 aggregate_tps_p50=59.7 uplift_vs_1row=1.68x aggregate_vs_serial=1.58x peak_rss_mb=30081
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=4 block=16 serial_tps_p50=37.5 engine_1row_tps_p50=37.3 aggregate_tps_p50=70.6 uplift_vs_1row=1.89x aggregate_vs_serial=1.88x peak_rss_mb=30096
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=8 block=16 serial_tps_p50=37.3 engine_1row_tps_p50=37.3 aggregate_tps_p50=78.7 uplift_vs_1row=2.11x aggregate_vs_serial=2.11x peak_rss_mb=30083
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=1 block=16 serial_tps_p50=38.1 engine_1row_tps_p50=38.0 aggregate_tps_p50=38.0 uplift_vs_1row=1.00x aggregate_vs_serial=1.00x peak_rss_mb=30066
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=2 block=16 serial_tps_p50=38.2 engine_1row_tps_p50=38.0 aggregate_tps_p50=63.1 uplift_vs_1row=1.66x aggregate_vs_serial=1.65x peak_rss_mb=30065
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=4 block=16 serial_tps_p50=38.1 engine_1row_tps_p50=37.9 aggregate_tps_p50=72.6 uplift_vs_1row=1.92x aggregate_vs_serial=1.91x peak_rss_mb=30068
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=8 block=16 serial_tps_p50=38.1 engine_1row_tps_p50=36.7 aggregate_tps_p50=81.3 uplift_vs_1row=2.21x aggregate_vs_serial=2.13x peak_rss_mb=30081
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=1 block=16 serial_tps_p50=37.9 engine_1row_tps_p50=34.2 aggregate_tps_p50=34.2 uplift_vs_1row=1.00x aggregate_vs_serial=0.90x peak_rss_mb=30076
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=2 block=16 serial_tps_p50=37.6 engine_1row_tps_p50=34.0 aggregate_tps_p50=56.6 uplift_vs_1row=1.66x aggregate_vs_serial=1.51x peak_rss_mb=30071
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=4 block=16 serial_tps_p50=38.0 engine_1row_tps_p50=33.3 aggregate_tps_p50=66.4 uplift_vs_1row=2.00x aggregate_vs_serial=1.75x peak_rss_mb=30061
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=8 block=16 serial_tps_p50=37.8 engine_1row_tps_p50=34.1 aggregate_tps_p50=76.1 uplift_vs_1row=2.23x aggregate_vs_serial=2.01x peak_rss_mb=30059
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=1 block=16 serial_tps_p50=38.2 engine_1row_tps_p50=34.4 aggregate_tps_p50=34.5 uplift_vs_1row=1.00x aggregate_vs_serial=0.90x peak_rss_mb=30057
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=2 block=16 serial_tps_p50=37.8 engine_1row_tps_p50=34.5 aggregate_tps_p50=57.3 uplift_vs_1row=1.66x aggregate_vs_serial=1.52x peak_rss_mb=30057
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=4 block=16 serial_tps_p50=38.1 engine_1row_tps_p50=33.6 aggregate_tps_p50=68.0 uplift_vs_1row=2.02x aggregate_vs_serial=1.78x peak_rss_mb=30057
+msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=8 block=16 serial_tps_p50=36.9 engine_1row_tps_p50=34.5 aggregate_tps_p50=79.1 uplift_vs_1row=2.29x aggregate_vs_serial=2.14x peak_rss_mb=30059
+contiguous L=32 r=1 rc=0
+contiguous L=32 r=2 rc=0
+contiguous L=32 r=4 rc=0
+contiguous L=32 r=8 rc=0
+contiguous L=1536 r=1 rc=0
+contiguous L=1536 r=2 rc=0
+contiguous L=1536 r=4 rc=0
+contiguous L=1536 r=8 rc=0
+paged L=32 r=1 rc=0
+paged L=32 r=2 rc=0
+paged L=32 r=4 rc=0
+paged L=32 r=8 rc=0
+paged L=1536 r=1 rc=0
+paged L=1536 r=2 rc=0
+paged L=1536 r=4 rc=0
+paged L=1536 r=8 rc=0
+MSB_DONE
+
+[exited with code 0]

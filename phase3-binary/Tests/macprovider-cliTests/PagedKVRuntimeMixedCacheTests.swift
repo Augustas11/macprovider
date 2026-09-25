@@ -178,6 +178,204 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         )
     }
 
+    func testHybridRowSnapshotsRecurrentStateAndMaterializesSerialCache() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
+            model: MixedCacheFakeModel(recorder: MixedCacheRecorder(), nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention]
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let handle = try await allocator.allocate(conversationKey: "row-a", maxTokens: 8)
+
+        func prefill(_ tokens: [Int], from offset: Int) async throws {
+            _ = try await allocator.extend(handle, by: tokens.count)
+            let binding = try await allocator.binding(for: handle)
+            _ = try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+                requestID: "row-a",
+                promptTokens: tokens,
+                binding: binding,
+                promptTokenOffset: offset,
+                committedKVTokenCount: offset,
+                targetKVTokenCount: offset + tokens.count,
+                isFinalChunk: false
+            )])
+        }
+
+        try await prefill([1, 2, 3], from: 0)
+        let snapshot = await backend.snapshotRecurrentState(requestID: "row-a", tokenCount: 3)
+        let checkpoint = try XCTUnwrap(snapshot)
+        try await prefill([4, 5], from: 3)
+
+        XCTAssertEqual(checkpoint.tokenCount, 3)
+        XCTAssertEqual(Array(checkpoint.states.keys), [0], "only the recurrent layer is snapshotted")
+        XCTAssertEqual(checkpoint.states[0]?.first?.asArray(Float.self), [201, 202, 203], "later prefill must not alias the snapshot")
+
+        let binding = try await allocator.binding(for: handle)
+        let materialized = try await backend.materializeSerialConversationCache(
+            requestID: "row-a",
+            binding: binding,
+            tokenCount: 4,
+            recurrentCheckpoints: [checkpoint]
+        )
+        let serial = try XCTUnwrap(materialized)
+        XCTAssertEqual(serial.tokenCount, 4)
+        XCTAssertEqual(serial.recurrentCheckpoints.map(\.tokenCount), [3])
+        XCTAssertTrue(serial.layers[0] is MambaCache)
+        XCTAssertTrue(serial.layers[0].state.isEmpty, "reuse always restores a checkpoint")
+        let attention = try XCTUnwrap(serial.layers[1] as? KVCacheSimple)
+        XCTAssertEqual(attention.offset, 4, "trimmed to the covered token count")
+        XCTAssertEqual(attention.state[0].asType(.float32).asArray(Float.self), [1, 2, 3, 4])
+
+        let pagedOnly = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2
+        )
+        let none = await pagedOnly.snapshotRecurrentState(requestID: "row-a", tokenCount: 3)
+        XCTAssertNil(none)
+        let noneSerial = try await pagedOnly.materializeSerialConversationCache(
+            requestID: "row-a", binding: binding, tokenCount: 4, recurrentCheckpoints: [checkpoint])
+        XCTAssertNil(noneSerial)
+    }
+
+    /// Pure layout gate for a hybrid checkpoint install; needs no Metal.
+    func testRecurrentCheckpointLayoutValidationRejectsMalformedState() {
+        typealias Slot = RecurrentStateSlotLayout
+        let conv = Slot(shape: [1, 3, 64], dtype: .bfloat16)
+        let ssm = Slot(shape: [1, 4, 16, 16], dtype: .float32)
+        let recurrent = [0, 2]
+        func valid(_ layouts: [Int: [Slot]]) -> Bool {
+            PagedKVSharedForwardBackend.recurrentCheckpointLayoutIsValid(layouts, recurrentLayerIndices: recurrent)
+        }
+        XCTAssertTrue(valid([0: [conv, ssm], 2: [conv, ssm]]))
+        XCTAssertFalse(valid([0: [conv], 2: [conv]]), "slot count below MambaCache's")
+        XCTAssertFalse(valid([0: [conv, ssm, ssm], 2: [conv, ssm, ssm]]), "slot count above MambaCache's")
+        XCTAssertFalse(valid([0: [Slot(shape: [3], dtype: .float32), ssm], 2: [Slot(shape: [3], dtype: .float32), ssm]]), "rank below 2")
+        XCTAssertFalse(valid([0: [Slot(shape: [2, 3, 64], dtype: .bfloat16), ssm], 2: [Slot(shape: [2, 3, 64], dtype: .bfloat16), ssm]]), "batch dimension must be 1")
+        XCTAssertFalse(valid([0: [Slot(shape: [1, 0, 64], dtype: .bfloat16), ssm], 2: [Slot(shape: [1, 0, 64], dtype: .bfloat16), ssm]]), "empty dimension")
+        for dtype in [DType.int32, .uint8, .bool, .complex64] {
+            let bad = Slot(shape: [1, 3, 64], dtype: dtype)
+            XCTAssertFalse(valid([0: [bad, ssm], 2: [bad, ssm]]), "dtype \(dtype)")
+        }
+        XCTAssertFalse(valid([0: [conv, ssm], 2: [Slot(shape: [1, 3, 32], dtype: .bfloat16), ssm]]), "shape differs across recurrent layers")
+        XCTAssertFalse(valid([0: [conv, ssm], 2: [Slot(shape: [1, 3, 64], dtype: .float16), ssm]]), "dtype differs across recurrent layers")
+        XCTAssertFalse(valid([0: [conv, ssm]]), "a recurrent layer is missing")
+        XCTAssertFalse(valid([0: [conv, ssm], 1: [conv, ssm], 2: [conv, ssm]]), "state for a non-recurrent layer")
+        XCTAssertFalse(PagedKVSharedForwardBackend.recurrentCheckpointLayoutIsValid([:], recurrentLayerIndices: []))
+    }
+
+    /// SPEC-038 AC-26 hybrid cached turn: a retained handoff installs its paged
+    /// attention layers plus recurrent layers restored from the checkpoint at
+    /// exactly the handoff length, and refuses anything else.
+    func testHybridRetainedInstallRestoresRecurrentStateFromCheckpoint() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
+            model: MixedCacheFakeModel(recorder: MixedCacheRecorder(), nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let bridge = PagedKVRuntimeContiguousCacheBridge()
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention],
+            contiguousCacheBridge: bridge
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16, contiguousCacheBridge: bridge)
+        let handle = try await allocator.allocate(conversationKey: "conv", maxTokens: 8)
+
+        func prefill(_ tokens: [Int], from offset: Int) async throws {
+            _ = try await allocator.extend(handle, by: tokens.count)
+            let binding = try await allocator.binding(for: handle)
+            _ = try await backend.prefill(rows: [ContinuousBatchPrefillInput(
+                requestID: "turn-1",
+                promptTokens: tokens,
+                binding: binding,
+                promptTokenOffset: offset,
+                committedKVTokenCount: offset,
+                targetKVTokenCount: offset + tokens.count,
+                isFinalChunk: false
+            )])
+        }
+
+        try await prefill([1, 2, 3], from: 0)
+        let snapshot = await backend.snapshotRecurrentState(requestID: "turn-1", tokenCount: 3)
+        let checkpoint = try XCTUnwrap(snapshot)
+        try await prefill([4, 5], from: 3)
+        let retained = try await allocator.retain(handle)
+        backend.finish(requestID: "turn-1")
+
+        let reattached = try await allocator.reattach(retained, conversationKey: "conv", trimToLogicalTokens: 3)
+        let binding = try await allocator.binding(for: reattached)
+        let handoff = try bridge.reattachPagedKVCache(handle: reattached, table: binding.currentTable)
+        XCTAssertEqual(handoff.logicalTokenCount, 3)
+
+        let slots = try XCTUnwrap(checkpoint.states[0])
+        let malformed: [RecurrentStateCheckpoint?] = [
+            nil,
+            RecurrentStateCheckpoint(tokenCount: 2, states: checkpoint.states),
+            RecurrentStateCheckpoint(tokenCount: 3, states: [0: [slots[0]]]),
+            RecurrentStateCheckpoint(tokenCount: 3, states: [0: slots.map { MLXArray.zeros([2] + Array($0.shape.dropFirst())) }]),
+            RecurrentStateCheckpoint(tokenCount: 3, states: [0: slots.map { $0.asType(.int32) }]),
+        ]
+        for invalid in malformed {
+            do {
+                try await backend.installRetainedPagedKVCache(
+                    requestID: "turn-2", handoff: handoff, binding: binding, recurrentCheckpoint: invalid)
+                XCTFail("a hybrid install needs a checkpoint at exactly the handoff length")
+            } catch ContinuousBatchSchedulerError.unsupported(let reason) {
+                XCTAssertEqual(reason, "continuous_batching_retained_hybrid_cache_unavailable")
+            }
+            let installed = await backend.snapshotRecurrentState(requestID: "turn-2", tokenCount: 3)
+            XCTAssertNil(installed, "a rejected checkpoint installs no row state")
+        }
+
+        try await backend.installRetainedPagedKVCache(
+            requestID: "turn-2", handoff: handoff, binding: binding, recurrentCheckpoint: checkpoint)
+        let restoredSnapshot = await backend.snapshotRecurrentState(requestID: "turn-2", tokenCount: 3)
+        let restored = try XCTUnwrap(restoredSnapshot)
+        XCTAssertEqual(restored.states[0]?.first?.asArray(Float.self), [201, 202, 203], "state at the checkpoint, not after it")
+
+        let pagedOnly = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2
+        )
+        do {
+            try await pagedOnly.installRetainedPagedKVCache(
+                requestID: "turn-2", handoff: handoff, binding: binding, recurrentCheckpoint: checkpoint)
+            XCTFail("a non-hybrid backend must refuse a recurrent checkpoint")
+        } catch ContinuousBatchSchedulerError.unsupported(let reason) {
+            XCTAssertEqual(reason, "continuous_batching_retained_hybrid_cache_unavailable")
+        }
+        backend.finish(requestID: "turn-2")
+        try await allocator.release(reattached)
+    }
+
     private func decodeInput(
         requestID: String,
         currentToken: Int,
@@ -219,10 +417,12 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
     private let recorder: MixedCacheRecorder
     private let nextTokenByInput: [Int: Int]
     private let vocabularySize = 32
+    private let attentionDType: DType
 
-    init(recorder: MixedCacheRecorder, nextTokenByInput: [Int: Int]) {
+    init(recorder: MixedCacheRecorder, nextTokenByInput: [Int: Int], attentionDType: DType = .float32) {
         self.recorder = recorder
         self.nextTokenByInput = nextTokenByInput
+        self.attentionDType = attentionDType
         super.init()
     }
 
@@ -251,8 +451,8 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
             }
 
             if cache.count > 1 {
-                let keys = MLXArray(flatTokens.map(Float.init), [batch, 1, sequenceLength, 1])
-                let values = MLXArray(flatTokens.map { Float($0 + 100) }, [batch, 1, sequenceLength, 1])
+                let keys = MLXArray(flatTokens.map(Float.init), [batch, 1, sequenceLength, 1]).asType(attentionDType)
+                let values = MLXArray(flatTokens.map { Float($0 + 100) }, [batch, 1, sequenceLength, 1]).asType(attentionDType)
                 let updated = cache[1].update(keys: keys, values: values)
                 eval(updated.0, updated.1)
                 recorder.recordPagedAttentionBatch(updated.0.dim(0))

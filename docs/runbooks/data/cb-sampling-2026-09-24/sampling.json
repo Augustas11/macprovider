@@ -1,0 +1,109 @@
+{
+ "near_deterministic": [
+  {
+   "scenario": "lone_row",
+   "exact": true
+  },
+  {
+   "scenario": "concurrent_x4",
+   "topic": "the Pacific Ocean",
+   "exact": true,
+   "sha": "291504b4decb"
+  },
+  {
+   "scenario": "concurrent_x4",
+   "topic": "photosynthesis",
+   "exact": false,
+   "sha": "57ebaa708011"
+  },
+  {
+   "scenario": "concurrent_x4",
+   "topic": "the Roman Empire",
+   "exact": false,
+   "sha": "26c3b03272cf"
+  },
+  {
+   "scenario": "concurrent_x4",
+   "topic": "volcanoes",
+   "exact": false,
+   "sha": "2781b8980c05"
+  }
+ ],
+ "isolation": [
+  {
+   "topic": "the Pacific Ocean",
+   "finish": "stop",
+   "tokens": 60,
+   "leak_signal": false,
+   "on_topic": true
+  },
+  {
+   "topic": "photosynthesis",
+   "finish": "stop",
+   "tokens": 39,
+   "leak_signal": false,
+   "on_topic": true
+  },
+  {
+   "topic": "the Roman Empire",
+   "finish": "stop",
+   "tokens": 45,
+   "leak_signal": false,
+   "on_topic": true
+  },
+  {
+   "topic": "volcanoes",
+   "finish": "stop",
+   "tokens": 47,
+   "leak_signal": false,
+   "on_topic": true
+  },
+  {
+   "topic": "the human heart",
+   "finish": "stop",
+   "tokens": 54,
+   "leak_signal": false,
+   "on_topic": true
+  },
+  {
+   "topic": "jazz music",
+   "finish": "stop",
+   "tokens": 59,
+   "leak_signal": false,
+   "on_topic": true
+  },
+  {
+   "topic": "the moon landing",
+   "finish": "stop",
+   "tokens": 51,
+   "leak_signal": false,
+   "on_topic": false
+  },
+  {
+   "topic": "honeybees",
+   "finish": "stop",
+   "tokens": 45,
+   "leak_signal": false,
+   "on_topic": true
+  }
+ ],
+ "throughput": {
+  "serial": {
+   "median_tok_s": 32.9,
+   "runs": [
+    32.5,
+    32.9,
+    33.0
+   ]
+  },
+  "batched": {
+   "median_tok_s": 50.0,
+   "runs": [
+    47.3,
+    50.0,
+    51.2
+   ]
+  },
+  "ratio": 1.52
+ }
+}

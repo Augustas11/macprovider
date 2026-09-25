@@ -1,0 +1,47 @@
+conv_cache action=miss key_hash=688d5136 reason=cold_start
+conv_cache action=cold_unattached key_hash=688d5136
+conv_cache action=miss key_hash=7c71f038 reason=cold_start
+conv_cache action=cold_unattached key_hash=7c71f038
+conv_cache action=miss key_hash=95ea63dc reason=cold_start
+conv_cache action=cold_unattached key_hash=95ea63dc
+conv_cache action=miss key_hash=26b972cc reason=cold_start
+conv_cache action=cold_unattached key_hash=26b972cc
+conv_cache action=hit key_hash=95ea63dc cached_prompt_tokens=1260 prompt_tokens=1365 lcp=1263 trim_by=87 recurrent_checkpoint=1260 conv_cache
+conv_cache action=hit key_hash=7c71f038 cached_prompt_tokens=1260 prompt_tokens=1374 lcp=1263 trim_by=96 recurrent_checkpoint=1260 conv_cache
+conv_cache action=hit key_hash=688d5136 cached_prompt_tokens=1260 prompt_tokens=1383 lcp=1263 trim_by=105 recurrent_checkpoint=1260 conv_cach
+conv_cache action=hit key_hash=26b972cc cached_prompt_tokens=1331 prompt_tokens=1447 lcp=1334 trim_by=98 recurrent_checkpoint=1331 conv_cache
+conv_cache action=cold_unattached key_hash=7c71f038
+conv_cache action=cold_unattached key_hash=95ea63dc
+conv_cache action=cold_unattached key_hash=688d5136
+conv_cache action=cold_unattached key_hash=26b972cc
+conv_cache action=miss key_hash=0761fa8b reason=cold_start
+conv_cache action=cold_unattached key_hash=0761fa8b
+conv_cache action=miss key_hash=be145fdd reason=cold_start
+conv_cache action=cold_unattached key_hash=be145fdd
+conv_cache action=hit key_hash=be145fdd cached_prompt_tokens=1258 prompt_tokens=1341 lcp=1261 trim_by=66 recurrent_checkpoint=1258 conv_cache
+conv_cache action=cold_unattached key_hash=be145fdd
+conv_cache action=miss key_hash=0432a3b6 reason=cold_start
+conv_cache action=cold_unattached key_hash=0432a3b6
+conv_cache action=miss key_hash=7ca7e628 reason=cold_start
+conv_cache action=cold_unattached key_hash=7ca7e628
+conv_cache action=hit key_hash=7ca7e628 cached_prompt_tokens=1258 prompt_tokens=1353 lcp=1261 trim_by=78 recurrent_checkpoint=1258 conv_cache
+conv_cache action=cold_unattached key_hash=7ca7e628
+conv_cache action=miss key_hash=18ee3873 reason=cold_start
+conv_cache action=evict key_hash=7c71f038 reason=lru
+conv_cache action=cold_unattached key_hash=18ee3873
+conv_cache action=miss key_hash=fb022728 reason=cold_start
+conv_cache action=evict key_hash=95ea63dc reason=lru
+conv_cache action=cold_unattached key_hash=fb022728
+conv_cache action=hit key_hash=fb022728 cached_prompt_tokens=1258 prompt_tokens=1355 lcp=1261 trim_by=80 recurrent_checkpoint=1258 conv_cache
+conv_cache action=cold_unattached key_hash=fb022728
+conv_cache action=miss key_hash=ae4a398a reason=cold_start
+conv_cache action=evict key_hash=688d5136 reason=lru
+conv_cache action=cold_unattached key_hash=ae4a398a
+conv_cache action=miss key_hash=1e9e44c4 reason=cold_start
+conv_cache action=evict key_hash=26b972cc reason=lru
+conv_cache action=cold_unattached key_hash=1e9e44c4
+conv_cache action=hit key_hash=1e9e44c4 cached_prompt_tokens=1258 prompt_tokens=1341 lcp=1261 trim_by=66 recurrent_checkpoint=1258 conv_cache
+conv_cache action=cold_unattached key_hash=1e9e44c4
+conv_cache action=miss key_hash=74e37e05 reason=cold_start
+conv_cache action=evict key_hash=0761fa8b reason=lru
+conv_cache action=cold_unattached key_hash=74e37e05

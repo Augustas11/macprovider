@@ -1,0 +1,32 @@
+{
+ "follow_ups": {
+  "databases": {
+   "ttft_s": 2.42,
+   "total_s": 11.12,
+   "cached": 1260,
+   "prompt": 1383
+  },
+  "networking": {
+   "ttft_s": 1.72,
+   "total_s": 10.14,
+   "cached": 1260,
+   "prompt": 1374
+  },
+  "compilers": {
+   "ttft_s": 0.84,
+   "total_s": 11.03,
+   "cached": 1260,
+   "prompt": 1365
+  },
+  "operating systems": {
+   "ttft_s": 4.41,
+   "total_s": 11.13,
+   "cached": 1331,
+   "prompt": 1447
+  }
+ },
+ "aggregate_tok_s": 31.6,
+ "wall_s": 11.13,
+ "hit_equals_miss_conv0": true,
+ "miss_ttft_s": 5.45
+}

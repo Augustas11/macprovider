@@ -1831,12 +1831,14 @@ private final class MSBSchedulerWindowTimingBackend: ContinuousBatchSchedulerBac
     func installRetainedPagedKVCache(
         requestID: String,
         handoff: PagedKVPagedCacheHandoff,
-        binding: PagedKVStorageBinding
+        binding: PagedKVStorageBinding,
+        recurrentCheckpoint: RecurrentStateCheckpoint?
     ) async throws {
         try await inner.installRetainedPagedKVCache(
             requestID: requestID,
             handoff: handoff,
-            binding: binding
+            binding: binding,
+            recurrentCheckpoint: recurrentCheckpoint
         )
     }
 
