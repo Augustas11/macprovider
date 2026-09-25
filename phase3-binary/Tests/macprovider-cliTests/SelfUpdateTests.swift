@@ -142,7 +142,7 @@ final class SelfUpdateTests: XCTestCase {
             XCTAssertEqual(
                 error.description,
                 UpdateError.untrustedReleaseAPIURL(
-                    "http://attacker.invalid/releases?per_page=20"
+                    "http://attacker.invalid/releases?per_page=100&page=1"
                 ).description
             )
         }
@@ -2104,16 +2104,17 @@ final class SelfUpdateTests: XCTestCase {
     func testDiscoveryPagesPastPrereleaseChurnWhenTransportIsNotOnPageOne() async throws {
         let releaseURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
         let listing = "https://api.github.com/repos/Augustas11/macprovider/releases?per_page=100"
-        // Page 3 would win on sequence, but discovery must stop at the first
-        // page carrying a transport and never request it.
+        // Page 2 is full and page 3 would win on sequence, so only stopping at
+        // the first page carrying a transport avoids requesting it. The mutable
+        // 299 listed first catches a first-match pick instead of the maximum.
         MockURLProtocol.responses = [
             URL(string: "\(listing)&page=1")!: (200, discoveryListingPage(prereleases: 100, startingAt: 200)),
             URL(string: "\(listing)&page=2")!: (
                 200,
                 discoveryListingPage(
-                    prereleases: 40,
+                    prereleases: 98,
                     startingAt: 100,
-                    transports: [("release-discovery-v1-300", true), ("release-discovery-v1-299", true)]
+                    transports: [("release-discovery-v1-299", false), ("release-discovery-v1-300", true)]
                 )
             ),
             URL(string: "\(listing)&page=3")!: (
@@ -2130,8 +2131,8 @@ final class SelfUpdateTests: XCTestCase {
             try await update.run(checkOnly: true)
             XCTFail("update unexpectedly accepted a discovery transport without signed head assets")
         } catch let error as UpdateError {
-            // Reaching the asset check proves the page-2 transport was selected
-            // and still had to pass the immutable-prerelease gate.
+            // Reaching the asset check proves page 2's highest transport (300)
+            // was selected and passed the immutable-prerelease gate.
             XCTAssertEqual(error.description, UpdateError.missingAsset.description)
         }
     }
