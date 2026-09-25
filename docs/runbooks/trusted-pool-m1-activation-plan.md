@@ -744,8 +744,9 @@ holds; the negative controls left no rows. Wait at least one
 
 ### Evidence for SPEC-022-R012 (CONFORMANCE)
 
-`SPEC-022-R012` is `pending`, `journeys: []`; its rationale names "a signed
-enforce-mode pool journey (M6)". Signed journeys follow the
+`SPEC-022-R012` is `pending` and already maps
+`journeys: ["JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"]` (B6); what it lacks is
+the signed evidence from an enforce-mode pool run. Signed journeys follow the
 JOURNEY-BUYER-PAID-PATH pattern:
 
 - definition `journeys/JOURNEY-<ID>.md`;
@@ -759,9 +760,9 @@ JOURNEY-BUYER-PAID-PATH pattern:
   `macprovider.journey-result-envelope.v1`, validated by
   `validate-signed-journey-result.py` and promoted by
   `promote-signed-journey-result.py`;
-- CONFORMANCE row gets `journeys: ["JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"]`
-  and an `evidence[]` entry `{artifact: "sha256:<envelope>", source:
-  "journeys/evidence/<file>", captured_at, expires_at}`.
+- promotion adds to the CONFORMANCE row (whose `journeys` already names
+  the journey) an `evidence[]` entry `{artifact: "sha256:<envelope>",
+  source: "journeys/evidence/<file>", captured_at, expires_at}`.
 
 The journey is `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md` (B6). It
 maps SPEC-022-R012, SPEC-042-R013 and SPEC-042-R014 (all still `pending`) and
