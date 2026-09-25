@@ -199,6 +199,54 @@ final class ProviderCredentialHandoffRunnerTests: XCTestCase {
         XCTAssertEqual(String(decoding: result.standardOutput, as: UTF8.self), "{\"contract_version\":1}")
     }
 
+    func testCapturedProcessNeverDropsFastChildStandardOutput() async throws {
+        let expected = "{\"contract_version\":1}"
+        for iteration in 0..<200 {
+            let result = try await ProviderCredentialHandoffRunner.runCapturedProcess(
+                executableURL: URL(fileURLWithPath: "/usr/bin/printf"),
+                arguments: ["%s", expected],
+                timeout: 2
+            )
+            XCTAssertEqual(result.exitCode, 0, "iteration \(iteration)")
+            XCTAssertEqual(
+                String(decoding: result.standardOutput, as: UTF8.self),
+                expected,
+                "iteration \(iteration)"
+            )
+        }
+    }
+
+    func testCapturedProcessResolvesWhenDescendantHoldsStandardOutput() async throws {
+        let started = Date()
+        do {
+            _ = try await ProviderCredentialHandoffRunner.runCapturedProcess(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "/bin/sleep 5 & printf ok"],
+                timeout: 10,
+                outputDrainGrace: 0.5
+            )
+            XCTFail("expected held-open output rejection")
+        } catch let error as ProviderCredentialHandoffRunner.Error {
+            XCTAssertEqual(error, .invalidOutput("output stream stayed open after exit"))
+            XCTAssertLessThan(Date().timeIntervalSince(started), 3)
+        }
+    }
+
+    func testCapturedProcessReportsLaunchFailure() async throws {
+        do {
+            _ = try await ProviderCredentialHandoffRunner.runCapturedProcess(
+                executableURL: URL(fileURLWithPath: "/nonexistent/macprovider-cli"),
+                arguments: [],
+                timeout: 2
+            )
+            XCTFail("expected launch failure")
+        } catch let error as ProviderCredentialHandoffRunner.Error {
+            guard case .launchFailed = error else {
+                return XCTFail("expected launchFailed, got \(error)")
+            }
+        }
+    }
+
     func testCapturedProcessRejectsOutputBeyondLimit() async throws {
         do {
             _ = try await ProviderCredentialHandoffRunner.runCapturedProcess(
