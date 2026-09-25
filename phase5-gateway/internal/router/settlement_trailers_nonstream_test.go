@@ -387,3 +387,91 @@ func TestNonStreamingSignedTrailersOverRealWire(t *testing.T) {
 		})
 	}
 }
+
+// Codex CODE MEDIUM: on a real net/http client response the transport moves
+// the Trailer declaration out of resp.Header into resp.Trailer's keys. A
+// streaming coordinator that declared signed trailers must still have its
+// MAC checked with the pin off: a valid tuple settles, a tampered one and
+// stripped values hold.
+func TestStreamingSignedTrailersOverRealWire(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(h http.Header, account, requestID string)
+		check func(t *testing.T, got gatewaySettlementState)
+	}{
+		{name: "valid MAC settles", write: func(h http.Header, account, requestID string) {
+			for name, values := range quarantinedFinality() {
+				h[name] = values
+			}
+			signFinality(testKey, account, requestID, testInternal, h)
+		}, check: wantRefunded},
+		{name: "tampered tuple held with the pin off", write: func(h http.Header, account, requestID string) {
+			for name, values := range quarantinedFinality() {
+				h[name] = values
+			}
+			h.Set(settlementOutcomeHeader, "verified")
+			h.Set(settlementReceiptResultHeader, "valid")
+			signFinality(testKey, account, requestID, testInternal, h)
+			h.Set(settlementOutcomeHeader, "quarantined")
+			h.Set(settlementReceiptResultHeader, "invalid")
+		}, check: wantHeld},
+		{name: "stripped values held", write: func(http.Header, string, string) {}, check: wantHeld},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var declaredOnWire bool
+			coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/chat/completions" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set(coordinatorInternalRequestIDHeader, testInternal)
+				for name := range quarantinedFinality() {
+					w.Header().Add("Trailer", name)
+				}
+				w.Header().Add("Trailer", settlementFinalityMACHeader)
+				w.WriteHeader(http.StatusOK)
+				_, _ = io.WriteString(w, trailerTestSSE)
+				tc.write(w.Header(), r.Header.Get("X-MacProvider-Account"), r.Header.Get("X-Request-ID"))
+			}))
+			defer coordinator.Close()
+			client := coordinator.Client()
+			base := client.Transport
+			client.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				resp, err := base.RoundTrip(r)
+				if err == nil && r.URL.Path == "/v1/chat/completions" {
+					// The real transport strips the declaration from the
+					// headers and keys resp.Trailer instead.
+					_, keyed := resp.Trailer[http.CanonicalHeaderKey(settlementFinalityMACHeader)]
+					declaredOnWire = keyed && len(resp.Header.Values("Trailer")) == 0
+				}
+				return resp, err
+			})
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = coordinator.URL
+				cfg.Coordinator.ServiceToken = testKey
+			}, WithHTTPClient(client))
+			accountID := "acct_stream_wire_" + strings.ReplaceAll(tc.name, " ", "_")
+			fullKey := createAccountAndKey(t, store, cfg, accountID)
+			resp := postChat(t, h, fullKey, `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			if !declaredOnWire {
+				t.Fatal("the fixture did not reproduce the real transport: the MAC declaration should be a resp.Trailer key, not a header")
+			}
+			tc.check(t, gatewaySettlementSnapshot(t, dbPath, accountID))
+		})
+	}
+}
+
+// The declaration checks see a real transport's resp.Trailer keys.
+func TestSettlementTrailerDeclarationFromTrailerKeys(t *testing.T) {
+	resp := &http.Response{Header: http.Header{}, Trailer: http.Header{
+		http.CanonicalHeaderKey(settlementOutcomeHeader):     nil,
+		http.CanonicalHeaderKey(settlementFinalityMACHeader): nil,
+	}}
+	if !hasSettlementFinalityTrailerDeclaration(resp) || !settlementFinalityMACDeclared(resp) {
+		t.Fatal("trailer keys pre-populated by net/http were not seen as declarations")
+	}
+}

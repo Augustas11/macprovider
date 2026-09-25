@@ -33,8 +33,8 @@ When the buyer response was delivered but the attempt's settlement evidence
 failed (the post-delivery record or receipt ingest, including a stream's
 post-stream record, `settlement_record_failed_after_delivery`; a credit whose
 evidence write failed and was marked missing,
-`settlement_output_missing_after_credit`; or a non-streaming response that
-reaches the end of the handler without a tuple,
+`settlement_output_missing_after_credit`; or a negotiated response,
+streaming or not, that reaches the end of the handler without a tuple,
 `settlement_finality_unset_after_delivery`), buyer and provider are settled
 alike. Under an enforce route snapshot the provider credit can never become
 payable (enforce payability needs a verified verdict and attempt output) and
@@ -1091,7 +1091,7 @@ the pool attempts recorded before a downgrade.
   `legacy` tuple for a non-streaming attempt without receipt state, and a
   tuple for a delivered attempt whose settlement evidence failed (the
   post-delivery record or ingest, a credit whose evidence was marked missing,
-  or a non-streaming response that would otherwise end without a tuple): a
+  or a negotiated response that would otherwise end without a tuple): a
   signed closed refund with the provider credit quarantined under an enforce
   route snapshot, else the signed `legacy` tuple with the payable credit
   kept, so buyer and provider agree without an operator. Every gateway builder of a
@@ -1108,7 +1108,9 @@ the pool attempts recorded before a downgrade.
   pin off under live traffic would let stripped or unsigned responses settle
   from headers or legacy mode. The gateway accepts a tuple only
   with a valid MAC bound to the account and request id it sent and the
-  coordinator's internal request id, and holds a missing, unsigned, tampered,
+  coordinator's internal request id (a MAC counts as declared whether the
+  declaration arrives in the Trailer header or, as a real net/http client
+  sees it, as a pre-populated trailer key), and holds a missing, unsigned, tampered,
   or replayed tuple as `missing_settlement_finality_trailer` (resolved by the
   reconciler; an observe-mode attempt resolves through the coordinator's
   request-scoped finality lookup). Loopback and `pool_operator_attested`

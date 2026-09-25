@@ -496,3 +496,25 @@ func TestMissingEvidenceLatchDoesNotLeakIntoRetry(t *testing.T) {
 		t.Fatalf("the retry carries no finality tuple: trailers=%v", resp.Trailer)
 	}
 }
+
+// Codex SECURITY (537d397c): a HARD settlement-output failure after the
+// credit, on a negotiated enforce stream with a route snapshot, surfaces
+// from recordRow to the post-stream render and ends in the signed refund
+// with the credit quarantined, never declared-but-empty trailers.
+func TestHTTPStreamingEnforceHardOutputFailureRefundsAndQuarantines(t *testing.T) {
+	t.Cleanup(buyer.SetSettlementOutputWriteErrForTest(errors.New("settlement attempt output table missing")))
+	server, dbPath := newEnforceHTTPServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello world\"},\"finish_reason\":null}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":4,\"total_tokens\":9}}\n\n"+
+			"data: [DONE]\n\n")
+	})
+	rr := httptest.NewRecorder()
+	postDeliveredOnly(server, context.Background(), strings.Replace(deliveredOnlyChatBody, `{"model"`, `{"stream":true,"model"`, 1), rr)
+	resp := rr.Result()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "Hello world") {
+		t.Fatalf("status=%d body=%s, want the delivered stream", resp.StatusCode, body)
+	}
+	assertEnforceRefundAndQuarantine(t, resp, dbPath, "settlement_record_failed_after_delivery")
+}

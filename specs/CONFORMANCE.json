@@ -6014,7 +6014,8 @@
         "phase5-gateway/internal/router/settlement_trailers.go:func finalityMACValid",
         "phase5-gateway/internal/router/settlement_trailers.go:func coordinatorNonStreamingSettlementFinality",
         "phase5-gateway/internal/router/settlement_trailers.go:func coordinatorStreamingSettlementFinality",
-        "phase5-gateway/internal/router/settlement_trailers.go:func streamingLocalTerminalMustHold"
+        "phase5-gateway/internal/router/settlement_trailers.go:func streamingLocalTerminalMustHold",
+        "phase5-gateway/internal/router/settlement_trailers.go:func settlementFinalityMACDeclared"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/spec022_r012_test.go:TestSPEC022R012PoolOperatorAttestedSettlesOnlyWhenR012Holds",
@@ -6044,6 +6045,7 @@
         "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPEnforceRecordFailureRefundsAndQuarantinesCredit",
         "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPEnforceOutputMissingAfterCreditRefundsAndQuarantinesCredit",
         "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestMissingEvidenceLatchDoesNotLeakIntoRetry",
+        "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPStreamingEnforceHardOutputFailureRefundsAndQuarantines",
         "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPNonStreamingNegotiatedCallerGetsMACdTrailerFinality",
         "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPNonStreamingLegacyCallerGetsHeaderFinalityRecordedBeforeWrite",
         "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestWSNonStreamingLegacyCallerRecordsBeforeWrite",
@@ -6053,6 +6055,8 @@
         "phase5-gateway/internal/router/settlement_trailers_nonstream_test.go:TestNonStreamingTrailerFinalityThroughChatPath",
         "phase5-gateway/internal/router/settlement_trailers_nonstream_test.go:TestRequireSettlementTrailersPinThroughChatPath",
         "phase5-gateway/internal/router/settlement_trailers_nonstream_test.go:TestNonStreamingSignedTrailersOverRealWire",
+        "phase5-gateway/internal/router/settlement_trailers_nonstream_test.go:TestStreamingSignedTrailersOverRealWire",
+        "phase5-gateway/internal/router/settlement_trailers_nonstream_test.go:TestSettlementTrailerDeclarationFromTrailerKeys",
         "phase5-gateway/internal/router/coordinator_chat_context_test.go:TestEveryCoordinatorChatBuilderNegotiatesSignedFinality",
         "phase5-gateway/internal/router/coordinator_chat_context_test.go:TestRelayBlindNegotiatesSignedFinalityUnderPin"
       ],

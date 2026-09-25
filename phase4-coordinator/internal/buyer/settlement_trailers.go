@@ -216,10 +216,10 @@ func setSettlementRecordFailedFinality(dst http.Header, rec *billingRecorder) {
 // finalizeNegotiatedSettlementFinality runs as the chat handler returns,
 // before net/http writes the trailers. A negotiated response that declared
 // signed trailers but set no tuple would otherwise hold at the gateway with
-// no coordinator finality to find (a 404 hold that never ends). For a
-// non-streaming response every path sets a tuple, so reaching here unset is
-// a failure this code did not anticipate. A stream without a tuple keeps its
-// hold only while its evidence can still produce finality.
+// no coordinator finality to find (a 404 hold that never ends). Every
+// expected path sets a tuple (a pending verdict included, which the
+// reconciler closes), so a negotiated response, streaming or not, that
+// reaches here unset takes the evidence-failure rule.
 func finalizeNegotiatedSettlementFinality(dst http.Header, rec *billingRecorder) {
 	if rec == nil || !rec.settlementFinalityMACActive {
 		return
@@ -229,12 +229,11 @@ func finalizeNegotiatedSettlementFinality(dst http.Header, rec *billingRecorder)
 			return
 		}
 	}
-	switch {
-	case rec.settlementOutputMissingMarked:
+	if rec.settlementOutputMissingMarked {
 		setSettlementEvidenceFailedFinality(dst, rec, settlementOutputMissingAfterCreditReason)
-	case !rec.stream:
-		setSettlementEvidenceFailedFinality(dst, rec, settlementFinalityUnsetReason)
+		return
 	}
+	setSettlementEvidenceFailedFinality(dst, rec, settlementFinalityUnsetReason)
 }
 
 // setSettlementEvidenceFailedFinality settles an attempt whose buyer

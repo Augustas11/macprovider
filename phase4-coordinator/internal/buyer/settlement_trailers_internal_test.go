@@ -404,14 +404,18 @@ func TestFinalizeNegotiatedSettlementFinality(t *testing.T) {
 		t.Fatalf("observe non-streaming unset tuple finalized to %v, want the signed legacy tuple", odst)
 	}
 
+	// A stream is finalized the same way: no negotiated stream ends with
+	// declared-but-empty trailers the reconciler could never resolve.
 	stream := negotiatedTestRecorderMode(billing.RouteSnapshotModeEnforce)
 	stream.stream = true
+	udst := http.Header{internalRequestIDHeader: {"internal-1"}}
+	declareNonStreamingSettlementTrailers(udst, stream)
+	finalizeNegotiatedSettlementFinality(udst, stream)
+	if udst.Get(settlementReasonHeader) != settlementFinalityUnsetReason || udst.Get(settlementClosedHeader) != "true" || udst.Get(settlementFinalityMACHeader) != finalityMACOf(udst) {
+		t.Fatalf("an enforce stream without a tuple finalized to %v, want the signed refund", udst)
+	}
 	sdst := http.Header{internalRequestIDHeader: {"internal-1"}}
 	declareNonStreamingSettlementTrailers(sdst, stream)
-	finalizeNegotiatedSettlementFinality(sdst, stream)
-	if sdst.Get(settlementOutcomeHeader) != "" || sdst.Get(settlementModeHeader) != "" {
-		t.Fatalf("a stream without a tuple was finalized: %v", sdst)
-	}
 	stream.settlementOutputMissingAfterCredit, stream.settlementOutputMissingMarked = true, true
 	finalizeNegotiatedSettlementFinality(sdst, stream)
 	if sdst.Get(settlementReasonHeader) != settlementOutputMissingAfterCreditReason || sdst.Get(settlementFinalityMACHeader) != finalityMACOf(sdst) {

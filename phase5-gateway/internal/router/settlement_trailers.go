@@ -110,7 +110,17 @@ func finalityMACValid(resp *http.Response, src http.Header, b settlementFinality
 	return hmac.Equal([]byte(got), []byte(want))
 }
 
+// settlementFinalityMACDeclared reports whether the response declared the
+// finality MAC trailer. On a real net/http client response the transport
+// removes "Trailer" from resp.Header and instead pre-populates resp.Trailer
+// with the declared keys (nil values until EOF), so both are checked, as
+// hasSettlementFinalityTrailerDeclaration does.
 func settlementFinalityMACDeclared(resp *http.Response) bool {
+	for name := range resp.Trailer {
+		if strings.EqualFold(strings.TrimSpace(name), settlementFinalityMACHeader) {
+			return true
+		}
+	}
 	for _, value := range resp.Header.Values("Trailer") {
 		for _, name := range strings.Split(value, ",") {
 			if strings.EqualFold(strings.TrimSpace(name), settlementFinalityMACHeader) {
