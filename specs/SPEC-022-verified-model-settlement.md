@@ -31,8 +31,12 @@ response without finality. A stream with a route snapshot declares signed
 trailers; one without carries the signed `legacy` tuple in its headers. A
 failed post-delivery record or receipt ingest sends a signed closed refund
 tuple (`quarantined`, `inconclusive`,
-`settlement_record_failed_after_delivery`): the gateway releases the
-reservation at once, the buyer is not charged, as with the pre-v0.2.2 500, and
+`settlement_record_failed_after_delivery`); the same tuple, with reason
+`settlement_output_missing_after_credit`, follows a credit whose settlement
+evidence write failed and was marked missing, and, with reason
+`settlement_finality_unset_after_delivery`, any negotiated non-streaming
+response that reaches the end of the handler without a tuple. The gateway
+releases the reservation at once, the buyer is not charged, as with the pre-v0.2.2 500, and
 the coordinator logs `settlement_record_failed_after_delivery` for operator
 review of any provider credit the failed write landed. The gateway holds
 declared finality that is missing, unsigned, or fails the MAC as
@@ -1078,7 +1082,12 @@ the pool attempts recorded before a downgrade.
   tuple: declared trailers on a non-streaming 200 and on a stream with a route
   snapshot, a signed `legacy` header tuple on a stream without one, a signed
   `legacy` tuple for a non-streaming attempt without receipt state, and a
-  signed closed refund tuple when the post-delivery record fails. Once both
+  signed closed refund tuple when the post-delivery record fails, when the
+  credit committed but its settlement evidence was marked missing, or when a
+  non-streaming response would otherwise end without a tuple (no attempt is
+  left to a hold the reconciler cannot resolve). Every gateway builder of a
+  coordinator chat request, relay-blind included, advertises the capability
+  with the bearer, account and request id the MAC binds. Once both
   are deployed, the gateway pin `coordinator.require_settlement_trailers:
   true` holds any coordinator 200 (streaming or non-streaming) without signed
   finality as `missing_settlement_finality_trailer`, so stripping the whole

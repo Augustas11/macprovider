@@ -48,7 +48,15 @@ const (
 	// refund tuple sent when the post-delivery record or receipt ingest
 	// fails.
 	settlementRecordFailedAfterDeliveryReason = "settlement_record_failed_after_delivery"
-	internalRequestIDHeader                   = "X-MacProvider-Internal-Request-ID"
+	// settlementOutputMissingAfterCreditReason is the sibling reason when the
+	// credit row committed but the settlement evidence write failed
+	// transiently and was marked missing: no finality can ever verify it.
+	settlementOutputMissingAfterCreditReason = "settlement_output_missing_after_credit"
+	// settlementFinalityUnsetReason is the reason on the refund
+	// finalizeNegotiatedSettlementFinality sends when a negotiated
+	// non-streaming response reached the end of the handler without a tuple.
+	settlementFinalityUnsetReason = "settlement_finality_unset_after_delivery"
+	internalRequestIDHeader       = "X-MacProvider-Internal-Request-ID"
 )
 
 // gatewayNegotiatedSettlementTrailers reports whether the gateway, holding
@@ -182,6 +190,14 @@ func setNonStreamingSettlementFinality(dst http.Header, rec *billingRecorder, st
 	if rec == nil || !rec.settlementFinalityMACActive {
 		return
 	}
+	if rec.settlementOutputMissingAfterCredit {
+		// The credit committed but its settlement evidence did not: no
+		// finality can ever verify the attempt, so a legacy debit would
+		// charge the buyer for an attempt whose provider evidence is
+		// missing. Refund, as for a failed record.
+		setSettlementRefundAfterDelivery(dst, rec, settlementOutputMissingAfterCreditReason)
+		return
+	}
 	for _, name := range settlementOutcomeHeaderNames {
 		dst.Del(name)
 	}
@@ -197,21 +213,53 @@ func setNonStreamingSettlementFinality(dst http.Header, rec *billingRecorder, st
 // provider credit the failed write did land stays for operator review; the
 // error log line is the operator's signal.
 func setSettlementRecordFailedRefund(dst http.Header, rec *billingRecorder) {
+	setSettlementRefundAfterDelivery(dst, rec, settlementRecordFailedAfterDeliveryReason)
+}
+
+// finalizeNegotiatedSettlementFinality runs as the chat handler returns,
+// before net/http writes the trailers. A negotiated response that declared
+// signed trailers but set no tuple would otherwise hold at the gateway with
+// no coordinator finality to find (a 404 hold that never ends). For a
+// non-streaming response every path sets a tuple, so reaching here unset is
+// a failure this code did not anticipate: refund. A stream without a tuple
+// keeps its hold only while its evidence can still produce finality; one
+// whose evidence was marked missing is refunded too.
+func finalizeNegotiatedSettlementFinality(dst http.Header, rec *billingRecorder) {
+	if rec == nil || !rec.settlementFinalityMACActive {
+		return
+	}
+	for _, name := range settlementOutcomeHeaderNames {
+		if dst.Get(name) != "" {
+			return
+		}
+	}
+	switch {
+	case rec.settlementOutputMissingAfterCredit:
+		setSettlementRefundAfterDelivery(dst, rec, settlementOutputMissingAfterCreditReason)
+	case !rec.stream:
+		setSettlementRefundAfterDelivery(dst, rec, settlementFinalityUnsetReason)
+	}
+}
+
+// setSettlementRefundAfterDelivery sends the signed closed refund tuple with
+// reason and logs it for operator review.
+func setSettlementRefundAfterDelivery(dst http.Header, rec *billingRecorder, reason string) {
 	if rec == nil || !rec.settlementFinalityMACActive {
 		return
 	}
 	if rec.server != nil {
 		rec.server.log.Error().
-			Str("event", "settlement_record_failed_after_delivery").
+			Str("event", reason).
 			Str("request_id", rec.requestID).
 			Str("account_id", rec.accountID).
-			Msg("post-delivery settlement record failed; buyer reservation released, review provider credit")
+			Bool("settlement_output_missing_after_credit", rec.settlementOutputMissingAfterCredit).
+			Msg("post-delivery settlement evidence incomplete; buyer reservation released, review provider credit")
 	}
 	dst.Del(settlementPendingUntilHeader)
 	setInternalSettlementOutcomeHeaders(dst, rec, billing.SettlementReceiptState{
 		SettlementOutcome:          billing.SettlementOutcomeQuarantined,
 		ReceiptResult:              billing.SettlementReceiptResultInconclusive,
-		Reason:                     settlementRecordFailedAfterDeliveryReason,
+		Reason:                     reason,
 		Closed:                     true,
 		RouteSnapshotMode:          billing.RouteSnapshotModeEnforce,
 		RouteSnapshotPolicyVersion: billing.RouteSnapshotPolicyVersion,

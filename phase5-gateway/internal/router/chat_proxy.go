@@ -672,14 +672,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		// already sends. M3-2 / SECU-4 post-cutover: the upstream
 		// bearer is service-token-only. ISS-211 R1 security audit HIGH.
 		if subject.AccountID != "" {
-			upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
-			upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
-			// SPEC-022 R-12.8: advertise that this gateway reads signed
-			// finality. The MAC key is the bearer, so advertise only when
-			// one is configured.
-			if strings.TrimSpace(s.cfg.Coordinator.UpstreamCoordinatorBearer()) != "" {
-				upReq.Header.Set(settlementTrailersCapabilityHeader, "1")
-			}
+			// SPEC-022 R-12.8: bearer, account, request id and the
+			// signed-finality capability, set together.
+			s.setCoordinatorChatContext(upReq.Header, r, subject.AccountID)
 			if s.isWholesaleAccount(subject.AccountID) {
 				upReq.Header.Set(wholesaleInternalHeader, "1")
 			}

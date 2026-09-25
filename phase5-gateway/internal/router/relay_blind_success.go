@@ -255,9 +255,9 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	up.Header.Set("Content-Type", "application/json")
-	up.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
-	up.Header.Set("X-MacProvider-Account", account)
-	up.Header.Set("X-Request-ID", requestID(r))
+	// SPEC-022 R-12.8: bearer, account, request id and the signed-finality
+	// capability, set together; subject.AccountID is account.
+	s.setCoordinatorChatContext(up.Header, r, subject.AccountID)
 	up.Header.Set(relayBlindExecutionHeader, consumed.ExecutionAuthorization)
 	if session != "" {
 		up.Header.Set("X-MacProvider-Wallet-Session", session)

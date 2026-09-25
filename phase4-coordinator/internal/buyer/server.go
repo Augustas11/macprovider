@@ -2352,6 +2352,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// semantics for what used to be captured outer-scope variables.
 	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID, externalRequestID, accountID, authenticatedAccount, hasAuthenticatedAccount)
 	rec.settlementTrailersNegotiated = s.gatewayNegotiatedSettlementTrailers(r.Header)
+	// Runs before net/http sends the trailers (settlement_trailers.go).
+	defer finalizeNegotiatedSettlementFinality(w.Header(), rec)
 	// #766 single-terminal-wins arbiter (observe-only). Deferred here so the
 	// agreement check runs after the whole request has settled — the WS paths
 	// record their billing row AFTER the terminal write, so an end-of-handler

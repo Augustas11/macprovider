@@ -53,6 +53,24 @@ func settlementFinalityMAC(key, accountID, requestID, internalRequestID string, 
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
+// setCoordinatorChatContext stamps a gateway-to-coordinator chat request
+// that can return a settleable 200 with the trusted context the finality MAC
+// binds: the service-token bearer, the account and request id the gateway
+// settles under (settlementFinalityBinding), and the signed-finality
+// capability. Every chat builder goes through it, so none can forget the
+// capability and have its 200s held under the pin
+// (TestEveryCoordinatorChatBuilderNegotiatesSignedFinality).
+func (s *Server) setCoordinatorChatContext(h http.Header, r *http.Request, accountID string) {
+	bearer := s.cfg.Coordinator.UpstreamCoordinatorBearer()
+	h.Set("Authorization", "Bearer "+bearer)
+	h.Set("X-MacProvider-Account", accountID)
+	h.Set("X-Request-ID", requestID(r))
+	// The MAC key is the bearer, so advertise only when one is configured.
+	if strings.TrimSpace(bearer) != "" {
+		h.Set(settlementTrailersCapabilityHeader, "1")
+	}
+}
+
 // settlementFinalityMACValues are the finality values in MAC order.
 func settlementFinalityMACValues(h http.Header) []string {
 	return []string{
