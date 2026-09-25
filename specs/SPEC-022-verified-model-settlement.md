@@ -47,7 +47,9 @@ pairing stays safe. The gateway pin `coordinator.require_settlement_trailers`
 (default off), set once both sides are deployed, also holds a 200 that carries
 no signed finality, closing the strip-everything downgrade; because a
 negotiating coordinator signs every 200, the pin holds only a stripped
-declaration or MAC.
+declaration or MAC. A rollback stops buyer traffic, drains gateway
+settlement holds, turns the pin off, rolls back the coordinator (and the
+gateway if needed), then resumes traffic.
 
 ### v0.2.1
 
@@ -1091,8 +1093,11 @@ the pool attempts recorded before a downgrade.
   are deployed, the gateway pin `coordinator.require_settlement_trailers:
   true` holds any coordinator 200 (streaming or non-streaming) without signed
   finality as `missing_settlement_finality_trailer`, so stripping the whole
-  declaration cannot downgrade settlement to header or legacy mode; the pin
-  MUST be off before a coordinator rollback. The gateway accepts a tuple only
+  declaration cannot downgrade settlement to header or legacy mode. A
+  rollback MUST stop buyer traffic, drain gateway settlement holds to zero,
+  turn the pin off, roll back the coordinator (and the gateway if needed),
+  and only then resume traffic; turning the pin off under live traffic would
+  let stripped or unsigned responses settle from headers or legacy mode. The gateway accepts a tuple only
   with a valid MAC bound to the account and request id it sent and the
   coordinator's internal request id, and holds a missing, unsigned, tampered,
   or replayed tuple as `missing_settlement_finality_trailer` (resolved by the

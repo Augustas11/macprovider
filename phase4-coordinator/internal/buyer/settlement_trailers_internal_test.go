@@ -401,3 +401,28 @@ func TestFinalizeNegotiatedSettlementFinality(t *testing.T) {
 		t.Fatalf("finalizer touched a non-negotiated response: %v", plain)
 	}
 }
+
+// Codex ARCH MEDIUM (WS, no route snapshot): a negotiated WS non-streaming
+// success whose attempt recorded no route snapshot takes the delivered-only
+// order and ends with a signed legacy tuple in its trailers, never an
+// unsigned or empty declaration the gateway would hold.
+func TestWSNegotiatedNoSnapshotSendsSignedLegacyTrailers(t *testing.T) {
+	reqLog, _ := h4OpenRequestLog(t)
+	var observed *requestTerminal
+	s := h4Server(t, reqLog, h4RelaySuccess(), &observed)
+	rr := h4PostChatNegotiated(t, s, []byte(h4ChatBody))
+	res := rr.Result()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", res.StatusCode, rr.Body.String())
+	}
+	if res.Header.Get(settlementModeHeader) != "" || res.Trailer.Get(settlementModeHeader) != settlementLegacyMode {
+		t.Fatalf("header mode=%q trailer mode=%q, want the legacy tuple as a trailer only", res.Header.Get(settlementModeHeader), res.Trailer.Get(settlementModeHeader))
+	}
+	values := make([]string, 0, len(settlementOutcomeHeaderNames))
+	for _, name := range settlementOutcomeHeaderNames {
+		values = append(values, res.Trailer.Get(name))
+	}
+	if want := settlementFinalityMAC(h4GatewayToken, "acct_h4", "", res.Header.Get(internalRequestIDHeader), values); res.Trailer.Get(settlementFinalityMACHeader) != want {
+		t.Fatalf("legacy MAC=%q, want %q", res.Trailer.Get(settlementFinalityMACHeader), want)
+	}
+}

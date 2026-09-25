@@ -277,47 +277,55 @@ provider credit is created. A coordinator from this release on also refuses a da
 `billing_compat_floor` is above its own contract, so a later downgrade onto a
 binary that cannot read newer settlement rows fails closed at startup.
 
-Before any rollback, set `coordinator.require_settlement_trailers: false`
-and restart the gateway: a coordinator older than this release declares no
-trailers, and with the pin on every one of its 200s would be held. Turn the
-pin off before rolling the coordinator back.
+Rollback, in this order. Turning the pin off while buyer traffic runs would
+let a stripped or unsigned response fall back to header or legacy
+settlement, and a gateway database restore erases whatever it has not
+settled, so traffic stops and holds drain first:
 
-Rollback runs in the reverse order: withdraw v2 allowlists (a policy core with
-an empty `runtime_allowlist`), then the CLI, then the gateway, then the
-coordinator. The coordinator rollback needs no gateway action beyond the pin:
-a v0.2.2 gateway reads an older coordinator's header finality.
-
-Prefer rolling the gateway forward: v14 only widens the
-`usage_events.token_source` CHECK. A gateway older than this release
-(`maxKnownSchemaVersion` 13) refuses a v14 database at open, and the only
-rollback the tooling supports is the manual recipe `deploy-pearl-vps.sh`
-prints at the end of a deploy: stop the gateway, reinstall
-`/opt/macprovider/gateway.prev`, and restore the newest
-`gateway.db.pre-deploy.<UTC timestamp>` snapshot that step 2d took with
-`sqlite3 .backup`. The script never restores the database on its own. That
-restore discards every gateway write since the snapshot: accounts and API
-keys issued, quota reservations and their settlement holds, usage
-(debit) rows, demo usage, and wallet-session state. If a gateway rollback is
-unavoidable:
-
-1. Turn the pin off (above), then stop buyer traffic to the gateway so no new
-   reservation opens.
+1. Stop buyer traffic to the gateway, so no new reservation opens.
 2. Drain settlement holds to zero with the reconciler
    (`POST /admin/settlement/reconcile` with the operator key, repeated) until
    `SELECT COUNT(*) FROM quota_reservations WHERE status = 'active' AND
    settlement_hold = 1` returns 0. A hold the reconciler cannot resolve
-   (`coordinator_404_held`) needs an operator decision before the restore,
-   because the restore would erase it.
-3. Export every row written after the snapshot timestamp from `accounts`,
+   (`coordinator_404_held`) needs an operator decision here, before anything
+   is rolled back.
+3. Set `coordinator.require_settlement_trailers: false` and restart the
+   gateway. A coordinator older than this release signs nothing, so with the
+   pin on every one of its 200s would be held.
+4. Roll back in the reverse of the rollout order: withdraw v2 allowlists (a
+   policy core with an empty `runtime_allowlist`), then the CLI, then the
+   gateway only if it must go (below), then the coordinator. The coordinator
+   rollback needs nothing more from the gateway: a v0.2.2 gateway reads an
+   older coordinator's header finality.
+5. Resume buyer traffic.
+
+Prefer rolling the gateway forward: v14 only widens the
+`usage_events.token_source` CHECK. A gateway older than this release
+(`maxKnownSchemaVersion` 13) refuses a v14 database at open. The
+`deploy-pearl-vps.sh` gateway deploy snapshots `gateway.db` at step 2d
+(`sqlite3 .backup` to `gateway.db.pre-deploy.<UTC timestamp>`) and, at the end
+of the run, only prints a rollback recipe: every restore command in its
+"Rollback:" block (script lines 761-797) is an `echo`, so the script itself
+never restores. The printed recipe, run by an operator, stops the gateway,
+reinstalls `/opt/macprovider/gateway.prev`, deletes `gateway.db-wal` and
+`gateway.db-shm`, and installs the snapshot over `gateway.db`. That discards
+every gateway write since the snapshot, including anything only in the WAL:
+accounts and API keys issued, quota reservations and their settlement holds,
+usage (debit) rows, demo usage, and wallet-session state. A gateway rollback
+therefore runs inside step 4 above, after traffic stopped and holds drained,
+and only as:
+
+1. Export every row written after the snapshot timestamp from `accounts`,
    `account_identities`, `api_keys`, `api_key_events`, `quota_reservations`,
    `usage_events`, `demo_usage_events`, and the `wallet_session*` tables
    (their `created_at`, `settled_at` or equivalent timestamp is after the
    snapshot's). These are the buyer debits and account state the restore
-   would lose.
-4. Restore the snapshot and the `.prev` binary per the printed recipe, then
-   re-apply the exported rows to the restored database before starting the
-   older gateway, and reconcile daily quota totals for the affected accounts.
-   Skipping this is only acceptable when step 3 exported nothing.
+   would lose. Export before running any part of the printed recipe.
+2. Run the printed recipe (binary, WAL/SHM removal, snapshot install), but do
+   not start traffic.
+3. Re-apply the exported rows to the restored database, reconcile daily quota
+   totals for the affected accounts, then start the older gateway. Skipping
+   this is only acceptable when step 1 exported nothing.
 
 Rollback to a coordinator that predates SPEC-022 v0.2.0, once any pool route
 has run on the new coordinator:
