@@ -42,6 +42,13 @@ private enum ReleaseSignatureEncoding {
 
 struct SelfUpdate {
     static let defaultReleasesAPIURL = "https://api.github.com/repos/Augustas11/macprovider/releases/latest"
+    /// Byte-identical copies of each GitHub release, for hosts that cannot
+    /// reach GitHub (#1737). Only tag-addressed releases are read from here;
+    /// the checksum signature, artifact index, code identity, and version
+    /// checks stay the authority, so the mirror host is untrusted.
+    static let releaseMirrorHost = "download.malibu.tech"
+    static let releaseMirrorPathPrefix = "/releases/"
+    static let maxReleaseMirrorMetadataBytes = 256 * 1_024
     static let launchdLabel = "live.malibu.provider"
     static let watchdogLaunchdLabel = "live.malibu.provider-watchdog"
     static let providerReloadLaunchdLabel = "\(launchdLabel)-compatibility-reload"
@@ -111,6 +118,7 @@ struct SelfUpdate {
 
     private let currentVersion: String
     private let releasesAPIURL: String
+    private let releaseMirrorEnabled: Bool
     private let session: URLSession
     private let drainBeforeReplace: (() async throws -> Void)?
     private let replaceBinary: ((URL) throws -> Void)?
@@ -128,6 +136,7 @@ struct SelfUpdate {
     init(
         currentVersion: String,
         releasesAPIURL: String?,
+        releaseMirrorEnabled: Bool = true,
         session: URLSession = .shared,
         markerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
         drainBeforeReplace: (() async throws -> Void)? = nil,
@@ -144,6 +153,7 @@ struct SelfUpdate {
     ) {
         self.currentVersion = currentVersion
         self.releasesAPIURL = releasesAPIURL ?? Self.defaultReleasesAPIURL
+        self.releaseMirrorEnabled = releaseMirrorEnabled
         self.session = session
         self.markerStore = markerStore
         self.drainBeforeReplace = drainBeforeReplace
@@ -794,7 +804,27 @@ struct SelfUpdate {
         return try JSONDecoder().decode([GitHubRelease].self, from: data)
     }
 
+    /// GitHub first. When GitHub cannot answer (transport failure or any
+    /// status but 404), read the same tag from the release mirror. A GitHub
+    /// 404 stays authoritative for "no such tag", and a mirror miss rethrows
+    /// the GitHub error so callers see the same failures as before.
     private func releaseByTag(_ tag: String) async throws -> GitHubRelease {
+        do {
+            return try await gitHubReleaseByTag(tag)
+        } catch UpdateError.releaseNotFound {
+            throw UpdateError.releaseNotFound
+        } catch {
+            guard releaseMirrorEnabled, !Task.isCancelled, !(error is CancellationError) else {
+                throw error
+            }
+            if let mirrored = try? await mirroredReleaseByTag(tag) {
+                return mirrored
+            }
+            throw error
+        }
+    }
+
+    private func gitHubReleaseByTag(_ tag: String) async throws -> GitHubRelease {
         guard let url = releaseTagURL(tag: tag) else {
             throw UpdateError.invalidURL(releasesAPIURL)
         }
@@ -812,6 +842,54 @@ struct SelfUpdate {
             }
         }
         return try JSONDecoder().decode(GitHubRelease.self, from: data)
+    }
+
+    /// `https://download.malibu.tech/releases/<tag>/release.json`: the GitHub
+    /// release object with every asset URL under the same mirror directory.
+    private func mirroredReleaseByTag(_ tag: String) async throws -> GitHubRelease {
+        let url = try Self.releaseMirrorURL(tag: tag, file: "release.json")
+        var request = URLRequest(url: url)
+        request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
+        request.timeoutInterval = 30
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+            throw UpdateError.httpStatus(http.statusCode)
+        }
+        guard data.count <= Self.maxReleaseMirrorMetadataBytes else {
+            throw UpdateError.untrustedDownloadURL(url.absoluteString)
+        }
+        let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+        guard release.tagName == tag else {
+            throw UpdateError.invalidReleaseVersion(release.tagName)
+        }
+        let directory = try Self.releaseMirrorURL(tag: tag, file: nil).path
+        for asset in release.assets {
+            guard !asset.name.isEmpty,
+                  !asset.name.contains("/"),
+                  asset.name != "..",
+                  asset.browserDownloadURL.scheme?.lowercased() == "https",
+                  asset.browserDownloadURL.host?.lowercased() == Self.releaseMirrorHost,
+                  asset.browserDownloadURL.path == directory + "/" + asset.name
+            else {
+                throw UpdateError.untrustedDownloadURL(asset.browserDownloadURL.absoluteString)
+            }
+        }
+        return release
+    }
+
+    static func releaseMirrorURL(tag: String, file: String?) throws -> URL {
+        _ = try validateReleaseTag(tag)
+        guard !tag.contains("/"), !tag.contains(".."), file.map({ !$0.contains("/") && $0 != ".." }) ?? true else {
+            throw UpdateError.invalidReleaseVersion(tag)
+        }
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = releaseMirrorHost
+        components.path = releaseMirrorPathPrefix + tag + (file.map { "/" + $0 } ?? "")
+        guard let url = components.url else {
+            throw UpdateError.invalidURL(components.path)
+        }
+        return url
     }
 
     private func releaseTagURL(tag: String) -> URL? {
@@ -2260,6 +2338,14 @@ struct SelfUpdate {
     private func validateDownloadURL(_ url: URL) throws {
         guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased() else {
             throw UpdateError.untrustedDownloadURL(url.absoluteString)
+        }
+        if releaseMirrorEnabled,
+           host == Self.releaseMirrorHost,
+           url.port == nil,
+           url.path.hasPrefix(Self.releaseMirrorPathPrefix),
+           !url.path.contains("/../")
+        {
+            return
         }
         guard host == "github.com" || host.hasSuffix(".github.com") || host == "objects.githubusercontent.com" else {
             throw UpdateError.untrustedDownloadURL(url.absoluteString)
