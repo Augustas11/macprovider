@@ -494,19 +494,32 @@ stopped and holds drained, and only as:
    `/opt/macprovider/gateway.prev` only if its sha256 matches that release's
    published gateway binary; if a later deploy replaced it, install the
    pre-v14 release binary explicitly.
-4. Export every row written after that snapshot's timestamp from `accounts`,
+4. Export every row written after that snapshot's timestamp from every
+   gateway table that takes durable writes while it serves: `accounts`,
    `account_identities`, `api_keys`, `api_key_events`, `quota_reservations`,
-   `usage_events`, `demo_usage_events`, and the `wallet_session*` tables
-   (their `created_at`, `settled_at` or equivalent timestamp is after the
-   snapshot's). These are the buyer debits and account state the restore
-   would lose.
+   `usage_events`, `demo_usage_events`, `demo_session_events`,
+   `wallet_identities`, the `wallet_session*` tables, `audit_events`,
+   `signup_events`, `feedback_events`, `public_issuance_events`,
+   `capacity_signal_events`, `relay_blind_replays` (replay protection),
+   `runtime_config` (operator changes), `settlement_fallback_candidates` and
+   `settlement_reconcile_attempts` (their `created_at`, `settled_at` or
+   equivalent timestamp is after the snapshot's). These are the buyer
+   debits, account state, audit trail, replay guards and reconcile bindings
+   the restore would lose. Not exported: `schema_migrations` (the restore's
+   own version must stay), and the short-lived `oauth_states`,
+   `oauth_handoffs` and `concurrency_reservations`, which are empty or
+   expired once traffic is stopped. Check the list against the gateway's
+   `CREATE TABLE` statements (`phase5-gateway/internal/storage/sqlite/`)
+   for both releases before the export: a table added since this runbook
+   was written belongs in it too.
 5. Run the printed recipe's restore steps with the named snapshot and binary,
    up to and including the snapshot install and its `PRAGMA
    integrity_check`, but leave out its final `systemctl start
    macprovider-gateway` and `/healthz` lines: the gateway stays stopped.
 6. Re-apply the exported rows to the restored database with `sqlite3`,
-   reconcile daily quota totals for the affected accounts, then start the
-   older gateway and check `/healthz`. Buyer traffic stays blocked at nginx
+   then start the older gateway and check `/healthz`. There is no separate
+   quota total to fix: daily quota is computed from `usage_events` and
+   `quota_reservations`, so re-applying those rows restores it. Buyer traffic stays blocked at nginx
    until step 5 of the rollback. Skipping the re-apply is only acceptable
    when step 4 exported nothing.
 
