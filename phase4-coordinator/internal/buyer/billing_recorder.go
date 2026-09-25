@@ -91,7 +91,14 @@ type billingRecorder struct {
 	accountID               string
 	authenticatedAccount    requestlog.AuthenticatedAccount
 	hasAuthenticatedAccount bool
-	promptTokenUpperBound   *int64
+	// settlementTrailersNegotiated: the gateway advertised non-streaming
+	// trailer finality (settlement_trailers.go). Without it non-streaming
+	// keeps the pre-#1690 record-before-write order and header finality.
+	settlementTrailersNegotiated bool
+	// settlementFinalityMACActive: this response declared MAC'd finality
+	// trailers, so every finality tuple set on it is signed.
+	settlementFinalityMACActive bool
+	promptTokenUpperBound       *int64
 
 	// attemptN is the running per-provider-attempt counter. Pre-refactor
 	// this was billingAttemptN, incremented via deferred closure on

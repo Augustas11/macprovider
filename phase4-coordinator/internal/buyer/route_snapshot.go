@@ -565,6 +565,7 @@ func setInternalSettlementOutcomeHeaders(dst http.Header, rec *billingRecorder, 
 		return
 	}
 	setSettlementOutcomeHeaders(dst, state)
+	setSettlementFinalityMAC(dst, rec)
 }
 
 func declareInternalSettlementOutcomeTrailers(dst http.Header, rec *billingRecorder) {

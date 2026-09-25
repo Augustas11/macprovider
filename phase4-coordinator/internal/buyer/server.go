@@ -2351,6 +2351,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// preserving the pre-refactor closure's "latest value at fire time"
 	// semantics for what used to be captured outer-scope variables.
 	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID, externalRequestID, accountID, authenticatedAccount, hasAuthenticatedAccount)
+	rec.settlementTrailersNegotiated = s.gatewayNegotiatedSettlementTrailers(r.Header)
 	// #766 single-terminal-wins arbiter (observe-only). Deferred here so the
 	// agreement check runs after the whole request has settled — the WS paths
 	// record their billing row AFTER the terminal write, so an end-of-handler
@@ -2902,6 +2903,10 @@ func (s *Server) forwardWSNonStreamSequence(
 			logSuccess := func(attempt requestLogAttempt) error {
 				receiptState, hasReceiptState, err := logAttemptWithReceiptState(state.provider, http.StatusOK, attempt, state.explicitRetries)
 				if err != nil {
+					// After delivery (negotiated trailers) the buyer already
+					// has the body: send the explicit hold. A no-op in the
+					// record-before-write order, which answers 500 instead.
+					setSettlementRecordFailedHold(w.Header(), rec)
 					return err
 				}
 				if hasReceiptState {
@@ -2923,9 +2928,17 @@ func (s *Server) forwardWSNonStreamSequence(
 			// Settlement pre-dispatch guard passed; we are now dispatching to the
 			// provider. Any non-503 terminal from here bills (item 18).
 			rec.markProviderDispatched()
-			result, attempt := s.forwardWS(w, r, requestID, dispatchBody, state.provider, false, s.attemptTimeout(r), logSuccess, func(h http.Header) {
-				declareInternalSettlementOutcomeTrailers(h, rec)
-			}, settlementMetadata, state, rec.attemptN)
+			// nil keeps the pre-#1690 record-before-write order for a
+			// gateway that did not advertise trailer finality.
+			var declareTrailers func(http.Header)
+			if rec.settlementTrailersNegotiated {
+				declareTrailers = func(h http.Header) {
+					if settlementMetadata != nil {
+						declareNonStreamingSettlementTrailers(h, rec)
+					}
+				}
+			}
+			result, attempt := s.forwardWS(w, r, requestID, dispatchBody, state.provider, false, s.attemptTimeout(r), logSuccess, declareTrailers, settlementMetadata, state, rec.attemptN)
 			tr := classifyWSResult(result, attempt)
 			return dispatchedAttempt{
 				tr:           tr,
@@ -3234,6 +3247,27 @@ func (s *Server) forwardHTTPSequence(
 					cancelAttempt()
 					return cancelled, true
 				}
+				if !rec.settlementTrailersNegotiated {
+					// A gateway that did not advertise trailer finality
+					// reads it from headers only: keep the pre-#1690 order,
+					// record before the write (settlement_trailers.go).
+					if err := rec.withPendingReceipt(state.provider, receiptValue, func() error {
+						return rec.logProviderRowWithCacheEstimateAndOutput(state.provider, http.StatusOK, promptTok, cachedPromptTok, completionTok, "", "", state.explicitRetries, estimatedCompletion, output)
+					}); err != nil {
+						cancelAttempt()
+						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
+						return dispatchedAttempt{}, false
+					}
+					receiptState, hasReceiptState, err := rec.ingestSettlementReceipt(state.provider, receiptValue)
+					if err != nil {
+						cancelAttempt()
+						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log settlement receipt")
+						return dispatchedAttempt{}, false
+					}
+					if hasReceiptState {
+						setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
+					}
+				}
 				setReceiptHeaderForProvider(w.Header(), receiptValue, state.provider)
 				w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 				if w.Header().Get("Content-Type") == "" {
@@ -3247,10 +3281,19 @@ func (s *Server) forwardHTTPSequence(
 					return cancelled, true
 				}
 				s.reconcileForwardedSlotAvailable(state)
+				if !rec.settlementTrailersNegotiated {
+					w.WriteHeader(http.StatusOK)
+					s.stickyStore(r.Header, state.provider, req.Model)
+					_, _ = w.Write(respBody)
+					cancelAttempt()
+					return dispatchedAttempt{}, false
+				}
 				// Delivered-only (SPEC-022 R-5.6): the attempt is recorded
 				// only once the body reached the buyer, so its settlement
-				// outcome travels as trailers.
-				declareInternalSettlementOutcomeTrailers(w.Header(), rec)
+				// outcome travels as MAC'd trailers.
+				if settlementMetadata != nil {
+					declareNonStreamingSettlementTrailers(w.Header(), rec)
+				}
 				w.WriteHeader(http.StatusOK)
 				if !writeDelivered(w, respBody) {
 					cancelAttempt()
@@ -3268,11 +3311,13 @@ func (s *Server) forwardHTTPSequence(
 				}); err != nil {
 					cancelAttempt()
 					s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("non-streaming success log failed after delivery")
+					setSettlementRecordFailedHold(w.Header(), rec)
 					return dispatchedAttempt{}, false
 				}
 				receiptState, hasReceiptState, err := rec.ingestSettlementReceipt(state.provider, receiptValue)
 				if err != nil {
 					s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("non-streaming settlement receipt log failed after delivery")
+					setSettlementRecordFailedHold(w.Header(), rec)
 				} else if hasReceiptState {
 					setInternalSettlementOutcomeHeaders(w.Header(), rec, receiptState)
 				}
@@ -3789,6 +3834,17 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				markProviderDone()
 				return wsForwardCancelled, requestLogAttempt{}
 			}
+			// A nil declareOutcomeTrailers is a caller that did not
+			// negotiate trailer finality: the pre-#1690 order, record
+			// before the write with finality in headers.
+			recordBeforeWrite := declareOutcomeTrailers == nil
+			if recordBeforeWrite && logSuccess != nil {
+				if err := logSuccess(attempt); err != nil {
+					writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
+					return wsForwardFailed, requestLogAttempt{Logged: true}
+				}
+				attempt.Logged = true
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
 			w.Header().Set(engineResponseHeader, providerEngineClass(provider))
@@ -3798,12 +3854,16 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			if s.poolAttemptCancelledBeforeCommit(r, state, provider.ProviderID) {
 				return wsForwardCancelled, requestLogAttempt{}
 			}
+			if recordBeforeWrite {
+				w.WriteHeader(http.StatusOK)
+				checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
+				_, _ = w.Write(checkedBody)
+				return wsForwardComplete, attempt
+			}
 			// Delivered-only (SPEC-022 R-5.6): success is recorded only
 			// once the body reached the buyer, so its settlement outcome
-			// travels as trailers.
-			if declareOutcomeTrailers != nil {
-				declareOutcomeTrailers(w.Header())
-			}
+			// travels as MAC'd trailers.
+			declareOutcomeTrailers(w.Header())
 			w.WriteHeader(http.StatusOK)
 			checkedBody = maybeRecoverQwenXMLToolCalls(checkedBody, state)
 			if !writeDelivered(w, checkedBody) {
@@ -3813,7 +3873,12 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			}
 			if logSuccess != nil {
 				if err := logSuccess(attempt); err != nil {
+					// logSuccess sent the explicit hold trailers. The one
+					// durable write for this attempt was made and failed;
+					// Logged stops the terminal handler writing a second,
+					// provider-fault row for a delivered body.
 					s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws non-streaming success log failed after delivery")
+					return wsForwardFailed, requestLogAttempt{Logged: true}
 				}
 				attempt.Logged = true
 			}

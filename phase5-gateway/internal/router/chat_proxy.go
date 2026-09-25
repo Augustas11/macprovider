@@ -674,6 +674,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if subject.AccountID != "" {
 			upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
 			upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
+			// SPEC-022 R-12.8: advertise that this gateway reads
+			// non-streaming finality from MAC'd trailers. The MAC key is
+			// the bearer, so advertise only when one is configured.
+			if s.cfg.Coordinator.UpstreamCoordinatorBearer() != "" {
+				upReq.Header.Set(settlementTrailersCapabilityHeader, "1")
+			}
 			if s.isWholesaleAccount(subject.AccountID) {
 				upReq.Header.Set(wholesaleInternalHeader, "1")
 			}
@@ -1040,10 +1046,18 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
 	}
-	// Delivered-only billing (SPEC-022 R-5.6): the coordinator records a
-	// non-streaming success only after its body write, so the settlement
-	// finality of a 200 arrives as trailers, read with the body above.
-	resp.Header = withSettlementFinalityTrailers(resp)
+	// Delivered-only billing (SPEC-022 R-5.6): a coordinator that negotiated
+	// trailers records a non-streaming success only after its body write, so
+	// the finality of a 200 arrives as MAC'd trailers, read with the body
+	// above. Missing or unauthenticated trailer finality holds; it never
+	// falls back to a local debit.
+	finality := coordinatorNonStreamingSettlementFinality(resp, s.cfg.Coordinator.UpstreamCoordinatorBearer(), subject.AccountID, requestID(r))
+	settleWithFinality := func(prompt, completion int64, source, outcome string) bool {
+		if finality.Reason == missingSettlementFinalityTrailer && s.settleMissingFinalityTrailerAsObserve(r, subject, prompt, completion, maxUsageTokens, source, outcome, window, resp) {
+			return true
+		}
+		return s.settleBeforeResponseWithFinality(w, r, subject, prompt, completion, maxUsageTokens, source, outcome, finality, resp.Header, false)
+	}
 	anthropicDuplicateProviderResponse := false
 	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream && anthropicRawHasDuplicateKeys(body) {
 		anthropicDuplicateProviderResponse = true
@@ -1061,14 +1075,14 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		if ok && usageErr == nil {
 			settlePrompt, settleCompletion, settleSource = usage.PromptTokens, usage.CompletionTokens, tokenSource
 		}
-		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, settlePrompt, settleCompletion, maxUsageTokens, settleSource, "invalid_provider_response", resp.Header) {
+		if !settleWithFinality(settlePrompt, settleCompletion, settleSource, "invalid_provider_response") {
 			return
 		}
 		writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_response", "Upstream provider returned invalid response")
 		return
 	}
 	if usageErr != nil {
-		if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_usage", resp.Header) {
+		if !settleWithFinality(promptEstimate, 0, "gateway_estimated", "invalid_provider_usage") {
 			return
 		}
 		writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_usage", "Upstream provider returned invalid usage")
@@ -1082,7 +1096,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 			if ok {
 				settlePrompt, settleCompletion, settleSource = usage.PromptTokens, usage.CompletionTokens, tokenSource
 			}
-			if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, settlePrompt, settleCompletion, maxUsageTokens, settleSource, "invalid_provider_response", resp.Header) {
+			if !settleWithFinality(settlePrompt, settleCompletion, settleSource, "invalid_provider_response") {
 				return
 			}
 			writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_response", "Upstream provider returned invalid response")
@@ -1091,14 +1105,14 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	}
 	if adapter := anthropicMessagesAdapterFromContext(r.Context()); adapter != nil && !adapter.stream {
 		if err := adapter.prepareNonStreamingResponse(body); err != nil {
-			if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "invalid_provider_response", resp.Header) {
+			if !settleWithFinality(usage.PromptTokens, usage.CompletionTokens, tokenSource, "invalid_provider_response") {
 				return
 			}
 			writeAnthropicMessagesError(w, http.StatusBadGateway, "api_error", "invalid_provider_response", "Upstream provider returned invalid response")
 			return
 		}
 	}
-	if !s.settleBeforeResponseWithCoordinatorFinality(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok", resp.Header) {
+	if !settleWithFinality(usage.PromptTokens, usage.CompletionTokens, tokenSource, "ok") {
 		return
 	}
 	emitProviderAttribution(w.Header(), resp.Header)
@@ -2402,7 +2416,12 @@ func (s *Server) nudgeBoundSettlementReconciler(r *http.Request, subject usageSu
 }
 
 func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string, h http.Header, boundHold bool) bool {
-	finality := coordinatorSettlementFinalityFromHeaders(h)
+	return s.settleBeforeResponseWithFinality(w, r, subject, prompt, completion, maxTotal, source, outcome, coordinatorSettlementFinalityFromHeaders(h), h, boundHold)
+}
+
+// settleBeforeResponseWithFinality settles a response from an already-parsed
+// coordinator finality; h still supplies the coordinator request binding.
+func (s *Server) settleBeforeResponseWithFinality(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string, finality coordinatorSettlementFinality, h http.Header, boundHold bool) bool {
 	switch finality.Action {
 	case settlementFinalityLegacy:
 		return s.settleBeforeResponse(w, r, subject, prompt, completion, maxTotal, source, outcome)
@@ -2458,33 +2477,12 @@ func (s *Server) settleBeforeResponseWithCoordinatorFinalityPolicy(w http.Respon
 
 func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string, resp *http.Response) {
 	finality := coordinatorStreamingSettlementFinality(resp)
-	internalRequestID := strings.TrimSpace(resp.Header.Get(coordinatorInternalRequestIDHeader))
-	if finality.Reason == "missing_settlement_finality_trailer" && !subject.ReservationCreatedAt.IsZero() && coordinatorHeadersPermitObserveFallback(resp.Header) {
+	if finality.Reason == missingSettlementFinalityTrailer {
 		fallbackOutcome := outcome
 		if fallbackOutcome == "ok" {
 			fallbackOutcome = "unverified_streaming"
 		}
-		if reservationWindow == "" {
-			reservationWindow = subject.ReservationCreatedAt.UTC().Format("2006-01-02")
-		}
-		candidate := storage.SettlementFallbackCandidate{
-			RequiredInternalRequestID: internalRequestID,
-			AccountID:                 subject.AccountID, RequestID: requestID(r), ReservationCreatedAt: subject.ReservationCreatedAt,
-			WalletSessionID: subject.WalletSessionID, DemoIdentity: subject.DemoIdentity, DemoTokenHash: subject.DemoTokenHash,
-			WindowDate: reservationWindow, PromptTokens: prompt, CompletionTokens: completion,
-			MaxTotalTokens: maxTotal, TokenSource: source, Outcome: fallbackOutcome,
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := s.store.SaveSettlementFallbackCandidate(ctx, candidate)
-		cancel()
-		if err != nil {
-			slog.Error("gateway could not persist unknown-mode settlement candidate", "request_id", requestID(r), "error", err)
-		} else if s.resolveMissingFinalityAsObserve(r, subject, resp) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := s.settleObserveFallbackCandidate(ctx, candidate); err != nil {
-				slog.Error("gateway deferred observe fallback to durable reconciliation", "request_id", requestID(r), "error", err)
-			}
+		if s.settleMissingFinalityTrailerAsObserve(r, subject, prompt, completion, maxTotal, source, fallbackOutcome, reservationWindow, resp) {
 			return
 		}
 	}
@@ -2528,6 +2526,43 @@ func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Reque
 	default:
 		s.settleAfterCommit(r, subject, prompt, completion, maxTotal, source, outcome, reservationWindow)
 	}
+}
+
+// settleMissingFinalityTrailerAsObserve handles finality trailers that were
+// declared but did not arrive (or, non-streaming, failed their MAC). It saves
+// a fallback candidate and, only when the coordinator's request-scoped
+// finality lookup says the attempt ran in observe mode, settles it as legacy
+// accounting and returns true. Otherwise the caller holds.
+func (s *Server) settleMissingFinalityTrailerAsObserve(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string, resp *http.Response) bool {
+	if subject.ReservationCreatedAt.IsZero() || !coordinatorHeadersPermitObserveFallback(resp.Header) {
+		return false
+	}
+	if reservationWindow == "" {
+		reservationWindow = subject.ReservationCreatedAt.UTC().Format("2006-01-02")
+	}
+	candidate := storage.SettlementFallbackCandidate{
+		RequiredInternalRequestID: strings.TrimSpace(resp.Header.Get(coordinatorInternalRequestIDHeader)),
+		AccountID:                 subject.AccountID, RequestID: requestID(r), ReservationCreatedAt: subject.ReservationCreatedAt,
+		WalletSessionID: subject.WalletSessionID, DemoIdentity: subject.DemoIdentity, DemoTokenHash: subject.DemoTokenHash,
+		WindowDate: reservationWindow, PromptTokens: prompt, CompletionTokens: completion,
+		MaxTotalTokens: maxTotal, TokenSource: source, Outcome: outcome,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	err := s.store.SaveSettlementFallbackCandidate(ctx, candidate)
+	cancel()
+	if err != nil {
+		slog.Error("gateway could not persist unknown-mode settlement candidate", "request_id", requestID(r), "error", err)
+		return false
+	}
+	if !s.resolveMissingFinalityAsObserve(r, subject, resp) {
+		return false
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.settleObserveFallbackCandidate(ctx, candidate); err != nil {
+		slog.Error("gateway deferred observe fallback to durable reconciliation", "request_id", requestID(r), "error", err)
+	}
+	return true
 }
 
 // Only request-scoped coordinator authority can release an unknown-mode hold
@@ -2742,7 +2777,7 @@ func coordinatorStreamingSettlementFinality(resp *http.Response) coordinatorSett
 		return coordinatorSettlementFinalityFromHeaders(resp.Trailer)
 	}
 	if hasSettlementFinalityTrailerDeclaration(resp) {
-		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: "missing_settlement_finality_trailer"}
+		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: missingSettlementFinalityTrailer}
 	}
 	return coordinatorSettlementFinalityFromHeaders(resp.Header)
 }
@@ -2803,22 +2838,6 @@ func hasAnySettlementFinalityHeader(h http.Header) bool {
 		}
 	}
 	return false
-}
-
-// withSettlementFinalityTrailers is resp.Header with any settlement finality
-// trailers the coordinator sent folded in. Without them the headers stand as
-// they are.
-func withSettlementFinalityTrailers(resp *http.Response) http.Header {
-	if !hasAnySettlementFinalityHeader(resp.Trailer) {
-		return resp.Header
-	}
-	h := resp.Header.Clone()
-	for name, values := range resp.Trailer {
-		if isSettlementFinalityHeader(name) {
-			h[name] = append([]string(nil), values...)
-		}
-	}
-	return h
 }
 
 func hasSettlementFinalityTrailerDeclaration(resp *http.Response) bool {

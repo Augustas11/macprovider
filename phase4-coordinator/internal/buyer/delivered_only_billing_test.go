@@ -4,12 +4,18 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,10 +44,23 @@ const deliveredOnlyChatBody = `{"model":"model-a","messages":[{"role":"user","co
 
 const deliveredOnlyCompletion = `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Hello world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9}}`
 
+// settlementTrailersCapabilityHeader is the request header a gateway sends
+// to negotiate non-streaming settlement trailers (settlement_trailers.go).
+const settlementTrailersCapabilityHeader = "X-MacProvider-Internal-Settlement-Trailers"
+
+// postDeliveredOnly posts as a gateway that negotiated settlement trailers.
 func postDeliveredOnly(server *buyer.Server, ctx context.Context, body string, w http.ResponseWriter) {
+	postNonStreaming(server, ctx, body, w, true)
+}
+
+func postNonStreaming(server *buyer.Server, ctx context.Context, body string, w http.ResponseWriter, negotiated bool) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body))).WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer operator-key")
 	req.Header.Set("X-MacProvider-Account", "acct_gateway")
+	req.Header.Set("X-Request-ID", "ext-req-1")
+	if negotiated {
+		req.Header.Set(settlementTrailersCapabilityHeader, "1")
+	}
 	server.Handler().ServeHTTP(w, req)
 }
 
@@ -96,6 +115,15 @@ func TestWSNonStreamingBuyerWriteFailureRecordsNoSuccess(t *testing.T) {
 }
 
 func TestHTTPNonStreamingBuyerWriteFailureRecordsNoSuccess(t *testing.T) {
+	server, dbPath := newDeliveredOnlyHTTPServer(t)
+	postDeliveredOnly(server, context.Background(), deliveredOnlyChatBody, resetBuyerWriter{httptest.NewRecorder()})
+	assertNothingDeliveredBilled(t, dbPath)
+}
+
+// newDeliveredOnlyHTTPServer is an enforce-mode coordinator with one HTTP
+// provider that answers deliveredOnlyCompletion without a receipt.
+func newDeliveredOnlyHTTPServer(t *testing.T) (*buyer.Server, string) {
+	t.Helper()
 	tier2.ResetForTest()
 	t.Cleanup(tier2.ResetForTest)
 	raw, pubkey := routeSnapshotCatalogFixture(t, "delivered-only-http-catalog", time.Now().UTC().Add(time.Hour))
@@ -123,7 +151,6 @@ func TestHTTPNonStreamingBuyerWriteFailureRecordsNoSuccess(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(deliveredOnlyCompletion))
 	}))
-	defer upstream.Close()
 	registry := pool.NewRegistry(nil)
 	registerSettlementProvider(registry, "p1", "session-1", upstream.URL, 20, bytes.Repeat([]byte{0x71}, 32))
 	server := buyer.NewServer(
@@ -135,8 +162,122 @@ func TestHTTPNonStreamingBuyerWriteFailureRecordsNoSuccess(t *testing.T) {
 		buyer.WithBilling(store, cfg),
 		buyer.WithBillingSnapshotID(snapshotID),
 	)
-	postDeliveredOnly(server, context.Background(), deliveredOnlyChatBody, resetBuyerWriter{httptest.NewRecorder()})
-	assertNothingDeliveredBilled(t, dbPath)
+	t.Cleanup(upstream.Close)
+	return server, dbPath
+}
+
+// settlementOutcomeNames are the finality tuple names in MAC order.
+var settlementOutcomeNames = []string{
+	"X-MacProvider-Settlement-Outcome",
+	"X-MacProvider-Settlement-Receipt-Result",
+	"X-MacProvider-Settlement-Reason",
+	"X-MacProvider-Settlement-Closed",
+	"X-MacProvider-Settlement-Mode",
+	"X-MacProvider-Settlement-Policy-Version",
+	"X-MacProvider-Settlement-Pending-Deadline-Unix-Ms",
+}
+
+// independentFinalityMAC re-derives the finality MAC outside the package.
+func independentFinalityMAC(key, account, requestID string, h http.Header) string {
+	fields := []string{"macprovider-settlement-finality-trailers-v1", account, requestID}
+	for _, name := range settlementOutcomeNames {
+		fields = append(fields, h.Get(name))
+	}
+	mac := hmac.New(sha256.New, []byte(key))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		fmt.Fprintf(mac, "%d:%s", len(field), field)
+	}
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// SPEC-022 R-12.8 negotiation: a gateway that advertised trailer finality
+// gets the delivered-only order, the finality tuple as declared trailers
+// (none of it in the headers), and a MAC over it keyed by the service token.
+func TestHTTPNonStreamingNegotiatedCallerGetsMACdTrailerFinality(t *testing.T) {
+	server, _ := newDeliveredOnlyHTTPServer(t)
+	rr := httptest.NewRecorder()
+	postDeliveredOnly(server, context.Background(), deliveredOnlyChatBody, rr)
+	resp := rr.Result()
+	_, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get(settlementOutcomeNames[0]); got != "" {
+		t.Fatalf("finality outcome %q sent as a header; negotiated finality travels only as a trailer", got)
+	}
+	if resp.Trailer.Get(settlementOutcomeNames[0]) == "" {
+		t.Fatalf("no finality outcome trailer: trailers=%v", resp.Trailer)
+	}
+	mac := resp.Trailer.Get("X-MacProvider-Settlement-Finality-Mac")
+	if want := independentFinalityMAC("operator-key", "acct_gateway", "ext-req-1", resp.Trailer); mac == "" || !hmac.Equal([]byte(mac), []byte(want)) {
+		t.Fatalf("finality MAC=%q, want %q", mac, want)
+	}
+}
+
+// A caller that did not advertise trailer finality (a pre-#1690 gateway)
+// gets the pre-#1690 order: the attempt is recorded before the write and its
+// finality arrives in headers, which that gateway reads. No trailers.
+func TestHTTPNonStreamingLegacyCallerGetsHeaderFinalityRecordedBeforeWrite(t *testing.T) {
+	server, dbPath := newDeliveredOnlyHTTPServer(t)
+	rr := httptest.NewRecorder()
+	postNonStreaming(server, context.Background(), deliveredOnlyChatBody, rr, false)
+	resp := rr.Result()
+	_, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+	if resp.Header.Get(settlementOutcomeNames[0]) == "" {
+		t.Fatal("a legacy caller got no header finality")
+	}
+	if len(resp.Header.Values("Trailer")) != 0 || resp.Header.Get("X-MacProvider-Settlement-Finality-Mac") != "" {
+		t.Fatalf("a legacy caller got trailer declarations or a MAC: %v", resp.Header)
+	}
+
+	// The pre-#1690 order records before the write, so a failed buyer write
+	// still leaves the full success recorded (SPEC-022 v0.2.2 change log).
+	server2, dbPath2 := newDeliveredOnlyHTTPServer(t)
+	postNonStreaming(server2, context.Background(), deliveredOnlyChatBody, resetBuyerWriter{httptest.NewRecorder()}, false)
+	db, err := sql.Open("sqlite", dbPath2)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var terminalState string
+	if err := db.QueryRow(`SELECT terminal_state FROM settlement_attempt_outputs`).Scan(&terminalState); err != nil {
+		t.Fatalf("query attempt output: %v", err)
+	}
+	if terminalState != billing.TerminalStateNormalDone {
+		t.Fatalf("legacy caller recorded %s, want normal_done recorded before the write", terminalState)
+	}
+	_ = dbPath
+}
+
+// The WS non-streaming path keeps the same split: a legacy caller is
+// recorded before the write.
+func TestWSNonStreamingLegacyCallerRecordsBeforeWrite(t *testing.T) {
+	h := newBuyerCancelHarness(t, "delivered-only-ws-legacy-catalog", func(h *buyerCancelHarness, ctx context.Context, requestID string, meta *providerws.SettlementReceiptMetadata) *providerws.RelayStream {
+		chunks := make(chan providerws.InferenceResponseChunk, 1)
+		done := make(chan providerws.InferenceResponseEnd, 1)
+		chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Data: deliveredOnlyCompletion}
+		close(chunks)
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1, Usage: json.RawMessage(`{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9}`)}
+		}()
+		return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: make(chan error, 1)}
+	})
+	rr := httptest.NewRecorder()
+	postNonStreaming(h.server, h.ctx, deliveredOnlyChatBody, rr, false)
+	resp := rr.Result()
+	_, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || resp.Header.Get(settlementOutcomeNames[0]) == "" || len(resp.Header.Values("Trailer")) != 0 {
+		t.Fatalf("legacy WS caller: status=%d headers=%v, want 200 with header finality and no trailers", resp.StatusCode, resp.Header)
+	}
+	ev := queryBuyerCancelEvidence(t, h.dbPath)
+	if ev.terminalState != billing.TerminalStateNormalDone {
+		t.Fatalf("terminal_state=%s, want normal_done", ev.terminalState)
+	}
 }
 
 // normalDoneReceipt signs the v0.4 normal_done tuple an honest provider signs
