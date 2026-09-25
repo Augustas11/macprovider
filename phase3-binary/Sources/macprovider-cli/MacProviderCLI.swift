@@ -2670,11 +2670,12 @@ struct ServeCommand: AsyncParsableCommand {
         if resolved.enableReceipts,
            let providerID = resolved.providerID,
            !providerID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let receiptSigningKeyStore = receiptRuntime.signingKeyStore,
            let coordinatorClient {
             receiptRotator = {
                 try await RotateKeyCommand.rotateActiveProvider(
                     providerID: providerID,
-                    keyStore: receiptKeyStore,
+                    keyStore: receiptSigningKeyStore,
                     coordinatorClient: coordinatorClient
                 )
             }
@@ -3383,11 +3384,11 @@ struct ServeCommand: AsyncParsableCommand {
     static func makeReceiptRuntime(
         config: AppConfig,
         keyStore: ReceiptKeyStoring = KeychainReceiptKeyStore()
-    ) throws -> (builder: ReceiptBuilder?, publicKeyBase64: String?) {
+    ) throws -> (builder: ReceiptBuilder?, publicKeyBase64: String?, signingKeyStore: ReceiptKeyStoring?) {
         guard config.enableReceipts,
               let providerID = config.providerID,
               !providerID.isEmpty else {
-            return (nil, nil)
+            return (nil, nil, nil)
         }
         let cachingStore = CachedReceiptKeyStore(keyStore)
         let privateKey: Curve25519.Signing.PrivateKey
@@ -3399,9 +3400,14 @@ struct ServeCommand: AsyncParsableCommand {
         } else {
             privateKey = try cachingStore.loadOrGenerate(providerId: providerID)
         }
+        // The builder caches the signing key for the process lifetime, so a
+        // receipt-key rotation MUST swap through this same caching store
+        // (signingKeyStore). Swapping the underlying store alone leaves the
+        // builder signing with the retired key (#1690 E2E-F9).
         return (
             ReceiptBuilder(keyStore: cachingStore),
-            Data(privateKey.publicKey.rawRepresentation).base64EncodedString()
+            Data(privateKey.publicKey.rawRepresentation).base64EncodedString(),
+            cachingStore
         )
     }
 
