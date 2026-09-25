@@ -248,12 +248,14 @@ allowlists):
    (`/healthz` versions, updater transactions committed), set
    `coordinator.require_settlement_trailers: true` in the gateway config and
    restart the gateway. From then on the gateway holds any coordinator 200,
-   streaming or non-streaming, that declares no settlement trailers as
+   streaming or non-streaming, that carries no signed finality as
    `missing_settlement_finality_trailer` instead of settling it from headers
-   or legacy mode, so stripping the whole trailer declaration on the hop can
-   no longer downgrade settlement. A 200 for an attempt without a route
-   snapshot also declares no trailers and is held for the reconciler; watch
-   the hold count after the restart.
+   or legacy mode, so stripping the trailer declaration on the hop can no
+   longer downgrade settlement. The coordinator signs every 200 it sends this
+   gateway, including a `legacy` tuple for an attempt without a route
+   snapshot (observe mode, a keyless provider), so those settle as before;
+   a hold after the restart means a stripped declaration or MAC. Watch the
+   `missing_settlement_finality_trailer` log reason and the hold count.
 3. Ship the provider CLI that signs pool-authorized loopback receipts
    (SPEC-015 0.4.10).
 4. Only then accept a v2 policy core with a non-empty `runtime_allowlist`.
@@ -282,12 +284,40 @@ pin off before rolling the coordinator back.
 
 Rollback runs in the reverse order: withdraw v2 allowlists (a policy core with
 an empty `runtime_allowlist`), then the CLI, then the gateway, then the
-coordinator. A gateway older than this release (`maxKnownSchemaVersion` 13)
-refuses a v14 database at open, so a gateway rollback restores the pre-deploy
-database snapshot (`deploy-pearl-vps.sh` step 5b). Settlements the new gateway
-already holds are resolved by the reconciler before or after the rollback;
-the older gateway reads coordinator header finality again, which a v0.2.2
-coordinator sends to any caller that does not advertise trailers.
+coordinator. The coordinator rollback needs no gateway action beyond the pin:
+a v0.2.2 gateway reads an older coordinator's header finality.
+
+Prefer rolling the gateway forward: v14 only widens the
+`usage_events.token_source` CHECK. A gateway older than this release
+(`maxKnownSchemaVersion` 13) refuses a v14 database at open, and the only
+rollback the tooling supports is the manual recipe `deploy-pearl-vps.sh`
+prints at the end of a deploy: stop the gateway, reinstall
+`/opt/macprovider/gateway.prev`, and restore the newest
+`gateway.db.pre-deploy.<UTC timestamp>` snapshot that step 2d took with
+`sqlite3 .backup`. The script never restores the database on its own. That
+restore discards every gateway write since the snapshot: accounts and API
+keys issued, quota reservations and their settlement holds, usage
+(debit) rows, demo usage, and wallet-session state. If a gateway rollback is
+unavoidable:
+
+1. Turn the pin off (above), then stop buyer traffic to the gateway so no new
+   reservation opens.
+2. Drain settlement holds to zero with the reconciler
+   (`POST /admin/settlement/reconcile` with the operator key, repeated) until
+   `SELECT COUNT(*) FROM quota_reservations WHERE status = 'active' AND
+   settlement_hold = 1` returns 0. A hold the reconciler cannot resolve
+   (`coordinator_404_held`) needs an operator decision before the restore,
+   because the restore would erase it.
+3. Export every row written after the snapshot timestamp from `accounts`,
+   `account_identities`, `api_keys`, `api_key_events`, `quota_reservations`,
+   `usage_events`, `demo_usage_events`, and the `wallet_session*` tables
+   (their `created_at`, `settled_at` or equivalent timestamp is after the
+   snapshot's). These are the buyer debits and account state the restore
+   would lose.
+4. Restore the snapshot and the `.prev` binary per the printed recipe, then
+   re-apply the exported rows to the restored database before starting the
+   older gateway, and reconcile daily quota totals for the affected accounts.
+   Skipping this is only acceptable when step 3 exported nothing.
 
 Rollback to a coordinator that predates SPEC-022 v0.2.0, once any pool route
 has run on the new coordinator:
