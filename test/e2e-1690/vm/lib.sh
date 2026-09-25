@@ -16,16 +16,16 @@ opkey() { sed -n 's/^OPERATOR_KEY=//p' /etc/macprovider/coordinator.env; }
 # curl_bearer <token> <curl args...>: curl with "Authorization: Bearer
 # <token>" read from a 0600 temp file (curl -H @file), so the token never
 # appears in a process argv. The token reaches this shell function as an
-# argument, which is not an exec.
-curl_bearer() {
-  local tok="$1" f rc; shift
-  f="$(mktemp)" || return 1
-  chmod 600 "$f"
+# argument, which is not an exec. The body runs in a subshell whose EXIT
+# trap removes the header file on every exit, a signal included.
+curl_bearer() (
+  tok="$1"; shift
+  f="$(umask 077 && mktemp)" || exit 1
+  trap 'rm -f "$f"' EXIT
+  trap 'exit 130' INT TERM HUP
   printf 'Authorization: Bearer %s\n' "$tok" >"$f"
-  curl -H @"$f" "$@"; rc=$?
-  rm -f "$f"
-  return $rc
-}
+  curl -H @"$f" "$@"
+)
 # with_coordinator_env <command...>: run a command as macprovider with
 # /etc/macprovider/coordinator.env loaded inside the child shell, so no
 # credential is expanded into an argv (`env KEY=...` would list them).
