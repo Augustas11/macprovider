@@ -195,6 +195,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     let promptTokens: [Int]
     let maxOutputTokens: Int
     let stopTokenSequences: [[Int]]
+    let modelStopTokenIDs: [Int]
     let samplerSeed: Int
     let temperature: Double
     let topP: Double
@@ -223,6 +224,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         promptTokens: [Int],
         maxOutputTokens: Int,
         stopTokenSequences: [[Int]] = [],
+        modelStopTokenIDs: [Int] = [],
         samplerSeed: Int = 0,
         temperature: Double = 1.0,
         topP: Double = 1.0,
@@ -239,6 +241,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.promptTokens = promptTokens
         self.maxOutputTokens = max(0, maxOutputTokens)
         self.stopTokenSequences = stopTokenSequences
+        self.modelStopTokenIDs = modelStopTokenIDs
         self.samplerSeed = samplerSeed
         self.temperature = temperature
         self.topP = topP
@@ -257,6 +260,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         case promptTokens
         case maxOutputTokens
         case stopTokenSequences
+        case modelStopTokenIDs
         case samplerSeed
         case temperature
         case topP
@@ -264,6 +268,11 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         case frequencyPenalty
         case cachedPromptTokens
     }
+}
+
+enum ContinuousBatchSchedulerStopCause: String, Sendable, Equatable {
+    case modelStop = "model_stop"
+    case requestStop = "request_stop"
 }
 
 /// Thread-safe runtime-only observer owned by the canonical scheduler row.
@@ -334,6 +343,9 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
     let snapshot: ContinuousBatchSchedulerSnapshot?
     let settlementDisposition: ContinuousBatchSettlementDisposition
     let retainedCache: ContinuousBatchRetainedCache?
+    /// The explicit generation stop recognized by the scheduler before it
+    /// removes the matched sequence from buyer-visible output.
+    var stopCause: ContinuousBatchSchedulerStopCause? = nil
     /// Canonical serial-tool boundary computed once by the scheduler row.
     var serialToolStopTokenCount: Int? = nil
     /// Keyed hybrid rows only: the row's cache in the serial conversation-cache
@@ -357,6 +369,7 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             snapshot: snapshot,
             settlementDisposition: disposition,
             retainedCache: disposition == .eligibleOwner ? retainedCache : nil,
+            stopCause: stopCause,
             serialToolStopTokenCount: serialToolStopTokenCount,
             serialConversationCache: disposition == .eligibleOwner ? serialConversationCache : nil
         )
@@ -377,6 +390,7 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             snapshot: snapshot,
             settlementDisposition: settlementDisposition,
             retainedCache: cache,
+            stopCause: stopCause,
             serialToolStopTokenCount: serialToolStopTokenCount,
             serialConversationCache: serialConversationCache
         )
@@ -395,6 +409,7 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             && lhs.errorCode == rhs.errorCode
             && lhs.snapshot == rhs.snapshot
             && lhs.settlementDisposition == rhs.settlementDisposition
+            && lhs.stopCause == rhs.stopCause
             && lhs.serialToolStopTokenCount == rhs.serialToolStopTokenCount
             && lhs.retainedCache?.retainedSequence == rhs.retainedCache?.retainedSequence
     }
@@ -1197,6 +1212,7 @@ actor ContinuousBatchScheduler {
         var generatedTokens: [Int]
         var outputTokens: [Int]
         var pendingOutputTokens: [Int]
+        var stopCause: ContinuousBatchSchedulerStopCause? = nil
         var prefillCursor: Int
         var snapshot: ContinuousBatchSchedulerSnapshot
         /// Keyed hybrid rows: recurrent state at each reached checkpoint (<= 2).
@@ -2291,6 +2307,9 @@ actor ContinuousBatchScheduler {
                 return
             }
             row.pendingOutputTokens.removeLast(stopLength)
+            row.stopCause = stopLength == 1 && row.request.modelStopTokenIDs.contains(token)
+                ? .modelStop
+                : .requestStop
             terminalStatus = .stop
         } else if earlyStopIDs.contains(row.request.id) {
             terminalStatus = .stop
@@ -2841,6 +2860,7 @@ actor ContinuousBatchScheduler {
             snapshot: row.snapshot,
             settlementDisposition: isSuccessful ? .eligibleOwner : .notEligible,
             retainedCache: nil,
+            stopCause: isSuccessful ? row.stopCause : nil,
             serialToolStopTokenCount: isSuccessful
                 ? row.request.serialToolStopObserver?.stopTokenCount
                 : nil,
@@ -2873,6 +2893,7 @@ actor ContinuousBatchScheduler {
             snapshot: row.snapshot,
             settlementDisposition: isSuccessful ? .eligibleOwner : .notEligible,
             retainedCache: isSuccessful ? retainedCache : nil,
+            stopCause: isSuccessful ? row.stopCause : nil,
             serialToolStopTokenCount: isSuccessful
                 ? row.request.serialToolStopObserver?.stopTokenCount
                 : nil

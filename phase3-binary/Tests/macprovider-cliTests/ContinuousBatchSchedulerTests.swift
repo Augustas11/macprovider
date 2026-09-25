@@ -3565,13 +3565,15 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             conversationKey: "",
             promptTokens: [1],
             maxOutputTokens: 1,
-            stopTokenSequences: [[7]]
+            stopTokenSequences: [[7]],
+            modelStopTokenIDs: [7]
         ))
 
         XCTAssertEqual(result.outputTokens, [])
         XCTAssertEqual(result.completionTokens, 1)
         XCTAssertEqual(result.emittedTokens, 0)
         XCTAssertEqual(result.terminalStatus, .stop)
+        XCTAssertEqual(result.stopCause, .modelStop)
     }
 
     func testMultiTokenStopPrefixIsHeldBackUntilMatchedOrDisproved() async throws {
@@ -3587,6 +3589,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(stopped.outputTokens, [5])
         XCTAssertEqual(stopped.completionTokens, 3)
         XCTAssertEqual(stopped.terminalStatus, .stop)
+        XCTAssertEqual(stopped.stopCause, .requestStop)
 
         let disprovedBackend = ScriptedBackend(scripts: ["disproved": [5, 7, 9]])
         let disprovedScheduler = try await makeScheduler(maxActiveRows: 1, backend: disprovedBackend)

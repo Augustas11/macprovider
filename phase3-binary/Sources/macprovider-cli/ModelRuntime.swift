@@ -4329,7 +4329,6 @@ actor ModelRuntime: ModelRuntimeServing {
         // before counting it; bill and cache the batched row the same way.
         // Harmony `<|return|>`/`<|call|>` are excluded from this set, as
         // they are from the serial stop set: the parser reads and counts them.
-        let rawGeneratedTokenCount = result.generatedTokens.count
         let serialStopTokenCount = result.serialToolStopTokenCount
         var generatedTokens = droppingTrailingModelStop(
             result.generatedTokens,
@@ -4338,6 +4337,7 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         var completionTokenCount = result.completionTokens
             - (result.generatedTokens.count - generatedTokens.count)
+        let postModelStopTokenCount = generatedTokens.count
         var outputTokens = result.outputTokens
         var truncated = false
         if let serialStopTokenCount, serialStopTokenCount < generatedTokens.count {
@@ -4363,13 +4363,16 @@ actor ModelRuntime: ModelRuntimeServing {
             requestStops: request.stop
         )
         // Serial reports `length` only for an explicitly supplied max_tokens
-        // reached by the pre-truncation generation. The scheduler's implicit
-        // context budget is an implementation limit, not an OpenAI length end.
-        let lengthTerminal = request.maxTokens.map { rawGeneratedTokenCount >= $0 } == true
+        // reached by the post-model-stop, pre-truncation generation. The
+        // scheduler's implicit context budget is an implementation limit, not
+        // an OpenAI length end.
+        let lengthTerminal = request.maxTokens.map { postModelStopTokenCount >= $0 } == true
+            && result.stopCause == nil
             && !truncated
-        let parserFinishReason = lengthTerminal && !filtered.hitStop
+        let requestStopTerminal = result.stopCause == .requestStop || filtered.hitStop
+        let parserFinishReason = lengthTerminal && !requestStopTerminal
             ? "length"
-            : (filtered.hitStop ? "request_stop" : "stop")
+            : (requestStopTerminal ? "request_stop" : "stop")
         let parsed = try parseGeneratedOutput(
             filteredText: filtered.text,
             generatedTokenIDs: generatedTokens,
@@ -4379,12 +4382,12 @@ actor ModelRuntime: ModelRuntimeServing {
             defaultCompletionTokens: completionTokenCount,
             stopTokenFilter: stopTokenFilter,
             requestStops: request.stop,
-            globalHitStop: filtered.hitStop
+            globalHitStop: requestStopTerminal
         )
         let finishReason: String
         if !parsed.toolCalls.isEmpty {
             finishReason = "tool_calls"
-        } else if lengthTerminal, !filtered.hitStop, !parsed.hitStop {
+        } else if lengthTerminal, !requestStopTerminal, !parsed.hitStop {
             finishReason = "length"
         } else {
             finishReason = "stop"
@@ -4657,6 +4660,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     promptTokens: prepared.promptTokens,
                     maxOutputTokens: maxOutputTokens,
                     stopTokenSequences: prepared.stopTokenSequences,
+                    modelStopTokenIDs: prepared.modelStopTokenIDs.sorted(),
                     samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: schedulerRequestID),
                     temperature: request.temperature,
                     topP: request.topP,
@@ -4882,6 +4886,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     promptTokens: prepared.promptTokens,
                     maxOutputTokens: maxOutputTokens,
                     stopTokenSequences: prepared.stopTokenSequences,
+                    modelStopTokenIDs: prepared.modelStopTokenIDs.sorted(),
                     samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: schedulerRequestID),
                     temperature: request.temperature,
                     topP: request.topP,

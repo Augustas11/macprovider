@@ -55,22 +55,26 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
 
     private func schedulerResult(
         _ ids: [Int],
+        outputIDs: [Int]? = nil,
+        stopCause: ContinuousBatchSchedulerStopCause? = nil,
         status: ContinuousBatchSchedulerTerminalStatus = .stop
     ) -> ContinuousBatchSchedulerResult {
-        ContinuousBatchSchedulerResult(
+        let outputIDs = outputIDs ?? ids
+        return ContinuousBatchSchedulerResult(
             requestID: "r",
             conversationKey: "",
             generatedTokens: ids,
-            outputTokens: ids,
+            outputTokens: outputIDs,
             promptTokens: 3,
             completionTokens: ids.count,
-            emittedTokens: ids.count,
+            emittedTokens: outputIDs.count,
             cachedPromptTokens: 0,
             terminalStatus: status,
             errorCode: nil,
             snapshot: nil,
             settlementDisposition: .eligibleOwner,
-            retainedCache: nil
+            retainedCache: nil,
+            stopCause: stopCause
         )
     }
 
@@ -78,9 +82,17 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         _ request: ChatCompletionRequest,
         vocab: Vocab,
         ids: [Int],
+        outputIDs: [Int]? = nil,
+        modelStopTokenIDs: Set<Int> = [],
+        stopCause: ContinuousBatchSchedulerStopCause? = nil,
         status: ContinuousBatchSchedulerTerminalStatus = .stop
     ) throws -> ModelRuntime.ContinuousBatchFinalizedRow {
-        var result = schedulerResult(ids, status: status)
+        var result = schedulerResult(
+            ids,
+            outputIDs: outputIDs,
+            stopCause: stopCause,
+            status: status
+        )
         if let observer = ModelRuntime.continuousBatchSerialToolStopObserver(
             request: request,
             detokenizer: ModelRuntime.StreamingDetokenizer(
@@ -95,7 +107,7 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         return try ModelRuntime.finalizeContinuousBatchRow(
             request: request,
             result: result,
-            modelStopTokenIDs: [],
+            modelStopTokenIDs: modelStopTokenIDs,
             promptTokenIDs: [1, 2, 3],
             decode: vocab.decode,
             stopTokenFilter: Self.stopTokenFilter,
@@ -237,6 +249,10 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         _ request: ChatCompletionRequest,
         vocab: Vocab,
         deliveryEvents: [[Int]]? = nil,
+        generatedIDs: [Int]? = nil,
+        outputIDs: [Int]? = nil,
+        modelStopTokenIDs: Set<Int> = [],
+        stopCause: ContinuousBatchSchedulerStopCause? = nil,
         status: ContinuousBatchSchedulerTerminalStatus = .stop
     ) -> (chunks: [String], result: Result<CompletionResult, APIError>, stopRequests: Int, finalized: ModelRuntime.ContinuousBatchFinalizedRow?) {
         let accumulator = StructuredStreamingContentAccumulator(
@@ -251,7 +267,8 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
                 tokenPiece: { vocab.pieces[$0] }
             )
         )
-        let events = deliveryEvents ?? vocab.ids.map { [$0] }
+        let outputIDs = outputIDs ?? vocab.ids
+        let events = deliveryEvents ?? outputIDs.map { [$0] }
         var stopRequests = 0
         for event in events {
             if state.step(
@@ -272,7 +289,10 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
             let finalized = try finalizeBatched(
                 request,
                 vocab: vocab,
-                ids: vocab.ids,
+                ids: generatedIDs ?? vocab.ids,
+                outputIDs: outputIDs,
+                modelStopTokenIDs: modelStopTokenIDs,
+                stopCause: stopCause,
                 status: status
             )
             if !state.hasObservedTokens {
@@ -432,6 +452,113 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
                 request: explicit
             )
             XCTAssertEqual(explicitCompletion.finishReason, "length", "\(testCase.body)")
+        }
+    }
+
+    func testEOSAtExplicitLimitFinishesStopForStreamingAndNonStreamingRows() throws {
+        let cases: [(body: [String: Any], pieces: [String])] = [
+            ([:], ["plain", " answer"]),
+            (["tools": Self.weatherTool], ["plain", " answer"]),
+            (["response_format": Self.schema], ["{\"a\"", ": 1}"]),
+        ]
+        for testCase in cases {
+            let vocab = Vocab(pieces: testCase.pieces + ["<eos>"])
+            var body = testCase.body
+            body["max_tokens"] = vocab.ids.count
+            let request = try request(body)
+            let outputIDs = Array(vocab.ids.dropLast())
+            let eos = try XCTUnwrap(vocab.ids.last)
+
+            let row = try finalizeBatched(
+                request,
+                vocab: vocab,
+                ids: vocab.ids,
+                outputIDs: outputIDs,
+                modelStopTokenIDs: [eos],
+                stopCause: .modelStop
+            )
+            XCTAssertEqual(
+                try ModelRuntime.validateStructuredCompletion(row.completion, request: request).finishReason,
+                "stop",
+                "non-streaming \(testCase.body)"
+            )
+
+            let stream = batchedStream(
+                request,
+                vocab: vocab,
+                generatedIDs: vocab.ids,
+                outputIDs: outputIDs,
+                modelStopTokenIDs: [eos],
+                stopCause: .modelStop
+            )
+            XCTAssertEqual(try stream.result.get().finishReason, "stop", "streaming \(testCase.body)")
+        }
+    }
+
+    func testBuyerStopAtExplicitLimitFinishesStopForStreamingAndNonStreamingRows() throws {
+        let cases: [(body: [String: Any], pieces: [String])] = [
+            ([:], ["plain", " answer"]),
+            (["tools": Self.weatherTool], ["plain", " answer"]),
+            (["response_format": Self.schema], ["{\"a\"", ": 1}"]),
+        ]
+        for testCase in cases {
+            let vocab = Vocab(pieces: testCase.pieces + ["END"])
+            var body = testCase.body
+            body["max_tokens"] = vocab.ids.count
+            body["stop"] = ["END"]
+            let request = try request(body)
+            let outputIDs = Array(vocab.ids.dropLast())
+
+            let row = try finalizeBatched(
+                request,
+                vocab: vocab,
+                ids: vocab.ids,
+                outputIDs: outputIDs,
+                stopCause: .requestStop
+            )
+            XCTAssertEqual(
+                try ModelRuntime.validateStructuredCompletion(row.completion, request: request).finishReason,
+                "stop",
+                "non-streaming \(testCase.body)"
+            )
+
+            let stream = batchedStream(
+                request,
+                vocab: vocab,
+                generatedIDs: vocab.ids,
+                outputIDs: outputIDs,
+                stopCause: .requestStop
+            )
+            XCTAssertEqual(try stream.result.get().finishReason, "stop", "streaming \(testCase.body)")
+        }
+    }
+
+    func testTrueExplicitLimitFinishesLengthForStreamingAndNonStreamingRows() throws {
+        let cases: [(body: [String: Any], pieces: [String])] = [
+            ([:], ["plain", " answer"]),
+            (["tools": Self.weatherTool], ["plain", " answer"]),
+            (["response_format": Self.schema], ["{\"a\"", ": 1}"]),
+        ]
+        for testCase in cases {
+            let vocab = Vocab(pieces: testCase.pieces)
+            var body = testCase.body
+            body["max_tokens"] = vocab.ids.count
+            let request = try request(body)
+
+            let row = try finalizeBatched(
+                request,
+                vocab: vocab,
+                ids: vocab.ids,
+                status: .length
+            )
+            XCTAssertEqual(
+                try ModelRuntime.validateStructuredCompletion(row.completion, request: request).finishReason,
+                "length",
+                "non-streaming \(testCase.body)"
+            )
+
+            let stream = batchedStream(request, vocab: vocab, status: .length)
+            XCTAssertEqual(try stream.result.get().finishReason, "length", "streaming \(testCase.body)")
         }
     }
 
