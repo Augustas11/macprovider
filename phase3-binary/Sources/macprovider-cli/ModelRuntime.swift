@@ -3915,15 +3915,184 @@ actor ModelRuntime: ModelRuntimeServing {
     /// `internal_error` after the first content chunk.
     struct StreamingDetokenizer: @unchecked Sendable {
         let decode: ([Int]) -> String
+        let makeIncremental: () -> IncrementalTextDecoder
+
+        init(
+            decode: @escaping ([Int]) -> String,
+            makeIncremental: @escaping () -> IncrementalTextDecoder
+        ) {
+            self.decode = decode
+            self.makeIncremental = makeIncremental
+        }
+
+        init(
+            decode: @escaping ([Int]) -> String,
+            tokenPiece: @escaping (Int) -> String?,
+            cleanUpTokenizationSpaces: Bool = false
+        ) {
+            self.init(
+                decode: decode,
+                makeIncremental: {
+                    let box = ByteLevelIncrementalTextDecoderBox(
+                        tokenPiece: tokenPiece,
+                        cleanUpTokenizationSpaces: cleanUpTokenizationSpaces
+                    )
+                    return IncrementalTextDecoder(appendToken: box.append)
+                }
+            )
+        }
+
+        init(tokenizer: any MLXLMCommon.Tokenizer) {
+            let cleanupProbe = tokenizer.encode(text: " .", addSpecialTokens: false)
+            self.init(
+                decode: { tokenizer.decode(tokenIds: $0) },
+                tokenPiece: tokenizer.convertIdToToken,
+                cleanUpTokenizationSpaces: tokenizer.decode(tokenIds: cleanupProbe) == "."
+            )
+        }
     }
 
-    /// A batched streaming row's buyer-visible state (SPEC-038 AC-6c). Each
-    /// delivered token runs the serial path's `SerialStreamingTextEmitter`
-    /// step over the decode of every token so far, as the serial generate
-    /// callback does. Once the serial path would have stopped generating (a
-    /// serial tool turn's first complete tool call, or a structured-output
-    /// accumulator error) later tokens are ignored and the stop point is kept
-    /// so the finalize truncates the row to it.
+    final class IncrementalTextDecoder: @unchecked Sendable {
+        private let appendToken: (Int) -> String
+        private let returnsDelta: Bool
+        private var text = ""
+
+        init(decodeToken: @escaping (Int) -> String) {
+            appendToken = decodeToken
+            returnsDelta = true
+        }
+
+        init(appendToken: @escaping (Int) -> String) {
+            self.appendToken = appendToken
+            returnsDelta = false
+        }
+
+        func append(_ token: Int) -> String {
+            let decoded = appendToken(token)
+            if returnsDelta {
+                text += decoded
+            } else {
+                text = decoded
+            }
+            return text
+        }
+
+        var appendedText: String { text }
+    }
+
+    /// Qwen and Llama 3.3 use the Hugging Face byte-level decoder. Decode the
+    /// token pieces directly so serial tool rows retain per-token boundaries
+    /// without repeatedly decoding the accumulated prefix.
+    private final class ByteLevelIncrementalTextDecoderBox: @unchecked Sendable {
+        private let tokenPiece: (Int) -> String?
+        private let cleanUpTokenizationSpaces: Bool
+        private var text = ""
+        private var heldText = ""
+        private var pendingBytes: [UInt8] = []
+
+        init(tokenPiece: @escaping (Int) -> String?, cleanUpTokenizationSpaces: Bool) {
+            self.tokenPiece = tokenPiece
+            self.cleanUpTokenizationSpaces = cleanUpTokenizationSpaces
+        }
+
+        func append(_ token: Int) -> String {
+            guard let piece = tokenPiece(token) else { return text }
+            if let bytes = Self.byteLevelBytes(piece) {
+                pendingBytes.append(contentsOf: bytes)
+                let incompleteCount = Self.incompleteUTF8SuffixCount(pendingBytes)
+                let stableEnd = pendingBytes.count - incompleteCount
+                if stableEnd > 0 {
+                    heldText += String(decoding: pendingBytes[..<stableEnd], as: UTF8.self)
+                    pendingBytes.removeFirst(stableEnd)
+                }
+            } else {
+                if !pendingBytes.isEmpty {
+                    heldText += String(decoding: pendingBytes, as: UTF8.self)
+                    pendingBytes.removeAll(keepingCapacity: true)
+                }
+                heldText += piece
+            }
+
+            // Match NaiveStreamingDetokenizer: an incomplete/invalid UTF-8
+            // tail is withheld until a later token makes the delta complete.
+            if pendingBytes.isEmpty, heldText.last != "\u{fffd}" {
+                if cleanUpTokenizationSpaces {
+                    appendCleaned(heldText)
+                } else {
+                    text += heldText
+                }
+                heldText.removeAll(keepingCapacity: true)
+            }
+            return text
+        }
+
+        private func appendCleaned(_ delta: String) {
+            let suffixStart = text.index(text.endIndex, offsetBy: -4, limitedBy: text.startIndex)
+                ?? text.startIndex
+            let suffix = (String(text[suffixStart...]) + delta)
+                .replacingOccurrences(of: " .", with: ".")
+                .replacingOccurrences(of: " ?", with: "?")
+                .replacingOccurrences(of: " !", with: "!")
+                .replacingOccurrences(of: " ,", with: ",")
+                .replacingOccurrences(of: " ' ", with: "'")
+                .replacingOccurrences(of: " n't", with: "n't")
+                .replacingOccurrences(of: " 'm", with: "'m")
+                .replacingOccurrences(of: " 's", with: "'s")
+                .replacingOccurrences(of: " 've", with: "'ve")
+                .replacingOccurrences(of: " 're", with: "'re")
+            text.replaceSubrange(suffixStart..., with: suffix)
+        }
+
+        private static func byteLevelBytes(_ piece: String) -> [UInt8]? {
+            var bytes: [UInt8] = []
+            bytes.reserveCapacity(piece.unicodeScalars.count)
+            for scalar in piece.unicodeScalars {
+                guard let byte = byteDecoder[scalar] else { return nil }
+                bytes.append(byte)
+            }
+            return bytes
+        }
+
+        private static func incompleteUTF8SuffixCount(_ bytes: [UInt8]) -> Int {
+            guard let last = bytes.last, last >= 0x80 else { return 0 }
+            var continuationCount = 0
+            var index = bytes.count - 1
+            while bytes[index] & 0xC0 == 0x80 {
+                continuationCount += 1
+                guard index > 0 else { return 0 }
+                index -= 1
+            }
+            let expected: Int
+            switch bytes[index] {
+            case 0xC2...0xDF: expected = 2
+            case 0xE0...0xEF: expected = 3
+            case 0xF0...0xF4: expected = 4
+            default: return 0
+            }
+            let available = continuationCount + 1
+            return available < expected ? available : 0
+        }
+
+        private static let byteDecoder: [Unicode.Scalar: UInt8] = {
+            var bytes = Array(33...126) + Array(161...172) + Array(174...255)
+            var scalars = bytes
+            var nextScalar = 256
+            for byte in 0...255 where !bytes.contains(byte) {
+                bytes.append(byte)
+                scalars.append(nextScalar)
+                nextScalar += 1
+            }
+            return Dictionary(uniqueKeysWithValues: zip(scalars, bytes).compactMap { scalar, byte in
+                Unicode.Scalar(scalar).map { ($0, UInt8(byte)) }
+            })
+        }()
+    }
+
+    /// A batched streaming row's buyer-visible state (SPEC-038 AC-6c). Serial
+    /// tool turns retain per-token emitter precision through the byte-level
+    /// incremental decoder; every other row decodes once per delivery event.
+    /// Once the serial path would have stopped generating, later tokens are
+    /// ignored and the stop point is kept so finalize truncates the row to it.
     final class AttachedPagedKVStreamState: @unchecked Sendable {
         private let lock = NSLock()
         private var tokenIDs: [Int] = []
@@ -3931,15 +4100,20 @@ actor ModelRuntime: ModelRuntimeServing {
         private var recordedError: APIError?
         private var stoppedValue = false
         private var serialStopTokenCountValue: Int?
+        private let decode: ([Int]) -> String
+        private let incrementalDecoder: IncrementalTextDecoder?
+        private let needsPerTokenPrecision: Bool
 
-        init(request: ChatCompletionRequest) {
+        init(request: ChatCompletionRequest, detokenizer: StreamingDetokenizer) {
             emitter = SerialStreamingTextEmitter(request: request)
+            decode = detokenizer.decode
+            needsPerTokenPrecision = ModelRuntime.serialNativeToolStopApplies(request)
+            incrementalDecoder = needsPerTokenPrecision ? detokenizer.makeIncremental() : nil
         }
 
         /// Returns true the first time the row should stop decoding.
         func step(
             eventTokens: [Int],
-            decode: ([Int]) -> String,
             stopTokenFilter: StopTokenFilter,
             requestStops: [String],
             structuredAccumulator: StructuredStreamingContentAccumulator,
@@ -3951,34 +4125,64 @@ actor ModelRuntime: ModelRuntimeServing {
             guard !stoppedValue, !eventTokens.isEmpty else { return false }
             for token in eventTokens {
                 tokenIDs.append(token)
-                let candidate = ModelRuntime.streamingSafePrefix(
-                    decode(tokenIDs),
-                    stopTokenFilter: stopTokenFilter,
-                    requestStops: requestStops
-                )
-                switch emitter.step(
-                    candidate: candidate,
-                    structuredAccumulator: structuredAccumulator,
-                    idleState: idleState,
-                    onChunk: onChunk
-                ) {
-                case .more, .requestStop:
-                    // A buyer stop string ends the row through its stop-token
-                    // sequences, and the final filter cuts the text at it.
-                    continue
-                case .toolCallComplete:
-                    stoppedValue = true
-                    serialStopTokenCountValue = tokenIDs.count
-                    return true
-                case .structuredError:
-                    stoppedValue = true
-                    if recordedError == nil {
-                        recordedError = structuredAccumulator.error
-                    }
+                if needsPerTokenPrecision,
+                   let decoded = incrementalDecoder?.append(token),
+                   observe(
+                       decoded: decoded,
+                       stopTokenFilter: stopTokenFilter,
+                       requestStops: requestStops,
+                       structuredAccumulator: structuredAccumulator,
+                       idleState: idleState,
+                       onChunk: onChunk
+                   ) {
                     return true
                 }
             }
-            return false
+            guard !needsPerTokenPrecision else { return false }
+            return observe(
+                decoded: decode(tokenIDs),
+                stopTokenFilter: stopTokenFilter,
+                requestStops: requestStops,
+                structuredAccumulator: structuredAccumulator,
+                idleState: idleState,
+                onChunk: onChunk
+            )
+        }
+
+        private func observe(
+            decoded: String,
+            stopTokenFilter: StopTokenFilter,
+            requestStops: [String],
+            structuredAccumulator: StructuredStreamingContentAccumulator,
+            idleState: StructuredStreamingIdleState,
+            onChunk: (StreamChunk) -> Void
+        ) -> Bool {
+            let candidate = ModelRuntime.streamingSafePrefix(
+                decoded,
+                stopTokenFilter: stopTokenFilter,
+                requestStops: requestStops
+            )
+            switch emitter.step(
+                candidate: candidate,
+                structuredAccumulator: structuredAccumulator,
+                idleState: idleState,
+                onChunk: onChunk
+            ) {
+            case .more, .requestStop:
+                // A buyer stop string ends the row through its stop-token
+                // sequences, and the final filter cuts the text at it.
+                return false
+            case .toolCallComplete:
+                stoppedValue = true
+                serialStopTokenCountValue = tokenIDs.count
+                return true
+            case .structuredError:
+                stoppedValue = true
+                if recordedError == nil {
+                    recordedError = structuredAccumulator.error
+                }
+                return true
+            }
         }
 
         func finish(
@@ -4027,18 +4231,19 @@ actor ModelRuntime: ModelRuntimeServing {
         private var tokenIDs: [Int] = []
         private var observer: NativeToolCallStreamEmitter
         private var stopTokenCountValue: Int?
+        private let incrementalDecoder: IncrementalTextDecoder
 
-        init(request: ChatCompletionRequest) {
+        init(request: ChatCompletionRequest, incrementalDecoder: IncrementalTextDecoder) {
             observer = NativeToolCallStreamEmitter(
                 modelID: request.model,
                 allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools)
             )
+            self.incrementalDecoder = incrementalDecoder
         }
 
         /// Returns true the first time the row should stop decoding.
         func observe(
             eventTokens: [Int],
-            decode: ([Int]) -> String,
             stopTokenFilter: StopTokenFilter,
             requestStops: [String]
         ) -> Bool {
@@ -4049,7 +4254,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 tokenIDs.append(token)
                 if ModelRuntime.observeSerialToolStop(
                     &observer,
-                    decoded: decode(tokenIDs),
+                    decoded: incrementalDecoder.append(token),
                     stopTokenFilter: stopTokenFilter,
                     requestStops: requestStops
                 ) {
@@ -4083,35 +4288,25 @@ actor ModelRuntime: ModelRuntimeServing {
         let truncatedAtSerialStop: Bool
     }
 
-    /// Derives the serial tool-turn stop from the row itself, independent of
-    /// which waiter observed which delivery chunks (including no events for a
-    /// terminal replay). This is the canonical boundary for billing and cache
-    /// settlement; per-waiter observers only bound decode and live delivery.
-    static func continuousBatchSerialToolStopTokenCount(
+    /// Builds the one serial-tool observer owned by the canonical scheduler
+    /// row. Its boundary is copied into the scheduler result for every waiter.
+    static func continuousBatchSerialToolStopObserver(
         request: ChatCompletionRequest,
-        generatedTokens: [Int],
-        decode: ([Int]) -> String,
+        detokenizer: StreamingDetokenizer,
         stopTokenFilter: StopTokenFilter
-    ) -> Int? {
-        guard serialToolStopApplies(request) else { return nil }
-        var observer = NativeToolCallStreamEmitter(
-            modelID: request.model,
-            allowedFunctionNames: toolFunctionNames(from: request.promptSource.tools)
+    ) -> ContinuousBatchCanonicalStopObserver? {
+        guard serialNativeToolStopApplies(request) else { return nil }
+        let state = ContinuousBatchSerialToolStopState(
+            request: request,
+            incrementalDecoder: detokenizer.makeIncremental()
         )
-        var prefix: [Int] = []
-        prefix.reserveCapacity(generatedTokens.count)
-        for token in generatedTokens {
-            prefix.append(token)
-            if observeSerialToolStop(
-                &observer,
-                decoded: decode(prefix),
+        return ContinuousBatchCanonicalStopObserver { token in
+            state.observe(
+                eventTokens: [token],
                 stopTokenFilter: stopTokenFilter,
                 requestStops: request.stop
-            ) {
-                return prefix.count
-            }
+            )
         }
-        return nil
     }
 
     /// SPEC-038 AC-6c: the one post-generation finalize for a batched row,
@@ -4135,12 +4330,7 @@ actor ModelRuntime: ModelRuntimeServing {
         // Harmony `<|return|>`/`<|call|>` are excluded from this set, as
         // they are from the serial stop set: the parser reads and counts them.
         let rawGeneratedTokenCount = result.generatedTokens.count
-        let serialStopTokenCount = continuousBatchSerialToolStopTokenCount(
-            request: request,
-            generatedTokens: result.generatedTokens,
-            decode: decode,
-            stopTokenFilter: stopTokenFilter
-        )
+        let serialStopTokenCount = result.serialToolStopTokenCount
         var generatedTokens = droppingTrailingModelStop(
             result.generatedTokens,
             terminalStatus: result.terminalStatus,
@@ -4422,7 +4612,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     ),
                     modelHasRecurrentLayers: hybrid
                 ),
-                StreamingDetokenizer { tokenizer.decode(tokenIds: $0) }
+                StreamingDetokenizer(tokenizer: tokenizer)
             )
         }
 
@@ -4450,12 +4640,13 @@ actor ModelRuntime: ModelRuntimeServing {
         ) {
             return nil
         }
-        // SPEC-038 AC-6c: a serial tool turn stops where the serial path
-        // stops generating (its first complete valid tool call).
-        let serialToolStop = Self.serialToolStopApplies(request)
-            ? ContinuousBatchSerialToolStopState(request: request)
-            : nil
-        let requestStops = request.stop
+        // SPEC-038 AC-6c: the scheduler row owns the one canonical serial
+        // tool boundary; every duplicate and terminal replay receives it.
+        let serialToolStop = Self.continuousBatchSerialToolStopObserver(
+            request: request,
+            detokenizer: detokenizer,
+            stopTokenFilter: stopTokenFilter
+        )
         let result: ContinuousBatchSchedulerResult
         do {
             CBTrace.log(schedulerRequestID, "rt_cb_submit")
@@ -4474,18 +4665,9 @@ actor ModelRuntime: ModelRuntimeServing {
                     cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
                     retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
                     recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
-                    retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease)
-                ), tokenSink: { event in
-                    guard let serialToolStop else { return }
-                    if serialToolStop.observe(
-                        eventTokens: event.replayTokens ?? [event.token],
-                        decode: detokenizer.decode,
-                        stopTokenFilter: stopTokenFilter,
-                        requestStops: requestStops
-                    ) {
-                        Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
-                    }
-                })
+                    retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
+                    serialToolStopObserver: serialToolStop
+                ))
             }
         } catch {
             if let lease {
@@ -4650,14 +4832,22 @@ actor ModelRuntime: ModelRuntimeServing {
                     ),
                     modelHasRecurrentLayers: hybrid
                 ),
-                StreamingDetokenizer { tokenizer.decode(tokenIds: $0) }
+                StreamingDetokenizer(tokenizer: tokenizer)
             )
         }
 
         try drainCancelled.check()
         try Task.checkCancellation()
         if shouldCancel() { throw CancellationError() }
-        let streamState = AttachedPagedKVStreamState(request: request)
+        let streamState = AttachedPagedKVStreamState(
+            request: request,
+            detokenizer: detokenizer
+        )
+        let serialToolStop = Self.continuousBatchSerialToolStopObserver(
+            request: request,
+            detokenizer: detokenizer,
+            stopTokenFilter: stopTokenFilter
+        )
         let maxOutputTokens = request.maxTokens ?? max(1, maxContextTokens - prepared.promptTokens.count)
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         let batchKVBits = Self.effectiveKVBits(
@@ -4700,12 +4890,12 @@ actor ModelRuntime: ModelRuntimeServing {
                     cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
                     retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
                     recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
-                    retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease)
+                    retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
+                    serialToolStopObserver: serialToolStop
                 ), tokenSink: { event in
                     guard !idleCancellation.isFired else { return }
                     if streamState.step(
                         eventTokens: event.replayTokens ?? [event.token],
-                        decode: detokenizer.decode,
                         stopTokenFilter: stopTokenFilter,
                         requestStops: requestStops,
                         structuredAccumulator: structuredAccumulator,
@@ -4754,7 +4944,6 @@ actor ModelRuntime: ModelRuntimeServing {
             if !streamState.hasObservedTokens {
                 _ = streamState.step(
                     eventTokens: finalized.generatedTokens,
-                    decode: detokenizer.decode,
                     stopTokenFilter: stopTokenFilter,
                     requestStops: requestStops,
                     structuredAccumulator: structuredAccumulator,
@@ -7115,6 +7304,11 @@ actor ModelRuntime: ModelRuntimeServing {
             && hasEnabledTools(request.promptSource.tools)
     }
 
+    static func serialNativeToolStopApplies(_ request: ChatCompletionRequest) -> Bool {
+        serialToolStopApplies(request)
+            && NativeToolCallStreamEmitter.supports(modelID: request.model)
+    }
+
     /// One serial-tool-turn stop test over the decode of every token so far.
     /// The serial non-streaming path and the continuous-batching rows
     /// (SPEC-038 AC-6c) share it, so both stop at the same token.
@@ -7720,7 +7914,7 @@ struct NativeToolCallStreamEmitter {
         let isQwen = modelID.localizedCaseInsensitiveContains("qwen2.5")
             || modelID.localizedCaseInsensitiveContains("qwen3")
         let isLlama33 = modelID.localizedCaseInsensitiveContains("llama-3.3")
-        self.enabled = isQwen || isLlama33
+        self.enabled = Self.supports(modelID: modelID)
         self.allowsFunctionXML = isQwen
         if isLlama33 {
             startDelimiter = "<|python_tag|>"
@@ -7731,6 +7925,12 @@ struct NativeToolCallStreamEmitter {
             endDelimiter = "</tool_call>"
             argumentKey = "arguments"
         }
+    }
+
+    static func supports(modelID: String) -> Bool {
+        modelID.localizedCaseInsensitiveContains("qwen2.5")
+            || modelID.localizedCaseInsensitiveContains("qwen3")
+            || modelID.localizedCaseInsensitiveContains("llama-3.3")
     }
 
     var suppressesAssistantContent: Bool { enabled && (opened || sawToolDelimiter) }

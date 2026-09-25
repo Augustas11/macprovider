@@ -212,6 +212,10 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// that sit on this prompt's checkpoint positions carry forward into the
     /// row's own checkpoints. Empty for every non-hybrid request.
     let retainedRecurrentCheckpoints: [RecurrentStateCheckpoint]
+    /// Runtime-only row observer. It is deliberately excluded from the
+    /// idempotency fingerprint: duplicate waiters reuse the canonical row's
+    /// observer and receive its boundary in the retained result.
+    let serialToolStopObserver: ContinuousBatchCanonicalStopObserver?
 
     init(
         id: String,
@@ -227,7 +231,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         cachedPromptTokens: Int = 0,
         retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
         recurrentCheckpointPositions: [Int] = [],
-        retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = []
+        retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
+        serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil
     ) {
         self.id = id
         self.conversationKey = conversationKey
@@ -243,6 +248,7 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.retainedPagedKVSequence = retainedPagedKVSequence
         self.recurrentCheckpointPositions = recurrentCheckpointPositions
         self.retainedRecurrentCheckpoints = retainedRecurrentCheckpoints
+        self.serialToolStopObserver = serialToolStopObserver
     }
 
     enum CodingKeys: String, CodingKey {
@@ -257,6 +263,48 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         case presencePenalty
         case frequencyPenalty
         case cachedPromptTokens
+    }
+}
+
+/// Thread-safe runtime-only observer owned by the canonical scheduler row.
+/// Its handler consumes one newly visible token at a time and therefore never
+/// replays a generated prefix. Equality intentionally ignores identity/state
+/// because the observer is not part of request semantics or dedupe identity.
+final class ContinuousBatchCanonicalStopObserver: @unchecked Sendable, Equatable {
+    private let lock = NSLock()
+    private let handler: @Sendable (Int) -> Bool
+    private var observedTokenCount = 0
+    private var stopTokenCountValue: Int?
+
+    init(handler: @escaping @Sendable (Int) -> Bool) {
+        self.handler = handler
+    }
+
+    func observe(_ tokens: [Int]) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard stopTokenCountValue == nil else { return false }
+        for token in tokens {
+            observedTokenCount += 1
+            if handler(token) {
+                stopTokenCountValue = observedTokenCount
+                return true
+            }
+        }
+        return false
+    }
+
+    var stopTokenCount: Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stopTokenCountValue
+    }
+
+    static func == (
+        lhs: ContinuousBatchCanonicalStopObserver,
+        rhs: ContinuousBatchCanonicalStopObserver
+    ) -> Bool {
+        true
     }
 }
 
@@ -286,6 +334,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
     let snapshot: ContinuousBatchSchedulerSnapshot?
     let settlementDisposition: ContinuousBatchSettlementDisposition
     let retainedCache: ContinuousBatchRetainedCache?
+    /// Canonical serial-tool boundary computed once by the scheduler row.
+    var serialToolStopTokenCount: Int? = nil
     /// Keyed hybrid rows only: the row's cache in the serial conversation-cache
     /// format, delivered to the settlement owner like `retainedCache`.
     var serialConversationCache: ContinuousBatchSerialConversationCache? = nil
@@ -307,6 +357,7 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             snapshot: snapshot,
             settlementDisposition: disposition,
             retainedCache: disposition == .eligibleOwner ? retainedCache : nil,
+            serialToolStopTokenCount: serialToolStopTokenCount,
             serialConversationCache: disposition == .eligibleOwner ? serialConversationCache : nil
         )
     }
@@ -326,6 +377,7 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             snapshot: snapshot,
             settlementDisposition: settlementDisposition,
             retainedCache: cache,
+            serialToolStopTokenCount: serialToolStopTokenCount,
             serialConversationCache: serialConversationCache
         )
     }
@@ -343,6 +395,7 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             && lhs.errorCode == rhs.errorCode
             && lhs.snapshot == rhs.snapshot
             && lhs.settlementDisposition == rhs.settlementDisposition
+            && lhs.serialToolStopTokenCount == rhs.serialToolStopTokenCount
             && lhs.retainedCache?.retainedSequence == rhs.retainedCache?.retainedSequence
     }
 }
@@ -2266,6 +2319,12 @@ actor ContinuousBatchScheduler {
 
         let firstVisibleIndex = row.outputTokens.count
         row.outputTokens.append(contentsOf: visibleTokens)
+        if row.request.serialToolStopObserver?.observe(visibleTokens) == true {
+            // Match the existing asynchronous stopEarly boundary: the token
+            // that completed the call is visible, and the next applied token
+            // closes the row. Finalization truncates to the recorded boundary.
+            earlyStopIDs.insert(row.request.id)
+        }
         activeDecode[row.request.id] = row
         CBTrace.log(row.request.id, "sch_active")
         if !deliverVisibleTokens(
@@ -2782,6 +2841,9 @@ actor ContinuousBatchScheduler {
             snapshot: row.snapshot,
             settlementDisposition: isSuccessful ? .eligibleOwner : .notEligible,
             retainedCache: nil,
+            serialToolStopTokenCount: isSuccessful
+                ? row.request.serialToolStopObserver?.stopTokenCount
+                : nil,
             serialConversationCache: isSuccessful ? serialConversationCache : nil
         )
         complete(requestID: row.request.id, result: result)
@@ -2810,7 +2872,10 @@ actor ContinuousBatchScheduler {
             errorCode: errorCode,
             snapshot: row.snapshot,
             settlementDisposition: isSuccessful ? .eligibleOwner : .notEligible,
-            retainedCache: isSuccessful ? retainedCache : nil
+            retainedCache: isSuccessful ? retainedCache : nil,
+            serialToolStopTokenCount: isSuccessful
+                ? row.request.serialToolStopObserver?.stopTokenCount
+                : nil
         )
         complete(requestID: row.request.id, result: result)
     }

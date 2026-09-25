@@ -125,6 +125,30 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(decodeCalls, 1)
     }
 
+    func testCanonicalSerialToolStopBoundaryIsRetainedForTerminalReplay() async throws {
+        let backend = ScriptedBackend(scripts: ["tool-stop": [10, 11, 12, 13]])
+        let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
+        let observer = ContinuousBatchCanonicalStopObserver { token in token == 11 }
+        let request = ContinuousBatchSchedulerRequest(
+            id: "tool-stop",
+            conversationKey: "",
+            promptTokens: [1],
+            maxOutputTokens: 4,
+            serialToolStopObserver: observer
+        )
+
+        let original = try await scheduler.submit(request)
+        XCTAssertEqual(original.terminalStatus, .stop)
+        XCTAssertEqual(original.generatedTokens, [10, 11, 12])
+        XCTAssertEqual(original.serialToolStopTokenCount, 2)
+
+        let replay = try await scheduler.submit(request)
+        XCTAssertEqual(replay.settlementDisposition, .nonSettlingReplay)
+        XCTAssertEqual(replay.generatedTokens, original.generatedTokens)
+        XCTAssertEqual(replay.serialToolStopTokenCount, 2)
+        XCTAssertEqual(observer.stopTokenCount, 2)
+    }
+
     func testKeyedHybridRowSplitsPrefillAtCheckpointsAndDeliversSerialCache() async throws {
         let backend = ScriptedBackend(scripts: ["hybrid": [7, 8]], recurrentCheckpointBackend: true)
         let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)

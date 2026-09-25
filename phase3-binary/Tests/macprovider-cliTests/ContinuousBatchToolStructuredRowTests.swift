@@ -80,9 +80,21 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         ids: [Int],
         status: ContinuousBatchSchedulerTerminalStatus = .stop
     ) throws -> ModelRuntime.ContinuousBatchFinalizedRow {
-        try ModelRuntime.finalizeContinuousBatchRow(
+        var result = schedulerResult(ids, status: status)
+        if let observer = ModelRuntime.continuousBatchSerialToolStopObserver(
             request: request,
-            result: schedulerResult(ids, status: status),
+            detokenizer: ModelRuntime.StreamingDetokenizer(
+                decode: vocab.decode,
+                tokenPiece: { vocab.pieces[$0] }
+            ),
+            stopTokenFilter: Self.stopTokenFilter
+        ) {
+            _ = observer.observe(ids)
+            result.serialToolStopTokenCount = observer.stopTokenCount
+        }
+        return try ModelRuntime.finalizeContinuousBatchRow(
+            request: request,
+            result: result,
             modelStopTokenIDs: [],
             promptTokenIDs: [1, 2, 3],
             decode: vocab.decode,
@@ -232,13 +244,18 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         )
         let idle = StructuredStreamingIdleState(enabled: false)
         let sink = ChunkSink()
-        let state = ModelRuntime.AttachedPagedKVStreamState(request: request)
+        let state = ModelRuntime.AttachedPagedKVStreamState(
+            request: request,
+            detokenizer: ModelRuntime.StreamingDetokenizer(
+                decode: vocab.decode,
+                tokenPiece: { vocab.pieces[$0] }
+            )
+        )
         let events = deliveryEvents ?? vocab.ids.map { [$0] }
         var stopRequests = 0
         for event in events {
             if state.step(
                 eventTokens: event,
-                decode: vocab.decode,
                 stopTokenFilter: Self.stopTokenFilter,
                 requestStops: request.stop,
                 structuredAccumulator: accumulator,
@@ -261,7 +278,6 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
             if !state.hasObservedTokens {
                 _ = state.step(
                     eventTokens: finalized.generatedTokens,
-                    decode: vocab.decode,
                     stopTokenFilter: Self.stopTokenFilter,
                     requestStops: request.stop,
                     structuredAccumulator: accumulator,
@@ -296,11 +312,15 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         XCTAssertLessThan(serial.tokenCount, vocab.pieces.count, "serial stops at the first complete call")
 
         // The batched row's sink runs the serial stop test on each token.
-        let stop = ModelRuntime.ContinuousBatchSerialToolStopState(request: request)
+        let stop = ModelRuntime.ContinuousBatchSerialToolStopState(
+            request: request,
+            incrementalDecoder: ModelRuntime.IncrementalTextDecoder(
+                decodeToken: { vocab.pieces[$0] }
+            )
+        )
         var stopRequests = 0
         for id in vocab.ids where stop.observe(
             eventTokens: [id],
-            decode: vocab.decode,
             stopTokenFilter: Self.stopTokenFilter,
             requestStops: request.stop
         ) {
@@ -416,6 +436,80 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
     }
 
     // MARK: - streaming
+
+    func testPlainReplayDecodingWorkIsLinear() throws {
+        let tokenCount = 128
+        let vocab = Vocab(pieces: Array(repeating: "x", count: tokenCount))
+        let request = try request([:])
+        var decodedTokens = 0
+        let detokenizer = ModelRuntime.StreamingDetokenizer(
+            decode: { ids in
+                decodedTokens += ids.count
+                return vocab.decode(ids)
+            },
+            tokenPiece: { vocab.pieces[$0] }
+        )
+        let state = ModelRuntime.AttachedPagedKVStreamState(
+            request: request,
+            detokenizer: detokenizer
+        )
+        let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+        let idle = StructuredStreamingIdleState(enabled: false)
+        let sink = ChunkSink()
+
+        XCTAssertFalse(state.step(
+            eventTokens: vocab.ids,
+            stopTokenFilter: Self.stopTokenFilter,
+            requestStops: [],
+            structuredAccumulator: accumulator,
+            idleState: idle,
+            onChunk: sink.append
+        ))
+        XCTAssertEqual(decodedTokens, tokenCount)
+        XCTAssertEqual(sink.normalized(), ["content:\(String(repeating: "x", count: tokenCount))"])
+    }
+
+    func testCanonicalSerialToolStopDecodingWorkIsLinear() throws {
+        let prefixCount = 128
+        let pieces = Array(repeating: "x", count: prefixCount) + [
+            #"<tool_call>{"name":"get_weather","arguments":{"city":"Paris"}}</tool_call>"#,
+            " trailing",
+        ]
+        let vocab = Vocab(pieces: pieces)
+        let request = try request(["tools": Self.weatherTool])
+        var decodedTokens = 0
+        let detokenizer = ModelRuntime.StreamingDetokenizer(
+            decode: vocab.decode,
+            tokenPiece: { token in
+                decodedTokens += 1
+                return vocab.pieces[token]
+            }
+        )
+        let observer = try XCTUnwrap(ModelRuntime.continuousBatchSerialToolStopObserver(
+            request: request,
+            detokenizer: detokenizer,
+            stopTokenFilter: Self.stopTokenFilter
+        ))
+
+        XCTAssertTrue(observer.observe(vocab.ids))
+        XCTAssertEqual(observer.stopTokenCount, prefixCount + 1)
+        XCTAssertEqual(decodedTokens, prefixCount + 1)
+    }
+
+    func testIncrementalByteLevelDecodingPreservesUTF8AndCleanupBoundaries() {
+        let pieces = ["Ã", "©", "Ġword", "Ġ."]
+        let detokenizer = ModelRuntime.StreamingDetokenizer(
+            decode: { _ in "" },
+            tokenPiece: { pieces[$0] },
+            cleanUpTokenizationSpaces: true
+        )
+        let decoder = detokenizer.makeIncremental()
+
+        XCTAssertEqual(decoder.append(0), "")
+        XCTAssertEqual(decoder.append(1), "é")
+        XCTAssertEqual(decoder.append(2), "é word")
+        XCTAssertEqual(decoder.append(3), "é word.")
+    }
 
     func testStreamingToolTurnEmitsSerialToolDeltasAndStopsAtSerialToken() throws {
         let request = try request(["tools": Self.weatherTool])
