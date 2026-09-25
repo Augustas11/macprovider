@@ -1308,6 +1308,11 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         rowCaches.compactMap(\.maxSize).min()
     }
 
+    /// The rows' allocator block size; batch buffers grow in whole blocks too.
+    private var blockSizeTokens: Int {
+        rowCaches.first?.blockSizeTokens ?? 1
+    }
+
     func innerState() -> [MLXArray] {
         guard let keys, let values else { return [] }
         return [Self.prefix(keys, length), Self.prefix(values, length)]
@@ -1367,9 +1372,9 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
            length == offset
         {
             let start = length
-            let newKeys = Self.write(incomingKeys, into: existingKeys, rowStarts: nil, stored: start, maxTokens: maxSize)
+            let newKeys = Self.write(incomingKeys, into: existingKeys, rowStarts: nil, stored: start, maxTokens: maxSize, blockSizeTokens: blockSizeTokens)
                 ?? concatenated([Self.prefix(existingKeys, start), incomingKeys], axis: 2)
-            let newValues = Self.write(incomingValues, into: existingValues, rowStarts: nil, stored: start, maxTokens: maxSize)
+            let newValues = Self.write(incomingValues, into: existingValues, rowStarts: nil, stored: start, maxTokens: maxSize, blockSizeTokens: blockSizeTokens)
                 ?? concatenated([Self.prefix(existingValues, start), incomingValues], axis: 2)
             keys = newKeys
             values = newValues
@@ -1457,8 +1462,8 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
             }
         }
         let newLength = (starts.map { $0 + n }.max()) ?? length
-        guard let newKeys = Self.write(incomingKeys, into: existingKeys, rowStarts: starts, stored: length, maxTokens: maxSize),
-              let newValues = Self.write(incomingValues, into: existingValues, rowStarts: starts, stored: length, maxTokens: maxSize)
+        guard let newKeys = Self.write(incomingKeys, into: existingKeys, rowStarts: starts, stored: length, maxTokens: maxSize, blockSizeTokens: blockSizeTokens),
+              let newValues = Self.write(incomingValues, into: existingValues, rowStarts: starts, stored: length, maxTokens: maxSize, blockSizeTokens: blockSizeTokens)
         else {
             // Unreachable: `canWrite` was checked above for both.
             return rebuildAfterPartialRaggedUpdate(failedRow: rowCaches.count, keys: incomingKeys, values: incomingValues)
@@ -1668,7 +1673,8 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         into buffer: MLXArray,
         rowStarts: [Int]?,
         stored: Int,
-        maxTokens: Int?
+        maxTokens: Int?,
+        blockSizeTokens: Int
     ) -> MLXArray? {
         guard canWrite(incoming, into: buffer) else { return nil }
         let n = incoming.dim(2)
@@ -1676,9 +1682,9 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         var target = buffer
         if buffer.dim(2) < needed {
             let capacity = PagedKVBlockLayout.grownCapacity(
-                stored: stored,
                 needed: needed,
-                maxTokens: maxTokens ?? Int.max
+                maxTokens: maxTokens ?? Int.max,
+                blockSizeTokens: blockSizeTokens
             )
             let extra = MLXArray.zeros(
                 [buffer.dim(0), buffer.dim(1), capacity - stored, buffer.dim(3)],

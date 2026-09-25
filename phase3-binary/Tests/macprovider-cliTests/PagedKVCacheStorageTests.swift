@@ -18,31 +18,38 @@ final class PagedKVCacheStorageTests: XCTestCase {
         XCTAssertEqual(PagedKVBlockLayout.blockRanges(tokens: 8, blockSizeTokens: 4), [0 ..< 4, 4 ..< 8])
     }
 
-    func testGrownCapacityUsesWholeStepsAndNeverExceedsMaxResident() {
-        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(stored: 0, needed: 1, maxTokens: 10_000), 256)
-        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(stored: 256, needed: 257, maxTokens: 10_000), 512)
-        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(stored: 0, needed: 300, maxTokens: 10_000), 512)
-        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(stored: 100, needed: 101, maxTokens: 10_000), 356)
-        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(stored: 0, needed: 1, maxTokens: 64), 64)
-        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(stored: 60, needed: 64, maxTokens: 64), 64)
+    func testGrownCapacityIsWholeAllocatorBlocksAndNeverExceedsMaxResident() {
+        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(needed: 1, maxTokens: 10_000, blockSizeTokens: 16), 16)
+        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(needed: 16, maxTokens: 10_000, blockSizeTokens: 16), 16)
+        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(needed: 17, maxTokens: 10_000, blockSizeTokens: 16), 32)
+        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(needed: 300, maxTokens: 10_000, blockSizeTokens: 16), 304)
+        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(needed: 5, maxTokens: 10_000, blockSizeTokens: 1), 5)
+        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(needed: 60, maxTokens: 62, blockSizeTokens: 16), 62)
         // Callers reject needed > maxTokens first; if reached, still fit the write.
-        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(stored: 60, needed: 70, maxTokens: 64), 70)
-        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(stored: Int.max - 10, needed: Int.max - 5, maxTokens: Int.max), Int.max)
+        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(needed: 70, maxTokens: 64, blockSizeTokens: 16), 70)
+        XCTAssertEqual(PagedKVBlockLayout.grownCapacity(needed: Int.max - 5, maxTokens: Int.max, blockSizeTokens: 16), Int.max - 5)
+        XCTAssertEqual(PagedKVBlockLayout.alignedCapacity(tokens: 0, blockSizeTokens: 16), 0)
+        XCTAssertEqual(PagedKVBlockLayout.alignedCapacity(tokens: 33, blockSizeTokens: 16), 48)
     }
 
-    func testSingleTokenGrowthNeverExceedsMaxResidentAndAlwaysFits() {
-        for maxTokens in [1, 17, 255, 256, 257, 700] {
-            var capacity = 0
-            var growths = 0
-            for stored in 0 ..< maxTokens {
-                if capacity < stored + 1 {
-                    capacity = PagedKVBlockLayout.grownCapacity(stored: stored, needed: stored + 1, maxTokens: maxTokens)
-                    growths += 1
+    /// SPEC-039 FR-PKV2: physical capacity never exceeds the whole blocks the
+    /// allocator accounts for the stored tokens, at any length.
+    func testSingleTokenGrowthStaysWithinAccountedBlocksAndAlwaysFits() {
+        for blockSize in [1, 4, 16] {
+            for maxTokens in [1, 17, 255, 256, 257, 700] {
+                var capacity = 0
+                var growths = 0
+                for stored in 0 ..< maxTokens {
+                    if capacity < stored + 1 {
+                        capacity = PagedKVBlockLayout.grownCapacity(needed: stored + 1, maxTokens: maxTokens, blockSizeTokens: blockSize)
+                        growths += 1
+                    }
+                    let accounted = PagedKVBlockLayout.blockCount(tokens: stored + 1, blockSizeTokens: blockSize) * blockSize
+                    XCTAssertGreaterThanOrEqual(capacity, stored + 1)
+                    XCTAssertLessThanOrEqual(capacity, min(maxTokens, accounted), "block=\(blockSize) stored=\(stored)")
                 }
-                XCTAssertGreaterThanOrEqual(capacity, stored + 1)
-                XCTAssertLessThanOrEqual(capacity, maxTokens)
+                XCTAssertEqual(growths, (maxTokens + blockSize - 1) / blockSize, "block=\(blockSize) maxTokens=\(maxTokens)")
             }
-            XCTAssertEqual(growths, (maxTokens + 255) / 256, "maxTokens=\(maxTokens)")
         }
     }
 
@@ -75,8 +82,7 @@ final class PagedKVCacheStorageTests: XCTestCase {
         XCTAssertEqual(cache.storedTokens, token)
         XCTAssertEqual(Self.bytes(cache.state[0]), Self.bytes(referenceKeys!))
         XCTAssertEqual(Self.bytes(cache.state[1]), Self.bytes(referenceValues!))
-        XCTAssertLessThanOrEqual(cache.bufferCapacityTokens, 800)
-        XCTAssertEqual(cache.bufferCapacityTokens % 256 == 0 || cache.bufferCapacityTokens == 800, true)
+        XCTAssertEqual(cache.bufferCapacityTokens, (token + 3) / 4 * 4)
         XCTAssertEqual(cache.debugDescription, "PagedKVCache(offset=\(token), blockSizeTokens=4, blocks=\((token + 3) / 4))")
     }
 
@@ -102,10 +108,15 @@ final class PagedKVCacheStorageTests: XCTestCase {
         for index in 0 ..< 10 {
             _ = cache.update(keys: history[.ellipsis, index ..< index + 1, 0...], values: history[.ellipsis, index ..< index + 1, 0...])
         }
-        let capacityBefore = cache.bufferCapacityTokens
+        XCTAssertEqual(cache.bufferCapacityTokens, 12)
         XCTAssertEqual(cache.trim(3), 3)
         XCTAssertEqual(cache.offset, 7)
-        XCTAssertEqual(cache.bufferCapacityTokens, capacityBefore)
+        // The freed block is released (SPEC-039 FR-PKV2 accounting).
+        XCTAssertEqual(cache.bufferCapacityTokens, 8)
+        XCTAssertEqual(cache.trim(1), 1)
+        XCTAssertEqual(cache.bufferCapacityTokens, 8)
+        XCTAssertEqual(Self.bytes(cache.state[0]), Self.bytes(history[.ellipsis, ..<6, 0...]))
+        _ = cache.update(keys: history[.ellipsis, 6 ..< 7, 0...], values: history[.ellipsis, 6 ..< 7, 0...])
         XCTAssertEqual(Self.bytes(cache.state[0]), Self.bytes(history[.ellipsis, ..<7, 0...]))
 
         let fresh = Self.tokens(start: 100, count: 2, salt: 9)
@@ -114,10 +125,12 @@ final class PagedKVCacheStorageTests: XCTestCase {
         XCTAssertEqual(Self.bytes(outKeys), Self.bytes(expected))
         XCTAssertEqual(Self.bytes(cache.state[0]), Self.bytes(expected))
         XCTAssertEqual(cache.offset, 9)
+        XCTAssertEqual(cache.bufferCapacityTokens, 12)
 
         XCTAssertEqual(cache.trim(50), 9)
         XCTAssertEqual(cache.offset, 0)
         XCTAssertTrue(cache.state.isEmpty)
+        XCTAssertEqual(cache.bufferCapacityTokens, 0)
         let restart = Self.tokens(start: 200, count: 1, salt: 2)
         let (restarted, _) = cache.update(keys: restart, values: restart)
         XCTAssertEqual(Self.bytes(restarted), Self.bytes(restart))

@@ -60,9 +60,6 @@ struct PagedKVGatherKernel {
 /// Pure block/capacity arithmetic for `PagedKVCache` storage, kept free of MLX
 /// so it is testable on hosts without the Metal library.
 enum PagedKVBlockLayout {
-    /// Growth step, matching `KVCacheSimple.step`.
-    static let growthStepTokens = 256
-
     static func blockCount(tokens: Int, blockSizeTokens: Int) -> Int {
         guard tokens > 0, blockSizeTokens > 0 else { return 0 }
         return (tokens - 1) / blockSizeTokens + 1
@@ -77,21 +74,27 @@ enum PagedKVBlockLayout {
         }
     }
 
-    /// Capacity after growing a buffer holding `stored` tokens so it fits
-    /// `needed`: whole growth steps past `stored`, never above `maxTokens`
-    /// unless `needed` itself is larger (callers reject that case first).
+    /// Capacity after growing a buffer so it fits `needed` tokens: `needed`
+    /// rounded up to whole allocator blocks, never above `maxTokens` unless
+    /// `needed` itself is larger (callers reject that case first). Physical
+    /// capacity therefore never exceeds the blocks SPEC-039 FR-PKV2 accounts
+    /// for the stored tokens.
     static func grownCapacity(
-        stored: Int,
         needed: Int,
         maxTokens: Int,
-        step: Int = growthStepTokens
+        blockSizeTokens: Int
     ) -> Int {
-        let incoming = max(needed - stored, 0)
-        let steps = (step + incoming - 1) / step
-        let (growth, growthOverflow) = steps.multipliedReportingOverflow(by: step)
-        let (capacity, capacityOverflow) = stored.addingReportingOverflow(growth)
-        let bounded = growthOverflow || capacityOverflow ? maxTokens : min(capacity, maxTokens)
-        return max(needed, bounded)
+        let alignedTo = alignedCapacity(tokens: needed, blockSizeTokens: blockSizeTokens)
+        return max(needed, min(alignedTo, maxTokens))
+    }
+
+    /// `tokens` rounded up to whole blocks of `blockSizeTokens`.
+    static func alignedCapacity(tokens: Int, blockSizeTokens: Int) -> Int {
+        guard tokens > 0 else { return 0 }
+        guard blockSizeTokens > 1 else { return tokens }
+        let blocks = blockCount(tokens: tokens, blockSizeTokens: blockSizeTokens)
+        let (capacity, overflow) = blocks.multipliedReportingOverflow(by: blockSizeTokens)
+        return overflow ? tokens : capacity
     }
 }
 
@@ -213,8 +216,8 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
 
         let start = storedTokens
         let end = start + incomingTokens
-        let nextKeys = Self.write(keys, into: keyBuffer, stored: start, maxTokens: maxResidentTokens)
-        let nextValues = Self.write(values, into: valueBuffer, stored: start, maxTokens: maxResidentTokens)
+        let nextKeys = Self.write(keys, into: keyBuffer, stored: start, maxTokens: maxResidentTokens, blockSizeTokens: blockSizeTokens)
+        let nextValues = Self.write(values, into: valueBuffer, stored: start, maxTokens: maxResidentTokens, blockSizeTokens: blockSizeTokens)
         keyBuffer = nextKeys
         valueBuffer = nextValues
         storedTokens = end
@@ -362,9 +365,17 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         let trimmed = min(offset, max(n, 0))
         guard trimmed > 0 else { return 0 }
         offset -= trimmed
-        // O(1): keep the buffers; positions past `storedTokens` are overwritten
-        // by the next `update`.
         storedTokens = min(storedTokens, offset)
+        // Keep capacity within the blocks the allocator still accounts for
+        // (SPEC-039 FR-PKV2): a trim that frees whole blocks copies the kept
+        // prefix into a right-sized buffer so the freed memory is released.
+        // Positions past `storedTokens` inside the kept blocks are overwritten
+        // by the next `update`.
+        let keep = PagedKVBlockLayout.alignedCapacity(tokens: storedTokens, blockSizeTokens: blockSizeTokens)
+        if let keyBuffer, let valueBuffer, keyBuffer.dim(2) > keep {
+            self.keyBuffer = Self.resized(keyBuffer, stored: storedTokens, capacity: keep)
+            self.valueBuffer = Self.resized(valueBuffer, stored: storedTokens, capacity: keep)
+        }
         mutationCount &+= 1
         return trimmed
     }
@@ -492,20 +503,32 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         return overflow ? Int.max : value
     }
 
+    /// A new buffer of `capacity` tokens holding `buffer`'s first `stored`
+    /// tokens; nil when nothing is kept. Always fresh memory, never a view.
+    private static func resized(_ buffer: MLXArray, stored: Int, capacity: Int) -> MLXArray? {
+        guard capacity > 0 else { return nil }
+        var shape = buffer.shape
+        shape[2] = capacity - stored
+        let extra = MLXArray.zeros(shape, dtype: buffer.dtype)
+        guard stored > 0 else { return extra }
+        return concatenated([prefix(buffer, stored), extra], axis: 2)
+    }
+
     /// Appends `incoming` at `[stored ..< stored + n]` of `buffer`, growing it
-    /// like `KVCacheSimple` (fixed steps, capped at `maxTokens`). A buffer whose
-    /// dtype or non-sequence dims differ from `incoming` falls back to the old
-    /// exact concatenation, so promotion and shape behavior stay unchanged.
+    /// to whole allocator blocks (capped at `maxTokens`). A buffer whose dtype
+    /// or non-sequence dims differ from `incoming` falls back to the old exact
+    /// concatenation, so promotion and shape behavior stay unchanged.
     private static func write(
         _ incoming: MLXArray,
         into buffer: MLXArray?,
         stored: Int,
-        maxTokens: Int
+        maxTokens: Int,
+        blockSizeTokens: Int
     ) -> MLXArray {
         let n = incoming.dim(2)
         guard let buffer else {
             guard n > 0 else { return prefix(incoming, 0) }
-            var target = grown(nil, like: incoming, stored: 0, needed: n, maxTokens: maxTokens)
+            var target = grown(nil, like: incoming, stored: 0, needed: n, maxTokens: maxTokens, blockSizeTokens: blockSizeTokens)
             target[.ellipsis, 0 ..< n, 0...] = incoming
             return target
         }
@@ -520,7 +543,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         }
         var target = buffer.dim(2) >= stored + n
             ? buffer
-            : grown(buffer, like: incoming, stored: stored, needed: stored + n, maxTokens: maxTokens)
+            : grown(buffer, like: incoming, stored: stored, needed: stored + n, maxTokens: maxTokens, blockSizeTokens: blockSizeTokens)
         target[.ellipsis, stored ..< stored + n, 0...] = incoming
         return target
     }
@@ -530,9 +553,10 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         like incoming: MLXArray,
         stored: Int,
         needed: Int,
-        maxTokens: Int
+        maxTokens: Int,
+        blockSizeTokens: Int
     ) -> MLXArray {
-        let capacity = PagedKVBlockLayout.grownCapacity(stored: stored, needed: needed, maxTokens: maxTokens)
+        let capacity = PagedKVBlockLayout.grownCapacity(needed: needed, maxTokens: maxTokens, blockSizeTokens: blockSizeTokens)
         let extra = MLXArray.zeros(
             [incoming.dim(0), incoming.dim(1), capacity - stored, incoming.dim(3)],
             dtype: incoming.dtype
