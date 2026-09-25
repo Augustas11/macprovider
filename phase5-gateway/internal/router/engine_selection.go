@@ -30,6 +30,7 @@ var engineRuntimeClasses = map[string]string{
 	"lmstudio": "lmstudio_loopback",
 	"mlxlm":    "mlxlm_loopback",
 	"ollama":   "ollama_loopback",
+	"omlx":     "omlx_loopback",
 }
 
 var (

@@ -311,11 +311,12 @@ func TestPolicyCoreV2RejectionVectors(t *testing.T) {
 }
 
 // SPEC-042-R001 0.0.34 (#1690 M8): mlxlm_loopback joins the closed allowlist
-// vocabulary; 0.0.35 (#1690 M9) adds lmstudio_loopback. The generic
+// vocabulary; 0.0.35 (#1690 M9) adds lmstudio_loopback and 0.0.36
+// omlx_loopback. The generic
 // OpenAI-compatible adapter stays out.
 func TestRuntimeAllowlistVocabularyMLXLM(t *testing.T) {
 	for source, want := range map[string]bool{
-		"llamacpp_loopback": true, "mlxlm_loopback": true, "ollama_loopback": true, "lmstudio_loopback": true,
+		"llamacpp_loopback": true, "mlxlm_loopback": true, "ollama_loopback": true, "lmstudio_loopback": true, "omlx_loopback": true,
 		"mlx_cache": false, "openai_compatible_loopback": false, "": false,
 	} {
 		if got := ValidRuntimeAllowlistSource(source); got != want {

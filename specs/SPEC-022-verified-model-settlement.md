@@ -1,11 +1,18 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.2.3
+Version: v0.2.4
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.2.4
+
+Rollback note for the #1690 M9 engines. A coordinator that predates v0.2.0
+also cannot load an artifact feed carrying the SPEC-023 v0.18.0
+`omlx_loopback` runtime source, so the R-12.8 rollback bullet names it next
+to `mlxlm_loopback`. No other change.
 
 ### v0.2.3
 
@@ -1277,8 +1284,9 @@ the pool attempts recorded before a downgrade.
   predates v0.2.0 strict-decodes the catalog artifact feed and allows only
   `mlx_cache` on an `mlx_safetensors` artifact, so it exits at startup on a
   feed that carries a gguf `huggingface_revision` source (`file_path`) or an
-  `mlxlm_loopback` runtime source. A rollback to such a coordinator MUST
-  first install a signed feed set without either tuple (a new catalog release
+  `mlxlm_loopback` or (v0.2.4) `omlx_loopback` runtime source. A rollback to
+  such a coordinator MUST first install a signed feed set without those
+  tuples (a new catalog release
   that withdraws them), after the v2 allowlists and the CLI are rolled back;
   the operator sequence is in `docs/runbooks/trusted-pool-production-launch.md`
   section 9.

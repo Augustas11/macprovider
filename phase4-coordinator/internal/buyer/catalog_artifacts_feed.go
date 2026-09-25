@@ -45,8 +45,8 @@ var (
 			hashAlgorithm:  artifactSnapshotManifestAlg,
 			sourceRefKinds: map[string]struct{}{"huggingface_revision": {}},
 			// SPEC-023 v0.17.0: mlx_lm.server serves the same snapshot
-			// (SPEC-010-R009).
-			runtimeSources: map[string]struct{}{"mlx_cache": {}, "mlxlm_loopback": {}},
+			// (SPEC-010-R009); v0.18.0 (#1690 M9): oMLX does too.
+			runtimeSources: map[string]struct{}{"mlx_cache": {}, "mlxlm_loopback": {}, "omlx_loopback": {}},
 		},
 		"gguf": {
 			hashAlgorithm: artifactGGUFFileAlg,

@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.37",
+      "version": "0.9.38",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -259,7 +259,7 @@
     {
       "spec_id": "SPEC-010",
       "title": "Provider Model Catalog",
-      "version": "1.13",
+      "version": "1.14",
       "path": "specs/SPEC-010-model-catalog.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -627,7 +627,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.2.3",
+      "version": "v0.2.4",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.19.1",
+      "version": "v0.20.0",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -919,7 +919,7 @@
     {
       "spec_id": "SPEC-032",
       "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
-      "version": "v0.3.3",
+      "version": "v0.3.4",
       "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1239,7 +1239,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.35",
+      "version": "0.0.36",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1394,7 +1394,7 @@
     {
       "spec_id": "SPEC-046",
       "title": "Provider BYOM Discovery",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "path": "specs/SPEC-046-provider-byom-discovery.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1432,7 +1432,7 @@
     {
       "spec_id": "SPEC-047",
       "title": "Network Model Admission",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "path": "specs/SPEC-047-network-model-admission.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -2059,7 +2059,11 @@
         "phase4-coordinator/internal/ws/model_admission_binding.go:func matchRuntimeOfferArtifactHashes",
         "phase4-coordinator/internal/ws/model_admission_pool_route.go:func poolRuntimeMemberAlgorithm",
         "phase4-coordinator/internal/ws/model_admission_pool_route.go:func PoolRouteSessionBoundMember",
-        "phase4-coordinator/internal/buyer/catalog_artifacts_feed.go:artifactIdentityMatrix"
+        "phase4-coordinator/internal/buyer/catalog_artifacts_feed.go:artifactIdentityMatrix",
+        "phase3-binary/Sources/macprovider-cli/OMLXLoopback.swift:enum OMLXLoopbackServeModel",
+        "phase3-binary/Sources/macprovider-cli/OMLXLoopback.swift:enum MLXSnapshotLoopbackKind",
+        "phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:static func oMLX",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func isMLXSnapshotLoopbackRuntimeSource"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/MLXLMLoopbackTests.swift:testRuntimeReportsTheNativeSnapshotPairAndBindsTheListedDirectory",
@@ -2072,7 +2076,14 @@
         "phase4-coordinator/internal/ws/model_admission_mlxlm_test.go:TestSPEC010R009OfferMatchAdmitsMLXLMOnlyWhenPrimaryAllows",
         "phase4-coordinator/internal/ws/model_admission_mlxlm_test.go:TestSPEC010R009PoolRouteDerivesMLXLMRowMember",
         "phase4-coordinator/internal/ws/model_admission_mlxlm_test.go:TestSPEC010R009MLXLMClaimServingGGUFFailsClosed",
-        "phase4-coordinator/internal/buyer/catalog_artifacts_feed_test.go:TestLoadAutotuneFeedsMLXLMLoopbackTuple"
+        "phase4-coordinator/internal/buyer/catalog_artifacts_feed_test.go:TestLoadAutotuneFeedsMLXLMLoopbackTuple",
+        "phase3-binary/Tests/macprovider-cliTests/OMLXLoopbackTests.swift:testRuntimeReportsTheSnapshotPairAndBindsTheStatusEntry",
+        "phase3-binary/Tests/macprovider-cliTests/OMLXLoopbackTests.swift:testStatusBindingNeedsOneLocalLLMEntryForTheDirectory",
+        "phase3-binary/Tests/macprovider-cliTests/OMLXLoopbackTests.swift:testRuntimeFailsClosedWithoutADeclaredOrListedSnapshot",
+        "phase3-binary/Tests/macprovider-cliTests/OMLXLoopbackTests.swift:testDiscoveryReportsOnlyTheListedDeclaredSnapshotAsOMLX",
+        "phase4-coordinator/internal/ws/model_admission_omlx_test.go:TestSPEC010R009OMLXCandidateRowAdmissibility",
+        "phase4-coordinator/internal/ws/model_admission_omlx_test.go:TestSPEC010R009OfferMatchAdmitsOMLXOnlyWhenPrimaryAllows",
+        "phase4-coordinator/internal/ws/model_admission_omlx_test.go:TestSPEC010R009PoolRouteDerivesOMLXRowMember"
       ],
       "journeys": [],
       "evidence": [],
@@ -2080,7 +2091,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-010 1.12 (#1690 M8) specifies the MLX-snapshot identity leg for mlxlm_loopback (mlx_lm.server): the CLI-computed snapshot-manifest pair of the operator-declared snapshot, the /v1/models runtime binding, admissibility only where the release-bound artifact allows mlxlm_loopback, and pool-only settlement. The #1690 M8 CLI leg (MLXSnapshotIdentity, the mlxlm: selector, the /v1/models binding, the offer hash, the mlxlm_loopback discovery adapter) and the coordinator side (primary-row admissibility gated on the release-bound primary artifact, the pool route-time snapshot-manifest member derivation, the SPEC-023 v0.17.0 feed matrix) are mapped with fail-closed tests. Pending until a signed pool journey; the #1690 M8 lab e2e is local evidence only."
+        "rationale": "SPEC-010 1.12 (#1690 M8) specifies the MLX-snapshot identity leg for mlxlm_loopback (mlx_lm.server): the CLI-computed snapshot-manifest pair of the operator-declared snapshot, the /v1/models runtime binding, admissibility only where the release-bound artifact allows mlxlm_loopback, and pool-only settlement. The #1690 M8 CLI leg (MLXSnapshotIdentity, the mlxlm: selector, the /v1/models binding, the offer hash, the mlxlm_loopback discovery adapter) and the coordinator side (primary-row admissibility gated on the release-bound primary artifact, the pool route-time snapshot-manifest member derivation, the SPEC-023 v0.17.0 feed matrix) are mapped with fail-closed tests. Pending until a signed pool journey; the #1690 M8 lab e2e is local evidence only. SPEC-010 1.14 (#1690 M9) adds R009(f), the same leg for omlx_loopback (oMLX), bound through its /v1/models/status model_path (mapped above)."
       }
     },
     {
@@ -5675,7 +5686,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-006 0.9.34 (#1690 M7) specifies buyer engine selection. The #1690 M7 gateway and coordinator slices implement it: the X-MacProvider-Engine-Select closed vocabulary resolved after the pool and before quota reservation, 400 invalid_engine_selection and 503 engine_unavailable (both non-retryable), the internal X-MacProvider-Internal-Engine transport honored only on gateway-authenticated requests, the relay-blind rejection, the id-less dedupe key, and the X-MacProvider-Engine disclosure with a closed-value pass-through guard. Pending until a signed journey serves an engine-selected pool request; the #1690 M7 lab e2e is local evidence only. SPEC-006 0.9.36 (#1690 M9) adds the lmstudio selector (lmstudio_loopback)."
+        "rationale": "SPEC-006 0.9.34 (#1690 M7) specifies buyer engine selection. The #1690 M7 gateway and coordinator slices implement it: the X-MacProvider-Engine-Select closed vocabulary resolved after the pool and before quota reservation, 400 invalid_engine_selection and 503 engine_unavailable (both non-retryable), the internal X-MacProvider-Internal-Engine transport honored only on gateway-authenticated requests, the relay-blind rejection, the id-less dedupe key, and the X-MacProvider-Engine disclosure with a closed-value pass-through guard. Pending until a signed journey serves an engine-selected pool request; the #1690 M7 lab e2e is local evidence only. SPEC-006 0.9.36 (#1690 M9) adds the lmstudio selector (lmstudio_loopback). SPEC-006 0.9.37 (#1690 M9) adds the omlx selector (omlx_loopback)."
       }
     },
     {
@@ -7079,7 +7090,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "SPEC-042 0.0.32 (#1690 M3) amends this requirement for external-runtime serving (policy-core/v2 runtime_allowlist, route-time runtime-allowlist predicate, pool_operator_attested usage source); the #1690 M4 coordinator side of those amendments is implemented and tracked by SPEC-042-R013 (the M5 CLI signing path has landed; pending until a signed enforce-mode pool journey exists). Signed manifest identity/rollback controls remain pending for production, but the coordinator durable store now records accepted manifest verdict evidence in trustpool_manifest_acceptances plus trustpool_manifest_acceptance_high_water, guards one-time backfill with a durable migration marker, verifies the projection against replayed manifest events during reconstruction and later opens, and treats projection/event divergence as malformed durable state. Still pending: rollback-resistant production promotion authorization, signed journey evidence, full signer/delegation lifecycle reconstruction, and production migration/full-rollback proof. SPEC-042 0.0.35 (#1690 M9) adds lmstudio_loopback to the closed runtime_allowlist vocabulary."
+        "rationale": "SPEC-042 0.0.32 (#1690 M3) amends this requirement for external-runtime serving (policy-core/v2 runtime_allowlist, route-time runtime-allowlist predicate, pool_operator_attested usage source); the #1690 M4 coordinator side of those amendments is implemented and tracked by SPEC-042-R013 (the M5 CLI signing path has landed; pending until a signed enforce-mode pool journey exists). Signed manifest identity/rollback controls remain pending for production, but the coordinator durable store now records accepted manifest verdict evidence in trustpool_manifest_acceptances plus trustpool_manifest_acceptance_high_water, guards one-time backfill with a durable migration marker, verifies the projection against replayed manifest events during reconstruction and later opens, and treats projection/event divergence as malformed durable state. Still pending: rollback-resistant production promotion authorization, signed journey evidence, full signer/delegation lifecycle reconstruction, and production migration/full-rollback proof. SPEC-042 0.0.35 (#1690 M9) adds lmstudio_loopback to the closed runtime_allowlist vocabulary. SPEC-042 0.0.36 (#1690 M9) adds omlx_loopback."
       }
     },
     {
@@ -7576,7 +7587,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-042 0.0.33 (#1690 M7) specifies the buyer engine filter on pool routes. The #1690 M7 coordinator slice implements it: engine_unavailable for a non-native class on a global route or outside the active v2 allowlist, the filter on the candidate, pinned/self-route, and slot-queue paths (failover re-enters the same selection), no-spill when the scope has no session of the class for the model, and the X-MacProvider-Engine disclosure of the coordinator-recorded class. Settlement is unchanged. Pending until a signed journey serves engine=llamacpp on an allowlisting pool with pool_operator_attested settlement; the #1690 M7 lab e2e is local evidence only. SPEC-042 0.0.35 (#1690 M9) adds lmstudio_loopback to the selectable classes."
+        "rationale": "SPEC-042 0.0.33 (#1690 M7) specifies the buyer engine filter on pool routes. The #1690 M7 coordinator slice implements it: engine_unavailable for a non-native class on a global route or outside the active v2 allowlist, the filter on the candidate, pinned/self-route, and slot-queue paths (failover re-enters the same selection), no-spill when the scope has no session of the class for the model, and the X-MacProvider-Engine disclosure of the coordinator-recorded class. Settlement is unchanged. Pending until a signed journey serves engine=llamacpp on an allowlisting pool with pool_operator_attested settlement; the #1690 M7 lab e2e is local evidence only. SPEC-042 0.0.35 (#1690 M9) adds lmstudio_loopback to the selectable classes. SPEC-042 0.0.36 (#1690 M9) adds omlx_loopback to the selectable classes."
       }
     },
     {
@@ -9062,11 +9073,13 @@
       "state": "pending",
       "implementation": [
         "phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:enum LoopbackServeSelection",
-        "phase3-binary/Sources/macprovider-cli/LMStudioLoopback.swift:static func bindingState"
+        "phase3-binary/Sources/macprovider-cli/LMStudioLoopback.swift:static func bindingState",
+        "phase3-binary/Sources/macprovider-cli/OMLXLoopback.swift:static func servedModelID"
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/LMStudioLoopbackTests.swift:testSelectionModelKeyAndOrigin",
-        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testLlamaCppSelectionMatchesDiscoveryVocabulary"
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testLlamaCppSelectionMatchesDiscoveryVocabulary",
+        "phase3-binary/Tests/macprovider-cliTests/OMLXLoopbackTests.swift:testSelectorAndVocabulary"
       ],
       "journeys": [],
       "evidence": [],
@@ -9074,7 +9087,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
-        "rationale": "SPEC-046 0.2.0 (#1690 M3) records the loopback serving selectors llamacpp: and ollama: (implemented in #1690 M2, LoopbackServeSelection) and names llamacpp_loopback the first external runtime for buyer serving; lmstudio: and openai: are deferred until they have a serving-time identity leg. Pending until the M2 selector tests are mapped here and the SPEC-042-R013 pool journey runs. SPEC-046 0.4.0 (#1690 M9) adds the lmstudio: selector, bound through the LM Studio /api/v1/models entry (mapped above with the selector tests)."
+        "rationale": "SPEC-046 0.2.0 (#1690 M3) records the loopback serving selectors llamacpp: and ollama: (implemented in #1690 M2, LoopbackServeSelection) and names llamacpp_loopback the first external runtime for buyer serving; lmstudio: and openai: are deferred until they have a serving-time identity leg. Pending until the M2 selector tests are mapped here and the SPEC-042-R013 pool journey runs. SPEC-046 0.4.0 (#1690 M9) adds the lmstudio: selector, bound through the LM Studio /api/v1/models entry (mapped above with the selector tests). SPEC-046 0.5.0 (#1690 M9) adds the omlx: selector and the omlx_loopback adapter."
       }
     },
     {

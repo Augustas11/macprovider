@@ -550,6 +550,13 @@ func TestLoadAutotuneFeedsMLXLMLoopbackTuple(t *testing.T) {
 		{"gguf allows mlxlm_loopback", func() string {
 			return artifactModelJSON(strings.Replace(ggufArtifactJSON(hash, "sha256:"+hash), `"allowed_runtime_sources":["ollama_loopback"]`, `"allowed_runtime_sources":["mlxlm_loopback","ollama_loopback"]`, 1))
 		}, `may not allow runtime source "mlxlm_loopback"`},
+		// SPEC-023 v0.18.0 (#1690 M9): oMLX serves the same snapshot.
+		{"mlx primary allows omlx_loopback", func() string {
+			return strings.Replace(artifactModelJSON(""), `"allowed_runtime_sources":["mlx_cache"]`, `"allowed_runtime_sources":["mlx_cache","mlxlm_loopback","omlx_loopback"]`, 1)
+		}, ""},
+		{"gguf allows omlx_loopback", func() string {
+			return artifactModelJSON(strings.Replace(ggufArtifactJSON(hash, "sha256:"+hash), `"allowed_runtime_sources":["ollama_loopback"]`, `"allowed_runtime_sources":["ollama_loopback","omlx_loopback"]`, 1))
+		}, `may not allow runtime source "omlx_loopback"`},
 	}
 	for _, tc := range cases {
 		tc := tc

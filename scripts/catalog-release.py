@@ -101,8 +101,9 @@ GGUF_FILE_ALG = "macprovider.gguf-file.v1"
 # SPEC-023 §3.7.4 closed artifact-identity matrix: runtime_format determines the
 # only legal hash_algorithm, source_ref.kind, and allowed_runtime_sources set.
 ARTIFACT_IDENTITY_MATRIX = {
-    # SPEC-023 v0.17.0: mlx_lm.server (mlxlm_loopback) serves the same snapshot.
-    "mlx_safetensors": (SNAPSHOT_MANIFEST_ALG, "huggingface_revision", frozenset({"mlx_cache", "mlxlm_loopback"})),
+    # SPEC-023 v0.17.0: mlx_lm.server (mlxlm_loopback) serves the same snapshot;
+    # v0.19.0 (#1690 M9): so does oMLX (omlx_loopback).
+    "mlx_safetensors": (SNAPSHOT_MANIFEST_ALG, "huggingface_revision", frozenset({"mlx_cache", "mlxlm_loopback", "omlx_loopback"})),
     "gguf": (GGUF_FILE_ALG, "ollama_library_tag", frozenset({
         "ollama_loopback", "llamacpp_loopback", "lmstudio_loopback", "openai_compatible_loopback",
     })),
@@ -114,7 +115,7 @@ ARTIFACT_VERIFICATION_STATUSES = frozenset({"declared", "verified", "blocked"})
 # raised, in a reviewed change, after every consumer implements it.
 ARTIFACT_FEED_CONSUMER_FLOOR = (0, 16, 0)
 # allowed_runtime_sources value -> the SPEC-023 revision that made it legal.
-ARTIFACT_RUNTIME_SOURCE_MIN_CONSUMER = {"mlxlm_loopback": (0, 17, 0)}
+ARTIFACT_RUNTIME_SOURCE_MIN_CONSUMER = {"mlxlm_loopback": (0, 17, 0), "omlx_loopback": (0, 19, 0)}
 # SPEC-005 §5.5 NormalizeModelKey parity (phase4-coordinator/internal/billing/formula.go).
 KNOWN_MODEL_NAMESPACES = frozenset({"mlx-community", "openai", "google", "meta-llama", "nvidia", "qwen"})
 TIER2_HASH_SCOPES = {

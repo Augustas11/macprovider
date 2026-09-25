@@ -85,8 +85,9 @@ struct ArtifactFeed: Equatable, Sendable {
         "mlx_safetensors": IdentityRow(
             hashAlgorithm: "macprovider.snapshot-manifest.v1",
             sourceRefKinds: ["huggingface_revision"],
-            // SPEC-023 v0.17.0: mlx_lm.server serves the same snapshot.
-            runtimeSources: ["mlx_cache", "mlxlm_loopback"]
+            // SPEC-023 v0.17.0: mlx_lm.server serves the same snapshot;
+            // v0.18.0 (#1690 M9): oMLX does too.
+            runtimeSources: ["mlx_cache", "mlxlm_loopback", "omlx_loopback"]
         ),
         "gguf": IdentityRow(
             hashAlgorithm: "macprovider.gguf-file.v1",

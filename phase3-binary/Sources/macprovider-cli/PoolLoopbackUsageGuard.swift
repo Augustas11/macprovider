@@ -23,19 +23,24 @@ enum PoolLoopbackUsageGuard {
     static let absoluteTolerance: Int64 = 8
     static let relativeTolerance = 0.05
 
-    /// GGUF runtimes (SPEC-023 §3.7.4 identity matrix) and mlxlm_loopback,
-    /// which serves the catalog row's own MLX snapshot (SPEC-010-R009).
+    /// GGUF runtimes (SPEC-023 §3.7.4 identity matrix) and the MLX-snapshot
+    /// runtimes (mlxlm_loopback, omlx_loopback), which serve the catalog
+    /// row's own MLX snapshot (SPEC-010-R009).
     static func applies(to authorization: PoolRuntimeAuthorization) -> Bool {
-        authorization.runtimeSource == MLXLMLoopbackServeModel.runtimeSource ||
+        MLXSnapshotLoopbackKind.kind(forRuntimeSource: authorization.runtimeSource) != nil ||
             ArtifactFeed.identityMatrix["gguf"]?.runtimeSources.contains(authorization.runtimeSource) == true
     }
 
-    /// mlxlm_loopback re-counts with the tokenizer in the served snapshot
-    /// itself; every other runtime uses the catalog model id's local Hugging
-    /// Face snapshot.
+    /// The MLX-snapshot runtimes re-count with the tokenizer in the served
+    /// snapshot itself; every other runtime uses the catalog model id's
+    /// local Hugging Face snapshot.
     static func snapshotDirectory(for authorization: PoolRuntimeAuthorization) -> (String) -> URL? {
         if authorization.runtimeSource == MLXLMLoopbackServeModel.runtimeSource,
            let directory = MLXLMLoopbackServeModel.snapshotDirectory() {
+            return { _ in directory }
+        }
+        if authorization.runtimeSource == OMLXLoopbackServeModel.runtimeSource,
+           let directory = OMLXLoopbackServeModel.snapshotDirectory() {
             return { _ in directory }
         }
         return ModelRuntime.localHuggingFaceSnapshot(for:)
@@ -96,9 +101,9 @@ enum PoolLoopbackUsageGuard {
     }
 
     /// #1690 M9: the token count of `text` with the tokenizer in `directory`
-    /// (no special tokens), or nil when it cannot load. `mlxlm_loopback` uses
-    /// it for the completion tokens of a cancelled stream, since
-    /// mlx_lm.server reports no per-chunk usage.
+    /// (no special tokens), or nil when it cannot load. `mlxlm_loopback` and
+    /// `omlx_loopback` use it for the completion tokens of a cancelled
+    /// stream, since neither reports per-chunk usage.
     static func snapshotTokenCount(of text: String, in directory: URL) async -> Int? {
         guard let tokenizer = await TokenizerCache.shared.tokenizer(at: directory) else { return nil }
         return tokenizer.encode(text: text, addSpecialTokens: false).count

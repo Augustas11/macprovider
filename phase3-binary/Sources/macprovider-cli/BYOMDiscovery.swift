@@ -2177,7 +2177,20 @@ struct BYOMDiscoveryEnvironment: Sendable {
     /// adapter has no default and is attempted only when both are set.
     let mlxlmOrigin: String?
     let mlxlmModelPath: URL?
+    /// SPEC-046 v0.5.0 `omlx_loopback` (#1690 M9): the operator-named oMLX
+    /// origin and the MLX snapshot directory it serves; attempted only when
+    /// both are set.
+    let omlxOrigin: String?
+    let omlxModelPath: URL?
     let artifactDigestCacheURL: URL
+
+    /// The configured MLX-snapshot loopback adapters, in a fixed order.
+    var mlxSnapshotLoopbacks: [(kind: MLXSnapshotLoopbackKind, origin: String, directory: URL)] {
+        var out: [(kind: MLXSnapshotLoopbackKind, origin: String, directory: URL)] = []
+        if let origin = mlxlmOrigin, let directory = mlxlmModelPath { out.append((.mlxLM, origin, directory)) }
+        if let origin = omlxOrigin, let directory = omlxModelPath { out.append((.oMLX, origin, directory)) }
+        return out
+    }
 
     init(
         namespaceURL: URL,
@@ -2192,6 +2205,8 @@ struct BYOMDiscoveryEnvironment: Sendable {
         llamacppModelPath: URL? = nil,
         mlxlmOrigin: String? = nil,
         mlxlmModelPath: URL? = nil,
+        omlxOrigin: String? = nil,
+        omlxModelPath: URL? = nil,
         artifactDigestCacheURL: URL? = nil
     ) {
         self.namespaceURL = namespaceURL
@@ -2206,6 +2221,8 @@ struct BYOMDiscoveryEnvironment: Sendable {
         self.llamacppModelPath = llamacppModelPath
         self.mlxlmOrigin = mlxlmOrigin
         self.mlxlmModelPath = mlxlmModelPath
+        self.omlxOrigin = omlxOrigin
+        self.omlxModelPath = omlxModelPath
         self.artifactDigestCacheURL = artifactDigestCacheURL ?? BYOMArtifactDigestCache.defaultURL()
     }
 
@@ -2277,6 +2294,8 @@ struct BYOMDiscoveryEnvironment: Sendable {
             llamacppModelPath: llamacppSelector.pinnedFile,
             mlxlmOrigin: LoopbackServeSelection.nonEmpty(environment[MLXLMLoopbackServeModel.originEnvironmentKey]),
             mlxlmModelPath: MLXLMLoopbackServeModel.snapshotDirectory(environment: environment),
+            omlxOrigin: LoopbackServeSelection.nonEmpty(environment[OMLXLoopbackServeModel.originEnvironmentKey]),
+            omlxModelPath: OMLXLoopbackServeModel.snapshotDirectory(environment: environment),
             artifactDigestCacheURL: BYOMArtifactDigestCache.defaultURL(homeDirectory: homeDirectory)
         )
     }
@@ -4377,59 +4396,79 @@ struct BYOMLlamaCppDiscovery: Sendable {
 }
 
 extension BYOMDiscoveryRunner {
-    /// `discover()` plus the SPEC-046 v0.3.0 `mlxlm_loopback` adapter (#1690
-    /// M8), attempted only when the operator names both its origin and the
+    /// `discover()` plus the MLX-snapshot loopback adapters: SPEC-046 v0.3.0
+    /// `mlxlm_loopback` (#1690 M8) and v0.5.0 `omlx_loopback` (#1690 M9), each
+    /// attempted only when the operator names both its origin and the
     /// snapshot directory. The rows merge with the same ordering `discover()`
     /// uses. `discover()` itself is unchanged.
     func discoverIncludingMLXLM() async -> BYOMDiscoveryWire {
         let base = await discover()
-        guard let origin = environment.mlxlmOrigin, let directory = environment.mlxlmModelPath else {
+        let configured = environment.mlxSnapshotLoopbacks
+        guard !configured.isEmpty else {
             return base
         }
         let namespace = BYOMDiscoveryNamespaceStore(fileManager: fileManager).readNamespace(at: environment.namespaceURL)
-        let mlxlm = await BYOMMLXLMDiscovery(
-            origin: origin,
-            snapshotDirectory: directory,
-            namespace: namespace.bytes,
-            namespaceWarnings: namespace.warnings,
-            httpClient: httpClient
-        ).discover()
         var warnings = Set(base.warnings)
-        warnings.formUnion(mlxlm.adapter.warningCodes)
-        for candidate in mlxlm.candidates {
-            warnings.formUnion(candidate.warningCodes)
+        var candidates = base.candidates
+        var adapters = base.adapters
+        for loopback in configured {
+            let found = await BYOMMLXLMDiscovery(
+                origin: loopback.origin,
+                snapshotDirectory: loopback.directory,
+                namespace: namespace.bytes,
+                namespaceWarnings: namespace.warnings,
+                httpClient: httpClient,
+                kind: loopback.kind
+            ).discover()
+            warnings.formUnion(found.adapter.warningCodes)
+            for candidate in found.candidates {
+                warnings.formUnion(candidate.warningCodes)
+            }
+            candidates += found.candidates
+            adapters.append(found.adapter)
         }
-        let candidates = (base.candidates + mlxlm.candidates).sorted {
+        candidates.sort {
             $0.runtimeSource == $1.runtimeSource ? $0.servedModelRef < $1.servedModelRef : $0.runtimeSource < $1.runtimeSource
         }
-        let adapters = (base.adapters + [mlxlm.adapter]).sorted { $0.runtimeSource < $1.runtimeSource }
+        adapters.sort { $0.runtimeSource < $1.runtimeSource }
         return BYOMDiscoveryWire(adapters: adapters, candidates: candidates, warnings: Array(warnings).sorted())
     }
 }
 
 extension BYOMEvaluationRunner {
-    /// `evaluate()` for an `mlxlm_loopback` target (#1690 M8): the candidate
-    /// comes from the mlxlm adapter and the bounded chat probe names
-    /// `default_model`, so mlx_lm.server never loads a model by name. Every
-    /// other target is `evaluate()` unchanged.
+    /// `evaluate()` for an `mlxlm_loopback` (#1690 M8) or `omlx_loopback`
+    /// (#1690 M9) target: the candidate comes from that adapter and the
+    /// bounded chat probe names the model the runtime serves the declared
+    /// snapshot under (`default_model` for mlx_lm.server, the listed id for
+    /// oMLX), so the runtime never loads another model by name. Every other
+    /// target is `evaluate()` unchanged.
     func evaluateIncludingMLXLM() async -> BYOMEvaluationWire {
-        guard let origin = environment.mlxlmOrigin, let directory = environment.mlxlmModelPath,
-              let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin)
-        else {
+        let configured = environment.mlxSnapshotLoopbacks
+        guard !configured.isEmpty else {
             return await evaluate()
         }
         BYOMDiscoveryNamespaceStore().provisionNamespaceIfMissing(at: environment.namespaceURL)
         let namespace = BYOMDiscoveryNamespaceStore().readNamespace(at: environment.namespaceURL)
-        let mlxlm = await BYOMMLXLMDiscovery(
-            origin: origin,
-            snapshotDirectory: directory,
-            namespace: namespace.bytes,
-            namespaceWarnings: namespace.warnings,
-            httpClient: httpClient
-        ).discover()
-        guard let candidate = selectLocalEvaluationCandidate(from: mlxlm.candidates) else {
+        var selected: (candidate: BYOMDiscoveryWire.Candidate, kind: MLXSnapshotLoopbackKind, baseURL: URL, directory: URL)?
+        for loopback in configured {
+            guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(loopback.origin) else { continue }
+            let found = await BYOMMLXLMDiscovery(
+                origin: loopback.origin,
+                snapshotDirectory: loopback.directory,
+                namespace: namespace.bytes,
+                namespaceWarnings: namespace.warnings,
+                httpClient: httpClient,
+                kind: loopback.kind
+            ).discover()
+            if let candidate = selectLocalEvaluationCandidate(from: found.candidates) {
+                selected = (candidate, loopback.kind, baseURL, loopback.directory)
+                break
+            }
+        }
+        guard let selected else {
             return await evaluate()
         }
+        let (candidate, kind, baseURL, directory) = selected
         guard candidate.candidateID.hasPrefix("byom_"),
               !candidate.candidateID.hasPrefix("byom_unstable_"),
               !candidate.warningCodes.contains(BYOMDiscoveryWarning.candidateIDUnstable.rawValue),
@@ -4444,9 +4483,14 @@ extension BYOMEvaluationRunner {
             return failureDocument(for: candidate, healthResult: "blocked", responseBody: nil, warnings: warnings,
                                    guidance: evaluationGuidance(health: "blocked", warnings: Set(warnings)))
         }
+        guard let runtimeModel = try? await kind.listedModelName(httpClient, origin: baseURL, directory: directory) else {
+            let warnings = mergedWarnings(candidate, adding: [.requiresPreparation])
+            return failureDocument(for: candidate, healthResult: "blocked", responseBody: nil, warnings: warnings,
+                                   guidance: evaluationGuidance(health: "blocked", warnings: Set(warnings)))
+        }
         return await evaluateOpenAICompatible(
             candidate: candidate,
-            runtimeModel: MLXLMLoopbackServeModel.upstreamModelName,
+            runtimeModel: runtimeModel,
             baseURL: baseURL
         )
     }
@@ -4461,6 +4505,10 @@ extension BYOMEvaluationRunner {
 /// SPEC-010-R009 snapshot-manifest pair, computed at offer time; the catalog
 /// match is made by the coordinator from that pair, so `catalog_model_key`
 /// stays null here.
+///
+/// #1690 M9: the same adapter serves `omlx_loopback` (`kind: .oMLX`), whose
+/// runtime lists the declared snapshot as the `model_path` of one
+/// `GET /v1/models/status` entry.
 struct BYOMMLXLMDiscovery: Sendable {
     static let runtimeSource = MLXLMLoopbackServeModel.runtimeSource
 
@@ -4469,26 +4517,30 @@ struct BYOMMLXLMDiscovery: Sendable {
     private let namespace: Data?
     private let namespaceWarnings: [BYOMDiscoveryWarning]
     private let httpClient: any BYOMDiscoveryHTTPClient
+    private let kind: MLXSnapshotLoopbackKind
+    private var runtimeSource: String { kind.runtimeSource }
 
     init(
         origin: String,
         snapshotDirectory: URL,
         namespace: Data?,
         namespaceWarnings: [BYOMDiscoveryWarning] = [],
-        httpClient: any BYOMDiscoveryHTTPClient
+        httpClient: any BYOMDiscoveryHTTPClient,
+        kind: MLXSnapshotLoopbackKind = .mlxLM
     ) {
         self.origin = origin
         self.snapshotDirectory = snapshotDirectory
         self.namespace = namespace
         self.namespaceWarnings = namespaceWarnings
         self.httpClient = httpClient
+        self.kind = kind
     }
 
     func discover() async -> (adapter: BYOMDiscoveryWire.Adapter, candidates: [BYOMDiscoveryWire.Candidate]) {
         guard let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
             return (
                 BYOMDiscoveryWire.Adapter(
-                    runtimeSource: Self.runtimeSource,
+                    runtimeSource: runtimeSource,
                     status: "rejected",
                     originClass: "rejected",
                     warningCodes: [BYOMDiscoveryWarning.adapterRejectedNonLoopback.rawValue]
@@ -4498,11 +4550,11 @@ struct BYOMMLXLMDiscovery: Sendable {
         }
         let listed: Bool
         do {
-            listed = try await MLXLMLoopbackServeModel.listsSnapshot(httpClient, origin: baseURL, directory: snapshotDirectory)
+            listed = try await kind.listedModelName(httpClient, origin: baseURL, directory: snapshotDirectory) != nil
         } catch {
             return (
                 BYOMDiscoveryWire.Adapter(
-                    runtimeSource: Self.runtimeSource,
+                    runtimeSource: runtimeSource,
                     status: "unavailable",
                     originClass: "loopback_http",
                     warningCodes: [BYOMDiscoveryWarning.adapterUnavailable.rawValue]
@@ -4511,7 +4563,7 @@ struct BYOMMLXLMDiscovery: Sendable {
             )
         }
         let adapter = BYOMDiscoveryWire.Adapter(
-            runtimeSource: Self.runtimeSource,
+            runtimeSource: runtimeSource,
             status: "ok",
             originClass: "loopback_http",
             warningCodes: []
@@ -4524,10 +4576,10 @@ struct BYOMMLXLMDiscovery: Sendable {
     }
 
     private func buildCandidate(name: String) -> BYOMDiscoveryWire.Candidate {
-        let servedModelRef = MLXLMLoopbackServeModel.servedModelRef(for: snapshotDirectory)
+        let servedModelRef = kind.servedModelRef(for: snapshotDirectory)
         let (candidateID, idWarnings) = BYOMCandidateIdentity.candidateID(
             namespace: namespace,
-            runtimeSource: Self.runtimeSource,
+            runtimeSource: runtimeSource,
             servedModelRef: servedModelRef
         )
         let warnings = Set((namespaceWarnings + idWarnings + [.capabilityUnevaluated, .evaluationRequired]).map(\.rawValue))
@@ -4545,7 +4597,7 @@ struct BYOMMLXLMDiscovery: Sendable {
         )
         return BYOMDiscoveryWire.Candidate(
             candidateID: candidateID,
-            runtimeSource: Self.runtimeSource,
+            runtimeSource: runtimeSource,
             displayName: BYOMDiscoveryPrivacy.displayName(from: name),
             servedModelRef: servedModelRef,
             catalogModelKey: nil,

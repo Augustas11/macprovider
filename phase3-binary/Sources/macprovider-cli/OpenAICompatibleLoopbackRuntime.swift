@@ -16,6 +16,9 @@ import MacProviderCore
 //   - `--model lmstudio:<key>`  -> `lmstudio_loopback` (the GGUF the LM Studio
 //     models root resolves for the key, bound to LM Studio's `/api/v1/models`
 //     entry for it; SPEC-010-R007(i), #1690 M9)
+//   - `--model omlx:<name>`     -> `omlx_loopback`     (operator-declared MLX
+//     snapshot, bound to the oMLX `/v1/models/status` entry whose
+//     `model_path` it is; SPEC-010-R009, #1690 M9)
 // Other OpenAI-compatible runtimes (`openai:`) are deliberately not
 // selectable here: they arrive with their identity leg, one at a time.
 //
@@ -104,12 +107,14 @@ enum LoopbackServeSelection: Equatable {
     case llamaCpp
     case mlxLM
     case lmStudio
+    case oMLX
 
     static func select(_ ref: String?) -> LoopbackServeSelection? {
         if OllamaLoopbackServeModel.isOllamaLoopbackRef(ref) { return .ollama }
         if LlamaCppLoopbackServeModel.isLlamaCppLoopbackRef(ref) { return .llamaCpp }
         if MLXLMLoopbackServeModel.isMLXLMLoopbackRef(ref) { return .mlxLM }
         if LMStudioLoopbackServeModel.isLMStudioLoopbackRef(ref) { return .lmStudio }
+        if OMLXLoopbackServeModel.isOMLXLoopbackRef(ref) { return .oMLX }
         return nil
     }
 
@@ -119,6 +124,7 @@ enum LoopbackServeSelection: Equatable {
         case .llamaCpp: return LlamaCppLoopbackServeModel.runtimeSource
         case .mlxLM: return MLXLMLoopbackServeModel.runtimeSource
         case .lmStudio: return LMStudioLoopbackServeModel.runtimeSource
+        case .oMLX: return OMLXLoopbackServeModel.runtimeSource
         }
     }
 
@@ -219,14 +225,15 @@ struct LoopbackGenerationTimeouts: Equatable, Sendable {
 /// client's safety posture (loopback-literal host check, no redirects, bounded
 /// header/body) with a closed per-method path allowlist:
 ///   POST /v1/chat/completions, /apply-template, /tokenize;
-///   GET /props, /v1/models, /api/v1/models.
+///   GET /props, /v1/models, /api/v1/models, /v1/models/status.
 /// `/apply-template`, `/tokenize` and `/props` are llama-server only
 /// (fingerprint, context window and the prompt-token preflight); `/v1/models`
-/// binds mlx_lm.server and `/api/v1/models` binds LM Studio (#1690 M9); the
-/// Ollama path only ever posts chat completions.
+/// binds mlx_lm.server, `/api/v1/models` binds LM Studio and
+/// `/v1/models/status` binds oMLX (#1690 M9); the Ollama path only ever
+/// posts chat completions.
 final class LoopbackServeHTTPClient: BYOMLoopbackStreamingHTTPClient, @unchecked Sendable {
     static let allowedPOSTPaths: Set<String> = ["/v1/chat/completions", "/apply-template", "/tokenize"]
-    static let allowedGETPaths: Set<String> = ["/props", "/v1/models", "/api/v1/models"]
+    static let allowedGETPaths: Set<String> = ["/props", "/v1/models", "/api/v1/models", "/v1/models/status"]
     /// How much later than the runtime watchdog the URLSession timers fire.
     static let backstopSlackSeconds: TimeInterval = 30
 
@@ -805,7 +812,8 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
 
     /// The artifact identity bound at construction and re-validated before
     /// every identity-binding report: a GGUF file (SPEC-010-R007(a)) or, for
-    /// `mlxlm_loopback`, an MLX snapshot (SPEC-010-R009(a)).
+    /// `mlxlm_loopback` and `omlx_loopback`, an MLX snapshot
+    /// (SPEC-010-R009(a)).
     private let identity: LoopbackServedIdentity
     /// `lmstudio_loopback`: the `/api/v1/models` entry the runtime must keep
     /// listing for the bound file (SPEC-046-R009, #1690 M9).
@@ -832,6 +840,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         digestResolver: BYOMArtifactDigestResolver? = nil,
         mlxSnapshot: MLXSnapshotIdentity? = nil,
         lmStudioBinding: LMStudioLoopbackServeModel.Binding? = nil,
+        upstreamModelID: String? = nil,
         deadline: Date? = nil
     ) throws {
         let trimmedRef = servedModelRef.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -844,6 +853,12 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             self.upstreamModelName = MLXLMLoopbackServeModel.upstreamModelName
         case LMStudioLoopbackServeModel.runtimeSource:
             self.upstreamModelName = LMStudioLoopbackServeModel.modelKey(fromServedRef: trimmedRef)
+        case OMLXLoopbackServeModel.runtimeSource:
+            // The model id oMLX lists for the bound snapshot directory.
+            guard let upstreamModelID, !upstreamModelID.isEmpty else {
+                throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("omlx_loopback requires the model id oMLX serves the snapshot under")
+            }
+            self.upstreamModelName = upstreamModelID
         default:
             self.upstreamModelName = OllamaLoopbackServeModel.upstreamModelName(fromServedRef: trimmedRef)
         }
@@ -866,14 +881,14 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         self.lmStudioBinding = lmStudioBinding
         if let mlxSnapshot {
             // SPEC-010-R009: an MLX snapshot is never a GGUF file, and only
-            // mlxlm_loopback serves one.
-            guard runtimeSource == MLXLMLoopbackServeModel.runtimeSource else {
-                throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("an MLX snapshot is served only by mlxlm_loopback")
+            // mlxlm_loopback and omlx_loopback serve one.
+            guard Self.servesMLXSnapshots(runtimeSource) else {
+                throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("an MLX snapshot is served only by mlxlm_loopback or omlx_loopback")
             }
             self.identity = .mlxSnapshot(mlxSnapshot)
         } else {
-            guard runtimeSource != MLXLMLoopbackServeModel.runtimeSource else {
-                throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("mlxlm_loopback requires an MLX snapshot identity")
+            guard !Self.servesMLXSnapshots(runtimeSource) else {
+                throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("\(runtimeSource) requires an MLX snapshot identity")
             }
             let resolver = digestResolver ?? BYOMArtifactDigestResolver(
                 store: BYOMOllamaModelStore(root: BYOMOllamaModelStore.defaultRoot()),
@@ -987,6 +1002,63 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             catalogModelIDAlias: catalogModelIDAlias,
             httpClient: client,
             mlxSnapshot: snapshot,
+            deadline: deadline
+        )
+    }
+
+    /// The runtimes whose identity is an MLX snapshot (SPEC-010-R009).
+    static func servesMLXSnapshots(_ runtimeSource: String) -> Bool {
+        runtimeSource == MLXLMLoopbackServeModel.runtimeSource || runtimeSource == OMLXLoopbackServeModel.runtimeSource
+    }
+
+    /// `omlx:<name>` (SPEC-010-R009, #1690 M9): require oMLX to list the
+    /// operator-declared snapshot directory as the `model_path` of exactly one
+    /// local `llm` entry, hash that directory with the native snapshot-manifest
+    /// algorithm, and serve that entry's model id. No declared directory, or a
+    /// runtime that does not list it, fails closed (no identity).
+    static func oMLX(
+        servedModelRef: String,
+        origin: String,
+        snapshotDirectory: URL?,
+        catalogModelIDAlias: String? = nil,
+        httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
+        deadline: Date = MLXLMLoopbackServeModel.snapshotHashingDeadline()
+    ) async throws -> OpenAICompatibleLoopbackRuntime {
+        guard let validatedOrigin = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
+            throw OpenAICompatibleLoopbackRuntimeError.invalidLoopbackOrigin(origin)
+        }
+        guard let snapshotDirectory else {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("\(OMLXLoopbackServeModel.snapshotPathEnvironmentKey) is not set to an absolute snapshot directory")
+        }
+        let client = httpClient ?? LoopbackServeHTTPClient()
+        let modelID: String?
+        do {
+            modelID = try await OMLXLoopbackServeModel.servedModelID(client, origin: validatedOrigin, directory: snapshotDirectory)
+        } catch {
+            throw OpenAICompatibleLoopbackRuntimeError.upstreamNotRecognized(OMLXLoopbackServeModel.runtimeSource)
+        }
+        guard let modelID else {
+            throw OpenAICompatibleLoopbackRuntimeError.upstreamNotRecognized(OMLXLoopbackServeModel.runtimeSource)
+        }
+        let snapshot: MLXSnapshotIdentity
+        do {
+            snapshot = try MLXSnapshotIdentity.compute(directory: snapshotDirectory, deadline: deadline)
+        } catch AutotuneContextCalibrationError.deadlineExceeded {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(
+                "MLX snapshot hashing exceeded the \(Int(BYOMModelAdmissionRuntime.artifactHashBudgetSeconds)) s artifact hashing budget; refusing to serve without an identity (SPEC-010-R009(a))"
+            )
+        } catch {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(String(describing: error))
+        }
+        return try OpenAICompatibleLoopbackRuntime(
+            servedModelRef: servedModelRef,
+            origin: origin,
+            runtimeSource: OMLXLoopbackServeModel.runtimeSource,
+            runtimeArtifactPath: snapshot.directory.path,
+            catalogModelIDAlias: catalogModelIDAlias,
+            httpClient: client,
+            mlxSnapshot: snapshot,
+            upstreamModelID: modelID,
             deadline: deadline
         )
     }
@@ -1160,14 +1232,19 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
 
     private var isLlamaCpp: Bool { runtimeSource == LlamaCppLoopbackServeModel.runtimeSource }
 
-    /// mlxlm_loopback: before every request the runtime must still list the
-    /// bound snapshot directory (SPEC-010-R009(b)). mlx_lm.server reports no
-    /// context window, so an over-context request fails upstream.
+    /// mlxlm_loopback / omlx_loopback: before every request the runtime must
+    /// still list the bound snapshot directory, and oMLX under the same model
+    /// id (SPEC-010-R009(b)). Neither reports a context window here, so an
+    /// over-context request fails upstream.
     private func requireMLXLMServesBoundSnapshot() async throws {
         guard case .mlxSnapshot(let snapshot) = identity else { return }
         let listed: Bool
         do {
-            listed = try await MLXLMLoopbackServeModel.listsSnapshot(httpClient, origin: origin, directory: snapshot.directory)
+            if runtimeSource == OMLXLoopbackServeModel.runtimeSource {
+                listed = try await OMLXLoopbackServeModel.servedModelID(httpClient, origin: origin, directory: snapshot.directory) == upstreamModelName
+            } else {
+                listed = try await MLXLMLoopbackServeModel.listsSnapshot(httpClient, origin: origin, directory: snapshot.directory)
+            }
         } catch {
             throw APIError(status: 502, message: "Upstream loopback error", type: "server_error", code: "upstream_unavailable")
         }

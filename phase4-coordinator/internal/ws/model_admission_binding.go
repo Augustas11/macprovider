@@ -49,8 +49,20 @@ const (
 	modelAdmissionMatchReasonSourceNotAllowed = "runtime_source_not_allowed"
 )
 
-// modelAdmissionRuntimeSourceMLXLMLoopback is mlx_lm.server (SPEC-010-R009).
-const modelAdmissionRuntimeSourceMLXLMLoopback = "mlxlm_loopback"
+// modelAdmissionRuntimeSourceMLXLMLoopback is mlx_lm.server and
+// modelAdmissionRuntimeSourceOMLXLoopback is oMLX (SPEC-010-R009; oMLX from
+// SPEC-010 1.14, #1690 M9): the loopback classes that serve an MLX snapshot.
+const (
+	modelAdmissionRuntimeSourceMLXLMLoopback = "mlxlm_loopback"
+	modelAdmissionRuntimeSourceOMLXLoopback  = "omlx_loopback"
+)
+
+// isMLXSnapshotLoopbackRuntimeSource reports whether a loopback class serves
+// a macprovider.snapshot-manifest.v1 member (SPEC-010-R009). Every other
+// loopback class serves a GGUF file (SPEC-010-R007).
+func isMLXSnapshotLoopbackRuntimeSource(runtimeSource string) bool {
+	return runtimeSource == modelAdmissionRuntimeSourceMLXLMLoopback || runtimeSource == modelAdmissionRuntimeSourceOMLXLoopback
+}
 
 // modelAdmissionDriftReasons is the closed drift origin reason set.
 var modelAdmissionDriftReasons = map[string]struct{}{
@@ -681,33 +693,34 @@ func (s *Server) usableIdentitySetLocked(catalog *autotune.Catalog) *artifactide
 
 // candidateRowAllowsRuntimeSource is the admissibility of the primary-row
 // member (the row's own snapshot-manifest pair). mlx_cache is always
-// admissible. mlxlm_loopback (SPEC-010-R009(c)) is admissible only when the
-// release-bound feed's primary artifact for that row carries the same pair
-// and lists mlxlm_loopback; a missing or stale feed admits nothing. Every
-// other runtime source, the GGUF loopback classes included, never binds a
-// row pair.
+// admissible. An MLX-snapshot loopback class (mlxlm_loopback, omlx_loopback;
+// SPEC-010-R009(c)) is admissible only when the release-bound feed's primary
+// artifact for that row carries the same pair and lists that class; a
+// missing or stale feed admits nothing. Every other runtime source, the GGUF
+// loopback classes included, never binds a row pair.
 func candidateRowAllowsRuntimeSource(set *artifactidentity.Index, modelKey, rowHash, runtimeSource string) bool {
-	switch runtimeSource {
-	case modelAdmissionRuntimeSourceMLXCache:
+	switch {
+	case runtimeSource == modelAdmissionRuntimeSourceMLXCache:
 		return true
-	case modelAdmissionRuntimeSourceMLXLMLoopback:
+	case isMLXSnapshotLoopbackRuntimeSource(runtimeSource):
 		binding, ok := set.Resolve(modelidentity.SnapshotManifestV1, rowHash)
 		return ok && binding.Member.IsPrimary && binding.Member.ModelKey == modelKey &&
-			binding.Member.AllowsRuntimeSource(modelAdmissionRuntimeSourceMLXLMLoopback)
+			binding.Member.AllowsRuntimeSource(runtimeSource)
 	default:
 		return false
 	}
 }
 
 // matchRuntimeOfferArtifactHashes is the offer-time match for every
-// runtime source. mlxlm_loopback (SPEC-010-R009) offers only a
-// snapshot-manifest pair. A non-primary MLX feed member binds when it allows
-// mlxlm_loopback, exactly as the generic match decides; the row's own pair
-// resolves through the generic match as the mlx_cache primary would, and is
-// kept only when the release-bound primary artifact allows mlxlm_loopback.
-// Every other runtime source is the generic match unchanged.
+// runtime source. An MLX-snapshot loopback class (mlxlm_loopback,
+// omlx_loopback; SPEC-010-R009) offers only a snapshot-manifest pair. A
+// non-primary MLX feed member binds when it allows that class, exactly as the
+// generic match decides; the row's own pair resolves through the generic
+// match as the mlx_cache primary would, and is kept only when the
+// release-bound primary artifact allows that class. Every other runtime
+// source is the generic match unchanged.
 func matchRuntimeOfferArtifactHashes(current *autotune.Catalog, set *artifactidentity.Index, feedIntegrityFailed bool, runtimeSource, assertedKey string, artifactHashes map[string]string) modelAdmissionCatalogMatch {
-	if runtimeSource != modelAdmissionRuntimeSourceMLXLMLoopback {
+	if !isMLXSnapshotLoopbackRuntimeSource(runtimeSource) {
 		return matchOfferArtifactHashes(current, set, feedIntegrityFailed, runtimeSource, assertedKey, artifactHashes)
 	}
 	for algorithm := range artifactHashes {

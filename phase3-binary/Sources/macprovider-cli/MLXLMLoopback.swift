@@ -263,26 +263,39 @@ struct MLXSnapshotIdentity: Equatable, Sendable {
 }
 
 extension BYOMModelAdmissionRuntime {
-    /// The `mlxlm_loopback` candidate `target` names (candidate id, served ref,
-    /// or display name), when the operator configured the adapter. `models
-    /// offer` dispatches on it, so every target form of an mlxlm candidate
-    /// reaches `submitMLXLMOffer` and its snapshot-manifest leg.
+    /// The `mlxlm_loopback` or (#1690 M9) `omlx_loopback` candidate `target`
+    /// names (candidate id, served ref, or display name), when the operator
+    /// configured that adapter. `models offer` dispatches on it, so every
+    /// target form of such a candidate reaches `submitMLXLMOffer` and its
+    /// snapshot-manifest leg.
     func mlxlmCandidate(target: String) async -> BYOMDiscoveryWire.Candidate? {
-        guard let origin = environment.mlxlmOrigin, let directory = environment.mlxlmModelPath else { return nil }
+        await mlxSnapshotCandidate(target: target)?.candidate
+    }
+
+    private func mlxSnapshotCandidate(
+        target: String
+    ) async -> (candidate: BYOMDiscoveryWire.Candidate, kind: MLXSnapshotLoopbackKind, origin: String, directory: URL)? {
         let namespace = BYOMDiscoveryNamespaceStore().readNamespace(at: environment.namespaceURL)
-        let discovery = await BYOMMLXLMDiscovery(
-            origin: origin,
-            snapshotDirectory: directory,
-            namespace: namespace.bytes,
-            namespaceWarnings: namespace.warnings,
-            httpClient: httpClient
-        ).discover()
-        return Self.selectCandidate(target: target, candidates: discovery.candidates)
+        for loopback in environment.mlxSnapshotLoopbacks {
+            let discovery = await BYOMMLXLMDiscovery(
+                origin: loopback.origin,
+                snapshotDirectory: loopback.directory,
+                namespace: namespace.bytes,
+                namespaceWarnings: namespace.warnings,
+                httpClient: httpClient,
+                kind: loopback.kind
+            ).discover()
+            if let candidate = Self.selectCandidate(target: target, candidates: discovery.candidates) {
+                return (candidate, loopback.kind, loopback.origin, loopback.directory)
+            }
+        }
+        return nil
     }
 
     /// SPEC-010-R009 / SPEC-046 v0.3.0 offer for an `mlxlm:` candidate (#1690
-    /// M8; closes the #1486 gap for this runtime). The candidate comes from the
-    /// `mlxlm_loopback` adapter only, and the offer always carries the
+    /// M8; closes the #1486 gap for this runtime), and (v0.5.0, #1690 M9) for
+    /// an `omlx:` candidate. The candidate comes from that runtime's adapter
+    /// only, and the offer always carries the
     /// snapshot-manifest pair the CLI computes over the declared snapshot. The
     /// snapshot must still be unchanged and listed by the runtime when the
     /// signed package leaves the machine; any failure fails the offer closed.
@@ -297,23 +310,12 @@ extension BYOMModelAdmissionRuntime {
         }
         let namespaceStore = BYOMDiscoveryNamespaceStore()
         namespaceStore.provisionNamespaceIfMissing(at: environment.namespaceURL)
-        guard let origin = environment.mlxlmOrigin,
-              let directory = environment.mlxlmModelPath,
-              let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin)
+        guard let found = await mlxSnapshotCandidate(target: target),
+              let baseURL = BYOMLoopbackOriginValidator.validatedHTTPOrigin(found.origin)
         else {
             throw BYOMModelAdmissionError.candidateNotFound
         }
-        let namespace = namespaceStore.readNamespace(at: environment.namespaceURL)
-        let discovery = await BYOMMLXLMDiscovery(
-            origin: origin,
-            snapshotDirectory: directory,
-            namespace: namespace.bytes,
-            namespaceWarnings: namespace.warnings,
-            httpClient: httpClient
-        ).discover()
-        guard let candidate = Self.selectCandidate(target: target, candidates: discovery.candidates) else {
-            throw BYOMModelAdmissionError.candidateNotFound
-        }
+        let (candidate, kind, directory) = (found.candidate, found.kind, found.directory)
         guard let bearer = try credentialStore.load(providerID: providerID) else {
             throw BYOMModelAdmissionError.missingBearer(providerID: providerID)
         }
@@ -340,7 +342,7 @@ extension BYOMModelAdmissionRuntime {
             artifactHashes: [snapshot.algorithm: snapshot.digest]
         )
         guard snapshot.isCurrent(),
-              (try? await MLXLMLoopbackServeModel.listsSnapshot(httpClient, origin: baseURL, directory: snapshot.directory)) == true
+              (try? await kind.listedModelName(httpClient, origin: baseURL, directory: snapshot.directory)) != nil
         else {
             throw BYOMModelAdmissionError.artifactIdentityChanged
         }

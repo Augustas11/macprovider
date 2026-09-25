@@ -2217,6 +2217,16 @@ struct ServeCommand: AsyncParsableCommand {
                         origin: LMStudioLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
                         catalogModelIDAlias: catalogModelIDAlias
                     )
+                case .oMLX:
+                    // SPEC-010-R009 (#1690 M9): the MLX snapshot oMLX serves
+                    // is named by the operator (MACPROVIDER_OMLX_MODEL_PATH)
+                    // and hashed by the CLI, never reported by the runtime.
+                    modelRuntime = try await OpenAICompatibleLoopbackRuntime.oMLX(
+                        servedModelRef: loopbackServedRef,
+                        origin: OMLXLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
+                        snapshotDirectory: OMLXLoopbackServeModel.snapshotDirectory(),
+                        catalogModelIDAlias: catalogModelIDAlias
+                    )
                 }
             } else {
                 helloRuntimeSource = nil

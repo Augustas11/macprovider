@@ -39,15 +39,16 @@ const (
 	PolicyCoreEncodingV2 uint8 = 2
 )
 
-// The closed SPEC-042-R001 0.0.35 runtime_allowlist vocabulary: the SPEC-046
+// The closed SPEC-042-R001 0.0.36 runtime_allowlist vocabulary: the SPEC-046
 // loopback adapters with a serving selector and a SPEC-010 identity leg (GGUF
-// for llama.cpp, LM Studio and Ollama, the MLX snapshot for mlx_lm.server).
-// Native MLX (mlx_cache) is always allowed and is never listed.
+// for llama.cpp, LM Studio and Ollama, the MLX snapshot for mlx_lm.server and
+// oMLX). Native MLX (mlx_cache) is always allowed and is never listed.
 const (
 	RuntimeSourceLlamacppLoopback = "llamacpp_loopback"
 	RuntimeSourceLMStudioLoopback = "lmstudio_loopback"
 	RuntimeSourceMLXLMLoopback    = "mlxlm_loopback"
 	RuntimeSourceOllamaLoopback   = "ollama_loopback"
+	RuntimeSourceOMLXLoopback     = "omlx_loopback"
 )
 
 // extensionIDPattern is the SPEC-042-R001 extension_id grammar.
@@ -151,10 +152,11 @@ func (pc PolicyCore) AllowsRuntimeSource(runtimeSource string) bool {
 }
 
 // ValidRuntimeAllowlistSource reports whether a runtime_source belongs to the
-// closed SPEC-042-R001 0.0.35 runtime_allowlist vocabulary.
+// closed SPEC-042-R001 0.0.36 runtime_allowlist vocabulary.
 func ValidRuntimeAllowlistSource(runtimeSource string) bool {
 	switch runtimeSource {
-	case RuntimeSourceLlamacppLoopback, RuntimeSourceLMStudioLoopback, RuntimeSourceMLXLMLoopback, RuntimeSourceOllamaLoopback:
+	case RuntimeSourceLlamacppLoopback, RuntimeSourceLMStudioLoopback, RuntimeSourceMLXLMLoopback,
+		RuntimeSourceOllamaLoopback, RuntimeSourceOMLXLoopback:
 		return true
 	default:
 		return false
