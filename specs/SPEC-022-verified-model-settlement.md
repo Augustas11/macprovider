@@ -15,10 +15,14 @@ normative text: R-5.6 (v0.2.3) and R-8.7.
 
 - A negotiated response whose body the gateway could not read in full
   (`body_read_failed`: the hop broke after the body, before or while the
-  finality trailers were read) is held for coordinator finality, never
+  finality trailers were read) is held for coordinator finality instead of
   refunded locally. The buyer, who received an error and none of the
   completion, is debited at most the verified prompt; the provider keeps the
-  credit for what reached the gateway.
+  credit for what reached the gateway. One bounded, logged exception: when
+  the gateway cannot bind the hold for reconciliation (the response carries
+  no coordinator internal request id, or the reconcile candidate or the hold
+  cannot be persisted), it refunds and logs an error, because such a hold
+  could never settle or age out.
 - The same delivered bound covers every gateway-ended response whose
   candidate records what the gateway delivered: a stream the gateway ended
   `stream_truncated` (the hop broke or a frame overflowed after part was
@@ -785,14 +789,25 @@ delivered:
   delivered and credited the provider; it MUST hold the reservation for
   coordinator finality and answer the buyer an error. The buyer received none
   of the completion, so its final debit is at most the verified prompt
-  (a refund when finality refunds).
+  (a refund when finality refunds). Exception: when the gateway cannot bind
+  the hold for reconciliation (the response carries no coordinator internal
+  request id, or the reconcile candidate or the hold cannot be persisted), it
+  MUST refund and log an error instead of holding. Such a hold could never be
+  settled by finality or aged out (R-8.7), and a hold nothing can resolve is
+  worse than this bounded, logged disagreement with a coordinator that may
+  already have credited the provider.
 - `stream_truncated` and `provider_timeout`: the gateway ended a stream after
   forwarding part of it because the hop broke, a frame exceeded its limit, or
   a stream timed out, or the coordinator answered 504 with nothing delivered.
   The buyer's final debit is the verified prompt plus the smaller of the
   verified completion and the completion the gateway forwarded.
 In each case the provider settlement stays the verified figure for the prefix
-delivered to the gateway, and the difference is billed to neither party.
+delivered to the gateway, and the difference is billed to neither party. For
+`client_disconnect`, `stream_truncated` and `provider_timeout`, the forwarded
+completion is the provider-reported completion when the provider's usage
+chunk was already forwarded; otherwise it is the gateway's byte-based
+estimate, ceil(forwarded bytes / 4), capped at the request's completion
+limit.
 
 R-5.7. Synchronous buyer response completion and asynchronous receipt
 verification MAY be decoupled. Until verification returns `verified`, buyer
