@@ -992,10 +992,13 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		// its body write (SPEC-022 R-5.6), so a hop that broke after the body
 		// or while its trailers were read can already hold a delivered,
 		// credited attempt. Hold for the reconciler, which settles to the
-		// coordinator's finality; a local refund would contradict it.
+		// coordinator's finality; a local refund would contradict it. The
+		// candidate records 0 delivered completion under bodyReadFailedOutcome,
+		// so the buyer is debited at most the prompt (R-5.6), never the
+		// completion that did not reach them.
 		if resp.StatusCode == http.StatusOK && hasSettlementFinalityTrailerDeclaration(resp) {
 			finality := missingSettlementFinality(s.settlementFinalityBinding(r, subject), "body read failed")
-			if !s.settleBeforeResponseWithFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "upstream_error", finality, resp.Header, false) {
+			if !s.settleBeforeResponseWithFinality(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", bodyReadFailedOutcome, finality, resp.Header, false) {
 				return
 			}
 			writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
