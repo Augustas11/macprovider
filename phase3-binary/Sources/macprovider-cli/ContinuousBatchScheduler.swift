@@ -1213,6 +1213,9 @@ actor ContinuousBatchScheduler {
     private var dedupeTombstones: Set<String> = []
     private var dedupeTombstoneOrder: [String] = []
     private var cancelledIDs: Set<String> = []
+    /// SPEC-038 AC-6c: decoding rows asked to end as a normal `.stop` at their
+    /// next applied token (a serial tool turn completed its first tool call).
+    private var earlyStopIDs: Set<String> = []
     private var draining = false
     private var cleanupFailedClosed = false
     private var backendCancellationPending = false
@@ -1375,6 +1378,17 @@ actor ContinuousBatchScheduler {
         }
         cancelledIDs.insert(requestID)
         ensurePump()
+    }
+
+    /// SPEC-038 AC-6c: end a decoding row as a normal `.stop` at its next
+    /// applied token. The serial path stops a serial tool turn (SPEC-018,
+    /// `parallel_tool_calls` omitted/false) once the first tool call is
+    /// complete; the batched caller truncates the row's tokens back to that
+    /// exact point, so this only bounds wasted decode. A row that is not
+    /// decoding (queued, prefilling, or already terminal) is left alone.
+    func stopEarly(requestID: String) {
+        guard activeDecode[requestID] != nil else { return }
+        earlyStopIDs.insert(requestID)
     }
 
     func drain() async throws -> ContinuousBatchDrainPermit {
@@ -2225,6 +2239,8 @@ actor ContinuousBatchScheduler {
             }
             row.pendingOutputTokens.removeLast(stopLength)
             terminalStatus = .stop
+        } else if earlyStopIDs.contains(row.request.id) {
+            terminalStatus = .stop
         } else if row.generatedTokens.count >= row.request.maxOutputTokens {
             terminalStatus = .length
         } else {
@@ -2748,6 +2764,7 @@ actor ContinuousBatchScheduler {
         errorCode: String?,
         serialConversationCache: ContinuousBatchSerialConversationCache? = nil
     ) {
+        earlyStopIDs.remove(row.request.id)
         record(status == .cancelled ? .cancelled : .stopped)
         let isSuccessful = status == .stop || status == .length
         let outputTokens = isSuccessful ? row.outputTokens : []
@@ -2776,6 +2793,7 @@ actor ContinuousBatchScheduler {
         errorCode: String?,
         retainedCache: ContinuousBatchRetainedCache?
     ) {
+        earlyStopIDs.remove(row.request.id)
         record(status == .cancelled ? .cancelled : .stopped)
         let isSuccessful = status == .stop || status == .length
         let outputTokens = isSuccessful ? row.outputTokens : []

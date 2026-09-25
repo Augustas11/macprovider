@@ -3363,19 +3363,31 @@ actor ModelRuntime: ModelRuntimeServing {
 
     /// A request is representable by the batched shared-forward contract only if
     /// its generation is fully described by the scalar sampling parameters the
-    /// contract carries. Structured-output/grammar validation, tool-constrained
-    /// decoding, logit_bias, and logprobs all impose row-local decoder state the
-    /// contract does not model, so such requests must serial-route (canary) / fail
-    /// closed (strict) before admission — a gate that holds for the SPEC-039 bridge
-    /// so a future backend cannot silently drop that state.
+    /// contract carries. logit_bias and logprobs impose row-local decoder state
+    /// the contract does not model, so such requests must serial-route (canary) /
+    /// fail closed (strict) before admission — a gate that holds for the SPEC-039
+    /// bridge so a future backend cannot silently drop that state.
+    ///
+    /// SPEC-038 AC-6c: structured output (`response_format` json_object /
+    /// json_schema) and enabled tools constrain no logit. The serial path
+    /// renders them into the prompt (`userInput(for:)`) and applies them after
+    /// generation (`parseGeneratedOutput`, `validateStructuredCompletion`, the
+    /// SPEC-018 byte caps, the serial tool-turn stop, and the streaming
+    /// `SerialStreamingTextEmitter`); a batched row reuses exactly those, so
+    /// they batch. Kept gated: Harmony (gpt-oss) models with tools or
+    /// structured output. Their serial stream parses Harmony channels as
+    /// tokens arrive and sends only the final channel; the batched stream
+    /// sink streams decoded text and has no Harmony channel parser, and the
+    /// gate cannot tell a streaming request from a non-streaming one.
     static func requestStateRepresentable(_ request: ChatCompletionRequest) -> Bool {
-        // Structured-output / grammar-constrained decoding.
-        if requiresStructuredValidation(request.responseFormat) { return false }
-        // Tool-bearing requests carry tool schemas + tool-call parser state.
         // hasEnabledTools treats an absent, explicit-null, or empty tools array as
         // no-tools, so a bare or explicit-null `tool_choice` does not false-positive
         // here (the meaningful signal is whether tools are actually enabled).
-        if hasEnabledTools(request.promptSource.tools) { return false }
+        if HarmonyResponseParser.isHarmonyModelID(request.model),
+           requiresStructuredValidation(request.responseFormat)
+            || hasEnabledTools(request.promptSource.tools) {
+            return false
+        }
         // logit_bias and logprobs (incl. top_logprobs metadata) have no carrier in
         // the scheduler row contract. top_logprobs only shapes response metadata,
         // not token selection, but is rejected here too so the gate is provably
@@ -3901,39 +3913,95 @@ actor ModelRuntime: ModelRuntimeServing {
     /// compiled lockstep already holds that hop, and a per-token `perform`
     /// behind the delivery buffer is what turned longer canary streams into
     /// `internal_error` after the first content chunk.
-    private struct StreamingDetokenizer: @unchecked Sendable {
+    struct StreamingDetokenizer: @unchecked Sendable {
         let decode: ([Int]) -> String
     }
 
-    private final class AttachedPagedKVStreamState: @unchecked Sendable {
+    /// A batched streaming row's buyer-visible state (SPEC-038 AC-6c). Each
+    /// delivered token runs the serial path's `SerialStreamingTextEmitter`
+    /// step over the decode of every token so far, as the serial generate
+    /// callback does. Once the serial path would have stopped generating (a
+    /// serial tool turn's first complete tool call, or a structured-output
+    /// accumulator error) later tokens are ignored and the stop point is kept
+    /// so the finalize truncates the row to it.
+    final class AttachedPagedKVStreamState: @unchecked Sendable {
         private let lock = NSLock()
         private var tokenIDs: [Int] = []
-        private var emittedText = ""
+        private var emitter: SerialStreamingTextEmitter
         private var recordedError: APIError?
+        private var stoppedValue = false
+        private var serialStopTokenCountValue: Int?
 
-        func appendTokens(_ tokens: [Int]) -> [Int] {
-            lock.lock()
-            defer { lock.unlock() }
-            tokenIDs.append(contentsOf: tokens)
-            return tokenIDs
+        init(request: ChatCompletionRequest) {
+            emitter = SerialStreamingTextEmitter(request: request)
         }
 
-        func delta(to candidateText: String) -> String {
+        /// Returns true the first time the row should stop decoding.
+        func step(
+            eventTokens: [Int],
+            decode: ([Int]) -> String,
+            stopTokenFilter: StopTokenFilter,
+            requestStops: [String],
+            structuredAccumulator: StructuredStreamingContentAccumulator,
+            idleState: StructuredStreamingIdleState,
+            onChunk: (StreamChunk) -> Void
+        ) -> Bool {
             lock.lock()
             defer { lock.unlock() }
-            let delta = ModelRuntime.streamDelta(from: emittedText, to: candidateText)
-            if !delta.isEmpty {
-                emittedText = candidateText
+            guard !stoppedValue, !eventTokens.isEmpty else { return false }
+            tokenIDs.append(contentsOf: eventTokens)
+            let candidate = ModelRuntime.streamingSafePrefix(
+                decode(tokenIDs),
+                stopTokenFilter: stopTokenFilter,
+                requestStops: requestStops
+            )
+            switch emitter.step(
+                candidate: candidate,
+                structuredAccumulator: structuredAccumulator,
+                idleState: idleState,
+                onChunk: onChunk
+            ) {
+            case .more, .requestStop:
+                // A buyer stop string ends the row through its stop-token
+                // sequences, and the final filter cuts the text at it.
+                return false
+            case .toolCallComplete:
+                stoppedValue = true
+                serialStopTokenCountValue = tokenIDs.count
+                return true
+            case .structuredError:
+                stoppedValue = true
+                if recordedError == nil {
+                    recordedError = structuredAccumulator.error
+                }
+                return true
             }
-            return delta
         }
 
-        func record(_ error: APIError) {
+        func finish(
+            finalText: String,
+            parsed: ModelRuntime.ParsedGeneratedOutput,
+            structuredAccumulator: StructuredStreamingContentAccumulator,
+            idleState: StructuredStreamingIdleState,
+            onChunk: (StreamChunk) -> Void
+        ) throws {
             lock.lock()
-            if recordedError == nil {
-                recordedError = error
-            }
-            lock.unlock()
+            defer { lock.unlock() }
+            try emitter.finish(
+                finalText: finalText,
+                parsed: parsed,
+                structuredAccumulator: structuredAccumulator,
+                idleState: idleState,
+                onChunk: onChunk
+            )
+        }
+
+        /// Token count at which the serial path would have stopped a serial
+        /// tool turn; nil when it would not have stopped early.
+        var serialStopTokenCount: Int? {
+            lock.lock()
+            defer { lock.unlock() }
+            return serialStopTokenCountValue
         }
 
         func error() -> APIError? {
@@ -3941,6 +4009,194 @@ actor ModelRuntime: ModelRuntimeServing {
             defer { lock.unlock() }
             return recordedError
         }
+    }
+
+    /// A batched non-streaming serial tool turn (SPEC-038 AC-6c): the serial
+    /// non-streaming stop test over each delivered token.
+    final class ContinuousBatchSerialToolStopState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var tokenIDs: [Int] = []
+        private var observer: NativeToolCallStreamEmitter
+        private var stopTokenCountValue: Int?
+
+        init(request: ChatCompletionRequest) {
+            observer = NativeToolCallStreamEmitter(
+                modelID: request.model,
+                allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools)
+            )
+        }
+
+        /// Returns true the first time the row should stop decoding.
+        func observe(
+            eventTokens: [Int],
+            decode: ([Int]) -> String,
+            stopTokenFilter: StopTokenFilter,
+            requestStops: [String]
+        ) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard stopTokenCountValue == nil, !eventTokens.isEmpty else { return false }
+            tokenIDs.append(contentsOf: eventTokens)
+            guard ModelRuntime.observeSerialToolStop(
+                &observer,
+                decoded: decode(tokenIDs),
+                stopTokenFilter: stopTokenFilter,
+                requestStops: requestStops
+            ) else { return false }
+            stopTokenCountValue = tokenIDs.count
+            return true
+        }
+
+        var stopTokenCount: Int? {
+            lock.lock()
+            defer { lock.unlock() }
+            return stopTokenCountValue
+        }
+    }
+
+    struct ContinuousBatchFinalizedRow: Sendable {
+        /// Not yet structured-validated: the non-streaming caller runs
+        /// `validateStructuredCompletion`, the streaming caller first sends
+        /// the held-back text and then `validateStructuredStreamingCompletion`,
+        /// each exactly as its serial counterpart does.
+        let completion: CompletionResult
+        let filteredText: String
+        let parsed: ParsedGeneratedOutput
+        /// Generated tokens the completion accounts for (model EOS dropped,
+        /// truncated to the serial stop point).
+        let generatedTokens: [Int]
+        /// The row decoded past the serial stop point, so its retained cache
+        /// covers tokens the completion does not and must not be committed.
+        let truncatedAtSerialStop: Bool
+    }
+
+    /// SPEC-038 AC-6c: the one post-generation finalize for a batched row,
+    /// streaming and non-streaming. It applies the serial path's response
+    /// byte cap, output filters, `parseGeneratedOutput` (tool calls,
+    /// SPEC-018 caps, Harmony) and finish-reason rule to the row's text. A
+    /// serial tool turn is first truncated to the token at which the serial
+    /// path stops generating, so the parsed text and billed tokens match.
+    static func finalizeContinuousBatchRow(
+        request: ChatCompletionRequest,
+        result: ContinuousBatchSchedulerResult,
+        modelStopTokenIDs: Set<Int>,
+        serialStopTokenCount: Int?,
+        promptTokenIDs: [Int32],
+        decode: ([Int]) -> String,
+        stopTokenFilter: StopTokenFilter,
+        generationMilliseconds: Int64,
+        modelHash: String?
+    ) throws -> ContinuousBatchFinalizedRow {
+        // The serial path discards the model's end-of-generation token
+        // before counting it; bill and cache the batched row the same way.
+        // Harmony `<|return|>`/`<|call|>` are excluded from this set, as
+        // they are from the serial stop set: the parser reads and counts them.
+        var generatedTokens = droppingTrailingModelStop(
+            result.generatedTokens,
+            terminalStatus: result.terminalStatus,
+            modelStopTokenIDs: modelStopTokenIDs
+        )
+        var completionTokenCount = result.completionTokens
+            - (result.generatedTokens.count - generatedTokens.count)
+        var outputTokens = result.outputTokens
+        var truncated = false
+        if let serialStopTokenCount, serialStopTokenCount < generatedTokens.count {
+            completionTokenCount -= generatedTokens.count - serialStopTokenCount
+            generatedTokens = Array(generatedTokens.prefix(serialStopTokenCount))
+            outputTokens = Array(outputTokens.prefix(serialStopTokenCount))
+            truncated = true
+        }
+        let decoded = decode(outputTokens)
+        guard decoded.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+            throw APIError(
+                status: 502,
+                message: "Model response exceeded 2097152 bytes",
+                type: "upstream_provider_error",
+                code: "response_byte_cap_exceeded",
+                inferenceRan: true,
+                settlementRan: true
+            )
+        }
+        let filtered = applyOutputFilters(
+            decoded,
+            stopTokenFilter: stopTokenFilter,
+            requestStops: request.stop
+        )
+        // A truncated row ended where the serial path's early stop does,
+        // which is never a length finish.
+        let lengthTerminal = result.terminalStatus == .length && !truncated
+        let parserFinishReason = lengthTerminal && !filtered.hitStop
+            ? "length"
+            : (filtered.hitStop ? "request_stop" : "stop")
+        let parsed = try parseGeneratedOutput(
+            filteredText: filtered.text,
+            generatedTokenIDs: generatedTokens,
+            decode: decode,
+            request: request,
+            mode: .complete(finishReason: parserFinishReason),
+            defaultCompletionTokens: completionTokenCount,
+            stopTokenFilter: stopTokenFilter,
+            requestStops: request.stop,
+            globalHitStop: filtered.hitStop
+        )
+        let finishReason: String
+        if !parsed.toolCalls.isEmpty {
+            finishReason = "tool_calls"
+        } else if lengthTerminal, !filtered.hitStop, !parsed.hitStop {
+            finishReason = "length"
+        } else {
+            finishReason = "stop"
+        }
+        let kvCacheBytesReused = cachedPromptUTF8Bytes(
+            promptTokenIds: promptTokenIDs,
+            cachedPromptTokens: result.cachedPromptTokens,
+            decode: decode
+        )
+        return ContinuousBatchFinalizedRow(
+            completion: CompletionResult(
+                content: parsed.content,
+                finishReason: finishReason,
+                promptTokens: promptTokenIDs.count,
+                cachedPromptTokens: result.cachedPromptTokens,
+                kvCacheBytesReused: kvCacheBytesReused,
+                completionTokens: parsed.completionTokens,
+                generatedCompletionTokens: parsed.generatedCompletionTokens,
+                ttftMilliseconds: nil,
+                generationMilliseconds: generationMilliseconds,
+                toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
+                modelHashObserved: validObservedModelHash(modelHash),
+                settlementDisposition: result.settlementDisposition
+            ),
+            filteredText: filtered.text,
+            parsed: parsed,
+            generatedTokens: generatedTokens,
+            truncatedAtSerialStop: truncated
+        )
+    }
+
+    /// SPEC-038 AC-6c: the batched streaming end, in the serial stream's
+    /// order: remaining tool-call deltas and held-back content first, then
+    /// the structured verdict on the buyer-visible text.
+    static func finishContinuousBatchStream(
+        _ finalized: ContinuousBatchFinalizedRow,
+        state: AttachedPagedKVStreamState,
+        request: ChatCompletionRequest,
+        structuredAccumulator: StructuredStreamingContentAccumulator,
+        idleState: StructuredStreamingIdleState,
+        onChunk: (StreamChunk) -> Void
+    ) throws -> CompletionResult {
+        try state.finish(
+            finalText: finalized.filteredText,
+            parsed: finalized.parsed,
+            structuredAccumulator: structuredAccumulator,
+            idleState: idleState,
+            onChunk: onChunk
+        )
+        return try validateStructuredStreamingCompletion(
+            finalized.completion,
+            request: request,
+            buyerVisibleContent: structuredAccumulator.content
+        )
     }
 
     private func serialRouteCanaryCachedHitMissingRetainedHandoff(
@@ -4081,7 +4337,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let stopTokenFilter = stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
         CBTrace.log(schedulerRequestID, "rt_cb_prepare")
-        let prepared = try await container.perform { context -> ContinuousBatchPreparedRequest in
+        let (prepared, detokenizer) = try await container.perform { context -> (ContinuousBatchPreparedRequest, StreamingDetokenizer) in
             try drainCancelled.check()
             try Task.checkCancellation()
             let input = try Self.userInput(
@@ -4095,22 +4351,26 @@ actor ModelRuntime: ModelRuntimeServing {
                 requestStops: request.stop,
                 context: context
             )
+            let tokenizer = context.tokenizer
             // Only keyed requests can hold or reuse conversation state.
             let hybrid = Self.nonEmpty(request.conversationKey) != nil
                 && ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
-            return ContinuousBatchPreparedRequest(
-                promptTokens: promptTokens,
-                stopTokenSequences: stopTokenSequences,
-                modelStopTokenIDs: Self.generationStopTokenIDs(
-                    for: Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
-                ),
-                recurrentCheckpointPositions: Self.continuousBatchRecurrentCheckpointPositions(
+            return (
+                ContinuousBatchPreparedRequest(
                     promptTokens: promptTokens,
-                    conversationKey: request.conversationKey,
-                    hybrid: hybrid,
-                    context: context
+                    stopTokenSequences: stopTokenSequences,
+                    modelStopTokenIDs: Self.generationStopTokenIDs(
+                        for: Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
+                    ),
+                    recurrentCheckpointPositions: Self.continuousBatchRecurrentCheckpointPositions(
+                        promptTokens: promptTokens,
+                        conversationKey: request.conversationKey,
+                        hybrid: hybrid,
+                        context: context
+                    ),
+                    modelHasRecurrentLayers: hybrid
                 ),
-                modelHasRecurrentLayers: hybrid
+                StreamingDetokenizer { tokenizer.decode(tokenIds: $0) }
             )
         }
 
@@ -4138,6 +4398,12 @@ actor ModelRuntime: ModelRuntimeServing {
         ) {
             return nil
         }
+        // SPEC-038 AC-6c: a serial tool turn stops where the serial path
+        // stops generating (its first complete valid tool call).
+        let serialToolStop = Self.serialToolStopApplies(request)
+            ? ContinuousBatchSerialToolStopState(request: request)
+            : nil
+        let requestStops = request.stop
         let result: ContinuousBatchSchedulerResult
         do {
             CBTrace.log(schedulerRequestID, "rt_cb_submit")
@@ -4157,7 +4423,17 @@ actor ModelRuntime: ModelRuntimeServing {
                     retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
                     recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
                     retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease)
-                ))
+                ), tokenSink: { event in
+                    guard let serialToolStop else { return }
+                    if serialToolStop.observe(
+                        eventTokens: event.replayTokens ?? [event.token],
+                        decode: detokenizer.decode,
+                        stopTokenFilter: stopTokenFilter,
+                        requestStops: requestStops
+                    ) {
+                        Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
+                    }
+                })
             }
         } catch {
             if let lease {
@@ -4177,77 +4453,23 @@ actor ModelRuntime: ModelRuntimeServing {
                 throw Self.terminalFailureError(code: result.errorCode ?? "continuous_batching_request_failed")
             }
             let completionEndedAt = Date()
-            // The serial path discards the model's end-of-generation token
-            // before counting it; bill and cache the batched row the same way.
-            // Harmony `<|return|>`/`<|call|>` are excluded from this set, as
-            // they are from the serial stop set: the parser reads and counts them.
-            let generatedTokens = Self.droppingTrailingModelStop(
-                result.generatedTokens,
-                terminalStatus: result.terminalStatus,
-                modelStopTokenIDs: prepared.modelStopTokenIDs
-            )
-            let completionTokenCount = result.completionTokens
-                - (result.generatedTokens.count - generatedTokens.count)
-            let completion = try await container.perform { context in
-                let decoded = context.tokenizer.decode(tokenIds: result.outputTokens)
-                guard decoded.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
-                    throw APIError(
-                        status: 502,
-                        message: "Model response exceeded 2097152 bytes",
-                        type: "upstream_provider_error",
-                        code: "response_byte_cap_exceeded",
-                        inferenceRan: true,
-                        settlementRan: true
-                    )
-                }
-                let filtered = Self.applyOutputFilters(
-                    decoded,
-                    stopTokenFilter: stopTokenFilter,
-                    requestStops: request.stop
-                )
-                let parserFinishReason = result.terminalStatus == .length && !filtered.hitStop
-                    ? "length"
-                    : (filtered.hitStop ? "request_stop" : "stop")
-                let parsed = try Self.parseGeneratedOutput(
-                    filteredText: filtered.text,
-                    generatedTokenIDs: generatedTokens,
-                    decode: { context.tokenizer.decode(tokenIds: $0) },
+            let finalized = try await container.perform { context in
+                try Self.finalizeContinuousBatchRow(
                     request: request,
-                    mode: .complete(finishReason: parserFinishReason),
-                    defaultCompletionTokens: completionTokenCount,
+                    result: result,
+                    modelStopTokenIDs: prepared.modelStopTokenIDs,
+                    serialStopTokenCount: serialToolStop?.stopTokenCount,
+                    promptTokenIDs: preparedPromptTokenIDs,
+                    decode: { context.tokenizer.decode(tokenIds: $0) },
                     stopTokenFilter: stopTokenFilter,
-                    requestStops: request.stop,
-                    globalHitStop: filtered.hitStop
-                )
-                let finishReason: String
-                if !parsed.toolCalls.isEmpty {
-                    finishReason = "tool_calls"
-                } else if result.terminalStatus == .length, !filtered.hitStop, !parsed.hitStop {
-                    finishReason = "length"
-                } else {
-                    finishReason = "stop"
-                }
-                let kvCacheBytesReused = Self.cachedPromptUTF8Bytes(
-                    promptTokenIds: preparedPromptTokenIDs,
-                    cachedPromptTokens: result.cachedPromptTokens,
-                    decode: { context.tokenizer.decode(tokenIds: $0) }
-                )
-                return try Self.validateStructuredCompletion(CompletionResult(
-                    content: parsed.content,
-                    finishReason: finishReason,
-                    promptTokens: prepared.promptTokens.count,
-                    cachedPromptTokens: result.cachedPromptTokens,
-                    kvCacheBytesReused: kvCacheBytesReused,
-                    completionTokens: parsed.completionTokens,
-                    generatedCompletionTokens: parsed.generatedCompletionTokens,
-                    ttftMilliseconds: nil,
                     generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
-                    toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
-                    modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
-                    settlementDisposition: result.settlementDisposition
-                ), request: request)
+                    modelHash: snapshot.modelHash
+                )
             }
-            if let lease, let retainedCache = result.retainedCache,
+            let completion = try Self.validateStructuredCompletion(finalized.completion, request: request)
+            let generatedTokens = finalized.generatedTokens
+            if !finalized.truncatedAtSerialStop,
+               let lease, let retainedCache = result.retainedCache,
                Self.retainedCacheIsCommittable(
                    retainedCache,
                    modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
@@ -4265,7 +4487,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
                 await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
-            } else if let lease, let serialCache = result.serialConversationCache,
+            } else if !finalized.truncatedAtSerialStop,
+                      let lease, let serialCache = result.serialConversationCache,
                       let fullTokens = Self.serialConversationCacheCommitTokens(
                           canonicalTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init),
                           coveredTokenCount: serialCache.tokenCount
@@ -4319,6 +4542,7 @@ actor ModelRuntime: ModelRuntimeServing {
         drainCancelled: DrainCancelToken,
         structuredAccumulator: StructuredStreamingContentAccumulator,
         idleState: StructuredStreamingIdleState,
+        idleCancellation: DrainCancelToken,
         onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult? {
         guard capability.isRequested,
@@ -4382,7 +4606,7 @@ actor ModelRuntime: ModelRuntimeServing {
         try drainCancelled.check()
         try Task.checkCancellation()
         if shouldCancel() { throw CancellationError() }
-        let streamState = AttachedPagedKVStreamState()
+        let streamState = AttachedPagedKVStreamState(request: request)
         let maxOutputTokens = request.maxTokens ?? max(1, maxContextTokens - prepared.promptTokens.count)
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         let batchKVBits = Self.effectiveKVBits(
@@ -4405,7 +4629,12 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         let result: ContinuousBatchSchedulerResult
         do {
-            result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
+            // The SPEC-019 structured idle timeout ends the row as it ends the
+            // serial generate loop.
+            result = try await Self.withDrainAndClientCancellation(
+                drainCancelled,
+                shouldCancel: { shouldCancel() || idleCancellation.isFired }
+            ) {
                 try await scheduler.submit(ContinuousBatchSchedulerRequest(
                     id: schedulerRequestID,
                     conversationKey: request.conversationKey ?? "",
@@ -4422,22 +4651,18 @@ actor ModelRuntime: ModelRuntimeServing {
                     recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
                     retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease)
                 ), tokenSink: { event in
-                    let eventTokens = event.replayTokens ?? [event.token]
-                    guard !eventTokens.isEmpty else { return }
-                    let allTokens = streamState.appendTokens(eventTokens)
-                    let candidate = Self.streamingSafePrefix(
-                        detokenizer.decode(allTokens),
+                    guard !idleCancellation.isFired else { return }
+                    if streamState.step(
+                        eventTokens: event.replayTokens ?? [event.token],
+                        decode: detokenizer.decode,
                         stopTokenFilter: stopTokenFilter,
-                        requestStops: requestStops
-                    )
-                    let delta = streamState.delta(to: candidate.text)
-                    guard !delta.isEmpty else { return }
-                    if let error = structuredAccumulator.append(delta) {
-                        streamState.record(error)
-                        return
+                        requestStops: requestStops,
+                        structuredAccumulator: structuredAccumulator,
+                        idleState: idleState,
+                        onChunk: onChunk
+                    ) {
+                        Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
                     }
-                    idleState.noteContent()
-                    onChunk(.content(delta))
                 })
             }
         } catch {
@@ -4459,95 +4684,34 @@ actor ModelRuntime: ModelRuntimeServing {
                 throw Self.terminalFailureError(code: result.errorCode ?? "continuous_batching_request_failed")
             }
             let completionEndedAt = Date()
-            // The serial path discards the model's end-of-generation token
-            // before counting it; bill and cache the batched row the same way.
-            // Harmony `<|return|>`/`<|call|>` are excluded from this set, as
-            // they are from the serial stop set: the parser reads and counts them.
-            let generatedTokens = Self.droppingTrailingModelStop(
-                result.generatedTokens,
-                terminalStatus: result.terminalStatus,
-                modelStopTokenIDs: prepared.modelStopTokenIDs
-            )
-            let completionTokenCount = result.completionTokens
-                - (result.generatedTokens.count - generatedTokens.count)
-            let completion = try await container.perform { context in
-                let decoded = context.tokenizer.decode(tokenIds: result.outputTokens)
-                guard decoded.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
-                    throw APIError(
-                        status: 502,
-                        message: "Model response exceeded 2097152 bytes",
-                        type: "upstream_provider_error",
-                        code: "response_byte_cap_exceeded",
-                        inferenceRan: true,
-                        settlementRan: true
-                    )
-                }
-                let filtered = Self.applyOutputFilters(
-                    decoded,
-                    stopTokenFilter: stopTokenFilter,
-                    requestStops: requestStops
-                )
-                let parserFinishReason = result.terminalStatus == .length && !filtered.hitStop
-                    ? "length"
-                    : (filtered.hitStop ? "request_stop" : "stop")
-                let parsed = try Self.parseGeneratedOutput(
-                    filteredText: filtered.text,
-                    generatedTokenIDs: generatedTokens,
-                    decode: { context.tokenizer.decode(tokenIds: $0) },
+            let finalized = try await container.perform { context in
+                try Self.finalizeContinuousBatchRow(
                     request: request,
-                    mode: .complete(finishReason: parserFinishReason),
-                    defaultCompletionTokens: completionTokenCount,
+                    result: result,
+                    modelStopTokenIDs: prepared.modelStopTokenIDs,
+                    serialStopTokenCount: streamState.serialStopTokenCount,
+                    promptTokenIDs: preparedPromptTokenIDs,
+                    decode: { context.tokenizer.decode(tokenIds: $0) },
                     stopTokenFilter: stopTokenFilter,
-                    requestStops: requestStops,
-                    globalHitStop: filtered.hitStop
-                )
-                let finishReason: String
-                if !parsed.toolCalls.isEmpty {
-                    finishReason = "tool_calls"
-                } else if result.terminalStatus == .length, !filtered.hitStop, !parsed.hitStop {
-                    finishReason = "length"
-                } else {
-                    finishReason = "stop"
-                }
-                let kvCacheBytesReused = Self.cachedPromptUTF8Bytes(
-                    promptTokenIds: preparedPromptTokenIDs,
-                    cachedPromptTokens: result.cachedPromptTokens,
-                    decode: { context.tokenizer.decode(tokenIds: $0) }
-                )
-                return try Self.validateStructuredCompletion(CompletionResult(
-                    content: parsed.content,
-                    finishReason: finishReason,
-                    promptTokens: prepared.promptTokens.count,
-                    cachedPromptTokens: result.cachedPromptTokens,
-                    kvCacheBytesReused: kvCacheBytesReused,
-                    completionTokens: parsed.completionTokens,
-                    generatedCompletionTokens: parsed.generatedCompletionTokens,
-                    ttftMilliseconds: nil,
                     generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
-                    toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
-                    modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
-                    settlementDisposition: result.settlementDisposition
-                ), request: request)
+                    modelHash: snapshot.modelHash
+                )
             }
             // #1690 E2E-F13: the stream held back an incomplete UTF-8 tail
-            // and any stop-string prefix; send the remainder as the final
-            // text renders it, so the buyer's bytes equal the receipt's.
-            if completion.toolCalls?.isEmpty != false {
-                let remainder = streamState.delta(to: completion.content)
-                if !remainder.isEmpty {
-                    if let error = structuredAccumulator.append(remainder) {
-                        throw error
-                    }
-                    idleState.noteContent()
-                    onChunk(.content(remainder))
-                }
-            }
-            let validated = try Self.validateStructuredStreamingCompletion(
-                completion,
+            // and any stop-string prefix; the serial stream's end sends the
+            // remainder as the final text renders it, so the buyer's bytes
+            // equal the receipt's.
+            let validated = try Self.finishContinuousBatchStream(
+                finalized,
+                state: streamState,
                 request: request,
-                buyerVisibleContent: structuredAccumulator.content
+                structuredAccumulator: structuredAccumulator,
+                idleState: idleState,
+                onChunk: onChunk
             )
-            if let lease, let retainedCache = result.retainedCache,
+            let generatedTokens = finalized.generatedTokens
+            if !finalized.truncatedAtSerialStop,
+               let lease, let retainedCache = result.retainedCache,
                Self.retainedCacheIsCommittable(
                    retainedCache,
                    modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
@@ -4565,7 +4729,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
                 await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
-            } else if let lease, let serialCache = result.serialConversationCache,
+            } else if !finalized.truncatedAtSerialStop,
+                      let lease, let serialCache = result.serialConversationCache,
                       let fullTokens = Self.serialConversationCacheCommitTokens(
                           canonicalTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init),
                           coveredTokenCount: serialCache.tokenCount
@@ -4952,6 +5117,7 @@ actor ModelRuntime: ModelRuntimeServing {
                                 modelID: request.model,
                                 allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools)
                             )
+                            let serialToolStopApplies = Self.serialToolStopApplies(request)
                             let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
                                 BlockingGenerateResult(generate(input: iteratorInput, context: generationContext, iterator: iterator) { tokens in
                                     if !tokens.isEmpty {
@@ -4965,20 +5131,15 @@ actor ModelRuntime: ModelRuntimeServing {
                                        tokens.last.map(Self.isHarmonyTerminalToken) == true {
                                         return GenerateDisposition.stop
                                     }
-                                    if request.stopsAfterFirstCompleteToolCall,
-                                       !HarmonyResponseParser.isHarmonyModelID(request.model),
-                                       Self.hasEnabledTools(request.promptSource.tools)
+                                    if serialToolStopApplies,
+                                       Self.observeSerialToolStop(
+                                           &serialToolObserver,
+                                           decoded: generationContext.tokenizer.decode(tokenIds: tokens),
+                                           stopTokenFilter: stopTokenFilter,
+                                           requestStops: request.stop
+                                       )
                                     {
-                                        let decoded = generationContext.tokenizer.decode(tokenIds: tokens)
-                                        let candidate = Self.streamingSafePrefix(
-                                            decoded,
-                                            stopTokenFilter: stopTokenFilter,
-                                            requestStops: request.stop
-                                        )
-                                        _ = serialToolObserver.observe(candidate.text)
-                                        if serialToolObserver.hasCompletedValidToolCall {
-                                            return GenerateDisposition.stop
-                                        }
+                                        return GenerateDisposition.stop
                                     }
                                     return GenerateDisposition.more
                                 })
@@ -5302,17 +5463,37 @@ actor ModelRuntime: ModelRuntimeServing {
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         let structuredAccumulator = StructuredStreamingContentAccumulator(enabled: Self.requiresStructuredValidation(request.responseFormat))
         let idleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))
-        if let completion = try await attachedContinuousBatchStreamingCompletion(
-            request: request,
-            snapshot: snapshot,
-            capability: continuousBatchingCapability,
-            completionStartedAt: Date(),
-            shouldCancel: shouldCancel,
-            drainCancelled: drainCancelled,
-            structuredAccumulator: structuredAccumulator,
-            idleState: idleState,
-            onChunk: onChunk
-        ) {
+        // SPEC-038 AC-6c: a batched structured-output stream runs under the
+        // same SPEC-019 idle timeout as the serial one. It gets its own idle
+        // state because the timeout race marks its state finished, and a
+        // batched attempt that serial-routes (nil) must leave the serial
+        // stream's timeout armed.
+        let batchedIdleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))
+        let batchedCompletionStartedAt = Date()
+        let batchedCompletion = try await Self.withStructuredStreamingIdleTimeout(
+            idleState: batchedIdleState,
+            onIdleTimeout: { () throws -> CompletionResult? in
+                try Self.synthesizeIdleTimeoutResultOrThrow(
+                    accumulator: structuredAccumulator,
+                    request: request,
+                    modelHash: snapshot.modelHash
+                )
+            }
+        ) { idleCancellation in
+            try await self.attachedContinuousBatchStreamingCompletion(
+                request: request,
+                snapshot: snapshot,
+                capability: continuousBatchingCapability,
+                completionStartedAt: batchedCompletionStartedAt,
+                shouldCancel: shouldCancel,
+                drainCancelled: drainCancelled,
+                structuredAccumulator: structuredAccumulator,
+                idleState: batchedIdleState,
+                idleCancellation: idleCancellation,
+                onChunk: onChunk
+            )
+        }
+        if let completion = batchedCompletion {
             return completion
         }
         if speculativeCacheWrapValidated,
@@ -5558,12 +5739,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                     }
 
-                    var emittedText = ""
                     var stoppedByRequestStop = false
-                    var toolStreamer = NativeToolCallStreamEmitter(
-                        modelID: request.model,
-                        allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools)
-                    )
+                    var textEmitter = SerialStreamingTextEmitter(request: request)
                     var streamingParseError: APIError?
                     var harmonyObservedFinalTokenCount = 0
                     var harmonyObservedTokenCount = 0
@@ -5587,7 +5764,6 @@ actor ModelRuntime: ModelRuntimeServing {
                         allowedFunctionNames: Self.toolFunctionNames(from: request.promptSource.tools),
                         stopCandidates: stopTokenFilter.tokens + request.stop
                     )
-                    let streamToolsIncrementally = Self.hasEnabledTools(request.promptSource.tools) && !isHarmonyResponse
                     let iterator = try TokenIterator(input: iteratorInput, model: generationContext.model, cache: kvCache, parameters: parameters)
                     do {
                         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
@@ -5649,47 +5825,20 @@ actor ModelRuntime: ModelRuntimeServing {
                                     stopTokenFilter: stopTokenFilter,
                                     requestStops: request.stop
                                 )
-                                    if streamToolsIncrementally {
-                                        for event in toolStreamer.observe(candidate.text) {
-                                        onChunk(event)
-                                    }
-                                    if !toolStreamer.suppressesAssistantContent {
-                                        let safe = toolStreamer.visibleContentPrefix(of: candidate.text)
-                                        let delta = Self.delta(from: emittedText, to: safe)
-                                        if !delta.isEmpty {
-                                            if structuredAccumulator.append(delta) != nil {
-                                                return .stop
-                                            }
-                                            idleState.noteContent()
-                                            emittedText = safe
-                                            onChunk(.content(delta))
-                                        }
-                                    }
-                                    if request.stopsAfterFirstCompleteToolCall, toolStreamer.hasCompletedValidToolCall {
-                                        return .stop
-                                    }
-                                    if candidate.hitStop {
-                                        stoppedByRequestStop = true
-                                        return .stop
-                                    }
+                                switch textEmitter.step(
+                                    candidate: candidate,
+                                    structuredAccumulator: structuredAccumulator,
+                                    idleState: idleState,
+                                    onChunk: onChunk
+                                ) {
+                                case .more:
                                     return .more
-                                }
-
-                                let delta = Self.delta(from: emittedText, to: candidate.text)
-                                if !delta.isEmpty {
-                                    if structuredAccumulator.append(delta) != nil {
-                                        return .stop
-                                    }
-                                    idleState.noteContent()
-                                    emittedText = candidate.text
-                                    onChunk(.content(delta))
-                                }
-
-                                if candidate.hitStop {
+                                case .requestStop:
                                     stoppedByRequestStop = true
                                     return .stop
+                                case .toolCallComplete, .structuredError:
+                                    return .stop
                                 }
-                                return .more
                             })
                         }
                         // Warm-decode wall-time: from the first decoded token
@@ -5733,34 +5882,13 @@ actor ModelRuntime: ModelRuntimeServing {
                             requestStops: request.stop,
                             globalHitStop: final.hitStop || stoppedByRequestStop
                         )
-                        let finalDelta = Self.delta(from: emittedText, to: parsed.content)
-                        if streamToolsIncrementally {
-                            for event in toolStreamer.observe(final.text) {
-                                onChunk(event)
-                            }
-                            if parsed.toolCalls.isEmpty,
-                               !parsed.content.isEmpty,
-                               !toolStreamer.suppressesAssistantContent
-                            {
-                                let contentDelta = Self.delta(from: emittedText, to: parsed.content)
-                                if !contentDelta.isEmpty {
-                                    if let error = structuredAccumulator.append(contentDelta) {
-                                        throw error
-                                    }
-                                    idleState.noteContent()
-                                    onChunk(.content(contentDelta))
-                                }
-                            }
-                        } else if !finalDelta.isEmpty {
-                            if let error = structuredAccumulator.append(finalDelta) {
-                                throw error
-                            }
-                            idleState.noteContent()
-                            onChunk(.content(finalDelta))
-                        }
-                        if let error = structuredAccumulator.error {
-                            throw error
-                        }
+                        try textEmitter.finish(
+                            finalText: final.text,
+                            parsed: parsed,
+                            structuredAccumulator: structuredAccumulator,
+                            idleState: idleState,
+                            onChunk: onChunk
+                        )
 
                         let finishReason: String
                         if !parsed.toolCalls.isEmpty {
@@ -6620,7 +6748,7 @@ actor ModelRuntime: ModelRuntimeServing {
         return hash
     }
 
-    private static func applyOutputFilters(
+    static func applyOutputFilters(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
         requestStops: [String]
@@ -6704,7 +6832,7 @@ actor ModelRuntime: ModelRuntimeServing {
         return decode(Array(prefixTokens)).utf8.count
     }
 
-    private static func streamingSafePrefix(
+    static func streamingSafePrefix(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
         requestStops: [String]
@@ -6913,6 +7041,33 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
+    /// SPEC-018 serial tool turn (`parallel_tool_calls` omitted/false) on a
+    /// non-Harmony model with tools: generation stops once the first tool
+    /// call is complete and valid.
+    static func serialToolStopApplies(_ request: ChatCompletionRequest) -> Bool {
+        request.stopsAfterFirstCompleteToolCall
+            && !HarmonyResponseParser.isHarmonyModelID(request.model)
+            && hasEnabledTools(request.promptSource.tools)
+    }
+
+    /// One serial-tool-turn stop test over the decode of every token so far.
+    /// The serial non-streaming path and the continuous-batching rows
+    /// (SPEC-038 AC-6c) share it, so both stop at the same token.
+    static func observeSerialToolStop(
+        _ observer: inout NativeToolCallStreamEmitter,
+        decoded: String,
+        stopTokenFilter: StopTokenFilter,
+        requestStops: [String]
+    ) -> Bool {
+        let candidate = streamingSafePrefix(
+            decoded,
+            stopTokenFilter: stopTokenFilter,
+            requestStops: requestStops
+        )
+        _ = observer.observe(candidate.text)
+        return observer.hasCompletedValidToolCall
+    }
+
     private static func parseToolCallsIfRequested(_ text: String, request: ChatCompletionRequest) -> (content: String, toolCalls: [ToolCall]) {
         guard let allowedFunctionNames = toolFunctionNames(from: request.promptSource.tools) else {
             return (text, [])
@@ -6931,7 +7086,7 @@ actor ModelRuntime: ModelRuntimeServing {
         return ("", parsed.toolCalls)
     }
 
-    private static func requiresStructuredValidation(_ responseFormat: ResponseFormat) -> Bool {
+    static func requiresStructuredValidation(_ responseFormat: ResponseFormat) -> Bool {
         switch responseFormat {
         case .text:
             return false
@@ -6979,7 +7134,7 @@ actor ModelRuntime: ModelRuntimeServing {
         return try ChatCompletionRequest.parse(data: try JSONSerialization.data(withJSONObject: body))
     }
 
-    private static func validateStructuredCompletion(_ completion: CompletionResult, request: ChatCompletionRequest) throws -> CompletionResult {
+    static func validateStructuredCompletion(_ completion: CompletionResult, request: ChatCompletionRequest) throws -> CompletionResult {
         if completion.toolCalls?.isEmpty == false {
             return completion
         }
@@ -7270,11 +7425,11 @@ actor ModelRuntime: ModelRuntimeServing {
         return converted.isEmpty ? nil : converted
     }
 
-    private static func hasEnabledTools(_ value: MacProviderCore.JSONValue?) -> Bool {
+    static func hasEnabledTools(_ value: MacProviderCore.JSONValue?) -> Bool {
         toolFunctionNames(from: value) != nil
     }
 
-    private static func toolFunctionNames(from value: MacProviderCore.JSONValue?) -> Set<String>? {
+    static func toolFunctionNames(from value: MacProviderCore.JSONValue?) -> Set<String>? {
         guard let value, case .array(let tools) = value, !tools.isEmpty else {
             return nil
         }
@@ -7350,6 +7505,121 @@ actor ModelRuntime: ModelRuntimeServing {
             return true
         default:
             return false
+        }
+    }
+}
+
+/// The serial streaming path's buyer-visible text step for non-Harmony output:
+/// incremental tool-call deltas (SPEC-018), assistant-content suppression once
+/// a tool call opens, the SPEC-019 structured-content accumulator, and the
+/// serial-tool-turn stop. The serial `stream` path and the continuous-batching
+/// stream sink (SPEC-038 AC-6c) both drive this one type, so a batched
+/// tool-bearing or structured-output row emits the serial SSE sequence.
+struct SerialStreamingTextEmitter {
+    enum Step: Equatable {
+        case more
+        /// A buyer `stop` string matched in the decoded text.
+        case requestStop
+        /// A serial tool turn completed its first valid tool call.
+        case toolCallComplete
+        /// The structured-output accumulator refused the delta (its error is
+        /// held by the accumulator).
+        case structuredError
+    }
+
+    private let streamToolsIncrementally: Bool
+    private let stopsAfterFirstCompleteToolCall: Bool
+    private var toolStreamer: NativeToolCallStreamEmitter
+    private(set) var emittedText = ""
+
+    init(request: ChatCompletionRequest) {
+        streamToolsIncrementally = ModelRuntime.hasEnabledTools(request.promptSource.tools)
+            && !HarmonyResponseParser.isHarmonyModelID(request.model)
+        stopsAfterFirstCompleteToolCall = request.stopsAfterFirstCompleteToolCall
+        toolStreamer = NativeToolCallStreamEmitter(
+            modelID: request.model,
+            allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools)
+        )
+    }
+
+    /// One decoded prefix of the generation (`streamingSafePrefix` of every
+    /// token so far).
+    mutating func step(
+        candidate: (text: String, hitStop: Bool),
+        structuredAccumulator: StructuredStreamingContentAccumulator,
+        idleState: StructuredStreamingIdleState,
+        onChunk: (StreamChunk) -> Void
+    ) -> Step {
+        if streamToolsIncrementally {
+            for event in toolStreamer.observe(candidate.text) {
+                onChunk(event)
+            }
+            if !toolStreamer.suppressesAssistantContent {
+                let safe = toolStreamer.visibleContentPrefix(of: candidate.text)
+                let delta = ModelRuntime.streamDelta(from: emittedText, to: safe)
+                if !delta.isEmpty {
+                    if structuredAccumulator.append(delta) != nil {
+                        return .structuredError
+                    }
+                    idleState.noteContent()
+                    emittedText = safe
+                    onChunk(.content(delta))
+                }
+            }
+            if stopsAfterFirstCompleteToolCall, toolStreamer.hasCompletedValidToolCall {
+                return .toolCallComplete
+            }
+            return candidate.hitStop ? .requestStop : .more
+        }
+
+        let delta = ModelRuntime.streamDelta(from: emittedText, to: candidate.text)
+        if !delta.isEmpty {
+            if structuredAccumulator.append(delta) != nil {
+                return .structuredError
+            }
+            idleState.noteContent()
+            emittedText = candidate.text
+            onChunk(.content(delta))
+        }
+        return candidate.hitStop ? .requestStop : .more
+    }
+
+    /// The end of generation: remaining tool-call deltas over the final
+    /// filtered text, then any content the stream held back.
+    mutating func finish(
+        finalText: String,
+        parsed: ModelRuntime.ParsedGeneratedOutput,
+        structuredAccumulator: StructuredStreamingContentAccumulator,
+        idleState: StructuredStreamingIdleState,
+        onChunk: (StreamChunk) -> Void
+    ) throws {
+        let finalDelta = ModelRuntime.streamDelta(from: emittedText, to: parsed.content)
+        if streamToolsIncrementally {
+            for event in toolStreamer.observe(finalText) {
+                onChunk(event)
+            }
+            if parsed.toolCalls.isEmpty,
+               !parsed.content.isEmpty,
+               !toolStreamer.suppressesAssistantContent
+            {
+                let contentDelta = ModelRuntime.streamDelta(from: emittedText, to: parsed.content)
+                if !contentDelta.isEmpty {
+                    if let error = structuredAccumulator.append(contentDelta) {
+                        throw error
+                    }
+                    idleState.noteContent()
+                    onChunk(.content(contentDelta))
+                }
+            }
+        } else if !finalDelta.isEmpty {
+            if let error = structuredAccumulator.append(finalDelta) {
+                throw error
+            }
+            idleState.noteContent()
+            onChunk(.content(finalDelta))
+        }
+        if let error = structuredAccumulator.error {
+            throw error
         }
     }
 }

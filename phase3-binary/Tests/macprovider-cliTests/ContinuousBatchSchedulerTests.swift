@@ -1806,6 +1806,36 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(result.snapshot?.modelSHA256, Self.modelSHA)
     }
 
+    /// SPEC-038 AC-6c: a serial tool turn asks its decoding row to end; the
+    /// row finishes as a normal `.stop` at its next token instead of running
+    /// to `max_tokens`.
+    func testStopEarlyEndsDecodingRowAsStopAtNextToken() async throws {
+        let secondDecodeGate = AsyncGate()
+        let recorder = TokenEventRecorder()
+        let backend = SecondDecodeGateBackend(secondDecodeGate: secondDecodeGate)
+        let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
+        let submitted = Task {
+            try await scheduler.submit(
+                .init(id: "tool-turn", conversationKey: "", promptTokens: [1], maxOutputTokens: 8),
+                tokenSink: { recorder.append($0) }
+            )
+        }
+        try await eventually { recorder.events().count == 1 }
+        await scheduler.stopEarly(requestID: "tool-turn")
+        await secondDecodeGate.open()
+        let result = try await submitted.value
+
+        XCTAssertEqual(result.terminalStatus, .stop)
+        XCTAssertNil(result.errorCode)
+        XCTAssertEqual(result.generatedTokens, [7, 8])
+        XCTAssertEqual(result.outputTokens, [7, 8])
+        XCTAssertEqual(result.completionTokens, 2)
+        XCTAssertEqual(result.settlementDisposition, .eligibleOwner)
+        // A stop request for a row that is not decoding is ignored.
+        await scheduler.stopEarly(requestID: "tool-turn")
+        await scheduler.stopEarly(requestID: "unknown")
+    }
+
     func testTerminalResultWaitsForAcceptedTokenDelivery() async throws {
         let sinkGate = AsyncGate()
         let recorder = TokenEventRecorder()
