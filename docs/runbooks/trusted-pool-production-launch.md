@@ -220,9 +220,30 @@ SPEC-022-R012 (R-12.8) is normative; this is the operator sequence.
 Rollout, in this order (the R-12.8 order: coordinator, gateway, CLI, then v2
 allowlists):
 
-0. Drain ledger recovery on the OLD coordinator immediately before step 1:
-   let the startup/nightly ledger recovery run to completion (or trigger it)
-   and confirm no request is missing its ledger row. Provider identity rows
+0. Drain ledger recovery on the OLD coordinator immediately before step 1
+   and confirm no request is missing its ledger row. There is no admin
+   trigger: the recovery runs at every coordinator start (the startup scan
+   over `settlement.startup_reconcile_window_hours`, default 24, ending
+   `recovery_grace_seconds` ago; it logs only on failure) and nightly at
+   00:00 UTC. Confirm with this read-only check against the coordinator's
+   `storage.db_path` (from `/opt/macprovider/coordinator.yaml` or the Pearl
+   overlay), which must print `0`:
+
+   ```bash
+   sudo sqlite3 -readonly "$COORDINATOR_DB" "
+   SELECT COUNT(*) FROM request_log rl
+    WHERE rl.provider_assigned_id IS NOT NULL
+      AND rl.status != 503
+      AND rl.ts_utc >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days')
+      AND NOT EXISTS (
+        SELECT 1 FROM ledger_request_credits lrc
+         WHERE lrc.request_id = rl.request_id
+           AND (rl.attempt_n IS NULL OR lrc.attempt_n = rl.attempt_n));"
+   ```
+
+   Above `0`: restart the old coordinator (its startup scan backfills rows
+   inside its window) or wait for the nightly run, and re-run the check;
+   rows older than the window need a review before step 1. Provider identity rows
    written before this release carry no recorded `runtime_source`, so the new
    coordinator's recovery treats a still-missing ledger row as possibly
    loopback and fails closed: 0 credit, quarantined as
@@ -232,7 +253,10 @@ allowlists):
 1. Pause every pool, deploy the coordinator that implements SPEC-022 v0.2.2
    (the `pool_operator_attested` usage source and negotiated settlement
    trailers), confirm `/healthz` reports it and the updater transaction
-   committed, then resume the pools. The still-old gateway does not advertise
+   committed, then resume the pools. Pause is `coordinator-cli
+   trust-pool-admin set-lifecycle --pool-id <id> --lifecycle paused`; resume
+   is `coordinator-cli trust-pool-admin promote --pool-id <id>
+   --operation-id <op>` (paused to active). The still-old gateway does not advertise
    `X-MacProvider-Internal-Settlement-Trailers`, so the new coordinator answers
    it in the pre-#1690 order: non-streaming attempts are recorded before the
    write and their finality travels in headers, which that gateway reads.
