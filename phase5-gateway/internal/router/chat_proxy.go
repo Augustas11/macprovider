@@ -99,8 +99,15 @@ const (
 	legacySettlementPolicyVersion     = "spec022-prereq-v0"
 	settlementHoldFallbackTTL         = 5 * time.Minute
 	maxStreamingFallbackMetadataBytes = int64(64 << 10)
-	decodeIdleSlowModelProgressTokens = 5
-	decodeIdleSlowModelMax            = 60 * time.Second
+	// streamingFallbackMetadataBytesPerToken widens the serialized-metadata
+	// ceiling by the requested completion budget (E2E-F2). An honest
+	// per-token SSE frame carries about 230 bytes of JSON around a few
+	// content bytes, so a fixed 64 KiB tripped every stream past about 280
+	// frames. The ceiling stays a hard, finite bound the buyer's own
+	// max_tokens sets; the fallback estimate is still capped at max_tokens.
+	streamingFallbackMetadataBytesPerToken = int64(512)
+	decodeIdleSlowModelProgressTokens      = 5
+	decodeIdleSlowModelMax                 = 60 * time.Second
 )
 
 var errStreamingIdleTimeout = errors.New("streaming upstream idle timeout")
@@ -1576,8 +1583,8 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 						settleGatewayTerminalOutputExceeded(cleanLengthFacadeCompletion(completion))
 						return false
 					}
-					if projectedSerializedBytes-projectedContentBytes > maxStreamingFallbackMetadataBytes {
-						slog.Warn("streaming gateway estimate exceeded serialized metadata ceiling; truncating stream", "request_id", requestID(r), "serialized_bytes", projectedSerializedBytes, "content_bytes", projectedContentBytes, "metadata_ceiling", maxStreamingFallbackMetadataBytes)
+					if metadataCeiling := streamingFallbackMetadataCeiling(maxCompletion); projectedSerializedBytes-projectedContentBytes > metadataCeiling {
+						slog.Warn("streaming gateway estimate exceeded serialized metadata ceiling; truncating stream", "request_id", requestID(r), "serialized_bytes", projectedSerializedBytes, "content_bytes", projectedContentBytes, "metadata_ceiling", metadataCeiling)
 						completion := cleanLengthFallbackCompletion(maxInt64(projectedContentBytes, projectedSerializedBytes))
 						setCleanLengthFallbackUsage(completion)
 						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
@@ -3305,6 +3312,19 @@ func estimateStreamingCompletionTokens(emitted, maxTokens int64) int64 {
 		return maxTokens
 	}
 	return completion
+}
+
+// streamingFallbackMetadataCeiling is the serialized-minus-content byte
+// allowance for one stream: the fixed floor plus a per-token share of the
+// requested completion budget, saturating instead of overflowing.
+func streamingFallbackMetadataCeiling(maxCompletion int64) int64 {
+	if maxCompletion <= 0 {
+		return maxStreamingFallbackMetadataBytes
+	}
+	if maxCompletion > (math.MaxInt64-maxStreamingFallbackMetadataBytes)/streamingFallbackMetadataBytesPerToken {
+		return math.MaxInt64
+	}
+	return maxStreamingFallbackMetadataBytes + maxCompletion*streamingFallbackMetadataBytesPerToken
 }
 
 func boundedStreamingFallbackFrameBytes(line []byte) int64 {
