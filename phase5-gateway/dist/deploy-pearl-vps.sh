@@ -526,7 +526,9 @@ print('unknown')
 # still running after the drain is cut, as on any crash. A reservation that
 # outlived a crashed request still counts here until its expires_at passes.
 # For a hard quiet window, stop buyer traffic at nginx first.
-INFLIGHT_SQL="SELECT COUNT(*) FROM quota_reservations WHERE status = 'active' AND settlement_hold = 0 AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now');"
+# expires_at is RFC3339Nano text with a variable fraction; a lexical compare
+# against whole-second text sorts ...00.5Z below ...00Z, so compare instants.
+INFLIGHT_SQL="SELECT COUNT(*) FROM quota_reservations WHERE status = 'active' AND settlement_hold = 0 AND julianday(expires_at) > julianday('now');"
 if [ "$INFLIGHT" = "unknown" ]; then
   INFLIGHT=$($SSH "DB='$REMOTE_GATEWAY_DB_PATH'; test -f \"\$DB\" || exit 1; sudo -u macprovider sqlite3 -readonly \"\$DB\" \"$INFLIGHT_SQL\"" 2>/dev/null) || INFLIGHT="unknown"
 fi
