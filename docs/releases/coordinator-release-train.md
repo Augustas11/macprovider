@@ -91,6 +91,8 @@ archive (#1717). #1718 fixed that deploy boundary; replacement runtime
 `v1.8.190` was signed and applied successfully. The next runtime tag is reserved
 as `v1.8.191` for the post-v1.8.190 changes listed below.
 
+**2026-09-25 v1.8.194 apply (partial).** The signed updater applied the v1.8.194 binary pair at 03:05Z (`rollout_completed success`; updater reinstalled from the tag first). The full `deploy-pearl-vps.sh` at 03:22Z reached `compare-live` = `descends` with 0 uncovered providers, then failed its SPEC-023 exact-byte canary and **rolled back** at about 03:35Z. There was about 30 s of public 502 during the rollback restart. Why: the canary Mac `mp-26592d…` runs CLI 1.8.123. Its `~/macprovider/catalog-release` holds the Sep 8 baked `published-2026-09-02-gpt-oss-120b-v1` files, and only a signed CLI payload writes that directory, so no restart can make it byte-equal to the new release. Live now: coordinator/gateway v1.8.194 binary, catalog still `published-2026-09-23-tier2-buyer-closure-v1`. `stats-inventory-sync` is left stopped by the rollback: #1738 migration 030 is applied and the old sidecar is held. Recover per the coordinator-deploy-recover runbook. #1735 catalog activation still needs a canary whose installed CLI payload carries `published-2026-09-25-artifact-hash-correction-v1`.
+
 ### Recent coordinator releases
 
 | Tag | Commit | Head PR |
