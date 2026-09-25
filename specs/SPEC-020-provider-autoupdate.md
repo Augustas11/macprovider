@@ -303,10 +303,10 @@ Discovery MUST begin from a signature-authenticated monotonic discovery head
 under the pinned release trust root, not from mutable GitHub `latest` ordering.
 The client MAY use a bounded GitHub public-release listing only to locate
 append-only transports whose tags match
-`release-discovery-v1-<positive-decimal-sequence>`. The listing MUST be read
-newest-first in explicitly numbered pages of at most 100 releases, at most 10
-pages per discovery attempt, and MUST fail closed with
-`transport_listing_oversized` on any page larger than 8 MiB. The client MUST
+`release-discovery-v1-<positive-decimal-sequence>`. The listing MUST be read in
+GitHub's default (creation-ordered, unsigned) order in explicitly numbered
+pages of at most 100 releases, at most 10 pages per discovery attempt, and
+MUST fail closed with `transport_listing_oversized` on any page larger than 16 MiB. The client MUST
 stop at the first page that contains a well-formed transport tag and MUST NOT
 request later pages; a short page ends the listing. When no page within the
 bound contains a transport, discovery MUST fail with `transport_absent`. The
@@ -1541,9 +1541,11 @@ Deferred to v0.3.0 or later:
   20-release listing let several-per-day Pearl prereleases push every
   `release-discovery-v1-*` transport off the only page, so manual and periodic
   discovery failed with `transport_absent` while GitHub was reachable. The
-  client now reads numbered newest-first pages (at most 100 releases and 8 MiB
+  client now reads numbered listing pages (at most 100 releases and 16 MiB
   each, at most 10 pages), stops at the first page holding a well-formed
-  transport, and selects the greatest sequence there. Immutability, prerelease,
+  transport, and selects the greatest sequence there. Because GitHub ordering
+  is unsigned and only approximately newest-first, a higher transport on a
+  later page is missed only as a fail-closed freeze bounded by head expiry. Immutability, prerelease,
   signature, transport-sequence binding, replay, equivocation, and expiry
   checks are unchanged; the listing remains an unsigned locator.
 - v0.1.19 (2026-09-08): Trust-table amendment: coordinator wire tier `trusted`

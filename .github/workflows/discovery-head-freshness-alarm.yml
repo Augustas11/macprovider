@@ -47,7 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           # Mirror EXACTLY what the client sees, not what exists. The client
-          # (SelfUpdate.swift releaseDiscoveryTransports) reads newest-first
+          # (SelfUpdate.swift releaseDiscoveryTransports) reads listing-order
           # pages of releaseDiscoveryPageSize=100, at most
           # maxReleaseDiscoveryPages=10, stops at the first page holding a
           # release-discovery-v1-<seq> transport, and picks the highest

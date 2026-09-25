@@ -99,11 +99,11 @@ struct SelfUpdate {
     )
     static let currentCodeValidityFlags = SecCSFlags(rawValue: kSecCSStrictValidate)
     // Pearl prereleases ship several times a day and push transports off a
-    // single listing page, so discovery pages newest-first with a hard page
+    // single listing page, so discovery pages in GitHub listing order with a hard page
     // bound and a per-page byte cap (SPEC-020-R001).
     static let releaseDiscoveryPageSize = 100
     static let maxReleaseDiscoveryPages = 10
-    static let maxReleaseDiscoveryListingBytes = 8 * 1_024 * 1_024
+    static let maxReleaseDiscoveryListingBytes = 16 * 1_024 * 1_024
     static let maxReleaseDiscoveryHeadBytes = 64 * 1_024
     static let maxReleaseDiscoverySignatureBytes = 4 * 1_024
     static let checksumPublicKeyPEM = """
