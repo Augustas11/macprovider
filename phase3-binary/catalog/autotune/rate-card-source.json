@@ -21,7 +21,7 @@
       "prompt_rate_per_mtok": 13500
     }
   },
-  "generated_at": "2026-09-23T02:11:36Z",
+  "generated_at": "2026-09-25T00:54:00Z",
   "global_multiplier_ppm": 1000000,
   "policy_version": "autotune-policy-v1",
   "provider_share_bps": 9000,
