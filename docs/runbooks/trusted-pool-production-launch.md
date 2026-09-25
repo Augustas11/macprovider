@@ -335,23 +335,29 @@ settled, so traffic stops and holds drain first:
    coordinator. The check fails closed: it parses the config (YAML or JSON,
    quoted or not) instead of matching text, and any error, a missing
    `python3`/`yaml`, a relative or unreadable path, or no `VERDICT` line
-   means STOP. On Pearl:
+   means STOP. It reads the live config and then the Pearl overlay (the
+   overlay wins, as for the coordinator); a missing overlay is STOP. On Pearl:
 
    ```bash
-   python3 - /etc/macprovider/coordinator.yaml <<'PY'
+   python3 - /opt/macprovider/coordinator.yaml /etc/macprovider/coordinator.pearl-overlays.yaml <<'PY'
    import os, sys
    try:
        import yaml
-       with open(sys.argv[1]) as f:
-           cfg = yaml.safe_load(f)
-       if not isinstance(cfg, dict):
-           raise ValueError("config is not a mapping")
-       auto = cfg.get("autotune")
-       if auto is None:
-           auto = {}
-       if not isinstance(auto, dict):
-           raise ValueError("autotune is not a mapping")
-       path = auto.get("catalog_artifacts_path")
+       path = None
+       for config_path in sys.argv[1:]:
+           with open(config_path) as f:
+               cfg = yaml.safe_load(f)
+           if cfg is None:
+               cfg = {}
+           if not isinstance(cfg, dict):
+               raise ValueError(f"{config_path} is not a mapping")
+           auto = cfg.get("autotune")
+           if auto is None:
+               auto = {}
+           if not isinstance(auto, dict):
+               raise ValueError(f"autotune in {config_path} is not a mapping")
+           if "catalog_artifacts_path" in auto:
+               path = auto.get("catalog_artifacts_path")
        if path is None or path == "":
            print("feed: none (autotune.catalog_artifacts_path unset)")
            print("VERDICT: no-feed")
@@ -475,8 +481,16 @@ has run on the new coordinator:
 2. Run the gate with the **current** binary against the live database:
 
    ```bash
-   coordinator pool-rollback-preflight --config /etc/macprovider/coordinator.yaml
+   sudo bash -c 'set -a; . /etc/macprovider/coordinator.env; set +a
+     /opt/macprovider/coordinator pool-rollback-preflight \
+       --config /opt/macprovider/coordinator.yaml \
+       --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml'
+   echo "exit: $?"
    ```
+
+   These are the paths the `macprovider-coordinator` unit runs with (live
+   config, Pearl overlay, env file for the `env:` credentials the config
+   names); `/etc/macprovider/coordinator.yaml` does not exist on Pearl.
 
    Exit 0 means every pool route snapshot has a closed verdict or is past its
    pending deadline with no verdict. Exit 3 means a pool attempt can still

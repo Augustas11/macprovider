@@ -29,11 +29,12 @@ func runPoolRollbackPreflightIO(args []string, stdout, stderr io.Writer, now fun
 	fs := flag.NewFlagSet("pool-rollback-preflight", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	configPath := fs.String("config", "coordinator.yaml", "path to coordinator YAML config")
+	configOverlay := fs.String("config-overlay", "", "optional coordinator YAML config overlay")
 	timeout := fs.Duration("timeout", 5*time.Minute, "max time the preflight may run")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.LoadWithOverlay(*configPath, *configOverlay)
 	if err != nil {
 		fmt.Fprintf(stderr, "config: %v\n", err)
 		return 1
