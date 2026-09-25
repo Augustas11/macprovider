@@ -36,13 +36,19 @@ evidence write failed and was marked missing,
 `settlement_output_missing_after_credit`; or a negotiated response,
 streaming or not, that reaches the end of the handler without a tuple,
 `settlement_finality_unset_after_delivery`), buyer and provider are settled
-alike. Under an enforce route snapshot the provider credit can never become
-payable (enforce payability needs a verified verdict and attempt output) and
-is also quarantined, and the buyer gets a signed closed refund tuple
-(`quarantined`, `inconclusive`); neither side is paid. In observe mode or
-without a route snapshot the credit stays payable, so the buyer gets the
-signed `legacy` tuple and is debited locally, the #1675 behaviour; both
-sides are paid. The coordinator logs the reason for operator review. The gateway holds
+alike. Under enforce route mode (from the attempt's route snapshot, or the
+enforce policy when store pressure skipped the snapshot) the provider credit
+can never become payable (enforce payability needs a verified verdict and
+attempt output) and is also quarantined, and the buyer gets a signed closed
+refund tuple (`quarantined`, `inconclusive`); neither side is paid. The
+coordinator's finality lookup reports such an attempt as closed
+`quarantined`, so a gateway that never received the trailer (a stream it
+ended, a dropped connection) still refunds instead of holding. In observe
+mode, or with no route snapshot and no enforce policy, the credit stays
+payable, so the buyer gets the signed `legacy` tuple and is debited locally,
+the #1675 behaviour; both sides are paid. The coordinator logs the reason for
+operator review. Only a 200 gets such a tuple; the gateway settles a non-200
+from its headers. The gateway holds
 declared finality that is missing, unsigned, or fails the MAC as
 `missing_settlement_finality_trailer`; it never debits it locally. A caller
 that did not advertise keeps the pre-v0.2.2 order (record before the write,
@@ -1036,7 +1042,9 @@ the pool attempts recorded before a downgrade.
   predates v14 (`maxKnownSchemaVersion` 13) refuses a v14 database at open
   (its schema-version gate), so a gateway rollback restores the pre-deploy
   snapshot. Roll back in the reverse order: v2 allowlists, CLI, gateway,
-  coordinator. Pool traffic MUST stay paused while the v0.2.0
+  coordinator. A gateway rollback is forbidden once any
+  `pool_operator_attested` usage row exists, because the older gateway's
+  `usage_events` CHECK cannot hold it; roll the gateway forward instead. Pool traffic MUST stay paused while the v0.2.0
   coordinator deploy can still roll back automatically, because v0.2.0
   writes the new labels on every pool route, native pools included, and an
   automatic rollback runs no gate. An old CLI against a new coordinator, and a new
@@ -1092,9 +1100,11 @@ the pool attempts recorded before a downgrade.
   tuple for a delivered attempt whose settlement evidence failed (the
   post-delivery record or ingest, a credit whose evidence was marked missing,
   or a negotiated response that would otherwise end without a tuple): a
-  signed closed refund with the provider credit quarantined under an enforce
-  route snapshot, else the signed `legacy` tuple with the payable credit
-  kept, so buyer and provider agree without an operator. Every gateway builder of a
+  signed closed refund with the provider credit quarantined under enforce
+  route mode (from the snapshot, or enforce policy under store pressure),
+  also reported closed `quarantined` by the finality lookup, else the signed
+  `legacy` tuple with the payable credit kept, so buyer and provider agree
+  without an operator. Every gateway builder of a
   coordinator chat request, relay-blind included, advertises the capability
   with the bearer, account and request id the MAC binds. Once both
   are deployed, the gateway pin `coordinator.require_settlement_trailers:

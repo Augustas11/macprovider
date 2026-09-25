@@ -285,13 +285,18 @@ settlement, and a gateway database restore erases whatever it has not
 settled, so traffic stops and holds drain first:
 
 1. Stop buyer traffic at nginx while the gateway stays up. In every nginx
-   server block that proxies buyer routes to the gateway (`grep -l 9443
+   server block that proxies to the gateway (`grep -l 9443
    /etc/nginx/sites-enabled/*`: `api.malibu.tech`, and any alias such as
-   `api.streamvc.live`), replace the `location /v1/` and `location /auth/`
-   bodies with `return 503;` (keep `/healthz`), then `sudo nginx -t && sudo
-   systemctl reload nginx`. The gateway keeps running on `127.0.0.1:9443`, so
-   the reconciler and the operator endpoints stay reachable from Pearl
-   itself (nginx never exposes `/admin/` publicly).
+   `api.streamvc.live`), replace the body of every `location` that
+   `proxy_pass`es to `127.0.0.1:9443`, except `location = /healthz`, with
+   `return 503;` (on `api.malibu.tech` today: `/v1/`, `/auth/`,
+   `= /account`, `= /docs`, `= /privacy`). Then `sudo nginx -t && sudo
+   systemctl reload nginx`, and verify from outside Pearl:
+   `curl -s -o /dev/null -w '%{http_code}\n' -X POST
+   https://api.malibu.tech/v1/chat/completions` prints `503`. The gateway
+   keeps running on `127.0.0.1:9443`, so the reconciler and the operator
+   endpoints stay reachable from Pearl itself (nginx never exposes `/admin/`
+   publicly).
 2. Drain settlement holds to zero with the reconciler, from Pearl:
    `curl -X POST -H "Authorization: Bearer $OPERATOR_KEY"
    http://127.0.0.1:9443/admin/settlement/reconcile`, repeated, until
@@ -311,37 +316,55 @@ settled, so traffic stops and holds drain first:
 
 Prefer rolling the gateway forward: v14 only widens the
 `usage_events.token_source` CHECK. A gateway older than this release
-(`maxKnownSchemaVersion` 13) refuses a v14 database at open. The
+(`maxKnownSchemaVersion` 13) refuses a v14 database at open, and its
+`usage_events` CHECK rejects `pool_operator_attested`. The
 `deploy-pearl-vps.sh` gateway deploy snapshots `gateway.db` at step 2d
-(`sqlite3 .backup` to `gateway.db.pre-deploy.<UTC timestamp>`) and, at the end
-of the run, only prints a rollback recipe: every restore command in its
-"Rollback:" block (script lines 761-797) is an `echo`, so the script itself
-never restores. The printed recipe, run by an operator, stops the gateway,
-reinstalls `/opt/macprovider/gateway.prev`, deletes `gateway.db-wal` and
+(`sqlite3 .backup` to `gateway.db.pre-deploy.<UTC timestamp>`; the run prints
+`db snapshot saved at <path>`) and copies the previous binary to
+`/opt/macprovider/gateway.prev` at step 3. At the end of the run it only
+prints a rollback recipe: every restore command in its "Rollback:" block
+(script lines 761-797) is an `echo`, so the script itself never restores.
+The printed recipe picks the newest snapshot (`ls -1t | head -1`), stops the
+gateway, reinstalls `gateway.prev`, deletes `gateway.db-wal` and
 `gateway.db-shm`, installs the snapshot over `gateway.db`, and then runs
 `systemctl start macprovider-gateway` and a `/healthz` check. The restore
 discards every gateway write since the snapshot, including anything only in
 the WAL: accounts and API keys issued, quota reservations and their
 settlement holds, usage (debit) rows, demo usage, and wallet-session state.
 The gateway cannot run with its reconciler off (`settlement.reconcile_enabled:
-false` fails config validation), so it must stay stopped until the lost rows
-are back. A gateway rollback therefore runs inside step 4 above, after
-traffic stopped and holds drained, and only as:
+false` fails config validation), so it stays stopped until the lost rows are
+back. A gateway rollback therefore runs inside step 4 above, after traffic
+stopped and holds drained, and only as:
 
-1. Export every row written after the snapshot timestamp from `accounts`,
+1. Pre-check, with the gateway still up: `SELECT COUNT(*) FROM usage_events
+   WHERE token_source = 'pool_operator_attested'`. Only a v14 gateway writes
+   that source, and the older gateway's CHECK cannot hold it, so any such row
+   makes a gateway rollback forbidden: roll the gateway forward instead.
+   Continue only when the count is 0.
+2. Stop the gateway (`sudo systemctl stop macprovider-gateway`), so nothing
+   is written after the export.
+3. Name the exact restore inputs; do not use the recipe's `ls -1t | head
+   -1`. The snapshot is the path the v14 deploy printed as `db snapshot saved
+   at ...` (the `gateway.db.pre-deploy.<UTC timestamp>` taken by that deploy,
+   not a later one). The binary is the pre-v14 release: use
+   `/opt/macprovider/gateway.prev` only if its sha256 matches that release's
+   published gateway binary; if a later deploy replaced it, install the
+   pre-v14 release binary explicitly.
+4. Export every row written after that snapshot's timestamp from `accounts`,
    `account_identities`, `api_keys`, `api_key_events`, `quota_reservations`,
    `usage_events`, `demo_usage_events`, and the `wallet_session*` tables
    (their `created_at`, `settled_at` or equivalent timestamp is after the
    snapshot's). These are the buyer debits and account state the restore
-   would lose. Export before running any part of the printed recipe.
-2. Run the printed recipe up to and including the snapshot install and its
-   `PRAGMA integrity_check`, but leave out its final `systemctl start
+   would lose.
+5. Run the printed recipe's restore steps with the named snapshot and binary,
+   up to and including the snapshot install and its `PRAGMA
+   integrity_check`, but leave out its final `systemctl start
    macprovider-gateway` and `/healthz` lines: the gateway stays stopped.
-3. Re-apply the exported rows to the restored database with `sqlite3`,
+6. Re-apply the exported rows to the restored database with `sqlite3`,
    reconcile daily quota totals for the affected accounts, then start the
    older gateway and check `/healthz`. Buyer traffic stays blocked at nginx
    until step 5 of the rollback. Skipping the re-apply is only acceptable
-   when step 1 exported nothing.
+   when step 4 exported nothing.
 
 Rollback to a coordinator that predates SPEC-022 v0.2.0, once any pool route
 has run on the new coordinator:
