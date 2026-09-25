@@ -32,6 +32,10 @@ def classify(req, check, obs, ev=None):
         return "E2E-F13(new: native long output_hash_mismatch)"
     if "rotate" in req["label"] and "missing_receipt_deadline_elapsed" in reasons and check in ("delivered_not_free", "buyer_usage_eq_debit"):
         return "E2E-F9"
+    # #1690 M9 E1: LM Studio refused logprobs with tools on a stream (fixed
+    # 598ae3e6): the tool-call stream ended malformed, the request unbilled.
+    if req["engine"] == "lmstudio" and req["shape"] == "tool" and check == "stream_complete" and o.get("stream_error") == "stream_malformed":
+        return "M9-E1"
     if "output_hash_mismatch" in reasons and check in ("delivered_not_free", "buyer_usage_eq_debit", "stream_complete"):
         return "E2E-F6"
     basis = str(o.get("basis", ""))
@@ -48,6 +52,9 @@ def classify(req, check, obs, ev=None):
     if check == "delivered_not_free" and req["shape"] == "long" and req["stream"] and req["behaviour"] in ("normal", "slow"):
         return "E2E-F2"
     if check == "delivered_not_free" and o.get("note") == "partial stream":
+        return "E2E-F3"
+    # #1690 M9: the external-engine disconnect check names the same finding.
+    if check == "disconnect_prefix_billed":
         return "E2E-F3"
     if check == "no_undelivered_bill" and req["behaviour"] == "disconnect":
         return "E2E-F4"
