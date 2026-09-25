@@ -59,13 +59,19 @@ Figures marked \* are from `continuous-batching-qwen36-throughput-decomposition-
      4-bit figure of 25.4.
    - Only MTP puts oMLX higher, at 48.9. That is about 90% of the estimated
      55 tok/s bandwidth ceiling and about 1.3× our serial rate.
-   - **Open:** production v1.8.192 decodes at 20.5 tok/s end to end (20.6 when
-     measured directly on the Studio). The campaign serve's serial figure is
-     36.4. That difference must be explained before either number is quoted to
-     providers. Candidates:
-     - the release binary;
-     - the serial-routed path under `canary`;
-     - the measurement window.
+   - **Resolved:** production v1.8.192 decodes at 20.5 tok/s because launchd
+     runs the provider at background priority. The LaunchAgent sets
+     `ProcessType` `Adaptive`, which leaves a daemon at Mach priority 4.
+     - Same release binary and config in a lab run on the Studio: 22.3 tok/s
+       under `Adaptive` and **37.8 tok/s** under `Standard`.
+     - Same binary under `taskpolicy -b`: 22.1 tok/s.
+     - Not the cause: the binary, the config, the 200k context setting, the
+       one-at-a-time path, or how each figure was measured.
+     - Fix: #1742 (SPEC-003 v0.11.4). The provider job becomes `Standard`, and
+       the fleet gets it through the auto-update plist template with the next
+       signed cut.
+     - Expect production figures to rise by about 1.7× once the fix ships. Quote
+       36–38 tok/s serial, not 20.5.
 3. **The real gap is prefill scheduling, and both documents agree.**
    - Serial prefill is about 300 tok/s for us and 330–340 for oMLX, so the
      kernels are close.
