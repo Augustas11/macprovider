@@ -1,0 +1,49 @@
+package buyer
+
+import (
+	"context"
+	"sync/atomic"
+)
+
+// Test hooks exported to the external buyer_test package (compiled only
+// into tests).
+
+// SetSettlementOutputWriteErrForTest fails the first try of every
+// settlement-output write with err.
+func SetSettlementOutputWriteErrForTest(err error) (restore func()) {
+	prev := settlementOutputWriteErrForTest
+	settlementOutputWriteErrForTest = err
+	return func() { settlementOutputWriteErrForTest = prev }
+}
+
+// SetMarkSettlementOutputMissingErrForTest makes the missing-output mark
+// fail.
+func SetMarkSettlementOutputMissingErrForTest(err error) (restore func()) {
+	prev := markSettlementOutputMissingErrForTest
+	markSettlementOutputMissingErrForTest = err
+	return func() { markSettlementOutputMissingErrForTest = prev }
+}
+
+// SetQuarantineUndeliveredErrForTest makes every undelivered-credit
+// quarantine attempt fail.
+func SetQuarantineUndeliveredErrForTest(err error) (restore func()) {
+	prev := quarantineUndeliveredErrForTest
+	quarantineUndeliveredErrForTest = err
+	return func() { quarantineUndeliveredErrForTest = prev }
+}
+
+// CancelSettlementOutputWritesForTest cancels the context of the first n
+// settlement-output write tries, a transient failure after the credit.
+func CancelSettlementOutputWritesForTest(n int) (restore func()) {
+	prev := settlementOutputWriteContextForTest
+	var seen atomic.Int64
+	settlementOutputWriteContextForTest = func(_ int, ctx context.Context) context.Context {
+		if seen.Add(1) <= int64(n) {
+			dead, cancel := context.WithCancel(ctx)
+			cancel()
+			return dead
+		}
+		return ctx
+	}
+	return func() { settlementOutputWriteContextForTest = prev }
+}

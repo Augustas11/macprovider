@@ -519,6 +519,7 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 		if err != nil {
 			return "", err
 		}
+		completion, total = buyerDeliveredCompletionBound(reservation, candidate, prompt, completion, total)
 		settlement := storage.ReservationSettlement{
 			ExpectedReservationCreatedAt: reservation.CreatedAt,
 			AccountID:                    reservation.AccountID,
@@ -707,6 +708,28 @@ func finalityHeaders(finality coordinatorRequestSettlementFinality) http.Header 
 	return h
 }
 
+// buyerDeliveredCompletionBound is SPEC-022 R-5.6 on the gateway-to-buyer
+// hop (E2E-F4). The coordinator's verified finality counts output delivered
+// to the gateway; it cannot see a buyer that disconnected, or a buyer write
+// that failed, after the engine finished. When the gateway ended the stream
+// itself for that reason (candidate outcome client_disconnect), its candidate
+// holds the completion it actually delivered to the buyer, and the buyer is
+// debited the smaller of the two. The prompt stays the coordinator's figure:
+// the engine consumed it either way. The provider credit is the
+// coordinator's and is not touched here.
+func buyerDeliveredCompletionBound(reservation storage.ActiveReservation, candidate storage.SettlementFallbackCandidate, prompt, completion, total int64) (int64, int64) {
+	if candidate.Outcome != "client_disconnect" || candidate.CompletionTokens < 0 || candidate.CompletionTokens >= completion {
+		return completion, total
+	}
+	slog.Info("SPEC-022 reconciler bounded verified completion by buyer-delivered output after client disconnect",
+		"request_id", reservation.RequestID,
+		"account_id", reservation.AccountID,
+		"coordinator_completion_tokens", completion,
+		"buyer_delivered_completion_tokens", candidate.CompletionTokens,
+	)
+	return candidate.CompletionTokens, prompt + candidate.CompletionTokens
+}
+
 func finalityTokenTotals(finality coordinatorRequestSettlementFinality) (int64, int64, int64, error) {
 	prompt := finality.PromptTokens
 	completion := finality.CompletionTokens
@@ -720,8 +743,12 @@ func finalityTokenTotals(finality coordinatorRequestSettlementFinality) (int64, 
 	if total != prompt+completion {
 		return 0, 0, 0, fmt.Errorf("coordinator finality total_tokens mismatch")
 	}
+	// SPEC-022 R-12.6a: a verified request reports coordinator_observed, or
+	// pool_operator_attested when any verified attempt was a Trusted Pool
+	// attestation. Both settle and are recorded under their own source; every
+	// other value is not settlement-capable.
 	source := strings.TrimSpace(finality.TokenSource)
-	if source != "coordinator_observed" {
+	if source != "coordinator_observed" && source != "pool_operator_attested" {
 		return 0, 0, 0, fmt.Errorf("coordinator finality token_source %q is not settlement-capable", source)
 	}
 	return prompt, completion, total, nil

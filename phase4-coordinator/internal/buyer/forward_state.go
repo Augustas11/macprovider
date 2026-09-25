@@ -61,6 +61,24 @@ type forwardState struct {
 	// settlement-mode hot reload cannot downgrade an enforce-required pool
 	// after selection but before provider relay.
 	poolRequiresSettlementEnforce bool
+	// poolManifestVersion and poolManifestCoreDigest are the SPEC-042 R006
+	// routing-time labels of the manifest that authorized this route.
+	poolManifestVersion    uint64
+	poolManifestCoreDigest string
+	// SPEC-042-R004 external-runtime predicate inputs, captured from the same
+	// consistent snapshot: the signed runtime allowlist, the pool creator's
+	// account, and the creator-owned members.
+	poolRuntimeAllowlist    []string
+	poolCreatorAccountID    string
+	poolCreatorOwnedMembers map[string]bool
+	// settlementTrailersNegotiated mirrors the recorder: the gateway
+	// advertised signed settlement finality under the service token. A pool
+	// route selects an external-runtime member only when it is set
+	// (SPEC-022 R-12.8, E2E-F10).
+	settlementTrailersNegotiated bool
+	// engineClass is the SPEC-042-R014 buyer engine selection, captured at
+	// selection so the slot-queue poll re-applies it. "" means none.
+	engineClass string
 
 	// routingDone is the wall-clock at which the current provider was
 	// selected. Updated on every advanceToNextProvider so the

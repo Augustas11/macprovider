@@ -85,7 +85,7 @@ struct ModelsDiscoverCommand: AsyncParsableCommand {
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
         )
-        let document = await BYOMDiscoveryRunner(environment: environment).discover()
+        let document = await BYOMDiscoveryRunner(environment: environment).discoverIncludingMLXLM()
         for warning in document.warnings.sorted() {
             writeStderr("models discover warning: \(warning)")
         }
@@ -155,7 +155,7 @@ struct ModelsEvaluateCommand: AsyncParsableCommand {
             llamacppOrigin: skipLlamacpp ? nil : llamacppOrigin,
             llamacppSelector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: llamacppModelRoot, cliPath: llamacppModelPath)
         )
-        let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluate()
+        let document = await BYOMEvaluationRunner(target: candidate, environment: environment).evaluateIncludingMLXLM()
         for warning in document.warnings.sorted() {
             writeStderr("models evaluate warning: \(warning)")
         }
@@ -275,14 +275,25 @@ struct ModelsOfferCommand: AsyncParsableCommand {
                 identityStore: ProviderCredentialStoreFactory.receiptKeyStore(for: resolved.config),
                 client: client
             )
-            let status = try await runtime.submitOffer(
-                providerID: resolved.providerID,
-                target: candidate,
-                evaluationDigestSHA256: evaluationDigestSHA256,
-                requestedDisclosureClass: requestedDisclosureClass,
-                servedArtifactPath: resolved.config.modelArtifactPath,
-                servedModelID: resolved.config.model
-            )
+            // SPEC-046 v0.3.0: a target that names an mlxlm_loopback
+            // candidate (by id, served ref, or display name) is offered
+            // through the mlxlm adapter and its snapshot-manifest leg.
+            let isMLXLMCandidate = await runtime.mlxlmCandidate(target: candidate) != nil
+            let status = isMLXLMCandidate
+                ? try await runtime.submitMLXLMOffer(
+                    providerID: resolved.providerID,
+                    target: candidate,
+                    evaluationDigestSHA256: evaluationDigestSHA256,
+                    requestedDisclosureClass: requestedDisclosureClass
+                )
+                : try await runtime.submitOffer(
+                    providerID: resolved.providerID,
+                    target: candidate,
+                    evaluationDigestSHA256: evaluationDigestSHA256,
+                    requestedDisclosureClass: requestedDisclosureClass,
+                    servedArtifactPath: resolved.config.modelArtifactPath,
+                    servedModelID: resolved.config.model
+                )
             try ModelSwitchingWireCodec.printJSON(status)
         } catch let error as BYOMModelAdmissionError {
             writeStderr(error.description)

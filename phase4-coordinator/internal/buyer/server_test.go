@@ -302,6 +302,44 @@ func TestPoolHeaderForAuthorizedExpiredRouteableSnapshotFailsPolicyStale(t *test
 	assertPoolPolicyStaleRetryable(t, rr)
 }
 
+// A routing registry whose revision differs from the durable replay (here it is
+// ahead of an empty store, the shape of a registry left over from state the
+// durable store no longer holds) must not authorize pool traffic.
+func TestPoolHeaderRegistryRevisionMismatchWithDurableReplayFailsClosed(t *testing.T) {
+	trustPools := trustpool.NewRegistry()
+	if err := trustPools.LoadRouteableSnapshotsAtRevision(3, []trustpool.RouteableSnapshot{{
+		PoolID:            "pool-fenced",
+		Members:           []string{"provider-a"},
+		BuyerAccounts:     []string{"acct_gateway"},
+		SettlementMode:    "observe",
+		Routeable:         true,
+		Generation:        7,
+		RouteableUntilUTC: time.Now().UTC().Add(time.Hour),
+	}}); err != nil {
+		t.Fatalf("LoadRouteableSnapshotsAtRevision: %v", err)
+	}
+	server := buyer.NewServer(
+		pool.NewRegistry(nil),
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithGatewayServiceToken("gateway-secret"),
+		buyer.WithRequireGatewayContext(true),
+		buyer.WithPoolMembership(trustPools),
+		buyer.WithTrustPoolStatusStore(openBuyerTrustPoolStore(t)),
+	)
+	body := `{"model":"unknown-model","messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer gateway-secret")
+	req.Header.Set("X-MacProvider-Account", "acct_gateway")
+	req.Header.Set("X-MacProvider-Pool", "pool-fenced")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s, want 503", rr.Code, rr.Body.String())
+	}
+	assertPoolUnavailableNonRetryable(t, rr)
+}
+
 func TestTrustPoolStatusRequiresGatewayAndReturnsBuyerSafeStatus(t *testing.T) {
 	ctx := context.Background()
 	trustStore := openBuyerTrustPoolStore(t)

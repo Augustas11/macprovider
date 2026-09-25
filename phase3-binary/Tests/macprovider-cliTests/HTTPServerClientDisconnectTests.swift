@@ -38,6 +38,24 @@ final class HTTPServerClientDisconnectTests: XCTestCase {
         XCTAssertTrue(probe.observedDisconnect, "closing the connection must flip shouldCancel")
     }
 
+    /// #1690: the realistic case. The buyer closes after the request has
+    /// been read and inference is running, with the shipping
+    /// `HTTPServerPipelineHandler` withholding reads. NIO on Darwin delivers
+    /// no early EOF without a read, so only `PeerCloseMonitor`'s read pump
+    /// lets `channelInactive` see this close.
+    func testStreamingDisconnectDuringInferenceReachesShouldCancel() async throws {
+        let probe = DisconnectProbe()
+        let runtime = DisconnectProbeRuntime(mode: .awaitDisconnect, probe: probe)
+
+        try await withDisconnectHTTPServer(runtime: runtime) { port in
+            let descriptor = try connectAndSend(port: port, stream: true)
+            try await eventuallyTrue { probe.observedInference }
+            close(descriptor)
+            try await eventuallyTrue { probe.observedDisconnect }
+        }
+        XCTAssertTrue(probe.observedDisconnect, "a close during inference must flip shouldCancel")
+    }
+
     // MARK: - Terminal outcome, before the first buyer-visible token
 
     func testNonStreamingCancelBeforeFirstTokenIsOneNonSettlingOutcome() async throws {
@@ -401,6 +419,7 @@ private actor DisconnectProbeRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func unregisterInFlight(_ id: Int) {}
 

@@ -1267,6 +1267,10 @@ type TrustedPoolsProductionActivationConfig struct {
 	AllowedLaunchEnvironments []string `yaml:"allowed_launch_environments"`
 	EvidenceSHA256            string   `yaml:"evidence_sha256"`
 	RootCustodyHashes         []string `yaml:"root_custody_hashes"`
+	// RootCustodyClasses records the SPEC-043-R002 custody class approved for
+	// each root_custody_hashes entry: hsm, mpc, or other. software is not
+	// production-approvable until a signed-exception path exists.
+	RootCustodyClasses map[string]string `yaml:"root_custody_classes"`
 }
 
 type TrustedPoolsCreatorAdminCredentialConfig struct {
@@ -1616,6 +1620,7 @@ func Default() Config {
 			ProductionActivation: TrustedPoolsProductionActivationConfig{
 				AllowedLaunchEnvironments: []string{},
 				RootCustodyHashes:         []string{},
+				RootCustodyClasses:        map[string]string{},
 			},
 		},
 		Logging: LoggingConfig{
@@ -2980,7 +2985,7 @@ func (c Config) validateAdvertisedVersions() error {
 
 func validateTrustedPoolsProductionActivation(c TrustedPoolsConfig) error {
 	gate := c.ProductionActivation
-	configured := strings.TrimSpace(gate.EvidenceSHA256) != "" || len(gate.AllowedLaunchEnvironments) != 0 || len(gate.RootCustodyHashes) != 0
+	configured := strings.TrimSpace(gate.EvidenceSHA256) != "" || len(gate.AllowedLaunchEnvironments) != 0 || len(gate.RootCustodyHashes) != 0 || len(gate.RootCustodyClasses) != 0
 	if !configured {
 		return nil
 	}
@@ -3017,6 +3022,19 @@ func validateTrustedPoolsProductionActivation(c TrustedPoolsConfig) error {
 			return fmt.Errorf("trusted_pools.production_activation.root_custody_hashes must be unique")
 		}
 		seenCustody[value] = true
+	}
+	// A hash without a class is accepted so a partially migrated config still
+	// starts; the store refuses to promote or route a pool whose root uses an
+	// unmapped hash. A class that is present must be valid and name a hash.
+	for hash, class := range gate.RootCustodyClasses {
+		if !seenCustody[strings.TrimSpace(hash)] {
+			return fmt.Errorf("trusted_pools.production_activation.root_custody_classes must only name root_custody_hashes entries")
+		}
+		switch strings.TrimSpace(class) {
+		case "hsm", "mpc", "other":
+		default:
+			return fmt.Errorf("trusted_pools.production_activation.root_custody_classes values must be hsm, mpc, or other")
+		}
 	}
 	return nil
 }

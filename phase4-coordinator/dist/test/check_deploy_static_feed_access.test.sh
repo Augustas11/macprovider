@@ -148,7 +148,7 @@ for marker in had-nginx-stats-shared had-nginx-stats-security-headers \
     fail "nginx rollback coverage missing for $marker"
 done
 
-grep -q 'snapshot_acl /var/lib/macprovider/request-log.sqlite' "$DEPLOY_SH" &&
+grep -q 'snapshot_acl /var/lib/macprovider/coordinator.db' "$DEPLOY_SH" &&
   grep -q 'restore_acl had-request-log-db-acl' "$RECOVER_SH" ||
   fail "request-log ACL changes must be captured and restored"
 
@@ -484,9 +484,32 @@ grep -q 'value.get("catalog_evidence_source") != "provider_reported"' "$DEPLOY_S
 grep -q 'value.get("catalog_admission_mode") != "current"' "$DEPLOY_SH" ||
   fail "deploy canary must reject legacy and previous catalog admissions"
 
-grep -A1 -F '  "$STATIC_DEMAND_SIG" \' "$DEPLOY_SH" |
-  grep -qF '  "$AUTOTUNE_TIER2_JSON" <<'"'"'PY'"'"'' ||
-  fail "deploy canary expected-byte set must include the release-bound Tier-2 catalog"
+# The Mac proof hashes every name in its `names` tuple, and the exact-byte
+# check compares that dict to the basenames of its expected argv files, so
+# the two sets must be equal. Before this check the rate card and its sidecar
+# were proven but never expected, so no canary could pass.
+python3 - "$DEPLOY_SH" <<'PY' || fail "deploy canary expected-byte set must equal the file set the Mac proof hashes"
+import re, sys
+text = open(sys.argv[1], encoding="utf-8").read()
+names_block = re.search(r'\n    names = \(\n(.*?)\n    \)\n', text, re.S)
+if names_block is None:
+    raise SystemExit("canary proof names tuple not found")
+proven = set(re.findall(r'"([^"]+)"', names_block.group(1)))
+check = re.search(r'  "\$CATALOG_CANARY_PROVIDER_ID" \\\n((?:  "\$[A-Z0-9_]+" \\\n)*)  "\$([A-Z0-9_]+)" <<\'PY\'\nimport hashlib, json, pathlib, re, sys\n\nproof = json.loads', text)
+if check is None:
+    raise SystemExit("canary exact-byte check argv not found")
+variables = re.findall(r'"\$([A-Z0-9_]+)"', check.group(1)) + [check.group(2)]
+basenames = set()
+for variable in variables:
+    assignment = re.search(r'(?m)^' + variable + r'="[^"\n]*/([^/"\n]+)"$', text)
+    if assignment is None:
+        raise SystemExit(f"no path assignment for {variable}")
+    basenames.add(assignment.group(1))
+if basenames != proven:
+    raise SystemExit(f"proven={sorted(proven)} expected={sorted(basenames)}")
+if "tier2-catalog.json" not in basenames or "rate-card.json.sig" not in basenames:
+    raise SystemExit("expected set must include the Tier-2 catalog and the signed rate card")
+PY
 
 grep -q 'value.get("catalog_candidate_sha256") != sys.argv\[6\]' "$DEPLOY_SH" ||
   fail "deploy canary must match the active candidate catalog digest"

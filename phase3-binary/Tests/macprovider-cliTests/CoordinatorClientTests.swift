@@ -4030,6 +4030,39 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(supportedModels, [catalogModelID])
     }
 
+    func testTunneledAuthDeclaresLoopbackRuntimeSourceLikeLegacyHello() async throws {
+        // #1690 M6: the default WS-tunneled session sends auth, not hello. A
+        // loopback runtime must declare runtime_source there too, or the
+        // coordinator records it as a native session and no Trusted Pool
+        // runtime-allowlist binding can ever select it.
+        for source in ["llamacpp_loopback", "ollama_loopback"] {
+            let client = try await makeClient(
+                status: ProviderStatus(
+                    modelID: "model-a",
+                    modelLoaded: true,
+                    capacity: ProviderCapacity(maxContextOverride: 2048, maxConcurrencyOverride: 1)
+                ),
+                recorder: CoordinatorFrameRecorder(),
+                runtimeSource: source
+            )
+            let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+            let hello = await client.helloMessage()
+            XCTAssertEqual(auth["runtime_source"] as? String, source)
+            XCTAssertEqual(hello["runtime_source"] as? String, source)
+        }
+        // The MLX path keeps its wire shape: no runtime_source field.
+        let native = try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 2048, maxConcurrencyOverride: 1)
+            ),
+            recorder: CoordinatorFrameRecorder()
+        )
+        let nativeAuth = await native.authInitialMessage(attempt: Tier2AuthAttempt())
+        XCTAssertNil(nativeAuth["runtime_source"])
+    }
+
     func testCatalogModelIDDoesNotMaskCompletedWarmSwapRuntimeModelID() async throws {
         let recorder = CoordinatorFrameRecorder()
         let runtime = makeRuntime(modelID: "model-b", modelHash: "runtime-hash", warmSwapEnabled: true)

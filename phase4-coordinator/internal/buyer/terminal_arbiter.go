@@ -258,8 +258,7 @@ func (t *requestTerminal) evaluateEndOfRequest(billingEnabled bool) {
 		return
 	}
 	// I-1 sweep for rows credited BEFORE the buyer terminal was claimed
-	// (HTTP paths bill before the write; the WS success path bills inside
-	// logSuccess and can then fail the terminal with a 500).
+	// (error renders log their row before writing the buyer error).
 	for i := range t.rows {
 		if t.rows[i].Conflicted {
 			continue

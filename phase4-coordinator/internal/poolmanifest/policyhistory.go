@@ -73,6 +73,15 @@ func deepCopyPolicyCore(pc PolicyCore) PolicyCore {
 	if pc.ModelAllowlist != nil {
 		out.ModelAllowlist = append([]string(nil), pc.ModelAllowlist...)
 	}
+	if pc.RuntimeAllowlist != nil {
+		out.RuntimeAllowlist = append([]string(nil), pc.RuntimeAllowlist...)
+	}
+	if pc.Extensions != nil {
+		out.Extensions = make([]PolicyExtension, len(pc.Extensions))
+		for i, ext := range pc.Extensions {
+			out.Extensions[i] = PolicyExtension{ID: ext.ID, Body: append([]byte(nil), ext.Body...)}
+		}
+	}
 	return out
 }
 

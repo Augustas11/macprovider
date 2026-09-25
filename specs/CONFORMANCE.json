@@ -152,7 +152,7 @@
     {
       "spec_id": "SPEC-006",
       "title": "Buyer API Gateway: Mac Provider's first public buyer surface",
-      "version": "0.9.33",
+      "version": "0.9.35",
       "path": "specs/SPEC-006-buyer-api.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -259,7 +259,7 @@
     {
       "spec_id": "SPEC-010",
       "title": "Provider Model Catalog",
-      "version": "1.10",
+      "version": "1.12",
       "path": "specs/SPEC-010-model-catalog.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -395,7 +395,7 @@
     {
       "spec_id": "SPEC-015",
       "title": "Verifiable inference receipts",
-      "version": "0.4.9",
+      "version": "0.4.10",
       "path": "specs/SPEC-015-receipts.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -412,7 +412,8 @@
         "SPEC-010",
         "SPEC-011",
         "SPEC-013",
-        "SPEC-022"
+        "SPEC-022",
+        "SPEC-042"
       ],
       "implementation_status": "pending-reconciliation",
       "production_status": "pending-verification",
@@ -626,7 +627,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.1.9",
+      "version": "v0.2.2",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -643,7 +644,10 @@
         "SPEC-010",
         "SPEC-011",
         "SPEC-015",
-        "SPEC-016"
+        "SPEC-016",
+        "SPEC-042",
+        "SPEC-046",
+        "SPEC-047"
       ],
       "implementation_status": "pending-reconciliation",
       "production_status": "pending-verification",
@@ -655,13 +659,13 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC-022-R001/R003/R010 restored to conformant from signed observe-mode JOURNEY-BUYER-PAID-PATH envelope 20260918T034532Z (#1022, expires 2026-10-18). R002 returns to pending in v0.1.9: R-2.7 (#1689) expands it, and that envelope predates R-2.7; it needs a signed enforce-mode journey covering AC-022-65. R004 remains conformant on later in-date paid-path evidence. R005/R006 remain pending on still-in-date paid-path evidence until a selector-fresh consume. Isolated JOURNEY-BUYER-ENFORCE (#1044) is the candidate harness for R007/R008/R009/R011; R007/R009 signed evidence expired 2026-09-17 and those rows remain pending. Observe-mode paid-path must not promote R007/R008. No production Pearl / enforce activation."
+        "rationale": "SPEC-022-R001/R003/R010 restored to conformant from signed observe-mode JOURNEY-BUYER-PAID-PATH envelope 20260918T034532Z (#1022, expires 2026-10-18). v0.2.1 tracks R-3.4.2 (#1690) under the pending SPEC-022-R012, so R003 keeps that envelope's native-path evidence. R002 returns to pending in v0.1.9: R-2.7 (#1689) expands it, and that envelope predates R-2.7; it needs a signed enforce-mode journey covering AC-022-65. R004 remains conformant on later in-date paid-path evidence. R005/R006 remain pending on still-in-date paid-path evidence until a selector-fresh consume. Isolated JOURNEY-BUYER-ENFORCE (#1044) is the candidate harness for R007/R008/R009/R011; R007/R009 signed evidence expired 2026-09-17 and those rows remain pending. Observe-mode paid-path must not promote R007/R008. No production Pearl / enforce activation."
       }
     },
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.16.0",
+      "version": "v0.18.0",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -672,6 +676,7 @@
       "depends_on": [
         "SPEC-017",
         "SPEC-028",
+        "SPEC-042",
         "SPEC-047"
       ],
       "implementation_status": "pending-reconciliation",
@@ -914,7 +919,7 @@
     {
       "spec_id": "SPEC-032",
       "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
-      "version": "v0.2.6",
+      "version": "v0.3.1",
       "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -928,7 +933,10 @@
         "SPEC-008",
         "SPEC-020",
         "SPEC-030",
-        "SPEC-031"
+        "SPEC-031",
+        "SPEC-042",
+        "SPEC-046",
+        "SPEC-047"
       ],
       "implementation_status": "partial",
       "production_status": "pending-verification",
@@ -1230,7 +1238,7 @@
     {
       "spec_id": "SPEC-042",
       "title": "Pool Control Plane and Trusted-Pool Manifest",
-      "version": "0.0.30",
+      "version": "0.0.34",
       "path": "specs/SPEC-042-pool-control-plane.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1250,8 +1258,11 @@
         "SPEC-016",
         "SPEC-020",
         "SPEC-022",
+        "SPEC-032",
         "SPEC-040",
-        "SPEC-041"
+        "SPEC-041",
+        "SPEC-046",
+        "SPEC-047"
       ],
       "implementation_status": "partial",
       "production_status": "not-deployed",
@@ -1269,7 +1280,7 @@
     {
       "spec_id": "SPEC-043",
       "title": "Trusted Pool Creator Onboarding MVP",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "path": "specs/SPEC-043-trusted-pool-creator-onboarding.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1289,7 +1300,9 @@
         "SPEC-020",
         "SPEC-022",
         "SPEC-040",
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-046",
+        "SPEC-047"
       ],
       "implementation_status": "partial",
       "production_status": "not-deployed",
@@ -1380,7 +1393,7 @@
     {
       "spec_id": "SPEC-046",
       "title": "Provider BYOM Discovery",
-      "version": "0.1.5",
+      "version": "0.3.0",
       "path": "specs/SPEC-046-provider-byom-discovery.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1398,6 +1411,7 @@
         "SPEC-023",
         "SPEC-032",
         "SPEC-033",
+        "SPEC-042",
         "SPEC-045",
         "SPEC-047"
       ],
@@ -1417,7 +1431,7 @@
     {
       "spec_id": "SPEC-047",
       "title": "Network Model Admission",
-      "version": "0.1.10",
+      "version": "0.2.2",
       "path": "specs/SPEC-047-network-model-admission.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1440,6 +1454,7 @@
         "SPEC-023",
         "SPEC-032",
         "SPEC-033",
+        "SPEC-042",
         "SPEC-046"
       ],
       "implementation_status": "partial",
@@ -1452,7 +1467,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "SPEC-047 v0.1.10 bars loopback runtime sources from settlement_capable until a trusted usage source exists (#1694); v0.1.9 marks offer_rejected reserved/unreachable and drops the rejected-reoffer journey observation; v0.1.8 clarifies settlement-capable guidance as conditional eligibility, freezes coordinator-backed not-offered copy, and rejects catalog-only reuse of per-candidate admission authority. Local CLI/coordinator/routing/buyer safeguards exist and are mapped, but Issue #1240 still needs the full admission policy/probe lifecycle, updated copy evidence, and signed JOURNEY-NETWORK-MODEL-ADMISSION evidence before conformance or production status can be claimed."
+        "rationale": "SPEC-047 v0.2.0 adds the #1690 pool route-time clause for loopback runtimes on SPEC-042 Trusted Pool routes only; the global loopback bar is unchanged. v0.2.2 moves the unimplemented pool-qualified eligibility claim out of R004 into the pending SPEC-047-R010, so R004 keeps its 2026-09-16 journey evidence. SPEC-047 v0.1.10 bars loopback runtime sources from settlement_capable until a trusted usage source exists (#1694); v0.1.9 marks offer_rejected reserved/unreachable and drops the rejected-reoffer journey observation; v0.1.8 clarifies settlement-capable guidance as conditional eligibility, freezes coordinator-backed not-offered copy, and rejects catalog-only reuse of per-candidate admission authority. Local CLI/coordinator/routing/buyer safeguards exist and are mapped, but Issue #1240 still needs the full admission policy/probe lifecycle, updated copy evidence, and signed JOURNEY-NETWORK-MODEL-ADMISSION evidence before conformance or production status can be claimed."
       }
     }
   ],
@@ -1975,7 +1990,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
-        "rationale": "SPEC-010 v1.7 specifies artifact-feed identity: `macprovider.gguf-file.v1` as a canonical wire pair computed by the CLI over the local GGUF bytes, a release-bound `verified` artifact-feed entry as an expected identity resolving by the globally unique (hash_algorithm, hash) pair to one (model_key, artifact_id), and six-value route-time evidence with fail-closed settlement re-verification for a non-primary member. Owner is the BYOM v0.2 epic (issue #1453), slice 3."
+        "rationale": "SPEC-010 1.11 (#1690 M3) adds R007(f) pool-scoped settlement for loopback-served GGUF members, (g) the huggingface_revision GGUF source kind, and (h) defers the MLX-snapshot identity leg for external runtimes; (f) is implemented on the coordinator by the #1690 M4 pool route-time member derivation and (g) by the coordinator feed parser; the generator and CLI legs of (g) and the signed pool journey remain. SPEC-010 v1.7 specifies artifact-feed identity: `macprovider.gguf-file.v1` as a canonical wire pair computed by the CLI over the local GGUF bytes, a release-bound `verified` artifact-feed entry as an expected identity resolving by the globally unique (hash_algorithm, hash) pair to one (model_key, artifact_id), and six-value route-time evidence with fail-closed settlement re-verification for a non-primary member. Owner is the BYOM v0.2 epic (issue #1453), slice 3."
       }
     },
     {
@@ -2018,6 +2033,47 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1689",
         "rationale": "SPEC-010 v1.10 operator artifact diagnostics (models verify-artifact, models prepare --profile catalog) are implemented and unit-tested; no physical run against a real mismatching catalog row or interrupted download has been captured yet."
+      }
+    },
+    {
+      "requirement_id": "SPEC-010-R009",
+      "spec_id": "SPEC-010",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:struct MLXSnapshotIdentity",
+        "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:enum MLXLMLoopbackServeModel",
+        "phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:static func mlxLM",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:struct BYOMMLXLMDiscovery",
+        "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:func submitMLXLMOffer",
+        "phase3-binary/Sources/macprovider-cli/MLXLMLoopback.swift:func mlxlmCandidate",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:func discoverIncludingMLXLM",
+        "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:func evaluateIncludingMLXLM",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func candidateRowAllowsRuntimeSource",
+        "phase4-coordinator/internal/ws/model_admission_binding.go:func matchRuntimeOfferArtifactHashes",
+        "phase4-coordinator/internal/ws/model_admission_pool_route.go:func poolRuntimeMemberAlgorithm",
+        "phase4-coordinator/internal/ws/model_admission_pool_route.go:func PoolRouteSessionBoundMember",
+        "phase4-coordinator/internal/buyer/catalog_artifacts_feed.go:artifactIdentityMatrix"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/MLXLMLoopbackTests.swift:testRuntimeReportsTheNativeSnapshotPairAndBindsTheListedDirectory",
+        "phase3-binary/Tests/macprovider-cliTests/MLXLMLoopbackTests.swift:testRuntimeFailsClosedWithoutADeclaredOrListedSnapshot",
+        "phase3-binary/Tests/macprovider-cliTests/MLXLMLoopbackTests.swift:testStreamingRevalidatesIdentityImmediatelyBeforeProxying",
+        "phase3-binary/Tests/macprovider-cliTests/MLXLMLoopbackTests.swift:testSnapshotRejectsLinksAndDetectsAddRemoveAndInPlaceRewrites",
+        "phase3-binary/Tests/macprovider-cliTests/MLXLMLoopbackTests.swift:testRunnerDryRunAndOfferTargetFormsSeeTheMLXLMCandidate",
+        "phase4-coordinator/internal/ws/model_admission_mlxlm_test.go:TestSPEC010R009PoolRouteDerivesMLXLMFeedMember",
+        "phase4-coordinator/internal/ws/model_admission_mlxlm_test.go:TestSPEC010R009CandidateRowAdmissibility",
+        "phase4-coordinator/internal/ws/model_admission_mlxlm_test.go:TestSPEC010R009OfferMatchAdmitsMLXLMOnlyWhenPrimaryAllows",
+        "phase4-coordinator/internal/ws/model_admission_mlxlm_test.go:TestSPEC010R009PoolRouteDerivesMLXLMRowMember",
+        "phase4-coordinator/internal/ws/model_admission_mlxlm_test.go:TestSPEC010R009MLXLMClaimServingGGUFFailsClosed",
+        "phase4-coordinator/internal/buyer/catalog_artifacts_feed_test.go:TestLoadAutotuneFeedsMLXLMLoopbackTuple"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-010 1.12 (#1690 M8) specifies the MLX-snapshot identity leg for mlxlm_loopback (mlx_lm.server): the CLI-computed snapshot-manifest pair of the operator-declared snapshot, the /v1/models runtime binding, admissibility only where the release-bound artifact allows mlxlm_loopback, and pool-only settlement. The #1690 M8 CLI leg (MLXSnapshotIdentity, the mlxlm: selector, the /v1/models binding, the offer hash, the mlxlm_loopback discovery adapter) and the coordinator side (primary-row admissibility gated on the release-bound primary artifact, the pool route-time snapshot-manifest member derivation, the SPEC-023 v0.17.0 feed matrix) are mapped with fail-closed tests. Pending until a signed pool journey; the #1690 M8 lab e2e is local evidence only."
       }
     },
     {
@@ -2500,7 +2556,9 @@
       "spec_id": "SPEC-023",
       "state": "pending",
       "implementation": [],
-      "tests": [],
+      "tests": [
+        "phase4-coordinator/internal/buyer/catalog_artifacts_feed_test.go:TestLoadAutotuneFeedsGGUFHuggingFaceRevisionTuple"
+      ],
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
       ],
@@ -2509,7 +2567,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
-        "rationale": "Current as of SPEC-023 v0.14.3: R004 settlement identity is the SPEC-010-R007 identity set (v0.10.3 lifted primary-only), minus loopback-served members, so no gguf artifact reaches settlement_capable while the SPEC-047-R003(iv) v0.1.10 loopback bar holds (#1694). Generator, coordinator, and CLI implementations now exist (SPEC-010-R007 and SPEC-047-R003 mappings); this entry stays pending because signed journey evidence is missing. Original v0.10.0 scope: SPEC-023 v0.10.0 specifies the signed catalog artifact feed, its closed artifact-identity matrix, its release.json binding and release-ledger feed-set evolution, the Stage-A/Stage-B activation that keeps the compatibility-set manifest's file map unchanged until a bridge CLI ships, primary-artifact consistency scoped to `listed`/`recommendable` rows, primary-artifact-only settlement identity, global `(hash_algorithm, hash)` uniqueness within a feed, GGUF source-digest equality, the closed `artifact_id` grammar with its ledger-backed cross-release rebinding check, artifact-feed signer-identity equality against the release binding and the candidate-feed signer, artifact evidence bound into the immutable SPEC-022 route-time record with settlement failing closed on missing, changed, cross-release, or wrong-signer evidence (a SPEC-047-owned optional record that leaves SPEC-022's minimum snapshot fields unchanged), release-ledger schema version 3 with its closed artifact-bound row and canonically ordered `artifact_bindings` array, and its fail-closed-without-fleet-fail-close failure classes, but no generator, coordinator, or CLI implementation exists yet. Owner is the BYOM v0.2 epic (issue #1453)."
+        "rationale": "SPEC-023 v0.16.0 (#1690 M3) adds a gguf huggingface_revision source kind (with file_path) and a route-time, pool-scoped settlement exception for gguf members served by an allowlisted runtime; global admission is unchanged. #1690 M4: the coordinator consumer (buyer/catalog_artifacts_feed.go) accepts the v0.16.0 gguf huggingface_revision tuple with a validated file_path; the generator (scripts/catalog-release.py) and the CLI do not, so under the rollout rule no release publishes the tuple yet. Current as of SPEC-023 v0.14.3: R004 settlement identity is the SPEC-010-R007 identity set (v0.10.3 lifted primary-only), minus loopback-served members, so no gguf artifact reaches settlement_capable while the SPEC-047-R003(iv) v0.1.10 loopback bar holds (#1694). Generator, coordinator, and CLI implementations now exist (SPEC-010-R007 and SPEC-047-R003 mappings); this entry stays pending because signed journey evidence is missing. Original v0.10.0 scope: SPEC-023 v0.10.0 specifies the signed catalog artifact feed, its closed artifact-identity matrix, its release.json binding and release-ledger feed-set evolution, the Stage-A/Stage-B activation that keeps the compatibility-set manifest's file map unchanged until a bridge CLI ships, primary-artifact consistency scoped to `listed`/`recommendable` rows, primary-artifact-only settlement identity, global `(hash_algorithm, hash)` uniqueness within a feed, GGUF source-digest equality, the closed `artifact_id` grammar with its ledger-backed cross-release rebinding check, artifact-feed signer-identity equality against the release binding and the candidate-feed signer, artifact evidence bound into the immutable SPEC-022 route-time record with settlement failing closed on missing, changed, cross-release, or wrong-signer evidence (a SPEC-047-owned optional record that leaves SPEC-022's minimum snapshot fields unchanged), release-ledger schema version 3 with its closed artifact-bound row and canonically ordered `artifact_bindings` array, and its fail-closed-without-fleet-fail-close failure classes, but no generator, coordinator, or CLI implementation exists yet. Owner is the BYOM v0.2 epic (issue #1453)."
       }
     },
     {
@@ -2906,7 +2964,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1737",
-        "rationale": "SPEC-023 v0.16.0 (SPEC-023-R019): catalog bytes may come from huggingface.co, a content-addressed mirror, or an operator HF_ENDPOINT; the signed model_sha256 stays the only authority. Implemented and unit-tested; the China-simulation lab e2e (GitHub and Hugging Face hosts blocked) on the Studio has not run and models.malibu.tech is not yet serving."
+        "rationale": "SPEC-023 v0.18.0 (SPEC-023-R019): catalog bytes may come from huggingface.co, a content-addressed mirror, or an operator HF_ENDPOINT; the signed model_sha256 stays the only authority. Implemented and unit-tested; the China-simulation lab e2e (GitHub and Hugging Face hosts blocked) on the Studio has not run and models.malibu.tech is not yet serving."
       }
     },
     {
@@ -2928,7 +2986,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1737",
-        "rationale": "SPEC-023 v0.16.0 (SPEC-023-R020): models import adopts a signed snapshot from a local directory or mirror tree with no network access. Implemented and unit-tested; no physical import on a provider Mac has been captured."
+        "rationale": "SPEC-023 v0.18.0 (SPEC-023-R020): models import adopts a signed snapshot from a local directory or mirror tree with no network access. Implemented and unit-tested; no physical import on a provider Mac has been captured."
       }
     },
     {
@@ -3102,6 +3160,27 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "Runtime reload lifecycle changes updated the mapped reloadCoordinatorConfig selector. Local regression checks pass, but the historical signed provider prebeta admission journey binds earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+      }
+    },
+    {
+      "requirement_id": "SPEC-032-R004",
+      "spec_id": "SPEC-032",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/pool/provider.go:func (p Provider) PoolExternalRuntimeRoutingEligible",
+        "phase4-coordinator/internal/buyer/pool_external_runtime.go:func routingEligibleForRoute"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/spec042_external_runtime_test.go:TestSPEC042ExternalRuntimePoolRouteDerivesMemberAndSnapshot",
+        "phase4-coordinator/internal/buyer/spec042_external_runtime_test.go:TestSPEC042ExternalRuntimeFailClosedSet"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-032 v0.3.0 (#1690 M3) amends FR-HG8 with a route-time, pool-scoped buyer-serving path for admission_sandboxed loopback sessions. #1690 M4 implements it: a separate pool-scoped predicate (Provider.PoolExternalRuntimeRoutingEligible) selects a sandboxed session only for a pool route that passes the SPEC-042-R004 runtime-allowlist predicate; RoutingEligible and the sandbox flag are unchanged and global routes never select it. Pending until the SPEC-042-R013 signed pool journey exists."
       }
     },
     {
@@ -5462,6 +5541,39 @@
       }
     },
     {
+      "requirement_id": "SPEC-006-R016",
+      "spec_id": "SPEC-006",
+      "state": "pending",
+      "implementation": [
+        "phase5-gateway/internal/router/engine_selection.go:func resolveEngineSelection",
+        "phase5-gateway/internal/router/engine_selection.go:func buyerVisibleEngineHeader",
+        "phase5-gateway/internal/router/server.go:func copyCleanHeadersWithReceipt",
+        "phase5-gateway/internal/router/relay_blind_success.go:func relayBlindPoolSelected",
+        "phase5-gateway/internal/router/idless_dedupe.go:func idlessRequestFingerprint",
+        "phase4-coordinator/internal/buyer/engine_selection.go:func internalEngineSelection",
+        "phase4-coordinator/internal/buyer/engine_selection.go:func providerEngineClass"
+      ],
+      "tests": [
+        "phase5-gateway/internal/router/engine_selection_test.go:TestEngineSelection_EmitsMappedRuntimeClass",
+        "phase5-gateway/internal/router/engine_selection_test.go:TestEngineSelection_NonNativeOnGlobalRouteFailsClosed",
+        "phase5-gateway/internal/router/engine_selection_test.go:TestEngineSelection_InvalidSelectorRejected",
+        "phase5-gateway/internal/router/engine_selection_test.go:TestEngineSelection_UnauthorizedPoolAnswersPoolUnavailableFirst",
+        "phase5-gateway/internal/router/engine_selection_test.go:TestEngineSelection_ResponseHeaderDisclosedWithClosedVocabulary",
+        "phase5-gateway/internal/router/engine_selection_test.go:TestEngineSelection_RelayBlindRejectsSelector",
+        "phase5-gateway/internal/router/engine_selection_test.go:TestEngineSelection_IdlessFingerprintSeparatesEngines",
+        "phase4-coordinator/internal/buyer/engine_selection_internal_test.go:TestInternalEngineSelectionClosedVocabulary",
+        "phase4-coordinator/internal/buyer/spec042_engine_selection_test.go:TestSPEC042R014EngineFailClosedSet"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-006 0.9.34 (#1690 M7) specifies buyer engine selection. The #1690 M7 gateway and coordinator slices implement it: the X-MacProvider-Engine-Select closed vocabulary resolved after the pool and before quota reservation, 400 invalid_engine_selection and 503 engine_unavailable (both non-retryable), the internal X-MacProvider-Internal-Engine transport honored only on gateway-authenticated requests, the relay-blind rejection, the id-less dedupe key, and the X-MacProvider-Engine disclosure with a closed-value pass-through guard. Pending until a signed journey serves an engine-selected pool request; the #1690 M7 lab e2e is local evidence only."
+      }
+    },
+    {
       "requirement_id": "SPEC-015-R001",
       "spec_id": "SPEC-015",
       "state": "conformant",
@@ -5576,6 +5688,37 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1023",
         "rationale": "Coordinator receipt storage, ingest idempotency, and audit redaction (\u00a713, \u00a7N). Retrieval remains SPEC-022-R006. Mapped to existing ingest tests. Not promoted. ID migration closed by #1023; not promoted. Signed journey-result still required (Entry 234)."
+      }
+    },
+    {
+      "requirement_id": "SPEC-015-R006",
+      "spec_id": "SPEC-015",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/ws/messages.go:type PoolRuntimeAuthorization",
+        "phase4-coordinator/internal/buyer/route_snapshot.go:func (b *billingRecorder) recordRouteSnapshot",
+        "phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:PoolRuntimeAuthorization",
+        "phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:SettlementReceiptEligibility",
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:buildReceiptHeader",
+        "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:receiptHeaderResult",
+        "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:RelayStreamBatcher"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/spec042_external_runtime_test.go:TestSPEC042ExternalRuntimePoolRouteDerivesMemberAndSnapshot",
+        "phase3-binary/Tests/macprovider-cliTests/PoolRuntimeAuthorizationTests.swift:testDecisionRequiresEveryBoundField",
+        "phase3-binary/Tests/macprovider-cliTests/InferenceRelayTests.swift:testPoolAuthorizedLoopbackSignsRelayReceiptOnlyForMatchingAuthorization",
+        "phase3-binary/Tests/macprovider-cliTests/PoolRuntimeAuthorizationTests.swift:testAbsentOrMalformedAuthorizationParsesAsNotAuthorized",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testStreamAccumulatorMissingOrPartialUpstreamUsageIsUnattested",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testStreamAccumulatorUsageIsChunkBoundaryInvariant",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testDecodeUpstreamResponseWithoutCompleteUsageIsUnattested"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-015 0.4.10 (#1690 M3) adds per-request receipt eligibility for a pool-authorized loopback runtime. The #1690 M4 coordinator side is implemented: pool_runtime_authorization is attached only to a SPEC-022-R012 pool attempt, bound to request_id, attempt_n, provider_id, and route_snapshot_digest, and the verifier accepts pool_operator_attested only through IngestPoolSettlementReceipt. The #1690 M5 CLI side is implemented too: SettlementReceiptEligibility decides per request, and a loopback runtime signs only when the coordinator-issued PoolRuntimeAuthorization matches every bound field (mapped above). Pending until AC-12b and the signed SPEC-042-R013 enforce-mode pool journey (#1690 M6) pass."
       }
     },
     {
@@ -5936,6 +6079,109 @@
         }
       ],
       "gap": null
+    },
+    {
+      "requirement_id": "SPEC-022-R012",
+      "spec_id": "SPEC-022",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/billing/route_snapshot.go:func (r RouteSnapshot) Value",
+        "phase4-coordinator/internal/billing/pool_operator_attestation.go:func (s *Store) PoolOperatorAttestationEligible",
+        "phase4-coordinator/internal/billing/settlement_receipts.go:func (s *Store) IngestPoolSettlementReceipt",
+        "phase4-coordinator/internal/billing/usage_source_migration.go:func (s *Store) ensureSettlementAttemptOutputUsageSourceVocabulary",
+        "phase4-coordinator/internal/billing/settlement_finality.go:func finalityTokenSource",
+        "phase4-coordinator/internal/buyer/billing_recorder.go:func (b *billingRecorder) poolOperatorAttestedAttempt",
+        "phase4-coordinator/internal/billing/pool_rollback_preflight.go:func CheckPoolRollbackPreflight",
+        "phase4-coordinator/cmd/coordinator/pool_rollback_preflight.go:func runPoolRollbackPreflightIO",
+        "phase4-coordinator/internal/billing/usage_source_migration.go:func (s *Store) requireBillingCompatFloor",
+        "phase4-coordinator/internal/billing/pool_operator_attestation.go:func (s *Store) poolOperatorAttestedIngest",
+        "phase4-coordinator/internal/buyer/settlement_receipt_recovery.go:func settlementReceiptRetryable",
+        "phase5-gateway/internal/router/settlement_reconcile.go:func finalityTokenTotals",
+        "phase5-gateway/internal/storage/sqlite/store.go:func (s *Store) ensureUsageEventsPoolOperatorAttestedSource",
+        "phase4-coordinator/internal/buyer/settlement_trailers.go:func (s *Server) gatewayNegotiatedSettlementTrailers",
+        "phase4-coordinator/internal/buyer/settlement_trailers.go:func declareNonStreamingSettlementTrailers",
+        "phase4-coordinator/internal/buyer/settlement_trailers.go:func prepareStreamingSettlementFinality",
+        "phase4-coordinator/internal/buyer/settlement_trailers.go:func settlementFinalityMAC",
+        "phase4-coordinator/internal/buyer/settlement_trailers.go:func setNonStreamingSettlementFinality",
+        "phase4-coordinator/internal/buyer/settlement_trailers.go:func finalizeNegotiatedSettlementFinality",
+        "phase4-coordinator/internal/buyer/settlement_trailers.go:func setSettlementEvidenceFailedFinality",
+        "phase4-coordinator/internal/billing/settlement_output.go:func (s *Store) QuarantineUndeliveredSettlementCredit",
+        "phase4-coordinator/internal/billing/settlement_finality.go:func (s *Store) requestSettlementAttemptsWithoutVerdict",
+        "phase4-coordinator/internal/billing/settlement_output.go:func (s *Store) SettlementAttemptEvidence",
+        "phase4-coordinator/internal/billing/settlement_finality.go:func (s *Store) requestEnforceCreditsWithoutSnapshot",
+        "phase4-coordinator/internal/billing/settlement_finality.go:func enforceCreditWithoutEvidence",
+        "phase4-coordinator/internal/buyer/settlement_trailers.go:func decideEnforceEvidenceFailure",
+        "phase4-coordinator/internal/buyer/phase_timing.go:func (w *phaseTimingResponseWriter) FlushError",
+        "phase5-gateway/internal/router/settlement_trailers.go:func (s *Server) setCoordinatorChatContext",
+        "phase5-gateway/internal/router/settlement_trailers.go:func finalityMACValid",
+        "phase5-gateway/internal/router/settlement_trailers.go:func coordinatorNonStreamingSettlementFinality",
+        "phase5-gateway/internal/router/settlement_trailers.go:func coordinatorStreamingSettlementFinality",
+        "phase5-gateway/internal/router/settlement_trailers.go:func streamingLocalTerminalMustHold",
+        "phase5-gateway/internal/router/settlement_trailers.go:func settlementFinalityMACDeclared"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/billing/spec022_r012_test.go:TestSPEC022R012PoolOperatorAttestedSettlesOnlyWhenR012Holds",
+        "phase4-coordinator/internal/billing/spec022_r012_test.go:TestSPEC022R012FailClosedSet",
+        "phase4-coordinator/internal/billing/spec022_r012_test.go:TestSPEC022R012FinalityTokenSourceWeakerProvenanceGoverns",
+        "phase4-coordinator/internal/billing/spec022_r012_test.go:TestSettlementAttemptOutputUsageSourceCheckMigration",
+        "phase4-coordinator/internal/billing/route_snapshot_runtime_source_test.go:TestRouteSnapshotRuntimeSourceDigestedOnlyWhenPresent",
+        "phase4-coordinator/internal/billing/route_snapshot_runtime_source_test.go:TestRouteSnapshotRuntimeSourceValidateFailsClosed",
+        "phase4-coordinator/internal/billing/pool_rollback_preflight_test.go:TestCheckPoolRollbackPreflightBlocksUntilPoolSettlementCloses",
+        "phase4-coordinator/internal/billing/pool_rollback_preflight_test.go:TestCheckPoolRollbackPreflightIgnoresNativeAndExpiredAttempts",
+        "phase4-coordinator/internal/billing/pool_settlement_retry_test.go:TestIngestPoolSettlementReceiptTransientAuthorityErrorIsRetryable",
+        "phase4-coordinator/internal/billing/pool_settlement_retry_test.go:TestBillingCompatFloorRefusesNewerDatabase",
+        "phase5-gateway/internal/router/settlement_pool_finality_test.go:TestSettlementReconcileSettlesPoolOperatorAttestedFinality",
+        "phase5-gateway/internal/storage/sqlite/usage_events_pool_source_test.go:TestUsageEventsMigratesToPoolOperatorAttestedSource",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestSettlementFinalityMACGoldenVector",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestGatewayNegotiatedSettlementTrailersNeedsServiceToken",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestSettlementRecordFailedFinalityFollowsRouteMode",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestNegotiatedLegacyTuplesAreSigned",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestHTTPNegotiatedNoSnapshotSendsSignedLegacyTrailersOverWire",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestHTTPNegotiatedRecordFailureNoSnapshotSendsSignedLegacyOverWire",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestStreamingNegotiatedNoSnapshotSignsLegacyHeaders",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestHTTPNegotiatedOutputMissingAfterCreditNoSnapshotSendsLegacyOverWire",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestWSNegotiatedOutputMissingAfterCreditNoSnapshotSendsLegacy",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestFinalizeNegotiatedSettlementFinality",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestWSNegotiatedNoSnapshotSendsSignedLegacyTrailers",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestWriterWrappersPropagateFlushError",
+        "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPEnforceRecordFailureRefundsAndQuarantinesCredit",
+        "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPEnforceOutputMissingAfterCreditRefundsAndQuarantinesCredit",
+        "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestMissingEvidenceLatchDoesNotLeakIntoRetry",
+        "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPStreamingEnforceHardOutputFailureRefundsAndQuarantines",
+        "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPEnforceOutputMissingWithFailedMarkRefundsAndQuarantinesCredit",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestRouteSnapshotDispatchForgetsPreviousProviderAttempt",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestFinalizeSkipsNon200Responses",
+        "phase5-gateway/internal/router/settlement_pool_finality_test.go:TestSettlementReconcileRefundsUndeliveredEvidenceQuarantine",
+        "phase5-gateway/internal/router/settlement_trailers_nonstream_test.go:TestMACOnlyDeclarationHeldOverRealWire",
+        "phase4-coordinator/internal/buyer/settlement_trailers_internal_test.go:TestDecideEnforceEvidenceFailure",
+        "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPEnforceQuarantineFailureRefundsOnlyWhenCreditUnpayable",
+        "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestQuarantineUndeliveredSettlementCreditSparesVerifiedAttempt",
+        "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestQuarantinedUndeliveredCreditFinalityIsClosedQuarantined",
+        "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestEnforceCreditWithoutEvidenceClosesAfterSnapshotDeadline",
+        "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestEnforceCreditWithoutSnapshotClosesAfterGrace",
+        "phase4-coordinator/internal/billing/settlement_undelivered_quarantine_test.go:TestEvidenceMissingRuleScope",
+        "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPNonStreamingNegotiatedCallerGetsMACdTrailerFinality",
+        "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestHTTPNonStreamingLegacyCallerGetsHeaderFinalityRecordedBeforeWrite",
+        "phase4-coordinator/internal/buyer/delivered_only_billing_test.go:TestWSNonStreamingLegacyCallerRecordsBeforeWrite",
+        "phase5-gateway/internal/router/settlement_trailers_nonstream_test.go:TestSettlementFinalityMACMatchesCoordinatorGolden",
+        "phase5-gateway/internal/router/settlement_trailers_nonstream_test.go:TestCoordinatorNonStreamingSettlementFinality",
+        "phase5-gateway/internal/router/settlement_trailers_nonstream_test.go:TestRequireSettlementTrailersPinFinality",
+        "phase5-gateway/internal/router/settlement_trailers_nonstream_test.go:TestNonStreamingTrailerFinalityThroughChatPath",
+        "phase5-gateway/internal/router/settlement_trailers_nonstream_test.go:TestRequireSettlementTrailersPinThroughChatPath",
+        "phase5-gateway/internal/router/settlement_trailers_nonstream_test.go:TestNonStreamingSignedTrailersOverRealWire",
+        "phase5-gateway/internal/router/settlement_trailers_nonstream_test.go:TestStreamingSignedTrailersOverRealWire",
+        "phase5-gateway/internal/router/settlement_trailers_nonstream_test.go:TestSettlementTrailerDeclarationFromTrailerKeys",
+        "phase5-gateway/internal/router/coordinator_chat_context_test.go:TestEveryCoordinatorChatBuilderNegotiatesSignedFinality",
+        "phase5-gateway/internal/router/coordinator_chat_context_test.go:TestRelayBlindNegotiatesSignedFinalityUnderPin"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-022 v0.2.0 (#1690 M3) adds pool-scoped settlement eligibility. #1690 M4 implements it in the coordinator: runtime_source, pool_generation, and pool_operator_account_id on the route snapshot (digested only when runtime_source is non-empty), the pool_operator_attested usage source derived from the snapshot's digested values and the durable pool records, the verifier and receipt-ingestion handling (IngestPoolSettlementReceipt; exact usage match still required), the usage_source CHECK migration without row rewrites, and finality token_source from the persisted per-attempt sources. The #1690 M5 CLI signs pool-authorized receipts, and R-12.8's downgrade gate (coordinator pool-rollback-preflight, CheckPoolRollbackPreflight) blocks a rollback to a pre-v0.2.0 coordinator while any pool attempt can still settle. SPEC-022 v0.2.1 also tracks R-3.4.2, the pool_operator_attested exception to R-3.4.1, under this requirement. SPEC-022 v0.2.2 adds R-12.8 signed settlement finality: a gateway that advertises X-MacProvider-Internal-Settlement-Trailers under the service token gets delivered-only non-streaming recording and a finality tuple signed with an HMAC over the account, request id, coordinator internal request id and tuple (declared trailers, a signed legacy tuple without receipt state or route snapshot, and, when post-delivery settlement evidence fails, a signed closed refund with the provider credit quarantined (and reported closed quarantined by the finality lookup) under enforce route mode, or the signed legacy tuple with the payable credit kept otherwise); any other caller keeps the pre-v0.2.2 order and header finality, so mixed versions stay safe, and the gateway pin coordinator.require_settlement_trailers holds any 200 without signed finality (mapped above, with golden-vector, wire, mixed-pairing and builder-sweep tests). Pending until a signed enforce-mode pool journey (M6) shows a verified receipt and a provider ledger credit."
+      }
     },
     {
       "requirement_id": "SPEC-016-R001",
@@ -6681,7 +6927,11 @@
         "phase4-coordinator/internal/trustpool/durable_store.go:func verifyManifestAcceptanceState(ctx context.Context, q eventQueryer, events []DurableEvent) error",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) AppendValidatedEvent",
         "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) Reconstruct",
-        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) migrateManifestAcceptanceTables"
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (s *Store) migrateManifestAcceptanceTables",
+        "phase4-coordinator/internal/poolmanifest/manifest.go:func (pc PolicyCore) ValidateAcceptance",
+        "phase4-coordinator/internal/poolmanifest/signature.go:func PolicyCoreSigningMessageV2",
+        "phase4-coordinator/internal/poolmanifest/persist.go:func VerifyNewestPolicyAcceptance",
+        "phase4-coordinator/internal/trustpool/durable_store.go:func (p *ReconstructedPoolState) activePolicyView"
       ],
       "tests": [
         "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestGoldenVectors",
@@ -6691,7 +6941,13 @@
         "phase4-coordinator/internal/poolmanifest/policyhistory_test.go:TestBuildPolicyHistoryRejects",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PersistsManifestAcceptanceProjection",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ManifestAcceptanceProjectionTamperFailsClosed",
-        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ManifestAcceptanceProjectionTamperFailsClosedOnOpen"
+        "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_ManifestAcceptanceProjectionTamperFailsClosedOnOpen",
+        "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestPolicyCoreV2GoldenVectors",
+        "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestPolicyCoreV2RejectionVectors",
+        "phase4-coordinator/internal/poolmanifest/persist_test.go:TestManifestSnapshotV2MigrationFixture",
+        "phase4-coordinator/internal/trustpool/spec042_runtime_allowlist_test.go:TestReconstructEvents_AcceptsPolicyCoreV2RuntimeAllowlist",
+        "phase4-coordinator/internal/poolmanifest/newest_policy_acceptance_test.go:TestVerifyNewestPolicyAcceptanceUsesOnlineGate",
+        "phase4-coordinator/internal/trustpool/active_policy_window_test.go:TestRouteableSnapshotsUseActivePolicyWindow"
       ],
       "journeys": [],
       "evidence": [],
@@ -6699,7 +6955,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Signed manifest identity/rollback controls remain pending for production, but the coordinator durable store now records accepted manifest verdict evidence in trustpool_manifest_acceptances plus trustpool_manifest_acceptance_high_water, guards one-time backfill with a durable migration marker, verifies the projection against replayed manifest events during reconstruction and later opens, and treats projection/event divergence as malformed durable state. Still pending: rollback-resistant production promotion authorization, signed journey evidence, full signer/delegation lifecycle reconstruction, and production migration/full-rollback proof."
+        "rationale": "SPEC-042 0.0.32 (#1690 M3) amends this requirement for external-runtime serving (policy-core/v2 runtime_allowlist, route-time runtime-allowlist predicate, pool_operator_attested usage source); the #1690 M4 coordinator side of those amendments is implemented and tracked by SPEC-042-R013 (the M5 CLI signing path has landed; pending until a signed enforce-mode pool journey exists). Signed manifest identity/rollback controls remain pending for production, but the coordinator durable store now records accepted manifest verdict evidence in trustpool_manifest_acceptances plus trustpool_manifest_acceptance_high_water, guards one-time backfill with a durable migration marker, verifies the projection against replayed manifest events during reconstruction and later opens, and treats projection/event divergence as malformed durable state. Still pending: rollback-resistant production promotion authorization, signed journey evidence, full signer/delegation lifecycle reconstruction, and production migration/full-rollback proof."
       }
     },
     {
@@ -6777,7 +7033,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "Pool-enforceable fail-closed trust predicates: the minimum-binary-version predicate is implemented fail-closed on every dispatch path (#1079). Other R004 predicates (attestation-tier-as-pool-predicate, require_encrypted_leg, model-hash policy, hardware_mda) and SPEC-020 signed-version evidence are deferred; the binary floor keys off self-reported binary_version (documented carry)."
+        "rationale": "SPEC-042 0.0.32 (#1690 M3) amends this requirement for external-runtime serving (policy-core/v2 runtime_allowlist, route-time runtime-allowlist predicate, pool_operator_attested usage source); the #1690 M4 coordinator side of those amendments is implemented and tracked by SPEC-042-R013 (the M5 CLI signing path has landed; pending until a signed enforce-mode pool journey exists). Pool-enforceable fail-closed trust predicates: the minimum-binary-version predicate is implemented fail-closed on every dispatch path (#1079). Other R004 predicates (attestation-tier-as-pool-predicate, require_encrypted_leg, model-hash policy, hardware_mda) and SPEC-020 signed-version evidence are deferred; the binary floor keys off self-reported binary_version (documented carry)."
       }
     },
     {
@@ -6812,7 +7068,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "The Layer 2 MVP journey envelope expired 2026-08-31 and was cleared from evidence[]; it previously covered per-attempt pool-scoped tenant isolation, successful member-only dispatch, generation-bumped no-member fail-closed behavior, and no global fallback. The row remains pending because broader production rollout evidence and remaining lifecycle carries are outside this evidence-only journey."
+        "rationale": "SPEC-042 0.0.32 (#1690 M3) amends this requirement for external-runtime serving (policy-core/v2 runtime_allowlist, route-time runtime-allowlist predicate, pool_operator_attested usage source); the #1690 M4 coordinator side of those amendments is implemented and tracked by SPEC-042-R013 (the M5 CLI signing path has landed; pending until a signed enforce-mode pool journey exists). The Layer 2 MVP journey envelope expired 2026-08-31 and was cleared from evidence[]; it previously covered per-attempt pool-scoped tenant isolation, successful member-only dispatch, generation-bumped no-member fail-closed behavior, and no global fallback. The row remains pending because broader production rollout evidence and remaining lifecycle carries are outside this evidence-only journey."
       }
     },
     {
@@ -6826,7 +7082,10 @@
         "phase4-coordinator/internal/trustpool/root_manifest.go:func validateCandidatePolicyCoreClaims",
         "phase4-coordinator/internal/trustpool/registry.go:type Snapshot",
         "phase4-coordinator/internal/trustpool/registry.go:type RouteableSnapshot",
-        "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) Snapshot"
+        "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) Snapshot",
+        "phase4-coordinator/internal/billing/settlement_pool_labels.go:func (s *Store) RecordSettlementPoolLabels",
+        "phase4-coordinator/internal/billing/settlement_pool_labels.go:func settlementPoolLabelStatus",
+        "phase4-coordinator/internal/buyer/settlement_receipt_recovery.go:func (s *Server) recordSettlementPoolLabels"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/route_snapshot_test.go:TestRouteSnapshotPoolID_DigestBinding",
@@ -6835,7 +7094,11 @@
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestReconstructEvents_ManifestRaiseOverridesOlderExplicitFloor",
         "phase4-coordinator/internal/trustpool/registry_test.go:TestModelAllowlistSnapshotsAndGeneration",
         "phase4-coordinator/internal/trustpool/registry_test.go:TestModelAllowlistRejectsMalformedSnapshots",
-        "phase4-coordinator/internal/buyer/spec042_trusted_pool_layer2_journey_test.go:TestJourneyTrustedPoolLayer2MVPCandidate"
+        "phase4-coordinator/internal/buyer/spec042_trusted_pool_layer2_journey_test.go:TestJourneyTrustedPoolLayer2MVPCandidate",
+        "phase4-coordinator/internal/billing/settlement_pool_labels_test.go:TestRouteSnapshotPoolLabels_GlobalDigestGoldenUnchanged",
+        "phase4-coordinator/internal/billing/settlement_pool_labels_test.go:TestRouteSnapshotPoolLabels_ManifestLabelsBindDigestAndRoundTrip",
+        "phase4-coordinator/internal/billing/settlement_pool_labels_test.go:TestSettlementPoolLabels_DisputedSettlesUnchangedAndIsSticky",
+        "phase4-coordinator/internal/buyer/spec042_pool_labels_test.go:TestSPEC042RouteSnapshotCarriesRoutingTimeManifestLabels"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
@@ -6845,7 +7108,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
-        "rationale": "The Layer 2 MVP journey envelope expired 2026-08-31 and was cleared from evidence[]; it previously covered labels-only settlement route-snapshot binding, including pool_id and canonical route digest with no payout-ready mutation. The row remains pending because label_disputed mismatch handling and creator revenue-split execution remain deferred."
+        "rationale": "SPEC-042 0.0.32 (#1690 M3) amends this requirement for external-runtime serving (policy-core/v2 runtime_allowlist, route-time runtime-allowlist predicate, pool_operator_attested usage source); the #1690 M4 coordinator side of those amendments is implemented and tracked by SPEC-042-R013 (the M5 CLI signing path has landed; pending until a signed enforce-mode pool journey exists). The Layer 2 MVP journey envelope expired 2026-08-31 and was cleared from evidence[]; it previously covered labels-only settlement route-snapshot binding, including pool_id and canonical route digest with no payout-ready mutation. SPEC-042 0.0.31 implements manifest_version/manifest_core_digest route labels and sticky label_disputed verdict labeling locally. The row remains pending until a fresh signed journey recaptures that evidence, and because creator revenue-split execution remains deferred."
       }
     },
     {
@@ -6939,7 +7202,9 @@
         "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) handleRestrictiveLifecycle",
         "phase4-coordinator/internal/buyer/server.go:func (s *Server) disableTrustPoolsOnMalformedDurableState",
         "phase4-coordinator/cmd/coordinator/main.go:func loadTrustedPools",
-        "phase4-coordinator/internal/buyer/server.go:func (s *Server) verifyTrustPoolDurableStateForRouting",
+        "phase4-coordinator/internal/buyer/server.go:func (s *Server) authorizeTrustPoolFromDurableState",
+        "phase4-coordinator/internal/trustpool/registry.go:func (r *Registry) AuthorizeAtDurableRevision",
+        "phase4-coordinator/internal/trustpool/admin_handler.go:func (h *adminHandler) republishRouteGates",
         "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:trustedPoolCapableInitialMessage",
         "phase4-coordinator/internal/ws/messages.go:type Tier2Caps struct",
         "phase4-coordinator/internal/ws/server.go:func (s *Server) handleV2Conn",
@@ -7010,7 +7275,10 @@
         "phase5-gateway/internal/router/server_test.go:TestCoordinatorPoolStateStaleAfterPriorProviderDispatchSettles",
         "phase4-coordinator/internal/config/config_test.go:TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate",
         "phase4-coordinator/internal/trustpool/durable_store_test.go:TestDurableStore_PromotePoolProductionRequiresActivationEvidence",
-        "phase4-coordinator/internal/buyer/spec042_trusted_pool_layer2_journey_test.go:TestJourneyTrustedPoolLayer2MVPCandidate"
+        "phase4-coordinator/internal/buyer/spec042_trusted_pool_layer2_journey_test.go:TestJourneyTrustedPoolLayer2MVPCandidate",
+        "phase4-coordinator/internal/buyer/server_test.go:TestPoolHeaderRegistryRevisionMismatchWithDurableReplayFailsClosed",
+        "phase4-coordinator/internal/trustpool/registry_test.go:TestAuthorizeAtDurableRevision_FencesRegistryToDurableReplay",
+        "phase4-coordinator/internal/trustpool/live_readiness_test.go:TestAdminHandler_OnCallReadinessUpdateRepublishesRouteGate"
       ],
       "journeys": [
         "JOURNEY-TRUSTED-POOL-LAYER2-MVP"
@@ -7117,6 +7385,69 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
         "rationale": "Manifest authority + signer-set key lifecycle: slice 2 (v0.0.9) implements policy-core signature verification against a signer set; slice 3 (v0.0.10) implements the append-only, hash-chained AUTHORITY LOG that establishes/versions those signer sets and sets their revocation state - the authority-log-entry content byte grammar + hash + signing preimage, and BuildAuthorityLog chain-replay verification (structural signer-set validation, strictly-monotonic signer_set_version/rollback reject, prev-hash chain, revokes_versions prior-existing-only, and authorization by one root-issuer signature or M-of-N of a prior still-authorized lower-versioned set), materializing signer_set_version -> SignerSet for policy-core verification - frozen by golden vectors (genesis->rotate->revoke). Slice 5 (v0.0.12) adds verdict-replay reconstruction (ReconstructPool in persist.go): a recorded acceptance verdict is replayed on restart rather than re-evaluated against the current wall-clock, grandfathering a policy accepted before its signer set was later revoked. Signed emergency control messages now verify against the manifest authority root or current operational signer set, bind latest accepted manifest version/digest, and for `revoke_immediate` bind the target provider identity. Still deferred: operator-provenance binding, root-issuer-compromise supersedes lineage, and production signed evidence."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R013",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/poolmanifest/manifest.go:func (pc PolicyCore) ValidateAcceptance",
+        "phase4-coordinator/internal/buyer/pool_external_runtime.go:func (v poolRouteView) externalRuntimeCandidate",
+        "phase4-coordinator/internal/buyer/pool_external_runtime.go:func (s *Server) poolExternalRuntimeRouteBinding",
+        "phase4-coordinator/internal/ws/model_admission_pool_route.go:func ModelAdmissionPoolSettlementBindingForRouteSnapshot",
+        "phase4-coordinator/internal/billing/hotpath.go:func IsLoopbackRuntimeSource",
+        "phase4-coordinator/internal/billing/pool_operator_attestation.go:func (s *Store) PoolOperatorAttestationEligible",
+        "phase4-coordinator/internal/trustpool/pool_operator_attestation.go:func (s *Store) VerifyPoolOperatorAttestation",
+        "phase4-coordinator/internal/buyer/pool_external_runtime.go:func providerForRoute"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/spec042_external_runtime_test.go:TestSPEC042ExternalRuntimePoolRouteDerivesMemberAndSnapshot",
+        "phase4-coordinator/internal/buyer/spec042_external_runtime_test.go:TestSPEC042ExternalRuntimeFailClosedSet",
+        "phase4-coordinator/internal/buyer/spec042_external_runtime_test.go:TestSPEC042ExternalRuntimeRecordedByteEstimatedWhenDurableRecordsReject",
+        "phase4-coordinator/internal/buyer/freeze_audit_loopback_routing_internal_test.go:TestLoopbackRuntimeNeverPaidGlobalRoutingEligible",
+        "phase4-coordinator/internal/billing/spec022_r012_test.go:TestSPEC022R012FailClosedSet",
+        "phase4-coordinator/internal/billing/freeze_audit_ledger_test.go:TestWriteHotPath_LoopbackRuntimeNeverEarnsOutsideAttestedPool",
+        "phase4-coordinator/internal/trustpool/pool_operator_attestation_test.go:TestVerifyPoolOperatorAttestationFromDurableRecords",
+        "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestPolicyCoreV2GoldenVectors",
+        "phase4-coordinator/internal/buyer/pool_external_runtime_queue_internal_test.go:TestProviderForRouteMatchesCandidatePathSandboxView"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-042 0.0.32 (#1690 M3) specifies external-runtime serving on Trusted Pools. The #1690 M4 coordinator side is implemented: policy-core/v2 encode/verify/replay with golden vectors, the route-time runtime-allowlist predicate at the five SPEC-042-R005 sites (the admission bar and the FR-HG8 hello sandbox stay unlifted), the SPEC-047-R003(iv) pool route-time member derivation, the SPEC-022-R012 route-snapshot members and pool_operator_attested usage source re-derived from durable pool records, and the route-time half of the fail-closed test set. The SPEC-015-R006 CLI per-request signing path and its older-CLI-never-signs test landed in #1690 M5 (mapped under SPEC-015-R006), and the slot queue now applies the same pool-scoped sandbox view as the candidate path. Pending: a signed enforce-mode pool journey with a verified receipt and a provider ledger credit (#1690 M6)."
+      }
+    },
+    {
+      "requirement_id": "SPEC-042-R014",
+      "spec_id": "SPEC-042",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/buyer/engine_selection.go:func engineRouteError",
+        "phase4-coordinator/internal/buyer/engine_selection.go:func providersForEngine",
+        "phase4-coordinator/internal/buyer/engine_selection.go:func (s *Server) engineServesModelInScope",
+        "phase4-coordinator/internal/buyer/engine_selection.go:func providerEngineClass"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/buyer/engine_selection_internal_test.go:TestEngineSelection_NonNativeFailsClosedWithoutAllowlistingPool",
+        "phase4-coordinator/internal/buyer/engine_selection_internal_test.go:TestEngineSelection_NativeSelectsOnlyNativeSessions",
+        "phase4-coordinator/internal/buyer/engine_selection_internal_test.go:TestEngineSelection_NativeOnPoolWithOnlyExternalRuntimeFailsClosed",
+        "phase4-coordinator/internal/buyer/engine_selection_internal_test.go:TestEngineSelection_PinnedProviderOfOtherClassFailsClosed",
+        "phase4-coordinator/internal/buyer/engine_selection_internal_test.go:TestEngineSelection_SlotQueuePollTerminalForOtherClass",
+        "phase4-coordinator/internal/buyer/spec042_engine_selection_test.go:TestSPEC042R014LlamacppOnAllowlistingPoolServedAndDisclosed",
+        "phase4-coordinator/internal/buyer/spec042_engine_selection_test.go:TestSPEC042R014MixedPoolHonoursEachSelection",
+        "phase4-coordinator/internal/buyer/spec042_engine_selection_test.go:TestSPEC042R014EngineFailClosedSet"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-042 0.0.33 (#1690 M7) specifies the buyer engine filter on pool routes. The #1690 M7 coordinator slice implements it: engine_unavailable for a non-native class on a global route or outside the active v2 allowlist, the filter on the candidate, pinned/self-route, and slot-queue paths (failover re-enters the same selection), no-spill when the scope has no session of the class for the model, and the X-MacProvider-Engine disclosure of the coordinator-recorded class. Settlement is unchanged. Pending until a signed journey serves engine=llamacpp on an allowlisting pool with pool_operator_attested settlement; the #1690 M7 lab e2e is local evidence only."
       }
     },
     {
@@ -7628,6 +7959,26 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1053",
         "rationale": "The previously consumed same-day signed SPEC-043 journey evidence (trusted-pool-creator-mvp-20260827T032524Z plus sibling spec043-ppt-20260827T032524Z-1) expired on 2026-08-27, so this row is no longer claimed conformant. Implementation and journey mappings remain as local coverage only. Restore conformant only after a fresh same-day signed JOURNEY-TRUSTED-POOL-CREATOR-MVP envelope and PoolPromotionTransitionV1 are produced by the protected main workflows and consumed by scripts/promote-signed-journey-result.py."
+      }
+    },
+    {
+      "requirement_id": "SPEC-043-R013",
+      "spec_id": "SPEC-043",
+      "state": "pending",
+      "implementation": [
+        "phase4-coordinator/internal/trustpool/status.go:func policyRuntimeDisclosure",
+        "phase4-coordinator/internal/trustpool/status.go:func policyRuntimeAllowlist"
+      ],
+      "tests": [
+        "phase4-coordinator/internal/trustpool/spec042_runtime_allowlist_test.go:TestPolicyAndStatusDiscloseRuntimeAllowlist"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-043 0.2.0 (#1690 M3) requires runtime allowlist disclosure. #1690 M4 publishes runtime_allowlist, runtime_scope, and the administrative-trust statement in pool_policy.json and pool_status.json (native MLX only for a v1 or empty-allowlist core), and the creator-owned-only earning statement in pool_policy.json. Not implemented: comparing the reviewed distribution artifact and public-announcement approval against the active allowlist (a new manifest_core_digest already forces a fresh review of both), and the launch-checklist step. Pending until those and the SPEC-042-R013 pool journey exist."
       }
     },
     {
@@ -8577,6 +8928,21 @@
       }
     },
     {
+      "requirement_id": "SPEC-046-R009",
+      "spec_id": "SPEC-046",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-046 0.2.0 (#1690 M3) records the loopback serving selectors llamacpp: and ollama: (implemented in #1690 M2, LoopbackServeSelection) and names llamacpp_loopback the first external runtime for buyer serving; lmstudio: and openai: are deferred until they have a serving-time identity leg. Pending until the M2 selector tests are mapped here and the SPEC-042-R013 pool journey runs."
+      }
+    },
+    {
       "requirement_id": "SPEC-047-R001",
       "spec_id": "SPEC-047",
       "state": "conformant",
@@ -8688,7 +9054,9 @@
         "phase4-coordinator/internal/buyer/model_admission.go:func (s *Server) byomRouteSnapshotBinding",
         "phase4-coordinator/internal/buyer/model_admission.go:func (s *Server) insertBYOMRouteSnapshot",
         "phase4-coordinator/internal/buyer/model_admission.go:func byomBoundMemberMatchesSession",
-        "phase4-coordinator/internal/buyer/billing_recorder.go:func (b *billingRecorder) recordSettlementAttemptOutput"
+        "phase4-coordinator/internal/buyer/billing_recorder.go:func (b *billingRecorder) recordSettlementAttemptOutput",
+        "phase4-coordinator/internal/ws/model_admission_pool_route.go:func PoolRouteSessionBoundMember",
+        "phase4-coordinator/internal/ws/model_admission_pool_route.go:func (s *Server) CompareAndInsertPoolModelAdmissionRouteSnapshot"
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/route_snapshot_test.go:TestBYOMNonSettlementStatesAreHiddenFromDefaultPaidModelsAndRouting",
@@ -8707,7 +9075,9 @@
         "phase4-coordinator/internal/ws/model_admission_r008_test.go:TestModelAdmissionStaleFeedAndRuntimeSourceAtDecisionTime",
         "phase4-coordinator/internal/ws/model_admission_r008_test.go:TestModelAdmissionLoopbackSessionNeverBindsForSettlement",
         "phase4-coordinator/internal/buyer/billing_recorder_test.go:TestRecordSettlementAttemptOutputLoopbackUsageIsNeverCoordinatorObserved",
-        "phase4-coordinator/internal/buyer/settlement_unsettled_leg_test.go:TestLoopbackLegIsRecordedByteEstimatedThroughRecordRow"
+        "phase4-coordinator/internal/buyer/settlement_unsettled_leg_test.go:TestLoopbackLegIsRecordedByteEstimatedThroughRecordRow",
+        "phase4-coordinator/internal/ws/model_admission_pool_route_test.go:TestModelAdmissionPoolSettlementBindingForRouteSnapshot",
+        "phase4-coordinator/internal/ws/model_admission_pool_route_test.go:TestPoolRouteSessionBoundMember"
       ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
@@ -8730,7 +9100,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
-        "rationale": "Pearl admission binding recovery changes updated the mapped refreshModelAdmissionBindingLocked selector after the 2026-09-16 signed JOURNEY-NETWORK-MODEL-ADMISSION evidence was captured. Local regression coverage proves the transient-refresh fail-closed behavior, but the historical signed journey binds earlier selector bytes; fresh independently trusted network-model-admission evidence at HEAD is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+        "rationale": "SPEC-047 v0.2.0 (#1690 M3) adds the pool route-time clause: the SPEC-042 pool policy is the coordinator-recorded trust binding and the pool operator's signed receipt (pool_operator_attested) the trusted usage source, applied only at route time on pool routes; the admission bar and hello sandbox stay unlifted. #1690 M4 implements the pool clause and its pool route-time member derivation on the coordinator (ws.PoolRouteSessionBoundMember, ModelAdmissionPoolSettlementBindingForRouteSnapshot, the buyer pool branch, and the pool compare-and-insert); the pool-qualified provider disclosure is not implemented and is tracked as the pending SPEC-047-R010. Pearl admission binding recovery changes updated the mapped refreshModelAdmissionBindingLocked selector after the 2026-09-16 signed JOURNEY-NETWORK-MODEL-ADMISSION evidence was captured. Local regression coverage proves the transient-refresh fail-closed behavior, but the historical signed journey binds earlier selector bytes; fresh independently trusted network-model-admission evidence at HEAD is required before restoring conformant status. Historical evidence is retained without redating or replacement."
       }
     },
     {
@@ -8962,6 +9332,23 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
         "rationale": "SPEC-047 v0.1.6 GET /admin/model-admission/intake (model_admission_intake_offer_counts.v1): the SPEC-023 \u00a716.2(b) distinct_provider_offer_count source, counted from the offer-time intake_model_key over DISTINCT (provider, key) pairs, sanction-excluded by provider_intake_sanctioned with active-trust-root eligibility, suppressed below the fixed k floor, materialized every 15 minutes with a per-build nonce and intake_unavailable instead of a partial count (BYOM v0.2 slice 5, #1453). Conformance needs the signed admission journey and a production read."
+      }
+    },
+    {
+      "requirement_id": "SPEC-047-R010",
+      "spec_id": "SPEC-047",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NETWORK-MODEL-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1690",
+        "rationale": "SPEC-047 v0.2.2 (#1690) gives the pool-qualified eligibility claim its own ID; v0.2.0 had stated it inside R004. A loopback candidate that earns on SPEC-042 pool routes while it stays catalog_priced MAY show a claim that names the pool, only while every pool route-time predicate holds. The claim is not implemented: no coordinator or CLI surface evaluates the pool route-time predicates for provider guidance or emits a pool-qualified claim, so provider surfaces keep the unqualified R004 catalog_priced rule. Pending until the claim is implemented with its predicate gating and a signed JOURNEY-NETWORK-MODEL-ADMISSION evidences it."
       }
     }
   ]

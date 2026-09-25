@@ -1,6 +1,7 @@
 package trustpool_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -620,4 +621,48 @@ func TestSnapshot_ConsistentMembersAndGenerationUnderConcurrency(t *testing.T) {
 
 func id(i int) string {
 	return "p" + string(rune('a'+i%26)) + string(rune('0'+i/26))
+}
+
+func TestAuthorizeAtDurableRevision_FencesRegistryToDurableReplay(t *testing.T) {
+	t.Parallel()
+	until := time.Now().UTC().Add(time.Hour)
+	snap := func(members, revoked []string, generation uint64) []trustpool.RouteableSnapshot {
+		return []trustpool.RouteableSnapshot{{
+			PoolID:            "P",
+			Members:           members,
+			Revoked:           revoked,
+			BuyerAccounts:     []string{"acct"},
+			SettlementMode:    "observe",
+			Routeable:         true,
+			Generation:        generation,
+			RouteableUntilUTC: until,
+		}}
+	}
+	r := trustpool.NewRegistry()
+	if err := r.LoadRouteableSnapshotsAtRevision(4, snap([]string{"x", "y"}, nil, 1)); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	// Registry behind durable (revocation committed, publication delayed):
+	// the replay is published before authorization, so y is gone.
+	got, ok, err := r.AuthorizeAtDurableRevision(5, snap([]string{"x", "y"}, []string{"y"}, 2), "P", "acct")
+	if err != nil || !ok {
+		t.Fatalf("behind: ok=%v err=%v, want authorized from the replay", ok, err)
+	}
+	if got.Revision != 5 || got.Generation != 2 || got.Members["y"] || !got.Members["x"] {
+		t.Fatalf("behind: snapshot=%+v, want revision 5 generation 2 without revoked y", got)
+	}
+
+	// Equal revision authorizes from the registry.
+	if _, ok, err := r.AuthorizeAtDurableRevision(5, snap([]string{"x"}, nil, 2), "P", "acct"); err != nil || !ok {
+		t.Fatalf("equal: ok=%v err=%v, want authorized", ok, err)
+	}
+
+	// Registry ahead of the replay fails closed.
+	if _, ok, err := r.AuthorizeAtDurableRevision(4, snap([]string{"x", "y"}, nil, 1), "P", "acct"); !errors.Is(err, trustpool.ErrRegistryRevisionMismatch) || ok {
+		t.Fatalf("ahead: ok=%v err=%v, want ErrRegistryRevisionMismatch", ok, err)
+	}
+	if r.Revision() != 5 {
+		t.Fatalf("revision=%d after rejected stale replay, want 5", r.Revision())
+	}
 }

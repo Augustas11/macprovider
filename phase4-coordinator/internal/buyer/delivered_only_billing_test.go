@@ -1,0 +1,606 @@
+package buyer_test
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/hmac"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/billing"
+	"github.com/augstar/macprovider-coordinator/internal/buyer"
+	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/tier2"
+	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
+	"github.com/rs/zerolog"
+)
+
+// Unified-billing audit (#1690): a buyer is billed, and a provider credited,
+// only for output confirmed delivered to the buyer (SPEC-015 §N.7, SPEC-022
+// R-5.6, AC-022-54/63).
+
+// resetBuyerWriter is a buyer connection that is gone by the time the body
+// is written.
+type resetBuyerWriter struct{ *httptest.ResponseRecorder }
+
+func (resetBuyerWriter) Write([]byte) (int, error) {
+	return 0, errors.New("buyer connection reset")
+}
+
+const deliveredOnlyChatBody = `{"model":"model-a","messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`
+
+const deliveredOnlyCompletion = `{"id":"c","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"Hello world"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9}}`
+
+// settlementTrailersCapabilityHeader is the request header a gateway sends
+// to negotiate non-streaming settlement trailers (settlement_trailers.go).
+const settlementTrailersCapabilityHeader = "X-MacProvider-Internal-Settlement-Trailers"
+
+// postDeliveredOnly posts as a gateway that negotiated settlement trailers.
+func postDeliveredOnly(server *buyer.Server, ctx context.Context, body string, w http.ResponseWriter) {
+	postNonStreaming(server, ctx, body, w, true)
+}
+
+func postNonStreaming(server *buyer.Server, ctx context.Context, body string, w http.ResponseWriter, negotiated bool) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(body))).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	req.Header.Set("X-MacProvider-Account", "acct_gateway")
+	req.Header.Set("X-Request-ID", "ext-req-1")
+	if negotiated {
+		req.Header.Set(settlementTrailersCapabilityHeader, "1")
+	}
+	server.Handler().ServeHTTP(w, req)
+}
+
+// assertNothingDeliveredBilled checks the attempt was recorded as a buyer
+// cancel over an empty prefix and the ledger billed none of the provider's
+// 5/4 usage.
+func assertNothingDeliveredBilled(t *testing.T, dbPath string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var terminalState string
+	var delivered int64
+	if err := db.QueryRow(`SELECT terminal_state, output_prefix_end_byte - output_prefix_start_byte FROM settlement_attempt_outputs`).Scan(&terminalState, &delivered); err != nil {
+		t.Fatalf("query attempt output: %v", err)
+	}
+	if terminalState != billing.TerminalStateBuyerCancel || delivered != 0 {
+		t.Fatalf("recorded (%s, %d bytes), want (buyer_cancel, 0 bytes): no full success for an undelivered body", terminalState, delivered)
+	}
+	rows, err := db.Query(`SELECT prompt_tokens, completion_tokens FROM ledger_request_credits`)
+	if err != nil {
+		t.Fatalf("query ledger: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var prompt, completion sql.NullInt64
+		if err := rows.Scan(&prompt, &completion); err != nil {
+			t.Fatalf("scan ledger: %v", err)
+		}
+		if (prompt.Valid && prompt.Int64 == 5) || (completion.Valid && completion.Int64 == 4) {
+			t.Fatalf("ledger billed the undelivered usage: prompt=%v completion=%v", prompt, completion)
+		}
+	}
+}
+
+func TestWSNonStreamingBuyerWriteFailureRecordsNoSuccess(t *testing.T) {
+	h := newBuyerCancelHarness(t, "delivered-only-ws-catalog", func(h *buyerCancelHarness, ctx context.Context, requestID string, meta *providerws.SettlementReceiptMetadata) *providerws.RelayStream {
+		chunks := make(chan providerws.InferenceResponseChunk, 1)
+		done := make(chan providerws.InferenceResponseEnd, 1)
+		chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Data: deliveredOnlyCompletion}
+		close(chunks)
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1, Usage: json.RawMessage(`{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9}`)}
+		}()
+		return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: make(chan error, 1)}
+	})
+	postDeliveredOnly(h.server, h.ctx, deliveredOnlyChatBody, resetBuyerWriter{httptest.NewRecorder()})
+	assertNothingDeliveredBilled(t, h.dbPath)
+}
+
+func TestHTTPNonStreamingBuyerWriteFailureRecordsNoSuccess(t *testing.T) {
+	server, dbPath := newDeliveredOnlyHTTPServer(t)
+	postDeliveredOnly(server, context.Background(), deliveredOnlyChatBody, resetBuyerWriter{httptest.NewRecorder()})
+	assertNothingDeliveredBilled(t, dbPath)
+}
+
+// newDeliveredOnlyHTTPServer is an enforce-mode coordinator with one HTTP
+// provider that answers deliveredOnlyCompletion without a receipt.
+func newDeliveredOnlyHTTPServer(t *testing.T) (*buyer.Server, string) {
+	t.Helper()
+	return newEnforceHTTPServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(deliveredOnlyCompletion))
+	})
+}
+
+// newEnforceHTTPServer registers one HTTP provider per upstream handler
+// (p1, p2, ...), in routing preference order, on an enforce-mode coordinator.
+func newEnforceHTTPServer(t *testing.T, upstreams ...http.HandlerFunc) (*buyer.Server, string) {
+	t.Helper()
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := routeSnapshotCatalogFixture(t, "delivered-only-http-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		ObserveEnabled:      true,
+		CatalogPath:         writeRouteSnapshotCatalog(t, raw),
+		CatalogPublicKey:    pubkey,
+		RequireHashVerified: true,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+	reqLog, dbPath := openBuyerRequestLog(t)
+	t.Cleanup(func() { _ = reqLog.Close() })
+	store, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	setSettlementModeForTest(store, billing.RouteSnapshotModeEnforce)
+	cfg := config.Default().Rewards
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(1716768000, 0).UTC())
+	if err != nil {
+		t.Fatalf("InsertConfigSnapshot: %v", err)
+	}
+	registry := pool.NewRegistry(nil)
+	for i, handler := range upstreams {
+		upstream := httptest.NewServer(handler)
+		t.Cleanup(upstream.Close)
+		id := fmt.Sprintf("p%d", i+1)
+		registerSettlementProvider(registry, id, "session-"+id, upstream.URL, float64(40-10*i), bytes.Repeat([]byte{0x71 + byte(i)}, 32))
+	}
+	opts := []buyer.Option{
+		buyer.WithGatewayServiceToken("operator-key"),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(store, cfg),
+		buyer.WithBillingSnapshotID(snapshotID),
+	}
+	if len(upstreams) > 1 {
+		// One retry, so a failed first provider fails over to the next.
+		opts = append(opts, buyer.WithRoutingConfig(config.RoutingConfig{MaxRetries: 1, StickyTTLS: 1800, StickyMaxEntries: 10000}))
+	}
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), opts...)
+	return server, dbPath
+}
+
+// settlementOutcomeNames are the finality tuple names in MAC order.
+var settlementOutcomeNames = []string{
+	"X-MacProvider-Settlement-Outcome",
+	"X-MacProvider-Settlement-Receipt-Result",
+	"X-MacProvider-Settlement-Reason",
+	"X-MacProvider-Settlement-Closed",
+	"X-MacProvider-Settlement-Mode",
+	"X-MacProvider-Settlement-Policy-Version",
+	"X-MacProvider-Settlement-Pending-Deadline-Unix-Ms",
+}
+
+// independentFinalityMAC re-derives the finality MAC outside the package.
+func independentFinalityMAC(key, account, requestID, internalRequestID string, h http.Header) string {
+	fields := []string{"macprovider-settlement-finality-trailers-v1", account, requestID, internalRequestID}
+	for _, name := range settlementOutcomeNames {
+		fields = append(fields, h.Get(name))
+	}
+	mac := hmac.New(sha256.New, []byte(key))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		fmt.Fprintf(mac, "%d:%s", len(field), field)
+	}
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// SPEC-022 R-12.8 negotiation: a gateway that advertised trailer finality
+// gets the delivered-only order, the finality tuple as declared trailers
+// (none of it in the headers), and a MAC over it keyed by the service token.
+func TestHTTPNonStreamingNegotiatedCallerGetsMACdTrailerFinality(t *testing.T) {
+	server, _ := newDeliveredOnlyHTTPServer(t)
+	rr := httptest.NewRecorder()
+	postDeliveredOnly(server, context.Background(), deliveredOnlyChatBody, rr)
+	resp := rr.Result()
+	_, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+	if got := resp.Header.Get(settlementOutcomeNames[0]); got != "" {
+		t.Fatalf("finality outcome %q sent as a header; negotiated finality travels only as a trailer", got)
+	}
+	if resp.Trailer.Get(settlementOutcomeNames[0]) == "" {
+		t.Fatalf("no finality outcome trailer: trailers=%v", resp.Trailer)
+	}
+	mac := resp.Trailer.Get("X-MacProvider-Settlement-Finality-Mac")
+	if want := independentFinalityMAC("operator-key", "acct_gateway", "ext-req-1", resp.Header.Get("X-MacProvider-Internal-Request-ID"), resp.Trailer); mac == "" || !hmac.Equal([]byte(mac), []byte(want)) {
+		t.Fatalf("finality MAC=%q, want %q", mac, want)
+	}
+}
+
+// A caller that did not advertise trailer finality (a pre-#1690 gateway)
+// gets the pre-#1690 order: the attempt is recorded before the write and its
+// finality arrives in headers, which that gateway reads. No trailers.
+func TestHTTPNonStreamingLegacyCallerGetsHeaderFinalityRecordedBeforeWrite(t *testing.T) {
+	server, dbPath := newDeliveredOnlyHTTPServer(t)
+	rr := httptest.NewRecorder()
+	postNonStreaming(server, context.Background(), deliveredOnlyChatBody, rr, false)
+	resp := rr.Result()
+	_, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want 200", resp.StatusCode)
+	}
+	if resp.Header.Get(settlementOutcomeNames[0]) == "" {
+		t.Fatal("a legacy caller got no header finality")
+	}
+	if len(resp.Header.Values("Trailer")) != 0 || resp.Header.Get("X-MacProvider-Settlement-Finality-Mac") != "" {
+		t.Fatalf("a legacy caller got trailer declarations or a MAC: %v", resp.Header)
+	}
+
+	// The pre-#1690 order records before the write, so a failed buyer write
+	// still leaves the full success recorded (SPEC-022 v0.2.2 change log).
+	server2, dbPath2 := newDeliveredOnlyHTTPServer(t)
+	postNonStreaming(server2, context.Background(), deliveredOnlyChatBody, resetBuyerWriter{httptest.NewRecorder()}, false)
+	db, err := sql.Open("sqlite", dbPath2)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var terminalState string
+	if err := db.QueryRow(`SELECT terminal_state FROM settlement_attempt_outputs`).Scan(&terminalState); err != nil {
+		t.Fatalf("query attempt output: %v", err)
+	}
+	if terminalState != billing.TerminalStateNormalDone {
+		t.Fatalf("legacy caller recorded %s, want normal_done recorded before the write", terminalState)
+	}
+	_ = dbPath
+}
+
+// The WS non-streaming path keeps the same split: a legacy caller is
+// recorded before the write.
+func TestWSNonStreamingLegacyCallerRecordsBeforeWrite(t *testing.T) {
+	h := newBuyerCancelHarness(t, "delivered-only-ws-legacy-catalog", func(h *buyerCancelHarness, ctx context.Context, requestID string, meta *providerws.SettlementReceiptMetadata) *providerws.RelayStream {
+		chunks := make(chan providerws.InferenceResponseChunk, 1)
+		done := make(chan providerws.InferenceResponseEnd, 1)
+		chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Data: deliveredOnlyCompletion}
+		close(chunks)
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1, Usage: json.RawMessage(`{"prompt_tokens":5,"completion_tokens":4,"total_tokens":9}`)}
+		}()
+		return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: make(chan error, 1)}
+	})
+	rr := httptest.NewRecorder()
+	postNonStreaming(h.server, h.ctx, deliveredOnlyChatBody, rr, false)
+	resp := rr.Result()
+	_, _ = io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || resp.Header.Get(settlementOutcomeNames[0]) == "" || len(resp.Header.Values("Trailer")) != 0 {
+		t.Fatalf("legacy WS caller: status=%d headers=%v, want 200 with header finality and no trailers", resp.StatusCode, resp.Header)
+	}
+	ev := queryBuyerCancelEvidence(t, h.dbPath)
+	if ev.terminalState != billing.TerminalStateNormalDone {
+		t.Fatalf("terminal_state=%s, want normal_done", ev.terminalState)
+	}
+}
+
+// normalDoneReceipt signs the v0.4 normal_done tuple an honest provider signs
+// over its whole output.
+func normalDoneReceipt(t *testing.T, key ed25519.PrivateKey, meta *providerws.SettlementReceiptMetadata, output billing.SettlementOutput, promptTokens, completionTokens, terminalTS int64) string {
+	t.Helper()
+	outputHash, _, err := output.Digest()
+	if err != nil {
+		t.Fatalf("output digest: %v", err)
+	}
+	tuple := map[string]any{
+		"account_scope":                 meta.AccountScope,
+		"attempt_n":                     meta.AttemptN,
+		"catalog_body_digest":           meta.CatalogBodyDigest,
+		"catalog_id":                    meta.CatalogID,
+		"expected_catalog_model_hash":   meta.ExpectedCatalogModelHash,
+		"issued_at_unix_ms":             terminalTS,
+		"model_hash":                    meta.ExpectedCatalogModelHash,
+		"model_id":                      meta.ModelID,
+		"output_hash":                   outputHash,
+		"output_prefix_end_byte":        output.OutputPrefixEndByte,
+		"output_prefix_start_byte":      output.OutputPrefixStartByte,
+		"prompt_hash":                   meta.PromptHash,
+		"provider_id":                   meta.ProviderID,
+		"provider_receipt_key_id":       meta.ProviderReceiptKeyID,
+		"receipt_version":               "4",
+		"request_id":                    meta.RequestID,
+		"route_snapshot_digest":         meta.RouteSnapshotDigest,
+		"route_snapshot_mode":           meta.RouteSnapshotMode,
+		"route_snapshot_policy_version": meta.RouteSnapshotPolicyVersion,
+		"signature_key_alg":             "Ed25519",
+		"terminal_state":                output.TerminalState,
+		"terminal_state_ts_unix_ms":     terminalTS,
+		"usage": map[string]any{
+			"billable_input_tokens":  promptTokens,
+			"billable_output_tokens": completionTokens,
+			"delivered_output_bytes": output.OutputPrefixEndByte - output.OutputPrefixStartByte,
+			"observed_input_tokens":  promptTokens,
+			"observed_output_tokens": completionTokens,
+		},
+	}
+	_, canonical, err := billing.CanonicalSHA256Hex(tuple)
+	if err != nil {
+		t.Fatalf("canonical tuple: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(canonical) + "." + base64.StdEncoding.EncodeToString(ed25519.Sign(key, canonical))
+}
+
+// Independent review 2 MEDIUM: a buffered tool-call completion whose
+// provider sends continuous usage and a final chunk carrying finish_reason
+// and usage materializes one tool call, one finish event, and one usage
+// event, and the provider's normal_done receipt verifies.
+func TestBufferedToolCallContinuousUsageReceiptVerifies(t *testing.T) {
+	t.Setenv("COORDINATOR_STREAMING_FORCE_BUFFERED", "1")
+	const args = `{"path":"Makefile"}`
+	chunks := []string{
+		`data: {"id":"c","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_0123456789abcdef","type":"function","function":{"name":"read","arguments":""}}]}}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}` + "\n\n",
+		`data: {"id":"c","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}` + "\n\n",
+		`data: {"id":"c","choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Makefile\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}}` + "\n\n",
+		"data: [DONE]\n\n",
+	}
+	h := newBuyerCancelHarness(t, "delivered-only-tool-catalog", func(h *buyerCancelHarness, ctx context.Context, requestID string, meta *providerws.SettlementReceiptMetadata) *providerws.RelayStream {
+		ch := make(chan providerws.InferenceResponseChunk, len(chunks))
+		done := make(chan providerws.InferenceResponseEnd, 1)
+		terminalTS := time.Now().UTC().UnixMilli()
+		finish := "tool_calls"
+		output := billing.SettlementOutput{
+			Available:             true,
+			FinishReason:          &finish,
+			OutputPrefixStartByte: meta.OutputPrefixStartByte,
+			OutputPrefixEndByte:   meta.OutputPrefixStartByte,
+			TerminalState:         billing.TerminalStateNormalDone,
+			ToolCalls:             []billing.SettlementToolCall{{ID: "call_0123456789abcdef", Type: "function", Name: "read", Arguments: args}},
+		}
+		receipt := normalDoneReceipt(t, h.key, meta, output, 5, 3, terminalTS)
+		for i, data := range chunks {
+			ch <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: i, Data: data}
+		}
+		close(ch)
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: len(chunks), Usage: json.RawMessage(`{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}`), TerminalStateTSUnixMS: terminalTS, Receipt: receipt}
+		}()
+		return &providerws.RelayStream{RequestID: requestID, Chunks: ch, Done: done, Errors: make(chan error, 1)}
+	})
+
+	rr := h.post(t, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}],"temperature":0.000001,"top_p":0.5,"presence_penalty":-0.25,"frequency_penalty":0.125}`))
+
+	body := rr.Body.Bytes()
+	if n := bytes.Count(body, []byte(`"finish_reason":"tool_calls"`)); n != 1 {
+		t.Fatalf("finish events=%d, want 1: %s", n, body)
+	}
+	if n := bytes.Count(body, []byte("Makefile")); n != 1 {
+		t.Fatalf("argument fragments repeated (%d copies): %s", n, body)
+	}
+	ev := queryBuyerCancelEvidence(t, h.dbPath)
+	if ev.terminalState != billing.TerminalStateNormalDone {
+		t.Fatalf("terminal_state=%s, want normal_done", ev.terminalState)
+	}
+	if ev.settlementOutcome != billing.SettlementOutcomeVerified || ev.receiptResult != billing.SettlementReceiptResultValid {
+		t.Fatalf("verdict=(%s,%s), want verified valid: the normal_done receipt must verify", ev.settlementOutcome, ev.receiptResult)
+	}
+	if !ev.ledgerPrompt.Valid || ev.ledgerPrompt.Int64 != 5 || !ev.ledgerCompletion.Valid || ev.ledgerCompletion.Int64 != 3 {
+		t.Fatalf("ledger prompt=%v completion=%v, want 5/3", ev.ledgerPrompt, ev.ledgerCompletion)
+	}
+}
+
+func postNegotiatedResponse(t *testing.T, server *buyer.Server) *http.Response {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	postDeliveredOnly(server, context.Background(), deliveredOnlyChatBody, rr)
+	resp := rr.Result()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want the delivered 200; body=%s", resp.StatusCode, body)
+	}
+	return resp
+}
+
+// assertLookupClosedQuarantined checks the coordinator's internal finality
+// lookup for ext-req-1: a gateway that never received the refund trailer
+// finds a closed quarantine (a refund), not a 404 (review R4 LOW-2).
+func assertLookupClosedQuarantined(t *testing.T, server *buyer.Server, reason string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/internal/settlement/finality?account_id=acct_gateway&request_id=ext-req-1", nil)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	rr := httptest.NewRecorder()
+	server.InternalHandler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("finality lookup status=%d body=%s, want a closed quarantine", rr.Code, rr.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["outcome"] != "quarantined" || got["closed"] != true || got["reason"] != reason {
+		t.Fatalf("finality lookup=%s, want closed quarantined %s", rr.Body.String(), reason)
+	}
+}
+
+func assertEnforceRefundAndQuarantine(t *testing.T, resp *http.Response, dbPath, reason string) {
+	t.Helper()
+	tr := resp.Trailer
+	if tr.Get(settlementOutcomeNames[0]) != "quarantined" || tr.Get("X-MacProvider-Settlement-Closed") != "true" ||
+		tr.Get("X-MacProvider-Settlement-Reason") != reason || tr.Get("X-MacProvider-Settlement-Mode") != "enforce" {
+		t.Fatalf("trailers=%v, want the signed closed %s refund", tr, reason)
+	}
+	if got, want := tr.Get("X-MacProvider-Settlement-Finality-Mac"), independentFinalityMAC("operator-key", "acct_gateway", "ext-req-1", resp.Header.Get("X-MacProvider-Internal-Request-ID"), tr); got != want {
+		t.Fatalf("refund MAC=%q, want %q", got, want)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var credited, quarantined int
+	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(quarantined), 0) FROM ledger_request_credits WHERE status = 200 AND provider_credits > 0`).Scan(&credited, &quarantined); err != nil {
+		t.Fatal(err)
+	}
+	if credited != quarantined {
+		t.Fatalf("credited rows=%d quarantined=%d: a refunded buyer's provider credit is still payable", credited, quarantined)
+	}
+	var payable int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM spec022_payable_request_credits`).Scan(&payable); err != nil {
+		t.Fatal(err)
+	}
+	if payable != 0 {
+		t.Fatalf("payable credits=%d, want 0 after the buyer refund", payable)
+	}
+}
+
+// Review R3 MEDIUM-2 (enforce): a hard post-delivery evidence failure
+// refunds the buyer and leaves no payable provider credit.
+func TestHTTPEnforceRecordFailureRefundsAndQuarantinesCredit(t *testing.T) {
+	t.Cleanup(buyer.SetSettlementOutputWriteErrForTest(errors.New("settlement attempt output table missing")))
+	server, dbPath := newDeliveredOnlyHTTPServer(t)
+	assertEnforceRefundAndQuarantine(t, postNegotiatedResponse(t, server), dbPath, "settlement_record_failed_after_delivery")
+	assertLookupClosedQuarantined(t, server, "settlement_record_failed_after_delivery")
+}
+
+// Review R3 MEDIUM-2 / Codex HIGH 2 (enforce): evidence lost transiently
+// after the credit refunds the buyer and quarantines the credit.
+func TestHTTPEnforceOutputMissingAfterCreditRefundsAndQuarantinesCredit(t *testing.T) {
+	t.Cleanup(buyer.CancelSettlementOutputWritesForTest(2))
+	server, dbPath := newDeliveredOnlyHTTPServer(t)
+	assertEnforceRefundAndQuarantine(t, postNegotiatedResponse(t, server), dbPath, "settlement_output_missing_after_credit")
+	assertLookupClosedQuarantined(t, server, "settlement_output_missing_after_credit")
+}
+
+// Review R4 MEDIUM-A: the evidence write fails after the credit AND the
+// missing-output mark fails too. The evidence is still missing, so the
+// non-streaming enforce attempt refunds (as a stream does), never a legacy
+// debit of a credit that can never be paid.
+func TestHTTPEnforceOutputMissingWithFailedMarkRefundsAndQuarantinesCredit(t *testing.T) {
+	t.Cleanup(buyer.CancelSettlementOutputWritesForTest(2))
+	t.Cleanup(buyer.SetMarkSettlementOutputMissingErrForTest(errors.New("database is locked")))
+	server, dbPath := newDeliveredOnlyHTTPServer(t)
+	assertEnforceRefundAndQuarantine(t, postNegotiatedResponse(t, server), dbPath, "settlement_output_missing_after_credit")
+	assertLookupClosedQuarantined(t, server, "settlement_output_missing_after_credit")
+}
+
+// Review R3 MEDIUM-1: the missing-evidence latch is per attempt. Attempt 1
+// is a billable 502 whose evidence write fails transiently twice (nothing
+// credited, nothing marked); attempt 2 succeeds and must keep its own
+// finality, not the refund.
+func TestMissingEvidenceLatchDoesNotLeakIntoRetry(t *testing.T) {
+	t.Cleanup(buyer.CancelSettlementOutputWritesForTest(2))
+	server, dbPath := newEnforceHTTPServer(t,
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, `{"error":{"message":"upstream failed","type":"api_error","code":"provider_error"}}`)
+		},
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(deliveredOnlyCompletion))
+		},
+	)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(deliveredOnlyChatBody)))
+	req.Header.Set("Authorization", "Bearer operator-key")
+	req.Header.Set("X-MacProvider-Account", "acct_gateway")
+	req.Header.Set("X-Request-ID", "ext-req-1")
+	req.Header.Set("X-MacProvider-Retry", "1")
+	req.Header.Set(settlementTrailersCapabilityHeader, "1")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	resp := rr.Result()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d, want the retry's delivered 200; body=%s", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("X-MacProvider-Provider"); got != "p2" {
+		t.Fatalf("served by %q, want the retry on p2", got)
+	}
+	if reason := resp.Trailer.Get("X-MacProvider-Settlement-Reason"); reason == "settlement_output_missing_after_credit" {
+		t.Fatalf("the retry inherited attempt 1's missing-evidence latch: trailers=%v", resp.Trailer)
+	}
+	if resp.Trailer.Get(settlementOutcomeNames[0]) == "" {
+		t.Fatalf("the retry carries no finality tuple: trailers=%v", resp.Trailer)
+	}
+	// Review R4 LOW-8: the retry keeps its own receipt outcome, not a refund,
+	// and its credit is not quarantined.
+	if outcome := resp.Trailer.Get(settlementOutcomeNames[0]); outcome != "pending" && outcome != "verified" {
+		t.Fatalf("retry outcome=%q (trailers=%v), want pending or verified", outcome, resp.Trailer)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var quarantined int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id = 'p2' AND quarantined = 1`).Scan(&quarantined); err != nil {
+		t.Fatal(err)
+	}
+	if quarantined != 0 {
+		t.Fatalf("the retry's credit was quarantined (%d rows)", quarantined)
+	}
+}
+
+// Codex SECURITY (537d397c): a HARD settlement-output failure after the
+// credit, on a negotiated enforce stream with a route snapshot, surfaces
+// from recordRow to the post-stream render and ends in the signed refund
+// with the credit quarantined, never declared-but-empty trailers.
+func TestHTTPStreamingEnforceHardOutputFailureRefundsAndQuarantines(t *testing.T) {
+	t.Cleanup(buyer.SetSettlementOutputWriteErrForTest(errors.New("settlement attempt output table missing")))
+	server, dbPath := newEnforceHTTPServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello world\"},\"finish_reason\":null}]}\n\n"+
+			"data: {\"id\":\"c\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":4,\"total_tokens\":9}}\n\n"+
+			"data: [DONE]\n\n")
+	})
+	rr := httptest.NewRecorder()
+	postDeliveredOnly(server, context.Background(), strings.Replace(deliveredOnlyChatBody, `{"model"`, `{"stream":true,"model"`, 1), rr)
+	resp := rr.Result()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "Hello world") {
+		t.Fatalf("status=%d body=%s, want the delivered stream", resp.StatusCode, body)
+	}
+	assertEnforceRefundAndQuarantine(t, resp, dbPath, "settlement_record_failed_after_delivery")
+	assertLookupClosedQuarantined(t, server, "settlement_record_failed_after_delivery")
+}
+
+// Codex CODE HIGH (a): the quarantine fails on every retry. The failed
+// record left no attempt output and no verdict, so the credit can never be
+// paid in enforce mode: the refund still goes out, and the unquarantined
+// credit stays out of the payable view.
+func TestHTTPEnforceQuarantineFailureRefundsOnlyWhenCreditUnpayable(t *testing.T) {
+	t.Cleanup(buyer.SetSettlementOutputWriteErrForTest(errors.New("settlement attempt output table missing")))
+	t.Cleanup(buyer.SetQuarantineUndeliveredErrForTest(errors.New("database is locked")))
+	server, dbPath := newDeliveredOnlyHTTPServer(t)
+	resp := postNegotiatedResponse(t, server)
+	tr := resp.Trailer
+	if tr.Get(settlementOutcomeNames[0]) != "quarantined" || tr.Get("X-MacProvider-Settlement-Closed") != "true" {
+		t.Fatalf("trailers=%v, want the signed closed refund", tr)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var quarantined, outputs, payable int
+	if err := db.QueryRow(`SELECT COALESCE(SUM(quarantined), 0) FROM ledger_request_credits`).Scan(&quarantined); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM settlement_attempt_outputs`).Scan(&outputs); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM spec022_payable_request_credits`).Scan(&payable); err != nil {
+		t.Fatal(err)
+	}
+	if quarantined != 0 || outputs != 0 || payable != 0 {
+		t.Fatalf("quarantined=%d outputs=%d payable=%d, want an unquarantined but unpayable credit", quarantined, outputs, payable)
+	}
+}

@@ -76,6 +76,7 @@ test-integration:
 test-dist:
 	bash scripts/test-openai-wire-compat.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_upstream_watch
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_bench_1690_runner
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_contract_lock
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_byom_journey_evidence
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_discovery_journey_driver

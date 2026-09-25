@@ -62,7 +62,8 @@ func relayBlindOutcomeMetadata(h http.Header, code string) map[string]any {
 	return map[string]any{"requested_privacy_mode": "relay_blind_required", "effective_privacy_outcome": h.Get(relayBlindEffectiveHeader), "scope": relayBlindScope, "retry_action": retry, "settlement": relayBlindDisclosureUnavailable().Settlement}
 }
 func relayBlindPoolSelected(r *http.Request) bool {
-	for _, name := range []string{poolSelectHeader, poolEmitHeader} {
+	// An engine selector is a routing control too (SPEC-006-R016 rule 6).
+	for _, name := range []string{poolSelectHeader, poolEmitHeader, engineSelectHeader} {
 		for _, v := range r.Header.Values(name) {
 			if strings.TrimSpace(v) != "" {
 				return true
@@ -254,9 +255,9 @@ func (s *Server) dispatchRelayBlindChat(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	up.Header.Set("Content-Type", "application/json")
-	up.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
-	up.Header.Set("X-MacProvider-Account", account)
-	up.Header.Set("X-Request-ID", requestID(r))
+	// SPEC-022 R-12.8: bearer, account, request id and the signed-finality
+	// capability, set together; subject.AccountID is account.
+	s.setCoordinatorChatContext(up.Header, r, subject.AccountID)
 	up.Header.Set(relayBlindExecutionHeader, consumed.ExecutionAuthorization)
 	if session != "" {
 		up.Header.Set("X-MacProvider-Wallet-Session", session)

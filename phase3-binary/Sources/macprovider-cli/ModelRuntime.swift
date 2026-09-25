@@ -45,7 +45,14 @@ protocol ModelRuntimeServing: Actor {
     /// protocol-extension default) so a new loopback or fixture runtime cannot
     /// inherit receipt eligibility by omission. This is a CLI accident guard,
     /// not a security boundary: the coordinator settlement gate is the control.
+    /// SPEC-015 §N.12 (#1690 M5) lifts it for one request at a time, only
+    /// through a matching coordinator `pool_runtime_authorization`.
     nonisolated var isSettlementReceiptEligible: Bool { get }
+    /// SPEC-015 §N.12: the SPEC-046 `runtime_source` a request's
+    /// `pool_runtime_authorization` must name to let this runtime sign that
+    /// request's v0.4 receipt. Nil for a runtime no pool authorization can
+    /// enable. Declared explicitly by every conformer, as above.
+    nonisolated var settlementRuntimeSource: String? { get }
 }
 
 struct RelayBlindPreparedRequest: @unchecked Sendable {
@@ -1285,6 +1292,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// Native MLX catalog serving settles through SPEC-015 receipts; it has no
     /// SPEC-047 admission rows, so eligibility is never gated on admission.
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
 
     private nonisolated static func makeServeGenerateParameters(
         maxTokens: Int?,
@@ -3913,8 +3921,7 @@ actor ModelRuntime: ModelRuntimeServing {
         func delta(to candidateText: String) -> String {
             lock.lock()
             defer { lock.unlock() }
-            guard candidateText.hasPrefix(emittedText) else { return "" }
-            let delta = String(candidateText.dropFirst(emittedText.count))
+            let delta = ModelRuntime.streamDelta(from: emittedText, to: candidateText)
             if !delta.isEmpty {
                 emittedText = candidateText
             }
@@ -4521,6 +4528,19 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
                     settlementDisposition: result.settlementDisposition
                 ), request: request)
+            }
+            // #1690 E2E-F13: the stream held back an incomplete UTF-8 tail
+            // and any stop-string prefix; send the remainder as the final
+            // text renders it, so the buyer's bytes equal the receipt's.
+            if completion.toolCalls?.isEmpty != false {
+                let remainder = streamState.delta(to: completion.content)
+                if !remainder.isEmpty {
+                    if let error = structuredAccumulator.append(remainder) {
+                        throw error
+                    }
+                    idleState.noteContent()
+                    onChunk(.content(remainder))
+                }
             }
             let validated = try Self.validateStructuredStreamingCompletion(
                 completion,
@@ -6700,10 +6720,34 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let candidates = stopTokenFilter.tokens + requestStops.filter { !$0.isEmpty }
         let holdback = longestSuffixPrefixLength(in: filtered.text, candidates: candidates)
-        guard holdback > 0 else {
-            return filtered
+        let safe = holdback > 0 ? String(filtered.text.dropLast(holdback)) : filtered.text
+        return (withoutIncompleteUTF8Tail(safe), false)
+    }
+
+    /// #1690 E2E-F13: a decode of a token prefix that ends inside a
+    /// multi-byte UTF-8 character renders the partial bytes as trailing
+    /// U+FFFD, which the next token replaces with the real character. Such a
+    /// tail is never streamed; the final decode flushes it as it renders.
+    static func withoutIncompleteUTF8Tail(_ text: String) -> String {
+        var scalars = text.unicodeScalars
+        while scalars.last == "\u{FFFD}" {
+            scalars.removeLast()
         }
-        return (String(filtered.text.dropLast(holdback)), false)
+        return String(scalars)
+    }
+
+    /// The text to append so the streamed bytes become `current`: exact on
+    /// Unicode scalars, not Characters, so a combining mark or a completed
+    /// grapheme cluster never makes `emitted` look like a non-prefix or a
+    /// dropped Character eat scalars. Empty when `current` does not extend
+    /// `emitted` (never a lossy or out-of-order fragment).
+    static func streamDelta(from emitted: String, to current: String) -> String {
+        let emittedScalars = emitted.unicodeScalars
+        let currentScalars = current.unicodeScalars
+        guard currentScalars.starts(with: emittedScalars) else { return "" }
+        var appended = String.UnicodeScalarView()
+        appended.append(contentsOf: currentScalars.dropFirst(emittedScalars.count))
+        return String(appended)
     }
 
     private static func longestSuffixPrefixLength(in text: String, candidates: [String]) -> Int {
@@ -6722,8 +6766,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     private static func delta(from emitted: String, to current: String) -> String {
-        guard current.hasPrefix(emitted) else { return "" }
-        return String(current.dropFirst(emitted.count))
+        streamDelta(from: emitted, to: current)
     }
 
     struct ParsedGeneratedOutput: Sendable {
@@ -7645,6 +7688,11 @@ struct CompletionResult: Sendable {
     let specDecodeDraftedTokens: Int
     let specDecodeAcceptedTokens: Int
     let specDecodeGeneration: Int?
+    /// #1690 E2E-F3: set on every loopback stream result, nil otherwise.
+    /// Maps each content UTF-8 byte length at an upstream chunk boundary to
+    /// the completion tokens generated through it, as the upstream attested
+    /// them per token; empty when it did not.
+    let loopbackPrefixCompletionTokens: [Int: Int]?
 
     init(
         content: String,
@@ -7661,8 +7709,10 @@ struct CompletionResult: Sendable {
         settlementDisposition: ContinuousBatchSettlementDisposition,
         specDecodeDraftedTokens: Int = 0,
         specDecodeAcceptedTokens: Int = 0,
-        specDecodeGeneration: Int? = nil
+        specDecodeGeneration: Int? = nil,
+        loopbackPrefixCompletionTokens: [Int: Int]? = nil
     ) {
+        self.loopbackPrefixCompletionTokens = loopbackPrefixCompletionTokens
         self.content = content
         self.finishReason = finishReason
         self.promptTokens = promptTokens
@@ -7698,6 +7748,37 @@ struct CompletionResult: Sendable {
             toolCalls: toolCalls,
             modelHashObserved: observed,
             settlementDisposition: settlementDisposition,
+            specDecodeDraftedTokens: specDecodeDraftedTokens,
+            specDecodeAcceptedTokens: specDecodeAcceptedTokens,
+            specDecodeGeneration: specDecodeGeneration,
+            loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens
+        )
+    }
+
+    /// #1690 E2E-F3: the usage a buyer_cancel end frame and receipt carry for
+    /// a cancelled loopback stream: the upstream's prompt tokens and the
+    /// completion tokens generated through exactly the delivered content.
+    /// Without an attested count for that prefix the usage is unattested, so
+    /// it is relayed empty and never signed. A native completion, or a
+    /// loopback one whose whole content was delivered, is returned unchanged.
+    func cancelledPrefixUsage(deliveredContent: String?) -> CompletionResult {
+        guard let table = loopbackPrefixCompletionTokens, deliveredContent != content else { return self }
+        let tokens = deliveredContent.flatMap { delivered in
+            content.utf8.starts(with: delivered.utf8) ? table[delivered.utf8.count] : nil
+        }
+        return CompletionResult(
+            content: deliveredContent ?? content,
+            finishReason: finishReason,
+            promptTokens: promptTokens,
+            cachedPromptTokens: cachedPromptTokens,
+            kvCacheBytesReused: kvCacheBytesReused,
+            completionTokens: tokens ?? completionTokens,
+            generatedCompletionTokens: tokens ?? generatedCompletionTokens,
+            ttftMilliseconds: ttftMilliseconds,
+            generationMilliseconds: generationMilliseconds,
+            toolCalls: toolCalls,
+            modelHashObserved: modelHashObserved,
+            settlementDisposition: tokens == nil ? .usageUnattested : settlementDisposition,
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration

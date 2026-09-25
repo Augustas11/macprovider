@@ -1,7 +1,9 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.4.9 (2026-09-23, informative loopback cross-reference, #1694; LOCKED v0.4 tuple unchanged)
-**Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 candidate `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.3 (settlement/accounting semantics; v0.4+ chargeability successor expected for terminal-state rows), SPEC-006 v0.9, SPEC-008 v0.3 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.5, SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3, SPEC-022 v0.1.4 (hard — settlement-capable receipt profile consumer)
+**Version:** 0.4.10 (2026-09-24, pool-authorized loopback receipt eligibility, #1690; LOCKED v0.4 tuple unchanged)
+**Depends on:** SPEC-001 v1.9.24, SPEC-002 v1.6.2 (v1.5 `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.6.8 (settlement/accounting semantics), SPEC-006 v0.9.35, SPEC-008 v0.7.0 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.12 (v1.7 R007(d), v1.10 R007(f) and v1.11 pool-scoped settlement for §N.12), SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3.1, SPEC-022 v0.2.0 (hard — settlement-capable receipt profile consumer; R-12 for §N.12), SPEC-042 0.0.34 (pool runtime authorization for §N.12, v0.4.10)
+
+**Change log v0.4.10 (2026-09-24, issue #1690 M3 — per-request receipt eligibility on Trusted Pools):** Adds §N.12 and conformance unit `SPEC-015-R006`. A runtime that is not settlement eligible (a SPEC-046 loopback runtime) MAY sign a v0.4 receipt for one request only when the coordinator's settlement metadata for that request carries a `pool_runtime_authorization` whose `runtime_source` equals the runtime's own. The coordinator attaches it only for a SPEC-022-R012 pool attempt. The provider decides per request, not from a per-runtime constant. Outside an authorizing pool a loopback runtime never signs (#1695 preserved), and a provider older than this version never signs, which is fail-closed. §N.2 records the owner-defined conditional route-snapshot members already in the digest (reconciling the "exactly these fields" text with SPEC-010/SPEC-042/SPEC-047). §N.6 names `pool_operator_attested` as the single exception to the provider-only-usage rule. The LOCKED v0.4 tuple and wire are unchanged. The coordinator verifier's and receipt ingestion's usage-source handling MUST change to accept `pool_operator_attested` for R-12 attempts only (SPEC-022 R-12.4), and usage still has to match exactly through `tupleUsageMatchesLedger`. The buyer-side verify CLI is unchanged.
 
 **Change log v0.4.9 (2026-09-23, issue #1694):** Informative cross-reference only; no normative change and the locked v0.4 tuple is unchanged. §N.6 notes that usage relayed from a SPEC-046-R002 loopback runtime is provider-only usage under the existing rule. SPEC-047-R003(iv) v0.1.10 owns the coordinator's loopback admission bar and recording rule. It is the coordinator-side control that v0.4.8's provider-side receipt-eligibility guard defers to.
 
@@ -860,6 +862,8 @@ areas without changing them:
 - `SPEC-015-R004` — pubkey trust root (§8).
 - `SPEC-015-R005` — coordinator receipt storage, ingest idempotency, and
   audit redaction (§13, §N). Buyer retrieval remains SPEC-022-R006.
+- `SPEC-015-R006` — (v0.4.10) per-request receipt eligibility for a
+  pool-authorized loopback runtime (§N.12, AC-12b).
 
 `requirement_id_migration` is `complete`. R002–R005 are not promoted from
 this close. Signed journey-result evidence is still required before any of
@@ -1631,7 +1635,9 @@ For non-streaming responses, the receipt MUST be omitted (no
 7. (v0.4.8, #1695) The serving runtime does not declare itself settlement
    eligible. This applies to success, streaming, and null-usage error
    responses, and whatever settlement metadata the request carries. Audit
-   reason: `runtime_not_settlement_eligible`.
+   reason: `runtime_not_settlement_eligible`. (v0.4.10) The single exception
+   is a request whose settlement metadata carries a matching
+   `pool_runtime_authorization` (§N.12).
 
 When a receipt is omitted, the provider MUST NOT emit a placeholder,
 empty value, or `X-MacProvider-Receipt: omitted` sentinel. Header
@@ -3612,7 +3618,7 @@ MLX container at the moment of receipt generation.
 - **MLX container route (alternative — direct binary
   introspection):** compute SHA-256 over the MLX container the
   provider has loaded (same algorithm
-  `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:294-325`
+  `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift` (`loadedWeightsManifestSHA256`, line 1203)
   uses for the heartbeat report); assert byte-equality with
   `receipt.model_hash`. v0.3 does NOT require a new
   `models inspect` CLI subcommand to expose this; an
@@ -3996,10 +4002,35 @@ fields:
   canonical request normalizer version;
 - `prompt_hash`.
 
-No other fields are allowed in `route_snapshot_v1`. If a deployment needs
+No other fields are allowed in `route_snapshot_v1` beyond the owner-defined
+conditional members below. If a deployment needs
 additional route-validity fields for settlement, it MUST define
 `route_snapshot_v2` and a corresponding policy version rather than silently
 changing the digest input.
+
+**Owner-defined conditional members (v0.4.10 reconciliation).** Each member
+below is defined by an owner spec, is present in the JCS object only when it
+is non-empty, and is therefore absent from every attempt that does not use
+it. An attempt without any of them digests exactly the object listed above
+(`phase4-coordinator/internal/billing/route_snapshot.go:121-184`,
+`RouteSnapshot.Value`):
+
+- `provider_reported_model_hash_algorithm` and
+  `expected_catalog_model_hash_algorithm` (SPEC-010 canonical identity);
+- the six `model_admission_*` values (SPEC-047-R001/R003);
+- the six artifact values `artifact_feed_sha256`, `artifact_id`,
+  `artifact_hash`, `artifact_hash_algorithm`, `artifact_feed_signer_key_id`,
+  `artifact_candidate_catalog_sha256` (SPEC-047-R003, SPEC-010-R007(d));
+- `pool_id`, `manifest_version`, `manifest_core_digest` (SPEC-042-R006);
+- `runtime_source`, `pool_generation`, `pool_operator_account_id`
+  (SPEC-022-R012, v0.2.0). `RouteSnapshot.Value` emits them only when
+  `runtime_source` is non-empty (implemented, #1690 M4); SPEC-015-R006 stays
+  pending until the signed enforce-mode pool journey (#1690 M6).
+
+The provider signs `route_snapshot_digest` as the coordinator delivers it and
+never reconstructs the object, so these members bind into the receipt with
+no tuple change. Any member beyond this list still falls under the
+`route_snapshot_v2` rule above.
 
 Settlement verification MUST prove the SPEC-022 three-way equality:
 
@@ -4149,14 +4180,16 @@ final debit or provider positive settlement MUST be derived from or
 cross-checked against coordinator/gateway-observed canonical request
 and delivered-output state under the applicable SPEC-005 rules. A
 provider-only usage value maps to `quarantined` for positive money
-movement.
+movement. (v0.4.10) The single exception is `pool_operator_attested`
+usage under SPEC-022-R012, whose receipt eligibility §N.12 defines.
 
 *Informative (v0.4.9, no normative change):* usage a provider relays
 from an operator-controlled external runtime, such as a SPEC-046-R002
 loopback `runtime_source`, is an instance of the provider-only usage
 above. SPEC-047-R003(iv) v0.1.10 owns how the coordinator applies this
 rule to loopback runtimes: it never records such an attempt as
-`coordinator_observed`. This is independent of the v0.4.8 provider-side
+`coordinator_observed`. Inside an allowlisting SPEC-042 Trusted Pool it
+may record `pool_operator_attested` instead (v0.4.10, §N.12). This is independent of the v0.4.8 provider-side
 guard (§6.4 case 7), which a modified provider can bypass.
 
 ### §N.7 Chargeability table
@@ -4264,7 +4297,8 @@ A v0.4 settlement `verified` outcome means:
   route_snapshot.expected_catalog_model_hash`;
 - prompt/output hashes matched the persisted canonical material;
 - usage was derived from or cross-checked against coordinator/gateway
-  observation;
+  observation, or (v0.4.10) is SPEC-022-R012 `pool_operator_attested` usage
+  for an attempt whose route snapshot satisfies R-12 (§N.12);
 - timestamp/window checks passed;
 - terminal-state and chargeability checks passed.
 
@@ -4326,7 +4360,9 @@ SPEC-022 can consume the profile:
   cross-check cannot produce buyer final debit or provider positive
   settlement; fixtures cover missing usage fields, extra usage fields,
   null usage values, negative usage values, and mismatched
-  `delivered_output_bytes`.
+  `delivered_output_bytes`. (v0.4.10) The single exception is a SPEC-022-R012
+  `pool_operator_attested` attempt with a verified receipt (AC-12b, SPEC-022
+  AC-022-66). The fixtures above still fail for it.
 - **AC-52:** Non-streaming `normal_done` with a settlement-capable,
   catalog-matching v0.4 receipt can map to `verified`.
 - **AC-53:** Streaming `normal_done` produces an internally
@@ -4388,6 +4424,75 @@ SPEC-022 can consume the profile:
 - **AC-71:** Each §N.7 terminal-state row is exercised for
   `delivered_output_bytes == 0` and `delivered_output_bytes > 0`,
   proving the deterministic `verified` vs `zero_settled` mapping.
+
+### §N.12 Pool-authorized loopback receipt eligibility (v0.4.10, SPEC-015-R006)
+
+A runtime that does not declare itself settlement eligible (§6.4 case 7)
+MUST NOT sign, except for one request at a time when the coordinator's
+route metadata for that request authorizes it. The SPEC-046 loopback
+runtimes are such runtimes
+(`OpenAICompatibleLoopbackRuntime.isSettlementReceiptEligible == false`,
+`phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:802`).
+The provider decides per request, not from a per-runtime constant.
+
+1. **Authorization member.** The coordinator's v0.4 settlement metadata for
+   a request, the object the provider parses into `SettlementReceiptMetadata`
+   (`phase3-binary/Sources/macprovider-cli/ReceiptBuilder.swift:157-224`),
+   MAY carry `pool_runtime_authorization`. It is a closed JSON object with
+   exactly `pool_id` (string), `manifest_core_digest` (64 lowercase hex),
+   `runtime_source` (string), `request_id` (string), `attempt_n` (integer),
+   `provider_id` (string), and `route_snapshot_digest` (64 lowercase hex).
+   It is request metadata, not a receipt field. The provider parses it
+   tolerantly: an absent or malformed member means not authorized
+   (`PoolRuntimeAuthorization`, `ReceiptBuilder.swift`; #1690 M5). The coordinator MUST attach it only when the attempt satisfies
+   SPEC-022-R012 at route time, and its three values MUST equal the route
+   snapshot's digested `pool_id`, `manifest_core_digest`, and
+   `runtime_source`. The receipt binds those values through
+   `route_snapshot_digest`, which the provider signs as delivered.
+2. **Provider decision.** The provider MAY sign a v0.4 receipt from a
+   runtime that is not settlement eligible only when the request's
+   settlement metadata is otherwise valid, `pool_runtime_authorization` is
+   present and well-formed, its `runtime_source` equals the serving
+   runtime's own `runtime_source`, and its `request_id`, `attempt_n`,
+   `provider_id`, and `route_snapshot_digest` equal the same fields of the
+   settlement metadata of the request being served and the provider's own
+   id. An authorization copied from another request, attempt, or provider
+   therefore never enables signing. In every other case (no authorization, a
+   malformed one, a different `runtime_source`, or no settlement metadata)
+   the §6.4 case 7 rule applies unchanged: no receipt, and one
+   `receipt_omitted` row with reason `runtime_not_settlement_eligible`.
+   Outside an authorizing pool a loopback runtime never signs (#1695
+   preserved).
+3. **Tuple and verifier.** The v0.4 tuple is LOCKED and unchanged: no new
+   tuple field and no new wire header. The coordinator verifier's
+   usage-source handling does change, as SPEC-022-R012 (R-12.4) owns: it
+   accepts `pool_operator_attested` only for an attempt whose snapshot
+   satisfies R-12. The buyer-side verify CLI is unchanged. The provider
+   signs the usage it relayed to the coordinator for that attempt. The
+   coordinator accepts it only when `tupleUsageMatchesLedger`
+   (`phase4-coordinator/internal/billing/settlement_verifier.go:340`) finds
+   an exact match with the recorded expected usage. There is no
+   receipt-less settlement path, which would collide with
+   `verified_model_settlement_mode=enforce`.
+4. **Older providers.** A provider older than v0.4.10 ignores
+   `pool_runtime_authorization` and never signs for a loopback runtime. The
+   attempt stays `pending` and becomes `quarantined` at the deadline, with
+   no credit. That is fail-closed, and the coordinator MUST NOT relax any
+   check to compensate. The coordinator MUST NOT use provider version
+   metadata to predict support: `binaryVersion` is a shared constant, not a
+   release identity.
+5. **Honest-bug guard (informative).** A provider may re-count completion
+   tokens for a pool-authorized loopback completion with the tokenizer of
+   the sibling catalog MLX row, and raise a local alert on a large
+   difference. This is not a conformance obligation. Any such re-count MUST
+   NOT change the relayed usage, the signed usage, or the signing decision.
+6. **Trust boundary.** Like §6.4 case 7, this is a provider-side accident
+   guard, not a trust boundary: a modified provider can sign without
+   authorization. The coordinator is the control. SPEC-022-R012 accepts
+   `pool_operator_attested` usage only for an attempt whose route snapshot
+   satisfies it, and every other loopback-served attempt is
+   `byte_estimated` with zero billable usage, so an unauthorized receipt
+   moves no money.
 
 ---
 
@@ -4632,6 +4737,17 @@ request emits exactly one `receipt_omitted` row with reason
 `runtime_not_settlement_eligible`, which takes precedence over
 `non_settling_replay`. Rebuilding a completion MUST preserve its settlement
 disposition. Native catalog serving remains receipt eligible.
+
+**AC-12b (v0.4.10, #1690).** A loopback-runtime request whose settlement
+metadata carries a well-formed `pool_runtime_authorization` whose
+`runtime_source` equals the runtime's own, and whose request, attempt,
+provider, and snapshot-digest fields match the request, signs exactly one
+v0.4 receipt, which the SPEC-022-R012 verifier accepts. The same request
+without the member, with a malformed member, with a different
+`runtime_source`, or with an authorization copied from another request,
+attempt, or provider signs nothing
+and emits one `receipt_omitted` row with reason
+`runtime_not_settlement_eligible`. Native catalog serving is unchanged.
 
 **AC-13.** A request that the gateway rejects before reaching any
 provider (auth failure, quota exhausted, kill switch on) does NOT

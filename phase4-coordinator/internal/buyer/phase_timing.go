@@ -121,6 +121,14 @@ func (w *phaseTimingResponseWriter) Flush() {
 	}
 }
 
+// FlushError reports a failed flush, so writeDelivered (via
+// http.ResponseController) sees a buyer connection that did not take the
+// body; Flush alone would hide the error.
+func (w *phaseTimingResponseWriter) FlushError() error {
+	w.inject()
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
 func (w *phaseTimingResponseWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
@@ -193,6 +201,12 @@ func (w *noPriorDispatchResponseWriter) Flush() {
 	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
+}
+
+// FlushError: see phaseTimingResponseWriter.FlushError.
+func (w *noPriorDispatchResponseWriter) FlushError() error {
+	w.mark(http.StatusOK, false)
+	return http.NewResponseController(w.ResponseWriter).Flush()
 }
 
 func (w *noPriorDispatchResponseWriter) Unwrap() http.ResponseWriter {

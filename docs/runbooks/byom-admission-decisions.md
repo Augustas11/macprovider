@@ -124,7 +124,12 @@ A GGUF candidate cannot reach `settlement_capable`: its sources are loopback,
 and a loopback runtime (recorded source or the session's hello source) is
 barred until a later SPEC-047-R003 amendment names a coordinator-recorded
 trust binding and a trusted usage source (SPEC-047 v0.1.10, #1694).
-Shipping the loopback runtime path does not lift this.
+Shipping the loopback runtime path does not lift this. SPEC-047 v0.2.0
+(#1690) names that binding only for SPEC-042 Trusted Pool routes: a pool
+route may settle an allowlisted loopback session at route time from a
+`catalog_priced` candidate, but the decision surface is unchanged. A loopback
+candidate still never reaches `settlement_capable`, and a decision request or
+approval for it still answers `no_verified_session`.
 
 The request appends NO event. The response repeats the current state twice,
 `coordinator_event_id` = the evaluated head, `decided_by` = actor A, and a

@@ -49,6 +49,9 @@ const (
 	modelAdmissionMatchReasonSourceNotAllowed = "runtime_source_not_allowed"
 )
 
+// modelAdmissionRuntimeSourceMLXLMLoopback is mlx_lm.server (SPEC-010-R009).
+const modelAdmissionRuntimeSourceMLXLMLoopback = "mlxlm_loopback"
+
 // modelAdmissionDriftReasons is the closed drift origin reason set.
 var modelAdmissionDriftReasons = map[string]struct{}{
 	modelAdmissionDriftRuntimeIdentity:       {},
@@ -655,7 +658,7 @@ func (s *Server) matchModelAdmissionOffer(runtimeSource, assertedKey string, art
 	s.withReleaseRead(func() {
 		current, _ := s.autotuneCatalogSnapshot()
 		set := s.usableIdentitySetLocked(current)
-		match = matchOfferArtifactHashes(current, set, s.artifactIdentitySets.integrityFailed(), runtimeSource, assertedKey, artifactHashes)
+		match = matchRuntimeOfferArtifactHashes(current, set, s.artifactIdentitySets.integrityFailed(), runtimeSource, assertedKey, artifactHashes)
 		intakeKey = intakeModelKeyForOffer(current, set, artifactHashes)
 	})
 	return match, intakeKey
@@ -674,6 +677,58 @@ func (s *Server) usableIdentitySetLocked(catalog *autotune.Catalog) *artifactide
 		return nil
 	}
 	return set
+}
+
+// candidateRowAllowsRuntimeSource is the admissibility of the primary-row
+// member (the row's own snapshot-manifest pair). mlx_cache is always
+// admissible. mlxlm_loopback (SPEC-010-R009(c)) is admissible only when the
+// release-bound feed's primary artifact for that row carries the same pair
+// and lists mlxlm_loopback; a missing or stale feed admits nothing. Every
+// other runtime source, the GGUF loopback classes included, never binds a
+// row pair.
+func candidateRowAllowsRuntimeSource(set *artifactidentity.Index, modelKey, rowHash, runtimeSource string) bool {
+	switch runtimeSource {
+	case modelAdmissionRuntimeSourceMLXCache:
+		return true
+	case modelAdmissionRuntimeSourceMLXLMLoopback:
+		binding, ok := set.Resolve(modelidentity.SnapshotManifestV1, rowHash)
+		return ok && binding.Member.IsPrimary && binding.Member.ModelKey == modelKey &&
+			binding.Member.AllowsRuntimeSource(modelAdmissionRuntimeSourceMLXLMLoopback)
+	default:
+		return false
+	}
+}
+
+// matchRuntimeOfferArtifactHashes is the offer-time match for every
+// runtime source. mlxlm_loopback (SPEC-010-R009) offers only a
+// snapshot-manifest pair. A non-primary MLX feed member binds when it allows
+// mlxlm_loopback, exactly as the generic match decides; the row's own pair
+// resolves through the generic match as the mlx_cache primary would, and is
+// kept only when the release-bound primary artifact allows mlxlm_loopback.
+// Every other runtime source is the generic match unchanged.
+func matchRuntimeOfferArtifactHashes(current *autotune.Catalog, set *artifactidentity.Index, feedIntegrityFailed bool, runtimeSource, assertedKey string, artifactHashes map[string]string) modelAdmissionCatalogMatch {
+	if runtimeSource != modelAdmissionRuntimeSourceMLXLMLoopback {
+		return matchOfferArtifactHashes(current, set, feedIntegrityFailed, runtimeSource, assertedKey, artifactHashes)
+	}
+	for algorithm := range artifactHashes {
+		if algorithm != modelidentity.SnapshotManifestV1 {
+			return unmatched(modelAdmissionMatchReasonSourceNotAllowed)
+		}
+	}
+	match := matchOfferArtifactHashes(current, set, feedIntegrityFailed, runtimeSource, assertedKey, artifactHashes)
+	if match.State == modelAdmissionCatalogMatched || match.Reason != modelAdmissionMatchReasonSourceNotAllowed {
+		return match
+	}
+	primary := matchOfferArtifactHashes(current, set, feedIntegrityFailed, modelAdmissionRuntimeSourceMLXCache, assertedKey, artifactHashes)
+	if primary.State != modelAdmissionCatalogMatched || len(primary.Members) != 1 {
+		return match
+	}
+	row := primary.Members[0]
+	if row.Source != modelAdmissionMemberSourceCandidateRow ||
+		!candidateRowAllowsRuntimeSource(set, primary.CatalogModelKey, row.Hash, runtimeSource) {
+		return match
+	}
+	return primary
 }
 
 func unmatched(reason string) modelAdmissionCatalogMatch {
@@ -861,7 +916,7 @@ func (s *Server) evaluateCatalogPreconditionsLocked(candidate ModelAdmissionEven
 			if member.HashAlgorithm != modelidentity.SnapshotManifestV1 || member.Hash != candidate.CatalogRowModelSHA256 {
 				return catalogPreconditionResult{decisionCode: "catalog_match_stale", driftReason: modelAdmissionDriftRowChanged}
 			}
-			if candidate.RuntimeSource != modelAdmissionRuntimeSourceMLXCache {
+			if !candidateRowAllowsRuntimeSource(set, candidate.CatalogModelKey, member.Hash, candidate.RuntimeSource) {
 				sourceAllowed = false
 			}
 			members = append(members, member)

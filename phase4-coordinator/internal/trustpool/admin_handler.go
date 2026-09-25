@@ -1771,11 +1771,41 @@ func (h *adminHandler) refreshRegistryIfAhead(w http.ResponseWriter, state *Reco
 	if h.deps.Registry == nil || state == nil || state.Revision <= h.deps.Registry.Revision() {
 		return true
 	}
+	// Publication re-checks the current production gate and on-call
+	// readiness, whichever store path produced this state. The mutation is
+	// already durable, so a failed publication must not leave the older
+	// routeable registry serving: disable it until a refresh republishes.
+	if err := h.deps.Store.ApplyRouteGates(context.Background(), state); err != nil {
+		h.deps.Registry.Disable()
+		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
+		return false
+	}
 	if err := h.deps.Registry.LoadRouteableSnapshotsAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
+		h.deps.Registry.Disable()
 		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
 		return false
 	}
 	return true
+}
+
+// republishRouteGates re-reads durable state after a same-revision route-gate
+// input (on-call readiness) changes and republishes it, so a shortened or
+// replaced on-call record stops routing now instead of at the next refresh.
+// Any failure disables the registry (fail closed) until a refresh succeeds.
+func (h *adminHandler) republishRouteGates(ctx context.Context) error {
+	if h.deps.Registry == nil || h.deps.Store == nil {
+		return nil
+	}
+	state, err := h.deps.Store.Reconstruct(ctx)
+	if err != nil {
+		h.deps.Registry.Disable()
+		return err
+	}
+	if _, err := h.deps.Registry.RefreshRouteableSnapshotsAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
+		h.deps.Registry.Disable()
+		return err
+	}
+	return nil
 }
 
 func normalizeAdminEvent(r *http.Request, e DurableEvent) (DurableEvent, error) {
@@ -2116,6 +2146,7 @@ type adminPoolState struct {
 	RootIssuerKeyID                string   `json:"root_issuer_key_id,omitempty"`
 	RootIssuerPublicKeyFingerprint string   `json:"root_issuer_public_key_fingerprint,omitempty"`
 	LaunchEnvironment              string   `json:"launch_environment,omitempty"`
+	RootCustodyClass               string   `json:"root_custody_class,omitempty"`
 	MinBinaryVersion               string   `json:"min_binary_version,omitempty"`
 	Members                        []string `json:"members"`
 	Revoked                        []string `json:"revoked"`
@@ -2163,6 +2194,7 @@ func adminPoolResponse(p *ReconstructedPoolState, routeGateCheckedAt time.Time) 
 		RootIssuerKeyID:                rootIssuerKeyID(p),
 		RootIssuerPublicKeyFingerprint: rootIssuerFingerprint(p),
 		LaunchEnvironment:              rootIssuerLaunchEnvironment(p),
+		RootCustodyClass:               rootIssuerCustodyClass(p),
 		MinBinaryVersion:               policyMinBinaryVersion(p),
 		Members:                        members,
 		Revoked:                        revoked,
@@ -2278,6 +2310,13 @@ func rootIssuerFingerprint(p *ReconstructedPoolState) string {
 		return ""
 	}
 	return p.RootIssuer.PublicKeyFingerprint
+}
+
+func rootIssuerCustodyClass(p *ReconstructedPoolState) string {
+	if p == nil || p.RootIssuer == nil {
+		return ""
+	}
+	return p.RootIssuer.CustodyClass
 }
 
 func rootIssuerLaunchEnvironment(p *ReconstructedPoolState) string {

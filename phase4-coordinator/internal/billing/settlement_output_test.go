@@ -348,8 +348,16 @@ func TestDeadlineRetryIdentityStaysOnOneAttempt(t *testing.T) {
 		t.Fatalf("other account evidence exists=%v err=%v, want absent", exists, err)
 	}
 
-	if err := store.MarkSettlementOutputMissing(ctx, input.RequestID, 1, input.ProviderID); err != nil {
-		t.Fatal(err)
+	if marked, err := store.MarkSettlementOutputMissing(ctx, input.RequestID, 1, input.ProviderID); err != nil || !marked {
+		t.Fatalf("mark credited attempt 1: marked=%v err=%v, want marked", marked, err)
+	}
+	// Review R3 MEDIUM-1: a second mark, or a row that is not a credited 200,
+	// reports that nothing was marked.
+	if marked, err := store.MarkSettlementOutputMissing(ctx, input.RequestID, 1, input.ProviderID); err != nil || marked {
+		t.Fatalf("re-mark attempt 1: marked=%v err=%v, want not marked", marked, err)
+	}
+	if marked, err := store.MarkSettlementOutputMissing(ctx, input.RequestID, 7, input.ProviderID); err != nil || marked {
+		t.Fatalf("mark absent attempt: marked=%v err=%v, want not marked", marked, err)
 	}
 	var attempt0, attempt1 sql.NullString
 	if err := store.db.QueryRow(`SELECT quarantine_reason FROM ledger_request_credits WHERE request_id = ? AND attempt_n = 0`, input.RequestID).Scan(&attempt0); err != nil {

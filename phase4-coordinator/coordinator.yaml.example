@@ -233,6 +233,11 @@ trusted_pools:
     allowed_launch_environments: []
     evidence_sha256: ""
     root_custody_hashes: []
+    # SPEC-043-R002 class for each root_custody_hashes entry: hsm, mpc, or
+    # other. A hash without a class starts, but no pool using it can promote
+    # or route. Startup-only: a SIGHUP that changes production_activation is
+    # rejected and needs a restart.
+    root_custody_classes: {}
 
 logging:
   level: "info"

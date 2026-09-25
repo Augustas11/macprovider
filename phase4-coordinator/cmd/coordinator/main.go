@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -106,6 +107,8 @@ func main() {
 			os.Exit(runBackfillAttemptN(os.Args[2:]))
 		case "stats-migrate":
 			os.Exit(runStatsMigrate(os.Args[2:]))
+		case "pool-rollback-preflight":
+			os.Exit(runPoolRollbackPreflight(os.Args[2:]))
 		}
 		// Round-1 CODE H1 fix: a non-flag first positional that
 		// is NEITHER a known daemon flag NOR a known CLI verb is
@@ -125,6 +128,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "  coordinator migrate-indexes --config <path> [--config-overlay <path>]  (one-shot operator migration)")
 			fmt.Fprintln(os.Stderr, "  coordinator backfill-attempt-n --config <path>  (one-shot attempt_n backfill)")
 			fmt.Fprintln(os.Stderr, "  coordinator stats-migrate [--admin-dsn DSN] [--check]  (SPEC-017 stats/rewards migrations)")
+			fmt.Fprintln(os.Stderr, "  coordinator pool-rollback-preflight --config <path>  (SPEC-022 v0.2.0 downgrade gate; exit 3 = blocked)")
 			os.Exit(2)
 		}
 	}
@@ -1095,6 +1099,16 @@ func main() {
 			logger.Fatal().Err(err).Msg("trusted pools durable store open failed")
 		}
 		if trustPoolsReady {
+			// SPEC-022-R012: settlement re-derives pool_operator_attested from
+			// the durable pool records only.
+			billingStore.SetPoolOperatorAttestationAuthority(trustPoolStore)
+			// Ledger recovery compares a route snapshot's routing-time pool
+			// labels with this settlement-time view (SPEC-042-R006).
+			registry := trustPoolRegistry
+			billingStore.SetSettlementPoolLabelSource(func(poolID string) (uint64, string, bool) {
+				snap := registry.Snapshot(poolID)
+				return snap.ManifestVersion, snap.ManifestCoreDigest, snap.Exists
+			})
 			buyerOpts = append(
 				buyerOpts,
 				buyer.WithPoolMembership(trustPoolRegistry),
@@ -1124,6 +1138,9 @@ func main() {
 	} else {
 		logger.Info().Msg("trusted pools disabled; coordinator will not advertise pool support")
 	}
+	// SPEC-022-R012.8: runs whether or not the trusted-pool feature is on,
+	// because disabling it is one way to stop pool traffic before a rollback.
+	startPoolSettlementExpirySweeper(shutdownCtx, billingStore, moneySQLiteActivity, logger)
 	buyerServer := buyer.NewServer(registry, logger, startedAt, buyerOpts...)
 	wsServer.SetCatalogMaterialRoutingGate(buyerServer.CatalogMaterialMissingUnderEnforce)
 	providerAddr := listenAddress(cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
@@ -1494,6 +1511,8 @@ func main() {
 		Msg("coordinator config applied")
 	recordAppliedConfig(logger, "boot", *configPath, *configOverlay, bootConfigDigests, bootConfigLoadedAt)
 
+	startupProductionActivation := cfg.TrustedPools.ProductionActivation
+	reloadStartupTrustedPoolsProductionActivation.Store(&startupProductionActivation)
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	for {
@@ -2521,6 +2540,53 @@ func startReferralServingReconciler(ctx context.Context, reconciler referralapi.
 	}()
 }
 
+type poolSettlementExpirySweeper interface {
+	SweepExpiredPoolSettlementVerdicts(context.Context, int64, int) (int, error)
+}
+
+// startPoolSettlementExpirySweeper closes expired pending pool verdicts that no
+// finality read will reach (a refunded gateway retry), so
+// pool-rollback-preflight can clear without a buyer request touching them.
+func startPoolSettlementExpirySweeper(ctx context.Context, sweeper poolSettlementExpirySweeper, idle moneySQLiteIdleTracker, logger zerolog.Logger) {
+	if sweeper == nil {
+		return
+	}
+	go func() {
+		attempts := newMoneySQLiteMaintenanceAttemptState(time.Now())
+		sweep := func() {
+			attempts.MarkAttempt(time.Now())
+			sweepCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			closed, err := sweeper.SweepExpiredPoolSettlementVerdicts(sweepCtx, time.Now().UTC().UnixMilli(), billing.DefaultPoolSettlementExpirySweepLimit)
+			if err != nil && ctx.Err() == nil {
+				logger.Error().Err(err).Int("closed", closed).Msg("pool settlement expiry sweep failed")
+				return
+			}
+			if closed > 0 {
+				logger.Info().Int("closed", closed).Msg("expired pending pool settlement verdicts finalized")
+			}
+		}
+		sweepIfIdle := func() {
+			if shouldYieldMoneySQLiteMaintenance(idle, moneySQLiteMaintenanceMinIdle, attempts, moneySQLiteMaintenanceMaxDeferral, time.Now()) {
+				logger.Debug().Msg("pool settlement expiry sweep skipped during active buyer money-path traffic")
+				return
+			}
+			sweep()
+		}
+		sweep()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				sweepIfIdle()
+			}
+		}
+	}()
+}
+
 type socialAuthorLookup interface {
 	RecheckPost(context.Context, string, string) (string, error)
 }
@@ -3302,6 +3368,7 @@ func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsCo
 		trustpool.WithProductionActivationGate(trustpool.ProductionActivationGate{
 			AllowedLaunchEnvironments: cfg.ProductionActivation.AllowedLaunchEnvironments,
 			RootCustodyHashes:         cfg.ProductionActivation.RootCustodyHashes,
+			RootCustodyClasses:        cfg.ProductionActivation.RootCustodyClasses,
 			EvidenceSHA256:            cfg.ProductionActivation.EvidenceSHA256,
 		}),
 	}
@@ -3325,6 +3392,11 @@ func loadTrustedPools(ctx context.Context, db *sql.DB, cfg config.TrustedPoolsCo
 	if err != nil {
 		logger.Error().Err(err).Msg("trusted pools routeable registry build failed; pool support disabled")
 		return nil, nil, false, nil
+	}
+	if store.ProductionActivationEnabled() {
+		// SPEC-042: a production-activated coordinator never routes a pool
+		// whose root launch_environment is candidate.
+		registry.RejectCandidateLaunchEnvironment()
 	}
 	logger.Info().
 		Int("pool_count", len(reconstructed.Pools)).
@@ -3659,6 +3731,40 @@ func candidateAutotuneFeedsForRuntimeParity(buyerServer *buyer.Server, haveReloa
 	return buyerServer.CurrentAutotuneFeeds()
 }
 
+// reloadStartupTrustedPoolsProductionActivation holds the boot-time
+// trusted_pools.production_activation. The trust-pool store builds its
+// production gate once at startup, so a SIGHUP that changes it would report a
+// config as applied that is not in force; such a reload is rejected instead.
+// Nil (tests, or before boot finishes) skips the check.
+var reloadStartupTrustedPoolsProductionActivation atomic.Pointer[config.TrustedPoolsProductionActivationConfig]
+
+// trustedPoolsProductionActivationChanged compares two production activation
+// configs by their normalized content, so whitespace or ordering differences
+// in a list are not a change.
+func trustedPoolsProductionActivationChanged(startup, next config.TrustedPoolsProductionActivationConfig) bool {
+	norm := func(values []string) []string {
+		out := make([]string, 0, len(values))
+		for _, v := range values {
+			if v = strings.TrimSpace(v); v != "" {
+				out = append(out, v)
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	normMap := func(values map[string]string) map[string]string {
+		out := make(map[string]string, len(values))
+		for k, v := range values {
+			out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+		return out
+	}
+	return strings.TrimSpace(startup.EvidenceSHA256) != strings.TrimSpace(next.EvidenceSHA256) ||
+		!reflect.DeepEqual(norm(startup.AllowedLaunchEnvironments), norm(next.AllowedLaunchEnvironments)) ||
+		!reflect.DeepEqual(norm(startup.RootCustodyHashes), norm(next.RootCustodyHashes)) ||
+		!reflect.DeepEqual(normMap(startup.RootCustodyClasses), normMap(next.RootCustodyClasses))
+}
+
 func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, autotuneCatalog *autotune.Catalog, billingStores ...*billing.Store) {
 	reloadCoordinatorConfig(configPath, "", startupTier2, logger, wsServer, buyerServer, autotuneCatalog, nil, nil, billingStores...)
 }
@@ -3727,6 +3833,13 @@ func reloadCoordinatorConfig(configPath, configOverlay string, startupTier2 conf
 	}
 	if tier2StartupFieldsChangedWithLogger(startupTier2, cfg.Tier2, logger) {
 		logger.Error().Msg("tier2 config reload rejected: startup-only tier2 fields require restart")
+		return
+	}
+	if startup := reloadStartupTrustedPoolsProductionActivation.Load(); startup != nil &&
+		trustedPoolsProductionActivationChanged(*startup, cfg.TrustedPools.ProductionActivation) {
+		logger.Error().
+			Str("field", "trusted_pools.production_activation").
+			Msg("config reload rejected: trusted_pools.production_activation is startup-only and requires a restart")
 		return
 	}
 	if err := validateAutotuneRuntimeEconomics(candidateAutotuneFeedsForRuntimeParity(buyerServer, haveReloadedAutotune, reloadedAutotuneFeeds), cfg); err != nil {

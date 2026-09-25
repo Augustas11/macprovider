@@ -252,8 +252,14 @@ func objectHasDuplicateJSONKeys(dec *json.Decoder) bool {
 			_, _ = dec.Token()
 		case '[':
 			for dec.More() {
+				before := dec.InputOffset()
 				if objectHasDuplicateJSONKeys(dec) {
 					return true
+				}
+				// A truncated element consumes nothing; without this check a
+				// torn line (a provider or buyer cut mid-event) loops forever.
+				if dec.InputOffset() == before {
+					return false
 				}
 			}
 			_, _ = dec.Token()
@@ -271,6 +277,27 @@ func settlementSSEDataValue(line string) (string, bool) {
 		value = strings.TrimPrefix(value, " ")
 	}
 	return value, true
+}
+
+// validateBlock reports whether observeBlock would accept block, without
+// recording it. The tracker records a block only once the buyer write
+// accepted it (SPEC-015 delivered-prefix rule).
+func (t *settlementStreamOutputTracker) validateBlock(block []byte) error {
+	probe := settlementStreamOutputTracker{toolCalls: map[int]*settlementStreamToolCall{}, terminalState: t.terminalState}
+	return probe.observeBlock(block)
+}
+
+// completeSSEEventsLen returns the length of the longest prefix of b that ends
+// with an event's blank-line terminator, "\n" or "\r\n" framed alike.
+func completeSSEEventsLen(b []byte) int {
+	end, offset := 0, 0
+	for _, line := range bytes.SplitAfter(b, []byte("\n")) {
+		offset += len(line)
+		if isSSEBlankLine(line) {
+			end = offset
+		}
+	}
+	return end
 }
 
 func (t *settlementStreamOutputTracker) observeBlock(block []byte) error {
