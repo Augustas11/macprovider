@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
@@ -11,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -121,7 +123,7 @@ func validTrustPoolKeyID(label, v string) error {
 // trustPoolAdminKeygen generates the root issuer (ECDSA P-256), manifest
 // authority root (Ed25519) and policy signer (Ed25519) keys into a new
 // owner-only directory, and writes pool-identity.json beside them.
-func trustPoolAdminKeygen(args []string, stdout io.Writer) error {
+func trustPoolAdminKeygen(args []string, stdout io.Writer) (retErr error) {
 	fs := flag.NewFlagSet("trust-pool-admin keygen", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	outDir := fs.String("out-dir", "", "new directory for the keys (created 0700; must not exist)")
@@ -149,6 +151,14 @@ func trustPoolAdminKeygen(args []string, stdout io.Writer) error {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return fmt.Errorf("create --out-dir: %w", err)
 	}
+	// The directory is ours from here on: a failure removes it, so no
+	// partial key set (keys without an identity, or unreported keys) is
+	// left for a retry to trip over or an operator to mistake for a pool.
+	defer func() {
+		if retErr != nil {
+			_ = os.RemoveAll(dir)
+		}
+	}()
 	root, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return err
@@ -474,6 +484,19 @@ func trustPoolAdminSignManifest(args []string, stdout io.Writer) error {
 			return fmt.Errorf("--prev manifest_core_digest: %w", err)
 		}
 		prevCore := snapshot.Policies[len(snapshot.Policies)-1].SignedCore.Core
+		// The event's digest and version must be the snapshot's last policy
+		// core, or the successor would chain to a core nobody accepted.
+		prevCoreDigest, err := prevCore.ManifestCoreDigest()
+		if err != nil {
+			return fmt.Errorf("--prev manifest_snapshot last policy core: %w", err)
+		}
+		if !bytes.Equal(prevCoreDigest, prevDigest) {
+			return fmt.Errorf("--prev manifest_core_digest does not match the snapshot's last policy core")
+		}
+		if prevCore.ManifestVersion != prev.ManifestVersion {
+			return fmt.Errorf("--prev manifest_version %d does not match the snapshot's last policy core version %d",
+				prev.ManifestVersion, prevCore.ManifestVersion)
+		}
 		if start < prevCore.ExpiresAtUnix {
 			return fmt.Errorf("--not-before must not precede the previous policy window end (%s)",
 				time.Unix(int64(prevCore.ExpiresAtUnix), 0).UTC().Format(time.RFC3339))
@@ -628,13 +651,27 @@ func loadTrustPoolIdentity(path string) (loadedTrustPoolIdentity, error) {
 	}, nil
 }
 
+// maxPrivateKeyFileBytes bounds a private key file read; a PKCS#8 PEM key
+// is well under 1 KiB.
+const maxPrivateKeyFileBytes = 64 << 10
+
 // readOwnerOnlyFile reads a private key file only when it is a regular file
 // (not a symlink) owned by the current user with no group/other permission.
+// The checks and the read use one handle opened with O_NOFOLLOW, so the
+// file cannot be swapped between the check and the read.
 func readOwnerOnlyFile(path, label string) ([]byte, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, fmt.Errorf("%s is required", label)
 	}
-	info, err := os.Lstat(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, fmt.Errorf("%s must be a regular file, not a symlink or special file", label)
+		}
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", label, err)
 	}
@@ -644,10 +681,18 @@ func readOwnerOnlyFile(path, label string) ([]byte, error) {
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		return nil, fmt.Errorf("%s has mode %04o; private keys must be owner-only (0600 or 0400)", label, perm)
 	}
-	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int(st.Uid) != os.Getuid() {
 		return nil, fmt.Errorf("%s must be owned by the current user", label)
 	}
-	return os.ReadFile(path)
+	raw, err := io.ReadAll(io.LimitReader(f, maxPrivateKeyFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", label, err)
+	}
+	if len(raw) > maxPrivateKeyFileBytes {
+		return nil, fmt.Errorf("%s is larger than %d bytes", label, maxPrivateKeyFileBytes)
+	}
+	return raw, nil
 }
 
 func parsePrivateKeyPEM(path, label string) (any, error) {
