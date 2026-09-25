@@ -25,4 +25,3 @@ ReadOnlyPaths=-/var/lib/macprovider/coordinator.db-wal
 ReadOnlyPaths=-/var/lib/macprovider/coordinator.db-shm
 InaccessiblePaths=/etc/macprovider
 InaccessiblePaths=-/opt/macprovider/coordinator.yaml
-InaccessiblePaths=-/var/lib/macprovider/coordinator.db

@@ -72,6 +72,14 @@ grep -qxF 'ExecStart=/opt/macprovider-stats/stats-billing-mirror --sqlite /var/l
   fail "billing mirror service must execute from deploy path"
 grep -qxF 'ReadOnlyPaths=/var/lib/macprovider/coordinator.db' "$SERVICE" ||
   fail "billing mirror service must read only the SQLite source"
+# The mirror's source DB must never also be inaccessible: systemd applies
+# InaccessiblePaths over ReadOnlyPaths, which hid the ledger and failed the
+# deploy's initial mirror run.
+source_db=$(sed -n 's/^ExecStart=.* --sqlite \([^ ]*\) .*/\1/p' "$SERVICE")
+[ -n "$source_db" ] || fail "stats billing mirror ExecStart must name its --sqlite source"
+if grep -qE "^InaccessiblePaths=-?${source_db}(-wal|-shm)?$" "$SERVICE"; then
+  fail "stats billing mirror source DB $source_db must not be listed in InaccessiblePaths"
+fi
 grep -qxF 'InaccessiblePaths=/etc/macprovider' "$SERVICE" ||
   fail "billing mirror service must not access coordinator secrets"
 grep -qxF 'OnUnitActiveSec=60s' "$TIMER" ||
