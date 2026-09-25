@@ -56,7 +56,9 @@ ROW_KEY=qwen2.5-0.5b-instruct
 ENGINE="${ENGINE:-llamacpp}"
 MLXLM_SNAPSHOT="${MLXLM_SNAPSHOT:-$LAB/models/mlx/Qwen2.5-0.5B-Instruct-4bit}"
 OLLAMA_TAG="${OLLAMA_TAG:-qwen2.5:0.5b}"
-export OLLAMA_MODELS="$LAB/ollama-models" OLLAMA_HOST=127.0.0.1:19130
+# 4096 tokens per llama.cpp slot and 8192 in Ollama and LM Studio leave room
+# for the ~2400-token disconnect_busy prompt (#1690 M9 review M1).
+export OLLAMA_MODELS="$LAB/ollama-models" OLLAMA_HOST=127.0.0.1:19130 OLLAMA_CONTEXT_LENGTH=8192
 # #1690 M9: the lab llmster home (its own HOME, see 1690-e2e/setup.sh) and oMLX.
 LMS_HOME="$LAB/lmshome"
 LMS_KEY=qwen2.5-0.5b-instruct
@@ -360,7 +362,7 @@ engine_offer_flags() {
 cmd_server_start() {
   case "$ENGINE" in
     llamacpp)
-      start_bg llama-server "$LLAMA_DIR/llama-server" -m "$LAB/models/$GGUF_FILE" --host 127.0.0.1 --port 19130 -c 8192 -np 4 -ngl 99 --jinja
+      start_bg llama-server "$LLAMA_DIR/llama-server" -m "$LAB/models/$GGUF_FILE" --host 127.0.0.1 --port 19130 -c 16384 -np 4 -ngl 99 --jinja
       wait_http http://127.0.0.1:19130/health ;;
     mlxlm)
       # mlx_lm.server lists its Hugging Face cache and fails the listing when
@@ -380,7 +382,7 @@ cmd_server_start() {
       # which is the served ref the CLI resolves.
       lms_lab daemon up >/dev/null
       lms_lab server start --port 19130 --bind 127.0.0.1 >/dev/null
-      lms_lab load "$LMS_KEY" -c 8192 -y >/dev/null
+      lms_lab load "$LMS_KEY" -c 16384 -y >/dev/null
       wait_http http://127.0.0.1:19130/api/v1/models ;;
     omlx)
       # --no-cache keeps oMLX from writing an SSD cache; its settings and

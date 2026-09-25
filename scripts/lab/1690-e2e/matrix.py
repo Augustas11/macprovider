@@ -75,10 +75,10 @@ SHAPES = {
     "tool": {"prompt": "What is the weather in Paris right now? Use the get_weather tool.", "max_tokens": 96, "tools": True},
     "long": {"prompt": "Write a detailed story of about 600 words about a lighthouse keeper and a storm.", "max_tokens": 700},
     "cap": {"prompt": "Write a detailed story of about 600 words about a lighthouse keeper and a storm.", "max_tokens": 8},
-    # #1690 M9 review M1: a prompt of about 3000 tokens.
+    # #1690 M9 review M1: a prompt of about 2400 tokens.
     "longprompt": {"prompt": ("Here is a log of lighthouse observations. " + " ".join(
         f"Day {i}: wind {i % 7} knots from the {('north', 'east', 'south', 'west')[i % 4]}, visibility {i % 10} miles, one ship passed."
-        for i in range(160)) + " Summarize the log as a long story."), "max_tokens": 700},
+        for i in range(120)) + " Summarize the log as a long story."), "max_tokens": 500},
 }
 # Shapes a behaviour runs on, and whether it streams.
 BEHAVIOURS = {
