@@ -836,6 +836,8 @@ struct ServeCommand: AsyncParsableCommand {
         /// row's model id must match before its tokenizer counts a cancelled
         /// stream (SPEC-015 §N.12 item 7). Nil otherwise.
         let siblingSnapshotSHA256: String?
+        /// The row's `model_revision`, which locates its verified artifact.
+        let siblingSnapshotRevision: String?
 
         init(
             state: String,
@@ -846,7 +848,8 @@ struct ServeCommand: AsyncParsableCommand {
             policyVersion: String? = nil,
             rowIdentity: String? = nil,
             modelSHA256: String? = nil,
-            siblingSnapshotSHA256: String? = nil
+            siblingSnapshotSHA256: String? = nil,
+            siblingSnapshotRevision: String? = nil
         ) {
             self.state = state
             self.releaseID = releaseID
@@ -857,6 +860,7 @@ struct ServeCommand: AsyncParsableCommand {
             self.rowIdentity = rowIdentity
             self.modelSHA256 = modelSHA256
             self.siblingSnapshotSHA256 = siblingSnapshotSHA256
+            self.siblingSnapshotRevision = siblingSnapshotRevision
         }
     }
 
@@ -1015,8 +1019,26 @@ struct ServeCommand: AsyncParsableCommand {
             policyVersion: catalog.value.policyVersion,
             rowIdentity: rowIdentity,
             modelSHA256: nil,
-            siblingSnapshotSHA256: row.modelSHA256
+            siblingSnapshotSHA256: row.modelSHA256,
+            siblingSnapshotRevision: row.modelRevision
         )
+    }
+
+    /// #1690 M9: where the catalog row's MLX artifact lives on this Mac, in
+    /// the order native serving verifies it: the durable-store copy, then the
+    /// Hugging Face snapshot macprovider's downloader writes (plain files).
+    static func loopbackSiblingSnapshotDirectories(_ resolved: AppConfig, trust: CatalogRuntimeTrust?) -> [URL] {
+        guard let modelID = LoopbackServeSelection.nonEmpty(resolved.modelCatalogModelID),
+              let revision = trust?.siblingSnapshotRevision,
+              let sha256 = trust?.siblingSnapshotSHA256
+        else { return [] }
+        let resolver = CachedModelArtifactResolver.forConfig(resolved)
+        var directories: [URL] = []
+        if let durable = try? resolver.durableStore.artifactURL(modelID: modelID, revision: revision, sha256: sha256) {
+            directories.append(durable)
+        }
+        directories.append(resolver.snapshotURL(modelID: modelID, revision: revision))
+        return directories
     }
 
     private static func isExistingDirectory(_ path: String) -> Bool {
@@ -2194,7 +2216,8 @@ struct ServeCommand: AsyncParsableCommand {
                         servedModelRef: loopbackServedRef,
                         origin: OllamaLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
                         catalogModelIDAlias: catalogModelIDAlias,
-                        siblingSnapshotSHA256: startupPreflight.catalogTrust?.siblingSnapshotSHA256
+                        siblingSnapshotSHA256: startupPreflight.catalogTrust?.siblingSnapshotSHA256,
+                        siblingSnapshotDirectories: Self.loopbackSiblingSnapshotDirectories(resolved, trust: startupPreflight.catalogTrust)
                     )
                 case .llamaCpp:
                     // The GGUF file llama.cpp serves is named by the operator
@@ -2205,7 +2228,8 @@ struct ServeCommand: AsyncParsableCommand {
                         origin: LlamaCppLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
                         selector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: nil, cliPath: nil),
                         catalogModelIDAlias: catalogModelIDAlias,
-                        siblingSnapshotSHA256: startupPreflight.catalogTrust?.siblingSnapshotSHA256
+                        siblingSnapshotSHA256: startupPreflight.catalogTrust?.siblingSnapshotSHA256,
+                        siblingSnapshotDirectories: Self.loopbackSiblingSnapshotDirectories(resolved, trust: startupPreflight.catalogTrust)
                     )
                 case .mlxLM:
                     // SPEC-010-R009: the MLX snapshot mlx_lm.server serves is
@@ -2226,7 +2250,8 @@ struct ServeCommand: AsyncParsableCommand {
                         servedModelRef: loopbackServedRef,
                         origin: LMStudioLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
                         catalogModelIDAlias: catalogModelIDAlias,
-                        siblingSnapshotSHA256: startupPreflight.catalogTrust?.siblingSnapshotSHA256
+                        siblingSnapshotSHA256: startupPreflight.catalogTrust?.siblingSnapshotSHA256,
+                        siblingSnapshotDirectories: Self.loopbackSiblingSnapshotDirectories(resolved, trust: startupPreflight.catalogTrust)
                     )
                 case .oMLX:
                     // SPEC-010-R009 (#1690 M9): the MLX snapshot oMLX serves

@@ -155,9 +155,16 @@ final class PinnedSnapshotTokenizer: @unchecked Sendable {
         return encode(text)
     }
 
+    /// Serializes encodes: swift-transformers does not document its
+    /// tokenizers as thread-safe, and concurrent cancels may count at once.
     private final class TokenizerBox: @unchecked Sendable {
+        private let lock = NSLock()
         private let tokenizer: any Tokenizer
         init(_ tokenizer: any Tokenizer) { self.tokenizer = tokenizer }
-        func count(_ text: String) -> Int { tokenizer.encode(text: text, addSpecialTokens: false).count }
+        func count(_ text: String) -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return tokenizer.encode(text: text, addSpecialTokens: false).count
+        }
     }
 }

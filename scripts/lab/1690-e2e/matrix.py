@@ -3,7 +3,7 @@
 invariants across the gateway and coordinator databases.
 
   matrix.py send --label L --engine E [--route pool:NAME|global] [--select SEL]
-                 [--shapes plain,tool,long,cap] [--behaviours normal,disconnect,slow,early_close,abort]
+                 [--shapes plain,tool,long,cap] [--behaviours normal,disconnect,disconnect_tool,slow,early_close,abort]
   matrix.py selection --label L --engine E [--pools A,M,O]
   matrix.py settle --label L [--timeout S] [--expect-refund] [--allow-hold]
 
@@ -79,7 +79,13 @@ SHAPES = {
     "longprompt": {"prompt": ("Here is a log of lighthouse observations. " + " ".join(
         f"Day {i}: wind {i % 7} knots from the {('north', 'east', 'south', 'west')[i % 4]}, visibility {i % 10} miles, one ship passed."
         for i in range(120)) + " Summarize the log as a long story."), "max_tokens": 500},
+    # #1690 M9 verification: tools offered but tool_choice "none", so the
+    # engine writes content; LM Studio streams no per-chunk logprobs with
+    # tools, so a cancel is counted with the catalog sibling tokenizer.
+    "toolnone": {"prompt": "Write a detailed story of about 600 words about a lighthouse keeper and a storm.", "max_tokens": 700,
+                 "tools": True, "tool_choice": "none"},
 }
+DISCONNECTS = ("disconnect", "disconnect_busy", "disconnect_tool")
 # Shapes a behaviour runs on, and whether it streams.
 BEHAVIOURS = {
     "normal": [("plain", False), ("plain", True), ("tool", False), ("tool", True), ("long", False), ("long", True), ("cap", False), ("cap", True)],
@@ -87,6 +93,7 @@ BEHAVIOURS = {
     # #1690 M9 review M1: the same disconnect with a long prompt while three
     # other long-prompt streams keep the engine busy (busy_load, recorded).
     "disconnect_busy": [("longprompt", True)],
+    "disconnect_tool": [("toolnone", True)],
     "busy_load": [("longprompt", True)],
     "slow": [("plain", True), ("long", True)],
     "early_close": [("long", False)],
@@ -115,6 +122,8 @@ def one(label, engine, route, select, shape, stream, behaviour, extra_headers=No
     body = {"model": MODEL, "messages": [{"role": "user", "content": f"{spec['prompt']} (ref {rid[:8]})"}], "max_tokens": spec["max_tokens"]}
     if spec.get("tools"):
         body["tools"] = TOOLS
+    if spec.get("tool_choice"):
+        body["tool_choice"] = spec["tool_choice"]
     if stream:
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}
@@ -176,7 +185,7 @@ def one(label, engine, route, select, shape, stream, behaviour, extra_headers=No
                     finish = ch.get("finish_reason") or finish
                 if c.get("usage"):
                     usage = c["usage"]
-                if behaviour in ("disconnect", "disconnect_busy") and content_events >= 4:
+                if behaviour in DISCONNECTS and content_events >= 4:
                     conn.sock.close()
                     out["disconnected_after_events"] = content_events
                     break
@@ -200,7 +209,7 @@ def one(label, engine, route, select, shape, stream, behaviour, extra_headers=No
     conn.close()
     out.update({"elapsed_s": round(time.time() - t0, 2), "finish_reason": finish, "done": done, "events": events,
                 "content_events": content_events, "content_len": len(text),
-                "received_tokens": token_count(text) if behaviour in ("disconnect", "disconnect_busy") else None,
+                "received_tokens": token_count(text) if behaviour in DISCONNECTS else None,
                 "content_sha256": hashlib.sha256(text.encode()).hexdigest()[:16] if text else None,
                 "tool_calls": [{"name": v["name"], "args_valid_json": valid_json(v["args"])} for v in tool_calls.values()],
                 "usage": {k: usage.get(k) for k in ("prompt_tokens", "completion_tokens")} if usage else None})
@@ -247,7 +256,7 @@ def cmd_send(a):
             if a.stream_only and not stream:
                 continue
             flag = LAB / "run" / "slow-stream"
-            slow_tap = behaviour in ("disconnect", "disconnect_busy") and a.engine != "native"
+            slow_tap = behaviour in DISCONNECTS and a.engine != "native"
             if slow_tap:
                 flag.touch()
             load = []
@@ -411,7 +420,7 @@ def evaluate(rec, ev, expect_refund=False):
     # SPEC-022 v0.2.2 R-5.6 (E2E-F4): a buyer that disconnected is debited the
     # smaller of the verified completion and what the gateway delivered to it,
     # with the verified prompt. Named so it is counted apart.
-    if not ok and rec["behaviour"] in ("disconnect", "disconnect_busy") and debit[0] == want[0] and 0 < debit[1] < want[1]:
+    if not ok and rec["behaviour"] in DISCONNECTS and debit[0] == want[0] and 0 < debit[1] < want[1]:
         name, ok = "debit_eq_settled[buyer-delivered-bound]", True
     out.append((name, ok, {"debit": debit, "settled": want, "basis": basis,
                                                                   "gateway": {"status": (res or {}).get("status"), "token_source": (use or {}).get("token_source"), "outcome": (use or {}).get("outcome")}}))
@@ -436,7 +445,7 @@ def evaluate(rec, ev, expect_refund=False):
     if rec["behaviour"] == "abort" and sum(debit) > 0:
         ok = False
         why["note"] = "aborted before response headers but debited"
-    if rec["behaviour"] in ("disconnect", "disconnect_busy"):
+    if rec["behaviour"] in DISCONNECTS:
         why["received_events"] = rec.get("content_events")
         if billed_c >= rec["max_tokens"]:
             ok = False
@@ -449,9 +458,9 @@ def evaluate(rec, ev, expect_refund=False):
                                                   "content_events": rec.get("content_events"), "max_tokens": rec["max_tokens"]}))
     if delivered:
         out.append(("delivered_not_free", sum(debit) > 0 or expect_refund, {"debit": debit, "finish": rec.get("finish_reason"), "expect_refund": expect_refund}))
-    if rec["behaviour"] == "disconnect" and (rec.get("content_events") or 0) > 0:
+    if rec["behaviour"] in ("disconnect", "disconnect_tool") and (rec.get("content_events") or 0) > 0:
         out.append(("delivered_not_free", sum(debit) > 0 or expect_refund, {"debit": debit, "received_events": rec.get("content_events"), "note": "partial stream"}))
-    if rec["behaviour"] == "disconnect" and rec["engine"] != "native" and rec["route"].startswith("pool:") and rec.get("status") == 200 \
+    if rec["behaviour"] in ("disconnect", "disconnect_tool") and rec["engine"] != "native" and rec["route"].startswith("pool:") and rec.get("status") == 200 \
             and (rec.get("content_events") or 0) > 0:
         out.append(("disconnect_prefix_billed", *disconnect_prefix(rec, ev, debit, payable)))
     if rec["behaviour"] == "disconnect_busy" and rec.get("status") == 200 and (rec.get("content_events") or 0) > 0:

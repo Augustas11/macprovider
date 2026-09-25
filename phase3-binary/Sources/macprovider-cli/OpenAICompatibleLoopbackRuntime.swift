@@ -828,9 +828,13 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// #1690 M9: the pinned tokenizer a cancelled stream's delivered content
     /// is counted with when the upstream attests no per-chunk count. It is
     /// loaded when serving starts from a hash-verified snapshot: the served
-    /// one (MLX runtimes) or, for a GGUF runtime, the catalog model id's local
-    /// MLX snapshot whose snapshot-manifest digest equals the signed catalog
-    /// row's (`siblingSnapshotSHA256`). Nil when neither is available.
+    /// one (MLX runtimes) or, for a GGUF runtime, the catalog row's verified
+    /// plain MLX artifact directory (`siblingSnapshotDirectories`, the
+    /// durable-store copy then the macprovider-downloaded Hugging Face
+    /// snapshot, as native serving verifies them) whose snapshot-manifest
+    /// digest equals the signed row's (`siblingSnapshotSHA256`). A
+    /// symlinked huggingface_hub cache is refused, as native serving refuses
+    /// it. Nil when none is available.
     private let recountTokenizer: Task<PinnedSnapshotTokenizer?, Never>?
     private var providerStatus: ProviderStatus?
     private var registrationCounter: Int = 0
@@ -856,7 +860,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         lmStudioBinding: LMStudioLoopbackServeModel.Binding? = nil,
         upstreamModelID: String? = nil,
         siblingSnapshotSHA256: String? = nil,
-        siblingTokenizerDirectory: (String) -> URL? = ModelRuntime.localHuggingFaceSnapshot(for:),
+        siblingSnapshotDirectories: [URL] = [],
         pinRecountTokenizer: @escaping @Sendable (MLXSnapshotIdentity) async -> PinnedSnapshotTokenizer? = { snapshot in
             await PinnedSnapshotTokenizer.load(snapshot: snapshot)
         },
@@ -908,10 +912,16 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             self.recountTokenizer = Task.detached(priority: .utility) { await pinRecountTokenizer(mlxSnapshot) }
         } else {
             let expected = siblingSnapshotSHA256.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-            if let expected, !expected.isEmpty, let directory = self.catalogModelIDAlias.flatMap(siblingTokenizerDirectory) {
+            if let expected, !expected.isEmpty, !siblingSnapshotDirectories.isEmpty {
                 self.recountTokenizer = Task.detached(priority: .utility) {
-                    guard let sibling = try? MLXSnapshotIdentity.compute(directory: directory), sibling.digest == expected else { return nil }
-                    return await pinRecountTokenizer(sibling)
+                    // The first candidate whose canonical snapshot-manifest
+                    // digest (regular files only, as the catalog hash) equals
+                    // the signed row's is pinned.
+                    for directory in siblingSnapshotDirectories {
+                        guard let sibling = try? MLXSnapshotIdentity.compute(directory: directory), sibling.digest == expected else { continue }
+                        return await pinRecountTokenizer(sibling)
+                    }
+                    return nil
                 }
             } else {
                 self.recountTokenizer = nil
@@ -947,6 +957,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         selector: BYOMLlamaCppArtifactSelector,
         catalogModelIDAlias: String? = nil,
         siblingSnapshotSHA256: String? = nil,
+        siblingSnapshotDirectories: [URL] = [],
         httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
         cache: BYOMArtifactDigestCache = BYOMArtifactDigestCache(url: BYOMArtifactDigestCache.defaultURL()),
         deadline: Date? = nil
@@ -982,6 +993,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             httpClient: client,
             digestResolver: resolver,
             siblingSnapshotSHA256: siblingSnapshotSHA256,
+            siblingSnapshotDirectories: siblingSnapshotDirectories,
             deadline: deadline
         )
     }
@@ -1105,6 +1117,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         modelsRoot: URL = BYOMLMStudioModelStore.defaultRoot(),
         catalogModelIDAlias: String? = nil,
         siblingSnapshotSHA256: String? = nil,
+        siblingSnapshotDirectories: [URL] = [],
         httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
         cache: BYOMArtifactDigestCache = BYOMArtifactDigestCache(url: BYOMArtifactDigestCache.defaultURL()),
         deadline: Date? = nil
@@ -1150,6 +1163,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             digestResolver: resolver,
             lmStudioBinding: binding,
             siblingSnapshotSHA256: siblingSnapshotSHA256,
+            siblingSnapshotDirectories: siblingSnapshotDirectories,
             deadline: deadline
         )
     }
@@ -1531,14 +1545,6 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         return stream.cancelledResult(upstreamPromptTokens: promptTokens)
     }
 
-    /// The upstream's `usage.prompt_tokens` for this request, from a
-    /// non-streamed one-token completion of the same body. The template and
-    /// tokenizer are the runtime's own, so it is the prompt count the
-    /// cancelled generation used. `tools` and `tool_choice` stay in the body
-    /// because the chat template renders them into the prompt. A 4xx on a
-    /// body with `response_format` is retried once without it: it constrains
-    /// sampling, not the templated prompt, and some engines refuse a format
-    /// with a one-token cap. Nil on any failure; the caller bounds the time.
     /// The prompt count, only while the runtime is still bound to the
     /// identity it served the request under (review CODE MEDIUM): the file or
     /// snapshot is unchanged, mlx_lm.server / oMLX still list the snapshot,
@@ -1554,12 +1560,25 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         return await countUpstreamPromptTokens(request)
     }
 
+    /// The upstream's `usage.prompt_tokens` for this request, from a
+    /// non-streamed one-token completion of the same body. The template and
+    /// tokenizer are the runtime's own, so it is the prompt count the
+    /// cancelled generation used. `tools` and `tool_choice` stay in the body
+    /// because the chat template renders them into the prompt. A 4xx on a
+    /// body with `response_format` is retried once without it: it constrains
+    /// sampling, not the templated prompt, and some engines refuse a format
+    /// with a one-token cap. Nil on any failure; the caller bounds the time
+    /// and cancels this task at its deadline, which cancels the URLSession
+    /// task; the socket's own timers are also short (`promptCountTimeoutSeconds`)
+    /// so an abandoned call never lingers.
     private func countUpstreamPromptTokens(_ request: ChatCompletionRequest) async -> Int? {
         guard let body = try? Self.encodePromptCountRequest(request, upstreamModelName: upstreamModelName) else { return nil }
         let retryBody = request.promptSource.responseFormat.map { $0 != .null } == true
             ? try? Self.encodePromptCountRequest(request, upstreamModelName: upstreamModelName, dropResponseFormat: true)
             : nil
-        let client = httpClient
+        let client: any BYOMDiscoveryHTTPClient = httpClient is LoopbackServeHTTPClient
+            ? LoopbackServeHTTPClient(requestTimeout: Self.promptCountTimeoutSeconds, resourceTimeout: Self.promptCountTimeoutSeconds)
+            : httpClient
         let url = chatCompletionsURL
         func count(_ body: Data) async -> (status: Int, tokens: Int?)? {
             guard let response = try? await client.post(
@@ -1583,6 +1602,10 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// cancel detection (at most one 100 ms watchdog tick) and the receipt
     /// signing stays well inside it.
     static let cancelUsageBudgetSeconds: Double = 1.25
+
+    /// URLSession request and resource timeouts for the post-cancel prompt
+    /// count call, just above `cancelUsageBudgetSeconds`.
+    static let promptCountTimeoutSeconds: TimeInterval = 2
 
     /// Runs `work` and returns its value, or nil at `deadline` without
     /// waiting for it: the work runs in an unstructured task, so a
@@ -1694,9 +1717,10 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             ("frequency_penalty", source.frequencyPenalty),
             ("response_format", source.responseFormat),
             // An empty or function-less `tools` is no tools (the enabled-tools
-            // rule of ModelRuntime.hasEnabledTools); it is not forwarded.
+            // rule of ModelRuntime.hasEnabledTools); it is not forwarded, and
+            // neither is a `tool_choice` that would name no tool.
             ("tools", ModelRuntime.hasEnabledTools(source.tools) ? source.tools : nil),
-            ("tool_choice", source.toolChoice),
+            ("tool_choice", ModelRuntime.hasEnabledTools(source.tools) ? source.toolChoice : nil),
             ("logit_bias", source.logitBias),
         ]
         for (key, value) in passthrough {

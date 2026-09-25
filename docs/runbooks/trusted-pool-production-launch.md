@@ -493,10 +493,17 @@ settled, so traffic stops and holds drain first:
 4b. Manifest-history check before the coordinator rollback (read-only). It
    reads every `manifest_accepted` event in the coordinator database
    (`storage.db_path`, as in step 0), decodes each manifest snapshot, and
-   lists the policy-core encoding and the runtime classes it carries; each
-   snapshot holds its pool's whole accepted policy history. It fails
+   lists the policy-core encoding and every `runtime_allowlist` string it
+   carries (a strict decode of the snapshot, not a search for known names);
+   each snapshot holds its pool's whole accepted policy history. It fails
    closed: a target tier other than the three in the table, an unreadable
-   database, an undecodable snapshot, or no `VERDICT` line means STOP.
+   database, an undecodable snapshot, a runtime class outside `CLASSES`
+   (no known build replays it), or no `VERDICT` line means STOP.
+   The manifest history is the only coordinator state an older build
+   decodes strictly at start with a runtime class in it. Other tables that
+   store `lmstudio_loopback` or `omlx_loopback` strings (route snapshots,
+   model admission events) either belong to a pool whose manifest allowlist
+   this check already covers or are read leniently, so they need no check.
    On Pearl, with the tier of the rollback target:
 
    ```bash
@@ -512,6 +519,55 @@ settled, so traffic stops and holds drain first:
    }
    V1 = b"macprovider/spec042/manifest-snapshot/v1"
    V2 = b"macprovider/spec042/manifest-snapshot/v2"
+
+   def allowlists(snap, tagged, event_id):
+       # Strict decode of the snapshot (phase4-coordinator/internal/
+       # poolmanifest/persist.go): every runtime_allowlist string of every
+       # accepted v2 policy core.
+       pos = len(V2 if tagged else V1)
+       def take(n):
+           nonlocal pos
+           if n < 0 or pos + n > len(snap):
+               raise ValueError(f"event {event_id}: truncated manifest snapshot")
+           pos += n
+           return snap[pos - n:pos]
+       u32 = lambda: int.from_bytes(take(4), "big")
+       u64 = lambda: take(8)
+       blob = lambda: take(u32())
+       def boolean():
+           if take(1) not in (b"\x00", b"\x01"):
+               raise ValueError(f"event {event_id}: bad boolean in manifest snapshot")
+       def signatures():
+           for _ in range(u32()):
+               blob(); blob()
+       found = set()
+       blob(); blob(); blob(); blob()                 # identity core, root issuer key
+       for _ in range(u32()):                         # authority log
+           blob(); u64(); blob()
+           for _ in range(u32()):
+               blob(); blob()
+           u64(); u64(); u64()
+           for _ in range(u32()):
+               u64()
+           u64(); signatures()
+       for _ in range(u32()):                         # accepted policies
+           encoding = take(1)[0] if tagged else 0
+           if encoding > 2:
+               raise ValueError(f"event {event_id}: unknown policy core encoding {encoding}")
+           blob(); u64(); blob(); u64()
+           for _ in range(u32()):
+               blob()
+           blob(); blob(); boolean(); blob(); u64(); blob(); blob(); u64()
+           blob(); boolean(); blob(); blob(); blob(); boolean(); u64(); u64()
+           if encoding == 2:
+               for _ in range(u32()):
+                   found.add(blob().decode("utf-8"))
+               for _ in range(u32()):
+                   blob(); blob()
+           signatures(); u64()
+       if pos != len(snap):
+           raise ValueError(f"event {event_id}: trailing bytes in manifest snapshot")
+       return found
    try:
        db, tier = sys.argv[1], sys.argv[2]
        if tier not in ACCEPTS:
@@ -542,15 +598,16 @@ settled, so traffic stops and holds drain first:
                v2 += 1
            elif not snap.startswith(V1):
                raise ValueError(f"event {event_id}: unknown manifest snapshot format")
-           for c in CLASSES:
-               if len(c).to_bytes(4, "big") + c.encode() in snap:
-                   seen.add(c)
+           seen |= allowlists(snap, snap.startswith(V2), event_id)
+       unknown = sorted(seen - set(CLASSES))
        accepts = ACCEPTS[tier]
        blockers = sorted(seen) if accepts is None else sorted(seen - accepts)
        if accepts is None and v2:
            blockers.insert(0, "policy-core v2 snapshots")
        print(f"manifests: {len(rows)} (v2 snapshots: {v2})")
        print(f"runtime classes in history: {', '.join(sorted(seen)) or 'none'}")
+       if unknown:
+           print(f"unknown runtime classes (no known build replays them): {', '.join(unknown)}")
        print(f"target tier: {tier}; cannot replay: {', '.join(blockers) or 'nothing'}")
        print("VERDICT: " + ("replayable" if not blockers else "STOP"))
        sys.exit(0 if not blockers else 1)

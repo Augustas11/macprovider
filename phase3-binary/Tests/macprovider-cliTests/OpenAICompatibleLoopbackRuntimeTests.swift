@@ -579,6 +579,25 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         XCTAssertEqual(tool.cancelledResult(upstreamPromptTokens: 12, recountedCompletionTokens: 1).settlementDisposition, .usageUnattested)
     }
 
+    /// A huggingface_hub-shaped cache: `snapshots/<rev>/<file>` symlinks
+    /// into `blobs/`, holding the same bytes as `source`.
+    private func makeHubCacheSnapshot(copying source: URL) throws -> URL {
+        let fm = FileManager.default
+        let repo = fm.temporaryDirectory.appendingPathComponent("hub-\(UUID().uuidString)/models--mlx-community--Gemma-3-270m-4bit")
+        let blobs = repo.appendingPathComponent("blobs")
+        let snapshot = repo.appendingPathComponent("snapshots/0123456789abcdef")
+        try fm.createDirectory(at: blobs, withIntermediateDirectories: true)
+        try fm.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        addTeardownBlock { try? fm.removeItem(at: repo.deletingLastPathComponent()) }
+        for name in try fm.contentsOfDirectory(atPath: source.path) {
+            let data = try Data(contentsOf: source.appendingPathComponent(name))
+            let blob = Data(SHA256.hash(data: data)).map { String(format: "%02x", $0) }.joined()
+            try data.write(to: blobs.appendingPathComponent(blob))
+            try fm.createSymbolicLink(atPath: snapshot.appendingPathComponent(name).path, withDestinationPath: "../../blobs/" + blob)
+        }
+        return snapshot.resolvingSymlinksInPath().standardizedFileURL
+    }
+
     private func makeSnapshotDirectory(_ name: String) throws -> URL {
         let parent = FileManager.default.temporaryDirectory.appendingPathComponent("\(name)-\(UUID().uuidString)")
         let directory = parent.appendingPathComponent("snapshot")
@@ -738,21 +757,29 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         XCTAssertEqual(fast, 7)
     }
 
-    // #1690 M9 review M3 and CODE HIGH: without per-chunk counts (an Ollama
-    // that ignores logprobs, LM Studio with tools) the delivered content is
-    // counted with the catalog sibling tokenizer, pinned only when the local
-    // snapshot's digest equals the signed row's; else unattested.
+    // #1690 M9 review M3 and CODE HIGH, verification MEDIUM: without
+    // per-chunk counts (an Ollama that ignores logprobs, LM Studio with tools)
+    // the delivered content is counted with the catalog sibling tokenizer,
+    // pinned from the first verified plain artifact directory (durable store,
+    // then macprovider's HF snapshot) whose canonical digest equals the signed
+    // row's. A huggingface_hub cache (snapshot files symlinked into blobs/)
+    // is refused, as native serving refuses it; else unattested.
     func testCancelWithoutPerChunkCountsFallsBackToTheVerifiedSiblingTokenizer() async throws {
         let store = try makeStore()
         let sibling = try makeSnapshotDirectory("sibling")
         let digest = try MLXSnapshotIdentity.compute(directory: sibling).digest
-        let cases: [(URL?, String?, Bool, String)] = [
-            (sibling, digest, true, "verified sibling"),
-            (sibling, String(repeating: "0", count: 64), false, "sibling digest differs from the catalog row"),
-            (nil, digest, false, "no local sibling"),
-            (sibling, nil, false, "no catalog digest"),
+        let other = try makeSnapshotDirectory("other")
+        try Data("other".utf8).write(to: other.appendingPathComponent("README.md"))
+        let hubCache = try makeHubCacheSnapshot(copying: sibling)
+        let cases: [([URL], String?, Bool, String)] = [
+            ([sibling], digest, true, "verified sibling"),
+            ([other, sibling], digest, true, "first candidate differs, second verifies"),
+            ([sibling], String(repeating: "0", count: 64), false, "sibling digest differs from the catalog row"),
+            ([], digest, false, "no local sibling"),
+            ([sibling], nil, false, "no catalog digest"),
+            ([hubCache], digest, false, "huggingface_hub cache with symlinks into blobs/"),
         ]
-        for (directory, expected, attested, label) in cases {
+        for (directories, expected, attested, label) in cases {
             let client = LogprobsStreamingLoopbackClient(promptTokens: 35, logprobs: false)
             let runtime = try OpenAICompatibleLoopbackRuntime(
                 servedModelRef: "ollama:gemma3:270m",
@@ -761,7 +788,7 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
                 httpClient: client,
                 digestResolver: makeResolver(store),
                 siblingSnapshotSHA256: expected,
-                siblingTokenizerDirectory: { _ in directory },
+                siblingSnapshotDirectories: directories,
                 pinRecountTokenizer: { snapshot in PinnedSnapshotTokenizer(snapshot: snapshot) { $0.count * 3 } }
             )
             let request = try makeRequest(model: "ollama:gemma3:270m", maxTokens: 100_000)
@@ -850,6 +877,48 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         )) as? [String: Any])
         XCTAssertNil(upstream["tools"])
         XCTAssertEqual(upstream["logprobs"] as? Bool, true)
+    }
+
+    // #1690 M9 verification LOW: at its deadline `bounded` returns nil and
+    // cancels the work's task, so a pending prompt-count POST (URLSession
+    // honours task cancellation) is torn down rather than left running.
+    func testBoundedCancelsItsWorkAtTheDeadline() async throws {
+        let cancelled = CancelFlag()
+        let start = Date()
+        let value: Int? = await OpenAICompatibleLoopbackRuntime.bounded(until: Date().addingTimeInterval(0.2)) {
+            await withTaskCancellationHandler {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                return 1
+            } onCancel: {
+                cancelled.set()
+            }
+        }
+        XCTAssertNil(value)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+        for _ in 0..<50 where !cancelled.isSet { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertTrue(cancelled.isSet)
+        XCTAssertLessThan(OpenAICompatibleLoopbackRuntime.cancelUsageBudgetSeconds, OpenAICompatibleLoopbackRuntime.promptCountTimeoutSeconds)
+    }
+
+    // #1690 M9 verification LOW: a `tool_choice` beside dropped (empty)
+    // tools names no tool; it is dropped with them. With real tools it stays.
+    func testToolChoiceIsDroppedWithDroppedTools() throws {
+        func upstream(tools: [Any]) throws -> [String: Any] {
+            let body: [String: Any] = [
+                "model": "lmstudio:tiny", "messages": [["role": "user", "content": "hi"]], "max_tokens": 4, "stream": true,
+                "tools": tools, "tool_choice": "auto",
+            ]
+            let request = try ChatCompletionRequest.parse(data: try JSONSerialization.data(withJSONObject: body))
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: OpenAICompatibleLoopbackRuntime.encodeUpstreamRequest(
+                request, upstreamModelName: "tiny", logprobsPerToken: false
+            )) as? [String: Any])
+        }
+        let dropped = try upstream(tools: [])
+        XCTAssertNil(dropped["tools"])
+        XCTAssertNil(dropped["tool_choice"])
+        let kept = try upstream(tools: [["type": "function", "function": ["name": "f", "parameters": ["type": "object"]]]])
+        XCTAssertNotNil(kept["tools"])
+        XCTAssertEqual(kept["tool_choice"] as? String, "auto")
     }
 
     // #1690 M9 review L6: tools stay in the count body (the template renders

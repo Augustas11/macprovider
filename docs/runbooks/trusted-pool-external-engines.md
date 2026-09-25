@@ -158,16 +158,28 @@ state it (SPEC-015 §N.12 item 7):
 | llama.cpp | per-chunk `timings_per_token` | the same timings |
 | Ollama, LM Studio | per-chunk `logprobs` token list (the CLI asks for it) | the engine's own count for the same request, asked once after the cancel |
 | `mlx_lm.server`, oMLX | the served snapshot's tokenizer over the delivered text | the engine's own count, as above |
-| any engine whose stream carries no per-chunk count (LM Studio with tools, an Ollama that ignores `logprobs`) | the tokenizer of the catalog model's local MLX snapshot over the delivered text, used only when that snapshot's digest equals the signed catalog row's | the engine's own count, as above |
+| any engine whose stream carries no per-chunk count (LM Studio with tools, an Ollama that ignores `logprobs`) | the tokenizer of the catalog model's prepared MLX artifact over the delivered text, used only when that artifact's digest equals the signed catalog row's | the engine's own count, as above |
 
 The coordinator waits 2 s for the cancelled frame, so the CLI gives the
 prompt count and the tokenizer count 1.25 s together and loads the tokenizer
 when `serve` starts. If anything is late or fails (an engine busy with other
 requests, no local tokenizer, a streamed tool call), the partial stream is
 left unsigned: it is not billed to the buyer and not credited to you. It is
-never billed wrong. Keep the catalog model's MLX snapshot in the local
-Hugging Face cache (`macprovider-cli models prepare`) so GGUF engines have a
-tokenizer to fall back on; the honest-bug usage check uses the same snapshot.
+never billed wrong.
+
+The tokenizer count counts the delivered visible text only. Reasoning text
+and streamed tool-call arguments are not in it, so the signed completion
+count can be lower than what the engine generated; the difference is in the
+buyer's favour.
+
+GGUF engines fall back on the catalog model's MLX artifact, so prepare it
+(`macprovider-cli models prepare <key>`). The CLI looks for it where native
+serving does: the verified model-artifact store first, then the snapshot
+macprovider downloaded into the Hugging Face cache. It uses the first one whose
+digest (every file in the directory, plain files only) equals the signed
+catalog row's. A snapshot written by `huggingface-cli` or `hf download`, whose
+files are symlinks into `blobs/`, is not used, because native serving does not
+use it either.
 
 ## Troubleshooting
 

@@ -26,9 +26,16 @@ def copy(name):
     path = os.path.join(d, name)
     if os.path.exists(path):
         os.remove(path)
-    s = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
     t = sqlite3.connect(path)
-    s.backup(t)
+    try:
+        s = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+        s.backup(t)
+    except sqlite3.OperationalError:
+        # a stopped, checkpointed WAL database opens read-only only as immutable
+        if os.path.exists(src + "-wal"):
+            raise
+        s = sqlite3.connect(f"file:{src}?mode=ro&immutable=1", uri=True)
+        s.backup(t)
     s.close()
     return t
 def classes(payload):
@@ -49,6 +56,30 @@ row = t.execute("SELECT id, payload_json FROM trustpool_events WHERE event_type 
 p = json.loads(row[1]); p["manifest_snapshot"] = base64.b64encode(b"not-a-snapshot").decode()
 t.execute("UPDATE trustpool_events SET payload_json = ? WHERE id = ?", (json.dumps(p), row[0]))
 t.commit(); t.close()
+# an allowlist string outside the known vocabulary (same length, so the
+# snapshot stays well-formed) in the history an m8 target would replay
+t = copy("unknown-class.db")
+done = False
+for event_id, payload in t.execute("SELECT id, payload_json FROM trustpool_events WHERE event_type = 'manifest_accepted' ORDER BY id").fetchall():
+    p = json.loads(payload); snap = base64.b64decode(p["manifest_snapshot"])
+    for c in ("llamacpp_loopback", "mlxlm_loopback", "ollama_loopback"):
+        token = len(c).to_bytes(4, "big") + c.encode()
+        if token in snap:
+            fake = "x" * (len(c) - len("_loopback")) + "_loopback"
+            p["manifest_snapshot"] = base64.b64encode(snap.replace(token, len(c).to_bytes(4, "big") + fake.encode())).decode()
+            t.execute("UPDATE trustpool_events SET payload_json = ? WHERE id = ?", (json.dumps(p), event_id))
+            done = True
+            break
+    if done:
+        break
+assert done, "no llamacpp/mlxlm/ollama allowlist in the lab history"
+t.commit(); t.close()
+# a snapshot with trailing bytes after a well-formed body
+t = copy("trailing.db")
+row = t.execute("SELECT id, payload_json FROM trustpool_events WHERE event_type = 'manifest_accepted' ORDER BY id LIMIT 1").fetchone()
+p = json.loads(row[1]); p["manifest_snapshot"] = base64.b64encode(base64.b64decode(p["manifest_snapshot"]) + b"\x00").decode()
+t.execute("UPDATE trustpool_events SET payload_json = ? WHERE id = ?", (json.dumps(p), row[0]))
+t.commit(); t.close()
 # a database without any trust-pool history
 t = sqlite3.connect(os.path.join(d, "empty.db")); t.execute("CREATE TABLE IF NOT EXISTS x (y)"); t.commit(); t.close()
 PY
@@ -61,6 +92,8 @@ declare -a CASES=(
   "m8-classes-only-v1-only|$D/m8-only.db|v1-only|STOP 1"
   "no-trustpool-history|$D/empty.db|v1-only|replayable 0"
   "unknown-snapshot-format|$D/corrupt.db|m9|STOP 2"
+  "unknown-runtime-class-m9|$D/unknown-class.db|m9|STOP 1"
+  "trailing-snapshot-bytes|$D/trailing.db|m9|STOP 2"
   "unknown-tier|$D/full.db|m10|STOP 2"
   "missing-database|$D/does-not-exist.db|m9|STOP 2"
 )
