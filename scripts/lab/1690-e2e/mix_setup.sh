@@ -7,13 +7,14 @@
 #
 #   mix_setup.sh A   new coordinator + origin/main gateway -> LAB .../e2e-mixA
 #   mix_setup.sh B   origin/main coordinator + new gateway -> LAB .../e2e-mixB
+# MIX_LAB overrides the lab dir (a fresh pairing next to kept evidence).
 #
 # origin/main binaries come from $SRC_LAB/bin-main (built from a detached
 # origin/main worktree). Prints the LAB to use with run_matrix.sh.
 set -euo pipefail
 SRC_LAB="${SRC_LAB:-/Users/a1/lab-1690-m6/e2e}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-case "${1:-}" in A) LAB=/Users/a1/lab-1690-m6/e2e-mixA ;; B) LAB=/Users/a1/lab-1690-m6/e2e-mixB ;; *) echo "usage: mix_setup.sh A|B" >&2; exit 2 ;; esac
+case "${1:-}" in A) LAB=${MIX_LAB:-/Users/a1/lab-1690-m6/e2e-mixA} ;; B) LAB=${MIX_LAB:-/Users/a1/lab-1690-m6/e2e-mixB} ;; *) echo "usage: mix_setup.sh A|B" >&2; exit 2 ;; esac
 export LAB
 "$HERE/setup.sh" >/dev/null
 for f in secrets.json static-feed.ed25519 tier2.priv tier2.pub; do cp -p "$SRC_LAB/keys/$f" "$LAB/keys/$f"; done
