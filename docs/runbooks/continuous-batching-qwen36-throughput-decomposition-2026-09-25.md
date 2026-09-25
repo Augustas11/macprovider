@@ -164,6 +164,52 @@ Fix, SPEC-003 v0.11.4: the provider LaunchAgent uses `ProcessType` `Standard`
 in all three sources: `install.sh`, `launchd-plist-template.plist` and the
 signed compatibility-set template that auto-update renders.
 
+## Final branch build, clean run with live paused
+
+Binary `39733dde7e3dc378`: in-place KV with allocator-block growth, the decode
+window while prefilling, and no prefill logits. The live `:8080` provider was
+paused for the whole run. Data:
+[`data/cb-perf-2026-09-25/clean-final/`](data/cb-perf-2026-09-25/clean-final/).
+
+Before this run, lab figures taken while live served traffic at `Standard`
+priority were depressed by GPU sharing (for example, 1.5k × 4 measured 40.5
+instead of 64). Lab benchmarks now pause live.
+
+### Steady-state aggregate decode (tok/s)
+
+| Prompt × rows | Before the milestone | Final |
+| --- | --- | --- |
+| 32 × 4 | 54.8 | 66.3 |
+| 1.5k × 2 | 36.8 | 54.3 |
+| 1.5k × 4 | 43.2 | 64.9 |
+| 1.5k × 8 | — | **76.3** |
+| 1.5k × 1 serial | 37 | 37.3 |
+
+### An active row while long prompts prefill (`stall.py`)
+
+| Arriving prompts | Base (one token per chunk) | Final (8-token window) | Long-prompt first token |
+| --- | --- | --- | --- |
+| 1 × 4k | 3.48 tok/s | **6.17 tok/s** | 16.4 s → 18.1 s |
+| 3 × 4k | 1.64 tok/s | **4.44 tok/s** | last: 47.0 s → 52.6 s |
+| 1 × 8k | — | 5.18 tok/s | 35.5 s |
+
+The maximum inter-token gap stays at about 2 s, which is one 512-token prefill
+chunk. Smaller gaps would need smaller chunks.
+
+### End to end (128 output tokens)
+
+This is still prefill-bound: 1.5k × 4 aggregates 19.5 tok/s and 4k × 4
+aggregates 9.2. Prefill is compute-bound at about 300 tok/s, so short-output,
+long-prompt traffic is limited by prefill, not by batching.
+
+### Correctness
+
+- `isolate_q36`: 5 of 5 scenarios, every row exact.
+- `crossrow_q36`: n=2 and n=4 fully exact; n=8 has 7 of 8 rows exact, with 0
+  leaks.
+- Failures: 0 forward or prefill failures.
+- Startup probes: parity established, batched isolation proven.
+
 ## Next
 
 Prefill scheduling:
