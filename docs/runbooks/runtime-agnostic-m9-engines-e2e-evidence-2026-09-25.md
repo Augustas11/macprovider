@@ -126,6 +126,40 @@ lab tokenizer's count of what the buyer got (text never stored).
   wrote to it, the provider keeps the verified prefix. `matrix.py` counts it
   as `debit_eq_settled[buyer-delivered-bound]`.
 
+## Review round: disconnect re-run D2 (`9e518db5`)
+
+After the review fixes (the 1.25 s cancel budget, the pinned and
+catalog-verified recount tokenizer, the binding re-check before the prompt
+count), `scripts/lab/1690-e2e/disconnect_rerun.sh D2` re-ran only the
+disconnect cases on the five external engines, gateway pin on, twice each:
+`disconnect` (short prompt, idle engine) and `disconnect_busy` (a prompt of
+about 2400 tokens, disconnected after 4 content events while three other
+long-prompt streams kept the engine busy; its check
+`disconnect_billed_or_free` accepts an exact bill or a fully free cancel and
+nothing else). Result: 5 of 5 labels PASS, 280 of 280 checks, 20 of 20
+disconnects billed exactly (none fell back to free), 0 held.
+
+| Engine | `disconnect` debit / verified prefix | `disconnect_busy` debit / verified prefix | Busy received tokens |
+|---|---|---|---|
+| llama.cpp | [61,4]/[61,4], [59,4]/[59,4] | [2274,4]/[2709,4] x2 | 4, 4 |
+| `mlx_lm.server` | [59,4]/[59,4] x2 | [2274,4]/[2708,4], [2274,3]/[2708,4] | 4, 4 |
+| Ollama | [59,4]/[59,4], [61,4]/[61,4] | [2274,4]/[2709,4], [2274,4]/[2710,4] | 4, 4 |
+| LM Studio | [60,4]/[60,4], [61,4]/[61,4] | [2274,4]/[2709,4], [2274,3]/[2709,4] | 4, 4 |
+| oMLX | [60,125]/[60,125], [59,124]/[59,124] | [2274,25]/[2709,25] x2 | 25, 25 |
+
+- Every busy cancel was answered inside the coordinator's 2 s wait: the
+  prompt count on a busy engine returned within the 1.25 s budget, and the
+  pinned tokenizer was loaded at serve start.
+- The busy prompt debit (2274) is below the attested prompt (about 2709):
+  that is the coordinator's independent prompt bound (E2E-F1, pre-existing),
+  which only lowers the buyer debit. A completion debit one token below the
+  prefix is the SPEC-022 R-5.6 gateway-to-buyer bound.
+- The first attempt (D1) stopped at llama.cpp with 413
+  `context_length_exceeded` (2048 tokens per slot); the rig now loads
+  4096 per slot and the busy prompt is about 2400 tokens.
+- The free branch (a prompt count or tokenizer that is late) is covered by
+  unit tests; no engine was slow enough in the lab to take it.
+
 ## Upstream per-chunk usage, probed on the Studio
 
 | Engine | Stream carries per chunk | Prompt tokens before the end | Used for a cancelled stream |
