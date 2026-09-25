@@ -86,7 +86,7 @@ def make_capture(root: Path) -> Path:
         "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
         "operator_role": "pearl-actor",
         "operator_identity": "operator-person-name",
-        "hardware_profile": "Mac Studio M3 Ultra 256GB",
+        "hardware_profile": "mac-studio-m3-ultra-256gb",
         "pool_id": POOL,
         "member_provider_id": MEMBER,
         "buyer_account_id": BUYER,
@@ -458,6 +458,40 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         requests.rename(elsewhere)
         requests.symlink_to(elsewhere, target_is_directory=True)
         self.assert_rejected("absent or unsafe")
+
+    def test_rejects_free_form_run_descriptors(self) -> None:
+        # codex R2 LOW: model_id, operator_role and hardware_profile reach
+        # signed evidence, so they get strict patterns in capture and payload.
+        for field, bad in (
+            ("model_id", "not a repo id"),
+            ("model_id", "owner/name/extra"),
+            ("model_id", "x" * 97 + "/y"),
+            ("operator_role", "Pearl Actor"),
+            ("operator_role", "role;rm -rf"),
+            ("hardware_profile", "Mac Studio M3 Ultra 256GB"),
+            ("hardware_profile", "a" * 49),
+        ):
+            with self.subTest(field=field, bad=bad):
+                path = self.capture / "run.json"
+                original = path.read_text()
+                value = json.loads(original)
+                value[field] = bad
+                path.write_text(json.dumps(value))
+                self.assert_rejected(f"run.json.{field}")
+                path.write_text(original)
+        evidence = self.build()
+        for location, mutate in (
+            ("candidate_identity.model_id", lambda e: e["candidate_identity"].__setitem__("model_id", "not a repo id")),
+            ("operator.role", lambda e: e["operator"].__setitem__("role", "Pearl Actor")),
+            ("environment.hardware_profile", lambda e: e["environment"].__setitem__("hardware_profile", "Mac Studio")),
+        ):
+            with self.subTest(location=location):
+                bad = json.loads(json.dumps(evidence))
+                mutate(bad)
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+                    BUILDER.require_run_descriptors(bad)
+                self.assertIn(location, stderr.getvalue())
 
     def test_observed_facts_accept_bounds(self) -> None:
         # The largest exact integer and a 19-character token still pass.

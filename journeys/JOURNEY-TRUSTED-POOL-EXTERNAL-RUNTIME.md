@@ -148,6 +148,10 @@ capture/
   controls/<name>/ledger.json
 ```
 
+`model_id` is a Hugging Face-style `owner/name` repo id; `operator_role` and
+`hardware_profile` are lowercase snake/kebab tokens of at most 48
+characters. The builder refuses anything else in `capture` and `payload`.
+
 `observed` is 1-8 named facts, never free text: a name is a snake_case word
 that names no credential (`key`, `token`, `secret`, `auth`, ... are refused);
 a value is a boolean, an integer from 0 to 2^53, or a token of at most 19
@@ -174,7 +178,7 @@ signs.
   "model_id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
   "operator_role": "pearl-actor",
   "operator_identity": "<text; only its sha256 is kept>",
-  "hardware_profile": "<member host>",
+  "hardware_profile": "<lowercase snake/kebab token, e.g. mac-studio-m3-ultra-256gb>",
   "pool_id": "<POOL_ID>",
   "member_provider_id": "<M1_PROVIDER_ID>",
   "buyer_account_id": "<M1_BUYER_ACCOUNT>",

@@ -75,6 +75,10 @@ OBSERVED_MAX_INT = 2**53
 RAW_IDENTITY_FIELDS = ("member_provider_id", "buyer_account_id", "pool_operator_account_id", "operator_identity")
 RUN_ID_RE = re.compile(r"^trusted-pool-external-runtime-[0-9]{8}T[0-9]{6}Z$")
 ACCEPTED_ID_RE = re.compile(r"^Augustas11/macprovider:v[0-9]+\.[0-9]+\.[0-9]+@[0-9a-f]{7,40}$")
+# Free-form run.json descriptors that reach signed evidence: a Hugging
+# Face-style repo id, and short lowercase snake/kebab tokens.
+MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,95}/[A-Za-z0-9][A-Za-z0-9._-]{0,95}$")
+SHORT_TOKEN_RE = re.compile(r"^(?=.{1,48}$)[a-z0-9]+(?:[_-][a-z0-9]+)*$")
 PRECONDITION_IDS = ("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "payout-disabled")
 REQUEST_KINDS = ("nonstream", "stream")
 # name -> (HTTP status, error.code); run plan §5A negative controls.
@@ -240,10 +244,10 @@ def load_run(capture: Path) -> dict[str, Any]:
         "llama_server_build": re.compile(r"^b[0-9]+$"),
         "gguf_sha256": SHA256_RE,
         "gguf_artifact_id": re.compile(r"^gguf-[a-z0-9-]+$"),
-        "model_id": None,
-        "operator_role": None,
+        "model_id": MODEL_ID_RE,
+        "operator_role": SHORT_TOKEN_RE,
         "operator_identity": None,
-        "hardware_profile": None,
+        "hardware_profile": SHORT_TOKEN_RE,
         "pool_id": None,
         "member_provider_id": None,
         "buyer_account_id": None,
@@ -581,6 +585,17 @@ def require_fingerprints_only(value: Any, location: str = "$") -> None:
             require_fingerprints_only(item, f"{location}[{index}]")
 
 
+def require_run_descriptors(evidence: dict[str, Any]) -> None:
+    """The free-form run.json descriptors that reach signed evidence keep
+    their capture-time patterns in the committed evidence too."""
+    identity = require_object(evidence.get("candidate_identity"), "candidate_identity")
+    require_string(identity.get("model_id"), MODEL_ID_RE, "candidate_identity.model_id")
+    operator = require_object(evidence.get("operator"), "operator")
+    require_string(operator.get("role"), SHORT_TOKEN_RE, "operator.role")
+    environment = require_object(evidence.get("environment"), "environment")
+    require_string(environment.get("hardware_profile"), SHORT_TOKEN_RE, "environment.hardware_profile")
+
+
 def revalidate_committed_evidence(evidence: dict[str, Any]) -> None:
     """The payload step signs committed evidence, which may not have come
     through `capture` unchanged: re-run the capture-time redaction checks
@@ -594,6 +609,7 @@ def revalidate_committed_evidence(evidence: dict[str, Any]) -> None:
         require_observed_facts(item["observed"], f"preconditions.{key}.observed")
         require_string(item["checked_at"], DATETIME_Z_RE, f"preconditions.{key}.checked_at")
     require_fingerprints_only(evidence)
+    require_run_descriptors(evidence)
 
 
 def reject_raw_identifiers(evidence: dict[str, Any], run: dict[str, Any]) -> None:
