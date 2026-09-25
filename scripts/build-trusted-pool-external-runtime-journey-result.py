@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -53,9 +54,18 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DATETIME_Z_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
-# preconditions.*.observed is operator free text copied into signed evidence:
-# printable ASCII only (no control or non-ASCII characters), at most 200.
-OBSERVED_RE = re.compile(r"^[ -~]{1,200}$")
+# preconditions.*.observed is structured, never free text: an object of at
+# most 8 named facts. A name is a short snake_case word that names no
+# credential; a value is a boolean, a non-negative integer, or a short token
+# (a version, a build id, a short commit) with no whitespace, so no prompt,
+# completion or sentence fits. A token that is a long hex/base64 run (a raw
+# key, digest or credential) is refused: an identity belongs in run.json and
+# reaches evidence only as a salted fingerprint.
+OBSERVED_MAX_FIELDS = 8
+OBSERVED_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+OBSERVED_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}$")
+OBSERVED_CREDENTIAL_NAME_RE = re.compile(r"(key|token|secret|bearer|password|passwd|auth|cookie|credential|private|signature)")
+OBSERVED_LONG_RUN_RE = re.compile(r"[0-9A-Fa-f]{20,}|[A-Za-z0-9+/=_-]{20,}")
 RUN_ID_RE = re.compile(r"^trusted-pool-external-runtime-[0-9]{8}T[0-9]{6}Z$")
 ACCEPTED_ID_RE = re.compile(r"^Augustas11/macprovider:v[0-9]+\.[0-9]+\.[0-9]+@[0-9a-f]{7,40}$")
 PRECONDITION_IDS = ("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "payout-disabled")
@@ -134,7 +144,14 @@ def parse_json_bytes(payload: bytes, label: str) -> Any:
 
 def read_capture_file(capture: Path, relative: str) -> bytes:
     path = capture / relative
-    if path.is_symlink() or not path.is_file():
+    # No component inside the capture (a subdirectory or the file) may be a
+    # symlink, whoever owns it.
+    current = capture
+    for part in Path(relative).parts:
+        current = current / part
+        if current.is_symlink():
+            die(f"capture file is absent or unsafe: {relative}")
+    if not path.is_file():
         die(f"capture file is absent or unsafe: {relative}")
     return path.read_bytes()
 
@@ -240,10 +257,40 @@ def check_preconditions(capture: Path) -> dict[str, Any]:
         item = require_object(raw[key], f"preconditions.{key}")
         require(set(item) == {"status", "observed", "checked_at"}, f"preconditions.{key} must have status, observed, checked_at")
         require(item["status"] == "pass", f"preconditions.{key}.status must equal 'pass'")
-        require_string(item["observed"], OBSERVED_RE, f"preconditions.{key}.observed")
+        require_observed_facts(item["observed"], f"preconditions.{key}.observed")
         require_string(item["checked_at"], DATETIME_Z_RE, f"preconditions.{key}.checked_at")
         out[key] = {"status": "pass", "observed": item["observed"], "checked_at": item["checked_at"]}
     return out
+
+
+def require_observed_facts(value: Any, location: str) -> None:
+    if not isinstance(value, dict) or not 1 <= len(value) <= OBSERVED_MAX_FIELDS:
+        die(f"{location} must be an object of 1-{OBSERVED_MAX_FIELDS} named facts, not free text")
+    for name, fact in value.items():
+        if not OBSERVED_NAME_RE.fullmatch(name) or OBSERVED_CREDENTIAL_NAME_RE.search(name):
+            die(f"{location}: fact name {name!r} is not an allowed snake_case name")
+        if isinstance(fact, bool):
+            continue
+        if isinstance(fact, int):
+            if fact < 0:
+                die(f"{location}.{name} must be a non-negative integer")
+            continue
+        if not isinstance(fact, str) or not OBSERVED_TOKEN_RE.fullmatch(fact) or OBSERVED_LONG_RUN_RE.search(fact):
+            die(f"{location}.{name} must be a boolean, a non-negative integer, or a short token (no long hex/base64 run)")
+
+
+def require_no_symlink_components(path: Path, label: str) -> None:
+    """Refuse a capture path with a symlink anywhere in it.
+
+    Every component of the absolute path is checked, not just the leaf. A
+    root-owned symlink (the OS's own, such as macOS /var and /tmp) is
+    allowed; any other symlink could redirect the build to files the
+    operator did not capture.
+    """
+    current = Path(os.path.abspath(path))
+    for candidate in [current, *current.parents]:
+        if candidate.is_symlink() and candidate.lstat().st_uid != 0:
+            die(f"{label} has a symlinked path component: {candidate}")
 
 
 def check_pool(capture: Path, run: dict[str, Any]) -> dict[str, Any]:
@@ -517,6 +564,7 @@ def reject_raw_identifiers(evidence: dict[str, Any], run: dict[str, Any]) -> Non
 def build_evidence(capture: Path) -> dict[str, Any]:
     if capture.is_symlink() or not capture.is_dir():
         die("--capture-dir must be a directory")
+    require_no_symlink_components(capture, "--capture-dir")
     run = load_run(capture)
     run["fingerprint_salt"] = secrets.token_hex(32)
     preconditions = check_preconditions(capture)
