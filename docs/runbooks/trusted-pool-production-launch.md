@@ -241,9 +241,16 @@ allowlists):
    coordinator records non-streaming successes only after the buyer write and
    sends their finality as MAC'd trailers. On Pearl the gateway reaches the
    coordinator directly at `http://127.0.0.1:8443`; trailers cross no proxy.
-   If a proxy is ever put on that hop and drops trailers, the gateway holds
-   those settlements as `missing_settlement_finality_trailer` (fail closed)
-   instead of debiting; watch for that log reason after the deploy.
+   Until step 2a turns the pin on, this is not fail closed against a proxy
+   on that hop. A proxy that drops only the trailer values (the `Trailer`
+   declaration survives) makes the gateway hold the settlement as
+   `missing_settlement_finality_trailer`. A proxy that strips the
+   declaration too makes the response look like an older coordinator's:
+   the gateway settles it from header finality, and a stream with none is
+   debited the gateway's byte estimate (also when the buyer closes right
+   after `[DONE]`, which is otherwise delivered usage), with no matching
+   provider credit. Put nothing on that hop and keep the window between
+   step 2 and step 2a short; step 2a closes it.
 2a. Once the step 1 coordinator and the step 2 gateway are both confirmed
    (`/healthz` versions, updater transactions committed), set
    `coordinator.require_settlement_trailers: true` in the gateway config and
