@@ -332,16 +332,64 @@ settled, so traffic stops and holds drain first:
    startup on `json: unknown field "file_path"` (a gguf artifact with a
    `huggingface_revision` source) or on `runtime_format "mlx_safetensors" may
    not allow runtime source "mlxlm_loopback"`, which would leave no
-   coordinator. On Pearl:
+   coordinator. The check fails closed: it parses the config (YAML or JSON,
+   quoted or not) instead of matching text, and any error, a missing
+   `python3`/`yaml`, a relative or unreadable path, or no `VERDICT` line
+   means STOP. On Pearl:
 
    ```bash
-   F=$(awk '/catalog_artifacts_path:/ {print $2}' /etc/macprovider/coordinator.yaml)
-   echo "feed: ${F:-none}"
-   [ -z "$F" ] || grep -c -e '"file_path"' -e mlxlm_loopback "$F"
+   python3 - /etc/macprovider/coordinator.yaml <<'PY'
+   import os, sys
+   try:
+       import yaml
+       with open(sys.argv[1]) as f:
+           cfg = yaml.safe_load(f)
+       if not isinstance(cfg, dict):
+           raise ValueError("config is not a mapping")
+       auto = cfg.get("autotune")
+       if auto is None:
+           auto = {}
+       if not isinstance(auto, dict):
+           raise ValueError("autotune is not a mapping")
+       path = auto.get("catalog_artifacts_path")
+       if path is None or path == "":
+           print("feed: none (autotune.catalog_artifacts_path unset)")
+           print("VERDICT: no-feed")
+           sys.exit(0)
+       if not isinstance(path, str) or path != path.strip() or not os.path.isabs(path):
+           raise ValueError(f"catalog_artifacts_path is not a clean absolute path: {path!r}")
+       with open(path, encoding="utf-8") as f:
+           body = f.read()
+       hits = body.count('"file_path"') + body.count("mlxlm_loopback")
+       print(f"feed: {path}")
+       print(f"older-coordinator blockers: {hits}")
+       print("VERDICT: " + ("clean" if hits == 0 else "replace-feed"))
+       sys.exit(0 if hits == 0 else 1)
+   except Exception as e:
+       print(f"feed check error: {e}")
+       print("VERDICT: STOP")
+       sys.exit(2)
+   PY
+   echo "exit: $?"
+   code=$(curl -sS -o /tmp/served-catalog-artifacts.json -w '%{http_code}' https://coordinator.malibu.tech/v1/catalog-artifacts) || code=error
+   echo "served: $code"
+   [ "$code" != 200 ] || grep -c -e '"file_path"' -e mlxlm_loopback /tmp/served-catalog-artifacts.json
    ```
 
-   `feed: none` or a count of `0`: go to the coordinator rollback. Otherwise,
-   replace the served feed first, with a signed release, never a hand edit:
+   Read it strictly; anything not listed here is STOP (do not roll back the
+   coordinator until it is resolved):
+   - `VERDICT: no-feed`, `exit: 0` and `served: 404`: go to the coordinator
+     rollback.
+   - `VERDICT: clean`, `exit: 0`, `served: 200` and a served count of `0`:
+     go to the coordinator rollback.
+   - `VERDICT: replace-feed` (`exit: 1`), or a served count above `0`:
+     replace the feed first (below).
+   - `VERDICT: STOP`, no `VERDICT` line, a `served` code that disagrees with
+     the verdict (`no-feed` with `200`, `clean` with anything but `200`), or
+     `served: error`: STOP. Resolve the config or the served feed first; the
+     path the coordinator logs at startup is the reference.
+
+   To replace the served feed, use a signed release, never a hand edit:
    the feed is release-bound (same signer `key_id` as the candidate feed,
    `candidate_catalog_sha256` of the served candidate bytes), so stripping
    and re-signing the file alone does not load.
