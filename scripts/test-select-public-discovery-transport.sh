@@ -140,6 +140,71 @@ set -e
 grep -Fqx "$expected" <<<"$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tag_name"])' "$work/release.json")" \
   || fail "successful selection did not persist the expected transport"
 
+page_state="$root/scripts/discovery_listing_page_state.py"
+python3 - "$work" "$expected" <<'PY'
+import json
+import pathlib
+import sys
+work, transport = pathlib.Path(sys.argv[1]), sys.argv[2]
+pearls = [{"tag_name": f"v1.8.{n}", "assets": []} for n in range(300, 200, -1)]
+(work / "page-full.json").write_text(json.dumps(pearls), encoding="utf-8")
+(work / "page-short.json").write_text(json.dumps(pearls[:3]), encoding="utf-8")
+(work / "page-transport.json").write_text(
+    json.dumps(pearls[:98] + [{"tag_name": transport, "assets": []}]), encoding="utf-8"
+)
+(work / "page-bad-grammar.json").write_text(
+    json.dumps(pearls[:3] + [{"tag_name": "release-discovery-v1-01", "assets": []}]), encoding="utf-8"
+)
+(work / "page-oversized.json").write_text(" " * (16 * 1024 * 1024 + 1), encoding="utf-8")
+PY
+[ "$(python3 "$page_state" "$work/page-full.json")" = next ] \
+  || fail "full page without a transport must continue to the next page"
+[ "$(python3 "$page_state" "$work/page-short.json")" = end ] \
+  || fail "short page without a transport must end the listing"
+[ "$(python3 "$page_state" "$work/page-transport.json")" = transport ] \
+  || fail "page holding a transport past prerelease churn must stop the walk"
+[ "$(python3 "$page_state" "$work/page-bad-grammar.json")" = end ] \
+  || fail "malformed transport tag must not stop the walk"
+if python3 "$page_state" "$work/page-oversized.json" >/dev/null 2>&1; then
+  fail "oversized listing page must fail closed"
+fi
+swift_source="$root/phase3-binary/Sources/macprovider-cli/SelfUpdate.swift"
+python3 - "$page_state" "$swift_source" <<'PY' || fail "verifier listing bounds must match the CLI's"
+import importlib.util
+import re
+import sys
+spec = importlib.util.spec_from_file_location("page_state", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+swift = open(sys.argv[2], encoding="utf-8").read()
+def constant(name):
+    expr = re.search(rf"static let {name} = ([0-9_ *]+)\n", swift).group(1)
+    value = 1
+    for factor in expr.replace("_", "").split("*"):
+        value *= int(factor)
+    return value
+assert constant("releaseDiscoveryPageSize") == module.PAGE_SIZE
+assert constant("maxReleaseDiscoveryPages") == module.MAX_PAGES
+assert constant("maxReleaseDiscoveryListingBytes") == module.MAX_PAGE_BYTES
+PY
+python3 - "$work" <<'PY'
+import json
+import pathlib
+import sys
+(pathlib.Path(sys.argv[1]) / "page-overflow.json").write_text(
+    json.dumps([{"tag_name": "release-discovery-v1-18446744073709551616", "assets": []}]),
+    encoding="utf-8",
+)
+PY
+[ "$(python3 "$page_state" "$work/page-overflow.json")" = end ] \
+  || fail "transport sequence beyond UInt64 must not stop the walk"
+grep -Fq 'no discovery transport within the client-visible listing bound' "$verifier" \
+  || fail "anonymous verifier must fail without retrying once the page bound is exhausted"
+grep -Fq 'scripts/discovery_listing_page_state.py' "$verifier" \
+  || fail "anonymous verifier must walk the listing like the client"
+grep -Fq 'releases?per_page=100&page=$page' "$verifier" \
+  || fail "anonymous verifier must request numbered listing pages"
+
 grep -Fq 'scripts/select_public_discovery_transport.py' "$verifier" \
   || fail "anonymous verifier must use the shared listing selector"
 grep -Fq 'releases?per_page=100' "$verifier" \
@@ -161,4 +226,4 @@ grep -Fq 'unset \' "$verifier" \
 grep -Fq 'MACPROVIDER_RELEASE_FIXTURE_GITHUB_TOKEN \' "$verifier" \
   || fail "anonymous verifier must unset fixture auth token after listing"
 
-printf '[test-select-public-discovery-transport] ok\n'
+printf '[test-select-public-discovery-transport] ok: verifier walks the client-visible listing\n'

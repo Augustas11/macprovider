@@ -142,7 +142,7 @@ final class SelfUpdateTests: XCTestCase {
             XCTAssertEqual(
                 error.description,
                 UpdateError.untrustedReleaseAPIURL(
-                    "http://attacker.invalid/releases?per_page=20"
+                    "http://attacker.invalid/releases?per_page=100&page=1"
                 ).description
             )
         }
@@ -2031,7 +2031,7 @@ final class SelfUpdateTests: XCTestCase {
 
     func testDefaultUpdateUsesBoundedAppendOnlyDiscoveryListing() async throws {
         let releaseURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
-        let discoveryURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases?per_page=20")!
+        let discoveryURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases?per_page=100&page=1")!
         MockURLProtocol.responses = [
             discoveryURL: (
                 200,
@@ -2061,7 +2061,7 @@ final class SelfUpdateTests: XCTestCase {
 
     func testDiscoveryFailsClosedOnHighestMutableTransportWithoutFallingBack() async throws {
         let releaseURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
-        let discoveryURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases?per_page=20")!
+        let discoveryURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases?per_page=100&page=1")!
         MockURLProtocol.responses = [
             discoveryURL: (
                 200,
@@ -2100,6 +2100,151 @@ final class SelfUpdateTests: XCTestCase {
             )
         }
     }
+
+    func testDiscoveryPagesPastPrereleaseChurnWhenTransportIsNotOnPageOne() async throws {
+        let releaseURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
+        let listing = "https://api.github.com/repos/Augustas11/macprovider/releases?per_page=100"
+        // Page 2 is full and page 3 would win on sequence, so only stopping at
+        // the first page carrying a transport avoids requesting it. The mutable
+        // 299 listed first catches a first-match pick instead of the maximum.
+        MockURLProtocol.responses = [
+            URL(string: "\(listing)&page=1")!: (200, discoveryListingPage(prereleases: 100, startingAt: 200)),
+            URL(string: "\(listing)&page=2")!: (
+                200,
+                discoveryListingPage(
+                    prereleases: 98,
+                    startingAt: 100,
+                    transports: [("release-discovery-v1-299", false), ("release-discovery-v1-300", true)]
+                )
+            ),
+            URL(string: "\(listing)&page=3")!: (
+                200,
+                discoveryListingPage(prereleases: 0, startingAt: 0, transports: [("release-discovery-v1-900", false)])
+            ),
+        ]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let update = SelfUpdate(currentVersion: "1.2.0", releasesAPIURL: releaseURL.absoluteString, session: session)
+
+        do {
+            try await update.run(checkOnly: true)
+            XCTFail("update unexpectedly accepted a discovery transport without signed head assets")
+        } catch let error as UpdateError {
+            // Reaching the asset check proves page 2's highest transport (300)
+            // was selected and passed the immutable-prerelease gate.
+            XCTAssertEqual(error.description, UpdateError.missingAsset.description)
+        }
+    }
+
+    func testDiscoveryReportsTransportAbsentAtPageBoundWithoutFetchingFurther() async throws {
+        let releaseURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
+        let listing = "https://api.github.com/repos/Augustas11/macprovider/releases?per_page=100"
+        var responses: [URL: (status: Int, body: Data)] = [:]
+        for page in 1 ... SelfUpdate.maxReleaseDiscoveryPages {
+            responses[URL(string: "\(listing)&page=\(page)")!] = (
+                200,
+                discoveryListingPage(prereleases: SelfUpdate.releaseDiscoveryPageSize, startingAt: page * 1_000)
+            )
+        }
+        responses[URL(string: "\(listing)&page=\(SelfUpdate.maxReleaseDiscoveryPages + 1)")!] = (
+            200,
+            discoveryListingPage(prereleases: 0, startingAt: 0, transports: [("release-discovery-v1-200", true)])
+        )
+        MockURLProtocol.responses = responses
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let update = SelfUpdate(currentVersion: "1.2.0", releasesAPIURL: releaseURL.absoluteString, session: session)
+
+        do {
+            try await update.run(checkOnly: true)
+            XCTFail("update unexpectedly read past the discovery page bound")
+        } catch let error as UpdateError {
+            XCTAssertEqual(
+                error.description,
+                UpdateError.discoveryHeadInvalid("transport_absent").description
+            )
+        }
+    }
+
+    func testDiscoveryStopsAtShortListingPage() async throws {
+        let releaseURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
+        let listing = "https://api.github.com/repos/Augustas11/macprovider/releases?per_page=100"
+        // A short page is the end of the listing; page 2 is absent from the
+        // mock, so fetching it would surface a URLError instead.
+        MockURLProtocol.responses = [
+            URL(string: "\(listing)&page=1")!: (200, discoveryListingPage(prereleases: 3, startingAt: 200)),
+        ]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let update = SelfUpdate(currentVersion: "1.2.0", releasesAPIURL: releaseURL.absoluteString, session: session)
+
+        do {
+            try await update.run(checkOnly: true)
+            XCTFail("update unexpectedly found a transport in a listing without one")
+        } catch let error as UpdateError {
+            XCTAssertEqual(
+                error.description,
+                UpdateError.discoveryHeadInvalid("transport_absent").description
+            )
+        }
+    }
+
+    func testDiscoveryRejectsOversizedLaterListingPage() async throws {
+        let releaseURL = URL(string: "https://api.github.com/repos/Augustas11/macprovider/releases/latest")!
+        let listing = "https://api.github.com/repos/Augustas11/macprovider/releases?per_page=100"
+        MockURLProtocol.responses = [
+            URL(string: "\(listing)&page=1")!: (200, discoveryListingPage(prereleases: 100, startingAt: 200)),
+            URL(string: "\(listing)&page=2")!: (
+                200,
+                Data(repeating: 0x20, count: SelfUpdate.maxReleaseDiscoveryListingBytes + 1)
+            ),
+        ]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let update = SelfUpdate(currentVersion: "1.2.0", releasesAPIURL: releaseURL.absoluteString, session: session)
+
+        do {
+            try await update.run(checkOnly: true)
+            XCTFail("update unexpectedly accepted an oversized listing page")
+        } catch let error as UpdateError {
+            XCTAssertEqual(
+                error.description,
+                UpdateError.discoveryHeadInvalid("transport_listing_oversized").description
+            )
+        }
+    }
+}
+
+/// A newest-first listing page of Pearl-style numeric prereleases followed by
+/// the given discovery transports (tag, immutable), all without assets.
+private func discoveryListingPage(
+    prereleases: Int,
+    startingAt patch: Int,
+    transports: [(tag: String, immutable: Bool)] = []
+) -> Data {
+    var rows: [[String: Any]] = (0 ..< prereleases).map { offset in
+        [
+            "tag_name": "v1.8.\(patch + prereleases - offset)",
+            "draft": false,
+            "prerelease": true,
+            "immutable": true,
+            "assets": [] as [Any],
+        ]
+    }
+    rows += transports.map { transport in
+        [
+            "tag_name": transport.tag,
+            "draft": false,
+            "prerelease": true,
+            "immutable": transport.immutable,
+            "assets": [] as [Any],
+        ]
+    }
+    return try! JSONSerialization.data(withJSONObject: rows)
 }
 
 private struct ReloadHelperScenarioResult {

@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.19
+Version: v0.1.20
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -41,6 +41,9 @@ v0.1.19 adds coordinator wire tier `trusted` to the autoupdate eligibility
 table as a pinned-equivalent pass (encrypted-leg, attestation, and token
 guards still apply). Production MALIBU-verified providers emit `trusted`, not
 `pinned`; the previous table treated that label as notify-only.
+v0.1.20 pages the SPEC-020-R001 discovery listing (bounded pages and a
+per-page byte cap) so frequent numeric prereleases cannot push every
+append-only transport out of a single listing page.
 
 ## Goal
 
@@ -300,10 +303,21 @@ Discovery MUST begin from a signature-authenticated monotonic discovery head
 under the pinned release trust root, not from mutable GitHub `latest` ordering.
 The client MAY use a bounded GitHub public-release listing only to locate
 append-only transports whose tags match
-`release-discovery-v1-<positive-decimal-sequence>`. It MUST select the greatest
-well-formed sequence in that bounded response and require that release to be
-public, prerelease, and immutable. It MUST require the selected transport tag
-sequence to equal the verified signed-head sequence. The unsigned listing,
+`release-discovery-v1-<positive-decimal-sequence>`. The listing MUST be read in
+GitHub's default order (release `created_at`, which follows the target commit
+date and is unsigned) in explicitly numbered pages of at most 100 releases, at
+most 10 pages per discovery attempt, and MUST fail closed with
+`transport_listing_oversized` on any page larger than 16 MiB. The client MUST
+stop at the first page that contains a well-formed transport tag and MUST NOT
+request later pages; a short page ends the listing. When no page within the
+bound contains a transport, discovery MUST fail with `transport_absent`. The
+client MUST select the greatest well-formed sequence in that stopping page and
+require that release to be public, prerelease, and immutable, without falling
+back to a lower sequence. Pagination only widens where the unsigned locator
+looks; it confers no authority. The anonymous promotion and renewal verifier
+MUST walk the listing with the same page, byte, and stop rules so it proves the
+transport the client will actually select. It MUST require the selected
+transport tag sequence to equal the verified signed-head sequence. The unsigned listing,
 release timestamp, and GitHub ordering MUST NOT authorize a target, policy,
 downgrade, or mutation.
 The head MUST bind a schema version, monotonically increasing unsigned
@@ -1526,6 +1540,19 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.20 (2026-09-25): SPEC-020-R001 listing amendment. The single
+  20-release listing let several-per-day Pearl prereleases push every
+  `release-discovery-v1-*` transport off the only page, so manual and periodic
+  discovery failed with `transport_absent` while GitHub was reachable. The
+  client now reads numbered listing pages (at most 100 releases and 16 MiB
+  each, at most 10 pages), stops at the first page holding a well-formed
+  transport, and selects the greatest sequence there. Because GitHub ordering
+  is unsigned and only approximately newest-first, a higher transport on a
+  later page is missed only as a fail-closed freeze bounded by head expiry. Immutability, prerelease,
+  signature, transport-sequence binding, replay, equivocation, and expiry
+  checks are unchanged; the listing remains an unsigned locator. The anonymous
+  verifier walks the same pages, since a renewal transport inherits its
+  unchanged target commit's listing position and sinks below newer prereleases.
 - v0.1.19 (2026-09-08): Trust-table amendment: coordinator wire tier `trusted`
   is autoupdate-eligible on the same encrypted-leg, attestation, and token
   guards as `pinned`. Closes the production skip where MALIBU-verified

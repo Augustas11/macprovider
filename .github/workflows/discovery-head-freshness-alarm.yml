@@ -47,23 +47,30 @@ jobs:
         run: |
           set -euo pipefail
           # Mirror EXACTLY what the client sees, not what exists. The client
-          # (SelfUpdate.swift releaseDiscoveryPageSize=20) fetches only the 20
-          # most-recent releases and picks the highest-sequence
-          # release-discovery-v1-<seq> transport among them, with the strict
-          # grammar [1-9][0-9]* (SignedReleaseDiscovery.swift / the verifier at
-          # scripts/verify-release-discovery-transport.py). If 20 newer non-transport
-          # releases push every transport out of that window, the client sees NO
-          # head and the rail is down — so this alarm must use the SAME 20-release
-          # window and grammar, and alarm when no client-visible transport exists.
-          latest_tag="$(
-            gh release list --repo "$GITHUB_REPOSITORY" --limit 20 \
-              --json tagName --jq '.[].tagName' \
-            | grep -E '^release-discovery-v1-[1-9][0-9]*$' \
-            | sort -t- -k4,4n \
-            | tail -1
-          )"
+          # (SelfUpdate.swift releaseDiscoveryTransports) reads listing-order
+          # pages of releaseDiscoveryPageSize=100, at most
+          # maxReleaseDiscoveryPages=10, stops at the first page holding a
+          # release-discovery-v1-<seq> transport, and picks the highest
+          # sequence on that page with the strict grammar [1-9][0-9]*
+          # (SignedReleaseDiscovery.swift / the verifier at
+          # scripts/verify-release-discovery-transport.py). If no page in that
+          # bound holds a transport, the client sees NO head and the rail is
+          # down — so this alarm uses the SAME window and grammar.
+          latest_tag=""
+          for page in $(seq 1 "$(python3 scripts/discovery_listing_page_state.py --max-pages)"); do
+            tags="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100&page=$page" --jq '.[].tag_name')"
+            latest_tag="$(
+              printf '%s\n' "$tags" \
+              | grep -E '^release-discovery-v1-[1-9][0-9]*$' \
+              | sort -t- -k4,4n \
+              | tail -1 || true
+            )"
+            if [ -n "$latest_tag" ] || [ "$(printf '%s\n' "$tags" | grep -c .)" -lt 100 ]; then
+              break
+            fi
+          done
           if [ -z "${latest_tag:-}" ]; then
-            echo "::error::no client-visible release-discovery-v1-* transport in the 20 most-recent releases — the self-heal rail is DOWN for clients; renew now." >&2
+            echo "::error::no client-visible release-discovery-v1-* transport in the client's bounded release listing — the self-heal rail is DOWN for clients; renew now." >&2
             exit 1
           fi
           echo "latest client-visible transport: $latest_tag"
