@@ -3921,8 +3921,7 @@ actor ModelRuntime: ModelRuntimeServing {
         func delta(to candidateText: String) -> String {
             lock.lock()
             defer { lock.unlock() }
-            guard candidateText.hasPrefix(emittedText) else { return "" }
-            let delta = String(candidateText.dropFirst(emittedText.count))
+            let delta = ModelRuntime.streamDelta(from: emittedText, to: candidateText)
             if !delta.isEmpty {
                 emittedText = candidateText
             }
@@ -4529,6 +4528,19 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
                     settlementDisposition: result.settlementDisposition
                 ), request: request)
+            }
+            // #1690 E2E-F13: the stream held back an incomplete UTF-8 tail
+            // and any stop-string prefix; send the remainder as the final
+            // text renders it, so the buyer's bytes equal the receipt's.
+            if completion.toolCalls?.isEmpty != false {
+                let remainder = streamState.delta(to: completion.content)
+                if !remainder.isEmpty {
+                    if let error = structuredAccumulator.append(remainder) {
+                        throw error
+                    }
+                    idleState.noteContent()
+                    onChunk(.content(remainder))
+                }
             }
             let validated = try Self.validateStructuredStreamingCompletion(
                 completion,
@@ -6708,10 +6720,34 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let candidates = stopTokenFilter.tokens + requestStops.filter { !$0.isEmpty }
         let holdback = longestSuffixPrefixLength(in: filtered.text, candidates: candidates)
-        guard holdback > 0 else {
-            return filtered
+        let safe = holdback > 0 ? String(filtered.text.dropLast(holdback)) : filtered.text
+        return (withoutIncompleteUTF8Tail(safe), false)
+    }
+
+    /// #1690 E2E-F13: a decode of a token prefix that ends inside a
+    /// multi-byte UTF-8 character renders the partial bytes as trailing
+    /// U+FFFD, which the next token replaces with the real character. Such a
+    /// tail is never streamed; the final decode flushes it as it renders.
+    static func withoutIncompleteUTF8Tail(_ text: String) -> String {
+        var scalars = text.unicodeScalars
+        while scalars.last == "\u{FFFD}" {
+            scalars.removeLast()
         }
-        return (String(filtered.text.dropLast(holdback)), false)
+        return String(scalars)
+    }
+
+    /// The text to append so the streamed bytes become `current`: exact on
+    /// Unicode scalars, not Characters, so a combining mark or a completed
+    /// grapheme cluster never makes `emitted` look like a non-prefix or a
+    /// dropped Character eat scalars. Empty when `current` does not extend
+    /// `emitted` (never a lossy or out-of-order fragment).
+    static func streamDelta(from emitted: String, to current: String) -> String {
+        let emittedScalars = emitted.unicodeScalars
+        let currentScalars = current.unicodeScalars
+        guard currentScalars.starts(with: emittedScalars) else { return "" }
+        var appended = String.UnicodeScalarView()
+        appended.append(contentsOf: currentScalars.dropFirst(emittedScalars.count))
+        return String(appended)
     }
 
     private static func longestSuffixPrefixLength(in text: String, candidates: [String]) -> Int {
@@ -6730,8 +6766,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     private static func delta(from emitted: String, to current: String) -> String {
-        guard current.hasPrefix(emitted) else { return "" }
-        return String(current.dropFirst(emitted.count))
+        streamDelta(from: emitted, to: current)
     }
 
     struct ParsedGeneratedOutput: Sendable {
