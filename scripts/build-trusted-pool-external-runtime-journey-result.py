@@ -65,7 +65,14 @@ OBSERVED_MAX_FIELDS = 8
 OBSERVED_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 OBSERVED_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}$")
 OBSERVED_CREDENTIAL_NAME_RE = re.compile(r"(key|token|secret|bearer|password|passwd|auth|cookie|credential|private|signature)")
-OBSERVED_LONG_RUN_RE = re.compile(r"[0-9A-Fa-f]{20,}|[A-Za-z0-9+/=_-]{20,}")
+# The run class covers every character a token may hold (including "." and
+# ":"), so this measures the whole token: at most 19 characters.
+OBSERVED_LONG_RUN_RE = re.compile(r"[A-Za-z0-9+/=_.:-]{20,}")
+# Integers stay exactly representable in every JSON consumer.
+OBSERVED_MAX_INT = 2**53
+# run.json identity fields; evidence carries them only as salted
+# fingerprints, never by name or value.
+RAW_IDENTITY_FIELDS = ("member_provider_id", "buyer_account_id", "pool_operator_account_id", "operator_identity")
 RUN_ID_RE = re.compile(r"^trusted-pool-external-runtime-[0-9]{8}T[0-9]{6}Z$")
 ACCEPTED_ID_RE = re.compile(r"^Augustas11/macprovider:v[0-9]+\.[0-9]+\.[0-9]+@[0-9a-f]{7,40}$")
 PRECONDITION_IDS = ("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "payout-disabled")
@@ -272,8 +279,8 @@ def require_observed_facts(value: Any, location: str) -> None:
         if isinstance(fact, bool):
             continue
         if isinstance(fact, int):
-            if fact < 0:
-                die(f"{location}.{name} must be a non-negative integer")
+            if fact < 0 or fact > OBSERVED_MAX_INT:
+                die(f"{location}.{name} must be an integer in [0, 2^53]")
             continue
         if not isinstance(fact, str) or not OBSERVED_TOKEN_RE.fullmatch(fact) or OBSERVED_LONG_RUN_RE.search(fact):
             die(f"{location}.{name} must be a boolean, a non-negative integer, or a short token (no long hex/base64 run)")
@@ -553,6 +560,42 @@ def reject_forbidden_secret_keys(value: Any, location: str = "$") -> None:
             die(f"{location} contains a forbidden secret-like value")
 
 
+def require_fingerprints_only(value: Any, location: str = "$") -> None:
+    """Identity-bearing evidence fields hold 64-hex salted fingerprints only,
+    and no run.json identity field appears by name."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in RAW_IDENTITY_FIELDS:
+                die(f"{location}.{key}: a raw identity field in redacted evidence")
+            if key.endswith("_fingerprint"):
+                require_string(item, SHA256_RE, f"{location}.{key}")
+            elif key.endswith("_fingerprints"):
+                if not isinstance(item, list) or not item:
+                    die(f"{location}.{key} must be a non-empty list of fingerprints")
+                for index, entry in enumerate(item):
+                    require_string(entry, SHA256_RE, f"{location}.{key}[{index}]")
+            else:
+                require_fingerprints_only(item, f"{location}.{key}")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            require_fingerprints_only(item, f"{location}[{index}]")
+
+
+def revalidate_committed_evidence(evidence: dict[str, Any]) -> None:
+    """The payload step signs committed evidence, which may not have come
+    through `capture` unchanged: re-run the capture-time redaction checks
+    that need no raw capture (observed facts, fingerprints-only identity)."""
+    preconditions = require_object(evidence.get("preconditions"), "preconditions")
+    require(set(preconditions) == set(PRECONDITION_IDS), f"preconditions must name exactly {list(PRECONDITION_IDS)}")
+    for key in PRECONDITION_IDS:
+        item = require_object(preconditions[key], f"preconditions.{key}")
+        require(set(item) == {"status", "observed", "checked_at"}, f"preconditions.{key} must have status, observed, checked_at")
+        require(item["status"] == "pass", f"preconditions.{key}.status must equal 'pass'")
+        require_observed_facts(item["observed"], f"preconditions.{key}.observed")
+        require_string(item["checked_at"], DATETIME_Z_RE, f"preconditions.{key}.checked_at")
+    require_fingerprints_only(evidence)
+
+
 def reject_raw_identifiers(evidence: dict[str, Any], run: dict[str, Any]) -> None:
     """Account and provider ids appear only as fingerprints in the output."""
     text = json.dumps(evidence, sort_keys=True)
@@ -641,6 +684,7 @@ def build_evidence(capture: Path) -> dict[str, Any]:
     }
     reject_forbidden_secret_keys(evidence)
     reject_raw_identifiers(evidence, run)
+    revalidate_committed_evidence(evidence)
     return evidence
 
 
@@ -823,6 +867,7 @@ def build_payload(root: Path, source: str, *, source_sha: str, evidence_sha: str
     evidence_bytes = path.read_bytes()
     evidence = require_object(parse_json_bytes(evidence_bytes, source), "trusted-pool external-runtime redacted evidence")
     reject_forbidden_secret_keys(evidence)
+    revalidate_committed_evidence(evidence)
     if evidence.get("schema_version") != EVIDENCE_SCHEMA:
         die(f"schema_version must equal {EVIDENCE_SCHEMA!r}")
     if evidence.get("journey_id") != JOURNEY_ID:
