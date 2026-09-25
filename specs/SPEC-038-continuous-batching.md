@@ -1,6 +1,6 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2.10
+Version: v0.2.11
 Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
@@ -12,6 +12,18 @@ clarifies the API-visible admission/replay/terminal contract, records
 decode-first scheduling as a conservative v0.2 choice rather than a claim of
 vLLM/SGLang-style unified-token scheduling, and tightens the real-serving
 evidence gate for retained paged-KV reuse.
+
+**Change log v0.2.11 (2026-09-25, tool-bearing and structured-output rows):**
+FR-CB6 and the new AC-6c admit requests with enabled tools or a JSON
+`response_format` (json_object / json_schema) into the shared forward. Neither
+constrains a logit: the serial path renders them into the prompt and applies
+them after generation, and a batched row now reuses exactly that prompt
+rendering and post-generation finalize. That covers tool-call parsing, the
+SPEC-018 byte caps, structured validation, and the streamed tool-call deltas
+and structured accumulator. A serial tool turn (`parallel_tool_calls` omitted
+or false) ends where the serial path stops generating. Harmony models with
+tools or structured output, logit-bias requests and logprob requests still
+serial-route.
 
 **Change log v0.2.10 (2026-09-25, bounded decode windows):** FR-CB2 now
 describes the decode hop as the implementation runs it. One hop advances every
@@ -485,6 +497,28 @@ replay of the same request identity reproduces the same draws. Parameters the
 serial path ignores (presence and frequency penalties) MUST be ignored on the
 batched path too, so batching never changes what a request asks for.
 
+**(v0.2.11)** A request with enabled tools or a JSON `response_format` MAY
+batch, because neither constrains a logit. Its row MUST use the serial path's
+prompt rendering (response-format instruction, tool schemas in the chat
+template) and, on the row's generated text, the serial path's post-generation
+steps:
+- the SPEC-018 response and per-call byte caps and tool-call parsing, with the
+  same `tool_calls` and `finish_reason: tool_calls` in non-streaming bodies;
+- the serial streaming text step, so streamed tool-call deltas, assistant
+  content suppression and the SPEC-019 structured-content accumulator produce
+  the serial SSE sequence;
+- structured validation with the serial error, raised after the same chunks
+  as on the serial path, and the SPEC-019 structured-streaming idle timeout.
+
+A serial tool turn (`parallel_tool_calls` omitted or false) MUST end where the
+serial path stops generating: at the first token whose decoded prefix holds a
+complete valid tool call. The row MAY decode past that token before it stops.
+The completion MUST then be computed from the tokens up to that point only,
+for text and billed tokens, and a row that decoded past it MUST NOT commit a
+conversation-cache entry. Requests on a Harmony model with tools or structured
+output stay serial-routed, because the batched stream has no Harmony channel
+parser. Logit-bias and logprob requests stay serial-routed too.
+
 The accepted numerical tolerance recognizes that a shared batched forward and
 a serial forward differ only in floating-point ACCUMULATION ORDER (batched
 matmuls and MoE expert routing versus a single row), which can flip greedy
@@ -898,6 +932,23 @@ hardware-capability run or a static-review obligation. Every
   ties that sampling filters and argmax break differently. A tiny top_p is NOT
   equivalent to greedy even on the serial path, because of those ties.
   Distinct concurrent requests MUST NOT share a sampler seed.
+- **AC-6c tool-bearing and structured-output row equivalence (FR-CB6,
+  v0.2.11):** unit fixtures show, for identical generated text:
+  - the batched finalize yields exactly the serial `tool_calls`,
+    `finish_reason` and structured-validation verdict (including invalid JSON
+    under `json_schema` and the SPEC-018 response byte cap), non-streaming and
+    streaming;
+  - the batched stream emits the serial tool-call delta and content chunk
+    sequence;
+  - a serial tool turn that decoded past its first complete tool call is
+    truncated to the serial stop token for text and billed tokens.
+
+  The routing gate admits tool-bearing and structured-output requests and
+  still rejects logit-bias and logprob requests. On hardware, a tool-bearing
+  request and a `json_schema` request each run as one row among concurrent
+  batched rows, streaming and non-streaming. Each returns the same
+  `tool_calls` (name and arguments) or schema-valid content that the serial
+  path returns for the same greedy request.
 - **AC-7 unsupported cache/`kv_bits`/local capability rejection (FR-CB8,
   FR-CB10):** a `newCache`-overriding model family, an unsupported
   `SPEC-039` tuple, an unsupported MoE expert-dispatch surface, and an
