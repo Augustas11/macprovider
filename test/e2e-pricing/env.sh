@@ -15,8 +15,9 @@ E2E_REPO="$E2E_WORK/repo"            # scratch clone the operator lane runs from
 E2E_BARE="$E2E_WORK/origin.git"      # plays origin (never GitHub)
 E2E_BARE_URL="file://$E2E_BARE"
 E2E_SSH_CONFIG="$E2E_WORK/ssh_config"
-E2E_LOGS="$E2E_WORK/logs"
-E2E_EVIDENCE="$E2E_WORK/evidence"
+# Per-run evidence/logs dirs may be set by the caller (E2E_RUN=run1 -> evidence-run1/, logs-run1/).
+E2E_LOGS="${E2E_LOGS:-$E2E_WORK/logs${E2E_RUN:+-$E2E_RUN}}"
+E2E_EVIDENCE="${E2E_EVIDENCE:-$E2E_WORK/evidence${E2E_RUN:+-$E2E_RUN}}"
 E2E_CANARY_HOME="$E2E_WORK/canary-home"
 E2E_TLS_PORT="${E2E_TLS_PORT:-18443}"
 # Commits: the pre-#1693 main (tag v1.8.191) and the branch head under test.
@@ -76,7 +77,7 @@ vm_script() { /usr/bin/ssh -F "$E2E_SSH_CONFIG" "$E2E_PEARL" bash -s -- "$@"; }
 e2e_lane_path() { printf '%s:%s' "$E2E_HARNESS/bin" "$PATH"; }
 
 e2e_export() {
-  export E2E_WORK E2E_KEYS E2E_SSH_CONFIG E2E_CANARY_HOME E2E_TLS_PORT E2E_HARNESS E2E_PEARL E2E_CANARY
+  export E2E_RUN E2E_LOGS E2E_EVIDENCE E2E_WORK E2E_KEYS E2E_SSH_CONFIG E2E_CANARY_HOME E2E_TLS_PORT E2E_HARNESS E2E_PEARL E2E_CANARY
 }
 e2e_export
 export COPYFILE_DISABLE=1

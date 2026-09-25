@@ -4,7 +4,8 @@
 # from a clean checkout of the enabling tag ($E2E_TAG_ENABLE). Each runbook step
 # is recorded PASS/FAIL/GAP in $E2E_EVIDENCE/results.jsonl.
 #   1. updater bundle first (ops/pearl-updater/install-pearl-updater.sh, as root on Pearl)
-#   2. full coordinator deploy (deploy-pearl-vps.sh)
+#   2. runtime pair via the updater (--plan/--apply --tag; GAP in E2 -> stand-in),
+#      then the full deploy with CONFIG_MODE=preserve-live FORCE_RESTART=1
 #   3. verify the host (healthz tag, Requires/Wants, alert unit, applied record, writer hashes)
 #   4. host check: scripts/catalog-content-release.sh --host-check (read-only
 #      pricing_host_state at the tag); a no-op --preflight cannot pass by
@@ -18,6 +19,8 @@ e2e_checkout "$E2E_TAG_ENABLE"
 e2e_tunnel_up
 TAG_COMMIT="$(git -C "$E2E_REPO" rev-parse "$E2E_TAG_ENABLE^{commit}")"
 
+# E2E_05_FROM=4 re-runs only step 4 on an already enabled host.
+if [ "${E2E_05_FROM:-1}" -le 3 ]; then
 # ---- step 1: updater bundle ---------------------------------------------------
 # The runbook says "Run ops/pearl-updater/install-pearl-updater.sh from the tag"
 # but not where: the installer must run as root ON Pearl beside a checkout of
@@ -31,22 +34,36 @@ else
   exit 1
 fi
 
-# ---- step 2: full coordinator deploy -------------------------------------------
-# As written the deploy is expected to install the #1693 coordinator. It refuses
-# unless the signed coordinator/gateway pair is already installed by
-# macprovider-pearl-update (ops/runbooks/pearl-release-updater.md). Run it as
-# written first to record that, then with the updater stand-in.
-rc=0
-e2e_run_logged 3600 "$E2E_LOGS/$S-step2-as-written.log" bash -c "cd '$E2E_REPO' && . '$E2E_HARNESS/env.sh' && . '$E2E_HARNESS/lib/common.sh' && e2e_lane_env && FORCE_RESTART=1 bash phase4-coordinator/dist/deploy-pearl-vps.sh" || rc=$?
-if [ "$rc" = 0 ]; then
-  e2e_result "$S" PASS "step 2 deploy as written installed $E2E_TAG_ENABLE"
+# ---- step 2: runtime pair (updater), then the full coordinator deploy -------------
+# Runbook step 2a: `macprovider-pearl-update --plan --tag <tag>` then `--apply
+# --tag <tag>` as root on Pearl. Run exactly as written but inside `unshare -n`
+# (no network namespace: the tier E2 VM must never reach GitHub or Better Stack).
+# The updater's production apply needs the Better Stack dead-man token, the #584
+# canary authority and a canary-buyer service that tier E2 does not have, so it
+# refuses; that is recorded as a GAP and the signed pair is installed by the
+# stand-in (lib/install-runtime-pair.sh: same sha-checked assets, same owners).
+upd_rc=0
+vm "unshare -n /usr/local/sbin/macprovider-pearl-update --plan --tag $E2E_TAG_ENABLE" >"$E2E_LOGS/$S-step2-updater-plan.log" 2>&1 || upd_rc=$?
+upd_apply_rc=0
+vm "unshare -n /usr/local/sbin/macprovider-pearl-update --apply --tag $E2E_TAG_ENABLE" >"$E2E_LOGS/$S-step2-updater-apply.log" 2>&1 || upd_apply_rc=$?
+installed="$(vm "sha256sum /opt/macprovider/coordinator | cut -c1-64")"
+want="$(shasum -a 256 "$E2E_WORK/gh-releases/$E2E_TAG_ENABLE/coordinator-linux-amd64" | cut -c1-64)"
+if [ "$upd_apply_rc" = 0 ] && [ "$installed" = "$want" ]; then
+  e2e_result "$S" PASS "step 2a updater --plan rc=$upd_rc, --apply rc=0 installed the $E2E_TAG_ENABLE pair"
 else
-  e2e_result "$S" FAIL "step 2 as written: deploy-pearl-vps.sh rc=$rc: $(grep -m1 -E 'refusing|aborting' "$E2E_LOGS/$S-step2-as-written.log" || tail -n 1 "$E2E_LOGS/$S-step2-as-written.log")"
+  e2e_result "$S" GAP "step 2a updater cannot apply in tier E2 (no network, no Better Stack/#584 canary authority): --plan rc=$upd_rc '$(tail -n 1 "$E2E_LOGS/$S-step2-updater-plan.log" | cut -c1-240)'; --apply rc=$upd_apply_rc '$(tail -n 1 "$E2E_LOGS/$S-step2-updater-apply.log" | cut -c1-240)'; signed pair installed by the stand-in"
   bash "$E2E_HARNESS/lib/install-runtime-pair.sh" "$E2E_TAG_ENABLE"
-  rc=0
-  e2e_run_logged 3600 "$E2E_LOGS/$S-step2.log" bash -c "cd '$E2E_REPO' && . '$E2E_HARNESS/env.sh' && . '$E2E_HARNESS/lib/common.sh' && e2e_lane_env && FORCE_RESTART=1 bash phase4-coordinator/dist/deploy-pearl-vps.sh" || rc=$?
-  [ "$rc" = 0 ] || { e2e_result "$S" FAIL "step 2 deploy after the updater stand-in rc=$rc: $(tail -n 3 "$E2E_LOGS/$S-step2.log" | tr '\n' ' ')"; exit 1; }
-  e2e_result "$S" GAP "step 2 needed 'macprovider-pearl-update --apply --tag $E2E_TAG_ENABLE' first (updater stand-in used); then deploy-pearl-vps.sh rc=0"
+fi
+# Runbook step 2b: the full deploy, CONFIG_MODE=preserve-live, FORCE_RESTART=1
+# (Pearl has connected providers; the runbook's policy for the enabling deploy).
+rc=0
+e2e_run_logged 3600 "$E2E_LOGS/$S-step2.log" bash -c "cd '$E2E_REPO' && . '$E2E_HARNESS/env.sh' && . '$E2E_HARNESS/lib/common.sh' && e2e_lane_env && CONFIG_MODE=preserve-live FORCE_RESTART=1 bash phase4-coordinator/dist/deploy-pearl-vps.sh" || rc=$?
+bypass="$(vm 'cat /var/lib/macprovider/last-deploy-bypass.json 2>/dev/null' | tr -d '\n' | cut -c1-200)"
+if [ "$rc" = 0 ]; then
+  e2e_result "$S" PASS "step 2b deploy (CONFIG_MODE=preserve-live FORCE_RESTART=1) installed $E2E_TAG_ENABLE; bypass record: $bypass"
+else
+  e2e_result "$S" FAIL "step 2b deploy rc=$rc: $(grep -E 'refusing|aborting|ERROR|FATAL' "$E2E_LOGS/$S-step2.log" | head -n 3 | tr '\n' '|' | cut -c1-500)"
+  exit 1
 fi
 
 # ---- step 3: verify the host ----------------------------------------------------
@@ -78,9 +95,12 @@ grep -qx 'RECORD=rate_table_sha256,signed_rate_card_sha256,autotune_release_id,b
 if [ -z "$problems" ]; then e2e_result "$S" PASS "step 3 host checks: $(tr '\n' ' ' <<<"$out")"
 else e2e_result "$S" FAIL "step 3 host checks:$problems ($(tr '\n' ' ' <<<"$out"))"; fi
 
+fi
+
 # ---- step 4: host check (older trees: the no-op preflight) -------------------------
 rc=0
-if git -C "$E2E_REPO" show "$E2E_TAG_ENABLE:scripts/catalog-content-release.sh" | grep -q -- '--host-check'; then
+# (no `grep -q` on a pipe: under pipefail its early exit SIGPIPEs git show -> false)
+if [ "$(git -C "$E2E_REPO" show "$E2E_TAG_ENABLE:scripts/catalog-content-release.sh" | grep -c -- '--host-check')" -gt 0 ]; then
   e2e_run_logged 1200 "$E2E_LOGS/$S-step4-noop.log" e2e_lane --host-check --commit "$TAG_COMMIT" || rc=$?
 else
   e2e_run_logged 1200 "$E2E_LOGS/$S-step4-noop.log" e2e_lane --preflight --commit "$TAG_COMMIT" || rc=$?
@@ -89,5 +109,5 @@ verdict="$(grep -E '^\{"checks"' "$E2E_LOGS/$S-step4-noop.log" | tail -n 1)"
 printf '%s\n' "$verdict" >"$E2E_EVIDENCE/$S-noop-verdict.json"
 failed="$(python3 -c 'import json,sys;v=json.loads(sys.stdin.read() or "{}");print(" ".join("%s(%s)"%(c["name"],c["detail"][:120]) for c in v.get("checks",[]) if not c["ok"]))' <<<"$verdict")"
 ran_pricing="$(python3 -c 'import json,sys;v=json.loads(sys.stdin.read() or "{}");print(any(c["name"]=="pricing_host_state" for c in v.get("checks",[])))' <<<"$verdict")"
-if [ "$rc" = 0 ]; then e2e_result "$S" PASS "step 4 no-op preflight GO (pricing_host_state ran: $ran_pricing)"
-else e2e_result "$S" FAIL "step 4 no-op preflight on the tag commit rc=$rc NO_GO: $failed (pricing_host_state ran: $ran_pricing)"; fi
+if [ "$rc" = 0 ] && [ "$ran_pricing" = True ]; then e2e_result "$S" PASS "step 4 --host-check rc=0 (pricing_host_state ran and passed): $(python3 -c 'import json,sys;v=json.loads(sys.stdin.read() or "{}");print(" ".join(c["name"]+"="+("ok" if c["ok"] else "FAIL") for c in v.get("checks",[])))' <<<"$verdict")"
+else e2e_result "$S" FAIL "step 4 --host-check on the tag commit rc=$rc: $failed (pricing_host_state ran: $ran_pricing)"; exit 1; fi

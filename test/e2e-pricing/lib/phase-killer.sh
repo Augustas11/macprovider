@@ -5,6 +5,8 @@
 # pricing helper). Together with the Mac-side kill of the lane this is "kill -9
 # the lane" at that journal phase. One long-lived python process polls txn.json
 # every ~2 ms (a per-poll interpreter start misses `prepared`/`mutating`).
+# PHASE_ACTION=kill (default) | sqlite-lock | unreadable-card (candidate
+# rate-card.json mode 0000 for LOCK_SECONDS, then restored) | poweroff.
 # Writes <out>: "KILLED <phase-seen> <pids>" or "TIMEOUT <last phase>";
 # <out>.trace lists every phase seen.
 # Usage: phase-killer.sh <phase> <out> [timeout-s]
@@ -31,6 +33,14 @@ while time.time() < end:
             open(out, "w").write("LOCKED %s\n" % p)
             time.sleep(float(os.environ.get("LOCK_SECONDS", "25")))
             c.rollback()
+            sys.exit(0)
+        if action == "unreadable-card":
+            f = os.path.realpath("/opt/macprovider/autotune/current/rate-card.json")
+            mode = os.stat(f).st_mode & 0o7777
+            os.chmod(f, 0)
+            open(out, "w").write("UNREADABLE %s %s %o\n" % (p, f, mode))
+            time.sleep(float(os.environ.get("LOCK_SECONDS", "25")))
+            os.chmod(f, mode)
             sys.exit(0)
         if action == "poweroff":
             open(out, "w").write("POWEROFF %s\n" % p)

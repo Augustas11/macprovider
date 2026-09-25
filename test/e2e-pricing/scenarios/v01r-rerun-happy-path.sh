@@ -22,7 +22,7 @@ jq -n --arg rid "e2e-v1r-$n" --arg row "e2e-rerun-$n" --argjson p "$((41000 + (n
 C="$(bash "$E2E_HARNESS/lib/make-pricing-commit.sh" main "$E2E_WORK/v1r.json")"
 label="e2e-v1r-$n"; e2e_checkout main
 e2e_baseline V1R
-e2e_load_start V1R
+e2e_load_start V1R --sampler
 rc=0; e2e_preflight V1R "$C" || rc=$?
 if [ "$rc" != 0 ]; then
   failed="$(e2e_verdict_failed "$E2E_EVIDENCE/V1R-verdict.json")"
@@ -42,7 +42,7 @@ if [ "$rc" = 0 ] && [ "$ph" = none ] && [ "$live" = "$label" ] && [ -z "$leftove
 else
   e2e_result "$S" FAIL "deploy rc=$rc journal=$ph live=$live (want $label) leftover=[$leftover]: $(grep -E 'ERROR|FAILED|ALERT|refus|not mutating' "$E2E_LOGS/V1R-deploy.log" | head -n 5 | tr '\n' '|')"
 fi
-verdict="$(e2e_oracle V1R --expect-labels "$label" || true)"
+verdict="$(e2e_oracle V1R --expect-labels "$label" --sampler /root/e2e/load/V1R/sampler.jsonl --o2-sequence "$prior,$label" || true)"
 printf '%s\n' "$verdict" >"$E2E_EVIDENCE/V1R-oracle.json"
 if python3 -c 'import json,sys;sys.exit(0 if json.loads(sys.stdin.read())["ok"] else 1)' <<<"$verdict"; then
   e2e_result "$S" PASS "O1-O6 ok (prior $prior); load: $load"

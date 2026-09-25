@@ -7,8 +7,8 @@
 # Order: 00 VM + keys -> 01 scratch repo (bare origin, test identities, tags) ->
 # 02 linux builds + release-asset stand-ins -> 03 host bootstrap -> 04 seed the
 # pre-#1693 world with the real pre-#1693 deploy -> 04b V2d -> 05 the enabling
-# rollout per the runbook -> scenarios V1 V2 V4 V5 V6(+V7) V10 V3 V8 V11 V12.
-# Results: $E2E_WORK/evidence/results.jsonl (one JSON line per assertion);
+# rollout per the runbook -> scenarios V1 V10 V4 V6(+V7) V5 V2 V8 V9 V11 V12 V3.
+# Results: $E2E_EVIDENCE/results.jsonl (E2E_RUN=<name> -> evidence-<name>/) (one JSON line per assertion);
 # logs: $E2E_WORK/logs/. Nothing touches production; see env.sh and bin/.
 # Workarounds for bugs found by the first E2 run (fixed in tree; each script
 # detects the fix and does nothing on a fixed tree):
@@ -22,10 +22,13 @@ H="$(cd "$(dirname "$0")" && pwd -P)"
 export COPYFILE_DISABLE=1
 step() { e2e_log "=== $1"; bash "$H/$1" "${@:2}" || e2e_log "=== $1 exited $?"; }
 if [ $# -eq 0 ]; then
-  step 00-setup-vm.sh && step 01-scratch-repo.sh && (cd "$H/fakeprov" && bash build.sh) && step 02-build.sh &&
+  # Fresh world: 00b wipes the VM host back to the post-00 layout (the VM
+  # itself is kept), 01 recreates the scratch repo and origin from E2E_BRANCH_HEAD.
+  step 00-setup-vm.sh && step 00b-reset-host.sh && step 00-setup-vm.sh && step 01-scratch-repo.sh &&
+    (cd "$H/fakeprov" && bash build.sh) && step 02-build.sh &&
     step 03-bootstrap-host.sh && step 04-seed-pre-1693.sh && step 04b-pre1693-preflight.sh && step 05-enabling-rollout.sh &&
     step lib/workaround-gate-trust-root.sh
-  set -- V1 V10 V4 V6 V5 V2 V8 V11 V12 V3
+  set -- V1 V10 V4 V6 V5 V2 V8 V9 V11 V12 V3
 fi
 for v in "$@"; do
   case "$v" in
@@ -37,6 +40,7 @@ for v in "$@"; do
     V5) step scenarios/v05-power-off.sh ;;
     V6|V7) step scenarios/v06-lease-loss-and-writers.sh ;;
     V8) step scenarios/v08-evidence-failures.sh ;;
+    V9) step scenarios/v09-deploy-conflict.sh ;;
     V10) step scenarios/v10-runtime-floor.sh ;;
     V11) step scenarios/v11-renewal-and-content.sh ;;
     V12) step scenarios/v12-wholesale.sh ;;

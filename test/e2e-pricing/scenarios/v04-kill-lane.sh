@@ -30,7 +30,7 @@ for ph in $phases; do
   C="$(bash "$E2E_HARNESS/lib/make-pricing-commit.sh" main "$E2E_WORK/v4-$ph.json")"
   label="e2e-v4-$ph-$n"; e2e_checkout main
   e2e_baseline "V4$ph"
-  e2e_load_start "V4$ph"
+  e2e_load_start "V4$ph" --sampler
   rc=0; e2e_preflight "V4$ph" "$C" || rc=$?
   [ "$rc" = 0 ] || { e2e_result "$S" FAIL "$ph: preflight NO_GO: $(e2e_verdict_failed "$E2E_EVIDENCE/V4$ph-verdict.json")"; e2e_load_stop "V4$ph" >/dev/null; continue; }
   ack="$(e2e_verdict_ack "$E2E_EVIDENCE/V4$ph-verdict.json")"
@@ -61,7 +61,8 @@ for ph in $phases; do
   sleep 5
   load="$(e2e_load_stop "V4$ph")"
   want="$prior"; [ "$ph" = verified ] && want="$label"
-  verdict="$(e2e_oracle "V4$ph" --expect-labels "$prior,$label" || true)"
+  seq="$prior,$label,$prior"; [ "$ph" = verified ] && seq="$prior,$label"
+  verdict="$(e2e_oracle "V4$ph" --expect-labels "$prior,$label" --sampler "/root/e2e/load/V4$ph/sampler.jsonl" --o2-sequence "$seq" || true)"
   printf '%s\n' "$verdict" >"$E2E_EVIDENCE/V4$ph-oracle.json"
   ok_oracle="$(python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["ok"])' <<<"$verdict" 2>/dev/null || echo False)"
   msg="$ph: watcher=[$killed] trace=[$trace] journal after kill=$at; recover rc=$rc -> journal=$after; live=$live (want $want); oracle ok=$ok_oracle; recover log: $(grep -E 'coordinator-pricing-recover|recovery' "$E2E_LOGS/V4$ph-recover.log" | tail -n 3 | tr '\n' '|' | cut -c1-500); load=$load"

@@ -10,17 +10,26 @@ set -euo pipefail
 . "$(dirname "$0")/../env.sh"
 . "$E2E_HARNESS/lib/common.sh"
 e2e_write_ssh_config; e2e_tunnel_up; e2e_push_tools
+live_label() { vm "python3 -c 'import json;print(json.load(open(\"/opt/macprovider/autotune/current/release.json\"))[\"release_id\"])'"; }
+# A rolled-back/recovered pricing correction (V4/V5/V6/V8) leaves reviewed but
+# not-live commits on main; renewals are cut from the live content.
 e2e_checkout main
 e2e_baseline V11
 if [ "${1:-}" != b ]; then
+e2e_main_to_live
 rc=0
+prior="$(live_label)"
+e2e_load_start V11a --sampler
 e2e_run_logged 2400 "$E2E_LOGS/V11a-renew.log" bash -c "cd '$E2E_REPO' && . '$E2E_HARNESS/env.sh' && . '$E2E_HARNESS/lib/common.sh' && e2e_lane_env && \
   AUTOTUNE_STATIC_KEY_ID='$E2E_AUTOTUNE_KEY_ID' AUTOTUNE_STATIC_PRIVATE_KEY_PATH='$E2E_KEYS/autotune.private.base64' RELEASE_ID_PREFIX=e2e-renew \
   bash scripts/renew-autotune-static-feed.sh --deploy" || rc=$?
+sleep 5; load="$(e2e_load_stop V11a)"
 live="$(vm 'readlink /opt/macprovider/autotune/current')"
-v="$(e2e_oracle V11 --allow-journal || true)"
-o56="$(python3 -c 'import json,sys;v=json.loads(sys.argv[1]);print(v["O5"]["ok"] and v["O6"]["ok"], v["O5"].get("problems"), v["O6"].get("problems"))' "$v" 2>/dev/null || echo "? $v")"
-if [ "$rc" = 0 ]; then e2e_result V11 PASS "a: renewal rc=0, live=$live; O5/O6: $o56"
+v="$(e2e_oracle V11 --allow-journal --sampler /root/e2e/load/V11a/sampler.jsonl --o2-sequence "$prior,$(live_label)" || true)"
+printf '%s\n' "$v" >"$E2E_EVIDENCE/V11a-oracle.json"
+o56="$(python3 -c 'import json,sys;v=json.loads(sys.argv[1]);print(v["O5"]["ok"] and v["O6"]["ok"] and v["O2"]["ok"], v["O5"].get("problems"), v["O6"].get("problems"), "O2:", {k: v["O2"].get(k) for k in ("events","events_in_sequence","violations","skipped")})' "$v" 2>/dev/null || echo "? $v")"
+case "$o56" in True*) ;; *) rc="$rc+oracle" ;; esac
+if [ "$rc" = 0 ]; then e2e_result V11 PASS "a: renewal rc=0, live=$live; O5/O6/O2: $o56; load=$load"
 else e2e_result V11 FAIL "a: renewal rc=$rc live=$live O5/O6: $o56; $(grep -iE 'error|drift|fail|refus' "$E2E_LOGS/V11a-renew.log" | tail -n 4 | tr '\n' '|' | cut -c1-600)"; fi
 
 fi
@@ -57,8 +66,13 @@ if [ "$rc" != 0 ]; then
   e2e_result V11 FAIL "b: content preflight NO_GO: $(e2e_verdict_failed "$E2E_EVIDENCE/V11b-verdict.json") | $(for x in $(e2e_verdict_failed "$E2E_EVIDENCE/V11b-verdict.json"); do e2e_verdict_detail "$E2E_EVIDENCE/V11b-verdict.json" "$x" | cut -c1-200; done | tr '\n' '|')"
   exit 0
 fi
+prior_b="$(live_label)"
+e2e_load_start V11b --sampler
 rc=0; e2e_deploy V11b "$C" || rc=$?
-v="$(e2e_oracle V11b --expect-snapshots 1 || true)"
-o56="$(python3 -c 'import json,sys;v=json.loads(sys.argv[1]);print(v["O5"]["ok"] and v["O6"]["ok"], v["O3"])' "$v" 2>/dev/null || echo "? $v")"
-if [ "$rc" = 0 ] && [ "$pricing" = None ]; then e2e_result V11 PASS "b: content-only release rc=0, verdict.pricing=null; O3/O5/O6: $o56"
+sleep 5; load="$(e2e_load_stop V11b)"
+v="$(e2e_oracle V11b --expect-snapshots 1 --sampler /root/e2e/load/V11b/sampler.jsonl --o2-sequence "$prior_b,$(live_label)" || true)"
+printf '%s\n' "$v" >"$E2E_EVIDENCE/V11b-oracle.json"
+o56="$(python3 -c 'import json,sys;v=json.loads(sys.argv[1]);print(v["ok"], "O1", v["O1"].get("credits_checked"), "O2", {k: v["O2"].get(k) for k in ("events","events_in_sequence","violations")}, "O3", v["O3"])' "$v" 2>/dev/null || echo "? $v")"
+case "$o56" in True*) ;; *) rc="$rc+oracle" ;; esac
+if [ "$rc" = 0 ] && [ "$pricing" = None ]; then e2e_result V11 PASS "b: content-only release rc=0, verdict.pricing=null; oracle: $o56; load=$load"
 else e2e_result V11 FAIL "b: content deploy rc=$rc pricing=$pricing; $(grep -E 'EVIDENCE|ERROR|ALERT' "$E2E_LOGS/V11b-deploy.log" | head -n 4 | tr '\n' '|'); $o56"; fi

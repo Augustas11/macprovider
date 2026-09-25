@@ -16,6 +16,11 @@ git init -q --bare "$E2E_BARE"
 git clone -q --no-checkout "$E2E_SRC_REPO" "$E2E_REPO"
 cd "$E2E_REPO"
 git remote set-url origin "$E2E_BARE_URL"
+# Drop the source repo's branches the clone recorded as origin/*: catalog-release.py
+# compares the release ledger with origin/main, which must be the scratch origin
+# (the pre-#1693 base until the first push), never whatever the source checkout's main is now.
+git for-each-ref --format='%(refname)' refs/remotes/origin | xargs -r -n 50 git update-ref -d 2>/dev/null ||
+  git for-each-ref --format='%(refname)' refs/remotes/origin | while read -r r; do git update-ref -d "$r"; done
 git config user.name "E2E Operator"
 git config user.email e2e@test.invalid
 git config gpg.format ssh
@@ -24,6 +29,8 @@ printf 'e2e@test.invalid %s\n' "$(cat "$E2E_KEYS/tag_signing_ed25519.pub")" >"$E
 git config gpg.ssh.allowedSignersFile "$E2E_KEYS/allowed_signers"
 git config advice.detachedHead false
 git fetch -q "$E2E_SRC_REPO" "$E2E_BRANCH_HEAD"
+# The release ledger base for the pre-#1693 genesis is the base commit itself.
+git update-ref refs/remotes/origin/main "$E2E_PRE_BASE"
 
 export E2E_GENERATED_AT="${E2E_GENERATED_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 printf '%s\n' "$E2E_GENERATED_AT" >"$E2E_WORK/release-a.generated_at"

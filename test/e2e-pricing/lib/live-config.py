@@ -43,7 +43,10 @@ text = sub_in_block("onboarding", "app_track_register_enabled", "false", text)
 # Pearl's live storage.db_path is request-log.sqlite (deploy-pearl-vps.sh ACLs,
 # stats-billing-mirror and the pricing lane all hardcode it); the tracked
 # template says coordinator.db.
-text = text.replace('db_path: "/var/lib/macprovider/request-log.sqlite"', 'db_path: "/var/lib/macprovider/request-log.sqlite"', 1)
+if 'db_path: "/var/lib/macprovider/coordinator.db"' in text:
+    text = text.replace('db_path: "/var/lib/macprovider/coordinator.db"', 'db_path: "/var/lib/macprovider/request-log.sqlite"', 1)
+elif 'db_path: "/var/lib/macprovider/request-log.sqlite"' not in text:
+    raise SystemExit("storage.db_path not found")
 text = sub_in_block("settlement", "verified_model_settlement_mode", "observe", text)
 
 m = re.search(r"(?m)^providers:\n((?:  .*\n|\n)*)", text)

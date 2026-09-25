@@ -142,10 +142,92 @@ e2e_result() { # <scenario> <PASS|FAIL|BUG|GAP> <message>
   e2e_log "[$1] $2: $3"
 }
 
+# ---- providers ------------------------------------------------------------------
+# Window slots (runbook §Enabling rollout "Window slots"): every pricing
+# correction mints a new release id and ages the 3-slot window; a provider that
+# never restarts keeps advertising an old release and a later preflight is
+# correctly NO_GO window_coverage. The runbook's operator action is to restart
+# such providers; the harness does that for its two VM fake providers before
+# every preflight (E2E_REFRESH_PROVIDERS=0 disables it). The canary stand-in is
+# restarted by the lane itself (kickstart after its catalog install).
+# A previous scenario may leave the coordinator still booting (a reboot or a
+# controlled restart replays a large WAL for minutes on qemu TCG): wait for it.
+e2e_wait_coordinator() {
+  vm 'for _ in $(seq 1 180); do curl -fsS -o /dev/null --max-time 5 http://127.0.0.1:8444/healthz && exit 0; sleep 10; done; exit 1' ||
+    e2e_log "coordinator /healthz still not answering after 30 min"
+}
+e2e_refresh_providers() {
+  [ "${E2E_REFRESH_PROVIDERS:-1}" = 1 ] || return 0
+  vm_script <<'SH' || e2e_log "fake provider refresh: not all providers reported ready"
+since="$(date '+%Y-%m-%d %H:%M:%S')"
+systemctl restart e2e-fakeprov@1 e2e-fakeprov@2
+for _ in $(seq 1 90); do
+  n=0
+  for i in 1 2; do journalctl -u e2e-fakeprov@$i --since "$since" -o cat --no-pager | grep -q 'state_update ready sent' && n=$((n + 1)); done
+  [ "$n" = 2 ] && exit 0
+  sleep 2
+done
+exit 1
+SH
+  # The canary stand-in adopts the coordinator's live release only on (re)start,
+  # like the real CLI; a renewal does not restart it, so restart it too.
+  local live i
+  live="$(vm "python3 -c 'import json;print(json.load(open(\"/opt/macprovider/autotune/current/release.json\"))[\"release_id\"])'" 2>/dev/null)"
+  if [ -n "$live" ] && [ -f "$E2E_CANARY_HOME/Library/LaunchAgents/live.malibu.provider.plist" ] &&
+     [ "$(curl -fsS --max-time 5 http://127.0.0.1:19191/v1/status 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["catalog"]["release_id"])' 2>/dev/null)" != "$live" ]; then
+    env E2E_CANARY_HOME="$E2E_CANARY_HOME" "$E2E_HARNESS/canary-bin/launchctl" kickstart
+    for i in $(seq 1 60); do
+      [ "$(curl -fsS --max-time 5 http://127.0.0.1:19191/v1/status 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["catalog"]["release_id"])' 2>/dev/null)" = "$live" ] && break
+      sleep 2
+    done
+  fi
+}
+
+# Point scratch origin/main back at the newest commit whose release is the one
+# live on the VM (a rolled-back / recovered pricing correction leaves reviewed
+# but not-live commits on main; renewals and content releases must be cut from
+# the live content, runbook §Which lane). Harness-scripted, scratch origin only.
+e2e_main_to_live() {
+  local live c
+  live="$(vm "python3 -c 'import json;print(json.load(open(\"/opt/macprovider/autotune/current/release.json\"))[\"release_id\"])'")"
+  git -C "$E2E_REPO" fetch -q origin
+  for c in $(git -C "$E2E_REPO" rev-list --first-parent origin/main); do
+    if [ "$(git -C "$E2E_REPO" show "$c:phase3-binary/catalog/autotune/release.json" 2>/dev/null | python3 -c 'import json,sys;print(json.load(sys.stdin)["release_id"])' 2>/dev/null)" = "$live" ]; then
+      if [ "$c" != "$(git -C "$E2E_REPO" rev-parse origin/main)" ]; then
+        git -C "$E2E_REPO" push -q -f origin "$c:refs/heads/main"
+        git -C "$E2E_REPO" fetch -q origin
+        e2e_log "scratch origin/main reset to $c (live release $live)"
+      fi
+      git -C "$E2E_REPO" checkout -q main && git -C "$E2E_REPO" reset -q --hard origin/main
+      return 0
+    fi
+  done
+  e2e_log "no commit on origin/main carries the live release $live"; return 1
+}
+
+# Pearl updater probe (tier E2 only): a copy of the installed updater config with
+# production apply enabled and a dummy LOCAL dead-man token, so --apply gets past
+# "production apply is disabled" to its guards. Always run it in test mode
+# (MACPROVIDER_UPDATER_TESTING=1, --source-dir) inside `unshare -n`: no network.
+e2e_updater_probe_conf() {
+  vm_script <<'SH'
+umask 077
+sed -e 's/^PEARL_UPDATER_ENABLED=.*/PEARL_UPDATER_ENABLED=1/' -e '/^PEARL_UPDATER_DEADMAN_API_TOKEN_FILE=/d' /etc/macprovider/pearl-updater.conf >/root/e2e/updater-probe.conf
+grep -q '^PEARL_UPDATER_ENABLED=' /root/e2e/updater-probe.conf || echo 'PEARL_UPDATER_ENABLED=1' >>/root/e2e/updater-probe.conf
+echo 'PEARL_UPDATER_DEADMAN_API_TOKEN_FILE=/root/e2e/deadman-dummy-token' >>/root/e2e/updater-probe.conf
+printf 'e2edummytoken\n' >/root/e2e/deadman-dummy-token
+SH
+}
+e2e_updater_src() { # <tag>: the tag's release stand-in at /root/e2e/updater-src
+  COPYFILE_DISABLE=1 tar -C "$E2E_WORK/gh-releases/$1" -cf - . | vm "rm -rf /root/e2e/updater-src && mkdir -p /root/e2e/updater-src && tar -xf - -C /root/e2e/updater-src"
+}
+
 # ---- lane runs with saved evidence ---------------------------------------------
 # e2e_preflight <name> <commit> [extra args]: saves the verdict JSON; returns rc.
 e2e_preflight() {
   local name="$1" commit="$2" rc=0; shift 2
+  e2e_wait_coordinator
+  e2e_refresh_providers
   e2e_run_logged "${E2E_LANE_TIMEOUT:-1500}" "$E2E_LOGS/$name-preflight.log" e2e_lane --preflight --commit "$commit" "$@" || rc=$?
   grep -E '^\{"checks"' "$E2E_LOGS/$name-preflight.log" | tail -n 1 >"$E2E_EVIDENCE/$name-verdict.json" || true
   return "$rc"

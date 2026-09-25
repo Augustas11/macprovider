@@ -72,11 +72,19 @@ e2e_log "root SSH ok"
 vm_script <<'SH'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+# Background apt (apt-daily, unattended-upgrades) takes the dpkg lock for many
+# minutes on qemu TCG and races the harness: turn it off on this test VM.
+systemctl disable apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service >/dev/null 2>&1 || true
+systemctl stop --no-block apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service unattended-upgrades.service >/dev/null 2>&1 || true
+pkill -f apt.systemd.daily 2>/dev/null || true
+for _ in $(seq 1 120); do fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1 || break; sleep 5; done
 need=""
 for p in nginx sqlite3 python3 postgresql postgresql-client acl curl jq openssl libdigest-sha-perl util-linux certbot python3-certbot-nginx dnsutils rsync golang-go; do
   dpkg -s "$p" >/dev/null 2>&1 || need="$need $p"
 done
 if [ -n "$need" ]; then
+  # cloud-init / unattended-upgrades may hold the dpkg lock right after boot.
+  for _ in $(seq 1 120); do fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1 || break; sleep 5; done
   apt-get update -qq
   apt-get install -qq -y $need >/dev/null
 fi

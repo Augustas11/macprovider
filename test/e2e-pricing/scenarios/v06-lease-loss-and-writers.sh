@@ -29,7 +29,7 @@ e2e_baseline V6
 rc=0; e2e_preflight V6 "$C" || rc=$?
 [ "$rc" = 0 ] || { e2e_result V6 FAIL "preflight NO_GO: $(e2e_verdict_failed "$E2E_EVIDENCE/V6-verdict.json")"; exit 1; }
 ack="$(e2e_verdict_ack "$E2E_EVIDENCE/V6-verdict.json")"
-e2e_load_start V6
+e2e_load_start V6 --sampler
 # Watcher: at `verifying`, kill -9 only the lock holder whose parent is sshd.
 vm "cat > /root/e2e/tools/kill-runner.sh" <<'SH'
 set -u
@@ -72,7 +72,11 @@ e2e_checkout "$E2E_TAG_ENABLE"
 w "deploy-pearl-vps.sh" 12 bash -c "cd '$E2E_REPO' && . '$E2E_HARNESS/env.sh' && . '$E2E_HARNESS/lib/common.sh' && e2e_lane_env && bash phase4-coordinator/dist/deploy-pearl-vps.sh"
 e2e_checkout main
 w "content lane --preflight" 3 e2e_lane --preflight --commit "$C"
-w "Pearl updater --apply" '[1-9][0-9]*' vm '/usr/local/sbin/macprovider-pearl-update --apply --tag v90.1.0'
+w "Pearl updater --apply (as installed)" '[1-9][0-9]*' vm '/usr/local/sbin/macprovider-pearl-update --apply --tag v90.1.0'
+# Past "production apply is disabled": probe config (apply enabled), test mode,
+# no network namespace -> the journal guard itself must be the refusal.
+e2e_updater_probe_conf; e2e_updater_src "$E2E_TAG_ENABLE"
+w "Pearl updater --apply (probe config, no network)" '[1-9][0-9]*' vm 'MACPROVIDER_UPDATER_TESTING=1 unshare -n timeout 300 /usr/local/sbin/macprovider-pearl-update --apply --tag v90.1.0 --source-dir /root/e2e/updater-src --config /root/e2e/updater-probe.conf'
 w "Tier-2 enforcement watchdog --reconcile" '[0-9]+' vm '/usr/local/sbin/macprovider-tier2-enforcement-watchdog --reconcile'
 w "activate-tier2-encrypted-leg.sh --apply" '[1-9][0-9]*' bash -c "cd '$E2E_REPO' && . '$E2E_HARNESS/env.sh' && . '$E2E_HARNESS/lib/common.sh' && e2e_lane_env && SSH_BIN='$E2E_HARNESS/bin/ssh' DEMO_TOKEN=x OPERATOR_KEY=\$(cat '$E2E_KEYS/operator_key') bash scripts/activate-tier2-encrypted-leg.sh --apply"
 w "deploy watchdog unit start" '[0-9]+' vm 'systemctl start macprovider-coordinator-deploy-watchdog.service; sleep 5; journalctl -u macprovider-coordinator-deploy-watchdog -n 5 -o cat --no-pager'
@@ -82,7 +86,7 @@ w "shell guard ccg_refuse_if_pricing_txn" 75 vm '. /opt/macprovider/coordinator-
 rc=0; e2e_recover V6 || rc=$?
 sleep 5; load="$(e2e_load_stop V6)"
 after="$(e2e_txn_phase)"; live="$(live_label)"
-verdict="$(e2e_oracle V6 --expect-labels "$prior,$label" || true)"
+verdict="$(e2e_oracle V6 --expect-labels "$prior,$label" --sampler /root/e2e/load/V6/sampler.jsonl --o2-sequence "$prior,$label,$prior" || true)"
 printf '%s\n' "$verdict" >"$E2E_EVIDENCE/V6-oracle.json"
 ok="$(python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["ok"])' <<<"$verdict" 2>/dev/null || echo False)"
 if [ "$rc" = 0 ] && [ "$after" = none ] && [ "$live" = "$prior" ] && [ "$ok" = True ]; then

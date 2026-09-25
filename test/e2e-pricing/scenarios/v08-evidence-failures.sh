@@ -5,13 +5,17 @@
 #  lock   : hold an EXCLUSIVE SQLite write lock on coordinator.db from hup-intent for
 #           25 s, so the SIGHUP's billing snapshot cannot commit ("billing config
 #           reload rejected")
-# Usage: v08-evidence-failures.sh [stop|lock ...]
+#  stale  : the served card stays stale: from hup-intent for 25 s the candidate's
+#           rate-card.json is unreadable to the coordinator (mode 0000), so the
+#           SIGHUP's feed reload keeps card A and the reload parity-rejects; the
+#           mode is restored before the lane's evidence watch ends
+# Usage: v08-evidence-failures.sh [stop|lock|stale ...]
 set -euo pipefail
 . "$(dirname "$0")/../env.sh"
 . "$E2E_HARNESS/lib/common.sh"
 S=V8
 e2e_write_ssh_config; e2e_tunnel_up; e2e_push_tools
-cases="${*:-stop lock}"
+cases="${*:-stop lock stale}"
 n="${E2E_V8_SEQ:-$(( $(date +%s) + 17 ))}"
 live_label() { vm "python3 -c 'import json;print(json.load(open(\"/opt/macprovider/autotune/current/release.json\"))[\"release_id\"])'"; }
 for c in $cases; do
@@ -26,9 +30,10 @@ for c in $cases; do
   rc=0; e2e_preflight "V8$c" "$C" || rc=$?
   [ "$rc" = 0 ] || { e2e_result "$S" FAIL "$c: preflight NO_GO: $(e2e_verdict_failed "$E2E_EVIDENCE/V8$c-verdict.json")"; continue; }
   ack="$(e2e_verdict_ack "$E2E_EVIDENCE/V8$c-verdict.json")"
-  e2e_load_start "V8$c"
+  e2e_load_start "V8$c" --sampler
   case "$c" in
     stop) action='systemctl stop macprovider-coordinator'; at=verifying ;;
+    stale) action='true'; at=hup-intent ;;  # phase-killer PHASE_ACTION=unreadable-card (2 ms poll)
     lock) action='nohup python3 -c "import sqlite3,time;c=sqlite3.connect(\"/var/lib/macprovider/request-log.sqlite\",timeout=60);c.execute(\"BEGIN EXCLUSIVE\");time.sleep(25);c.rollback()" >/root/e2e/v8-lock.log 2>&1 &'; at=hup-intent ;;
   esac
   vm "cat > /root/e2e/tools/v8-$c.sh" <<SH
@@ -38,9 +43,10 @@ for _ in \$(seq 1 6000); do
   sleep 0.05
 done
 SH
-  if [ "$c" = lock ]; then
+  if [ "$c" = lock ] || [ "$c" = stale ]; then
+    pa=sqlite-lock; [ "$c" = stale ] && pa=unreadable-card
     vm "cat > /root/e2e/tools/phase-killer.sh && chmod 700 /root/e2e/tools/phase-killer.sh" <"$E2E_HARNESS/lib/phase-killer.sh"
-    vm "rm -f /root/e2e/v8-$c.fired; PHASE_ACTION=sqlite-lock nohup /root/e2e/tools/phase-killer.sh hup-intent /root/e2e/v8-$c.fired 1500 >/dev/null 2>&1 </dev/null &"
+    vm "rm -f /root/e2e/v8-$c.fired /root/e2e/v8-$c.fired.trace; PHASE_ACTION=$pa nohup /root/e2e/tools/phase-killer.sh hup-intent /root/e2e/v8-$c.fired 1500 >/dev/null 2>&1 </dev/null &"
   else
     vm "rm -f /root/e2e/v8-$c.fired; nohup bash /root/e2e/tools/v8-$c.sh >/dev/null 2>&1 </dev/null &"
   fi
@@ -51,7 +57,7 @@ SH
   load="$(e2e_load_stop "V8$c")"
   post_state="$(vm 'sha256sum /opt/macprovider/coordinator.yaml | cut -c1-16; readlink /opt/macprovider/autotune/current; sha256sum /opt/macprovider/autotune/.previous-target 2>/dev/null | cut -c1-16' | tr '\n' ' ')"
   ph="$(e2e_txn_phase)"; live="$(live_label)"
-  verdict="$(e2e_oracle "V8$c" --expect-labels "$prior,$label" || true)"
+  verdict="$(e2e_oracle "V8$c" --expect-labels "$prior,$label" --sampler "/root/e2e/load/V8$c/sampler.jsonl" --o2-sequence "$prior,$label,$prior" || true)"
   printf '%s\n' "$verdict" >"$E2E_EVIDENCE/V8$c-oracle.json"
   ok="$(python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["ok"])' <<<"$verdict" 2>/dev/null || echo False)"
   why="$(grep -E 'EVIDENCE|rolled back|ROLLBACK|ALERT|pricing journal' "$E2E_LOGS/V8$c-deploy.log" | head -n 6 | tr '\n' '|' | cut -c1-700)"

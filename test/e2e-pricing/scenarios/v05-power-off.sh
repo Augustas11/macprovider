@@ -42,7 +42,7 @@ for ph in $phases; do
   rc=0; e2e_preflight "V5$ph" "$C" || rc=$?
   [ "$rc" = 0 ] || { e2e_result "$S" FAIL "$ph: preflight NO_GO: $(e2e_verdict_failed "$E2E_EVIDENCE/V5$ph-verdict.json")"; continue; }
   ack="$(e2e_verdict_ack "$E2E_EVIDENCE/V5$ph-verdict.json")"
-  e2e_load_start "V5$ph"
+  e2e_load_start "V5$ph" --sampler
   vm "rm -f /root/e2e/off-$ph*; PHASE_ACTION=poweroff nohup /root/e2e/tools/phase-poweroff.sh $ph /root/e2e/off-$ph 1500 >/dev/null 2>&1 </dev/null &"
   ( cd "$E2E_REPO" && e2e_lane_env && exec perl -e 'setpgrp(0,0); exec @ARGV' bash scripts/catalog-content-release.sh --deploy --commit "$C" \
       --pricing-diff-sha256 "$ack" --preflight-verdict "$E2E_EVIDENCE/V5$ph-verdict.json" ) >"$E2E_LOGS/V5$ph-deploy.log" 2>&1 &
@@ -66,14 +66,15 @@ for ph in $phases; do
   e2e_tunnel_up
   # Give pre-start + a slow coordinator boot (minutes of WAL recovery on TCG)
   # + the closer (it waits for readiness, then the boot record) time.
-  for _ in $(seq 1 240); do
-    [ "$(e2e_txn_phase)" = none ] && vm 'systemctl is-active --quiet macprovider-coordinator' && break
+  for _ in $(seq 1 360); do
+    # the journal can finalize at pre-start (verified) long before a slow boot serves
+    [ "$(e2e_txn_phase)" = none ] && vm 'systemctl is-active --quiet macprovider-coordinator && curl -fsS -o /dev/null http://127.0.0.1:8444/healthz' && break
     sleep 5
   done
   trace="$(vm "cat /root/e2e/off-$ph.trace 2>/dev/null | awk '{print \$3}' | tr '\n' ' '")"
   after="$(e2e_txn_phase)"
-  units="$(vm 'for u in macprovider-coordinator macprovider-coordinator-deploy-recovery macprovider-coordinator-pricing-close; do printf "%s=%s " $u $(systemctl is-active $u); done; systemctl is-failed macprovider-pearl-updater-alert@macprovider-coordinator-pricing-close.service.service 2>/dev/null')"
-  jr="$(vm 'journalctl -b -u macprovider-coordinator-deploy-recovery -u macprovider-coordinator-pricing-close -o cat --no-pager | grep -E "pricing-recover|pricing" | tail -n 6' | tr '\n' '|' | cut -c1-900)"
+  units="$(vm 'for u in macprovider-coordinator macprovider-coordinator-deploy-recovery macprovider-coordinator-pricing-close; do printf "%s=%s " $u $(systemctl is-active $u); done; printf "alert=%s" $(systemctl is-failed macprovider-pearl-updater-alert@macprovider-coordinator-pricing-close.service.service 2>/dev/null || true)' || true)"
+  jr="$(vm 'journalctl -b -u macprovider-coordinator-deploy-recovery -u macprovider-coordinator-pricing-close -o cat --no-pager | grep -E "pricing-recover|pricing" | tail -n 6 || true' | tr '\n' '|' | cut -c1-900 || true)"
   manual=""
   if [ "$after" != none ]; then
     rrc=0; e2e_recover "V5$ph" || rrc=$?
@@ -81,8 +82,15 @@ for ph in $phases; do
   fi
   live="$(live_label)"
   want="$prior"; [ "$ph" = verified ] && want="$label"
-  e2e_load_start "V5$ph-after"; sleep 30; load="$(e2e_load_stop "V5$ph-after")"
-  verdict="$(e2e_oracle "V5$ph" --expect-labels "$prior,$label" || true)"
+  e2e_load_start "V5$ph-after" --sampler; sleep 30; load="$(e2e_load_stop "V5$ph-after")"
+  # O2 over what survived of the pre-power-off sampler log (unsynced page cache
+  # is lost with SysRq o) plus the post-boot sampler.
+  vm "cat /root/e2e/load/V5$ph/sampler.jsonl /root/e2e/load/V5$ph-after/sampler.jsonl 2>/dev/null | python3 -c 'import json,sys
+for l in sys.stdin:
+    try: json.loads(l); sys.stdout.write(l)
+    except ValueError: pass' > /root/e2e/load/V5$ph-combined.jsonl"
+  seq="$prior,$label,$prior"; [ "$ph" = verified ] && seq="$prior,$label"
+  verdict="$(e2e_oracle "V5$ph" --expect-labels "$prior,$label" --sampler "/root/e2e/load/V5$ph-combined.jsonl" --o2-sequence "$seq" || true)"
   printf '%s\n' "$verdict" >"$E2E_EVIDENCE/V5$ph-oracle.json"
   ok_oracle="$(python3 -c 'import json,sys;print(json.loads(sys.stdin.read())["ok"])' <<<"$verdict" 2>/dev/null || echo False)"
   msg="$ph: trace=[$trace] lane=[$lane_tail]; after boot journal=$after; $manual; live=$live (want $want) units: $units; recovery journal: $jr; oracle ok=$ok_oracle; load after boot=$load"

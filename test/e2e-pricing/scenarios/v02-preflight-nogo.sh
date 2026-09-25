@@ -83,41 +83,28 @@ e2e_checkout main 2>/dev/null || { git -C "$E2E_REPO" checkout -q main; git -C "
 run_case e "$C_E" 'pricing_release|content_gate' '' ''
 restore_main
 
-# g1: remove row qwen3-4b acking only its own key; the request-log-only name
-# "qwen/qwen3-4b" (normalizes onto that row) moves qwen3-4b -> default unacked.
-vm 'k=$(cat /root/e2e/buyer-api-key); curl -s -o /dev/null -H "Authorization: Bearer $k" -H "Content-Type: application/json" -d "{\"model\":\"qwen/qwen3-4b\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}" http://127.0.0.1:9443/v1/chat/completions'
-e2e_checkout main
-jq '.release_id = ("e2e-v2g1-" + (now|tostring|.[0:10])) | .remove = ["qwen3-4b"] | .acks = [{"model":"qwen3-4b","from_row":"qwen3-4b","to_row":"default"}]' "$E2E_WORK/v2-base.json" >"$E2E_WORK/v2g1.json"
-C_G1="$(push_tmp "$E2E_WORK/v2g1.json")"; e2e_checkout main
-run_case g1 "$C_G1" 'pricing_effective_diff|coordinator_dry_load' '' ''
-restore_main
+# g1 / h (request-log-only names, Unicode/bidi names) run in v02b with SEEDED
+# request_log rows: a buyer request for an unserved model is answered 404
+# without a request_log row, so it cannot create a request-log-only name.
 
-# g2: an added exact row captures a catalog key that resolved to another row.
+# g2: an added exact row capturing a catalog key. Every catalog key resolves by
+# normalization, so only an exact (non-normalized) row could capture one, and
+# catalog-release.py generate refuses such a row at authoring time. Either an
+# authoring refusal or a preflight NO_GO is a pass; a GO is a failure.
 e2e_checkout main
-jq '.release_id = ("e2e-v2g2-" + (now|tostring|.[0:10])) | .add["qwen/qwen3-30b-a3b-instruct-2507"] = [70000, 17500, 140000]' "$E2E_WORK/v2-base.json" >"$E2E_WORK/v2g2.json"
-C_G2="$(push_tmp "$E2E_WORK/v2g2.json")"; e2e_checkout main
-run_case g2 "$C_G2" 'pricing_effective_diff|coordinator_dry_load|content_gate' '' ''
-restore_main
-
-# h: buyer-controlled names outside the key grammar in request_log: a bidi
-# override, a zero-width joiner and an upper-case variant of the removed row
-# (resolved by the live binary). The upper-case one moves rows without an ack.
-vm_script <<'SH'
-k=$(cat /root/e2e/buyer-api-key)
-for m in 'Qwen/Qwen3-4B' 'qwen3-4b‮gnp.exe' 'qwen3‍4b'; do
-  curl -s -o /dev/null -w "%{http_code} " -H "Authorization: Bearer $k" -H "Content-Type: application/json" \
-    -d "{\"model\":\"$m\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}" http://127.0.0.1:9443/v1/chat/completions
-done; echo
-sqlite3 /var/lib/macprovider/request-log.sqlite "select distinct hex(model) from request_log where lower(model) like '%qwen3%4b%'"
-SH
-e2e_checkout main
-jq '.release_id = ("e2e-v2h-" + (now|tostring|.[0:10])) | .remove = ["qwen3-4b"] | .acks = [{"model":"qwen3-4b","from_row":"qwen3-4b","to_row":"default"},{"model":"qwen/qwen3-4b","from_row":"qwen3-4b","to_row":"default"}]' "$E2E_WORK/v2-base.json" >"$E2E_WORK/v2h.json"
-C_H="$(push_tmp "$E2E_WORK/v2h.json")"; e2e_checkout main
-run_case h "$C_H" 'pricing_effective_diff|coordinator_dry_load' '' ''
-grep -a -F '[catalog-content]   ' "$E2E_LOGS/V2h-preflight.log" >"$E2E_EVIDENCE/V2h-price-table.txt" || true
-if LC_ALL=C grep -q $'\xe2\x80\xae\|\xe2\x80\x8d' "$E2E_LOGS/V2h-preflight.log"; then
-  e2e_result "$S" FAIL "case h: a raw bidi/zero-width code point reached the operator's terminal output"
+jq '.release_id = ("e2e-v2g2-" + (now|tostring|.[0:10])) | .add["mlx-community/Qwen3-8B-4bit"] = [70000, 17500, 140000]' "$E2E_WORK/v2-base.json" >"$E2E_WORK/v2g2.json"
+g2rc=0; C_G2="$(bash "$E2E_HARNESS/lib/make-pricing-commit.sh" main "$E2E_WORK/v2g2.json" 2>"$E2E_LOGS/V2g2-author.log")" || g2rc=$?
+git -C "$E2E_REPO" checkout -q -- . 2>/dev/null || true; git -C "$E2E_REPO" clean -fdq -- phase3-binary/catalog phase3-binary/dist/static 2>/dev/null || true
+e2e_checkout main 2>/dev/null || { git -C "$E2E_REPO" checkout -q main; git -C "$E2E_REPO" reset -q --hard origin/main; }
+if [ "$g2rc" != 0 ]; then
+  # A catalog key is mixed-case (outside the row-key grammar) and never its own
+  # normalized key: generate refuses it either way.
+  if grep -Eq 'must be the SPEC-005 normalized model key|invalid model key' "$E2E_LOGS/V2g2-author.log"; then
+    e2e_result "$S" PASS "case g2 (catalog key mlx-community/Qwen3-8B-4bit captured by an added exact row): refused at authoring time: $(grep -m1 -E 'normalized model key|invalid model key' "$E2E_LOGS/V2g2-author.log" | cut -c1-260)"
+  else
+    e2e_result "$S" FAIL "case g2: authoring failed for another reason: $(tail -n 3 "$E2E_LOGS/V2g2-author.log" | tr '\n' '|' | cut -c1-400)"
+  fi
 else
-  e2e_result "$S" PASS "case h: no raw bidi/zero-width code point in the lane output; table: $(tr '\n' '|' <"$E2E_EVIDENCE/V2h-price-table.txt" | cut -c1-600)"
+  run_case g2 "$C_G2" 'pricing_effective_diff|coordinator_dry_load|content_gate' '' ''
+  restore_main
 fi
-restore_main

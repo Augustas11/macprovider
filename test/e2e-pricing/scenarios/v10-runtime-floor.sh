@@ -45,16 +45,31 @@ e2e_run_logged 3600 "$E2E_LOGS/V10b.log" deploy || rc=$?
 after="$(e2e_host_hash)"
 hz="$(vm 'curl -fsS http://127.0.0.1:8444/healthz' | python3 -c 'import json,sys;print(json.load(sys.stdin).get("version"))' 2>/dev/null || echo '?')"
 e2e_checkout main
-msg="b: runbook marker check says '$marker'; old deploy rc=$rc; live version after=$hz; host $([ "$before" = "$after" ] && echo unchanged || echo CHANGED); first refusal: $(grep -m1 -E 'refusing|aborting' "$E2E_LOGS/V10b.log" | cut -c1-200)"
+msg="b: runbook marker check says '$marker' (operator rule: do not deploy a pre-#1693 tag); old deploy run anyway rc=$rc; live version after=$hz; host $([ "$before" = "$after" ] && echo unchanged || echo CHANGED); first refusal: $(grep -m1 -E 'refusing|aborting|Refusing' "$E2E_LOGS/V10b.log" | cut -c1-200)"
 units_after="$(units)"
-if [ "$hz" = "$E2E_TAG_ENABLE" ] && [ "$rc" != 0 ] && [ "$units_before" = "$units_after" ]; then e2e_result "$S" PASS "$msg"
-else e2e_result "$S" FAIL "$msg; recovery wiring before=[$units_before] after=[$units_after] (the pre-#1693 script's step 1 reinstalls its own deploy-recovery unit/helper/guard drop-in BEFORE any later refusal)"; fi
+# Runbook §Pricing runtime floor "If a pre-#1693 deploy script ran anyway": its
+# step 1 reinstalls its own recovery unit/helper/drop-in; detection is the
+# --host-check NO_GO pricing_host_state 'pricing recovery DISABLED'.
+hc_rc=0; e2e_run_logged 1200 "$E2E_LOGS/V10b-hostcheck.log" e2e_lane --host-check --commit "$(git -C "$E2E_REPO" rev-parse "$E2E_TAG_ENABLE^{commit}")" || hc_rc=$?
+hc="$(grep -E '^\{"checks"' "$E2E_LOGS/V10b-hostcheck.log" | tail -n 1)"; printf '%s\n' "$hc" >"$E2E_EVIDENCE/V10b-hostcheck.json"
+hc_detail="$(e2e_verdict_detail "$E2E_EVIDENCE/V10b-hostcheck.json" pricing_host_state 2>/dev/null | cut -c1-300)"
+if [ "$hz" = "$E2E_TAG_ENABLE" ] && [ "$rc" != 0 ] && { [ "$units_before" = "$units_after" ] || { [ "$hc_rc" != 0 ] && grep -q 'pricing recovery DISABLED' <<<"$hc_detail"; }; }; then
+  e2e_result "$S" PASS "$msg; recovery wiring $([ "$units_before" = "$units_after" ] && echo unchanged || echo "REPLACED by the old script (documented operator-rule gap) and DETECTED: --host-check rc=$hc_rc pricing_host_state: $hc_detail")"
+else
+  e2e_result "$S" FAIL "$msg; recovery wiring before=[$units_before] after=[$units_after]; --host-check rc=$hc_rc: $hc_detail"
+fi
 fi
 if [ "${1:-}" != c ]; then
-# Restore the #1693 wiring with the enabling deploy (as an operator would).
+# Restore the #1693 wiring with the enabling deploy (runbook fix), then
+# --host-check until it passes.
 e2e_checkout "$E2E_TAG_ENABLE"
-rc=0; e2e_run_logged 3600 "$E2E_LOGS/V10b-restore.log" bash -c "cd '$E2E_REPO' && . '$E2E_HARNESS/env.sh' && . '$E2E_HARNESS/lib/common.sh' && e2e_lane_env && FORCE_RESTART=1 bash phase4-coordinator/dist/deploy-pearl-vps.sh" || rc=$?
-e2e_result "$S" INFO "b: restore with the enabling deploy rc=$rc; wiring now [$(units)]"
+rc=0; e2e_run_logged 3600 "$E2E_LOGS/V10b-restore.log" bash -c "cd '$E2E_REPO' && . '$E2E_HARNESS/env.sh' && . '$E2E_HARNESS/lib/common.sh' && e2e_lane_env && CONFIG_MODE=preserve-live FORCE_RESTART=1 bash phase4-coordinator/dist/deploy-pearl-vps.sh" || rc=$?
+hc_rc=0; e2e_run_logged 1200 "$E2E_LOGS/V10b-restore-hostcheck.log" e2e_lane --host-check --commit "$(git -C "$E2E_REPO" rev-parse "$E2E_TAG_ENABLE^{commit}")" || hc_rc=$?
+if [ "$rc" = 0 ] && [ "$hc_rc" = 0 ]; then
+  e2e_result "$S" PASS "b-fix: enabling deploy re-run rc=0, --host-check rc=0; wiring now [$(units)]"
+else
+  e2e_result "$S" FAIL "b-fix: enabling deploy re-run rc=$rc ($(grep -E 'refusing|aborting|ERROR' "$E2E_LOGS/V10b-restore.log" | head -n 2 | tr '\n' '|' | cut -c1-300)); --host-check rc=$hc_rc ($(grep -E '^\{"checks"' "$E2E_LOGS/V10b-restore-hostcheck.log" | tail -n 1 | cut -c1-400))"
+fi
 e2e_checkout main
 fi
 
@@ -68,5 +83,50 @@ after="$(e2e_host_hash)"
 if grep -q 'PricingRuntimeFloorRefused\|pricing runtime floor' "$E2E_LOGS/V10c.log" && [ "$before" = "$after" ]; then
   e2e_result "$S" PASS "c: updater refuses the pre-#1693 release (rc=$rc): $(grep -m1 -i 'floor' "$E2E_LOGS/V10c.log" | cut -c1-240)"
 else
-  e2e_result "$S" GAP "c: updater did not reach the floor check in tier E2 (rc=$rc, host $([ "$before" = "$after" ] && echo unchanged || echo CHANGED)): $(tail -n 3 "$E2E_LOGS/V10c.log" | tr '\n' '|' | cut -c1-400)"
+  # How far does it get with apply enabled? A probe copy of the config (apply
+  # enabled, a dummy local dead-man token), test mode, no network namespace.
+  prc=0
+  e2e_updater_probe_conf
+  vm "MACPROVIDER_UPDATER_TESTING=1 unshare -n timeout 300 /usr/local/sbin/macprovider-pearl-update --apply --tag $E2E_TAG_PRE --source-dir /root/e2e/updater-src --config /root/e2e/updater-probe.conf" >"$E2E_LOGS/V10c-probe.log" 2>&1 || prc=$?
+  after2="$(e2e_host_hash)"
+  if grep -q 'PricingRuntimeFloorRefused\|pricing runtime floor' "$E2E_LOGS/V10c-probe.log" && [ "$before" = "$after2" ]; then
+    e2e_result "$S" PASS "c (probe config: apply enabled, dummy dead-man token, no network): updater refuses the pre-#1693 release rc=$prc: $(grep -m1 -i 'floor' "$E2E_LOGS/V10c-probe.log" | cut -c1-240)"
+  else
+    e2e_result "$S" GAP "c: updater never reaches its pricing-floor check (apply() -> require_pricing_runtime_floor) in tier E2: as installed rc=$rc '$(tail -n 1 "$E2E_LOGS/V10c.log" | cut -c1-200)'; with a probe config (apply enabled, dummy dead-man token, unshare -n) rc=$prc stops at '$(grep -v '^$' "$E2E_LOGS/V10c-probe.log" | tail -n 1 | cut -c1-300)' (host $([ "$before" = "$after2" ] && echo unchanged || echo CHANGED)); covered only by ops/pearl-updater/test_pearl_updater.py"
+  fi
+fi
+
+# d) deploy recovery asked to restore a snapshot whose coordinator is pre-#1693:
+#    a deploy that died right after arming its transaction (lib/synth-deploy-
+#    snapshot.sh, a port of deploy-pearl-vps.sh step 4/9) with the pre-#1693
+#    binary as the rollback target. `coordinator-deploy-recover --recover`
+#    (the watchdog/operator path; pre-start runs the same code) must refuse and
+#    keep the snapshot; then the runbook's fix (replace the snapshot binary with
+#    the enabling release's sha-checked coordinator, rerun --recover) completes.
+vm "cat > /root/e2e/tools/synth-deploy-snapshot.sh && chmod 700 /root/e2e/tools/synth-deploy-snapshot.sh" <"$E2E_HARNESS/lib/synth-deploy-snapshot.sh"
+/usr/bin/scp -F "$E2E_SSH_CONFIG" -q "$E2E_WORK/bins/$E2E_TAG_PRE/coordinator-linux-amd64" "$E2E_PEARL:/root/e2e/coordinator-pre1693"
+/usr/bin/scp -F "$E2E_SSH_CONFIG" -q "$E2E_WORK/gh-releases/$E2E_TAG_ENABLE/coordinator-linux-amd64" "$E2E_PEARL:/root/e2e/coordinator-enable"
+vm "chmod 0750 /root/e2e/coordinator-pre1693 /root/e2e/coordinator-enable"
+want_enable="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["components"]["coordinator"]["sha256"])' "$E2E_WORK/gh-releases/$E2E_TAG_ENABLE/pearl-release.json")"
+vm "SNAP_COORDINATOR=/root/e2e/coordinator-pre1693 /root/e2e/tools/synth-deploy-snapshot.sh" >"$E2E_LOGS/V10d-synth.log" 2>&1
+armed="$(e2e_host_hash)"; rc=0
+vm "/opt/macprovider/coordinator-deploy-recover --recover" >"$E2E_LOGS/V10d.log" 2>&1 || rc=$?
+after="$(e2e_host_hash)"
+kept="$(vm 'test -f /opt/macprovider/.coordinator-deploy-rollback/complete && echo kept || echo gone')"
+live_ok="$(vm 'cmp -s /opt/macprovider/coordinator /root/e2e/coordinator-enable && echo enable-binary || echo OTHER')"
+if [ "$rc" != 0 ] && grep -q 'pricing runtime floor' "$E2E_LOGS/V10d.log" && [ "$kept" = kept ] && [ "$armed" = "$after" ] && [ "$live_ok" = enable-binary ]; then
+  e2e_result "$S" PASS "d: coordinator-deploy-recover --recover refuses the pre-#1693 rollback target rc=$rc, snapshot kept, host unchanged, live binary still the enabling one: $(grep -m1 'pricing runtime floor' "$E2E_LOGS/V10d.log" | cut -c1-240)"
+else
+  e2e_result "$S" FAIL "d: rc=$rc snapshot=$kept host $([ "$armed" = "$after" ] && echo unchanged || echo CHANGED) live=$live_ok: $(tail -n 3 "$E2E_LOGS/V10d.log" | tr '\n' '|' | cut -c1-400)"
+fi
+# Runbook fix (two operators): replace the snapshot binary with the enabling
+# release's coordinator after checking its sha256, then --recover.
+rc=0
+vm "set -e; [ \"\$(sha256sum /root/e2e/coordinator-enable | cut -c1-64)\" = '$want_enable' ]; install -m 0750 -o root -g macprovider /root/e2e/coordinator-enable /opt/macprovider/.coordinator-deploy-rollback/coordinator; /opt/macprovider/coordinator-deploy-recover --recover" >"$E2E_LOGS/V10d-fix.log" 2>&1 || rc=$?
+kept="$(vm 'test -e /opt/macprovider/.coordinator-deploy-rollback && echo kept || echo gone')"
+hc_rc=0; e2e_run_logged 1200 "$E2E_LOGS/V10d-hostcheck.log" e2e_lane --host-check --commit "$(git -C "$E2E_REPO" rev-parse "$E2E_TAG_ENABLE^{commit}")" || hc_rc=$?
+if [ "$rc" = 0 ] && [ "$kept" = gone ] && [ "$hc_rc" = 0 ]; then
+  e2e_result "$S" PASS "d-fix: sha-checked enabling binary into the snapshot, --recover rc=0, snapshot consumed, --host-check rc=0"
+else
+  e2e_result "$S" FAIL "d-fix: --recover rc=$rc snapshot=$kept --host-check rc=$hc_rc: $(tail -n 3 "$E2E_LOGS/V10d-fix.log" | tr '\n' '|' | cut -c1-300) $(grep -E '^\{"checks"' "$E2E_LOGS/V10d-hostcheck.log" | tail -n 1 | cut -c1-300)"
 fi

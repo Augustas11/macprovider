@@ -200,8 +200,8 @@ def o2(con, sampler, labels, tables, sequence):
     if not sampler or not os.path.exists(sampler):
         return {"ok": True, "skipped": "no sampler log"}
     card_label = {}
-    for n, t in tables.items():
-        card_label.setdefault(t.get("card_sha256"), n)
+    for n, t in sorted(tables.items()):
+        card_label[t.get("card_sha256")] = card_label[t.get("card_sha256")] + "|" + n if t.get("card_sha256") in card_label else n
     ext_to_rid = dict(con.execute("SELECT external_request_id, request_id FROM request_log WHERE external_request_id IS NOT NULL"))
     events, missing = [], 0
     for line in open(sampler):
@@ -218,27 +218,37 @@ def o2(con, sampler, labels, tables, sequence):
         events.append((e["t0"], e["t1"], lab, e["kind"], e.get("external_id") or e.get("sha", "")[:12]))
     if len(sequence) < 2:
         return {"ok": True, "events": len(events), "skipped": "single-generation scenario"}
+    # A label may occur more than once in the sequence (a rollback: prior,
+    # candidate, prior). Each event takes the EARLIEST generation index of its
+    # label(s) that is >= every generation already completed before it
+    # started; no such index = a publication/billing order violation.
     idx = {}
     for i, lab in enumerate(sequence):
-        idx[lab] = i
-    def gen(lab):
-        return max((idx.get(x, -1) for x in lab.split("|")), default=-1)
+        idx.setdefault(lab, []).append(i)
+    def allowed(lab):
+        return sorted({i for x in lab.split("|") for i in idx.get(x, [])})
+    import heapq
     events.sort()
-    violations = []
-    # max generation index among events that ENDED before each event started
-    ends = sorted((t1, gen(lab), kind, ref) for (_, t1, lab, kind, ref) in events)
-    j, best, best_ev = 0, -1, None
+    violations, ended, best, best_ev, used = [], [], -1, None, 0
     for t0, t1, lab, kind, ref in events:
-        while j < len(ends) and ends[j][0] < t0:
-            if ends[j][1] > best:
-                best, best_ev = ends[j][1], ends[j]
-            j += 1
-        g = gen(lab)
-        if g < best:
+        while ended and ended[0][0] < t0:
+            _, g, ev = heapq.heappop(ended)
+            if g > best:
+                best, best_ev = g, ev
+        opts = allowed(lab)
+        if not opts:
+            continue  # a table outside this scenario's sequence: O1/O3 judge it
+        used += 1
+        ok = [i for i in opts if i >= best]
+        if ok:
+            g = ok[0]
+        else:
+            g = opts[-1]
             violations.append("%s %s at %.3f observed %s after %s %s (%s) completed" % (
-                kind, ref, t0, lab, best_ev[2], best_ev[3], sequence[best]))
-    return {"ok": not violations and bool(events), "events": len(events), "requests_without_ledger_row": missing,
-            "violations": violations[:20]}
+                kind, ref, t0, lab, best_ev[0], best_ev[1], sequence[best]))
+        heapq.heappush(ended, (t1, g, (kind, ref)))
+    return {"ok": not violations and used > 0, "events": len(events), "events_in_sequence": used,
+            "requests_without_ledger_row": missing, "sequence": sequence, "violations": violations[:20]}
 
 
 def cmd_check(args):
