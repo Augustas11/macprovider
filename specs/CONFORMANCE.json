@@ -6077,7 +6077,9 @@
         "phase5-gateway/internal/router/coordinator_chat_context_test.go:TestEveryCoordinatorChatBuilderNegotiatesSignedFinality",
         "phase5-gateway/internal/router/coordinator_chat_context_test.go:TestRelayBlindNegotiatesSignedFinalityUnderPin"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -7233,7 +7235,9 @@
         "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestPolicyCoreV2GoldenVectors",
         "phase4-coordinator/internal/buyer/pool_external_runtime_queue_internal_test.go:TestProviderForRouteMatchesCandidatePathSandboxView"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -7262,7 +7266,9 @@
         "phase4-coordinator/internal/buyer/spec042_engine_selection_test.go:TestSPEC042R014MixedPoolHonoursEachSelection",
         "phase4-coordinator/internal/buyer/spec042_engine_selection_test.go:TestSPEC042R014EngineFailClosedSet"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
