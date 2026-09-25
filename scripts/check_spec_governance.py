@@ -263,6 +263,7 @@ TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS = {
     "manifest_version",
     "manifest_core_digest",
     "runtime_source",
+    "fingerprint_salt",
 }
 LOCAL_CONSUMER_ENDPOINT_JOURNEY_ID = "JOURNEY-LOCAL-CONSUMER-ENDPOINT"
 LOCAL_CONSUMER_ENDPOINT_EVIDENCE_CONTROL_IMPLEMENTATION_MAPPINGS = frozenset(
@@ -2161,7 +2162,7 @@ def _validate_trusted_pool_external_runtime_journey_result(
             f"{location}.signed.candidate_identity",
             result,
         )
-        for field_name in ("member_cli_sha256", "gguf_sha256", "manifest_core_digest"):
+        for field_name in ("member_cli_sha256", "gguf_sha256", "manifest_core_digest", "fingerprint_salt"):
             value = identity.get(field_name)
             if not isinstance(value, str) or not SHA256_HEX_RE.fullmatch(value):
                 result.error(f"{location}.signed.candidate_identity.{field_name}", "must be a 64-char hex fingerprint")

@@ -109,8 +109,11 @@ All of these are captured, with timestamps, in `preconditions.json` (below).
 10. `step-10-gateway-holds` - the held-reservation count and the
     `missing_settlement_finality_trailer` log count are 0 before and after.
 11. `step-11-redaction` - the redacted evidence has no prompt, completion,
-    key, token, or account secret: account and provider ids are sha256
-    fingerprints, completions are sha256 digests, and the secret scan passes.
+    key, token, or account secret: account and provider ids are
+    HMAC-SHA256 fingerprints keyed by a random per-run salt (recorded,
+    non-secret, as `candidate_identity.fingerprint_salt`), completions are
+    sha256 digests, each `preconditions.*.observed` note is printable ASCII
+    of at most 200 characters, and the secret scan passes.
 
 ## Capture layout
 
@@ -227,7 +230,7 @@ carrying:
 - `candidate_identity`: `coordinator_version`, `accepted_id`,
   `member_cli_sha256`, `llama_server_build`, `gguf_sha256`,
   `gguf_artifact_id`, `model_id`, `pool_id`, `manifest_version`,
-  `manifest_core_digest`, `runtime_source`.
+  `manifest_core_digest`, `runtime_source`, `fingerprint_salt` (64 hex).
 
 The payload is signed in CI (`production-release`,
 `MACPROVIDER_ACCEPTANCE_SIGNING_KEY_PEM`, key id

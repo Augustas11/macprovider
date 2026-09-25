@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -51,6 +53,9 @@ COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 DATETIME_Z_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+# preconditions.*.observed is operator free text copied into signed evidence:
+# printable ASCII only (no control or non-ASCII characters), at most 200.
+OBSERVED_RE = re.compile(r"^[ -~]{1,200}$")
 RUN_ID_RE = re.compile(r"^trusted-pool-external-runtime-[0-9]{8}T[0-9]{6}Z$")
 ACCEPTED_ID_RE = re.compile(r"^Augustas11/macprovider:v[0-9]+\.[0-9]+\.[0-9]+@[0-9a-f]{7,40}$")
 PRECONDITION_IDS = ("P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "payout-disabled")
@@ -107,8 +112,15 @@ def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def fingerprint(value: str) -> str:
-    return sha256_hex(value.encode("utf-8"))
+def fingerprint(value: str, salt: str) -> str:
+    """HMAC-SHA256 of an account/provider id keyed by the run's salt.
+
+    The salt is random per evidence build and recorded (non-secret) in
+    candidate_identity.fingerprint_salt, so a fingerprint still binds the id
+    for anyone who knows it, but a bare sha256 dictionary over known ids no
+    longer links runs or reverses the fingerprint.
+    """
+    return hmac.new(bytes.fromhex(salt), value.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def parse_json_bytes(payload: bytes, label: str) -> Any:
@@ -228,7 +240,7 @@ def check_preconditions(capture: Path) -> dict[str, Any]:
         item = require_object(raw[key], f"preconditions.{key}")
         require(set(item) == {"status", "observed", "checked_at"}, f"preconditions.{key} must have status, observed, checked_at")
         require(item["status"] == "pass", f"preconditions.{key}.status must equal 'pass'")
-        require_string(item["observed"], None, f"preconditions.{key}.observed")
+        require_string(item["observed"], OBSERVED_RE, f"preconditions.{key}.observed")
         require_string(item["checked_at"], DATETIME_Z_RE, f"preconditions.{key}.checked_at")
         out[key] = {"status": "pass", "observed": item["observed"], "checked_at": item["checked_at"]}
     return out
@@ -272,8 +284,8 @@ def check_pool(capture: Path, run: dict[str, Any]) -> dict[str, Any]:
         "launch_environment": "candidate",
         "manifest_version": manifest_version,
         "manifest_core_digest": digest,
-        "creator_account_fingerprint": fingerprint(run["pool_operator_account_id"]),
-        "member_fingerprints": [fingerprint(member)],
+        "creator_account_fingerprint": fingerprint(run["pool_operator_account_id"], run["fingerprint_salt"]),
+        "member_fingerprints": [fingerprint(member, run["fingerprint_salt"])],
         "buyer_authorized": True,
         "event_counts": dict(sorted(counts.items())),
     }
@@ -327,7 +339,7 @@ def check_response(capture: Path, kind: str, run: dict[str, Any]) -> dict[str, A
         "status": 200,
         "engine": RUNTIME_SOURCE,
         "request_id": request_id,
-        "provider_fingerprint": fingerprint(run["member_provider_id"]),
+        "provider_fingerprint": fingerprint(run["member_provider_id"], run["fingerprint_salt"]),
         "finish_reason": finish_reason,
         "buyer_visible_usage": {
             "prompt_tokens": as_int(usage.get("prompt_tokens"), f"{kind} usage.prompt_tokens"),
@@ -440,7 +452,7 @@ def check_settlement(capture: Path, kind: str, run: dict[str, Any], pool: dict[s
         },
         "ledger": {
             "payable_rows": 1,
-            "provider_fingerprint": fingerprint(run["member_provider_id"]),
+            "provider_fingerprint": fingerprint(run["member_provider_id"], run["fingerprint_salt"]),
             "provider_credits": as_int(credit.get("provider_credits"), f"{kind} ledger.provider_credits"),
             "settlement_policy_mode": "enforce",
         },
@@ -506,6 +518,7 @@ def build_evidence(capture: Path) -> dict[str, Any]:
     if capture.is_symlink() or not capture.is_dir():
         die("--capture-dir must be a directory")
     run = load_run(capture)
+    run["fingerprint_salt"] = secrets.token_hex(32)
     preconditions = check_preconditions(capture)
     pool = check_pool(capture, run)
     requests: dict[str, Any] = {}
@@ -528,7 +541,7 @@ def build_evidence(capture: Path) -> dict[str, Any]:
         "repository": {"name": REPOSITORY, "commit": run["source_commit"]},
         "captured_at": run["captured_at"],
         "expires_at": run["expires_at"],
-        "operator": {"role": run["operator_role"], "identity_fingerprint": fingerprint(run["operator_identity"])},
+        "operator": {"role": run["operator_role"], "identity_fingerprint": fingerprint(run["operator_identity"], run["fingerprint_salt"])},
         "environment": {
             "class": TRUSTED_POOL_EXTERNAL_RUNTIME_EXECUTION_MODE,
             "hardware_profile": run["hardware_profile"],
@@ -570,6 +583,7 @@ def build_evidence(capture: Path) -> dict[str, Any]:
             "manifest_version": pool["manifest_version"],
             "manifest_core_digest": pool["manifest_core_digest"],
             "runtime_source": RUNTIME_SOURCE,
+            "fingerprint_salt": run["fingerprint_salt"],
         },
         "preconditions": preconditions,
         "pool": pool,
@@ -741,7 +755,7 @@ def require_candidate_identity(value: Any) -> dict[str, Any]:
     identity = require_object(value, "candidate_identity")
     if set(identity) != TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS:
         die(f"candidate_identity keys must be exactly {sorted(TRUSTED_POOL_EXTERNAL_RUNTIME_CANDIDATE_IDENTITY_KEYS)}")
-    for field in ("member_cli_sha256", "gguf_sha256", "manifest_core_digest"):
+    for field in ("member_cli_sha256", "gguf_sha256", "manifest_core_digest", "fingerprint_salt"):
         require_string(identity.get(field), SHA256_RE, f"candidate_identity.{field}")
     require_string(identity.get("accepted_id"), ACCEPTED_ID_RE, "candidate_identity.accepted_id")
     for field in ("coordinator_version", "llama_server_build", "gguf_artifact_id", "model_id", "pool_id"):
