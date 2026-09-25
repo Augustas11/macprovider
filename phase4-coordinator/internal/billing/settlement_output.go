@@ -297,8 +297,9 @@ WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
 // mode). A quarantined row leaves spec022_payable_request_credits unless an
 // operator force-credits it. The credit amount is kept for that review. The
 // reason replaces MarkSettlementOutputMissing's informational reason so the
-// finality lookup recognises it (UndeliveredSettlementQuarantineReasons). It
-// reports whether a row was quarantined.
+// finality lookup recognises it (UndeliveredSettlementQuarantineReasons). A
+// credit whose attempt already has a closed verified verdict is never
+// quarantined (UndeliveredQuarantineVerified).
 // UndeliveredSettlementQuarantineReasons are the coordinator reasons a
 // credit is quarantined with after a delivered attempt's settlement evidence
 // failed (SPEC-022 v0.2.2). The finality lookup reports such an attempt as
@@ -310,10 +311,27 @@ var UndeliveredSettlementQuarantineReasons = []string{
 	"settlement_finality_unset_after_delivery",
 }
 
-func (s *Store) QuarantineUndeliveredSettlementCredit(ctx context.Context, requestID string, attemptN int, providerID, reason string) (bool, error) {
+// UndeliveredQuarantineResult is what QuarantineUndeliveredSettlementCredit
+// found.
+type UndeliveredQuarantineResult int
+
+const (
+	// UndeliveredQuarantineNoCredit: no unsettled, unquarantined credit row
+	// for the attempt and no verified verdict for it.
+	UndeliveredQuarantineNoCredit UndeliveredQuarantineResult = iota
+	// UndeliveredQuarantineQuarantined: the credit row is now quarantined.
+	UndeliveredQuarantineQuarantined
+	// UndeliveredQuarantineVerified: the attempt already has a closed
+	// verified verdict, so its credit is legitimately payable and was left
+	// alone.
+	UndeliveredQuarantineVerified
+)
+
+func (s *Store) QuarantineUndeliveredSettlementCredit(ctx context.Context, accountScope, requestID string, attemptN int, providerID, reason string) (UndeliveredQuarantineResult, error) {
 	if s == nil || requestID == "" || providerID == "" || attemptN < 0 || reason == "" {
-		return false, nil
+		return UndeliveredQuarantineNoCredit, nil
 	}
+	scopeHash := SettlementAccountScopeHash(accountScope)
 	res, err := s.db.ExecContext(ctx, `
 UPDATE ledger_request_credits
    SET quarantined = 1,
@@ -323,13 +341,51 @@ UPDATE ledger_request_credits
        updated_at_utc = ?
  WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
    AND quarantined = 0
-   AND settled = 0`,
-		reason, time.Now().UTC().Format(time.RFC3339Nano), requestID, attemptN, providerID)
+   AND settled = 0
+   AND NOT EXISTS (
+       SELECT 1 FROM settlement_receipt_verdicts srv
+        WHERE srv.account_scope_hash = ?
+          AND srv.request_id = ledger_request_credits.request_id
+          AND srv.provider_id = ledger_request_credits.provider_id
+          AND srv.closed = 1
+          AND srv.settlement_outcome = 'verified')`,
+		reason, time.Now().UTC().Format(time.RFC3339Nano), requestID, attemptN, providerID, scopeHash)
 	if err != nil {
-		return false, err
+		return UndeliveredQuarantineNoCredit, err
 	}
-	n, err := res.RowsAffected()
-	return n > 0, err
+	if n, err := res.RowsAffected(); err != nil {
+		return UndeliveredQuarantineNoCredit, err
+	} else if n > 0 {
+		return UndeliveredQuarantineQuarantined, nil
+	}
+	_, verified, err := s.SettlementAttemptEvidence(ctx, accountScope, requestID, providerID)
+	if err != nil {
+		return UndeliveredQuarantineNoCredit, err
+	}
+	if verified {
+		return UndeliveredQuarantineVerified, nil
+	}
+	return UndeliveredQuarantineNoCredit, nil
+}
+
+// SettlementAttemptEvidence reports whether the request's attempt on
+// providerID has a settlement attempt output and a closed verified verdict.
+// Only the in-request recorder writes an attempt output, and an enforce
+// credit is payable only with both (spec022_payable_request_credits).
+func (s *Store) SettlementAttemptEvidence(ctx context.Context, accountScope, requestID, providerID string) (hasOutput, verified bool, err error) {
+	if s == nil {
+		return false, false, nil
+	}
+	err = s.db.QueryRowContext(ctx, `
+SELECT
+    EXISTS (SELECT 1 FROM settlement_attempt_outputs
+             WHERE account_scope = ? AND request_id = ? AND provider_id = ?),
+    EXISTS (SELECT 1 FROM settlement_receipt_verdicts
+             WHERE account_scope_hash = ? AND request_id = ? AND provider_id = ?
+               AND closed = 1 AND settlement_outcome = 'verified')`,
+		accountScope, requestID, providerID,
+		SettlementAccountScopeHash(accountScope), requestID, providerID).Scan(&hasOutput, &verified)
+	return hasOutput, verified, err
 }
 
 func (s *Store) InsertSettlementAttemptOutput(ctx context.Context, attempt SettlementAttemptOutput) (string, error) {

@@ -571,3 +571,36 @@ func TestHTTPStreamingEnforceHardOutputFailureRefundsAndQuarantines(t *testing.T
 	assertEnforceRefundAndQuarantine(t, resp, dbPath, "settlement_record_failed_after_delivery")
 	assertLookupClosedQuarantined(t, server, "settlement_record_failed_after_delivery")
 }
+
+// Codex CODE HIGH (a): the quarantine fails on every retry. The failed
+// record left no attempt output and no verdict, so the credit can never be
+// paid in enforce mode: the refund still goes out, and the unquarantined
+// credit stays out of the payable view.
+func TestHTTPEnforceQuarantineFailureRefundsOnlyWhenCreditUnpayable(t *testing.T) {
+	t.Cleanup(buyer.SetSettlementOutputWriteErrForTest(errors.New("settlement attempt output table missing")))
+	t.Cleanup(buyer.SetQuarantineUndeliveredErrForTest(errors.New("database is locked")))
+	server, dbPath := newDeliveredOnlyHTTPServer(t)
+	resp := postNegotiatedResponse(t, server)
+	tr := resp.Trailer
+	if tr.Get(settlementOutcomeNames[0]) != "quarantined" || tr.Get("X-MacProvider-Settlement-Closed") != "true" {
+		t.Fatalf("trailers=%v, want the signed closed refund", tr)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var quarantined, outputs, payable int
+	if err := db.QueryRow(`SELECT COALESCE(SUM(quarantined), 0) FROM ledger_request_credits`).Scan(&quarantined); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM settlement_attempt_outputs`).Scan(&outputs); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM spec022_payable_request_credits`).Scan(&payable); err != nil {
+		t.Fatal(err)
+	}
+	if quarantined != 0 || outputs != 0 || payable != 0 {
+		t.Fatalf("quarantined=%d outputs=%d payable=%d, want an unquarantined but unpayable credit", quarantined, outputs, payable)
+	}
+}

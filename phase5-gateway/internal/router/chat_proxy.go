@@ -2824,9 +2824,17 @@ func hasAnySettlementFinalityHeader(h http.Header) bool {
 	return false
 }
 
+// hasSettlementFinalityTrailerDeclaration reports whether the response
+// declared settlement finality trailers, in the Trailer header or (on a real
+// net/http client response) as pre-populated resp.Trailer keys. A declared
+// finality MAC alone counts: an intermediary that strips the tuple
+// declarations but leaves the MAC's must not downgrade to legacy settlement.
 func hasSettlementFinalityTrailerDeclaration(resp *http.Response) bool {
 	if resp == nil {
 		return false
+	}
+	if settlementFinalityMACDeclared(resp) {
+		return true
 	}
 	for _, value := range resp.Header.Values("Trailer") {
 		for _, name := range strings.Split(value, ",") {

@@ -40,7 +40,13 @@ alike. Under enforce route mode (from the attempt's route snapshot, or the
 enforce policy when store pressure skipped the snapshot) the provider credit
 can never become payable (enforce payability needs a verified verdict and
 attempt output) and is also quarantined, and the buyer gets a signed closed
-refund tuple (`quarantined`, `inconclusive`); neither side is paid. The
+refund tuple (`quarantined`, `inconclusive`); neither side is paid. A credit
+whose attempt already has a closed verified verdict is never quarantined; that
+buyer gets the verified finality. If the quarantine still fails after bounded
+retries, the refund goes out only when the attempt has neither an attempt
+output nor a verified verdict (only the in-request recorder writes an
+attempt output, so that credit can never become payable); otherwise the buyer
+gets an open `pending` tuple the reconciler resolves. The
 coordinator's finality lookup reports such an attempt as closed
 `quarantined`, so a gateway that never received the trailer (a stream it
 ended, a dropped connection) still refunds instead of holding. In observe
@@ -1120,7 +1126,8 @@ the pool attempts recorded before a downgrade.
   with a valid MAC bound to the account and request id it sent and the
   coordinator's internal request id (a MAC counts as declared whether the
   declaration arrives in the Trailer header or, as a real net/http client
-  sees it, as a pre-populated trailer key), and holds a missing, unsigned, tampered,
+  sees it, as a pre-populated trailer key, and a declared MAC alone is a
+  finality declaration), and holds a missing, unsigned, tampered,
   or replayed tuple as `missing_settlement_finality_trailer` (resolved by the
   reconciler; an observe-mode attempt resolves through the coordinator's
   request-scoped finality lookup). Loopback and `pool_operator_attested`

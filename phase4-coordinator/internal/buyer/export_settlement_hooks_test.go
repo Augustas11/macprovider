@@ -24,6 +24,14 @@ func SetMarkSettlementOutputMissingErrForTest(err error) (restore func()) {
 	return func() { markSettlementOutputMissingErrForTest = prev }
 }
 
+// SetQuarantineUndeliveredErrForTest makes every undelivered-credit
+// quarantine attempt fail.
+func SetQuarantineUndeliveredErrForTest(err error) (restore func()) {
+	prev := quarantineUndeliveredErrForTest
+	quarantineUndeliveredErrForTest = err
+	return func() { quarantineUndeliveredErrForTest = prev }
+}
+
 // CancelSettlementOutputWritesForTest cancels the context of the first n
 // settlement-output write tries, a transient failure after the credit.
 func CancelSettlementOutputWritesForTest(n int) (restore func()) {

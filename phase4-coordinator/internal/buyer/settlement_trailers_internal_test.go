@@ -527,3 +527,30 @@ func TestFinalizeSkipsNon200Responses(t *testing.T) {
 		t.Fatalf("a 200 without a tuple finalized to %v, want the refund", odst)
 	}
 }
+
+// Codex CODE HIGH (a)/(b): the enforce decision never refunds a buyer whose
+// provider credit could still be paid, and never refunds a verified attempt.
+func TestDecideEnforceEvidenceFailure(t *testing.T) {
+	boom := errors.New("database is locked")
+	for _, tc := range []struct {
+		name      string
+		result    billing.UndeliveredQuarantineResult
+		qErr      error
+		hasOutput bool
+		verified  bool
+		evErr     error
+		want      evidenceFailureAction
+	}{
+		{name: "quarantined", result: billing.UndeliveredQuarantineQuarantined, want: evidenceFailureRefund},
+		{name: "no credit", result: billing.UndeliveredQuarantineNoCredit, want: evidenceFailureRefund},
+		{name: "already verified", result: billing.UndeliveredQuarantineVerified, want: evidenceFailureVerified},
+		{name: "quarantine failed, verified verdict", qErr: boom, verified: true, want: evidenceFailureVerified},
+		{name: "quarantine failed, no output and no verdict (provably unpayable)", qErr: boom, want: evidenceFailureRefund},
+		{name: "quarantine failed, output exists", qErr: boom, hasOutput: true, want: evidenceFailurePending},
+		{name: "quarantine and evidence read failed", qErr: boom, evErr: boom, want: evidenceFailurePending},
+	} {
+		if got := decideEnforceEvidenceFailure(tc.result, tc.qErr, tc.hasOutput, tc.verified, tc.evErr); got != tc.want {
+			t.Errorf("%s: got %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}

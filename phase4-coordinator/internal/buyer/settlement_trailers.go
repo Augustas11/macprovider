@@ -251,10 +251,13 @@ func finalizeNegotiatedSettlementFinality(dst http.Header, rec *billingRecorder)
 //   - enforce route mode (the attempt's snapshot, or the enforce policy when
 //     store pressure skipped the snapshot): an enforce credit is payable only
 //     once a verified verdict and attempt output exist
-//     (spec022_payable_request_credits), which this attempt can no longer
-//     reach; the credit is also quarantined, which the finality lookup then
-//     reports as closed quarantined, and the buyer gets a signed closed
-//     refund. Neither side is paid.
+//     (spec022_payable_request_credits); the credit is quarantined (never
+//     one already verified), which the finality lookup then reports as
+//     closed quarantined, and the buyer gets a signed closed refund, so
+//     neither side is paid. If the quarantine cannot land the refund is sent
+//     only when the credit is provably unpayable
+//     (decideEnforceEvidenceFailure); a verified attempt gets its verified
+//     finality.
 //   - observe mode, or no snapshot and no enforce policy: the credit stays
 //     payable as every observe credit is, so the buyer gets the signed
 //     legacy tuple and is debited locally, the #1675 behaviour. Both sides
@@ -266,40 +269,134 @@ func setSettlementEvidenceFailedFinality(dst http.Header, rec *billingRecorder, 
 		return
 	}
 	mode, _ := rec.settlementPolicyForLedger()
-	enforce := mode == billing.RouteSnapshotModeEnforce
-	quarantined := false
-	if enforce && rec.hasLastProviderAttempt && rec.server != nil {
-		if store, _, _ := rec.server.billingState(); store != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
-			var err error
-			quarantined, err = store.QuarantineUndeliveredSettlementCredit(ctx, rec.requestID, rec.lastProviderAttemptN, rec.lastProviderID, reason)
-			cancel()
-			if err != nil {
-				rec.server.log.Error().Err(err).Str("request_id", rec.requestID).Msg("could not quarantine provider credit after settlement evidence failure")
-			}
-		}
-	}
-	if rec.server != nil {
-		rec.server.log.Error().
-			Str("event", reason).
-			Str("request_id", rec.requestID).
-			Str("account_id", rec.accountID).
-			Str("settlement_mode", mode).
-			Bool("buyer_refunded", enforce).
-			Bool("provider_credit_quarantined", quarantined).
-			Msg("post-delivery settlement evidence failed")
-	}
-	if !enforce {
+	if mode != billing.RouteSnapshotModeEnforce {
+		logSettlementEvidenceFailure(rec, reason, mode, "legacy")
 		setSignedLegacyTuple(dst, rec)
 		return
 	}
-	dst.Del(settlementPendingUntilHeader)
-	setInternalSettlementOutcomeHeaders(dst, rec, billing.SettlementReceiptState{
-		SettlementOutcome:          billing.SettlementOutcomeQuarantined,
-		ReceiptResult:              billing.SettlementReceiptResultInconclusive,
-		Reason:                     reason,
-		Closed:                     true,
+	action := enforceEvidenceFailureAction(rec, reason)
+	logSettlementEvidenceFailure(rec, reason, mode, action.String())
+	state := billing.SettlementReceiptState{
 		RouteSnapshotMode:          billing.RouteSnapshotModeEnforce,
 		RouteSnapshotPolicyVersion: billing.RouteSnapshotPolicyVersion,
-	})
+	}
+	switch action {
+	case evidenceFailureVerified:
+		// The attempt already verified: its credit is payable, so the
+		// buyer settles through the verified finality (the reconciler
+		// debits it from the coordinator lookup), not a refund.
+		state.SettlementOutcome, state.ReceiptResult, state.Reason, state.Closed = billing.SettlementOutcomeVerified, billing.SettlementReceiptResultValid, "verified_settlement", true
+	case evidenceFailurePending:
+		// Payability is not yet decided: hold for the reconciler, whose
+		// lookup reaches a terminal verdict once the attempt output's
+		// pending deadline passes.
+		state.SettlementOutcome, state.ReceiptResult, state.Reason = billing.SettlementOutcomePending, billing.SettlementReceiptResultInconclusive, reason
+	default:
+		state.SettlementOutcome, state.ReceiptResult, state.Reason, state.Closed = billing.SettlementOutcomeQuarantined, billing.SettlementReceiptResultInconclusive, reason, true
+	}
+	dst.Del(settlementPendingUntilHeader)
+	setInternalSettlementOutcomeHeaders(dst, rec, state)
+}
+
+type evidenceFailureAction int
+
+const (
+	evidenceFailureRefund evidenceFailureAction = iota
+	evidenceFailureVerified
+	evidenceFailurePending
+)
+
+func (a evidenceFailureAction) String() string {
+	switch a {
+	case evidenceFailureVerified:
+		return "verified"
+	case evidenceFailurePending:
+		return "pending"
+	default:
+		return "refund"
+	}
+}
+
+const undeliveredQuarantineAttempts = 3
+
+// enforceEvidenceFailureAction quarantines the delivered attempt's credit
+// (bounded retries) and decides the buyer's finality from what is durably
+// true, so the refund never outruns the provider side.
+func enforceEvidenceFailureAction(rec *billingRecorder, reason string) evidenceFailureAction {
+	if !rec.hasLastProviderAttempt || rec.server == nil {
+		// No provider row was recorded for the delivered attempt: there is
+		// no credit to pay.
+		return evidenceFailureRefund
+	}
+	store, _, _ := rec.server.billingState()
+	if store == nil {
+		return evidenceFailureRefund
+	}
+	scope := accountScopeForSettlement(rec.accountID)
+	var result billing.UndeliveredQuarantineResult
+	var qErr error
+	for attempt := 0; attempt < undeliveredQuarantineAttempts; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+		if quarantineUndeliveredErrForTest != nil {
+			result, qErr = billing.UndeliveredQuarantineNoCredit, quarantineUndeliveredErrForTest
+		} else {
+			result, qErr = store.QuarantineUndeliveredSettlementCredit(ctx, scope, rec.requestID, rec.lastProviderAttemptN, rec.lastProviderID, reason)
+		}
+		cancel()
+		if qErr == nil {
+			break
+		}
+		rec.server.log.Error().Err(qErr).Int("attempt", attempt+1).Str("request_id", rec.requestID).Msg("could not quarantine provider credit after settlement evidence failure")
+	}
+	var hasOutput, verified bool
+	var evErr error
+	if qErr != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+		hasOutput, verified, evErr = store.SettlementAttemptEvidence(ctx, scope, rec.requestID, rec.lastProviderID)
+		cancel()
+	}
+	return decideEnforceEvidenceFailure(result, qErr, hasOutput, verified, evErr)
+}
+
+// decideEnforceEvidenceFailure is the enforce-mode decision table:
+//   - quarantine landed, or found no credit: refund (the credit is excluded
+//     from payment, or there is none);
+//   - the attempt already has a closed verified verdict: verified finality;
+//   - quarantine failed but the attempt has no attempt output and no
+//     verified verdict: refund. The credit can never become payable, because
+//     enforce payability needs both, only the in-request recorder writes an
+//     attempt output, and none of these failure paths queues receipt
+//     recovery, the only other writer of a verdict;
+//   - anything else (an output exists, or the evidence read failed): an
+//     open pending tuple the reconciler resolves.
+func decideEnforceEvidenceFailure(result billing.UndeliveredQuarantineResult, qErr error, hasOutput, verified bool, evErr error) evidenceFailureAction {
+	if qErr == nil {
+		if result == billing.UndeliveredQuarantineVerified {
+			return evidenceFailureVerified
+		}
+		return evidenceFailureRefund
+	}
+	if evErr != nil {
+		return evidenceFailurePending
+	}
+	if verified {
+		return evidenceFailureVerified
+	}
+	if !hasOutput {
+		return evidenceFailureRefund
+	}
+	return evidenceFailurePending
+}
+
+func logSettlementEvidenceFailure(rec *billingRecorder, reason, mode, outcome string) {
+	if rec.server == nil {
+		return
+	}
+	rec.server.log.Error().
+		Str("event", reason).
+		Str("request_id", rec.requestID).
+		Str("account_id", rec.accountID).
+		Str("settlement_mode", mode).
+		Str("buyer_finality", outcome).
+		Msg("post-delivery settlement evidence failed")
 }

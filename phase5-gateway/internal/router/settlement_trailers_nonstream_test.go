@@ -475,3 +475,52 @@ func TestSettlementTrailerDeclarationFromTrailerKeys(t *testing.T) {
 		t.Fatal("trailer keys pre-populated by net/http were not seen as declarations")
 	}
 }
+
+// Codex CODE MEDIUM (6db8ae78): a response that declares only the finality
+// MAC trailer (the tuple declarations stripped on the way) is still a
+// trailer declaration, so its missing tuple is held with the pin off, over
+// the real transport, streaming and non-streaming.
+func TestMACOnlyDeclarationHeldOverRealWire(t *testing.T) {
+	for _, stream := range []bool{true, false} {
+		t.Run(map[bool]string{true: "stream", false: "nonstream"}[stream], func(t *testing.T) {
+			coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/chat/completions" {
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.Header().Set(coordinatorInternalRequestIDHeader, testInternal)
+				w.Header().Add("Trailer", settlementFinalityMACHeader)
+				if stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.WriteHeader(http.StatusOK)
+					_, _ = io.WriteString(w, trailerTestSSE)
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusOK)
+					_, _ = io.WriteString(w, trailerTestCompletion)
+				}
+				w.Header().Set(settlementFinalityMACHeader, strings.Repeat("0", 64))
+			}))
+			defer coordinator.Close()
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = coordinator.URL
+				cfg.Coordinator.ServiceToken = testKey
+			}, WithHTTPClient(coordinator.Client()))
+			accountID := "acct_mac_only_" + map[bool]string{true: "stream", false: "nonstream"}[stream]
+			fullKey := createAccountAndKey(t, store, cfg, accountID)
+			body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+			if stream {
+				body = `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+			}
+			resp := postChat(t, h, fullKey, body, nil)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			wantHeld(t, gatewaySettlementSnapshot(t, dbPath, accountID))
+		})
+	}
+	mOnly := &http.Response{Header: http.Header{}, Trailer: http.Header{http.CanonicalHeaderKey(settlementFinalityMACHeader): nil}}
+	if !hasSettlementFinalityTrailerDeclaration(mOnly) {
+		t.Fatal("a MAC-only trailer declaration was not seen as a finality declaration")
+	}
+}

@@ -31,6 +31,10 @@ var settlementOutputWriteErrForTest error
 // mark fail after its write.
 var markSettlementOutputMissingErrForTest error
 
+// quarantineUndeliveredErrForTest, when set, makes every quarantine attempt
+// after a delivered attempt's evidence failure fail.
+var quarantineUndeliveredErrForTest error
+
 // billingRecorder is the typed extraction of the previously-inline
 // logRowWithBilling closure from handleChatCompletions. M3-10
 // (audits/2026-06-10/REPO_AUDIT.md ARCH-6) hoisted the closure into
