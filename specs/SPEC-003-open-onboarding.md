@@ -1169,10 +1169,13 @@ package, the tarball) from GitHub Releases first and, on any failure, the same
 asset name from `https://download.malibu.tech/releases/<tag>/`; after one GitHub
 failure later assets MAY go mirror-first, and `MACPROVIDER_RELEASE_MIRROR=1`
 (only `0` or `1` is valid) MUST go mirror-first with GitHub as the fallback.
-Unpinned discovery MUST fall back, when the GitHub Releases API fails, to the
-newest of the mirror's `latest.json` `tag_name` and the coordinator
-`/healthz` `recommended_binary_version`; a candidate is used only if it is a
-canonical `vMAJOR.MINOR.PATCH` at or above the supported rollback floor. The
+Unpinned discovery MUST fall back, when the GitHub Releases API fails, to
+exactly the coordinator `/healthz` `recommended_binary_version` (the fleet's
+`latest_binary_version`, read over the coordinator's own TLS endpoint), used
+only if it is a canonical `vMAJOR.MINOR.PATCH` at or above the supported
+rollback floor; with no such advertisement the install MUST fail. The mirror's
+`latest.json` MUST NOT choose the tag: it is unsigned and mirror-controlled, and
+every public release, old or canary, carries a valid `checksums.txt.sig`. The
 embedded-key `checksums.txt.sig` verification, per-asset SHA-256, Gatekeeper,
 and payload validation MUST be applied identically whichever host served the
 bytes. A repository fork MUST NOT use the mirror.
@@ -1185,7 +1188,8 @@ byte-identical copy of every GitHub release asset of `<tag>`, and
 URLs. Publication (`scripts/publish-release-mirror.sh`) MUST refuse any byte
 whose SHA-256 differs from GitHub's asset digest, MUST NOT modify a published
 `<tag>/` directory, and MUST re-download the served bytes to confirm them.
-`releases/latest.json` (`{"tag_name": "<tag>"}`) is advisory; it MUST move only
+`releases/latest.json` (`{"tag_name": "<tag>"}`) is an operator-facing hint
+that no installer or updater reads; it MUST move only
 to a stable tag the coordinator already advertises as `latest_binary_version`
 and MUST NOT move backwards.
 

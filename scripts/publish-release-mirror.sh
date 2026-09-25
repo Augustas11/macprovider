@@ -7,7 +7,8 @@
 #
 #   /releases/<tag>/<asset>      byte-identical copy of every GitHub release asset
 #   /releases/<tag>/release.json GitHub-API-shaped listing of exactly those assets
-#   /releases/latest.json        {"tag_name": "<tag>"}, advisory; --promote-latest
+#   /releases/latest.json        {"tag_name": "<tag>"}, operator hint only (installers
+#                                use the coordinator advertisement); --promote-latest
 #   /python/<asset>              the python-build-standalone tarball pinned by
 #                                phase3-binary/dist/install.sh (SHA-256 checked)
 #

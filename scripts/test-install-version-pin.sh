@@ -1224,45 +1224,51 @@ rc=0
 report "m7-fork-no-mirror-fails" 3 "$rc"
 report "m7-fork-never-contacts-mirror" 0 "$(grep -c 'download.malibu.tech' "$FETCH_LOG" | tr -d ' ')"
 
-# M8 — unpinned discovery with the GitHub API down uses mirror latest.json.
+# M8 — unpinned discovery with the GitHub API down installs exactly the
+# coordinator-advertised release (#1737 security audit MEDIUM-1).
+reset_mocks
+MOCK_GITHUB_DOWN=1
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+tag="$(resolve_release_tag 2>/dev/null)"
+report "m8-discovery-from-coordinator" "v1.8.123" "$tag"
+
+# M9 — a mirror latest.json never chooses the tag: an older one cannot roll a
+# fresh install back ...
+reset_mocks
+MOCK_GITHUB_DOWN=1
+MOCK_MIRROR_LATEST_JSON='{"tag_name":"v1.7.11"}'
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+tag="$(resolve_release_tag 2>/dev/null)"
+report "m9-mirror-cannot-roll-back" "v1.8.123" "$tag"
+
+# M10 — ... and a newer one (an unpromoted canary) cannot push ahead of it.
+reset_mocks
+MOCK_GITHUB_DOWN=1
+MOCK_MIRROR_LATEST_JSON='{"tag_name":"v1.8.200"}'
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+tag="$(resolve_release_tag 2>/dev/null)"
+report "m10-mirror-cannot-push-canary" "v1.8.123" "$tag"
+report "m10-latest-json-not-read" 0 "$(grep -c 'latest.json' "$FETCH_LOG" | tr -d ' ')"
+
+# M11 — no coordinator advertisement: fail closed even when latest.json exists.
 reset_mocks
 MOCK_GITHUB_DOWN=1
 MOCK_MIRROR_LATEST_JSON='{"tag_name":"v1.8.123"}'
-tag="$(resolve_release_tag 2>/dev/null)"
-report "m8-discovery-from-mirror-latest" "v1.8.123" "$tag"
-
-# M9 — the coordinator-advertised version outranks a stale latest.json, so a
-# replayed pointer cannot pin a fresh install below the advertised release.
-reset_mocks
-MOCK_GITHUB_DOWN=1
-MOCK_MIRROR_LATEST_JSON='{"tag_name":"v1.8.100"}'
 coordinator_base="https://coordinator.malibu.tech"
-MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
-tag="$(resolve_release_tag 2>/dev/null)"
-report "m9-coordinator-outranks-stale-latest" "v1.8.123" "$tag"
+MOCK_HEALTH_JSON='{"status":"ok"}'
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "m11-no-advertisement-fails-closed" 3 "$rc"
 
-# M10 — a newer latest.json is kept over an older coordinator advertisement.
-reset_mocks
-MOCK_GITHUB_DOWN=1
-MOCK_MIRROR_LATEST_JSON='{"tag_name":"v1.8.124"}'
-coordinator_base="https://coordinator.malibu.tech"
-MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
-tag="$(resolve_release_tag 2>/dev/null)"
-report "m10-newer-latest-kept" "v1.8.124" "$tag"
-
-# M11 — latest.json unreachable: the coordinator advertisement alone resolves.
-reset_mocks
-MOCK_GITHUB_DOWN=1
-coordinator_base="https://coordinator.malibu.tech"
-MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
-tag="$(resolve_release_tag 2>/dev/null)"
-report "m11-coordinator-only" "v1.8.123" "$tag"
-
-# M12 — invalid or below-floor mirror tags are rejected, never installed.
-for bad in '{"tag_name":"v1.7.10"}' '{"tag_name":"main"}' '{"tag_name":"v1.8.123\nx"}' '["v1.8.123"]' 'not json'; do
+# M12 — an invalid or below-floor advertisement is rejected, never installed.
+for bad in '{"recommended_binary_version":"1.7.10"}' '{"recommended_binary_version":"main"}' '{"recommended_binary_version":"1.8.123\nx"}' '["1.8.123"]' 'not json'; do
   reset_mocks
   MOCK_GITHUB_DOWN=1
-  MOCK_MIRROR_LATEST_JSON="$bad"
+  coordinator_base="https://coordinator.malibu.tech"
+  MOCK_HEALTH_JSON="$bad"
   rc=0
   ( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
   report "m12-rejects-${bad//[^A-Za-z0-9]/_}" 3 "$rc"
@@ -1278,7 +1284,8 @@ report "m13-no-mirror-contact" 0 "$(grep -c 'download.malibu.tech' "$FETCH_LOG" 
 # M14 — mirror-first discovery skips the GitHub API entirely.
 reset_mocks
 RELEASE_MIRROR_FIRST=1
-MOCK_MIRROR_LATEST_JSON='{"tag_name":"v1.8.123"}'
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
 tag="$(resolve_release_tag 2>/dev/null)"
 report "m14-mirror-first-discovery" "v1.8.123" "$tag"
 report "m14-no-github-api" 0 "$(grep -c 'api.github.com' "$FETCH_LOG" | tr -d ' ')"

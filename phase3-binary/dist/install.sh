@@ -9958,40 +9958,23 @@ discovered_release_tag_acceptable() {
   version_at_least "$candidate" "$MACPROVIDER_MIN_SUPPORTED_VERSION"
 }
 
-# Prints the tag_name of a small JSON object read from stdin, or fails.
-release_pointer_tag_name() {
-  python3 -c '
-import json, sys
-raw = sys.stdin.buffer.read(4097)
-if not 0 < len(raw) <= 4096:
-    raise SystemExit(1)
-value = json.loads(raw.decode("utf-8"))
-tag = value.get("tag_name") if isinstance(value, dict) else None
-if not isinstance(tag, str):
-    raise SystemExit(1)
-sys.stdout.write(tag)
-'
-}
-
-# Mirror-side discovery for Macs that cannot reach api.github.com. Candidates are
-# the mirror's advisory latest.json and the coordinator's advertised
-# latest_binary_version (/healthz recommended_binary_version, a first-party
-# TLS endpoint that stays reachable). The newest acceptable candidate wins, so a
-# stale or replayed latest.json cannot hold a fresh install below what the
-# coordinator advertises. Neither source is trusted for bytes: download_release
-# still verifies checksums.txt.sig for whatever tag this returns.
+# Mirror-side discovery for Macs that cannot reach api.github.com. The tag is
+# exactly the coordinator's advertised latest_binary_version (/healthz
+# recommended_binary_version over the coordinator's own TLS endpoint), the
+# release the fleet is told to run. The mirror's latest.json is unsigned and
+# mirror-controlled, so it never chooses the tag: a compromised mirror could
+# otherwise roll a fresh install back to the oldest supported release or push
+# an unpromoted canary, both of which carry a valid checksums.txt.sig. No
+# advertisement means no install (fail closed). download_release still verifies
+# checksums.txt.sig for the tag returned here.
 mirror_latest_release_tag() {
-  local body mirror_tag="" advertised="" chosen=""
-  body="$(curl -fsSL --proto '=https' --max-filesize 4096 --connect-timeout 10 --max-time 30 --retry 2 --retry-connrefused "$RELEASE_MIRROR_BASE/latest.json" 2>/dev/null)" \
-    && mirror_tag="$(printf '%s' "$body" | release_pointer_tag_name 2>/dev/null)" \
-    || mirror_tag=""
-  if [ -n "$mirror_tag" ] && ! discovered_release_tag_acceptable "$mirror_tag"; then
-    log "Ignoring release mirror latest.json tag that is not an installable vMAJOR.MINOR.PATCH at or above $MACPROVIDER_MIN_SUPPORTED_VERSION." >&2
-    mirror_tag=""
+  local body advertised=""
+  if [ -z "${coordinator_base:-}" ]; then
+    log "Release mirror discovery needs the coordinator's advertised release, and no coordinator is configured." >&2
+    return 1
   fi
-  if [ -n "${coordinator_base:-}" ]; then
-    body="$(curl -fsS --max-time 10 "$coordinator_base/healthz" 2>/dev/null)" \
-      && advertised="$(printf '%s' "$body" | python3 -c '
+  body="$(curl -fsS --max-filesize 65536 --connect-timeout 10 --max-time 30 --retry 2 --retry-connrefused "$coordinator_base/healthz" 2>/dev/null)" \
+    && advertised="$(printf '%s' "$body" | python3 -c '
 import json, sys
 value = json.loads(sys.stdin.buffer.read(65536).decode("utf-8"))
 version = value.get("recommended_binary_version") if isinstance(value, dict) else None
@@ -9999,21 +9982,16 @@ if not isinstance(version, str) or not version:
     raise SystemExit(1)
 sys.stdout.write(version if version.startswith("v") else "v" + version)
 ' 2>/dev/null)" \
-      || advertised=""
-    if [ -n "$advertised" ] && ! discovered_release_tag_acceptable "$advertised"; then
-      advertised=""
-    fi
+    || advertised=""
+  if [ -z "$advertised" ]; then
+    log "The coordinator at $coordinator_base did not advertise a release; cannot pick a release without GitHub." >&2
+    return 1
   fi
-  chosen="$mirror_tag"
-  if [ -n "$advertised" ]; then
-    if [ -z "$chosen" ] || ! version_at_least "$chosen" "$advertised"; then
-      [ -z "$chosen" ] \
-        || log "Release mirror latest.json ($chosen) is older than the coordinator-advertised $advertised; installing $advertised." >&2
-      chosen="$advertised"
-    fi
+  if ! discovered_release_tag_acceptable "$advertised"; then
+    log "Ignoring the coordinator-advertised release $advertised: not an installable vMAJOR.MINOR.PATCH at or above $MACPROVIDER_MIN_SUPPORTED_VERSION." >&2
+    return 1
   fi
-  [ -n "$chosen" ] || return 1
-  printf '%s' "$chosen"
+  printf '%s' "$advertised"
 }
 
 # Release discovery with the #1737 mirror fallback. GitHub stays first unless
@@ -10022,7 +10000,7 @@ discover_latest_release_tag() {
   local discovered=""
   if release_mirror_enabled && [ "${RELEASE_MIRROR_FIRST:-0}" = "1" ]; then
     if discovered="$(mirror_latest_release_tag)"; then
-      log "Latest release from the Malibu release mirror: $discovered" >&2
+      log "Latest release (coordinator-advertised, served by the Malibu release mirror): $discovered" >&2
       printf '%s' "$discovered"
       return 0
     fi
@@ -10036,8 +10014,8 @@ discover_latest_release_tag() {
     || die 3 "failed to resolve the latest release from GitHub Releases for $GITHUB_REPO"
   log "GitHub Releases is unreachable; resolving the latest release through the Malibu release mirror." >&2
   discovered="$(mirror_latest_release_tag)" \
-    || die 3 "could not resolve the latest release from GitHub Releases or the Malibu release mirror ($RELEASE_MIRROR_BASE/latest.json)"
-  log "Latest release from the Malibu release mirror: $discovered" >&2
+    || die 3 "could not resolve the latest release from GitHub Releases or the coordinator-advertised release"
+  log "Latest release (coordinator-advertised, served by the Malibu release mirror): $discovered" >&2
   printf '%s' "$discovered"
 }
 
