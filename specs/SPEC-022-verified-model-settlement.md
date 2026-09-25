@@ -46,7 +46,13 @@ buyer gets the verified finality. If the quarantine still fails after bounded
 retries, the refund goes out only when the attempt has neither an attempt
 output nor a verified verdict (only the in-request recorder writes an
 attempt output, so that credit can never become payable); otherwise the buyer
-gets an open `pending` tuple the reconciler resolves. The
+gets an open `pending` tuple the reconciler resolves. The coordinator's
+finality lookup also reports an enforce-mode credit that has no attempt
+output and no verdict as closed `quarantined`
+(`settlement_evidence_missing`) once its evidence deadline passes (the route
+snapshot's pending deadline after the credit, or five minutes for a credit
+recorded under store pressure without a snapshot), so a refund whose trailer
+never reached the gateway still resolves instead of holding forever. The
 coordinator's finality lookup reports such an attempt as closed
 `quarantined`, so a gateway that never received the trailer (a stream it
 ended, a dropped connection) still refunds instead of holding. In observe

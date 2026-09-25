@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -45,6 +46,46 @@ type requestSettlementVerdictRow struct {
 	pendingDeadlineUnixMS int64
 	policyVersion         string
 	mode                  string
+	// noSnapshot marks an enforce credit recorded without a route snapshot
+	// (store pressure): the snapshot scope check does not apply to it.
+	noSnapshot bool
+}
+
+// SettlementEvidenceMissingReason closes an enforce-mode attempt whose
+// ledger credit has no settlement attempt output and no verdict once its
+// evidence deadline passed. Enforce payability needs both
+// (spec022_payable_request_credits) and only the in-request recorder writes
+// an attempt output, so such a credit can never be paid; reporting it closed
+// quarantined lets a held buyer reservation refund instead of waiting on a
+// lookup that would otherwise 404 forever (SPEC-022 v0.2.2).
+const SettlementEvidenceMissingReason = "settlement_evidence_missing"
+
+// enforceEvidenceMissingGrace bounds how long an enforce credit without a
+// route snapshot waits for evidence before it is closed; one with a snapshot
+// uses the snapshot's pending deadline.
+const enforceEvidenceMissingGrace = 5 * time.Minute
+
+// enforceCreditWithoutEvidence is the finality row for an enforce credit that
+// has no attempt output and no verdict: pending until creditTS plus grace,
+// then closed quarantined.
+func enforceCreditWithoutEvidence(row requestSettlementVerdictRow, creditTS string, grace time.Duration, nowUnixMS int64) (requestSettlementVerdictRow, bool) {
+	ts, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(creditTS))
+	if err != nil {
+		return row, false
+	}
+	row.receiptResult = SettlementReceiptResultInconclusive
+	deadline := ts.Add(grace).UnixMilli()
+	if nowUnixMS < deadline {
+		row.settlementOutcome = SettlementOutcomePending
+		row.reason = "settlement_evidence_pending"
+		row.pendingDeadlineUnixMS = deadline
+		return row, true
+	}
+	row.settlementOutcome = SettlementOutcomeQuarantined
+	row.reason = SettlementEvidenceMissingReason
+	row.closed = true
+	row.pendingDeadlineUnixMS = 0
+	return row, true
 }
 
 const externalRequestFinalityLookupSkew = 5 * time.Minute
@@ -146,10 +187,15 @@ func (s *Store) RequestSettlementFinality(ctx context.Context, accountScope, req
 	if err != nil {
 		return RequestSettlementFinality{}, false, err
 	}
-	missing, err := s.requestSettlementAttemptsWithoutVerdict(ctx, accountScope, requestID, rows)
+	missing, err := s.requestSettlementAttemptsWithoutVerdict(ctx, accountScope, requestID, rows, nowUnixMS)
 	if err != nil {
 		return RequestSettlementFinality{}, false, err
 	}
+	withoutSnapshot, err := s.requestEnforceCreditsWithoutSnapshot(ctx, accountScope, requestID, nowUnixMS)
+	if err != nil {
+		return RequestSettlementFinality{}, false, err
+	}
+	missing = append(missing, withoutSnapshot...)
 	changed := false
 	pending := make([]requestSettlementVerdictRow, 0, len(missing))
 	for _, row := range missing {
@@ -372,7 +418,7 @@ SELECT attempt_n, provider_id, receipt_result, settlement_outcome, reason, close
 // deliberately absent: before the deadline the gateway must hold, and after
 // the deadline RecordMissingSettlementReceipt produces an explicit terminal
 // classification instead of leaving the reservation unresolved forever.
-func (s *Store) requestSettlementAttemptsWithoutVerdict(ctx context.Context, accountScope, requestID string, verdicts []requestSettlementVerdictRow) ([]requestSettlementVerdictRow, error) {
+func (s *Store) requestSettlementAttemptsWithoutVerdict(ctx context.Context, accountScope, requestID string, verdicts []requestSettlementVerdictRow, nowUnixMS int64) ([]requestSettlementVerdictRow, error) {
 	type attemptKey struct {
 		attemptN   int64
 		providerID string
@@ -381,14 +427,18 @@ func (s *Store) requestSettlementAttemptsWithoutVerdict(ctx context.Context, acc
 	for _, verdict := range verdicts {
 		covered[attemptKey{attemptN: verdict.attemptN, providerID: verdict.providerID}] = struct{}{}
 	}
-	// An attempt with no attempt output has no finality to wait for, unless
-	// the coordinator quarantined its credit after a delivered response's
-	// evidence failed (UndeliveredSettlementQuarantineReasons, SPEC-022
-	// v0.2.2): that attempt is closed quarantined, so a gateway that never
-	// received the refund trailer refunds instead of holding forever.
+	// An attempt with no attempt output is closed quarantined when the
+	// coordinator quarantined its credit after a delivered response's
+	// evidence failed (UndeliveredSettlementQuarantineReasons), and, for an
+	// enforce snapshot with an enforce credit, once the snapshot's pending
+	// deadline after the credit passed (SettlementEvidenceMissingReason).
+	// Either way a gateway that never received the refund trailer refunds
+	// instead of holding forever (SPEC-022 v0.2.2). With no credit there is
+	// nothing to settle and the attempt is skipped.
 	rows, err := s.db.QueryContext(ctx, `
 SELECT rs.attempt_n, rs.provider_id,
        COALESCE(sao.terminal_state_ts_unix_ms + (rs.pending_deadline_seconds * 1000), 0),
+       rs.pending_deadline_seconds,
        rs.route_snapshot_policy_version, rs.route_snapshot_mode,
        sao.request_id IS NOT NULL,
        COALESCE((
@@ -400,7 +450,14 @@ SELECT rs.attempt_n, rs.provider_id,
               AND lrc.quarantined = 1
               AND lrc.quarantine_reason IN (?, ?, ?)
             ORDER BY lrc.attempt_n DESC
-            LIMIT 1), '')
+            LIMIT 1), ''),
+       COALESCE((
+           SELECT MIN(lrc.ts_utc)
+             FROM ledger_request_credits lrc
+            WHERE lrc.request_id = rs.request_id
+              AND lrc.provider_id = rs.provider_id
+              AND lrc.settlement_account_scope_hash = ?
+              AND lrc.settlement_policy_mode = 'enforce'), '')
   FROM settlement_route_snapshots rs
   LEFT JOIN settlement_attempt_outputs sao
     ON sao.account_scope = rs.account_scope
@@ -411,6 +468,7 @@ SELECT rs.attempt_n, rs.provider_id,
  ORDER BY rs.attempt_n ASC, rs.provider_id ASC`,
 		SettlementAccountScopeHash(accountScope),
 		UndeliveredSettlementQuarantineReasons[0], UndeliveredSettlementQuarantineReasons[1], UndeliveredSettlementQuarantineReasons[2],
+		SettlementAccountScopeHash(accountScope),
 		accountScope, requestID)
 	if err != nil {
 		return nil, err
@@ -420,8 +478,9 @@ SELECT rs.attempt_n, rs.provider_id,
 	for rows.Next() {
 		var row requestSettlementVerdictRow
 		var hasOutput bool
-		var quarantineReason string
-		if err := rows.Scan(&row.attemptN, &row.providerID, &row.pendingDeadlineUnixMS, &row.policyVersion, &row.mode, &hasOutput, &quarantineReason); err != nil {
+		var quarantineReason, creditTS string
+		var pendingDeadlineSeconds int64
+		if err := rows.Scan(&row.attemptN, &row.providerID, &row.pendingDeadlineUnixMS, &pendingDeadlineSeconds, &row.policyVersion, &row.mode, &hasOutput, &quarantineReason, &creditTS); err != nil {
 			return nil, err
 		}
 		if _, ok := covered[attemptKey{attemptN: row.attemptN, providerID: row.providerID}]; ok {
@@ -438,12 +497,68 @@ SELECT rs.attempt_n, rs.provider_id,
 			row.reason = quarantineReason
 			row.closed = true
 			row.pendingDeadlineUnixMS = 0
+		case creditTS != "" && row.mode == RouteSnapshotModeEnforce:
+			evidenceRow, ok := enforceCreditWithoutEvidence(row, creditTS, time.Duration(pendingDeadlineSeconds)*time.Second, nowUnixMS)
+			if !ok {
+				continue
+			}
+			row = evidenceRow
 		default:
 			continue
 		}
 		missing = append(missing, row)
 	}
 	return missing, rows.Err()
+}
+
+// requestEnforceCreditsWithoutSnapshot covers enforce credits recorded with
+// no route snapshot (store pressure): no attempt output, no verdict, and no
+// snapshot for the provider. Each is pending for enforceEvidenceMissingGrace
+// after the credit, then closed quarantined; one the coordinator already
+// quarantined after a delivery closes at once with that reason.
+func (s *Store) requestEnforceCreditsWithoutSnapshot(ctx context.Context, accountScope, requestID string, nowUnixMS int64) ([]requestSettlementVerdictRow, error) {
+	scopeHash := SettlementAccountScopeHash(accountScope)
+	rows, err := s.db.QueryContext(ctx, `
+SELECT lrc.attempt_n, lrc.provider_id, lrc.ts_utc,
+       COALESCE(lrc.settlement_policy_version, ''),
+       CASE WHEN lrc.quarantined = 1 AND lrc.quarantine_reason IN (?, ?, ?) THEN lrc.quarantine_reason ELSE '' END
+  FROM ledger_request_credits lrc
+ WHERE lrc.request_id = ?
+   AND lrc.settlement_account_scope_hash = ?
+   AND lrc.settlement_policy_mode = 'enforce'
+   AND NOT EXISTS (SELECT 1 FROM settlement_route_snapshots rs
+                    WHERE rs.account_scope = ? AND rs.request_id = lrc.request_id AND rs.provider_id = lrc.provider_id)
+   AND NOT EXISTS (SELECT 1 FROM settlement_attempt_outputs sao
+                    WHERE sao.account_scope = ? AND sao.request_id = lrc.request_id AND sao.provider_id = lrc.provider_id)
+   AND NOT EXISTS (SELECT 1 FROM settlement_receipt_verdicts srv
+                    WHERE srv.account_scope_hash = ? AND srv.request_id = lrc.request_id AND srv.provider_id = lrc.provider_id)
+ ORDER BY lrc.attempt_n ASC, lrc.provider_id ASC`,
+		UndeliveredSettlementQuarantineReasons[0], UndeliveredSettlementQuarantineReasons[1], UndeliveredSettlementQuarantineReasons[2],
+		requestID, scopeHash, accountScope, accountScope, scopeHash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []requestSettlementVerdictRow
+	for rows.Next() {
+		row := requestSettlementVerdictRow{mode: RouteSnapshotModeEnforce, noSnapshot: true}
+		var creditTS, quarantineReason string
+		if err := rows.Scan(&row.attemptN, &row.providerID, &creditTS, &row.policyVersion, &quarantineReason); err != nil {
+			return nil, err
+		}
+		if quarantineReason != "" {
+			row.receiptResult = SettlementReceiptResultInconclusive
+			row.settlementOutcome = SettlementOutcomeQuarantined
+			row.reason = quarantineReason
+			row.closed = true
+			out = append(out, row)
+			continue
+		}
+		if evidenceRow, ok := enforceCreditWithoutEvidence(row, creditTS, enforceEvidenceMissingGrace, nowUnixMS); ok {
+			out = append(out, evidenceRow)
+		}
+	}
+	return out, rows.Err()
 }
 
 // Snapshots exist before pending verdicts do. Looking only at verdict rows can
@@ -458,6 +573,9 @@ func (s *Store) requestSettlementScopeReason(ctx context.Context, accountScope, 
 	}
 	remaining := make(map[attemptKey]requestSettlementVerdictRow, len(verdicts))
 	for _, verdict := range verdicts {
+		if verdict.noSnapshot {
+			continue
+		}
 		remaining[attemptKey{verdict.attemptN, verdict.providerID}] = verdict
 	}
 	rows, err := s.db.QueryContext(ctx, `

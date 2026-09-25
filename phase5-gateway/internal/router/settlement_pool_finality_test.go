@@ -117,11 +117,17 @@ func TestFinalityTokenTotalsSettlementCapableSources(t *testing.T) {
 // finality lookup reports the quarantined credit as closed quarantined, and
 // the reconciler refunds the held reservation instead of holding it forever.
 func TestSettlementReconcileRefundsUndeliveredEvidenceQuarantine(t *testing.T) {
-	const (
-		accountID         = "acct_undelivered_quarantine"
-		requestID         = "req_undelivered_quarantine"
-		internalRequestID = "internal_undelivered_quarantine"
-	)
+	for _, reason := range []string{"settlement_record_failed_after_delivery", "settlement_evidence_missing"} {
+		t.Run(reason, func(t *testing.T) { reconcileRefundsClosedQuarantine(t, reason) })
+	}
+}
+
+// reconcileRefundsClosedQuarantine: a held reservation whose coordinator
+// finality is closed quarantined with reason is refunded by the reconciler.
+func reconcileRefundsClosedQuarantine(t *testing.T, reason string) {
+	accountID := "acct_" + reason
+	requestID := "req_" + reason
+	internalRequestID := "internal_" + reason
 	coordinator := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(coordinatorRequestSettlementFinality{
 			RequestID:                 requestID,
@@ -130,7 +136,7 @@ func TestSettlementReconcileRefundsUndeliveredEvidenceQuarantine(t *testing.T) {
 			PolicyVersion:             settlementPolicyVersion,
 			Outcome:                   "quarantined",
 			ReceiptResult:             "inconclusive",
-			Reason:                    "settlement_record_failed_after_delivery",
+			Reason:                    reason,
 			Closed:                    true,
 			ModeScopeComplete:         true,
 			QuarantinedAttempts:       1,
