@@ -74,6 +74,12 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// `defaultDecodeLockstepWindow` so compiled contiguous decode can amortize
     /// the model-container hop. FR-CB5 still inserts at the next hop boundary.
     let maxDecodeLockstepWindow: Int
+    /// Decode tokens per hop while a prompt is mid-prefill and nothing else is
+    /// waiting to join. `1` is strict one-token-per-prefill-chunk alternation,
+    /// which starves active rows behind a long prompt: one 512-token chunk
+    /// costs about as much as 30-50 decode steps. Production uses
+    /// `defaultDecodeStepsWhilePrefilling` (SPEC-038 FR-CB2).
+    let maxDecodeStepsWhilePrefilling: Int
 
     init(
         descriptor: PagedKVDescriptor,
@@ -102,7 +108,8 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         maxStopSequenceTokens: Int = 64,
         maxTotalStopTokens: Int = 256,
         snapshot: ContinuousBatchSchedulerSnapshot,
-        maxDecodeLockstepWindow: Int = 1
+        maxDecodeLockstepWindow: Int = 1,
+        maxDecodeStepsWhilePrefilling: Int = 1
     ) {
         self.descriptor = descriptor
         self.tuple = tuple
@@ -151,11 +158,18 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.maxTotalStopTokens = max(1, maxTotalStopTokens)
         self.snapshot = snapshot
         self.maxDecodeLockstepWindow = max(1, maxDecodeLockstepWindow)
+        self.maxDecodeStepsWhilePrefilling = max(1, maxDecodeStepsWhilePrefilling)
     }
 
     /// Production serve-path lockstep burst. Join/leave still happens between
     /// hops (FR-CB5); a queued row forces the scheduler back to one token.
     static let defaultDecodeLockstepWindow = 16
+
+    /// Production decode tokens per hop while a prompt prefills. On the M3
+    /// Ultra a 512-token Qwen3.6 chunk is about 1.7 s and a 4-row decode step
+    /// about 60 ms, so 8 steps give active rows about 4 tok/s instead of about
+    /// 0.6 behind a long prompt, for about 25% slower prefill.
+    static let defaultDecodeStepsWhilePrefilling = 8
 
     /// Stream token delivery is non-blocking on the scheduler actor. Compiled
     /// lockstep offers a full window per hop, and the next hop can start while
@@ -1951,9 +1965,12 @@ actor ContinuousBatchScheduler {
         let joinPending = !waiting.isEmpty
             || pendingBindingChecks > 0
             || !admittingRequests.isEmpty
-            || !activePrompt.isEmpty
         guard !joinPending else { return 1 }
-        let configured = configuration.maxDecodeLockstepWindow
+        // A prompt mid-prefill joins only after its last chunk, so decode may
+        // take a bounded window between chunks (FR-CB2) instead of one token.
+        let configured = activePrompt.isEmpty
+            ? configuration.maxDecodeLockstepWindow
+            : min(configuration.maxDecodeLockstepWindow, configuration.maxDecodeStepsWhilePrefilling)
         guard configured > 1 else { return 1 }
         var window = configured
         var bounded = false

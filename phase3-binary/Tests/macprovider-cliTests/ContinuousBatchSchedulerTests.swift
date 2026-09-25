@@ -3893,6 +3893,78 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(windows.last?.steps, 2)
     }
 
+    /// FR-CB2: while a long prompt prefills chunk by chunk, active rows take a
+    /// bounded decode window between chunks instead of one token per chunk.
+    func testActiveRowsDecodeABoundedWindowBetweenPrefillChunks() async throws {
+        let windows = try await decodeWindowsWhileAPromptPrefills(maxDecodeStepsWhilePrefilling: 3)
+        let whilePrefilling = windows.dropFirst().prefix { !$0.ids.contains("long") }
+        XCTAssertFalse(whilePrefilling.isEmpty)
+        XCTAssertTrue(whilePrefilling.contains { $0.steps == 3 })
+        XCTAssertFalse(whilePrefilling.contains { $0.steps == 1 })
+        XCTAssertFalse(whilePrefilling.contains { $0.steps > 3 })
+    }
+
+    /// The strict alternation the window replaces: one decode token per chunk.
+    func testOneStepWhilePrefillingKeepsStrictAlternation() async throws {
+        let windows = try await decodeWindowsWhileAPromptPrefills(maxDecodeStepsWhilePrefilling: 1)
+        let whilePrefilling = windows.dropFirst().prefix { !$0.ids.contains("long") }
+        XCTAssertFalse(whilePrefilling.isEmpty)
+        XCTAssertTrue(whilePrefilling.allSatisfy { $0.steps == 1 })
+    }
+
+    private func decodeWindowsWhileAPromptPrefills(
+        maxDecodeStepsWhilePrefilling: Int
+    ) async throws -> [(ids: [String], steps: Int)] {
+        let decodeGate = AsyncGate()
+        let backend = WindowRecordingBackend(
+            scripts: [
+                "active": Array(100 ..< 124),
+                "long": [200, 201],
+            ],
+            decodeGate: decodeGate
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            maxPromptChunkTokens: 2,
+            tokenDeliveryBufferLimit: 64,
+            maxDecodeLockstepWindow: 8,
+            maxDecodeStepsWhilePrefilling: maxDecodeStepsWhilePrefilling,
+            backend: backend
+        )
+        let active = Task {
+            try await scheduler.submit(.init(
+                id: "active",
+                conversationKey: "",
+                promptTokens: [1],
+                maxOutputTokens: 24,
+                temperature: 0.0,
+                topP: 1.0
+            ))
+        }
+        try await eventually { await backend.windowCallCount() == 1 }
+        let long = Task {
+            try await scheduler.submit(.init(
+                id: "long",
+                conversationKey: "",
+                promptTokens: Array(1 ... 9),
+                maxOutputTokens: 2,
+                temperature: 0.0,
+                topP: 1.0
+            ))
+        }
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        await decodeGate.open()
+
+        let activeResult = try await active.value
+        let longResult = try await long.value
+        XCTAssertEqual(activeResult.outputTokens, Array(100 ..< 124))
+        XCTAssertEqual(longResult.outputTokens, [200, 201])
+        let windows = await backend.windowCalls()
+        XCTAssertEqual(windows.first?.ids, ["active"])
+        XCTAssertEqual(windows.first?.steps, 8)
+        return windows
+    }
+
     func testLockstepWindowStopSequenceAppliesTokensSequentially() async throws {
         let backend = WindowRecordingBackend(scripts: [
             "stopped": [1, 2, 5, 6, 9],
@@ -4018,6 +4090,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             .defaultQueueWaitTimeoutNanoseconds,
         tokenDeliveryBufferLimit: Int = 16,
         maxDecodeLockstepWindow: Int = 1,
+        maxDecodeStepsWhilePrefilling: Int = 1,
         maxPrefillRowsPerIteration: Int = 1,
         backend: any ContinuousBatchSchedulerBackend,
         allocator: PagedKVBlockAllocator? = nil,
@@ -4042,7 +4115,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 modelSHA256: Self.modelSHA,
                 weightsGeneration: 3
             ),
-            maxDecodeLockstepWindow: maxDecodeLockstepWindow
+            maxDecodeLockstepWindow: maxDecodeLockstepWindow,
+            maxDecodeStepsWhilePrefilling: maxDecodeStepsWhilePrefilling
         )
         return ContinuousBatchScheduler(
             configuration: config,

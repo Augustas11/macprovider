@@ -566,7 +566,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
                         context.model(text, cache: state.caches, state: state.state)
                     }
-                    eval(output.logits)
+                    // Prefill never samples: the last prompt token is fed by the
+                    // first decode step. Evaluate only the caches, as
+                    // `LLMModel.prepare` does, so the vocabulary projection over
+                    // every chunk position is never computed.
+                    eval(state.caches)
                     state.state = output.state
                 }
                 try self.setRowState(state, for: input.requestID, binding: input.binding)

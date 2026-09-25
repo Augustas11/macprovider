@@ -1,6 +1,6 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2.9
+Version: v0.2.10
 Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
@@ -12,6 +12,23 @@ clarifies the API-visible admission/replay/terminal contract, records
 decode-first scheduling as a conservative v0.2 choice rather than a claim of
 vLLM/SGLang-style unified-token scheduling, and tightens the real-serving
 evidence gate for retained paged-KV reuse.
+
+**Change log v0.2.10 (2026-09-25, bounded decode windows):** FR-CB2 now
+describes the decode hop as the implementation runs it. One hop advances every
+active decode row by a bounded window of W tokens, applying sampling, stop and
+emission to each token in order. W is at most the lockstep window (16 in
+production) and is capped by each row's remaining output budget.
+
+- W is 1 whenever a request waits for a free slot or is being admitted, so it
+  joins at the next hop boundary.
+- While a prompt is mid-prefill and nothing else waits to join, W is at most
+  the prefill decode window (8 in production). The rule was one token per
+  prefill chunk, which left active rows at about 0.6 tok/s behind a long
+  prompt on the M3 Ultra, because a 512-token chunk costs about as much as
+  30–50 decode steps.
+
+Prefill evaluates only the caches, never the vocabulary projection, because
+prefill never samples.
 
 **Change log v0.2.9 (2026-09-24, per-tuple cached-turn acceptance):** AC-26
 is satisfied per tuple and per runtime revision. The FR-CB10 accepted-tuple
@@ -305,11 +322,22 @@ phases; it MUST NOT combine arbitrary prefill and one-token decode work into
 one heterogeneous model call in v0.2. A request joins the shared decode batch
 only after its prompt prefill completes and its request-private block table is
 initialized over `SPEC-039` blocks. Scheduling MUST be decode-first: each
-iteration advances the current decode batch by one token, applies per-row
-sampling and stop conditions, emits tokens, removes terminal rows, processes
+iteration advances the current decode batch by a bounded window of `W >= 1`
+tokens. Per-row sampling, stop conditions and emission are applied to every
+token in order. The iteration then removes terminal rows, processes
 cancellation at a safe boundary, and only then admits and prefills new prompt
-work into free capacity. Prefill MUST be bounded or chunked so a long prompt
-cannot block existing decode rows for an unbounded interval.
+work into free capacity.
+
+`W` is capped by each row's remaining output budget and by the configured
+lockstep window. It MUST be 1 while a request is waiting for a free slot or
+being admitted, so that request joins at the next hop boundary (FR-CB5). While
+a prompt is mid-prefill and nothing else is waiting to join, `W` MUST NOT
+exceed the prefill decode window. The prefill decode window gives active rows
+several tokens per prefill chunk rather than one, so a long prompt slows them
+by a bounded factor instead of stalling them. Prefill MUST be bounded or
+chunked (one chunk per iteration) so a long prompt cannot block existing
+decode rows for an unbounded interval. Prefill never samples, so it evaluates
+only the prompt's cache state, not the vocabulary projection.
 
 This decode-first split is a v0.2 safety choice. It preserves simple
 per-request accounting, cancellation, and receipt boundaries while the shared
