@@ -808,7 +808,10 @@ coordinator-cli trust-pool-admin set-lifecycle --admin-url http://127.0.0.1:8444
   verdicts about a minute after their deadline; the gateway reconciler
   settles or refunds the reservation from finality.
 - Before any coordinator rollback: `coordinator pool-rollback-preflight
-  --config /opt/macprovider/coordinator.yaml` must exit 0 (runbook §9).
+  --config /opt/macprovider/coordinator.yaml --config-overlay
+  /etc/macprovider/coordinator.pearl-overlays.yaml`, with
+  `/etc/macprovider/coordinator.env` loaded, must exit 0 (runbook §9 has the
+  exact command).
 
 Harder stops, in order of reach:
 
