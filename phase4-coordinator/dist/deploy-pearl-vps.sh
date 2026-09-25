@@ -4689,6 +4689,8 @@ if ! python3 - \
   "$STATIC_AUTOTUNE_SIG" \
   "$STATIC_DEMAND_JSON" \
   "$STATIC_DEMAND_SIG" \
+  "$STATIC_RATE_CARD_JSON" \
+  "$STATIC_RATE_CARD_SIG" \
   "$AUTOTUNE_TIER2_JSON" <<'PY'
 import hashlib, json, pathlib, re, sys
 
