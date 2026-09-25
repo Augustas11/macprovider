@@ -687,15 +687,15 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         let handle = try await runtime.acquireRequestHandle(request)
         let cancel = CancelFlag()
         let collector = ChunkCollector()
-        do {
-            _ = try await runtime.stream(request, with: handle, shouldCancel: { cancel.isSet }) { chunk in
-                collector.record(chunk)
-                if collector.contentChunks.count >= 3 { cancel.set() }
-            }
-            XCTFail("a cancelled stream must not complete")
-        } catch is CancellationError {
-            // expected
+        // #1690 E2E-F3: like the native runtime, a cancelled stream returns
+        // its delivered prefix (empty finish reason) so the relay can sign a
+        // buyer_cancel receipt over it, instead of throwing.
+        let result = try await runtime.stream(request, with: handle, shouldCancel: { cancel.isSet }) { chunk in
+            collector.record(chunk)
+            if collector.contentChunks.count >= 3 { cancel.set() }
         }
+        XCTAssertEqual(result.finishReason, "", "a cancelled stream must not report a normal finish")
+        XCTAssertTrue(collector.contentChunks.joined().hasPrefix(result.content) || result.content.hasPrefix(collector.contentChunks.joined()))
         // The upstream line stream was terminated (the real client cancels
         // the URLSession task there, which closes the loopback connection).
         for _ in 0..<50 where !client.wasTerminated {
