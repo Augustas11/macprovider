@@ -302,7 +302,12 @@ func TestLoadAutotuneFeedsRejectsUnboundCatalogArtifacts(t *testing.T) {
 		{
 			name:      "cross-variant source_ref field present",
 			artifacts: replace(`"revision":"`+strings.Repeat("1", 40)+`"}`, `"revision":"`+strings.Repeat("1", 40)+`","digest":"sha256:`+strings.Repeat("2", 64)+`"}`),
-			want:      "source_ref carries fields outside {kind, repo_id, revision}",
+			want:      "source_ref carries fields outside {kind, repo_id, revision, file_path}",
+		},
+		{
+			name:      "mlx huggingface_revision carrying file_path (SPEC-023 v0.16.0)",
+			artifacts: replace(`"revision":"`+strings.Repeat("1", 40)+`"}`, `"revision":"`+strings.Repeat("1", 40)+`","file_path":"model.gguf"}`),
+			want:      `source_ref.file_path is forbidden for runtime_format "mlx_safetensors"`,
 		},
 		{
 			name:      "candidate digest drift",
@@ -394,6 +399,63 @@ func TestLoadAutotuneFeedsRejectsUnboundCatalogArtifacts(t *testing.T) {
 	}
 }
 
+func ggufHFArtifactJSON(hash, sourceRef string) string {
+	return fmt.Sprintf(
+		`,"gguf-q4":{"allowed_runtime_sources":["llamacpp_loopback","ollama_loopback"],"hash":%q,"hash_algorithm":"macprovider.gguf-file.v1","min_ram_gb":4,"quantization":"q4_k_m","runtime_format":"gguf","size_bytes":654321,"source_ref":%s,"verification_status":"declared","verified_at":null}`,
+		hash, sourceRef,
+	)
+}
+
+// SPEC-023 v0.16.0 / SPEC-010 1.10 R007(g): the coordinator parser accepts a
+// gguf artifact sourced by huggingface_revision with a valid file_path, and
+// rejects every illegal variant of that tuple (AC-CAT-16). No release
+// publishes the tuple yet (rollout rule); this proves the consumer is ready.
+func TestLoadAutotuneFeedsGGUFHuggingFaceRevisionTuple(t *testing.T) {
+	t.Parallel()
+	hash := strings.Repeat("4", 64)
+	rev := strings.Repeat("a", 40)
+	hfRef := func(extra string) string {
+		return `{"kind":"huggingface_revision","repo_id":"unsloth/Test-Model-GGUF","revision":"` + rev + `"` + extra + `}`
+	}
+	cases := []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{"valid nested file_path", hfRef(`,"file_path":"Q4_K_M/test-model-Q4_K_M.gguf"`), ""},
+		{"valid top-level file_path", hfRef(`,"file_path":"test-model.Q4_K_M.gguf"`), ""},
+		{"missing file_path", hfRef(``), "gguf source_ref.file_path must be"},
+		{"absolute file_path", hfRef(`,"file_path":"/models/x.gguf"`), "gguf source_ref.file_path must be"},
+		{"dot-dot segment", hfRef(`,"file_path":"a/../x.gguf"`), "gguf source_ref.file_path must be"},
+		{"dot segment", hfRef(`,"file_path":"./x.gguf"`), "gguf source_ref.file_path must be"},
+		{"not a gguf file", hfRef(`,"file_path":"x.safetensors"`), "gguf source_ref.file_path must be"},
+		{"over 255 bytes", hfRef(`,"file_path":"` + strings.Repeat("a", 252) + `.gguf"`), "gguf source_ref.file_path must be"},
+		{"digest on a huggingface gguf", hfRef(`,"file_path":"x.gguf","digest":"sha256:` + hash + `"`), "source_ref carries fields outside"},
+		{"file_path on an ollama gguf", `{"digest":"sha256:` + hash + `","file_path":"x.gguf","kind":"ollama_library_tag","library_tag":"test-model:q4_k_m"}`, "source_ref carries fields outside {kind, library_tag, digest}"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			publicKey, privateKey := testSigningKey(t)
+			fixture := artifactBoundFeedSet(t, func(candidateSHA string) []byte {
+				models := `"test-model":` + artifactModelJSON(ggufHFArtifactJSON(hash, tc.ref))
+				return catalogArtifactsFeedWithModels("test-release", "2026-07-10T00:00:00Z", "autotune-policy-v1", candidateSHA, models)
+			}, privateKey, "test-key", map[string]ed25519.PublicKey{"test-key": publicKey}, privateKey)
+			_, err := buyer.LoadAutotuneFeeds(fixture.cfg)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("valid gguf huggingface_revision tuple rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("LoadAutotuneFeeds error=%v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadAutotuneFeedsAcceptsADeclaredGGUFSecondaryArtifact(t *testing.T) {
 	t.Parallel()
 	publicKey, privateKey := testSigningKey(t)
@@ -465,5 +527,48 @@ func TestLoadAutotuneFeedsRejectsCatalogArtifactsWithoutBaseFeeds(t *testing.T) 
 	})
 	if err == nil || !strings.Contains(err.Error(), "autotune.catalog_artifacts_path and autotune.catalog_artifacts_sig_path must both be set") {
 		t.Fatalf("LoadAutotuneFeeds error=%v, want pair requirement", err)
+	}
+}
+
+// SPEC-023 v0.17.0 / SPEC-010-R009 (#1690 M8): an mlx_safetensors artifact may
+// allow mlxlm_loopback next to mlx_cache; a gguf artifact never may, and an
+// mlx artifact still may not allow any other loopback adapter (AC-CAT-16).
+func TestLoadAutotuneFeedsMLXLMLoopbackTuple(t *testing.T) {
+	t.Parallel()
+	hash := strings.Repeat("4", 64)
+	cases := []struct {
+		name  string
+		model func() string
+		want  string
+	}{
+		{"mlx primary allows mlxlm_loopback", func() string {
+			return strings.Replace(artifactModelJSON(""), `"allowed_runtime_sources":["mlx_cache"]`, `"allowed_runtime_sources":["mlx_cache","mlxlm_loopback"]`, 1)
+		}, ""},
+		{"mlx primary allows ollama_loopback", func() string {
+			return strings.Replace(artifactModelJSON(""), `"allowed_runtime_sources":["mlx_cache"]`, `"allowed_runtime_sources":["mlx_cache","ollama_loopback"]`, 1)
+		}, `may not allow runtime source "ollama_loopback"`},
+		{"gguf allows mlxlm_loopback", func() string {
+			return artifactModelJSON(strings.Replace(ggufArtifactJSON(hash, "sha256:"+hash), `"allowed_runtime_sources":["ollama_loopback"]`, `"allowed_runtime_sources":["mlxlm_loopback","ollama_loopback"]`, 1))
+		}, `may not allow runtime source "mlxlm_loopback"`},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			publicKey, privateKey := testSigningKey(t)
+			fixture := artifactBoundFeedSet(t, func(candidateSHA string) []byte {
+				return catalogArtifactsFeedWithModels("test-release", "2026-07-10T00:00:00Z", "autotune-policy-v1", candidateSHA, `"test-model":`+tc.model())
+			}, privateKey, "test-key", map[string]ed25519.PublicKey{"test-key": publicKey}, privateKey)
+			_, err := buyer.LoadAutotuneFeeds(fixture.cfg)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("legal mlxlm tuple rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("LoadAutotuneFeeds error=%v, want %q", err, tc.want)
+			}
+		})
 	}
 }

@@ -190,6 +190,22 @@ func VerifyManifestAcceptedEvent(e DurableEvent, root ReconstructedRootIssuer) (
 	return prevDigest, core, verifyP256Signature(pub, msg, sig)
 }
 
+// verifyManifestAcceptanceOnline gates a NEW manifest_accepted append with the
+// online policy verifier. Replay (VerifyManifestAcceptedEvent) keeps the
+// timeless verifier so a policy accepted before its signer set was revoked
+// still reconstructs.
+func verifyManifestAcceptanceOnline(e DurableEvent) error {
+	raw, err := canonicalBase64(e.ManifestSnapshot)
+	if err != nil {
+		return err
+	}
+	snapshot, err := poolmanifest.ParseManifestSnapshot(raw)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errManifestSnapshot, err)
+	}
+	return poolmanifest.VerifyNewestPolicyAcceptance(snapshot)
+}
+
 func verifyManifestSnapshot(e DurableEvent, root ReconstructedRootIssuer) (string, poolmanifest.PolicyCore, error) {
 	raw, err := canonicalBase64(e.ManifestSnapshot)
 	if err != nil {
@@ -285,6 +301,11 @@ func validateCandidatePolicyCoreClaims(core poolmanifest.PolicyCore) error {
 		return ErrProhibitedPromiseClaim
 	}
 	if !validPoolSettlementMode(core.SettlementMode) {
+		return errManifestSnapshot
+	}
+	// SPEC-042-R001 0.0.32: the v2 acceptance rules (closed runtime
+	// vocabulary, enforce for a non-empty allowlist, no unknown extension).
+	if err := core.ValidateAcceptance(); err != nil {
 		return errManifestSnapshot
 	}
 	if err := ValidatePromiseClaimsText(core.ModelAllowlist...); err != nil {

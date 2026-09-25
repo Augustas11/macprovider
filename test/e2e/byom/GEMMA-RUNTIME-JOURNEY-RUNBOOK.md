@@ -93,6 +93,14 @@ export MACPROVIDER_JOURNEY_LEDGER_DSN=postgres://...   # read access to the ten 
 export MACPROVIDER_OLLAMA_ORIGIN=http://127.0.0.1:11434
 ```
 
+The generic loopback origin (#1690 M2) applies to every loopback runtime
+(`ollama:` and `llamacpp:`): yaml key `loopback_origin` or env
+`MACPROVIDER_LOOPBACK_ORIGIN`, env over yaml. Precedence for Ollama is
+`MACPROVIDER_OLLAMA_ORIGIN` > `MACPROVIDER_LOOPBACK_ORIGIN` > `loopback_origin` >
+`http://127.0.0.1:11434`; for llama.cpp it is `MACPROVIDER_LOOPBACK_ORIGIN` >
+`loopback_origin` > `http://127.0.0.1:8080`. Every value is loopback-validated
+when serve builds the runtime.
+
 ## Run
 
 ```bash

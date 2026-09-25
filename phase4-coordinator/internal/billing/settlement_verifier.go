@@ -341,7 +341,10 @@ func tupleUsageMatchesLedger(usage settlementUsageV04, input SettlementVerifyInp
 	if !input.UsageCrossChecked {
 		return "usage_not_cross_checked"
 	}
-	if input.UsageSource != UsageSourceCoordinatorObserved {
+	// SPEC-022-R012.4: pool_operator_attested is cross-checked only when the
+	// caller re-evaluated R-12 for the persisted snapshot; every other source
+	// stays rejected. The usage must still match the recorded usage exactly.
+	if input.UsageSource != UsageSourceCoordinatorObserved && input.UsageSource != UsageSourcePoolOperatorAttested {
 		return "usage_source_not_settlement_capable"
 	}
 	checks.UsageCrossChecked = true

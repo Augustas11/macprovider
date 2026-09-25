@@ -137,7 +137,10 @@ provenance. A verified member served by `mlx_cache` (a secondary
 source is a loopback runtime, and SPEC-047-R003(iv) v0.1.10 / SPEC-023
 v0.14.3 bar loopback from `settlement_capable` until a later SPEC-047-R003
 amendment names a coordinator-recorded trust binding and a trusted usage
-source (#1694). A GGUF member reaches at most `catalog_priced`. For a member
+source (#1694). A GGUF member reaches at most `catalog_priced` globally.
+The one exception (SPEC-047 v0.2.0 / SPEC-023 v0.16.0, #1690) is route-time
+settlement on a SPEC-042 Trusted Pool route whose signed policy allowlists
+the serving runtime; it never changes global admission. For a member
 that settles, the BYOM admission predicate, the route snapshot, and
 settlement carry the SPEC-047-R003 six values
 (`artifact_feed_sha256`, `artifact_id`, `artifact_hash`,
@@ -181,10 +184,13 @@ mismatches and hash-less reports, and only a model change resets it. A stale fee
 `artifact_identity_index_stale` once per refresh. `scripts/verify-tier2-live.sh`
 accepts both canonical algorithms in its ready-cohort check.
 
-What this slice does NOT do: the provider CLI has no GGUF serving runtime, and
-SPEC-046 does not proxy buyer traffic, so a served GGUF model cannot yet
-report the wire pair in hello/heartbeat. R007 defines the identity that
-runtime path will report; the path itself is a later runtime slice.
+Historical context for the R007 slice: at that time the provider CLI had no
+GGUF serving runtime. Since #1690 M2 the CLI serves GGUF through the
+`llamacpp:` and `ollama:` selectors (SPEC-046-R009). Such a session is
+sandboxed for global traffic and earns only on a SPEC-042 Trusted Pool route
+whose signed policy allowlists its runtime, under SPEC-047-R003(iv)'s pool
+route-time clause and SPEC-022-R012. Check those rules, not this slice note,
+before serving a GGUF member.
 
 ## Activation state
 
@@ -284,7 +290,7 @@ matrix on all four identity fields; anything else fails the release closed.
 | `runtime_format` | `hash_algorithm` | `source_ref.kind` | `allowed_runtime_sources` ⊆ |
 |---|---|---|---|
 | `mlx_safetensors` | `macprovider.snapshot-manifest.v1` | `huggingface_revision` | `{mlx_cache}` |
-| `gguf` | `macprovider.gguf-file.v1` | `ollama_library_tag` | `{ollama_loopback, llamacpp_loopback, lmstudio_loopback, openai_compatible_loopback}` |
+| `gguf` | `macprovider.gguf-file.v1` | `ollama_library_tag`, or (SPEC-023 v0.16.0) `huggingface_revision` with `file_path` | `{ollama_loopback, llamacpp_loopback, lmstudio_loopback, openai_compatible_loopback}` |
 
 A `verified` artifact may never allow `openai_compatible_loopback` — an opaque
 endpoint supplies no bytes to hash.
@@ -335,9 +341,14 @@ endpoint supplies no bytes to hash.
    settlement bar holds: every GGUF source is a loopback runtime (SPEC-023
    v0.14.3 §3.7.4, #1694). It reaches at most `catalog_priced`. Only
    `mlx_safetensors` artifacts served by `mlx_cache` (the primary, or a
-   verified secondary) may settle. A catalog release that adds a `gguf` row
-   is safe to ship only because of this bar; do not ship one on a build
-   without it.
+   verified secondary) may settle globally. A catalog release that adds a
+   `gguf` row is safe to ship only because of this bar; do not ship one on a
+   build without it. From SPEC-023 v0.16.0 (#1690) a `gguf` member may also
+   settle at route time on a SPEC-042 Trusted Pool route whose signed
+   policy allowlists the serving runtime, never through global admission.
+   A `gguf` artifact may use `source_ref.kind: "huggingface_revision"` with
+   a `file_path` only after the generator and every consumer of the release
+   implement v0.16.0. An older consumer rejects the whole feed.
 
 ### Never rebind an `artifact_id`
 

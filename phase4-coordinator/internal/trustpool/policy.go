@@ -64,6 +64,8 @@ type PolicyPolicy struct {
 	MinEligibleMembers               int      `json:"min_eligible_members"`
 	MinBinaryVersion                 string   `json:"min_binary_version,omitempty"`
 	ModelAllowlist                   []string `json:"model_allowlist,omitempty"`
+	RuntimeAllowlist                 []string `json:"runtime_allowlist"`
+	RuntimeScope                     string   `json:"runtime_scope"`
 	RetentionPolicyID                string   `json:"retention_policy_id,omitempty"`
 	RetentionPolicyStatus            string   `json:"retention_policy_status"`
 	RetentionPolicyGoverningVersion  string   `json:"retention_policy_governing_version,omitempty"`
@@ -164,6 +166,7 @@ func buildPolicyDocumentForPool(p *ReconstructedPoolState, approval CreatorAppro
 	visibility := "authorized"
 	productionBlocker := "public_announcement_and_production_gates_not_implemented"
 	claimValidationStatus := "manifest_overclaim_rejection_enabled_candidate_surface_not_public"
+	runtimeScope, runtimeDisclosure := policyRuntimeDisclosure(p)
 	disclosures := []string{
 		"prompts and responses are visible to the MacProvider coordinator",
 		"prompts and responses may be visible to the selected provider operator",
@@ -171,6 +174,8 @@ func buildPolicyDocumentForPool(p *ReconstructedPoolState, approval CreatorAppro
 		"single-operator Trusted Pools do not provide a high-availability guarantee",
 		"root issuer custody class is not yet recorded as an immutable approved class; production activation remains blocked",
 		"retention policy id is resolved against MacProvider registered retention policy records; unknown ids fail activation",
+		runtimeDisclosure,
+		"only providers owned by the creator account earn through an allowlisted external runtime; a delegated provider is never selected for external-runtime serving",
 		"this policy document is not a Privacy Pool, anonymous-routing, zero-knowledge, confidential-compute, end-to-end-encryption, or regulated-compliance claim",
 		"public unauthenticated policy/status exposure requires an operator approval bound to the current manifest digest",
 	}
@@ -223,6 +228,8 @@ func buildPolicyDocumentForPool(p *ReconstructedPoolState, approval CreatorAppro
 			MinEligibleMembers:               policyMinEligibleMembers(p),
 			MinBinaryVersion:                 policyMinBinaryVersion(p),
 			ModelAllowlist:                   policyModelAllowlist(p),
+			RuntimeAllowlist:                 nonNilStrings(policyRuntimeAllowlist(p)),
+			RuntimeScope:                     runtimeScope,
 			RetentionPolicyID:                retentionPolicyIDForPool(p, approval),
 			RetentionPolicyStatus:            retentionStatus,
 			RetentionPolicyGoverningVersion:  retention.GoverningPolicyVersion,
@@ -245,6 +252,14 @@ func buildPolicyDocumentForPool(p *ReconstructedPoolState, approval CreatorAppro
 		Disclosures: disclosures,
 	}
 	return doc
+}
+
+// nonNilStrings keeps a closed-schema list present as [] rather than null.
+func nonNilStrings(in []string) []string {
+	if in == nil {
+		return []string{}
+	}
+	return in
 }
 
 func redactPublicPolicyDocument(doc PolicyDocument) PolicyDocument {

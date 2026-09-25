@@ -121,6 +121,17 @@ func (s *Server) byomDefaultPaidRoutingEligibility(p pool.Provider) modelAdmissi
 }
 
 func (s *Server) byomDefaultPaidRoutingEligibilityWithContext(ctx context.Context, p pool.Provider) modelAdmissionPaidRoutingEligibility {
+	// SPEC-047-R003(iv) / SPEC-032 FR-HG8: a loopback runtime session never
+	// serves paid global traffic, bound or not, sandboxed or not (the hello
+	// sandbox only applies when the strict gate is on). Every paid selection
+	// path (filter, pins, slot queue) and the buyer-serving projection share
+	// this predicate.
+	if providerws.IsBYOMLoopbackRuntimeSource(p.RuntimeSource) {
+		// SPEC-042-R005 site (1): the only path for a loopback session is the
+		// pool predicate, and only on a pool route whose selection-time view
+		// rides on ctx. A global route carries no view and stays ineligible.
+		return s.poolExternalRuntimeEligibility(ctx, p)
+	}
 	bound := byomAdmissionCandidate(p)
 	// SPEC-010-R007(d): a session bound to a feed member routes only with the
 	// admission evidence its route snapshot must carry (which needs a store).

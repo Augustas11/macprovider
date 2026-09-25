@@ -33,6 +33,17 @@ type Store struct {
 	routeSnapshotBusyTimeoutMS atomic.Int64
 	settlementMu               sync.RWMutex
 	settlement                 SettlementConfig
+	// poolAttestation is the SPEC-022-R012 durable pool authority (nil when
+	// trusted pools are disabled: pool_operator_attested is never derived).
+	poolAttestationMu sync.RWMutex
+	poolAttestation   PoolOperatorAttestationAuthority
+	// poolLabelSource is the settlement-time pool label view ledger recovery
+	// checks (nil when trusted pools are off, so recovery zero-bills pools).
+	poolLabelSource SettlementPoolLabelSource
+	// poolSweep is the expiry sweeper's keyset cursor and per-verdict
+	// failure backoff, carried across passes (pool_settlement_expiry_sweep.go).
+	poolSweepMu sync.Mutex
+	poolSweep   poolSettlementSweepState
 	// SPEC-005 v0.4 §13.2 — billing.quarantine_resolution_force_void_enabled
 	// route-layer flag. Held as atomic.Bool so the handler reads it on
 	// every request (no re-wire of the HTTP handler on reload).
@@ -260,6 +271,7 @@ CREATE INDEX IF NOT EXISTS idx_lcs_effective_at ON ledger_config_snapshots(effec
 	    pool_session_started_at_utc TEXT NULL,
 	    config_snapshot_id INTEGER NULL CHECK(config_snapshot_id IS NULL OR config_snapshot_id > 0),
 	    provider_reported_prompt_tokens INTEGER NULL CHECK(provider_reported_prompt_tokens IS NULL OR provider_reported_prompt_tokens >= 0),
+	    runtime_source TEXT NULL,
 	    created_at_utc TEXT NOT NULL,
 	    UNIQUE(request_id, attempt_n, provider_assigned_id)
 	);
@@ -362,7 +374,7 @@ CREATE TABLE IF NOT EXISTS settlement_attempt_outputs (
     settlement_output_canonical_json TEXT,
     usage_hash TEXT NOT NULL CHECK(length(usage_hash) = 64 AND usage_hash NOT GLOB '*[^0-9a-f]*'),
     usage_canonical_json TEXT NOT NULL,
-    usage_source TEXT NOT NULL CHECK(usage_source IN ('coordinator_observed','byte_estimated')),
+    usage_source TEXT NOT NULL CHECK(usage_source IN ('coordinator_observed','byte_estimated','pool_operator_attested')),
     overlapping_or_duplicate INTEGER NOT NULL DEFAULT 0 CHECK(overlapping_or_duplicate IN (0,1)),
     created_at_utc TEXT NOT NULL,
     UNIQUE(account_scope, request_id, attempt_n, provider_id)
@@ -512,6 +524,12 @@ CREATE INDEX IF NOT EXISTS idx_lqr_request_latest ON ledger_quarantine_resolutio
 		return err
 	}
 	if err := s.ensureSettlementReceiptAuditOutboxSnapshotColumns(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureSettlementReceiptPoolLabelColumns(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureSettlementAttemptOutputUsageSourceVocabulary(ctx); err != nil {
 		return err
 	}
 	if err := s.normalizeBillingTimeTextColumns(ctx); err != nil {
@@ -1090,6 +1108,16 @@ ADD COLUMN config_snapshot_id INTEGER NULL CHECK(config_snapshot_id IS NULL OR c
 		if _, err := s.db.ExecContext(ctx, `
 ALTER TABLE ledger_provider_identity_snapshots
 ADD COLUMN provider_reported_prompt_tokens INTEGER NULL CHECK(provider_reported_prompt_tokens IS NULL OR provider_reported_prompt_tokens >= 0)`); err != nil {
+			return err
+		}
+	}
+	// runtime_source is the serving session's hello-time runtime class, so
+	// ledger recovery can apply the loopback rule to a re-created row. NULL
+	// marks a row written before it was recorded.
+	if !cols["runtime_source"] {
+		if _, err := s.db.ExecContext(ctx, `
+ALTER TABLE ledger_provider_identity_snapshots
+ADD COLUMN runtime_source TEXT NULL`); err != nil {
 			return err
 		}
 	}

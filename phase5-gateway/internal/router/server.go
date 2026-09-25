@@ -1443,6 +1443,9 @@ var gatewayPermanentCodes = map[string]bool{
 	// (setGatewayRetryAfter only fires for retryable codes), matching the
 	// SPEC-042 R010 table (503 | no).
 	"pool_unavailable": true, "pool_selection_invalid": true,
+	// SPEC-006-R016 buyer engine selection: the named engine cannot serve the
+	// same request on this route later, and a bad selector is a client error.
+	"engine_unavailable": true, "invalid_engine_selection": true,
 }
 
 func gatewayRetryable(code string) bool {
@@ -1564,6 +1567,17 @@ func copyCleanHeadersWithReceipt(dst, src http.Header, allowReceipt bool) {
 			for _, value := range values {
 				if mode := buyerVisibleStreamingModeHeader(value); mode != "" {
 					dst.Set(streamingModeResponseHeader, mode)
+					break
+				}
+			}
+			continue
+		}
+		// SPEC-006-R016 / §8.3: the served runtime class survives the strip,
+		// but only as one exact value of the closed vocabulary.
+		if isEngineResponseHeader(key) {
+			for _, value := range values {
+				if class := buyerVisibleEngineHeader(value); class != "" {
+					dst.Set(engineResponseHeader, class)
 					break
 				}
 			}

@@ -350,6 +350,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     // in seconds. Derived from the configured admission wait so the hint the
     // buyer is handed is the bound this provider actually enforces.
     private let queueWaitRetryAfterSeconds: Int
+    // Makes the peer's EOF observable so `channelInactive` can mark
+    // `inflightDisconnects`; see `PeerCloseMonitor`.
+    private let peerCloseMonitor = PeerCloseMonitor()
 
     init(
         modelID: String?,
@@ -389,6 +392,23 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         self.lifecycleLeaseStore = lifecycleLeaseStore
     }
 
+    func handlerAdded(context: ChannelHandlerContext) {
+        // Installed here rather than by the bootstrap so every pipeline that
+        // carries this router detects a buyer disconnect. Only a pipeline with
+        // `HTTPServerPipelineHandler` withholds reads while a response is in
+        // flight; without it reads continue, the peer's EOF already reaches
+        // `channelInactive`, and pipelined requests must still reach this
+        // router, so the monitor is not installed.
+        guard (try? context.pipeline.syncOperations.handler(type: HTTPServerPipelineHandler.self)) != nil else {
+            return
+        }
+        do {
+            try context.pipeline.syncOperations.addHandler(peerCloseMonitor, position: .first)
+        } catch {
+            context.close(promise: nil)
+        }
+    }
+
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let part = unwrapInboundIn(data)
 
@@ -410,6 +430,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             }
             bodyBuffer?.writeBuffer(&chunk)
         case .end:
+            peerCloseMonitor.watchForPeerClose()
             handleRequest(context: context)
             requestHead = nil
             bodyBuffer = nil
@@ -700,6 +721,17 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     CBTrace.log(auditRequestID, "http_runtime_call")
                     let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, with: handle, shouldCancel: { disconnect.isDisconnected })
                     CBTrace.log(auditRequestID, "http_runtime_returned")
+                    guard !disconnect.isDisconnected else {
+                        // The buyer left while generation ran: a buyer
+                        // disconnect, not a completion. No usage, receipt,
+                        // or completion telemetry, and nothing is written.
+                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false)
+                        if settlementMetadata != nil {
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                        }
+                        writer.close()
+                        return
+                    }
                     let modelHashSource = Self.resolveModelHashSource(
                         warmSwapEnabled: warmSwapEnabled,
                         snapshot: servedSnapshot,
@@ -741,6 +773,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         requestID: auditRequestID,
                         settlementMetadata: settlementMetadata,
                         runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
+                        settlementRuntimeSource: modelRuntime.settlementRuntimeSource,
                         settlementDisposition: completion.settlementDisposition,
                         terminalStateTSUnixMS: terminalStateTSUnixMS
                     )
@@ -760,9 +793,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
 	                } catch is CancellationError {
 	                    CBTrace.log(auditRequestID, "http_catch_cancellation")
-	                    // SPEC-038 AC-25 (`:620`): the buyer closed the
-	                    // connection. A non-streaming request has emitted
-	                    // nothing buyer-visible yet, so this is always the
+	                    // SPEC-038 AC-25 (`:620`) and #1690: the buyer closed
+	                    // the connection, a buyer cancel and never a provider
+	                    // failure. A non-streaming request has emitted nothing
+	                    // buyer-visible yet, so this is always the
 	                    // before-first-token case: one terminal outcome,
 	                    // non-settling, no receipt. The scheduler slot and any
 	                    // block-table reservation are already released —
@@ -770,10 +804,15 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 	                    // `withTaskCancellationHandler`, which runs
 	                    // `cancelWaiter`.
 	                    if providerRequestStarted {
-	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+	                        await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false)
 	                    }
 	                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .preTokenCancel)
-	                    writer.writeAPIError(Self.buyerCancelledError())
+	                    if disconnect.isDisconnected {
+	                        // Nothing is written to the closed socket.
+	                        writer.close()
+	                    } else {
+	                        writer.writeAPIError(Self.buyerCancelledError())
+	                    }
 	                } catch is DrainCancelledError {
 	                    CBTrace.log(auditRequestID, "http_catch_drain")
 	                    if providerRequestStarted {
@@ -1053,6 +1092,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
                 let toolCallOpenEmitted = StreamedFlag()
                 let streamedToolArgs = StreamedToolCallArgs()
+                // A buyer that disconnects mid-stream cancels generation
+                // (the runtime stops; a loopback runtime cancels upstream).
                 let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { disconnect.isDisconnected }) { chunk in
                     emittedBuyerToken.set()
                     switch chunk {
@@ -1084,6 +1125,17 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     }
                 }
                 await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
+                // The buyer left after generation finished: the relay's
+                // cancelled-after-completion case. The tokens were generated,
+                // but nothing (usage, [DONE], receipt) can reach the buyer, so
+                // no completion telemetry and no receipt.
+                guard !disconnect.isDisconnected else {
+                    if settlementMetadata != nil {
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                    }
+                    writer.close()
+                    return
+                }
                 KVCacheTelemetry.emitRequestCompleted(
                     providerID: providerID,
                     requestID: requestID,
@@ -1133,6 +1185,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 let terminalStateTSUnixMS = Int64(Date().timeIntervalSince1970 * 1000)
                 let unixTsSeconds = Int64(Date().timeIntervalSince1970)
                 var trailers: [(String, String)] = []
+                var receiptDelivery: (@Sendable (Bool) -> Void)?
                 if settlementMetadata != nil {
                     let modelHashSource = Self.resolveModelHashSource(
                         warmSwapEnabled: warmSwapEnabled,
@@ -1155,18 +1208,29 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         requestID: requestID,
                         settlementMetadata: settlementMetadata,
                         runtimeSettlementEligible: modelRuntime.isSettlementReceiptEligible,
+                        settlementRuntimeSource: modelRuntime.settlementRuntimeSource,
                         settlementDisposition: completion.settlementDisposition,
                         terminalStateTSUnixMS: terminalStateTSUnixMS
                     )
                     switch receipt {
                     case .issued(let header):
                         trailers = Self.receiptExtraHeaders(header: header, settlementMetadata: settlementMetadata, terminalStateTSUnixMS: terminalStateTSUnixMS)
-                        ReceiptAudit.emitIssued(providerID: providerID, requestID: requestID, modelID: request.model, tokensOut: Int64(completion.generatedCompletionTokens), ttftMs: ttftMs, unixTs: unixTsSeconds)
+                        // Issued only once the terminal write (usage, [DONE],
+                        // trailers) is confirmed, as the non-streaming path does.
+                        let modelID = request.model
+                        let tokensOut = Int64(completion.generatedCompletionTokens)
+                        receiptDelivery = { delivered in
+                            if delivered {
+                                ReceiptAudit.emitIssued(providerID: providerID, requestID: requestID, modelID: modelID, tokensOut: tokensOut, ttftMs: ttftMs, unixTs: unixTsSeconds)
+                            } else {
+                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                            }
+                        }
                     case .omitted(let reason):
                         ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: reason)
                     }
                 }
-                writer.writeSSEDone(trailers: trailers)
+                writer.writeSSEDone(trailers: trailers, completion: receiptDelivery)
             } catch let error as APIError {
                 if providerRequestStarted {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
@@ -1189,22 +1253,37 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     writer.writeAPIError(error)
                 }
             } catch is CancellationError {
-                // SPEC-038 AC-25 (`:620-621`): the buyer closed the
-                // connection. `stream` has already returned, so no further
-                // token can be emitted; this branch writes exactly one
-                // terminal outcome and nothing after it. Non-settling either
-                // side of the first-token boundary — no receipt is built and
-                // no trailer is written.
+                // SPEC-038 AC-25 (`:620-621`) and #1690: a buyer cancel, as
+                // on the relay's `cancelled` status, never a provider failure.
+                // `stream` has already returned, so no further token can be
+                // emitted. Non-settling either side of the first-token
+                // boundary: no receipt is built and no trailer is written.
                 if providerRequestStarted {
-                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: false)
                 }
-                let cancelError = Self.buyerCancelledError(inferenceRan: emittedBuyerToken.get())
-                if sseStarted {
-                    writer.writeSSEJSON(cancelError.envelope)
-                    writer.writeSSEDone()
+                if disconnect.isDisconnected {
+                    // Nothing can reach a closed connection. A receipt that
+                    // was due is recorded as undeliverable.
+                    if sseStarted, settlementMetadata != nil {
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                    } else if !sseStarted {
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .preTokenCancel)
+                    }
+                    writer.close()
                 } else {
-                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .preTokenCancel)
-                    writer.writeAPIError(cancelError)
+                    // Still connected: exactly one terminal outcome and
+                    // nothing after it.
+                    let cancelError = Self.buyerCancelledError(inferenceRan: emittedBuyerToken.get())
+                    if sseStarted {
+                        if settlementMetadata != nil {
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .writeFailed)
+                        }
+                        writer.writeSSEJSON(cancelError.envelope)
+                        writer.writeSSEDone()
+                    } else {
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .preTokenCancel)
+                        writer.writeAPIError(cancelError)
+                    }
                 }
             } catch is DrainCancelledError {
                 if providerRequestStarted {
@@ -1507,6 +1586,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         requestID: String? = nil,
         settlementMetadata: SettlementReceiptMetadata? = nil,
         runtimeSettlementEligible: Bool,
+        settlementRuntimeSource: String? = nil,
         settlementDisposition: ContinuousBatchSettlementDisposition,
         terminalState: String = "normal_done",
         terminalStateTSUnixMS: Int64? = nil
@@ -1518,11 +1598,27 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             return .omitted(.preV16Binary)
         }
         // #1695: eligibility is explicit. A runtime that is not settlement
-        // eligible (loopback, fixture) never signs, whatever its completions say.
-        guard runtimeSettlementEligible else {
+        // eligible (loopback, fixture) never signs, whatever its completions
+        // say, unless this request's v0.4 settlement metadata carries a
+        // matching SPEC-015 §N.12 pool_runtime_authorization (#1690 M5).
+        // Error receipts pass no runtime source, so they never qualify.
+        let poolAuthorized = !runtimeSettlementEligible && SettlementReceiptEligibility.poolAuthorizes(
+            runtimeSource: settlementRuntimeSource,
+            settlementMetadata: settlementMetadata,
+            providerID: providerID
+        )
+        guard runtimeSettlementEligible || poolAuthorized else {
             return .omitted(.runtimeNotSettlementEligible)
         }
-        guard settlementDisposition == .eligibleOwner else {
+        guard settlementDisposition != .usageUnattested else {
+            return .omitted(.runtimeNotSettlementEligible)
+        }
+        // A pool-authorized loopback completion carries the runtime-level
+        // `.notEligible` marker (#1695); only a replay waiter stays excluded.
+        let dispositionSettles = poolAuthorized
+            ? settlementDisposition != .nonSettlingReplay
+            : settlementDisposition == .eligibleOwner
+        guard dispositionSettles else {
             return .omitted(.nonSettlingReplay)
         }
         // SPEC-015 §M.2.2 — fail-closed refusal BEFORE construction.
@@ -1549,6 +1645,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                       settlementMetadata.modelID == request.model,
                       case .captured(let modelHash) = modelHashSource else {
                     return .omitted(.constructionFailed)
+                }
+                if poolAuthorized {
+                    PoolLoopbackUsageGuard.schedule(
+                        settlementMetadata: settlementMetadata,
+                        providerID: providerID,
+                        completionText: outputContent,
+                        reportedCompletionTokens: tokensOut
+                    )
                 }
                 let issuedAt = Int64(Date().timeIntervalSince1970 * 1000)
                 let header = try receiptBuilder.buildSettlement(
@@ -1763,8 +1867,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         return result
     }
 
-    private static func usage(_ completion: CompletionResult) -> [String: Any] {
-        [
+    static func usage(_ completion: CompletionResult) -> [String: Any] {
+        var usage: [String: Any] = [
             "prompt_tokens": completion.promptTokens,
             "cached_prompt_tokens": completion.cachedPromptTokens,
             "completion_tokens": completion.completionTokens,
@@ -1789,6 +1893,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             // OpenAI-compat. NSNull when the serve path did not record timing.
             "macprovider_generation_ms": completion.generationMilliseconds ?? NSNull(),
         ]
+        // Usage the upstream did not report is never sent as billing token
+        // counts; the display-only vendor extensions stay.
+        if completion.settlementDisposition == .usageUnattested {
+            for key in ["prompt_tokens", "cached_prompt_tokens", "completion_tokens", "total_tokens"] {
+                usage.removeValue(forKey: key)
+            }
+        }
+        return usage
     }
 
     /// Which coordinator hold, if any, local status may report (#1616).
@@ -2293,6 +2405,55 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     }
 }
 
+/// `HTTPServerPipelineHandler` withholds socket reads while a response is in
+/// flight, so a buyer that closes its connection during generation is never
+/// observed until a write fails, and a stream that writes nothing for a while
+/// cannot see the disconnect at all. Every response here is `connection:
+/// close`, so bytes arriving after a request's end can never be served. Placed
+/// ahead of the HTTP decoder, this handler keeps reading the socket once the
+/// request has ended and discards what arrives; the peer's EOF or reset then
+/// closes the channel, and `RouterHandler.channelInactive` marks every
+/// in-flight `ClientDisconnectState` (SPEC-038 AC-25): a buyer cancel, the
+/// relay's `cancelled`, never a provider failure. It is a read pump only; the
+/// disconnect signal itself is `ClientDisconnectState`. NIO on Darwin does not
+/// deliver an early EOF without a read (`isEarlyEOFDeliveryWorkingOnThisOS`),
+/// so without this pump a buyer that closes after the request's read burst is
+/// not seen until a write fails, and never by a stream that writes nothing.
+private final class PeerCloseMonitor: ChannelInboundHandler {
+    typealias InboundIn = ByteBuffer
+    typealias InboundOut = ByteBuffer
+
+    private var context: ChannelHandlerContext?
+    private var requestEnded = false
+
+    func handlerAdded(context: ChannelHandlerContext) {
+        self.context = context
+    }
+
+    func handlerRemoved(context: ChannelHandlerContext) {
+        self.context = nil
+    }
+
+    /// Event-loop only: called once the request's end has been decoded.
+    func watchForPeerClose() {
+        guard let context, !requestEnded else { return }
+        requestEnded = true
+        context.read()
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        guard !requestEnded else { return }
+        context.fireChannelRead(data)
+    }
+
+    func channelReadComplete(context: ChannelHandlerContext) {
+        context.fireChannelReadComplete()
+        if requestEnded {
+            context.read()
+        }
+    }
+}
+
 private struct ResponseWriter: @unchecked Sendable {
     let context: ChannelHandlerContext
     /// SPEC-038 `:614` bounded retry guidance, in seconds. Applied by
@@ -2359,7 +2520,9 @@ private struct ResponseWriter: @unchecked Sendable {
         }
     }
 
-    func writeSSEDone(trailers: [(String, String)] = []) {
+    /// `completion` reports whether the terminal part (and so every earlier
+    /// write on this ordered channel) reached the socket.
+    func writeSSEDone(trailers: [(String, String)] = [], completion: (@Sendable (Bool) -> Void)? = nil) {
         writeSSEData("[DONE]")
         context.eventLoop.execute {
             var headers: HTTPHeaders?
@@ -2370,9 +2533,20 @@ private struct ResponseWriter: @unchecked Sendable {
                 }
                 headers = trailerHeaders
             }
-            context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(headers))).whenComplete { _ in
+            context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(headers))).whenComplete { result in
+                if case .success = result {
+                    completion?(true)
+                } else {
+                    completion?(false)
+                }
                 context.close(promise: nil)
             }
+        }
+    }
+
+    func close() {
+        context.eventLoop.execute {
+            context.close(promise: nil)
         }
     }
 

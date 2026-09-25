@@ -26,6 +26,11 @@ import (
 // DISTINCT from the policyCoreTag (slice 1) that prefixes the digest preimage.
 const policyCoreSigTag = "macprovider/spec042/policy-core-sig/v1"
 
+// policyCoreSigTagV2 signs a v2 policy core (SPEC-042-R001 0.0.32). It is
+// distinct from the v1 tag so a signature is never valid under the other
+// encoding.
+const policyCoreSigTagV2 = "macprovider/spec042/policy-core-sig/v2"
+
 var (
 	errSignerSetEmpty       = errors.New("poolmanifest: signer set has no keys")
 	errSignerSetVersionZero = errors.New("poolmanifest: signer set version 0 is reserved")
@@ -155,11 +160,37 @@ func (ss SignerSet) keyByID(id string) (ed25519.PublicKey, bool) {
 // for a policy core: policyCoreSigTag ‖ manifest_core_digest. manifestCoreDigest
 // must be the 32-byte SHA-256 policy-core digest from ManifestCoreDigest.
 func PolicyCoreSigningMessage(manifestCoreDigest []byte) ([]byte, error) {
+	return policyCoreSigningMessage(policyCoreSigTag, manifestCoreDigest)
+}
+
+// PolicyCoreSigningMessageV2 is the v2 signing message:
+// policyCoreSigTagV2 ‖ manifest_core_digest (SPEC-042-R001 0.0.32).
+func PolicyCoreSigningMessageV2(manifestCoreDigest []byte) ([]byte, error) {
+	return policyCoreSigningMessage(policyCoreSigTagV2, manifestCoreDigest)
+}
+
+// SigningMessage returns the signing message for this core's encoding.
+func (pc PolicyCore) SigningMessage() ([]byte, error) {
+	digest, err := pc.ManifestCoreDigest()
+	if err != nil {
+		return nil, err
+	}
+	return policyCoreSigningMessage(pc.signingTag(), digest)
+}
+
+func (pc PolicyCore) signingTag() string {
+	if pc.IsV2() {
+		return policyCoreSigTagV2
+	}
+	return policyCoreSigTag
+}
+
+func policyCoreSigningMessage(tag string, manifestCoreDigest []byte) ([]byte, error) {
 	if len(manifestCoreDigest) != manifestCoreHashLen {
 		return nil, errDigestLen
 	}
-	msg := make([]byte, 0, len(policyCoreSigTag)+manifestCoreHashLen)
-	msg = append(msg, policyCoreSigTag...)
+	msg := make([]byte, 0, len(tag)+manifestCoreHashLen)
+	msg = append(msg, tag...)
 	msg = append(msg, manifestCoreDigest...)
 	return msg, nil
 }
@@ -186,12 +217,15 @@ func VerifyPolicyCore(core PolicyCore, sigs []Signature, ss SignerSet) error {
 	if !(ss.NotBeforeUnix <= core.NotBeforeUnix && core.NotBeforeUnix < ss.ExpiresAtUnix) {
 		return errSignerSetInactive
 	}
+	if err := core.ValidateAcceptance(); err != nil {
+		return err
+	}
 	// Recompute the digest (also runs slice-1 structural validation of the core).
 	digest, err := core.ManifestCoreDigest()
 	if err != nil {
 		return err
 	}
-	return verifyThreshold(digest, sigs, ss)
+	return verifyThreshold(core.signingTag(), digest, sigs, ss)
 }
 
 // verifyPolicyCoreSignature verifies a policy core's M-of-N signatures against a
@@ -210,19 +244,22 @@ func verifyPolicyCoreSignature(core PolicyCore, sigs []Signature, ss SignerSet) 
 	if ss.Version != core.SignerSetVersion {
 		return errSignerSetVersion
 	}
+	if err := core.ValidateAcceptance(); err != nil {
+		return err
+	}
 	digest, err := core.ManifestCoreDigest()
 	if err != nil {
 		return err
 	}
-	return verifyThreshold(digest, sigs, ss)
+	return verifyThreshold(core.signingTag(), digest, sigs, ss)
 }
 
 // verifyThreshold enforces M-of-N over distinct authorized valid signatures for a
 // policy core. ss is assumed already Validate()d. It delegates to the generic
 // message-based primitive; the only policy-core-specific part is the signing
 // message construction.
-func verifyThreshold(manifestCoreDigest []byte, sigs []Signature, ss SignerSet) error {
-	msg, err := PolicyCoreSigningMessage(manifestCoreDigest)
+func verifyThreshold(tag string, manifestCoreDigest []byte, sigs []Signature, ss SignerSet) error {
+	msg, err := policyCoreSigningMessage(tag, manifestCoreDigest)
 	if err != nil {
 		return err
 	}

@@ -10,12 +10,12 @@ enum ReceiptEligibilityFixtures {
     static let fixtureModel = "relay-blind-fixture-model"
 
     struct LoopbackRuntime {
-        let runtime: OllamaLoopbackRuntime
+        let runtime: OpenAICompatibleLoopbackRuntime
         let blobURL: URL
         let digest: String
     }
 
-    /// A real `OllamaLoopbackRuntime` over a fake Ollama store and a stubbed
+    /// A real `OpenAICompatibleLoopbackRuntime` over a fake Ollama store and a stubbed
     /// loopback upstream, so its snapshot carries a genuine GGUF digest.
     static func makeOllamaLoopbackRuntime(
         testCase: XCTestCase,
@@ -38,7 +38,7 @@ enum ReceiptEligibilityFixtures {
         let upstream = Data("""
         {"id":"chatcmpl-x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"\(content)"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":2,"total_tokens":11}}
         """.utf8)
-        let runtime = try OllamaLoopbackRuntime(
+        let runtime = try OpenAICompatibleLoopbackRuntime(
             servedModelRef: ollamaServedRef,
             origin: "http://127.0.0.1:11434",
             httpClient: ReceiptEligibilityStubLoopbackClient(responseBody: upstream),
@@ -79,6 +79,26 @@ enum ReceiptEligibilityFixtures {
             "prompt_hash": String(repeating: "4", count: 64),
             "output_prefix_start_byte": 0,
             "pending_deadline_seconds": 120,
+        ]
+    }
+
+    /// SPEC-015 §N.12 (#1690 M5): a well-formed `pool_runtime_authorization`
+    /// bound to `settlementMetadataWire`'s attempt and route snapshot.
+    static func poolRuntimeAuthorizationWire(
+        runtimeSource: String,
+        requestID: String,
+        providerID: String,
+        attemptN: Int = 0,
+        routeSnapshotDigest: String = String(repeating: "3", count: 64)
+    ) -> [String: Any] {
+        [
+            "pool_id": "pool-lab-1",
+            "manifest_core_digest": String(repeating: "6", count: 64),
+            "runtime_source": runtimeSource,
+            "request_id": requestID,
+            "attempt_n": attemptN,
+            "provider_id": providerID,
+            "route_snapshot_digest": routeSnapshotDigest,
         ]
     }
 

@@ -1249,7 +1249,7 @@ struct MalibuBYOMEvaluationDocument: Decodable, Equatable, Sendable {
             "json_mode",
             "usage_reporting",
         ]),
-              ["mlx_cache", "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback", "unknown"].contains(runtimeSource),
+              ["mlx_cache", "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback", "mlxlm_loopback", "unknown"].contains(runtimeSource),
               ["openai_compatible_loopback", "mlx_cache_local_artifact", "unknown"].contains(adapterIdentity),
               Self.isLowercaseSHA256(diagnosticHashes.promptSHA256),
               diagnosticHashes.responseBodySHA256.map(Self.isLowercaseSHA256) ?? true else {

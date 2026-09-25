@@ -38,6 +38,10 @@ type SettlementReceiptIngestionInput struct {
 	SettlementReceiptIdentity
 	Header                string
 	ProviderReceiptPubkey []byte
+	// PoolLabels is the SPEC-042-R006 settlement-time view of the attempt's
+	// pool labels. A pool_operator_attested attempt is cross-checked only
+	// when these verify against its route snapshot (SPEC-022-R012.4/R-12.5).
+	PoolLabels            *SettlementPoolLabels
 	receiptReceivedUnixMS int64
 }
 
@@ -188,6 +192,83 @@ func (s *Store) IngestSettlementReceipt(ctx context.Context, input SettlementRec
 			ComputeIntegrityCapture:  evidence.computeIntegrityCapture,
 		})
 	})
+}
+
+// IngestPoolSettlementReceipt is IngestSettlementReceipt for an attempt routed
+// through a SPEC-042 Trusted Pool (the caller holds settlement-time pool
+// labels). It is identical except for the SPEC-022-R012.4 usage-source rule:
+// a pool_operator_attested attempt is cross-checked only when its persisted
+// route snapshot re-evaluates as R-12 at settlement (the durable pool records
+// and an undisputed label, evaluated before the verdict transaction against
+// the same snapshot digest). The usage must still match exactly. A separate
+// function keeps the mapped IngestSettlementReceipt, and the conformance
+// evidence bound to it, unchanged.
+func (s *Store) IngestPoolSettlementReceipt(ctx context.Context, input SettlementReceiptIngestionInput) (SettlementReceiptState, error) {
+	if err := input.SettlementReceiptIdentity.validate(); err != nil {
+		return SettlementReceiptState{}, err
+	}
+	if input.Header == "" {
+		return SettlementReceiptState{}, fmt.Errorf("receipt header is required")
+	}
+	if len(input.ProviderReceiptPubkey) == 0 {
+		return SettlementReceiptState{}, fmt.Errorf("provider receipt pubkey is required")
+	}
+	receivedAt := input.receiptReceivedUnixMS
+	if receivedAt == 0 {
+		receivedAt = s.nowUTC().UnixMilli()
+	}
+	if err := s.MirrorRouteSnapshotForAttempt(ctx, input.SettlementReceiptIdentity); err != nil {
+		return SettlementReceiptState{}, err
+	}
+	attestedRouteHash, attestedEligible, err := s.poolOperatorAttestedIngest(ctx, input.SettlementReceiptIdentity, input.PoolLabels)
+	if err != nil {
+		return SettlementReceiptState{}, err
+	}
+	return s.applySettlementReceiptVerdict(ctx, input.SettlementReceiptIdentity, true, receivedAt, func(evidence settlementEvidence, alreadyTerminal bool) SettlementVerifyResult {
+		crossChecked := evidence.attempt.UsageSource == UsageSourceCoordinatorObserved ||
+			(evidence.attempt.UsageSource == UsageSourcePoolOperatorAttested && attestedEligible && evidence.routeHash == attestedRouteHash)
+		return VerifySettlementReceipt(SettlementVerifyInput{
+			Header:                   input.Header,
+			ProviderReceiptPubkey:    input.ProviderReceiptPubkey,
+			RouteSnapshot:            evidence.route,
+			AccountScope:             input.AccountScope,
+			RequestID:                input.RequestID,
+			AttemptN:                 input.AttemptN,
+			ProviderID:               input.ProviderID,
+			ProviderReceiptKeyID:     evidence.route.ProviderReceiptKeyID,
+			TerminalState:            evidence.attempt.TerminalState,
+			TerminalStateTSUnixMS:    evidence.attempt.TerminalStateTSUnixMS,
+			OutputHash:               evidence.attempt.OutputHash,
+			OutputPrefixStartByte:    evidence.attempt.OutputPrefixStartByte,
+			OutputPrefixEndByte:      evidence.attempt.OutputPrefixEndByte,
+			ExpectedUsage:            evidence.attempt.Usage,
+			UsageSource:              evidence.attempt.UsageSource,
+			UsageCrossChecked:        crossChecked,
+			OverlappingOrDuplicate:   evidence.attempt.OverlappingOrDuplicate,
+			ReceiptReceivedUnixMS:    receivedAt,
+			NowUnixMS:                receivedAt,
+			CanonicalHashesAvailable: evidence.attempt.OutputAvailable && evidence.attempt.OutputHash != "",
+			TerminalOutcomeFinal:     alreadyTerminal,
+			ComputeIntegrityCapture:  evidence.computeIntegrityCapture,
+		})
+	})
+}
+
+// WithReceivedAt carries the coordinator's first observation of the receipt
+// through recovery retries, so a receipt that arrived before its pending
+// deadline is never judged late because a verdict write had to be retried.
+// Zero keeps the ingestion-time default.
+func (in SettlementReceiptIngestionInput) WithReceivedAt(unixMS int64) SettlementReceiptIngestionInput {
+	if unixMS > 0 {
+		in.receiptReceivedUnixMS = unixMS
+	}
+	return in
+}
+
+// ReceiptObservedAtUnixMS is this store's clock reading for stamping a
+// receipt's first observation.
+func (s *Store) ReceiptObservedAtUnixMS() int64 {
+	return s.nowUTC().UnixMilli()
 }
 
 func (s *Store) RecordMissingSettlementReceipt(ctx context.Context, input SettlementReceiptMissingInput) (SettlementReceiptState, error) {
@@ -784,7 +865,7 @@ func loadSettlementEvidenceConn(ctx context.Context, conn *sql.Conn, id Settleme
 	}, nil
 }
 
-func loadSettlementRouteSnapshotConn(ctx context.Context, conn *sql.Conn, id SettlementReceiptIdentity) (RouteSnapshot, string, error) {
+func loadSettlementRouteSnapshotConn(ctx context.Context, conn settlementReceiptCreditSyncDB, id SettlementReceiptIdentity) (RouteSnapshot, string, error) {
 	var r RouteSnapshot
 	var providerSession, providerGeneration sql.NullString
 	var computeIntegrityHardwareDigest sql.NullString
@@ -848,7 +929,12 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 		// column), so it MUST be recovered here before the digest recompute
 		// below, or a pool snapshot's recompute-digest would omit pool_id and
 		// mismatch the stored insert-digest.
-		PoolID string `json:"pool_id"`
+		PoolID                string `json:"pool_id"`
+		ManifestVersion       uint64 `json:"manifest_version"`
+		ManifestCoreDigest    string `json:"manifest_core_digest"`
+		RuntimeSource         string `json:"runtime_source"`
+		PoolGeneration        uint64 `json:"pool_generation"`
+		PoolOperatorAccountID string `json:"pool_operator_account_id"`
 		// SPEC-010 v1.7 R007(d) / SPEC-047-R003: the six artifact values are
 		// likewise json-carried and MUST be recovered before the recompute;
 		// a snapshot whose evidence is missing or changed fails Validate()
@@ -872,6 +958,11 @@ WHERE account_scope = ? AND request_id = ? AND attempt_n = ? AND provider_id = ?
 	r.ModelAdmissionDiscoveryDigestSHA256 = recovered.ModelAdmissionDiscoveryDigestSHA256
 	r.ModelAdmissionEvaluationDigestSHA256 = recovered.ModelAdmissionEvaluationDigestSHA256
 	r.PoolID = recovered.PoolID
+	r.ManifestVersion = recovered.ManifestVersion
+	r.ManifestCoreDigest = recovered.ManifestCoreDigest
+	r.RuntimeSource = recovered.RuntimeSource
+	r.PoolGeneration = recovered.PoolGeneration
+	r.PoolOperatorAccountID = recovered.PoolOperatorAccountID
 	r.ArtifactFeedSHA256 = recovered.ArtifactFeedSHA256
 	r.ArtifactID = recovered.ArtifactID
 	r.ArtifactHash = recovered.ArtifactHash

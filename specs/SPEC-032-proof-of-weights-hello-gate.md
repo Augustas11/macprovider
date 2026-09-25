@@ -1,10 +1,13 @@
 # SPEC-032 — Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary
 
-**Status:** v0.2.6-draft
+**Status:** v0.3.1-draft
 **Amendment (v0.2.6, #1569):** FR-HG8 exempts SPEC-046 BYOM loopback `runtime_source`
 models from the catalog proof-of-weights hard-close; they admit as non-earning,
 route-excluded `admission_sandboxed` sessions governed by SPEC-047. Reconciles this gate
 with BYOM (SPEC-046/047); preserves every earning/buyer-serving protection.
+**Amendment (v0.3.0, #1690):** FR-HG8 gains a pool-scoped buyer-serving path (conformance
+unit `SPEC-032-R004`). A sandboxed loopback session stays route-excluded for global traffic;
+only SPEC-042 pool routing may select it, under the SPEC-042-R004 runtime-allowlist predicate.
 **Date:** 2026-08-02
 **Depends on:** SPEC-002 (coordinator admission, provider state machine; F-2 defines provisional/pinned tiers), SPEC-003 (open onboarding, tiers), **SPEC-008 (Tier-2 — authoritative on the model-hash routing-exclusion predicate and attestation; this spec MUST NOT override it)**, SPEC-031 (canary probe mechanism — OPoI reuses it), and the item-10 hardware-verifier verdict spec (owns `hardware-verifier.v2`, consumed here as an input). SPEC-020 (provider *autoupdate* trust table) is only tangentially related and is **not** the tier-definition source.
 **Related (distinct, cross-referenced only):** SPEC-030 (losslessness probe — a separate distributional probe family)
@@ -387,8 +390,8 @@ closes.
 proof-of-weights hello gate (FR-HG2–FR-HG4) governs admission of models the provider
 claims from the **signed autotune/model catalog** for catalog/earning routing. A hello
 whose `runtime_source` is a SPEC-046 bring-your-own-model **loopback adapter**
-(`ollama_loopback`, `lmstudio_loopback`, `llamacpp_loopback`, or
-`openai_compatible_loopback`) advertises a BYOM candidate that is, **by SPEC-046/047
+(`ollama_loopback`, `lmstudio_loopback`, `llamacpp_loopback`,
+`openai_compatible_loopback`, or (v0.3.1) `mlxlm_loopback`) advertises a BYOM candidate that is, **by SPEC-046/047
 design, not expected to be in the signed catalog** — treating "not in the catalog" as
 the `autotune_model_uncatalogued` hard-close (FR-HG4) for such a hello contradicts the
 entire purpose of BYOM. Therefore, when the gate is active, a hello bearing a BYOM
@@ -416,6 +419,25 @@ candidate is not cap-checked precisely because it is non-routing. Note that
 `openai_compatible_loopback` may enter this sandbox but can **never** bind a `verified`
 catalog artifact (SPEC-010/SPEC-023 forbid it from `allowed_runtime_sources`), so its
 non-earning status is doubly enforced.
+
+**[amended v0.3.0, #1690] Pool-scoped buyer-serving path (conformance unit
+`SPEC-032-R004`).** The sandbox above is unchanged. A loopback hello is admitted
+`admission_sandboxed`, is route-excluded for global traffic, is never globally
+buyer-serving, and receives no newly minted durable provider credentials; this FR's
+hello-time evaluation is unchanged (`phase4-coordinator/internal/ws/server.go:3535`).
+The one exception is route-time and pool-scoped. SPEC-042 pool routing MAY select a
+sandboxed loopback session for a request whose route carries a `pool_id`, but only when
+every condition of the SPEC-042-R004 runtime-allowlist predicate and of the
+SPEC-047-R003(iv) pool route-time clause holds at that selection attempt. That selection
+does not clear `admission_sandboxed`, does not make the session eligible for any global
+request or any other pool's request, and changes no hello-time close reason. FR-HG7 is
+preserved: the pool path requires a SPEC-010-R007 GGUF member of a `listed` or
+`recommendable` catalog row, bound through a `catalog_priced` candidate, so an
+uncatalogued served model is never selected. The FR-HG3/FR-HG7 hardware capacity
+ceiling for catalog MLX models is not evaluated for the external runtime; slot and
+capacity accounting follow SPEC-002 as for any selected provider. Current state: routing
+excludes every `admission_sandboxed` session (`Provider.RoutingEligible`,
+`phase4-coordinator/internal/pool/provider.go`); the pool path is the #1690 M4 slice.
 
 ## Part B — OPoI / proof-of-weights honesty
 
@@ -566,6 +588,7 @@ and a runtime telemetry-drift evaluator swap.
 | FR-HG5 redundancy alert; no auto-probation | **Gap (alert)** | The below-two operator redundancy alert is unimplemented. No automatic buyer-routable probation ships: evidence-absent providers may connect only as `AdmissionSandboxed`, which is not routing-eligible / serving-capable and does not mint a new durable provider credential; it remains subject to provisional admission/session limits. Auto-probation is deferred with its full constraint set. |
 | FR-HG6 bounded mid-session expiry recheck | **Partial** | When `require_autotune_hello_gate:true`, the 30s trust-revalidation sweep now re-checks live autotune evidence TTL for admitted sessions with observed caps and route-excludes stale / tuple-mismatched / invalid rechecks. Proactive refresh remains forward work; config hot-reload re-gating is covered by FR-CFG2. |
 | **FR-HG7 ceiling enforced on model transition** | Implemented | When `require_autotune_hello_gate:true`, `Provider.AdmissionCeilingExcluded` is set on heartbeat from the signed admission catalog verdict and is consumed by `RoutingEligible` / `ServingCapable`, including over-ceiling and uncatalogued heartbeat targets. Gate-off deployments remain observe-only. |
+| FR-HG8 pool-scoped buyer-serving path (v0.3.0, `SPEC-032-R004`) | **Gap (forward)** | Specified for #1690; no pool path selects a sandboxed loopback session yet. Global sandboxing (`ws/server.go:3535`) is implemented and stays. |
 | FR-PW1 OPoI non-binding labeling | **Tightens** | Go source already says liveness-only; this makes it a normative repo-wide prohibition on weight-claims. Reconciled in this change: the `server.go` OPoI comment and the `proof-of-weights-implementation.md` runbook's "anti-downgrade" claims (both docs/comment-only). |
 | FR-PW2 OPoI flag observability-only | Implemented | Zero routing/tiering/degrade/payout readers **and** already exposed as `model_class_opoi_pass` on the operator-auth `/poolz` surface. Not dead state. |
 | FR-PW3 real proof-of-weights definition | **Gap (forward)** | No weight-binding test exists; deferred. |
@@ -733,6 +756,16 @@ smaller box), which is why v0.2.2 ships no automatic buyer-routable probation.
   design is the other candidate substrate for FR-PW3.
 
 ## Changelog
+
+- **v0.3.1-draft (2026-09-24, #1690 M8)** — FR-HG8 lists `mlxlm_loopback`
+  (`mlx_lm.server`, SPEC-046 v0.3.0). Its hello is sandboxed exactly like the
+  other loopback adapters, even though it reports a catalog snapshot pair.
+  Docs-only.
+- **v0.3.0-draft (2026-09-24, #1690 M3)** — FR-HG8 pool-scoped buyer-serving path,
+  registered as `SPEC-032-R004`. A loopback session stays `admission_sandboxed` and
+  route-excluded for global traffic. Only SPEC-042 pool routing may select it, at route
+  time, when the SPEC-042-R004 runtime-allowlist predicate and the SPEC-047-R003(iv)
+  pool clause hold. The hello-time evaluation and close reasons are unchanged. Docs-only.
 
 - **v0.2.5-draft (2026-08-02, #687 r5)** — Admission matches the catalog
   admission-policy digest, not the full catalog SHA. Added a normative FR-HG3

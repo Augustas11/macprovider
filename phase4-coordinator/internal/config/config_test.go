@@ -1224,6 +1224,28 @@ func TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate(t *testing
 			want: "non-candidate",
 		},
 		{
+			name: "software custody class rejected",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
+				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
+				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+				cfg.TrustedPools.ProductionActivation.RootCustodyClasses = map[string]string{digest: "software"}
+			},
+			want: "root_custody_classes",
+		},
+		{
+			name: "custody class for unapproved hash rejected",
+			build: func(cfg *Config) {
+				cfg.TrustedPools.Enabled = true
+				cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
+				cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
+				cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+				cfg.TrustedPools.ProductionActivation.RootCustodyClasses = map[string]string{digest: "hsm", strings.Repeat("b", 64): "hsm"}
+			},
+			want: "root_custody_classes",
+		},
+		{
 			name: "invalid custody digest",
 			build: func(cfg *Config) {
 				cfg.TrustedPools.Enabled = true
@@ -1253,6 +1275,7 @@ func TestTrustedPoolsProductionActivationRequiresCompleteExplicitGate(t *testing
 	cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
 	cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
 	cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+	cfg.TrustedPools.ProductionActivation.RootCustodyClasses = map[string]string{digest: "hsm"}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("complete production activation gate should validate: %v", err)
 	}
@@ -1883,5 +1906,22 @@ func TestStatsIntakeConfigValidateAndPolicyID(t *testing.T) {
 	}
 	if strings.Contains(id, "a\x00b") || strings.Contains(id, base.PolicySalt) {
 		t.Fatalf("the id leaks its inputs")
+	}
+}
+
+// Freeze audit M7: a production config that lists custody hashes without
+// root_custody_classes (a partially migrated config) must still start. The
+// trust-pool store then refuses to promote or route a pool using such a hash.
+func TestTrustedPoolsProductionActivationAcceptsUnmappedCustodyHash(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	cfg := validTestConfig()
+	cfg.TrustedPools.Enabled = true
+	cfg.TrustedPools.RefreshIntervalS = 30
+	cfg.TrustedPools.ProductionActivation.EvidenceSHA256 = digest
+	cfg.TrustedPools.ProductionActivation.AllowedLaunchEnvironments = []string{"production"}
+	cfg.TrustedPools.ProductionActivation.RootCustodyHashes = []string{digest}
+	ensureTrustedPoolsProviderOwnerKeys(&cfg)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate err=%v, want a partially migrated production config to start", err)
 	}
 }

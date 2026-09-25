@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -41,6 +42,12 @@ const (
 
 	promotionLaunchEnvironmentCandidate = "candidate"
 	RootCompromiseFreezeReason          = "root_compromise_freeze"
+
+	// SPEC-043-R002 key_custody_disclosure.class vocabulary.
+	RootCustodyClassSoftware = "software"
+	RootCustodyClassHSM      = "hsm"
+	RootCustodyClassMPC      = "mpc"
+	RootCustodyClassOther    = "other"
 )
 
 var (
@@ -127,6 +134,10 @@ type DurableEvent struct {
 	ManifestSnapshot    string    `json:"manifest_snapshot,omitempty"`
 	SignedControl       string    `json:"signed_control,omitempty"`
 	ControlSignatures   string    `json:"control_signatures,omitempty"`
+	// RootCustodyClass is stamped by PromotePool on a production promotion from
+	// the operator-approved class of the root's custody disclosure hash
+	// (SPEC-043-R002/R008). It is never accepted from a caller.
+	RootCustodyClass string `json:"root_custody_class,omitempty"`
 
 	CurrentApprovalVersion             string `json:"current_approval_version,omitempty"`
 	RootIssuerKeyID                    string `json:"root_issuer_key_id,omitempty"`
@@ -170,6 +181,7 @@ type productionActivationGate struct {
 	enabled                  bool
 	allowedLaunchEnvironment map[string]bool
 	rootCustodyHashes        map[string]bool
+	rootCustodyClasses       map[string]string
 	evidenceSHA256           string
 }
 
@@ -180,7 +192,11 @@ type productionActivationGate struct {
 type ProductionActivationGate struct {
 	AllowedLaunchEnvironments []string
 	RootCustodyHashes         []string
-	EvidenceSHA256            string
+	// RootCustodyClasses maps every approved custody disclosure hash to its
+	// SPEC-043-R002 class. software is rejected until a signed-exception path
+	// exists.
+	RootCustodyClasses map[string]string
+	EvidenceSHA256     string
 }
 
 type StoreOption func(*Store) error
@@ -341,7 +357,7 @@ func NewStore(db *sql.DB, opts ...StoreOption) (*Store, error) {
 
 func normalizeProductionActivationGate(g ProductionActivationGate) (productionActivationGate, error) {
 	evidenceSHA := strings.TrimSpace(g.EvidenceSHA256)
-	if evidenceSHA == "" && len(g.AllowedLaunchEnvironments) == 0 && len(g.RootCustodyHashes) == 0 {
+	if evidenceSHA == "" && len(g.AllowedLaunchEnvironments) == 0 && len(g.RootCustodyHashes) == 0 && len(g.RootCustodyClasses) == 0 {
 		return productionActivationGate{}, nil
 	}
 	if requireLowerHex64(evidenceSHA) != nil {
@@ -351,6 +367,7 @@ func normalizeProductionActivationGate(g ProductionActivationGate) (productionAc
 		enabled:                  true,
 		allowedLaunchEnvironment: make(map[string]bool),
 		rootCustodyHashes:        make(map[string]bool),
+		rootCustodyClasses:       make(map[string]string),
 		evidenceSHA256:           evidenceSHA,
 	}
 	for _, value := range g.AllowedLaunchEnvironments {
@@ -370,7 +387,42 @@ func normalizeProductionActivationGate(g ProductionActivationGate) (productionAc
 	if len(out.allowedLaunchEnvironment) == 0 || len(out.rootCustodyHashes) == 0 {
 		return productionActivationGate{}, fmt.Errorf("%w: incomplete production activation gate", ErrPromotionPreconditionFailed)
 	}
+	for hash, class := range g.RootCustodyClasses {
+		hash = strings.TrimSpace(hash)
+		class = strings.TrimSpace(class)
+		if !out.rootCustodyHashes[hash] || !ProductionRootCustodyClassApproved(class) {
+			return productionActivationGate{}, fmt.Errorf("%w: production activation custody class", ErrPromotionPreconditionFailed)
+		}
+		out.rootCustodyClasses[hash] = class
+	}
+	// A custody hash without a class mapping (a partially migrated config) is
+	// accepted at startup; validateProductionPromotionGate then refuses to
+	// promote or route any pool whose root uses it.
 	return out, nil
+}
+
+// ProductionActivationEnabled reports whether this store runs with the
+// production activation gate, i.e. it backs a production coordinator.
+func (s *Store) ProductionActivationEnabled() bool {
+	return s != nil && s.productionActivationGate.enabled
+}
+
+// ValidRootCustodyClass reports whether class is in the SPEC-043-R002
+// key_custody_disclosure.class vocabulary.
+func ValidRootCustodyClass(class string) bool {
+	switch class {
+	case RootCustodyClassSoftware, RootCustodyClassHSM, RootCustodyClassMPC, RootCustodyClassOther:
+		return true
+	default:
+		return false
+	}
+}
+
+// ProductionRootCustodyClassApproved reports whether class may back a
+// production promotion. software custody needs a signed, expiring exception
+// (SPEC-043-R002) that the coordinator cannot record yet, so it is rejected.
+func ProductionRootCustodyClassApproved(class string) bool {
+	return ValidRootCustodyClass(class) && class != RootCustodyClassSoftware
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -1813,6 +1865,11 @@ func (s *Store) appendValidatedEvent(ctx context.Context, e DurableEvent, allowS
 		if err := preState.validateMutationCreatorGate(e, time.Now().UTC()); err != nil {
 			return err
 		}
+		if e.EventType == EventManifestAccepted {
+			if err := verifyManifestAcceptanceOnline(e); err != nil {
+				return fmt.Errorf("%w: manifest policy not acceptable now: %v", errCreatorInvalidEvent, err)
+			}
+		}
 		if e.EventType == EventRootIssuerRegistered {
 			if err := consumeRootRegistrationNonce(ctx, conn, e, time.Now().UTC()); err != nil {
 				return err
@@ -1888,6 +1945,7 @@ func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*Reconstructed
 	}
 	e.EventType = EventLifecycleChanged
 	e.Lifecycle = LifecycleActive
+	e.RootCustodyClass = ""
 	timestampProvided := !e.TimestampUTC.IsZero()
 	if timestampProvided {
 		e.TimestampUTC = e.TimestampUTC.UTC()
@@ -1914,6 +1972,7 @@ func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*Reconstructed
 			if !timestampProvided {
 				e.TimestampUTC = existing.TimestampUTC.UTC()
 			}
+			e.RootCustodyClass = existing.RootCustodyClass
 			if err := validateEvent(e); err != nil {
 				return err
 			}
@@ -1949,8 +2008,15 @@ func (s *Store) PromotePool(ctx context.Context, e DurableEvent) (*Reconstructed
 		if err != nil {
 			return err
 		}
-		if err := preState.validatePromotion(e, now, s.productionActivationGate); err != nil {
+		onCall, err := onCallReadinessFromQueryer(ctx, conn)
+		if err != nil {
 			return err
+		}
+		if err := preState.validatePromotion(e, now, s.productionActivationGate, onCall); err != nil {
+			return err
+		}
+		if root := preState.Pools[e.PoolID].RootIssuer; root.LaunchEnvironment != promotionLaunchEnvironmentCandidate {
+			e.RootCustodyClass = s.productionActivationGate.rootCustodyClasses[root.StructuredCustodyDisclosureHash]
 		}
 		next := append(append([]DurableEvent(nil), events...), e)
 		state, err := reconstructEventsWithApprovals(next, approvals, now)
@@ -2547,12 +2613,79 @@ func (s *Store) Reconstruct(ctx context.Context) (*ReconstructedState, error) {
 			return err
 		}
 		state, err = reconstructEventsWithApprovalsAndPublicAnnouncements(events, approvals, publicAnnouncements, reviewedArtifacts, time.Now().UTC())
-		return err
+		if err != nil {
+			return err
+		}
+		onCall, err := onCallReadinessFromQueryer(ctx, conn)
+		if err != nil {
+			return err
+		}
+		state.applyProductionRouteGates(s.productionActivationGate, onCall)
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return state, nil
+}
+
+// ApplyRouteGates re-checks every active production pool of a reconstructed
+// state against this coordinator's CURRENT production activation gate and the
+// CURRENT on-call readiness of its launch environment, before the state is
+// published to the routing registry. Promotion checked both once; a gate that
+// tightens later, or an on-call record that lapses, must stop routing too.
+func (s *Store) ApplyRouteGates(ctx context.Context, state *ReconstructedState) error {
+	if s == nil || s.db == nil || state == nil {
+		return nil
+	}
+	var onCall map[string]OnCallReadiness
+	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		var err error
+		onCall, err = onCallReadinessFromQueryer(ctx, conn)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	state.applyProductionRouteGates(s.productionActivationGate, onCall)
+	return nil
+}
+
+// applyProductionRouteGates is idempotent: a pool already gated keeps its
+// first reason. Candidate roots are left to the registry's sticky
+// candidate-on-production rejection.
+func (s *ReconstructedState) applyProductionRouteGates(gate productionActivationGate, onCall map[string]OnCallReadiness) {
+	if s == nil {
+		return
+	}
+	at := s.RouteGateCheckedAt
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	for _, p := range s.Pools {
+		if p == nil || p.RootIssuer == nil || p.Lifecycle != LifecycleActive || p.ProductionGateReason != "" {
+			continue
+		}
+		environment := p.RootIssuer.LaunchEnvironment
+		if environment == promotionLaunchEnvironmentCandidate {
+			continue
+		}
+		reason := ""
+		if err := validateProductionPromotionGate(p.RootIssuer, gate); err != nil {
+			var precondition PromotionPreconditionError
+			reason = "production_gate_unsatisfied"
+			if errors.As(err, &precondition) && precondition.Reason != "" {
+				reason = precondition.Reason
+			}
+		} else if rec, ok := onCall[environment]; !ok {
+			reason = "oncall_readiness_missing"
+		} else if rec.Expired(at) {
+			reason = "oncall_readiness_expired"
+		} else {
+			p.OnCallReadinessExpiresAtUTC = rec.LastConfirmedAtUTC.UTC().Add(rec.ttl())
+		}
+		p.ProductionGateReason = reason
+	}
 }
 
 // ReconstructedState is the coordinator's query/admin view after durable replay.
@@ -2577,21 +2710,31 @@ type frozenLineageKey struct {
 }
 
 type ReconstructedPoolState struct {
-	PoolID                       string
-	CreatorAccountID             string
-	ApprovalRecordID             string
-	Lifecycle                    string
-	LifecycleReason              string
-	MinBinaryVersion             string
-	ManifestVersion              uint64
-	ManifestCoreDigest           string
-	ManifestSnapshot             string
-	ManifestMinEligibleMembers   uint64
-	ManifestMinBinaryVersion     string
-	ManifestModelAllowlist       []string
-	ManifestSettlementMode       string
+	PoolID                     string
+	CreatorAccountID           string
+	ApprovalRecordID           string
+	Lifecycle                  string
+	LifecycleReason            string
+	MinBinaryVersion           string
+	ManifestVersion            uint64
+	ManifestCoreDigest         string
+	ManifestSnapshot           string
+	ManifestMinEligibleMembers uint64
+	ManifestMinBinaryVersion   string
+	ManifestModelAllowlist     []string
+	ManifestSettlementMode     string
+	// ManifestPolicyCoreV2 and ManifestRuntimeAllowlist project the accepted
+	// core's SPEC-042-R001 encoding and signed runtime_allowlist. A v1 core or
+	// an empty list is native MLX only.
+	ManifestPolicyCoreV2         bool
+	ManifestRuntimeAllowlist     []string
 	ManifestRetentionPolicyID    string
 	ManifestSplitExecutionStatus string
+	// ManifestPolicies is every accepted policy core's routing projection with
+	// its validity window, ascending by version. The Manifest* fields above
+	// are the newest accepted core; routing uses the core ACTIVE at the
+	// route-gate instant (SPEC-042-R001), see activePolicyView.
+	ManifestPolicies             []manifestPolicyWindow
 	RootIssuer                   *ReconstructedRootIssuer
 	Members                      map[string]bool
 	MemberDelegationIDs          map[string]string
@@ -2607,6 +2750,14 @@ type ReconstructedPoolState struct {
 	LastEventAtUTC               time.Time
 	CreatorGateReason            string
 	CreatorGateExpiresAtUTC      time.Time
+	// OnCallReadinessExpiresAtUTC is when the launch environment's current
+	// on-call readiness lapses for an active production pool; routing stops
+	// at that instant (SPEC-043-R008/R011).
+	OnCallReadinessExpiresAtUTC time.Time
+	// ProductionGateReason is set when an active production pool no longer
+	// satisfies the current production activation gate or on-call readiness;
+	// it removes the pool from routing only.
+	ProductionGateReason string
 }
 
 type ReconstructedRootIssuer struct {
@@ -2618,11 +2769,15 @@ type ReconstructedRootIssuer struct {
 	ManifestAuthorityRootKeyID      string
 	ManifestAuthorityRootPublicKey  string
 	StructuredCustodyDisclosureHash string
-	GenesisNonceDigest              string
-	IntendedPoolDisplayNameHash     string
-	LaunchEnvironment               string
-	RegistrationNonce               string
-	RegistrationNonceExpiry         string
+	// CustodyClass is the operator-approved SPEC-043-R002 class of
+	// StructuredCustodyDisclosureHash, recorded by the first production
+	// promotion and immutable afterwards. Empty for candidate pools.
+	CustodyClass                string
+	GenesisNonceDigest          string
+	IntendedPoolDisplayNameHash string
+	LaunchEnvironment           string
+	RegistrationNonce           string
+	RegistrationNonceExpiry     string
 }
 
 func ReconstructEvents(events []DurableEvent) (*ReconstructedState, error) {
@@ -2788,14 +2943,36 @@ func (s *ReconstructedState) applyEvent(index int, e DurableEvent) (*Reconstruct
 		p.ManifestMinBinaryVersion = core.MinBinaryVersion
 		p.ManifestModelAllowlist = append([]string(nil), core.ModelAllowlist...)
 		p.ManifestSettlementMode = canonicalPoolSettlementMode(core.SettlementMode)
+		p.ManifestPolicyCoreV2 = core.IsV2()
+		p.ManifestRuntimeAllowlist = append([]string(nil), core.RuntimeAllowlist...)
 		p.ManifestRetentionPolicyID = core.RetentionPolicyID
 		p.ManifestSplitExecutionStatus = core.SplitExecutionStatus
+		p.ManifestPolicies = append(p.ManifestPolicies, manifestPolicyWindow{
+			Version:              e.ManifestVersion,
+			CoreDigest:           e.ManifestCoreDigest,
+			NotBeforeUnix:        core.NotBeforeUnix,
+			ExpiresAtUnix:        core.ExpiresAtUnix,
+			MinEligibleMembers:   core.MinEligibleMembers,
+			MinBinaryVersion:     core.MinBinaryVersion,
+			ModelAllowlist:       append([]string(nil), core.ModelAllowlist...),
+			SettlementMode:       canonicalPoolSettlementMode(core.SettlementMode),
+			PolicyCoreV2:         core.IsV2(),
+			RuntimeAllowlist:     append([]string(nil), core.RuntimeAllowlist...),
+			RetentionPolicyID:    core.RetentionPolicyID,
+			SplitExecutionStatus: core.SplitExecutionStatus,
+		})
 	case EventLifecycleChanged:
 		if e.Lifecycle == LifecycleActive && p.ManifestVersion == 0 {
 			return nil, fmt.Errorf("%w: event %d active lifecycle before manifest_accepted for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
 		}
 		if !validLifecycleTransition(p.Lifecycle, e.Lifecycle) {
 			return nil, fmt.Errorf("%w: event %d invalid lifecycle transition %s -> %s for pool %q", ErrMalformedDurableEvent, index, p.Lifecycle, e.Lifecycle, e.PoolID)
+		}
+		if e.RootCustodyClass != "" {
+			if p.RootIssuer == nil || (p.RootIssuer.CustodyClass != "" && p.RootIssuer.CustodyClass != e.RootCustodyClass) {
+				return nil, fmt.Errorf("%w: event %d root custody class changed for pool %q", ErrMalformedDurableEvent, index, e.PoolID)
+			}
+			p.RootIssuer.CustodyClass = e.RootCustodyClass
 		}
 		p.Lifecycle = e.Lifecycle
 		p.LifecycleReason = e.Reason
@@ -3175,7 +3352,7 @@ func (s *ReconstructedState) validateMutationCreatorGate(e DurableEvent, now tim
 	return nil
 }
 
-func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time, gate productionActivationGate) error {
+func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time, gate productionActivationGate, onCall map[string]OnCallReadiness) error {
 	if s == nil {
 		return PromotionPreconditionError{Reason: "state_unavailable"}
 	}
@@ -3192,10 +3369,15 @@ func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time, ga
 	if p.RootIssuer == nil {
 		return PromotionPreconditionError{Reason: "root_issuer_missing"}
 	}
-	if p.RootIssuer.LaunchEnvironment != promotionLaunchEnvironmentCandidate {
+	production := p.RootIssuer.LaunchEnvironment != promotionLaunchEnvironmentCandidate
+	if production {
 		if err := validateProductionPromotionGate(p.RootIssuer, gate); err != nil {
 			return err
 		}
+	} else if gate.enabled {
+		// A production-activated coordinator never promotes a candidate root:
+		// that would skip the production, on-call, and lifecycle gates.
+		return PromotionPreconditionError{Reason: "launch_environment_candidate_on_production"}
 	}
 	if p.ManifestVersion == 0 || p.ManifestCoreDigest == "" {
 		return PromotionPreconditionError{Reason: "manifest_missing"}
@@ -3221,6 +3403,12 @@ func (s *ReconstructedState) validatePromotion(e DurableEvent, now time.Time, ga
 			return PromotionPreconditionError{Reason: approval.InvalidReason(p.ApprovalRecordID, p.RootIssuer.CurrentApprovalVersion, p.RootIssuer.LaunchEnvironment, now)}
 		}
 	}
+	if production {
+		rec, ok := onCall[p.RootIssuer.LaunchEnvironment]
+		if err := requireCurrentOnCallReadiness(rec, ok, p.RootIssuer.LaunchEnvironment, now); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -3236,6 +3424,13 @@ func validateProductionPromotionGate(root *ReconstructedRootIssuer, gate product
 	}
 	if !gate.rootCustodyHashes[root.StructuredCustodyDisclosureHash] {
 		return PromotionPreconditionError{Reason: "production_root_custody_unapproved"}
+	}
+	class := gate.rootCustodyClasses[root.StructuredCustodyDisclosureHash]
+	if !ProductionRootCustodyClassApproved(class) {
+		return PromotionPreconditionError{Reason: "production_root_custody_class_unapproved"}
+	}
+	if root.CustodyClass != "" && root.CustodyClass != class {
+		return PromotionPreconditionError{Reason: "production_root_custody_class_changed"}
 	}
 	if gate.evidenceSHA256 == "" {
 		return PromotionPreconditionError{Reason: "production_activation_evidence_missing"}
@@ -3270,6 +3465,61 @@ func hasSignedControlProof(e DurableEvent) bool {
 	return strings.TrimSpace(e.SignedControl) != "" || strings.TrimSpace(e.ControlSignatures) != ""
 }
 
+// manifestPolicyWindow is one accepted policy core's routing projection and its
+// half-open validity window [NotBeforeUnix, ExpiresAtUnix) (SPEC-042-R001).
+type manifestPolicyWindow struct {
+	Version              uint64
+	CoreDigest           string
+	NotBeforeUnix        uint64
+	ExpiresAtUnix        uint64
+	MinEligibleMembers   uint64
+	MinBinaryVersion     string
+	ModelAllowlist       []string
+	SettlementMode       string
+	PolicyCoreV2         bool
+	RuntimeAllowlist     []string
+	RetentionPolicyID    string
+	SplitExecutionStatus string
+}
+
+// activePolicyView returns a copy of p whose manifest fields are the accepted
+// policy core active at `at`, plus that core's expiry. accepted policy windows
+// never overlap, so at most one matches. ok=false means the pool has accepted
+// policies but none is active at `at` (pool_policy_stale): a future-dated
+// core never routes early and an expired core never keeps routing. A pool with
+// no accepted policy is returned unchanged.
+func (p *ReconstructedPoolState) activePolicyView(at time.Time) (*ReconstructedPoolState, time.Time, bool) {
+	if p == nil || len(p.ManifestPolicies) == 0 {
+		return p, time.Time{}, true
+	}
+	now := at.UTC().Unix()
+	if now < 0 {
+		return p, time.Time{}, false
+	}
+	for _, w := range p.ManifestPolicies {
+		if uint64(now) < w.NotBeforeUnix || uint64(now) >= w.ExpiresAtUnix {
+			continue
+		}
+		view := *p
+		view.ManifestVersion = w.Version
+		view.ManifestCoreDigest = w.CoreDigest
+		view.ManifestMinEligibleMembers = w.MinEligibleMembers
+		view.ManifestMinBinaryVersion = w.MinBinaryVersion
+		view.ManifestModelAllowlist = w.ModelAllowlist
+		view.ManifestSettlementMode = w.SettlementMode
+		view.ManifestPolicyCoreV2 = w.PolicyCoreV2
+		view.ManifestRuntimeAllowlist = w.RuntimeAllowlist
+		view.ManifestRetentionPolicyID = w.RetentionPolicyID
+		view.ManifestSplitExecutionStatus = w.SplitExecutionStatus
+		var until time.Time
+		if w.ExpiresAtUnix <= uint64(math.MaxInt64) {
+			until = time.Unix(int64(w.ExpiresAtUnix), 0).UTC()
+		}
+		return &view, until, true
+	}
+	return p, time.Time{}, false
+}
+
 func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 	if s == nil {
 		return nil
@@ -3281,14 +3531,26 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 	sort.Strings(ids)
 	out := make([]RouteableSnapshot, 0, len(ids))
 	for _, id := range ids {
-		p := s.Pools[id]
+		at := s.RouteGateCheckedAt
+		if at.IsZero() {
+			at = time.Now().UTC()
+		}
+		pool := s.Pools[id]
+		p, policyUntil, policyActive := pool.activePolicyView(at)
 		routeable, routeabilityReason := poolRouteability(p)
+		if routeable && !policyActive {
+			routeable, routeabilityReason = false, "pool_policy_stale"
+		}
+		generation := pool.EffectiveGeneration()
+		if pool.Lifecycle == LifecycleActive && !routeable {
+			generation++
+		}
+		routeableUntil := earliestDeadline(p.CreatorGateExpiresAtUTC, p.OnCallReadinessExpiresAtUTC)
+		if routeable {
+			routeableUntil = earliestDeadline(routeableUntil, policyUntil)
+		}
 		members := make([]string, 0, len(p.Members))
 		if routeable {
-			at := s.RouteGateCheckedAt
-			if at.IsZero() {
-				at = time.Now().UTC()
-			}
 			for id := range p.Members {
 				if p.Revoked[id] {
 					continue
@@ -3311,9 +3573,13 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 		sort.Strings(revoked)
 		sort.Strings(buyers)
 		memberDelegationExpiry := make(map[string]time.Time, len(members))
+		var delegatedMembers []string
 		for _, memberID := range members {
 			if expiry, ok := p.MemberDelegationExpiresUTC[memberID]; ok && !expiry.IsZero() {
 				memberDelegationExpiry[memberID] = expiry.UTC()
+			}
+			if p.MemberDelegationIDs[memberID] != "" {
+				delegatedMembers = append(delegatedMembers, memberID)
 			}
 		}
 		out = append(out, RouteableSnapshot{
@@ -3325,14 +3591,33 @@ func (s *ReconstructedState) RouteableSnapshots() []RouteableSnapshot {
 			BuyerAccounts:             buyers,
 			MinBinaryVersion:          policyMinBinaryVersion(p),
 			ModelAllowlist:            append([]string(nil), p.ManifestModelAllowlist...),
+			RuntimeAllowlist:          policyRuntimeAllowlist(p),
+			DelegatedMembers:          delegatedMembers,
 			SettlementMode:            routeablePoolSettlementMode(p.ManifestSettlementMode),
 			Routeable:                 routeable,
-			Generation:                p.RouteableSnapshotGeneration(),
-			RouteableUntilUTC:         p.CreatorGateExpiresAtUTC,
+			Generation:                generation,
+			RouteableUntilUTC:         routeableUntil,
 			RouteableExpired:          routeabilityReason == "creator_agreement_expired",
+			ManifestVersion:           p.ManifestVersion,
+			ManifestCoreDigest:        p.ManifestCoreDigest,
+			LaunchEnvironment:         rootIssuerLaunchEnvironment(p),
 		})
 	}
 	return out
+}
+
+// earliestDeadline returns the earlier non-zero instant, or zero if both are.
+func earliestDeadline(a, b time.Time) time.Time {
+	switch {
+	case a.IsZero():
+		return b
+	case b.IsZero():
+		return a
+	case b.Before(a):
+		return b
+	default:
+		return a
+	}
 }
 
 func (p *ReconstructedPoolState) EffectiveGeneration() uint64 {
@@ -3393,6 +3678,9 @@ func validateEvent(e DurableEvent) error {
 	}
 	if err := ValidatePromiseClaimsText(e.PoolID); err != nil {
 		return err
+	}
+	if e.RootCustodyClass != "" && (e.EventType != EventLifecycleChanged || e.Lifecycle != LifecycleActive || !ProductionRootCustodyClassApproved(e.RootCustodyClass)) {
+		return fmt.Errorf("root_custody_class is only valid on a production promotion")
 	}
 	switch e.EventType {
 	case EventPoolCreated:

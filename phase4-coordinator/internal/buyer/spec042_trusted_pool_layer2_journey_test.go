@@ -68,7 +68,7 @@ func TestJourneyTrustedPoolLayer2MVPCandidate(t *testing.T) {
 	providerRegistry := pool.NewRegistry(nil)
 	registerTrustedPoolLayer2Provider(providerRegistry, providerID, "session-member", provider.URL, []byte(strings.Repeat("r", 32)))
 	trustPools := trustpool.NewRegistry()
-	loadTrustedPoolLayer2Snapshot(t, trustPools, 1, trustpool.RouteableSnapshot{
+	loadTrustedPoolLayer2Snapshot(t, trustPools, 0, trustpool.RouteableSnapshot{
 		PoolID:            poolID,
 		Members:           []string{providerID},
 		BuyerAccounts:     []string{buyerAccountID},
@@ -124,7 +124,7 @@ func TestJourneyTrustedPoolLayer2MVPCandidate(t *testing.T) {
 		t.Fatalf("route snapshot mode=%q, want observe", got)
 	}
 
-	loadTrustedPoolLayer2Snapshot(t, trustPools, 2, trustpool.RouteableSnapshot{
+	loadTrustedPoolLayer2Snapshot(t, trustPools, 0, trustpool.RouteableSnapshot{
 		PoolID:            poolID,
 		Members:           nil,
 		BuyerAccounts:     []string{buyerAccountID},
@@ -266,6 +266,10 @@ func registerTrustedPoolLayer2Provider(registry *pool.Registry, providerID, assi
 	registry.ApplyStateUpdate(providerID, assignedID, pool.StateUpdate{State: pool.StateReady, SlotsFree: &slotsFree, At: now})
 }
 
+// loadTrustedPoolLayer2Snapshot hand-seeds the routing registry. Routing fences
+// the registry to the durable replay revision, so callers pairing it with an
+// empty durable store (revision 0) must seed at revision 0; revision 0 also
+// permits re-seeding.
 func loadTrustedPoolLayer2Snapshot(t *testing.T, registry *trustpool.Registry, revision uint64, snapshot trustpool.RouteableSnapshot) {
 	t.Helper()
 	if err := registry.LoadRouteableSnapshotsAtRevision(revision, []trustpool.RouteableSnapshot{snapshot}); err != nil {

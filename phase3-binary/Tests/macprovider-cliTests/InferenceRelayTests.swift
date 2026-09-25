@@ -869,6 +869,15 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual((tuple["terminal_state_ts_unix_ms"] as? NSNumber)?.int64Value, terminalTS)
         let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: key.publicKey.rawRepresentation)
         XCTAssertTrue(publicKey.isValidSignature(signature, for: tupleBytes))
+        // Nothing reached the buyer: the receipt binds the empty prefix and
+        // bills nothing, while still reporting observed usage (SPEC-015 §N.7).
+        let usage = try XCTUnwrap(tuple["usage"] as? [String: Any])
+        XCTAssertEqual((usage["delivered_output_bytes"] as? NSNumber)?.int64Value, 0)
+        XCTAssertEqual((usage["billable_input_tokens"] as? NSNumber)?.int64Value, 0)
+        XCTAssertEqual((usage["billable_output_tokens"] as? NSNumber)?.int64Value, 0)
+        XCTAssertEqual((usage["observed_input_tokens"] as? NSNumber)?.int64Value, 5)
+        XCTAssertEqual((usage["observed_output_tokens"] as? NSNumber)?.int64Value, 2)
+        XCTAssertEqual(tuple["output_hash"] as? String, try buyerCancelOutputHash(content: "", start: 0))
         XCTAssertTrue(telemetry.records.isEmpty)
     }
 
@@ -940,6 +949,13 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual((tuple["terminal_state_ts_unix_ms"] as? NSNumber)?.int64Value, terminalTS)
         let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: key.publicKey.rawRepresentation)
         XCTAssertTrue(publicKey.isValidSignature(signature, for: tupleBytes))
+        // The buyer received "answer" and no finish chunk: the receipt binds
+        // that delivered prefix with a null finish reason (SPEC-015 §N.5).
+        let usage = try XCTUnwrap(tuple["usage"] as? [String: Any])
+        XCTAssertEqual((usage["delivered_output_bytes"] as? NSNumber)?.int64Value, 6)
+        XCTAssertEqual((usage["billable_input_tokens"] as? NSNumber)?.int64Value, 5)
+        XCTAssertEqual((usage["billable_output_tokens"] as? NSNumber)?.int64Value, 2)
+        XCTAssertEqual(tuple["output_hash"] as? String, try buyerCancelOutputHash(content: "answer", start: 0))
         XCTAssertTrue(telemetry.records.isEmpty)
     }
 
@@ -1239,6 +1255,75 @@ final class InferenceRelayTests: XCTestCase {
         }
     }
 
+    // SPEC-015 §N.12 / AC-12b (#1690 M5): a loopback runtime signs exactly one
+    // relay receipt when the request's settlement metadata carries a matching
+    // pool_runtime_authorization, and nothing (one runtime_not_settlement_eligible
+    // row) when it is absent, malformed, for another runtime, or copied from
+    // another request, attempt, provider, or route snapshot.
+    func testPoolAuthorizedLoopbackSignsRelayReceiptOnlyForMatchingAuthorization() async throws {
+        let loopback = try ReceiptEligibilityFixtures.makeOllamaLoopbackRuntime(testCase: self)
+        let model = ReceiptEligibilityFixtures.ollamaServedRef
+        let providerID = "provider-relay-test"
+        for stream in [false, true] {
+            let requestID = "req-pool-\(stream ? "stream" : "complete")"
+            func authorization(
+                runtimeSource: String = OllamaLoopbackServeModel.runtimeSource,
+                requestID authorizedRequestID: String? = nil,
+                providerID authorizedProviderID: String? = nil,
+                attemptN: Int = 0,
+                routeSnapshotDigest: String = String(repeating: "3", count: 64)
+            ) -> [String: Any] {
+                ReceiptEligibilityFixtures.poolRuntimeAuthorizationWire(
+                    runtimeSource: runtimeSource,
+                    requestID: authorizedRequestID ?? requestID,
+                    providerID: authorizedProviderID ?? providerID,
+                    attemptN: attemptN,
+                    routeSnapshotDigest: routeSnapshotDigest
+                )
+            }
+
+            let authorized = try await relayReceiptRoundTrip(
+                runtime: loopback.runtime,
+                model: model,
+                expectedModelHash: loopback.digest,
+                requestID: requestID,
+                stream: stream,
+                providerID: providerID,
+                settlementExtras: [PoolRuntimeAuthorization.wireKey: authorization()]
+            )
+            XCTAssertEqual(authorized.endFrame["status"] as? String, "complete", "stream=\(stream)")
+            XCTAssertNotNil(authorized.endFrame["receipt"], "authorized loopback MUST sign: stream=\(stream)")
+            XCTAssertEqual(authorized.omittedReasons, [], "stream=\(stream)")
+
+            var malformed = authorization()
+            malformed["extra"] = "member"
+            let refused: [(label: String, extras: [String: Any])] = [
+                ("absent", [:]),
+                ("malformed", [PoolRuntimeAuthorization.wireKey: malformed]),
+                ("other_runtime_source", [PoolRuntimeAuthorization.wireKey: authorization(runtimeSource: LlamaCppLoopbackServeModel.runtimeSource)]),
+                ("other_request", [PoolRuntimeAuthorization.wireKey: authorization(requestID: "req-other")]),
+                ("other_attempt", [PoolRuntimeAuthorization.wireKey: authorization(attemptN: 1)]),
+                ("other_provider", [PoolRuntimeAuthorization.wireKey: authorization(providerID: "provider-other")]),
+                ("other_route_snapshot", [PoolRuntimeAuthorization.wireKey: authorization(routeSnapshotDigest: String(repeating: "5", count: 64))]),
+            ]
+            for testCase in refused {
+                let result = try await relayReceiptRoundTrip(
+                    runtime: loopback.runtime,
+                    model: model,
+                    expectedModelHash: loopback.digest,
+                    requestID: requestID,
+                    stream: stream,
+                    providerID: providerID,
+                    settlementExtras: testCase.extras
+                )
+                let context = "\(testCase.label) stream=\(stream)"
+                XCTAssertEqual(result.endFrame["status"] as? String, "complete", context)
+                XCTAssertNil(result.endFrame["receipt"], "unauthorized loopback MUST NOT sign: \(context)")
+                XCTAssertEqual(result.omittedReasons, ["runtime_not_settlement_eligible"], context)
+            }
+        }
+    }
+
     private func relayReceiptRoundTrip(
         runtime: any ModelRuntimeServing,
         model: String,
@@ -1249,7 +1334,8 @@ final class InferenceRelayTests: XCTestCase {
             key: try! Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
         ),
         providerID: String? = "provider-relay-test",
-        attachSettlement: Bool = true
+        attachSettlement: Bool = true,
+        settlementExtras: [String: Any] = [:]
     ) async throws -> (endFrame: [String: Any], omittedReasons: [String]) {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
         let recorder = FrameRecorder()
@@ -1289,7 +1375,7 @@ final class InferenceRelayTests: XCTestCase {
                 modelID: model,
                 receiptKeyID: ReceiptEligibilityFixtures.receiptKeyID(key.publicKey.rawRepresentation),
                 expectedModelHash: expectedModelHash
-            )
+            ).merging(settlementExtras) { _, extra in extra }
         }
         let frames = try await ReceiptAudit.withSink({ record in audit.append(record) }) {
             try await relay.handleInferenceRequest(frame)
@@ -1319,6 +1405,7 @@ private actor FakeReceiptCompletionRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func currentSnapshot() async -> RuntimeSnapshot {
@@ -1358,6 +1445,50 @@ private actor FakeReceiptCompletionRuntime: ModelRuntimeServing {
     func unregisterInFlight(_ id: Int) { }
 }
 
+/// sha256(JCS(settlement_output_v1)) for a buyer_cancel prefix that carried no
+/// finish reason and no tool calls.
+private func buyerCancelOutputHash(content: String, start: Int) throws -> String {
+    let canonical = try RFC8785JCS.canonicalString(.object([
+        "content": .string(content),
+        "finish_reason": .null,
+        "output_prefix_end_byte": .int(start + content.utf8.count),
+        "output_prefix_start_byte": .int(start),
+        "terminal_state": .string("buyer_cancel"),
+        "tool_calls": .null,
+    ]))
+    return SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+}
+
+final class UnattestedUsageWireTests: XCTestCase {
+    private func completion(_ disposition: ContinuousBatchSettlementDisposition) -> CompletionResult {
+        CompletionResult(
+            content: "answer",
+            finishReason: "stop",
+            promptTokens: 0,
+            completionTokens: 7,
+            generatedCompletionTokens: 7,
+            settlementDisposition: disposition
+        )
+    }
+
+    // Independent review HIGH: a loopback completion whose upstream omitted
+    // usage carries placeholder counts (promptTokens ?? 0, delta events); the
+    // wire must not send them as billing usage.
+    func testUnattestedUsageSendsNoBillingTokenCounts() {
+        for usage in [InferenceRelay.usage(completion(.usageUnattested)), RouterHandler.usage(completion(.usageUnattested))] {
+            for key in ["prompt_tokens", "cached_prompt_tokens", "completion_tokens", "total_tokens"] {
+                XCTAssertNil(usage[key], "\(key) sent for unattested usage")
+            }
+        }
+    }
+
+    func testAttestedUsageStillSendsTokenCounts() {
+        let usage = InferenceRelay.usage(completion(.notEligible))
+        XCTAssertEqual(usage["prompt_tokens"] as? Int, 0)
+        XCTAssertEqual(usage["completion_tokens"] as? Int, 7)
+    }
+}
+
 private actor FakeCancelAfterCompletionReceiptRuntime: ModelRuntimeServing {
     private let servedSnapshot: RuntimeSnapshot
     private let settlementEligible: Bool
@@ -1372,6 +1503,7 @@ private actor FakeCancelAfterCompletionReceiptRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { settlementEligible }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func currentSnapshot() async -> RuntimeSnapshot {
@@ -1493,6 +1625,7 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func complete(
         _ request: ChatCompletionRequest,
@@ -1535,6 +1668,7 @@ private actor FakePreflightRejectRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func currentSnapshot() async -> RuntimeSnapshot {
         RuntimeSnapshot(state: .ready, container: nil, modelID: "mlx-community/Test-Model", modelHash: nil)
@@ -1589,6 +1723,7 @@ private actor FakeCompletionRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func observedConversationKeys() -> [String?] {
@@ -1671,4 +1806,77 @@ private func waitForFrames(
     }
     XCTFail("Timed out waiting for frames")
     return await read()
+}
+
+// #1690 final audit R1 CODE-6: the streaming chunk callback is @Sendable and
+// may run concurrently; batching state and frame order stay consistent.
+final class RelayStreamBatcherConcurrencyTests: XCTestCase {
+    private final class FrameSink: @unchecked Sendable {
+        private let lock = NSLock()
+        private var frames: [String] = []
+        func append(_ frame: String) -> Bool {
+            lock.lock()
+            frames.append(frame)
+            lock.unlock()
+            return true
+        }
+        var all: [String] {
+            lock.lock()
+            defer { lock.unlock() }
+            return frames
+        }
+    }
+
+    func testConcurrentContentDeliveryKeepsEveryTokenExactlyOnce() {
+        let sink = FrameSink()
+        let batcher = RelayStreamBatcher(
+            streamInterval: 7,
+            deltaFrame: { delta in (delta["content"] as? String) ?? "" },
+            enqueueFrame: { sink.append($0) }
+        )
+        let tokens = 2_000
+        DispatchQueue.concurrentPerform(iterations: tokens) { _ in
+            batcher.accept(.content("x"))
+        }
+        batcher.flushContent()
+        let frames = sink.all
+        XCTAssertEqual(frames.joined().count, tokens, "every token lands in exactly one frame")
+        XCTAssertTrue(frames.dropLast().allSatisfy { $0.count == 7 }, "full batches are never torn")
+        XCTAssertTrue(batcher.everyFrameDelivered(sent: frames.count))
+        XCTAssertFalse(batcher.everyFrameDelivered(sent: frames.count - 1))
+    }
+
+    func testDeliveredContentIsTheSentContentOnly() {
+        let sink = FrameSink()
+        let batcher = RelayStreamBatcher(
+            streamInterval: 2,
+            deltaFrame: { delta in (delta["content"] as? String) ?? "" },
+            enqueueFrame: { sink.append($0) }
+        )
+        batcher.accept(.content("ab"))
+        batcher.accept(.content("cd"))
+        batcher.accept(.content("e"))
+        XCTAssertEqual(batcher.deliveredContent(sent: sink.all.count), "abcd", "unflushed content was never sent")
+        XCTAssertNil(batcher.deliveredContent(sent: sink.all.count - 1))
+        batcher.flushContent()
+        XCTAssertEqual(batcher.deliveredContent(sent: sink.all.count), "abcde")
+    }
+
+    func testDeliveredContentIsNilOnceAToolCallOpened() {
+        let sink = FrameSink()
+        let batcher = RelayStreamBatcher(
+            streamInterval: 1,
+            deltaFrame: { _ in "f" },
+            enqueueFrame: { sink.append($0) }
+        )
+        batcher.accept(.content("a"))
+        batcher.accept(.toolCallDelta(StreamToolCallDelta(index: 0, id: "call_1", type: "function", functionName: "f", arguments: "{")))
+        XCTAssertNil(batcher.deliveredContent(sent: sink.all.count))
+    }
+
+    func testDroppedFrameIsNeverReportedDelivered() {
+        let batcher = RelayStreamBatcher(streamInterval: 1, deltaFrame: { _ in "f" }, enqueueFrame: { _ in false })
+        batcher.accept(.content("x"))
+        XCTAssertFalse(batcher.everyFrameDelivered(sent: 0))
+    }
 }

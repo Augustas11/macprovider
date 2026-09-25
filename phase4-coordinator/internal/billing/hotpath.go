@@ -48,6 +48,39 @@ type HotPathInput struct {
 	// runtime_source. A SPEC-046 loopback source relays usage from an
 	// operator-controlled runtime, so it is never coordinator_observed.
 	ProviderRuntimeSource string
+	// PoolOperatorAttested is set only for an attempt the recorder derived as
+	// SPEC-022-R012 pool_operator_attested. With the pool runtime's reported
+	// PromptTokens and CompletionTokens it is the single case in which a
+	// loopback-served attempt may carry ledger credit; settlement still has
+	// to verify a receipt before that credit becomes payable.
+	PoolOperatorAttested bool
+	// PoolAttestationFence is the pool state that decision used. The ledger
+	// transaction re-reads it and keeps the credit only if it still holds.
+	PoolAttestationFence *PoolAttestationFence
+}
+
+// LoopbackRuntimeNotSettlementEligible is the ledger quarantine reason for an
+// attempt served by a SPEC-046 loopback runtime outside an authorizing
+// SPEC-042 pool route (SPEC-047-R003(iv), SPEC-022-R012.6).
+const LoopbackRuntimeNotSettlementEligible = "loopback_runtime_not_settlement_eligible"
+
+// IsLoopbackRuntimeSource reports whether a hello runtime_source is a SPEC-046
+// loopback adapter: an operator-controlled external process whose reported
+// usage is provider-only (SPEC-015 §N.6).
+// IsNativeRuntimeSource reports whether a runtime_source is the coordinator's
+// native MLX runtime: an empty value (pre-runtime_source sessions) or
+// mlx_cache. Every other value, recognised or not, is not native.
+func IsNativeRuntimeSource(value string) bool {
+	return value == "" || value == "mlx_cache"
+}
+
+func IsLoopbackRuntimeSource(value string) bool {
+	switch value {
+	case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback", "mlxlm_loopback":
+		return true
+	default:
+		return false
+	}
 }
 
 type CacheBillingRoutingDecision struct {
@@ -183,6 +216,39 @@ func (s *Store) writeHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		// just persisted by InsertExec (v1.5.2 always writes a non-NULL
 		// value); the in.AttemptN was already aligned to the persisted
 		// value by the post-INSERT COUNT-1 derivation above.
+		// SPEC-047-R003(iv) / SPEC-022-R012.6 at the ledger boundary: a
+		// loopback-served attempt earns nothing and bills nothing unless the
+		// recorder derived it pool_operator_attested. This holds whatever
+		// routing decided, so a routing regression can never pay loopback
+		// usage. Attested usage is the pool runtime's own reported usage
+		// (R-12); an attempt without it, such as a cancelled stream whose
+		// runtime never reported usage, is byte_estimated and zero billable
+		// even on an authorizing pool route.
+		// The pool state that decision used is re-read inside this
+		// transaction, so a manifest, membership, or lifecycle change, or
+		// trusted pools going off, before the commit zero-bills it.
+		poolAttestedUsage := in.PoolOperatorAttested && in.PromptTokens != nil && in.CompletionTokens != nil &&
+			s.poolAttestationFenceHolds(ctx, conn, in.PoolAttestationFence)
+		// Only a known-native runtime bills as before; any other value,
+		// recognised or not, could be loopback and fails closed, the rule
+		// ledger recovery applies (recoveredLoopbackAttemptBillable).
+		if !IsNativeRuntimeSource(in.ProviderRuntimeSource) && !poolAttestedUsage {
+			result := zeroCredits(ComputeCredits(
+				in.PromptTokens,
+				in.CompletionTokens,
+				in.EstimatedCompTokens,
+				usageFor(in.ErrorCode, in.EstimatedCompTokens),
+				in.FaultFlag,
+				hotPathRateEntry(in),
+				in.MultiplierPPM,
+				in.ProviderShareBps,
+			))
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			if _, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, true, LoopbackRuntimeNotSettlementEligible); err != nil {
+				return err
+			}
+			return insertProviderIdentitySnapshotTx(ctx, conn, in, now)
+		}
 		if in.AttemptN == 1 && reqRow.Retried == 0 {
 			result := ComputeCredits(
 				in.PromptTokens,
@@ -390,10 +456,10 @@ func insertProviderIdentitySnapshotTx(ctx context.Context, db sqlExecutor, in Ho
 	INSERT INTO ledger_provider_identity_snapshots (
 	    request_id, attempt_n, provider_assigned_id, provider_id, resolved_from,
 	    pool_session_started_at_utc, config_snapshot_id, provider_reported_prompt_tokens,
-	    created_at_utc
-	) VALUES (?, ?, ?, ?, 'pool_entry', NULL, ?, ?, ?)
+	    runtime_source, created_at_utc
+	) VALUES (?, ?, ?, ?, 'pool_entry', NULL, ?, ?, ?, ?)
 	ON CONFLICT(request_id, attempt_n, provider_assigned_id) DO NOTHING`,
-		in.RequestID, in.AttemptN, in.ProviderAssignedID, in.ProviderID, nullPositiveInt64(in.ConfigSnapshotID), nullInt64(in.ProviderReportedPromptTokens), now,
+		in.RequestID, in.AttemptN, in.ProviderAssignedID, in.ProviderID, nullPositiveInt64(in.ConfigSnapshotID), nullInt64(in.ProviderReportedPromptTokens), in.ProviderRuntimeSource, now,
 	)
 	return err
 }

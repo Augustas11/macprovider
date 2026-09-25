@@ -40,7 +40,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "malibu-cli",
         abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, MSBThroughputCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self, RelayBlindFixtureCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBPerplexityCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self, RelayBlindFixtureCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
@@ -861,9 +861,11 @@ struct ServeCommand: AsyncParsableCommand {
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
         persistConfigMigration: Bool = false
     ) async throws -> CatalogRuntimeTrust? {
-        // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569): an
-        // `ollama_loopback` model carries a `macprovider.gguf-file.v1` identity
-        // resolved from the local Ollama store at serve time, not a catalog
+        // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569, #1690): an
+        // `ollama_loopback` / `llamacpp_loopback` model carries a
+        // `macprovider.gguf-file.v1` identity resolved from the local GGUF
+        // file at serve time (an `mlxlm_loopback` model the CLI-computed
+        // snapshot-manifest pair of its declared snapshot), not a catalog
         // artifact SHA. It is intentionally uncatalogued and non-earning, so it
         // neither requires nor runs the MLX catalog-artifact preflight. Returning
         // nil (no catalog trust) lets the daemon stay connected instead of
@@ -874,8 +876,13 @@ struct ServeCommand: AsyncParsableCommand {
         // `ReasonBYOMNonSettlement`) excludes it. That money-path gate, not the
         // SPEC-032 hello-gate ceiling flag (which is set only when the gate is
         // ON), is what holds in the gate-off E2E posture (SPEC-047-R003/R005).
-        if OllamaLoopbackServeModel.isOllamaLoopbackRef(resolved.model ?? "") {
-            return nil
+        if LoopbackServeSelection.select(resolved.model) != nil {
+            return try await runLoopbackPoolCatalogPreflight(
+                resolved,
+                joiningCoordinator: joiningCoordinator,
+                isolateLifecycle: isolateLifecycle,
+                staticInputs: staticInputs
+            )
         }
         var artifactResolver = artifactResolver
         if let root = resolved.modelArtifactRoot, root.hasPrefix("/") {
@@ -946,6 +953,62 @@ struct ServeCommand: AsyncParsableCommand {
             )
         }
         return nil
+    }
+
+    /// SPEC-042-R013 / SPEC-047-R003(iv) pool route-time clause (#1690 M6): a
+    /// loopback model the operator pins to a signed catalog row
+    /// (`model_catalog_key` + `model_catalog_model_id`) is a Trusted Pool
+    /// member candidate. The coordinator binds its GGUF identity only for a
+    /// session admitted on a current or compatible catalog release, so the
+    /// hello must carry the release envelope of that row. Without the pin the
+    /// loopback path stays envelope-less and non-earning, as before. The row
+    /// check is the same one the MLX preflight applies; the weights are proven
+    /// by the GGUF file digest, never by the row's MLX `model_sha256`, so no
+    /// served-model refresher is attached (`modelSHA256` is nil).
+    static func runLoopbackPoolCatalogPreflight(
+        _ resolved: AppConfig,
+        joiningCoordinator: Bool,
+        isolateLifecycle: Bool,
+        staticInputs: AutotuneStaticInputs
+    ) async throws -> CatalogRuntimeTrust? {
+        guard joiningCoordinator, !resolved.donorMode,
+              let key = LoopbackServeSelection.nonEmpty(resolved.modelCatalogKey),
+              let modelID = LoopbackServeSelection.nonEmpty(resolved.modelCatalogModelID)
+        else {
+            return nil
+        }
+        // A lab join (isolated lifecycle, loopback coordinator) binds the
+        // compiled-in release and never fetches the production static feeds.
+        var inputs = staticInputs
+        if relaxesJoinAdmissionForLab(isolateLifecycle: isolateLifecycle, coordinatorURL: resolved.coordinatorURL) {
+            inputs.fetch = { _ in throw AutotuneRecommendError.invalidStaticJSON("lab join: static feed fetch disabled") }
+        }
+        let catalog = await inputs.loadCandidateCatalog()
+        if !catalog.warnings.isDisjoint(with: [.candidateCatalogIntegrityFailure, .candidateCatalogUpdateRequired]) {
+            let state = catalog.warnings.contains(.candidateCatalogIntegrityFailure)
+                ? "catalog_integrity_failure"
+                : "catalog_update_required"
+            FileHandle.standardError.write(Data("\(state): refusing coordinator join with an untrusted or incompatible catalog release\n".utf8))
+            throw ExitCode(2)
+        }
+        guard let row = catalog.value.rows[key],
+              row.runtimeStatus == "recommendable",
+              row.modelID == modelID,
+              let rowIdentity = catalog.value.rowIdentity(for: key)
+        else {
+            FileHandle.standardError.write(Data("loopback model_catalog_key/model_catalog_model_id is not a recommendable row of the signed candidate catalog\n".utf8))
+            throw ExitCode(2)
+        }
+        return CatalogRuntimeTrust(
+            state: catalog.usedFallback ? "safe_offline_fallback" : "live_verified",
+            releaseID: catalog.value.version,
+            digest: AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes),
+            signerKeyID: catalog.signerKeyID,
+            source: catalog.usedFallback ? "baked" : "coordinator",
+            policyVersion: catalog.value.policyVersion,
+            rowIdentity: rowIdentity,
+            modelSHA256: nil
+        )
     }
 
     private static func isExistingDirectory(_ path: String) -> Bool {
@@ -2107,17 +2170,44 @@ struct ServeCommand: AsyncParsableCommand {
         // execution and advertised heartbeat capability until the tagged fix and
         // cache-wrap parity gate are green.
         do {
-            if let ollamaServedRef = resolved.model, OllamaLoopbackServeModel.isOllamaLoopbackRef(ollamaServedRef) {
-                // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569):
-                // proxy inference to the validated loopback Ollama origin. ONE
-                // process, ONE model — no MLX weights are loaded. Non-earning:
-                // relay-blind and signed receipts are disabled on this path.
-                helloRuntimeSource = OllamaLoopbackServeModel.runtimeSource
-                modelRuntime = try OllamaLoopbackRuntime(
-                    servedModelRef: ollamaServedRef,
-                    origin: OllamaLoopbackServeModel.resolveOrigin(),
-                    catalogModelIDAlias: catalogModelIDAlias
-                )
+            if let loopbackServedRef = resolved.model, let loopback = LoopbackServeSelection.select(loopbackServedRef) {
+                // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569,
+                // #1690 M2): proxy inference to the validated loopback
+                // OpenAI-compatible origin. ONE process, ONE model — no MLX
+                // weights are loaded. Relay-blind is disabled on this path, and
+                // signed receipts are disabled outside the authorized pool
+                // path: a receipt is signed only for a request whose
+                // coordinator-issued pool runtime authorization matches
+                // (SPEC-015-R006, #1690 M5); global traffic stays non-earning.
+                helloRuntimeSource = loopback.runtimeSource
+                switch loopback {
+                case .ollama:
+                    modelRuntime = try OpenAICompatibleLoopbackRuntime(
+                        servedModelRef: loopbackServedRef,
+                        origin: OllamaLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
+                        catalogModelIDAlias: catalogModelIDAlias
+                    )
+                case .llamaCpp:
+                    // The GGUF file llama.cpp serves is named by the operator
+                    // (MACPROVIDER_LLAMACPP_MODEL_ROOT / _PATH, as for
+                    // `models discover`), never by the runtime.
+                    modelRuntime = try await OpenAICompatibleLoopbackRuntime.llamaCpp(
+                        servedModelRef: loopbackServedRef,
+                        origin: LlamaCppLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
+                        selector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: nil, cliPath: nil),
+                        catalogModelIDAlias: catalogModelIDAlias
+                    )
+                case .mlxLM:
+                    // SPEC-010-R009: the MLX snapshot mlx_lm.server serves is
+                    // named by the operator (MACPROVIDER_MLXLM_MODEL_PATH) and
+                    // hashed by the CLI, never reported by the runtime.
+                    modelRuntime = try await OpenAICompatibleLoopbackRuntime.mlxLM(
+                        servedModelRef: loopbackServedRef,
+                        origin: MLXLMLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
+                        snapshotDirectory: MLXLMLoopbackServeModel.snapshotDirectory(),
+                        catalogModelIDAlias: catalogModelIDAlias
+                    )
+                }
             } else {
                 helloRuntimeSource = nil
                 if let applied = ModelRuntime.applyMLXCacheLimit(megabytes: resolved.mlxCacheLimitMB) {
@@ -2580,11 +2670,12 @@ struct ServeCommand: AsyncParsableCommand {
         if resolved.enableReceipts,
            let providerID = resolved.providerID,
            !providerID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let receiptSigningKeyStore = receiptRuntime.signingKeyStore,
            let coordinatorClient {
             receiptRotator = {
                 try await RotateKeyCommand.rotateActiveProvider(
                     providerID: providerID,
-                    keyStore: receiptKeyStore,
+                    keyStore: receiptSigningKeyStore,
                     coordinatorClient: coordinatorClient
                 )
             }
@@ -3293,11 +3384,11 @@ struct ServeCommand: AsyncParsableCommand {
     static func makeReceiptRuntime(
         config: AppConfig,
         keyStore: ReceiptKeyStoring = KeychainReceiptKeyStore()
-    ) throws -> (builder: ReceiptBuilder?, publicKeyBase64: String?) {
+    ) throws -> (builder: ReceiptBuilder?, publicKeyBase64: String?, signingKeyStore: ReceiptKeyStoring?) {
         guard config.enableReceipts,
               let providerID = config.providerID,
               !providerID.isEmpty else {
-            return (nil, nil)
+            return (nil, nil, nil)
         }
         let cachingStore = CachedReceiptKeyStore(keyStore)
         let privateKey: Curve25519.Signing.PrivateKey
@@ -3309,9 +3400,14 @@ struct ServeCommand: AsyncParsableCommand {
         } else {
             privateKey = try cachingStore.loadOrGenerate(providerId: providerID)
         }
+        // The builder caches the signing key for the process lifetime, so a
+        // receipt-key rotation MUST swap through this same caching store
+        // (signingKeyStore). Swapping the underlying store alone leaves the
+        // builder signing with the retired key (#1690 E2E-F9).
         return (
             ReceiptBuilder(keyStore: cachingStore),
-            Data(privateKey.publicKey.rawRepresentation).base64EncodedString()
+            Data(privateKey.publicKey.rawRepresentation).base64EncodedString(),
+            cachingStore
         )
     }
 

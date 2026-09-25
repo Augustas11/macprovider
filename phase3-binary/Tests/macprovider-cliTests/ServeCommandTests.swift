@@ -1105,6 +1105,64 @@ final class ServeCommandTests: XCTestCase {
         }
     }
 
+    // #1690 M6: a loopback model pinned to a signed catalog row gets that
+    // row's release envelope for its hello; an unpinned one stays envelope-less.
+    private func bakedRecommendableRow() throws -> (key: String, modelID: String) {
+        let catalog = try AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8))
+        let row = try XCTUnwrap(catalog.rows.sorted { $0.key < $1.key }.first { $0.value.runtimeStatus == "recommendable" })
+        return (row.key, row.value.modelID)
+    }
+
+    func testLoopbackPoolCatalogPreflightWithoutPinKeepsNoEnvelope() async throws {
+        var config = AppConfig.defaults()
+        config.model = "llamacpp:qwen2.5-0.5b-instruct-q4_k_m"
+        let trust = try await ServeCommand.runModelArtifactPreflight(&config, joiningCoordinator: true)
+        XCTAssertNil(trust)
+    }
+
+    func testLoopbackPoolCatalogPreflightBindsPinnedRecommendableRow() async throws {
+        let row = try bakedRecommendableRow()
+        var config = AppConfig.defaults()
+        config.model = "llamacpp:qwen2.5-0.5b-instruct-q4_k_m"
+        config.modelCatalogKey = row.key
+        config.modelCatalogModelID = row.modelID
+        config.coordinatorURL = "ws://127.0.0.1:19102/ws/provider"
+        let fetched = LoopbackFetchCounter()
+        let inputs = AutotuneStaticInputs(fetch: { _ in
+            fetched.increment()
+            throw AutotuneRecommendError.invalidStaticJSON("offline")
+        })
+        // A lab join (isolated lifecycle, loopback coordinator) never fetches.
+        let preflight = try await ServeCommand.runModelArtifactPreflight(
+            &config, joiningCoordinator: true, isolateLifecycle: true, staticInputs: inputs
+        )
+        let trust = try XCTUnwrap(preflight)
+        XCTAssertEqual(fetched.value, 0)
+        XCTAssertEqual(trust.source, "baked")
+        XCTAssertEqual(trust.releaseID, try AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)).version)
+        XCTAssertEqual(trust.signerKeyID, AutotuneStaticInputs.bakedCatalogSignerKeyID)
+        XCTAssertNotNil(trust.rowIdentity)
+        XCTAssertNil(trust.modelSHA256, "the GGUF digest, not the row MLX sha, proves a loopback artifact")
+    }
+
+    func testLoopbackPoolCatalogPreflightRejectsPinThatIsNotTheRow() async throws {
+        let row = try bakedRecommendableRow()
+        for (key, modelID) in [(row.key, "other-org/other-model"), ("not-a-catalog-key", row.modelID)] {
+            var config = AppConfig.defaults()
+            config.model = "llamacpp:qwen2.5-0.5b-instruct-q4_k_m"
+            config.modelCatalogKey = key
+            config.modelCatalogModelID = modelID
+            config.coordinatorURL = "ws://127.0.0.1:19102/ws/provider"
+            let inputs = AutotuneStaticInputs(fetch: { _ in throw AutotuneRecommendError.invalidStaticJSON("offline") })
+            do {
+                _ = try await ServeCommand.runModelArtifactPreflight(&config, joiningCoordinator: true, isolateLifecycle: true, staticInputs: inputs)
+                XCTFail("\(key)/\(modelID) must not bind a loopback pool envelope")
+            } catch {
+                // expected
+            }
+        }
+    }
+
     func testCoordinatorJoinAcceptsCatalogBoundSnapshotWithStaleProvenanceEnvelope() async throws {
         let hub = try tempDir()
         let resolver = CachedModelArtifactResolver(hubRoot: hub)
@@ -1920,4 +1978,11 @@ final class ServeCommandTests: XCTestCase {
             launchdServiceProcessID: { _ in launchdServiceProcessID }
         )
     }
+}
+
+private final class LoopbackFetchCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.lock(); count += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
 }

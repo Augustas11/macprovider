@@ -758,6 +758,7 @@ func TestDurableStore_PromotePoolProductionRequiresActivationEvidence(t *testing
 			store, err := trustpool.NewStore(openTrustPoolDB(t), trustpool.WithProductionActivationGate(trustpool.ProductionActivationGate{
 				AllowedLaunchEnvironments: []string{"production"},
 				RootCustodyHashes:         []string{tc.gateCustody},
+				RootCustodyClasses:        map[string]string{tc.gateCustody: trustpool.RootCustodyClassHSM},
 				EvidenceSHA256:            evidenceHash,
 			}))
 			if err != nil {
@@ -779,6 +780,9 @@ func TestDurableStore_PromotePoolProductionRequiresActivationEvidence(t *testing
 					e.BuyerAccountID = "acct-a"
 				}),
 			)
+			if tc.wantActive {
+				upsertSignedOnCall(t, store, "op-oncall", "production")
+			}
 			state, _, _, err := store.PromotePool(ctx, trustpool.DurableEvent{
 				OperationID: "op-promote",
 				PoolID:      root.poolID,
