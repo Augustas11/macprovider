@@ -153,6 +153,9 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 
 ## Open Pearl actions (not new code)
 
+- **Gateway settlement trailers enforced (2026-09-25 about 10:21Z).** The #1690 session set `coordinator.require_settlement_trailers: true` in `/opt/macprovider/gateway.yaml` (backup `gateway.yaml.bak-require-trailers-20260925T102055Z`) and restarted the gateway. Proof requests settled with hold 0 and `spec022_verified`, with no `missing_settlement_finality_trailer`.
+- **Coordinator start-to-listen budget.** v1.8.198 takes 25–44 s from start to listen on Pearl, against the updater's 60 s health window. Most of it is `normalizeBillingTimeTextColumns`, which rescans 11 timestamp columns on every start, plus the unindexed `provider_reported_prompt_tokens` backfill. Make both one-time (a done-marker) or run them after the listener before the DB grows further.
+- **Held reservation backlog (pre-existing).** `gateway.db` has 47,408 `status=active AND settlement_hold=1` reservations: 46,028 on `acct_902fdfc…` (likely the synthetic buyer) and 1,368 on the OpenRouter account, dating back before 09-11, with none new since 10:00Z on 09-25. The periodic reconciler re-queries all of them on every sweep. They need an operator resolution pass.
 - **Pearl updater snapshot retention (2026-09-25).** `macprovider-pearl-update` keeps every transaction snapshot under `/var/lib/macprovider-pearl-updater/transactions` (about 6 GB each, a DB copy) with no retention. It filled `/` to 100%. 29 old snapshots were removed at about 09:03Z, and v1.8.197 onwards remain. Each apply also stops the coordinator for about 6 min while it copies the DB. Both need an updater change: retention, plus a snapshot that doesn't block serving.
 
 These came with #1706 but are not active on Pearl, because the recent releases
