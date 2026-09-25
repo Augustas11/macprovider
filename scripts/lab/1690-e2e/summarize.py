@@ -56,6 +56,8 @@ def classify(req, check, obs, ev=None):
     # #1690 M9: the external-engine disconnect check names the same finding.
     if check == "disconnect_prefix_billed":
         return "E2E-F3"
+    if check == "disconnect_billed_or_free":
+        return "M9-M1(WRONG bill after a busy disconnect)"
     if check == "no_undelivered_bill" and req["behaviour"] == "disconnect":
         return "E2E-F4"
     if req["shape"] == "tool" and req["engine"] == "native" and check in ("no_hold", "debit_eq_settled", "delivered_not_free", "buyer_usage_eq_debit"):

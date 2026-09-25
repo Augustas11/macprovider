@@ -26,6 +26,10 @@ request:
   credit_implies_debit a payable provider credit means the buyer was debited
   no_undelivered_bill billed completion never exceeds what the engine
                       generated, and an aborted request bills nothing
+  disconnect_billed_or_free (#1690 M9 review M1) a disconnect during a
+                      multi-thousand-token prompt on a busy engine is either
+                      disconnect_prefix_billed or entirely free (no debit, no
+                      payable credit); never billed otherwise
   disconnect_prefix_billed (#1690 M9) an external engine's partial stream
                       after a buyer disconnect ends buyer_cancel with a valid
                       receipt, pool_operator_attested usage, a payable credit,
@@ -71,11 +75,19 @@ SHAPES = {
     "tool": {"prompt": "What is the weather in Paris right now? Use the get_weather tool.", "max_tokens": 96, "tools": True},
     "long": {"prompt": "Write a detailed story of about 600 words about a lighthouse keeper and a storm.", "max_tokens": 700},
     "cap": {"prompt": "Write a detailed story of about 600 words about a lighthouse keeper and a storm.", "max_tokens": 8},
+    # #1690 M9 review M1: a prompt of about 3000 tokens.
+    "longprompt": {"prompt": ("Here is a log of lighthouse observations. " + " ".join(
+        f"Day {i}: wind {i % 7} knots from the {('north', 'east', 'south', 'west')[i % 4]}, visibility {i % 10} miles, one ship passed."
+        for i in range(160)) + " Summarize the log as a long story."), "max_tokens": 700},
 }
 # Shapes a behaviour runs on, and whether it streams.
 BEHAVIOURS = {
     "normal": [("plain", False), ("plain", True), ("tool", False), ("tool", True), ("long", False), ("long", True), ("cap", False), ("cap", True)],
     "disconnect": [("long", True)],
+    # #1690 M9 review M1: the same disconnect with a long prompt while three
+    # other long-prompt streams keep the engine busy (busy_load, recorded).
+    "disconnect_busy": [("longprompt", True)],
+    "busy_load": [("longprompt", True)],
     "slow": [("plain", True), ("long", True)],
     "early_close": [("long", False)],
     "abort": [("long", False)],
@@ -164,7 +176,7 @@ def one(label, engine, route, select, shape, stream, behaviour, extra_headers=No
                     finish = ch.get("finish_reason") or finish
                 if c.get("usage"):
                     usage = c["usage"]
-                if behaviour == "disconnect" and content_events >= 4:
+                if behaviour in ("disconnect", "disconnect_busy") and content_events >= 4:
                     conn.sock.close()
                     out["disconnected_after_events"] = content_events
                     break
@@ -188,7 +200,7 @@ def one(label, engine, route, select, shape, stream, behaviour, extra_headers=No
     conn.close()
     out.update({"elapsed_s": round(time.time() - t0, 2), "finish_reason": finish, "done": done, "events": events,
                 "content_events": content_events, "content_len": len(text),
-                "received_tokens": token_count(text) if behaviour == "disconnect" else None,
+                "received_tokens": token_count(text) if behaviour in ("disconnect", "disconnect_busy") else None,
                 "content_sha256": hashlib.sha256(text.encode()).hexdigest()[:16] if text else None,
                 "tool_calls": [{"name": v["name"], "args_valid_json": valid_json(v["args"])} for v in tool_calls.values()],
                 "usage": {k: usage.get(k) for k in ("prompt_tokens", "completion_tokens")} if usage else None})
@@ -228,19 +240,29 @@ def append(rec):
 
 def cmd_send(a):
     shapes = set(a.shapes.split(",")) if a.shapes else None
-    for behaviour in a.behaviours.split(","):
+    for behaviour in a.behaviours.split(",") * a.repeat:
         for shape, stream in BEHAVIOURS[behaviour]:
             if shapes and shape not in shapes:
                 continue
             if a.stream_only and not stream:
                 continue
             flag = LAB / "run" / "slow-stream"
-            slow_tap = behaviour == "disconnect" and a.engine != "native"
+            slow_tap = behaviour in ("disconnect", "disconnect_busy") and a.engine != "native"
             if slow_tap:
                 flag.touch()
+            load = []
+            if behaviour == "disconnect_busy":
+                import threading
+                for _ in range(3):
+                    t = threading.Thread(target=lambda: append(one(a.label, a.engine, a.route, a.select, shape, stream, "busy_load")))
+                    t.start()
+                    load.append(t)
+                time.sleep(1.0)
             try:
                 append(one(a.label, a.engine, a.route, a.select, shape, stream, behaviour))
             finally:
+                for t in load:
+                    t.join()
                 if slow_tap and flag.exists():
                     flag.unlink()
 
@@ -389,7 +411,7 @@ def evaluate(rec, ev, expect_refund=False):
     # SPEC-022 v0.2.2 R-5.6 (E2E-F4): a buyer that disconnected is debited the
     # smaller of the verified completion and what the gateway delivered to it,
     # with the verified prompt. Named so it is counted apart.
-    if not ok and rec["behaviour"] == "disconnect" and debit[0] == want[0] and 0 < debit[1] < want[1]:
+    if not ok and rec["behaviour"] in ("disconnect", "disconnect_busy") and debit[0] == want[0] and 0 < debit[1] < want[1]:
         name, ok = "debit_eq_settled[buyer-delivered-bound]", True
     out.append((name, ok, {"debit": debit, "settled": want, "basis": basis,
                                                                   "gateway": {"status": (res or {}).get("status"), "token_source": (use or {}).get("token_source"), "outcome": (use or {}).get("outcome")}}))
@@ -414,7 +436,7 @@ def evaluate(rec, ev, expect_refund=False):
     if rec["behaviour"] == "abort" and sum(debit) > 0:
         ok = False
         why["note"] = "aborted before response headers but debited"
-    if rec["behaviour"] == "disconnect":
+    if rec["behaviour"] in ("disconnect", "disconnect_busy"):
         why["received_events"] = rec.get("content_events")
         if billed_c >= rec["max_tokens"]:
             ok = False
@@ -432,6 +454,11 @@ def evaluate(rec, ev, expect_refund=False):
     if rec["behaviour"] == "disconnect" and rec["engine"] != "native" and rec["route"].startswith("pool:") and rec.get("status") == 200 \
             and (rec.get("content_events") or 0) > 0:
         out.append(("disconnect_prefix_billed", *disconnect_prefix(rec, ev, debit, payable)))
+    if rec["behaviour"] == "disconnect_busy" and rec.get("status") == 200 and (rec.get("content_events") or 0) > 0:
+        billed, obs = disconnect_prefix(rec, ev, debit, payable)
+        free = sum(debit) == 0 and not payable
+        obs["outcome"] = "billed" if billed else ("free" if free else "WRONG")
+        out.append(("disconnect_billed_or_free", billed or free, obs))
     if delivered and rec.get("usage"):
         seen = (rec["usage"]["prompt_tokens"], rec["usage"]["completion_tokens"])
         name = "buyer_usage_eq_debit"
@@ -506,6 +533,7 @@ def main():
     s.add_argument("--select")
     s.add_argument("--shapes")
     s.add_argument("--behaviours", default="normal,disconnect,slow,early_close,abort")
+    s.add_argument("--repeat", type=int, default=1)
     s.add_argument("--stream-only", action="store_true")
     e = sub.add_parser("selection")
     e.add_argument("--label", required=True)
