@@ -147,7 +147,7 @@ func main() {
 		}
 	}()
 
-	<-ctx.Done()
+	waitForShutdownSignal(ctx, stop)
 	drainHTTPServer(httpServer, gracefulShutdownTimeout)
 	slog.Info("gateway shutdown complete")
 }
@@ -160,6 +160,14 @@ func main() {
 // (TestGracefulShutdownFitsTheSystemdStopTimeout). A deploy restart
 // (`systemctl restart`, KillSignal=SIGTERM) takes this path.
 const gracefulShutdownTimeout = 40 * time.Second
+
+// waitForShutdownSignal blocks until the first SIGINT/SIGTERM and then
+// restores default signal handling, so a second signal during the drain
+// terminates the process at once instead of being swallowed.
+func waitForShutdownSignal(ctx context.Context, stop context.CancelFunc) {
+	<-ctx.Done()
+	stop()
+}
 
 // drainHTTPServer stops accepting connections and waits, up to timeout, for
 // in-flight requests to complete.
