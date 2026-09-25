@@ -6778,6 +6778,33 @@ class PearlUpdaterTests(unittest.TestCase):
         )
         self.assertEqual((result.returncode, result.stdout), (0, "config: readable\n"))
 
+    def test_example_config_loads_with_the_release_mirror_gate_required(self):
+        config = self.root / "example.conf"
+        config.write_text(SCRIPT.with_name("pearl-updater.conf.example").read_text())
+        config.chmod(0o600)
+        loaded = updater_module.load_config(config, trusted_uid=os.geteuid())
+        self.assertEqual(loaded.release_mirror_gate, "required")
+        self.assertEqual(loaded.release_mirror_root, Path("/var/www/malibu-download/releases"))
+
+    def test_release_mirror_gate_config_round_trips_disabled(self):
+        config = self.root / "updater.conf"
+        config.write_text(
+            "PEARL_UPDATER_RELEASE_MIRROR_GATE=disabled\n"
+            "PEARL_UPDATER_RELEASE_MIRROR_ROOT=/srv/mirror/releases\n"
+        )
+        config.chmod(0o600)
+        loaded = updater_module.load_config(config, trusted_uid=os.geteuid())
+        self.assertEqual(loaded.release_mirror_gate, "disabled")
+        self.assertEqual(loaded.release_mirror_root, Path("/srv/mirror/releases"))
+
+    def test_release_mirror_gate_ignores_non_string_asset_names(self):
+        self.with_release_mirror_gate()
+        directory = self.seed_release_mirror()
+        listing = json.loads((directory / "release.json").read_text())
+        listing["assets"].append({"name": ["not", "a", "name"]})
+        (directory / "release.json").write_text(json.dumps(listing))
+        self.updater.assert_release_mirrored("1.8.27")
+
     def test_trusted_inputs_reject_symlinks_hardlinks_and_writable_files(self):
         config = self.root / "updater.conf"
         config.write_text("PEARL_UPDATER_ENABLED=0\n")

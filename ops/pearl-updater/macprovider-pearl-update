@@ -697,6 +697,8 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
         "PEARL_UPDATER_PROVIDER_ADMISSION_POLICY",
         "PEARL_UPDATER_MINIMUM_POOL_READY_AFTER_ROLLOUT",
         "PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S",
+        "PEARL_UPDATER_RELEASE_MIRROR_GATE",
+        "PEARL_UPDATER_RELEASE_MIRROR_ROOT",
     }
     unknown = sorted(set(values) - known)
     if unknown:
@@ -1313,7 +1315,7 @@ class Updater:
         the webroot.
         """
         if self.config.release_mirror_gate == RELEASE_MIRROR_GATE_DISABLED:
-            self._journal_transition("release_mirror_gate_disabled", provider_advertised_version=version)
+            self.audit("release_mirror_gate", "disabled", provider_advertised_version=version)
             return
         tag = version if version.startswith("v") else f"v{version}"
         if not ASSET_RE.fullmatch(tag):
@@ -1344,7 +1346,11 @@ class Updater:
             assets = listing.get("assets")
             if not isinstance(assets, list):
                 raise UpdateError(f"release mirror {tag} release.json has no asset list")
-            listed = {asset.get("name") for asset in assets if isinstance(asset, dict)}
+            listed = {
+                asset["name"]
+                for asset in assets
+                if isinstance(asset, dict) and isinstance(asset.get("name"), str)
+            }
             checksums = private_copy("checksums.txt", scratch, 1024 * 1024)
             signature = private_copy("checksums.txt.sig", scratch, 4 * 1024)
             self.verify_signature(checksums, signature)
@@ -1357,7 +1363,7 @@ class Updater:
                 source = directory / name
                 if source.is_symlink() or not source.is_file() or sha256_file(source) != digest:
                     raise UpdateError(f"release mirror {tag} {name} is missing or does not match checksums.txt")
-        self._journal_transition("release_mirror_verified", provider_advertised_version=version, release_mirror_tag=tag)
+        self.audit("release_mirror_gate", "verified", provider_advertised_version=version, release_mirror_tag=tag)
 
     def release_tags(self) -> list[str]:
         url = f"https://api.github.com/repos/{PINNED_REPOSITORY}/releases?per_page=30"
