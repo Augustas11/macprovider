@@ -78,14 +78,12 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         _ request: ChatCompletionRequest,
         vocab: Vocab,
         ids: [Int],
-        serialStopTokenCount: Int?,
         status: ContinuousBatchSchedulerTerminalStatus = .stop
     ) throws -> ModelRuntime.ContinuousBatchFinalizedRow {
         try ModelRuntime.finalizeContinuousBatchRow(
             request: request,
             result: schedulerResult(ids, status: status),
             modelStopTokenIDs: [],
-            serialStopTokenCount: serialStopTokenCount,
             promptTokenIDs: [1, 2, 3],
             decode: vocab.decode,
             stopTokenFilter: Self.stopTokenFilter,
@@ -226,7 +224,8 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
     private func batchedStream(
         _ request: ChatCompletionRequest,
         vocab: Vocab,
-        deliveredIDs: [Int]? = nil
+        deliveryEvents: [[Int]]? = nil,
+        status: ContinuousBatchSchedulerTerminalStatus = .stop
     ) -> (chunks: [String], result: Result<CompletionResult, APIError>, stopRequests: Int, finalized: ModelRuntime.ContinuousBatchFinalizedRow?) {
         let accumulator = StructuredStreamingContentAccumulator(
             enabled: ModelRuntime.requiresStructuredValidation(request.responseFormat)
@@ -234,18 +233,20 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         let idle = StructuredStreamingIdleState(enabled: false)
         let sink = ChunkSink()
         let state = ModelRuntime.AttachedPagedKVStreamState(request: request)
-        let ids = deliveredIDs ?? vocab.ids
+        let events = deliveryEvents ?? vocab.ids.map { [$0] }
         var stopRequests = 0
-        for id in ids where state.step(
-            eventTokens: [id],
-            decode: vocab.decode,
-            stopTokenFilter: Self.stopTokenFilter,
-            requestStops: request.stop,
-            structuredAccumulator: accumulator,
-            idleState: idle,
-            onChunk: sink.append
-        ) {
-            stopRequests += 1
+        for event in events {
+            if state.step(
+                eventTokens: event,
+                decode: vocab.decode,
+                stopTokenFilter: Self.stopTokenFilter,
+                requestStops: request.stop,
+                structuredAccumulator: accumulator,
+                idleState: idle,
+                onChunk: sink.append
+            ) {
+                stopRequests += 1
+            }
         }
         if let error = state.error() {
             return (sink.normalized(), .failure(error), stopRequests, nil)
@@ -254,9 +255,20 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
             let finalized = try finalizeBatched(
                 request,
                 vocab: vocab,
-                ids: ids,
-                serialStopTokenCount: state.serialStopTokenCount
+                ids: vocab.ids,
+                status: status
             )
+            if !state.hasObservedTokens {
+                _ = state.step(
+                    eventTokens: finalized.generatedTokens,
+                    decode: vocab.decode,
+                    stopTokenFilter: Self.stopTokenFilter,
+                    requestStops: request.stop,
+                    structuredAccumulator: accumulator,
+                    idleState: idle,
+                    onChunk: sink.append
+                )
+            }
             let completion = try ModelRuntime.finishContinuousBatchStream(
                 finalized,
                 state: state,
@@ -302,7 +314,6 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
             request,
             vocab: vocab,
             ids: vocab.ids,
-            serialStopTokenCount: stop.stopTokenCount,
             status: .length
         )
         let completion = try ModelRuntime.validateStructuredCompletion(batched.completion, request: request)
@@ -323,7 +334,7 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         XCTAssertEqual(serial.tokenCount, vocab.pieces.count)
         XCTAssertFalse(ModelRuntime.serialToolStopApplies(request))
 
-        let batched = try finalizeBatched(request, vocab: vocab, ids: vocab.ids, serialStopTokenCount: nil)
+        let batched = try finalizeBatched(request, vocab: vocab, ids: vocab.ids)
         let completion = try ModelRuntime.validateStructuredCompletion(batched.completion, request: request)
         XCTAssertEqual(calls(completion.toolCalls), calls(serial.completion.toolCalls))
         XCTAssertEqual(completion.toolCalls?.count, 2)
@@ -334,14 +345,14 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
     func testResponseByteCapMatchesSerialNonStreamingGuard() throws {
         let request = try request(["tools": Self.weatherTool])
         let vocab = Vocab(pieces: [String(repeating: "a", count: ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP + 1)])
-        XCTAssertThrowsError(try finalizeBatched(request, vocab: vocab, ids: vocab.ids, serialStopTokenCount: nil)) { error in
+        XCTAssertThrowsError(try finalizeBatched(request, vocab: vocab, ids: vocab.ids)) { error in
             let apiError = error as? APIError
             XCTAssertEqual(apiError?.status, 502)
             XCTAssertEqual(apiError?.code, "response_byte_cap_exceeded")
             XCTAssertEqual(apiError?.message, "Model response exceeded 2097152 bytes")
         }
         let atCap = Vocab(pieces: [String(repeating: "a", count: ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP)])
-        XCTAssertNoThrow(try finalizeBatched(request, vocab: atCap, ids: atCap.ids, serialStopTokenCount: nil))
+        XCTAssertNoThrow(try finalizeBatched(request, vocab: atCap, ids: atCap.ids))
     }
 
     // MARK: - non-streaming structured output
@@ -357,11 +368,50 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
             let vocab = Vocab(pieces: testCase.pieces)
             let serialCode = Self.apiCode { _ = try self.serialComplete(request, vocab: vocab) }
             let batchedCode = Self.apiCode {
-                let row = try self.finalizeBatched(request, vocab: vocab, ids: vocab.ids, serialStopTokenCount: nil)
+                let row = try self.finalizeBatched(request, vocab: vocab, ids: vocab.ids)
                 _ = try ModelRuntime.validateStructuredCompletion(row.completion, request: request)
             }
             XCTAssertEqual(batchedCode, serialCode, "\(testCase.pieces)")
             XCTAssertEqual(serialCode, testCase.expectedCode, "\(testCase.pieces)")
+        }
+    }
+
+    func testImplicitContextLimitUsesSerialFinishReasonForEveryBatchedRowShape() throws {
+        let cases: [(body: [String: Any], pieces: [String])] = [
+            ([:], ["plain", " answer"]),
+            (["tools": Self.weatherTool], ["plain", " answer"]),
+            (["response_format": Self.schema], ["{\"a\"", ": 1}"]),
+        ]
+        for testCase in cases {
+            let vocab = Vocab(pieces: testCase.pieces)
+
+            let implicit = try request(testCase.body)
+            let implicitRow = try finalizeBatched(
+                implicit,
+                vocab: vocab,
+                ids: vocab.ids,
+                status: .length
+            )
+            let implicitCompletion = try ModelRuntime.validateStructuredCompletion(
+                implicitRow.completion,
+                request: implicit
+            )
+            XCTAssertEqual(implicitCompletion.finishReason, "stop", "\(testCase.body)")
+
+            var explicitBody = testCase.body
+            explicitBody["max_tokens"] = vocab.ids.count
+            let explicit = try request(explicitBody)
+            let explicitRow = try finalizeBatched(
+                explicit,
+                vocab: vocab,
+                ids: vocab.ids,
+                status: .length
+            )
+            let explicitCompletion = try ModelRuntime.validateStructuredCompletion(
+                explicitRow.completion,
+                request: explicit
+            )
+            XCTAssertEqual(explicitCompletion.finishReason, "length", "\(testCase.body)")
         }
     }
 
@@ -384,6 +434,67 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         XCTAssertEqual(batchedCompletion.finishReason, "tool_calls")
         XCTAssertEqual(batchedCompletion.completionTokens, serialCompletion.completionTokens)
         XCTAssertEqual(batched.finalized?.truncatedAtSerialStop, true)
+    }
+
+    func testStreamingTerminalFinishReasonUsesExplicitLimitForEveryBatchedRowShape() throws {
+        let cases: [(body: [String: Any], pieces: [String])] = [
+            ([:], ["plain", " answer"]),
+            (["tools": Self.weatherTool], ["plain", " answer"]),
+            (["response_format": Self.schema], ["{\"a\"", ": 1}"]),
+        ]
+        for testCase in cases {
+            let vocab = Vocab(pieces: testCase.pieces)
+
+            let implicit = batchedStream(
+                try request(testCase.body),
+                vocab: vocab,
+                status: .length
+            )
+            XCTAssertEqual(try implicit.result.get().finishReason, "stop", "\(testCase.body)")
+
+            var explicitBody = testCase.body
+            explicitBody["max_tokens"] = vocab.ids.count
+            let explicit = batchedStream(
+                try request(explicitBody),
+                vocab: vocab,
+                status: .length
+            )
+            XCTAssertEqual(try explicit.result.get().finishReason, "length", "\(testCase.body)")
+        }
+    }
+
+    func testSerialToolStopIsCanonicalForDuplicateAndTerminalReplay() throws {
+        let request = try request(["tools": Self.weatherTool])
+        let vocab = Vocab(pieces: ["Checking. "] + Self.twoCallPieces)
+
+        let original = batchedStream(request, vocab: vocab, status: .length)
+        let duplicate = batchedStream(
+            request,
+            vocab: vocab,
+            deliveryEvents: [vocab.ids],
+            status: .length
+        )
+        let terminalReplay = batchedStream(
+            request,
+            vocab: vocab,
+            deliveryEvents: [],
+            status: .length
+        )
+
+        let originalCompletion = try original.result.get()
+        for replay in [duplicate, terminalReplay] {
+            let replayCompletion = try replay.result.get()
+            XCTAssertEqual(replay.chunks, original.chunks)
+            XCTAssertEqual(replayCompletion.content, originalCompletion.content)
+            XCTAssertEqual(replayCompletion.completionTokens, originalCompletion.completionTokens)
+            XCTAssertEqual(calls(replayCompletion.toolCalls), calls(originalCompletion.toolCalls))
+            XCTAssertEqual(replay.finalized?.generatedTokens, original.finalized?.generatedTokens)
+            XCTAssertEqual(replay.finalized?.truncatedAtSerialStop, true)
+        }
+        XCTAssertEqual(duplicate.stopRequests, 1)
+        XCTAssertEqual(terminalReplay.stopRequests, 0)
+        XCTAssertLessThan(originalCompletion.completionTokens, vocab.ids.count)
+        XCTAssertFalse(original.chunks.contains { $0.contains("Rome") || $0.contains("trailing") })
     }
 
     func testStreamingOversizedToolArgumentsStreamNothingLikeSerial() throws {

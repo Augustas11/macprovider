@@ -3949,33 +3949,36 @@ actor ModelRuntime: ModelRuntimeServing {
             lock.lock()
             defer { lock.unlock() }
             guard !stoppedValue, !eventTokens.isEmpty else { return false }
-            tokenIDs.append(contentsOf: eventTokens)
-            let candidate = ModelRuntime.streamingSafePrefix(
-                decode(tokenIDs),
-                stopTokenFilter: stopTokenFilter,
-                requestStops: requestStops
-            )
-            switch emitter.step(
-                candidate: candidate,
-                structuredAccumulator: structuredAccumulator,
-                idleState: idleState,
-                onChunk: onChunk
-            ) {
-            case .more, .requestStop:
-                // A buyer stop string ends the row through its stop-token
-                // sequences, and the final filter cuts the text at it.
-                return false
-            case .toolCallComplete:
-                stoppedValue = true
-                serialStopTokenCountValue = tokenIDs.count
-                return true
-            case .structuredError:
-                stoppedValue = true
-                if recordedError == nil {
-                    recordedError = structuredAccumulator.error
+            for token in eventTokens {
+                tokenIDs.append(token)
+                let candidate = ModelRuntime.streamingSafePrefix(
+                    decode(tokenIDs),
+                    stopTokenFilter: stopTokenFilter,
+                    requestStops: requestStops
+                )
+                switch emitter.step(
+                    candidate: candidate,
+                    structuredAccumulator: structuredAccumulator,
+                    idleState: idleState,
+                    onChunk: onChunk
+                ) {
+                case .more, .requestStop:
+                    // A buyer stop string ends the row through its stop-token
+                    // sequences, and the final filter cuts the text at it.
+                    continue
+                case .toolCallComplete:
+                    stoppedValue = true
+                    serialStopTokenCountValue = tokenIDs.count
+                    return true
+                case .structuredError:
+                    stoppedValue = true
+                    if recordedError == nil {
+                        recordedError = structuredAccumulator.error
+                    }
+                    return true
                 }
-                return true
             }
+            return false
         }
 
         func finish(
@@ -4002,6 +4005,12 @@ actor ModelRuntime: ModelRuntimeServing {
             lock.lock()
             defer { lock.unlock() }
             return serialStopTokenCountValue
+        }
+
+        var hasObservedTokens: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return !tokenIDs.isEmpty
         }
 
         func error() -> APIError? {
@@ -4036,15 +4045,19 @@ actor ModelRuntime: ModelRuntimeServing {
             lock.lock()
             defer { lock.unlock() }
             guard stopTokenCountValue == nil, !eventTokens.isEmpty else { return false }
-            tokenIDs.append(contentsOf: eventTokens)
-            guard ModelRuntime.observeSerialToolStop(
-                &observer,
-                decoded: decode(tokenIDs),
-                stopTokenFilter: stopTokenFilter,
-                requestStops: requestStops
-            ) else { return false }
-            stopTokenCountValue = tokenIDs.count
-            return true
+            for token in eventTokens {
+                tokenIDs.append(token)
+                if ModelRuntime.observeSerialToolStop(
+                    &observer,
+                    decoded: decode(tokenIDs),
+                    stopTokenFilter: stopTokenFilter,
+                    requestStops: requestStops
+                ) {
+                    stopTokenCountValue = tokenIDs.count
+                    return true
+                }
+            }
+            return false
         }
 
         var stopTokenCount: Int? {
@@ -4070,6 +4083,37 @@ actor ModelRuntime: ModelRuntimeServing {
         let truncatedAtSerialStop: Bool
     }
 
+    /// Derives the serial tool-turn stop from the row itself, independent of
+    /// which waiter observed which delivery chunks (including no events for a
+    /// terminal replay). This is the canonical boundary for billing and cache
+    /// settlement; per-waiter observers only bound decode and live delivery.
+    static func continuousBatchSerialToolStopTokenCount(
+        request: ChatCompletionRequest,
+        generatedTokens: [Int],
+        decode: ([Int]) -> String,
+        stopTokenFilter: StopTokenFilter
+    ) -> Int? {
+        guard serialToolStopApplies(request) else { return nil }
+        var observer = NativeToolCallStreamEmitter(
+            modelID: request.model,
+            allowedFunctionNames: toolFunctionNames(from: request.promptSource.tools)
+        )
+        var prefix: [Int] = []
+        prefix.reserveCapacity(generatedTokens.count)
+        for token in generatedTokens {
+            prefix.append(token)
+            if observeSerialToolStop(
+                &observer,
+                decoded: decode(prefix),
+                stopTokenFilter: stopTokenFilter,
+                requestStops: request.stop
+            ) {
+                return prefix.count
+            }
+        }
+        return nil
+    }
+
     /// SPEC-038 AC-6c: the one post-generation finalize for a batched row,
     /// streaming and non-streaming. It applies the serial path's response
     /// byte cap, output filters, `parseGeneratedOutput` (tool calls,
@@ -4080,7 +4124,6 @@ actor ModelRuntime: ModelRuntimeServing {
         request: ChatCompletionRequest,
         result: ContinuousBatchSchedulerResult,
         modelStopTokenIDs: Set<Int>,
-        serialStopTokenCount: Int?,
         promptTokenIDs: [Int32],
         decode: ([Int]) -> String,
         stopTokenFilter: StopTokenFilter,
@@ -4091,6 +4134,13 @@ actor ModelRuntime: ModelRuntimeServing {
         // before counting it; bill and cache the batched row the same way.
         // Harmony `<|return|>`/`<|call|>` are excluded from this set, as
         // they are from the serial stop set: the parser reads and counts them.
+        let rawGeneratedTokenCount = result.generatedTokens.count
+        let serialStopTokenCount = continuousBatchSerialToolStopTokenCount(
+            request: request,
+            generatedTokens: result.generatedTokens,
+            decode: decode,
+            stopTokenFilter: stopTokenFilter
+        )
         var generatedTokens = droppingTrailingModelStop(
             result.generatedTokens,
             terminalStatus: result.terminalStatus,
@@ -4122,9 +4172,11 @@ actor ModelRuntime: ModelRuntimeServing {
             stopTokenFilter: stopTokenFilter,
             requestStops: request.stop
         )
-        // A truncated row ended where the serial path's early stop does,
-        // which is never a length finish.
-        let lengthTerminal = result.terminalStatus == .length && !truncated
+        // Serial reports `length` only for an explicitly supplied max_tokens
+        // reached by the pre-truncation generation. The scheduler's implicit
+        // context budget is an implementation limit, not an OpenAI length end.
+        let lengthTerminal = request.maxTokens.map { rawGeneratedTokenCount >= $0 } == true
+            && !truncated
         let parserFinishReason = lengthTerminal && !filtered.hitStop
             ? "length"
             : (filtered.hitStop ? "request_stop" : "stop")
@@ -4458,7 +4510,6 @@ actor ModelRuntime: ModelRuntimeServing {
                     request: request,
                     result: result,
                     modelStopTokenIDs: prepared.modelStopTokenIDs,
-                    serialStopTokenCount: serialToolStop?.stopTokenCount,
                     promptTokenIDs: preparedPromptTokenIDs,
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     stopTokenFilter: stopTokenFilter,
@@ -4689,12 +4740,26 @@ actor ModelRuntime: ModelRuntimeServing {
                     request: request,
                     result: result,
                     modelStopTokenIDs: prepared.modelStopTokenIDs,
-                    serialStopTokenCount: streamState.serialStopTokenCount,
                     promptTokenIDs: preparedPromptTokenIDs,
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     stopTokenFilter: stopTokenFilter,
                     generationMilliseconds: Int64(completionEndedAt.timeIntervalSince(completionStartedAt) * 1000),
                     modelHash: snapshot.modelHash
+                )
+            }
+            // A terminal replay returns the retained result without token
+            // events. Re-run its canonical finalized prefix through the same
+            // token-by-token emitter so buyer-visible text and tool deltas
+            // match the original waiter before the terminal event is sent.
+            if !streamState.hasObservedTokens {
+                _ = streamState.step(
+                    eventTokens: finalized.generatedTokens,
+                    decode: detokenizer.decode,
+                    stopTokenFilter: stopTokenFilter,
+                    requestStops: requestStops,
+                    structuredAccumulator: structuredAccumulator,
+                    idleState: idleState,
+                    onChunk: onChunk
                 )
             }
             // #1690 E2E-F13: the stream held back an incomplete UTF-8 tail
