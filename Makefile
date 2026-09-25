@@ -218,6 +218,7 @@ test-dist:
 	bash scripts/test-install-provider-id-preserve.sh
 	bash scripts/test-install-launchd-enable.sh
 	bash scripts/test-install-version-pin.sh
+	bash scripts/test-publish-release-mirror.sh
 	bash scripts/test-install-amfi-retry.sh
 	bash scripts/test-install-autotune-recommend-config.sh
 	bash phase3-binary/dist/test/install_referral_handoff.test.sh

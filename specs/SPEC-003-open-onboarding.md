@@ -1,6 +1,19 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.11.3 (2026-09-10, SPEC-041 relay-blind identity composition)
+**Version:** 0.12.0 (2026-09-25, issue #1737 release mirror for GitHub-blocked Macs)
+
+**Change log v0.12.0:** Adds §6.5 for provider Macs that cannot reach
+github.com, api.github.com, or *.githubusercontent.com (mainland China).
+SPEC-003-R003: `install.sh` falls back to the byte-identical release mirror at
+`https://download.malibu.tech/releases/` for release discovery and every
+release asset, with the embedded-key `checksums.txt.sig` chain unchanged as the
+only authority. SPEC-003-R004: the mirror layout (`<tag>/<asset>`,
+`<tag>/release.json`, `latest.json`) and its publication rules (byte identity
+against GitHub's asset digests, immutable tags, coordinator-gated
+`latest.json`). SPEC-003-R005: the pinned bootstrap python tarball has a
+`download.malibu.tech/python/` fallback under the same SHA-256 pin. The layout
+is the contract the provider self-updater consumes; SPEC-020 references it
+rather than restating it.
 
 **Change log v0.11.3:** A SPEC-041 pilot provider uses a dedicated Ed25519 relay-blind signing identity independently operator-pinned to authenticated provider ID/session. It is distinct from admission, receipt, SPEC-008, and X25519 keys and does not alter onboarding identity or create a public trust-distribution claim. Private custody remains outside repositories; rotation/recovery requires authenticated public-pin distribution and invalidates old reservations.
 
@@ -1141,6 +1154,47 @@ Defined in FR-C1. Summary:
 | Asset | `macprovider-cli-{version}-{os}-{arch}.tar.gz` | `macprovider-cli-v1.2.0-darwin-arm64.tar.gz` |
 | Checksums | `checksums.txt` (SHA-256, GNU format) | `a1b2c3...  macprovider-cli-v1.2.0-darwin-arm64.tar.gz` |
 | Release notes | Markdown body | Version, date, changes, breaking changes, spec version |
+
+### 6.5. Release mirror for GitHub-blocked Macs (issue #1737)
+
+Provider Macs in mainland China cannot reach github.com, api.github.com, or
+*.githubusercontent.com, but can reach `https://download.malibu.tech` and
+`https://coordinator.malibu.tech`. The mirror is transport only; it adds no
+trust.
+
+**SPEC-003-R003 — Installer release sources.** For
+`MACPROVIDER_GITHUB_REPO=Augustas11/macprovider` (the default), `install.sh`
+MUST fetch every release asset (`checksums.txt`, `checksums.txt.sig`, the
+package, the tarball) from GitHub Releases first and, on any failure, the same
+asset name from `https://download.malibu.tech/releases/<tag>/`; after one GitHub
+failure later assets MAY go mirror-first, and `MACPROVIDER_RELEASE_MIRROR=1`
+(only `0` or `1` is valid) MUST go mirror-first with GitHub as the fallback.
+Unpinned discovery MUST fall back, when the GitHub Releases API fails, to the
+newest of the mirror's `latest.json` `tag_name` and the coordinator
+`/healthz` `recommended_binary_version`; a candidate is used only if it is a
+canonical `vMAJOR.MINOR.PATCH` at or above the supported rollback floor. The
+embedded-key `checksums.txt.sig` verification, per-asset SHA-256, Gatekeeper,
+and payload validation MUST be applied identically whichever host served the
+bytes. A repository fork MUST NOT use the mirror.
+
+**SPEC-003-R004 — Release mirror layout and publication.** For every stable
+release, `https://download.malibu.tech/releases/<tag>/<asset>` MUST be a
+byte-identical copy of every GitHub release asset of `<tag>`, and
+`<tag>/release.json` MUST be `{"tag_name", "draft": false, "prerelease", "assets":
+[{"name", "browser_download_url"}]}` listing exactly those assets at their mirror
+URLs. Publication (`scripts/publish-release-mirror.sh`) MUST refuse any byte
+whose SHA-256 differs from GitHub's asset digest, MUST NOT modify a published
+`<tag>/` directory, and MUST re-download the served bytes to confirm them.
+`releases/latest.json` (`{"tag_name": "<tag>"}`) is advisory; it MUST move only
+to a stable tag the coordinator already advertises as `latest_binary_version`
+and MUST NOT move backwards.
+
+**SPEC-003-R005 — Bootstrap python mirror.** When the installer bootstraps the
+pinned python-build-standalone interpreter, it MUST fall back to
+`https://download.malibu.tech/python/<the same file name>` when GitHub fails
+(mirror first under `MACPROVIDER_RELEASE_MIRROR=1`), and MUST install bytes from
+a source only when they reproduce the pinned SHA-256; a mismatching source is
+skipped, never installed.
 
 ---
 

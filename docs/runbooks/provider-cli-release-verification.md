@@ -185,6 +185,36 @@ asset return HTTP 200. Run it locally with
 green parity means the curl channel is serving a broken resolver; fix the
 installer, cut the next stable CLI, and republish.
 
+## Release mirror byte identity (download.malibu.tech, #1737)
+
+Macs that cannot reach GitHub (mainland China) install and update from
+`https://download.malibu.tech/releases/<tag>/`. The mirror is untrusted
+transport: `checksums.txt.sig` stays the only authority, so a wrong mirror byte
+fails closed, but it also strands those Macs. Stable releases run
+`scripts/publish-release-mirror.sh --tag <tag>` as a non-blocking
+post-publication step in `release.yml` and `promote-acceptance-candidate.yml`.
+It refuses any asset whose SHA-256 differs from GitHub's asset digest, writes
+`release.json`, and re-downloads every served file to compare hashes.
+
+1. Confirm the step passed in the release run. If it failed, rerun it:
+   ```bash
+   GH_TOKEN=... MALIBU_DOWNLOAD_SSH_KEY=~/.ssh/pearl_operator_ed25519 \
+     bash scripts/publish-release-mirror.sh --tag vX.Y.Z
+   ```
+2. Spot-check byte identity against GitHub from any host:
+   ```bash
+   tag=vX.Y.Z; a=checksums.txt
+   cmp <(curl -fsSL "https://github.com/Augustas11/macprovider/releases/download/$tag/$a") \
+       <(curl -fsSL "https://download.malibu.tech/releases/$tag/$a")
+   ```
+3. When the coordinator's `latest_binary_version` advances to the tag, move the
+   advisory pointer: `bash scripts/publish-release-mirror.sh --tag vX.Y.Z
+   --promote-latest`. It refuses unless `coordinator.malibu.tech/healthz`
+   already advertises the tag, and never moves `latest.json` backwards.
+
+A published `/releases/<tag>/` is immutable: a rerun is a no-op when the bytes
+match and an error otherwise. Do not edit it in place; cut a new release.
+
 ## What not to count as release proof
 
 - matching `malibu-cli --version`
