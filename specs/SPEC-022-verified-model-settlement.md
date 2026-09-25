@@ -74,6 +74,38 @@ settlement holds, turns the pin off, rolls back in the reverse of the
 rollout order (v2 allowlists, CLI, the gateway if it must go, then the
 coordinator), then resumes traffic.
 
+Real-engine e2e findings (2026-09-25,
+`docs/runbooks/runtime-agnostic-e2e-evidence-2026-09-25.md`) close four
+gaps inside v0.2.2, with no receipt tuple or wire change:
+
+- R-5.6 on the gateway-to-buyer hop (E2E-F4): the coordinator's verified
+  finality counts output delivered to the gateway. When the gateway ends a
+  stream itself because the buyer disconnected or a buyer write failed, the
+  buyer is debited no more completion than the gateway delivered to the
+  buyer (the smaller of the two figures); the provider stays credited for
+  the prefix delivered to the gateway, which its receipt binds.
+- R-8.4 (E2E-F5): a closed verified verdict whose attempt's ledger credits
+  the coordinator had all quarantined for a ledger-validity reason (not a
+  receipt trust failure; for example `invalid_cached_prompt_tokens`) is
+  reported by the finality lookup as closed `zero_settled` with a `valid`
+  receipt result, reason `verified_receipt_credit_quarantined`: the buyer is
+  refunded and the provider credit stays zero, never an error that holds the
+  reservation forever.
+- R-12.8 (E2E-F10): the coordinator selects an external-runtime pool member
+  only for a request whose caller negotiated signed settlement finality; any
+  other caller (an older gateway) fails closed before dispatch, so the
+  rollout order no longer depends on operator discipline alone.
+- R-12.8 rollback (E2E-F11): a coordinator older than v0.2.0 refuses to
+  start on an artifact feed carrying a gguf `huggingface_revision` source
+  (`file_path`) or an `mlxlm_loopback` runtime source, so the coordinator
+  rollback first installs a feed set it can load.
+
+Observe mode keeps the R-7.7 local fallback rules (E2E-F8): the buyer is
+debited by gateway accounting while the coordinator credits the provider by
+its own figures, and the two can differ (the SPEC-005 prompt bound, a buyer
+disconnect, a gateway-truncated stream). That divergence is the documented
+observe-mode behaviour, not an enforce-mode settlement.
+
 ### v0.2.1
 
 Conformance tracking only (#1690). R-3.4.2, the `pool_operator_attested`
@@ -708,6 +740,14 @@ sufficient for partial-output settlement. (v0.2.0) The R-3.4.2 exception
 applies here too: for an attempt that satisfies R-12, the partial usage is the
 `pool_operator_attested` usage the receipt signs, which MUST equal the recorded
 expected usage exactly and stays bounded by the SPEC-005 ceilings.
+(v0.2.2) The delivered prefix the coordinator observes is the one delivered
+to the gateway. When the gateway ends a stream itself because the buyer
+disconnected or a write to the buyer failed, the buyer's final debit MUST NOT
+exceed the completion the gateway delivered to the buyer: the gateway debits
+the smaller of the verified completion and its own delivered completion,
+with the verified prompt. Provider settlement stays the verified figure for
+the prefix delivered to the gateway, which the receipt binds; the difference
+is not billed to either party.
 
 R-5.7. Synchronous buyer response completion and asynchronous receipt
 verification MAY be decoupled. Until verification returns `verified`, buyer
@@ -811,7 +851,12 @@ R-8.4. If receipt verification returns `zero_settled`, the row is terminal. The
 buyer final debit MUST be zero or the buyer reservation MUST be released or
 refunded; provider credit MUST remain zero; and the row MUST remain excluded
 from earnings, settlement sweeps, and payout readiness while included in
-zero-settled counters.
+zero-settled counters. (v0.2.2) A closed verified verdict whose attempt's
+ledger credits the coordinator had all already quarantined for a
+ledger-validity reason (not a receipt trust failure; R-7.4 still governs
+those) is such a terminal: the finality lookup reports it `zero_settled`
+with receipt result `valid` and reason `verified_receipt_credit_quarantined`,
+the quarantine stands, and the buyer reservation is refunded.
 
 R-8.5. Buyer-visible usage and receipt-status APIs MUST distinguish pending,
 verified, quarantined/refunded, and zero-settled outcomes. Buyer-facing labels
@@ -1140,6 +1185,26 @@ the pool attempts recorded before a downgrade.
   credit are unaffected by the order: in both orders the ledger write credits
   a loopback attempt only when a receipt signed by the pinned key backs its
   usage, and otherwise records it byte-estimated with zero billable.
+- External-runtime dispatch needs the negotiation (v0.2.2): the coordinator
+  selects an external-runtime pool member (a SPEC-046 loopback session on a
+  pool route) only for a request whose caller advertised
+  `X-MacProvider-Internal-Settlement-Trailers: 1` under the gateway service
+  token. For any other caller the pool's runtime allowlist is withheld for
+  that request, so no such member is selectable, failover and the slot queue
+  included, and the request fails closed before dispatch with 503
+  `byom_non_settlement_unavailable` (or `engine_unavailable` for an explicit
+  non-native engine selection) naming the missing negotiation. A gateway
+  that predates v0.2.2 cannot settle `pool_operator_attested` finality, so
+  without this it would hold the buyer while the provider credit is payable.
+- Artifact-feed compatibility on rollback (v0.2.2): a coordinator that
+  predates v0.2.0 strict-decodes the catalog artifact feed and allows only
+  `mlx_cache` on an `mlx_safetensors` artifact, so it exits at startup on a
+  feed that carries a gguf `huggingface_revision` source (`file_path`) or an
+  `mlxlm_loopback` runtime source. A rollback to such a coordinator MUST
+  first install a signed feed set without either tuple (a new catalog release
+  that withdraws them), after the v2 allowlists and the CLI are rolled back;
+  the operator sequence is in `docs/runbooks/trusted-pool-production-launch.md`
+  section 9.
 - A pool-authority read that cannot decide (a store or authority error) is
   not an eligibility verdict. Receipt ingestion returns a retryable error and
   keeps the receipt's first-observed arrival time for the retry; only a

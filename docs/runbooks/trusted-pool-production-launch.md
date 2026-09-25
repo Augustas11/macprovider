@@ -261,6 +261,19 @@ allowlists):
 3. Ship the provider CLI that signs pool-authorized loopback receipts
    (SPEC-015 0.4.10).
 4. Only then accept a v2 policy core with a non-empty `runtime_allowlist`.
+   The coordinator enforces this order for the gateway half (SPEC-022 v0.2.2
+   R-12.8, E2E-F10): it selects an external-runtime member only for a
+   request whose gateway advertised signed settlement finality, and answers
+   any other caller 503 `byom_non_settlement_unavailable` ("External-runtime
+   pool members serve only through a gateway that negotiates signed
+   settlement finality") before dispatch. If that message shows up after
+   this step, a pre-step-2 gateway is still serving; nothing was billed or
+   credited.
+   Record the first catalog release that publishes a gguf artifact with a
+   `huggingface_revision` source (it carries `file_path`) or lists
+   `mlxlm_loopback` in an `allowed_runtime_sources`. From that release on, a
+   coordinator older than this release cannot start on the served feed; the
+   coordinator rollback below has to replace the feed first.
 
 Mixed versions are safe in both directions during steps 1-2 and during a
 rollback, because the trailer order is negotiated per request:
@@ -311,7 +324,47 @@ settled, so traffic stops and holds drain first:
    policy core with an empty `runtime_allowlist`), then the CLI, then the
    gateway only if it must go (below), then the coordinator. The coordinator
    rollback needs nothing more from the gateway: a v0.2.2 gateway reads an
-   older coordinator's header finality.
+   older coordinator's header finality. It does need a feed the older
+   coordinator can load (E2E-F11): before replacing the coordinator binary,
+   run the feed check below.
+4a. Feed check before the coordinator rollback. A coordinator older than
+   this release strict-decodes the catalog artifact feed and exits at
+   startup on `json: unknown field "file_path"` (a gguf artifact with a
+   `huggingface_revision` source) or on `runtime_format "mlx_safetensors" may
+   not allow runtime source "mlxlm_loopback"`, which would leave no
+   coordinator. On Pearl:
+
+   ```bash
+   F=$(awk '/catalog_artifacts_path:/ {print $2}' /etc/macprovider/coordinator.yaml)
+   echo "feed: ${F:-none}"
+   [ -z "$F" ] || grep -c -e '"file_path"' -e mlxlm_loopback "$F"
+   ```
+
+   `feed: none` or a count of `0`: go to the coordinator rollback. Otherwise,
+   replace the served feed first, with a signed release, never a hand edit:
+   the feed is release-bound (same signer `key_id` as the candidate feed,
+   `candidate_catalog_sha256` of the served candidate bytes), so stripping
+   and re-signing the file alone does not load.
+   1. In a fresh worktree off `origin/main`, edit
+      `phase3-binary/catalog/autotune/autotune-artifacts-source.json`: delete
+      every `gguf` artifact whose `source_ref.kind` is `huggingface_revision`
+      (and repoint any `primary_artifact_id` that named one), and remove
+      `mlxlm_loopback` from every `allowed_runtime_sources`. Leave
+      `ollama_library_tag` gguf artifacts and `mlx_cache` as they are; the
+      older coordinator accepts both.
+   2. Cut the release exactly as `docs/runbooks/catalog-artifact-feed-release.md`
+      describes (`scripts/catalog-release.py generate` with
+      `--previous-release-dir` set to the release now live, signing, then
+      `scripts/catalog-release.py verify`). If the generator refuses the
+      removal (its cross-release binding checks), stop: roll the coordinator
+      forward instead of back.
+   3. Deploy that catalog release to Pearl through the normal catalog deploy
+      and re-run the check above against the new
+      `catalog_artifacts_path`; also confirm the served bytes:
+      `curl -s https://coordinator.malibu.tech/v1/catalog-artifacts | grep -c -e '"file_path"' -e mlxlm_loopback`
+      prints `0`.
+   Then roll back the coordinator binary and confirm it started (`/healthz`
+   reports the older version and `/v1/catalog-artifacts` answers 200).
 5. Resume buyer traffic: restore the nginx `location` bodies and reload.
 
 Prefer rolling the gateway forward: v14 only widens the

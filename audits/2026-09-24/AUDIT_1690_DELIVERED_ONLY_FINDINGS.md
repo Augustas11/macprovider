@@ -79,6 +79,10 @@ Status is one of:
 | CODE M | MEDIUM | A MAC-only declaration downgraded to legacy. | FIXED 97bbf2ac |
 | SEC H | HIGH | An enforce refund whose trailer is lost could 404 forever. | FIXED 551fd876 |
 
+R4 codex ARCH lane (on 6db8ae78), recorded after the round: 0 CRITICAL,
+0 HIGH, 2 MEDIUM. Both MEDIUMs were already fixed on the branch by then, one
+by `cab2fb0b` and one by `551fd876`; no further change.
+
 ## Carried (in the PR body)
 
 1. **The gateway periodic reconciler re-queries `coordinator_404_held` forever.** PRE-EXISTING; there is no terminal state for a 404 hold.
