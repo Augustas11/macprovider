@@ -9,10 +9,12 @@ Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011
 
 ### v0.2.4
 
-Rollback note for the #1690 M9 engines. A coordinator that predates v0.2.0
+Rollback notes for the #1690 M9 engines. A coordinator that predates v0.2.0
 also cannot load an artifact feed carrying the SPEC-023 v0.18.0
 `omlx_loopback` runtime source, so the R-12.8 rollback bullet names it next
-to `mlxlm_loopback`. No other change.
+to `mlxlm_loopback`. A new R-12.8 rollback precondition: the target must
+replay every runtime class ever accepted in pool manifest history. No other
+change.
 
 ### v0.2.3
 
@@ -1290,6 +1292,19 @@ the pool attempts recorded before a downgrade.
   that withdraws them), after the v2 allowlists and the CLI are rolled back;
   the operator sequence is in `docs/runbooks/trusted-pool-production-launch.md`
   section 9.
+- Manifest-history compatibility on rollback (v0.2.4, #1690 M9 review M2):
+  a coordinator replays every accepted `manifest_accepted` event at start
+  and rejects a policy core outside its own closed SPEC-042-R001
+  vocabulary, so a target that cannot read one of them disables every
+  pool. Withdrawing an allowlist mints a new policy version and does not
+  remove the old one from history. A coordinator rollback target MUST
+  therefore be at or above the build that introduced every runtime class
+  ever accepted in any pool's manifest history (`llamacpp_loopback`,
+  `mlxlm_loopback`, `ollama_loopback` from #1719; `lmstudio_loopback`,
+  `omlx_loopback` from #1754), and MUST read `manifest-snapshot/v2` if any
+  v2 policy core was ever accepted. The runbook's read-only step 4b check
+  decides it and says STOP otherwise; the only way forward then is to roll
+  the coordinator forward.
 - A pool-authority read that cannot decide (a store or authority error) is
   not an eligibility verdict. Receipt ingestion returns a retryable error and
   keeps the receipt's first-observed arrival time for the retry; only a

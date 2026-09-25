@@ -375,7 +375,28 @@ settled, so traffic stops and holds drain first:
    rollback needs nothing more from the gateway: a v0.2.2 gateway reads an
    older coordinator's header finality. It does need a feed the older
    coordinator can load (E2E-F11): before replacing the coordinator binary,
-   run the feed check below.
+   run the feed check below. It also needs a target that can replay the
+   pool manifest history (step 4b): withdrawing an allowlist mints a new
+   policy version, but every earlier `manifest_accepted` event stays in
+   history, and a coordinator replays all of them at start. A target that
+   cannot read one of them disables every pool.
+
+   **Rollback precondition (#1690 M9 review M2).** The coordinator rollback
+   target MUST be at or above the build that introduced every runtime class
+   ever accepted in any pool's manifest history, and it MUST read
+   `manifest-snapshot/v2` if any v2 policy core was ever accepted. The
+   builds, from the target's source commit:
+
+   | Target tier | Target contains | Replays |
+   |---|---|---|
+   | `v1-only` | not `747557cc` (#1719) | v1 policy cores only |
+   | `m8` | `747557cc`, not the #1754 merge | v2 cores listing `llamacpp_loopback`, `mlxlm_loopback`, `ollama_loopback` |
+   | `m9` | the #1754 merge | also `lmstudio_loopback` and `omlx_loopback` |
+
+   Decide the tier with `git merge-base --is-ancestor 747557cc <target>` and
+   the same check against the #1754 merge commit. When step 4b says STOP,
+   roll the coordinator forward instead: there is no supported way to drop
+   an accepted manifest from history.
 4a. Feed check before the coordinator rollback. A coordinator older than
    this release strict-decodes the catalog artifact feed and exits at
    startup on `json: unknown field "file_path"` (a gguf artifact with a
@@ -468,8 +489,87 @@ settled, so traffic stops and holds drain first:
       `catalog_artifacts_path`; also confirm the served bytes:
       `curl -s https://coordinator.malibu.tech/v1/catalog-artifacts | grep -c -e '"file_path"' -e mlxlm_loopback -e omlx_loopback`
       prints `0`.
-   Then roll back the coordinator binary and confirm it started (`/healthz`
-   reports the older version and `/v1/catalog-artifacts` answers 200).
+   Then run step 4b.
+4b. Manifest-history check before the coordinator rollback (read-only). It
+   reads every `manifest_accepted` event in the coordinator database
+   (`storage.db_path`, as in step 0), decodes each manifest snapshot, and
+   lists the policy-core encoding and the runtime classes it carries; each
+   snapshot holds its pool's whole accepted policy history. It fails
+   closed: a target tier other than the three in the table, an unreadable
+   database, an undecodable snapshot, or no `VERDICT` line means STOP.
+   On Pearl, with the tier of the rollback target:
+
+   ```bash
+   sudo python3 - "$COORDINATOR_DB" m8 <<'PY'
+   import base64, json, os, sqlite3, sys
+   CLASSES = ["llamacpp_loopback", "lmstudio_loopback", "mlxlm_loopback",
+              "ollama_loopback", "omlx_loopback", "openai_compatible_loopback"]
+   ACCEPTS = {
+       "v1-only": None,
+       "m8": {"llamacpp_loopback", "mlxlm_loopback", "ollama_loopback"},
+       "m9": {"llamacpp_loopback", "lmstudio_loopback", "mlxlm_loopback",
+              "ollama_loopback", "omlx_loopback"},
+   }
+   V1 = b"macprovider/spec042/manifest-snapshot/v1"
+   V2 = b"macprovider/spec042/manifest-snapshot/v2"
+   try:
+       db, tier = sys.argv[1], sys.argv[2]
+       if tier not in ACCEPTS:
+           raise ValueError(f"unknown target tier {tier!r}")
+       if not os.path.isabs(db) or not os.path.isfile(db):
+           raise ValueError(f"no database file at {db!r}")
+       try:
+           con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+           tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+       except sqlite3.OperationalError:
+           # A WAL database with no -wal file (a stopped, checkpointed
+           # coordinator) cannot be opened read-only; its main file is then
+           # complete, so read it as immutable.
+           if os.path.exists(db + "-wal"):
+               raise
+           con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True)
+           tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+       if "trustpool_events" not in tables:
+           print("manifests: 0 (no trustpool history)")
+           print("VERDICT: replayable")
+           sys.exit(0)
+       rows = con.execute("SELECT id, pool_id, payload_json FROM trustpool_events "
+                          "WHERE event_type = 'manifest_accepted' ORDER BY id").fetchall()
+       v2, seen = 0, set()
+       for event_id, pool_id, payload in rows:
+           snap = base64.b64decode(json.loads(payload)["manifest_snapshot"], validate=True)
+           if snap.startswith(V2):
+               v2 += 1
+           elif not snap.startswith(V1):
+               raise ValueError(f"event {event_id}: unknown manifest snapshot format")
+           for c in CLASSES:
+               if len(c).to_bytes(4, "big") + c.encode() in snap:
+                   seen.add(c)
+       accepts = ACCEPTS[tier]
+       blockers = sorted(seen) if accepts is None else sorted(seen - accepts)
+       if accepts is None and v2:
+           blockers.insert(0, "policy-core v2 snapshots")
+       print(f"manifests: {len(rows)} (v2 snapshots: {v2})")
+       print(f"runtime classes in history: {', '.join(sorted(seen)) or 'none'}")
+       print(f"target tier: {tier}; cannot replay: {', '.join(blockers) or 'nothing'}")
+       print("VERDICT: " + ("replayable" if not blockers else "STOP"))
+       sys.exit(0 if not blockers else 1)
+   except SystemExit:
+       raise
+   except Exception as e:
+       print(f"manifest history check error: {e}")
+       print("VERDICT: STOP")
+       sys.exit(2)
+   PY
+   echo "exit: $?"
+   ```
+
+   `VERDICT: replayable` with `exit: 0` is the only go: roll back the
+   coordinator binary and confirm it started (`/healthz` reports the older
+   version, `/v1/catalog-artifacts` answers 200, and `/poolz` still lists
+   the pools). `VERDICT: STOP` (exit 1 or 2), or no `VERDICT` line: do not
+   roll back the coordinator; roll it forward. The check is exercised
+   against lab databases by `scripts/lab/1690-e2e/check4b.sh`.
 5. Resume buyer traffic: restore the nginx `location` bodies and reload.
 
 Prefer rolling the gateway forward: v14 only widens the
