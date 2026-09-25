@@ -100,8 +100,8 @@ POOL="$(cat /root/e2e/pools/p$PASS_ID/pool_id 2>/dev/null)"
 [ -n "$POOL" ] || die "no pool id: pool creation did not complete"
 rf="$(grep -c REGISTRY_REFRESH_FAILED "$EV/pool-create.txt")"
 [ "$rf" = 0 ] || result S5-registry-refresh-race FAIL "$rf admin event(s) answered 500 registry_refresh_failed although durable: $(grep REGISTRY_REFRESH_FAILED "$EV/pool-create.txt" | head -2 | tr '\n' ' ')"
-curl -s -H "Authorization: Bearer $(opkey)" http://127.0.0.1:8444/admin/trust-pools/pools/$POOL >"$EV/get-pool.json"
-curl -s -H "Authorization: Bearer $(opkey)" http://127.0.0.1:8444/poolz >"$EV/poolz.json"
+curl_bearer "$(opkey)" -s http://127.0.0.1:8444/admin/trust-pools/pools/$POOL >"$EV/get-pool.json"
+curl_bearer "$(opkey)" -s http://127.0.0.1:8444/poolz >"$EV/poolz.json"
 gw_set features.trusted_pools '{enabled: true, coordinator_authorizes: true}'
 gw_restart
 MODEL=$MLX_ID
@@ -109,7 +109,7 @@ MODEL=$MLX_ID
 # 5 s; the dev run saw pool_unavailable right after the first promote).
 t=0; code=""
 while [ $t -le 120 ]; do
-  code="$(curl -s -o $EV/probe.body -w '%{http_code}' https://api.malibu.tech/v1/chat/completions -H "Authorization: Bearer $(cat /root/e2e/buyer-api-key)" \
+  code="$(curl_bearer "$(cat /root/e2e/buyer-api-key)" -s -o $EV/probe.body -w '%{http_code}' https://api.malibu.tech/v1/chat/completions \
     -H 'Content-Type: application/json' -H "X-MacProvider-Pool-Select: $POOL" -d "{\"model\":\"$MLX_ID\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"probe $t\"}]}")"
   [ "$code" = 200 ] && break
   echo "t=$t $code $(head -c 200 $EV/probe.body)" >>"$EV/probe.log"; sleep 5; t=$((t+5))
@@ -135,7 +135,7 @@ pre="$(gwsql "SELECT COUNT(*) FROM usage_events WHERE token_source = 'pool_opera
 # coordinator downgrade gate: pools paused, current binary, live DB
 python3 $E2E_H/tools/pool-setup.py lifecycle p$PASS_ID paused >"$EV/pause.txt" 2>&1 || result S5-pause FAIL "$(tail -2 $EV/pause.txt)"
 for t in 0 1; do
-  sudo -u macprovider env $(grep -v '^#' /etc/macprovider/coordinator.env | xargs) /opt/macprovider/coordinator pool-rollback-preflight \
+  with_coordinator_env /opt/macprovider/coordinator pool-rollback-preflight \
     --config /opt/macprovider/coordinator.yaml >"$EV/preflight-$t.txt" 2>&1
   echo "rc=$?" >>"$EV/preflight-$t.txt"
   [ $t = 0 ] && sleep 330

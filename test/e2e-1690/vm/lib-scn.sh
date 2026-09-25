@@ -20,7 +20,7 @@ reservations_active() {
   gwsql "SELECT COUNT(*) FROM quota_reservations WHERE status='active' AND request_id IN (${ids:-''})"
 }
 reconcile_once() {
-  curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $(opkey)" http://127.0.0.1:9443/admin/settlement/reconcile
+  curl_bearer "$(opkey)" -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:9443/admin/settlement/reconcile
 }
 # drain <run-id> [max-seconds]: poke the reconciler (runbook rollback step 2
 # command) until no reservation of the run is active and no hold remains.
@@ -61,8 +61,8 @@ probe_finality() {
   local label="$1" stream="${2:-false}" acct gst
   acct="$(gwsql "SELECT account_id FROM accounts LIMIT 1")"
   gst="$(sed -n 's/^GATEWAY_SERVICE_TOKEN=//p' /etc/macprovider/coordinator.env)"
-  curl -sS --raw -D "$E2E_EVIDENCE/probe-$label.headers" -o "$E2E_EVIDENCE/probe-$label.body" \
-    -H "Authorization: Bearer $gst" -H "X-MacProvider-Account: $acct" -H "X-Request-ID: probe-$label-$(date +%s)" \
+  curl_bearer "$gst" -sS --raw -D "$E2E_EVIDENCE/probe-$label.headers" -o "$E2E_EVIDENCE/probe-$label.body" \
+    -H "X-MacProvider-Account: $acct" -H "X-Request-ID: probe-$label-$(date +%s)" \
     -H "X-MacProvider-Internal-Settlement-Trailers: 1" -H 'Content-Type: application/json' -H 'TE: trailers' \
     -d "{\"model\":\"$MODEL\",\"stream\":$stream,\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"probe\"}]}" \
     http://127.0.0.1:8443/v1/chat/completions

@@ -13,6 +13,25 @@ CDB=/var/lib/macprovider/request-log.sqlite
 gwsql() { sqlite3 -cmd '.timeout 5000' "$GWDB" "$@"; }
 csql() { sqlite3 -cmd '.timeout 5000' "$CDB" "$@"; }
 opkey() { sed -n 's/^OPERATOR_KEY=//p' /etc/macprovider/coordinator.env; }
+# curl_bearer <token> <curl args...>: curl with "Authorization: Bearer
+# <token>" read from a 0600 temp file (curl -H @file), so the token never
+# appears in a process argv. The token reaches this shell function as an
+# argument, which is not an exec.
+curl_bearer() {
+  local tok="$1" f rc; shift
+  f="$(mktemp)" || return 1
+  chmod 600 "$f"
+  printf 'Authorization: Bearer %s\n' "$tok" >"$f"
+  curl -H @"$f" "$@"; rc=$?
+  rm -f "$f"
+  return $rc
+}
+# with_coordinator_env <command...>: run a command as macprovider with
+# /etc/macprovider/coordinator.env loaded inside the child shell, so no
+# credential is expanded into an argv (`env KEY=...` would list them).
+with_coordinator_env() {
+  sudo -u macprovider bash -c 'set -a; . /etc/macprovider/coordinator.env; set +a; exec "$@"' with_coordinator_env "$@"
+}
 # result <scenario> <PASS|FAIL|BUG|GAP|INFO> <message>
 result() {
   python3 - "$1" "$2" "$3" >>"$E2E_EVIDENCE/results.jsonl" <<'PY'

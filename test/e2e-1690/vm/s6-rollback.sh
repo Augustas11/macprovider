@@ -38,7 +38,7 @@ for i in $(seq 1 24); do [ -s "$EV/outside-curl.done" ] && break; sleep 5; done;
 # ---- 2. drain holds -------------------------------------------------------------
 t=0
 until [ "$(gwsql "SELECT COUNT(*) FROM quota_reservations WHERE status = 'active' AND settlement_hold = 1")" = 0 ] || [ $t -ge 600 ]; do
-  curl -s -X POST -H "Authorization: Bearer $(opkey)" http://127.0.0.1:9443/admin/settlement/reconcile >>"$EV/reconcile.txt"; echo >>"$EV/reconcile.txt"
+  curl_bearer "$(opkey)" -s -X POST http://127.0.0.1:9443/admin/settlement/reconcile >>"$EV/reconcile.txt"; echo >>"$EV/reconcile.txt"
   sleep 10; t=$((t+10))
 done
 hc="$(gwsql "SELECT COUNT(*) FROM quota_reservations WHERE status = 'active' AND settlement_hold = 1")"
@@ -89,9 +89,10 @@ fi
 
 # ---- 4b. coordinator rollback ---------------------------------------------------------
 # Literal runbook command first (config path as written), then the path the
-# live Pearl config actually has. The subcommand takes no --config-overlay.
+# live Pearl config actually has. (At d5dd3334 the subcommand took no
+# --config-overlay; F-6 added it.)
 /opt/macprovider/coordinator pool-rollback-preflight --config /etc/macprovider/coordinator.yaml >"$EV/preflight-literal.txt" 2>&1; rc1=$?
-sudo -u macprovider env $(grep -v '^#' /etc/macprovider/coordinator.env | xargs) /opt/macprovider/coordinator pool-rollback-preflight \
+with_coordinator_env /opt/macprovider/coordinator pool-rollback-preflight \
   --config /opt/macprovider/coordinator.yaml >"$EV/preflight-pearl.txt" 2>&1; rc2=$?
 result S6-step4-coord-preflight INFO "literal (--config /etc/macprovider/coordinator.yaml) rc=$rc1: $(head -c 200 "$EV/preflight-literal.txt" | tr '\n' ' '); --config /opt/macprovider/coordinator.yaml rc=$rc2: $(head -c 300 "$EV/preflight-pearl.txt" | tr '\n' ' ')"
 [ "$rc2" = 0 ] || result S6-step4-coord-preflight-gate FAIL "gate exits $rc2 with no pool ever created"
