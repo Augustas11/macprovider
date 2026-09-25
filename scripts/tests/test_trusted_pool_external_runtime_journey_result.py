@@ -189,6 +189,7 @@ def valid_signed(**overrides):
             "manifest_version": 1,
             "manifest_core_digest": DIGEST,
             "runtime_source": "llamacpp_loopback",
+            "fingerprint_salt": "f" * 64,
         },
         "artifacts": [{"id": TRUSTED_POOL_EXTERNAL_RUNTIME_ARTIFACT_ID, "sha256": "e" * 64, "source": "journeys/evidence/x"}],
         "steps": [
@@ -398,6 +399,37 @@ class TrustedPoolExternalRuntimeCaptureTests(unittest.TestCase):
         value["P5"]["observed"] = f"buyer {BUYER} ready"
         path.write_text(json.dumps(value))
         self.assert_rejected("raw")
+
+    def test_fingerprints_are_salted_per_run(self) -> None:
+        # #1690 review LOW: a bare sha256 of a known id links runs and is
+        # reversible by dictionary; fingerprints are HMAC-SHA256 under a
+        # random per-run salt recorded in candidate_identity.
+        import hashlib
+        import hmac
+
+        first, second = self.build(), self.build()
+        salt = first["candidate_identity"]["fingerprint_salt"]
+        self.assertRegex(salt, r"^[0-9a-f]{64}$")
+        self.assertNotEqual(salt, second["candidate_identity"]["fingerprint_salt"])
+        member_fp = first["pool"]["member_fingerprints"][0]
+        self.assertNotEqual(hashlib.sha256(MEMBER.encode()).hexdigest(), member_fp)
+        self.assertEqual(hmac.new(bytes.fromhex(salt), MEMBER.encode(), hashlib.sha256).hexdigest(), member_fp)
+        self.assertNotEqual(member_fp, second["pool"]["member_fingerprints"][0])
+        signed = valid_signed(candidate_identity=first["candidate_identity"])
+        self.assertEqual([], validate(signed))
+        del signed["candidate_identity"]["fingerprint_salt"]
+        self.assertTrue(any("candidate_identity" in error for error in validate(signed)))
+
+    def test_rejects_unbounded_or_control_observed_text(self) -> None:
+        # #1690 review LOW: operator free text copied into signed evidence
+        # is bounded and printable ASCII.
+        for bad in ("x" * 201, "line one\nline two", "tab\there", "caf\u00e9"):
+            with self.subTest(bad=bad):
+                path = self.capture / "preconditions.json"
+                value = json.loads(path.read_text())
+                value["P2"]["observed"] = bad
+                path.write_text(json.dumps(value))
+                self.assert_rejected("preconditions.P2.observed")
 
     def test_builder_requirement_ids_are_bounded(self) -> None:
         evidence = {"requirement_ids": ["SPEC-022-R012", "SPEC-022-R007"]}
