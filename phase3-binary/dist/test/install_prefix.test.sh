@@ -40,4 +40,15 @@ if grep -Eq '<string>--(model|provider-id|coordinator|port)</string>' "$PLIST_TE
   echo "mutable provider settings leaked into launchd template ProgramArguments" >&2
   exit 1
 fi
+# SPEC-003 v0.11.4: launchd pins `Adaptive`/`Background` jobs at background
+# priority, which costs about 40% of decode throughput. The provider must be
+# `Standard` in the rendered plist and in both shipped templates.
+COMPAT_TEMPLATE="$REPO_ROOT/phase3-binary/dist/compatibility-set-assets/provider-launch-agent.plist.template"
+printf "%s\n" "$plist" | grep -A1 '<key>ProcessType</key>' | grep -F '<string>Standard</string>' >/dev/null
+for template in "$PLIST_TEMPLATE" "$COMPAT_TEMPLATE"; do
+  if ! grep -A1 '<key>ProcessType</key>' "$template" | grep -F '<string>Standard</string>' >/dev/null; then
+    echo "provider launchd template must use ProcessType Standard: $template" >&2
+    exit 1
+  fi
+done
 echo "install prefix rendering ok"

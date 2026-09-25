@@ -1,6 +1,16 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.11.3 (2026-09-10, SPEC-041 relay-blind identity composition)
+**Version:** 0.11.4 (2026-09-25, provider LaunchAgent runs at Standard priority)
+
+**Change log v0.11.4:** The provider LaunchAgent (`live.malibu.provider`) MUST
+use `ProcessType = Standard`. The shipped templates used `Adaptive`, and this
+spec said `Background`. Under launchd, both leave an inference daemon at
+background priority (Mach priority 4) permanently, because no XPC activity ever
+boosts it. On an M3 Ultra, Qwen3.6-27B single-stream decode measured 22.3 tok/s
+under `Adaptive` and 37.8 tok/s under `Standard` (priority 20), with the same
+binary and config, a 40% loss. Evidence:
+`docs/runbooks/continuous-batching-qwen36-throughput-decomposition-2026-09-25.md`.
+Helper jobs (watchdog, one-shot reload) stay `Background`.
 
 **Change log v0.11.3:** A SPEC-041 pilot provider uses a dedicated Ed25519 relay-blind signing identity independently operator-pinned to authenticated provider ID/session. It is distinct from admission, receipt, SPEC-008, and X25519 keys and does not alter onboarding identity or create a public trust-distribution claim. Private custody remains outside repositories; rotation/recovery requires authenticated public-pin distribution and invalidates old reservations.
 
@@ -571,7 +581,7 @@ crash:
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>ProcessType</key>
-  <string>Background</string>
+  <string>Standard</string>
 </dict>
 </plist>
 ```
@@ -586,7 +596,9 @@ Notes:
 - `KeepAlive.SuccessfulExit = false` means launchd restarts the binary
   only on crash (non-zero exit), not on clean SIGTERM shutdown.
 - `ThrottleInterval = 10` prevents restart storms.
-- `ProcessType = Background` reduces scheduling priority and power impact.
+- `ProcessType = Standard`. The provider does latency-sensitive GPU inference;
+  `Background` and `Adaptive` both pin it at background priority under launchd
+  and cost about 40% of decode throughput (v0.11.4).
 - Log rotation is handled by the binary (FR-C8), not launchd.
 
 **FR-C6. malibu-cli uninstall subcommand.**
@@ -1129,7 +1141,7 @@ Defined in FR-C5. Key properties:
 | RunAtLoad | true | Start on login |
 | KeepAlive.SuccessfulExit | false | Restart on crash, not on clean stop |
 | ThrottleInterval | 10 | Prevent crash-loop restart storms |
-| ProcessType | Background | Reduce scheduling priority |
+| ProcessType | Standard | Inference must not run at background priority (v0.11.4) |
 
 ### 6.4. GitHub Releases shape
 
