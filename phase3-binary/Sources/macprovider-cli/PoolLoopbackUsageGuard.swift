@@ -149,10 +149,14 @@ final class PinnedSnapshotTokenizer: @unchecked Sendable {
     }
 
     /// The token count of `text` (no special tokens), or nil when the
-    /// snapshot is no longer the verified one.
+    /// snapshot is not the verified one both before and after the encode
+    /// (the stamps are compared with the pinned ones each time), so a swap
+    /// during the encode never yields a count.
     func count(_ text: String) -> Int? {
         guard snapshot.isCurrent() else { return nil }
-        return encode(text)
+        let tokens = encode(text)
+        guard snapshot.isCurrent() else { return nil }
+        return tokens
     }
 
     /// Serializes encodes: swift-transformers does not document its

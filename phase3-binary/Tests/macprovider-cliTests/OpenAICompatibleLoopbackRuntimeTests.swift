@@ -809,6 +809,85 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         }
     }
 
+    // #1690 M9 R2 SECURITY: a streamed tool-call delta leaves a cancelled
+    // stream unattested even when per-chunk logprobs cover every chunk
+    // (Ollama always asks for them).
+    func testCancelAfterAStreamedToolCallIsUnattestedOnTheLogprobsPath() async throws {
+        let store = try makeStore()
+        let client = LogprobsStreamingLoopbackClient(promptTokens: 30, logprobs: true, toolCallAfter: 2)
+        let runtime = try makeRuntime(httpClient: client, store: store)
+        let request = try makeRequest(model: "ollama:gemma3:270m", maxTokens: 100_000)
+        let handle = try await runtime.acquireRequestHandle(request)
+        let cancel = CancelFlag()
+        let collector = ChunkCollector()
+        let result = try await runtime.stream(request, with: handle, shouldCancel: { cancel.isSet }) { chunk in
+            collector.record(chunk)
+            if collector.contentChunks.count >= 4 { cancel.set() }
+        }
+        XCTAssertFalse(result.content.isEmpty)
+        XCTAssertNotNil(result.toolCalls)
+        XCTAssertEqual(result.settlementDisposition, .usageUnattested)
+        XCTAssertEqual(result.loopbackPrefixCompletionTokens, [:])
+
+        // The accumulator itself: timings and logprobs tables with a tool call.
+        var logprobs = OpenAICompatibleStreamAccumulator()
+        for line in [
+            #"data: {"choices":[{"index":0,"delta":{"content":"ok"},"logprobs":{"content":[{"token":"ok","logprob":-1}]}}]}"#, "",
+            #"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"f","arguments":"{}"}}]},"logprobs":{"content":[{"token":"t","logprob":-1}]}}]}"#, "",
+        ] {
+            _ = try logprobs.consume(line: line)
+        }
+        XCTAssertEqual(logprobs.cancelledResult(upstreamPromptTokens: 12).settlementDisposition, .usageUnattested)
+        var timings = OpenAICompatibleStreamAccumulator()
+        for line in [
+            #"data: {"choices":[{"index":0,"delta":{"content":"ok"}}],"timings":"# + Self.llamaTimings(prompt: 3, cached: 0, predicted: 1) + "}", "",
+            #"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"f","arguments":"{}"}}]}}],"timings":"# + Self.llamaTimings(prompt: 3, cached: 0, predicted: 2) + "}", "",
+        ] {
+            _ = try timings.consume(line: line)
+        }
+        XCTAssertEqual(timings.cancelledResult().settlementDisposition, .usageUnattested)
+    }
+
+    // #1690 M9 R2 TOCTOU: the pinned tokenizer re-checks its snapshot after
+    // the encode; a swap during the encode yields no count.
+    func testPinnedTokenizerSwapDuringEncodeYieldsNoCount() throws {
+        let directory = try makeSnapshotDirectory("swap-encode")
+        let snapshot = try MLXSnapshotIdentity.compute(directory: directory)
+        let pinned = PinnedSnapshotTokenizer(snapshot: snapshot) { text in
+            try? Data(#"{"swapped":true}"#.utf8).write(to: directory.appendingPathComponent("tokenizer.json"))
+            return text.count
+        }
+        XCTAssertNil(pinned.count("abc"))
+    }
+
+    // #1690 M9 R2 TOCTOU: the runtime binding is re-checked after the
+    // prompt-count response; mlx_lm.server dropping the snapshot while it
+    // answers leaves the cancel unattested.
+    func testBindingChangeDuringThePromptCountLeavesTheCancelUnattested() async throws {
+        let snapshotDirectory = try makeSnapshotDirectory("mlxlm-count-swap")
+        let snapshot = try MLXSnapshotIdentity.compute(directory: snapshotDirectory)
+        let client = LogprobsStreamingLoopbackClient(promptTokens: 21, logprobs: false, listedModelPath: snapshot.directory.path, unlistOnCount: true)
+        let runtime = try OpenAICompatibleLoopbackRuntime(
+            servedModelRef: "mlxlm:snapshot",
+            origin: "http://127.0.0.1:9191",
+            runtimeSource: "mlxlm_loopback",
+            runtimeArtifactPath: snapshot.directory.path,
+            httpClient: client,
+            mlxSnapshot: snapshot,
+            pinRecountTokenizer: { pinned in PinnedSnapshotTokenizer(snapshot: pinned) { $0.count * 2 } }
+        )
+        let request = try makeRequest(model: "mlxlm:snapshot", maxTokens: 100_000)
+        let handle = try await runtime.acquireRequestHandle(request)
+        let cancel = CancelFlag()
+        let collector = ChunkCollector()
+        let result = try await runtime.stream(request, with: handle, shouldCancel: { cancel.isSet }) { chunk in
+            collector.record(chunk)
+            if collector.contentChunks.count >= 3 { cancel.set() }
+        }
+        XCTAssertFalse(client.countBodies.isEmpty, "the prompt count was asked")
+        XCTAssertEqual(result.settlementDisposition, .usageUnattested)
+    }
+
     // #1690 M9 review L8 / CODE HIGH / CODE MEDIUM: the actor-level
     // mlx_lm.server cancel counts the delivered content with the pinned
     // snapshot tokenizer (a fake encode here). It is unattested when the
@@ -1396,6 +1475,8 @@ private final class LogprobsStreamingLoopbackClient: BYOMLoopbackStreamingHTTPCl
     private let logprobs: Bool
     private let countDelaySeconds: Double
     private let rejectResponseFormat: Bool
+    private let unlistOnCount: Bool
+    private let toolCallAfter: Int?
     private var listedModelPath: String?
     private var _streamedBody: Data?
     private var _countBody: Data?
@@ -1404,12 +1485,18 @@ private final class LogprobsStreamingLoopbackClient: BYOMLoopbackStreamingHTTPCl
     /// `logprobs: false` streams plain chunks (mlx_lm.server, oMLX, LM Studio
     /// with tools). `countDelaySeconds` delays the prompt-count answer, and
     /// `rejectResponseFormat` answers 400 to a count body that carries one.
-    /// `listedModelPath` makes `GET /v1/models` list that path (mlx_lm.server).
-    init(promptTokens: Int?, logprobs: Bool = true, countDelaySeconds: Double = 0, rejectResponseFormat: Bool = false, listedModelPath: String? = nil) {
+    /// `listedModelPath` makes `GET /v1/models` list that path (mlx_lm.server);
+    /// `unlistOnCount` stops listing it while answering the prompt count.
+    /// `toolCallAfter` streams one tool-call delta (with logprobs when
+    /// `logprobs`) after that many content chunks.
+    init(promptTokens: Int?, logprobs: Bool = true, countDelaySeconds: Double = 0, rejectResponseFormat: Bool = false, listedModelPath: String? = nil,
+         unlistOnCount: Bool = false, toolCallAfter: Int? = nil) {
         self.promptTokens = promptTokens
         self.logprobs = logprobs
         self.countDelaySeconds = countDelaySeconds
         self.rejectResponseFormat = rejectResponseFormat
+        self.unlistOnCount = unlistOnCount
+        self.toolCallAfter = toolCallAfter
         self.listedModelPath = listedModelPath
     }
 
@@ -1434,6 +1521,7 @@ private final class LogprobsStreamingLoopbackClient: BYOMLoopbackStreamingHTTPCl
         if countDelaySeconds > 0 {
             try? await Task.sleep(nanoseconds: UInt64(countDelaySeconds * 1_000_000_000))
         }
+        if unlistOnCount { unlist() }
         if rejectResponseFormat,
            let object = try? JSONSerialization.jsonObject(with: jsonBody) as? [String: Any], object["response_format"] != nil {
             return BYOMHTTPResponse(statusCode: 400, headers: [], body: Data(#"{"error":{"message":"format"}}"#.utf8))
@@ -1454,9 +1542,18 @@ private final class LogprobsStreamingLoopbackClient: BYOMLoopbackStreamingHTTPCl
     ) async throws -> BYOMLoopbackLineResponse {
         lock.withLock { _streamedBody = jsonBody }
         let logprobs = self.logprobs
+        let toolCallAfter = self.toolCallAfter
         let lines = AsyncThrowingStream<String, Error> { continuation in
             let producer = Task {
+                var sent = 0
                 while !Task.isCancelled {
+                    if sent == toolCallAfter {
+                        continuation.yield(logprobs
+                            ? #"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"f","arguments":"{}"}}]},"logprobs":{"content":[{"token":"<tool_call>","logprob":-1}]}}]}"#
+                            : #"data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"f","arguments":"{}"}}]}}]}"#)
+                        continuation.yield("")
+                    }
+                    sent += 1
                     continuation.yield(logprobs
                         ? #"data: {"choices":[{"index":0,"delta":{"content":"x"},"logprobs":{"content":[{"token":"x","logprob":-1},{"token":"","logprob":-1}]}}]}"#
                         : #"data: {"choices":[{"index":0,"delta":{"content":"x"}}]}"#)

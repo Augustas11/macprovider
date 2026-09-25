@@ -610,12 +610,17 @@ struct OpenAICompatibleStreamAccumulator {
     /// (`upstreamPromptTokens`). `recountedCompletionTokens` is the
     /// `mlxlm_loopback` count of the whole received content with the served
     /// snapshot's tokenizer; it binds only that content (and the empty
-    /// prefix), and only when no tool call was streamed.
+    /// prefix). A streamed tool-call delta leaves the result unattested on
+    /// every count path (timings, `logprobs`, recount): the relay has no
+    /// delivered prefix for tool-call deltas (SPEC-015 item 7, R2 SECURITY).
     func cancelledResult(upstreamPromptTokens: Int? = nil, recountedCompletionTokens: Int? = nil) -> CompletionResult {
         let calls = toolCalls.map { ToolCall(id: $0.id, functionName: $0.name, arguments: $0.arguments) }
         var table = prefixCompletionTokens
         if let recountedCompletionTokens {
-            table = calls.isEmpty ? [0: 0, content.utf8.count: recountedCompletionTokens] : nil
+            table = [0: 0, content.utf8.count: recountedCompletionTokens]
+        }
+        if !calls.isEmpty {
+            table = nil
         }
         let prompt = prefixPromptTokens ?? upstreamPromptTokens
         let attested = table != nil && prompt != nil
@@ -1524,7 +1529,9 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         let deadline = Date().addingTimeInterval(Self.cancelUsageBudgetSeconds)
         let needsRecount = !stream.hasPerChunkCompletionCounts
         let pinned = needsRecount ? recountTokenizer : nil
-        if needsRecount && (pinned == nil || stream.streamedToolCall) {
+        // A streamed tool call is never attested, whatever the count source
+        // (SPEC-015 item 7; cancelledResult enforces it too).
+        if stream.streamedToolCall || (needsRecount && pinned == nil) {
             return stream.cancelledResult()
         }
         async let prompt: Int? = Self.bounded(until: deadline) { [self] () async -> Int? in
@@ -1545,19 +1552,29 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         return stream.cancelledResult(upstreamPromptTokens: promptTokens)
     }
 
-    /// The prompt count, only while the runtime is still bound to the
-    /// identity it served the request under (review CODE MEDIUM): the file or
-    /// snapshot is unchanged, mlx_lm.server / oMLX still list the snapshot,
-    /// and LM Studio still lists the bound model. Nil otherwise.
+    /// The prompt count, only while the runtime is bound to the identity it
+    /// served the request under both before the count request and after its
+    /// response (review CODE MEDIUM, R2 TOCTOU): the file or snapshot is
+    /// unchanged against the pinned stamps, mlx_lm.server / oMLX still list
+    /// the snapshot, and LM Studio still lists the bound model. Nil
+    /// otherwise, so a swap during the re-query never yields a count. The
+    /// caller's deadline bounds both checks with the request.
     private func boundPromptCount(_ request: ChatCompletionRequest) async -> Int? {
-        guard identityIsValid() else { return nil }
+        guard await servesBoundIdentity() else { return nil }
+        guard let count = await countUpstreamPromptTokens(request) else { return nil }
+        guard !Task.isCancelled, await servesBoundIdentity() else { return nil }
+        return count
+    }
+
+    private func servesBoundIdentity() async -> Bool {
+        guard identityIsValid() else { return false }
         do {
             try await requireMLXLMServesBoundSnapshot()
             _ = try await requireLMStudioServesBoundFile()
         } catch {
-            return nil
+            return false
         }
-        return await countUpstreamPromptTokens(request)
+        return identityIsValid()
     }
 
     /// The upstream's `usage.prompt_tokens` for this request, from a

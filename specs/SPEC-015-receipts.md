@@ -4542,15 +4542,19 @@ The provider decides per request, not from a per-runtime constant.
      hashed one after the load, and holds it in memory; a count is taken
      only while the snapshot is still current, so tokenizer files changed
      after admission never count. It binds only when the delivered content
-     is all the content received and no tool call was streamed.
+     is all the content received. A streamed tool-call delta leaves the
+     usage unattested on every completion-token source (timings,
+     `logprobs`, tokenizer count).
    - **Time bound.** The coordinator waits `CancelTerminalWait` (2 s) for
      the cancelled terminal frame. The prompt count call and the tokenizer
      count run concurrently within 1.25 s of the cancel, and a result that
-     is not ready then is dropped. Before the prompt count call the CLI
-     re-checks the runtime's binding (the file or snapshot unchanged,
-     mlx_lm.server / oMLX still listing the snapshot, LM Studio still
-     listing the bound model) inside the same budget, and a changed binding
-     leaves the usage unattested. A slow runtime therefore makes the
+     is not ready then is dropped. Before the prompt count call and again
+     after its response the CLI re-checks the runtime's binding (the file
+     or snapshot unchanged against its pinned stamps, mlx_lm.server / oMLX
+     still listing the snapshot, LM Studio still listing the bound model),
+     and the pinned tokenizer re-checks its snapshot before and after the
+     encode, all inside the same budget; a binding that changed at either
+     check leaves the usage unattested. A slow runtime therefore makes the
      cancel free; it never makes it late or wrong.
    In every other case (a runtime with none of these sources, a delivered
    length off a chunk boundary, unknown delivery, a streamed tool call, a
