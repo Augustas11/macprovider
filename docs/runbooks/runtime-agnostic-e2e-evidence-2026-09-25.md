@@ -66,13 +66,13 @@ buffer, 50 ms per line), `early_close` (non-stream, close after headers),
 
 ### Run 1 and Run 2 (enforce coordinator, pin off and on)
 
-| Engine x route | R1 pin0 | R1 pin1 | R2 pin0 | R2 pin1 | Failures (both runs) |
-|---|---|---|---|---|---|
-| native, pool A + global (32 req) | 202/236 | 207/227 | 199/234 | 202/236 | F1, F2, F3, F4, F5 (stuck holds 2/1/2/2), F6 |
-| llama.cpp, pool A + global refusals (21 req) | 133/146 | 133/146 | 133/146 | 133/146 | F1, F2, F3 |
-| mlx_lm.server, pool M + global refusals (21 req) | 130/140 | 129/138 | 130/140 | 131/142 | F1, F2, F3 |
-| Ollama, pool O + global refusals (21 req) | 133/146 | 133/146 | 133/146 | 133/146 | F1, F2, F3 |
-| Engine selection, 9 selectors x (global, A, M, O), per engine (36 req) | all PASS except F1 on served 200s | same | same | same | F1 only |
+| Engine x route | R1 pin0 | R1 pin1 | R2 pin0 | R2 pin1 | Failures (both runs) | Post-fix (`97b22eb3`) |
+|---|---|---|---|---|---|---|
+| native, pool A + global (32 req) | 202/236 | 207/227 | 199/234 | 202/236 | F1, F2, F3, F4, F5 (stuck holds 2/1/2/2), F6 | R1 213/240, 217/231; R2 217/240, 213/231. 0 stuck holds; F2, F4, F5 fixed. Left: F1, F3, F6 (expected), **F13 new** |
+| llama.cpp, pool A + global refusals (21 req) | 133/146 | 133/146 | 133/146 | 133/146 | F1, F2, F3 | pin1 139/148: F2 fixed; left F1, F3 |
+| mlx_lm.server, pool M + global refusals (21 req) | 130/140 | 129/138 | 130/140 | 131/142 | F1, F2, F3 | pin1 137/144: F2 fixed; left F1, F3 |
+| Ollama, pool O + global refusals (21 req) | 133/146 | 133/146 | 133/146 | 133/146 | F1, F2, F3 | pin1 139/148: F2 fixed; left F1, F3 |
+| Engine selection, 9 selectors x (global, A, M, O), per engine (36 req) | all PASS except F1 on served 200s | same | same | same | F1 only | not re-run |
 
 What passed everywhere:
 
@@ -110,7 +110,7 @@ What passed everywhere:
 | proxy `tamper_mac`, pin 0/1 | PASS | PASS | 2 holds each, reconciled; never debited from the tampered tuple |
 | proxy `tamper_outcome` ("refunded"), pin 0/1 | PASS | PASS | 2 holds each (MAC mismatch), reconciled to `verified`; never refunded from the forged tuple |
 | engine killed mid-stream (llama-server stopped) | PASS | PASS | R1b: stream cut by F2 first; R1 (non-stream attempt) 502 + null_error, no credit, refund |
-| receipt-key rotation mid-stream (native) | not staged (harness, see below) | **FAIL F9** | rotation accepted; every later request `receipt_omitted construction_failed` → quarantined, refunded |
+| receipt-key rotation mid-stream (native) | not staged (harness, see below) | **FAIL F9** | rotation accepted; every later request `receipt_omitted construction_failed` → quarantined, refunded. **Post-fix `PF-rotate`: PASS** (53/56, F1 only): the in-flight stream and all 6 later requests verified, 0 `receipt_omitted` |
 
 R1 `rotate`, R1b `rotate` and R1c `rotate` did not rotate. The harness looked
 for the control socket at the wrong path. An `--isolate-lifecycle` serve binds
@@ -127,7 +127,7 @@ nearest real case, rotation with a stream in flight, is F9.
 | Case | R1 | R2 | Notes |
 |---|---|---|---|
 | llama.cpp on enforce pool A | PASS | PASS | 12/12 503 `pool_settlement_mode_unsatisfied`, no dispatch |
-| native, pool NO (native-only, observe) + global (32 req) | 204/236, 203/228 | 204/236, 202/230 | F2, F5, F6, **F8** |
+| native, pool NO (native-only, observe) + global (32 req) | 204/236, 203/228 | 204/236, 202/230 | F2, F5, F6, **F8**. Post-fix R1: 216/240, 214/232; F2 gone; left F8 (documented), F6, one F4-by-design gap |
 | native on enforce pool A | 60/62 | 60/62 | 503 on pool A (correct); global F8 |
 
 An observe pool for an external engine can't be created: a v2 core with a
@@ -141,9 +141,9 @@ design. My first attempt, pool AO, returned `invalid_event` because of this
 | Pairing | Case | Result |
 |---|---|---|
 | A: new coordinator + origin/main gateway | native global + pool A (24 req) | 155/184, same F1/F2/F5/F6 pattern as the new gateway: **baseline holds** |
-| A | llama.cpp pool A (17 req) | 60/120: **all 12 pool 200s held forever**; the old gateway rejects `pool_operator_attested` finality ("not settlement-capable") while the provider credit is payable (**F10**) |
+| A | llama.cpp pool A (17 req) | 60/120: **all 12 pool 200s held forever**; the old gateway rejects `pool_operator_attested` finality ("not settlement-capable") while the provider credit is payable (**F10**). **Post-fix: PASS 85/85**: all 13 pool requests 503 before dispatch, 0 route snapshots, 0 ledger rows, 0 upstream calls, every reservation refunded, 0 held |
 | A | global refusals | old gateway ignores `X-MacProvider-Engine-Select` (503 `byom_non_settlement_unavailable`), expected |
-| B: origin/main coordinator + new gateway | coordinator start on the #1690 feed | **fails to start** (**F11**): `unknown field "file_path"`, then `runtime source "mlxlm_loopback"` |
+| B: origin/main coordinator + new gateway | coordinator start on the #1690 feed | **fails to start** (**F11**): `unknown field "file_path"`, then `runtime source "mlxlm_loopback"`. Post-fix (unstripped feed): still exits (expected; the fix is operational); step 4a flags it on a YAML config, see **F12** |
 | B | native global, feed stripped of #1690 fields and re-signed (11 req) | 74/84, F1/F2/F6 only: **baseline holds**; new gateway reads old coordinator's header finality |
 | B | any pool | not run: the old coordinator rejects the v2 policy core (`invalid_event`), by design |
 | B | llama.cpp | not run: the old coordinator cannot price a loopback candidate; fail closed, by design |
@@ -178,6 +178,151 @@ Lab re-run needed to confirm on real engines (same harness, a fresh `LAB`):
 `MIXA-llamacpp-pin0` (F10: expect 503 before dispatch, no holds, no credit);
 `MIXB-native-pin0` with the unstripped #1690 feed, only to confirm the step 4a
 check flags it (the fix is operational).
+
+## Post-fix re-run (bench `97b22eb3`, 2026-09-25)
+
+**Code:** `bench/1690-loopback-vs-native` at `97b22eb3` (F5 `065dbe2c`, F10
+`12bc0ed2`, F4 `550dc3c7`, F2 `de721874`, F11 docs `5c4a7c94`, F9
+`97b22eb3`, harness `39b51ce1`). **Harness:** `e2e/1690-postfix` on top of
+it. Every lab binary was rebuilt from that tree into a fresh
+`LAB=/Users/a1/lab-1690-m6/e2e-post`: coordinator, coordinator-cli, gateway,
+labtool, the lab CLI, and the lab native CLI with the `static_swift` patch
+(confirmed in both exported trees). Mixed pairings: fresh
+`e2e-post-mixA` / `e2e-post-mixB` with the same origin/main `d967bc6d`
+binaries. Driver: `LAB/postfix.sh`; log `LAB/postfix.out`.
+
+**Memory guard:** another agent's lab (`/Users/a1/lab-1690-f9`, F3 work) runs
+on the Studio. Before every engine start, the driver waited while any
+`lab-1690-f9` serve or engine process existed. It waited once, 06:31:27 →
+06:32:27Z. Memory stayed ≥ 98% free.
+
+That lab uses the same 127.0.0.1:191xx ports as this rig. Its stack started at
+06:57:05Z, 13 s after this re-run finished (06:56:52Z), so there was no overlap.
+Two such rigs can't run at once, and a stack bound on a port makes the other
+rig's `rig.sh up` fail instead of mixing traffic.
+
+**Live provider:** `:8080` (now PID 84503, rolled back to 1.8.192 by another
+session) was up before and after, and was never signalled.
+
+### Per invariant (post-fix, pass/total)
+
+| Label | no_hold | debit_eq_settled | credit_has_evidence | credit_implies_debit | no_undelivered_bill | delivered_not_free | buyer_usage_eq_debit | stream_complete |
+|---|---|---|---|---|---|---|---|---|
+| R1-native-pin0 | 32/32 | 31/32 | 32/32 | 32/32 | 32/32 | 21/28 | 10/26 | 23/26 |
+| R1-native-pin1 | 32/32 | 31/32 | 32/32 | 32/32 | 32/32 | 23/25 | 12/23 | 23/23 |
+| R2-native-pin0 | 32/32 | 32/32 | 32/32 | 32/32 | 32/32 | 22/28 | 12/26 | 23/26 |
+| R2-native-pin1 | 32/32 | 30/32 | 32/32 | 32/32 | 32/32 | 22/25 | 10/23 | 23/23 |
+| R1-llamacpp-pin1 | 21/21 | 21/21 | 21/21 | 21/21 | 21/21 | 14/15 | 6/14 | 14/14 |
+| R1-mlxlm-pin1 | 21/21 | 21/21 | 21/21 | 21/21 | 21/21 | 12/13 | 6/12 | 14/14 |
+| R1-ollama-pin1 | 21/21 | 21/21 | 21/21 | 21/21 | 21/21 | 14/15 | 6/14 | 14/14 |
+| R1-observe-native-pin0 | 32/32 | 14/32 | 32/32 | 32/32 | 32/32 | 28/28 | 23/26 | 23/26 |
+| R1-observe-native-pin1 | 32/32 | 14/32 | 32/32 | 32/32 | 32/32 | 25/25 | 23/23 | 24/24 |
+| PF-rotate (native) | 7/7 | 7/7 | 7/7 | 7/7 | 7/7 | 7/7 | 4/7 | 7/7 |
+| MIXA-llamacpp-pin0 | 17/17 | 17/17 | 17/17 | 17/17 | 17/17 | - | - | - |
+
+`no_hold`, `credit_has_evidence`, `credit_implies_debit` and
+`no_undelivered_bill` pass on every request of every post-fix label (0 stuck
+holds; pre-fix native left 1-2 per label). Every failed check is classified
+(`summarize.py --lab .../e2e-post`, 0 unclassified):
+
+| Label | Failed checks by finding |
+|---|---|
+| R1-native-pin0 | F1 x10, F6 x11, F3 x1, F5-fixed x2, F4-fixed x1, **F13 x2** |
+| R1-native-pin1 | F1 x10, F5-fixed x2, F4-fixed x1, **F13 x1** |
+| R2-native-pin0 | F1 x10, F6 x9, F3 x1, F5-fixed x2, **F13 x1** |
+| R2-native-pin1 | F1 x10, F6 x2, F5-fixed x2, F4-fixed x2, **F13 x2** |
+| R1-llamacpp-pin1 / R1-mlxlm-pin1 / R1-ollama-pin1 | F1 x8 / x6 / x8, F3 x1 each |
+| R1-observe-native-pin0 / pin1 | F8 x18 / x17, F6 x6 / 0, F4-fixed 0 / x1 |
+| PF-rotate | F1 x3 |
+| MIXA-llamacpp-pin0 | none |
+
+`F4-fixed` and `F5-fixed` are the fixes' designed outcomes, which the pre-fix
+invariants still count as failures:
+
+- **F4-fixed:** a disconnected buyer is debited only what reached it (13-16
+  completion tokens), while finality and the provider credit keep the
+  gateway-delivered count (411-700). That is the designed gap, "billed to
+  neither party", so `debit_eq_settled` reports it.
+- **F5-fixed:** closes `zero_settled` / `verified_receipt_credit_quarantined`;
+  the buyer is refunded and the credit stays quarantined, so
+  `delivered_not_free` reports it.
+
+### Per finding
+
+| Finding | Post-fix result |
+|---|---|
+| F1 | Unchanged (carried): every served 200 with a templated or tool prompt |
+| F2 | **Fixed.** Every `long/s/normal` and `long/s/slow` on llama.cpp, mlx_lm, Ollama and native ran to its finish (up to 700 content events), no `stream_output_exceeded` in any label |
+| F3 | Unchanged (Swift fix pending): loopback `disconnect` → `missing_receipt_deadline_elapsed`, refunded. Also seen on native pool A disconnects (R1/R2 pin0, pool NO in observe): same receipt-less cancel shape |
+| F4 | **Fixed.** 5 native disconnects settled `verified`: buyer debited 13-16 completion tokens (what it received), provider credited the gateway-delivered prefix. 0 `no_undelivered_bill` failures |
+| F5 | **Fixed.** Native non-streaming tool calls with the quarantined credit close `zero_settled` / `verified_receipt_credit_quarantined`, refunded, 0 holds (was: finality 500, held forever) |
+| F6 | Unchanged (carried): native streaming tool calls `stream_malformed` / `output_hash_mismatch`; the breaker still trips (502x3 in pin1 labels) |
+| F8 | Unchanged semantics (documented); its F2 component is gone: truncated observe streams billed 0 no longer occur |
+| F9 | **Fixed** (`PF-rotate`): `rotate-key` accepted with a slow stream in flight; that stream and 6 later global and pool-A requests all `verified` with valid receipts; 0 `receipt_omitted` in the serve log |
+| F10 | **Fixed** (`MIXA-llamacpp-pin0`, 85/85): new coordinator + origin/main gateway refuses all 13 pool requests with 503 before dispatch (0 snapshots, 0 ledger rows, 0 upstream calls, 0 holds) |
+| F11 | Operational fix confirmed: origin/main coordinator on the unstripped feed still exits (`unknown field "file_path"`), and step 4a flags the feed on a YAML config. But see F12 |
+
+### New findings from the post-fix run
+
+#### E2E-F12 (LOW, runbook): the step 4a feed check fails open on some config forms
+
+Runbook §9 step 4a extracts the feed path with
+`awk '/catalog_artifacts_path:/ {print $2}'`:
+
+- **Plain YAML** (`catalog_artifacts_path: /path`, Pearl's form): prints the
+  path and a count of 1 for the lab #1690 feed. Correct.
+- **JSON config** (the lab's): the key is followed by `":`, so nothing
+  matches, and the check prints `feed: none`. The runbook reads that as "go
+  to the coordinator rollback", which is the failure F11 describes.
+- **Quoted YAML value** (`catalog_artifacts_path: "/path"`): awk keeps the
+  quotes, grep fails with `No such file or directory` and prints no count
+  (exit 2).
+
+Repro: `LAB/check4a.sh LAB` (renders the lab config both ways; quoted form by
+hand). Suggested fix: strip quotes, treat a missing key as an error (not
+`none`), and compare against the path the coordinator logs at startup.
+
+#### E2E-F13 (MEDIUM, code, native CLI; newly visible now that F2 no longer cuts long streams): a token boundary inside a multi-byte UTF-8 character → `output_hash_mismatch`, delivered output free
+
+- **Repro:** native, `long` stream (`max_tokens` 700) whose output runs into
+  non-Latin text.
+  - **Control probe:** `scripts/lab/1690-e2e/probe_hash.py 12` sends 12 long
+    streams on the global route, no tool calls and no downgrade, recording
+    only flags about the delivered text. Log: `LAB/probe.out`.
+  - 2 of 12 settled `quarantined` / `output_hash_mismatch`: the only 2 whose
+    delivered text contained U+FFFD (1 each; 207 and 433 non-ASCII
+    characters).
+  - All 10 streams without U+FFFD verified.
+  - In the matrix: 6 of 18 native global long streams (6 labels x normal,
+    disconnect, slow) plus 3 pre-fix, where F2 had cut the streams first.
+- **Effect:**
+  - The buyer receives a complete 200 stream with `finish_reason: length`,
+    containing a replacement character.
+  - The verdict quarantines the credit and the buyer is refunded, so the
+    output is free and the provider unpaid.
+  - The coordinator's `delivered_output_bytes` equals the bytes the buyer
+    got (661 / 1363), so the coordinator hashed what it delivered. The
+    provider's receipt signed a different output hash.
+- **Suspected root cause** (not traced to the byte): the native streaming path
+  emits per-token text segments through
+  `MLXLMCommon.NaiveStreamingDetokenizer` (`ModelRuntime.swift:4981`). A
+  token that ends inside a multi-byte UTF-8 character yields a segment with
+  U+FFFD, which is what reaches the buyer. The receipt's output hash is built
+  from a different rendering of the text (e.g. the full decode, where the
+  character completes).
+- **Fix direction:** hold back an incomplete UTF-8 tail in the streaming
+  detokenizer, and have the receipt hash the exact delivered frames.
+- **Not the cause:** the buffered-downgrade path. F6's `recordMalformed`
+  (`streaming_downgrade.go:66-77`) still downgrades native for 10 minutes
+  after 3 malformed tool streams, but the probe reproduces the mismatch
+  without it.
+
+### Not re-run
+
+Engine-selection labels (no fix touched engine selection), R1 `*-pin0` for
+the external engines, and the proxy tamper/strip faults (F7 unchanged by
+design; no finality-MAC code changed) were not re-run. Their pre-fix results
+stand.
 
 ## Findings
 
