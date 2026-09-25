@@ -67,15 +67,24 @@ func settlementFinalityMACValues(h http.Header) []string {
 // trailers alone, and only with a valid MAC. Missing values, a missing MAC or
 // a bad MAC hold as missing_settlement_finality_trailer, never a local debit.
 // Without a declaration (an older coordinator, or no route snapshot) the
-// headers stand as before.
-func coordinatorNonStreamingSettlementFinality(resp *http.Response, key, accountID, requestID string) coordinatorSettlementFinality {
+// headers stand as before, unless requireTrailers (the
+// coordinator.require_settlement_trailers pin) is set: then a response
+// stripped of its declaration holds too, so an on-path strip cannot
+// downgrade the gateway to header or legacy settlement.
+func coordinatorNonStreamingSettlementFinality(resp *http.Response, key, accountID, requestID string, requireTrailers bool) coordinatorSettlementFinality {
+	missing := coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: missingSettlementFinalityTrailer}
 	if resp == nil {
+		if requireTrailers {
+			return missing
+		}
 		return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
 	}
 	if !hasSettlementFinalityTrailerDeclaration(resp) {
+		if requireTrailers {
+			return missing
+		}
 		return coordinatorSettlementFinalityFromHeaders(resp.Header)
 	}
-	missing := coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: missingSettlementFinalityTrailer}
 	if !hasAnySettlementFinalityHeader(resp.Trailer) {
 		return missing
 	}

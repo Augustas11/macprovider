@@ -22,6 +22,11 @@ coordinator:
   # from operator credentials. Mint with: openssl rand -hex 32.
   service_token: env:COORDINATOR_SERVICE_TOKEN
   poolz_poll_interval_s: 10
+  # SPEC-022 R-12.8: hold (never settle from headers) any coordinator 200
+  # that declares no settlement trailers. Enable only after the negotiating
+  # coordinator and gateway are both deployed; disable before a coordinator
+  # rollback. See docs/runbooks/trusted-pool-production-launch.md section 9.
+  require_settlement_trailers: false
 
 storage:
   driver: sqlite

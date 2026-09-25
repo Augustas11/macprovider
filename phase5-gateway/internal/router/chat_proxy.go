@@ -1051,7 +1051,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	// the finality of a 200 arrives as MAC'd trailers, read with the body
 	// above. Missing or unauthenticated trailer finality holds; it never
 	// falls back to a local debit.
-	finality := coordinatorNonStreamingSettlementFinality(resp, s.cfg.Coordinator.UpstreamCoordinatorBearer(), subject.AccountID, requestID(r))
+	finality := coordinatorNonStreamingSettlementFinality(resp, s.cfg.Coordinator.UpstreamCoordinatorBearer(), subject.AccountID, requestID(r), s.cfg.Coordinator.RequireSettlementTrailers)
 	settleWithFinality := func(prompt, completion int64, source, outcome string) bool {
 		if finality.Reason == missingSettlementFinalityTrailer && s.settleMissingFinalityTrailerAsObserve(r, subject, prompt, completion, maxUsageTokens, source, outcome, window, resp) {
 			return true
@@ -1326,7 +1326,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		// This is a gateway-authored terminal SSE error. The gateway cancels
 		// the coordinator stream before EOF, so declared settlement trailers
 		// may be unavailable and must not rewrite the buyer-visible outcome.
-		if hasSettlementFinalityTrailerDeclaration(resp) || coordinatorSettlementFinalityFromHeaders(resp.Header).Action != settlementFinalityLegacy {
+		if s.cfg.Coordinator.RequireSettlementTrailers || hasSettlementFinalityTrailerDeclaration(resp) || coordinatorSettlementFinalityFromHeaders(resp.Header).Action != settlementFinalityLegacy {
 			holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if !s.boundStreamingSettlementHoldWithCandidate(holdCtx, r, subject, coordinatorSettlementFinality{
@@ -1354,7 +1354,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		if estimateTokensFromBytes(emitted) > maxStreamingCompletionTokens(maxTokens) {
 			outcome = "stream_output_exceeded"
 		}
-		if hasSettlementFinalityTrailerDeclaration(resp) || coordinatorSettlementFinalityFromHeaders(resp.Header).Action != settlementFinalityLegacy {
+		if s.cfg.Coordinator.RequireSettlementTrailers || hasSettlementFinalityTrailerDeclaration(resp) || coordinatorSettlementFinalityFromHeaders(resp.Header).Action != settlementFinalityLegacy {
 			holdCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if !s.boundStreamingSettlementHoldWithCandidate(holdCtx, r, subject, coordinatorSettlementFinality{
@@ -2476,7 +2476,7 @@ func (s *Server) settleBeforeResponseWithFinality(w http.ResponseWriter, r *http
 }
 
 func (s *Server) settleStreamingAfterCommitWithCoordinatorFinality(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string, resp *http.Response) {
-	finality := coordinatorStreamingSettlementFinality(resp)
+	finality := coordinatorStreamingSettlementFinality(resp, s.cfg.Coordinator.RequireSettlementTrailers)
 	if finality.Reason == missingSettlementFinalityTrailer {
 		fallbackOutcome := outcome
 		if fallbackOutcome == "ok" {
@@ -2769,15 +2769,22 @@ func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Reque
 	return true
 }
 
-func coordinatorStreamingSettlementFinality(resp *http.Response) coordinatorSettlementFinality {
+// coordinatorStreamingSettlementFinality reads a streaming 200's finality.
+// requireTrailers (coordinator.require_settlement_trailers) holds a stream
+// that declared no trailers instead of reading header or legacy finality.
+func coordinatorStreamingSettlementFinality(resp *http.Response, requireTrailers bool) coordinatorSettlementFinality {
+	missing := coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: missingSettlementFinalityTrailer}
 	if resp == nil {
+		if requireTrailers {
+			return missing
+		}
 		return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
 	}
 	if hasAnySettlementFinalityHeader(resp.Trailer) {
 		return coordinatorSettlementFinalityFromHeaders(resp.Trailer)
 	}
-	if hasSettlementFinalityTrailerDeclaration(resp) {
-		return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: missingSettlementFinalityTrailer}
+	if requireTrailers || hasSettlementFinalityTrailerDeclaration(resp) {
+		return missing
 	}
 	return coordinatorSettlementFinalityFromHeaders(resp.Header)
 }

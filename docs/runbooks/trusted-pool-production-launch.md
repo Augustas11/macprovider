@@ -244,6 +244,16 @@ allowlists):
    If a proxy is ever put on that hop and drops trailers, the gateway holds
    those settlements as `missing_settlement_finality_trailer` (fail closed)
    instead of debiting; watch for that log reason after the deploy.
+2a. Once the step 1 coordinator and the step 2 gateway are both confirmed
+   (`/healthz` versions, updater transactions committed), set
+   `coordinator.require_settlement_trailers: true` in the gateway config and
+   restart the gateway. From then on the gateway holds any coordinator 200,
+   streaming or non-streaming, that declares no settlement trailers as
+   `missing_settlement_finality_trailer` instead of settling it from headers
+   or legacy mode, so stripping the whole trailer declaration on the hop can
+   no longer downgrade settlement. A 200 for an attempt without a route
+   snapshot also declares no trailers and is held for the reconciler; watch
+   the hold count after the restart.
 3. Ship the provider CLI that signs pool-authorized loopback receipts
    (SPEC-015 0.4.10).
 4. Only then accept a v2 policy core with a non-empty `runtime_allowlist`.
@@ -264,6 +274,11 @@ coordinator, fails closed: no pool-authorized receipt is signed and no
 provider credit is created. A coordinator from this release on also refuses a database whose
 `billing_compat_floor` is above its own contract, so a later downgrade onto a
 binary that cannot read newer settlement rows fails closed at startup.
+
+Before any rollback, set `coordinator.require_settlement_trailers: false`
+and restart the gateway: a coordinator older than this release declares no
+trailers, and with the pin on every one of its 200s would be held. Turn the
+pin off before rolling the coordinator back.
 
 Rollback runs in the reverse order: withdraw v2 allowlists (a policy core with
 an empty `runtime_allowlist`), then the CLI, then the gateway, then the

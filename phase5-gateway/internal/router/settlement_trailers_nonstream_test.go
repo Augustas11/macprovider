@@ -51,23 +51,23 @@ func TestCoordinatorNonStreamingSettlementFinality(t *testing.T) {
 	const key, account, reqID = "service-token", "acct_1", "req-1"
 
 	// No declaration (an older coordinator, or no route snapshot): headers.
-	if got := coordinatorNonStreamingSettlementFinality(&http.Response{Header: http.Header{}}, key, account, reqID); got.Action != settlementFinalityLegacy {
+	if got := coordinatorNonStreamingSettlementFinality(&http.Response{Header: http.Header{}}, key, account, reqID, false); got.Action != settlementFinalityLegacy {
 		t.Fatalf("no finality anywhere: %+v, want legacy", got)
 	}
-	if got := coordinatorNonStreamingSettlementFinality(&http.Response{Header: quarantinedFinality()}, key, account, reqID); got.Action != settlementFinalityRefund {
+	if got := coordinatorNonStreamingSettlementFinality(&http.Response{Header: quarantinedFinality()}, key, account, reqID, false); got.Action != settlementFinalityRefund {
 		t.Fatalf("header finality from an older coordinator: %+v, want refund", got)
 	}
 
 	// Declared and present with a valid MAC.
 	signed := quarantinedFinality()
 	signFinality(key, account, reqID, signed)
-	if got := coordinatorNonStreamingSettlementFinality(declaredTrailerResponse(signed), key, account, reqID); got.Action != settlementFinalityRefund || got.Outcome != "quarantined" {
+	if got := coordinatorNonStreamingSettlementFinality(declaredTrailerResponse(signed), key, account, reqID, false); got.Action != settlementFinalityRefund || got.Outcome != "quarantined" {
 		t.Fatalf("signed trailer finality: %+v, want the quarantined refund", got)
 	}
 
 	hold := func(name string, resp *http.Response, key string) {
 		t.Helper()
-		got := coordinatorNonStreamingSettlementFinality(resp, key, account, reqID)
+		got := coordinatorNonStreamingSettlementFinality(resp, key, account, reqID, false)
 		if got.Action != settlementFinalityHold || got.Reason != missingSettlementFinalityTrailer {
 			t.Fatalf("%s: %+v, want a missing_settlement_finality_trailer hold", name, got)
 		}
@@ -192,6 +192,118 @@ func TestNonStreamingTrailerFinalityThroughChatPath(t *testing.T) {
 			}
 			if advertised != "1" {
 				t.Fatalf("capability header=%q, want the gateway's own 1", advertised)
+			}
+			tc.check(t, gatewaySettlementSnapshot(t, dbPath, accountID))
+		})
+	}
+}
+
+// The coordinator.require_settlement_trailers pin: a 200 whose settlement
+// Trailer declaration was stripped holds instead of settling from headers or
+// legacy mode, on the non-streaming and the streaming path alike.
+func TestRequireSettlementTrailersPinFinality(t *testing.T) {
+	const key, account, reqID = "service-token", "acct_1", "req-1"
+	isMissingHold := func(got coordinatorSettlementFinality) bool {
+		return got.Action == settlementFinalityHold && got.Reason == missingSettlementFinalityTrailer
+	}
+	stripped := &http.Response{Header: quarantinedFinality()}
+	if got := coordinatorNonStreamingSettlementFinality(stripped, key, account, reqID, true); !isMissingHold(got) {
+		t.Fatalf("pin on, declaration stripped, header tuple present: %+v, want a hold", got)
+	}
+	if got := coordinatorNonStreamingSettlementFinality(&http.Response{Header: http.Header{}}, key, account, reqID, true); !isMissingHold(got) {
+		t.Fatalf("pin on, no finality at all: %+v, want a hold, not legacy", got)
+	}
+	signed := quarantinedFinality()
+	signFinality(key, account, reqID, signed)
+	if got := coordinatorNonStreamingSettlementFinality(declaredTrailerResponse(signed), key, account, reqID, true); got.Action != settlementFinalityRefund {
+		t.Fatalf("pin on, signed trailers: %+v, want the refund", got)
+	}
+	if got := coordinatorNonStreamingSettlementFinality(stripped, key, account, reqID, false); got.Action != settlementFinalityRefund {
+		t.Fatalf("pin off, header finality: %+v, want the header refund", got)
+	}
+
+	if got := coordinatorStreamingSettlementFinality(&http.Response{Header: quarantinedFinality()}, true); !isMissingHold(got) {
+		t.Fatalf("streaming, pin on, no declaration: %+v, want a hold", got)
+	}
+	if got := coordinatorStreamingSettlementFinality(&http.Response{Header: http.Header{}}, true); !isMissingHold(got) {
+		t.Fatalf("streaming, pin on, no finality: %+v, want a hold, not legacy", got)
+	}
+	if got := coordinatorStreamingSettlementFinality(&http.Response{Header: http.Header{}, Trailer: quarantinedFinality()}, true); got.Action != settlementFinalityRefund {
+		t.Fatalf("streaming, pin on, trailer finality: %+v, want the refund", got)
+	}
+	if got := coordinatorStreamingSettlementFinality(&http.Response{Header: http.Header{}}, false); got.Action != settlementFinalityLegacy {
+		t.Fatalf("streaming, pin off, no finality: %+v, want legacy", got)
+	}
+}
+
+func TestRequireSettlementTrailersPinThroughChatPath(t *testing.T) {
+	const serviceToken = "service-token"
+	const completion = `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`
+	const sse = "data: {\"id\":\"c\",\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":4,\"total_tokens\":7},\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n"
+	strippedNonStream := func(r *http.Request) *http.Response {
+		h := quarantinedFinality()
+		h.Set("Content-Type", "application/json")
+		return responseWithBody(http.StatusOK, h, completion)
+	}
+	signedNonStream := func(r *http.Request) *http.Response {
+		trailer := quarantinedFinality()
+		signFinality(serviceToken, r.Header.Get("X-MacProvider-Account"), r.Header.Get("X-Request-ID"), trailer)
+		resp := declaredTrailerResponse(trailer)
+		resp.StatusCode, resp.Body = http.StatusOK, io.NopCloser(strings.NewReader(completion))
+		return resp
+	}
+	strippedStream := func(r *http.Request) *http.Response {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": {"text/event-stream; charset=utf-8"}}, sse)
+	}
+	held := func(t *testing.T, got gatewaySettlementState) {
+		if got.usageRows != 0 || got.settledRows != 0 || got.refundedRows != 0 || got.activeRows != 1 {
+			t.Fatalf("snapshot=%+v, want a held reservation", got)
+		}
+	}
+	cases := []struct {
+		name    string
+		pin     bool
+		stream  bool
+		respond func(r *http.Request) *http.Response
+		check   func(t *testing.T, got gatewaySettlementState)
+	}{
+		{name: "non-streaming, pin on, declaration stripped", pin: true, respond: strippedNonStream, check: held},
+		{name: "non-streaming, pin on, signed trailers", pin: true, respond: signedNonStream, check: func(t *testing.T, got gatewaySettlementState) {
+			if got.usageRows != 0 || got.refundedRows != 1 {
+				t.Fatalf("snapshot=%+v, want the signed quarantine refund", got)
+			}
+		}},
+		{name: "non-streaming, pin off, header finality", respond: strippedNonStream, check: func(t *testing.T, got gatewaySettlementState) {
+			if got.usageRows != 0 || got.refundedRows != 1 {
+				t.Fatalf("snapshot=%+v, want the header quarantine refund", got)
+			}
+		}},
+		{name: "streaming, pin on, declaration stripped", pin: true, stream: true, respond: strippedStream, check: held},
+		{name: "streaming, pin off, no finality", stream: true, respond: strippedStream, check: func(t *testing.T, got gatewaySettlementState) {
+			if got.usageRows != 1 || got.settledRows != 1 {
+				t.Fatalf("snapshot=%+v, want the legacy local debit", got)
+			}
+		}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return tc.respond(r), nil
+			})}
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+				cfg.Coordinator.ServiceToken = serviceToken
+				cfg.Coordinator.RequireSettlementTrailers = tc.pin
+			}, WithHTTPClient(client))
+			accountID := "acct_trailer_pin_" + string(rune('a'+i))
+			fullKey := createAccountAndKey(t, store, cfg, accountID)
+			body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+			if tc.stream {
+				body = `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+			}
+			resp := postChat(t, h, fullKey, body, nil)
+			if resp.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 			}
 			tc.check(t, gatewaySettlementSnapshot(t, dbPath, accountID))
 		})

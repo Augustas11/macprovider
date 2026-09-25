@@ -28,7 +28,10 @@ declared trailer finality that is missing, unsigned, or fails the MAC as
 `missing_settlement_finality_trailer`; it never debits it locally. A failed
 post-delivery record sends an explicit open `pending` tuple. A caller that did
 not advertise keeps the pre-v0.2.2 order (record before the write, finality in
-headers), so each mixed gateway/coordinator version pairing stays safe.
+headers), so each mixed gateway/coordinator version pairing stays safe. The
+gateway pin `coordinator.require_settlement_trailers` (default off), set once
+both sides are deployed, also holds a 200 whose trailer declaration was
+stripped, closing the strip-everything downgrade.
 
 ### v0.2.1
 
@@ -1059,7 +1062,12 @@ the pool attempts recorded before a downgrade.
   as before and it never sees trailer-only finality it would ignore. A v0.2.2
   gateway reads trailer finality only when the response declares it; an older
   coordinator declares none and sends header finality, which the gateway still
-  reads. In trailer mode the gateway accepts the tuple only with a valid MAC
+  reads. Once both are deployed, the gateway pin
+  `coordinator.require_settlement_trailers: true` holds any coordinator 200
+  (streaming or non-streaming) that declares no settlement trailers as
+  `missing_settlement_finality_trailer`, so stripping the whole declaration
+  cannot downgrade settlement to header or legacy mode; the pin MUST be off
+  before a coordinator rollback. In trailer mode the gateway accepts the tuple only with a valid MAC
   trailer bound to the account and request id it sent, and holds a missing,
   unsigned, tampered, or replayed tuple as `missing_settlement_finality_trailer`
   (resolved by the reconciler; an observe-mode attempt resolves through the
