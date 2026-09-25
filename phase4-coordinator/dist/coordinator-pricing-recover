@@ -32,10 +32,15 @@ from then on no coordinator without per-generation wholesale pricing may be
 installed (deploy-pearl-vps.sh, coordinator-deploy-recover.sh and the Pearl
 updater refuse one).
 
-State S = (base yaml sha, overlay presence+sha, `current` target, window
-bytes|absent, digest set of the `current` release). Restore order is always
-yaml, then `current`, then window. Every yaml write is same-directory temp +
-file fsync + rename + parent fsync with explicit owner/group/mode.
+State S = (base yaml sha + owner:group:mode, overlay presence+sha, `current`
+target, window bytes|absent + owner:group:mode, digest set and owner:group:mode
+of the `current` release's files). Restore order is always yaml, then
+`current`, then window. Every yaml write is same-directory temp + file fsync +
+rename + parent fsync with explicit owner/group/mode.
+
+A full verify-directory of a terminal side (operator recovery) uses the Tier-2
+trust root the transaction was gated with: `begin` copies it into the journal
+and pins its sha256, so recovery never depends on the operator's checkout.
 
 Standard library only; run as `python3 -I`. Exit codes: 0 ok / nothing to do,
 1 usage or refusal before any change, 3 state differs from the journal
@@ -110,6 +115,12 @@ ROLLBACK_NAME = ".coordinator-deploy-rollback"
 # Pricing runtime floor (#1693): present once any pricing transaction began.
 FLOOR_NAME = ".pricing-runtime-floor"
 FLOOR_TMP_PREFIX = FLOOR_NAME + ".tmp."
+# The Tier-2 trust root (tier2.catalog_public_key) the lane's gate used, copied
+# into the journal at begin and sha-pinned (#1693 E2 V4).
+TRUST_ROOT_NAME = "tier2-trust-root.yaml"
+# The candidate window's owner/mode: scripts/autotune_window.py, its single
+# writer, installs it REQUIRED_UID-owned 0640 (group: the service group).
+CANDIDATE_WINDOW_MODE = 0o640
 HEX40 = re.compile(r"[0-9a-f]{40}")
 # A coordinator supports per-generation wholesale pricing and the pricing lane
 # when its offline validator accepts --expect-base-equivalent: with nonexistent
@@ -503,10 +514,20 @@ def load_journal() -> Journal | None:
 # ---------------------------------------------------------------------------
 # State S.
 # ---------------------------------------------------------------------------
+def meta_of(info: os.stat_result | None) -> str | None:
+    """owner:group:mode of a file, None when absent."""
+    return None if info is None else f"{info.st_uid}:{info.st_gid}:{stat.S_IMODE(info.st_mode):04o}"
+
+
+def meta_str(uid: int, gid: int, mode: int) -> str:
+    return f"{uid}:{gid}:{mode:04o}"
+
+
 def disk_state() -> dict:
     root_fd = open_dir(ROOT)
     try:
         yaml = read_at(root_fd, CONFIG_NAME)
+        yaml_meta = meta_of(stat_at(root_fd, CONFIG_NAME)) if yaml is not None else None
     finally:
         os.close(root_fd)
     overlay = None
@@ -522,33 +543,116 @@ def disk_state() -> dict:
     try:
         current = read_current(at_fd)
         window = read_at(at_fd, ".previous-target", 64 * 1024)
+        window_meta = meta_of(stat_at(at_fd, ".previous-target")) if window is not None else None
     finally:
         os.close(at_fd)
     return {
         "yaml_sha256": None if yaml is None else sha256(yaml),
+        "yaml_meta": yaml_meta,
         "overlay": {"present": overlay is not None, "sha256": "" if overlay is None else sha256(overlay)},
         "current": current,
         "window_sha256": None if window is None else sha256(window),
+        "window_meta": window_meta,
     }
+
+
+def prior_yaml_meta(j: Journal) -> str:
+    p = j.txn["prior"]
+    return meta_str(p["yaml_uid"], p["yaml_gid"], p["yaml_mode"])
+
+
+def prior_window_meta(j: Journal) -> str | None:
+    w = j.txn["prior"]["window"]
+    return meta_str(w["uid"], w["gid"], w["mode"]) if w["present"] else None
+
+
+def candidate_window_meta_ok(value: str | None) -> bool:
+    """The candidate window is the window helper's: REQUIRED_UID-owned 0640."""
+    if value is None:
+        return False
+    uid, _, mode = value.split(":")
+    return int(uid) == REQUIRED_UID and int(mode, 8) == CANDIDATE_WINDOW_MODE
 
 
 def side_state(j: Journal, side: str) -> dict:
     s = j.txn[side]
-    return {"yaml_sha256": s["yaml_sha256"], "overlay": j.txn["overlay"], "current": s["current"],
-            "window_sha256": s["window"]["sha256"] if s["window"]["present"] else None}
+    # install-candidate writes the candidate yaml with the prior's owner/mode.
+    return {"yaml_sha256": s["yaml_sha256"], "yaml_meta": prior_yaml_meta(j), "overlay": j.txn["overlay"],
+            "current": s["current"], "window_sha256": s["window"]["sha256"] if s["window"]["present"] else None}
 
 
-def check_state(j: Journal, side: str, verifier: str | None = None) -> None:
+def release_meta(target: str) -> dict:
+    """owner:group:mode of every regular file in the release directory (flat)."""
+    if not RELEASE_REF.fullmatch(target):
+        raise Mismatch(f"malformed release reference {target!r}")
+    out = {}
+    fd = open_dir(os.path.join(AUTOTUNE, target))
+    try:
+        for name in sorted(os.listdir(fd)):
+            info = stat_at(fd, name)
+            if info is not None and stat.S_ISREG(info.st_mode):
+                out[name] = meta_of(info)
+    finally:
+        os.close(fd)
+    return out
+
+
+def release_matches(j: Journal, side: str, target: str) -> str | None:
+    """None when the release's files hash (and, when the journal recorded it,
+    carry the owner/mode) as the journal's `side` recorded; else what differs."""
+    if release_digests(target) != j.txn[side]["release_digests"]:
+        return "release digest set of " + target
+    if "release_meta" in j.txn[side] and release_meta(target) != j.txn[side]["release_meta"]:
+        return "release owner/mode set of " + target
+    return None
+
+
+def trust_root_path(j: Journal, fallback: tuple[str, str] | None) -> str:
+    """The Tier-2 trust root a full verify-directory uses: the journal's own
+    sha-pinned copy; for a journal begun without one, the caller's sha-pinned
+    copy. Never the verifier's default (absent beside a shipped bundle)."""
+    want = j.txn.get("tier2_trust_root_sha256")
+    if want:
+        data = j.file(TRUST_ROOT_NAME)
+        if data is None or sha256(data) != want:
+            raise Stop(f"journal {TRUST_ROOT_NAME} is missing or is not its pinned sha256 {want}")
+        if fallback is not None and fallback[1] != want:
+            log(f"using the journal's Tier-2 trust root ({want[:12]}), not the supplied one ({fallback[1][:12]})")
+        return os.path.join(JOURNAL, TRUST_ROOT_NAME)
+    if fallback is None:
+        raise Stop("the journal pins no Tier-2 trust root and none was supplied (--tier2-trust-root + "
+                   "--tier2-trust-root-sha256); refusing a verify-directory without an explicit trust root")
+    path, want = fallback
+    if not HEX64.fullmatch(want):
+        raise Refused("--tier2-trust-root-sha256 must be 64 lowercase hex")
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read(MAX_FILE + 1)
+    except OSError as exc:
+        raise Stop(f"cannot read the supplied Tier-2 trust root {path}: {exc}") from exc
+    if sha256(data) != want:
+        raise Stop(f"the supplied Tier-2 trust root {path} is not its pinned sha256 {want}")
+    return path
+
+
+def check_state(j: Journal, side: str, verifier: str | None = None,
+                trust_root: tuple[str, str] | None = None) -> None:
     want, got = side_state(j, side), disk_state()
     diffs = [k for k in want if want[k] != got[k]]
+    if side == "prior" and prior_window_meta(j) != got["window_meta"]:
+        diffs.append("window owner/mode")
+    if side == "candidate" and not candidate_window_meta_ok(got["window_meta"]):
+        diffs.append(f"window owner/mode ({got['window_meta']})")
     if not diffs:
-        digests = release_digests(got["current"])
-        if digests != j.txn[side]["release_digests"]:
-            diffs.append("release digest set of " + got["current"])
+        why = release_matches(j, side, got["current"])
+        if why:
+            diffs.append(why)
     if diffs:
         raise Mismatch(f"state is not the journal's {side} pair: {', '.join(diffs)} differ")
     if verifier:
+        root = trust_root_path(j, trust_root)
         rc = subprocess.run([sys.executable, "-I", verifier, "verify-directory", "--allow-expired-tier2",
+                             "--tier2-coordinator-config", root,
                              "--directory", os.path.join(AUTOTUNE, got["current"])],
                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if rc.returncode != 0:
@@ -561,7 +665,9 @@ def restore_disk(j: Journal) -> None:
     restore needs are checked BEFORE the first write: any member that is
     neither the journal's prior nor its candidate, or a missing/corrupt
     payload, refuses with every member unchanged. Then, in order yaml,
-    current, window: candidate -> prior, prior -> skip."""
+    current, window: candidate -> prior; prior bytes with the journal's
+    owner/mode -> skip; prior bytes with any other owner/mode -> reinstalled
+    with the journal's (a yaml the service user cannot read would not boot)."""
     if j.phase in TERMINAL:
         raise Refused(f"journal is {j.phase} (terminal); not restoring")
     prior, cand = j.txn["prior"], j.txn["candidate"]
@@ -581,20 +687,26 @@ def restore_disk(j: Journal) -> None:
     yaml_side = side(got["yaml_sha256"], prior["yaml_sha256"], cand["yaml_sha256"], "coordinator.yaml")
     current_side = side(got["current"], prior["current"], cand["current"], f"current ({got['current']!r})")
     window_side = side(got["window_sha256"], psha, csha, ".previous-target")
+    # Prior bytes are prior only with the journal's owner/mode too.
+    if yaml_side == "prior" and got["yaml_meta"] != prior_yaml_meta(j):
+        yaml_side = "prior-meta"
+    if window_side == "prior" and psha is not None and got["window_meta"] != prior_window_meta(j):
+        window_side = "prior-meta"
     prior_yaml = prior_window = None
-    if yaml_side == "candidate":
+    if yaml_side != "prior":
         prior_yaml = j.file("prior-coordinator.yaml")
         if prior_yaml is None or sha256(prior_yaml) != prior["yaml_sha256"]:
             raise Stop("journal prior-coordinator.yaml is missing or corrupt (nothing changed)")
-    if window_side == "candidate" and prior["window"]["present"]:
+    if window_side != "prior" and prior["window"]["present"]:
         prior_window = j.file("prior-window")
         if prior_window is None or sha256(prior_window) != psha:
             raise Stop("journal prior-window is missing or corrupt (nothing changed)")
     # The prior release (current's target after the restore) must still hash
-    # as the journal recorded it, or the final check_state would refuse after
-    # the writes.
-    if release_digests(prior["current"]) != prior["release_digests"]:
-        raise Mismatch(f"release {prior['current']} differs from the journal; not restoring (nothing changed)")
+    # (and carry the owner/mode) as the journal recorded it, or the final
+    # check_state would refuse after the writes.
+    why = release_matches(j, "prior", prior["current"])
+    if why:
+        raise Mismatch(f"{why} differs from the journal; not restoring (nothing changed)")
 
     if prior_yaml is not None:
         root_fd = open_dir(ROOT)
@@ -603,20 +715,20 @@ def restore_disk(j: Journal) -> None:
                                prior["yaml_mode"], YAML_TMP_PREFIX)
         finally:
             os.close(root_fd)
-        log("restored prior coordinator.yaml")
+        log("restored prior coordinator.yaml" + (" owner/mode" if yaml_side == "prior-meta" else ""))
     at_fd = open_dir(AUTOTUNE)
     try:
         if current_side == "candidate":
             swap_current(at_fd, prior["current"])
             log(f"restored current -> {prior['current']}")
-        if window_side == "candidate":
+        if window_side != "prior":
             if prior_window is not None:
                 durable_install_at(at_fd, ".previous-target", prior_window, prior["window"]["uid"],
                                    prior["window"]["gid"], prior["window"]["mode"], WINDOW_TMP_PREFIX)
             else:
                 os.unlink(".previous-target", dir_fd=at_fd)
                 os.fsync(at_fd)
-            log("restored prior .previous-target")
+            log("restored prior .previous-target" + (" owner/mode" if window_side == "prior-meta" else ""))
     finally:
         os.close(at_fd)
     check_state(j, "prior")
@@ -871,6 +983,9 @@ def cmd_begin(args: dict) -> int:
     if not RELEASE_REF.fullmatch(new_current):
         raise Refused("malformed --new-current")
     candidate_window = open(args["--candidate-window"], "rb").read()
+    trust_root = open(args["--tier2-trust-root"], "rb").read(MAX_FILE + 1)
+    if not trust_root or len(trust_root) > MAX_FILE:
+        raise Refused("--tier2-trust-root must be a non-empty bounded file")
 
     root_fd = open_dir(ROOT)
     try:
@@ -906,13 +1021,14 @@ def cmd_begin(args: dict) -> int:
             "yaml_mode": stat.S_IMODE(yinfo.st_mode), "current": prior_current,
             "window": ({"present": True, "sha256": sha256(window), "uid": winfo.st_uid, "gid": winfo.st_gid,
                         "mode": stat.S_IMODE(winfo.st_mode)} if window is not None else {"present": False}),
-            "release_digests": release_digests(prior_current),
+            "release_digests": release_digests(prior_current), "release_meta": release_meta(prior_current),
         },
         "candidate": {
             "yaml_sha256": sha256(candidate_yaml), "current": new_current,
             "window": {"present": True, "sha256": sha256(candidate_window)},
-            "release_digests": release_digests(new_current),
+            "release_digests": release_digests(new_current), "release_meta": release_meta(new_current),
         },
+        "tier2_trust_root_sha256": sha256(trust_root),
         "overlay": state["overlay"],
         "verdict": dict({k: verdict[k] for k in VERDICT_FIELDS + ("prior_billing_snapshot_id",)},
                         overlay_sha256=state["overlay"]["sha256"]),
@@ -930,6 +1046,7 @@ def cmd_begin(args: dict) -> int:
             if window is not None:
                 write_new_at(tfd, "prior-window", window)
             write_new_at(tfd, "candidate-window", candidate_window)
+            write_new_at(tfd, TRUST_ROOT_NAME, trust_root)
             write_new_at(tfd, "txn.json", (json.dumps(txn, sort_keys=True, indent=1) + "\n").encode())
             os.fsync(tfd)
         finally:
@@ -972,9 +1089,16 @@ def cmd_install_candidate(j: Journal) -> int:
     return 0
 
 
-def terminal_check(j: Journal, verifier: str | None) -> None:
+def terminal_check(j: Journal, verifier: str | None, trust_root: tuple[str, str] | None = None) -> None:
     side = TERMINAL[j.phase]
-    check_state(j, side, verifier)
+    check_state(j, side, verifier, trust_root)
+
+
+def trust_root_arg(args: dict) -> tuple[str, str] | None:
+    path, want = args.get("--tier2-trust-root"), args.get("--tier2-trust-root-sha256")
+    if (path is None) != (want is None):
+        raise Refused("--tier2-trust-root and --tier2-trust-root-sha256 go together")
+    return None if path is None else (path, want)
 
 
 def cmd_recover(args: dict) -> int:
@@ -985,12 +1109,13 @@ def cmd_recover(args: dict) -> int:
         print("no pricing transaction journal")
         return 0
     verifier = args.get("--verifier")
+    trust_root = trust_root_arg(args)
     wait = float(args.get("--wait-seconds", "60"))
     ready_wait = float(args.get("--ready-seconds", "900"))
     prior_snap = j.txn["verdict"]["prior_billing_snapshot_id"]
     log(f"journal {j.txn['id']} phase {j.phase}")
     if j.phase in TERMINAL:
-        terminal_check(j, verifier)
+        terminal_check(j, verifier, trust_root)
         j.finalize()
         print(f"finalized {TERMINAL[j.txn['phase']]} ({j.txn['phase']})")
         return 0
@@ -1235,6 +1360,19 @@ def snapshot_tuple(j: Journal) -> tuple[str, list[str]]:
             raise Refused(f"the snapshot (yaml {yaml_sha[:12]}, current {target!r}, window "
                           f"{(window_sha or 'absent')[:12]}) is not one coherent journal pair "
                           f"({' or '.join(allowed)}, journal phase {j.phase}); mixed or foreign: nothing changed")
+        # Deploy recovery restores these with `cp -p`: their owner/mode become
+        # live. A pair the service user cannot read (or anyone can write) is
+        # not the journal's pair; refuse rather than normalize it.
+        yaml_meta = meta_of(stat_at(snap_fd, "coordinator.yaml"))
+        if yaml_meta != prior_yaml_meta(j):
+            raise Refused(f"the snapshot's coordinator.yaml owner/mode {yaml_meta} is not the journal's "
+                          f"{prior_yaml_meta(j)}; deploy recovery would install it as is: nothing changed")
+        if window is not None:
+            window_meta = meta_of(stat_at(snap_fd, "catalog-previous-target"))
+            ok = (window_meta == prior_window_meta(j)) if matches[0] == "prior" else candidate_window_meta_ok(window_meta)
+            if not ok:
+                raise Refused(f"the snapshot's .previous-target owner/mode {window_meta} is not the journal's "
+                              f"{matches[0]} window's; deploy recovery would install it as is: nothing changed")
         if not has("had-coordinator"):
             raise Refused("deploy rollback snapshot restores no coordinator binary")
         if not runtime_supports_pricing(os.path.join(path, "coordinator")):
@@ -1397,11 +1535,14 @@ def main(argv: list[str]) -> int:
     if cmd == "--close-restored":
         return cmd_close_restored(parse(rest, ("--wait-seconds", "--windows", "--lock-wait-seconds")))
     if cmd in ("recover", "--recover"):
-        return cmd_recover(parse(rest, ("--verifier", "--wait-seconds", "--ready-seconds")))
+        return cmd_recover(parse(rest, ("--verifier", "--wait-seconds", "--ready-seconds", "--tier2-trust-root",
+                                        "--tier2-trust-root-sha256")))
     if cmd == "begin":
-        a = parse(rest, ("--candidate-yaml", "--new-current", "--prior-current", "--candidate-window", "--verdict"))
-        if len(a) != 5:
-            raise Refused("begin needs --candidate-yaml --new-current --prior-current --candidate-window --verdict")
+        a = parse(rest, ("--candidate-yaml", "--new-current", "--prior-current", "--candidate-window", "--verdict",
+                         "--tier2-trust-root"))
+        if len(a) != 6:
+            raise Refused("begin needs --candidate-yaml --new-current --prior-current --candidate-window --verdict "
+                          "--tier2-trust-root")
         return cmd_begin(a)
     if cmd == "foreign-state":
         problems = foreign_state(allow_journal="--allow-journal" in rest)
@@ -1422,7 +1563,8 @@ def main(argv: list[str]) -> int:
         elif cmd == "install-candidate" and not rest:
             cmd_install_candidate(j)
         elif cmd == "check-state" and rest and rest[0] in ("prior", "candidate"):
-            check_state(j, rest[0], parse(rest[1:], ("--verifier",)).get("--verifier"))
+            a = parse(rest[1:], ("--verifier", "--tier2-trust-root", "--tier2-trust-root-sha256"))
+            check_state(j, rest[0], a.get("--verifier"), trust_root_arg(a))
         elif cmd == "restore-disk" and not rest:
             restore_disk(j)
         elif cmd == "verify-live" and rest and rest[0] in ("prior", "candidate"):

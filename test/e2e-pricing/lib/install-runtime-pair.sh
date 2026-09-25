@@ -13,6 +13,8 @@ set -euo pipefail
 tag="$1"; rel="$E2E_WORK/gh-releases/$tag"
 [ -f "$rel/pearl-release.json" ] || e2e_die "no release stand-in for $tag"
 e2e_write_ssh_config
+# The VM-target guard (refuses anything but the pearl-e2e loopback alias).
+. "$E2E_HARNESS/lib/common.sh"
 stage="$(mktemp -d)"; trap 'rm -rf "$stage"' EXIT
 cp "$rel/pearl-release.json" "$rel/coordinator-linux-amd64" "$rel/coordinator-cli-linux-amd64" "$rel/gateway-linux-amd64" "$stage/"
 # The stats sidecars ship as their own signed sidecar release; same stand-in.

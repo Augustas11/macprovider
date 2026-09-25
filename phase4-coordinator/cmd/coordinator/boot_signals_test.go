@@ -109,7 +109,7 @@ func TestMainOrdersSIGHUPHandlingBeforeBootWorkAndListeners(t *testing.T) {
 	s := string(src)
 	guard := strings.Index(s, "installBootSIGHUPGuard(")
 	load := strings.Index(s, "config.LoadWithOverlayDigests(*configPath, *configOverlay)")
-	notify := strings.Index(s, "signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)")
+	notify := strings.Index(s, "signals := notifyCoordinatorSignals()")
 	handOff := strings.Index(s, "bootSIGHUP.handOff()")
 	listen := strings.Index(s, "providerHTTP.ListenAndServe()")
 	record := strings.Index(s, `recordAppliedConfig(logger, "boot"`)
@@ -120,6 +120,17 @@ func TestMainOrdersSIGHUPHandlingBeforeBootWorkAndListeners(t *testing.T) {
 	}
 	if !(guard < load && notify < handOff && handOff < listen && listen < record) {
 		t.Fatalf("SIGHUP ordering broken: guard=%d load=%d notify=%d handOff=%d listen=%d record=%d", guard, load, notify, handOff, listen, record)
+	}
+	// #1693 E2 V4: reloads run off the main loop, which waits only on the
+	// termination channel; shutdown halts reloads and never waits unbounded.
+	reloader := strings.Index(s, "reloads := startSIGHUPReloader(signals.hup, func() {")
+	term := strings.Index(s, "case sig := <-signals.term:\n\t\t\treloads.halt()")
+	wait := strings.Index(s, "if !reloads.wait(ctx) {")
+	if reloader < record || term < reloader || wait < term {
+		t.Fatalf("reload/shutdown wiring broken: reloader=%d term=%d wait=%d", reloader, term, wait)
+	}
+	if strings.Count(s, "reloadCoordinatorConfig(*configPath") != 1 || strings.Index(s, "reloadCoordinatorConfig(*configPath") < reloader {
+		t.Fatal("the SIGHUP reload must run only inside the reloader goroutine")
 	}
 }
 

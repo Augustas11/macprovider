@@ -14,6 +14,8 @@
 set -euo pipefail
 . "$(dirname "$0")/env.sh"
 e2e_write_ssh_config
+# The VM-target guard (refuses anything but the pearl-e2e loopback alias).
+. "$E2E_HARNESS/lib/common.sh"
 BINS="$E2E_WORK/bins/$E2E_TAG_PRE"
 [ -x "$BINS/coordinator-linux-amd64" ] || e2e_die "run 02-build.sh first"
 FAKEPROV="$E2E_HARNESS/fakeprov/dist/fakeprov-linux-amd64"

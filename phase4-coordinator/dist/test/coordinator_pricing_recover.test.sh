@@ -156,6 +156,7 @@ setup() {
   ln -s releases/old "$A/current"
   printf 'releases/prev\n' >"$A/.previous-target"; chmod 0640 "$A/.previous-target"
   printf 'releases/old\nreleases/prev\n' >"$T/stage/window"
+  cp "$REPO_ROOT/phase4-coordinator/dist/coordinator.yaml" "$T/stage/trust-root.yaml"
   echo boot-1 >"$T/boot_id"
   start_coordinator
   PRIOR_YAML="$(sha "$R/coordinator.yaml")"; PRIOR_WINDOW="$(sha "$A/.previous-target")"
@@ -175,9 +176,10 @@ PY
 }
 begin() {
   h begin --candidate-yaml "$T/stage/candidate.yaml" --new-current releases/new --prior-current releases/old \
-    --candidate-window "$T/stage/window" --verdict "$T/stage/verdict.json" >/dev/null
+    --candidate-window "$T/stage/window" --verdict "$T/stage/verdict.json" --tier2-trust-root "$T/stage/trust-root.yaml" >/dev/null
 }
-swap_window() { cp "$T/stage/window" "$A/.pw.tmp"; mv "$A/.pw.tmp" "$A/.previous-target"; }
+# The window helper (scripts/autotune_window.py) installs the window 0640.
+swap_window() { cp "$T/stage/window" "$A/.pw.tmp"; chmod 0640 "$A/.pw.tmp"; mv "$A/.pw.tmp" "$A/.previous-target"; }
 swap_current() { ln -s releases/new "$A/.c.tmp"; if mv --version >/dev/null 2>&1; then mv -Tf "$A/.c.tmp" "$A/current"; else mv -hf "$A/.c.tmp" "$A/current"; fi; }
 prior_on_disk() { # <label>
   [ "$(sha "$R/coordinator.yaml")" = "$PRIOR_YAML" ] || fail "$1: yaml not prior"
@@ -550,6 +552,79 @@ rc=0; h restore-disk 2>"$T/err" || rc=$?
 note "restore-disk: foreign current / foreign window / corrupt payload refuse with every member unchanged"
 
 # ---------------------------------------------------------------------------
+# Owner/mode are part of S (#1693 E2 finding 3): prior bytes at the wrong mode
+# are reinstalled with the journal's owner/mode, never skipped as "prior".
+# ---------------------------------------------------------------------------
+setup; forward_until 2; chmod 0600 "$R/coordinator.yaml"
+rc=0; h check-state prior 2>"$T/err" || rc=$?
+[ "$rc" = 3 ] && grep -q 'yaml_meta' "$T/err" || fail "prior bytes at 0600 must not pass as the prior pair (rc=$rc): $(cat "$T/err")"
+stop_coordinator; echo boot-2 >"$T/boot_id"
+h --pre-start || fail "pre-start must restore a prior yaml at the wrong mode"
+[ "$(mode_of "$R/coordinator.yaml")" = 640 ] || fail "pre-start must restore the journal's 0640 (got $(mode_of "$R/coordinator.yaml"))"
+prior_on_disk "prior yaml at 0600 -> pre-start"
+[ "$(phase)" = restored-unverified ] || fail "pre-start must leave restored-unverified"
+start_coordinator; h --close-restored --wait-seconds 5 || fail "the closer must finalize the mode-restored pair"
+setup; forward_until 2; chmod 0600 "$A/.previous-target"
+h phase rolling-back; h restore-disk || fail "restore-disk must restore a prior window at the wrong mode"
+[ "$(mode_of "$A/.previous-target")" = 640 ] && [ "$(sha "$A/.previous-target")" = "$PRIOR_WINDOW" ] ||
+  fail "restore-disk must reinstall the prior window with the journal's 0640 (got $(mode_of "$A/.previous-target"))"
+h check-state prior || fail "after the restore S must be the prior pair including owner/mode"
+setup; forward_until 5; chmod 0644 "$A/.previous-target"
+rc=0; h check-state candidate 2>"$T/err" || rc=$?
+[ "$rc" = 3 ] && grep -q 'window owner/mode' "$T/err" || fail "a candidate window that is not the window helper's 0640 must fail check-state (rc=$rc)"
+setup; forward_until 5; chmod 0600 "$A/releases/old/rate-card.json"; before="$(tuple_digest)"
+rc=0; h restore-disk 2>"$T/err" || rc=$?
+[ "$rc" = 3 ] && grep -q 'release owner/mode' "$T/err" && [ "$(tuple_digest)" = "$before" ] ||
+  fail "a prior release file at another mode must refuse before any write (rc=$rc): $(cat "$T/err")"
+note "owner/mode: prior bytes at 0600 are restored to the journal's mode; candidate window and release modes are checked"
+
+# ---------------------------------------------------------------------------
+# #1693 E2 V4: finalizing a verified journal runs the REAL verify-directory
+# from a shipped verifier bundle (no coordinator.yaml beside it) with the
+# journal's pinned Tier-2 trust root, never the verifier's default path.
+# ---------------------------------------------------------------------------
+BUNDLE="$T/bundle"; rm -rf "$BUNDLE"; mkdir -p "$BUNDLE/scripts"
+grep -v '^#' "$REPO_ROOT/scripts/catalog-verifier-bundle.txt" | grep -v '^$' | while read -r f; do cp "$REPO_ROOT/$f" "$BUNDLE/scripts/"; done
+[ ! -e "$BUNDLE/phase4-coordinator" ] || fail "the bundle must not carry a coordinator.yaml"
+real_release() { # the repo's committed release, assembled as the lane does, as releases/new
+  rm -rf "$A/releases/new"; mkdir -p "$A/releases/new"
+  for n in release.json trusted-keys.json tier2-catalog.json; do cp "$REPO_ROOT/phase3-binary/catalog/autotune/$n" "$A/releases/new/"; done
+  for n in autotune-candidates.json autotune-candidates.json.sig demand-rank.json demand-rank.json.sig rate-card.json rate-card.json.sig; do
+    cp "$REPO_ROOT/phase3-binary/dist/static/$n" "$A/releases/new/"
+  done
+  if grep -q '"autotune-artifacts.json"' "$A/releases/new/release.json"; then
+    cp "$REPO_ROOT/phase3-binary/dist/static/autotune-artifacts.json" "$REPO_ROOT/phase3-binary/dist/static/autotune-artifacts.json.sig" "$A/releases/new/"
+  fi
+  chmod 0750 "$A/releases/new"
+}
+verified_real() { setup; real_release; forward_until 5; h phase hup-intent; h phase verifying; h phase verified; }
+verified_real
+rc=0; python3 -I "$BUNDLE/scripts/catalog-release.py" verify-directory --allow-expired-tier2 --directory "$A/releases/new" 2>"$T/err" || rc=$?
+[ "$rc" != 0 ] && grep -q 'phase4-coordinator/dist/coordinator.yaml' "$T/err" || fail "the bundle's default trust root must be absent (the E2 condition; rc=$rc): $(cat "$T/err")"
+h recover --verifier "$BUNDLE/scripts/catalog-release.py" --wait-seconds 2 2>"$T/err" || fail "recover must finalize a verified journal from a bundle without coordinator.yaml: $(cat "$T/err")"
+[ ! -e "$R/.pricing-txn" ] && [ "$(readlink "$A/current")" = releases/new ] || fail "the verified candidate must be finalized, not rolled back"
+# A journal whose pinned trust root was altered stops (journal kept).
+verified_real; printf '# x\n' >>"$R/.pricing-txn/tier2-trust-root.yaml"
+rc=0; h recover --verifier "$BUNDLE/scripts/catalog-release.py" 2>"$T/err" || rc=$?
+[ "$rc" = 5 ] && grep -q 'not its pinned sha256' "$T/err" && [ "$(phase)" = verified ] || fail "a tampered journal trust root must stop (rc=$rc): $(cat "$T/err")"
+# A journal begun without a trust root: never the default path; the operator's
+# sha-pinned copy is used, a wrong sha stops.
+verified_real
+python3 - "$R/.pricing-txn/txn.json" <<'PY2'
+import json, sys
+t = json.load(open(sys.argv[1])); del t["tier2_trust_root_sha256"]; json.dump(t, open(sys.argv[1], "w"))
+PY2
+rm -f "$R/.pricing-txn/tier2-trust-root.yaml"
+rc=0; h recover --verifier "$BUNDLE/scripts/catalog-release.py" 2>"$T/err" || rc=$?
+[ "$rc" = 5 ] && grep -q 'pins no Tier-2 trust root' "$T/err" && [ "$(phase)" = verified ] || fail "no trust root anywhere must stop (rc=$rc): $(cat "$T/err")"
+rc=0; h recover --verifier "$BUNDLE/scripts/catalog-release.py" --tier2-trust-root "$T/stage/trust-root.yaml" --tier2-trust-root-sha256 "$(printf '0%.0s' $(seq 64))" 2>"$T/err" || rc=$?
+[ "$rc" = 5 ] && [ "$(phase)" = verified ] || fail "a supplied trust root with the wrong sha must stop (rc=$rc): $(cat "$T/err")"
+h recover --verifier "$BUNDLE/scripts/catalog-release.py" --tier2-trust-root "$T/stage/trust-root.yaml" \
+  --tier2-trust-root-sha256 "$(sha "$T/stage/trust-root.yaml")" --wait-seconds 2 2>"$T/err" || fail "the supplied sha-pinned trust root must finalize: $(cat "$T/err")"
+[ ! -e "$R/.pricing-txn" ] || fail "the verified journal must be finalized"
+note "verified journal: the real verify-directory from a bundle without coordinator.yaml uses the journal's pinned trust root"
+
+# ---------------------------------------------------------------------------
 # Pricing runtime floor: begin writes it once, durably, and never rewrites it.
 # ---------------------------------------------------------------------------
 setup; rm -f "$R/.pricing-runtime-floor"; begin
@@ -633,6 +708,8 @@ conflict_setup() { # <n> <yaml> <current> <window> [old]
   case "$2" in prior) cp "$R/.pricing-txn/prior-coordinator.yaml" "$S/coordinator.yaml" ;; *) cp "$T/stage/candidate.yaml" "$S/coordinator.yaml" ;; esac
   case "$3" in prior) printf 'releases/old' ;; candidate) printf 'releases/new' ;; *) printf 'releases/prev' ;; esac >"$S/catalog-current-target"
   case "$4" in prior) cp "$R/.pricing-txn/prior-window" "$S/catalog-previous-target" ;; *) cp "$T/stage/window" "$S/catalog-previous-target" ;; esac
+  # The deploy snapshots the live files with cp -p: their live 0640 modes.
+  chmod 0640 "$S/coordinator.yaml" "$S/catalog-previous-target"
   printf 'coordinator.yaml.bak-20260924T000000Z' >"$S/config-backup-name"
   cp "$T/bin/coordinator-${5:-new}" "$S/coordinator"
   cp "$R/coordinator-pricing-recover" "$S/coordinator-pricing-recover"
@@ -700,6 +777,13 @@ refused_unchanged "foreign snapshot yaml" 'not one coherent journal pair'
 conflict_setup 5 prior prior prior; touch "$R/.coordinator-deploy-rollback/had-overlay"; printf 'o: 1\n' >"$R/.coordinator-deploy-rollback/coordinator.pearl-overlays.yaml"
 refused_unchanged "snapshot overlay differs" "overlay is not the journal's overlay"
 note "conflict: every mixed prior/candidate combination and a foreign yaml/current/overlay are refused, nothing changed"
+conflict_setup 5 prior prior prior; chmod 0600 "$R/.coordinator-deploy-rollback/coordinator.yaml"
+refused_unchanged "prior snapshot with a 0600 yaml" "coordinator.yaml owner/mode"
+conflict_setup 3 candidate candidate candidate; chmod 0644 "$R/.coordinator-deploy-rollback/catalog-previous-target"
+refused_unchanged "candidate snapshot with a 0644 window" "previous-target owner/mode"
+conflict_setup 5 prior prior prior; chmod 0600 "$R/.coordinator-deploy-rollback/catalog-previous-target"
+refused_unchanged "prior snapshot with a 0600 window" "previous-target owner/mode"
+note "conflict: a snapshot whose yaml or window owner/mode is not the journal's is refused, nothing changed"
 
 # A verified (terminal) journal accepts only its candidate pair.
 conflict_setup 5 prior prior prior; h phase hup-intent; h phase verifying; h phase verified

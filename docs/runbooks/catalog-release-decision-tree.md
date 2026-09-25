@@ -317,7 +317,7 @@ computes the effective-price diff. The pricing checks:
 | --- | --- |
 | `pricing_txn_absent` | a journal exists: [Pricing txn](#pricing-txn) first |
 | `pricing_release` | the commit lacks `coordinator.yaml` or `acknowledged-pricing-moves.json`, or its `rate_card` block does not match the release rows |
-| `pricing_host_state` | foreign recovery state (deploy snapshot, updater or Tier-2 transaction, live journal temp dir); pricing keys in the overlay; the installed helper, units, or guard-bearing writers differ from the commit; served card, on-disk `current` card, and applied-config record disagree (prior not settled); the coordinator lacks the #1693 applied-config fields (`pricing needs the #1693 enabling runtime release`: [Enabling rollout](#enabling-rollout-once)); or the recovery unit lacks the pricing pre-start (`pricing recovery DISABLED`: a pre-#1693 deploy script ran; re-run the enabling deploy, [Pricing runtime floor](#pricing-runtime-floor)). Operator hints lead the detail |
+| `pricing_host_state` | foreign recovery state (deploy snapshot, updater or Tier-2 transaction, live journal temp dir); pricing keys in the overlay; the installed helper, units, or guard-bearing writers differ from the commit; served card, on-disk `current` card, and applied-config record disagree (prior not settled); the coordinator lacks the #1693 applied-config fields (`pricing needs the #1693 enabling runtime release`: [Enabling rollout](#enabling-rollout-once)); or the recovery unit lacks the pricing pre-start (`pricing recovery DISABLED`: a pre-#1693 deploy script ran; re-run the enabling rollout from a tag whose ledger carries the live release, [Pricing runtime floor](#pricing-runtime-floor)). Operator hints lead the detail |
 | `pricing_effective_diff` (request log) | `cannot locate the request_log: storage.db_path ...`: the request_log is read from the coordinator's effective `storage.db_path` (overlay over base, else `coordinator.db`, relative to `/opt/macprovider`); the named database does not exist |
 | `pricing_effective_diff` | a served name moves rows without an acknowledgement, or the splice/dry-load disagrees with the applied config |
 | `pricing_gate` | the content gate, rerun against the fetched diff, refused (`pricing-globals`, `pricing-unacked-move`, or a digest mismatch) |
@@ -887,6 +887,38 @@ boot or closed after it. Detection: the next pricing preflight or
 `--host-check` is NO_GO `pricing_host_state` with `pricing recovery
 DISABLED: ...`, and a #1693 coordinator logs `"event":"pricing_recovery_wiring_missing"`
 at ERROR on every boot and SIGHUP while the floor marker exists. Fix: re-run
-the enabling deploy (step 2 of [Enabling rollout](#enabling-rollout-once),
-from the enabling or a later tag), then `--host-check` until it passes. Do
-not run a pricing correction, and avoid coordinator restarts, until then.
+steps 1-4 of [Enabling rollout](#enabling-rollout-once) from a tag whose
+release ledger carries the LIVE catalog release, then `--host-check` until it
+passes. Do not run a pricing correction, and avoid coordinator restarts, until
+then.
+
+Which tag. Before any pricing correction ran, the enabling tag works. After
+one, it does not: the live release is the correction's (or a renewal of it),
+which the enabling tag's ledger predates, so `deploy-pearl-vps.sh` aborts at
+compare-live with `catalog regression — live release ... is neither
+equivalent ... nor in this tag's release ledger`, before any mutation. Use a
+tag at or after the commit of the live release instead: at that commit the
+tag's release is the live content (`equivalent`), and later tags carry it in
+their ledger (`descends`). To find it:
+
+```bash
+live="$(ssh pearl "python3 -c 'import json;print(json.load(open(\"/opt/macprovider/autotune/current/release.json\"))[\"release_id\"])'")"
+c="$(git log --format=%H -1 -S"$live" origin/main -- phase3-binary/catalog/autotune/release.json)"
+git tag --contains "$c" --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1
+```
+
+For a renewal re-id of the correction on Pearl (`release_id` in no commit),
+search for the correction's id from `.previous-target` or the pricing lane's
+output instead. If no signed tag contains the commit yet, cut one through the
+normal release process first; that tag is then the runtime floor's minimum.
+
+Never use `CATALOG_REGRESSION_OVERRIDE_REASON` here. It activates the tag's
+older release, whose rate rows predate the correction: it would roll live
+prices back outside the pricing lane's journal, and under
+`CONFIG_MODE=preserve-live` pair the live yaml's corrected `rate_card` with
+the older signed card, which the coordinator's parity check rejects on the
+restart. Once the floor marker exists, `deploy-pearl-vps.sh` refuses the
+override whenever the tag's rate rows differ from the live release's
+(`refusing CATALOG_REGRESSION_OVERRIDE_REASON: the pricing runtime floor
+exists ...`). A content-only regression with equal rate rows keeps the
+audited override.

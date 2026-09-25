@@ -585,7 +585,8 @@ pf_live() {
     record rollback_preconditions 0 "cannot read the live release $CURRENT_TARGET"; return 1
   fi
   release_identity "$LIVE" LIVE || { record rollback_preconditions 0 "live release identity is malformed"; return 1; }
-  if ! python3 -I "$SCRIPT_DIR/catalog-release.py" verify-directory --directory "$LIVE" >"$WORK/verify-live.out" 2>&1; then
+  if ! python3 -I "$SCRIPT_DIR/catalog-release.py" verify-directory --directory "$LIVE" \
+      --tier2-coordinator-config "$WORK/gate/tier2-trust-root.yaml" >"$WORK/verify-live.out" 2>&1; then
     record rollback_preconditions 0 "live release $CURRENT_TARGET does not verify: $(tail -n 3 "$WORK/verify-live.out")"; return 1
   fi
   for entry in $ORIG_PREVIOUS_TARGET; do
@@ -738,7 +739,7 @@ for line in sys.stdin:
         problems.append("macprovider-coordinator does not Want macprovider-coordinator-pricing-close.service")
     elif key == "PRESTART" and val != "ok":
         hints.append("pricing recovery DISABLED: the recovery unit lacks the coordinator-pricing-recover --pre-start line "
-                     "(a pre-#1693 deploy script reinstalled its units); re-run the #1693 enabling deploy (runbook runtime floor rule)")
+                     "(a pre-#1693 deploy script reinstalled its units); re-run the #1693 enabling rollout from a tag whose ledger carries the live release (runbook runtime floor rule)")
     elif key == "ALERT_LOADSTATE" and val != "loaded":
         problems.append("macprovider-pearl-updater-alert@.service is not loadable (%s)" % (val or "?"))
     elif key == "FOREIGN" and val:
@@ -1851,15 +1852,26 @@ canary_back_on_live() {
 if [ "$MODE" = recover-pricing-txn ]; then
   # Journal-only state: no commit, no canary. The installed helper must be the
   # reviewed copy this tooling carries; full verify-directory
-  # (--allow-expired-tier2) of a terminal side runs from the shipped bundle.
+  # (--allow-expired-tier2) of a terminal side runs from the shipped bundle
+  # with an explicit Tier-2 trust root: the one the journal pinned at begin,
+  # or (a journal begun without one) this checkout's HEAD coordinator.yaml,
+  # shipped beside the verifier and sha-pinned.
   trap 'exit 71' HUP INT TERM
   AA_LOCK_MODE=lease
   aa_lease_acquire
   aa_install_helpers
   [ "$(SSH "sha256sum '$PRICING_HELPER' 2>/dev/null" | cut -d' ' -f1)" = "$(sha256_file "$REPO_ROOT/phase4-coordinator/dist/coordinator-pricing-recover")" ] ||
     { CCR_FATAL_RC=5; fatal "the installed $PRICING_HELPER is not this tooling's reviewed copy; follow $RUNBOOK_PRICING_TXN"; }
+  mkdir -p "$WORK/gate"
+  git -C "$REPO_ROOT" show "HEAD:phase4-coordinator/dist/coordinator.yaml" >"$WORK/gate/tier2-trust-root.yaml" 2>/dev/null &&
+    [ -s "$WORK/gate/tier2-trust-root.yaml" ] ||
+    { CCR_FATAL_RC=5; fatal "cannot read the Tier-2 trust root (HEAD:phase4-coordinator/dist/coordinator.yaml); follow $RUNBOOK_PRICING_TXN"; }
+  T2_ROOT_SHA="$(sha256_file "$WORK/gate/tier2-trust-root.yaml")"
+  SSH "cat >'$LOCK_HELPER_DIR/tier2-trust-root.yaml'" <"$WORK/gate/tier2-trust-root.yaml" &&
+    [ "$(SSH "sha256sum '$LOCK_HELPER_DIR/tier2-trust-root.yaml'" | cut -d' ' -f1)" = "$T2_ROOT_SHA" ] ||
+    { CCR_FATAL_RC=5; fatal "cannot install the Tier-2 trust root on $PEARL_SSH; follow $RUNBOOK_PRICING_TXN"; }
   rc=0
-  aa_lease_sh "python3 -I '$PRICING_HELPER' recover --verifier '$CONTINUITY_VERIFIER' --wait-seconds '$SETTLE_SECONDS' --ready-seconds '$READY_SECONDS'" || rc=$?
+  aa_lease_sh "python3 -I '$PRICING_HELPER' recover --verifier '$CONTINUITY_VERIFIER' --tier2-trust-root '$LOCK_HELPER_DIR/tier2-trust-root.yaml' --tier2-trust-root-sha256 '$T2_ROOT_SHA' --wait-seconds '$SETTLE_SECONDS' --ready-seconds '$READY_SECONDS'" || rc=$?
   if [ "$rc" -eq 0 ]; then log "pricing transaction recovery: done"; exit 0; fi
   if [ "$rc" -eq 4 ]; then
     log "pricing transaction recovery WAITING: $COORDINATOR_UNIT is down or still booting (not a foreign write); the journal is kept; re-run --recover-pricing-txn once it serves /healthz ($RUNBOOK_PRICING_TXN)"

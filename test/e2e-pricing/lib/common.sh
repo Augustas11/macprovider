@@ -1,6 +1,43 @@
 # shellcheck shell=bash
 # Shared helpers for the tier E2 steps and scenarios. Source after env.sh.
 
+# ---- target guard (runs when this file is sourced) ----------------------------
+# The lane, deploy-pearl-vps.sh, the updater and the recovery helper default to
+# PEARL_SSH/VPS_HOST=pearl: the operator's REAL Pearl in ~/.ssh/config. Every
+# harness step sources this file, so a step that would reach anything but the
+# VM alias fails here, before its first command. The alias must resolve, in
+# $E2E_SSH_CONFIG only, to this Mac's loopback (Lima's forwarded port).
+# Self-test: test/e2e-pricing/lib/guard-selftest.sh.
+E2E_VM_ALIAS=pearl-e2e
+e2e_guard_vm_target() {
+  local v resolved host proxy jump
+  [ "${E2E_PEARL:-}" = "$E2E_VM_ALIAS" ] ||
+    { echo "[e2e] SAFETY: E2E_PEARL='${E2E_PEARL:-}' is not the VM alias $E2E_VM_ALIAS; refusing" >&2; return 1; }
+  for v in PEARL_SSH VPS_HOST; do
+    [ "${!v:-}" = "$E2E_VM_ALIAS" ] ||
+      { echo "[e2e] SAFETY: $v='${!v:-}' is not the VM alias $E2E_VM_ALIAS; refusing" >&2; return 1; }
+  done
+  [ -n "${E2E_SSH_CONFIG:-}" ] && [ -f "$E2E_SSH_CONFIG" ] ||
+    { echo "[e2e] SAFETY: ssh config '${E2E_SSH_CONFIG:-}' is missing (run 00-setup-vm.sh); refusing" >&2; return 1; }
+  resolved="$(/usr/bin/ssh -G -F "$E2E_SSH_CONFIG" "$E2E_VM_ALIAS" 2>/dev/null)" ||
+    { echo "[e2e] SAFETY: cannot resolve $E2E_VM_ALIAS in $E2E_SSH_CONFIG; refusing" >&2; return 1; }
+  host="$(awk '$1 == "hostname" { print $2; exit }' <<<"$resolved")"
+  proxy="$(awk '$1 == "proxycommand" { $1 = ""; sub(/^ /, ""); print; exit }' <<<"$resolved")"
+  jump="$(awk '$1 == "proxyjump" { print $2; exit }' <<<"$resolved")"
+  [ "$host" = 127.0.0.1 ] ||
+    { echo "[e2e] SAFETY: $E2E_VM_ALIAS resolves to hostname '$host', not 127.0.0.1; refusing" >&2; return 1; }
+  [ -z "$jump" ] || [ "$jump" = none ] ||
+    { echo "[e2e] SAFETY: $E2E_VM_ALIAS has ProxyJump '$jump'; refusing" >&2; return 1; }
+  case "$proxy" in
+    ""|none) ;;
+    "/usr/bin/nc 127.0.0.1 "*)
+      case "${proxy#/usr/bin/nc 127.0.0.1 }" in ""|*[!0-9]*) echo "[e2e] SAFETY: $E2E_VM_ALIAS ProxyCommand '$proxy' is not the loopback forward; refusing" >&2; return 1 ;; esac ;;
+    *) echo "[e2e] SAFETY: $E2E_VM_ALIAS ProxyCommand '$proxy' is not the loopback forward; refusing" >&2; return 1 ;;
+  esac
+}
+export PEARL_SSH="${PEARL_SSH-$E2E_VM_ALIAS}" VPS_HOST="${VPS_HOST-$E2E_VM_ALIAS}"
+e2e_guard_vm_target || exit 70
+
 E2E_TUNNEL_PIDFILE="$E2E_WORK/tunnel.pid"
 E2E_GATEWAY_LOCAL_PORT=19443     # Mac -> VM gateway 127.0.0.1:9443
 E2E_BUYER_LOCAL_PORT=18843       # Mac -> VM coordinator buyer mux 127.0.0.1:8443
@@ -64,6 +101,7 @@ e2e_lane_env() {
   export CATALOG_GATEWAY_CONVERGENCE_SECONDS="${CATALOG_GATEWAY_CONVERGENCE_SECONDS:-420}"
   # deploy-pearl-vps.sh
   export SSH_KEY="$E2E_KEYS/pearl_root_ed25519" VPS_HOST="$E2E_PEARL" VPS_USER=root
+  e2e_guard_vm_target
 }
 
 # e2e_run_logged <timeout-s> <log> <cmd...>: run with a TERM-then-KILL watchdog.

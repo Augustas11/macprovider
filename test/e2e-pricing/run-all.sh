@@ -21,6 +21,8 @@ H="$(cd "$(dirname "$0")" && pwd -P)"
 . "$H/env.sh"
 export COPYFILE_DISABLE=1
 step() { e2e_log "=== $1"; bash "$H/$1" "${@:2}" || e2e_log "=== $1 exited $?"; }
+# The VM-target guard (lib/common.sh) must hold before any step can reach a host.
+bash "$H/lib/guard-selftest.sh" >/dev/null || e2e_die "lib/guard-selftest.sh failed: the VM-target guard is broken"
 if [ $# -eq 0 ]; then
   # Fresh world: 00b wipes the VM host back to the post-00 layout (the VM
   # itself is kept), 01 recreates the scratch repo and origin from E2E_BRANCH_HEAD.

@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 
@@ -55,13 +57,80 @@ func (g *bootSIGHUPGuard) handOff() {
 	<-g.done
 }
 
+// coordinatorSignals are the main loop's signal channels (#1693 E2 V4).
+// signal.Notify never blocks: it drops a signal when the channel is full. With
+// one shared capacity-1 channel a SIGHUP queued behind a slow reload dropped
+// the SIGTERM that followed it, and the unit hung in stop-sigterm. Termination
+// has its own channel that no SIGHUP can fill; SIGHUP's capacity-1 channel is
+// the pending-reload flag: any number of SIGHUPs during a reload coalesce into
+// exactly one follow-up reload.
+type coordinatorSignals struct {
+	term chan os.Signal
+	hup  chan os.Signal
+}
+
+func notifyCoordinatorSignals() coordinatorSignals {
+	s := coordinatorSignals{term: make(chan os.Signal, 2), hup: make(chan os.Signal, 1)}
+	signal.Notify(s.term, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(s.hup, syscall.SIGHUP)
+	return s
+}
+
+// sighupReloader runs config reloads one at a time off the main loop, so a
+// reload stuck behind a slow SQLite write never delays shutdown.
+type sighupReloader struct {
+	stop     chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
+}
+
+func startSIGHUPReloader(hup <-chan os.Signal, reload func()) *sighupReloader {
+	r := &sighupReloader{stop: make(chan struct{}), done: make(chan struct{})}
+	go func() {
+		defer close(r.done)
+		for {
+			select {
+			case <-r.stop:
+				return
+			case <-hup:
+			}
+			// select picks randomly when both are ready: shutdown wins.
+			select {
+			case <-r.stop:
+				return
+			default:
+			}
+			reload()
+		}
+	}()
+	return r
+}
+
+// halt stops new reloads; one already running continues.
+func (r *sighupReloader) halt() {
+	r.stopOnce.Do(func() { close(r.stop) })
+}
+
+// wait reports whether the reloader finished before ctx ended. A reload still
+// running at the deadline is abandoned: the process exits, and SQLite rolls
+// back any uncommitted transaction on the next open.
+func (r *sighupReloader) wait(ctx context.Context) bool {
+	select {
+	case <-r.done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // Pricing recovery wiring (#1693 E2 V10). A pre-#1693 deploy script (even one
 // that aborts) reinstalls its own recovery unit and guard drop-in at its step
 // 1, which drops the pricing pre-start (journal restore before boot) and the
 // post-start closer. Once the pricing runtime floor marker exists a pricing
 // journal may exist, so running on that wiring is reported loudly at boot and
 // on every SIGHUP. It is never a refusal: refusing to start would turn an
-// aborted old deploy into an outage. The fix is to re-run the enabling deploy
+// aborted old deploy into an outage. The fix is to re-run the enabling rollout
+// from a tag whose ledger carries the live catalog release
 // (docs/runbooks/catalog-release-decision-tree.md, runtime floor rule).
 var (
 	pricingRecoveryUnitPath   = "/etc/systemd/system/macprovider-coordinator-deploy-recovery.service"
@@ -121,5 +190,5 @@ func checkPricingRecoveryWiring(logger zerolog.Logger, configDir string) {
 		Str("event", "pricing_recovery_wiring_missing").
 		Strs("problems", problems).
 		Str("runbook", "docs/runbooks/catalog-release-decision-tree.md §Enabling rollout and pricing (runtime floor rule)").
-		Msg("pricing recovery is DISABLED on this host (a pre-#1693 deploy reinstalled its recovery units); re-run the enabling deploy before any pricing transaction or restart")
+		Msg("pricing recovery is DISABLED on this host (a pre-#1693 deploy reinstalled its recovery units); re-run the enabling rollout from a tag whose ledger carries the live catalog release before any pricing transaction or restart")
 }

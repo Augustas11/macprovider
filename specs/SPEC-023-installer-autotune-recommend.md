@@ -1,12 +1,23 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.16.1
+version: v0.16.2
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-09-24
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.16.2 (2026-09-25)** — `SPEC-023-R018` rules 7 and 12 tightened after
+  the #1693 E2 re-run. Rule 7: State S also carries owner, group and mode of
+  the base yaml, the window and every file of the `current` release; bytes
+  equal to the prior with another owner or mode are reinstalled with the
+  journal's, never skipped as prior; the journal also holds the Tier-2 trust
+  root the lane's gate used (bytes + sha256), and recovery's full
+  verify-directory of a terminal side uses that pinned root, never the
+  verifier's default path. Rule 12: while the floor marker exists, a deploy's
+  catalog-regression override is refused when the incoming release's rate rows
+  differ from the live release's. No other normative change.
 
 - **v0.16.1 (2026-09-24)** — `SPEC-023-R018` rule 2 clarified after the #1693
   fake-Pearl end-to-end run: a served name that resolved to `default` and
@@ -1438,8 +1449,10 @@ continuity, and every `SPEC-023-R017` rule not amended here apply unchanged.
    prior window bytes or `absent`, and a manifest of every digest needed to
    recognize the prior and candidate states: yaml, overlay presence and
    digest, `current` target, window, and the full file-digest set of both
-   releases. State S is (base digest, overlay presence and digest, `current`
-   target, window bytes, digest set of the `current` release). Phases are
+   releases, plus (v0.16.2) the Tier-2 trust root the gate verified with
+   (bytes and sha256). State S is (base digest, overlay presence and digest,
+   `current` target, window bytes, digest set of the `current` release), each
+   file member with its owner, group, and mode (v0.16.2). Phases are
    written durably before each step: `prepared` → `mutating` → `hup-intent`
    → `verifying` → `verified`, or `rolling-back` → `rolled-back`, plus
    `restored-unverified` (rule 8). Every yaml install (forward, rollback,
@@ -1450,10 +1463,12 @@ continuity, and every `SPEC-023-R017` rule not amended here apply unchanged.
    directories whose owning process is gone are removed under the lock set.
    Recovery (`--recover-pricing-txn`, same locks, journal-only state):
    `verified` or `rolled-back` requires S to equal the candidate or prior
-   respectively (release re-hashed and verified) and then finalizes without a
-   SIGHUP; any other phase restores each item by compare-and-swap (candidate
-   → prior; prior → skip; anything else stops with the journal kept and an
-   alert), then, if the coordinator runs, always sends one SIGHUP and
+   respectively (release re-hashed and verified with the journal's pinned
+   Tier-2 trust root) and then finalizes without a SIGHUP; any other phase
+   restores each item by compare-and-swap (candidate → prior; prior bytes with
+   the journal's owner and mode → skip; prior bytes with any other owner or
+   mode → reinstalled with the journal's; anything else stops with the
+   journal kept and an alert), then, if the coordinator runs, always sends one SIGHUP and
    finalizes only on positive live evidence — an applied-config record loaded
    after that SIGHUP whose config, billing-table, and served-card digests equal
    the prior values, and coordinator-served card bytes equal to the prior
@@ -1519,7 +1534,10 @@ continuity, and every `SPEC-023-R017` rule not amended here apply unchanged.
     install or restore a coordinator binary that lacks the pricing validator
     capability (`--validate-autotune-release --expect-base-equivalent`). Deploy
     scripts from tags older than #1693 cannot enforce this, so running one
-    after enablement is prohibited by operator rule.
+    after enablement is prohibited by operator rule. While the marker exists,
+    a deploy's catalog-regression override MUST also be refused when the
+    incoming release's rate rows differ from the live release's (v0.16.2): it
+    would move prices outside this lane.
 
 Every refusal, override, recovery, and rollback MUST leave an audit record
 naming the release ids, the effective-diff digest, and the reason. Nothing in

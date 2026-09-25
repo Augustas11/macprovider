@@ -1492,8 +1492,7 @@ func main() {
 	// The main loop owns SIGHUP before the listeners start: a coordinator that
 	// answers /healthz always reloads on SIGHUP (release lanes signal only
 	// then). A SIGHUP queued here is handled once boot is recorded below.
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	signals := notifyCoordinatorSignals()
 	bootSIGHUP.handOff()
 
 	go func() {
@@ -1517,15 +1516,15 @@ func main() {
 		Str("event", "coordinator_config_applied").
 		Msg("coordinator config applied")
 	recordAppliedConfig(logger, "boot", *configPath, *configOverlay, bootConfigDigests, bootConfigLoadedAt, buyerServer.AppliedEconomics())
+	reloads := startSIGHUPReloader(signals.hup, func() {
+		checkPricingRecoveryWiring(logger, filepath.Dir(*configPath))
+		reloadCoordinatorConfig(*configPath, *configOverlay, cfg.Tier2, logger, wsServer, buyerServer, autotuneCatalog, autotuneEvidenceStore, trustPoolAdminReloader, billingStore)
+	})
 
 	for {
 		select {
-		case sig := <-signals:
-			if sig == syscall.SIGHUP {
-				checkPricingRecoveryWiring(logger, filepath.Dir(*configPath))
-				reloadCoordinatorConfig(*configPath, *configOverlay, cfg.Tier2, logger, wsServer, buyerServer, autotuneCatalog, autotuneEvidenceStore, trustPoolAdminReloader, billingStore)
-				continue
-			}
+		case sig := <-signals.term:
+			reloads.halt()
 			timeout := 30 * time.Second
 			if sig == syscall.SIGINT {
 				timeout = 5 * time.Second
@@ -1578,6 +1577,9 @@ func main() {
 			outboxFlushCtx, outboxFlushCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			flushSettlementReceiptAuditOutbox(outboxFlushCtx)
 			outboxFlushCancel()
+			if !reloads.wait(ctx) {
+				logger.Warn().Str("event", "coordinator_shutdown_reload_abandoned").Msg("a SIGHUP reload was still running at the shutdown deadline; exiting without it (SQLite rolls back its uncommitted transaction)")
+			}
 			logger.Info().Msg("coordinator shutdown complete")
 			return
 		case err := <-errs:

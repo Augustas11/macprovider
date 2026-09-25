@@ -3587,6 +3587,31 @@ case "$CATALOG_VERDICT" in
       echo "  or set CATALOG_REGRESSION_OVERRIDE_REASON='<why>' to activate anyway (logged on Pearl)." >&2
       exit 1
     fi
+    # #1693: after the pricing runtime floor, the override must not move prices.
+    # The older release's rate rows would roll a pricing correction back outside
+    # the journaled pricing lane (and, under preserve-live, pair the live yaml's
+    # corrected rate_card with an older signed card). Rows compare as the
+    # content gate's rate-card projection (catalog-release.py
+    # _rate_card_rows_content: generated_at/version/policy_version dropped).
+    CATALOG_OVERRIDE_PRICING="$($SSH "set -e
+      if [ ! -e /opt/macprovider/.pricing-runtime-floor ] && [ ! -L /opt/macprovider/.pricing-runtime-floor ]; then echo no-floor; exit 0; fi
+      python3 -I -c 'import json, sys
+def rows(p):
+    o = json.load(open(p, \"rb\"))
+    for k in (\"generated_at\", \"version\", \"policy_version\"):
+        o.pop(k, None)
+    return json.dumps(o, sort_keys=True)
+print(\"same\" if rows(sys.argv[1]) == rows(sys.argv[2]) else \"differs\")' $DEPLOY_TMP/rate-card.json /opt/macprovider/autotune/$CATALOG_LIVE_TARGET/rate-card.json")" ||
+      { echo "aborting deploy: cannot compare the incoming and live rate cards for the regression override" >&2; exit 1; }
+    case "$CATALOG_OVERRIDE_PRICING" in
+      no-floor|same) ;;
+      differs)
+        echo "aborting deploy: refusing CATALOG_REGRESSION_OVERRIDE_REASON: the pricing runtime floor exists and $AUTOTUNE_RELEASE_ID's rate rows differ from live $CATALOG_LIVE_RELEASE_ID's" >&2
+        echo "  The override would roll a pricing correction back outside the pricing lane. Deploy a tag at or after the live release's commit" >&2
+        echo "  (its ledger carries the live release). See docs/runbooks/catalog-release-decision-tree.md §Pricing runtime floor." >&2
+        exit 1 ;;
+      *) echo "aborting deploy: the regression override rate-card check answered '$CATALOG_OVERRIDE_PRICING'" >&2; exit 1 ;;
+    esac
     log "  CATALOG REGRESSION OVERRIDE: activating $AUTOTUNE_RELEASE_ID over live $CATALOG_LIVE_RELEASE_ID"
     CATALOG_OVERRIDE_RECORD_B64="$(python3 - "$CATALOG_REGRESSION_OVERRIDE_B64" "$AUTOTUNE_RELEASE_DIR_NAME" "$CATALOG_LIVE_TARGET" "$CATALOG_LIVE_RELEASE_ID" "$COORDINATOR_RELEASE_VERSION" "$COORDINATOR_RELEASE_COMMIT" <<'PY'
 import base64, json, sys

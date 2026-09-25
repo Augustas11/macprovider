@@ -52,6 +52,23 @@ the e2e plan (`docs/testing/1693-pricing-lane-e2e-plan.md`).
   older than #1693 cannot enforce the runtime floor; running one after
   enablement is prohibited by the runbook. E2 scenario V10 tests the documented
   marker check.
+- **Money SQLite WAL never truncates under steady load (PRE-EXISTING, found by
+  the E2 re-run, V4 run 1).** The money DB handles open with
+  `wal_autocheckpoint(0)` (`internal/sqliteutil/dsn.go:48`,
+  `WithManualWALCheckpointPragmas`), and `runMoneySQLiteWALCheckpoint`
+  (`cmd/coordinator/main.go` ~2082) TRUNCATEs only after an idle interval; its
+  PASSIVE copy also returns early once buyer traffic resumes. Under continuous
+  buyer load the WAL only grows: after ~70 min of E2 load `request-log.sqlite-wal`
+  was 2.1 GB and the route-snapshot WAL 880 MB. From then on billing hot-path
+  inserts timed out (`context deadline exceeded`, ~70/min), requests ended
+  `served_2xx_without_credited_row` (`terminal_conflict` warnings), and a
+  SIGHUP reload stalled: the candidate applied ~100 s late, so V4's verified
+  deploy failed evidence (a) and rolled back (correctly). The pricing lane is
+  not the cause, but a reload stuck behind this is what exposed the dropped
+  SIGTERM (fixed here: separate termination channel, reloads off the main
+  loop). Follow-up: a size-triggered checkpoint under load (bounded PASSIVE
+  with a TRUNCATE/RESTART when the WAL exceeds a cap, or re-enabling a bounded
+  autocheckpoint), with a load test that asserts WAL size stays bounded.
 
 ## Open for testing (from the plan, not audit findings)
 

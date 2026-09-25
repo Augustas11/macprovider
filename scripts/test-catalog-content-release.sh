@@ -577,7 +577,13 @@ def main():
         return hashlib.sha256(subprocess.run(["git", "-C", os.environ["CCR_R"], "show", os.environ["CCR_EXPECT_COMMIT"] + ":phase4-coordinator/dist/coordinator.yaml"],
                                              capture_output=True, check=True).stdout).hexdigest()
     if cmd == "verify-directory":
-        if arg("--tier2-coordinator-config") and tier2_root_error(arg("--tier2-coordinator-config")):
+        # #1693 E2: the REAL trust-root resolution on every call, flag or not
+        # (a shipped bundle has no default coordinator.yaml beside it).
+        why = tier2_root_error(arg("--tier2-coordinator-config"))
+        with open(ctl / "verify-directory-calls.log", "a") as fh:
+            fh.write("%s %s %s\n" % (arg("--directory"), arg("--tier2-coordinator-config"), "error" if why else "ok"))
+        if why:
+            print("catalog-release: ERROR: " + why, file=sys.stderr)
             sys.exit(1)
         sys.exit(1 if (ctl / "verify-fail").exists() else 0)
     if cmd == "check-tier2-binding":
@@ -1473,12 +1479,36 @@ runc "$PRICE_COMMIT" --deploy --pricing-diff-sha256 "$PDIFF"
 grep -q 'ROLLBACK' "$T/out" && fail "a verified price must never be rolled back"
 [ "$(pricing_journal_phase)" = verified ] || fail "the journal must stay verified (got $(pricing_journal_phase))"
 [ "$(shasum -a 256 "$YAML" | cut -d' ' -f1)" = "$CAND_SHA" ] || fail "the candidate yaml must stay live after a finalize failure"
+[ -f "$CCR_FAKE/opt/macprovider/.pricing-txn/tier2-trust-root.yaml" ] || fail "begin must pin the gate's Tier-2 trust root in the journal"
+rm -f "$CCR_TEST_CTL/verify-directory-calls.log"
 RC=0; (cd "$R" && bash scripts/catalog-content-release.sh --recover-pricing-txn) >"$T/out" 2>"$T/err" || RC=$?
 [ "$RC" -eq 0 ] || fail "--recover-pricing-txn must finalize a verified journal (rc=$RC): $(tail -n 20 "$T/out") $(tail -n 10 "$T/err")"
 [ ! -e "$CCR_FAKE/opt/macprovider/.pricing-txn" ] || fail "recovery must finalize the verified journal"
+# #1693 E2 V4: the terminal verify-directory ran on Pearl from the shipped
+# bundle with the journal's pinned trust root (the default path is absent there).
+grep -q "/opt/macprovider/.pricing-txn/tier2-trust-root.yaml ok\$" "$CCR_TEST_CTL/verify-directory-calls.log" ||
+  fail "--recover-pricing-txn must verify the verified side with the journal's Tier-2 trust root: $(cat "$CCR_TEST_CTL/verify-directory-calls.log" 2>/dev/null)"
 [ "$(shasum -a 256 "$YAML" | cut -d' ' -f1)" = "$CAND_SHA" ] || fail "recovery must not roll back a verified journal"
 case "$(readlink "$A_ROOT/current")" in releases/test-new-v1-*) ;; *) fail "recovery must keep the verified release current" ;; esac
 note "ok: finalize fails after verified -> exit 0 + ALERT, recovery finalizes the candidate"
+
+# A verified journal begun without a pinned trust root (pre-fix helper): the
+# recovery uses the operator checkout's HEAD coordinator.yaml, shipped beside
+# the verifier and sha-pinned, never the verifier's absent default.
+setup_env
+touch "$CCR_TEST_CTL/fail-finalize-once"
+runc "$PRICE_COMMIT" --deploy --pricing-diff-sha256 "$PDIFF"
+[ "$RC" -eq 0 ] && [ "$(pricing_journal_phase)" = verified ] || fail "setup: a verified journal must be kept (rc=$RC)"
+python3 - "$CCR_FAKE/opt/macprovider/.pricing-txn/txn.json" <<'PY2'
+import json, sys
+t = json.load(open(sys.argv[1])); del t["tier2_trust_root_sha256"]; json.dump(t, open(sys.argv[1], "w"))
+PY2
+rm -f "$CCR_FAKE/opt/macprovider/.pricing-txn/tier2-trust-root.yaml" "$CCR_TEST_CTL/verify-directory-calls.log"
+RC=0; (cd "$R" && bash scripts/catalog-content-release.sh --recover-pricing-txn) >"$T/out" 2>"$T/err" || RC=$?
+[ "$RC" -eq 0 ] && [ ! -e "$CCR_FAKE/opt/macprovider/.pricing-txn" ] || fail "--recover-pricing-txn must finalize an unpinned verified journal with the shipped trust root (rc=$RC): $(tail -n 10 "$T/err")"
+grep -q "/tier2-trust-root.yaml ok\$" "$CCR_TEST_CTL/verify-directory-calls.log" && ! grep -q "/.pricing-txn/" "$CCR_TEST_CTL/verify-directory-calls.log" ||
+  fail "an unpinned journal must verify with the shipped trust root: $(cat "$CCR_TEST_CTL/verify-directory-calls.log" 2>/dev/null)"
+note "ok: an unpinned verified journal is finalized with the operator's sha-pinned trust root"
 
 # NO_GO before any mutation.
 pricing_no_go() { # <label> <check> <commit>

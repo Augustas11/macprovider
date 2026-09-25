@@ -843,8 +843,10 @@ for n in os.listdir(d):
 for p in (d, os.path.dirname(d)):
     fd = os.open(p, os.O_RDONLY); os.fsync(fd); os.close(fd)' "$root/releases/$final" \
   || { rm -rf "$root/releases/$final"; abort_pre_mutation "cannot fsync the staged release; not mutating"; }
+# The journal keeps the gate's sha-pinned Tier-2 trust root ($t2_root), so a
+# later recovery verifies with it and never with the operator's checkout.
 python3 -I "$ptx" begin --candidate-yaml "$pricing_candidate" --new-current "releases/$final" --prior-current "$prev" \
-  --candidate-window "$pricing_dir/candidate-window" --verdict "$pricing_dir/verdict.json" \
+  --candidate-window "$pricing_dir/candidate-window" --verdict "$pricing_dir/verdict.json" --tier2-trust-root "$t2_root" \
   || { rm -rf "$root/releases/$final"; abort_pre_mutation "pricing transaction journal refused; not mutating"; }
 mutated=1
 python3 -I "$ptx" phase mutating
