@@ -74,11 +74,11 @@ func TestEveryCoordinatorChatBuilderNegotiatesSignedFinality(t *testing.T) {
 	// coordinator route (receipts, settlement finality) or a non-coordinator
 	// host; a new computed URL fails until it is reviewed and listed here.
 	unresolvedAllowlist := map[string]bool{
-		"disclosure.go:coordinatorRoutingMetadataFresh":                     true, // GET operator /internal/routing
-		"public_feeds.go:fetchPublicFeed":                                   true, // GET public stats and rate-card feeds
-		"receipts.go:fetchCoordinatorBuyerReceipt":                          true, // GET /internal/settlement/receipts
-		"server.go:handleStickyDelete":                                      true, // DELETE operator /internal/sticky
-		"server.go:statusFromPoolz":                                         true, // GET operator /poolz
+		"disclosure.go:coordinatorRoutingMetadataFresh":                           true, // GET operator /internal/routing
+		"public_feeds.go:fetchPublicFeed":                                         true, // GET public stats and rate-card feeds
+		"receipts.go:fetchCoordinatorBuyerReceipt":                                true, // GET /internal/settlement/receipts
+		"server.go:handleStickyDelete":                                            true, // DELETE operator /internal/sticky
+		"server.go:statusFromPoolz":                                               true, // GET operator /poolz
 		"settlement_reconcile.go:fetchCoordinatorRequestSettlementFinalityDetail": true, // GET /internal/settlement/finality
 	}
 	seenAllowlisted := map[string]bool{}

@@ -749,11 +749,12 @@ func finalityHeaders(finality coordinatorRequestSettlementFinality) http.Header 
 // negotiated 200's body, so the buyer got a 502 and none of the completion)
 // is bounded the same way: its candidate records 0 delivered completion.
 func buyerDeliveredCompletionBound(reservation storage.ActiveReservation, candidate storage.SettlementFallbackCandidate, prompt, completion, total int64) (int64, int64) {
-	if (candidate.Outcome != "client_disconnect" && candidate.Outcome != bodyReadFailedOutcome) || candidate.CompletionTokens < 0 || candidate.CompletionTokens >= completion {
+	if !buyerDeliveredBoundOutcomes[candidate.Outcome] || candidate.CompletionTokens < 0 || candidate.CompletionTokens >= completion {
 		return completion, total
 	}
-	slog.Info("SPEC-022 reconciler bounded verified completion by buyer-delivered output after client disconnect",
+	slog.Info("SPEC-022 reconciler bounded verified completion by buyer-delivered output",
 		"request_id", reservation.RequestID,
+		"candidate_outcome", candidate.Outcome,
 		"account_id", reservation.AccountID,
 		"coordinator_completion_tokens", completion,
 		"buyer_delivered_completion_tokens", candidate.CompletionTokens,
@@ -783,6 +784,27 @@ func finalityTokenTotals(finality coordinatorRequestSettlementFinality) (int64, 
 		return 0, 0, 0, fmt.Errorf("coordinator finality token_source %q is not settlement-capable", source)
 	}
 	return prompt, completion, total, nil
+}
+
+// buyerDeliveredBoundOutcomes are the candidate outcomes whose candidate
+// completion is what the gateway actually delivered to the buyer, so a
+// verified finality above it is bounded by it (SPEC-022 R-5.6):
+//   - client_disconnect: the buyer left or a write to it failed;
+//   - body_read_failed: a negotiated 200 whose body read failed, 0 delivered;
+//   - stream_truncated: the coordinator stream broke (or a line overflowed)
+//     after the gateway forwarded part of it; the candidate is the forwarded
+//     estimate, or the provider-reported usage when its usage chunk had
+//     already been forwarded (then nothing was withheld and min() is a no-op);
+//   - provider_timeout: the gateway timed the stream out after forwarding
+//     part of it, or the coordinator answered 504 with nothing delivered (0).
+//
+// Outcomes where the buyer received the whole response ("ok",
+// "unverified_streaming", length-truncated terminals) are not bounded.
+var buyerDeliveredBoundOutcomes = map[string]bool{
+	"client_disconnect":   true,
+	bodyReadFailedOutcome: true,
+	"stream_truncated":    true,
+	"provider_timeout":    true,
 }
 
 // bodyReadFailedOutcome marks a hold the gateway took because its read of a
