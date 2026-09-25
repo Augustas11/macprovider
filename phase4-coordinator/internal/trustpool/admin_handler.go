@@ -1780,7 +1780,10 @@ func (h *adminHandler) refreshRegistryIfAhead(w http.ResponseWriter, state *Reco
 		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
 		return false
 	}
-	if err := h.deps.Registry.LoadRouteableSnapshotsAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
+	// The periodic refresher may publish this revision (or a newer one)
+	// after the unlocked check above; the locked publish treats that as
+	// already published, so only a real load failure disables routing.
+	if err := h.deps.Registry.PublishRouteableSnapshotsIfAhead(state.Revision, state.RouteableSnapshots()); err != nil {
 		h.deps.Registry.Disable()
 		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
 		return false
