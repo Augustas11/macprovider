@@ -509,6 +509,17 @@ for k in ('in_flight_requests', 'inflight'):
         print(int(v)); sys.exit(0)
 print('unknown')
 " 2>/dev/null || echo "unknown")
+# #1690 VM e2e F-8: the gateway /healthz has never emitted an in-flight
+# metric, so the parse above always read "unknown" and every deploy needed
+# FORCE_RESTART=1 plus a bypass tombstone. Fall back to the live gateway DB
+# (read-only): an active, unheld, unexpired quota reservation is exactly a
+# buyer request that is being served now and that a restart would drop.
+# Held reservations wait for the reconciler and survive a restart. Any
+# failure (no DB, no sqlite3, query error) stays "unknown" and fails closed.
+INFLIGHT_SQL="SELECT COUNT(*) FROM quota_reservations WHERE status = 'active' AND settlement_hold = 0 AND expires_at > strftime('%Y-%m-%dT%H:%M:%SZ', 'now');"
+if [ "$INFLIGHT" = "unknown" ]; then
+  INFLIGHT=$($SSH "DB='$REMOTE_GATEWAY_DB_PATH'; test -f \"\$DB\" || exit 1; sudo -u macprovider sqlite3 -readonly \"\$DB\" \"$INFLIGHT_SQL\"" 2>/dev/null) || INFLIGHT="unknown"
+fi
 # #290 R4 SEC HIGH — belt-and-braces shell-side validation. After the
 # Python parser, INFLIGHT MUST be either the literal string "unknown"
 # or a bounded ASCII digit string. Any other shape (whitespace, "True",
@@ -519,7 +530,7 @@ case "$INFLIGHT" in
   *) if [ "${#INFLIGHT}" -gt 10 ]; then INFLIGHT="unknown"; fi ;;
 esac
 if [ "${INFLIGHT}" = "unknown" ] && [ "${FORCE_RESTART:-0}" != "1" ]; then
-  log "  REFUSING TO PROCEED — gateway /healthz did not report a numeric in-flight metric."
+  log "  REFUSING TO PROCEED — neither gateway /healthz nor the gateway DB reported a numeric in-flight count."
   log "  Cannot verify quiet window; refusing EARLY (pre-scp) so no artifact is placed."
   log "  To proceed anyway:  FORCE_RESTART=1 bash $0"
   exit 4

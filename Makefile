@@ -83,6 +83,7 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_admission_journey_runner
 	node --test phase3-binary/app/Tests/MalibuTests/payout-signer-chain.test.mjs
 	bash scripts/test-production-exceptions.sh
+	bash phase5-gateway/dist/test/gateway_deploy_inflight.test.sh
 	bash scripts/test-coordinator-advertised-version-test.sh
 	bash scripts/test-cli-se-entitlements.sh
 	bash scripts/test-malibu-independent-release.sh
