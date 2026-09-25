@@ -2207,6 +2207,16 @@ struct ServeCommand: AsyncParsableCommand {
                         snapshotDirectory: MLXLMLoopbackServeModel.snapshotDirectory(),
                         catalogModelIDAlias: catalogModelIDAlias
                     )
+                case .lmStudio:
+                    // SPEC-010-R007(i) / SPEC-046-R009 (#1690 M9): the GGUF is
+                    // the one file the operator's LM Studio models root
+                    // (MACPROVIDER_LMSTUDIO_MODELS_ROOT) resolves for the key,
+                    // hashed by the CLI; LM Studio names no file.
+                    modelRuntime = try await OpenAICompatibleLoopbackRuntime.lmStudio(
+                        servedModelRef: loopbackServedRef,
+                        origin: LMStudioLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
+                        catalogModelIDAlias: catalogModelIDAlias
+                    )
                 }
             } else {
                 helloRuntimeSource = nil

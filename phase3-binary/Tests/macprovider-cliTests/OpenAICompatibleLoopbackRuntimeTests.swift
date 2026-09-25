@@ -587,6 +587,7 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
 
     func testUpstreamRequestAsksOllamaForPerTokenLogprobsOnly() throws {
         XCTAssertTrue(OpenAICompatibleLoopbackRuntime.streamsPerTokenLogprobs("ollama_loopback"))
+        XCTAssertTrue(OpenAICompatibleLoopbackRuntime.streamsPerTokenLogprobs("lmstudio_loopback"))
         XCTAssertFalse(OpenAICompatibleLoopbackRuntime.streamsPerTokenLogprobs("llamacpp_loopback"))
         XCTAssertFalse(OpenAICompatibleLoopbackRuntime.streamsPerTokenLogprobs("mlxlm_loopback"))
         let request = try makeRequest(model: "ollama:gemma3:270m")
@@ -884,7 +885,7 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         XCTAssertEqual(LoopbackServeSelection.select("llamacpp:qwen2.5-0.5b-instruct-q4_k_m"), .llamaCpp)
         XCTAssertEqual(LoopbackServeSelection.select("ollama:gemma3:270m"), .ollama)
         XCTAssertNil(LoopbackServeSelection.select("mlx-community/Qwen3-8B"))
-        XCTAssertNil(LoopbackServeSelection.select("lmstudio:foo"), "lmstudio: arrives with its identity leg")
+        XCTAssertEqual(LoopbackServeSelection.select("lmstudio:foo"), .lmStudio, "lmstudio: arrived with its identity leg (#1690 M9)")
         XCTAssertNil(LoopbackServeSelection.select("openai:foo"))
         XCTAssertEqual(LoopbackServeSelection.llamaCpp.runtimeSource, "llamacpp_loopback")
         XCTAssertEqual(LlamaCppLoopbackServeModel.servedRefPrefix, BYOMLlamaCppModelStore.servedModelRefPrefix)
@@ -905,6 +906,8 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         XCTAssertTrue(LoopbackServeHTTPClient.isAllowed(URL(string: base + "/tokenize")!, method: "POST"))
         XCTAssertTrue(LoopbackServeHTTPClient.isAllowed(URL(string: base + "/apply-template")!, method: "POST"))
         XCTAssertTrue(LoopbackServeHTTPClient.isAllowed(URL(string: base + "/props")!, method: "GET"))
+        XCTAssertTrue(LoopbackServeHTTPClient.isAllowed(URL(string: base + "/api/v1/models")!, method: "GET"))
+        XCTAssertFalse(LoopbackServeHTTPClient.isAllowed(URL(string: base + "/api/v1/models/load")!, method: "POST"))
         XCTAssertFalse(LoopbackServeHTTPClient.isAllowed(URL(string: base + "/props")!, method: "POST"))
         XCTAssertFalse(LoopbackServeHTTPClient.isAllowed(URL(string: base + "/slots")!, method: "GET"))
         XCTAssertFalse(LoopbackServeHTTPClient.isAllowed(URL(string: base + "/props?x=1")!, method: "GET"))

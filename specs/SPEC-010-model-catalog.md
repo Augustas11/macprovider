@@ -1,8 +1,9 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.12
-**Status:** v1.12 MLX-snapshot identity leg for `mlxlm_loopback` (R009, #1690
-M8, 2026-09-24) over v1.11 GGUF `huggingface_revision` source and pool-scoped
+**Version:** 1.13
+**Status:** v1.13 serving-time GGUF binding for `lmstudio_loopback` (R007(i),
+#1690 M9, 2026-09-25) over v1.12 MLX-snapshot identity leg for
+`mlxlm_loopback` (R009, #1690 M8, 2026-09-24) over v1.11 GGUF `huggingface_revision` source and pool-scoped
 settlement scope for R007 (#1690, 2026-09-24) over v1.10 operator artifact
 diagnostics (#1689 part 4, 2026-09-23) over v1.9 row-continuity
 admission clarification (#1615, 2026-09-20) over v1.8 R004 composite-proof clarification (BYOM v0.2 epic #1453,
@@ -43,6 +44,21 @@ SPEC-023 owns candidate-catalog `bench_gate` provenance, including
   artifact-derived identity across a scheduled catalog re-stamp by resolving
   in its own release's set (slice-4 implementation). Bounded
   `model-catalog-identity` amendment.
+
+**Change log v1.13 (issue #1690 M9 — LM Studio serving):**
+- New R007(i): LM Studio (`lmstudio_loopback`, SPEC-046-R009 `lmstudio:`)
+  serves a GGUF member under R007(a)-(f) unchanged. The file is the one
+  `.gguf` the CLI's LM Studio locator resolves for the model key under the
+  operator's LM Studio models root; LM Studio never names it. LM Studio's
+  REST surface (0.4 and later, including the headless `llmster` daemon)
+  reports no file path, so the serving-time binding is its
+  `GET /api/v1/models` entry for the key: a loaded `llm` of format `gguf`
+  with the file's publisher directory and exact byte size (SPEC-046-R009).
+  The loaded weights stay administrative trust, as for every loopback
+  runtime. This replaces the v1.12 note that LM Studio had no serving-time
+  binding.
+- R009(e): LM Studio is no longer listed as a runtime without an identity
+  leg; oMLX and mlx-serve still are.
 
 **Change log v1.12 (issue #1690 M8 — MLX-snapshot identity leg):**
 - New **SPEC-010-R009**: an external MLX runtime, `mlx_lm.server` served
@@ -1255,6 +1271,24 @@ algorithm.
   binds one only under R009. Every other external runtime that serves MLX
   safetensors (oMLX, mlx-serve) has no identity leg until an amendment
   defines how the CLI binds that runtime process to a snapshot manifest.
+  (i) **LM Studio serving (v1.13, #1690 M9).** `lmstudio_loopback` (LM
+  Studio 0.4 or later, the desktop app's server or the headless `llmster`
+  daemon) serves a `gguf` member through the SPEC-046-R009 `lmstudio:<key>`
+  selector, under (a)-(f) unchanged. The file is the one regular `.gguf`
+  file the CLI's LM Studio locator resolves for the model key under the
+  operator's LM Studio models root (`MACPROVIDER_LMSTUDIO_MODELS_ROOT`,
+  default `~/.lmstudio/models`, layout `<publisher>/<repo>/<file>.gguf`);
+  zero or several matching files mean no identity. LM Studio never names
+  the file. Its REST surface reports no file path, so the serving-time
+  binding is weaker than llama-server's `/props` path: at startup and before
+  every request, `GET /api/v1/models` must list exactly one entry for the
+  key, an `llm` of format `gguf` whose `publisher` is the file's publisher
+  directory and whose `size_bytes` is the file's exact size, with at least
+  one loaded instance. That rules out a different file of another size or
+  publisher, an unloaded key, and an MLX-format model. The loaded weights
+  are administrative trust (SPEC-042-R004), exactly as for every loopback
+  runtime. LM Studio MLX-format models have no leg: no `mlx_safetensors`
+  member is ever valid for `lmstudio_loopback` ((h), SPEC-023 §3.7.4).
 
 - **SPEC-010-R009 — MLX-snapshot identity leg for `mlxlm_loopback` (v1.12,
   #1690 M8).** An `mlx_lm.server` process served through the SPEC-046-R009
@@ -1292,9 +1326,9 @@ algorithm.
   session never settles on a global route. A primary-row binding carries no
   R007(d) six values (the primary exemption); a feed-member binding carries
   all six.
-  (e) **Scope.** `mlx_cache` is unchanged. oMLX, mlx-serve, and LM Studio
-  (`lmstudio_loopback`) have no identity leg and are not selectable for
-  serving; each needs its own amendment.
+  (e) **Scope.** `mlx_cache` is unchanged. oMLX and mlx-serve have no
+  identity leg and are not selectable for serving; each needs its own
+  amendment. (v1.13) LM Studio serves GGUF members only, under R007(i).
 
 ### 3.8 Operator artifact diagnostics (v1.10 amendment)
 

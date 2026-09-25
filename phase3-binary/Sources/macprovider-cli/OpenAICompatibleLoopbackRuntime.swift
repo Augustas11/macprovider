@@ -13,9 +13,11 @@ import MacProviderCore
 //   - `--model mlxlm:<name>`    -> `mlxlm_loopback`    (operator-declared MLX
 //     snapshot, bound to the path mlx_lm.server lists in `/v1/models`;
 //     SPEC-010-R009, #1690 M8)
-// Other OpenAI-compatible runtimes (`lmstudio:`, `openai:`, oMLX) are
-// deliberately not selectable here: they arrive with their identity leg,
-// one at a time.
+//   - `--model lmstudio:<key>`  -> `lmstudio_loopback` (the GGUF the LM Studio
+//     models root resolves for the key, bound to LM Studio's `/api/v1/models`
+//     entry for it; SPEC-010-R007(i), #1690 M9)
+// Other OpenAI-compatible runtimes (`openai:`) are deliberately not
+// selectable here: they arrive with their identity leg, one at a time.
 //
 // The adapter reports the `macprovider.gguf-file.v1` identity of the LOCAL
 // GGUF file (never a runtime-reported digest), keeps the loopback constraints
@@ -101,11 +103,13 @@ enum LoopbackServeSelection: Equatable {
     case ollama
     case llamaCpp
     case mlxLM
+    case lmStudio
 
     static func select(_ ref: String?) -> LoopbackServeSelection? {
         if OllamaLoopbackServeModel.isOllamaLoopbackRef(ref) { return .ollama }
         if LlamaCppLoopbackServeModel.isLlamaCppLoopbackRef(ref) { return .llamaCpp }
         if MLXLMLoopbackServeModel.isMLXLMLoopbackRef(ref) { return .mlxLM }
+        if LMStudioLoopbackServeModel.isLMStudioLoopbackRef(ref) { return .lmStudio }
         return nil
     }
 
@@ -114,6 +118,7 @@ enum LoopbackServeSelection: Equatable {
         case .ollama: return OllamaLoopbackServeModel.runtimeSource
         case .llamaCpp: return LlamaCppLoopbackServeModel.runtimeSource
         case .mlxLM: return MLXLMLoopbackServeModel.runtimeSource
+        case .lmStudio: return LMStudioLoopbackServeModel.runtimeSource
         }
     }
 
@@ -213,12 +218,15 @@ struct LoopbackGenerationTimeouts: Equatable, Sendable {
 /// SPEC-046-R002 loopback HTTP leg for the serve proxy. Mirrors the discovery
 /// client's safety posture (loopback-literal host check, no redirects, bounded
 /// header/body) with a closed per-method path allowlist:
-///   POST /v1/chat/completions, /apply-template, /tokenize; GET /props.
-/// The last three are llama-server only (fingerprint, context window and the
-/// prompt-token preflight); the Ollama path only ever posts chat completions.
+///   POST /v1/chat/completions, /apply-template, /tokenize;
+///   GET /props, /v1/models, /api/v1/models.
+/// `/apply-template`, `/tokenize` and `/props` are llama-server only
+/// (fingerprint, context window and the prompt-token preflight); `/v1/models`
+/// binds mlx_lm.server and `/api/v1/models` binds LM Studio (#1690 M9); the
+/// Ollama path only ever posts chat completions.
 final class LoopbackServeHTTPClient: BYOMLoopbackStreamingHTTPClient, @unchecked Sendable {
     static let allowedPOSTPaths: Set<String> = ["/v1/chat/completions", "/apply-template", "/tokenize"]
-    static let allowedGETPaths: Set<String> = ["/props", "/v1/models"]
+    static let allowedGETPaths: Set<String> = ["/props", "/v1/models", "/api/v1/models"]
     /// How much later than the runtime watchdog the URLSession timers fire.
     static let backstopSlackSeconds: TimeInterval = 30
 
@@ -799,6 +807,9 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// every identity-binding report: a GGUF file (SPEC-010-R007(a)) or, for
     /// `mlxlm_loopback`, an MLX snapshot (SPEC-010-R009(a)).
     private let identity: LoopbackServedIdentity
+    /// `lmstudio_loopback`: the `/api/v1/models` entry the runtime must keep
+    /// listing for the bound file (SPEC-046-R009, #1690 M9).
+    private let lmStudioBinding: LMStudioLoopbackServeModel.Binding?
     private var providerStatus: ProviderStatus?
     private var registrationCounter: Int = 0
 
@@ -820,6 +831,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
         digestResolver: BYOMArtifactDigestResolver? = nil,
         mlxSnapshot: MLXSnapshotIdentity? = nil,
+        lmStudioBinding: LMStudioLoopbackServeModel.Binding? = nil,
         deadline: Date? = nil
     ) throws {
         let trimmedRef = servedModelRef.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -830,6 +842,8 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             self.upstreamModelName = LlamaCppLoopbackServeModel.upstreamModelName(fromServedRef: trimmedRef)
         case MLXLMLoopbackServeModel.runtimeSource:
             self.upstreamModelName = MLXLMLoopbackServeModel.upstreamModelName
+        case LMStudioLoopbackServeModel.runtimeSource:
+            self.upstreamModelName = LMStudioLoopbackServeModel.modelKey(fromServedRef: trimmedRef)
         default:
             self.upstreamModelName = OllamaLoopbackServeModel.upstreamModelName(fromServedRef: trimmedRef)
         }
@@ -844,6 +858,12 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             return trimmed.isEmpty ? nil : trimmed
         }
         self.httpClient = httpClient ?? LoopbackServeHTTPClient()
+        // An LM Studio runtime is always bound to its `/api/v1/models` entry;
+        // no other runtime has one.
+        guard (lmStudioBinding != nil) == (runtimeSource == LMStudioLoopbackServeModel.runtimeSource) else {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("lmstudio_loopback requires its LM Studio model binding")
+        }
+        self.lmStudioBinding = lmStudioBinding
         if let mlxSnapshot {
             // SPEC-010-R009: an MLX snapshot is never a GGUF file, and only
             // mlxlm_loopback serves one.
@@ -967,6 +987,64 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             catalogModelIDAlias: catalogModelIDAlias,
             httpClient: client,
             mlxSnapshot: snapshot,
+            deadline: deadline
+        )
+    }
+
+    /// `lmstudio:<key>` (SPEC-010-R007(i) / SPEC-046-R009, #1690 M9): hash
+    /// the one GGUF file the LM Studio models root resolves for the key, and
+    /// require LM Studio to list a loaded `gguf` model for that key with the
+    /// file's publisher and exact size. No file, an ambiguous key, or an entry
+    /// that does not match fails closed (no identity).
+    static func lmStudio(
+        servedModelRef: String,
+        origin: String,
+        modelsRoot: URL = BYOMLMStudioModelStore.defaultRoot(),
+        catalogModelIDAlias: String? = nil,
+        httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
+        cache: BYOMArtifactDigestCache = BYOMArtifactDigestCache(url: BYOMArtifactDigestCache.defaultURL()),
+        deadline: Date? = nil
+    ) async throws -> OpenAICompatibleLoopbackRuntime {
+        guard let validatedOrigin = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
+            throw OpenAICompatibleLoopbackRuntimeError.invalidLoopbackOrigin(origin)
+        }
+        let client = httpClient ?? LoopbackServeHTTPClient()
+        let resolver = BYOMArtifactDigestResolver(locators: [BYOMLMStudioModelStore(root: modelsRoot)], cache: cache)
+        let evidence: BYOMArtifactEvidence
+        do {
+            evidence = try resolver.computeEvidence(
+                runtimeSource: LMStudioLoopbackServeModel.runtimeSource,
+                servedModelRef: servedModelRef,
+                runtimeArtifactPath: nil,
+                deadline: deadline
+            )
+        } catch {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(String(describing: error))
+        }
+        guard let binding = LMStudioLoopbackServeModel.binding(
+            modelKey: LMStudioLoopbackServeModel.modelKey(fromServedRef: servedModelRef),
+            locator: evidence.locatorDigest,
+            sizeBytes: evidence.file.sizeBytes
+        ) else {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("the LM Studio model file has no publisher/repo/file locator")
+        }
+        let state: LMStudioLoopbackServeModel.BindingState
+        do {
+            state = try await LMStudioLoopbackServeModel.bindingState(client, origin: validatedOrigin, binding: binding)
+        } catch {
+            throw OpenAICompatibleLoopbackRuntimeError.upstreamNotRecognized(LMStudioLoopbackServeModel.runtimeSource)
+        }
+        guard case .bound = state else {
+            throw OpenAICompatibleLoopbackRuntimeError.upstreamNotRecognized(LMStudioLoopbackServeModel.runtimeSource)
+        }
+        return try OpenAICompatibleLoopbackRuntime(
+            servedModelRef: servedModelRef,
+            origin: origin,
+            runtimeSource: LMStudioLoopbackServeModel.runtimeSource,
+            catalogModelIDAlias: catalogModelIDAlias,
+            httpClient: client,
+            digestResolver: resolver,
+            lmStudioBinding: binding,
             deadline: deadline
         )
     }
@@ -1098,11 +1176,36 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         }
     }
 
-    /// llama.cpp only: re-read `/props`, require the bound file is still the
-    /// one served, then gate prompt + max_tokens against `n_ctx`. Returns the
-    /// context window used (nil when the runtime reports none).
+    /// lmstudio_loopback: before every request LM Studio must still list the
+    /// bound model loaded, with the bound file's publisher and size
+    /// (SPEC-046-R009, #1690 M9). Returns its loaded context window; nil for
+    /// every other runtime or when no instance reports one.
+    private func requireLMStudioServesBoundFile() async throws -> Int? {
+        guard let lmStudioBinding else { return nil }
+        let state: LMStudioLoopbackServeModel.BindingState
+        do {
+            state = try await LMStudioLoopbackServeModel.bindingState(httpClient, origin: origin, binding: lmStudioBinding)
+        } catch {
+            throw APIError(status: 502, message: "Upstream loopback error", type: "server_error", code: "upstream_unavailable")
+        }
+        guard case .bound(let contextWindow) = state else {
+            throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
+        }
+        return contextWindow
+    }
+
+    /// llama.cpp: re-read `/props`, require the bound file is still the one
+    /// served, then gate prompt + max_tokens against `n_ctx`. LM Studio:
+    /// require the bound entry, then gate max_tokens against its loaded
+    /// context. Returns the context window used (nil when the runtime
+    /// reports none).
     private func upstreamContextGate(_ request: ChatCompletionRequest) async throws -> Int? {
         try await requireMLXLMServesBoundSnapshot()
+        if lmStudioBinding != nil {
+            guard let contextWindow = try await requireLMStudioServesBoundFile() else { return nil }
+            try Self.contextGate(promptTokens: nil, maxTokens: request.maxTokens, contextWindow: contextWindow)
+            return contextWindow
+        }
         guard isLlamaCpp else { return nil }
         let props: BYOMHTTPResponse
         do {
@@ -1172,12 +1275,14 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         if shouldCancel() { throw CancellationError() }
         // The last check before any byte goes upstream, for streaming and
         // non-streaming alike: the bound artifact identity is unchanged and,
-        // for mlxlm_loopback, the runtime still lists the bound snapshot
-        // (SPEC-010-R007(a) / R009(a)(b)).
+        // for mlxlm_loopback, the runtime still lists the bound snapshot, and
+        // for lmstudio_loopback the bound model entry (SPEC-010-R007(a) /
+        // R009(a)(b), SPEC-046-R009).
         guard identityIsValid() else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
         try await requireMLXLMServesBoundSnapshot()
+        _ = try await requireLMStudioServesBoundFile()
         let body = try Self.encodeUpstreamRequest(
             request,
             upstreamModelName: upstreamModelName,
@@ -1332,7 +1437,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// Runtimes asked for a per-chunk `logprobs` list, whose entries count
     /// the completion tokens each chunk carries (#1690 M9).
     static func streamsPerTokenLogprobs(_ runtimeSource: String) -> Bool {
-        runtimeSource == OllamaLoopbackServeModel.runtimeSource
+        runtimeSource == OllamaLoopbackServeModel.runtimeSource || runtimeSource == LMStudioLoopbackServeModel.runtimeSource
     }
 
     /// The one mapping for every upstream deadline, whichever timer fires.

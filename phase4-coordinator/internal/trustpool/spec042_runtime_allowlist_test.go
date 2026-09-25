@@ -73,7 +73,7 @@ func TestReconstructEvents_AcceptsPolicyCoreV2RuntimeAllowlist(t *testing.T) {
 	}
 	// A malformed durable projection never authorizes an external runtime.
 	bad := snaps[0]
-	bad.RuntimeAllowlist = []string{"lmstudio_loopback"}
+	bad.RuntimeAllowlist = []string{"openai_compatible_loopback"}
 	if err := trustpool.NewRegistry().LoadRouteableSnapshot(bad); err == nil {
 		t.Fatal("registry accepted an out-of-vocabulary runtime allowlist")
 	}
@@ -115,9 +115,9 @@ func TestReconstructEvents_RejectsPolicyCoreV2AcceptanceViolations(t *testing.T)
 			allowLlamacpp(core)
 			core.RuntimeAllowlist = []string{"mlx_cache"}
 		},
-		"allowlist lmstudio": func(core *poolmanifest.PolicyCore) {
+		"allowlist openai": func(core *poolmanifest.PolicyCore) {
 			allowLlamacpp(core)
-			core.RuntimeAllowlist = []string{"lmstudio_loopback"}
+			core.RuntimeAllowlist = []string{"openai_compatible_loopback"}
 		},
 		"unknown extension": func(core *poolmanifest.PolicyCore) {
 			allowLlamacpp(core)
