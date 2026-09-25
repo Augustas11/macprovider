@@ -664,7 +664,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.17.1",
+      "version": "v0.17.2",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1979,7 +1979,8 @@
         "phase4-coordinator/internal/billing/artifact_evidence_test.go:TestRouteSnapshotArtifactEvidenceDigestBindingAndRoundTrip",
         "phase4-coordinator/internal/billing/artifact_evidence_test.go:TestRouteSnapshotArtifactEvidenceIsAllSixOrNoneAndNamesTheExpectedPair",
         "phase3-binary/Tests/macprovider-cliTests/BYOMArtifactDigestTests.swift:testDigestIsComputedOverTheBytesNeverTheManifestLocator",
-        "phase3-binary/Tests/macprovider-cliTests/BYOMArtifactDigestTests.swift:testOllamaDiscoveryReportsHashAvailabilityAndMatchesByComputedDigestOnly"
+        "phase3-binary/Tests/macprovider-cliTests/BYOMArtifactDigestTests.swift:testOllamaDiscoveryReportsHashAvailabilityAndMatchesByComputedDigestOnly",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneArtifactFeedGGUFRevisionTests.swift:testLlamaCppDiscoveryIsCatalogMatchedThroughTheBakedFeed"
       ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
@@ -1989,7 +1990,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
-        "rationale": "SPEC-010 1.11 (#1690 M3) adds R007(f) pool-scoped settlement for loopback-served GGUF members, (g) the huggingface_revision GGUF source kind, and (h) defers the MLX-snapshot identity leg for external runtimes; (f) is implemented on the coordinator by the #1690 M4 pool route-time member derivation and (g) by the coordinator feed parser; the generator and CLI legs of (g) and the signed pool journey remain. SPEC-010 v1.7 specifies artifact-feed identity: `macprovider.gguf-file.v1` as a canonical wire pair computed by the CLI over the local GGUF bytes, a release-bound `verified` artifact-feed entry as an expected identity resolving by the globally unique (hash_algorithm, hash) pair to one (model_key, artifact_id), and six-value route-time evidence with fail-closed settlement re-verification for a non-primary member. Owner is the BYOM v0.2 epic (issue #1453), slice 3."
+        "rationale": "SPEC-010 1.11 (#1690 M3) adds R007(f) pool-scoped settlement for loopback-served GGUF members, (g) the huggingface_revision GGUF source kind, and (h) defers the MLX-snapshot identity leg for external runtimes; (f) is implemented on the coordinator by the #1690 M4 pool route-time member derivation and (g) by the coordinator feed parser and (#1690 M1 B3a) the CLI feed parser and catalog matcher; the generator leg of (g) and the signed pool journey remain. SPEC-010 v1.7 specifies artifact-feed identity: `macprovider.gguf-file.v1` as a canonical wire pair computed by the CLI over the local GGUF bytes, a release-bound `verified` artifact-feed entry as an expected identity resolving by the globally unique (hash_algorithm, hash) pair to one (model_key, artifact_id), and six-value route-time evidence with fail-closed settlement re-verification for a non-primary member. Owner is the BYOM v0.2 epic (issue #1453), slice 3."
       }
     },
     {
@@ -2519,7 +2520,9 @@
       "state": "pending",
       "implementation": [],
       "tests": [
-        "phase4-coordinator/internal/buyer/catalog_artifacts_feed_test.go:TestLoadAutotuneFeedsGGUFHuggingFaceRevisionTuple"
+        "phase4-coordinator/internal/buyer/catalog_artifacts_feed_test.go:TestLoadAutotuneFeedsGGUFHuggingFaceRevisionTuple",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneArtifactFeedGGUFRevisionTests.swift:testIllegalHuggingFaceGGUFTuplesAreIntegrityFailures",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneArtifactFeedGGUFRevisionTests.swift:testM1TupleDecodesAndBindsToTheCompiledInRelease"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
@@ -2529,7 +2532,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
-        "rationale": "SPEC-023 v0.16.0 (#1690 M3) adds a gguf huggingface_revision source kind (with file_path) and a route-time, pool-scoped settlement exception for gguf members served by an allowlisted runtime; global admission is unchanged. #1690 M4: the coordinator consumer (buyer/catalog_artifacts_feed.go) accepts the v0.16.0 gguf huggingface_revision tuple with a validated file_path; the generator (scripts/catalog-release.py) and the CLI do not, so under the rollout rule no release publishes the tuple yet. Current as of SPEC-023 v0.14.3: R004 settlement identity is the SPEC-010-R007 identity set (v0.10.3 lifted primary-only), minus loopback-served members, so no gguf artifact reaches settlement_capable while the SPEC-047-R003(iv) v0.1.10 loopback bar holds (#1694). Generator, coordinator, and CLI implementations now exist (SPEC-010-R007 and SPEC-047-R003 mappings); this entry stays pending because signed journey evidence is missing. Original v0.10.0 scope: SPEC-023 v0.10.0 specifies the signed catalog artifact feed, its closed artifact-identity matrix, its release.json binding and release-ledger feed-set evolution, the Stage-A/Stage-B activation that keeps the compatibility-set manifest's file map unchanged until a bridge CLI ships, primary-artifact consistency scoped to `listed`/`recommendable` rows, primary-artifact-only settlement identity, global `(hash_algorithm, hash)` uniqueness within a feed, GGUF source-digest equality, the closed `artifact_id` grammar with its ledger-backed cross-release rebinding check, artifact-feed signer-identity equality against the release binding and the candidate-feed signer, artifact evidence bound into the immutable SPEC-022 route-time record with settlement failing closed on missing, changed, cross-release, or wrong-signer evidence (a SPEC-047-owned optional record that leaves SPEC-022's minimum snapshot fields unchanged), release-ledger schema version 3 with its closed artifact-bound row and canonically ordered `artifact_bindings` array, and its fail-closed-without-fleet-fail-close failure classes, but no generator, coordinator, or CLI implementation exists yet. Owner is the BYOM v0.2 epic (issue #1453)."
+        "rationale": "SPEC-023 v0.16.0 (#1690 M3) adds a gguf huggingface_revision source kind (with file_path) and a route-time, pool-scoped settlement exception for gguf members served by an allowlisted runtime; global admission is unchanged. #1690 M4: the coordinator consumer (buyer/catalog_artifacts_feed.go) accepts the v0.16.0 gguf huggingface_revision tuple with a validated file_path; SPEC-023 v0.17.2 (#1690 M1 B3a): the provider CLI (AutotuneArtifactFeed.swift) accepts it too and resolves a llama.cpp-served GGUF through it by the file digest it computes; the generator (scripts/catalog-release.py) does not yet, so under the rollout rule no release publishes the tuple yet. Current as of SPEC-023 v0.14.3: R004 settlement identity is the SPEC-010-R007 identity set (v0.10.3 lifted primary-only), minus loopback-served members, so no gguf artifact reaches settlement_capable while the SPEC-047-R003(iv) v0.1.10 loopback bar holds (#1694). Generator, coordinator, and CLI implementations now exist (SPEC-010-R007 and SPEC-047-R003 mappings); this entry stays pending because signed journey evidence is missing. Original v0.10.0 scope: SPEC-023 v0.10.0 specifies the signed catalog artifact feed, its closed artifact-identity matrix, its release.json binding and release-ledger feed-set evolution, the Stage-A/Stage-B activation that keeps the compatibility-set manifest's file map unchanged until a bridge CLI ships, primary-artifact consistency scoped to `listed`/`recommendable` rows, primary-artifact-only settlement identity, global `(hash_algorithm, hash)` uniqueness within a feed, GGUF source-digest equality, the closed `artifact_id` grammar with its ledger-backed cross-release rebinding check, artifact-feed signer-identity equality against the release binding and the candidate-feed signer, artifact evidence bound into the immutable SPEC-022 route-time record with settlement failing closed on missing, changed, cross-release, or wrong-signer evidence (a SPEC-047-owned optional record that leaves SPEC-022's minimum snapshot fields unchanged), release-ledger schema version 3 with its closed artifact-bound row and canonically ordered `artifact_bindings` array, and its fail-closed-without-fleet-fail-close failure classes, but no generator, coordinator, or CLI implementation exists yet. Owner is the BYOM v0.2 epic (issue #1453)."
       }
     },
     {

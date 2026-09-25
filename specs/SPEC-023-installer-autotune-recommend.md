@@ -1,12 +1,26 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.17.1
+version: v0.17.2
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-09-23
 lockstep: SPEC-005 v0.6.7 (SPEC-005-R011 money-table owner). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.17.2 (2026-09-25)** — Records the v0.16.0 rollout state (#1690 M1,
+  B3a). The v0.16.0 `gguf` + `huggingface_revision` + `file_path` tuple is
+  implemented by the coordinator consumer (`buyer/catalog_artifacts_feed.go`)
+  and, from this revision, by the provider CLI consumer
+  (`phase3-binary/Sources/macprovider-cli/AutotuneArtifactFeed.swift`). The
+  CLI resolves such an artifact by the `macprovider.gguf-file.v1` digest it
+  computes over the served file, the same `(hash_algorithm, hash)` pair the
+  coordinator resolves the member by. The release generator still refuses the
+  tuple (`ARTIFACT_IDENTITY_MATRIX` in `scripts/catalog-release.py`); its
+  consumer floor v0.16.0 gates `allowed_runtime_sources` only and never made
+  the generator emit it. The rollout rule is unchanged: no release publishes
+  the tuple until the generator implements it and every consumer reading that
+  release is a v0.16.0 consumer. No schema or matching-rule change.
 
 - **v0.17.1 (2026-09-25)** — The v0.17.0 rollout rule is mechanical (#1690 M8
   audit R1). The release generator carries a consumer floor
@@ -1068,7 +1082,7 @@ The release generator MUST apply these same closed field sets before signing, so
 
   **Rollout of the v0.17.0 tuple (enforced, v0.17.1).** The release generator MUST refuse to emit an artifact whose `allowed_runtime_sources` contains `mlxlm_loopback` while its consumer floor (`ARTIFACT_FEED_CONSUMER_FLOOR`, `scripts/catalog-release.py`) is below v0.17.0. The floor MUST be raised only in a reviewed change, after every provider CLI and coordinator that reads the release implements v0.17.0. A consumer older than v0.17.0 rejects such a feed as `catalog_artifact_feed_integrity_failure`, which fails closed for artifact-derived use only.
 
-  **Rollout of the v0.16.0 tuple.** Current consumers accept a `gguf` artifact only with `ollama_library_tag` (`phase4-coordinator/internal/buyer/catalog_artifacts_feed.go:41-56`; the generator's matrix in `scripts/catalog-release.py` likewise). Because the feed schema is closed, a consumer older than v0.16.0 rejects a whole feed that carries a `huggingface_revision` GGUF artifact as `catalog_artifact_feed_integrity_failure`. That fails closed for artifact-derived use only (§3.7.6 rule 6). A release MUST NOT publish such an artifact until the generator and every consumer that reads that release implement v0.16.0.
+  **Rollout of the v0.16.0 tuple.** State as of v0.17.2: the coordinator consumer (`phase4-coordinator/internal/buyer/catalog_artifacts_feed.go`, `artifactIdentityMatrix`) and the provider CLI consumer (`phase3-binary/Sources/macprovider-cli/AutotuneArtifactFeed.swift`, `identityMatrix`) implement it; the release generator's matrix (`ARTIFACT_IDENTITY_MATRIX`, `scripts/catalog-release.py`) does not, and the generator's consumer floor v0.16.0 does not make it emit the tuple. A provider CLI built before v0.17.2 accepts a `gguf` artifact only with `ollama_library_tag`. Because the feed schema is closed, a consumer older than v0.16.0 rejects a whole feed that carries a `huggingface_revision` GGUF artifact as `catalog_artifact_feed_integrity_failure`. That fails closed for artifact-derived use only (§3.7.6 rule 6). A release MUST NOT publish such an artifact until the generator and every consumer that reads that release implement v0.16.0.
 
 - `verification_status` is a closed enum: `declared`, `verified`, or `blocked`. `declared` means the operator has recorded the artifact's identity but has not confirmed the hash against real bytes. `verified` means the operator has confirmed that the recorded `hash` is the digest of the artifact obtained from `source_ref` under `hash_algorithm`. `blocked` means the artifact is withdrawn for safety, licensing, runtime, or economics reasons. `verified_at` is an RFC3339 `full-date`: exactly `YYYY-MM-DD` (the `2026-09-08` form used in the §3.7.3 example), never a full RFC3339 timestamp. A consumer MUST parse it as a date and MUST reject a value carrying time-of-day or a zone offset. It MUST be non-null exactly when `verification_status == "verified"`.
 - **`verified` is necessary for every artifact-derived capability, and never sufficient for settlement.** Settlement additionally requires the SPEC-010-R007 expected-identity conditions (v0.10.3; primary-only before) (next bullet); this bullet states what `declared` and `blocked` exclude. A `declared` artifact MAY appear in operator backlog and review material only — the working list of artifacts an operator has recorded but not yet confirmed. It MUST NOT satisfy the §16.1 P1 intake precondition, MUST NOT contribute to admission at any tier, MUST NOT satisfy SPEC-047 `catalog_matched`, MUST NOT support `catalog_priced` or `settlement_capable`, MUST NOT be priced, and MUST NOT be downloaded or prepared as a catalog artifact. A key whose artifacts are all `declared` MUST NOT enter `listed` or `recommendable` (§16.1 P1, AC-CAT-11); it may exist only as an operator-staged `candidate` row, which reaches no SPEC-047 admission tier at all (§3.2). A `blocked` artifact MUST NOT be matched, displayed as available, downloaded, prepared, probed, or settled.
