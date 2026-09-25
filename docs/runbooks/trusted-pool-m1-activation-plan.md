@@ -3,7 +3,7 @@
 **Status:** prepared 2026-09-25, not executed. **Issue:** #1690 (epic PR #1719,
 merged as `747557cc`). **Governing rules:** SPEC-022 v0.2.2 R-12 / R-12.8,
 SPEC-042 v0.0.34 (R001 policy-core/v2, R006 labels, R013, R014), SPEC-023
-v0.17.1 §3.7, SPEC-047-R003(iv), SPEC-015 0.4.10 R006. **Operator sequence
+v0.17.2 §3.7, SPEC-047-R003(iv), SPEC-015 0.4.10 R006. **Operator sequence
 this plan follows:** [`trusted-pool-production-launch.md`](trusted-pool-production-launch.md)
 §4 and §9. Lab rehearsals:
 [`runtime-agnostic-m6-lab-e2e-evidence-2026-09-24.md`](runtime-agnostic-m6-lab-e2e-evidence-2026-09-24.md),
@@ -19,6 +19,18 @@ finality tokens, and produces the signed evidence that moves SPEC-022-R012 from
 
 Every Pearl write below is done by the single Pearl actor of the day, in the
 order given. Nothing here is executed by the author of this plan.
+
+**Execution order and the B3b gate.** The release generator cannot emit the
+§3.2 GGUF tuple until B3b (the `scripts/catalog-release.py` change that lands
+after #1732; §3.2 rollout state, §7 B3). Until B3b is merged, only these are
+executable: §1 checks P1-P6 and P8, §2 (read-only), and §4.3 steps 0-6
+(feature, creator approval, keys, root nonce, pool create, root
+registration, manifest v1; the pool stays `candidate` with no member).
+Everything that needs the artifact feed is **DEFERRED until B3b**, and then
+runs strictly in this order: §3.3 (catalog PR, signed cut, deploy) → P7 →
+§3.5 (CLI candidate baking that release) → §5 (member, including §3.4
+`catalog_priced`) → §4.3 steps 7-9 → §5A. Do not start a later step before
+the earlier one passes.
 
 ## 0. Scope decision: M1 is an operator-internal pool, `launch_environment: candidate`
 
@@ -288,6 +300,13 @@ A coordinator older than `v1.8.200` (the first deployable #1690 tag) cannot star
 
 ### 3.3 Catalog release (PR, then signed cut)
 
+**DEFERRED until B3b.** Do not run any step of §3.3 yet: until the generator
+change after #1732 (B3b, §3.2 rollout state, §7 B3) is merged,
+`catalog-release.py` maps `gguf` to `ollama_library_tag` only, `status`
+stays NOT ACTIVATABLE on the `gguf-q4-k-m` entry, and `generate
+--activate-artifact-feed` cannot publish the tuple. Resume here only after
+B3b is on `origin/main`, then follow the order at the top of this plan.
+
 This is the first artifact-bound release, so it is also the artifact-feed
 activation (`catalog-artifact-feed-release.md`, "Activation state").
 
@@ -322,6 +341,8 @@ activation (`catalog-artifact-feed-release.md`, "Activation state").
 
 ### 3.4 Admission of the member's candidate
 
+DEFERRED until §3.3 is deployed and P7 passes (so, until B3b).
+
 After the member serves (§4), `models offer` resolves the GGUF hash through
 the feed (`catalog_match_state: catalog_matched`, member
 `artifact_feed`/`gguf-q4-k-m`). An operator then records
@@ -333,6 +354,9 @@ never reaches `settlement_capable` globally; pool route-time settlement is the
 only way it earns.
 
 ### 3.5 CLI candidate ordering
+
+DEFERRED until §3.3 is deployed and P7 passes (so, until B3b): the candidate
+must bake that release.
 
 `models offer` / `discover` / `evaluate` resolve BYOM identity against the
 **compiled-in** release (`catalog-artifact-feed-release.md`, slice 2c). So the
@@ -525,6 +549,9 @@ only.
 
 ## 5. The pool member
 
+DEFERRED until §3.5 has an accepted candidate (so, until B3b); see the
+execution order at the top.
+
 ### 5.1 Separate provider identity on the Mac Studio
 
 Host: the Mac Studio (M3 Ultra, 256 GB, macOS 26.4.1), which already has
@@ -625,6 +652,8 @@ llama-server (flags proven in the lab, `rig.sh:350`):
 
 ### 5.4 Join and enrolment steps
 
+DEFERRED until §3.5 has an accepted candidate (so, until B3b).
+
 1. Download the GGUF at the pinned revision; `shasum -a 256` must equal
    `6c1a2b41…c728ff`.
 2. Install the §3.5 candidate CLI into `$M1M/bin/` (flat asset dir from the
@@ -654,6 +683,8 @@ llama-server (flags proven in the lab, `rig.sh:350`):
 7. §4.3 step 7 admits it; step 9 promotes the pool.
 
 ## 5A. Paid production journey
+
+DEFERRED until §4.3 step 9 has promoted the pool (so, until B3b).
 
 Buyer: a dedicated operator gateway account (`$M1_BUYER_ACCOUNT`, the gateway
 `accounts.id`), with an API key issued through the normal console flow, never
