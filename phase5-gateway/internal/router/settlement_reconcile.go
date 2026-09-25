@@ -519,6 +519,7 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 		if err != nil {
 			return "", err
 		}
+		completion, total = buyerDeliveredCompletionBound(reservation, candidate, prompt, completion, total)
 		settlement := storage.ReservationSettlement{
 			ExpectedReservationCreatedAt: reservation.CreatedAt,
 			AccountID:                    reservation.AccountID,
@@ -705,6 +706,28 @@ func finalityHeaders(finality coordinatorRequestSettlementFinality) http.Header 
 		h.Set(settlementPendingUntilHeader, strconv.FormatInt(finality.PendingDeadlineUnixMS, 10))
 	}
 	return h
+}
+
+// buyerDeliveredCompletionBound is SPEC-022 R-5.6 on the gateway-to-buyer
+// hop (E2E-F4). The coordinator's verified finality counts output delivered
+// to the gateway; it cannot see a buyer that disconnected, or a buyer write
+// that failed, after the engine finished. When the gateway ended the stream
+// itself for that reason (candidate outcome client_disconnect), its candidate
+// holds the completion it actually delivered to the buyer, and the buyer is
+// debited the smaller of the two. The prompt stays the coordinator's figure:
+// the engine consumed it either way. The provider credit is the
+// coordinator's and is not touched here.
+func buyerDeliveredCompletionBound(reservation storage.ActiveReservation, candidate storage.SettlementFallbackCandidate, prompt, completion, total int64) (int64, int64) {
+	if candidate.Outcome != "client_disconnect" || candidate.CompletionTokens < 0 || candidate.CompletionTokens >= completion {
+		return completion, total
+	}
+	slog.Info("SPEC-022 reconciler bounded verified completion by buyer-delivered output after client disconnect",
+		"request_id", reservation.RequestID,
+		"account_id", reservation.AccountID,
+		"coordinator_completion_tokens", completion,
+		"buyer_delivered_completion_tokens", candidate.CompletionTokens,
+	)
+	return candidate.CompletionTokens, prompt + candidate.CompletionTokens
 }
 
 func finalityTokenTotals(finality coordinatorRequestSettlementFinality) (int64, int64, int64, error) {
