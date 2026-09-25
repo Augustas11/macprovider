@@ -1364,7 +1364,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             request,
             upstreamModelName: upstreamModelName,
             timingsPerToken: runtimeSource == LlamaCppLoopbackServeModel.runtimeSource,
-            logprobsPerToken: Self.streamsPerTokenLogprobs(runtimeSource)
+            logprobsPerToken: Self.streamsPerTokenLogprobs(runtimeSource, hasTools: request.promptSource.tools.map { $0 != .null } ?? false)
         )
         let clock = LoopbackProgressClock()
         let timeouts = LoopbackGenerationTimeouts.forGeneration(maxTokens: request.maxTokens, contextWindow: contextWindow)
@@ -1512,9 +1512,19 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     static let promptCountTimeoutSeconds: Double = 15
 
     /// Runtimes asked for a per-chunk `logprobs` list, whose entries count
-    /// the completion tokens each chunk carries (#1690 M9).
-    static func streamsPerTokenLogprobs(_ runtimeSource: String) -> Bool {
-        runtimeSource == OllamaLoopbackServeModel.runtimeSource || runtimeSource == LMStudioLoopbackServeModel.runtimeSource
+    /// the completion tokens each chunk carries (#1690 M9). LM Studio refuses
+    /// `logprobs` together with `tools` on a stream (its llama.cpp engine
+    /// answers 400 "logprobs is not supported with tools + stream"), so a
+    /// request with tools asks for none; a cancel of it stays unattested.
+    static func streamsPerTokenLogprobs(_ runtimeSource: String, hasTools: Bool = false) -> Bool {
+        switch runtimeSource {
+        case OllamaLoopbackServeModel.runtimeSource:
+            return true
+        case LMStudioLoopbackServeModel.runtimeSource:
+            return !hasTools
+        default:
+            return false
+        }
     }
 
     /// The one mapping for every upstream deadline, whichever timer fires.

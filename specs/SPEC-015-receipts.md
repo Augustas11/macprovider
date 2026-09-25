@@ -4505,7 +4505,9 @@ The provider decides per request, not from a per-runtime constant.
    llama-server's per-chunk `timings_per_token`. `ollama_loopback` and
    `lmstudio_loopback`: the completion tokens are the running length of the
    per-chunk `logprobs.content` token list the runtime is asked to stream,
-   read at the last delivered chunk; the prompt tokens are the runtime's own
+   read at the last delivered chunk (LM Studio refuses `logprobs` together
+   with `tools` on a stream, so a `lmstudio_loopback` request with tools is
+   not asked for it and its cancel is unattested); the prompt tokens are the runtime's own
    `usage.prompt_tokens` for the same request body, non-streamed and
    capped at one completion token, asked once after the cancel.
    `mlxlm_loopback` and `omlx_loopback`: the same prompt count, and the

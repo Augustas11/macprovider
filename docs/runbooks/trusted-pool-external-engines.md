@@ -155,7 +155,7 @@ state it (SPEC-015 §N.12 item 7):
 | Engine | Completion tokens of the delivered part | Prompt tokens |
 |---|---|---|
 | llama.cpp | per-chunk `timings_per_token` | the same timings |
-| Ollama, LM Studio | per-chunk `logprobs` token list (the CLI asks for it) | the engine's own count for the same request, asked once after the cancel |
+| Ollama, LM Studio | per-chunk `logprobs` token list (the CLI asks for it; LM Studio refuses it on a request with tools, so such a request is not asked and its partial stream is not billed) | the engine's own count for the same request, asked once after the cancel |
 | `mlx_lm.server`, oMLX | the served snapshot's tokenizer over the delivered text | the engine's own count for the same request, asked once after the cancel |
 
 If that fails (an engine version without per-chunk logprobs, a timeout, a

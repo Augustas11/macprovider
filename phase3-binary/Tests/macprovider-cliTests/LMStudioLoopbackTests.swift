@@ -168,6 +168,15 @@ final class LMStudioLoopbackTests: XCTestCase {
         XCTAssertEqual(body["model"] as? String, "tiny-1b-instruct")
         XCTAssertEqual(body["logprobs"] as? Bool, true)
     }
+
+    // #1690 M9 lab finding: LM Studio answers 400 "logprobs is not supported
+    // with tools + stream", which failed every tool-call request (502 or a
+    // malformed stream). A request with tools asks LM Studio for no logprobs.
+    func testToolRequestsAskLMStudioForNoLogprobs() {
+        XCTAssertFalse(OpenAICompatibleLoopbackRuntime.streamsPerTokenLogprobs("lmstudio_loopback", hasTools: true))
+        XCTAssertTrue(OpenAICompatibleLoopbackRuntime.streamsPerTokenLogprobs("lmstudio_loopback", hasTools: false))
+        XCTAssertTrue(OpenAICompatibleLoopbackRuntime.streamsPerTokenLogprobs("ollama_loopback", hasTools: true), "Ollama streams logprobs with tools")
+    }
 }
 
 /// An LM Studio stand-in: `GET /api/v1/models` answers the configured body;

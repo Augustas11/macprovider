@@ -5831,7 +5831,8 @@
         "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledOllamaStreamBindsTheUpstreamPromptCountAndPerChunkTokens",
         "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledLogprobsStreamBindsCompletionPerChunkAndNeedsTheUpstreamPromptCount",
         "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledStreamRecountBindsOnlyTheWholeReceivedContent",
-        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledOllamaStreamStaysUnattestedWhenThePromptCountFails"
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledOllamaStreamStaysUnattestedWhenThePromptCountFails",
+        "phase3-binary/Tests/macprovider-cliTests/LMStudioLoopbackTests.swift:testToolRequestsAskLMStudioForNoLogprobs"
       ],
       "journeys": [],
       "evidence": [],
