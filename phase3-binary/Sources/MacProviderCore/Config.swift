@@ -43,6 +43,11 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
     /// overhead ceiling) and re-accepted, not inherit this entry.
     public let metallibSHA256: String
     public let kernelIdentifier: String
+    /// SPEC-038 AC-26: the operator recorded the packaged gateway/relay proof
+    /// for positive-cached turns on exactly this tuple and runtime revision.
+    /// Only then may `continuous_batching_cached_turns` batch such turns here.
+    /// Optional in config; absent means false.
+    public let cachedTurnsAccepted: Bool
 
     public init(
         modelID: String,
@@ -52,7 +57,8 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
         requiresMoE: Bool,
         hardwareClass: String,
         metallibSHA256: String,
-        kernelIdentifier: String
+        kernelIdentifier: String,
+        cachedTurnsAccepted: Bool = false
     ) {
         self.modelID = modelID
         self.modelSHA256 = modelSHA256
@@ -62,6 +68,7 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
         self.hardwareClass = hardwareClass
         self.metallibSHA256 = metallibSHA256
         self.kernelIdentifier = kernelIdentifier
+        self.cachedTurnsAccepted = cachedTurnsAccepted
     }
 }
 
@@ -265,6 +272,14 @@ public struct AppConfig: Equatable, Sendable {
     // milliseconds. Unset ⇒ the scheduler's 30s default. A request still
     // queued when it expires is rejected pre-admission, non-settling.
     public var continuousBatchQueueWaitTimeoutMS: Int?
+    // SPEC-038 AC-26: let positive-cached follow-up turns that carry a usable
+    // retained paged-KV handoff (plus a recurrent checkpoint on hybrid models)
+    // batch instead of serial-routing. Default off; inert while
+    // `continuous_batching` is off. Triple-exposed: yaml key
+    // `continuous_batching_cached_turns`, env
+    // `MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS`, CLI
+    // `--[no-]continuous-batching-cached-turns`.
+    public var continuousBatchingCachedTurns: Bool
     // MLX buffer-cache ceiling in MiB. MLX defaults it to its memory limit, so
     // freed GPU buffers accumulate for the life of the process (Studio live
     // provider 2026-09-24: 50 GB fresh -> ~130 GB under traffic -> kernel
@@ -349,6 +364,7 @@ public struct AppConfig: Equatable, Sendable {
             continuousBatching: .off,
             continuousBatchQueueLimit: nil,
             continuousBatchQueueWaitTimeoutMS: nil,
+            continuousBatchingCachedTurns: false,
             mlxCacheLimitMB: nil,
             continuousBatchingAcceptedTuples: [],
             kvDiskCache: .defaults(),
@@ -401,6 +417,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var continuousBatching: String?
     public var continuousBatchQueueLimit: Int?
     public var continuousBatchQueueWaitTimeoutMS: Int?
+    public var continuousBatchingCachedTurns: Bool?
     // SPEC-037 FR-KVP11: KV disk-tier CLI flags (`--kv-disk-cache-*`).
     public var kvDiskCache: KVDiskCacheCLIOverrides
     // SPEC-039 FR-PKV14: paged KV CLI flags (`--paged-kv-*`).
@@ -448,6 +465,7 @@ public struct CLIOverrides: Equatable, Sendable {
         continuousBatching: String? = nil,
         continuousBatchQueueLimit: Int? = nil,
         continuousBatchQueueWaitTimeoutMS: Int? = nil,
+        continuousBatchingCachedTurns: Bool? = nil,
         pagedKV: PagedKVCLIOverrides = PagedKVCLIOverrides()
     ) {
         self.port = port
@@ -490,6 +508,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.continuousBatching = continuousBatching
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
+        self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.kvDiskCache = kvDiskCache
         self.pagedKV = pagedKV
     }
@@ -703,6 +722,12 @@ public enum ConfigLoader {
             key: "continuous_batch_queue_wait_timeout_ms",
             expected: "integer >= 1"
         )
+        try assign(
+            &config.continuousBatchingCachedTurns,
+            from: dict,
+            key: "continuous_batching_cached_turns",
+            expected: "boolean"
+        )
         try assign(&config.mlxCacheLimitMB, from: dict, key: "mlx_cache_limit_mb", expected: "integer >= 0")
         if let rawTuples = dict["continuous_batching_accepted_tuples"] {
             config.continuousBatchingAcceptedTuples = try parseContinuousBatchingAcceptedTuples(rawTuples)
@@ -731,7 +756,7 @@ public enum ConfigLoader {
                 throw ConfigError.invalidValue(
                     key: entryKey,
                     value: String(describing: entry),
-                    expected: "map with model_id, model_sha256, cache_class, kv_dtype, requires_moe, hardware_class, metallib_sha256, kernel_identifier"
+                    expected: "map with model_id, model_sha256, cache_class, kv_dtype, requires_moe, hardware_class, metallib_sha256, kernel_identifier, optional cached_turns_accepted"
                 )
             }
             // Coverage matching in `ContinuousBatchingAcceptanceCoverage.covers(_:)`
@@ -788,6 +813,19 @@ public enum ConfigLoader {
                     expected: "boolean"
                 )
             }
+            // Optional, but a present value must be a real boolean: a quoted
+            // "true" or a typo must not silently grant (or drop) the grant.
+            var cachedTurnsAccepted = false
+            if let rawCachedTurns = fields["cached_turns_accepted"] {
+                guard let value = rawCachedTurns as? Bool else {
+                    throw ConfigError.invalidValue(
+                        key: "\(entryKey).cached_turns_accepted",
+                        value: String(describing: rawCachedTurns),
+                        expected: "boolean"
+                    )
+                }
+                cachedTurnsAccepted = value
+            }
             return ContinuousBatchingAcceptedTuple(
                 modelID: try requiredString("model_id"),
                 modelSHA256: try requiredSHA256("model_sha256"),
@@ -796,7 +834,8 @@ public enum ConfigLoader {
                 requiresMoE: requiresMoE,
                 hardwareClass: try requiredString("hardware_class"),
                 metallibSHA256: try requiredSHA256("metallib_sha256"),
-                kernelIdentifier: try requiredString("kernel_identifier")
+                kernelIdentifier: try requiredString("kernel_identifier"),
+                cachedTurnsAccepted: cachedTurnsAccepted
             )
         }
     }
@@ -873,6 +912,12 @@ public enum ConfigLoader {
             from: environment,
             env: "MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS",
             expected: "integer >= 1"
+        )
+        try assign(
+            &config.continuousBatchingCachedTurns,
+            from: environment,
+            env: "MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS",
+            expected: "boolean"
         )
         try assign(&config.mlxCacheLimitMB, from: environment, env: "MACPROVIDER_MLX_CACHE_LIMIT_MB", expected: "integer >= 0")
         return config
@@ -1054,6 +1099,9 @@ public enum ConfigLoader {
         }
         if let continuousBatchQueueWaitTimeoutMS = cli.continuousBatchQueueWaitTimeoutMS {
             config.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
+        }
+        if let continuousBatchingCachedTurns = cli.continuousBatchingCachedTurns {
+            config.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         }
         return config
     }

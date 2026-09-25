@@ -1,21 +1,56 @@
 import CryptoKit
 import Foundation
+import MLX
 import MLXLMCommon
 import MacProviderCore
+
+/// Recurrent (`ArraysCache`/`MambaCache`) layer states captured right after the
+/// prompt was prefilled to exactly `tokenCount` tokens. Recurrent state cannot be
+/// trimmed, so a hybrid entry is reusable only from one of these (SPEC-024 FR-CI2).
+/// `@unchecked Sendable` for the same reason `ConversationCacheLayers` is: the
+/// batched scheduler hands it across actors and nothing mutates the arrays.
+struct RecurrentStateCheckpoint: @unchecked Sendable {
+    let tokenCount: Int
+    /// Layer index → that layer's `state` arrays. MLX arrays are immutable values
+    /// and `ArraysCache` replaces (never mutates) its slots, so holding the
+    /// references is a valid snapshot.
+    let states: [Int: [MLXArray]]
+}
+
+/// Identity equality: the same snapshot, i.e. the same length and the very same
+/// state arrays per layer. Lets scheduler requests that carry a checkpoint stay
+/// `Equatable` without comparing tensor contents.
+extension RecurrentStateCheckpoint: Equatable {
+    static func == (lhs: RecurrentStateCheckpoint, rhs: RecurrentStateCheckpoint) -> Bool {
+        guard lhs.tokenCount == rhs.tokenCount, lhs.states.count == rhs.states.count else { return false }
+        return lhs.states.allSatisfy { index, arrays in
+            guard let other = rhs.states[index], other.count == arrays.count else { return false }
+            return zip(arrays, other).allSatisfy { $0 === $1 }
+        }
+    }
+}
 
 final class ConversationCacheLayers: @unchecked Sendable {
     let layers: [KVCache]
     let retainedPagedKVSequence: PagedKVRetainedSequence?
+    /// Ascending by `tokenCount`; at most two (scaffold end, last turn start).
+    let recurrentCheckpoints: [RecurrentStateCheckpoint]
     private let discardRetainedPagedKVSequence: (@Sendable (PagedKVRetainedSequence, String) async -> Void)?
 
     init(
         _ layers: [KVCache],
         retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
-        discardRetainedPagedKVSequence: (@Sendable (PagedKVRetainedSequence, String) async -> Void)? = nil
+        discardRetainedPagedKVSequence: (@Sendable (PagedKVRetainedSequence, String) async -> Void)? = nil,
+        recurrentCheckpoints: [RecurrentStateCheckpoint] = []
     ) {
         self.layers = layers
         self.retainedPagedKVSequence = retainedPagedKVSequence
         self.discardRetainedPagedKVSequence = discardRetainedPagedKVSequence
+        self.recurrentCheckpoints = recurrentCheckpoints
+    }
+
+    static func hasRecurrentLayers(_ layers: [KVCache]) -> Bool {
+        layers.contains { $0 is ArraysCache }
     }
 
     func discardRetainedPagedKV(conversationKey: String) async {
@@ -48,6 +83,10 @@ final class ConversationCacheLease: @unchecked Sendable {
     /// used only for telemetry attribution.
     let promotedFromCold: Bool
     let reusableCanonicalPromptTokens: [Int32]?
+    /// SPEC-038 AC-26 hybrid cached turn: the recurrent checkpoint a retained
+    /// paged-KV hit resumes from (`cachedPromptTokens == tokenCount`). Nil for
+    /// every other lease; the batched scheduler installs it into the row.
+    let recurrentCheckpoint: RecurrentStateCheckpoint?
 
     init(
         key: String,
@@ -63,7 +102,8 @@ final class ConversationCacheLease: @unchecked Sendable {
         localPurgeStamp: Int = 0,
         globalPurgeStamp: Int = 0,
         promotedFromCold: Bool = false,
-        reusableCanonicalPromptTokens: [Int32]? = nil
+        reusableCanonicalPromptTokens: [Int32]? = nil,
+        recurrentCheckpoint: RecurrentStateCheckpoint? = nil
     ) {
         self.key = key
         self.keyHash = keyHash
@@ -79,6 +119,7 @@ final class ConversationCacheLease: @unchecked Sendable {
         self.globalPurgeStamp = globalPurgeStamp
         self.promotedFromCold = promotedFromCold
         self.reusableCanonicalPromptTokens = reusableCanonicalPromptTokens
+        self.recurrentCheckpoint = recurrentCheckpoint
     }
 }
 
@@ -171,14 +212,16 @@ actor ConversationCache {
         func stampedLease(
             reusableCache: ConversationCacheLayers?, cachedPromptTokens: Int, lcp: Int, trimBy: Int,
             promotedFromCold: Bool = false,
-            reusableCanonicalPromptTokens: [Int32]? = nil
+            reusableCanonicalPromptTokens: [Int32]? = nil,
+            recurrentCheckpoint: RecurrentStateCheckpoint? = nil
         ) -> ConversationCacheLease {
             ConversationCacheLease(
                 key: key, keyHash: keyHash, incomingTokens: incomingTokens, modelID: modelID, kvBits: kvBits,
                 reusableCache: reusableCache, cachedPromptTokens: cachedPromptTokens, lcp: lcp, trimBy: trimBy,
                 sampledPurgeGeneration: sampledPurgeGeneration, localPurgeStamp: localPurgeStamp,
                 globalPurgeStamp: globalPurgeStamp, promotedFromCold: promotedFromCold,
-                reusableCanonicalPromptTokens: reusableCanonicalPromptTokens)
+                reusableCanonicalPromptTokens: reusableCanonicalPromptTokens,
+                recurrentCheckpoint: recurrentCheckpoint)
         }
 
         // Acquire a candidate entry from the hot tier, or — for a gated key that
@@ -258,7 +301,23 @@ actor ConversationCache {
             log("event=conv_cache action=miss key_hash=\(keyHash) reason=retained_paged_kv_requires_handoff")
             return await predicateMiss("retained_paged_kv_requires_handoff")
         }
-        let trimBy = entry.canonicalPromptTokens.count - lcp
+        // Tokens of the stored prefix actually reused: `lcp`, or the chosen recurrent
+        // checkpoint's length for a hybrid entry.
+        var reuseLength = lcp
+        var restoreCheckpoint: RecurrentStateCheckpoint?
+        var retainedCheckpoint: RecurrentStateCheckpoint?
+        if retainedPagedKV, !entry.kvCache.recurrentCheckpoints.isEmpty {
+            // SPEC-038 AC-26 hybrid retained entry: its recurrent state is only
+            // reusable at a checkpoint, so the hit resumes from the largest one
+            // within the shared prefix. The scheduler's reattach trims the paged
+            // attention KV to exactly that length.
+            guard let checkpoint = Self.selectRecurrentCheckpoint(entry.kvCache.recurrentCheckpoints, lcp: lcp) else {
+                log("event=conv_cache action=miss key_hash=\(keyHash) reason=recurrent_checkpoint_diverged lcp=\(lcp) checkpoints=\(entry.kvCache.recurrentCheckpoints.map(\.tokenCount))")
+                return await predicateMiss("recurrent_checkpoint_diverged")
+            }
+            reuseLength = checkpoint.tokenCount
+            retainedCheckpoint = checkpoint
+        }
         if !retainedPagedKV {
             // SPEC-024-R001: RotatingKVCache is trimmable only while offset < maxSize,
             // and even then trim is windowed — not full-prefix reuse. Reject the class
@@ -267,13 +326,32 @@ actor ConversationCache {
                 log("event=conv_cache action=miss key_hash=\(keyHash) reason=rotating_window_cache")
                 return await predicateMiss("rotating_window_cache")
             }
-            guard entry.kvCache.layers.allSatisfy(\.isTrimmable) else {
-                log("event=conv_cache action=miss key_hash=\(keyHash) reason=cache_not_trimmable")
-                return await predicateMiss("cache_not_trimmable")
+            if !entry.kvCache.recurrentCheckpoints.isEmpty,
+               ConversationCacheLayers.hasRecurrentLayers(entry.kvCache.layers) {
+                guard let checkpoint = Self.selectRecurrentCheckpoint(entry.kvCache.recurrentCheckpoints, lcp: lcp) else {
+                    log("event=conv_cache action=miss key_hash=\(keyHash) reason=recurrent_checkpoint_diverged lcp=\(lcp) checkpoints=\(entry.kvCache.recurrentCheckpoints.map(\.tokenCount))")
+                    return await predicateMiss("recurrent_checkpoint_diverged")
+                }
+                let covered = entry.kvCache.layers.indices.allSatisfy { index in
+                    let layer = entry.kvCache.layers[index]
+                    return layer.isTrimmable || (layer is ArraysCache && checkpoint.states[index] != nil)
+                }
+                guard covered else {
+                    log("event=conv_cache action=miss key_hash=\(keyHash) reason=cache_not_trimmable")
+                    return await predicateMiss("cache_not_trimmable")
+                }
+                reuseLength = checkpoint.tokenCount
+                restoreCheckpoint = checkpoint
+            } else {
+                guard entry.kvCache.layers.allSatisfy(\.isTrimmable) else {
+                    log("event=conv_cache action=miss key_hash=\(keyHash) reason=cache_not_trimmable")
+                    return await predicateMiss("cache_not_trimmable")
+                }
             }
         }
+        let trimBy = entry.canonicalPromptTokens.count - reuseLength
         if trimBy > 0 && !retainedPagedKV {
-            for layer in entry.kvCache.layers {
+            for layer in entry.kvCache.layers where layer.isTrimmable || restoreCheckpoint == nil {
                 let trimmed = layer.trim(trimBy)
                 if trimmed != trimBy {
                     log("event=conv_cache action=miss key_hash=\(keyHash) reason=trim_underflow requested=\(trimBy) actual=\(trimmed)")
@@ -281,19 +359,26 @@ actor ConversationCache {
                 }
             }
         }
+        if let restoreCheckpoint {
+            for (index, state) in restoreCheckpoint.states where entry.kvCache.layers.indices.contains(index) {
+                (entry.kvCache.layers[index] as? ArraysCache)?.state = state
+            }
+        }
         entry.lastUsedAt = now
         if let promotionCandidate {
             await coldTier?.finishPromotion(promotionCandidate, accepted: true, rejectionReason: nil)
         }
         let stats = currentStats()
-        log("event=conv_cache action=hit key_hash=\(keyHash) cached_prompt_tokens=\(lcp) prompt_tokens=\(incomingTokens.count) lcp=\(lcp) trim_by=\(trimBy) conv_cache_entries=\(stats.entries) conv_cache_tokens=\(stats.tokens)")
+        let checkpointField = (restoreCheckpoint ?? retainedCheckpoint).map { " recurrent_checkpoint=\($0.tokenCount)" } ?? ""
+        log("event=conv_cache action=hit key_hash=\(keyHash) cached_prompt_tokens=\(reuseLength) prompt_tokens=\(incomingTokens.count) lcp=\(lcp) trim_by=\(trimBy)\(checkpointField) conv_cache_entries=\(stats.entries) conv_cache_tokens=\(stats.tokens)")
         return stampedLease(
             reusableCache: entry.kvCache,
-            cachedPromptTokens: min(lcp, incomingTokens.count),
-            lcp: lcp,
+            cachedPromptTokens: min(reuseLength, incomingTokens.count),
+            lcp: reuseLength,
             trimBy: trimBy,
             promotedFromCold: promotionCandidate != nil,
-            reusableCanonicalPromptTokens: Array(entry.canonicalPromptTokens.prefix(lcp)))
+            reusableCanonicalPromptTokens: Array(entry.canonicalPromptTokens.prefix(reuseLength)),
+            recurrentCheckpoint: retainedCheckpoint)
     }
 
     func commit(_ lease: ConversationCacheLease, cache: ConversationCacheLayers, fullTokens: [Int32], now: Date = Date(), cold: ConversationColdContext? = nil) async {
@@ -405,6 +490,9 @@ actor ConversationCache {
         releaseTurn(lease.key)
     }
 
+    /// A retained paged-KV entry (including a hybrid one with recurrent
+    /// checkpoints) cannot serve the serial path, so it is discarded here and the
+    /// serial request misses; only a serial-format entry is put back.
     func abortForSerialFallback(_ lease: ConversationCacheLease, now: Date = Date()) async {
         defer { releaseTurn(lease.key) }
         guard let reusableCache = lease.reusableCache,
@@ -437,6 +525,39 @@ actor ConversationCache {
 
     func snapshotStats() -> (entries: Int, tokens: Int) {
         currentStats()
+    }
+
+    /// The largest checkpoint the incoming prompt still shares (`tokenCount <= lcp`).
+    static func selectRecurrentCheckpoint(_ checkpoints: [RecurrentStateCheckpoint], lcp: Int) -> RecurrentStateCheckpoint? {
+        checkpoints
+            .filter { $0.tokenCount >= lcpThreshold && $0.tokenCount <= lcp }
+            .max { $0.tokenCount < $1.tokenCount }
+    }
+
+    /// Recurrent-state checkpoint positions for a ChatML prompt on a hybrid model,
+    /// ascending, deduplicated, each `>= lcpThreshold`:
+    /// - C1: the first `<|im_start|>` that opens a `user` turn — the end of the
+    ///   system/tools scaffold that gateway auto-prefix keys hash, so a new
+    ///   conversation under a shared key still reuses it.
+    /// - C2: the last `<|im_start|>` — the history the next turn repeats; the
+    ///   generation prompt and re-rendered assistant turn after it may differ.
+    /// The role is detected by decoding up to three tokens after the marker and
+    /// requiring the text to start with `user\n`, which is independent of how the
+    /// tokenizer splits `user` and the newline.
+    static func recurrentCheckpointPositions(
+        promptTokenIds: [Int32],
+        imStartTokenID: Int32?,
+        hybrid: Bool,
+        decode: ([Int]) -> String
+    ) -> [Int] {
+        guard hybrid, let imStartTokenID else { return [] }
+        let starts = promptTokenIds.indices.filter { promptTokenIds[$0] == imStartTokenID }
+        guard let last = starts.last else { return [] }
+        let firstUser = starts.first { index in
+            let roleTokens = promptTokenIds[(index + 1)..<min(index + 4, promptTokenIds.count)].map(Int.init)
+            return decode(roleTokens).hasPrefix("user\n")
+        }
+        return Array(Set([firstUser, last].compactMap { $0 }.filter { $0 >= lcpThreshold })).sorted()
     }
 
     static func longestCommonPrefix(_ lhs: [Int32], _ rhs: [Int32]) -> Int {

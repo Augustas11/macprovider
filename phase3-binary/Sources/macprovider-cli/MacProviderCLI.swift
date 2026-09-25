@@ -399,6 +399,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Bounded continuous-batching admission wait in milliseconds. Default 30000. A request still queued when it expires is rejected pre-admission and never settles. Overrides MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS and config key continuous_batch_queue_wait_timeout_ms.")
     var continuousBatchQueueWaitTimeoutMS: Int?
 
+    @Flag(name: .customLong("continuous-batching-cached-turns"), inversion: .prefixedNo, help: "Let a positive-cached follow-up turn with a usable retained paged-KV handoff (plus a recurrent checkpoint on hybrid models) batch instead of serial-routing. Default off. Inert while continuous batching is off. Overrides MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS and config key continuous_batching_cached_turns.")
+    var continuousBatchingCachedTurns: Bool?
+
     // SPEC-037 FR-KVP11 — encrypted KV survival disk-tier CLI flags (MEDIUM-5). Each is
     // an Optional so absence defers to the environment / YAML / default; the resolver
     // (KVDiskCacheConfigResolver) applies CLI-wins precedence and fails closed on any
@@ -723,12 +726,26 @@ struct ServeCommand: AsyncParsableCommand {
         if resolved.continuousBatching == .canary {
             ContinuousBatchingPolicy.logSerialRouteIfNeeded(capability)
         }
+        if let line = continuousBatchingCachedTurnsPreflightLine(resolved) {
+            FileHandle.standardError.write(Data(line.utf8))
+        }
         do {
             try ContinuousBatchingPolicy.validateStrictStartup(capability)
         } catch let error as APIError {
             FileHandle.standardError.write(Data("\(error.code): \(error.message)\n".utf8))
             throw ExitCode(2)
         }
+    }
+
+    /// SPEC-038 AC-26: an opt-in cached-turns flag is always announced, and
+    /// named inert when batching itself is off, so an operator never mistakes a
+    /// no-op flag for enabled cached-turn batching.
+    static func continuousBatchingCachedTurnsPreflightLine(_ resolved: AppConfig) -> String? {
+        guard resolved.continuousBatchingCachedTurns else { return nil }
+        if resolved.continuousBatching == .off {
+            return "event=batching_cached_turns action=inert reason=continuous_batching_off\n"
+        }
+        return "event=batching_cached_turns action=enabled mode=\(resolved.continuousBatching.rawValue)\n"
     }
 
     static func runSpecDecodeHeartbeatCompatibilityPreflight(
@@ -1647,6 +1664,7 @@ struct ServeCommand: AsyncParsableCommand {
                 continuousBatching: continuousBatching,
                 continuousBatchQueueLimit: continuousBatchQueueLimit,
                 continuousBatchQueueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
+                continuousBatchingCachedTurns: continuousBatchingCachedTurns,
                 pagedKV: pagedKVCLIOverrides
             )
         )
@@ -2120,6 +2138,7 @@ struct ServeCommand: AsyncParsableCommand {
                     continuousBatchingMode: resolved.continuousBatching,
                     continuousBatchQueueLimit: resolved.continuousBatchQueueLimit,
                     continuousBatchQueueWaitTimeoutMS: resolved.continuousBatchQueueWaitTimeoutMS,
+                    continuousBatchingCachedTurns: resolved.continuousBatchingCachedTurns,
                     continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage(
                         acceptedTuples: resolved.continuousBatchingAcceptedTuples
                     ),
@@ -3711,6 +3730,7 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  continuous_batching: \(config.continuousBatching.rawValue)")
     print("  continuous_batch_queue_limit: \(config.continuousBatchQueueLimit.map(String.init) ?? "<unset, 2 * max_batch>")")
     print("  continuous_batch_queue_wait_timeout_ms: \(config.continuousBatchQueueWaitTimeoutMS.map(String.init) ?? "<unset, 30000>")")
+    print("  continuous_batching_cached_turns: \(config.continuousBatchingCachedTurns)")
     print("  enable_receipts: \(config.enableReceipts)")
     print("  relay_blind_enabled: \(config.relayBlindEnabled)")
     print("  idle_prewarm.enabled: \(config.idlePrewarmEnabled)")

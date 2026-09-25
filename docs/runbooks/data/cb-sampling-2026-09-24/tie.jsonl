@@ -1,0 +1,7 @@
+{"serial_self_consistent": [true, true, true, true]}
+{"rep": 0, "mode": "greedy_batched", "rows": [{"exact": true, "first_diff": null, "len": 226}, {"exact": true, "first_diff": null, "len": 240}, {"exact": false, "first_diff": 21, "len": 264}, {"exact": true, "first_diff": null, "len": 273}]}
+{"rep": 0, "mode": "topp_batched", "rows": [{"exact": true, "first_diff": null, "len": 226}, {"exact": false, "first_diff": 56, "len": 240}, {"exact": false, "first_diff": 21, "len": 264}, {"exact": false, "first_diff": 139, "len": 273}]}
+{"rep": 0, "mode": "tinyT_batched", "rows": [{"exact": true, "first_diff": null, "len": 226}, {"exact": false, "first_diff": 56, "len": 240}, {"exact": false, "first_diff": 21, "len": 264}, {"exact": false, "first_diff": 225, "len": 273}]}
+{"rep": 1, "mode": "greedy_batched", "rows": [{"exact": true, "first_diff": null, "len": 226}, {"exact": true, "first_diff": null, "len": 240}, {"exact": false, "first_diff": 21, "len": 264}, {"exact": true, "first_diff": null, "len": 273}]}
+{"rep": 1, "mode": "topp_batched", "rows": [{"exact": true, "first_diff": null, "len": 226}, {"exact": false, "first_diff": 56, "len": 240}, {"exact": false, "first_diff": 21, "len": 264}, {"exact": false, "first_diff": 139, "len": 273}]}
+{"rep": 1, "mode": "tinyT_batched", "rows": [{"exact": true, "first_diff": null, "len": 226}, {"exact": false, "first_diff": 56, "len": 240}, {"exact": false, "first_diff": 21, "len": 264}, {"exact": true, "first_diff": null, "len": 273}]}
