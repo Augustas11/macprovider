@@ -1188,10 +1188,20 @@ byte-identical copy of every GitHub release asset of `<tag>`, and
 URLs. Publication (`scripts/publish-release-mirror.sh`) MUST refuse any byte
 whose SHA-256 differs from GitHub's asset digest, MUST NOT modify a published
 `<tag>/` directory, and MUST re-download the served bytes to confirm them.
-`releases/latest.json` (`{"tag_name": "<tag>"}`) is an operator-facing hint
-that no installer or updater reads; it MUST move only
-to a stable tag the coordinator already advertises as `latest_binary_version`
-and MUST NOT move backwards.
+Every published provider release MUST be on the mirror, byte-identical, before
+it is advertised: the Pearl updater MUST refuse to move
+`coordinator_advertised_version.latest_binary_version` to a release unless
+`<tag>/release.json` names that tag, `<tag>/checksums.txt` verifies under the
+pinned release key, and every checksummed asset is present with a matching
+SHA-256 (`PEARL_UPDATER_RELEASE_MIRROR_GATE=required`, the default), and the
+coordinator MUST refuse a config whose `required_binary_version` exceeds
+`latest_binary_version`. Together these keep every required release
+installable and updatable from the mirror. `releases/latest.json`
+(`{"tag_name": "<tag>"}`) is an operator-facing hint that no installer or
+updater reads; it MUST move only to a stable tag the coordinator already
+advertises as `latest_binary_version` and MUST NOT move backwards. This
+section is the single owner of the `release-mirror` authority domain; SPEC-020
+consumes it.
 
 **SPEC-003-R005 — Bootstrap python mirror.** When the installer bootstraps the
 pinned python-build-standalone interpreter, it MUST fall back to

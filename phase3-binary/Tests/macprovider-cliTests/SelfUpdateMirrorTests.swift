@@ -97,6 +97,27 @@ final class SelfUpdateMirrorTests: XCTestCase {
         XCTAssertFalse(MirrorMockURLProtocol.requested.contains(mirror))
     }
 
+    func testCustomReleasesAPINeverFallsBackToTheMirror() async throws {
+        let fork = URL(string: "https://api.github.com/repos/example/fork/releases/tags/v1.9.0")!
+        MirrorMockURLProtocol.failures = [fork: URLError(.cannotConnectToHost)]
+        MirrorMockURLProtocol.responses = [mirror: (200, mirrorRelease())]
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MirrorMockURLProtocol.self]
+        let update = SelfUpdate(
+            currentVersion: "1.8.0",
+            releasesAPIURL: "https://api.github.com/repos/example/fork/releases/latest",
+            session: URLSession(configuration: configuration)
+        )
+
+        do {
+            _ = try await update.resolveReleaseByTags(normalizedTarget: "1.9.0")
+            XCTFail("a fork fell back to the production mirror")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .cannotConnectToHost)
+        }
+        XCTAssertFalse(MirrorMockURLProtocol.requested.contains(mirror))
+    }
+
     func testReleaseMirrorURLRejectsNonReleaseTags() {
         XCTAssertEqual(
             try SelfUpdate.releaseMirrorURL(tag: "v1.9.0", file: "checksums.txt").absoluteString,

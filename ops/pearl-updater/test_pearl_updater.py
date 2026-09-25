@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import grp
 import hashlib
 import importlib.machinery
@@ -130,6 +131,8 @@ class PearlUpdaterTests(unittest.TestCase):
             provider_admission_policy="bridge_required",
             minimum_pool_ready_after_rollout=2,
             minimum_bridge_remaining_s=360,
+            release_mirror_gate="disabled",
+            release_mirror_root=self.root / "mirror" / "releases",
         )
         (self.root / "revoked").write_text("# required fail-closed policy; intentionally empty\n")
         (self.root / "revoked").chmod(0o600)
@@ -1533,6 +1536,96 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertTrue(self.updater.local_coordinator_ready(release, False))
         self.updater.get_json.return_value["recommended_binary_version"] = "1.8.26"
         self.assertFalse(self.updater.local_coordinator_ready(release, False))
+
+    def seed_release_mirror(self, tag: str = "v1.8.27", *, tamper: bool = False, listing_tag: str | None = None) -> Path:
+        directory = self.config.release_mirror_root / tag
+        directory.mkdir(parents=True)
+        assets = {
+            f"macprovider-cli-{tag}-darwin-arm64.tar.gz": b"tarball",
+            f"Malibu-{tag}.dmg": b"dmg",
+        }
+        for name, payload in assets.items():
+            (directory / name).write_bytes(payload)
+        lines = "".join(f"{hashlib.sha256(data).hexdigest()}  {name}\n" for name, data in sorted(assets.items()))
+        (directory / "checksums.txt").write_text(lines)
+        subprocess.run(
+            ["openssl", "dgst", "-sha256", "-sign", str(self.key), "-out", str(directory / "checksums.txt.sig"), str(directory / "checksums.txt")],
+            check=True,
+            capture_output=True,
+        )
+        names = [*assets, "checksums.txt", "checksums.txt.sig"]
+        (directory / "release.json").write_text(json.dumps({
+            "tag_name": listing_tag or tag,
+            "draft": False,
+            "prerelease": False,
+            "assets": [
+                {"name": name, "browser_download_url": f"https://download.malibu.tech/releases/{tag}/{name}"}
+                for name in names
+            ],
+        }))
+        if tamper:
+            (directory / f"Malibu-{tag}.dmg").write_bytes(b"tampered")
+        return directory
+
+    def with_release_mirror_gate(self) -> None:
+        self.config = dataclasses.replace(self.config, release_mirror_gate="required")
+        self.updater.config = self.config
+
+    def test_release_mirror_gate_accepts_a_verified_mirror_copy(self):
+        self.with_release_mirror_gate()
+        self.seed_release_mirror()
+        self.updater.assert_release_mirrored("1.8.27")
+
+    def test_release_mirror_gate_refuses_a_missing_mirror_copy(self):
+        self.with_release_mirror_gate()
+        with self.assertRaisesRegex(updater_module.UpdateError, "no v1.8.27 directory"):
+            self.updater.assert_release_mirrored("1.8.27")
+
+    def test_release_mirror_gate_refuses_a_tampered_asset(self):
+        self.with_release_mirror_gate()
+        self.seed_release_mirror(tamper=True)
+        with self.assertRaisesRegex(updater_module.UpdateError, "does not match checksums.txt"):
+            self.updater.assert_release_mirrored("1.8.27")
+
+    def test_release_mirror_gate_refuses_a_listing_for_another_tag(self):
+        self.with_release_mirror_gate()
+        self.seed_release_mirror(listing_tag="v1.8.26")
+        with self.assertRaisesRegex(updater_module.UpdateError, "names another tag"):
+            self.updater.assert_release_mirrored("1.8.27")
+
+    def test_release_mirror_gate_refuses_an_unsigned_checksums_file(self):
+        self.with_release_mirror_gate()
+        directory = self.seed_release_mirror()
+        (directory / "checksums.txt.sig").write_bytes(b"not a signature")
+        with self.assertRaisesRegex(updater_module.UpdateError, "signature verification failed"):
+            self.updater.assert_release_mirrored("1.8.27")
+
+    def test_release_mirror_gate_config_rejects_unknown_values(self):
+        with self.assertRaisesRegex(updater_module.UpdateError, "required or disabled"):
+            updater_module.release_mirror_gate_value("off")
+
+    def test_advertised_version_update_refuses_an_unmirrored_release(self):
+        self.with_release_mirror_gate()
+        install = self.updater.install_root
+        install.mkdir(parents=True)
+        base = install / "coordinator.yaml"
+        base.write_text(
+            'coordinator_advertised_version:\n'
+            '  latest_binary_version: "1.8.26"\n'
+            'tier2:\n'
+            '  catalog_path: /opt/macprovider/tier2-catalog.json\n'
+            '  require_hash_verified: false\n'
+        )
+        self.updater.coordinator_runtime = mock.Mock(
+            return_value=updater_module.CoordinatorRuntime(base_config=base, overlay_config=None, environment={})
+        )
+        release = self.stage(self.verify())
+        self.updater.verify_candidate_versions(release)
+        with self.assertRaisesRegex(updater_module.UpdateError, "release mirror has no v1.8.27 directory"):
+            self.updater.prepare_config_update(release)
+        self.seed_release_mirror()
+        update = self.updater.prepare_config_update(release)
+        self.assertEqual(update.next_version, "1.8.27")
 
     def test_advertised_version_update_preserves_hash_enforcement(self):
         install = self.updater.install_root

@@ -601,6 +601,9 @@ decides whether bytes are the signed snapshot.
    `https://models.malibu.tech`, then an `HF_ENDPOINT` whose host is not
    huggingface.co (the Hugging Face API and resolve layout on that host).
    Non-HTTPS bases, bases with credentials, query, or fragment are ignored.
+   After huggingface.co fails at the transport level once in a run, later
+   snapshots in that run MAY try the fallback sources first and
+   huggingface.co last.
 2. A content-addressed mirror serves `<base>/<model_sha256>/manifest`, the
    exact canonical manifest bytes defined above, and
    `<base>/<model_sha256>/files/<relative path>` for each entry. The CLI MUST
@@ -609,8 +612,9 @@ decides whether bytes are the signed snapshot.
    entry, and MUST reject a file whose size or SHA-256 differs from its
    entry. A mirror is never used for a row without `model_sha256`.
 3. `HF_TOKEN` MUST be sent only to huggingface.co. A Hugging Face request
-   may redirect only to the Hugging Face CDN hosts; a mirror request may
-   redirect to any HTTPS host and never carries `Authorization`.
+   may redirect only to the Hugging Face CDN hosts; a mirror request, for
+   metadata and files alike, may redirect to any HTTPS host and never
+   carries `Authorization`.
 4. Every source writes into a fresh staging directory and publishes it by
    atomic move. The full canonical verification above still runs before
    benchmark, adoption, or serve; a mirror's per-file checks do not replace
@@ -622,11 +626,13 @@ decides whether bytes are the signed snapshot.
 6. A verified durable-store copy of the pinned snapshot MUST satisfy the
    recommend path without a Hugging Face cache snapshot and without any
    download.
-7. When an existing cache snapshot fails verification, the CLI MUST move it
-   into one quarantine slot per model repository
+7. When an existing cache snapshot fails verification and its volume has at
+   least three times the snapshot's size free, the CLI MUST move it into one
+   quarantine slot per model repository
    (`models--<org>--<name>/macprovider-quarantine/`), replacing any earlier
-   quarantined copy, instead of deleting it. The slot is removed once a
-   verified replacement is published.
+   quarantined copy, instead of deleting it; with less room it deletes the
+   snapshot as before, so repair never needs more disk than it used to. The
+   slot is removed once a verified replacement is published.
 
 #### 3.2.2 Offline import (v0.16.0)
 

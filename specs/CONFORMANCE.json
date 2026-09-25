@@ -67,7 +67,8 @@
       "status": "normative",
       "owner": "@Augustas11",
       "authority_domains": [
-        "provider-onboarding-identity"
+        "provider-onboarding-identity",
+        "release-mirror"
       ],
       "supersedes": [],
       "depends_on": [
@@ -719,7 +720,7 @@
     {
       "spec_id": "SPEC-025",
       "title": "Native Mac App (signed `.dmg` + menu bar wrapper)",
-      "version": "v0.30",
+      "version": "v0.29",
       "path": "specs/SPEC-025-native-mac-app.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -2368,7 +2369,8 @@
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testMirrorAssetOutsideItsTagDirectoryIsRejected",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testMirrorReleaseForAnotherTagIsRejected",
         "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testMirrorDisabledKeepsGitHubOnlyBehavior",
-        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testReleaseMirrorURLRejectsNonReleaseTags"
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testReleaseMirrorURLRejectsNonReleaseTags",
+        "phase3-binary/Tests/macprovider-cliTests/SelfUpdateMirrorTests.swift:testCustomReleasesAPINeverFallsBackToTheMirror"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-AUTOUPDATE-PHYSICAL"
@@ -2378,7 +2380,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1737",
-        "rationale": "SPEC-020 v0.1.20 (SPEC-020-R006): coordinator-triggered autoupdate and update --tag resolve a release tag from the byte-identical download.malibu.tech mirror when GitHub cannot answer; all signature and identity checks are unchanged. Implemented and unit-tested; no physical autoupdate with GitHub blocked has been captured and the mirror is not yet populated."
+        "rationale": "SPEC-020 v0.1.20 (SPEC-020-R006): coordinator-triggered autoupdate and update --tag resolve a release tag from the SPEC-003-R004 release mirror when GitHub cannot answer; all signature and identity checks are unchanged. Known gap: signed discovery (R001, used by a plain update, the Malibu Update button, and the R005 recovery rail) stays GitHub-only, so a GitHub-blocked node updates only through the coordinator trigger or update --tag. Implemented and unit-tested; no physical autoupdate with GitHub blocked has been captured and the mirror is not yet populated."
       }
     },
     {
@@ -2888,7 +2890,8 @@
         "phase3-binary/Tests/macprovider-cliTests/ModelArtifactSourceTests.swift:testMirrorRedirectMayLeaveTheMirrorHost",
         "phase3-binary/Tests/macprovider-cliTests/ModelArtifactSourceTests.swift:testVerifiedArtifactSkipsCandidateOnTransportFailure",
         "phase3-binary/Tests/macprovider-cliTests/ModelArtifactSourceTests.swift:testVerifiedArtifactUsesDurableCopyWithoutHuggingFaceSnapshot",
-        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactSourceTests.swift:testMismatchedSnapshotIsQuarantinedNotDeletedWhenNoSourceIsReachable"
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactSourceTests.swift:testMismatchedSnapshotIsQuarantinedNotDeletedWhenNoSourceIsReachable",
+        "phase3-binary/Tests/macprovider-cliTests/ModelArtifactSourceTests.swift:testLaterSnapshotsSkipAnUnreachableHuggingFaceUntilTheMirrorsFail"
       ],
       "journeys": [],
       "evidence": [],
@@ -2967,30 +2970,6 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1636",
         "rationale": "Pi reads OpenAI prompt_tokens_details.cached_tokens; auto-prefix ConversationCache hits were buyer-invisible and would ambiguous_cache whole-row-zero. Not promoted; no signed journey."
-      }
-    },
-    {
-      "requirement_id": "SPEC-025-R001",
-      "spec_id": "SPEC-025",
-      "state": "pending",
-      "implementation": [
-        "phase3-binary/dist/install.sh:verify_bundled_fresh_code_signature()",
-        "phase3-binary/dist/install.sh:a fresh install from MACPROVIDER_BUNDLED_APP requires MACPROVIDER_VERSION",
-        "phase3-binary/dist/install.sh:MALIBU_CLI_CODE_REQUIREMENT="
-      ],
-      "tests": [
-        "phase3-binary/dist/test/install_bundled_repair.test.sh:F1 \u2014 fresh without an explicit version pin",
-        "phase3-binary/dist/test/install_bundled_repair.test.sh:F2 \u2014 fresh with a pin and valid Developer ID",
-        "phase3-binary/dist/test/install_bundled_repair.test.sh:F3 \u2014 an app bundle that fails",
-        "phase3-binary/dist/test/install_bundled_repair.test.sh:R1 \u2014 repair keeps its existing trust model"
-      ],
-      "journeys": [],
-      "evidence": [],
-      "gap": {
-        "verdict": "UNKNOWN",
-        "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/1737",
-        "rationale": "SPEC-025 v0.30 (SPEC-025-R001): install.sh accepts MACPROVIDER_BUNDLED_APP outside repair with a version pin and Developer ID verification of the app and staged CLI. Tested with a codesign stub on Linux; real codesign on a signed Malibu.app has not been exercised, and Malibu does not yet invoke this path."
       }
     },
     {
@@ -6612,8 +6591,10 @@
       "tests": [
         "scripts/test-install-version-pin.sh:m1-github-down-pkg-from-mirror",
         "scripts/test-install-version-pin.sh:m3-mirror-signature-mismatch-fails",
-        "scripts/test-install-version-pin.sh:m9-coordinator-outranks-stale-latest",
-        "scripts/test-install-version-pin.sh:m12-rejects-"
+        "scripts/test-install-version-pin.sh:m9-mirror-cannot-roll-back",
+        "scripts/test-install-version-pin.sh:m12-rejects-",
+        "scripts/test-install-version-pin.sh:m11-no-advertisement-fails-closed",
+        "scripts/test-install-version-pin.sh:m10-mirror-cannot-push-canary"
       ],
       "journeys": [],
       "evidence": [],
@@ -6633,13 +6614,17 @@
         "scripts/publish-release-mirror.sh:releases are immutable",
         "scripts/publish-release-mirror.sh:advance latest_binary_version first",
         ".github/workflows/release.yml:bash scripts/publish-release-mirror.sh",
-        ".github/workflows/promote-acceptance-candidate.yml:bash scripts/publish-release-mirror.sh"
+        ".github/workflows/promote-acceptance-candidate.yml:bash scripts/publish-release-mirror.sh",
+        "ops/pearl-updater/macprovider-pearl-update:def assert_release_mirrored(",
+        "phase4-coordinator/internal/config/config.go:func (c Config) validateAdvertisedVersions("
       ],
       "tests": [
         "scripts/test-publish-release-mirror.sh:release-json-contract",
         "scripts/test-publish-release-mirror.sh:tampered-download-refused",
         "scripts/test-publish-release-mirror.sh:upload-refuses-to-patch-published-release",
-        "scripts/test-publish-release-mirror.sh:promote-unadvertised-refused"
+        "scripts/test-publish-release-mirror.sh:promote-unadvertised-refused",
+        "ops/pearl-updater/test_pearl_updater.py::PearlUpdaterTests",
+        "phase4-coordinator/internal/config/seam_767_768_test.go:TestValidateRejectsMalformedVersionFloors"
       ],
       "journeys": [],
       "evidence": [],

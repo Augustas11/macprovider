@@ -408,20 +408,18 @@ cooldown for that normalized target.
 
 **SPEC-020-R006 — Release mirror for tag resolution (v0.1.20, #1737).** When
 the GitHub release-by-tag request of R-1.4 fails for any reason other than a
-404, the provider MUST read the same tag from
-`https://download.malibu.tech/releases/<tag>/release.json`, a byte-for-byte
-mirror of the GitHub release object whose every asset URL is
-`https://download.malibu.tech/releases/<tag>/<asset name>`. It MUST reject a
-mirror object whose `tag_name` differs from the requested tag or whose asset
-URL leaves that directory, and it MUST then treat the result exactly as a
-GitHub release: the same required assets, checksum signature, compatibility
-artifact index, staged binary version, code-signing identity, and Malibu
-bundle checks apply, so the mirror host is never an authority. A GitHub 404
-stays authoritative (`target_release_not_found`); when the mirror also fails,
-the GitHub error is reported. Signed release discovery (SPEC-020-R001) keeps
-its GitHub-only transport, because its immutability check is a GitHub
-attestation the mirror cannot provide. Every published release MUST be
-mirrored byte-identically before it is advertised as `latest_binary_version`.
+404, the provider MUST read the same tag from the SPEC-003-R004 release mirror
+(`release-mirror` authority domain, owned by SPEC-003; this requirement does not
+restate its layout or publication rules). It MUST reject a mirror listing
+whose tag differs from the requested tag or whose asset URL leaves that tag's
+mirror directory, and MUST then apply exactly the GitHub-release checks: the
+same required assets, checksum signature, compatibility artifact index, staged
+binary version, code-signing identity, and Malibu bundle checks, so the mirror
+host is never an authority. A GitHub 404 stays authoritative
+(`target_release_not_found`); when the mirror also fails, the GitHub error is
+reported. Signed release discovery (SPEC-020-R001) keeps its GitHub-only
+transport, because its immutability check is a GitHub attestation the mirror
+cannot provide.
 
 R-1.5. The provider MUST attempt at most one autoupdate per coordinator session
 per target version. A reconnect that repeats the same target version MUST honor

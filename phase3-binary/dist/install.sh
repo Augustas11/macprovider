@@ -38,7 +38,6 @@ GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 # Issue #1737: Macs that cannot reach github.com (mainland China) fetch the same
 # release bytes from a byte-identical mirror of Augustas11/macprovider releases:
 #   $RELEASE_MIRROR_BASE/<tag>/<asset>   every GitHub release asset
-#   $RELEASE_MIRROR_BASE/latest.json     {"tag_name": ...} advisory pointer
 # The mirror is untrusted transport. checksums.txt.sig under the embedded key
 # stays the only authority for every byte, whichever host served it.
 RELEASE_MIRROR_BASE="https://download.malibu.tech/releases"
@@ -87,12 +86,6 @@ HEADLESS_RECOVERY_TRUST_PATH="/Library/Application Support/macprovider/install-r
 SUDO_BIN="/usr/bin/sudo"
 LAUNCHCTL_BIN="/bin/launchctl"
 SECURITY_BIN="/usr/bin/security"
-CODESIGN_BIN="/usr/bin/codesign"
-# Developer ID designated requirements for a fresh install staged from a
-# Malibu.app bundle instead of signed release assets (#1737). Same team and
-# identifiers the CLI self-updater and Malibu enforce.
-MALIBU_APP_CODE_REQUIREMENT='identifier "tech.malibu.app" and anchor apple generic and certificate leaf[subject.OU] = "YF7XNRJUG4"'
-MALIBU_CLI_CODE_REQUIREMENT='identifier "live.malibu.provider.cli" and anchor apple generic and certificate leaf[subject.OU] = "YF7XNRJUG4"'
 ROOT_PYTHON3_BIN="/usr/bin/python3"
 # Resolved interpreter after ensure_python3_usable. Empty until the gate runs.
 INSTALL_PYTHON3=""
@@ -10033,19 +10026,29 @@ fetch_release_asset() {
   else
     sources="github mirror"
   fi
+  # With no mirror to fall back to (a fork), GitHub keeps its original retry
+  # budget. The mirror is untrusted transport, so its bytes are size-capped
+  # before checksums.txt.sig can vouch for them.
+  local github_budget="--connect-timeout 15 --retry 3 --retry-max-time 300"
+  release_mirror_enabled && github_budget="--connect-timeout 10 --retry 2 --retry-max-time 120"
+  local mirror_cap=2147483648
+  case "$name" in
+    checksums.txt|checksums.txt.sig) mirror_cap=1048576 ;;
+  esac
   for source in $sources; do
     rm -f "$dest"
     if [ "$source" = "github" ]; then
       url="https://github.com/${GITHUB_REPO}/releases/download/${tag}/${name}"
       log "Downloading $name from GitHub Releases."
-      if curl -fL --connect-timeout 10 --speed-limit 1024 --speed-time 120 --retry 2 --retry-connrefused --retry-max-time 120 "$url" -o "$dest"; then
+      # shellcheck disable=SC2086 # github_budget is a fixed list of flags
+      if curl -fL $github_budget --speed-limit 1024 --speed-time 120 --retry-connrefused "$url" -o "$dest"; then
         return 0
       fi
       RELEASE_GITHUB_UNREACHABLE=1
     else
       url="${RELEASE_MIRROR_BASE}/${tag}/${name}"
       log "Downloading $name from the Malibu release mirror."
-      if curl -fL --proto '=https' --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$url" -o "$dest"; then
+      if curl -fL --proto '=https' --max-filesize "$mirror_cap" --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$url" -o "$dest"; then
         return 0
       fi
     fi
@@ -10268,27 +10271,9 @@ print(path)
 PY
 }
 
-# A fresh install from Malibu.app has no trusted incumbent and no
-# checksums.txt.sig, so the Apple Developer ID signature chain is its authority:
-# the app bundle's sealed resources (compatibility set, catalog release,
-# metallib) and the staged CLI must both satisfy the pinned requirements.
-verify_bundled_fresh_code_signature() {
-  local target="$1" requirement="$2" what="$3"
-  [ -x "${CODESIGN_BIN:-/usr/bin/codesign}" ] \
-    || die 4 "codesign is required to verify the Malibu.app bundled $what"
-  "${CODESIGN_BIN:-/usr/bin/codesign}" --verify --strict --test-requirement="=$requirement" "$target" >/dev/null 2>&1 \
-    || die 4 "Malibu.app bundled $what failed Developer ID signature verification"
-}
-
 stage_bundled_repair_payload() {
-  bundled_fresh_install=0
-  if [ "${REPAIR_EXISTING_INSTALL:-0}" -ne 1 ]; then
-    # Fresh installs pin the bundled version explicitly; they never let
-    # release discovery pick a tag the bundle then has to match.
-    [ -n "${MACPROVIDER_VERSION:-}" ] \
-      || die 7 "a fresh install from MACPROVIDER_BUNDLED_APP requires MACPROVIDER_VERSION pinned to the bundled provider CLI version"
-    bundled_fresh_install=1
-  fi
+  [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ] \
+    || die 7 "bundled CLI staging is only allowed for existing-install repair"
   [ -n "${BUNDLED_APP:-}" ] \
     || die 7 "existing-install repair requires MACPROVIDER_BUNDLED_APP from Malibu.app"
   [ -n "${MACPROVIDER_ACCEPTANCE_ASSET_DIR:-}" ] \
@@ -10306,9 +10291,6 @@ stage_bundled_repair_payload() {
     bundled_cli="$(validated_bundled_cli "$bundled_app/Contents/MacOS/macprovider-cli")" \
       || die 7 "Malibu.app is missing an executable provider CLI"
   fi
-  if [ "$bundled_fresh_install" -eq 1 ]; then
-    verify_bundled_fresh_code_signature "$bundled_app" "$MALIBU_APP_CODE_REQUIREMENT" "app bundle"
-  fi
   [ -n "$TMPDIR_PATH" ] || die 5 "bundled repair staging requires a temp directory"
   staging_dir="$TMPDIR_PATH/staging"
   rm -rf "$staging_dir"
@@ -10319,10 +10301,6 @@ stage_bundled_repair_payload() {
     || die 5 "failed to mark the staged bundled provider CLI executable"
   [ -x "$staging_dir/macprovider-cli" ] \
     || die 5 "staged bundled macprovider-cli is not executable"
-  if [ "$bundled_fresh_install" -eq 1 ]; then
-    # Verify the private staged copy that will actually be installed.
-    verify_bundled_fresh_code_signature "$staging_dir/macprovider-cli" "$MALIBU_CLI_CODE_REQUIREMENT" "provider CLI"
-  fi
   macos_dir="$bundled_app/Contents/MacOS"
   resources_dir="$bundled_app/Contents/Resources"
   [ -f "$macos_dir/mlx.metallib" ] \
@@ -14547,17 +14525,11 @@ main() {
     log "Latest release: $tag"
   fi
   if [ -n "${BUNDLED_APP}" ]; then
-    if [ "${REPAIR_EXISTING_INSTALL:-0}" -ne 1 ]; then
-      [ -n "${MACPROVIDER_VERSION:-}" ] \
-        || die 7 "a fresh install from MACPROVIDER_BUNDLED_APP requires MACPROVIDER_VERSION pinned to the bundled provider CLI version"
-    fi
+    [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ] \
+      || die 7 "MACPROVIDER_BUNDLED_APP is only allowed for existing-install repair"
     TMPDIR_PATH="$(mktemp -d)"
     asset_kind="bundled"
-    if [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 1 ]; then
-      log "Repairing from Malibu.app bundled provider CLI (no GitHub download)."
-    else
-      log "Installing from the Developer ID-signed Malibu.app bundled provider CLI (no release download)."
-    fi
+    log "Repairing from Malibu.app bundled provider CLI (no GitHub download)."
   else
     [ "${REPAIR_EXISTING_INSTALL:-0}" -eq 0 ] || headless_acceptance_repair_mode \
       || die 7 "existing-install repair requires MACPROVIDER_BUNDLED_APP from Malibu.app"

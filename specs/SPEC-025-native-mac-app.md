@@ -1,16 +1,6 @@
 # SPEC-025 — Native Mac App (signed `.dmg` + menu bar wrapper)
 
-Status: DRAFT v0.30 · Owner: augstar · Target: 2026 Q3
-
-**Change log v0.30 (2026-09-25, issue #1737 GitHub-blocked fresh installs).**
-Adds SPEC-025-R001: the bundled `install.sh` may stage the Malibu.app
-embedded provider CLI outside repair (a fresh install) only with an explicit
-`MACPROVIDER_VERSION` pin and Developer ID verification of both the app bundle
-and the staged CLI. Malibu's own fresh onboarding is unchanged: it stays
-unpinned, follows signed release discovery, and reaches Macs that cannot reach
-GitHub through the installer's SPEC-003-R003 release-mirror fallback, so the
-app passes no new environment. The onboarding progress hint treats a curl of
-`download.malibu.tech/releases/` as the release-download stage.
+Status: DRAFT v0.29 · Owner: augstar · Target: 2026 Q3
 
 **Change log v0.29 (2026-09-08, issue #1445 frozen-Sparkle-bridge confinement).**
 Restores the code and this spec to DECISION_CRITERIA Entry 156/158: the frozen
@@ -524,21 +514,6 @@ From reading `phase3-binary/`:
      download + **launchd provider-service + watchdog install**; the app only surfaces a progress hint
      by scraping `ps` for the autotune stage (`:110-149`). A non-zero installer exit
      throws (installer rollback semantics).
-
-     **SPEC-025-R001 — Bundled CLI outside repair.** `install.sh` MUST accept
-     `MACPROVIDER_BUNDLED_APP` outside `MACPROVIDER_REPAIR_EXISTING_INSTALL=1`
-     only when `MACPROVIDER_VERSION` is explicitly pinned, and MUST then apply
-     every repair-path check (canonical non-world-writable `.app`, required
-     members, embedded-CLI identity, CLI `--version` and
-     `compatibility-set.json` provider version equal to the pin, no acceptance
-     assets, no emergency rollback, not headless) plus `codesign --verify
-     --strict` of the app bundle against `identifier "tech.malibu.app" and
-     anchor apple generic and certificate leaf[subject.OU] = "YF7XNRJUG4"` and
-     of the privately staged CLI copy against `identifier
-     "live.malibu.provider.cli"` with the same anchor and team, failing closed
-     when `codesign` is missing. Because no signed `checksums.txt.sig` covers
-     this path and no trusted incumbent exists, the Developer ID chain is its
-     authority. Repair behavior is unchanged.
    - **Verify CLI credential custody** (`importCLIConfigAfterInstall` →
      `ProviderConfig.importExistingCLIConfig()`, `:128`) — for an existing YAML bearer,
      save/verify the temporary App-Keychain compatibility copy, run installed-CLI

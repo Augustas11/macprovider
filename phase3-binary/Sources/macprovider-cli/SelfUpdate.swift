@@ -136,7 +136,7 @@ struct SelfUpdate {
     init(
         currentVersion: String,
         releasesAPIURL: String?,
-        releaseMirrorEnabled: Bool = true,
+        releaseMirrorEnabled: Bool? = nil,
         session: URLSession = .shared,
         markerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
         drainBeforeReplace: (() async throws -> Void)? = nil,
@@ -153,7 +153,10 @@ struct SelfUpdate {
     ) {
         self.currentVersion = currentVersion
         self.releasesAPIURL = releasesAPIURL ?? Self.defaultReleasesAPIURL
+        // The mirror only carries the default repository's releases; a fork
+        // or staging releases API never falls through to it (SPEC-003-R003).
         self.releaseMirrorEnabled = releaseMirrorEnabled
+            ?? ((releasesAPIURL ?? Self.defaultReleasesAPIURL) == Self.defaultReleasesAPIURL)
         self.session = session
         self.markerStore = markerStore
         self.drainBeforeReplace = drainBeforeReplace

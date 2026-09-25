@@ -94,6 +94,41 @@ final class ModelArtifactSourceTests: XCTestCase {
         XCTAssertTrue(mirrorRequests.allSatisfy { $0.value(forHTTPHeaderField: "Authorization") == nil })
     }
 
+    func testLaterSnapshotsSkipAnUnreachableHuggingFaceUntilTheMirrorsFail() async throws {
+        let source = try makeSnapshot(["w.bin": "weights"])
+        let (manifest, expected) = try canonicalManifest(of: source)
+        let requests = RequestLog()
+        var downloader = HuggingFaceSnapshotDownloader(
+            fetch: { request in
+                requests.append(request)
+                guard request.url?.host == "mirror.example" else { throw URLError(.timedOut) }
+                return (manifest, Self.ok(request.url!))
+            },
+            download: { request in
+                requests.append(request)
+                return try Self.serve(request, from: source, sha256: expected)
+            }
+        )
+        downloader.fallbackSources = [.contentAddressed(mirror)]
+
+        try await downloader.downloadSnapshot(
+            modelID: modelID,
+            revision: revision,
+            expectedSHA256: expected,
+            to: try tempDir().appendingPathComponent("first", isDirectory: true)
+        )
+        let afterFirst = requests.all.filter { $0.url?.host == "huggingface.co" }.count
+        try await downloader.downloadSnapshot(
+            modelID: modelID,
+            revision: revision,
+            expectedSHA256: expected,
+            to: try tempDir().appendingPathComponent("second", isDirectory: true)
+        )
+
+        XCTAssertEqual(afterFirst, 1)
+        XCTAssertEqual(requests.all.filter { $0.url?.host == "huggingface.co" }.count, 1, "the second snapshot went straight to the mirror")
+    }
+
     func testDownloaderRejectsMirrorFileThatDoesNotMatchItsManifest() async throws {
         let source = try makeSnapshot(["w.bin": "weights"])
         let (manifest, expected) = try canonicalManifest(of: source)

@@ -3602,11 +3602,37 @@ struct HuggingFaceSnapshotDownloader {
         try await HuggingFaceSnapshotDownloader.guardedSession.data(for: request, delegate: HFRedirectGuard())
     }
     var download: @Sendable (URLRequest, Date?) async throws -> (URL, URLResponse)
+    /// Metadata fetch for fallback sources (mirror manifest, HF_ENDPOINT API).
+    /// Unlike `fetch`, it may follow a redirect to another HTTPS host (a CDN
+    /// in front of object storage); nothing it returns is trusted before the
+    /// signed-hash check. Test initializers reuse `fetch`.
+    var mirrorFetch: @Sendable (URLRequest) async throws -> (Data, URLResponse)
     /// Byte sources tried in order after huggingface.co fails. The signed
     /// row hash stays the only authority, so none of these hosts is trusted
     /// (SPEC-023 §3.2 artifact byte sources, #1737). Test initializers leave
     /// this empty so a failure keeps its original error.
     var fallbackSources: [ModelArtifactSource] = []
+    /// Shared by every copy of this downloader (one recommend run): once
+    /// huggingface.co fails at the transport level, later snapshots try the
+    /// fallback sources first instead of waiting on the same timeout again.
+    let reachability = SourceReachability()
+
+    final class SourceReachability: @unchecked Sendable {
+        private let lock = NSLock()
+        private var huggingFaceUnreachable = false
+
+        var preferFallbacks: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return huggingFaceUnreachable
+        }
+
+        func markHuggingFaceUnreachable() {
+            lock.lock()
+            huggingFaceUnreachable = true
+            lock.unlock()
+        }
+    }
 
     init() {
         fetch = {
@@ -3614,6 +3640,9 @@ struct HuggingFaceSnapshotDownloader {
         }
         download = {
             try await HuggingFaceSnapshotDownloader.defaultDownload($0, deadline: $1)
+        }
+        mirrorFetch = {
+            try await HuggingFaceSnapshotDownloader.guardedSession.data(for: $0, delegate: HFAssetRedirectGuard())
         }
         fallbackSources = ModelArtifactSource.productionFallbacks(
             environment: ProcessInfo.processInfo.environment
@@ -3629,6 +3658,7 @@ struct HuggingFaceSnapshotDownloader {
         }
     ) {
         self.fetch = fetch
+        self.mirrorFetch = fetch
         self.download = { request, _ in
             try await download(request)
         }
@@ -3641,6 +3671,7 @@ struct HuggingFaceSnapshotDownloader {
         downloadWithDeadline: @escaping @Sendable (URLRequest, Date?) async throws -> (URL, URLResponse)
     ) {
         self.fetch = fetch
+        self.mirrorFetch = fetch
         self.download = downloadWithDeadline
     }
 
@@ -3761,20 +3792,26 @@ struct HuggingFaceSnapshotDownloader {
     ) async throws {
         try Self.assertDeadlineActive(deadline)
         var failures: [String] = []
-        do {
-            try await downloadHuggingFaceSnapshot(
-                endpoint: Self.huggingFaceOrigin,
-                modelID: modelID,
-                revision: revision,
-                to: snapshot,
-                deadline: deadline
-            )
-            return
-        } catch {
-            if fallbackSources.isEmpty || Self.stopsSourceWalk(error) {
-                throw error
+        let huggingFaceLast = !fallbackSources.isEmpty && reachability.preferFallbacks
+        if !huggingFaceLast {
+            do {
+                try await downloadHuggingFaceSnapshot(
+                    endpoint: Self.huggingFaceOrigin,
+                    modelID: modelID,
+                    revision: revision,
+                    to: snapshot,
+                    deadline: deadline
+                )
+                return
+            } catch {
+                if fallbackSources.isEmpty || Self.stopsSourceWalk(error) {
+                    throw error
+                }
+                if error is URLError {
+                    reachability.markHuggingFaceUnreachable()
+                }
+                failures.append("huggingface.co: \(Self.sourceFailureSummary(error))")
             }
-            failures.append("huggingface.co: \(Self.sourceFailureSummary(error))")
         }
         for source in fallbackSources {
             try Self.assertDeadlineActive(deadline)
@@ -3807,6 +3844,23 @@ struct HuggingFaceSnapshotDownloader {
                     throw error
                 }
                 failures.append("\(source.label): \(Self.sourceFailureSummary(error))")
+            }
+        }
+        if huggingFaceLast {
+            do {
+                try await downloadHuggingFaceSnapshot(
+                    endpoint: Self.huggingFaceOrigin,
+                    modelID: modelID,
+                    revision: revision,
+                    to: snapshot,
+                    deadline: deadline
+                )
+                return
+            } catch {
+                if Self.stopsSourceWalk(error) {
+                    throw error
+                }
+                failures.append("huggingface.co: \(Self.sourceFailureSummary(error))")
             }
         }
         throw AutotuneRecommendError.invalidArtifact(
@@ -3929,7 +3983,7 @@ struct HuggingFaceSnapshotDownloader {
         var request = URLRequest(url: ModelArtifactSource.contentAddressedManifestURL(base: base, sha256: expectedSHA256))
         request.timeoutInterval = try Self.boundedInterval(30, deadline: deadline)
         let manifestRequest = request
-        let fetch = self.fetch
+        let fetch = self.mirrorFetch
         let result = try await Self.withDeadline(deadline) {
             let (data, response) = try await fetch(manifestRequest)
             return FetchResponseBox(data: data, response: response)
@@ -3992,7 +4046,7 @@ struct HuggingFaceSnapshotDownloader {
             addTokenHeader(&request)
         }
         let metadataRequest = request
-        let fetch = self.fetch
+        let fetch = sendToken ? self.fetch : self.mirrorFetch
         let result = try await Self.withDeadline(deadline) {
             let (data, response) = try await fetch(metadataRequest)
             return FetchResponseBox(data: data, response: response)
@@ -4222,12 +4276,19 @@ struct CachedModelArtifactResolver {
                 // an old manifest, or be left corrupted by an interrupted
                 // external cache operation. Do not keep rejecting it forever:
                 // move only this pinned revision aside and rebuild it through
-                // the downloader's staging-directory/atomic-move path. The
-                // bytes are kept in one bounded quarantine slot per model, not
-                // deleted, because a host that cannot reach any source would
-                // otherwise lose the only copy it has (#1737).
+                // the downloader's staging-directory/atomic-move path. When the
+                // volume has room for the old copy plus a fresh download and
+                // its durable adoption, the bytes are kept in one bounded
+                // quarantine slot per model, because a host that cannot reach
+                // any source would otherwise lose the only copy it has (#1737).
+                // Without that room they are deleted as before, so repair on
+                // a nearly full disk still succeeds.
                 do {
-                    try quarantineSnapshot(snapshot, modelID: row.modelID)
+                    if quarantineHasRoom(for: snapshot) {
+                        try quarantineSnapshot(snapshot, modelID: row.modelID)
+                    } else {
+                        try FileManager.default.removeItem(at: snapshot)
+                    }
                 } catch {
                     throw AutotuneRecommendError.invalidArtifact(
                         message + "; automatic repair could not move cached snapshot aside: " + String(describing: error)
@@ -4289,6 +4350,32 @@ struct CachedModelArtifactResolver {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .appendingPathComponent("macprovider-quarantine", isDirectory: true)
+    }
+
+    /// Room for the kept copy plus a same-size download and its durable
+    /// adoption: three times the snapshot's bytes free on its volume.
+    func quarantineHasRoom(for snapshot: URL) -> Bool {
+        var total: UInt64 = 0
+        if let enumerator = FileManager.default.enumerator(
+            at: snapshot,
+            includingPropertiesForKeys: [.isRegularFileKey, .fileSizeKey],
+            options: []
+        ) {
+            for case let url as URL in enumerator {
+                let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                if values?.isRegularFile == true {
+                    total += UInt64(max(0, values?.fileSize ?? 0))
+                }
+            }
+        }
+        guard let values = try? snapshot.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+              let available = values.volumeAvailableCapacityForImportantUsage,
+              available > 0
+        else {
+            return false
+        }
+        let (needed, overflow) = total.multipliedReportingOverflow(by: 3)
+        return !overflow && UInt64(available) >= needed
     }
 
     private func quarantineSnapshot(_ snapshot: URL, modelID: String) throws {
