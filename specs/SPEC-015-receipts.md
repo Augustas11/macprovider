@@ -4525,17 +4525,24 @@ The provider decides per request, not from a per-runtime constant.
      per-chunk count (`mlxlm_loopback`, `omlx_loopback`, `lmstudio_loopback`
      with tools, a runtime that ignored `logprobs`), the completion tokens
      are the count of the delivered content (no special tokens) by a local
-     tokenizer: the one in the served, hash-bound snapshot for
-     `mlxlm_loopback` and `omlx_loopback`, else the tokenizer of the
-     catalog model id's local MLX snapshot (the SPEC-010 sibling of the
-     served GGUF, the same tokenizer item 5 re-counts with). It binds only
-     when the delivered content is all the content received and no tool
-     call was streamed, and only when that tokenizer is local; the CLI loads
-     it when serving starts.
+     tokenizer from a hash-verified snapshot: the served, hash-bound
+     snapshot for `mlxlm_loopback` and `omlx_loopback`, else the catalog
+     model id's local MLX snapshot (the SPEC-010 sibling of the served GGUF)
+     when its `macprovider.snapshot-manifest.v1` digest equals the signed
+     catalog row's `model_sha256`. The CLI loads that tokenizer once, when
+     serving starts, keeps it only when the snapshot is still exactly the
+     hashed one after the load, and holds it in memory; a count is taken
+     only while the snapshot is still current, so tokenizer files changed
+     after admission never count. It binds only when the delivered content
+     is all the content received and no tool call was streamed.
    - **Time bound.** The coordinator waits `CancelTerminalWait` (2 s) for
      the cancelled terminal frame. The prompt count call and the tokenizer
      count run concurrently within 1.25 s of the cancel, and a result that
-     is not ready then is dropped. A slow runtime therefore makes the
+     is not ready then is dropped. Before the prompt count call the CLI
+     re-checks the runtime's binding (the file or snapshot unchanged,
+     mlx_lm.server / oMLX still listing the snapshot, LM Studio still
+     listing the bound model) inside the same budget, and a changed binding
+     leaves the usage unattested. A slow runtime therefore makes the
      cancel free; it never makes it late or wrong.
    In every other case (a runtime with none of these sources, a delivered
    length off a chunk boundary, unknown delivery, a streamed tool call, a

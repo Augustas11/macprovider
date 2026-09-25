@@ -831,6 +831,11 @@ struct ServeCommand: AsyncParsableCommand {
         let policyVersion: String?
         let rowIdentity: String?
         let modelSHA256: String?
+        /// #1690 M9: for a loopback serve, the signed catalog row's
+        /// snapshot-manifest digest, which the local MLX snapshot of the
+        /// row's model id must match before its tokenizer counts a cancelled
+        /// stream (SPEC-015 §N.12 item 7). Nil otherwise.
+        let siblingSnapshotSHA256: String?
 
         init(
             state: String,
@@ -840,7 +845,8 @@ struct ServeCommand: AsyncParsableCommand {
             source: String,
             policyVersion: String? = nil,
             rowIdentity: String? = nil,
-            modelSHA256: String? = nil
+            modelSHA256: String? = nil,
+            siblingSnapshotSHA256: String? = nil
         ) {
             self.state = state
             self.releaseID = releaseID
@@ -850,6 +856,7 @@ struct ServeCommand: AsyncParsableCommand {
             self.policyVersion = policyVersion
             self.rowIdentity = rowIdentity
             self.modelSHA256 = modelSHA256
+            self.siblingSnapshotSHA256 = siblingSnapshotSHA256
         }
     }
 
@@ -1007,7 +1014,8 @@ struct ServeCommand: AsyncParsableCommand {
             source: catalog.usedFallback ? "baked" : "coordinator",
             policyVersion: catalog.value.policyVersion,
             rowIdentity: rowIdentity,
-            modelSHA256: nil
+            modelSHA256: nil,
+            siblingSnapshotSHA256: row.modelSHA256
         )
     }
 
@@ -2185,7 +2193,8 @@ struct ServeCommand: AsyncParsableCommand {
                     modelRuntime = try OpenAICompatibleLoopbackRuntime(
                         servedModelRef: loopbackServedRef,
                         origin: OllamaLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
-                        catalogModelIDAlias: catalogModelIDAlias
+                        catalogModelIDAlias: catalogModelIDAlias,
+                        siblingSnapshotSHA256: startupPreflight.catalogTrust?.siblingSnapshotSHA256
                     )
                 case .llamaCpp:
                     // The GGUF file llama.cpp serves is named by the operator
@@ -2195,7 +2204,8 @@ struct ServeCommand: AsyncParsableCommand {
                         servedModelRef: loopbackServedRef,
                         origin: LlamaCppLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
                         selector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: nil, cliPath: nil),
-                        catalogModelIDAlias: catalogModelIDAlias
+                        catalogModelIDAlias: catalogModelIDAlias,
+                        siblingSnapshotSHA256: startupPreflight.catalogTrust?.siblingSnapshotSHA256
                     )
                 case .mlxLM:
                     // SPEC-010-R009: the MLX snapshot mlx_lm.server serves is
@@ -2215,7 +2225,8 @@ struct ServeCommand: AsyncParsableCommand {
                     modelRuntime = try await OpenAICompatibleLoopbackRuntime.lmStudio(
                         servedModelRef: loopbackServedRef,
                         origin: LMStudioLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
-                        catalogModelIDAlias: catalogModelIDAlias
+                        catalogModelIDAlias: catalogModelIDAlias,
+                        siblingSnapshotSHA256: startupPreflight.catalogTrust?.siblingSnapshotSHA256
                     )
                 case .oMLX:
                     // SPEC-010-R009 (#1690 M9): the MLX snapshot oMLX serves

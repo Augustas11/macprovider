@@ -100,15 +100,6 @@ enum PoolLoopbackUsageGuard {
         return status
     }
 
-    /// #1690 M9: the token count of `text` with the tokenizer in `directory`
-    /// (no special tokens), or nil when it cannot load. `mlxlm_loopback` and
-    /// `omlx_loopback` use it for the completion tokens of a cancelled
-    /// stream, since neither reports per-chunk usage.
-    static func snapshotTokenCount(of text: String, in directory: URL) async -> Int? {
-        guard let tokenizer = await TokenizerCache.shared.tokenizer(at: directory) else { return nil }
-        return tokenizer.encode(text: text, addSpecialTokens: false).count
-    }
-
     static func isDivergent(reported: Int64, recounted: Int64) -> Bool {
         let relative = Int64((Double(max(reported, 0)) * relativeTolerance).rounded(.up))
         return abs(reported - recounted) > max(absoluteTolerance, relative)
@@ -128,5 +119,45 @@ enum PoolLoopbackUsageGuard {
             loaded[directory.path] = .some(tokenizer)
             return tokenizer
         }
+    }
+}
+
+/// #1690 M9 (review CODE HIGH): the tokenizer a cancelled loopback stream's
+/// delivered content is counted with, loaded from a hash-verified MLX
+/// snapshot and pinned in memory. It is loaded once, when serving starts, and
+/// kept only when the snapshot is still exactly the one that was hashed after
+/// the load, so the files it came from are the hashed files. A count is
+/// given only while the snapshot is still current: a snapshot changed after
+/// admission yields no count, so the cancel stays unattested.
+final class PinnedSnapshotTokenizer: @unchecked Sendable {
+    let snapshot: MLXSnapshotIdentity
+    private let encode: @Sendable (String) -> Int
+
+    init(snapshot: MLXSnapshotIdentity, encode: @escaping @Sendable (String) -> Int) {
+        self.snapshot = snapshot
+        self.encode = encode
+    }
+
+    /// Loads the tokenizer in `snapshot.directory`, or nil when it does not
+    /// load or the snapshot changed while it loaded.
+    static func load(snapshot: MLXSnapshotIdentity) async -> PinnedSnapshotTokenizer? {
+        guard let tokenizer = try? await AutoTokenizer.from(modelFolder: snapshot.directory), snapshot.isCurrent() else {
+            return nil
+        }
+        let box = TokenizerBox(tokenizer)
+        return PinnedSnapshotTokenizer(snapshot: snapshot) { text in box.count(text) }
+    }
+
+    /// The token count of `text` (no special tokens), or nil when the
+    /// snapshot is no longer the verified one.
+    func count(_ text: String) -> Int? {
+        guard snapshot.isCurrent() else { return nil }
+        return encode(text)
+    }
+
+    private final class TokenizerBox: @unchecked Sendable {
+        private let tokenizer: any Tokenizer
+        init(_ tokenizer: any Tokenizer) { self.tokenizer = tokenizer }
+        func count(_ text: String) -> Int { tokenizer.encode(text: text, addSpecialTokens: false).count }
     }
 }

@@ -579,10 +579,27 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         XCTAssertEqual(tool.cancelledResult(upstreamPromptTokens: 12, recountedCompletionTokens: 1).settlementDisposition, .usageUnattested)
     }
 
-    func testSnapshotTokenCountIsNilWithoutATokenizer() async {
-        let missing = FileManager.default.temporaryDirectory.appendingPathComponent("no-tokenizer-\(UUID().uuidString)")
-        let count = await PoolLoopbackUsageGuard.snapshotTokenCount(of: "Hello", in: missing)
-        XCTAssertNil(count)
+    private func makeSnapshotDirectory(_ name: String) throws -> URL {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent("\(name)-\(UUID().uuidString)")
+        let directory = parent.appendingPathComponent("snapshot")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: parent) }
+        try Data(#"{"model_type":"qwen2"}"#.utf8).write(to: directory.appendingPathComponent("config.json"))
+        try Data("{}".utf8).write(to: directory.appendingPathComponent("tokenizer.json"))
+        return directory.resolvingSymlinksInPath().standardizedFileURL
+    }
+
+    // #1690 M9 review CODE HIGH: the recount tokenizer is pinned from a
+    // hash-verified snapshot and counts only while that snapshot is current.
+    func testPinnedTokenizerCountsOnlyWhileItsSnapshotIsCurrent() async throws {
+        let directory = try makeSnapshotDirectory("pinned")
+        let snapshot = try MLXSnapshotIdentity.compute(directory: directory)
+        let pinned = PinnedSnapshotTokenizer(snapshot: snapshot) { $0.count * 2 }
+        XCTAssertEqual(pinned.count("abc"), 6)
+        try Data(#"{"swapped":true}"#.utf8).write(to: directory.appendingPathComponent("tokenizer.json"))
+        XCTAssertNil(pinned.count("abc"), "tokenizer files changed after admission: no count")
+        let unloadable = await PinnedSnapshotTokenizer.load(snapshot: try MLXSnapshotIdentity.compute(directory: directory))
+        XCTAssertNil(unloadable, "a snapshot without a loadable tokenizer pins nothing")
     }
 
     func testUpstreamRequestAsksOllamaForPerTokenLogprobsOnly() throws {
@@ -721,13 +738,21 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
         XCTAssertEqual(fast, 7)
     }
 
-    // #1690 M9 review M3: without per-chunk counts (an Ollama that ignores
-    // logprobs, LM Studio with tools) the delivered content is counted with
-    // the catalog sibling tokenizer when it is local, else unattested.
-    func testCancelWithoutPerChunkCountsFallsBackToTheSiblingTokenizer() async throws {
+    // #1690 M9 review M3 and CODE HIGH: without per-chunk counts (an Ollama
+    // that ignores logprobs, LM Studio with tools) the delivered content is
+    // counted with the catalog sibling tokenizer, pinned only when the local
+    // snapshot's digest equals the signed row's; else unattested.
+    func testCancelWithoutPerChunkCountsFallsBackToTheVerifiedSiblingTokenizer() async throws {
         let store = try makeStore()
-        let sibling = FileManager.default.temporaryDirectory.appendingPathComponent("sibling-\(UUID().uuidString)")
-        for (directory, expectAttested) in [(sibling as URL?, true), (nil, false)] {
+        let sibling = try makeSnapshotDirectory("sibling")
+        let digest = try MLXSnapshotIdentity.compute(directory: sibling).digest
+        let cases: [(URL?, String?, Bool, String)] = [
+            (sibling, digest, true, "verified sibling"),
+            (sibling, String(repeating: "0", count: 64), false, "sibling digest differs from the catalog row"),
+            (nil, digest, false, "no local sibling"),
+            (sibling, nil, false, "no catalog digest"),
+        ]
+        for (directory, expected, attested, label) in cases {
             let client = LogprobsStreamingLoopbackClient(promptTokens: 35, logprobs: false)
             let runtime = try OpenAICompatibleLoopbackRuntime(
                 servedModelRef: "ollama:gemma3:270m",
@@ -735,8 +760,9 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
                 catalogModelIDAlias: "mlx-community/Gemma-3-270m-4bit",
                 httpClient: client,
                 digestResolver: makeResolver(store),
-                tokenCounter: { text, dir in dir == sibling ? text.count * 3 : nil },
-                siblingTokenizerDirectory: { _ in directory }
+                siblingSnapshotSHA256: expected,
+                siblingTokenizerDirectory: { _ in directory },
+                pinRecountTokenizer: { snapshot in PinnedSnapshotTokenizer(snapshot: snapshot) { $0.count * 3 } }
             )
             let request = try makeRequest(model: "ollama:gemma3:270m", maxTokens: 100_000)
             let handle = try await runtime.acquireRequestHandle(request)
@@ -746,60 +772,84 @@ final class OpenAICompatibleLoopbackRuntimeTests: XCTestCase {
                 collector.record(chunk)
                 if collector.contentChunks.count >= 3 { cancel.set() }
             }
-            if expectAttested {
-                XCTAssertEqual(result.settlementDisposition, .notEligible)
-                XCTAssertEqual(result.promptTokens, 35)
-                XCTAssertEqual(result.completionTokens, result.content.count * 3)
-                XCTAssertEqual(result.cancelledPrefixUsage(deliveredContent: result.content).completionTokens, result.content.count * 3)
+            if attested {
+                XCTAssertEqual(result.settlementDisposition, .notEligible, label)
+                XCTAssertEqual(result.promptTokens, 35, label)
+                XCTAssertEqual(result.completionTokens, result.content.count * 3, label)
             } else {
-                XCTAssertEqual(result.settlementDisposition, .usageUnattested, "no local tokenizer: free")
+                XCTAssertEqual(result.settlementDisposition, .usageUnattested, label)
             }
         }
     }
 
-    // #1690 M9 review L8: the actor-level mlx_lm.server cancel counts the
-    // delivered content with the served snapshot's tokenizer (a fake here),
-    // and a tokenizer that answers late leaves the cancel unattested.
-    func testCancelledMLXLMStreamRecountsWithTheSnapshotTokenizer() async throws {
-        let parent = FileManager.default.temporaryDirectory.appendingPathComponent("mlxlm-cancel-\(UUID().uuidString)")
-        let snapshotDirectory = parent.appendingPathComponent("mlxlm-snapshot")
-        try FileManager.default.createDirectory(at: snapshotDirectory, withIntermediateDirectories: true)
-        addTeardownBlock { try? FileManager.default.removeItem(at: parent) }
-        try Data(#"{"model_type":"qwen2"}"#.utf8).write(to: snapshotDirectory.appendingPathComponent("config.json"))
-        let snapshot = try MLXSnapshotIdentity.compute(directory: snapshotDirectory)
-        for slow in [false, true] {
+    // #1690 M9 review L8 / CODE HIGH / CODE MEDIUM: the actor-level
+    // mlx_lm.server cancel counts the delivered content with the pinned
+    // snapshot tokenizer (a fake encode here). It is unattested when the
+    // tokenizer answers late, when a snapshot file changes during the stream,
+    // or when the runtime stops listing the snapshot before the prompt count.
+    func testCancelledMLXLMStreamRecountsWithThePinnedSnapshotTokenizer() async throws {
+        enum Twist: String { case none, slowTokenizer, mutatedSnapshot, unlisted }
+        for twist in [Twist.none, .slowTokenizer, .mutatedSnapshot, .unlisted] {
+            let snapshotDirectory = try makeSnapshotDirectory("mlxlm-cancel")
+            let snapshot = try MLXSnapshotIdentity.compute(directory: snapshotDirectory)
             let client = LogprobsStreamingLoopbackClient(promptTokens: 21, logprobs: false, listedModelPath: snapshot.directory.path)
             let runtime = try OpenAICompatibleLoopbackRuntime(
-                servedModelRef: "mlxlm:mlxlm-snapshot",
+                servedModelRef: "mlxlm:snapshot",
                 origin: "http://127.0.0.1:9191",
                 runtimeSource: "mlxlm_loopback",
                 runtimeArtifactPath: snapshot.directory.path,
                 httpClient: client,
                 mlxSnapshot: snapshot,
-                tokenCounter: { text, dir in
-                    guard !text.isEmpty else { return 0 }
-                    if slow { try? await Task.sleep(nanoseconds: 3_000_000_000) }
-                    return dir == snapshot.directory ? text.count * 2 : nil
+                pinRecountTokenizer: { pinned in
+                    PinnedSnapshotTokenizer(snapshot: pinned) { text in
+                        if twist == .slowTokenizer { Thread.sleep(forTimeInterval: 3) }
+                        return text.count * 2
+                    }
                 }
             )
-            let request = try makeRequest(model: "mlxlm:mlxlm-snapshot", maxTokens: 100_000)
+            let request = try makeRequest(model: "mlxlm:snapshot", maxTokens: 100_000)
             let handle = try await runtime.acquireRequestHandle(request)
             let cancel = CancelFlag()
             let collector = ChunkCollector()
             let start = Date()
             let result = try await runtime.stream(request, with: handle, shouldCancel: { cancel.isSet }) { chunk in
                 collector.record(chunk)
-                if collector.contentChunks.count >= 3 { cancel.set() }
+                guard collector.contentChunks.count >= 3, !cancel.isSet else { return }
+                switch twist {
+                case .mutatedSnapshot:
+                    try? Data(#"{"swapped":true}"#.utf8).write(to: snapshotDirectory.appendingPathComponent("tokenizer.json"))
+                case .unlisted:
+                    client.unlist()
+                default:
+                    break
+                }
+                cancel.set()
             }
-            if slow {
-                XCTAssertEqual(result.settlementDisposition, .usageUnattested)
-                XCTAssertLessThan(Date().timeIntervalSince(start), 3.0)
-            } else {
+            XCTAssertLessThan(Date().timeIntervalSince(start), 3.0, twist.rawValue)
+            if twist == .none {
                 XCTAssertEqual(result.settlementDisposition, .notEligible)
                 XCTAssertEqual(result.promptTokens, 21)
                 XCTAssertEqual(result.completionTokens, result.content.count * 2)
+            } else {
+                XCTAssertEqual(result.settlementDisposition, .usageUnattested, twist.rawValue)
             }
         }
+    }
+
+    // #1690 M9 review SECURITY LOW: `tools: []` is no tools. It is not
+    // forwarded, and LM Studio is still asked for per-chunk logprobs.
+    func testEmptyToolsArrayIsNoTools() throws {
+        let body: [String: Any] = [
+            "model": "lmstudio:tiny", "messages": [["role": "user", "content": "hi"]], "max_tokens": 4, "stream": true, "tools": [] as [Any],
+        ]
+        let request = try ChatCompletionRequest.parse(data: try JSONSerialization.data(withJSONObject: body))
+        XCTAssertFalse(ModelRuntime.hasEnabledTools(request.promptSource.tools))
+        XCTAssertTrue(OpenAICompatibleLoopbackRuntime.streamsPerTokenLogprobs("lmstudio_loopback", hasTools: ModelRuntime.hasEnabledTools(request.promptSource.tools)))
+        let upstream = try XCTUnwrap(JSONSerialization.jsonObject(with: OpenAICompatibleLoopbackRuntime.encodeUpstreamRequest(
+            request, upstreamModelName: "tiny", logprobsPerToken: true
+        )) as? [String: Any])
+        XCTAssertNil(upstream["tools"])
+        XCTAssertEqual(upstream["logprobs"] as? Bool, true)
     }
 
     // #1690 M9 review L6: tools stay in the count body (the template renders
@@ -1277,7 +1327,7 @@ private final class LogprobsStreamingLoopbackClient: BYOMLoopbackStreamingHTTPCl
     private let logprobs: Bool
     private let countDelaySeconds: Double
     private let rejectResponseFormat: Bool
-    private let listedModelPath: String?
+    private var listedModelPath: String?
     private var _streamedBody: Data?
     private var _countBody: Data?
     private var _countBodies: [Data] = []
@@ -1297,18 +1347,21 @@ private final class LogprobsStreamingLoopbackClient: BYOMLoopbackStreamingHTTPCl
     var streamedBody: Data? { lock.lock(); defer { lock.unlock() }; return _streamedBody }
     var countBody: Data? { lock.lock(); defer { lock.unlock() }; return _countBody }
     var countBodies: [Data] { lock.lock(); defer { lock.unlock() }; return _countBodies }
+    func unlist() { lock.lock(); listedModelPath = nil; lock.unlock() }
 
     func get(_ url: URL, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
-        guard url.path == "/v1/models", let listedModelPath else { throw BYOMDiscoveryAdapterError.rejectedNonLoopback }
-        let body = try JSONSerialization.data(withJSONObject: ["object": "list", "data": [["id": listedModelPath, "object": "model"]]])
+        let listed = lock.withLock { listedModelPath }
+        guard url.path == "/v1/models" else { throw BYOMDiscoveryAdapterError.rejectedNonLoopback }
+        let ids = listed.map { [["id": $0, "object": "model"]] } ?? [["id": "other-model", "object": "model"]]
+        let body = try JSONSerialization.data(withJSONObject: ["object": "list", "data": ids])
         return BYOMHTTPResponse(statusCode: 200, headers: [], body: body)
     }
 
     func post(_ url: URL, jsonBody: Data, maxHeaderBytes: Int, maxBodyBytes: Int) async throws -> BYOMHTTPResponse {
-        lock.lock()
-        _countBody = jsonBody
-        _countBodies.append(jsonBody)
-        lock.unlock()
+        lock.withLock {
+            _countBody = jsonBody
+            _countBodies.append(jsonBody)
+        }
         if countDelaySeconds > 0 {
             try? await Task.sleep(nanoseconds: UInt64(countDelaySeconds * 1_000_000_000))
         }
@@ -1330,9 +1383,7 @@ private final class LogprobsStreamingLoopbackClient: BYOMLoopbackStreamingHTTPCl
         maxTotalBytes: Int,
         timeouts: LoopbackGenerationTimeouts
     ) async throws -> BYOMLoopbackLineResponse {
-        lock.lock()
-        _streamedBody = jsonBody
-        lock.unlock()
+        lock.withLock { _streamedBody = jsonBody }
         let logprobs = self.logprobs
         let lines = AsyncThrowingStream<String, Error> { continuation in
             let producer = Task {

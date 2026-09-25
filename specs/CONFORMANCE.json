@@ -5818,7 +5818,8 @@
         "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:buildReceiptHeader",
         "phase3-binary/Sources/macprovider-cli/HTTPServer.swift:receiptHeaderResult",
         "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift:RelayStreamBatcher",
-        "phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:cancelledStreamResult"
+        "phase3-binary/Sources/macprovider-cli/OpenAICompatibleLoopbackRuntime.swift:cancelledStreamResult",
+        "phase3-binary/Sources/macprovider-cli/PoolLoopbackUsageGuard.swift:final class PinnedSnapshotTokenizer"
       ],
       "tests": [
         "phase4-coordinator/internal/buyer/spec042_external_runtime_test.go:TestSPEC042ExternalRuntimePoolRouteDerivesMemberAndSnapshot",
@@ -5834,10 +5835,12 @@
         "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledOllamaStreamStaysUnattestedWhenThePromptCountFails",
         "phase3-binary/Tests/macprovider-cliTests/LMStudioLoopbackTests.swift:testToolRequestsAskLMStudioForNoLogprobs",
         "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testSlowPromptCountLeavesTheCancelUnattestedWithinTheBudget",
-        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelWithoutPerChunkCountsFallsBackToTheSiblingTokenizer",
-        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledMLXLMStreamRecountsWithTheSnapshotTokenizer",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelWithoutPerChunkCountsFallsBackToTheVerifiedSiblingTokenizer",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledMLXLMStreamRecountsWithThePinnedSnapshotTokenizer",
         "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testPromptCountRetriesOnceWithoutResponseFormat",
-        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledStreamRejectsMixedPerChunkCountSources"
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testCancelledStreamRejectsMixedPerChunkCountSources",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testPinnedTokenizerCountsOnlyWhileItsSnapshotIsCurrent",
+        "phase3-binary/Tests/macprovider-cliTests/OpenAICompatibleLoopbackRuntimeTests.swift:testEmptyToolsArrayIsNoTools"
       ],
       "journeys": [],
       "evidence": [],

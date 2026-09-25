@@ -49,7 +49,8 @@ The first production activation of a pool with an external engine follows
 | oMLX (`omlx serve`) | `omlx:<snapshot dir name>` | `omlx_loopback`, `omlx` | MLX snapshot, `macprovider.snapshot-manifest.v1` | `GET /v1/models/status`: one local `llm` entry whose `model_path` is the snapshot | `MACPROVIDER_OMLX_MODEL_PATH` (required), `MACPROVIDER_OMLX_ORIGIN` |
 
 The CLI reaches the engine at `loopback_origin` (config key, or
-`MACPROVIDER_LOOPBACK_ORIGIN`), which must be `http://127.0.0.0/8:<port>` or
+`MACPROVIDER_LOOPBACK_ORIGIN`), which must be a loopback origin such as
+`http://127.0.0.1:<port>` (any address in `127.0.0.0/8`) or
 `http://[::1]:<port>`; every other origin is refused. Without it the CLI uses
 the engine's usual port (llama.cpp and `mlx_lm.server` 8080, Ollama 11434,
 LM Studio 1234, oMLX 8000). Malibu's own serve port is also 8080 by default,
@@ -157,7 +158,7 @@ state it (SPEC-015 §N.12 item 7):
 | llama.cpp | per-chunk `timings_per_token` | the same timings |
 | Ollama, LM Studio | per-chunk `logprobs` token list (the CLI asks for it) | the engine's own count for the same request, asked once after the cancel |
 | `mlx_lm.server`, oMLX | the served snapshot's tokenizer over the delivered text | the engine's own count, as above |
-| any engine whose stream carries no per-chunk count (LM Studio with tools, an Ollama that ignores `logprobs`) | the tokenizer of the catalog model's local MLX snapshot over the delivered text | the engine's own count, as above |
+| any engine whose stream carries no per-chunk count (LM Studio with tools, an Ollama that ignores `logprobs`) | the tokenizer of the catalog model's local MLX snapshot over the delivered text, used only when that snapshot's digest equals the signed catalog row's | the engine's own count, as above |
 
 The coordinator waits 2 s for the cancelled frame, so the CLI gives the
 prompt count and the tokenizer count 1.25 s together and loads the tokenizer

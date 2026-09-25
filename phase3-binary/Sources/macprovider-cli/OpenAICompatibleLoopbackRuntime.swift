@@ -825,13 +825,13 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// `lmstudio_loopback`: the `/api/v1/models` entry the runtime must keep
     /// listing for the bound file (SPEC-046-R009, #1690 M9).
     private let lmStudioBinding: LMStudioLoopbackServeModel.Binding?
-    /// #1690 M9: the tokenizer a cancelled stream's delivered content is
-    /// counted with when the upstream attests no per-chunk count: the served
-    /// snapshot (MLX runtimes) or, for a GGUF runtime, the catalog model id's
-    /// local Hugging Face snapshot. Nil when neither is available.
-    private let recountTokenizerDirectory: URL?
-    /// Counts `text` with the tokenizer in a directory (injected in tests).
-    private let tokenCounter: @Sendable (String, URL) async -> Int?
+    /// #1690 M9: the pinned tokenizer a cancelled stream's delivered content
+    /// is counted with when the upstream attests no per-chunk count. It is
+    /// loaded when serving starts from a hash-verified snapshot: the served
+    /// one (MLX runtimes) or, for a GGUF runtime, the catalog model id's local
+    /// MLX snapshot whose snapshot-manifest digest equals the signed catalog
+    /// row's (`siblingSnapshotSHA256`). Nil when neither is available.
+    private let recountTokenizer: Task<PinnedSnapshotTokenizer?, Never>?
     private var providerStatus: ProviderStatus?
     private var registrationCounter: Int = 0
 
@@ -855,10 +855,11 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         mlxSnapshot: MLXSnapshotIdentity? = nil,
         lmStudioBinding: LMStudioLoopbackServeModel.Binding? = nil,
         upstreamModelID: String? = nil,
-        tokenCounter: @escaping @Sendable (String, URL) async -> Int? = { text, directory in
-            await PoolLoopbackUsageGuard.snapshotTokenCount(of: text, in: directory)
-        },
+        siblingSnapshotSHA256: String? = nil,
         siblingTokenizerDirectory: (String) -> URL? = ModelRuntime.localHuggingFaceSnapshot(for:),
+        pinRecountTokenizer: @escaping @Sendable (MLXSnapshotIdentity) async -> PinnedSnapshotTokenizer? = { snapshot in
+            await PinnedSnapshotTokenizer.load(snapshot: snapshot)
+        },
         deadline: Date? = nil
     ) throws {
         let trimmedRef = servedModelRef.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -891,7 +892,6 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             return trimmed.isEmpty ? nil : trimmed
         }
         self.httpClient = httpClient ?? LoopbackServeHTTPClient()
-        self.tokenCounter = tokenCounter
         // An LM Studio runtime is always bound to its `/api/v1/models` entry;
         // no other runtime has one.
         guard (lmStudioBinding != nil) == (runtimeSource == LMStudioLoopbackServeModel.runtimeSource) else {
@@ -905,9 +905,17 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
                 throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("an MLX snapshot is served only by mlxlm_loopback or omlx_loopback")
             }
             self.identity = .mlxSnapshot(mlxSnapshot)
-            self.recountTokenizerDirectory = mlxSnapshot.directory
+            self.recountTokenizer = Task.detached(priority: .utility) { await pinRecountTokenizer(mlxSnapshot) }
         } else {
-            self.recountTokenizerDirectory = self.catalogModelIDAlias.flatMap(siblingTokenizerDirectory)
+            let expected = siblingSnapshotSHA256.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            if let expected, !expected.isEmpty, let directory = self.catalogModelIDAlias.flatMap(siblingTokenizerDirectory) {
+                self.recountTokenizer = Task.detached(priority: .utility) {
+                    guard let sibling = try? MLXSnapshotIdentity.compute(directory: directory), sibling.digest == expected else { return nil }
+                    return await pinRecountTokenizer(sibling)
+                }
+            } else {
+                self.recountTokenizer = nil
+            }
             guard !Self.servesMLXSnapshots(runtimeSource) else {
                 throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("\(runtimeSource) requires an MLX snapshot identity")
             }
@@ -927,11 +935,6 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
                 throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(String(describing: error))
             }
         }
-        // Load the recount tokenizer at serve start, so a cancel never pays
-        // the first load inside its short budget (#1690 M9).
-        if let directory = recountTokenizerDirectory {
-            Task.detached(priority: .utility) { _ = await tokenCounter("", directory) }
-        }
     }
 
     /// `llamacpp:<stem>`: fingerprint the origin as llama-server (`/props`),
@@ -943,6 +946,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         origin: String,
         selector: BYOMLlamaCppArtifactSelector,
         catalogModelIDAlias: String? = nil,
+        siblingSnapshotSHA256: String? = nil,
         httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
         cache: BYOMArtifactDigestCache = BYOMArtifactDigestCache(url: BYOMArtifactDigestCache.defaultURL()),
         deadline: Date? = nil
@@ -977,6 +981,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             catalogModelIDAlias: catalogModelIDAlias,
             httpClient: client,
             digestResolver: resolver,
+            siblingSnapshotSHA256: siblingSnapshotSHA256,
             deadline: deadline
         )
     }
@@ -1099,6 +1104,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         origin: String,
         modelsRoot: URL = BYOMLMStudioModelStore.defaultRoot(),
         catalogModelIDAlias: String? = nil,
+        siblingSnapshotSHA256: String? = nil,
         httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
         cache: BYOMArtifactDigestCache = BYOMArtifactDigestCache(url: BYOMArtifactDigestCache.defaultURL()),
         deadline: Date? = nil
@@ -1143,6 +1149,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             httpClient: client,
             digestResolver: resolver,
             lmStudioBinding: binding,
+            siblingSnapshotSHA256: siblingSnapshotSHA256,
             deadline: deadline
         )
     }
@@ -1390,7 +1397,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             request,
             upstreamModelName: upstreamModelName,
             timingsPerToken: runtimeSource == LlamaCppLoopbackServeModel.runtimeSource,
-            logprobsPerToken: Self.streamsPerTokenLogprobs(runtimeSource, hasTools: request.promptSource.tools.map { $0 != .null } ?? false)
+            logprobsPerToken: Self.streamsPerTokenLogprobs(runtimeSource, hasTools: ModelRuntime.hasEnabledTools(request.promptSource.tools))
         )
         let clock = LoopbackProgressClock()
         let timeouts = LoopbackGenerationTimeouts.forGeneration(maxTokens: request.maxTokens, contextWindow: contextWindow)
@@ -1493,8 +1500,7 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// upstream's per-chunk `logprobs` count (Ollama, LM Studio) when the
     /// stream carried one for every content chunk; otherwise (mlx_lm.server,
     /// oMLX, LM Studio with tools, an upstream that ignored `logprobs`) the
-    /// delivered content is counted with `recountTokenizerDirectory`'s
-    /// tokenizer. Both run concurrently inside `cancelUsageBudgetSeconds`.
+    /// delivered content is counted with the pinned `recountTokenizer`. Both run concurrently inside `cancelUsageBudgetSeconds`.
     /// Anything that fails or runs late leaves the usage unattested (relayed
     /// empty, never signed), so a slow engine makes the cancel free, never
     /// wrongly billed.
@@ -1503,15 +1509,18 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         guard !isLlamaCpp, !content.isEmpty else { return stream.cancelledResult() }
         let deadline = Date().addingTimeInterval(Self.cancelUsageBudgetSeconds)
         let needsRecount = !stream.hasPerChunkCompletionCounts
-        let recountDirectory = needsRecount ? recountTokenizerDirectory : nil
-        if needsRecount && (recountDirectory == nil || stream.streamedToolCall) {
+        let pinned = needsRecount ? recountTokenizer : nil
+        if needsRecount && (pinned == nil || stream.streamedToolCall) {
             return stream.cancelledResult()
         }
-        let counter = tokenCounter
-        async let prompt = countUpstreamPromptTokens(request, deadline: deadline)
+        async let prompt: Int? = Self.bounded(until: deadline) { [self] () async -> Int? in
+            await self.boundPromptCount(request)
+        }
         async let recount: Int? = Self.bounded(until: deadline) { () async -> Int? in
-            guard let recountDirectory else { return nil }
-            return await counter(content, recountDirectory)
+            // The pinned tokenizer re-checks that its snapshot is still the
+            // verified one; a changed snapshot yields no count.
+            guard let tokenizer = await pinned?.value else { return nil }
+            return tokenizer.count(content)
         }
         let (promptTokens, recounted) = await (prompt, recount)
         guard let promptTokens else { return stream.cancelledResult() }
@@ -1529,29 +1538,42 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     /// because the chat template renders them into the prompt. A 4xx on a
     /// body with `response_format` is retried once without it: it constrains
     /// sampling, not the templated prompt, and some engines refuse a format
-    /// with a one-token cap. Nil on any failure or at `deadline`.
-    private func countUpstreamPromptTokens(_ request: ChatCompletionRequest, deadline: Date) async -> Int? {
+    /// with a one-token cap. Nil on any failure; the caller bounds the time.
+    /// The prompt count, only while the runtime is still bound to the
+    /// identity it served the request under (review CODE MEDIUM): the file or
+    /// snapshot is unchanged, mlx_lm.server / oMLX still list the snapshot,
+    /// and LM Studio still lists the bound model. Nil otherwise.
+    private func boundPromptCount(_ request: ChatCompletionRequest) async -> Int? {
+        guard identityIsValid() else { return nil }
+        do {
+            try await requireMLXLMServesBoundSnapshot()
+            _ = try await requireLMStudioServesBoundFile()
+        } catch {
+            return nil
+        }
+        return await countUpstreamPromptTokens(request)
+    }
+
+    private func countUpstreamPromptTokens(_ request: ChatCompletionRequest) async -> Int? {
         guard let body = try? Self.encodePromptCountRequest(request, upstreamModelName: upstreamModelName) else { return nil }
         let retryBody = request.promptSource.responseFormat.map { $0 != .null } == true
             ? try? Self.encodePromptCountRequest(request, upstreamModelName: upstreamModelName, dropResponseFormat: true)
             : nil
         let client = httpClient
         let url = chatCompletionsURL
-        return await Self.bounded(until: deadline) { () async -> Int? in
-            func count(_ body: Data) async -> (status: Int, tokens: Int?)? {
-                guard let response = try? await client.post(
-                    url,
-                    jsonBody: body,
-                    maxHeaderBytes: Self.maxHeaderBytes,
-                    maxBodyBytes: Self.maxResponseBodyBytes
-                ) else { return nil }
-                return (response.statusCode, response.statusCode == 200 ? Self.decodeUsagePromptTokens(response.body) : nil)
-            }
-            guard let first = await count(body) else { return nil }
-            if first.status == 200 { return first.tokens }
-            guard (400..<500).contains(first.status), let retryBody else { return nil }
-            return await count(retryBody)?.tokens
+        func count(_ body: Data) async -> (status: Int, tokens: Int?)? {
+            guard let response = try? await client.post(
+                url,
+                jsonBody: body,
+                maxHeaderBytes: Self.maxHeaderBytes,
+                maxBodyBytes: Self.maxResponseBodyBytes
+            ) else { return nil }
+            return (response.statusCode, response.statusCode == 200 ? Self.decodeUsagePromptTokens(response.body) : nil)
         }
+        guard let first = await count(body) else { return nil }
+        if first.status == 200 { return first.tokens }
+        guard (400..<500).contains(first.status), let retryBody else { return nil }
+        return await count(retryBody)?.tokens
     }
 
     /// Budget for the post-cancel usage work (the prompt count call and the
@@ -1671,7 +1693,9 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             ("presence_penalty", source.presencePenalty),
             ("frequency_penalty", source.frequencyPenalty),
             ("response_format", source.responseFormat),
-            ("tools", source.tools),
+            // An empty or function-less `tools` is no tools (the enabled-tools
+            // rule of ModelRuntime.hasEnabledTools); it is not forwarded.
+            ("tools", ModelRuntime.hasEnabledTools(source.tools) ? source.tools : nil),
             ("tool_choice", source.toolChoice),
             ("logit_bias", source.logitBias),
         ]
