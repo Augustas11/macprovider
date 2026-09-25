@@ -13,7 +13,7 @@ case "${1:-}" in
   stop) stop ;;
   start)
     stop
-    LAB_CLI="${2:-$LAB/bin/macprovider-cli-lab}" nohup "$HERE/cli.sh" serve --config "$LAB/provider/config.yaml" --isolate-lifecycle >>"$LAB/logs/serve.log" 2>&1 &
+    LAB_CLI="${2:-${LAB_CLI:-$LAB/bin/macprovider-cli-lab}}" nohup "$HERE/cli.sh" serve --config "$LAB/provider/config.yaml" --isolate-lifecycle >>"$LAB/logs/serve.log" 2>&1 &
     pg_record "$PIDF" $!
     sleep 12
     pid=$(pg_verify "$PIDF") && echo "serve pid $pid" ;;

@@ -16,6 +16,16 @@
 # $LAB/venv serving MLXLM_SNAPSHOT, or Ollama's release binary in
 # $LAB/ollama with OLLAMA_MODELS under $LAB. Only one runs at a time.
 #   rig.sh down     stop every lab process (by recorded, verified identity only)
+#
+# #1690 e2e (scripts/lab/1690-e2e): ENGINE=native serves the catalog MLX row
+# in-process (mlx_cache) from the lab Hugging Face cache; it offers nothing
+# and joins pool A, which allows native MLX by definition.
+#   rig.sh build-native         the lab-only native-preflight CLI (see cmd_build_native)
+#   rig.sh configs              rewrite the configs (E2E_* env, write_configs.py)
+#   rig.sh gateway-restart      restart only the gateway on the current configs
+#   rig.sh coordinator-restart  restart only the coordinator
+#   rig.sh proxy-start | proxy-stop   the fault proxy (E2E_PROXY_PORT, default
+#                   19105) between the gateway and the coordinator buyer port
 #   rig.sh status   show lab processes and the coordinator's view of the member
 #
 # It never signals a process by name, never uses port 8080/8443/8444, never
@@ -84,7 +94,22 @@ prep_src() {
   git -C "$WT" archive HEAD | tar -xm -C "$SRC_ROOT"
   if [[ -d "$LAB/$1.build-cache" ]]; then mv "$LAB/$1.build-cache" "$SRC/.build"; fi
 }
-static_swift() { cp "$LAB/static/AutotuneCatalog.generated.swift" "$SRC/Sources/macprovider-cli/AutotuneCatalog.generated.swift"; }
+static_swift() {
+  cp "$LAB/static/AutotuneCatalog.generated.swift" "$SRC/Sources/macprovider-cli/AutotuneCatalog.generated.swift"
+  # #1690 e2e: the CLI's signed-static loader (AutotuneRecommend.swift
+  # loadSignedStatic) GETs https://coordinator.malibu.tech/v1/<name>{,.sig}
+  # on every serve preflight, a hardcoded production URL. Point the lab build
+  # at a closed lab loopback port so the fetch fails fast and the baked lab
+  # release is used, and no lab process contacts production.
+  python3 - "$SRC/Sources/macprovider-cli/AutotuneRecommend.swift" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = 'URL(string: "https://coordinator.malibu.tech/v1/\\(name)'
+assert s.count(old) == 2, f"static feed URL sites: {s.count(old)}"
+open(p, "w").write(s.replace(old, 'URL(string: "http://127.0.0.1:19108/v1/\\(name)'))
+PY
+}
 wait_http() { for _ in $(seq 1 60); do curl -fs "$1" >/dev/null 2>&1 && return 0; sleep 0.5; done; echo "timeout waiting for $1" >&2; return 1; }
 
 cmd_model() {
@@ -138,6 +163,31 @@ PY
   echo "spoof build ok"
 }
 
+cmd_build_native() {
+  # #1690 e2e: a lab-only CLI that runs the real native catalog preflight in
+  # the isolated lab. The shipped CLI skips it for an --isolate-lifecycle join
+  # to a loopback coordinator (relaxesJoinAdmissionForLab), so a native member
+  # joins uncatalogued and never serves. LAB_NATIVE_CATALOG_PREFLIGHT=1 turns
+  # that relaxation off. Patched only in its own export ($LAB/src-native).
+  prep_src src-native
+  static_swift
+  python3 - "$SRC/Sources/macprovider-cli/MacProviderCLI.swift" <<'PY'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = """        isolateLifecycle && isLoopbackCoordinatorURL(coordinatorURL)
+    }"""
+new = """        if ProcessInfo.processInfo.environment["LAB_NATIVE_CATALOG_PREFLIGHT"] == "1" { return false }
+        return isolateLifecycle && isLoopbackCoordinatorURL(coordinatorURL)
+    }"""
+assert s.count(old) == 1, "relaxesJoinAdmissionForLab body not found"
+open(p, "w").write(s.replace(old, new))
+PY
+  (cd "$SRC" && swift build -c release --product macprovider-cli)
+  cp "$SRC/.build/release/macprovider-cli" "$LAB/bin/macprovider-cli-lab-native"
+  echo "native build ok"
+}
+
 cmd_static() {
   [[ -f "$LAB/static/tier2-catalog.json" && -f "$LAB/static/AutotuneCatalog.generated.swift" ]] && return 0
   # MLX_SHA (#1690 M8): the real snapshot-manifest digest of MLXLM_SNAPSHOT,
@@ -165,6 +215,16 @@ cmd_up() {
   python3 "$HERE/write_configs.py"
   start_bg coordinator "$LAB/bin/coordinator" -config "$LAB/run/coordinator.yaml"
   wait_http http://127.0.0.1:19101/healthz
+  if [[ "$ENGINE" == native && "${E2E_NATIVE_CLEAR_ADMISSION:-0}" == 1 ]]; then
+    # #1690 e2e: any model_admission_events row for a provider (a loopback
+    # engine's offer, even revoked) excludes it from default catalog routing
+    # (SPEC-047-R003), so the same provider can serve native again only after
+    # its rows are removed. Lab DB only; the rows are backed up first.
+    sqlite3 "$LAB/db/coordinator.db" ".mode insert model_admission_events" \
+      "SELECT * FROM model_admission_events WHERE provider_id = 'lab-1690-m6-provider';" \
+      >"$LAB/logs/admission-events-backup-$(date -u +%Y%m%dT%H%M%SZ).sql"
+    sqlite3 "$LAB/db/coordinator.db" "DELETE FROM model_admission_events WHERE provider_id = 'lab-1690-m6-provider';"
+  fi
   if [[ ! -f "$LAB/keys/provider-token.out" ]]; then
     (umask 077; "$LAB/bin/coordinator-cli" issue-token -db "$LAB/db/coordinator.db" -provider-id lab-1690-m6-provider -provider-name lab-1690-m6 >"$LAB/keys/provider-token.out")
   fi
@@ -191,17 +251,55 @@ EOF
     "$HERE/cli.sh" credentials import --config "$LAB/provider/config.yaml"
   fi
   # One model line per engine; the protected credentials stay as imported.
-  python3 - "$LAB/provider/config.yaml" "$(engine_model_ref)" <<'EOF'
-import re, sys
-path, ref = sys.argv[1], sys.argv[2]
+  # Native (#1690 e2e) serves the catalog MLX snapshot in the lab Hugging
+  # Face cache, pinned by its snapshot-manifest digest (what autotune
+  # --apply would write; autotune itself is never run next to the live
+  # provider). Loopback engines carry no artifact pin.
+  python3 - "$LAB/provider/config.yaml" "$(engine_model_ref)" "$ENGINE" "${MLX_SHA:-}" \
+    "$HF_HOME/hub/models--mlx-community--Qwen2.5-0.5B-Instruct-4bit/snapshots/$MLX_REV" "$MLX_REV" \
+    "$LAB/static/autotune-candidates.json" <<'EOF'
+import hashlib, json, re, sys
+path, ref, engine, sha, snap, rev, candidates = sys.argv[1:8]
 text = open(path).read()
-open(path, "w").write(re.sub(r"(?m)^model: .*$", "model: " + ref, text, count=1))
+text = re.sub(r"(?m)^model: .*$", "model: " + ref, text, count=1)
+text = re.sub(r"(?m)^model_artifact_(sha256|path): .*\n", "", text)
+text = re.sub(r"(?m)^model_catalog_(revision|sha256|version|hash): .*\n", "", text)
+if engine == "native":
+    if not sha:
+        sys.exit("ENGINE=native needs MLX_SHA (scripts/lab/1690-e2e/env.sh)")
+    raw = open(candidates, "rb").read()
+    text += (f"model_artifact_sha256: {sha}\nmodel_artifact_path: {snap}\nmodel_catalog_revision: {rev}\n"
+             f"model_catalog_sha256: {sha}\nmodel_catalog_version: {json.loads(raw)['version']}\n"
+             f"model_catalog_hash: {hashlib.sha256(raw).hexdigest()}\n")
+open(path, "w").write(text)
 EOF
-  "$HERE/serve.sh" start
-  if [[ ! -f "$LAB/logs/$(offer_name)" ]]; then
-    "$HERE/cli.sh" models offer "$(engine_model_ref)" --yes --json --config "$LAB/provider/config.yaml" \
-      --coordinator-url http://127.0.0.1:19102 --mlx-cache-dir "$LAB/home/hf" $(engine_offer_flags) >"$LAB/logs/$(offer_name)"
-    python3 - "$LAB" "$(offer_name)" "$ENGINE" <<'EOF'
+  if [[ "$ENGINE" == native && -x "$LAB/bin/macprovider-cli-lab-native" ]]; then
+    LAB_CLI="$LAB/bin/macprovider-cli-lab-native" LAB_NATIVE_CATALOG_PREFLIGHT=1 "$HERE/serve.sh" start
+  else
+    "$HERE/serve.sh" start
+  fi
+  # E2E_REOFFER=1 (#1690 e2e): offer and price again even when an offer file
+  # exists. One provider switching engines revokes the previous engine's
+  # catalog_priced candidate (runtime_identity_drift, SPEC-047-R006), so every
+  # engine switch needs a fresh offer and operator pricing, then a serve
+  # restart to bind it.
+  local reoffer=0
+  if [[ "$ENGINE" != native && "${E2E_REOFFER:-0}" == 1 && -f "$LAB/logs/$(offer_name)" ]]; then reoffer=1; fi
+  if [[ "$ENGINE" != native && ( ! -f "$LAB/logs/$(offer_name)" || $reoffer == 1 ) ]]; then
+    # A re-offer while this engine's candidate is still current is refused
+    # (HTTP 409); then the existing priced candidate stands.
+    if ! "$HERE/cli.sh" models offer "$(engine_model_ref)" --yes --json --config "$LAB/provider/config.yaml" \
+      --coordinator-url http://127.0.0.1:19102 --mlx-cache-dir "$LAB/home/hf" $(engine_offer_flags) >"$LAB/logs/$(offer_name).new"; then
+      rm -f "$LAB/logs/$(offer_name).new"
+      [[ $reoffer == 1 ]] || exit 1
+      echo "re-offer refused; the current candidate stands"
+      reoffer=2
+    else
+      mv "$LAB/logs/$(offer_name).new" "$LAB/logs/$(offer_name)"
+    fi
+  fi
+  if [[ "$ENGINE" != native && $reoffer != 2 && ( $reoffer == 1 || ! -f "$LAB/logs/decision-catalog-priced$([[ $ENGINE == llamacpp ]] || echo "-$ENGINE").json" ) ]]; then
+    python3 - "$LAB" "$(offer_name)" "$ENGINE" "$reoffer" <<'EOF'
 import json, sys, urllib.request
 lab, name, engine = sys.argv[1], sys.argv[2], sys.argv[3]
 offer = json.load(open(f"{lab}/logs/{name}"))
@@ -209,16 +307,18 @@ key = json.load(open(f"{lab}/keys/secrets.json"))["operator_lab_a"]
 body = {"schema": "model_admission_decision_request.v1", "provider_id": offer["provider_id"], "candidate_id": offer["candidate_id"],
         "next_state": "catalog_priced", "reason_code": "operator_lab_pool_priced",
         "expected_coordinator_event_id": offer["coordinator_event_id"],
-        "idempotency_key": "lab-1690-m6-priced-1" if engine == "llamacpp" else f"lab-1690-m8-priced-{engine}"}
+        "idempotency_key": f"lab-1690-e2e-repriced-{offer['coordinator_event_id']}" if sys.argv[4] == "1" else
+                           ("lab-1690-m6-priced-1" if engine == "llamacpp" else f"lab-1690-m8-priced-{engine}")}
 req = urllib.request.Request("http://127.0.0.1:19102/admin/model-admission/decisions", data=json.dumps(body).encode(),
                              headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
 doc = json.load(urllib.request.urlopen(req))
 open(f"{lab}/logs/decision-catalog-priced{'' if engine == 'llamacpp' else '-' + engine}.json", "w").write(json.dumps(doc))
 print("decision:", doc["admission_state"])
 EOF
+    if [[ $reoffer == 1 ]]; then "$HERE/serve.sh" start; fi
   fi
   case "$ENGINE" in
-    llamacpp) [[ -d "$LAB/pools/A" ]] || python3 "$HERE/pool_setup.py" create A --encoding 2 --runtime-allowlist llamacpp_loopback ;;
+    llamacpp|native) [[ -d "$LAB/pools/A" ]] || python3 "$HERE/pool_setup.py" create A --encoding 2 --runtime-allowlist llamacpp_loopback ;;
     mlxlm) [[ -d "$LAB/pools/M" ]] || python3 "$HERE/pool_setup.py" create M --encoding 2 --runtime-allowlist mlxlm_loopback ;;
     ollama) [[ -d "$LAB/pools/O" ]] || python3 "$HERE/pool_setup.py" create O --encoding 2 --runtime-allowlist ollama_loopback ;;
   esac
@@ -230,6 +330,7 @@ engine_model_ref() {
     llamacpp) echo "llamacpp:${GGUF_FILE%.gguf}" ;;
     mlxlm) echo "mlxlm:$(basename "$MLXLM_SNAPSHOT")" ;;
     ollama) echo "ollama:$OLLAMA_TAG" ;;
+    native) echo "$ROW_KEY" ;;
     *) echo "unknown ENGINE $ENGINE" >&2; exit 2 ;;
   esac
 }
@@ -246,7 +347,7 @@ engine_offer_flags() {
 cmd_server_start() {
   case "$ENGINE" in
     llamacpp)
-      start_bg llama-server "$LLAMA_DIR/llama-server" -m "$LAB/models/$GGUF_FILE" --host 127.0.0.1 --port 19130 -c 8192 -np 4 -ngl 99
+      start_bg llama-server "$LLAMA_DIR/llama-server" -m "$LAB/models/$GGUF_FILE" --host 127.0.0.1 --port 19130 -c 8192 -np 4 -ngl 99 --jinja
       wait_http http://127.0.0.1:19130/health ;;
     mlxlm)
       # mlx_lm.server lists its Hugging Face cache and fails the listing when
@@ -258,6 +359,7 @@ cmd_server_start() {
     ollama)
       start_bg ollama "$LAB/ollama/ollama" serve
       wait_http http://127.0.0.1:19130/api/version ;;
+    native) ;;
   esac
 }
 
@@ -265,12 +367,12 @@ cmd_server_stop() { for p in llama-server mlxlm-server ollama; do stop_pid "$p";
 
 cmd_down() {
   "$HERE/serve.sh" stop
-  for p in usage-tap llama-server mlxlm-server ollama gateway coordinator; do stop_pid "$p"; done
+  for p in trailer-proxy usage-tap llama-server mlxlm-server ollama gateway coordinator; do stop_pid "$p"; done
   echo "rig down"
 }
 
 cmd_status() {
-  for p in serve usage-tap llama-server mlxlm-server ollama gateway coordinator; do
+  for p in serve trailer-proxy usage-tap llama-server mlxlm-server ollama gateway coordinator; do
     if pid=$(pg_verify "$LAB/run/$p.pid"); then echo "$p: pid $pid"; elif [[ -f "$LAB/run/$p.pid" ]]; then echo "$p: stale pid file"; else echo "$p: stopped"; fi
   done
   if curl -fs http://127.0.0.1:19102/healthz >/dev/null 2>&1; then
@@ -281,14 +383,36 @@ for p in json.load(sys.stdin)["pool"]:
   fi
 }
 
+cmd_gateway_restart() {
+  stop_pid gateway
+  start_bg gateway "$LAB/bin/gateway" -config "$LAB/run/gateway.yaml"
+  wait_http http://127.0.0.1:19110/healthz
+}
+cmd_coordinator_restart() {
+  stop_pid coordinator
+  start_bg coordinator "$LAB/bin/coordinator" -config "$LAB/run/coordinator.yaml"
+  wait_http http://127.0.0.1:19101/healthz
+}
+cmd_proxy_start() {
+  pg_verify "$LAB/run/trailer-proxy.pid" >/dev/null 2>&1 && return 0
+  start_bg trailer-proxy python3 "$WT/scripts/lab/1690-e2e/trailer_proxy.py" "${E2E_PROXY_PORT:-19105}" 19101 "$LAB/run/proxy-mode" "$LAB/logs/proxy.jsonl"
+  sleep 0.5
+}
+
 case "${1:-}" in
   model) cmd_model ;;
+  configs) python3 "$HERE/write_configs.py" ;;
+  gateway-restart) cmd_gateway_restart ;;
+  coordinator-restart) cmd_coordinator_restart ;;
+  proxy-start) cmd_proxy_start ;;
+  proxy-stop) stop_pid trailer-proxy ;;
   build) cmd_build ;;
   build-spoof) cmd_build_spoof ;;
+  build-native) cmd_build_native ;;
   up) cmd_up ;;
   down) cmd_down ;;
   status) cmd_status ;;
   server-start) cmd_server_start ;;
   server-stop) cmd_server_stop ;;
-  *) echo "usage: rig.sh model|build|build-spoof|up|down|status|server-start|server-stop" >&2; exit 2 ;;
+  *) echo "usage: rig.sh model|build|build-spoof|up|down|status|server-start|server-stop|configs|gateway-restart|coordinator-restart|proxy-start|proxy-stop" >&2; exit 2 ;;
 esac

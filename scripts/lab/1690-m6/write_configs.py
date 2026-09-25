@@ -111,11 +111,33 @@ def main():
         "settlement": {"reconcile_enabled": True, "reconcile_interval_s": 5, "reconcile_batch_limit": 100, "reconcile_request_timeout_s": 5},
         "explorer": {"enabled": False},
     }
+    # #1690 e2e overrides (scripts/lab/1690-e2e): the coordinator settlement
+    # mode and pending deadline, the gateway signed-finality pin, and a fault
+    # proxy port between gateway and coordinator buyer port.
+    if os.environ.get("E2E_SETTLEMENT_MODE") is not None or os.environ.get("E2E_PENDING_DEADLINE_S"):
+        # The e2e matrix sends bursts from one account (selection matrix) and
+        # many long outputs; the defaults would 429 or exhaust the day.
+        gateway["quotas"]["account_request_rate_per_second"] = 50
+        gateway["quotas"]["account_daily_tokens"] = 100000000
+    if os.environ.get("E2E_SETTLEMENT_MODE"):
+        coord["settlement"]["verified_model_settlement_mode"] = os.environ["E2E_SETTLEMENT_MODE"]
+    if os.environ.get("E2E_PENDING_DEADLINE_S"):
+        coord["settlement"]["pending_deadline_seconds"] = int(os.environ["E2E_PENDING_DEADLINE_S"])
+    if os.environ.get("E2E_GATEWAY_PIN") == "1":
+        gateway["coordinator"]["require_settlement_trailers"] = True
+    if os.environ.get("E2E_PROXY_PORT"):
+        proxy = int(os.environ["E2E_PROXY_PORT"])
+        if not 19100 <= proxy <= 19199:
+            sys.exit(f"refusing non-lab proxy port {proxy}")
+        gateway["coordinator"]["buyer_url"] = f"http://127.0.0.1:{proxy}"
     (LAB / "run" / "coordinator.yaml").write_text(json.dumps(coord, indent=2))
     (LAB / "run" / "gateway.yaml").write_text(json.dumps(gateway, indent=2))
     for p in ("coordinator.yaml", "gateway.yaml"):
         (LAB / "run" / p).chmod(0o600)
-    print(json.dumps({"ports": PORTS, "provider_id": PROVIDER_ID, "buyer_account": BUYER_ACCOUNT}))
+    print(json.dumps({"ports": PORTS, "provider_id": PROVIDER_ID, "buyer_account": BUYER_ACCOUNT,
+                      "settlement_mode": coord["settlement"]["verified_model_settlement_mode"],
+                      "require_settlement_trailers": gateway["coordinator"].get("require_settlement_trailers", False),
+                      "gateway_buyer_url": gateway["coordinator"]["buyer_url"]}))
 
 
 if __name__ == "__main__":
