@@ -75,7 +75,7 @@ validate_block="$(awk '/^CATALOG_WINDOW_OVERRIDE_REASON="\$\{CATALOG_WINDOW_OVER
 ROOT="$TMP/opt/macprovider"
 VAR="$TMP/var/lib/macprovider"
 DEPLOY_TMP="$TMP/deploy-tmp"
-INCOMING_DIR="published-2026-09-23-tier2-buyer-closure-v1-0123456789abcdef"
+INCOMING_DIR="published-2026-09-25-artifact-hash-correction-v1-0123456789abcdef"
 TOKEN="test-operator-key-0123456789abcdefghijklmnop"
 UID_NOW="$(id -u)"
 GID_NOW="$(id -g)"
@@ -205,7 +205,7 @@ FAKE
   release p1 p1-v
   release p2 p2-v
   release p3 p3-v
-  release "$INCOMING_DIR" published-2026-09-23-tier2-buyer-closure-v1
+  release "$INCOMING_DIR" published-2026-09-25-artifact-hash-correction-v1
   ln -s releases/live "$ROOT/autotune/current"
   printf 'releases/p1\nreleases/p2\nreleases/p3\n' > "$ROOT/autotune/.previous-target"
 }
@@ -222,7 +222,7 @@ run_slice() {
     CATALOG_CANARY_AUTH_TOKEN="$TOKEN"
     CATALOG_LIVE_TARGET="${LIVE_TARGET-releases/live}"
     CATALOG_LIVE_RELEASE_ID="live-v"
-    AUTOTUNE_RELEASE_ID="published-2026-09-23-tier2-buyer-closure-v1"
+    AUTOTUNE_RELEASE_ID="published-2026-09-25-artifact-hash-correction-v1"
     AUTOTUNE_RELEASE_DIR_NAME="$INCOMING_DIR"
     COORDINATOR_RELEASE_VERSION="v9.9.9"
     COORDINATOR_RELEASE_COMMIT="0123456789abcdef0123456789abcdef01234567"
