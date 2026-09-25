@@ -494,6 +494,10 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 		return "", err
 	}
 	if !found {
+		if candidate.Outcome == bodyReadFailedOutcome && !reservation.CreatedAt.IsZero() &&
+			s.now().Sub(reservation.CreatedAt) >= bodyReadFailedCoordinator404StaleAge {
+			return s.staleHoldAgedBodyReadFailure(ctx, reservation)
+		}
 		// A missing coordinator lookup is not authority to discard local
 		// delivered usage. Keep this specific hold discoverable for retry.
 		return "coordinator_404_held", nil
@@ -717,8 +721,12 @@ func finalityHeaders(finality coordinatorRequestSettlementFinality) http.Header 
 // debited the smaller of the two. The prompt stays the coordinator's figure:
 // the engine consumed it either way. The provider credit is the
 // coordinator's and is not touched here.
+//
+// bodyReadFailedOutcome (the gateway's hop to the coordinator broke after a
+// negotiated 200's body, so the buyer got a 502 and none of the completion)
+// is bounded the same way: its candidate records 0 delivered completion.
 func buyerDeliveredCompletionBound(reservation storage.ActiveReservation, candidate storage.SettlementFallbackCandidate, prompt, completion, total int64) (int64, int64) {
-	if candidate.Outcome != "client_disconnect" || candidate.CompletionTokens < 0 || candidate.CompletionTokens >= completion {
+	if (candidate.Outcome != "client_disconnect" && candidate.Outcome != bodyReadFailedOutcome) || candidate.CompletionTokens < 0 || candidate.CompletionTokens >= completion {
 		return completion, total
 	}
 	slog.Info("SPEC-022 reconciler bounded verified completion by buyer-delivered output after client disconnect",
@@ -752,4 +760,38 @@ func finalityTokenTotals(finality coordinatorRequestSettlementFinality) (int64, 
 		return 0, 0, 0, fmt.Errorf("coordinator finality token_source %q is not settlement-capable", source)
 	}
 	return prompt, completion, total, nil
+}
+
+// bodyReadFailedOutcome marks a hold the gateway took because its read of a
+// negotiated 200 failed after the coordinator may have recorded delivery
+// (#1690 VM F-1). Nothing of the completion reached the buyer.
+const bodyReadFailedOutcome = "body_read_failed"
+
+// bodyReadFailedCoordinator404StaleAge bounds the crash window of a
+// body_read_failed hold: a coordinator that never recorded the attempt (it
+// crashed between the write and the record) answers the finality lookup 404
+// forever. After this age the hold becomes a terminal stale_held with no
+// debit, for operator review, instead of staying held without end.
+const bodyReadFailedCoordinator404StaleAge = time.Hour
+
+func (s *Server) staleHoldAgedBodyReadFailure(ctx context.Context, reservation storage.ActiveReservation) (string, error) {
+	var err error
+	if reservation.WalletSessionID != "" {
+		err = s.store.MarkWalletSessionReservationStaleHeld(ctx, reservation.AccountID, reservation.WalletSessionID, reservation.RequestID, s.now())
+	} else {
+		err = s.store.MarkReservationStaleHeld(ctx, reservation.AccountID, reservation.RequestID, s.now())
+	}
+	if err != nil {
+		if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
+			return "already_terminal", nil
+		}
+		return "", err
+	}
+	slog.Error("SPEC-022 reconciler moved an aged body_read_failed hold with no coordinator record to stale_held; no buyer debit, operator review required",
+		"request_id", reservation.RequestID,
+		"account_id", reservation.AccountID,
+		"reservation_created_at", reservation.CreatedAt,
+		"stale_age", bodyReadFailedCoordinator404StaleAge.String(),
+	)
+	return "coordinator_404_expired", nil
 }
