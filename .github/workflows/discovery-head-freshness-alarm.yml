@@ -57,7 +57,7 @@ jobs:
           # bound holds a transport, the client sees NO head and the rail is
           # down — so this alarm uses the SAME window and grammar.
           latest_tag=""
-          for page in $(seq 1 10); do
+          for page in $(seq 1 "$(python3 scripts/discovery_listing_page_state.py --max-pages)"); do
             tags="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100&page=$page" --jq '.[].tag_name')"
             latest_tag="$(
               printf '%s\n' "$tags" \

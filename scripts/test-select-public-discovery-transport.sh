@@ -168,6 +168,38 @@ PY
 if python3 "$page_state" "$work/page-oversized.json" >/dev/null 2>&1; then
   fail "oversized listing page must fail closed"
 fi
+swift_source="$root/phase3-binary/Sources/macprovider-cli/SelfUpdate.swift"
+python3 - "$page_state" "$swift_source" <<'PY' || fail "verifier listing bounds must match the CLI's"
+import importlib.util
+import re
+import sys
+spec = importlib.util.spec_from_file_location("page_state", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+swift = open(sys.argv[2], encoding="utf-8").read()
+def constant(name):
+    expr = re.search(rf"static let {name} = ([0-9_ *]+)\n", swift).group(1)
+    value = 1
+    for factor in expr.replace("_", "").split("*"):
+        value *= int(factor)
+    return value
+assert constant("releaseDiscoveryPageSize") == module.PAGE_SIZE
+assert constant("maxReleaseDiscoveryPages") == module.MAX_PAGES
+assert constant("maxReleaseDiscoveryListingBytes") == module.MAX_PAGE_BYTES
+PY
+python3 - "$work" <<'PY'
+import json
+import pathlib
+import sys
+(pathlib.Path(sys.argv[1]) / "page-overflow.json").write_text(
+    json.dumps([{"tag_name": "release-discovery-v1-18446744073709551616", "assets": []}]),
+    encoding="utf-8",
+)
+PY
+[ "$(python3 "$page_state" "$work/page-overflow.json")" = end ] \
+  || fail "transport sequence beyond UInt64 must not stop the walk"
+grep -Fq 'no discovery transport within the client-visible listing bound' "$verifier" \
+  || fail "anonymous verifier must fail without retrying once the page bound is exhausted"
 grep -Fq 'scripts/discovery_listing_page_state.py' "$verifier" \
   || fail "anonymous verifier must walk the listing like the client"
 grep -Fq 'releases?per_page=100&page=$page' "$verifier" \
