@@ -127,12 +127,23 @@ func (s *Store) widenSettlementAttemptOutputUsageSourceCheck(ctx context.Context
 		return err
 	}
 	committed = true
-	var check string
-	if err := conn.QueryRowContext(ctx, `PRAGMA quick_check`).Scan(&check); err != nil {
+	// Verify the edited definition only. A whole-database PRAGMA quick_check
+	// reads every page (4.8 GB on Pearl) before the coordinator listens and
+	// blew the updater's 60 s health window; the edit touches no row, so a
+	// schema re-read plus a forced re-parse of the table is the right proof.
+	var edited string
+	if err := conn.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'settlement_attempt_outputs'`).Scan(&edited); err != nil {
 		return err
 	}
-	if check != "ok" {
-		return fmt.Errorf("settlement_attempt_outputs usage_source CHECK migration: quick_check %q", check)
+	if strings.Count(edited, usageSourceCheckV02) != 1 || strings.Contains(edited, usageSourceCheckV01) {
+		return fmt.Errorf("settlement_attempt_outputs usage_source CHECK migration left an unexpected definition")
+	}
+	rows, err := conn.QueryContext(ctx, `SELECT usage_source FROM settlement_attempt_outputs LIMIT 0`)
+	if err != nil {
+		return fmt.Errorf("settlement_attempt_outputs usage_source CHECK migration: edited schema does not parse: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return err
 	}
 	return nil
 }
