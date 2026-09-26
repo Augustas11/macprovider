@@ -70,12 +70,33 @@ final class Build1LaneAStagingInputTests: XCTestCase {
         let handoff = try XCTUnwrap(object["handoff"] as? [String: Any])
         XCTAssertEqual(handoff["catalog_key"] as? String, Build1LaneAPrepareProfile.catalogKey)
         XCTAssertEqual(handoff["model_id"] as? String, Build1LaneAPrepareProfile.artifactModelID)
-        XCTAssertEqual(handoff["artifact_sha256"] as? String, Build1LaneAPrepareProfile.artifactHash)
+        XCTAssertEqual(handoff["artifact_sha256"] as? String, fixture.authority.hash)
         XCTAssertEqual(handoff["release_id"] as? String, fixture.authority.releaseID)
         XCTAssertEqual(handoff["next_required_steps"] as? [String], Build1LaneAStagingInput.nextRequiredSteps)
         let line = try report.jsonLine()
         XCTAssertFalse(line.contains(fixture.durableRoot.path), "no private path may leak")
         XCTAssertFalse(line.contains(Build1LaneAPreparationRecorder.authorityLeaf))
+    }
+
+    func testPrivateQwenAuthorityDrivesStatusCorrelationAndHandoff() async throws {
+        let fixture = try makeRecordedFixture(payload: "private-qwen-staging-input", privateProfile: true)
+        let status = try await makeStatus(fixture)
+
+        let report = Build1LaneAStagingInputAssembler.assemble(
+            authority: .success(fixture.authority),
+            privateRecord: fixture.context,
+            status: .observed(source: .statusCaptureFile, object: status)
+        )
+
+        XCTAssertEqual(report.state, .ready)
+        XCTAssertEqual(report.statusCorrelation.state, .correlated)
+        let object = report.jsonObject()
+        XCTAssertEqual(object["profile"] as? String, Build1PrivatePrepareProfile.profile)
+        let handoff = try XCTUnwrap(object["handoff"] as? [String: Any])
+        XCTAssertEqual(handoff["catalog_key"] as? String, Build1PrivatePrepareProfile.modelKey)
+        XCTAssertEqual(handoff["model_id"] as? String, Build1PrivatePrepareProfile.modelID)
+        XCTAssertEqual(handoff["artifact_sha256"] as? String, fixture.authority.hash)
+        XCTAssertEqual(handoff["runtime_source"] as? String, Build1PrivatePrepareProfile.runtimeSource)
     }
 
     func testAuthorityFailuresBlockAndSkipDownstreamEvidence() async throws {
@@ -429,6 +450,39 @@ final class Build1LaneAStagingInputTests: XCTestCase {
         XCTAssertFalse(capture.stdout.contains(fixture.durableRoot.path))
         XCTAssertFalse(capture.stdout.contains(capturePath.path))
         XCTAssertFalse(capture.stdout.contains(config.path))
+    }
+
+    func testPrivateQwenCommandResolvesPrivateRecordAndAssemblesReadyInput() async throws {
+        let fixture = try makeRecordedFixture(payload: "private-qwen-command-ready", privateProfile: true)
+        let config = try writeConfig(durableRoot: fixture.durableRoot)
+        let capturePath = try writeStatusCapture(try await makeStatus(fixture))
+
+        let capture = try await withPrivateAuthoritySeam({ authorityURL, signatureURL in
+            XCTAssertEqual(authorityURL.path, "/tmp/private-authority.json")
+            XCTAssertEqual(signatureURL.path, "/tmp/private-authority.json.sig")
+            return fixture.authority
+        }) {
+            let command = try ModelsStagingInputCommand.parse([
+                Build1PrivatePrepareProfile.modelKey,
+                "--json",
+                "--profile", Build1PrivatePrepareProfile.profile,
+                "--authority-file", "/tmp/private-authority.json",
+                "--authority-signature", "/tmp/private-authority.json.sig",
+                "--config", config.path,
+                "--status-capture", capturePath.path,
+            ])
+            return await captureOutput { try await command.run() }
+        }
+
+        XCTAssertNil(capture.error, capture.stderr)
+        let object = try decodeReport(capture.stdout)
+        XCTAssertEqual(object["state"] as? String, "staging_input_ready")
+        XCTAssertEqual(object["profile"] as? String, Build1PrivatePrepareProfile.profile)
+        XCTAssertEqual((object["private_record"] as? [String: Any])?["state"] as? String, "recorded")
+        XCTAssertEqual((object["status_correlation"] as? [String: Any])?["state"] as? String, "correlated")
+        let handoff = try XCTUnwrap(object["handoff"] as? [String: Any])
+        XCTAssertEqual(handoff["catalog_key"] as? String, Build1PrivatePrepareProfile.modelKey)
+        XCTAssertEqual(handoff["model_id"] as? String, Build1PrivatePrepareProfile.modelID)
     }
 
     func testCommandUsesLiveLocalStatusWhenNoCaptureIsGiven() async throws {
@@ -886,16 +940,16 @@ final class Build1LaneAStagingInputTests: XCTestCase {
 
     // MARK: - Fixtures
 
-    private func makeRecordedFixture(payload: String) throws -> RecordedFixture {
+    private func makeRecordedFixture(payload: String, privateProfile: Bool = false) throws -> RecordedFixture {
         let durableRoot = try tempDir().appendingPathComponent("durable", isDirectory: true)
         let staging = try tempDir()
         try Data(payload.utf8).write(to: staging.appendingPathComponent("weights.bin"))
         let hash = try ModelArtifactVerifier.canonicalArtifactHash(directory: staging)
         let authority = Build1LaneAArtifactAuthority(
-            catalogKey: Build1LaneAPrepareProfile.catalogKey,
-            modelID: Build1LaneAPrepareProfile.artifactModelID,
-            revision: Build1LaneAPrepareProfile.artifactRevision,
-            artifactID: Build1LaneAPrepareProfile.artifactID,
+            catalogKey: privateProfile ? Build1PrivatePrepareProfile.modelKey : Build1LaneAPrepareProfile.catalogKey,
+            modelID: privateProfile ? Build1PrivatePrepareProfile.modelID : Build1LaneAPrepareProfile.artifactModelID,
+            revision: privateProfile ? Build1PrivatePrepareProfile.revision : Build1LaneAPrepareProfile.artifactRevision,
+            artifactID: privateProfile ? Build1PrivatePrepareProfile.artifactID : Build1LaneAPrepareProfile.artifactID,
             hashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
             hash: hash,
             sizeBytes: payload.utf8.count,
@@ -929,7 +983,7 @@ final class Build1LaneAStagingInputTests: XCTestCase {
         laneAContext: ProviderBuild1LaneAStatusContext?? = nil
     ) async throws -> [String: Any] {
         let status = ProviderStatus(
-            modelID: Build1LaneAPrepareProfile.artifactModelID,
+            modelID: fixture.authority.modelID,
             modelLoaded: true,
             capacity: ProviderCapacity(maxContextOverride: 50_000, maxConcurrencyOverride: 4),
             modelHash: runtimeModelHash ?? fixture.authority.hash,
@@ -939,9 +993,9 @@ final class Build1LaneAStagingInputTests: XCTestCase {
         let context = ProviderCatalogStatusContext(
             trust: nil,
             donorMode: false,
-            catalogKey: Build1LaneAPrepareProfile.catalogKey,
-            catalogModelID: Build1LaneAPrepareProfile.artifactModelID,
-            modelRevision: Build1LaneAPrepareProfile.artifactRevision,
+            catalogKey: fixture.authority.catalogKey,
+            catalogModelID: fixture.authority.modelID,
+            modelRevision: fixture.authority.revision,
             artifactSHA256: fixture.authority.hash,
             modelArtifactSHA256: fixture.authority.hash,
             configuredReleaseID: fixture.authority.releaseID,
@@ -994,6 +1048,16 @@ final class Build1LaneAStagingInputTests: XCTestCase {
         let original = ModelsStagingInputCommand.resolveAuthority
         ModelsStagingInputCommand.resolveAuthority = resolve
         defer { ModelsStagingInputCommand.resolveAuthority = original }
+        return try await body()
+    }
+
+    private func withPrivateAuthoritySeam<T>(
+        _ load: @escaping @Sendable (URL, URL) throws -> Build1LaneAArtifactAuthority,
+        _ body: () async throws -> T
+    ) async rethrows -> T {
+        let original = ModelsStagingInputCommand.loadPrivateAuthority
+        ModelsStagingInputCommand.loadPrivateAuthority = load
+        defer { ModelsStagingInputCommand.loadPrivateAuthority = original }
         return try await body()
     }
 

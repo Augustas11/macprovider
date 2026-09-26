@@ -936,6 +936,23 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertNotNil(ProviderBuild1LaneAStatusResolver.make(config: config))
     }
 
+    func testBuild1PrivateStatusResolverAcceptsExactQwenTupleWithoutCoordinator() {
+        var config = AppConfig.defaults()
+        config.model = Build1PrivatePrepareProfile.modelKey
+        config.modelCatalogKey = Build1PrivatePrepareProfile.modelKey
+        config.modelCatalogModelID = Build1PrivatePrepareProfile.modelID
+        config.modelCatalogRevision = Build1PrivatePrepareProfile.revision
+        config.modelCatalogSHA256 = Build1PrivatePrepareProfile.hash
+        config.modelArtifactSHA256 = Build1PrivatePrepareProfile.hash
+        config.modelCatalogVersion = "private-test-release"
+        config.coordinatorURL = "https://coordinator.malibu.tech"
+
+        XCTAssertNotNil(ProviderBuild1LaneAStatusResolver.make(config: config))
+
+        config.modelCatalogKey = Build1LaneAPrepareProfile.catalogKey
+        XCTAssertNil(ProviderBuild1LaneAStatusResolver.make(config: config), "a public catalog alias must not select the private record")
+    }
+
     func testStatusResponsePublishesFreshCompleteSafetyTelemetry() async throws {
         let gate = ThermalGate(stateProvider: FixedThermalProvider(state: .serious))
         let status = ProviderStatus(

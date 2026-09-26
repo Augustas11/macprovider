@@ -70,6 +70,8 @@ Stop condition: no execution milestone or evidence gate depends on Llama.
 
 ### M2 - Pin the private acceptance tuple
 
+Status: complete on the PR head; physical-byte verification remains part of M4.
+
 The selected acceptance tuple is:
 
 - model key: `orcarouter/qwen3.8-27b-uncensored`;
@@ -81,14 +83,18 @@ The selected acceptance tuple is:
 - artifact scope: the complete pinned revision snapshot;
 - snapshot-manifest algorithm: `macprovider.snapshot-manifest.v1`.
 
-The repository dry-run currently reports 80 files totaling 94.7 GB. That is
-discovery evidence only, not the measured positive `size_bytes` or canonical
-snapshot-manifest digest. Complete M2 by recording:
+The pinned Hugging Face revision contains 80 files totaling 94,723,099,062
+bytes. Its deterministic complete-revision `macprovider.snapshot-manifest.v1`
+digest is
+`8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88dcd`.
+The signed repository authority records:
 
-- the measured positive size and snapshot-manifest digest;
-- staging release and signer identity;
-- a fresh run-time check that the tuple remains absent from the active public
-  catalog. The 2026-09-26 repository check found no matching row.
+- release `build1-orcarouter-private-2026-09-26-v1`;
+- signer `streamvc-autotune-static-v4`;
+- the active candidate-catalog byte digest and release;
+- a 2026-09-26 catalog-absence check for the exact private model key;
+- explicit false values for admission, settlement, production activation,
+  public catalog publication, rewards, and payouts.
 
 The authority must be source-reviewable without exposing private credentials,
 repository access tokens, local paths, or private key material.
@@ -98,6 +104,9 @@ the physical journey. A placeholder or arbitrary runtime-selected model does
 not satisfy this milestone.
 
 ### M3 - Extend the guarded path to the private tuple
+
+Status: implementation and hermetic verification complete on the PR head;
+Mac Studio execution is intentionally deferred to M4.
 
 - Reuse the durable store, private preparation store, receipt, and status
   correlation contracts recovered in M0.
@@ -111,6 +120,12 @@ not satisfy this milestone.
 
 Stop condition: targeted tests prove the control tuple and private tuple cannot
 be confused and neither grants admission, settlement, or production status.
+
+The `build1-orcarouter-private` prepare profile now requires the signed local
+authority and detached signature, accepts only the exact Qwen tuple, rejects
+all coordinator URLs, revalidates authority before durable publication, and
+reuses the existing verified staging, durable adoption, private receipt, and
+status contracts. The Llama profile remains a separate regression-only path.
 
 ### M4 - Physical private-tuple preparation and serving
 
@@ -177,12 +192,13 @@ evidence is non-proof.
 
 ## Current Next Action
 
-Complete M0, then finish M2 for the pinned OrcaRouter tuple and continue
-directly to M3. Do not run a Llama hardware preflight. Do not begin the hardware
-campaign from the stale #1658 branch and do not connect a branch-built CLI to
-the live Malibu coordinator. This development Mac must not be used for E2E;
-prepare the isolated Mac Studio campaign and its live-provider protection plan
-before M4.
+Freeze and audit the M2/M3 diff, obtain one uninterrupted green CI run, then
+perform the read-only Mac Studio M4 preflight. Do not run a Llama hardware
+preflight. Do not connect a branch-built CLI to the live Malibu coordinator.
+This development Mac must not be used for E2E. The Mac Studio campaign may
+start only after separate ports, roots, logs, credentials, coordinator target,
+disk and memory headroom, live-provider health monitoring, and a no-touch
+rollback boundary are recorded and pass.
 
 ## Final Stop Condition
 

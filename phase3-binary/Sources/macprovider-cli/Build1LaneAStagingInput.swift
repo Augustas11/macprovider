@@ -127,6 +127,7 @@ struct Build1LaneAStagingInput: Equatable, Sendable {
     var state: State
     var blockers: [String]
     var generatedAt: String
+    var authorityTuple: Build1LaneAArtifactAuthority?
     var artifactAuthority: ArtifactAuthority
     var privateRecord: PrivateRecord
     var statusCorrelation: StatusCorrelation
@@ -135,9 +136,11 @@ struct Build1LaneAStagingInput: Equatable, Sendable {
         let authority = artifactAuthority
         let record = privateRecord
         let status = statusCorrelation
+        let tuple = authorityTuple
+        let expected = tuple.flatMap { Build1PrepareProfileSupport.expectedTuple(for: $0.catalogKey) }
         return [
             "schema": Self.schema,
-            "profile": Build1LaneAPrepareProfile.profile,
+            "profile": tuple.flatMap { Build1PrepareProfileSupport.profile(for: $0) } ?? Build1LaneAPrepareProfile.profile,
             "state": state.rawValue,
             "blockers": blockers,
             "generated_at": generatedAt,
@@ -193,13 +196,13 @@ struct Build1LaneAStagingInput: Equatable, Sendable {
                 ],
             ],
             "handoff": [
-                "catalog_key": Build1LaneAPrepareProfile.catalogKey,
-                "model_id": Build1LaneAPrepareProfile.artifactModelID,
-                "model_revision": Build1LaneAPrepareProfile.artifactRevision,
-                "artifact_id": Build1LaneAPrepareProfile.artifactID,
-                "runtime_source": Build1LaneAPrepareProfile.runtimeSource,
-                "artifact_hash_algorithm": ModelArtifactIdentity.snapshotManifestV1,
-                "artifact_sha256": Build1LaneAPrepareProfile.artifactHash,
+                "catalog_key": tuple?.catalogKey ?? Build1LaneAPrepareProfile.catalogKey,
+                "model_id": tuple?.modelID ?? Build1LaneAPrepareProfile.artifactModelID,
+                "model_revision": tuple?.revision ?? Build1LaneAPrepareProfile.artifactRevision,
+                "artifact_id": tuple?.artifactID ?? Build1LaneAPrepareProfile.artifactID,
+                "runtime_source": expected?.runtimeSource ?? Build1LaneAPrepareProfile.runtimeSource,
+                "artifact_hash_algorithm": tuple?.hashAlgorithm ?? ModelArtifactIdentity.snapshotManifestV1,
+                "artifact_sha256": tuple?.hash ?? Build1LaneAPrepareProfile.artifactHash,
                 "release_id": Self.nullable(authority.releaseID),
                 "size_bytes": authority.sizeBytes.map { $0 as Any } ?? NSNull(),
                 "next_required_steps": Self.nextRequiredSteps,
@@ -283,6 +286,7 @@ enum Build1LaneAStagingInputAssembler {
             state: unique.isEmpty ? .ready : .blocked,
             blockers: unique,
             generatedAt: ModelSwitchingWireCodec.timestamp(now),
+            authorityTuple: resolvedAuthority,
             artifactAuthority: authoritySection,
             privateRecord: recordSection,
             statusCorrelation: statusSection
@@ -686,21 +690,30 @@ struct ModelsStagingInputCommand: AsyncParsableCommand {
     nonisolated(unsafe) static var resolveAuthority: @Sendable (String?) async throws -> Build1LaneAArtifactAuthority = { coordinatorURL in
         try await Build1LaneAArtifactAuthorityResolver.resolve(coordinatorURL: coordinatorURL)
     }
+    nonisolated(unsafe) static var loadPrivateAuthority: @Sendable (URL, URL) throws -> Build1LaneAArtifactAuthority = {
+        try Build1PrivateAuthorityLoader.load(authorityURL: $0, signatureURL: $1)
+    }
     nonisolated(unsafe) static var fetchLocalStatus: @Sendable (Int) async throws -> [String: Any] = { port in
         try await LocalStatusClient.fetch(port: port)
     }
 
-    @Argument(help: "Lane A catalog key. Only the approved Build 1 Llama 3B tuple is accepted.")
+    @Argument(help: "Build 1 model key or id. Only the exact tuple selected by --profile is accepted.")
     var catalogKey: String
 
     @Flag(name: .customLong("json"), help: "Emit one build1_lane_a_staging_input.v1 object on stdout.")
     var emitJSON = false
 
-    @Option(help: "Preparation profile. The only accepted value is build1-lane-a.")
+    @Option(help: "Preparation profile: build1-lane-a or build1-orcarouter-private.")
     var profile: String = Build1LaneAPrepareProfile.profile
 
     @Option(help: "Explicit staging coordinator URL. Only loopback and approved staging hosts are accepted.")
     var coordinatorURL: String?
+
+    @Option(help: "build1-orcarouter-private only: path to the signed private authority JSON.")
+    var authorityFile: String?
+
+    @Option(help: "build1-orcarouter-private only: path to the detached authority signature JSON.")
+    var authoritySignature: String?
 
     @Option(help: "YAML config path used to resolve model_artifact_root and the local status port. Overrides MACPROVIDER_CONFIG.")
     var config: String?
@@ -715,14 +728,29 @@ struct ModelsStagingInputCommand: AsyncParsableCommand {
         }
 
         var guardBlockers: [String] = []
-        if profile != Build1LaneAPrepareProfile.profile {
+        if ![Build1LaneAPrepareProfile.profile, Build1PrivatePrepareProfile.profile].contains(profile) {
             guardBlockers.append("unsupported_profile")
         }
-        if !Build1LaneAPrepareProfile.isApprovedCatalogKey(catalogKey) {
-            guardBlockers.append("unsupported_model_tuple")
-        }
-        if !Build1LaneAPrepareProfile.coordinatorIsAllowedForStaging(coordinatorURL) {
-            guardBlockers.append("staging_coordinator_required")
+        if profile == Build1PrivatePrepareProfile.profile {
+            if !Build1PrivatePrepareProfile.isApprovedModel(catalogKey) {
+                guardBlockers.append("unsupported_model_tuple")
+            }
+            if coordinatorURL != nil {
+                guardBlockers.append("coordinator_not_allowed_for_private_profile")
+            }
+            if authorityFile?.isEmpty != false || authoritySignature?.isEmpty != false {
+                guardBlockers.append("private_authority_required")
+            }
+        } else if profile == Build1LaneAPrepareProfile.profile {
+            if !Build1LaneAPrepareProfile.isApprovedCatalogKey(catalogKey) {
+                guardBlockers.append("unsupported_model_tuple")
+            }
+            if !Build1LaneAPrepareProfile.coordinatorIsAllowedForStaging(coordinatorURL) {
+                guardBlockers.append("staging_coordinator_required")
+            }
+            if authorityFile != nil || authoritySignature != nil {
+                guardBlockers.append("private_authority_not_allowed")
+            }
         }
         if !guardBlockers.isEmpty {
             let report = Build1LaneAStagingInputAssembler.assemble(
@@ -737,7 +765,16 @@ struct ModelsStagingInputCommand: AsyncParsableCommand {
 
         let authority: Result<Build1LaneAArtifactAuthority, Build1LaneAArtifactAuthorityError>
         do {
-            authority = .success(try await Self.resolveAuthority(coordinatorURL))
+            if profile == Build1PrivatePrepareProfile.profile,
+               let authorityFile,
+               let authoritySignature {
+                authority = .success(try Self.loadPrivateAuthority(
+                    URL(fileURLWithPath: authorityFile),
+                    URL(fileURLWithPath: authoritySignature)
+                ))
+            } else {
+                authority = .success(try await Self.resolveAuthority(coordinatorURL))
+            }
         } catch let error as Build1LaneAArtifactAuthorityError {
             authority = .failure(error)
         } catch {
@@ -758,7 +795,8 @@ struct ModelsStagingInputCommand: AsyncParsableCommand {
             privateRecord = ProviderBuild1LaneAStatusResolver(
                 durableRoot: ProviderBuild1LaneAStatusResolver.durableRoot(config: appConfig),
                 expectedArtifactSHA256: verified.hash,
-                expectedReleaseID: verified.releaseID
+                expectedReleaseID: verified.releaseID,
+                catalogKey: verified.catalogKey
             ).resolve()
         }
 
