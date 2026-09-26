@@ -134,7 +134,7 @@ func TestSPEC042R014EngineFailClosedSet(t *testing.T) {
 	}
 }
 
-// SPEC-042 0.0.35 / SPEC-006 0.9.36 (#1690 M9): an LM Studio GGUF member of a
+// SPEC-042 0.0.35 / SPEC-006 0.9.37 (#1690 M9): an LM Studio GGUF member of a
 // pool whose v2 allowlist is lmstudio_loopback is selectable as
 // engine=lmstudio, discloses its class, records it in the route snapshot,
 // and settles pool_operator_attested. The same selection on a pool that

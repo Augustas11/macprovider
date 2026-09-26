@@ -3,7 +3,7 @@
 **Status:** prepared 2026-09-25, not executed. **Issue:** #1690 (epic PR #1719,
 merged as `747557cc`). **Governing rules:** SPEC-022 v0.2.2 R-12 / R-12.8,
 SPEC-042 v0.0.34 (R001 policy-core/v2, R006 labels, R013, R014), SPEC-023
-v0.17.2 §3.7, SPEC-047-R003(iv), SPEC-015 0.4.10 R006. **Operator sequence
+v0.18.3 §3.7, SPEC-047-R003(iv), SPEC-015 0.4.10 R006. **Operator sequence
 this plan follows:** [`trusted-pool-production-launch.md`](trusted-pool-production-launch.md)
 §4 and §9. Lab rehearsals:
 [`runtime-agnostic-m6-lab-e2e-evidence-2026-09-24.md`](runtime-agnostic-m6-lab-e2e-evidence-2026-09-24.md),
@@ -273,7 +273,7 @@ Feed-tuple requirements this satisfies: the closed identity matrix row
 `^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\.gguf$`; `(hash_algorithm, hash)` is
 unique in the feed; the artifact id is new, so no rebinding.
 
-Rollout state of this tuple (SPEC-023 v0.17.2), checked 2026-09-25:
+Rollout state of this tuple (SPEC-023 v0.18.3), checked 2026-09-25:
 
 - coordinator: implemented (`buyer/catalog_artifacts_feed.go`,
   `artifactIdentityMatrix`, since `747557cc`);

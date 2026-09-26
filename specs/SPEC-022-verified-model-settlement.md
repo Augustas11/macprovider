@@ -10,7 +10,7 @@ Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011
 ### v0.2.4
 
 Rollback notes for the #1690 M9 engines. A coordinator that predates v0.2.0
-also cannot load an artifact feed carrying the SPEC-023 v0.18.0
+also cannot load an artifact feed carrying the SPEC-023 v0.19.0
 `omlx_loopback` runtime source, so the R-12.8 rollback bullet names it next
 to `mlxlm_loopback`. A new R-12.8 rollback precondition: the target must
 replay every runtime class ever accepted in pool manifest history. No other

@@ -340,14 +340,14 @@ class ArtifactFeedValidationTest(unittest.TestCase):
         self.assertEqual(catalog_release.ARTIFACT_FEED_CONSUMER_FLOOR, (0, 16, 0))
 
     def test_generator_refuses_omlx_loopback_below_the_consumer_floor(self):
-        # SPEC-023 v0.18.0 rollout gate (#1690 M9): the same rule as mlxlm.
+        # SPEC-023 v0.19.0 rollout gate (#1690 M9): the same rule as mlxlm.
         models = {"qwen3-8b": {"artifacts": {"mlx-4bit": {"allowed_runtime_sources": ["mlx_cache", "omlx_loopback"]}}}}
         with self.assertRaises(catalog_release.CatalogError):
             catalog_release.require_feed_consumer_floor(models, floor=(0, 17, 0))
         catalog_release.require_feed_consumer_floor(models, floor=(0, 18, 0))
 
     def test_mlx_artifact_may_allow_omlx_loopback(self):
-        # SPEC-023 v0.18.0 / SPEC-010 1.14 R009 (#1690 M9).
+        # SPEC-023 v0.19.0 / SPEC-010 1.14 R009 (#1690 M9).
         feed = feed_from(artifact_source())
         feed["models"]["qwen3-8b"]["artifacts"]["mlx-4bit"]["allowed_runtime_sources"] = ["mlx_cache", "mlxlm_loopback", "omlx_loopback"]
         self.validate(feed)
