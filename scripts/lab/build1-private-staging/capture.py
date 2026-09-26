@@ -35,8 +35,8 @@ SOURCE_SCHEMA = "macprovider.build1-private-qwen-source-capture.v1"
 SOURCE_TOOLS = {
     "physical_run_log": "macprovider-cli-physical-run-summary",
     "request_transcript": "staging-gateway-request-transcript",
-    "status_before": "macprovider-cli-status",
-    "status_after": "macprovider-cli-status",
+    "status_before": "macprovider-cli-local-status",
+    "status_after": "macprovider-cli-local-status",
     "provider_receipt_audit": "macprovider-cli-receipt-audit",
     "coordinator_route_snapshot": "staging-coordinator-route-snapshot",
     "coordinator_settlement_verdict": "staging-coordinator-settlement-verdict",
