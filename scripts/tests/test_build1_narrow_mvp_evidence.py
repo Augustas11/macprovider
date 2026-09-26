@@ -157,7 +157,7 @@ def valid_evidence() -> dict:
             "release_id": mod.ARTIFACT_RELEASE_ID,
             "artifact_feed_signer_key_id": mod.TRUSTED_ARTIFACT_FEED_SIGNER_KEY_ID,
             "verification_status": "verified",
-            "primary_artifact_id": mod.ARTIFACT_ID,
+            "primary_artifact_id": mod.RUNTIME_ARTIFACT_ID,
             "artifact_hash_algorithm": mod.ARTIFACT_HASH_ALGORITHM,
             "artifact_hash": mod.ARTIFACT_HASH,
             "route_binding": {
@@ -284,8 +284,8 @@ def valid_evidence() -> dict:
                 "provider_reported_model_hash_algorithm": mod.ARTIFACT_HASH_ALGORITHM,
                 "expected_catalog_model_hash": mod.ARTIFACT_HASH,
                 "expected_catalog_model_hash_algorithm": mod.ARTIFACT_HASH_ALGORITHM,
-                "catalog_id": mod.CATALOG_KEY,
-                "catalog_body_digest": CANDIDATE_CATALOG_DIGEST,
+                "catalog_id": "lab-build1-tier2",
+                "catalog_body_digest": "b" * 64,
                 "model_admission_candidate_id": "byom-build1-mvp-candidate",
                 "model_admission_coordinator_event_id": "7" * 64,
                 "model_admission_served_model_ref": "mlx-cache:orcarouter-qwen3.8-27b-uncensored",
@@ -345,8 +345,8 @@ def valid_evidence() -> dict:
             "model_id": mod.MODEL_ID,
             "provider_reported_model_hash": mod.ARTIFACT_HASH,
             "expected_catalog_model_hash": mod.ARTIFACT_HASH,
-            "catalog_id": mod.CATALOG_KEY,
-            "catalog_body_digest": CANDIDATE_CATALOG_DIGEST,
+            "catalog_id": "lab-build1-tier2",
+            "catalog_body_digest": "b" * 64,
             "route_snapshot_digest": ROUTE_SNAPSHOT_DIGEST,
             "route_snapshot_mode": "enforce",
             "receipt_version": "4",
@@ -664,6 +664,15 @@ class Build1NarrowMVPEvidenceTests(unittest.TestCase):
         payload["settlement_verdict"]["artifact_binding"]["candidate_catalog_body_digest"] = "0" * 64
         self.assert_invalid_contains(payload, "artifact_feed_signer_key_id")
         self.assert_invalid_contains(payload, "candidate_catalog_body_digest")
+
+    def test_accepts_distinct_tier2_and_candidate_catalog_authorities(self) -> None:
+        result = mod.validate_build1_narrow_mvp_evidence(valid_evidence())
+        self.assertTrue(result.ok, result.errors)
+
+    def test_rejects_settlement_verdict_tier2_catalog_drift(self) -> None:
+        payload = valid_evidence()
+        payload["settlement_verdict"]["catalog_body_digest"] = "c" * 64
+        self.assert_invalid_contains(payload, "catalog_body_digest")
 
     def test_rejects_consistently_wrong_artifact_feed_signer(self) -> None:
         payload = valid_evidence()

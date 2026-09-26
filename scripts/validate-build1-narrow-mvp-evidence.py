@@ -26,6 +26,7 @@ CATALOG_KEY = "orcarouter/qwen3.8-27b-uncensored"
 MODEL_ID = "orcarouter/Qwen3.8-27B-Uncensored-MLX"
 RUNTIME_SOURCE = "mlx_cache"
 ARTIFACT_ID = "mlx-revision-snapshot"
+RUNTIME_ARTIFACT_ID = "mlx-4bit"
 MODEL_REVISION = "38d0ad4e02031658fadd3828634a0174e0b8a282"
 ARTIFACT_HASH_ALGORITHM = "macprovider.snapshot-manifest.v1"
 ARTIFACT_HASH = "8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88dcd"
@@ -779,7 +780,7 @@ def validate_build1_narrow_mvp_evidence(payload: dict[str, Any], *, now: _dt.dat
     signer_key_id = _require_text(feed, "artifact_feed_signer_key_id", "$.artifact_feed", result, pattern=IDENTIFIER_RE)
     _require_equal(feed, "artifact_feed_signer_key_id", TRUSTED_ARTIFACT_FEED_SIGNER_KEY_ID, "$.artifact_feed", result)
     _require_equal(feed, "verification_status", "verified", "$.artifact_feed", result)
-    _require_equal(feed, "primary_artifact_id", ARTIFACT_ID, "$.artifact_feed", result)
+    _require_equal(feed, "primary_artifact_id", RUNTIME_ARTIFACT_ID, "$.artifact_feed", result)
     _require_equal(feed, "artifact_hash", ARTIFACT_HASH, "$.artifact_feed", result)
     _require_equal(feed, "artifact_hash_algorithm", ARTIFACT_HASH_ALGORITHM, "$.artifact_feed", result)
 
@@ -994,8 +995,17 @@ def validate_build1_narrow_mvp_evidence(payload: dict[str, Any], *, now: _dt.dat
     _require_equal(route_snapshot_v1, "provider_reported_model_hash_algorithm", ARTIFACT_HASH_ALGORITHM, "$.route_snapshot.route_snapshot_v1", result)
     _require_equal(route_snapshot_v1, "expected_catalog_model_hash", ARTIFACT_HASH, "$.route_snapshot.route_snapshot_v1", result)
     _require_equal(route_snapshot_v1, "expected_catalog_model_hash_algorithm", ARTIFACT_HASH_ALGORITHM, "$.route_snapshot.route_snapshot_v1", result)
-    _require_equal(route_snapshot_v1, "catalog_id", CATALOG_KEY, "$.route_snapshot.route_snapshot_v1", result)
-    _require_equal(route_snapshot_v1, "catalog_body_digest", candidate_catalog_sha256, "$.route_snapshot.route_snapshot_v1", result)
+    # `catalog_id` and `catalog_body_digest` identify the independently signed
+    # Tier-2 catalog used for route eligibility. The candidate-catalog release
+    # is bound separately by `artifact_candidate_catalog_sha256`; conflating
+    # the two authorities would reject the coordinator's immutable record or,
+    # worse, encourage evidence post-processing.
+    route_catalog_id = _require_text(
+        route_snapshot_v1, "catalog_id", "$.route_snapshot.route_snapshot_v1", result, pattern=IDENTIFIER_RE
+    )
+    route_catalog_body_digest = _require_text(
+        route_snapshot_v1, "catalog_body_digest", "$.route_snapshot.route_snapshot_v1", result, pattern=HEX64_RE
+    )
     _require_equal(route_snapshot_v1, "model_admission_candidate_id", model_admission_candidate_id, "$.route_snapshot.route_snapshot_v1", result)
     _require_equal(route_snapshot_v1, "model_admission_coordinator_event_id", model_admission_coordinator_event_id, "$.route_snapshot.route_snapshot_v1", result)
     _require_equal(route_snapshot_v1, "model_admission_served_model_ref", model_admission_served_model_ref, "$.route_snapshot.route_snapshot_v1", result)
@@ -1098,8 +1108,14 @@ def validate_build1_narrow_mvp_evidence(payload: dict[str, Any], *, now: _dt.dat
     _require_equal(settlement_verdict, "model_id", MODEL_ID, "$.settlement_verdict", result)
     _require_equal(settlement_verdict, "provider_reported_model_hash", ARTIFACT_HASH, "$.settlement_verdict", result)
     _require_equal(settlement_verdict, "expected_catalog_model_hash", ARTIFACT_HASH, "$.settlement_verdict", result)
-    _require_equal(settlement_verdict, "catalog_id", CATALOG_KEY, "$.settlement_verdict", result)
-    _require_equal(settlement_verdict, "catalog_body_digest", candidate_catalog_sha256, "$.settlement_verdict", result)
+    _require_equal(settlement_verdict, "catalog_id", route_catalog_id, "$.settlement_verdict", result)
+    _require_equal(
+        settlement_verdict,
+        "catalog_body_digest",
+        route_catalog_body_digest,
+        "$.settlement_verdict",
+        result,
+    )
     _require_equal(settlement_verdict, "route_snapshot_digest", route_snapshot_digest, "$.settlement_verdict", result)
     _require_equal(settlement_verdict, "route_snapshot_mode", "enforce", "$.settlement_verdict", result)
     _require_equal(settlement_verdict, "receipt_version", "4", "$.settlement_verdict", result)

@@ -213,6 +213,13 @@ case "${1:-}" in
     require_discovery_cache
     python3 "$WT/scripts/lab/1690-m6/evidence.py" --last 1
     ;;
+  capture)
+    require_discovery_cache
+    : "${BUILD1_REQUEST_ID:?set BUILD1_REQUEST_ID to the verified staging request}"
+    : "${BUILD1_CAPTURE_OUT:?set BUILD1_CAPTURE_OUT to an absolute capture directory}"
+    case "$BUILD1_CAPTURE_OUT" in /*) ;; *) printf 'refusing: BUILD1_CAPTURE_OUT must be absolute\n' >&2; exit 2 ;; esac
+    python3 "$HERE/capture.py" --request-id "$BUILD1_REQUEST_ID" --output "$BUILD1_CAPTURE_OUT"
+    ;;
   up|configs)
     require_discovery_cache
     exec "$BASE_RIG" "$1"
@@ -221,7 +228,7 @@ case "${1:-}" in
     exec "$BASE_RIG" "$1"
     ;;
   *)
-    printf 'usage: rig.sh build-feed|install-feed|prepare|rebuild-provider|up|admit|request|evidence|status|down|configs\n' >&2
+    printf 'usage: rig.sh build-feed|install-feed|prepare|rebuild-provider|up|admit|request|evidence|capture|status|down|configs\n' >&2
     exit 2
     ;;
 esac
