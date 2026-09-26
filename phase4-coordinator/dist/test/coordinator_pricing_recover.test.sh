@@ -44,9 +44,9 @@ mkdir -p "$T/bin" "$CTL"
 cat >"$T/bin/systemctl" <<'SH'
 #!/bin/sh
 case "$*" in
-  *"-p MainPID"*) if [ -e "$CTL/stopped" ]; then echo 0; else cat "$CTL/pid"; fi ;;
+  *"-p MainPID"*) if [ -e "$CTL/main-pid" ]; then cat "$CTL/main-pid"; elif [ -e "$CTL/stopped" ]; then echo 0; else cat "$CTL/pid"; fi ;;
   *"-p ActiveEnterTimestampMonotonic"*) cat "$CTL/active-enter" ;;
-  *"-p ActiveState --value macprovider-coordinator") if [ -e "$CTL/stopped" ]; then echo inactive; else echo active; fi ;;
+  *"-p ActiveState --value macprovider-coordinator") if [ -e "$CTL/active-state" ]; then cat "$CTL/active-state"; elif [ -e "$CTL/stopped" ]; then echo inactive; else echo active; fi ;;
   *"-p LoadState"*) echo not-found ;;
   daemon-reload|"try-reload-or-restart nginx") ;;
   "start --no-block macprovider-pearl-updater-alert@"*) printf '%s\n' "$*" >>"$CTL/alerts" ;;
@@ -680,7 +680,16 @@ print(" ".join(out))' "$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE" "$MACPROVIDER_DEPLO
 if [ -e "$CTL/nginx-hang" ]; then touch "$CTL/nginx-waiting"; while :; do sleep 0.1; done; fi
 [ ! -e "$CTL/nginx-fail" ]
 SH
-printf '#!/bin/sh\nexit 0\n' >"$T/bin/setfacl"
+# setfacl --restore: like GNU setfacl, every "# file:" entry must exist.
+cat >"$T/bin/setfacl" <<'SH'
+#!/bin/sh
+case "$1" in
+  --restore=*)
+    sed -n 's/^# file: //p' "${1#--restore=}" | while IFS= read -r f; do
+      [ -e "$f" ] || { echo "setfacl: $f: No such file or directory" >&2; exit 1; }
+    done ;;
+esac
+SH
 chmod 0755 "$T/bin/coordinator-new" "$T/bin/coordinator-old" "$T/bin/nginx" "$T/bin/setfacl"
 
 resolve_env() {
@@ -794,6 +803,18 @@ note "conflict: a verified journal never takes a prior snapshot"
 conflict_setup 5 prior prior prior; start_coordinator
 refused_unchanged "coordinator active" 'coordinator must be stopped'
 stop_coordinator
+# E2 V9 r1: only a definitively stopped unit (inactive|failed, MainPID 0) is
+# stopped. A Restart= wait (activating/auto-restart, MainPID 0), a drain
+# (deactivating), a reload, a stale MainPID or an unreadable state all refuse.
+for st in "activating 0" "deactivating 4242" "deactivating 0" "reloading 4242" "failed 4242" "inactive 4242" " 0"; do
+  set -- $st
+  conflict_setup 5 prior prior prior
+  if [ "$#" = 2 ]; then printf '%s\n' "$1" >"$CTL/active-state"; printf '%s\n' "$2" >"$CTL/main-pid"
+  else : >"$CTL/active-state"; printf '%s\n' "$1" >"$CTL/main-pid"; fi
+  refused_unchanged "coordinator ActiveState=[${st% *}] MainPID=${st##* }" 'coordinator must be stopped'
+  rm -f "$CTL/active-state" "$CTL/main-pid"
+done
+note "conflict: activating/deactivating/reloading, a stale MainPID or an unknown state -> refused, nothing changed"
 # Someone else holds the lock set: refused.
 conflict_setup 5 prior prior prior
 python3 -c 'import fcntl,os,sys,time;fd=os.open(sys.argv[1],os.O_RDWR|os.O_CREAT,0o600);fcntl.flock(fd,fcntl.LOCK_EX);open(sys.argv[2],"w").close();time.sleep(30)' \
@@ -816,6 +837,31 @@ no_held "failure"; rm -f "$CTL/nginx-fail"
 rc=0; resolve >"$T/out" 2>"$T/err" || rc=$?
 [ "$rc" = 0 ] || fail "a rerun after a failed deploy recovery must resolve (rc=$rc): $(cat "$T/err")"
 note "conflict: deploy recovery failure restores the journal and keeps the snapshot; a rerun resolves"
+
+# E2 V9 r1: the deploy snapshot dumped the request-log -wal/-shm ACLs while the
+# coordinator ran; its clean stop deleted both before the resolution. Deploy
+# recovery skips exactly those absent sidecars and the resolution completes.
+conflict_setup 5 prior prior prior
+S="$R/.coordinator-deploy-rollback"; DB="$T/var/lib/macprovider"
+mkdir -p "$DB"; : >"$DB/request-log.sqlite"; rm -f "$DB/request-log.sqlite-wal" "$DB/request-log.sqlite-shm"
+printf '# file: %s\nuser::rw-\n' "$DB/request-log.sqlite" >"$S/request-log-db.acl"
+printf '# file: %s\nuser::rw-\n' "$DB/request-log.sqlite-wal" >"$S/request-log-wal.acl"
+printf '# file: %s\nuser::rw-\n' "$DB/request-log.sqlite-shm" >"$S/request-log-shm.acl"
+touch "$S/had-request-log-db-acl" "$S/had-request-log-wal-acl" "$S/had-request-log-shm-acl"
+rc=0; resolve >"$T/out" 2>"$T/err" || rc=$?
+[ "$rc" = 0 ] && grep -q '"resolved": "prior"' "$T/out" || fail "absent -wal/-shm must not abort the resolution (rc=$rc): $(cat "$T/err")"
+grep -q 'skipping ACL restore for absent SQLite sidecar' "$T/err" || fail "the absent sidecar skip must be logged: $(cat "$T/err")"
+[ -d "$R/.pricing-txn" ] && [ ! -e "$S" ] || fail "absent sidecars: journal visible, snapshot consumed"
+no_held "absent sidecars"
+# ...but an absent database still fails closed: journal restored, snapshot kept.
+conflict_setup 5 prior prior prior
+mkdir -p "$DB"; rm -f "$DB/request-log.sqlite"
+printf '# file: %s\nuser::rw-\n' "$DB/request-log.sqlite" >"$S/request-log-db.acl"; touch "$S/had-request-log-db-acl"
+rc=0; resolve >"$T/out" 2>"$T/err" || rc=$?
+[ "$rc" = 5 ] && grep -q 'failed (rc=' "$T/err" || fail "an absent database ACL target must stop (rc=$rc): $(cat "$T/err")"
+[ -d "$R/.pricing-txn" ] && [ -d "$S" ] || fail "absent database: journal restored and snapshot kept"
+no_held "absent database"
+note "conflict: absent SQLite -wal/-shm ACL targets are skipped; an absent database still stops, fail-closed"
 
 # Interrupted (SIGTERM) during deploy recovery: its process group is stopped,
 # the journal restored, the snapshot kept.

@@ -184,11 +184,32 @@ restore_link_or_file() {
 restore_acl() {
   marker=$1
   snapshot=$2
+  sqlite_sidecar=${3:-}
   if [ -f "$ROLLBACK/$marker" ]; then
     [ -f "$ROLLBACK/$snapshot" ] || {
       echo "rollback snapshot missing $snapshot" >&2
       exit 1
     }
+    # A SQLite -wal/-shm file exists only while a connection has the database
+    # open: a clean coordinator stop between the snapshot and this recovery
+    # deletes it, and SQLite recreates it on the next open. setfacl --restore on
+    # a dump naming an absent sidecar fails, so skip exactly that case: a
+    # single-entry dump for a plain absolute path ending in the expected
+    # suffix. Anything else (the database, the directory, a present sidecar, a
+    # malformed dump) still goes through setfacl and fails closed.
+    if [ -n "$sqlite_sidecar" ]; then
+      acl_entries=$(grep -c '^# file: ' "$ROLLBACK/$snapshot" || true)
+      acl_target=$(sed -n 's/^# file: //p' "$ROLLBACK/$snapshot")
+      case "$acl_entries:$acl_target" in
+        *\\*) ;;
+        "1:/"*"$sqlite_sidecar")
+          if [ ! -e "$acl_target" ] && [ ! -L "$acl_target" ]; then
+            echo "skipping ACL restore for absent SQLite sidecar $acl_target (SQLite recreates it on next open)" >&2
+            return 0
+          fi
+          ;;
+      esac
+    fi
     "$SETFACL" --restore="$ROLLBACK/$snapshot"
   fi
 }
@@ -277,8 +298,8 @@ restore_link_or_file had-nginx-coordinator-full nginx-coordinator.full "$NGINX_R
 
 restore_acl had-request-log-dir-acl request-log-dir.acl
 restore_acl had-request-log-db-acl request-log-db.acl
-restore_acl had-request-log-wal-acl request-log-wal.acl
-restore_acl had-request-log-shm-acl request-log-shm.acl
+restore_acl had-request-log-wal-acl request-log-wal.acl -wal
+restore_acl had-request-log-shm-acl request-log-shm.acl -shm
 
 previous=$(cat "$ROLLBACK/catalog-current-target" 2>/dev/null || true)
 case "$previous" in
