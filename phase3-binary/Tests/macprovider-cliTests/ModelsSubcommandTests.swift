@@ -2254,7 +2254,11 @@ final class ModelsSubcommandTests: XCTestCase {
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: base) }
         let hub = base.appendingPathComponent("hub", isDirectory: true)
-        try FileManager.default.createDirectory(at: hub, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: hub,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
         let durable = base.appendingPathComponent("durable", isDirectory: true)
         let config = base.appendingPathComponent("config.yaml")
         try Data("model_artifact_root: \(durable.path)\n".utf8).write(to: config)
