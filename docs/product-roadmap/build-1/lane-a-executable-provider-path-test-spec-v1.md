@@ -1,7 +1,9 @@
 # Build 1 Lane A executable provider path test spec v1
 
-Status: selected planning test spec. No executable behavior is changed by this
-document.
+Status: plumbing-control test spec. Passing the Llama-specific checks in this
+document does not satisfy final Build 1 acceptance;
+`build1-control-recovery-plan-v2.md` requires a pinned non-catalog/private tuple
+for the physical acceptance bundle.
 Date: 2026-09-15.
 Branch: `codex/build1-lane-a-provider-path`.
 Base: `origin/main` at `e7213fa1`.

@@ -1,9 +1,10 @@
 # Build 1 Control Recovery Plan v1
 
-Status: active control ledger
+Status: superseded for current execution by `build1-control-recovery-plan-v2.md`
 Date: 2026-09-15
 Base evidence: `origin/main` at `7c2e4d97` plus PR #1658
-Decision: freeze new Build 1 implementation slices unless they name one Build 1 lane from this document.
+Decision: retained as historical control evidence. The v2 ledger owns the
+private-tuple acceptance correction and current recovery sequence.
 Execution overlay: `build1-single-pr-orchestrator-workflow-v1.md` keeps Lane A
 work in one orchestrator-owned PR (#1658) until the Lane A stop condition is
 met and the owner explicitly greenlights merge.

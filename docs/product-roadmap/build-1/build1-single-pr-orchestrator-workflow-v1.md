@@ -6,6 +6,16 @@ Owner intent: stop merging one Build 1 slice at a time. Keep one
 orchestrator-owned PR open until the current Build 1 Lane A plan is complete,
 then merge once.
 
+## Recovery Amendment - 2026-09-26
+
+`build1-control-recovery-plan-v2.md` is authoritative where it conflicts with
+this workflow. PR #1658 is being rebuilt from current `origin/main`; its former
+branch head is recovery input, not merge authority. The Llama tuple is a
+plumbing control only, and final acceptance requires a pinned
+non-catalog/private tuple. Superseded coordinator commits and stale conformance
+evidence must not be replayed. A locally built or unsigned CLI must not connect
+to the live Malibu coordinator.
+
 ## Decision
 
 PR #1658, branch `feat/build1-lane-a-private-prep-record`, becomes the
