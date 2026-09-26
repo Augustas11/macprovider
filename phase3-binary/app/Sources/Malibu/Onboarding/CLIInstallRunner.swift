@@ -444,7 +444,13 @@ enum CLIInstallRunner {
                     downloadFraction: nil
                 )
             }
-            if processLines.contains(where: { $0.contains("curl") && $0.lowercased().contains("github") }) {
+            // install.sh falls back to the download.malibu.tech release mirror
+            // when GitHub is unreachable (#1737); both are the release download.
+            if processLines.contains(where: { line in
+                let lower = line.lowercased()
+                return line.contains("curl")
+                    && (lower.contains("github") || lower.contains("download.malibu.tech/releases/"))
+            }) {
                 return InstallProgress(
                     stage: .downloadingRelease,
                     detail: "Downloading provider software…",

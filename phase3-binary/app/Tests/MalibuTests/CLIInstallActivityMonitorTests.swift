@@ -12,6 +12,14 @@ final class CLIInstallActivityMonitorTests: XCTestCase {
         XCTAssertLessThan(progress.overallFraction, 0.2)
     }
 
+    func testReleaseMirrorDownloadIsTheReleaseStage() {
+        let progress = CLIInstallRunner.ActivityMonitor.progress(
+            processLines: ["curl -fL https://download.malibu.tech/releases/v1.8.123/macprovider-cli-v1.8.123-darwin-arm64.tar.gz"]
+        )
+        XCTAssertEqual(progress.stage, .downloadingRelease)
+        XCTAssertEqual(progress.detail, "Downloading provider software…")
+    }
+
     func testInstalledSoftwareAdvancesPastReleaseDownload() {
         let progress = CLIInstallRunner.ActivityMonitor.progress(
             processLines: [],

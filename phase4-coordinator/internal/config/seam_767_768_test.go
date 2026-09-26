@@ -60,6 +60,14 @@ func TestValidateRejectsMalformedVersionFloors(t *testing.T) {
 			wantSub: "latest_binary_version",
 		},
 		{
+			name: "required floor above the advertised release",
+			mutate: func(c *Config) {
+				c.CoordinatorAdvertisedVersion.RequiredBinaryVersion = "1.8.124"
+				c.CoordinatorAdvertisedVersion.LatestBinaryVersion = "1.8.123"
+			},
+			wantSub: "must not exceed latest_binary_version",
+		},
+		{
 			name: "malformed per-model floor",
 			mutate: func(c *Config) {
 				c.CoordinatorAdvertisedVersion.PerModelRequiredBinaryVersion = map[string]string{"model-a": "newest"}

@@ -543,6 +543,29 @@ jobs:
               "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" > "$download/$name"
             cmp "$accepted/$name" "$download/$name"
           done < "$RUNNER_TEMP/assets.tsv"
+      - name: Mirror release assets to download.malibu.tech
+        # Issue #1737: byte-identical copy for Macs that cannot reach GitHub.
+        # Post-publication and idempotent: a failure here must not fail the
+        # already-published release; rerun scripts/publish-release-mirror.sh.
+        continue-on-error: true
+        shell: bash
+        env:
+          MALIBU_DOWNLOAD_VPS_HOST: ${{ secrets.MALIBU_DOWNLOAD_VPS_HOST }}
+          MALIBU_DOWNLOAD_SSH_KEY: ${{ secrets.MALIBU_DOWNLOAD_SSH_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.request.outputs.tag }}
+        run: |
+          set -euo pipefail
+          [ -n "$MALIBU_DOWNLOAD_SSH_KEY" ] || {
+            echo "::error::MALIBU_DOWNLOAD_SSH_KEY is required to mirror release assets" >&2
+            exit 1
+          }
+          key_file="$(mktemp "$RUNNER_TEMP/release-mirror-key.XXXXXX")"
+          trap 'rm -f "$key_file"' EXIT
+          printf '%s\n' "$MALIBU_DOWNLOAD_SSH_KEY" > "$key_file"
+          chmod 600 "$key_file"
+          export MALIBU_DOWNLOAD_SSH_KEY="$key_file"
+          bash scripts/publish-release-mirror.sh --tag "$TAG"
 
   verify_public:
     name: Verify published bytes without protected credentials

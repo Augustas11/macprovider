@@ -240,6 +240,85 @@ got="$(run_bootstrap_download "$GOOD_SHA")"
 [ -x "$got" ] || { echo "bootstrap download: expected executable INSTALL_PYTHON3, got '$got'" >&2; exit 1; }
 expect "F hash-mismatch" "$(run_bootstrap_download deadbeef)" "DIE:8"
 
+# ── Part 5b: #1737 mirror fallback for the pinned tarball ────────────────────
+# GitHub unreachable (mainland China): the same pinned bytes come from
+# download.malibu.tech/python/, and the pinned SHA-256 is still the authority.
+printf 'not the pinned tarball\n' > "$TMP/evil.tgz"
+mkdir -p "$TMP/mirrorcurlbin"
+cat > "$TMP/mirrorcurlbin/curl" <<EOF
+#!/bin/sh
+dest=""; url=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -o) dest="\$2"; shift 2; continue ;;
+    http*) url="\$1" ;;
+  esac
+  shift
+done
+printf '%s\n' "\$url" >> "$TMP/py-fetches.log"
+case "\$url" in
+  https://github.com/*) mode="\${MOCK_GITHUB:-good}" ;;
+  https://download.malibu.tech/*) mode="\${MOCK_MIRROR:-good}" ;;
+  *) exit 2 ;;
+esac
+case "\$mode" in
+  down) exit 7 ;;
+  bad) cp "$TMP/evil.tgz" "\$dest" ;;
+  *) cp "$TMP/py.tgz" "\$dest" ;;
+esac
+EOF
+chmod +x "$TMP/mirrorcurlbin/curl"
+
+# run_bootstrap_mirror <github-mode> <mirror-mode> <mirror-first 0|1>
+run_bootstrap_mirror() {
+  (
+    set +e
+    source "$TMP/guard.sh"
+    HOME="$TMP/home"
+    mkdir -p "$HOME"
+    PATH="$TMP/mirrorcurlbin:/usr/bin:/bin"
+    MOCK_GITHUB="$1"; MOCK_MIRROR="$2"; export MOCK_GITHUB MOCK_MIRROR
+    RELEASE_MIRROR_FIRST="$3"
+    MACPROVIDER_BOOTSTRAP_PYTHON3=""
+    MACPROVIDER_PYTHON_BOOTSTRAP_DISABLE=0
+    MACPROVIDER_TEST_ALLOW_BOOTSTRAP_OVERRIDE=1
+    MACPROVIDER_BOOTSTRAP_PYTHON_DIR="$TMP/install-python-mirror"
+    BOOTSTRAP_PYTHON_URL="https://github.com/astral-sh/python-build-standalone/releases/download/x/cpython-test.tar.gz"
+    BOOTSTRAP_PYTHON_MIRROR_URL="https://download.malibu.tech/python/cpython-test.tar.gz"
+    BOOTSTRAP_PYTHON_SHA256="$GOOD_SHA"
+    BOOTSTRAP_PYTHON_ASSET="cpython-test.tar.gz"
+    rm -rf "$MACPROVIDER_BOOTSTRAP_PYTHON_DIR"
+    bootstrap_standalone_python3 && printf 'OK\n'
+  )
+}
+fetches() { tr '\n' ' ' < "$TMP/py-fetches.log" | sed 's/ $//'; }
+GH_PY="https://github.com/astral-sh/python-build-standalone/releases/download/x/cpython-test.tar.gz"
+MIRROR_PY="https://download.malibu.tech/python/cpython-test.tar.gz"
+
+: > "$TMP/py-fetches.log"
+expect "M github-down-mirror" "$(run_bootstrap_mirror down good 0)" "OK"
+expect "M github-down-order" "$(fetches)" "$GH_PY $MIRROR_PY"
+
+: > "$TMP/py-fetches.log"
+expect "M github-ok-no-mirror" "$(run_bootstrap_mirror good good 0)" "OK"
+expect "M github-ok-order" "$(fetches)" "$GH_PY"
+
+: > "$TMP/py-fetches.log"
+expect "M mirror-first" "$(run_bootstrap_mirror good good 1)" "OK"
+expect "M mirror-first-order" "$(fetches)" "$MIRROR_PY"
+
+: > "$TMP/py-fetches.log"
+expect "M bad-mirror-bytes-fall-back" "$(run_bootstrap_mirror good bad 1)" "OK"
+expect "M bad-mirror-bytes-order" "$(fetches)" "$MIRROR_PY $GH_PY"
+
+: > "$TMP/py-fetches.log"
+expect "M github-down-bad-mirror" "$(run_bootstrap_mirror down bad 0)" "DIE:8"
+[ ! -x "$TMP/install-python-mirror/bin/python3" ] \
+  || { echo "M github-down-bad-mirror: unverified mirror bytes were installed" >&2; exit 1; }
+
+: > "$TMP/py-fetches.log"
+expect "M both-down" "$(run_bootstrap_mirror down down 0)" "DIE:8"
+
 # ── Part 6: ordering — guard runs before validate_install_dir (first python3) ─
 grep -Eq 'ensure_python3_usable' "$INSTALL_SH" || { echo "guard not wired into installer" >&2; exit 1; }
 python3 - "$INSTALL_SH" <<'PY'

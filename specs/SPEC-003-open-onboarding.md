@@ -1,6 +1,22 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.11.4 (2026-09-25, provider LaunchAgent runs at Standard priority)
+**Version:** 0.12.0 (2026-09-25, issue #1737 release mirror for GitHub-blocked Macs)
+
+**Change log v0.12.0:** Adds §6.5 for provider Macs that cannot reach
+github.com, api.github.com, or *.githubusercontent.com (mainland China).
+SPEC-003-R003: `install.sh` falls back to the byte-identical release mirror at
+`https://download.malibu.tech/releases/` for release discovery and every
+release asset, with the embedded-key `checksums.txt.sig` chain unchanged as the
+only authority; without GitHub, discovery installs exactly the coordinator's
+advertised release, never older than the installed binary. SPEC-003-R004: the mirror layout (`<tag>/<asset>`,
+`index/<tag>.json`) and its publication rules (byte identity against GitHub's
+asset digests, immutable tags, the Pearl updater never advertising an unmirrored
+release, `required_binary_version` never above `latest_binary_version`, and
+the coordinator `/healthz` `recommended_binary_version` field), owned
+here as the `release-mirror` authority domain. SPEC-003-R005: the pinned bootstrap python tarball has a
+`download.malibu.tech/python/` fallback under the same SHA-256 pin. The layout
+is the contract the provider self-updater consumes; SPEC-020 references it
+rather than restating it.
 
 **Change log v0.11.4:** The provider LaunchAgent (`live.malibu.provider`) MUST
 use `ProcessType = Standard`. The shipped templates used `Adaptive`, and this
@@ -1153,6 +1169,70 @@ Defined in FR-C1. Summary:
 | Asset | `macprovider-cli-{version}-{os}-{arch}.tar.gz` | `macprovider-cli-v1.2.0-darwin-arm64.tar.gz` |
 | Checksums | `checksums.txt` (SHA-256, GNU format) | `a1b2c3...  macprovider-cli-v1.2.0-darwin-arm64.tar.gz` |
 | Release notes | Markdown body | Version, date, changes, breaking changes, spec version |
+
+### 6.5. Release mirror for GitHub-blocked Macs (issue #1737)
+
+Provider Macs in mainland China cannot reach github.com, api.github.com, or
+*.githubusercontent.com, but can reach `https://download.malibu.tech` and
+`https://coordinator.malibu.tech`. The mirror is transport only; it adds no
+trust.
+
+**SPEC-003-R003 — Installer release sources.** For
+`MACPROVIDER_GITHUB_REPO=Augustas11/macprovider` (the default), `install.sh`
+MUST fetch every release asset (`checksums.txt`, `checksums.txt.sig`, the
+package, the tarball) from GitHub Releases first and, on any failure, the same
+asset name from `https://download.malibu.tech/releases/<tag>/`; after one GitHub
+failure later assets MAY go mirror-first, and `MACPROVIDER_RELEASE_MIRROR=1`
+(only `0` or `1` is valid) MUST go mirror-first with GitHub as the fallback.
+Unpinned discovery MUST fall back, when the GitHub Releases API fails, to
+exactly the coordinator `/healthz` `recommended_binary_version` (the fleet's
+`latest_binary_version`, read over the coordinator's own TLS endpoint), used
+only if it is a canonical `vMAJOR.MINOR.PATCH` at or above the supported
+rollback floor and not older than an installed provider binary (only a pinned
+emergency rollback may go backwards); with no such advertisement the install
+MUST fail. The mirror's
+`latest.json` MUST NOT choose the tag: it is unsigned and mirror-controlled, and
+every public release, old or canary, carries a valid `checksums.txt.sig`. The
+embedded-key `checksums.txt.sig` verification, per-asset SHA-256, Gatekeeper,
+and payload validation MUST be applied identically whichever host served the
+bytes. A repository fork MUST NOT use the mirror.
+
+**SPEC-003-R004 — Release mirror layout and publication.** For every stable
+release, `https://download.malibu.tech/releases/<tag>/<asset>` MUST be a
+byte-identical copy of every GitHub release asset of `<tag>`, whatever its
+name (v1.8.123 ships an asset named `release.json`), and the updater index
+`https://download.malibu.tech/releases/index/<tag>.json`, outside the tag
+directory, MUST be `{"tag_name", "draft": false, "prerelease", "assets":
+[{"name", "browser_download_url"}]}` listing exactly those assets at their mirror
+URLs. Publication (`scripts/publish-release-mirror.sh`) MUST refuse any byte
+whose SHA-256 differs from GitHub's asset digest, MUST NOT modify a published
+`<tag>/` directory or index, and MUST re-download the served bytes to confirm them.
+Every published provider release MUST be on the mirror, byte-identical, before
+it is advertised: the Pearl updater MUST refuse to move
+`coordinator_advertised_version.latest_binary_version` to a release unless
+`index/<tag>.json` names that tag, `<tag>/checksums.txt` verifies under the
+pinned release key, and every checksummed asset is present with a matching
+SHA-256 (`PEARL_UPDATER_RELEASE_MIRROR_GATE=required`, the default), and the
+coordinator MUST refuse a config whose `required_binary_version` exceeds
+`latest_binary_version`. Together these keep every required release
+installable and updatable from the mirror. `releases/latest.json`
+(`{"tag_name": "<tag>"}`) is an operator-facing hint that no installer or
+updater reads; it MUST move only to a stable tag the coordinator already
+advertises as `latest_binary_version` and MUST NOT move backwards. The
+coordinator's unauthenticated `GET /healthz` field `recommended_binary_version`
+is part of this contract: it MUST equal `latest_binary_version`, MUST be served
+without authentication or capability gating, and is the release a Mac without
+GitHub installs (SPEC-003-R003) or updates to (SPEC-020-R006); renaming,
+gating, or removing it strands those Macs. This section is the single owner of
+the `release-mirror` authority domain; SPEC-020 and the SPEC-002 FR-O1 field
+list consume it.
+
+**SPEC-003-R005 — Bootstrap python mirror.** When the installer bootstraps the
+pinned python-build-standalone interpreter, it MUST fall back to
+`https://download.malibu.tech/python/<the same file name>` when GitHub fails
+(mirror first under `MACPROVIDER_RELEASE_MIRROR=1`), and MUST install bytes from
+a source only when they reproduce the pinned SHA-256; a mismatching source is
+skipped, never installed.
 
 ---
 

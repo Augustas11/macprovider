@@ -1,7 +1,13 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.6.2 (2026-09-22, WS occupancy and free-seat routing)
+**Version:** 1.6.3 (2026-09-25, `/healthz` release fields)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.6.3 (2026-09-25, issue #1737):** FR-O1 lists the `/healthz`
+`recommended_binary_version` and `required_binary_version` fields. The first is
+now the release a GitHub-blocked Mac installs or updates to, so its contract
+(unauthenticated, ungated, equal to `latest_binary_version`) is owned by
+SPEC-003-R004. No wire or behavior change.
 
 **Change log v1.6.2 (2026-09-22, issue #1679):** A `busy` label with
 `slots_free > 0` is stale occupancy and remains routable after all other
@@ -2015,6 +2021,13 @@ the coordinator is draining (SIGTERM received).
 
 No authentication required — intended for VPS-side monitoring
 (systemd, uptime checks).
+
+The response also carries `recommended_binary_version` (the configured
+`latest_binary_version`) and, when a floor is configured,
+`required_binary_version`. `recommended_binary_version` is not only a
+monitoring value: it is the release a provider Mac without GitHub installs or
+updates to. Its contract is owned by SPEC-003-R004 (`release-mirror`): it
+MUST stay unauthenticated, ungated, and equal to `latest_binary_version`.
 
 **FR-O2. /poolz endpoint (operator-only, auth-gated).**
 `GET /poolz` returns the full pool state, including per-provider

@@ -172,6 +172,7 @@ struct Build1LaneAArtifactStager {
                 try await resolver.downloader.downloadSnapshot(
                     modelID: authority.modelID,
                     revision: authority.revision,
+                    expectedSHA256: authority.hash,
                     to: staged,
                     deadline: deadline
                 )

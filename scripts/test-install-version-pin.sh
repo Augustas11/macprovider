@@ -105,6 +105,11 @@ done
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
 MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.30"
 GITHUB_REPO="Augustas11/macprovider"
+RELEASE_MIRROR_BASE="https://download.malibu.tech/releases"
+RELEASE_MIRROR_REPO="Augustas11/macprovider"
+RELEASE_MIRROR_FIRST=0
+RELEASE_GITHUB_UNREACHABLE=0
+FETCH_LOG="$workdir/fetches.log"
 TMPDIR_PATH=""
 asset_path=""
 asset_kind=""
@@ -158,7 +163,23 @@ curl() {
     esac
   done
 
+  printf '%s\n' "$url" >> "$FETCH_LOG"
+  # Issue #1737: simulate a network where GitHub (and/or the mirror) is
+  # unreachable. curl exit 7 is "failed to connect".
   case "$url" in
+    https://github.com/*|https://api.github.com/*)
+      [ "${MOCK_GITHUB_DOWN:-0}" = "1" ] && return 7
+      ;;
+    https://download.malibu.tech/*)
+      [ "${MOCK_MIRROR_DOWN:-0}" = "1" ] && return 7
+      ;;
+  esac
+
+  case "$url" in
+    "https://download.malibu.tech/releases/latest.json")
+      [ -n "${MOCK_MIRROR_LATEST_JSON:-}" ] || return 22
+      printf '%s' "$MOCK_MIRROR_LATEST_JSON"
+      ;;
     *"/releases?per_page=100&page="*)
       # Page-aware release mock. install.sh paginates newest-first; each fetched
       # page is logged so tests can assert early-stop on an empty page. Page N is
@@ -224,6 +245,14 @@ report() {
 reset_mocks() {
   : > "$DOWNLOAD_LOG"
   : > "$RELEASE_PAGE_LOG"
+  : > "$FETCH_LOG"
+  MOCK_GITHUB_DOWN=0
+  MOCK_MIRROR_DOWN=0
+  MOCK_MIRROR_LATEST_JSON=""
+  RELEASE_MIRROR_FIRST=0
+  RELEASE_GITHUB_UNREACHABLE=0
+  GITHUB_REPO="Augustas11/macprovider"
+  coordinator_base=""
   : > "$LOG_FILE"
   # Clear any per-page release fixtures left by a previous case so pagination
   # tests start from a clean slate (page 1 falls back to MOCK_RELEASES_JSON).
@@ -1113,6 +1142,198 @@ rc=0
 tag="$(latest_release_tag)" || rc=$?
 report "case28-early-match-large-page-no-sigpipe" 0 "$rc"
 report "case28-early-match-large-page-tag" "v1.8.223" "$tag"
+
+################################################################
+# Issue #1737 — GitHub blocked (mainland China). Release discovery and every
+# asset fall back to the byte-identical download.malibu.tech mirror, and the
+# signature/checksum chain is applied identically to mirror bytes.
+################################################################
+MIRROR="https://download.malibu.tech/releases"
+
+# M1 — pinned tag, GitHub down: all assets come from the mirror, checksums and
+# the payload validation chain still run.
+reset_mocks
+MOCK_GITHUB_DOWN=1
+MACPROVIDER_VERSION="v1.7.11"
+run_release_chain
+report "m1-github-down-pkg-from-mirror" \
+  "$MIRROR/v1.7.11/macprovider-cli-v1.7.11-darwin-arm64.pkg" \
+  "$(cat "$DOWNLOAD_LOG")"
+report "m1-signature-still-checked" 1 "$(grep -c 'signature checked' "$LOG_FILE" | tr -d ' ')"
+report "m1-validation-chain-called" 1 "$VALIDATE_CALLED"
+# Only the first asset pays the GitHub timeout; later assets go mirror-first.
+report "m1-github-tried-once" 1 "$(grep -c '^https://github.com/' "$FETCH_LOG" | tr -d ' ')"
+
+# M2 — mirror-served checksum mismatch fails closed exactly like GitHub bytes.
+reset_mocks
+MOCK_GITHUB_DOWN=1
+MACPROVIDER_VERSION="v1.7.11"
+MOCK_SHA="badhash"
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "m2-mirror-checksum-mismatch-fails" 4 "$rc"
+
+# M3 — mirror-served checksums.txt with a bad signature fails closed and no
+# release asset is downloaded.
+reset_mocks
+MOCK_GITHUB_DOWN=1
+MACPROVIDER_VERSION="v1.7.11"
+MOCK_SIGNATURE_FAIL=1
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "m3-mirror-signature-mismatch-fails" 4 "$rc"
+report "m3-no-asset-after-mirror-signature-fail" "" "$(cat "$DOWNLOAD_LOG")"
+
+# M4 — MACPROVIDER_RELEASE_MIRROR=1 goes mirror-first and never touches GitHub
+# when the mirror serves the release.
+reset_mocks
+RELEASE_MIRROR_FIRST=1
+MACPROVIDER_VERSION="v1.7.11"
+run_release_chain
+report "m4-mirror-first-pkg" \
+  "$MIRROR/v1.7.11/macprovider-cli-v1.7.11-darwin-arm64.pkg" \
+  "$(cat "$DOWNLOAD_LOG")"
+report "m4-mirror-first-no-github" 0 "$(grep -c 'github.com' "$FETCH_LOG" | tr -d ' ')"
+
+# M5 — mirror-first falls back to GitHub when the mirror is down.
+reset_mocks
+RELEASE_MIRROR_FIRST=1
+MOCK_MIRROR_DOWN=1
+MACPROVIDER_VERSION="v1.7.11"
+run_release_chain
+report "m5-mirror-down-falls-back-to-github" \
+  "https://github.com/Augustas11/macprovider/releases/download/v1.7.11/macprovider-cli-v1.7.11-darwin-arm64.pkg" \
+  "$(cat "$DOWNLOAD_LOG")"
+
+# M6 — both hosts down fails with the download exit code.
+reset_mocks
+MOCK_GITHUB_DOWN=1
+MOCK_MIRROR_DOWN=1
+MACPROVIDER_VERSION="v1.7.11"
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "m6-both-down-fails" 3 "$rc"
+
+# M7 — a MACPROVIDER_GITHUB_REPO fork never falls back to the Malibu mirror.
+reset_mocks
+GITHUB_REPO="someone/fork"
+MOCK_GITHUB_DOWN=1
+MACPROVIDER_VERSION="v1.7.11"
+rc=0
+( run_release_chain ) >/dev/null 2>&1 || rc=$?
+report "m7-fork-no-mirror-fails" 3 "$rc"
+report "m7-fork-never-contacts-mirror" 0 "$(grep -c 'download.malibu.tech' "$FETCH_LOG" | tr -d ' ')"
+
+# M8 — unpinned discovery with the GitHub API down installs exactly the
+# coordinator-advertised release (#1737 security audit MEDIUM-1).
+reset_mocks
+MOCK_GITHUB_DOWN=1
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+tag="$(resolve_release_tag 2>/dev/null)"
+report "m8-discovery-from-coordinator" "v1.8.123" "$tag"
+
+# M9 — a mirror latest.json never chooses the tag: an older one cannot roll a
+# fresh install back ...
+reset_mocks
+MOCK_GITHUB_DOWN=1
+MOCK_MIRROR_LATEST_JSON='{"tag_name":"v1.7.11"}'
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+tag="$(resolve_release_tag 2>/dev/null)"
+report "m9-mirror-cannot-roll-back" "v1.8.123" "$tag"
+
+# M10 — ... and a newer one (an unpromoted canary) cannot push ahead of it.
+reset_mocks
+MOCK_GITHUB_DOWN=1
+MOCK_MIRROR_LATEST_JSON='{"tag_name":"v1.8.200"}'
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+tag="$(resolve_release_tag 2>/dev/null)"
+report "m10-mirror-cannot-push-canary" "v1.8.123" "$tag"
+report "m10-latest-json-not-read" 0 "$(grep -c 'latest.json' "$FETCH_LOG" | tr -d ' ')"
+
+# M11 — no coordinator advertisement: fail closed even when latest.json exists.
+reset_mocks
+MOCK_GITHUB_DOWN=1
+MOCK_MIRROR_LATEST_JSON='{"tag_name":"v1.8.123"}'
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"status":"ok"}'
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "m11-no-advertisement-fails-closed" 3 "$rc"
+
+# M12 — an invalid or below-floor advertisement is rejected, never installed.
+for bad in '{"recommended_binary_version":"1.7.10"}' '{"recommended_binary_version":"main"}' '{"recommended_binary_version":"1.8.123\nx"}' '["1.8.123"]' 'not json'; do
+  reset_mocks
+  MOCK_GITHUB_DOWN=1
+  coordinator_base="https://coordinator.malibu.tech"
+  MOCK_HEALTH_JSON="$bad"
+  rc=0
+  ( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+  report "m12-rejects-${bad//[^A-Za-z0-9]/_}" 3 "$rc"
+done
+
+# M13 — GitHub reachable: discovery stays on GitHub and ignores the mirror.
+reset_mocks
+MOCK_MIRROR_LATEST_JSON='{"tag_name":"v1.8.999"}'
+tag="$(resolve_release_tag 2>/dev/null)"
+report "m13-github-first" "v1.7.11" "$tag"
+report "m13-no-mirror-contact" 0 "$(grep -c 'download.malibu.tech' "$FETCH_LOG" | tr -d ' ')"
+
+# M14 — mirror-first discovery skips the GitHub API entirely.
+reset_mocks
+RELEASE_MIRROR_FIRST=1
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+tag="$(resolve_release_tag 2>/dev/null)"
+report "m14-mirror-first-discovery" "v1.8.123" "$tag"
+report "m14-no-github-api" 0 "$(grep -c 'api.github.com' "$FETCH_LOG" | tr -d ' ')"
+
+# M16 — a rerun with GitHub down never downgrades: an advertisement older
+# than the installed binary is refused, while repair of the same release and
+# an upgrade still resolve (#1737 freeze audit SEC MEDIUM-1).
+reset_mocks
+MOCK_GITHUB_DOWN=1
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+write_installed_version "1.8.124"
+rc=0
+( resolve_release_tag ) >/dev/null 2>&1 || rc=$?
+report "m16-advertised-downgrade-refused" 3 "$rc"
+reset_mocks
+MOCK_GITHUB_DOWN=1
+RELEASE_MIRROR_FIRST=1
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+write_installed_version "1.8.124"
+tag="$(resolve_release_tag 2>/dev/null)" || tag=""
+report "m16-mirror-first-downgrade-refused" "" "$tag"
+reset_mocks
+MOCK_GITHUB_DOWN=1
+coordinator_base="https://coordinator.malibu.tech"
+MOCK_HEALTH_JSON='{"recommended_binary_version":"1.8.123"}'
+write_installed_version "1.8.123"
+tag="$(resolve_release_tag 2>/dev/null)"
+report "m16-same-release-repair" "v1.8.123" "$tag"
+write_installed_version "1.8.100"
+tag="$(resolve_release_tag 2>/dev/null)"
+report "m16-upgrade-allowed" "v1.8.123" "$tag"
+rm -f "$BINARY_PATH"
+
+# M15 — MACPROVIDER_RELEASE_MIRROR accepts only 0/1 and only for the
+# mirrored repository.
+reset_mocks
+RELEASE_MIRROR_FIRST=yes
+rc=0
+( validate_release_mirror_mode ) >/dev/null 2>&1 || rc=$?
+report "m15-invalid-mode" 7 "$rc"
+reset_mocks
+RELEASE_MIRROR_FIRST=1
+GITHUB_REPO="someone/fork"
+rc=0
+( validate_release_mirror_mode ) >/dev/null 2>&1 || rc=$?
+report "m15-fork-mirror-first-refused" 7 "$rc"
 
 if [ "$fail" -ne 0 ]; then
   printf '[install-version-pin-test] %d failed, %d passed\n' "$fail" "$pass" >&2

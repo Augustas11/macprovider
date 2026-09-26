@@ -65,3 +65,11 @@ PEARL_UPDATER_CATALOG_CANARY_SSH_PORT=22
 PEARL_UPDATER_CATALOG_CANARY_SSH_KEY_FILE=/etc/macprovider/pearl-updater.catalog-canary-ssh-key
 PEARL_UPDATER_CATALOG_CANARY_KNOWN_HOSTS_FILE=/etc/macprovider/pearl-updater.catalog-canary-known-hosts
 PEARL_UPDATER_CATALOG_CANARY_INSTALL_DIR=macprovider/catalog-release
+
+# #1737: before latest_binary_version moves to a new provider release, the
+# release must already be served byte-identically (signed checksums.txt) at
+# $PEARL_UPDATER_RELEASE_MIRROR_ROOT/v<version>/ so GitHub-blocked Macs can
+# install and autoupdate it. Seed it with scripts/publish-release-mirror.sh.
+# Use disabled only while no GitHub-blocked providers depend on the mirror.
+PEARL_UPDATER_RELEASE_MIRROR_GATE=required
+PEARL_UPDATER_RELEASE_MIRROR_ROOT=/var/www/malibu-download/releases
