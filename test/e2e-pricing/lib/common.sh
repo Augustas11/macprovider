@@ -56,6 +56,36 @@ e2e_checkout() { # <tag|branch|commit>: clean checkout + that tag's cached linux
   [ -z "$(git -C "$E2E_REPO" status --porcelain)" ] || e2e_die "scratch checkout of $ref is dirty"
 }
 
+# e2e_new_tag <tag> <commit>: sign + push a new scratch release tag (mirrors
+# 01-scratch-repo.sh's tag creation, minus the genesis/base-tree work — used
+# for a tag cut *after* the scratch repo already exists, e.g. V10 b-fix's
+# post-pricing-correction tag).
+e2e_new_tag() {
+  local tag="$1" commit="$2"
+  git -C "$E2E_REPO" tag -s -m "$tag (e2e scratch tag)" "$tag" "$commit"
+  git -C "$E2E_REPO" push -q origin "refs/tags/$tag"
+  git -C "$E2E_REPO" fetch -q origin
+}
+
+# e2e_build_and_release_tag <tag>: build + cache a scratch tag's linux
+# binaries and gh-release stand-in, the way 02-build.sh does for the two base
+# tags (E2E_TAG_PRE/E2E_TAG_ENABLE). Leaves the checkout back where it started.
+e2e_build_and_release_tag() {
+  local tag="$1" orig
+  orig="$(git -C "$E2E_REPO" rev-parse --abbrev-ref HEAD)"
+  grep -qx 'phase4-coordinator/dist/stats-hardware-verifier-linux-amd64' "$E2E_REPO/.git/info/exclude" ||
+    echo 'phase4-coordinator/dist/stats-hardware-verifier-linux-amd64' >>"$E2E_REPO/.git/info/exclude"
+  git -C "$E2E_REPO" checkout -q "$tag"
+  ( cd "$E2E_REPO" && make build-linux ) >"$E2E_LOGS/build-$tag.log" 2>&1 ||
+    { tail -20 "$E2E_LOGS/build-$tag.log"; e2e_die "build at $tag failed"; }
+  mkdir -p "$E2E_WORK/bins/$tag"
+  cp "$E2E_REPO"/phase4-coordinator/dist/*-linux-amd64 "$E2E_REPO"/phase5-gateway/dist/gateway-linux-amd64 "$E2E_WORK/bins/$tag/"
+  [ -z "$(git -C "$E2E_REPO" status --porcelain)" ] || e2e_die "build dirtied the checkout at $tag"
+  bash "$E2E_HARNESS/lib/make-gh-release.sh" "$tag"
+  git -C "$E2E_REPO" checkout -q "$orig" 2>/dev/null || git -C "$E2E_REPO" checkout -q main
+  e2e_log "built $tag: $(shasum -a 256 "$E2E_WORK/bins/$tag/coordinator-linux-amd64" | cut -c1-16)"
+}
+
 # ---- tunnels (the canary stand-in and the Mac-side gateway poll) --------------
 e2e_tunnel_up() {
   e2e_tunnel_down
@@ -99,6 +129,13 @@ e2e_lane_env() {
   export CATALOG_EVIDENCE_POLL_SECONDS="${CATALOG_EVIDENCE_POLL_SECONDS:-10}"
   export CATALOG_GATEWAY_RATE_CARD_URL="http://127.0.0.1:$E2E_GATEWAY_LOCAL_PORT/v1/rate-card"
   export CATALOG_GATEWAY_CONVERGENCE_SECONDS="${CATALOG_GATEWAY_CONVERGENCE_SECONDS:-420}"
+  # The VM is x86_64 under qemu TCG on an arm64 Mac: the coordinator's
+  # pre-listen startup ledger scan (24 h of request_log, ~20k rows by late in a
+  # full run) takes 10-21 min here against well under a minute on Pearl
+  # (ledger_reconciliation_runs, run3). The lane's 900 s default readiness
+  # budget is sized for Pearl; the controlled restart must not time out on
+  # emulation alone (documented deviation; semantics unchanged).
+  export CATALOG_COORDINATOR_READY_SECONDS="${CATALOG_COORDINATOR_READY_SECONDS:-3600}"
   # deploy-pearl-vps.sh
   export SSH_KEY="$E2E_KEYS/pearl_root_ed25519" VPS_HOST="$E2E_PEARL" VPS_USER=root
   e2e_guard_vm_target
@@ -148,6 +185,13 @@ e2e_load_stop() { # <name>: stop and print the summary
   vm "touch /root/e2e/load/$name/stop"
   for i in $(seq 1 90); do vm "test -f /root/e2e/load/$name/summary.json" && break; sleep 1; done
   vm "cat /root/e2e/load/$name/summary.json 2>/dev/null || echo '{\"error\":\"loadgen did not stop\"}'"
+}
+# journald on the VM rotates on every qemu clock step ("Time jumped backwards,
+# rotating") and the coordinator logs a rate_card_normalized line per scanned
+# row, so the system journal keeps well under an hour: capture the coordinator,
+# and its recovery units (systemd logs OOM kills per unit) to a file per scenario instead.
+e2e_journal_capture() { # <tag>: /root/e2e/journal-<tag>.log until the next capture
+  vm "pkill -f '^journalctl -f .*macprovider-coordinator' 2>/dev/null; nohup sh -c 'journalctl -f -n 0 -o short-iso-precise --utc -u macprovider-coordinator -u macprovider-coordinator-deploy-recovery -u macprovider-coordinator-pricing-close | grep --line-buffered -v rate_card_normalized >>/root/e2e/journal-$1.log' >/dev/null 2>&1 </dev/null &" || true
 }
 e2e_baseline() { vm "python3 /root/e2e/tools/oracle.py baseline /root/e2e/baseline-$1.json" >/dev/null; }
 e2e_oracle() { # <baseline-name> <extra args...>: prints verdict JSON, returns its status

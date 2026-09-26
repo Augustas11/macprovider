@@ -482,6 +482,46 @@ prior_on_disk "recovery after waiting for a booting coordinator"
 rm -f "$CTL/boot-delay"
 note "recovery never SIGHUPs a booting coordinator: not-ready (exit 4) or waits for /healthz, then re-HUPs"
 
+# #1693 E2 V8 run3: the lane's rollback restored the prior pair, the re-HUP
+# found the coordinator stopped, and its controlled restart booted longer than
+# the lane's readiness budget (the startup ledger scan grows with the day's
+# traffic): the lane gave up and the journal stayed `rolling-back`, which no
+# closer finishes. hand-to-closer stamps the restore before the restart, so the
+# restart's closer finalizes it from the boot record once the coordinator is up.
+setup; forward_until 8
+h phase rolling-back; h restore-disk; stop_coordinator
+rc=0; h hand-to-closer 2>/dev/null || rc=$?
+[ "$rc" = 0 ] && [ "$(phase)" = restored-unverified ] || fail "hand-to-closer must stamp restored-unverified (rc=$rc)"
+python3 -c 'import json,sys;r=json.load(open(sys.argv[1]))["restore"];assert r["boot_id"]=="boot-1" and r["nonce"] and r["monotonic_us"]>0' \
+  "$R/.pricing-txn/txn.json" || fail "hand-to-closer must record the restore stamp (boot_id, nonce, monotonic)"
+printf '3\n' >"$CTL/boot-delay"; start_coordinator
+h --close-restored --wait-seconds 1 --windows 10 2>"$T/err" || fail "the closer must finalize the handed-over journal after a slow boot: $(cat "$T/err")"
+grep -q 'window 1/10' "$T/err" || fail "the slow boot must outlast at least one closer window"
+[ ! -e "$R/.pricing-txn" ] || fail "the closer must finalize the handed-over journal"
+prior_on_disk "hand-to-closer + slow boot"
+rm -f "$CTL/boot-delay"
+# Only out of rolling-back, and only with the exact prior pair on disk.
+setup; forward_until 8
+rc=0; h hand-to-closer 2>"$T/err" || rc=$?
+[ "$rc" = 1 ] && [ "$(phase)" = verifying ] || fail "hand-to-closer must refuse a journal that is not rolling-back (rc=$rc)"
+h phase rolling-back
+rc=0; h hand-to-closer 2>"$T/err" || rc=$?
+[ "$rc" = 3 ] && [ "$(phase)" = rolling-back ] || fail "hand-to-closer must refuse while the candidate pair is on disk (rc=$rc): $(cat "$T/err")"
+# The lane finalized the handed-over journal itself while still holding its
+# lease: the closer has nothing left to close (no spurious OnFailure alert).
+setup; forward_until 8; h phase rolling-back; h restore-disk; h hand-to-closer 2>/dev/null
+stop_coordinator; start_coordinator
+[ -e "$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE" ] || { : >"$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE"; chmod 0600 "$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE"; }
+exec 8<"$MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE"; python3 -c 'import fcntl;fcntl.flock(8,fcntl.LOCK_EX)'
+( sleep 1; h phase rolled-back; h finalize prior ) 2>/dev/null &
+lane_pid=$!
+rc=0; h --close-restored --wait-seconds 5 --lock-wait-seconds 3 2>"$T/err" || rc=$?
+wait "$lane_pid"
+exec 8<&-
+[ "$rc" = 0 ] || fail "the closer must exit 0 when the lane already finalized the journal (rc=$rc): $(cat "$T/err")"
+[ ! -e "$R/.pricing-txn" ] || fail "the lane's finalize must have removed the journal"
+note "hand-to-closer: a controlled restart that outlasts the lane's budget is finalized by the closer"
+
 # ---------------------------------------------------------------------------
 # deploy-recover --pre-start and the shared guard.
 # ---------------------------------------------------------------------------

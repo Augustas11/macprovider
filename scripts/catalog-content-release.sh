@@ -1760,8 +1760,9 @@ ccr_after_rollback() {
 # an applied-config record since the rollback with the prior yaml, rate table
 # and served card digests and an advanced billing snapshot, plus the prior
 # served bytes — then the journal is finalized. A rejected re-HUP gets the
-# controlled restart (pre-start skips: this lease holds the lock set) and the
-# boot record must prove the same.
+# controlled restart (pre-start skips: this lease holds the lock set; the
+# journal is handed to the pricing closer first) and the boot record must
+# prove the same.
 pricing_prior_live() { # <since epoch> <source> [ready seconds]
   aa_lease_sh "python3 -I '$PRICING_HELPER' verify-live prior --since '$1' --source '$2' --wait-seconds '$SETTLE_SECONDS' --ready-seconds '${3:-0}'" >&3 2>&1 &&
     rollback_served_verified
@@ -1780,9 +1781,16 @@ pricing_after_rollback() {
   if [ "$CCR_FATAL_RC" = 4 ] && ! pricing_prior_live "$T_RB" sighup; then
     log "ALERT: the rollback re-HUP did not prove the prior pair live; restarting $COORDINATOR_UNIT (controlled)"
     t_restart="$(remote_now 2>/dev/null || echo "$T_RB")"
+    # E2 V8: a boot can outlast READY_SECONDS (the pre-listen startup ledger
+    # scan grows with the day's traffic). Stamp the restored prior pair first,
+    # so the restart's pricing closer finalizes the journal from the boot
+    # record once the coordinator is up, even after this lane gives up.
+    if ! aa_lease_sh "python3 -I '$PRICING_HELPER' hand-to-closer" >&3 2>&1; then
+      log "ALERT: could not hand the restored pricing journal to $COORDINATOR_UNIT's pricing closer; restarting anyway"
+    fi
     if ! aa_lease_sh "systemctl restart '$COORDINATOR_UNIT' && systemctl is-active --quiet '$COORDINATOR_UNIT'" ||
        ! pricing_prior_live "$t_restart" boot "$READY_SECONDS"; then
-      log "ALERT: controlled coordinator restart did not prove the prior pair live; the pricing journal is kept"
+      log "ALERT: controlled coordinator restart did not prove the prior pair live within ${READY_SECONDS}s; the pricing journal is kept (a restored-unverified journal is finalized by macprovider-coordinator-pricing-close.service once the boot record proves the prior pair)"
       CCR_FATAL_RC=5
     fi
   fi

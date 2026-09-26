@@ -1248,6 +1248,14 @@ def cmd_close_restored(args: dict) -> int:
         j.close()
     fds = take_locks(float(args.get("--lock-wait-seconds", "300")))
     if fds is None:
+        # A lane that handed this journal over (hand-to-closer) may still hold
+        # its lease after finalizing the journal itself: nothing left to close.
+        j = load_journal()
+        closed = j is None or j.phase != "restored-unverified" or (j.txn.get("restore") or {}).get("nonce") != nonce
+        if j is not None:
+            j.close()
+        if closed:
+            return 0
         raise Stop("could not take the lane lock set to close the restored pricing journal")
     try:
         j = load_journal()
@@ -1567,6 +1575,17 @@ def main(argv: list[str]) -> int:
             check_state(j, rest[0], a.get("--verifier"), trust_root_arg(a))
         elif cmd == "restore-disk" and not rest:
             restore_disk(j)
+        elif cmd == "hand-to-closer" and not rest:
+            # The lane's controlled restart after a rollback (#1693 E2 V8):
+            # the prior pair is already on disk, so stamp the restore exactly
+            # like a recovery with the coordinator down. The restart's closer
+            # then finalizes from the boot record however long the boot takes,
+            # also after the lane has given up on its own readiness budget.
+            if j.phase != "rolling-back":
+                raise Refused(f"hand-to-closer needs phase rolling-back, journal is {j.phase}")
+            check_state(j, "prior")
+            j.txn["restore"] = restore_stamp()
+            j.set_phase("restored-unverified")
         elif cmd == "verify-live" and rest and rest[0] in ("prior", "candidate"):
             a = parse(rest[1:], ("--since", "--source", "--snapshot-after", "--wait-seconds", "--ready-seconds"))
             # A booting coordinator writes its record only once up: wait for

@@ -14,7 +14,7 @@ set -euo pipefail
 . "$(dirname "$0")/../env.sh"
 . "$E2E_HARNESS/lib/common.sh"
 S=V8
-e2e_write_ssh_config; e2e_tunnel_up; e2e_push_tools
+e2e_write_ssh_config; e2e_tunnel_up; e2e_push_tools; e2e_journal_capture "$S${E2E_RUN:+-$E2E_RUN}"
 cases="${*:-stop lock stale}"
 n="${E2E_V8_SEQ:-$(( $(date +%s) + 17 ))}"
 live_label() { vm "python3 -c 'import json;print(json.load(open(\"/opt/macprovider/autotune/current/release.json\"))[\"release_id\"])'"; }
@@ -51,7 +51,12 @@ SH
     vm "rm -f /root/e2e/v8-$c.fired; nohup bash /root/e2e/tools/v8-$c.sh >/dev/null 2>&1 </dev/null &"
   fi
   rc=0; e2e_deploy "V8$c" "$C" --pricing-diff-sha256 "$ack" --preflight-verdict "$E2E_EVIDENCE/V8$c-verdict.json" || rc=$?
-  fired="$(vm "cat /root/e2e/v8-$c.fired 2>/dev/null")"
+  # E2E FIX: under `set -e` a plain `x=$(cmd)` assignment aborts the whole
+  # script if cmd's exit status is nonzero (e.g. the .fired marker was never
+  # written because the deploy failed before reaching the target phase, as
+  # when the lease could not be acquired at all) -- tolerate that so the
+  # remaining cases still run and this case's own result is still recorded.
+  fired="$(vm "cat /root/e2e/v8-$c.fired 2>/dev/null" || true)"
   vm 'systemctl is-active --quiet macprovider-coordinator || systemctl start macprovider-coordinator' || true
   sleep 10
   load="$(e2e_load_stop "V8$c")"

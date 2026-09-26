@@ -60,15 +60,66 @@ else
 fi
 fi
 if [ "${1:-}" != c ]; then
-# Restore the #1693 wiring with the enabling deploy (runbook fix), then
-# --host-check until it passes.
+# The naive runbook fix (re-run the enabling tag's deploy) no longer works once
+# a pricing correction is live: the enabling tag's ledger predates the
+# correction, so compare-live returns "regression" and deploy-pearl-vps.sh
+# aborts before any mutation (docs/runbooks/catalog-release-decision-tree.md
+# §Pricing runtime floor "Which tag"). First assert the documented guard: the
+# runbook says "Never use CATALOG_REGRESSION_OVERRIDE_REASON here" and the
+# script now refuses it once the floor marker exists and the tag's rows differ
+# from live.
 e2e_checkout "$E2E_TAG_ENABLE"
-rc=0; e2e_run_logged 3600 "$E2E_LOGS/V10b-restore.log" bash -c "cd '$E2E_REPO' && . '$E2E_HARNESS/env.sh' && . '$E2E_HARNESS/lib/common.sh' && e2e_lane_env && CONFIG_MODE=preserve-live FORCE_RESTART=1 bash phase4-coordinator/dist/deploy-pearl-vps.sh" || rc=$?
-hc_rc=0; e2e_run_logged 1200 "$E2E_LOGS/V10b-restore-hostcheck.log" e2e_lane --host-check --commit "$(git -C "$E2E_REPO" rev-parse "$E2E_TAG_ENABLE^{commit}")" || hc_rc=$?
-if [ "$rc" = 0 ] && [ "$hc_rc" = 0 ]; then
-  e2e_result "$S" PASS "b-fix: enabling deploy re-run rc=0, --host-check rc=0; wiring now [$(units)]"
+before="$(e2e_host_hash)"; rc=0
+e2e_run_logged 1800 "$E2E_LOGS/V10b-override.log" bash -c "cd '$E2E_REPO' && . '$E2E_HARNESS/env.sh' && . '$E2E_HARNESS/lib/common.sh' && e2e_lane_env && CONFIG_MODE=preserve-live FORCE_RESTART=1 CATALOG_REGRESSION_OVERRIDE_REASON='e2e V10 b-fix override probe' bash phase4-coordinator/dist/deploy-pearl-vps.sh" || rc=$?
+after="$(e2e_host_hash)"
+if [ "$rc" != 0 ] && grep -q 'refusing CATALOG_REGRESSION_OVERRIDE_REASON: the pricing runtime floor exists' "$E2E_LOGS/V10b-override.log" && [ "$before" = "$after" ]; then
+  e2e_result "$S" PASS "b-fix-override-refused: CATALOG_REGRESSION_OVERRIDE_REASON refused after a pricing correction (rc=$rc), host unchanged: $(grep -m1 'refusing CATALOG_REGRESSION_OVERRIDE_REASON' "$E2E_LOGS/V10b-override.log" | cut -c1-240)"
 else
-  e2e_result "$S" FAIL "b-fix: enabling deploy re-run rc=$rc ($(grep -E 'refusing|aborting|ERROR' "$E2E_LOGS/V10b-restore.log" | head -n 2 | tr '\n' '|' | cut -c1-300)); --host-check rc=$hc_rc ($(grep -E '^\{"checks"' "$E2E_LOGS/V10b-restore-hostcheck.log" | tail -n 1 | cut -c1-400))"
+  e2e_result "$S" FAIL "b-fix-override-refused: rc=$rc host_changed=$([ "$before" = "$after" ] && echo no || echo yes): $(grep -E 'aborting|refus' "$E2E_LOGS/V10b-override.log" | head -n 3 | tr '\n' '|')"
+fi
+
+# Runbook remedy: deploy a tag at or after the live release's commit (its
+# ledger then carries or equals the live release). Cut + build that tag
+# through the harness's own scripted flow (e2e_new_tag / e2e_build_and_release_tag,
+# lib/common.sh), then restore the #1693 wiring from it, then --host-check
+# until it passes.
+live="$(vm "python3 -c 'import json;print(json.load(open(\"/opt/macprovider/autotune/current/release.json\"))[\"release_id\"])'")"
+# E2E FIX: `git log -S<string> -1` returns the MOST RECENT commit whose diff
+# changes the occurrence count of that string -- but once release.json starts
+# recording an earlier release_id as provenance/history (e.g. a later
+# scenario's commit mentions the prior release in passing), that later,
+# unrelated commit also matches and -1 picks IT instead of the commit that
+# actually made $live the current release. Tagging there bakes in that LATER
+# commit's own (different) release_id, so the remedy deploy tries to activate
+# a release the operator never asked for and hits an unrelated guard
+# ("refusing coordinator-only replacement: install the signed coordinator/
+# gateway pair with macprovider-pearl-update first") instead of proving the
+# runtime-floor remedy. Filter every -S match to the one whose release.json
+# release_id field, checked out AT that commit, equals $live exactly.
+live_commit=""
+for _c in $(git -C "$E2E_REPO" log --format=%H -S"$live" origin/main -- phase3-binary/catalog/autotune/release.json); do
+  _rid="$(git -C "$E2E_REPO" show "$_c:phase3-binary/catalog/autotune/release.json" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("release_id",""))
+except Exception: print("")' 2>/dev/null)"
+  [ "$_rid" = "$live" ] || continue
+  live_commit="$_c"; break
+done
+if [ -z "$live_commit" ]; then
+  e2e_result "$S" FAIL "b-fix: no commit on origin/main carries the live release $live"
+else
+  POST_TAG=v90.2.0
+  if ! git -C "$E2E_REPO" rev-parse -q --verify "refs/tags/$POST_TAG" >/dev/null; then
+    e2e_new_tag "$POST_TAG" "$live_commit"
+    e2e_build_and_release_tag "$POST_TAG"
+  fi
+  e2e_checkout "$POST_TAG"
+  rc=0; e2e_run_logged 3600 "$E2E_LOGS/V10b-restore.log" bash -c "cd '$E2E_REPO' && . '$E2E_HARNESS/env.sh' && . '$E2E_HARNESS/lib/common.sh' && e2e_lane_env && CONFIG_MODE=preserve-live FORCE_RESTART=1 bash phase4-coordinator/dist/deploy-pearl-vps.sh" || rc=$?
+  hc_rc=0; e2e_run_logged 1200 "$E2E_LOGS/V10b-restore-hostcheck.log" e2e_lane --host-check --commit "$(git -C "$E2E_REPO" rev-parse "$POST_TAG^{commit}")" || hc_rc=$?
+  if [ "$rc" = 0 ] && [ "$hc_rc" = 0 ]; then
+    e2e_result "$S" PASS "b-fix: deploy from post-correction tag $POST_TAG (commit $live_commit carries live release $live) rc=0, --host-check rc=0; wiring now [$(units)]"
+  else
+    e2e_result "$S" FAIL "b-fix: deploy from $POST_TAG rc=$rc ($(grep -E 'refusing|aborting|ERROR' "$E2E_LOGS/V10b-restore.log" | head -n 2 | tr '\n' '|' | cut -c1-300)); --host-check rc=$hc_rc ($(grep -E '^\{"checks"' "$E2E_LOGS/V10b-restore-hostcheck.log" | tail -n 1 | cut -c1-400))"
+  fi
 fi
 e2e_checkout main
 fi

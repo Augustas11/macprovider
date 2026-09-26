@@ -18,7 +18,7 @@ set -euo pipefail
 . "$(dirname "$0")/../env.sh"
 . "$E2E_HARNESS/lib/common.sh"
 S=V9
-e2e_write_ssh_config; e2e_tunnel_up; e2e_push_tools
+e2e_write_ssh_config; e2e_tunnel_up; e2e_push_tools; e2e_journal_capture "$S${E2E_RUN:+-$E2E_RUN}"
 vm "cat > /root/e2e/tools/phase-killer.sh && chmod 700 /root/e2e/tools/phase-killer.sh" <"$E2E_HARNESS/lib/phase-killer.sh"
 vm "cat > /root/e2e/tools/synth-deploy-snapshot.sh && chmod 700 /root/e2e/tools/synth-deploy-snapshot.sh" <"$E2E_HARNESS/lib/synth-deploy-snapshot.sh"
 /usr/bin/scp -F "$E2E_SSH_CONFIG" -q "$E2E_WORK/bins/$E2E_TAG_PRE/coordinator-linux-amd64" "$E2E_PEARL:/root/e2e/coordinator-pre1693"

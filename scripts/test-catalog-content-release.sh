@@ -1715,6 +1715,25 @@ prior_pair "stop mid-verify + slow restart"
 kill -0 "$STUB_PID" 2>/dev/null || fail "E2 V8: the coordinator died"
 note "ok: E2 V8 stop mid-verify: no SIGHUP to a stopped coordinator, the slow restart is waited for, exit 4"
 
+# E2 V8 run3: the controlled restart boots longer than the lane's readiness
+# budget (the coordinator's startup ledger scan grows with the day's traffic).
+# The lane exits 5, but the journal it leaves is handed to the pricing closer
+# (restored-unverified with a restore stamp, prior pair on disk), never
+# `rolling-back`: the restart's boot record closes it without an operator.
+setup_env; touch "$CCR_TEST_CTL/stop-on-hup"; printf '12\n' >"$CCR_TEST_CTL/restart-delay"
+CATALOG_COORDINATOR_READY_SECONDS=2 runc "$PRICE_COMMIT" --deploy --pricing-diff-sha256 "$PDIFF"
+[ "$RC" -eq 5 ] || fail "E2 V8 run3: a restart slower than the readiness budget must exit 5 (rc=$RC): $(tail -n 30 "$T/out")"
+[ "$(python3 -c 'import json,sys;t=json.load(open(sys.argv[1]));print(t["phase"], bool((t.get("restore") or {}).get("nonce")))' "$CCR_FAKE/opt/macprovider/.pricing-txn/txn.json")" = "restored-unverified True" ] ||
+  fail "E2 V8 run3: the lane must hand the journal to the pricing closer (restored-unverified + restore stamp): $(cat "$CCR_FAKE/opt/macprovider/.pricing-txn/txn.json")"
+[ "$(shasum -a 256 "$YAML" | cut -d' ' -f1)" = "$PRIOR_YAML_SHA" ] || fail "E2 V8 run3: coordinator.yaml is not the prior bytes"
+live_unchanged "E2 V8 run3"
+for _ in $(seq 1 200); do grep -q 'coordinator started' "$CCR_FAKE/journal.log" && break; sleep 0.1; done
+RC=0; (cd "$R" && bash scripts/catalog-content-release.sh --recover-pricing-txn) >"$T/out" 2>"$T/err" || RC=$?
+[ "$RC" -eq 0 ] || fail "E2 V8 run3: the handed-over journal must close from the restart's boot record (rc=$RC): $(tail -n 20 "$T/out") $(tail -n 10 "$T/err")"
+prior_pair "E2 V8 run3 handed-over journal"
+git -C "$R" update-ref refs/remotes/origin/main "$COMMIT"
+note "ok: E2 V8 run3: a restart slower than the budget leaves a closer-owned restored-unverified journal, closed by the boot record"
+
 # V8 bug 3: --recover-pricing-txn against a coordinator still booting (its
 # SIGHUP handler not yet installed) waits for /healthz, never kills it.
 setup_env
