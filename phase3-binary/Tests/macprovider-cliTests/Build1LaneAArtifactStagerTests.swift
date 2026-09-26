@@ -202,6 +202,11 @@ final class Build1LaneAArtifactStagerTests: XCTestCase {
         XCTAssertThrowsError(try session.record(authority: otherRevision, adoptedSHA256: otherRevision.hash, adoptedBytes: 1)) { error in
             XCTAssertEqual(error as? Build1LaneAPreparationRecordError, .adoptedArtifactMismatch)
         }
+        var unsupportedProfile = authority
+        unsupportedProfile.catalogKey = "other/model-key"
+        XCTAssertThrowsError(try session.record(authority: unsupportedProfile, adoptedSHA256: unsupportedProfile.hash, adoptedBytes: 1)) { error in
+            XCTAssertEqual(error as? Build1LaneAPreparationRecordError, .adoptedArtifactMismatch)
+        }
         session.close()
         XCTAssertFalse(FileManager.default.fileExists(atPath: privateInventoryURL(durable: roots.durable).path))
         let objects = roots.durable
@@ -270,9 +275,11 @@ final class Build1LaneAArtifactStagerTests: XCTestCase {
         let seed = try tempDir()
         try Data(payload.utf8).write(to: seed.appendingPathComponent("weights.bin"))
         _ = try store.adoptVerifiedStaging(staging: seed, modelID: authority.modelID, revision: authority.revision, sha256: authority.hash)
-        // The deadline is still ahead when staging starts and is already past
-        // by the time the reuse path reaches the commit boundary.
-        let deadline = Date(timeIntervalSinceNow: 0.15)
+        // Leave enough headroom for this test process to bootstrap its private
+        // store even when the suite runs every test in parallel. The progress
+        // callback then deterministically carries execution past the deadline
+        // at the post-adoption commit boundary.
+        let deadline = Date(timeIntervalSinceNow: 5)
         let stager = Build1LaneAArtifactStager(
             resolver: CachedModelArtifactResolver(hubRoot: roots.hub, durableRoot: roots.durable, downloader: Self.refusingDownloader()),
             reauthorize: { authority },
@@ -361,9 +368,8 @@ final class Build1LaneAArtifactStagerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: privateInventoryURL(durable: roots.durable)), before)
     }
 
-    func testReuseRefusesRecordedTupleWhoseIdentityFeedSizeOrBytesDiffer() async throws {
+    func testReuseRefusesRecordedTupleWhoseFeedSizeOrBytesDiffer() async throws {
         let cases: [(String, (inout Build1LaneAArtifactAuthority) -> Void, Int64?)] = [
-            ("event key", { $0.catalogKey = "other/model-key" }, nil),
             ("feed size", { $0.sizeBytes = 999_999 }, nil),
             ("measured bytes", { _ in }, 5),
         ]
@@ -375,8 +381,7 @@ final class Build1LaneAArtifactStagerTests: XCTestCase {
             try Data(payload.utf8).write(to: seed.appendingPathComponent("weights.bin"))
             _ = try store.adoptVerifiedStaging(staging: seed, modelID: authority.modelID, revision: authority.revision, sha256: authority.hash)
             // Seed a record that binds to the same artifact identity fields but
-            // was made under a different Lane A identity, feed size, or
-            // measured byte count.
+            // was made with a different feed size or measured byte count.
             var seeded = authority
             mutate(&seeded)
             let recorder = Build1LaneAPreparationRecorder(durableRoot: roots.durable)
@@ -516,6 +521,7 @@ final class Build1LaneAArtifactStagerTests: XCTestCase {
         let seed = try tempDir()
         try Data(payload.utf8).write(to: seed.appendingPathComponent("weights.bin"))
         _ = try store.adoptVerifiedStaging(staging: seed, modelID: authority.modelID, revision: authority.revision, sha256: authority.hash)
+        let reauthorizationCount = Build1LaneACounter()
         let stager = Build1LaneAArtifactStager(
             resolver: CachedModelArtifactResolver(
                 hubRoot: roots.hub,
@@ -523,7 +529,7 @@ final class Build1LaneAArtifactStagerTests: XCTestCase {
                 downloader: Self.refusingDownloader()
             ),
             reauthorize: {
-                XCTFail("reuse must not re-resolve authority")
+                reauthorizationCount.increment()
                 return authority
             },
             diskProbe: { _ in
@@ -536,6 +542,7 @@ final class Build1LaneAArtifactStagerTests: XCTestCase {
         let result = try await stager.stageAndAdopt(authority: authority) { stage, _, _ in stages.append(stage) }
 
         XCTAssertTrue(result.reusedDurableArtifact)
+        XCTAssertEqual(reauthorizationCount.value, 1, "reuse must reauthorize immediately before recording publication")
         XCTAssertEqual(result.adoptedBytes, Int64(payload.utf8.count))
         XCTAssertEqual(stages, [.verified, .adopted])
     }
