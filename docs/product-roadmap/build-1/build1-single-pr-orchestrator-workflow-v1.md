@@ -10,11 +10,11 @@ then merge once.
 
 `build1-control-recovery-plan-v2.md` is authoritative where it conflicts with
 this workflow. PR #1658 is being rebuilt from current `origin/main`; its former
-branch head is recovery input, not merge authority. The Llama tuple is a
-plumbing control only, and final acceptance requires a pinned
-non-catalog/private tuple. Superseded coordinator commits and stale conformance
-evidence must not be replayed. A locally built or unsigned CLI must not connect
-to the live Malibu coordinator.
+branch head is recovery input, not merge authority. The Llama tuple is
+regression-only and must not receive a physical campaign. Execution and final
+acceptance use the pinned non-catalog OrcaRouter tuple from v2. Superseded
+coordinator commits and stale conformance evidence must not be replayed. A
+locally built or unsigned CLI must not connect to the live Malibu coordinator.
 
 ## Decision
 
@@ -217,9 +217,9 @@ Rules:
   auditable, scoped to Lane A, and cleaned up or withdrawn after evidence
   capture.
 - Do not touch secrets or operator key material.
-- Treat Lane A's exact Llama 3B tuple as plumbing-control evidence only. Do not
-  add a private acceptance tuple unless the orchestrator supplies the pinned
-  tuple and assigns the M2/M3 milestone from the v2 recovery plan.
+- Treat Lane A's exact Llama 3B tuple as regression-only and do not run it on
+  physical hardware. Use the pinned OrcaRouter tuple only when the orchestrator
+  assigns the M2/M3 milestone from the v2 recovery plan.
 - Use existing repo patterns and targeted tests.
 - Return a summary, changed files, tests run, remaining risks, and any scope
   pressure. If you push or commit, report the exact commit SHA.

@@ -2,8 +2,8 @@
 
 Status: plumbing-control test spec. Passing the Llama-specific checks in this
 document does not satisfy final Build 1 acceptance;
-`build1-control-recovery-plan-v2.md` requires a pinned non-catalog/private tuple
-for the physical acceptance bundle.
+`build1-control-recovery-plan-v2.md` defines the pinned OrcaRouter tuple for the
+physical acceptance bundle. Llama must not receive a physical campaign.
 Date: 2026-09-15.
 Branch: `codex/build1-lane-a-provider-path`.
 Base: `origin/main` at `e7213fa1`.
