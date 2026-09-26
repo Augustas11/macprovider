@@ -40,13 +40,13 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-029 | Sweep Workload-Class Stratification | 0.1-draft | draft | pending | pending corpus migration | [SPEC-029-sweep-workload-class-stratification.md](SPEC-029-sweep-workload-class-stratification.md) |
 | SPEC-030 | Losslessness Probe | v0.1 | draft | pending | pending corpus migration | [SPEC-030-losslessness-probe.md](SPEC-030-losslessness-probe.md) |
 | SPEC-031 | Canary Probe, Degrade & Sanction Lifecycle | v0.2 | draft | pending | pending corpus migration | [SPEC-031-canary-degrade-sanctions.md](SPEC-031-canary-degrade-sanctions.md) |
-| SPEC-032 | Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary | v0.3.1 | draft | complete | conformant: 2, pending: 2 | [SPEC-032-proof-of-weights-hello-gate.md](SPEC-032-proof-of-weights-hello-gate.md) |
+| SPEC-032 | Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary | v0.3.3 | draft | complete | conformant: 2, pending: 2 | [SPEC-032-proof-of-weights-hello-gate.md](SPEC-032-proof-of-weights-hello-gate.md) |
 | SPEC-033 | Hardware-Evidence Verifier (`hardware-verifier.v2`) | v0.6.3 | draft | pending | conformant: 1 | [SPEC-033-hardware-verifier.md](SPEC-033-hardware-verifier.md) |
 | SPEC-034 | Referral admission, provider invites, and advocacy rewards | v0.4.7 | normative | pending | conformant: 1 | [SPEC-034-referral-gated-prebeta.md](SPEC-034-referral-gated-prebeta.md) |
 | SPEC-035 | Provider connection diagnostics and failure history | v0.4.3 | draft | complete | pending: 13 | [SPEC-035-provider-connection-diagnostics.md](SPEC-035-provider-connection-diagnostics.md) |
 | SPEC-036 | Compute-Integrity Receipt Companion | v0.1.1 | draft | complete | pending: 17 | [SPEC-036-compute-integrity-receipt.md](SPEC-036-compute-integrity-receipt.md) |
 | SPEC-037 | KV survival across provider restarts (encrypted provider-local disk tier) | v0.1.4 | draft | complete | pending: 13 | [SPEC-037-kv-survival-restart.md](SPEC-037-kv-survival-restart.md) |
-| SPEC-038 | Continuous batching for concurrent provider inference | v0.2.10 | draft | complete | pending: 17 | [SPEC-038-continuous-batching.md](SPEC-038-continuous-batching.md) |
+| SPEC-038 | Continuous batching for concurrent provider inference | v0.2.15 | draft | complete | pending: 17 | [SPEC-038-continuous-batching.md](SPEC-038-continuous-batching.md) |
 | SPEC-039 | Paged KV / paged-attention engine | v0.1.6 | draft | complete | pending: 14 | [SPEC-039-paged-kv-attention-engine.md](SPEC-039-paged-kv-attention-engine.md) |
 | SPEC-040 | Wallet-Native Buyer Sessions | 0.1.9 | draft | complete | pending: 10 | [SPEC-040-wallet-native-buyer-sessions.md](SPEC-040-wallet-native-buyer-sessions.md) |
 | SPEC-041 | Relay-Blind Request Encryption | 0.2.0 | draft | complete | pending: 8 | [SPEC-041-relay-blind-request-encryption.md](SPEC-041-relay-blind-request-encryption.md) |

@@ -1,6 +1,16 @@
 # SPEC-032 — Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary
 
-**Status:** v0.3.1-draft
+**Status:** v0.3.3-draft
+**Amendment (v0.3.3, Gate A5 source-review boundary):** Gate A5 is limited to
+predeclared focal row-zero observations and requires an independently signed
+post-collection source review. Counter success is not an unqualified all-row
+continuous-batching result and is insufficient without manual custody/review.
+**Amendment (v0.3.2, Gate A5 boundary clarification):** FR-PW2 explicitly
+distinguishes an offline, manual release-quality decision about the continuous-
+batching feature implementation from prohibited provider/model tier, routing,
+punitive, and money-path enforcement. Aggregated authenticated OPoI observations
+may inform that feature review; the signal remains non-weight-binding and cannot
+act on a provider, model tier, live request, or live configuration.
 **Amendment (v0.2.6, #1569):** FR-HG8 exempts SPEC-046 BYOM loopback `runtime_source`
 models from the catalog proof-of-weights hard-close; they admit as non-earning,
 route-excluded `admission_sandboxed` sessions governed by SPEC-047. Reconciles this gate
@@ -465,6 +475,22 @@ it already has a defined operator-observability consumer — it is JSON-exported
 proof-of-weights implementation runbook defines it as a `/poolz` export). This spec
 makes that observability-only status a **deliberate guarantee ceiling** rather than an
 accident; the flag is not dead state.
+
+This ceiling does not prohibit an offline, manual release-quality review from
+using a predeclared, authenticated aggregate of paired batch/serial OPoI
+observations to decide whether the **continuous-batching implementation itself**
+is mature enough to be proposed as a default in a future reviewed release. That
+is a feature-quality decision, not provider trust or provider/model tier
+promotion. Such evidence MUST NOT automatically change configuration, target or
+classify an individual provider, alter provider/model tier or admission, route or
+reject a request, trigger degrade/sanction, or affect payout, billing, receipts,
+or settlement. It does not become proof of weights and MUST NOT be described as
+weight-binding evidence. SPEC-038 Gate A5 is the sole current use of this narrow
+offline feature-review allowance. Its counter covers only predeclared focal
+row-zero observations; companion outcomes are audit/membership evidence, not
+metric observations. Reviewer custody, source-review quality, seed commitment,
+and append-only receipt timing remain manual external trust assumptions and are
+not proven by counter success.
 
 **FR-PW3 — What a real proof-of-weights test must provide (deferred).** A mechanism
 may be called "proof-of-weights" only if it **binds the provider's output to the

@@ -918,7 +918,7 @@
     {
       "spec_id": "SPEC-032",
       "title": "Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary",
-      "version": "v0.3.1",
+      "version": "v0.3.3",
       "path": "specs/SPEC-032-proof-of-weights-hello-gate.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1099,7 +1099,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.2.10",
+      "version": "v0.2.15",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1114,6 +1114,7 @@
         "SPEC-023",
         "SPEC-024",
         "SPEC-028",
+        "SPEC-032",
         "SPEC-037",
         "SPEC-039"
       ],

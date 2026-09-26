@@ -210,6 +210,33 @@ long-prompt traffic is limited by prefill, not by batching.
 - Failures: 0 forward or prefill failures.
 - Startup probes: parity established, batched isolation proven.
 
+## Live production, end to end from a remote client (2026-09-26)
+
+The live `:8080` provider after the #1742 cut (binary `3dc6bd356af0e791`,
+launchd `ProcessType` `Standard`, priority 20, CB `canary` with 8 slots) was
+measured from a remote client through the OpenAI-compatible endpoint,
+streaming. Prompts were about 1.5k tokens and each request asked for 300
+output tokens. First-token times include about 1 s of network.
+
+| Sampling | Concurrent requests | Aggregate tok/s | Per-request decode tok/s | First token p50 / p95 |
+| --- | --- | --- | --- | --- |
+| Greedy | 1 | 19.7 | 35.4 | 6.8 s / 7.1 s |
+| Greedy | 2 | 26.3 | 23.6 | 11.9 s / 13.3 s |
+| Greedy | 4 | 29.4 | 11.8 | 16.0 s / 26.1 s |
+| Temperature 0.7 | 4 | 28.8 | 11.8 | 17.8 s / 25.9 s |
+
+The same measurement on v1.8.192 at `Adaptive` priority gave 13.6, 9.9 and
+11.7 tok/s aggregate at 1, 2 and 4 requests, and 15.9 at 4 sampled requests.
+
+- Sampled requests now batch at the same throughput as greedy ones.
+- A single request decodes at about 35 tok/s, in line with the serial figure
+  above.
+- All 45 requests succeeded, and billed usage matched the client's token counts
+  exactly.
+- First-token time is the remaining gap. It grows with queued prompts, which is
+  the prefill scheduling work below.
+
+
 ## Next
 
 Prefill scheduling:
