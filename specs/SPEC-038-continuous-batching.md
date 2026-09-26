@@ -1,10 +1,34 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2.11
+Version: v0.2.15
 Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
+Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.2.15 (2026-09-26):** Gate A5 schema v4 binds a closed
+candidate frame and per-stratum order, derives focal row-zero events from raw
+source captures, requires an independently signed post-run source review, and
+states the manual reviewer-custody/quality/timing assumptions.
+**Change log v0.2.14 (2026-09-26):** Gate A5 now uses a schema-v3 signed
+canonical plan, independent reviewer commitment receipt, three disjoint strict
+single-principal trust roots, and a bounded raw-event bundle. A5 establishes
+future package eligibility only; production rollout is a separate review.
+**Change log v0.2.13 (2026-09-26, Gate A5 audit hardening):** FR-CB15 now
+requires a closed schema, bounded authenticated input, a complete predeclared
+sample, unique observation identities, real shared-forward versus explicit
+serial provenance, minimum sample sufficiency, an exact one-sided confidence
+bound, cryptographic evidence bindings, and atomic durable output. It also
+reconciles Gate A5 explicitly with SPEC-032: this is only an offline manual
+release-quality decision about the continuous-batching feature, never provider
+trust/tier, routing, punitive, money-path, or live-configuration enforcement.
+
+**Change log v0.2.12 (2026-09-26, Gate A5 OPoI measurement):** FR-CB15 now
+defines the paired batch/serial numerator, denominator, UTC window, exact tuple
+and challenge binding, bounded pair gap, strict `< 5%` comparison, and
+fail-closed invalid/inconclusive handling used by the offline campaign counter.
+The counter is evidence for manual promotion review only and does not change
+SPEC-032's observability-only enforcement boundary.
 v0.2.3 lets canary admit conversation-keyed first-turn / cache-miss requests
 into the scheduler. Any positive `cached_prompt_tokens` still serial-routes
 until AC-26, even when a retained FR-PKV10 paged-KV handoff exists. v0.2.2
@@ -737,12 +761,111 @@ operators is captured in a provider runbook (forward reference:
 `docs/runbooks/continuous-batching-enable-gate.md`, authored with the IMPL PR),
 analogous to the SPEC-037 KVS graduation runbook.
 
-Promotion of continuous batching to a production default for a tier (as
-distinct from an operator-enabled canary above) additionally requires the Gate
-A5 production-economics conditions (§8) to hold on measured evidence:
+Promotion of the continuous-batching implementation to release-quality default
+eligibility for a reviewed future package (as distinct from an operator-enabled
+canary above) additionally requires the Gate A5 production-economics conditions
+(§8) to hold on measured evidence:
 `sku-econ` green, material sustained provider upside (not a short burst),
-acceptable tail latency and rejection rate, and an OPoI false-positive rate
-below 5%. A tier failing any A5 condition MUST remain opt-in.
+acceptable tail latency and rejection rate, and a predeclared focal row-zero
+OPoI false-positive rate below 5%. Companion rows are membership/audit evidence,
+not observations in this metric. All-row promotion requires separate per-row
+evidence and is outside Gate A5.
+
+The OPoI input MUST use the closed, strictly typed Gate A5 schema. It MUST bind
+one campaign/provider/run, exact hardware/model/quantization/KV-mode/runtime-
+revision/binary tuple, packaged artifact and runtime-bundle digests, canonical
+evaluator and challenge-bank revisions, and raw source artifact/event digests.
+Before the window, a signer MUST sign a canonical versioned PLAN envelope
+binding schema/version, campaign/provider/run, exact tuple, artifact/runtime
+digests, evaluator/challenge-bank revisions, window, maximum gap, sampling
+design, a closed canonical candidate-frame manifest, and the complete scheduled
+manifest. Each frame entry binds challenge ID, workload stratum, and challenge-
+payload digest; duplicate identities and undeclared strata fail. The counter
+MUST recompute SHA-256 ranking without replacement from the full frame, signed
+seed, and frame revision and require scheduled focal challenges to equal the
+derived selection. Arm order MUST derive from seed/stratum plus the within-
+stratum ordinal and be balanced within every stratum (difference at most one).
+Reviewer-controlled seed custody and commitment before plan signing is an
+external manual control, not something the counter establishes. Completed evidence MUST reproduce
+that exact plan byte-for-byte. A separate reviewer principal MUST sign a
+commitment receipt binding its SHA-256 and a time before `window.start`; the
+receipt requires reviewer-controlled append-only retention. Pair, request,
+challenge-issuance, and event identities for both measured arms and every
+companion MUST be predeclared; canonical event digests are post-collection
+evidence. Missing, extra, duplicate, replayed, or unscheduled observations fail
+closed. The raw-event identity set MUST exactly equal the predeclared event set,
+with every identity occurring exactly once. The window MUST be positive and no
+longer than 3,600 seconds; the declared positive pair gap MUST be no greater
+than 60 seconds. There MUST be between 60 and 4,096 scheduled pairs and at
+least 60 eligible pairs. Each arm MUST occur within the declared pair gap of
+its signed scheduled time.
+
+The counter MUST read a bounded raw source-capture bundle and recompute its exact
+file digest. Every event has one immutable closed capture with a unique stable
+locator, actual bounded challenge payload and response transcript with digests,
+a closed evaluator output (`pass` or `fail`) and evaluator revisions, runtime
+mode/forward/membership, artifact/runtime/campaign provenance, identities, and
+observed time. The counter derives normalized `opoi_pass` solely from that
+closed evaluator output and requires completed evidence to equal it;
+duplicate normalized assertions are not a source of truth. Each eligible
+observation is one recorded focal row-zero batching attempt paired with
+an explicit serial control for the same signed binding and challenge issuance.
+The batching evidence MUST identify one globally unique measured shared forward
+with a complete membership record of the declared row count, distinct event/
+request identities and row indexes, the measured row, and at least one explicit
+predeclared companion. Companion source events MUST carry the identical full
+membership record while `execution.row_index` equals their own scheduled row and
+their own member entry matches. The
+control evidence MUST identify serial execution with one row and no shared-
+forward ID. Both UTC timestamps MUST fall in the declared half-open window and
+within the declared gap. Observations MUST follow the predeclared strict arm
+order: `batch_then_serial` means batch time is earlier than serial time, and
+`serial_then_batch` means serial time is earlier than batch time; equality
+fails. Every companion event MUST bind the plan campaign, tuple, artifact,
+evaluator, pair and challenge issuance, its own scheduled challenge, workload,
+request and event identities, the `batch_companion` arm, a closed evaluator
+output, and the identical complete batch membership record. Derived companion
+`opoi_pass` MUST NOT affect the paired numerator or denominator. The denominator
+is all otherwise-valid focal row-zero pairs whose
+serial control passes; the numerator is the subset whose batching attempt fails.
+Batch fail plus serial fail and batch pass plus serial fail are inconclusive and
+count in neither. Any invalid or inconclusive pair fails the measurement closed.
+
+The comparison is strict (`numerator / denominator < 0.05`), so exactly 5%
+fails. In addition, the one-sided exact Clopper-Pearson 95% upper confidence
+bound MUST be below 5%. The counter MUST derive classification from paired
+outcomes rather than accept a precomputed false-positive flag. It MUST reject
+duplicate JSON keys, unknown object fields, Boolean versions, non-finite values,
+completed file/stdin input above 4 MiB, raw-event bundles above 8 MiB, or over-
+limit line, string, nesting, pair, or report sizes, and non-regular file inputs.
+After collection, the independent reviewer MUST sign a closed source-review
+object under a distinct namespace. It binds plan SHA-256, exact raw-bundle file
+SHA-256, reviewer identity/role, review time, and an `approved` disposition.
+Reviewer custody, review quality, append-only receipt timing, and seed commitment
+are manual external trust assumptions. Counter success alone does not satisfy
+Gate A5; final manual review MUST record those facts and the signed source review.
+The evidence-custodian signature MUST cover the source-review object. The deterministic report MUST bind with SHA-256 the
+canonical input, sampling manifest, counter source/revision, authenticated
+detached signatures and reviewer trust file, and raw source artifact/event
+digests. A success exit MUST occur only after create-only atomic durable output
+completes; a broken output stream MUST be non-success.
+
+Authenticity MUST use `/usr/bin/ssh-keygen` detached verification checked against
+strict single-principal trust files for the plan author, independent reviewer,
+and evidence custodian. The reviewer key signs both the pre-window receipt and
+post-run source review under separate namespaces and its key/append-only store
+remain reviewer-controlled. The exact key fingerprints MUST be recorded, and any
+equality across the three roles MUST be rejected. Wildcards, options, multiple
+principals, and ambiguous trust syntax are forbidden. Private signing material
+MUST NOT reside in the repository or evidence bundle. This is offline evidence
+for a manual
+release-quality decision about the continuous-batching feature implementation.
+It MUST NOT promote or demote a provider/model tier, mutate live configuration,
+or feed admission, coordinator/provider routing, degrade/sanction, payout,
+billing, receipts, settlement, or any other money/live-provider behavior.
+SPEC-032 FR-PW2/FR-TD1 remains authoritative, and the OPoI observation remains
+non-weight-binding. Failure keeps the feature in its experimental/default-off
+release posture; it does not act on any provider or request.
 
 ### FR-CB16 - SPEC-039 boundary and MoE scheduler obligations (SPEC-038-R016)
 
@@ -837,9 +960,10 @@ buyer traffic.
 The flag has the three states carried by the PR #804 scaffold: **`off`**
 (default, inert serial-identical), **`canary`** (operator-enabled above serial,
 reason-coded, not a production default until Gate A5 / FR-CB15), and **`on`**
-(the production-default state a tier reaches only after Gate A5). `canary` and
-`on` share the same serving path; they differ only in whether the tier has met
-the A5 production-economics conditions (FR-CB15, §8).
+(a production-default state reached only by a separate reviewed release and
+configuration decision after all evidence gates). Gate A5 never drives an
+OPoI-based provider/model-tier transition. `canary` and `on` share the serving
+path; rollout authority remains separate from A5 (FR-CB15, §8).
 
 | Draft model (SPEC-028) | Flag | Entry 110 depth | Local batching capability | Result |
 |---|---|---:|---|---|
