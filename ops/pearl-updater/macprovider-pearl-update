@@ -200,6 +200,12 @@ CANARY_LEGACY_ENABLE_GATE = Path("/etc/macprovider/canary-buyer.enabled")
 CANARY_DISABLE_SENTINEL = Path("/var/lib/macprovider-canary-buyer/DISABLED")
 CANARY_DISABLE_STATE_DIRECTORY = Path("/var/lib/private/macprovider-canary-buyer")
 BUYER_CANARY_MODE_REQUIRED = "required"
+# #1737: Macs that cannot reach GitHub install and autoupdate exactly the
+# advertised latest_binary_version from download.malibu.tech/releases/<tag>/
+# (SPEC-003-R004). The advertisement must never move to a tag the mirror
+# cannot serve.
+RELEASE_MIRROR_GATE_REQUIRED = "required"
+RELEASE_MIRROR_GATE_DISABLED = "disabled"
 BUYER_CANARY_MODE_DISABLED = "disabled"
 BUYER_CANARY_DISABLED_AUTHORITY = "hard-disabled-posture-v1"
 BUYER_CANARY_MODES = frozenset(
@@ -299,6 +305,8 @@ class Config:
     provider_admission_policy: str = ""
     minimum_pool_ready_after_rollout: int = 0
     minimum_bridge_remaining_s: int = 0
+    release_mirror_gate: str = RELEASE_MIRROR_GATE_REQUIRED
+    release_mirror_root: Path = Path("/var/www/malibu-download/releases")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -689,6 +697,8 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
         "PEARL_UPDATER_PROVIDER_ADMISSION_POLICY",
         "PEARL_UPDATER_MINIMUM_POOL_READY_AFTER_ROLLOUT",
         "PEARL_UPDATER_MINIMUM_BRIDGE_REMAINING_S",
+        "PEARL_UPDATER_RELEASE_MIRROR_GATE",
+        "PEARL_UPDATER_RELEASE_MIRROR_ROOT",
     }
     unknown = sorted(set(values) - known)
     if unknown:
@@ -769,7 +779,19 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
             0,
             86_400,
         ),
+        release_mirror_gate=release_mirror_gate_value(
+            values.get("PEARL_UPDATER_RELEASE_MIRROR_GATE", RELEASE_MIRROR_GATE_REQUIRED)
+        ),
+        release_mirror_root=Path(
+            values.get("PEARL_UPDATER_RELEASE_MIRROR_ROOT", "/var/www/malibu-download/releases")
+        ),
     )
+
+
+def release_mirror_gate_value(value: str) -> str:
+    if value not in (RELEASE_MIRROR_GATE_REQUIRED, RELEASE_MIRROR_GATE_DISABLED):
+        raise UpdateError("PEARL_UPDATER_RELEASE_MIRROR_GATE must be required or disabled")
+    return value
 
 
 def sha256_file(path: Path) -> str:
@@ -1282,6 +1304,73 @@ class Updater:
         finally:
             os.close(descriptor)
             key_snapshot.unlink(missing_ok=True)
+
+    def assert_release_mirrored(self, version: str) -> None:
+        """Refuse to advertise a provider release the mirror cannot serve.
+
+        The mirror must carry the updater index releases/index/<tag>.json for
+        exactly this tag (outside the tag directory, because a release may
+        ship its own asset named release.json) and, in releases/<tag>/, a
+        checksums.txt whose signature verifies under the pinned release key,
+        and every checksummed asset must be present with a matching SHA-256.
+        Files are verified from private copies so nothing is written into
+        the webroot.
+        """
+        if self.config.release_mirror_gate == RELEASE_MIRROR_GATE_DISABLED:
+            self.audit("release_mirror_gate", "disabled", provider_advertised_version=version)
+            return
+        tag = version if version.startswith("v") else f"v{version}"
+        if not ASSET_RE.fullmatch(tag):
+            raise UpdateError(f"release mirror: invalid provider release tag {tag!r}")
+        directory = self.config.release_mirror_root / tag
+        if directory.is_symlink() or not directory.is_dir():
+            raise UpdateError(f"release mirror has no {tag} directory; run scripts/publish-release-mirror.sh --tag {tag}")
+
+        def private_copy(name: str, into: Path, limit: int | None = None, source: Path | None = None) -> Path:
+            source = source if source is not None else directory / name
+            if source.is_symlink() or not source.is_file():
+                raise UpdateError(f"release mirror {tag} is missing {name}")
+            if limit is not None and source.stat().st_size > limit:
+                raise UpdateError(f"release mirror {tag} {name} is oversized")
+            target = into / name
+            shutil.copyfile(source, target)
+            return target
+
+        with tempfile.TemporaryDirectory(prefix="pearl-release-mirror-") as tmp:
+            scratch = Path(tmp)
+            release_json = private_copy(
+                "index.json",
+                scratch,
+                256 * 1024,
+                source=self.config.release_mirror_root / "index" / f"{tag}.json",
+            )
+            try:
+                listing = json.loads(release_json.read_text(encoding="utf-8"))
+            except (ValueError, OSError) as exc:
+                raise UpdateError(f"release mirror {tag} updater index is invalid") from exc
+            if not isinstance(listing, dict) or listing.get("tag_name") != tag:
+                raise UpdateError(f"release mirror {tag} updater index names another tag")
+            assets = listing.get("assets")
+            if not isinstance(assets, list):
+                raise UpdateError(f"release mirror {tag} updater index has no asset list")
+            listed = {
+                asset["name"]
+                for asset in assets
+                if isinstance(asset, dict) and isinstance(asset.get("name"), str)
+            }
+            checksums = private_copy("checksums.txt", scratch, 1024 * 1024)
+            signature = private_copy("checksums.txt.sig", scratch, 4 * 1024)
+            self.verify_signature(checksums, signature)
+            expected = parse_checksums(checksums)
+            if not expected:
+                raise UpdateError(f"release mirror {tag} checksums.txt is empty")
+            for name, digest in expected.items():
+                if name not in listed:
+                    raise UpdateError(f"release mirror {tag} updater index does not list {name}")
+                source = directory / name
+                if source.is_symlink() or not source.is_file() or sha256_file(source) != digest:
+                    raise UpdateError(f"release mirror {tag} {name} is missing or does not match checksums.txt")
+        self.audit("release_mirror_gate", "verified", provider_advertised_version=version, release_mirror_tag=tag)
 
     def release_tags(self) -> list[str]:
         url = f"https://api.github.com/repos/{PINNED_REPOSITORY}/releases?per_page=30"
@@ -2739,6 +2828,8 @@ class Updater:
         bridge_deadline: str | None = None
         next_version = previous
         if release.catalog is not None:
+            if release.provider_advertised_version != previous:
+                self.assert_release_mirrored(release.provider_advertised_version)
             lines[index] = f'{match.group(1)}"{release.provider_advertised_version}"{match.group(5)}{match.group(6) or ""}'
             next_version = release.provider_advertised_version
             if self.config.provider_admission_policy != release.provider_admission_rollout.mode:

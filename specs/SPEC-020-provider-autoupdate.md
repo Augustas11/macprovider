@@ -1,6 +1,6 @@
 # SPEC-020 - Provider autoupdate
 
-Version: v0.1.19
+Version: v0.1.20
 Status: Normative; coordinator-independent recovery is reconciled and
 implementation remains nonconformant under issue #610. The production path ran
 the 2026-07-10 incident-recovery
@@ -405,6 +405,27 @@ cooldown for that normalized target. When the release tag exists but the require
 tarball, checksum, or signature asset is missing, the provider MUST emit
 `failure_class:"release_asset_missing"`, perform no download, and enter
 cooldown for that normalized target.
+
+**SPEC-020-R006 — Release mirror for tag resolution (v0.1.20, #1737).** When
+the GitHub release-by-tag request of R-1.4 fails for any reason other than a
+404, the provider MUST read the same tag from the SPEC-003-R004 release mirror
+(`release-mirror` authority domain, owned by SPEC-003; this requirement does not
+restate its layout or publication rules). It MUST reject a mirror listing
+whose tag differs from the requested tag or whose asset URL leaves that tag's
+mirror directory, and MUST then apply exactly the GitHub-release checks: the
+same required assets, checksum signature, compatibility artifact index, staged
+binary version, code-signing identity, and Malibu bundle checks, so the mirror
+host is never an authority. A GitHub 404 stays authoritative
+(`target_release_not_found`); when the mirror also fails, the GitHub error is
+reported. Signed release discovery (SPEC-020-R001) keeps its GitHub-only
+transport, because its immutability check is a GitHub attestation the mirror
+cannot provide. When a manual `update` cannot reach that discovery at all (a
+transport failure or a non-404 status; never a replayed, equivocating,
+expired, or invalid head), it MUST take its target from the configured
+coordinator's `/healthz` `recommended_binary_version` (the SPEC-003-R004
+contract) over the coordinator's own TLS endpoint, install it only when it is
+newer than the installed release, apply the persisted signed policy floor and revocations,
+and install that tag through the path above.
 
 R-1.5. The provider MUST attempt at most one autoupdate per coordinator session
 per target version. A reconnect that repeats the same target version MUST honor
@@ -1526,6 +1547,14 @@ Deferred to v0.3.0 or later:
 
 ## Change log
 
+- v0.1.20 (2026-09-25): SPEC-020-R006 release mirror for tag resolution
+  (#1737). Providers in mainland China cannot reach api.github.com or
+  github.com release assets, so coordinator-triggered autoupdate falls back to
+  the byte-identical `download.malibu.tech/releases/<tag>/` mirror, and a
+  manual `update` (also Malibu's Update button) whose GitHub discovery cannot be
+  reached installs the configured coordinator's advertised release through it. The signature, checksum,
+  artifact-index, version, and code-identity checks are unchanged and remain
+  the only authority. Discovery (R001) stays GitHub-only.
 - v0.1.19 (2026-09-08): Trust-table amendment: coordinator wire tier `trusted`
   is autoupdate-eligible on the same encrypted-leg, attestation, and token
   guards as `pinned`. Closes the production skip where MALIBU-verified

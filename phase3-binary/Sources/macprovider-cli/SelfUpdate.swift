@@ -42,6 +42,13 @@ private enum ReleaseSignatureEncoding {
 
 struct SelfUpdate {
     static let defaultReleasesAPIURL = "https://api.github.com/repos/Augustas11/macprovider/releases/latest"
+    /// Byte-identical copies of each GitHub release, for hosts that cannot
+    /// reach GitHub (#1737). Only tag-addressed releases are read from here;
+    /// the checksum signature, artifact index, code identity, and version
+    /// checks stay the authority, so the mirror host is untrusted.
+    static let releaseMirrorHost = "download.malibu.tech"
+    static let releaseMirrorPathPrefix = "/releases/"
+    static let maxReleaseMirrorMetadataBytes = 256 * 1_024
     static let launchdLabel = "live.malibu.provider"
     static let watchdogLaunchdLabel = "live.malibu.provider-watchdog"
     static let providerReloadLaunchdLabel = "\(launchdLabel)-compatibility-reload"
@@ -111,6 +118,10 @@ struct SelfUpdate {
 
     private let currentVersion: String
     private let releasesAPIURL: String
+    private let releaseMirrorEnabled: Bool
+    /// The configured coordinator's `/healthz`, used only when GitHub release
+    /// discovery cannot be reached (#1737).
+    private let coordinatorHealthzURL: URL?
     private let session: URLSession
     private let drainBeforeReplace: (() async throws -> Void)?
     private let replaceBinary: ((URL) throws -> Void)?
@@ -128,6 +139,8 @@ struct SelfUpdate {
     init(
         currentVersion: String,
         releasesAPIURL: String?,
+        releaseMirrorEnabled: Bool? = nil,
+        coordinatorURL: String? = nil,
         session: URLSession = .shared,
         markerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore(),
         drainBeforeReplace: (() async throws -> Void)? = nil,
@@ -144,6 +157,11 @@ struct SelfUpdate {
     ) {
         self.currentVersion = currentVersion
         self.releasesAPIURL = releasesAPIURL ?? Self.defaultReleasesAPIURL
+        // The mirror only carries the default repository's releases; a fork
+        // or staging releases API never falls through to it (SPEC-003-R003).
+        self.releaseMirrorEnabled = releaseMirrorEnabled
+            ?? ((releasesAPIURL ?? Self.defaultReleasesAPIURL) == Self.defaultReleasesAPIURL)
+        self.coordinatorHealthzURL = DoctorRunner.healthzURL(coordinatorURL: coordinatorURL)
         self.session = session
         self.markerStore = markerStore
         self.drainBeforeReplace = drainBeforeReplace
@@ -164,7 +182,105 @@ struct SelfUpdate {
         // sibling compatibility-set.json is reachable via symlink resolution
         // (#616 / #610 physical matrix J1/J4).
         _ = try markerStore.ensurePathEntrypointMatchesInstallAuthority()
-        let head = try await discoverSignedReleaseHead()
+        let head: SignedReleaseDiscoveryHead
+        do {
+            head = try await discoverSignedReleaseHead()
+        } catch let discoveryError {
+            guard Self.discoveryFailureAllowsCoordinatorFallback(discoveryError),
+                  !Task.isCancelled,
+                  releaseMirrorEnabled,
+                  coordinatorHealthzURL != nil
+            else {
+                throw discoveryError
+            }
+            let target: String
+            do {
+                target = try await coordinatorAdvertisedReleaseVersion()
+            } catch {
+                // The coordinator was only a fallback; the GitHub failure is
+                // the cause the user can act on.
+                FileHandle.standardError.write(Data(
+                    "The coordinator-advertised release is also unavailable: \(error)\n".utf8
+                ))
+                throw discoveryError
+            }
+            FileHandle.standardError.write(Data(
+                "GitHub release discovery is unreachable; using the coordinator-advertised release v\(target) from the release mirror.\n".utf8
+            ))
+            try await runCoordinatorAdvertised(target: target, checkOnly: checkOnly)
+            return
+        }
+        try await run(checkOnly: checkOnly, head: head)
+    }
+
+    /// Only a transport failure or a non-404 HTTP status falls back. A
+    /// replayed, equivocating, expired, or invalid discovery head is a
+    /// security signal and is never bypassed.
+    static func discoveryFailureAllowsCoordinatorFallback(_ error: Error) -> Bool {
+        if let urlError = error as? URLError {
+            return urlError.code != .cancelled
+        }
+        if case UpdateError.httpStatus(let status) = error {
+            return status != 404
+        }
+        return false
+    }
+
+    /// The coordinator's advertised `recommended_binary_version`, read from its own
+    /// TLS endpoint. It names the release to install; the release bytes are
+    /// still accepted only through the signed checksum, artifact index,
+    /// version, and code-identity checks.
+    func coordinatorAdvertisedReleaseVersion() async throws -> String {
+        guard let url = coordinatorHealthzURL else {
+            throw UpdateError.invalidURL("coordinator /healthz")
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+            throw UpdateError.httpStatus(http.statusCode)
+        }
+        guard data.count <= 64 * 1_024,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let advertised = object["recommended_binary_version"] as? String,
+              !advertised.isEmpty
+        else {
+            throw UpdateError.invalidReleaseVersion("coordinator advertised no release")
+        }
+        return try Self.validateReleaseTag(advertised)
+    }
+
+    private func runCoordinatorAdvertised(target: String, checkOnly: Bool) async throws {
+        let installedReleaseVersion = (try? installedCompatibilitySetReleaseVersion()) ?? currentVersion
+        guard Self.compareSemver(installedReleaseVersion, target) == .orderedAscending else {
+            print("Already up to date (v\(installedReleaseVersion))")
+            return
+        }
+        try Self.requireTargetAllowedBySignedPolicy(target, policy: markerStore.effectivePolicy())
+        if checkOnly {
+            print("Update available: v\(installedReleaseVersion) -> v\(target)")
+            return
+        }
+        let release = try await resolveReleaseByTags(normalizedTarget: target)
+        let prepared = try await prepareValidatedUpdate(from: release)
+        defer { prepared.cleanup() }
+        try await applyValidatedUpdate(
+            newBinary: prepared.newBinary,
+            stagedMalibuApp: prepared.stagedMalibuApp,
+            targetVersion: prepared.compatibilityManifest.providerCLIVersion,
+            compatibilityManifest: prepared.compatibilityManifest,
+            authorityMode: nil,
+            discoveryHead: nil
+        )
+        try await persistSignedPolicyIfPresent(prepared.signedPolicy)
+        print(
+            "Update complete. Restart malibu-cli to use provider CLI "
+                + "v\(prepared.compatibilityManifest.providerCLIVersion)."
+        )
+    }
+
+    private func run(checkOnly: Bool, head: SignedReleaseDiscoveryHead) async throws {
         try await markerStore.updateSignedPolicy(
             minimum: head.signedPolicyMinimum,
             revoked: head.signedPolicyRevoked
@@ -794,7 +910,27 @@ struct SelfUpdate {
         return try JSONDecoder().decode([GitHubRelease].self, from: data)
     }
 
+    /// GitHub first. When GitHub cannot answer (transport failure or any
+    /// status but 404), read the same tag from the release mirror. A GitHub
+    /// 404 stays authoritative for "no such tag", and a mirror miss rethrows
+    /// the GitHub error so callers see the same failures as before.
     private func releaseByTag(_ tag: String) async throws -> GitHubRelease {
+        do {
+            return try await gitHubReleaseByTag(tag)
+        } catch UpdateError.releaseNotFound {
+            throw UpdateError.releaseNotFound
+        } catch {
+            guard releaseMirrorEnabled, !Task.isCancelled, !(error is CancellationError) else {
+                throw error
+            }
+            if let mirrored = try? await mirroredReleaseByTag(tag) {
+                return mirrored
+            }
+            throw error
+        }
+    }
+
+    private func gitHubReleaseByTag(_ tag: String) async throws -> GitHubRelease {
         guard let url = releaseTagURL(tag: tag) else {
             throw UpdateError.invalidURL(releasesAPIURL)
         }
@@ -812,6 +948,71 @@ struct SelfUpdate {
             }
         }
         return try JSONDecoder().decode(GitHubRelease.self, from: data)
+    }
+
+    /// `https://download.malibu.tech/releases/index/<tag>.json`: the GitHub
+    /// release object with every asset URL under `/releases/<tag>/`. The index
+    /// lives outside the tag directory because a release may itself carry an
+    /// asset named `release.json` (SPEC-003-R004).
+    private func mirroredReleaseByTag(_ tag: String) async throws -> GitHubRelease {
+        let url = try Self.releaseMirrorIndexURL(tag: tag)
+        var request = URLRequest(url: url)
+        request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
+        request.timeoutInterval = 30
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+            throw UpdateError.httpStatus(http.statusCode)
+        }
+        guard data.count <= Self.maxReleaseMirrorMetadataBytes else {
+            throw UpdateError.untrustedDownloadURL(url.absoluteString)
+        }
+        let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+        guard release.tagName == tag else {
+            throw UpdateError.invalidReleaseVersion(release.tagName)
+        }
+        let directory = try Self.releaseMirrorURL(tag: tag, file: nil).path
+        for asset in release.assets {
+            guard !asset.name.isEmpty,
+                  !asset.name.contains("/"),
+                  asset.name != "..",
+                  asset.browserDownloadURL.scheme?.lowercased() == "https",
+                  asset.browserDownloadURL.host?.lowercased() == Self.releaseMirrorHost,
+                  asset.browserDownloadURL.path == directory + "/" + asset.name
+            else {
+                throw UpdateError.untrustedDownloadURL(asset.browserDownloadURL.absoluteString)
+            }
+        }
+        return release
+    }
+
+    static func releaseMirrorIndexURL(tag: String) throws -> URL {
+        _ = try validateReleaseTag(tag)
+        guard !tag.contains("/"), !tag.contains("..") else {
+            throw UpdateError.invalidReleaseVersion(tag)
+        }
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = releaseMirrorHost
+        components.path = releaseMirrorPathPrefix + "index/" + tag + ".json"
+        guard let url = components.url else {
+            throw UpdateError.invalidURL(components.path)
+        }
+        return url
+    }
+
+    static func releaseMirrorURL(tag: String, file: String?) throws -> URL {
+        _ = try validateReleaseTag(tag)
+        guard !tag.contains("/"), !tag.contains(".."), file.map({ !$0.contains("/") && $0 != ".." }) ?? true else {
+            throw UpdateError.invalidReleaseVersion(tag)
+        }
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = releaseMirrorHost
+        components.path = releaseMirrorPathPrefix + tag + (file.map { "/" + $0 } ?? "")
+        guard let url = components.url else {
+            throw UpdateError.invalidURL(components.path)
+        }
+        return url
     }
 
     private func releaseTagURL(tag: String) -> URL? {
@@ -2260,6 +2461,14 @@ struct SelfUpdate {
     private func validateDownloadURL(_ url: URL) throws {
         guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased() else {
             throw UpdateError.untrustedDownloadURL(url.absoluteString)
+        }
+        if releaseMirrorEnabled,
+           host == Self.releaseMirrorHost,
+           url.port == nil,
+           url.path.hasPrefix(Self.releaseMirrorPathPrefix),
+           !url.path.contains("/../")
+        {
+            return
         }
         guard host == "github.com" || host.hasSuffix(".github.com") || host == "objects.githubusercontent.com" else {
             throw UpdateError.untrustedDownloadURL(url.absoluteString)

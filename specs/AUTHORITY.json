@@ -60,6 +60,18 @@
       "issue": "https://github.com/Augustas11/macprovider/issues/614"
     },
     {
+      "id": "release-mirror",
+      "owner_spec": "SPEC-003",
+      "consumers": [
+        "SPEC-002",
+        "SPEC-020"
+      ],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/1737"
+    },
+    {
       "id": "sticky-routing-identity",
       "owner_spec": "SPEC-004",
       "consumers": [

@@ -35,6 +35,19 @@ unset MACPROVIDER_BUNDLED_CLI
 unset MACPROVIDER_BUNDLED_APP
 
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
+# Issue #1737: Macs that cannot reach github.com (mainland China) fetch the same
+# release bytes from a byte-identical mirror of Augustas11/macprovider releases:
+#   $RELEASE_MIRROR_BASE/<tag>/<asset>   every GitHub release asset
+# The mirror is untrusted transport. checksums.txt.sig under the embedded key
+# stays the only authority for every byte, whichever host served it.
+RELEASE_MIRROR_BASE="https://download.malibu.tech/releases"
+RELEASE_MIRROR_REPO="Augustas11/macprovider"
+# MACPROVIDER_RELEASE_MIRROR=1 tries the mirror before GitHub (skips GitHub
+# timeouts on networks where it is known to be blocked). 0 (default) tries
+# GitHub first and falls back to the mirror on any failure.
+RELEASE_MIRROR_FIRST="${MACPROVIDER_RELEASE_MIRROR:-0}"
+# Set once a GitHub release download fails so later assets go mirror-first.
+RELEASE_GITHUB_UNREACHABLE=0
 MACPROVIDER_MIN_SUPPORTED_VERSION="v1.7.11"
 MACPROVIDER_MIN_EMERGENCY_VERSION="v1.8.30"
 MACPROVIDER_MIN_HEADLESS_VERSION="v1.8.108"
@@ -83,6 +96,9 @@ BOOTSTRAP_PYTHON_RELEASE="20260901"
 BOOTSTRAP_PYTHON_ASSET="cpython-3.12.14+20260901-aarch64-apple-darwin-install_only_stripped.tar.gz"
 BOOTSTRAP_PYTHON_SHA256="81a359f1cfadd4da11766534c5913791cea55f26e1bb902cacd2a531bb1e4b2b"
 BOOTSTRAP_PYTHON_URL="https://github.com/astral-sh/python-build-standalone/releases/download/${BOOTSTRAP_PYTHON_RELEASE}/${BOOTSTRAP_PYTHON_ASSET}"
+# Same tarball on the Malibu download host for Macs that cannot reach GitHub
+# (#1737). Untrusted: the SHA-256 pin above is the only authority.
+BOOTSTRAP_PYTHON_MIRROR_URL="https://download.malibu.tech/python/${BOOTSTRAP_PYTHON_ASSET}"
 # Headless LaunchDaemon / sudo helpers must not execute a user-writable tree.
 ROOT_INSTALL_PYTHON_DIR="/Library/Application Support/macprovider/install-python"
 SYSTEM_LAUNCHD_DIR="/Library/LaunchDaemons"
@@ -1225,6 +1241,10 @@ Usage: bash install.sh [--dry-run]
 Environment overrides:
   MACPROVIDER_GITHUB_REPO        owner/repo for GitHub Releases
   MACPROVIDER_VERSION            pin installer to vMAJOR.MINOR.PATCH
+  MACPROVIDER_RELEASE_MIRROR=1   fetch releases from download.malibu.tech
+                                 before GitHub (GitHub is still the fallback;
+                                 with 0, the default, the mirror is the
+                                 fallback). Signature checks are identical.
                                  (pipe-side form: curl ... | MACPROVIDER_VERSION=v1.7.11 bash)
   MACPROVIDER_ACCEPTANCE_ASSET_DIR
                                  absolute owner-only directory containing a
@@ -7752,7 +7772,7 @@ _bootstrap_python_die() {
 # MACPROVIDER_TEST_ALLOW_BOOTSTRAP_OVERRIDE=1 (test-only; production curl|bash
 # must use the in-script pin).
 bootstrap_standalone_python3() {
-  local override="" cache_dir tmp tarball actual py url expected asset
+  local override="" cache_dir tmp tarball actual py url mirror_url expected asset sources source verified=0
   if _bootstrap_overrides_allowed; then
     override="${MACPROVIDER_BOOTSTRAP_PYTHON3:-}"
   fi
@@ -7765,11 +7785,13 @@ bootstrap_standalone_python3() {
     return 1
   fi
   url="$BOOTSTRAP_PYTHON_URL"
+  mirror_url="${BOOTSTRAP_PYTHON_MIRROR_URL:-}"
   expected="$BOOTSTRAP_PYTHON_SHA256"
   asset="$BOOTSTRAP_PYTHON_ASSET"
   cache_dir="$(_install_python_cache_dir)"
   if _bootstrap_overrides_allowed; then
     url="${MACPROVIDER_BOOTSTRAP_PYTHON_URL:-$url}"
+    mirror_url="${MACPROVIDER_BOOTSTRAP_PYTHON_MIRROR_URL:-$mirror_url}"
     expected="${MACPROVIDER_BOOTSTRAP_PYTHON_SHA256:-$expected}"
     asset="$(basename "${MACPROVIDER_BOOTSTRAP_PYTHON_ASSET:-$asset}")"
   fi
@@ -7787,12 +7809,30 @@ bootstrap_standalone_python3() {
     || _bootstrap_python_die "could not create a temporary directory"
   tarball="$tmp/$asset"
   log "Downloading pinned standalone python3 ($asset) so setup can continue without Command Line Tools."
-  curl -fL --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 \
-    "$url" -o "$tarball" \
-    || { rm -rf "$tmp"; _bootstrap_python_die "download failed"; }
-  actual="$(shasum -a 256 "$tarball" | awk '{print $1}')"
-  [ "$actual" = "$expected" ] \
-    || { rm -rf "$tmp"; _bootstrap_python_die "SHA-256 mismatch"; }
+  # GitHub first, then the Malibu mirror (#1737); mirror first when
+  # MACPROVIDER_RELEASE_MIRROR=1. Each source must reproduce the pinned
+  # SHA-256, so a wrong mirror byte only moves on to the next source.
+  if [ "${RELEASE_MIRROR_FIRST:-0}" = "1" ]; then
+    sources="$mirror_url $url"
+  else
+    sources="$url $mirror_url"
+  fi
+  for source in $sources; do
+    rm -f "$tarball"
+    if ! curl -fL --connect-timeout 10 --speed-limit 1024 --speed-time 120 --retry 2 --retry-connrefused --retry-max-time 120 \
+      "$source" -o "$tarball"; then
+      log "Could not download pinned python3 from $source; trying the next source."
+      continue
+    fi
+    actual="$(shasum -a 256 "$tarball" | awk '{print $1}')"
+    if [ "$actual" = "$expected" ]; then
+      verified=1
+      break
+    fi
+    log "Pinned python3 from $source did not match the pinned SHA-256; trying the next source."
+  done
+  [ "$verified" -eq 1 ] \
+    || { rm -rf "$tmp"; _bootstrap_python_die "download failed or SHA-256 mismatch from every source"; }
   if tar tzf "$tarball" | grep -E '(^/)|(^\.\./)|(/\.\./)' >/dev/null; then
     rm -rf "$tmp"
     _bootstrap_python_die "tarball contains unsafe paths"
@@ -9776,7 +9816,9 @@ latest_release_tag() {
     # rides out transient failures. Without these the installer hangs indefinitely
     # on a stalled GitHub API socket and the Malibu UI is stuck at "Starting
     # installer…" (its progress monitor only tracks macprovider-cli processes).
-    json="$(curl -fsSL --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$api_url")" || die 3 "failed to query GitHub Releases API: $api_url"
+    # The budget stays short because discover_latest_release_tag falls back to
+    # the Malibu release mirror when GitHub is unreachable (#1737).
+    json="$(curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 120 --retry 2 --retry-connrefused --retry-max-time 60 "$api_url")" || die 3 "failed to query GitHub Releases API: $api_url"
     # End of the release list: an empty array (or whitespace) means no more
     # pages exist, so stop rather than spending the full page budget.
     case "$(printf "%s" "$json" | tr -d '[:space:]')" in
@@ -9882,6 +9924,155 @@ latest_release_tag() {
   done
   [ -n "$tag" ] || die 3 "no non-prerelease macprovider-cli release (tag ^v[0-9]+.[0-9]+.[0-9]+) found in the first ${max_pages} pages of GitHub Releases"
   printf "%s" "$tag"
+}
+
+# The release mirror only carries Augustas11/macprovider; a MACPROVIDER_GITHUB_REPO
+# fork never falls back to it.
+release_mirror_enabled() {
+  [ "$GITHUB_REPO" = "$RELEASE_MIRROR_REPO" ]
+}
+
+validate_release_mirror_mode() {
+  case "${RELEASE_MIRROR_FIRST:-0}" in
+    0|1) ;;
+    *) die 7 "MACPROVIDER_RELEASE_MIRROR must be 0 or 1" ;;
+  esac
+  if [ "${RELEASE_MIRROR_FIRST:-0}" = "1" ] && ! release_mirror_enabled; then
+    die 7 "MACPROVIDER_RELEASE_MIRROR=1 is only available for $RELEASE_MIRROR_REPO releases"
+  fi
+}
+
+# A discovered (not operator-pinned) tag must have the same canonical shape and
+# rollback floor as MACPROVIDER_VERSION. Returns nonzero instead of dying so the
+# caller can try the next discovery source.
+discovered_release_tag_acceptable() {
+  local candidate="$1"
+  [[ "$candidate" =~ ^v(0|[1-9][0-9]{0,8})[.](0|[1-9][0-9]{0,8})[.](0|[1-9][0-9]{0,8})$ ]] || return 1
+  version_at_least "$candidate" "$MACPROVIDER_MIN_SUPPORTED_VERSION"
+}
+
+# Mirror-side discovery for Macs that cannot reach api.github.com. The tag is
+# exactly the coordinator's advertised latest_binary_version (/healthz
+# recommended_binary_version over the coordinator's own TLS endpoint), the
+# release the fleet is told to run. The mirror's latest.json is unsigned and
+# mirror-controlled, so it never chooses the tag: a compromised mirror could
+# otherwise roll a fresh install back to the oldest supported release or push
+# an unpromoted canary, both of which carry a valid checksums.txt.sig. No
+# advertisement means no install (fail closed). download_release still verifies
+# checksums.txt.sig for the tag returned here.
+mirror_latest_release_tag() {
+  local body advertised=""
+  if [ -z "${coordinator_base:-}" ]; then
+    log "Release mirror discovery needs the coordinator's advertised release, and no coordinator is configured." >&2
+    return 1
+  fi
+  body="$(curl -fsS --max-filesize 65536 --connect-timeout 10 --max-time 30 --retry 2 --retry-connrefused "$coordinator_base/healthz" 2>/dev/null)" \
+    && advertised="$(printf '%s' "$body" | python3 -c '
+import json, sys
+value = json.loads(sys.stdin.buffer.read(65536).decode("utf-8"))
+version = value.get("recommended_binary_version") if isinstance(value, dict) else None
+if not isinstance(version, str) or not version:
+    raise SystemExit(1)
+sys.stdout.write(version if version.startswith("v") else "v" + version)
+' 2>/dev/null)" \
+    || advertised=""
+  if [ -z "$advertised" ]; then
+    log "The coordinator at $coordinator_base did not advertise a release; cannot pick a release without GitHub." >&2
+    return 1
+  fi
+  if ! discovered_release_tag_acceptable "$advertised"; then
+    log "Ignoring the coordinator-advertised release $advertised: not an installable vMAJOR.MINOR.PATCH at or above $MACPROVIDER_MIN_SUPPORTED_VERSION." >&2
+    return 1
+  fi
+  # A rerun must never let a blocked GitHub turn into a silent downgrade: the
+  # advertisement can lag a provider that followed signed discovery ahead of
+  # the fleet. Only a pinned emergency rollback may go backwards.
+  if [ -x "$BINARY_PATH" ]; then
+    local installed_version installed_tag
+    installed_version="$("$BINARY_PATH" --version 2>/dev/null | tr -d '\r\n')"
+    case "$installed_version" in
+      v*) installed_tag="$installed_version" ;;
+      *) installed_tag="v$installed_version" ;;
+    esac
+    if [[ "$installed_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+        && [ "$installed_tag" != "$advertised" ] \
+        && version_at_least "$installed_tag" "$advertised"; then
+      log "Refusing the coordinator-advertised release $advertised: it would downgrade installed $installed_tag. To repair the installed release, rerun with MACPROVIDER_VERSION=$installed_tag." >&2
+      return 1
+    fi
+  fi
+  printf '%s' "$advertised"
+}
+
+# Release discovery with the #1737 mirror fallback. GitHub stays first unless
+# MACPROVIDER_RELEASE_MIRROR=1. log goes to stderr: callers capture stdout.
+discover_latest_release_tag() {
+  local discovered=""
+  if release_mirror_enabled && [ "${RELEASE_MIRROR_FIRST:-0}" = "1" ]; then
+    if discovered="$(mirror_latest_release_tag)"; then
+      log "Latest release (coordinator-advertised, served by the Malibu release mirror): $discovered" >&2
+      printf '%s' "$discovered"
+      return 0
+    fi
+    log "Malibu release mirror discovery failed; trying GitHub Releases." >&2
+  fi
+  if discovered="$(latest_release_tag)"; then
+    printf '%s' "$discovered"
+    return 0
+  fi
+  release_mirror_enabled \
+    || die 3 "failed to resolve the latest release from GitHub Releases for $GITHUB_REPO"
+  log "GitHub Releases is unreachable; resolving the latest release through the Malibu release mirror." >&2
+  discovered="$(mirror_latest_release_tag)" \
+    || die 3 "could not resolve the latest release from GitHub Releases or the coordinator-advertised release"
+  log "Latest release (coordinator-advertised, served by the Malibu release mirror): $discovered" >&2
+  printf '%s' "$discovered"
+}
+
+# fetch_release_asset <asset-name> <destination>: download one asset of release
+# $tag from GitHub, falling back to the byte-identical mirror (mirror first with
+# MACPROVIDER_RELEASE_MIRROR=1, or after a GitHub download already failed).
+# Callers verify every byte against checksums.txt.sig exactly as before; the
+# serving host is never an authority.
+fetch_release_asset() {
+  local name="$1" dest="$2" sources source url
+  if ! release_mirror_enabled; then
+    sources="github"
+  elif [ "${RELEASE_MIRROR_FIRST:-0}" = "1" ] || [ "${RELEASE_GITHUB_UNREACHABLE:-0}" = "1" ]; then
+    sources="mirror github"
+  else
+    sources="github mirror"
+  fi
+  # With no mirror to fall back to (a fork), GitHub keeps its original retry
+  # budget. The mirror is untrusted transport, so its bytes are size-capped
+  # before checksums.txt.sig can vouch for them.
+  local github_budget="--connect-timeout 15 --retry 3 --retry-max-time 300"
+  release_mirror_enabled && github_budget="--connect-timeout 10 --retry 2 --retry-max-time 120"
+  local mirror_cap=2147483648
+  case "$name" in
+    checksums.txt|checksums.txt.sig) mirror_cap=1048576 ;;
+  esac
+  for source in $sources; do
+    rm -f "$dest"
+    if [ "$source" = "github" ]; then
+      url="https://github.com/${GITHUB_REPO}/releases/download/${tag}/${name}"
+      log "Downloading $name from GitHub Releases."
+      # shellcheck disable=SC2086 # github_budget is a fixed list of flags
+      if curl -fL $github_budget --speed-limit 1024 --speed-time 120 --retry-connrefused "$url" -o "$dest"; then
+        return 0
+      fi
+      RELEASE_GITHUB_UNREACHABLE=1
+    else
+      url="${RELEASE_MIRROR_BASE}/${tag}/${name}"
+      log "Downloading $name from the Malibu release mirror."
+      if curl -fL --proto '=https' --max-filesize "$mirror_cap" --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$url" -o "$dest"; then
+        return 0
+      fi
+    fi
+    log "Could not download $name from $url."
+  done
+  rm -f "$dest"
+  return 1
 }
 
 version_at_least() (
@@ -9993,7 +10184,9 @@ resolve_release_tag() {
     fi
     printf "%s" "$MACPROVIDER_VERSION"
   else
-    tag="$(latest_release_tag)"
+    # Command substitution does not inherit errexit; propagate a discovery
+    # failure instead of printing an empty tag.
+    tag="$(discover_latest_release_tag)" || exit "$?"
     printf "%s" "$tag"
   fi
 }
@@ -10169,7 +10362,6 @@ download_release() {
   tag="$1"
   tarball_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
   pkg_asset="macprovider-cli-${tag}-darwin-arm64.pkg"
-  base="https://github.com/${GITHUB_REPO}/releases/download/${tag}"
   TMPDIR_PATH="$(mktemp -d)"
   tarball_path="$TMPDIR_PATH/$tarball_asset"
   pkg_path="$TMPDIR_PATH/$pkg_asset"
@@ -10202,8 +10394,8 @@ download_release() {
       || die 3 "failed to stage acceptance-candidate.json.sig"
     log "Using protected non-public acceptance assets for $tag."
   else
-    curl -fL --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$base/checksums.txt" -o "$checksums_path" || die 3 "failed to download checksums.txt"
-    curl -fL --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$base/checksums.txt.sig" -o "$checksums_sig_path" || die 3 "failed to download checksums.txt.sig"
+    fetch_release_asset checksums.txt "$checksums_path" || die 3 "failed to download checksums.txt"
+    fetch_release_asset checksums.txt.sig "$checksums_sig_path" || die 3 "failed to download checksums.txt.sig"
   fi
   verify_checksum_signature
 
@@ -10220,8 +10412,7 @@ download_release() {
         [ -f "$acceptance_dir/$pkg_asset" ] || die 3 "acceptance candidate is missing $pkg_asset"
         cp "$acceptance_dir/$pkg_asset" "$pkg_path" || die 3 "failed to stage acceptance package"
       else
-        log "Downloading signed package $pkg_asset from GitHub Releases."
-        curl -fL --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$base/$pkg_asset" -o "$pkg_path" || die 3 "failed to download release package"
+        fetch_release_asset "$pkg_asset" "$pkg_path" || die 3 "failed to download release package"
       fi
       asset_path="$pkg_path"
       asset_kind="pkg"
@@ -10236,8 +10427,7 @@ download_release() {
     [ -f "$acceptance_dir/$tarball_asset" ] || die 3 "acceptance candidate is missing $tarball_asset"
     cp "$acceptance_dir/$tarball_asset" "$tarball_path" || die 3 "failed to stage acceptance tarball"
   else
-    log "Downloading $tarball_asset from GitHub Releases."
-    curl -fL --connect-timeout 15 --speed-limit 1024 --speed-time 120 --retry 3 --retry-connrefused --retry-max-time 300 "$base/$tarball_asset" -o "$tarball_path" || die 3 "failed to download release tarball"
+    fetch_release_asset "$tarball_asset" "$tarball_path" || die 3 "failed to download release tarball"
   fi
   asset_path="$tarball_path"
   asset_kind="tar"
@@ -14292,6 +14482,7 @@ main() {
   validate_repair_privilege_domain
   validate_headless_acceptance_source
   validate_port_value "$PORT"
+  validate_release_mirror_mode
   for tool in curl tar shasum grep sed awk date hostname mktemp openssl find lsof cmp diff readlink ps; do
     require_tool "$tool"
   done

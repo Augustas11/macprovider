@@ -126,6 +126,7 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_catalog_propose
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_openrouter_fetch_health
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_hash_sweep
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_publish_model_mirror
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_classify_benchmark_evidence
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_revenue_benchmark_workload
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_revenue_benchmark_calculator
@@ -218,6 +219,7 @@ test-dist:
 	bash scripts/test-install-provider-id-preserve.sh
 	bash scripts/test-install-launchd-enable.sh
 	bash scripts/test-install-version-pin.sh
+	bash scripts/test-publish-release-mirror.sh
 	bash scripts/test-install-amfi-retry.sh
 	bash scripts/test-install-autotune-recommend-config.sh
 	bash phase3-binary/dist/test/install_referral_handoff.test.sh

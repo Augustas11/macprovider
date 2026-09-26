@@ -2961,6 +2961,17 @@ func (c Config) validateAdvertisedVersions() error {
 	if latest := strings.TrimSpace(advertised.LatestBinaryVersion); latest != "" && !versionfloor.Valid(latest) {
 		return fmt.Errorf("coordinator_advertised_version.latest_binary_version %q must be a bare numeric version (e.g. 1.8.65)", latest)
 	}
+	// A floor above the advertised release fences every provider with no
+	// release to update to. It also strands GitHub-blocked providers (#1737):
+	// they can only autoupdate to the advertised latest_binary_version from
+	// the release mirror, which the Pearl updater fills before advertising.
+	required := strings.TrimSpace(advertised.RequiredBinaryVersion)
+	latest := strings.TrimSpace(advertised.LatestBinaryVersion)
+	if required != "" && latest != "" {
+		if cmp, ok := versionfloor.Compare(required, latest); !ok || cmp > 0 {
+			return fmt.Errorf("coordinator_advertised_version.required_binary_version %q must not exceed latest_binary_version %q", required, latest)
+		}
+	}
 	for modelID, floor := range advertised.PerModelRequiredBinaryVersion {
 		if strings.TrimSpace(modelID) == "" {
 			return fmt.Errorf("coordinator_advertised_version.per_model_required_binary_version has an empty model_id key")

@@ -1,12 +1,28 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.17.1
+version: v0.18.0
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-09-23
+last-locked: 2026-09-25
 lockstep: SPEC-005 v0.6.7 (SPEC-005-R011 money-table owner). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.18.0 (2026-09-25)** — Catalog bytes from any host, verified only by
+  the signed hash (#1737). Provider Macs in mainland China cannot reach
+  huggingface.co: a first install died at `autotune --recommend --apply`
+  (transport error, exit 6, rollback) and a staged snapshot that did not
+  verify was deleted before the failed re-download. Registers
+  `SPEC-023-R019` (§3.2.1 artifact byte sources: Hugging Face first, then
+  content-addressed mirrors and an operator `HF_ENDPOINT`; a transport
+  failure makes one candidate unavailable instead of failing the run; a
+  verified durable copy needs no download; a snapshot that fails
+  verification is quarantined in one bounded slot, not deleted) and
+  `SPEC-023-R020` (§3.2.2 `models import`: offline adoption from a local
+  directory or mirror tree). §3.2 `model_id` wording now names the model
+  identity, not the byte host. No catalog, artifact-feed, rate-card, or
+  wire schema changes: the signed row's `model_sha256` stays the only
+  authority, and settlement, routing, and trust tiers are unchanged.
 
 - **v0.17.1 (2026-09-25)** — The v0.17.0 rollout rule is mechanical (#1690 M8
   audit R1). The release generator carries a consumer floor
@@ -538,7 +554,7 @@ timestamps) — are illustrative, not normative catalog values.
 Field rules:
 
 - `model_key` is the normalized key used for rate-card and demand-rank joins.
-- `model_id` is the HuggingFace MLX model ID allowed for download/benchmark.
+- `model_id` is the HuggingFace MLX model ID allowed for download/benchmark. It names the model identity and the default byte host; §3.2.1 lets the bytes come from other hosts because `model_sha256` alone decides whether they are the signed snapshot.
 - `model_revision` is a content-addressed immutable model-host revision, such as a 40-hex HuggingFace repository commit. The CLI MUST download by this revision, not by a mutable branch or tag.
 - `model_sha256` is a lowercase hex SHA-256 digest of the canonical artifact-set manifest for the release-pinned model snapshot. After downloading by `model_revision`, the CLI MUST reject the snapshot if any filesystem entry is not a regular file or directory; symlinks, hardlinks with link count greater than one, device nodes, sockets, FIFOs, absolute paths, path escapes, relative paths containing `..`, and relative paths containing C0 control characters (`U+0000` through `U+001F`) or DEL (`U+007F`) are forbidden. The CLI then enumerates every regular file, computes each file SHA-256, sorts entries by normalized POSIX relative path, serializes each entry as `path LF size_decimal LF sha256_hex LF`, concatenates those UTF-8 entries, and SHA-256s the concatenated bytes. A mismatch fails closed before benchmark, recommendation, local donor-mode commit, or provider run.
 - SPEC-010 §3.7 owns the name `macprovider.snapshot-manifest.v1`, provider/coordinator wire fields, and comparison authority for this digest. This section defines the canonical manifest bytes only and MUST NOT be used as a second admission authority.
@@ -607,6 +623,67 @@ The current signed catalog carries these in-band `bench_gate.provenance` classif
 || `qwen3-8b` | `measured_single_host` | `M5 32GB` | #744 audit: measured single-host row; #745 blocks trusted gate re-derivation. |
 
 `blocked` rows may be shown only as diagnostics when useful; they are never downloaded, benchmarked, or recommended by default. The current signed candidate catalog has no blocked rows; Gemma and Nemotron are `recommendable` after `mlx-swift-lm` runtime validation and coordinator rate-card rollout.
+
+#### 3.2.1 Artifact byte sources (v0.18.0)
+
+**SPEC-023-R019 — Hash-authoritative byte sources.** Where the bytes of a
+signed row's snapshot come from is not an authority. Only the canonical
+manifest digest above, compared with the signed row's `model_sha256`,
+decides whether bytes are the signed snapshot.
+
+1. The CLI MUST try `huggingface.co` first, by `model_revision`. When that
+   fails for any reason other than the caller's deadline or cancellation,
+   it MUST try, in order: content-addressed mirrors from
+   `MACPROVIDER_MODEL_MIRRORS` (HTTPS base URLs), the Malibu mirror
+   `https://models.malibu.tech`, then an `HF_ENDPOINT` whose host is not
+   huggingface.co (the Hugging Face API and resolve layout on that host).
+   Non-HTTPS bases, bases with credentials, query, or fragment are ignored.
+   After huggingface.co fails at the transport level once in a run, later
+   snapshots in that run MAY try the fallback sources first and
+   huggingface.co last.
+2. A content-addressed mirror serves `<base>/<model_sha256>/manifest`, the
+   exact canonical manifest bytes defined above, and
+   `<base>/<model_sha256>/files/<relative path>` for each entry. The CLI MUST
+   check that the manifest bytes SHA-256 to the signed `model_sha256` before
+   fetching any file, MUST apply the path rules above to every manifest
+   entry, and MUST reject a file whose size or SHA-256 differs from its
+   entry. A mirror is never used for a row without `model_sha256`.
+3. `HF_TOKEN` MUST be sent only to huggingface.co. A Hugging Face request
+   may redirect only to the Hugging Face CDN hosts; a mirror request, for
+   metadata and files alike, may redirect to any HTTPS host and never
+   carries `Authorization`.
+4. Every source writes into a fresh staging directory and publishes it by
+   atomic move. The full canonical verification above still runs before
+   benchmark, adoption, or serve; a mirror's per-file checks do not replace
+   it.
+5. On the recommend path, when no source delivers a candidate's snapshot,
+   that candidate MUST be skipped as unavailable with its diagnostic, not
+   fail the whole run. The caller's deadline and cancellation still stop the
+   run. Upgrade prefetch stays fail-closed.
+6. A verified durable-store copy of the pinned snapshot MUST satisfy the
+   recommend path without a Hugging Face cache snapshot and without any
+   download.
+7. When an existing cache snapshot fails verification and its volume has at
+   least three times the snapshot's size free, the CLI MUST move it into one
+   quarantine slot per model repository
+   (`models--<org>--<name>/macprovider-quarantine/`), replacing any earlier
+   quarantined copy, instead of deleting it; with less room it deletes the
+   snapshot as before, so repair never needs more disk than it used to. The
+   slot is removed once a verified replacement is published.
+
+#### 3.2.2 Offline import (v0.18.0)
+
+**SPEC-023-R020 — `models import`.** `models import <key> --from <dir>`
+MUST resolve the signed row the same way `models verify-artifact` does and
+MUST NOT use the network for bytes. From a mirror tree (`manifest` plus
+`files/`) it copies exactly the files the manifest names, after checking the
+manifest against `model_sha256`. From any other directory it copies every
+regular file, following symlinks (a Hugging Face cache snapshot links into
+`blobs/`) and ignoring `.DS_Store` and `._*` platform metadata and a top-level `.cache/` (the download state `hf download --local-dir` writes). Copies are
+new regular files in a staging directory outside the durable root. Only a
+staging tree whose canonical digest equals `model_sha256` is adopted into
+the durable store; a mismatch adopts nothing and exits 3. The command never
+changes config or the active model.
 
 ### 3.3 Rate card
 
