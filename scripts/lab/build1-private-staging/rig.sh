@@ -74,6 +74,10 @@ case "${1:-}" in
     "$BASE_RIG" build
     "$BASE_RIG" build-native
     ;;
+  rebuild-provider)
+    require_discovery_cache
+    "$BASE_RIG" build-native
+    ;;
   request)
     require_discovery_cache
     python3 "$WT/scripts/lab/1690-m6/buyer.py" --n 1 --concurrency 1 --max-tokens 16
@@ -94,7 +98,7 @@ case "${1:-}" in
     exec "$BASE_RIG" "$1"
     ;;
   *)
-    printf 'usage: rig.sh prepare|up|admit|request|evidence|status|down|configs\n' >&2
+    printf 'usage: rig.sh prepare|rebuild-provider|up|admit|request|evidence|status|down|configs\n' >&2
     exit 2
     ;;
 esac

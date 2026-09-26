@@ -993,17 +993,25 @@ struct ServeCommand: AsyncParsableCommand {
             isolateLifecycle: isolateLifecycle,
             coordinatorURL: resolved.coordinatorURL
         )) {
+            // Catalog admission verifies and canonicalizes the authority-bound
+            // artifact root. The private Build 1 runtime loads only its 4-bit
+            // member, whose scoped digest intentionally differs from the full
+            // signed revision digest, so never feed that member path back into
+            // full-artifact catalog verification. Restore the already verified
+            // runtime load path after catalog trust has been established.
+            let catalogTrust = try await runModelCatalogPreflight(
+                &resolved,
+                modelPath: authorityPath,
+                actualArtifactSHA256: actual,
+                requireRecommendable: !resolved.donorMode,
+                staticInputs: staticInputs,
+                artifactResolver: artifactResolver,
+                persistConfigMigration: persistConfigMigration,
+                persistFrom: persistFrom
+            )
+            resolved.modelArtifactPath = loadPath
             return ModelArtifactPreflightOutcome(
-                catalogTrust: try await runModelCatalogPreflight(
-                    &resolved,
-                    modelPath: loadPath,
-                    actualArtifactSHA256: actual,
-                    requireRecommendable: !resolved.donorMode,
-                    staticInputs: staticInputs,
-                    artifactResolver: artifactResolver,
-                    persistConfigMigration: persistConfigMigration,
-                    persistFrom: persistFrom
-                ),
+                catalogTrust: catalogTrust,
                 runtimeBinding: runtimeBinding
             )
         }
