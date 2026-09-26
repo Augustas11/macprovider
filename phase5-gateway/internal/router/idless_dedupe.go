@@ -102,7 +102,10 @@ const (
 //     otherwise share a fingerprint and the second could replay the first —
 //     a silent pool<->global / cross-pool reassignment SPEC-042-R002 forbids.
 //     "" (global) is a distinct key from any named pool.
-//  8. SHA-256 of the raw body bytes.
+//  8. engineClass — the SPEC-006-R016 runtime class the buyer selected. It is
+//     hashed only when non-empty, so a request without a selection keeps its
+//     existing fingerprint and no version bump is needed.
+//  9. SHA-256 of the raw body bytes.
 //
 // Everything else that changes the generated answer is inside those bytes
 // (model, messages, stream, max_tokens, response_format). Transport-level
@@ -112,11 +115,15 @@ const (
 // Adding a component is a keying change: bump idlessDedupeFingerprintVersion
 // when one is added to a build that is already deployed, so old and new
 // fingerprints cannot collide.
-func idlessRequestFingerprint(entrypoint, accountID, demoTokenHash, conversationTag, retryHint, poolID string, body []byte) string {
+func idlessRequestFingerprint(entrypoint, accountID, demoTokenHash, conversationTag, retryHint, poolID, engineClass string, body []byte) string {
 	bodyDigest := sha256.Sum256(body)
 	h := sha256.New()
 	for _, part := range []string{idlessDedupeFingerprintVersion, entrypoint, accountID, demoTokenHash, conversationTag, retryHint, poolID} {
 		h.Write([]byte(part))
+		h.Write([]byte{0})
+	}
+	if engineClass != "" {
+		h.Write([]byte("engine=" + engineClass))
 		h.Write([]byte{0})
 	}
 	h.Write(bodyDigest[:])

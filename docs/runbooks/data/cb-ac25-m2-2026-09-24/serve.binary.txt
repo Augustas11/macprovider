@@ -1,0 +1,1 @@
+pid=36062 exe=<lab>/macprovider-cli sha=4a61ac362e8702d53aeff816aebb2fa4d248dc3c4a97caa3c0e5e0bc514b6e2d

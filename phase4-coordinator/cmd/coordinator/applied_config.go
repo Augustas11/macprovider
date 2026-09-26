@@ -37,7 +37,7 @@ type appliedConfigRecord struct {
 	LoadedAt      string `json:"loaded_at"`
 	Source        string `json:"source"`
 	Version       string `json:"version"`
-	// SPEC-005-R013 / SPEC-023-R018 (additive to v1): the pricing state in
+	// SPEC-005-R013 / SPEC-023-R019 (additive to v1): the pricing state in
 	// force after this boot or reload. RateTableSHA256 is
 	// billing.RateTableDigest of the request table (the snapshot's
 	// rate_card_json); SignedRateCardSHA256 is the sha256 of the

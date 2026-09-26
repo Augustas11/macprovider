@@ -2,7 +2,7 @@
 # V1R: V1's happy path, re-runnable in an existing world (V1's spec is
 # one-shot). A reviewed pricing PR changes the served model's row and adds a
 # row with NO acknowledgement file entry: an added row capturing only its own
-# key needs none (SPEC-023-R018 rule 2, v0.16.1). Preflight GO -> deploy with
+# key needs none (SPEC-023-R019 rule 2, v0.18.1). Preflight GO -> deploy with
 # the ack -> verified -> finalized -> O1-O6. Exercises the under-lock content
 # gate's Tier-2 trust root and the service-readable candidate (#1693 E2 bugs 1
 # and 2) with no workaround applied.

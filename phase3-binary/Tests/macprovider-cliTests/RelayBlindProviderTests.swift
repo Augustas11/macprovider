@@ -803,6 +803,7 @@ private actor RelayBlindTestRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func currentSnapshot() -> RuntimeSnapshot {
         RuntimeSnapshot(state: .ready, container: nil, modelID: model, modelHash: nil)

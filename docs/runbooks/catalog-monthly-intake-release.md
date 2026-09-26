@@ -167,7 +167,7 @@ needs no signal, no manifest entry, and no threshold. Never add, promote,
 re-class, or re-price out of band. A reviewed correction of a wrong rate-card
 row is not an intake re-price: it ships through the catalog-content lane's
 pricing path (`catalog-release-decision-tree.md` §Pricing corrections,
-SPEC-023-R018).
+SPEC-023-R019).
 
 ## Failure modes the generator refuses
 

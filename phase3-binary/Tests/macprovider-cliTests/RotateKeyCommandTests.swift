@@ -27,6 +27,64 @@ final class RotateKeyCommandTests: XCTestCase {
         XCTAssertEqual(store.previousKeyForTest(providerId: providerID)?.rawRepresentation, original.rawRepresentation)
     }
 
+    // #1690 E2E-F9: serve's receipt builder caches its signing key. Rotating
+    // through the runtime's signing store must make the very next receipt
+    // carry and verify under the new key; swapping only the underlying store
+    // leaves the cached builder on the retired key.
+    func testRotationThroughServeSigningStoreSignsNextReceiptWithNewKey() async throws {
+        var config = AppConfig.defaults()
+        config.enableReceipts = true
+        config.providerID = "provider-rotate"
+        let underlying = InMemoryReceiptKeyStore()
+        let runtime = try ServeCommand.makeReceiptRuntime(config: config, keyStore: underlying)
+        let builder = try XCTUnwrap(runtime.builder)
+        let signingStore = try XCTUnwrap(runtime.signingKeyStore)
+        let original = try XCTUnwrap(underlying.loadCurrent(providerId: "provider-rotate"))
+
+        // The F9 mechanism: an underlying-only swap is invisible to the builder.
+        try underlying.swapToCurrent(providerId: "provider-rotate", newKey: Curve25519.Signing.PrivateKey())
+        XCTAssertEqual(try Self.receiptPublicKey(builder), original.publicKey.rawRepresentation)
+
+        try await RotateKeyCommand.rotateActiveProvider(
+            providerID: "provider-rotate",
+            keyStore: signingStore,
+            coordinatorClient: MockRotatingCoordinatorClient { _, commitKey in
+                try await commitKey()
+            }
+        )
+
+        let rotated = try XCTUnwrap(underlying.loadCurrent(providerId: "provider-rotate"))
+        XCTAssertNotEqual(rotated.rawRepresentation, original.rawRepresentation)
+        XCTAssertEqual(try Self.receiptPublicKey(builder), rotated.publicKey.rawRepresentation)
+    }
+
+    /// Builds one v0.3 receipt, checks it self-verifies, and returns the
+    /// public key it names.
+    private static func receiptPublicKey(_ builder: ReceiptBuilder) throws -> Data {
+        let receipt = try builder.build(
+            providerId: "provider-rotate",
+            input: ReceiptInput(
+                modelId: "fixture-model",
+                request: PromptCanonicalizerTests.fixtureRequest(),
+                outputContent: "answer",
+                outputToolCalls: nil,
+                finishReason: "stop",
+                ttftMs: 1,
+                tokensOut: 1,
+                unixTsSeconds: 1_800_000_000,
+                modelHash: nil
+            )
+        )
+        let pieces = receipt.split(separator: ".")
+        let tupleData = try XCTUnwrap(Data(base64Encoded: String(pieces[0])))
+        let signature = try XCTUnwrap(Data(base64Encoded: String(pieces[1])))
+        let tuple = try XCTUnwrap(JSONSerialization.jsonObject(with: tupleData) as? [String: Any])
+        let publicKeyData = try XCTUnwrap(Data(base64Encoded: XCTUnwrap(tuple["provider_pubkey"] as? String)))
+        let publicKey = try Curve25519.Signing.PublicKey(rawRepresentation: publicKeyData)
+        XCTAssertTrue(publicKey.isValidSignature(signature, for: tupleData))
+        return publicKeyData
+    }
+
     func testRotateKeyLeavesKeychainUnchangedWhenReconnectRejected() async throws {
         let store = InMemoryReceiptKeyStore()
         let providerID = "provider-rotate"

@@ -30,11 +30,12 @@ const (
 )
 
 // artifactIdentityRow is one row of the §3.7.4 closed artifact-identity matrix:
-// runtime_format determines the only legal hash_algorithm, source_ref.kind, and
-// allowed_runtime_sources set. Any other tuple is an integrity failure.
+// runtime_format determines the only legal hash_algorithm, the legal
+// source_ref.kind set, and the allowed_runtime_sources set. Any other tuple is
+// an integrity failure.
 type artifactIdentityRow struct {
 	hashAlgorithm  string
-	sourceRefKind  string
+	sourceRefKinds map[string]struct{}
 	runtimeSources map[string]struct{}
 }
 
@@ -42,12 +43,17 @@ var (
 	artifactIdentityMatrix = map[string]artifactIdentityRow{
 		"mlx_safetensors": {
 			hashAlgorithm:  artifactSnapshotManifestAlg,
-			sourceRefKind:  "huggingface_revision",
-			runtimeSources: map[string]struct{}{"mlx_cache": {}},
+			sourceRefKinds: map[string]struct{}{"huggingface_revision": {}},
+			// SPEC-023 v0.17.0: mlx_lm.server serves the same snapshot
+			// (SPEC-010-R009).
+			runtimeSources: map[string]struct{}{"mlx_cache": {}, "mlxlm_loopback": {}},
 		},
 		"gguf": {
 			hashAlgorithm: artifactGGUFFileAlg,
-			sourceRefKind: "ollama_library_tag",
+			// SPEC-023 v0.16.0 §3.7.4: a gguf artifact may also be sourced by
+			// huggingface_revision with a file_path. Rollout: no release may
+			// publish that tuple until every consumer implements v0.16.0.
+			sourceRefKinds: map[string]struct{}{"ollama_library_tag": {}, "huggingface_revision": {}},
 			runtimeSources: map[string]struct{}{
 				"ollama_loopback":            {},
 				"llamacpp_loopback":          {},
@@ -135,6 +141,26 @@ type catalogArtifactSourceRef struct {
 	Revision   presentString `json:"revision"`
 	LibraryTag presentString `json:"library_tag"`
 	Digest     presentString `json:"digest"`
+	// FilePath is the SPEC-023 v0.16.0 repository-relative GGUF path of a
+	// gguf huggingface_revision reference; forbidden on mlx_safetensors.
+	FilePath presentString `json:"file_path"`
+}
+
+// ggufFilePathPattern is the SPEC-023 v0.16.0 §3.7.4 file_path grammar.
+var ggufFilePathPattern = regexp.MustCompile(`^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\.gguf$`)
+
+// validGGUFFilePath applies the full file_path rule: the grammar, at most 255
+// bytes, and no "." or ".." segment.
+func validGGUFFilePath(path string) bool {
+	if len(path) > 255 || !ggufFilePathPattern.MatchString(path) {
+		return false
+	}
+	for _, segment := range strings.Split(path, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 type catalogArtifactEntry struct {
@@ -307,13 +333,22 @@ func validateCatalogArtifactEntry(label string, entry catalogArtifactEntry) erro
 		return fmt.Errorf("%s: source_ref must be an object", label)
 	}
 	ref := entry.SourceRef
-	if ref.Kind != row.sourceRefKind {
-		return fmt.Errorf("%s: runtime_format %q requires source_ref.kind %q, not %q", label, entry.RuntimeFormat, row.sourceRefKind, ref.Kind)
+	if _, ok := row.sourceRefKinds[ref.Kind]; !ok {
+		return fmt.Errorf("%s: runtime_format %q may not use source_ref.kind %q", label, entry.RuntimeFormat, ref.Kind)
 	}
 	switch ref.Kind {
 	case "huggingface_revision":
 		if ref.LibraryTag.present || ref.Digest.present {
-			return fmt.Errorf("%s: source_ref carries fields outside {kind, repo_id, revision}", label)
+			return fmt.Errorf("%s: source_ref carries fields outside {kind, repo_id, revision, file_path}", label)
+		}
+		// SPEC-023 v0.16.0: file_path is REQUIRED for gguf and forbidden for
+		// mlx_safetensors; a gguf huggingface_revision has no source digest.
+		if entry.RuntimeFormat == "gguf" {
+			if !ref.FilePath.present || !validGGUFFilePath(ref.FilePath.value) {
+				return fmt.Errorf("%s: gguf source_ref.file_path must be a repository-relative single-file .gguf path", label)
+			}
+		} else if ref.FilePath.present {
+			return fmt.Errorf("%s: source_ref.file_path is forbidden for runtime_format %q", label, entry.RuntimeFormat)
 		}
 		if !ref.RepoID.present || !modelIDPattern.MatchString(ref.RepoID.value) {
 			return fmt.Errorf("%s: source_ref.repo_id must be a HuggingFace repo id", label)
@@ -322,7 +357,7 @@ func validateCatalogArtifactEntry(label string, entry catalogArtifactEntry) erro
 			return fmt.Errorf("%s: source_ref.revision must be an immutable lowercase 40-hex commit", label)
 		}
 	default:
-		if ref.RepoID.present || ref.Revision.present {
+		if ref.RepoID.present || ref.Revision.present || ref.FilePath.present {
 			return fmt.Errorf("%s: source_ref carries fields outside {kind, library_tag, digest}", label)
 		}
 		if !ref.LibraryTag.present || strings.TrimSpace(ref.LibraryTag.value) == "" {

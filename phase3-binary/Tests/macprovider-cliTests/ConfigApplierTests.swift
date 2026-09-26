@@ -529,6 +529,7 @@ final class ConfigApplierTests: XCTestCase {
             "model_catalog_version", "model_catalog_hash", "kv_bits", "max_context_override",
             "max_concurrency_override",
             "donor_mode",
+            MaxContextProvenance.configKey,
         ]
         return text.split(separator: "\n", omittingEmptySubsequences: false).compactMap { sub in
             let line = String(sub)

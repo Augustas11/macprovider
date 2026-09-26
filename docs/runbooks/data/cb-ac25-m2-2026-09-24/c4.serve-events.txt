@@ -1,0 +1,2 @@
+event=batching_unsupported action=serial_routed reason=request_local_state_unrepresented
+event=batching_unsupported action=serial_routed reason=stable_request_id_unavailable

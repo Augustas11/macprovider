@@ -1,0 +1,7 @@
+{"n": 1, "batched": false, "median_agg_tps": 110.34, "ok": [1, 1, 1], "tokens": [256, 256, 256], "errors": 0}
+{"n": 1, "batched": true, "median_agg_tps": 85.49, "ok": [1, 1, 1], "tokens": [256, 256, 256], "errors": 0}
+{"n": 2, "batched": false, "median_agg_tps": 110.5, "ok": [2, 2, 2], "tokens": [512, 512, 512], "errors": 0}
+{"n": 2, "batched": true, "median_agg_tps": 98.69, "ok": [2, 2, 0], "tokens": [512, 512, 0], "errors": 2}
+{"n": 4, "batched": false, "median_agg_tps": 109.66, "ok": [4, 4, 4], "tokens": [1024, 1024, 1024], "errors": 0}
+{"n": 4, "batched": true, "median_agg_tps": 79.8, "ok": [0, 0, 1], "tokens": [0, 0, 256], "errors": 11}
+{"n": 8, "batched": false, "median_agg_tps": 110.55, "ok": [8, 8, 8], "tokens": [2048, 2048, 2048], "errors": 0}

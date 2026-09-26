@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -88,6 +89,21 @@ type RouteSnapshot struct {
 	// is carried in route_snapshot_json (not a dedicated column) and recovered
 	// on the settlement recompute path so insert-digest == recompute-digest.
 	PoolID string `json:"pool_id"`
+	// ManifestVersion and ManifestCoreDigest are the SPEC-042 R006 routing-time
+	// labels of the pool manifest that authorized the route. Like PoolID they
+	// are json-carried, bound into the digest only when non-empty, and
+	// recovered on the settlement recompute path.
+	ManifestVersion    uint64 `json:"manifest_version,omitempty"`
+	ManifestCoreDigest string `json:"manifest_core_digest,omitempty"`
+	// SPEC-022-R012.1 (v0.2.0): RuntimeSource is the coordinator-derived
+	// runtime class of an external-runtime member session selected on a pool
+	// route; PoolGeneration is the fenced pool generation of that selection and
+	// PoolOperatorAccountID the account verified as both pool creator and
+	// provider owner. All three are json-carried and digested only when
+	// RuntimeSource is non-empty, so no other digest changes.
+	RuntimeSource         string `json:"runtime_source,omitempty"`
+	PoolGeneration        uint64 `json:"pool_generation,omitempty"`
+	PoolOperatorAccountID string `json:"pool_operator_account_id,omitempty"`
 	// SPEC-010 v1.7 R007(d) / SPEC-047-R003: the six artifact values of a
 	// feed-derived binding. Carried in route_snapshot_json (no dedicated
 	// columns), bound into the digest only when present, recovered on the
@@ -148,6 +164,17 @@ func (r RouteSnapshot) Value() map[string]any {
 	// and keeps a byte-identical digest to pre-SPEC-042.
 	if r.PoolID != "" {
 		value["pool_id"] = r.PoolID
+	}
+	if r.ManifestVersion != 0 {
+		value["manifest_version"] = int64(r.ManifestVersion)
+	}
+	if r.ManifestCoreDigest != "" {
+		value["manifest_core_digest"] = r.ManifestCoreDigest
+	}
+	if r.RuntimeSource != "" {
+		value["runtime_source"] = r.RuntimeSource
+		value["pool_generation"] = int64(r.PoolGeneration)
+		value["pool_operator_account_id"] = r.PoolOperatorAccountID
 	}
 	if r.ModelAdmissionCandidateID != "" {
 		value["model_admission_candidate_id"] = r.ModelAdmissionCandidateID
@@ -253,6 +280,28 @@ func (r RouteSnapshot) Validate() error {
 	}
 	if r.PendingDeadlineSeconds <= 0 || r.PendingDeadlineSeconds > MaxPendingReceiptDeadlineSeconds {
 		return fmt.Errorf("route snapshot pending_deadline_seconds must be between 1 and %d", MaxPendingReceiptDeadlineSeconds)
+	}
+	if r.ManifestVersion != 0 || r.ManifestCoreDigest != "" {
+		if r.PoolID == "" {
+			return fmt.Errorf("route snapshot manifest labels require pool_id")
+		}
+		if r.ManifestVersion == 0 || r.ManifestVersion > math.MaxInt64 || !hex64Pattern.MatchString(r.ManifestCoreDigest) {
+			return fmt.Errorf("route snapshot manifest labels invalid")
+		}
+	}
+	// SPEC-022-R012.1: an external-runtime snapshot carries the full pool
+	// label set, a loopback runtime class, the fenced generation, and the
+	// operator account, or it is invalid and fails closed before dispatch.
+	if r.RuntimeSource != "" || r.PoolGeneration != 0 || r.PoolOperatorAccountID != "" {
+		if !IsLoopbackRuntimeSource(r.RuntimeSource) {
+			return fmt.Errorf("route snapshot runtime_source must be a loopback runtime class")
+		}
+		if r.PoolID == "" || r.ManifestVersion == 0 || r.ManifestCoreDigest == "" {
+			return fmt.Errorf("route snapshot runtime_source requires pool_id and manifest labels")
+		}
+		if r.PoolGeneration == 0 || r.PoolGeneration > math.MaxInt64 || strings.TrimSpace(r.PoolOperatorAccountID) == "" {
+			return fmt.Errorf("route snapshot runtime_source requires pool_generation and pool_operator_account_id")
+		}
 	}
 	if r.ComputeIntegrityCaptureRequired {
 		if r.RouteSnapshotMode != RouteSnapshotModeEnforce {

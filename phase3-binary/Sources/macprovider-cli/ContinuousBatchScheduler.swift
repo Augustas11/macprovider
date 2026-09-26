@@ -28,6 +28,7 @@ enum ContinuousBatchSchedulerDiagnostic: String, Sendable, Equatable {
     case poolCapacityRejected = "pool_capacity_rejected"
     case prefillFailed = "prefill_failed"
     case promptHeadroomReserved = "prompt_headroom_reserved"
+    case queueWaitTimedOut = "queue_wait_timed_out"
     case stickyCacheUnsupported = "sticky_cache_unsupported"
     case stopped
 }
@@ -55,6 +56,10 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     let tokenDeliveryBufferLimit: Int
     let tokenDeliveryTaskLimit: Int
     let tokenDeliveryTimeoutNanoseconds: UInt64
+    /// Bounded admission wait. A request that has not reached a slot within
+    /// this window is rejected pre-admission with `.queueWaitTimedOut` rather
+    /// than waiting forever behind a saturated batch. `0` disables the bound.
+    let queueWaitTimeoutNanoseconds: UInt64
     let diagnosticLimit: Int
     let vocabularySize: Int
     let maxRequestIDBytes: Int
@@ -69,6 +74,12 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// `defaultDecodeLockstepWindow` so compiled contiguous decode can amortize
     /// the model-container hop. FR-CB5 still inserts at the next hop boundary.
     let maxDecodeLockstepWindow: Int
+    /// Decode tokens per hop while a prompt is mid-prefill and nothing else is
+    /// waiting to join. `1` is strict one-token-per-prefill-chunk alternation,
+    /// which starves active rows behind a long prompt: one 512-token chunk
+    /// costs about as much as 30-50 decode steps. Production uses
+    /// `defaultDecodeStepsWhilePrefilling` (SPEC-038 FR-CB2).
+    let maxDecodeStepsWhilePrefilling: Int
 
     init(
         descriptor: PagedKVDescriptor,
@@ -87,6 +98,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         tokenDeliveryBufferLimit: Int = 16,
         tokenDeliveryTaskLimit: Int? = nil,
         tokenDeliveryTimeoutNanoseconds: UInt64 = 5_000_000_000,
+        queueWaitTimeoutNanoseconds: UInt64 = ContinuousBatchSchedulerConfiguration.defaultQueueWaitTimeoutNanoseconds,
         diagnosticLimit: Int = 512,
         vocabularySize: Int = Int.max,
         maxRequestIDBytes: Int = 256,
@@ -96,7 +108,8 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         maxStopSequenceTokens: Int = 64,
         maxTotalStopTokens: Int = 256,
         snapshot: ContinuousBatchSchedulerSnapshot,
-        maxDecodeLockstepWindow: Int = 1
+        maxDecodeLockstepWindow: Int = 1,
+        maxDecodeStepsWhilePrefilling: Int = 1
     ) {
         self.descriptor = descriptor
         self.tuple = tuple
@@ -131,6 +144,10 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
             min(64, tokenDeliveryTaskLimit ?? (deliveryLimitOverflow ? 64 : scaledDeliveryLimit))
         )
         self.tokenDeliveryTimeoutNanoseconds = tokenDeliveryTimeoutNanoseconds
+        self.queueWaitTimeoutNanoseconds = min(
+            queueWaitTimeoutNanoseconds,
+            ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutNanoseconds
+        )
         self.diagnosticLimit = max(1, diagnosticLimit)
         self.vocabularySize = max(1, vocabularySize)
         self.maxRequestIDBytes = max(1, maxRequestIDBytes)
@@ -141,11 +158,18 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.maxTotalStopTokens = max(1, maxTotalStopTokens)
         self.snapshot = snapshot
         self.maxDecodeLockstepWindow = max(1, maxDecodeLockstepWindow)
+        self.maxDecodeStepsWhilePrefilling = max(1, maxDecodeStepsWhilePrefilling)
     }
 
     /// Production serve-path lockstep burst. Join/leave still happens between
     /// hops (FR-CB5); a queued row forces the scheduler back to one token.
     static let defaultDecodeLockstepWindow = 16
+
+    /// Production decode tokens per hop while a prompt prefills. On the M3
+    /// Ultra a 512-token Qwen3.6 chunk is about 1.7 s and a 4-row decode step
+    /// about 60 ms, so 8 steps give active rows about 4 tok/s instead of about
+    /// 0.6 behind a long prompt, for about 25% slower prefill.
+    static let defaultDecodeStepsWhilePrefilling = 8
 
     /// Stream token delivery is non-blocking on the scheduler actor. Compiled
     /// lockstep offers a full window per hop, and the next hop can start while
@@ -153,6 +177,16 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// more than one window. Tests that want fail-closed backpressure keep the
     /// initializer default of 16.
     static let productionTokenDeliveryBufferLimit = 8_192
+
+    /// SPEC-038 AC-25 bounded admission wait. An unbounded queue wait has no
+    /// API-visible terminal outcome at all, so the serve path defaults to 30s
+    /// unless the operator sets `continuous_batch_queue_wait_timeout_ms`.
+    static let defaultQueueWaitTimeoutNanoseconds: UInt64 = 30_000_000_000
+
+    /// Upper bound (1 hour) for `continuous_batch_queue_wait_timeout_ms`. A
+    /// longer wait is not a bounded admission outcome in any useful sense.
+    static let maximumQueueWaitTimeoutMS = 3_600_000
+    static let maximumQueueWaitTimeoutNanoseconds = UInt64(maximumQueueWaitTimeoutMS) * 1_000_000
 }
 
 struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
@@ -168,6 +202,16 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     let frequencyPenalty: Double
     let cachedPromptTokens: Int
     let retainedPagedKVSequence: PagedKVRetainedSequence?
+    /// Prompt positions (`ConversationCache.recurrentCheckpointPositions`) at which
+    /// a keyed hybrid row snapshots its recurrent state during prefill. Derived
+    /// from `promptTokens`, so it stays out of the idempotency fingerprint.
+    let recurrentCheckpointPositions: [Int]
+    /// SPEC-038 AC-26 hybrid cached turn: the retained entry's recurrent
+    /// checkpoints at or below `cachedPromptTokens`. The one at exactly
+    /// `cachedPromptTokens` is installed with the retained paged KV; any others
+    /// that sit on this prompt's checkpoint positions carry forward into the
+    /// row's own checkpoints. Empty for every non-hybrid request.
+    let retainedRecurrentCheckpoints: [RecurrentStateCheckpoint]
 
     init(
         id: String,
@@ -181,7 +225,9 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         presencePenalty: Double = 0.0,
         frequencyPenalty: Double = 0.0,
         cachedPromptTokens: Int = 0,
-        retainedPagedKVSequence: PagedKVRetainedSequence? = nil
+        retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
+        recurrentCheckpointPositions: [Int] = [],
+        retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = []
     ) {
         self.id = id
         self.conversationKey = conversationKey
@@ -195,6 +241,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.frequencyPenalty = frequencyPenalty
         self.cachedPromptTokens = max(0, cachedPromptTokens)
         self.retainedPagedKVSequence = retainedPagedKVSequence
+        self.recurrentCheckpointPositions = recurrentCheckpointPositions
+        self.retainedRecurrentCheckpoints = retainedRecurrentCheckpoints
     }
 
     enum CodingKeys: String, CodingKey {
@@ -216,6 +264,11 @@ enum ContinuousBatchSettlementDisposition: String, Sendable, Equatable {
     case eligibleOwner = "eligible_owner"
     case nonSettlingReplay = "non_settling_replay"
     case notEligible = "not_eligible"
+    /// A loopback completion whose upstream did not report complete usage
+    /// (`prompt_tokens` and `completion_tokens`). Its counts are not the
+    /// upstream's, so it never signs a settlement receipt, even under a
+    /// pool runtime authorization (SPEC-015 §N.12, SPEC-022 R-12).
+    case usageUnattested = "usage_unattested"
 }
 
 struct ContinuousBatchSchedulerResult: Sendable, Equatable {
@@ -233,6 +286,9 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
     let snapshot: ContinuousBatchSchedulerSnapshot?
     let settlementDisposition: ContinuousBatchSettlementDisposition
     let retainedCache: ContinuousBatchRetainedCache?
+    /// Keyed hybrid rows only: the row's cache in the serial conversation-cache
+    /// format, delivered to the settlement owner like `retainedCache`.
+    var serialConversationCache: ContinuousBatchSerialConversationCache? = nil
 
     func withSettlementDisposition(
         _ disposition: ContinuousBatchSettlementDisposition
@@ -250,7 +306,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             errorCode: errorCode,
             snapshot: snapshot,
             settlementDisposition: disposition,
-            retainedCache: disposition == .eligibleOwner ? retainedCache : nil
+            retainedCache: disposition == .eligibleOwner ? retainedCache : nil,
+            serialConversationCache: disposition == .eligibleOwner ? serialConversationCache : nil
         )
     }
 
@@ -268,7 +325,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             errorCode: errorCode,
             snapshot: snapshot,
             settlementDisposition: settlementDisposition,
-            retainedCache: cache
+            retainedCache: cache,
+            serialConversationCache: serialConversationCache
         )
     }
 
@@ -293,19 +351,45 @@ final class ContinuousBatchRetainedCache: @unchecked Sendable {
     let retainedSequence: PagedKVRetainedSequence
     let layers: [KVCache]
     let deliveryID: UUID?
+    /// Keyed hybrid rows: recurrent state at each checkpoint the row reached, so
+    /// the next cached turn can resume from one (SPEC-038 AC-26). Empty otherwise.
+    let recurrentCheckpoints: [RecurrentStateCheckpoint]
 
-    init(retainedSequence: PagedKVRetainedSequence, layers: [KVCache], deliveryID: UUID? = nil) {
+    init(
+        retainedSequence: PagedKVRetainedSequence,
+        layers: [KVCache],
+        deliveryID: UUID? = nil,
+        recurrentCheckpoints: [RecurrentStateCheckpoint] = []
+    ) {
         self.retainedSequence = retainedSequence
         self.layers = layers
         self.deliveryID = deliveryID
+        self.recurrentCheckpoints = recurrentCheckpoints
     }
 
     func withDeliveryID(_ deliveryID: UUID?) -> ContinuousBatchRetainedCache {
         ContinuousBatchRetainedCache(
             retainedSequence: retainedSequence,
             layers: layers,
-            deliveryID: deliveryID
+            deliveryID: deliveryID,
+            recurrentCheckpoints: recurrentCheckpoints
         )
+    }
+}
+
+/// SPEC-038 FR-CB4: a keyed hybrid row's cache in the serial conversation-cache
+/// format. Attention layers are contiguous `KVCacheSimple` covering the first
+/// `tokenCount` canonical tokens; recurrent layers are empty `MambaCache`s,
+/// because reuse always restores one of `recurrentCheckpoints` (SPEC-024 FR-CI2).
+final class ContinuousBatchSerialConversationCache: @unchecked Sendable {
+    let layers: [KVCache]
+    let recurrentCheckpoints: [RecurrentStateCheckpoint]
+    let tokenCount: Int
+
+    init(layers: [KVCache], recurrentCheckpoints: [RecurrentStateCheckpoint], tokenCount: Int) {
+        self.layers = layers
+        self.recurrentCheckpoints = recurrentCheckpoints
+        self.tokenCount = tokenCount
     }
 }
 
@@ -443,16 +527,31 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
     ) async throws -> [ContinuousBatchDecodeOutcome]
     /// Install a same-conversation retained paged-KV handoff before the row resumes
     /// prefill at its serial LCP. Backends that cannot consume FR-PKV10 must fail
-    /// closed instead of accepting positive cached-token credit.
+    /// closed instead of accepting positive cached-token credit. A hybrid backend
+    /// restores its recurrent layers from `recurrentCheckpoint`, taken at exactly
+    /// the handoff length, and must fail closed without one.
     func installRetainedPagedKVCache(
         requestID: String,
         handoff: PagedKVPagedCacheHandoff,
-        binding: PagedKVStorageBinding
+        binding: PagedKVStorageBinding,
+        recurrentCheckpoint: RecurrentStateCheckpoint?
     ) async throws
     /// Commit the final buyer-visible token into row-local KV state when a row
     /// stops immediately after sampling it. Retention happens after this step so
     /// canonical prompt history and retained paged-KV length agree.
     func commitTerminalKV(_ input: ContinuousBatchTerminalKVCommitInput) async throws
+    /// Snapshot the row's own recurrent-layer state right after prefill reached
+    /// `tokenCount` prompt tokens. Nil when the backend has no recurrent layers.
+    func snapshotRecurrentState(requestID: String, tokenCount: Int) async -> RecurrentStateCheckpoint?
+    /// Build the row's serial-format conversation cache at a normal terminal,
+    /// before its blocks are released: attention KV materialized from `binding`
+    /// and trimmed to `tokenCount`. Nil when the backend has no recurrent layers.
+    func materializeSerialConversationCache(
+        requestID: String,
+        binding: PagedKVStorageBinding,
+        tokenCount: Int,
+        recurrentCheckpoints: [RecurrentStateCheckpoint]
+    ) async throws -> ContinuousBatchSerialConversationCache?
     /// Row-local cleanup hook for backend state that is not owned by the
     /// scheduler/allocator. Called after the scheduler has reached a terminal
     /// result for the request. Implementations that keep no row-local state can
@@ -537,13 +636,27 @@ extension ContinuousBatchSchedulerBackend {
     func installRetainedPagedKVCache(
         requestID: String,
         handoff: PagedKVPagedCacheHandoff,
-        binding: PagedKVStorageBinding
+        binding: PagedKVStorageBinding,
+        recurrentCheckpoint: RecurrentStateCheckpoint?
     ) async throws {
         throw ContinuousBatchSchedulerError.unsupported("continuous_batching_paged_kv_handoff_unavailable")
     }
 
     func commitTerminalKV(_ input: ContinuousBatchTerminalKVCommitInput) async throws {
         throw ContinuousBatchSchedulerError.unsupported("continuous_batching_terminal_kv_commit_unavailable")
+    }
+
+    func snapshotRecurrentState(requestID: String, tokenCount: Int) async -> RecurrentStateCheckpoint? {
+        nil
+    }
+
+    func materializeSerialConversationCache(
+        requestID: String,
+        binding: PagedKVStorageBinding,
+        tokenCount: Int,
+        recurrentCheckpoints: [RecurrentStateCheckpoint]
+    ) async throws -> ContinuousBatchSerialConversationCache? {
+        nil
     }
 
     func finish(requestID: String) {}
@@ -566,9 +679,17 @@ struct ContinuousBatchSchedulerReplayKey: Sendable, Equatable {
 /// are an optimization, never the authority that permits re-execution.
 protocol ContinuousBatchSchedulerReplayAuthority: Sendable {
     func claim(_ key: ContinuousBatchSchedulerReplayKey) throws -> ContinuousBatchSchedulerReplayClaim
+    /// Drops a claim taken for a request that never reached admission, so the
+    /// same request ID can be re-sent. Only the pre-admission queue-wait
+    /// expiry calls this: the request owns no slot, no result and no receipt,
+    /// so releasing cannot permit a re-execution of work that already ran.
+    /// Must be a no-op when the stored fingerprint no longer matches `key`,
+    /// so a re-claim by a different body is never deleted. Best-effort: a
+    /// release that fails leaves the claim standing, which is the safe side.
+    func release(_ key: ContinuousBatchSchedulerReplayKey)
 }
 
-private final class ContinuousBatchTokenDeliveryCapacity: @unchecked Sendable {
+final class ContinuousBatchTokenDeliveryCapacity: @unchecked Sendable {
     private let lock = NSLock()
     private let limit: Int
     private var inUse = 0
@@ -593,7 +714,7 @@ private final class ContinuousBatchTokenDeliveryCapacity: @unchecked Sendable {
     }
 }
 
-private final class ContinuousBatchTokenDelivery: @unchecked Sendable {
+final class ContinuousBatchTokenDelivery: @unchecked Sendable {
     private let lock = NSLock()
     private let bufferLimit: Int
     private let timeoutNanoseconds: UInt64
@@ -608,6 +729,9 @@ private final class ContinuousBatchTokenDelivery: @unchecked Sendable {
     private var drainGeneration: UUID?
     private var deliveryTask: Task<Void, Never>?
     private var timeoutTask: Task<Void, Never>?
+    /// Test seam: runs after the drain loop sees an empty queue and before it
+    /// decides whether to finish, the window an `offer()` can land in.
+    var afterDrainSawEmptyQueueForTest: (@Sendable () -> Void)?
 
     init(
         bufferLimit: Int,
@@ -726,11 +850,21 @@ private final class ContinuousBatchTokenDelivery: @unchecked Sendable {
     }
 
     private func drain(generation: UUID) async {
-        while let event = nextEvent(generation: generation) {
-            await sink(event)
-            if Task.isCancelled { break }
+        while true {
+            while let event = nextEvent(generation: generation) {
+                await sink(event)
+                if Task.isCancelled { break }
+            }
+            afterDrainSawEmptyQueueForTest?()
+            // An `offer()` between the empty check above and this call saw
+            // `draining == true`, appended, and started no drain of its own;
+            // finishing here would strand that event and the terminal
+            // `finish(afterDraining:)` would wait forever. `finishDrain`
+            // re-checks the queue under the same lock that clears `draining`.
+            if finishDrain(generation: generation, keepDrainingIfQueued: !Task.isCancelled) {
+                return
+            }
         }
-        finishDrain(generation: generation)
     }
 
     private func nextEvent(generation: UUID) -> ContinuousBatchSchedulerTokenEvent? {
@@ -764,7 +898,9 @@ private final class ContinuousBatchTokenDelivery: @unchecked Sendable {
         completion(false)
     }
 
-    private func finishDrain(generation: UUID) {
+    /// Returns `false` only when events were queued after the drain loop saw
+    /// an empty queue; the caller keeps draining.
+    private func finishDrain(generation: UUID, keepDrainingIfQueued: Bool) -> Bool {
         lock.lock()
         guard drainGeneration == generation else {
             let shouldReleaseDetachedCapacity = timedOut
@@ -775,7 +911,11 @@ private final class ContinuousBatchTokenDelivery: @unchecked Sendable {
             }
             lock.unlock()
             if shouldReleaseDetachedCapacity { capacity.release() }
-            return
+            return true
+        }
+        if keepDrainingIfQueued, !timedOut, !queue.isEmpty {
+            lock.unlock()
+            return false
         }
         draining = false
         drainGeneration = nil
@@ -791,18 +931,191 @@ private final class ContinuousBatchTokenDelivery: @unchecked Sendable {
         timeout?.cancel()
         if shouldRelease { capacity.release() }
         completion?(completedBeforeTimeout)
+        return true
     }
 }
 
 enum ContinuousBatchSchedulerError: Error, Equatable {
     case unsupported(String)
+    /// Pre-admission queue pressure: the request was refused before any
+    /// inference ran, so nothing is on the wire and re-sending it once the
+    /// queue drains is safe. Every throw site is in `submit()` / `enqueue()`
+    /// and fires before the waiter's delivery has been offered a single
+    /// event. Post-token delivery failure is `.deliveryBackpressure`, which
+    /// is a different buyer-visible outcome — do not merge the two.
     case backpressure
+    /// Post-token delivery backpressure: an *active decode row's* waiter
+    /// would not accept a token event, so the row is torn down mid-stream.
+    /// Inference ran and the buyer may already hold partial output, so this
+    /// is `inferenceRan: true`, not retryable, and carries no `Retry-After`:
+    /// telling the buyer to retry would invite a duplicate request for work
+    /// that partly happened.
+    case deliveryBackpressure
+    /// Serve-path-unreachable today. `.drained` and `.drainTimedOut` are only
+    /// thrown out of `ContinuousBatchScheduler.drain()`, whose sole caller in
+    /// `Sources/` is `MSBThroughputCommand` — a benchmark harness, not the
+    /// HTTP serve path. They are deliberately absent from `asAPIError()`:
+    /// mapping them would ship buyer-visible code no request can reach. Wire
+    /// `drain()` into the warm-swap path before adding a mapping here.
     case drained
+    /// See `.drained`: harness-only, deliberately unmapped.
     case drainTimedOut
     case requestFailed(String)
     case duplicateRequestMismatch
     case idempotencyWindowExpired
     case idempotencyAuthorityUnavailable
+    /// Admission wait exceeded `queueWaitTimeoutNanoseconds`. Distinct from
+    /// `.backpressure`, which rejects at submit because the queue was already
+    /// full; this request was queued and never reached a slot in time.
+    case queueWaitTimedOut
+}
+
+extension ContinuousBatchSchedulerError {
+    /// Buyer-visible code for post-token delivery backpressure, named once so
+    /// the throw site, the terminal-result error code and the serve-path
+    /// mapper cannot drift apart.
+    static let deliveryBackpressureCode = "continuous_batching_stream_delivery_backpressure"
+
+    /// SPEC-038 AC-25: the single scheduler-error → buyer-visible outcome map.
+    /// Both the streaming and non-streaming serve paths call this so the two
+    /// cannot drift. Returns `nil` only for the serve-unreachable cases
+    /// (`.drained` / `.drainTimedOut`); the caller then rethrows unchanged.
+    ///
+    /// Every mapped case is a pre-admission or pre-inference rejection, so all
+    /// of them are `inferenceRan: false, settlementRan: false` — non-settling,
+    /// no receipt. The one exception is `.deliveryBackpressure`, which is
+    /// raised against an already-decoding row: see its case below.
+    func asAPIError() -> APIError? {
+        switch self {
+        case .backpressure:
+            return APIError(
+                status: 503,
+                message: "Inference engine unavailable",
+                type: "server_error",
+                code: "continuous_batching_stream_backpressure",
+                inferenceRan: false,
+                settlementRan: false
+            )
+        case .deliveryBackpressure:
+            // Not `continuous_batching_stream_backpressure`: that code is
+            // marked retryable and carries a `Retry-After` bound, which is
+            // correct for a pre-admission refusal and wrong here. This row
+            // was decoding, tokens may already have reached the buyer, and a
+            // retry would re-run work that partly happened. `retryable` is
+            // pinned false at the call site so a later entry in
+            // `APIError.retryableByCode` cannot silently flip it.
+            return APIError(
+                status: 503,
+                message: "Inference engine unavailable",
+                type: "server_error",
+                code: Self.deliveryBackpressureCode,
+                retryable: false,
+                inferenceRan: true,
+                settlementRan: false
+            )
+        case .queueWaitTimedOut:
+            return APIError(
+                status: 503,
+                message: "Inference engine unavailable",
+                type: "server_error",
+                code: "continuous_batching_queue_wait_timeout",
+                inferenceRan: false,
+                settlementRan: false
+            )
+        case .duplicateRequestMismatch:
+            return APIError(
+                status: 409,
+                message: "Request id was already used for a different request body",
+                type: "invalid_request_error",
+                code: "continuous_batching_duplicate_request_mismatch",
+                inferenceRan: false,
+                settlementRan: false
+            )
+        case .idempotencyWindowExpired:
+            return APIError(
+                status: 409,
+                message: "Request id is outside the idempotency retention window",
+                type: "invalid_request_error",
+                code: "continuous_batching_idempotency_window_expired",
+                inferenceRan: false,
+                settlementRan: false
+            )
+        case .idempotencyAuthorityUnavailable:
+            return APIError(
+                status: 503,
+                message: "Idempotency authority unavailable",
+                type: "server_error",
+                code: "continuous_batching_idempotency_authority_unavailable",
+                inferenceRan: false,
+                settlementRan: false
+            )
+        case .unsupported(let code), .requestFailed(let code):
+            // Both cases already carry a well-formed API code string, so the
+            // carried string IS the buyer-visible code; only the status has to
+            // be decided. Every one of these that can escape `submit()` is
+            // raised before the request is enqueued or before it reaches a
+            // slot, so none of them can be thrown after inference ran — the
+            // decode/prefill-structure `.requestFailed` codes never propagate
+            // to a caller, the pump converts them into a terminal
+            // `ContinuousBatchSchedulerResult` instead.
+            let status = Self.carriedCodeStatus(code)
+            return APIError(
+                status: status,
+                message: status == 400
+                    ? "Continuous batching rejected the request before admission"
+                    : "Continuous batching is unavailable for this request",
+                type: status == 400 ? "invalid_request_error" : "server_error",
+                code: code,
+                inferenceRan: false,
+                settlementRan: false
+            )
+        case .drained, .drainTimedOut:
+            return nil
+        }
+    }
+
+    /// Status for a code carried by `.unsupported` / `.requestFailed`.
+    ///
+    /// A code that `ContinuousBatchingUnsupportedReason` already publishes
+    /// takes that reason's status, so the preflight surface and the runtime
+    /// surface cannot disagree about the same string. The rest follow the same
+    /// convention by shape: 400 when the rejection is a property of the
+    /// request, 503 when it is a property of the provider's capability or
+    /// availability. Unknown codes fail to 503 — an unrecognised scheduler
+    /// rejection is a provider-side condition, not buyer error — but the
+    /// fallback is a runtime safety net, not the classification: every code
+    /// the scheduler can carry is listed in `carriedCodeStatuses`, and
+    /// `ContinuousBatchSchedulerTests
+    /// .testEveryCarriedSchedulerCodeIsClassified` fails on any new literal
+    /// that is not, so a future serve-path code cannot silently inherit 503.
+    static let carriedCodeStatuses: [String: Int] = [
+        // 400 — a property of the request.
+        ContinuousBatchingUnsupportedReason.stickyCacheHandoffUnavailable.apiCode: 400,
+        // Mirrors `.tupleNotAdvertised` / `.moePromotionEvidenceUnavailable`,
+        // which `localCapabilityReason` reports without the API prefix.
+        "local_paged_kv_descriptor_mismatch": 400,
+        "moe_promotion_evidence_unavailable": 400,
+        "continuous_batching_cached_tokens_require_conversation_key": 400,
+        "continuous_batching_invalid_cached_prompt_tokens": 400,
+        "continuous_batching_invalid_request": 400,
+        "continuous_batching_request_fingerprint_failed": 400,
+        // 503 — a property of the provider's capability or availability.
+        "continuous_batching_scheduler_failed_closed": 503,
+        "continuous_batching_admission_sequence_exhausted": 503,
+        "continuous_batching_local_binding_mismatch": 503,
+        "continuous_batching_terminal_kv_commit_unavailable": 503,
+        "continuous_batching_retained_hybrid_cache_unavailable": 503,
+        "continuous_batching_terminal_kv_commit_missing_token": 503,
+        "continuous_batching_decode_row_mismatch": 503,
+        "continuous_batching_duplicate_decode_row": 503,
+        "continuous_batching_duplicate_prefill_row": 503,
+        "continuous_batching_prefill_row_mismatch": 503,
+        "continuous_batching_reservation_overflow": 503,
+    ]
+
+    private static func carriedCodeStatus(_ code: String) -> Int {
+        carriedCodeStatuses[code] ?? 503
+    }
 }
 
 actor ContinuousBatchScheduler {
@@ -833,6 +1146,8 @@ actor ContinuousBatchScheduler {
         var pendingOutputTokens: [Int]
         var prefillCursor: Int
         var snapshot: ContinuousBatchSchedulerSnapshot
+        /// Keyed hybrid rows: recurrent state at each reached checkpoint (<= 2).
+        var recurrentCheckpoints: [RecurrentStateCheckpoint] = []
 
         var retainedLogicalTokenCount: Int {
             request.promptTokens.count + generatedTokens.count
@@ -871,6 +1186,11 @@ actor ContinuousBatchScheduler {
     private let tokenDeliveryCapacity: ContinuousBatchTokenDeliveryCapacity
 
     private var waiting: [ContinuousBatchSchedulerRequest] = []
+    /// Absolute uptime deadline per queued request, set once when the request
+    /// enters `waiting` so a re-queued admission attempt keeps the original
+    /// clock instead of restarting it.
+    private var queueWaitDeadlines: [String: UInt64] = [:]
+    private var queueWaitTimeoutTasks: [String: Task<Void, Never>] = [:]
     private var pendingBindingChecks = 0
     private var pendingBindingTokenCount = 0
     private var nextAdmissionSequence: UInt64 = 0
@@ -1001,8 +1321,11 @@ actor ContinuousBatchScheduler {
         nextAdmissionSequence += 1
         pendingBindingChecks += 1
         pendingBindingTokenCount += retainedTokenCost
+        CBTrace.log(request.id, "sch_submit seq=\(admissionSequence) cur=\(currentAdmissionSequence) active=\(activeDecode.count)")
         let bindingsAreValid = await localBindingsAreValid()
+        CBTrace.log(request.id, "sch_bindings")
         await waitForAdmissionTurn(admissionSequence)
+        CBTrace.log(request.id, "sch_turn")
         pendingBindingChecks -= 1
         pendingBindingTokenCount -= retainedTokenCost
         guard bindingsAreValid else {
@@ -1034,6 +1357,7 @@ actor ContinuousBatchScheduler {
                     continuation: continuation,
                     delivery: delivery
                 )
+                CBTrace.log(request.id, "sch_enqueued waiting=\(waiting.count) active=\(activeDecode.count)")
                 finishAdmissionTurn(admissionSequence)
             }
         } onCancel: {
@@ -1204,6 +1528,10 @@ actor ContinuousBatchScheduler {
             return
         }
         if var pending = pendingTerminalDeliveries[request.id] {
+            // Pre-admission for *this* caller: a duplicate that could not be
+            // attached to the in-flight terminal delivery. Its own delivery
+            // has never been offered an event, so nothing reached this buyer
+            // and re-sending the same id is safe — it attaches or replays.
             guard pending.waiters.count < configuration.duplicateWaiterLimit else {
                 record(.backpressureRejected)
                 delivery.finish()
@@ -1226,6 +1554,10 @@ actor ContinuousBatchScheduler {
                     replayTokens: pending.result.outputTokens,
                     snapshot: snapshot
                 )
+                // Still pre-admission for this caller: `delivery` is the
+                // new waiter's, freshly built in `submit()`, and this replay
+                // is the first event ever offered to it. A refusal here means
+                // the caller has seen nothing.
                 guard delivery.offer(replay) else {
                     record(.backpressureRejected)
                     delivery.finish()
@@ -1260,6 +1592,8 @@ actor ContinuousBatchScheduler {
             return
         }
         if knownRequests[request.id] != nil {
+            // Same shape as the `pendingTerminalDeliveries` guard above:
+            // the duplicate never attached and never received an event.
             let deferredWaiterCount = deferredTerminalCompletions[request.id]?.waiters.count ?? 0
             guard requestWaiters[request.id, default: []].count + deferredWaiterCount
                     < configuration.duplicateWaiterLimit else {
@@ -1283,6 +1617,10 @@ actor ContinuousBatchScheduler {
                     replayTokens: row.outputTokens,
                     snapshot: row.snapshot
                 )
+                // First offer to this waiter's own fresh delivery, as
+                // above: the attach is rolled back and the caller has seen
+                // no output, so this stays the pre-admission classification
+                // even though the request it tried to join is decoding.
                 if !delivery.offer(replay) {
                     var retained = requestWaiters[request.id] ?? []
                     retained.removeAll { $0.id == waiterID }
@@ -1338,10 +1676,102 @@ actor ContinuousBatchScheduler {
             delivery: delivery
         ))
         waiting.append(request)
+        beginQueueWait(requestID: request.id)
         ensurePump()
     }
 
+    /// Starts the bounded admission clock for a request that just entered the
+    /// waiting queue.
+    private func beginQueueWait(requestID: String) {
+        let timeout = configuration.queueWaitTimeoutNanoseconds
+        guard timeout > 0 else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let (candidate, overflow) = now.addingReportingOverflow(timeout)
+        queueWaitDeadlines[requestID] = overflow ? UInt64.max : candidate
+        armQueueWaitTimeout(requestID: requestID)
+    }
+
+    private func armQueueWaitTimeout(requestID: String) {
+        guard let deadline = queueWaitDeadlines[requestID] else { return }
+        let now = DispatchTime.now().uptimeNanoseconds
+        let remaining = deadline > now ? deadline - now : 0
+        queueWaitTimeoutTasks.removeValue(forKey: requestID)?.cancel()
+        queueWaitTimeoutTasks[requestID] = Task { [weak self] in
+            if remaining > 0 {
+                try? await Task.sleep(nanoseconds: remaining)
+            }
+            guard !Task.isCancelled else { return }
+            await self?.expireQueueWait(requestID: requestID)
+        }
+    }
+
+    /// Stops the timer while the request is out of `waiting` for an admission
+    /// attempt. The deadline is retained so a re-queue resumes the same clock.
+    private func suspendQueueWaitTimeout(requestID: String) {
+        queueWaitTimeoutTasks.removeValue(forKey: requestID)?.cancel()
+    }
+
+    /// Test hook: cancels a queued request's timeout task but keeps its
+    /// absolute deadline, reproducing "deadline passed, timer not yet run"
+    /// deterministically. Production code never calls it.
+    func cancelQueueWaitTimerForTest(requestID: String) {
+        suspendQueueWaitTimeout(requestID: requestID)
+    }
+
+    private func endQueueWait(requestID: String) {
+        queueWaitTimeoutTasks.removeValue(forKey: requestID)?.cancel()
+        queueWaitDeadlines.removeValue(forKey: requestID)
+    }
+
+    /// Bounded admission wait expiry. The request never reached a slot, so it
+    /// owns no row, no block-table handle and no terminal result: the only
+    /// state it leaves behind is the non-receipt diagnostic. It can never be
+    /// settlement-eligible because no result is produced for it at all.
+    ///
+    /// Internal rather than private so a `@testable` test can drive the stale
+    /// wake directly: it happens only when the timeout task reaches the actor
+    /// in the same turn the pump pulls the request into admission, which
+    /// cannot be forced from outside the actor.
+    func expireQueueWait(requestID: String) async {
+        // A timeout task can reach here after `suspendQueueWaitTimeout`
+        // cancelled it: cancellation does not unschedule a task that already
+        // woke. Do not touch `queueWaitDeadlines` until the request is
+        // confirmed still queued and actually past its deadline. Clearing it
+        // for a request that is mid-admission would strip the absolute
+        // deadline, and a `capacityExceeded` bounce would then re-arm with no
+        // deadline at all — the unbounded wait this bound exists to remove.
+        guard let deadline = queueWaitDeadlines[requestID],
+              DispatchTime.now().uptimeNanoseconds >= deadline,
+              let index = waiting.firstIndex(where: { $0.id == requestID }) else { return }
+        let request = waiting.remove(at: index)
+        endQueueWait(requestID: requestID)
+        record(.queueWaitTimedOut)
+        // SPEC-038 AC-25: the durable replay claim was taken at submit, before
+        // this request ever reached a slot. Nothing ran, nothing was cached,
+        // nothing can settle, so the claim guards no execution — holding it
+        // would answer a same-ID retry of a 503 this provider itself marked
+        // `retryable: true` with a 409 instead, and churn a claim file for
+        // work that never happened. Released before the waiters are resumed
+        // so a retry cannot race ahead of the release.
+        if let fingerprint = knownRequests[requestID] {
+            replayAuthority.release(ContinuousBatchSchedulerReplayKey(
+                requestID: requestID,
+                fingerprintSHA256: fingerprint.sha256
+            ))
+        }
+        knownRequests.removeValue(forKey: requestID)
+        requestAdmissionSequences.removeValue(forKey: requestID)
+        cancelledIDs.remove(requestID)
+        let waiters = requestWaiters.removeValue(forKey: requestID) ?? []
+        await discardUnacceptedRetainedCache(for: request)
+        for waiter in waiters {
+            waiter.delivery.finish()
+            waiter.continuation.resume(throwing: ContinuousBatchSchedulerError.queueWaitTimedOut)
+        }
+    }
+
     private func cancelWaiter(requestID: String, waiterID: UUID) async {
+        CBTrace.log(requestID, "sch_cancel_waiter")
         guard stoppingWaiterIDs.insert(waiterID).inserted else { return }
         if let delivered = deliveredRetainedOwners.removeValue(forKey: waiterID) {
             stoppingWaiterIDs.remove(waiterID)
@@ -1540,9 +1970,12 @@ actor ContinuousBatchScheduler {
         let joinPending = !waiting.isEmpty
             || pendingBindingChecks > 0
             || !admittingRequests.isEmpty
-            || !activePrompt.isEmpty
         guard !joinPending else { return 1 }
-        let configured = configuration.maxDecodeLockstepWindow
+        // A prompt mid-prefill joins only after its last chunk, so decode may
+        // take a bounded window between chunks (FR-CB2) instead of one token.
+        let configured = activePrompt.isEmpty
+            ? configuration.maxDecodeLockstepWindow
+            : min(configuration.maxDecodeLockstepWindow, configuration.maxDecodeStepsWhilePrefilling)
         guard configured > 1 else { return 1 }
         var window = configured
         var bounded = false
@@ -1818,6 +2251,7 @@ actor ContinuousBatchScheduler {
         let firstVisibleIndex = row.outputTokens.count
         row.outputTokens.append(contentsOf: visibleTokens)
         activeDecode[row.request.id] = row
+        CBTrace.log(row.request.id, "sch_active")
         if !deliverVisibleTokens(
             visibleTokens,
             firstIndex: firstVisibleIndex,
@@ -1825,11 +2259,16 @@ actor ContinuousBatchScheduler {
         ) {
             activeDecode.removeValue(forKey: row.request.id)
             let released = await release(row.handle)
+            // Post-token, like the `.deliveryBackpressure` thrown at the
+            // waiter above: this row was decoding when its last consumer
+            // refused an event. The terminal result is replayable to a later
+            // duplicate of the same request id, so it must not carry the
+            // pre-admission code — that one is retryable and this is not.
             finish(
                 row,
                 status: .requestFailed,
                 errorCode: released
-                    ? "continuous_batching_stream_backpressure"
+                    ? ContinuousBatchSchedulerError.deliveryBackpressureCode
                     : "continuous_batching_cleanup_failed"
             )
             return
@@ -1837,18 +2276,41 @@ actor ContinuousBatchScheduler {
 
         if let terminalStatus {
             activeDecode.removeValue(forKey: row.request.id)
-            if let retainedCache = await retainTerminalCache(
-                for: row,
-                targetLogicalTokens: row.retainedLogicalTokenCount
-            ) {
-                finish(row, status: terminalStatus, errorCode: nil, retainedCache: retainedCache)
-            } else {
-                let released = await release(row.handle)
-                finish(row, status: released ? terminalStatus : .requestFailed, errorCode: released
-                    ? nil
-                    : "continuous_batching_cleanup_failed")
-            }
+            await finishTerminal(row, status: terminalStatus)
         }
+    }
+
+    /// Normal terminal for a row already removed from active tracking. The
+    /// retain / materialize awaits can interleave with `cancel(requestID:)`,
+    /// which only records the ID and no longer finds the row; a cancel recorded
+    /// meanwhile wins, and no conversation cache is published for it.
+    private func finishTerminal(_ row: Row, status: ContinuousBatchSchedulerTerminalStatus) async {
+        if let retainedCache = await retainTerminalCache(
+            for: row,
+            targetLogicalTokens: row.retainedLogicalTokenCount
+        ) {
+            if cancelledIDs.remove(row.request.id) != nil {
+                await discardRetainedCache(
+                    retainedCache.retainedSequence,
+                    conversationKey: schedulerConversationKey(for: row.request)
+                )
+                finish(row, status: .cancelled, errorCode: "request_cancelled")
+                return
+            }
+            finish(row, status: status, errorCode: nil, retainedCache: retainedCache)
+            return
+        }
+        let serialCache = await materializeSerialConversationCache(for: row)
+        let released = await release(row.handle)
+        if cancelledIDs.remove(row.request.id) != nil {
+            finish(row, status: released ? .cancelled : .requestFailed, errorCode: released
+                ? "request_cancelled"
+                : "continuous_batching_cleanup_failed")
+            return
+        }
+        finish(row, status: released ? status : .requestFailed, errorCode: released
+            ? nil
+            : "continuous_batching_cleanup_failed", serialConversationCache: serialCache)
     }
 
     private func deliverVisibleTokens(_ tokens: [Int], firstIndex: Int, row: Row) -> Bool {
@@ -1869,7 +2331,7 @@ actor ContinuousBatchScheduler {
                     beginStoppingActiveWaiter(
                         requestID: row.request.id,
                         waiter: waiter,
-                        error: ContinuousBatchSchedulerError.backpressure
+                        error: ContinuousBatchSchedulerError.deliveryBackpressure
                     )
                 }
             }
@@ -1906,7 +2368,19 @@ actor ContinuousBatchScheduler {
               occupiedSlots < configuration.maxActiveRows,
               !waiting.isEmpty {
             attempts += 1
+            // SPEC-038 AC-25: a request already past its absolute admission
+            // deadline (for example re-queued by a `capacityExceeded` bounce
+            // after the deadline passed) expires here, synchronously. Its
+            // zero-delay timeout task would otherwise race this pump, and the
+            // pump could admit it after the bound it was promised.
+            if let deadline = queueWaitDeadlines[waiting[0].id],
+               DispatchTime.now().uptimeNanoseconds >= deadline {
+                await expireQueueWait(requestID: waiting[0].id)
+                madeProgress = true
+                continue
+            }
             let request = waiting.removeFirst()
+            suspendQueueWaitTimeout(requestID: request.id)
             madeProgress = true
             if cancelledIDs.remove(request.id) != nil {
                 await finishQueued(request, status: .cancelled, errorCode: "request_cancelled")
@@ -1925,6 +2399,16 @@ actor ContinuousBatchScheduler {
                             "continuous_batching_paged_kv_handoff_unavailable"
                         )
                     }
+                    // A hybrid handoff resumes only from a checkpoint at exactly
+                    // the cached length; the reattach below trims to it.
+                    let recurrentCheckpoint = request.retainedRecurrentCheckpoints.first {
+                        $0.tokenCount == request.cachedPromptTokens
+                    }
+                    if !request.retainedRecurrentCheckpoints.isEmpty && recurrentCheckpoint == nil {
+                        throw ContinuousBatchSchedulerError.unsupported(
+                            "continuous_batching_retained_hybrid_cache_unavailable"
+                        )
+                    }
                     handle = try await allocator.reattach(
                         retained,
                         conversationKey: request.conversationKey,
@@ -1940,7 +2424,8 @@ actor ContinuousBatchScheduler {
                     try await backend.installRetainedPagedKVCache(
                         requestID: request.id,
                         handoff: handoff,
-                        binding: binding
+                        binding: binding,
+                        recurrentCheckpoint: recurrentCheckpoint
                     )
                     prefillCursor = request.cachedPromptTokens
                 } else {
@@ -1975,6 +2460,7 @@ actor ContinuousBatchScheduler {
                 }
                 record(.promptHeadroomReserved)
                 record(.accepted)
+                try? FileHandle.standardError.write(contentsOf: Data("event=batching_admitted action=scheduler_admitted\n".utf8))
                 activePrompt[request.id] = Row(
                     request: request,
                     handle: handle,
@@ -1983,9 +2469,15 @@ actor ContinuousBatchScheduler {
                     outputTokens: [],
                     pendingOutputTokens: [],
                     prefillCursor: prefillCursor,
-                    snapshot: configuration.snapshot
+                    snapshot: configuration.snapshot,
+                    // Stored checkpoints on this prompt's own positions are a
+                    // prefix of it, so they carry forward (as on the serial path).
+                    recurrentCheckpoints: request.retainedRecurrentCheckpoints.filter {
+                        request.recurrentCheckpointPositions.contains($0.tokenCount)
+                    }
                 )
                 promptOrder.append(request.id)
+                endQueueWait(requestID: request.id)
             } catch PagedKVAllocatorError.capacityExceeded {
                 admittingRequests.removeValue(forKey: request.id)
                 if draining {
@@ -1999,6 +2491,7 @@ actor ContinuousBatchScheduler {
                     )
                 } else {
                     waiting.insert(request, at: 0)
+                    armQueueWaitTimeout(requestID: request.id)
                     return madeProgress
                 }
             } catch PagedKVAllocatorError.conversationMismatch {
@@ -2039,7 +2532,12 @@ actor ContinuousBatchScheduler {
                 if cleanupFailedClosed { return true }
                 continue
             }
-            let end = min(prefixTokenCount, row.prefillCursor + configuration.maxPromptChunkTokens)
+            var end = min(prefixTokenCount, row.prefillCursor + configuration.maxPromptChunkTokens)
+            // A chunk ends exactly on the next recurrent checkpoint so its state
+            // can be snapshotted there.
+            if let checkpoint = pendingRecurrentCheckpointPositions(for: row).first(where: { $0 > row.prefillCursor }) {
+                end = min(end, checkpoint)
+            }
             let chunk = Array(row.request.promptTokens[row.prefillCursor..<end])
             do {
                 _ = try await allocator.extend(row.handle, by: chunk.count)
@@ -2126,6 +2624,24 @@ actor ContinuousBatchScheduler {
                 continue
             }
             row.prefillCursor += item.chunkCount
+            if pendingRecurrentCheckpointPositions(for: row).contains(row.prefillCursor) {
+                if let checkpoint = await backend.snapshotRecurrentState(requestID: id, tokenCount: row.prefillCursor) {
+                    row.recurrentCheckpoints.append(checkpoint)
+                }
+                guard activePrompt[id] != nil else { continue }
+                // A cancel that arrived while the snapshot was suspended only
+                // recorded the ID; honour it here, before the row can
+                // materialize a cache or move on to decode.
+                if cancelledIDs.remove(id) != nil {
+                    _ = removePromptRow(id)
+                    let released = await release(row.handle)
+                    finish(row, status: released ? .cancelled : .requestFailed, errorCode: released
+                        ? "request_cancelled"
+                        : "continuous_batching_cleanup_failed")
+                    if !released { return true }
+                    continue
+                }
+            }
             if row.prefillCursor == row.request.promptTokens.count - 1 {
                 activePrompt[id] = row
                 await transitionPrefilledRow(row)
@@ -2140,19 +2656,10 @@ actor ContinuousBatchScheduler {
     private func transitionPrefilledRow(_ row: Row) async {
         _ = removePromptRow(row.request.id)
         if row.request.maxOutputTokens == 0 {
-            if let retainedCache = await retainTerminalCache(
-                for: row,
-                targetLogicalTokens: row.retainedLogicalTokenCount
-            ) {
-                finish(row, status: .length, errorCode: nil, retainedCache: retainedCache)
-            } else {
-                let released = await release(row.handle)
-                finish(row, status: released ? .length : .requestFailed, errorCode: released
-                    ? nil
-                    : "continuous_batching_cleanup_failed")
-            }
+            await finishTerminal(row, status: .length)
         } else {
             activeDecode[row.request.id] = row
+            CBTrace.log(row.request.id, "sch_active")
             record(.joinedDecode)
         }
     }
@@ -2191,7 +2698,22 @@ actor ContinuousBatchScheduler {
         status: ContinuousBatchSchedulerTerminalStatus,
         errorCode: String?
     ) async {
+        // Every pre-admission completion funnels through here. A cancel recorded
+        // while the request was out of `waiting` (mid-admission, e.g. during a
+        // retained install) wins over the admission outcome: nothing ran for
+        // it, and `requestFailed`/`rejected` would contradict the caller's
+        // cancel. A cleanup failure stays visible as such.
         await discardUnacceptedRetainedCache(for: request)
+        // Checked after the last await and with none before the result is
+        // built, so a cancel recorded during the discard above wins too.
+        var status = status
+        var errorCode = errorCode
+        if status != .cancelled,
+           errorCode != "continuous_batching_cleanup_failed",
+           cancelledIDs.remove(request.id) != nil {
+            status = .cancelled
+            errorCode = "request_cancelled"
+        }
         let result = ContinuousBatchSchedulerResult(
             requestID: request.id,
             conversationKey: request.conversationKey,
@@ -2223,7 +2745,8 @@ actor ContinuousBatchScheduler {
     private func finish(
         _ row: Row,
         status: ContinuousBatchSchedulerTerminalStatus,
-        errorCode: String?
+        errorCode: String?,
+        serialConversationCache: ContinuousBatchSerialConversationCache? = nil
     ) {
         record(status == .cancelled ? .cancelled : .stopped)
         let isSuccessful = status == .stop || status == .length
@@ -2241,7 +2764,8 @@ actor ContinuousBatchScheduler {
             errorCode: errorCode,
             snapshot: row.snapshot,
             settlementDisposition: isSuccessful ? .eligibleOwner : .notEligible,
-            retainedCache: nil
+            retainedCache: nil,
+            serialConversationCache: isSuccessful ? serialConversationCache : nil
         )
         complete(requestID: row.request.id, result: result)
     }
@@ -2274,6 +2798,8 @@ actor ContinuousBatchScheduler {
     }
 
     private func complete(requestID: String, result: ContinuousBatchSchedulerResult) {
+        CBTrace.log(requestID, "sch_complete status=\(result.terminalStatus) waiters=\(requestWaiters[requestID]?.count ?? 0) stopping=\(stoppingActiveWaiters.values.contains(where: { $0.requestID == requestID }))")
+        endQueueWait(requestID: requestID)
         guard terminalResults[requestID] == nil, pendingTerminalDeliveries[requestID] == nil else { return }
         requestAdmissionSequences.removeValue(forKey: requestID)
         let waiters = requestWaiters.removeValue(forKey: requestID) ?? []
@@ -2323,9 +2849,16 @@ actor ContinuousBatchScheduler {
     }
 
     private func finishTerminalDelivery(requestID: String, waiterID: UUID, delivered: Bool) async {
-        guard !stoppingWaiterIDs.contains(waiterID) else { return }
+        guard !stoppingWaiterIDs.contains(waiterID) else {
+            CBTrace.log(requestID, "sch_ftd_skip_stopping")
+            return
+        }
         guard var pending = pendingTerminalDeliveries[requestID],
-              pending.remainingWaiterIDs.remove(waiterID) != nil else { return }
+              pending.remainingWaiterIDs.remove(waiterID) != nil else {
+            CBTrace.log(requestID, "sch_ftd_skip_no_pending")
+            return
+        }
+        CBTrace.log(requestID, "sch_ftd delivered=\(delivered) remaining=\(pending.remainingWaiterIDs.count)")
         pending.deliveryOutcomes[waiterID] = delivered
         guard pending.remainingWaiterIDs.isEmpty else {
             pendingTerminalDeliveries[requestID] = pending
@@ -2416,6 +2949,7 @@ actor ContinuousBatchScheduler {
                 }
                 waiter.continuation.resume(returning: waiterResult)
             }
+            CBTrace.log(requestID, "sch_resumed")
         }
         while terminalResultOrder.count > configuration.terminalResultLimit {
             let evictedID = terminalResultOrder.removeFirst()
@@ -2506,7 +3040,8 @@ actor ContinuousBatchScheduler {
             )
             return ContinuousBatchRetainedCache(
                 retainedSequence: retained,
-                layers: handoff.caches
+                layers: handoff.caches,
+                recurrentCheckpoints: row.recurrentCheckpoints
             )
         } catch {
             if let retainedSequence {
@@ -2517,6 +3052,43 @@ actor ContinuousBatchScheduler {
                     record(.cleanupFailed)
                 }
             }
+            return nil
+        }
+    }
+
+    /// Checkpoint positions this row still captures: keyed rows only, inside the
+    /// prefilled prefix, at most two.
+    private func pendingRecurrentCheckpointPositions(for row: Row) -> [Int] {
+        guard row.recurrentCheckpoints.count < 2,
+              !row.request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return [] }
+        let prefixTokenCount = row.request.promptTokens.count - 1
+        return row.request.recurrentCheckpointPositions.filter { position in
+            position > 0 && position <= prefixTokenCount
+                && !row.recurrentCheckpoints.contains { $0.tokenCount == position }
+        }.sorted()
+    }
+
+    /// SPEC-038 FR-CB4 hybrid first turn: at a normal terminal, before the row's
+    /// blocks are released, hand back its cache in the serial conversation-cache
+    /// format. The row's KV covers the prompt and every sampled token except the
+    /// last (never fed back), which is a prefix of the canonical token list the
+    /// runtime commits. Best effort: any failure commits nothing.
+    private func materializeSerialConversationCache(for row: Row) async -> ContinuousBatchSerialConversationCache? {
+        guard !row.recurrentCheckpoints.isEmpty,
+              !row.request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        let tokenCount = row.request.promptTokens.count - 1 + row.generatedTokens.count
+        do {
+            let binding = try await allocator.binding(for: row.handle)
+            guard tokenCount <= binding.currentTable.logicalTokenCount else { return nil }
+            return try await backend.materializeSerialConversationCache(
+                requestID: row.request.id,
+                binding: binding,
+                tokenCount: tokenCount,
+                recurrentCheckpoints: row.recurrentCheckpoints
+            )
+        } catch {
             return nil
         }
     }

@@ -61,7 +61,7 @@ func TestSeamH3_RelayTimeoutStrikesOnBuyerCancel(t *testing.T) {
 	errCh <- providerws.ErrRelayTimeout
 	relay := &providerws.RelayStream{RequestID: "req-h3", Errors: errCh}
 
-	result, attempt := s.forwardWSNonStreaming(w, r, "req-h3", provider, relay, nil, nil, 1)
+	result, attempt := s.forwardWSNonStreaming(w, r, "req-h3", provider, relay, nil, nil, nil, 1)
 
 	if result != wsForwardCancelled {
 		t.Fatalf("expected wsForwardCancelled (buyer-cancel guard, #761), got %v", result)

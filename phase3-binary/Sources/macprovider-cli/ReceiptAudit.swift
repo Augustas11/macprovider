@@ -100,6 +100,51 @@ enum ReceiptAudit {
         emit(try? omittedPayload(providerID: providerID, requestID: requestID, reason: reason))
     }
 
+    /// SPEC-015 §N.12 item 5 (informative): the honest-bug guard's line for a
+    /// pool-authorized loopback completion. Alert-only; never a receipt input.
+    static func usageRecountPayload(
+        providerID: String,
+        requestID: String,
+        modelID: String,
+        runtimeSource: String,
+        poolID: String,
+        reportedCompletionTokens: Int64,
+        recountedCompletionTokens: Int64?,
+        status: String
+    ) throws -> Data {
+        try JSONSerialization.data(
+            withJSONObject: [
+                "event": "pool_usage_recount",
+                "provider_id": providerID,
+                "request_id": requestID,
+                "model_id": modelID,
+                "runtime_source": runtimeSource,
+                "pool_id": poolID,
+                "reported_completion_tokens": reportedCompletionTokens,
+                "recounted_completion_tokens": recountedCompletionTokens.map { $0 as Any } ?? NSNull(),
+                "status": status,
+            ],
+            options: [.sortedKeys]
+        )
+    }
+
+    static func emitUsageRecount(
+        providerID: String,
+        requestID: String,
+        modelID: String,
+        runtimeSource: String,
+        poolID: String,
+        reportedCompletionTokens: Int64,
+        recountedCompletionTokens: Int64?,
+        status: String
+    ) {
+        emit(try? usageRecountPayload(
+            providerID: providerID, requestID: requestID, modelID: modelID, runtimeSource: runtimeSource,
+            poolID: poolID, reportedCompletionTokens: reportedCompletionTokens,
+            recountedCompletionTokens: recountedCompletionTokens, status: status
+        ))
+    }
+
     private static func emit(_ payload: Data?) {
         guard var payload else { return }
         payload.append(Data("\n".utf8))

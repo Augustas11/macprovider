@@ -13,6 +13,8 @@ enum ConfigApplierError: Error, Equatable, CustomStringConvertible {
     case configReadFailed(String)
     case unsafeConfigPath(String)
     case stringEncodingFailed(String)
+    case draftCapacityShortfall(String)
+    case draftModelUnresolved(String)
 
     var description: String {
         switch self {
@@ -32,11 +34,20 @@ enum ConfigApplierError: Error, Equatable, CustomStringConvertible {
             return "unsafe config path at \(path)"
         case .stringEncodingFailed(let path):
             return "failed to encode YAML for \(path)"
+        case .draftCapacityShortfall(let message):
+            return "draft_model_capacity_shortfall: \(message)"
+        case .draftModelUnresolved(let message):
+            return "draft_model_unresolved: \(message)"
         }
     }
 }
 
 struct ConfigApplier {
+    enum DraftCapacityPolicy {
+        case refuse
+        case clamp
+    }
+
     let configPath: URL
     let maxBackupCounter: Int
     let tempFileNamer: (URL, Int) -> URL
@@ -58,6 +69,10 @@ struct ConfigApplier {
         recommendation: RecommendationCore,
         now: Date,
         donorMode: Bool = false,
+        benchmarkID: String? = nil,
+        draftCapacity: DraftCapacityPolicy = .refuse,
+        physicalMemoryGB: Int = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB,
+        recordsProvenance: Bool = true,
         beforeMutation: ((_ originalOwnedValues: [String: String], _ targetOwnedValues: [String: String], _ backupPath: URL, _ preApplySHA256: String, _ postApplySHA256: String) throws -> Void)? = nil
     ) throws -> AppliedConfig {
         let fileManager = FileManager.default
@@ -68,6 +83,16 @@ struct ConfigApplier {
             let originalData = try readConfigDataAllowingMissing()
             let originalText = String(decoding: originalData, as: UTF8.self)
             try validateYAML(originalText)
+            // #1689: re-read the draft model serve will use from the file
+            // under the lock, so one added after the caller's snapshot still
+            // caps what is written; a file serve cannot load fails closed.
+            let written = try Self.cappedForServedDraftModel(
+                recommendation,
+                configText: originalText,
+                configPath: configPath.path,
+                policy: draftCapacity,
+                physicalMemoryGB: physicalMemoryGB
+            )
 
             let unixTS = Int(now.timeIntervalSince1970)
             // Autotune backups are model/config rollback artifacts, never
@@ -76,7 +101,22 @@ struct ConfigApplier {
             let backupText = ProviderTokenPersist.removingProviderTokenLines(in: originalText)
             let backupPath = try writeBackupExclusively(Data(backupText.utf8), unixTS: unixTS)
 
-            let updatedText = try updatedConfigText(originalText, recommendation: recommendation, donorMode: donorMode)
+            // Without a record (the classic measured sweep) the written pair
+            // is operator-owned and any earlier record is removed, so it never
+            // reads as a generated, jointly bounded pair (SPEC-023-R018 item 9).
+            let provenance = recordsProvenance ? MaxContextProvenance(
+                source: MaxContextSource.recommendationApply.rawValue,
+                value: written.knobs.maxContext,
+                model: written.model,
+                benchmarkID: benchmarkID,
+                generatedAt: ISO8601DateFormatter().string(from: now)
+            ) : nil
+            let updatedText = try updatedConfigText(
+                originalText,
+                recommendation: written,
+                donorMode: donorMode,
+                provenance: provenance
+            )
             try validateYAML(updatedText)
             guard let updatedData = updatedText.data(using: .utf8) else {
                 throw ConfigApplierError.stringEncodingFailed(configPath.path)
@@ -92,8 +132,43 @@ struct ConfigApplier {
 
             return AppliedConfig(
                 backupPath: backupPath,
-                summary: Self.summary(recommendation: recommendation, backupPath: backupPath, donorMode: donorMode)
+                summary: Self.summary(recommendation: written, backupPath: backupPath, donorMode: donorMode)
             )
+        }
+    }
+
+    /// SPEC-028 draft term at write time: with a draft model in the config
+    /// being written, serve refuses a context above the draft cap or more than
+    /// one slot. `.clamp` lowers the values and says so on stderr (recommend,
+    /// whose snapshot may predate the draft model); `.refuse` throws and writes
+    /// nothing (adoption, which validated the values it was handed).
+    static func cappedForServedDraftModel(
+        _ recommendation: RecommendationCore,
+        configText: String,
+        configPath: String,
+        policy: DraftCapacityPolicy,
+        physicalMemoryGB: Int
+    ) throws -> RecommendationCore {
+        let draftModel: String?
+        do {
+            draftModel = try ProviderCapacity.servedDraftModel(configText: configText, configPath: configPath)
+        } catch {
+            throw ConfigApplierError.draftModelUnresolved(String(describing: error))
+        }
+        guard let cap = ProviderCapacity.draftModelContextLimit(physicalMemoryGB: physicalMemoryGB, draftModel: draftModel),
+              recommendation.knobs.maxContext > cap || recommendation.knobs.maxBatch > 1 else {
+            return recommendation
+        }
+        let shortfall = "draft_model is configured in \(configPath); context \(recommendation.knobs.maxContext) (draft cap \(cap)) and max_concurrency \(recommendation.knobs.maxBatch) (draft cap 1)"
+        switch policy {
+        case .refuse:
+            throw ConfigApplierError.draftCapacityShortfall(shortfall)
+        case .clamp:
+            var capped = recommendation
+            capped.knobs.maxContext = min(recommendation.knobs.maxContext, cap)
+            capped.knobs.maxBatch = 1
+            FileHandle.standardError.write(Data("[warn] \(shortfall): writing context \(capped.knobs.maxContext) and max_concurrency 1\n".utf8))
+            return capped
         }
     }
 
@@ -143,6 +218,139 @@ struct ConfigApplier {
     struct AppliedConfig {
         var backupPath: URL
         var summary: String
+    }
+
+    /// Writes one recommendation-owned key as an operator-owned value (#1689
+    /// `provider context set`). Backs up the current config first, like
+    /// `apply`. Setting `max_context_override` removes its provenance in the
+    /// same write, so the value is operator-owned even when it equals the
+    /// generated one. `beforeWrite` runs under the config lock with the file
+    /// as read there and the complete config that would be written; it
+    /// throws to refuse, before any backup or write.
+    @discardableResult
+    func setOperatorOwnedValue(
+        key: String,
+        value: String,
+        now: Date,
+        beforeWrite: ((_ lockedText: String, _ updatedText: String) throws -> Void)? = nil
+    ) throws -> URL {
+        let directory = configPath.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try validateConfigPathSafety()
+        return try ProviderConfigMutationLock.withExclusiveLock(configPath: configPath.path) {
+            let originalText = String(decoding: try readConfigDataAllowingMissing(), as: UTF8.self)
+            try validateYAML(originalText)
+            let updatedText = try settingOperatorOwnedValue(key: key, value: value, in: originalText)
+            try beforeWrite?(originalText, updatedText)
+            let unixTS = Int(now.timeIntervalSince1970)
+            let backupPath = try writeBackupExclusively(
+                Data(ProviderTokenPersist.removingProviderTokenLines(in: originalText).utf8),
+                unixTS: unixTS
+            )
+            try atomicWrite(Data(updatedText.utf8), to: configPath, unixTS: unixTS)
+            return backupPath
+        }
+    }
+
+    /// The config `setOperatorOwnedValue` would write over `originalText`.
+    func settingOperatorOwnedValue(key: String, value: String, in originalText: String) throws -> String {
+        precondition(Self.recommendationOwnedKeys.contains(key), "not a recommendation-owned key: \(key)")
+        var values = Self.extractOwnedValues(from: originalText)
+        values[key] = value
+        if key == "max_context_override" {
+            values.removeValue(forKey: MaxContextProvenance.configKey)
+        }
+        let updatedText = try replacingOwnedFields(in: originalText, with: values)
+        try validateYAML(updatedText)
+        return updatedText
+    }
+
+    /// The config file as it is now, read without the lock, for a preflight
+    /// that a locked write re-checks.
+    func currentConfigText() throws -> String {
+        try validateConfigPathSafety()
+        let text = String(decoding: try readConfigDataAllowingMissing(), as: UTF8.self)
+        try validateYAML(text)
+        return text
+    }
+
+    /// What `rollbackToNewestBackup` would restore now, read without the lock.
+    func rollbackPreview() throws -> (backup: URL, currentText: String, restoredText: String) {
+        let currentText = try currentConfigText()
+        let plan = try rollbackPlan(originalText: currentText)
+        return (plan.backup, currentText, plan.restoredText)
+    }
+
+    private func rollbackPlan(originalText: String) throws -> (backup: URL, restoredText: String) {
+        guard let newest = try newestBackup() else {
+            throw ConfigApplierError.configReadFailed("no \(configPath.lastPathComponent).bak-* backup to roll back to")
+        }
+        let backupText = try String(contentsOf: newest, encoding: .utf8)
+        try validateYAML(backupText)
+        let restoredText = try replacingOwnedFields(in: originalText, with: Self.extractOwnedValues(from: backupText))
+        try validateYAML(restoredText)
+        return (newest, restoredText)
+    }
+
+    /// Restores the recommendation-owned fields from the newest
+    /// `config.yaml.bak-<unix>-<counter>` backup, first saving the current
+    /// config as a new backup so the rollback itself can be undone.
+    /// `beforeWrite` runs under the config lock with the file as read there,
+    /// the backup chosen, and the complete restored config; it throws to
+    /// refuse, before any backup or write.
+    func rollbackToNewestBackup(
+        now: Date,
+        beforeWrite: ((_ lockedText: String, _ backup: URL, _ restoredText: String) throws -> Void)? = nil
+    ) throws -> (restoredFrom: URL, savedCurrentAs: URL) {
+        try validateConfigPathSafety()
+        return try ProviderConfigMutationLock.withExclusiveLock(configPath: configPath.path) {
+            let originalText = String(decoding: try readConfigDataAllowingMissing(), as: UTF8.self)
+            try validateYAML(originalText)
+            let plan = try rollbackPlan(originalText: originalText)
+            try beforeWrite?(originalText, plan.backup, plan.restoredText)
+            let unixTS = Int(now.timeIntervalSince1970)
+            let saved = try writeBackupExclusively(
+                Data(ProviderTokenPersist.removingProviderTokenLines(in: originalText).utf8),
+                unixTS: unixTS
+            )
+            try atomicWrite(Data(plan.restoredText.utf8), to: configPath, unixTS: unixTS)
+            return (plan.backup, saved)
+        }
+    }
+
+    /// The backup written last: the one `latestBackupPointerURL` names, so
+    /// the order survives a wall clock that moved backwards. Without a
+    /// usable pointer (backups from an older CLI, or the named file is gone),
+    /// the highest `<unix>-<counter>` name.
+    private func newestBackup() throws -> URL? {
+        let directory = configPath.deletingLastPathComponent()
+        if let pointed = try? String(contentsOf: latestBackupPointerURL, encoding: .utf8),
+           let name = Self.backupRank(pointed, prefix: backupNamePrefix)?.name {
+            let candidate = directory.appendingPathComponent(name)
+            var info = stat()
+            if lstat(candidate.path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG {
+                return candidate
+            }
+        }
+        let names = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        let ranked = names.compactMap { Self.backupRank($0, prefix: backupNamePrefix) }
+        guard let newest = ranked.max(by: { ($0.ts, $0.counter) < ($1.ts, $1.counter) }) else { return nil }
+        return directory.appendingPathComponent(newest.name)
+    }
+
+    private var backupNamePrefix: String { "\(configPath.lastPathComponent).bak-" }
+
+    /// Names the backup `writeBackupExclusively` created last. Outside the
+    /// `.bak-` namespace so backup listings and token redaction ignore it.
+    private var latestBackupPointerURL: URL {
+        configPath.deletingLastPathComponent().appendingPathComponent("\(configPath.lastPathComponent).latest-backup")
+    }
+
+    private static func backupRank(_ name: String, prefix: String) -> (ts: Int, counter: Int, name: String)? {
+        guard name.hasPrefix(prefix) else { return nil }
+        let parts = name.dropFirst(prefix.count).split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 2, let ts = Int(parts[0]), let counter = Int(parts[1]) else { return nil }
+        return (ts, counter, name)
     }
 
     struct RecommendationOwnedSnapshot {
@@ -271,6 +479,13 @@ struct ConfigApplier {
                     throw ConfigApplierError.backupWriteFailed(destination: candidate.path, errno: errno)
                 }
                 try syncDirectory(directory)
+                // Bookkeeping, not the config write: never the injected temp namer.
+                try atomicWrite(
+                    Data(candidate.lastPathComponent.utf8),
+                    to: latestBackupPointerURL,
+                    unixTS: unixTS,
+                    tempURL: Self.defaultTempFileName(destination: latestBackupPointerURL, unixTS: unixTS)
+                )
                 return candidate
             }
             let openErrno = errno
@@ -306,8 +521,8 @@ struct ConfigApplier {
         }
     }
 
-    private func atomicWrite(_ data: Data, to destination: URL, unixTS: Int) throws {
-        let tempURL = tempFileNamer(destination, unixTS)
+    private func atomicWrite(_ data: Data, to destination: URL, unixTS: Int, tempURL: URL? = nil) throws {
+        let tempURL = tempURL ?? tempFileNamer(destination, unixTS)
         let fd = tempURL.path.withCString { open($0, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0o600) }
         guard fd >= 0 else {
             throw ConfigApplierError.backupWriteFailed(destination: tempURL.path, errno: errno)
@@ -355,7 +570,8 @@ struct ConfigApplier {
     private func updatedConfigText(
         _ original: String,
         recommendation: RecommendationCore,
-        donorMode: Bool
+        donorMode: Bool,
+        provenance: MaxContextProvenance?
     ) throws -> String {
         let values: [String: String?] = [
             "model": Self.yamlScalar(recommendation.model),
@@ -371,6 +587,7 @@ struct ConfigApplier {
             "max_context_override": String(recommendation.knobs.maxContext),
             "max_concurrency_override": String(recommendation.knobs.maxBatch),
             "donor_mode": donorMode ? "true" : nil,
+            MaxContextProvenance.configKey: provenance?.yamlFlowValue,
         ]
         let ownedKeys = Self.recommendationOwnedKeys
 
@@ -380,21 +597,28 @@ struct ConfigApplier {
 
         var seen = Set<String>()
         var output = ""
+        var inOwnedValue = false
+        let recordToPlace = Self.provenanceToPlace(original: original, record: values[MaxContextProvenance.configKey] ?? nil)
         original.enumerateSubstrings(in: original.startIndex..<original.endIndex, options: .byLines) {
             line, _, enclosingRange, _ in
             guard let line else {
                 return
             }
+            // Indented lines under an owned key (a hand-written block value)
+            // are part of the value this write replaces.
+            if inOwnedValue, line.first?.isWhitespace == true { return }
+            inOwnedValue = false
             let rawLine = String(original[enclosingRange])
             guard let key = Self.ownedTopLevelKey(in: line, ownedKeys: ownedKeys) else {
                 output += rawLine
                 return
             }
+            inOwnedValue = true
             seen.insert(key)
             guard let value = values[key] ?? nil else {
                 return
             }
-            output += "\(key): \(value)\(Self.lineTerminator(from: rawLine))"
+            output += Self.ownedLine(key: key, value: value, rawLine: rawLine, record: recordToPlace, seen: &seen)
         }
 
         let missingLines = ownedKeys.compactMap { key -> String? in
@@ -420,17 +644,22 @@ struct ConfigApplier {
         }
         var seen = Set<String>()
         var output = ""
+        var inOwnedValue = false
+        let recordToPlace = Self.provenanceToPlace(original: original, record: values[MaxContextProvenance.configKey])
         original.enumerateSubstrings(in: original.startIndex..<original.endIndex, options: .byLines) {
             line, _, enclosingRange, _ in
             guard let line else { return }
+            if inOwnedValue, line.first?.isWhitespace == true { return }
+            inOwnedValue = false
             let rawLine = String(original[enclosingRange])
             guard let key = Self.ownedTopLevelKey(in: line, ownedKeys: Self.recommendationOwnedKeys) else {
                 output += rawLine
                 return
             }
+            inOwnedValue = true
             seen.insert(key)
             guard let value = values[key] else { return }
-            output += "\(key): \(value)\(Self.lineTerminator(from: rawLine))"
+            output += Self.ownedLine(key: key, value: value, rawLine: rawLine, record: recordToPlace, seen: &seen)
         }
         let missing = Self.recommendationOwnedKeys.compactMap { key -> String? in
             guard !seen.contains(key), let value = values[key] else { return nil }
@@ -460,6 +689,7 @@ struct ConfigApplier {
         "max_context_override",
         "max_concurrency_override",
         "donor_mode",
+        MaxContextProvenance.configKey,
     ]
 
     private func renderOwnedConfig(values: [String: String?]) -> String {
@@ -492,6 +722,9 @@ struct ConfigApplier {
         if let donorMode = values["donor_mode"] ?? nil {
             lines.append("donor_mode: \(donorMode)")
         }
+        if let provenance = values[MaxContextProvenance.configKey] ?? nil {
+            lines.append("\(MaxContextProvenance.configKey): \(provenance)")
+        }
         return lines.joined(separator: "\n") + "\n"
     }
 
@@ -512,7 +745,35 @@ struct ConfigApplier {
             else { return }
             values[key] = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
         }
+        // The loader also accepts a provenance record written as a block (or
+        // a flow mapping continued on further lines), whose text after the
+        // colon is not the record. Capture it in the one-line flow form the
+        // writers use, so a restore keeps the value generated.
+        let provenanceKey = MaxContextProvenance.configKey
+        if let inline = values[provenanceKey],
+           MaxContextProvenance.parse(try? Yams.load(yaml: inline)) == nil,
+           let root = try? Yams.load(yaml: text) as? [String: Any],
+           let record = MaxContextProvenance.parse(root[provenanceKey]) {
+            values[provenanceKey] = record.yamlFlowValue
+        }
         return values
+    }
+
+    /// A provenance record the original config has no line for; it is placed
+    /// right after `max_context_override` so the two stay together.
+    private static func provenanceToPlace(original: String, record: String?) -> String? {
+        guard let record, extractOwnedValues(from: original)[MaxContextProvenance.configKey] == nil else { return nil }
+        return record
+    }
+
+    private static func ownedLine(key: String, value: String, rawLine: String, record: String?, seen: inout Set<String>) -> String {
+        let terminator = lineTerminator(from: rawLine)
+        guard key == "max_context_override", let record else {
+            return "\(key): \(value)\(terminator)"
+        }
+        seen.insert(MaxContextProvenance.configKey)
+        let separator = terminator.isEmpty ? "\n" : terminator
+        return "\(key): \(value)\(separator)\(MaxContextProvenance.configKey): \(record)\(terminator)"
     }
 
     private static func lineTerminator(from rawLine: String) -> String {

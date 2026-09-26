@@ -66,6 +66,14 @@ func byomAdmissionCandidate(p pool.Provider) bool {
 // the session).
 const buyerServingHoldModelAdmissionPending = "model_admission_pending"
 
+// buyerServingHoldCatalogMaterialMissing is the closed `buyer_serving_hold`
+// value for a session that is buyer-serving in every respect except
+// SPEC-022-R002 R-2.7: enforce mode is on and the network Tier-2 catalog has
+// no route-snapshot material for the served model. Reconnecting cannot fix
+// that (only a catalog update can), so a CLI that advertised
+// catalog_material_hold_v1 holds its session and keeps polling.
+const buyerServingHoldCatalogMaterialMissing = "catalog_material_missing"
+
 // byomBuyerServingHold names the readiness hold for a session that must stay
 // up through a pending BYOM admission. SPEC-047-R003(iv) grants
 // settlement_capable only while THIS live session is bound; SPEC-047-R006
@@ -113,6 +121,17 @@ func (s *Server) byomDefaultPaidRoutingEligibility(p pool.Provider) modelAdmissi
 }
 
 func (s *Server) byomDefaultPaidRoutingEligibilityWithContext(ctx context.Context, p pool.Provider) modelAdmissionPaidRoutingEligibility {
+	// SPEC-047-R003(iv) / SPEC-032 FR-HG8: a loopback runtime session never
+	// serves paid global traffic, bound or not, sandboxed or not (the hello
+	// sandbox only applies when the strict gate is on). Every paid selection
+	// path (filter, pins, slot queue) and the buyer-serving projection share
+	// this predicate.
+	if providerws.IsBYOMLoopbackRuntimeSource(p.RuntimeSource) {
+		// SPEC-042-R005 site (1): the only path for a loopback session is the
+		// pool predicate, and only on a pool route whose selection-time view
+		// rides on ctx. A global route carries no view and stays ineligible.
+		return s.poolExternalRuntimeEligibility(ctx, p)
+	}
 	bound := byomAdmissionCandidate(p)
 	// SPEC-010-R007(d): a session bound to a feed member routes only with the
 	// admission evidence its route snapshot must carry (which needs a store).
@@ -125,7 +144,7 @@ func (s *Server) byomDefaultPaidRoutingEligibilityWithContext(ctx context.Contex
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	material, ok := tier2.SnapshotMaterial(p.ModelID, byomMaterialHash(p))
+	material, ok := routeSnapshotCatalogMaterial(p)
 	if !ok {
 		return s.byomLegacyRoutingEligible(ctx, p)
 	}

@@ -42,7 +42,7 @@
 #                       canonical `uncovered` list the operator's override
 #                       record describes; the publish aborts pre-mutation when
 #                       its own under-lock coverage differs.
-#   AA_PRICING_TXN      0 (default) or 1 (lease mode only; #1693 SPEC-023-R018):
+#   AA_PRICING_TXN      0 (default) or 1 (lease mode only; #1693 SPEC-023-R019):
 #                       the release also replaces the live base coordinator.yaml
 #                       rate_card block. The gate snippet must leave the spliced
 #                       candidate at $pricing_candidate (macprovider-readable) and
@@ -824,7 +824,7 @@ BODY
 # first mutation; every later step records its phase before it runs.
 _aa_pricing_publish_body() {
   cat <<'BODY'
-# #1693 SPEC-023-R018 L4/L5. The spliced candidate yaml, the window and the
+# #1693 SPEC-023-R019 L4/L5. The spliced candidate yaml, the window and the
 # release move together; the journal is committed (atomic rename + fsync)
 # before the first mutation, each phase is written before its step, and the
 # ERR trap (mutated=1) sends the controller to the journal-driven rollback.

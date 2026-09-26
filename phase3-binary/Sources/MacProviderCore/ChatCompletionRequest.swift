@@ -36,6 +36,16 @@ public struct ChatCompletionRequest: Sendable {
     // to `.unknown` (non-persisting) at parse; each boundary stamps its own.
     public let ingestProvenance: KVIngestProvenance
 
+    /// The ingest byte cap on a raw chat-completions body (4 MiB). Loopback
+    /// proxies size their upstream request bound from it.
+    public static let rawBodyByteCap = RequestValidation.rawBodyByteCap
+
+    /// Whether a tool-call id has the shape this ingest boundary accepts
+    /// back on a follow-up turn (`call_` + 16-64 ASCII alphanumerics).
+    public static func isAcceptedToolCallID(_ value: String) -> Bool {
+        RequestValidation.isRequestAcceptedToolCallID(value)
+    }
+
     /// Serial agent turns (omitted/`false`) stop after the first complete tool.
     public var stopsAfterFirstCompleteToolCall: Bool {
         parallelToolCalls != true
@@ -545,6 +555,15 @@ public struct APIError: Error, Sendable {
         "duplicate_tool_call_id": false,
         "tool_call_result_out_of_order": false,
         "unsupported_modelID_for_multi_turn": false,
+        // SPEC-038 AC-25 (`:614`): a queue-pressure rejection MUST carry
+        // bounded retry guidance. Both codes reject pre-admission with no
+        // work done, so the same request is safe to re-send once the batch
+        // drains; declaring them non-retryable contradicts that clause and
+        // suppresses the gateway's `Retry-After`
+        // (`phase5-gateway/internal/router/server.go` `setGatewayRetryAfter`
+        // returns early when the resolved value is false).
+        "continuous_batching_stream_backpressure": true,
+        "continuous_batching_queue_wait_timeout": true,
     ]
 
     public let status: Int

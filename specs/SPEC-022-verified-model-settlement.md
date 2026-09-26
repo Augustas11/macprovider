@@ -1,11 +1,154 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.1.8
+Version: v0.2.2
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
-Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016
+Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.2.2
+
+Delivered-only recording for negotiated gateways (#1690); adds the R-12.8
+signed-finality negotiation bullet. Under R-5.6 and AC-022-54/63, a buyer is
+debited, and a provider credited, only for output confirmed delivered to the
+buyer. A gateway advertises on the service-token-authenticated
+gateway-to-coordinator hop that it reads signed finality
+(`X-MacProvider-Internal-Settlement-Trailers: 1`). For that gateway the
+coordinator records a non-streaming success, its usage, and its bytes only
+after the buyer write succeeded; a failed or cancelled write records a
+`buyer_cancel` over an empty prefix. A non-streaming body is usable only
+whole, so a native (catalog MLX) non-streaming buyer disconnect then bills
+nothing, where it previously billed a byte estimate. That is the intended
+delivered-only outcome, not a regression. Every finality tuple sent to that
+gateway is signed with `X-MacProvider-Settlement-Finality-Mac`, an HMAC-SHA256
+keyed by the trimmed gateway service token over the account, the request id,
+the coordinator's `X-MacProvider-Internal-Request-ID`, and the tuple. A
+non-streaming 200 always declares the tuple and MAC as trailers; an attempt
+without receipt state (no route snapshot, observe mode, a keyless provider)
+carries a signed `legacy` tuple, settled with local accounting exactly as a
+response without finality. A stream with a route snapshot declares signed
+trailers; one without carries the signed `legacy` tuple in its headers.
+When the buyer response was delivered but the attempt's settlement evidence
+failed (the post-delivery record or receipt ingest, including a stream's
+post-stream record, `settlement_record_failed_after_delivery`; a credit whose
+evidence write failed and was marked missing,
+`settlement_output_missing_after_credit`; or a negotiated response,
+streaming or not, that reaches the end of the handler without a tuple,
+`settlement_finality_unset_after_delivery`), buyer and provider are settled
+alike. Under enforce route mode (from the attempt's route snapshot, or the
+enforce policy when store pressure skipped the snapshot) the provider credit
+can never become payable (enforce payability needs a verified verdict and
+attempt output) and is also quarantined, and the buyer gets a signed closed
+refund tuple (`quarantined`, `inconclusive`); neither side is paid. A credit
+whose attempt already has a closed verified verdict is never quarantined; that
+buyer gets the verified finality. If the quarantine still fails after bounded
+retries, the refund goes out only when the attempt has neither an attempt
+output nor a verified verdict (only the in-request recorder writes an
+attempt output, so that credit can never become payable); otherwise the buyer
+gets an open `pending` tuple the reconciler resolves. The coordinator's
+finality lookup also reports an enforce-mode credit that has no attempt
+output and no verdict as closed `quarantined`
+(`settlement_evidence_missing`) once its evidence deadline passes (the route
+snapshot's pending deadline after the credit, or five minutes for a credit
+recorded under store pressure without a snapshot), so a refund whose trailer
+never reached the gateway still resolves instead of holding forever. The
+coordinator's finality lookup reports such an attempt as closed
+`quarantined`, so a gateway that never received the trailer (a stream it
+ended, a dropped connection) still refunds instead of holding. In observe
+mode, or with no route snapshot and no enforce policy, the credit stays
+payable, so the buyer gets the signed `legacy` tuple and is debited locally,
+the #1675 behaviour; both sides are paid. The coordinator logs the reason for
+operator review. Only a 200 gets such a tuple; the gateway settles a non-200
+from its headers. The gateway holds
+declared finality that is missing, unsigned, or fails the MAC as
+`missing_settlement_finality_trailer`; it never debits it locally. A caller
+that did not advertise keeps the pre-v0.2.2 order (record before the write,
+unsigned finality in headers), so each mixed gateway/coordinator version
+pairing stays safe. The gateway pin `coordinator.require_settlement_trailers`
+(default off), set once both sides are deployed, also holds a 200 that carries
+no signed finality, closing the strip-everything downgrade; because a
+negotiating coordinator signs every 200, the pin holds only a stripped
+declaration or MAC. A rollback stops buyer traffic, drains gateway
+settlement holds, turns the pin off, rolls back in the reverse of the
+rollout order (v2 allowlists, CLI, the gateway if it must go, then the
+coordinator), then resumes traffic.
+
+Real-engine e2e findings (2026-09-25,
+`docs/runbooks/runtime-agnostic-e2e-evidence-2026-09-25.md`) close four
+gaps inside v0.2.2, with no receipt tuple or wire change:
+
+- R-5.6 on the gateway-to-buyer hop (E2E-F4): the coordinator's verified
+  finality counts output delivered to the gateway. When the gateway ends a
+  stream itself because the buyer disconnected or a buyer write failed, the
+  buyer is debited no more completion than the gateway delivered to the
+  buyer (the smaller of the two figures); the provider stays credited for
+  the prefix delivered to the gateway, which its receipt binds.
+- R-8.4 (E2E-F5): a closed verified verdict whose attempt's ledger credits
+  the coordinator had all quarantined for a ledger-validity reason (not a
+  receipt trust failure; for example `invalid_cached_prompt_tokens`) is
+  reported by the finality lookup as closed `zero_settled` with a `valid`
+  receipt result, reason `verified_receipt_credit_quarantined`: the buyer is
+  refunded and the provider credit stays zero, never an error that holds the
+  reservation forever.
+- R-12.8 (E2E-F10): the coordinator selects an external-runtime pool member
+  only for a request whose caller negotiated signed settlement finality; any
+  other caller (an older gateway) fails closed before dispatch, so the
+  rollout order no longer depends on operator discipline alone.
+- R-12.8 rollback (E2E-F11): a coordinator older than v0.2.0 refuses to
+  start on an artifact feed carrying a gguf `huggingface_revision` source
+  (`file_path`) or an `mlxlm_loopback` runtime source, so the coordinator
+  rollback first installs a feed set it can load.
+
+Observe mode keeps the R-7.7 local fallback rules (E2E-F8): the buyer is
+debited by gateway accounting while the coordinator credits the provider by
+its own figures, and the two can differ (the SPEC-005 prompt bound, a buyer
+disconnect, a gateway-truncated stream). That divergence is the documented
+observe-mode behaviour, not an enforce-mode settlement.
+
+### v0.2.1
+
+Conformance tracking only (#1690). R-3.4.2, the `pool_operator_attested`
+exception to R-3.4.1, is a conformance obligation of `SPEC-022-R012`
+(pending), not of `SPEC-022-R003`. R-3 keeps its native-path obligations,
+which the signed 2026-09-18 JOURNEY-BUYER-PAID-PATH evidence covers, so
+`SPEC-022-R003` stays conformant. No requirement text or obligation changes.
+
+### v0.2.0
+
+Pool-aware settlement eligibility (#1690 M3; normative text only). Adds
+requirement group R-12 (`SPEC-022-R012`). A route snapshot gains a
+`runtime_source` member, bound into the digest only when non-empty (the
+`pool_id` pattern), so global and native-pool digests stay byte-identical.
+Adds the settlement usage source `pool_operator_attested`, distinct from
+`coordinator_observed`, for an attempt served by an allowlisted external
+runtime on a SPEC-042 Trusted Pool route under the SPEC-042-R006 conditions.
+R-3.4.2 makes it the single, bounded exception to R-3.4.1. It still needs a
+verified v0.4 receipt with an exact usage match, and SPEC-005 arithmetic and
+ceilings are unchanged. A disputed pool label or a global route gets zero
+billable. No v0.4 receipt tuple change; SPEC-008 `attestation_tier` unchanged.
+R-12.8 fixes the rollout order (coordinator, gateway, then CLI, then v2
+allowlists), records a billing compatibility floor, and makes a downgrade to a
+pre-v0.2.0 coordinator fail closed behind the `coordinator
+pool-rollback-preflight` gate.
+
+### v0.1.9
+
+Issue #1689: adds R-2.7. Under `enforce`, a session that is not bound to a
+BYOM candidate and whose served model has no Tier-2 route-snapshot material in
+the network catalog is excluded from covered paid routing (every candidate,
+pinned, and slot-queue path), because the pre-dispatch route snapshot must fail
+for it; buyers get a retryable `no_provider_available` (or
+`pool_settlement_mode_unsatisfied` for a pool that requires enforce) instead of
+`route_snapshot_failed`; routing telemetry counts these exclusions as
+`catalog_material_missing`; `/poolz.routing_eligible` applies the same
+verdict. `/v1/pool/check` readiness names the closed hold
+`buyer_serving_hold: catalog_material_missing` only to a session whose CLI
+advertised `tier2_capabilities.catalog_material_hold_v1` (SPEC-001 v1.9.21), and
+keeps the pre-R-2.7 verdict for any other session until the fleet floor
+advertises the capability. SPEC-022-R002 returns to `pending` until a signed
+enforce-mode journey covers AC-022-65. `off`/`observe` behavior,
+the route-snapshot tuple, and settlement are unchanged.
 
 ### v0.1.8
 
@@ -23,7 +166,7 @@ overlapping output. No settlement runtime behavior changes.
 ### v0.1.6
 
 Editorial, non-normative: registers the conformance-unit requirement IDs
-`SPEC-022-R001`..`SPEC-022-R011` (one per normative requirement group R-1..R-11)
+`SPEC-022-R001`..`SPEC-022-R011` (one per normative requirement group R-1..R-11; v0.2.0 adds `SPEC-022-R012` for R-12)
 in `specs/CONFORMANCE.json` and anchors each ID in the corresponding `### R-N`
 requirement-group header under `## Normative requirements`. No requirement text, obligation, or
 observable contract changes; this only migrates SPEC-022 out of the
@@ -325,6 +468,13 @@ captured when a request attempt is admitted to a provider. It contains at least:
 - SPEC-008 hash status at route time;
 - route decision timestamp.
 
+Owner specs extend this minimum with members that exist only when non-empty
+and enter the snapshot digest only then: SPEC-042-R006 pool labels
+(`pool_id`, `manifest_version`, `manifest_core_digest`), SPEC-047-R003
+admission and artifact values, and (v0.2.0) the R-12 `runtime_source`. A
+snapshot that carries none of them has the same digest as before those
+extensions existed (`phase4-coordinator/internal/billing/route_snapshot.go:121-184`).
+
 Settlement MUST verify against this snapshot, not against an unspecified
 current catalog at settlement time.
 
@@ -372,8 +522,8 @@ state and terminal-state timestamp.
 
 ## Normative requirements
 
-Requirement IDs `SPEC-022-R001`..`SPEC-022-R011` are the conformance units and
-map one-to-one to the top-level requirement groups R-1..R-11 below; the `R-N.M`
+Requirement IDs `SPEC-022-R001`..`SPEC-022-R012` are the conformance units and
+map one-to-one to the top-level requirement groups R-1..R-12 below; the `R-N.M`
 sub-clauses are the normative obligations within each group. The IDs are
 registered in `specs/CONFORMANCE.json`.
 
@@ -434,6 +584,47 @@ predicate." Ordinary routing filters still apply, including provider readiness,
 auth state, slots, model support, context limits, breaker state, quota policy,
 and sticky-affinity rules.
 
+R-2.7. Under `mode: enforce`, a provider session that is not bound to a BYOM
+admission candidate (SPEC-047) and whose served model has no Tier-2
+route-snapshot material in the active signed network catalog MUST be excluded
+from covered paid routing on every selection path (candidate filter, hard pin,
+and slot queue), because the route-time snapshot of R-3.1 cannot be created
+for it. Routing and the pre-dispatch snapshot guard MUST derive "material
+present" from the same lookup (served model plus admitted row digest), so the
+two cannot disagree; the pre-dispatch guard remains the fail-closed backstop.
+A BYOM-bound session keeps its own SPEC-047 fail-closed rule. Under `off` or
+`observe`, and when the settlement store is unavailable, R-2.7 does not apply.
+Routing-decision telemetry counts an R-2.7 exclusion as
+`catalog_material_missing`, separate from `receipt_key_missing` (R-2.4/R-2.5),
+attributing each provider by the reason the route-snapshot gate rejected that
+provider for, never from another provider's evaluation in the same pass; the
+buyer response and eligibility are the same for both.
+
+Operator and public routability projections that claim a session is
+buyer-routable, such as the provider server's `GET /poolz` `routing_eligible`,
+MUST apply the same R-2.7 verdict routing applies, taken from the buyer
+router's predicate rather than re-derived. The FR-CAN22 last-provider canary
+floor does not consult R-2.7, so the gate never changes canary degradation.
+
+The coordinator's `GET /v1/pool/check?details=readiness` verdict applies R-2.7
+as follows. When R-2.7 is the only reason the session is not buyer-serving, and
+the session's CLI advertised `tier2_capabilities.catalog_material_hold_v1` in
+its `auth_request` (SPEC-001 v1.9.21), the response MUST carry
+`buyer_serving: false` with `buyer_serving_hold: catalog_material_missing`.
+For a session that did not advertise the capability, the response MUST keep the
+verdict it would have had without R-2.7: deployed CLIs drop an unknown hold and
+treat an authoritative `false` without a known hold as a websocket reconnect,
+which cannot clear missing catalog material and would only churn the session.
+This compatibility exception affects the readiness report only; routing still
+excludes the session. `details=deployment` (operator evidence) reports the
+honest R-2.7 verdict. The exception is transitional. It is retired, by a
+SPEC-022 revision that removes this paragraph, once the SPEC-020 fleet floor
+(the oldest provider binary the coordinator still accepts for buyer serving)
+is a version that advertises `catalog_material_hold_v1`, so no session the
+coordinator can route is still owed the legacy verdict. Fleet adoption of the
+capability, the share of connected sessions whose `auth_request` advertised
+it, is the tracking signal.
+
 ### R-3. Route-time verification snapshot (SPEC-022-R003)
 
 R-3.1. For every covered request attempt, the coordinator MUST create and
@@ -456,6 +647,14 @@ R-3.4.1. Usage fields used for buyer debit or provider settlement MUST be
 derived from or cross-checked against coordinator/gateway-observed canonical
 request and output state under the applicable SPEC-005 settlement rules.
 Provider-signed usage fields alone are not sufficient for positive settlement.
+
+R-3.4.2. (v0.2.0) The single exception to R-3.4.1 is an attempt that
+satisfies R-12 and carries usage source `pool_operator_attested`. Its usage
+is the pool operator's own reported usage, which the serving provider signs
+in its v0.4 receipt, trusted administratively under the SPEC-042 pool policy.
+The SPEC-005 ceilings still bound it (R-12.4). No other attempt may rely on
+this exception. (v0.2.1) R-3.4.2 is a conformance obligation of
+`SPEC-022-R012`, not of `SPEC-022-R003`.
 
 R-3.5. Settlement MUST compare receipt `prompt_hash` and `output_hash` against
 persisted canonical hashes for the exact request attempt: the buyer request
@@ -537,7 +736,18 @@ become quarantined with buyer reservation released and no provider credit.
 Partial usage used for buyer debit or provider settlement MUST be derived from
 or cross-checked against the coordinator/gateway-observed delivered prefix and
 the settlement usage rules. Provider-signed usage fields alone are not
-sufficient for partial-output settlement.
+sufficient for partial-output settlement. (v0.2.0) The R-3.4.2 exception
+applies here too: for an attempt that satisfies R-12, the partial usage is the
+`pool_operator_attested` usage the receipt signs, which MUST equal the recorded
+expected usage exactly and stays bounded by the SPEC-005 ceilings.
+(v0.2.2) The delivered prefix the coordinator observes is the one delivered
+to the gateway. When the gateway ends a stream itself because the buyer
+disconnected or a write to the buyer failed, the buyer's final debit MUST NOT
+exceed the completion the gateway delivered to the buyer: the gateway debits
+the smaller of the verified completion and its own delivered completion,
+with the verified prompt. Provider settlement stays the verified figure for
+the prefix delivered to the gateway, which the receipt binds; the difference
+is not billed to either party.
 
 R-5.7. Synchronous buyer response completion and asynchronous receipt
 verification MAY be decoupled. Until verification returns `verified`, buyer
@@ -641,7 +851,12 @@ R-8.4. If receipt verification returns `zero_settled`, the row is terminal. The
 buyer final debit MUST be zero or the buyer reservation MUST be released or
 refunded; provider credit MUST remain zero; and the row MUST remain excluded
 from earnings, settlement sweeps, and payout readiness while included in
-zero-settled counters.
+zero-settled counters. (v0.2.2) A closed verified verdict whose attempt's
+ledger credits the coordinator had all already quarantined for a
+ledger-validity reason (not a receipt trust failure; R-7.4 still governs
+those) is such a terminal: the finality lookup reports it `zero_settled`
+with receipt result `valid` and reason `verified_receipt_credit_quarantined`,
+the quarantine stands, and the buyer reservation is refunded.
 
 R-8.5. Buyer-visible usage and receipt-status APIs MUST distinguish pending,
 verified, quarantined/refunded, and zero-settled outcomes. Buyer-facing labels
@@ -758,6 +973,242 @@ reason code.
 R-11.4. Recovery/backfill paths MUST either populate every required audit field
 from persisted state or mark the row outside SPEC-022 enforcement. They MUST
 NOT synthesize missing route snapshots after the fact.
+
+### R-12. Pool-scoped settlement eligibility (SPEC-022-R012)
+
+R-12.1. `runtime_source` on the route snapshot. For an attempt whose route
+carries a SPEC-042 `pool_id` and whose selected session reports a SPEC-046-R002
+loopback `runtime_source`, the route-time snapshot MUST carry that session's
+coordinator-derived runtime class as `runtime_source`, captured at selection. For every other attempt
+(global routes, and native sessions in a pool) the member MUST be empty. It
+enters the canonical digest only when non-empty, exactly as `pool_id` does,
+so global and native-pool digests are byte-identical to v0.1.8. A non-empty
+`runtime_source` with an empty `pool_id`, `manifest_version`, or
+`manifest_core_digest` is an invalid snapshot and MUST fail closed before
+dispatch. The recorded value is the coordinator-derived runtime class of
+SPEC-042-R004, never the hello value alone. Its `expected_catalog_model_hash`
+is the GGUF member derived at route time by the SPEC-047-R003(iv) pool
+route-time member derivation. A snapshot with a non-empty
+`runtime_source` MUST also carry `pool_generation` (the fenced pool
+generation of the selection) and `pool_operator_account_id` (the account the
+coordinator verified as both pool creator and provider owner at routing).
+Both are digested only when `runtime_source` is non-empty, so no other digest
+changes. Settlement re-evaluates R-12.3 from these values and the durable,
+append-only records they name (SPEC-042-R006), never from live state.
+Implementation state (#1690 M4): `RouteSnapshot` carries these members and
+digests them only when `runtime_source` is non-empty
+(`phase4-coordinator/internal/billing/route_snapshot.go`, `RouteSnapshot.Value`).
+SPEC-022-R012 stays pending until the signed enforce-mode pool journey (#1690
+M6) evidences it.
+
+R-12.2. Usage-source vocabulary. The settlement-attempt usage source is the
+closed set `coordinator_observed`, `byte_estimated`, and
+`pool_operator_attested`. `pool_operator_attested` is distinct from
+`coordinator_observed`. It MUST NOT be recorded, aggregated, reported, or
+disclosed as `coordinator_observed`, and buyer and provider surfaces MUST NOT
+describe its usage or served weights as coordinator-verified. They MUST
+describe them as attested by the pool operator under the pool's signed policy.
+Implementation state (#1690 M4): all three values are defined in
+`phase4-coordinator/internal/billing/settlement_output.go`, and the
+`settlement_attempt_outputs.usage_source` CHECK is widened to them (R-12.6a).
+
+R-12.3. Eligibility. An attempt MAY be recorded `pool_operator_attested`
+only when every SPEC-042-R006 condition holds. In short: a pool route whose
+snapshot carries `pool_id`, `manifest_version`, `manifest_core_digest`, and
+`runtime_source`; a current coordinator-recorded member at the fenced
+generation; a durable v2 policy core for that digest that declares
+`enforce` and allowlists that `runtime_source`; a serving provider whose
+account is the pool creator; and a pool label that is not disputed when the
+attempt is recorded. The coordinator MUST derive the source only from the
+snapshot's digested values and the durable policy history they name, never
+from the live registry, the provider hello, or the receipt. It MUST also
+require that the snapshot's `route_snapshot_mode` is `enforce`.
+
+R-12.4. Settlement. A `pool_operator_attested` attempt is settlement-capable
+only through a verified v0.4 receipt. Every R-3, R-4, and R-7 check applies,
+and the receipt's usage MUST equal the coordinator's expected usage exactly
+(`tupleUsageMatchesLedger`,
+`phase4-coordinator/internal/billing/settlement_verifier.go:340`). A missing
+receipt stays `pending` and then `quarantined` under R-7.6; there is no
+receipt-less settlement. Buyer debit and provider credit follow SPEC-005
+unchanged. The completion-byte clamp and the prompt bound (SPEC-005;
+`phase4-coordinator/internal/billing/formula.go:322-362`,
+`phase4-coordinator/internal/billing/hotpath.go:280-298`) remain ceilings on
+the credited amount and are not a trust source. The v0.4 tuple and wire are
+unchanged; only the coordinator verifier's usage-source handling changes.
+`tupleUsageMatchesLedger` and receipt ingestion MUST accept
+`coordinator_observed`, and `pool_operator_attested` only when the attempt's
+persisted route snapshot satisfies R-12.3 as re-evaluated at settlement.
+Every other source stays rejected. Implementation state (#1690 M4):
+`tupleUsageMatchesLedger`
+(`phase4-coordinator/internal/billing/settlement_verifier.go`) rejects every
+other source, and only `IngestPoolSettlementReceipt`
+(`phase4-coordinator/internal/billing/settlement_receipts.go`) marks a
+`pool_operator_attested` attempt cross-checked, after re-evaluating R-12.3
+against the persisted snapshot digest. The generic ingestion path still marks
+only `coordinator_observed`.
+
+R-12.5. Disputed labels. An attempt whose SPEC-042-R006 pool label is
+`label_disputed` when it is recorded MUST be recorded `byte_estimated`, with
+zero billable usage. If a later settlement-time comparison marks a
+`pool_operator_attested` attempt `label_disputed`, the attempt MUST map to
+`quarantined` and MUST NOT create buyer-final debit, provider credit, or
+payout readiness.
+
+R-12.6. Global routes. An attempt served by a loopback `runtime_source`
+session on a route without a `pool_id` MUST be recorded `byte_estimated`
+with zero billable usage, whether or not the provider is a member of any
+pool (SPEC-047-R003(iv)). Such a session MUST NOT be selected for paid
+global traffic.
+
+R-12.6a. Usage-source provenance end to end. The source is set once, per
+attempt, when the attempt is recorded
+(`recordSettlementAttemptOutput`,
+`phase4-coordinator/internal/buyer/billing_recorder.go:747-757`). It is
+persisted in `settlement_attempt_outputs.usage_source`, whose CHECK constraint
+(`phase4-coordinator/internal/billing/store.go:365`) a migration MUST widen to
+the R-12.2 vocabulary without rewriting existing rows. Receipt ingestion and
+the verifier read it from that row (R-12.4). Every later report MUST derive
+from the persisted per-attempt values and MUST NOT substitute a constant.
+Request finality (`finalityTokenSource`,
+`phase4-coordinator/internal/billing/settlement_finality.go`; implemented in
+#1690 M4) derives its `token_source` from the persisted sources: it MUST be `coordinator_observed` when every verified
+attempt of the request persisted `coordinator_observed`, and
+`pool_operator_attested` when any verified attempt persisted
+`pool_operator_attested`. The weaker provenance governs a request that mixes
+native and pool-attested verified attempts. The same rule applies to the
+overlap-blocked terminal result. Aggregates and disclosure surfaces MUST
+group by the persisted source.
+
+R-12.7. Scope. R-12 adds no receipt tuple field, no receipt-less settlement
+path, and no SPEC-016 payout path. It does not change SPEC-008
+`attestation_tier`, and it changes no native-session settlement.
+
+R-12.8. Rollout and downgrade. A coordinator that predates v0.2.0 rejects
+`pool_operator_attested` and recomputes a pool route-snapshot digest without
+the R-12.1 members and the SPEC-042-R006 labels. It would leave any pool
+attempt it still has to settle unverifiable, `pending`, or `quarantined`. It
+never records a new `pool_operator_attested` attempt, so the hazard is only
+the pool attempts recorded before a downgrade.
+
+- Rollout order: deploy the v0.2.0 coordinator first, then the gateway that
+  accepts `pool_operator_attested` request finality (gateway schema v14,
+  `usage_events.token_source`), then the provider CLI that signs
+  pool-authorized receipts (SPEC-015-R006), and only then accept a v2 policy
+  core with a non-empty `runtime_allowlist` (SPEC-042-R001). A gateway that
+  predates v14 (`maxKnownSchemaVersion` 13) refuses a v14 database at open
+  (its schema-version gate), so a gateway rollback restores the pre-deploy
+  snapshot. Roll back in the reverse order: v2 allowlists, CLI, gateway,
+  coordinator. A gateway rollback is forbidden once any
+  `pool_operator_attested` usage row exists, because the older gateway's
+  `usage_events` CHECK cannot hold it; roll the gateway forward instead. Pool traffic MUST stay paused while the v0.2.0
+  coordinator deploy can still roll back automatically, because v0.2.0
+  writes the new labels on every pool route, native pools included, and an
+  automatic rollback runs no gate. An old CLI against a new coordinator, and a new
+  CLI against an old coordinator, both fail closed: no pool-authorized
+  receipt is signed and no provider credit is created.
+- Downgrade gate: a rollback to a coordinator that predates v0.2.0 is in
+  contract only when `coordinator pool-rollback-preflight --config <path>`,
+  run with the current binary against the live database after new pool
+  traffic is stopped (every pool paused, or the trusted-pool feature
+  disabled), exits 0. It exits 0 only when every pool route snapshot either
+  has a closed verdict, which is final because credit syncs inside the
+  verdict transaction, or has no verdict and is past its pending deadline.
+  It exits 3 while any pool attempt can still reach receipt ingestion or a
+  verdict update
+  (`phase4-coordinator/internal/billing/pool_rollback_preflight.go`,
+  `CheckPoolRollbackPreflight`). An operator MUST NOT roll back while it
+  exits non-zero; the fix is to roll forward. A rollback between two
+  coordinators that both implement v0.2.0 is not affected.
+- Expiry sweep: a gateway retry can refund its reservation while the
+  coordinator attempt it opened stays `pending`, and no later finality read
+  reaches that attempt. The v0.2.0 coordinator therefore runs a bounded,
+  periodic sweep, independent of gateway holds and of whether the
+  trusted-pool feature is enabled, that closes every open `pending` pool
+  verdict past its pending deadline through `RecordMissingSettlementReceipt`,
+  the same terminalization a finality read applies
+  (`phase4-coordinator/internal/billing/pool_settlement_expiry_sweep.go`,
+  `SweepExpiredPoolSettlementVerdicts`). It never touches a verdict still
+  inside its window, and a closed verdict is never selected again. The
+  downgrade gate still counts every open verdict; the sweep only makes
+  expired ones close without a buyer request.
+- Compatibility floor: a v0.2.0 coordinator records billing contract 2 in
+  `billing_compat_floor` and refuses to open a database whose floor is above
+  its own contract (`requireBillingCompatFloor`), so every later downgrade
+  onto a binary that cannot read newer rows fails closed at startup. A
+  coordinator that predates the floor cannot read it; the preflight gate above
+  is what governs a downgrade to one.
+- Signed settlement finality (v0.2.2): the coordinator uses the
+  delivered-only order for a non-streaming attempt, and signs its finality,
+  only when the gateway advertised `X-MacProvider-Internal-Settlement-Trailers:
+  1` under the gateway service token. The header is in the internal namespace,
+  so a buyer-port request carrying it without that token is refused, and the
+  gateway never forwards a buyer-supplied copy. Every other caller gets the
+  pre-v0.2.2 order: the attempt is recorded before the write and its unsigned
+  finality travels in headers. The negotiation keeps each version pairing
+  safe. An older gateway never advertises, so a v0.2.2 coordinator answers it
+  exactly as before and it never sees trailer-only finality it would ignore. A
+  v0.2.2 gateway reads trailer finality only when the response declares it;
+  an older coordinator declares none and sends header finality, which the
+  gateway still reads. For a negotiating gateway every 200 carries a signed
+  tuple: declared trailers on a non-streaming 200 and on a stream with a route
+  snapshot, a signed `legacy` header tuple on a stream without one, a signed
+  `legacy` tuple for a non-streaming attempt without receipt state, and a
+  tuple for a delivered attempt whose settlement evidence failed (the
+  post-delivery record or ingest, a credit whose evidence was marked missing,
+  or a negotiated response that would otherwise end without a tuple): a
+  signed closed refund with the provider credit quarantined under enforce
+  route mode (from the snapshot, or enforce policy under store pressure),
+  also reported closed `quarantined` by the finality lookup, else the signed
+  `legacy` tuple with the payable credit kept, so buyer and provider agree
+  without an operator. Every gateway builder of a
+  coordinator chat request, relay-blind included, advertises the capability
+  with the bearer, account and request id the MAC binds. Once both
+  are deployed, the gateway pin `coordinator.require_settlement_trailers:
+  true` holds any coordinator 200 (streaming or non-streaming) without signed
+  finality as `missing_settlement_finality_trailer`, so stripping the whole
+  declaration cannot downgrade settlement to header or legacy mode. A
+  rollback MUST stop buyer traffic (keeping the gateway and its reconciler
+  up), drain gateway settlement holds to zero, turn the pin off, roll back in
+  the reverse of the rollout order (v2 allowlists, CLI, the gateway if it
+  must go, then the coordinator), and only then resume traffic; turning the
+  pin off under live traffic would let stripped or unsigned responses settle
+  from headers or legacy mode. The gateway accepts a tuple only
+  with a valid MAC bound to the account and request id it sent and the
+  coordinator's internal request id (a MAC counts as declared whether the
+  declaration arrives in the Trailer header or, as a real net/http client
+  sees it, as a pre-populated trailer key, and a declared MAC alone is a
+  finality declaration), and holds a missing, unsigned, tampered,
+  or replayed tuple as `missing_settlement_finality_trailer` (resolved by the
+  reconciler; an observe-mode attempt resolves through the coordinator's
+  request-scoped finality lookup). Loopback and `pool_operator_attested`
+  credit are unaffected by the order: in both orders the ledger write credits
+  a loopback attempt only when a receipt signed by the pinned key backs its
+  usage, and otherwise records it byte-estimated with zero billable.
+- External-runtime dispatch needs the negotiation (v0.2.2): the coordinator
+  selects an external-runtime pool member (a SPEC-046 loopback session on a
+  pool route) only for a request whose caller advertised
+  `X-MacProvider-Internal-Settlement-Trailers: 1` under the gateway service
+  token. For any other caller the pool's runtime allowlist is withheld for
+  that request, so no such member is selectable, failover and the slot queue
+  included, and the request fails closed before dispatch with 503
+  `byom_non_settlement_unavailable` (or `engine_unavailable` for an explicit
+  non-native engine selection) naming the missing negotiation. A gateway
+  that predates v0.2.2 cannot settle `pool_operator_attested` finality, so
+  without this it would hold the buyer while the provider credit is payable.
+- Artifact-feed compatibility on rollback (v0.2.2): a coordinator that
+  predates v0.2.0 strict-decodes the catalog artifact feed and allows only
+  `mlx_cache` on an `mlx_safetensors` artifact, so it exits at startup on a
+  feed that carries a gguf `huggingface_revision` source (`file_path`) or an
+  `mlxlm_loopback` runtime source. A rollback to such a coordinator MUST
+  first install a signed feed set without either tuple (a new catalog release
+  that withdraws them), after the v2 allowlists and the CLI are rolled back;
+  the operator sequence is in `docs/runbooks/trusted-pool-production-launch.md`
+  section 9.
+- A pool-authority read that cannot decide (a store or authority error) is
+  not an eligibility verdict. Receipt ingestion returns a retryable error and
+  keeps the receipt's first-observed arrival time for the retry; only a
+  decided rejection leaves an attempt un-cross-checked.
 
 ## Acceptance criteria
 
@@ -947,7 +1398,8 @@ NOT synthesize missing route snapshots after the fact.
   the provider or re-debit the buyer.
 - **AC-022-54:** Partial-output settlement usage is derived from or
   cross-checked against the coordinator/gateway-observed delivered prefix and
-  cannot rely solely on provider-signed usage fields.
+  cannot rely solely on provider-signed usage fields, except for an R-12
+  `pool_operator_attested` attempt, which R-5.6 and AC-022-66 govern.
 - **AC-022-55:** Buyer-facing surfaces co-locate any use of "verified" model
   language with the provider-reported-hash caveat in the same view.
 - **AC-022-56:** Buyer-facing quota and usage surfaces explain that a completed
@@ -980,16 +1432,36 @@ NOT synthesize missing route snapshots after the fact.
 - **AC-022-63:** Normal-completion usage used for buyer debit and provider
   settlement is derived from or cross-checked against coordinator/gateway
   canonical request and output state under the settlement usage rules and cannot
-  rely solely on provider-signed usage fields.
+  rely solely on provider-signed usage fields, except for an R-12 attempt
+  (AC-022-66).
 - **AC-022-64:** Provider-facing onboarding or operating docs state that receipts
   arriving after `pending_deadline_seconds` are non-settling and non-recoverable
   unless a future operator-review spec defines an exception.
+- **AC-022-65:** With enforce mode enabled, a non-BYOM provider session whose
+  served model has no Tier-2 route-snapshot material is never selected for a
+  buyer request (candidate, pinned, or slot-queue path): the buyer receives a
+  retryable 503 instead of `route_snapshot_failed`, no route snapshot or ledger
+  credit is written, and `/v1/pool/check?details=readiness` reports
+  `buyer_serving: false` with `buyer_serving_hold: catalog_material_missing` to a
+  `catalog_material_hold_v1` session while keeping the legacy verdict for any
+  other session. Observe mode is unchanged.
+- **AC-022-66 (v0.2.0):** For a normal and a partial completion served by an
+  allowlisted external runtime on a pool route that satisfies R-12, a verified
+  receipt whose usage equals the recorded `pool_operator_attested` usage settles
+  under SPEC-005 with the byte and prompt ceilings applied. The same completion
+  on a global route, with a disputed label, with a non-creator provider, or with
+  a snapshot missing any R-12.1 member is `byte_estimated`, or `quarantined`,
+  with zero buyer debit and zero provider credit. The settled request's
+  finality reports `token_source: pool_operator_attested`. A request whose
+  verified attempts mix a native attempt and a pool-attested attempt also
+  reports `pool_operator_attested`. An all-native request still reports
+  `coordinator_observed` (R-12.6a).
 
 ## Implementation sequencing
 
 1. Receipt-profile spec: lock SPEC-015 v0.4 or successor with the
    settlement-capable profile for non-streaming and streaming requests.
-2. Gap audit: map current code against AC-022-1 through AC-022-64.
+2. Gap audit: map current code against AC-022-1 through AC-022-66.
 3. Policy surface: implement authoritative `verified_model_settlement` policy
    and service propagation.
 4. Route snapshots: persist route-time verification snapshots for covered
@@ -1114,3 +1586,10 @@ spec or the SPEC-022 implementation prompt, not in the locked settlement gate.
   aggregate multiple provider attempts for UX, but SPEC-022 money movement is
   per attempt. Only verified per-attempt prefixes can become buyer-final or
   provider-creditable.
+- **D-022-9: Pool operator attestation is bounded administrative trust
+  (v0.2.0, #1690).** D-022-4 still holds for the network. Inside a
+  single-operator Trusted Pool whose signed policy allowlists an external
+  runtime, the operator that reports the usage is the operator that set the
+  policy and receives the credit. There, a verified receipt of the operator's
+  own usage, under SPEC-005 ceilings, is the trusted usage source (R-12). It
+  is never used for global traffic or third-party supply.

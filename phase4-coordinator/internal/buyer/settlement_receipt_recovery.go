@@ -3,6 +3,7 @@ package buyer
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"time"
 
@@ -20,6 +21,16 @@ type settlementReceiptRecoveryInput struct {
 	identity              billing.SettlementReceiptIdentity
 	header                string
 	providerReceiptPubkey []byte
+	poolLabels            *billing.SettlementPoolLabels
+	// receivedAtUnixMS is the first observation of the receipt; every retry
+	// re-uses it as the authoritative arrival time.
+	receivedAtUnixMS int64
+}
+
+// settlementReceiptRetryable is the recovery-queue retry predicate: transient
+// SQLite pressure, or a pool-authority read that could not decide.
+func settlementReceiptRetryable(err error) bool {
+	return settlementOutputPersistFailedAfterCredit(err) || errors.Is(err, billing.ErrPoolOperatorAttestationTransient)
 }
 
 type settlementReceiptRecoveryItem struct {
@@ -36,11 +47,20 @@ func persistSettlementReceiptDirect(ctx context.Context, store *billing.Store, i
 			SettlementReceiptIdentity: input.identity,
 		})
 	}
+	if input.poolLabels != nil {
+		// SPEC-022-R012.4: a pool attempt may settle pool_operator_attested.
+		return store.IngestPoolSettlementReceipt(ctx, billing.SettlementReceiptIngestionInput{
+			SettlementReceiptIdentity: input.identity,
+			Header:                    input.header,
+			ProviderReceiptPubkey:     input.providerReceiptPubkey,
+			PoolLabels:                input.poolLabels,
+		}.WithReceivedAt(input.receivedAtUnixMS))
+	}
 	return store.IngestSettlementReceipt(ctx, billing.SettlementReceiptIngestionInput{
 		SettlementReceiptIdentity: input.identity,
 		Header:                    input.header,
 		ProviderReceiptPubkey:     input.providerReceiptPubkey,
-	})
+	}.WithReceivedAt(input.receivedAtUnixMS))
 }
 
 func (s *Server) persistSettlementReceipt(ctx context.Context, store *billing.Store, input settlementReceiptRecoveryInput) (billing.SettlementReceiptState, error) {
@@ -48,8 +68,85 @@ func (s *Server) persistSettlementReceipt(ctx context.Context, store *billing.St
 	if persist == nil {
 		persist = persistSettlementReceiptDirect
 	}
-	return persist(ctx, store, input)
+	state, err := persist(ctx, store, input)
+	if err == nil && input.poolLabels != nil && store != nil {
+		s.recordSettlementPoolLabels(ctx, store, input)
+	}
+	return state, err
 }
+
+// recordSettlementPoolLabels stamps the SPEC-042 R006 labels after the verdict
+// is durable. A failure only leaves the label unrecorded, which already keeps
+// the request out of pool-scoped accounting; it never fails settlement.
+func (s *Server) recordSettlementPoolLabels(ctx context.Context, store *billing.Store, input settlementReceiptRecoveryInput) {
+	var rec billing.SettlementPoolLabelRecord
+	var err error
+	// A transient store failure is retried; a persistent one is logged as a
+	// terminal, operator-visible event. Either way the request stays out of
+	// pool-scoped accounting, because only a verified label counts there.
+	for attempt := 1; attempt <= settlementPoolLabelAttempts; attempt++ {
+		rec, err = store.RecordSettlementPoolLabels(ctx, input.identity, input.poolLabels)
+		if err == nil || ctx.Err() != nil {
+			break
+		}
+		if attempt < settlementPoolLabelAttempts {
+			time.Sleep(time.Duration(attempt) * settlementPoolLabelRetryBackoff)
+		}
+	}
+	if err != nil {
+		s.log.Error().Err(err).
+			Str("event", "trusted_pool_label_unrecorded").
+			Str("pool_id", input.poolLabels.PoolID).
+			Str("request_id", input.identity.RequestID).
+			Int64("attempt_n", input.identity.AttemptN).
+			Str("provider_id", input.identity.ProviderID).
+			Msg("trusted pool settlement label not recorded after retries; request excluded from pool-scoped accounting")
+		return
+	}
+	if rec.Status != billing.PoolLabelStatusDisputed {
+		return
+	}
+	// SPEC-042 R006 pool-audit event. Usage already settled under SPEC-005;
+	// only pool-scoped attribution is withheld.
+	s.log.Warn().
+		Str("event", "trusted_pool_label_disputed").
+		Str("pool_id", rec.PoolID).
+		Uint64("routing_manifest_version", rec.ManifestVersion).
+		Str("routing_manifest_core_digest", rec.ManifestCoreDigest).
+		Uint64("settlement_manifest_version", input.poolLabels.ManifestVersion).
+		Str("settlement_manifest_core_digest", input.poolLabels.ManifestCoreDigest).
+		Str("route_snapshot_hash", rec.RouteSnapshotHash).
+		Str("verdict_route_snapshot_digest", rec.VerdictRouteSnapshotDigest).
+		Str("request_id", input.identity.RequestID).
+		Int64("attempt_n", input.identity.AttemptN).
+		Str("provider_id", input.identity.ProviderID).
+		Msg("trusted pool settlement label disputed; request excluded from pool-scoped accounting")
+}
+
+// settlementPoolLabels captures the SPEC-042 R006 settlement-time labels: the
+// selected pool, its manifest as the live registry holds it now, and the route
+// snapshot digest recorded at routing time. nil for global traffic.
+func (b *billingRecorder) settlementPoolLabels() *billing.SettlementPoolLabels {
+	if b == nil || b.state == nil || b.state.poolID == "" {
+		return nil
+	}
+	labels := &billing.SettlementPoolLabels{
+		PoolID:            b.state.poolID,
+		RouteSnapshotHash: b.settlementRouteSnapshotDigest,
+	}
+	if b.server != nil && b.server.trustPools != nil {
+		if snap := b.server.trustPools.Snapshot(b.state.poolID); snap.Exists {
+			labels.ManifestVersion = snap.ManifestVersion
+			labels.ManifestCoreDigest = snap.ManifestCoreDigest
+		}
+	}
+	return labels
+}
+
+const (
+	settlementPoolLabelAttempts     = 3
+	settlementPoolLabelRetryBackoff = 50 * time.Millisecond
+)
 
 func settlementReceiptRecoveryKey(input settlementReceiptRecoveryInput) string {
 	digest := sha256.Sum256([]byte(input.header))
@@ -130,7 +227,7 @@ func (s *Server) drainSettlementReceiptRecoveries() {
 			ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 			_, err = s.persistSettlementReceipt(ctx, store, item.input)
 			cancel()
-			retryable = settlementOutputPersistFailedAfterCredit(err)
+			retryable = settlementReceiptRetryable(err)
 		}
 		if err == nil {
 			s.finishSettlementReceiptRecovery(item.key)

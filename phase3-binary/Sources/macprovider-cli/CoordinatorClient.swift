@@ -193,7 +193,7 @@ actor CoordinatorClient {
     /// `isBYOMLoopbackRuntimeSource` vocabulary.
     static func isBYOMLoopbackRuntimeSource(_ value: String?) -> Bool {
         switch value {
-        case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback":
+        case "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback", "openai_compatible_loopback", "mlxlm_loopback":
             return true
         default:
             return false
@@ -331,11 +331,13 @@ actor CoordinatorClient {
     /// SPEC-047-R003(iv) hold: polls readiness for an accepted session whose
     /// buyer serving the coordinator is holding on a pending BYOM admission.
     private var admissionPendingReadinessWatchTask: Task<Void, Never>?
-    /// True while the accepted session is held for a pending BYOM admission.
+    /// The coordinator hold the accepted session is held through: a pending
+    /// BYOM admission, or (SPEC-001 v1.9.21) missing network catalog material.
     /// The Issue #189 watchdog must reconnect this session, not Darwin.exit:
     /// launchd KeepAlive is not present on the physical admission-journey rig,
     /// and exiting drops the live binding SPEC-047-R003(iv) requires.
-    private var admissionPendingHoldActive = false
+    private var activeBuyerServingHold: CoordinatorReadinessClient.BuyerServingHold?
+    private var admissionPendingHoldActive: Bool { activeBuyerServingHold != nil }
     private var lastHeartbeatSuccessNanoseconds: UInt64 = 0
     private let watchdogExitHook: @Sendable (String) -> Void
     private var swapHeartbeatTask: Task<Void, Never>?
@@ -420,6 +422,12 @@ actor CoordinatorClient {
     private let catalogModelSHA256: String?
     private let catalogArtifactIdentity: CatalogArtifactIdentity
     private let coordinatorReadiness: CoordinatorReadiness
+    /// Isolated lab join only (`--isolate-lifecycle` + protected-file + a
+    /// literal loopback coordinator URL): that relaxation skips the catalog
+    /// preflight, so there is never a catalog envelope and the buyer-serving
+    /// readiness gate would fail closed on every connect. Never set for a
+    /// non-loopback coordinator.
+    private let labLoopbackCatalogReadinessWaived: Bool
     private let coordinatorReadinessAttempts: Int
     private let coordinatorReadinessRetryNanoseconds: UInt64
     private let admissionPendingReadinessPollNanoseconds: UInt64
@@ -475,6 +483,7 @@ actor CoordinatorClient {
         providerAdmissionRecovery: Bool = false,
         commitAdmissionIdentityPublicKey: (@Sendable (Data, Date?) throws -> Void)? = nil,
         receiptBuilder: ReceiptBuilder? = nil,
+        labLoopbackCatalogReadinessWaived: Bool = false,
         catalogReleaseID: String? = nil,
         catalogPolicyVersion: String? = nil,
         catalogCandidateSHA256: String? = nil,
@@ -671,6 +680,7 @@ actor CoordinatorClient {
             }
             return try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
         }
+        self.labLoopbackCatalogReadinessWaived = labLoopbackCatalogReadinessWaived
         self.coordinatorReadiness = coordinatorReadiness ?? { providerID, assignedProviderID, expected in
             await CoordinatorReadinessClient.fetchReadiness(
                 coordinatorURL: config.coordinatorURL,
@@ -735,7 +745,7 @@ actor CoordinatorClient {
         heartbeatTask?.cancel()
         heartbeatWatchdogTask?.cancel()
         admissionPendingReadinessWatchTask?.cancel()
-        admissionPendingHoldActive = false
+        activeBuyerServingHold = nil
         swapHeartbeatTask?.cancel()
         await clearRequestCapacityStateUpdateHandler()
         setSleepAssertionDesired(false)
@@ -2133,7 +2143,7 @@ actor CoordinatorClient {
         heartbeatWatchdogTask = nil
         admissionPendingReadinessWatchTask?.cancel()
         admissionPendingReadinessWatchTask = nil
-        admissionPendingHoldActive = false
+        activeBuyerServingHold = nil
         // Deliberately do NOT release the sleep assertion here: cleanupConnection
         // runs on every disconnect, and the provider must keep the Mac awake
         // while reconnecting. Serving intent is cleared explicitly instead — at
@@ -2593,7 +2603,7 @@ actor CoordinatorClient {
     }
 
     func setAdmissionPendingHoldActiveForTest(_ active: Bool) {
-        admissionPendingHoldActive = active
+        activeBuyerServingHold = active ? .modelAdmissionPending : nil
     }
 
     static func heartbeatWatchdogToleranceNanosecondsForTest(intervalSeconds: Int) -> UInt64 {
@@ -3283,7 +3293,7 @@ actor CoordinatorClient {
             switch await waitForCoordinatorServingCapabilityOutcome() {
             case .confirmed:
                 break
-            case .admissionPending:
+            case .held(let hold):
                 // SPEC-047-R003(iv): `settlement_capable` is granted only
                 // while THIS live session is bound and hash-verified, and
                 // SPEC-047-R006 clears the binding on disconnect. A BYOM
@@ -3292,8 +3302,11 @@ actor CoordinatorClient {
                 // make settlement unreachable. Hold the accepted session
                 // (heartbeats keep the binding alive) and promote to
                 // serving_buyers once the coordinator confirms readiness.
+                // SPEC-001 v1.9.21: `catalog_material_missing` is held the
+                // same way; only a network catalog update can clear it, so
+                // reconnecting would just churn the session.
                 buyerServingHeldForAdmission = true
-                enterAdmissionPendingHold()
+                enterAdmissionPendingHold(hold)
             case .unconfirmed:
                 do {
                     _ = try recordLifecycleTransition(
@@ -3934,14 +3947,37 @@ actor CoordinatorClient {
     private enum ServingCapabilityOutcome: Equatable {
         case confirmed
         case unconfirmed
-        /// The coordinator holds buyer serving on a pending BYOM admission
-        /// (`buyer_serving_hold: model_admission_pending`). Authoritative and
-        /// operator-gated, so it is not retried on the readiness budget.
-        case admissionPending
+        /// The coordinator holds buyer serving for a closed reason
+        /// (`buyer_serving_hold`: a pending BYOM admission, or missing
+        /// network catalog material). Authoritative and cleared only by the
+        /// coordinator side, so it is not retried on the readiness budget.
+        case held(CoordinatorReadinessClient.BuyerServingHold)
     }
 
     static let admissionPendingLifecycleReasonCode = "byom_admission_pending_buyer_serving"
     static let admissionConfirmedLifecycleReasonCode = "coordinator_buyer_serving_confirmed_after_admission"
+    static let catalogMaterialMissingLifecycleReasonCode = "catalog_material_missing_buyer_serving"
+    static let catalogMaterialConfirmedLifecycleReasonCode = "coordinator_buyer_serving_confirmed_after_catalog_material"
+
+    /// What promotion after a hold records, named for the hold that ended.
+    static func buyerServingHoldEnded(
+        _ hold: CoordinatorReadinessClient.BuyerServingHold
+    ) -> (lifecycleReasonCode: String, autoupdateSuccessReason: String, consoleMessage: String) {
+        switch hold {
+        case .modelAdmissionPending:
+            return (
+                admissionConfirmedLifecycleReasonCode,
+                "coordinator_admitted_serving_capability_confirmed_after_admission",
+                "Coordinator confirmed buyer serving after model admission"
+            )
+        case .catalogMaterialMissing:
+            return (
+                catalogMaterialConfirmedLifecycleReasonCode,
+                "coordinator_admitted_serving_capability_confirmed_after_catalog_material",
+                "Coordinator confirmed buyer serving after the network catalog added this model"
+            )
+        }
+    }
 
     private func acceptedReadinessEnvelope() -> (assignedProviderID: String, expected: CoordinatorReadinessClient.ExpectedCatalogEnvelope)? {
         guard let assignedProviderID = acceptedAssignedProviderID,
@@ -3968,14 +4004,18 @@ actor CoordinatorClient {
 
     private func waitForCoordinatorServingCapabilityOutcome() async -> ServingCapabilityOutcome {
         guard let (assignedProviderID, expected) = acceptedReadinessEnvelope() else {
+            if labLoopbackCatalogReadinessWaived {
+                print("WARN lab_loopback_readiness_waived isolated lab join has no catalog envelope; treating loopback coordinator buyer-serving readiness as confirmed")
+                return .confirmed
+            }
             return .unconfirmed
         }
         for attempt in 0 ..< coordinatorReadinessAttempts {
             switch await coordinatorReadiness(providerID, assignedProviderID, expected) {
             case .confirmed:
                 return .confirmed
-            case .notServing(hold: .modelAdmissionPending):
-                return .admissionPending
+            case .notServing(hold: .some(let hold)):
+                return .held(hold)
             case .notServing(hold: nil), .indeterminate:
                 break
             }
@@ -4012,16 +4052,24 @@ actor CoordinatorClient {
     /// Record the hold and keep the accepted session. Lifecycle bookkeeping
     /// must not drop the live session (reconnect can still be in
     /// `validating_catalog`).
-    private func enterAdmissionPendingHold() {
-        admissionPendingHoldActive = true
+    private func enterAdmissionPendingHold(_ hold: CoordinatorReadinessClient.BuyerServingHold) {
+        activeBuyerServingHold = hold
+        let reasonCode: String
+        switch hold {
+        case .modelAdmissionPending:
+            reasonCode = Self.admissionPendingLifecycleReasonCode
+            print("Coordinator session accepted; buyer serving held while model admission is pending")
+        case .catalogMaterialMissing:
+            reasonCode = Self.catalogMaterialMissingLifecycleReasonCode
+            print("Coordinator session accepted; buyer serving held: the network catalog has no verified material for this model yet")
+        }
         do {
             _ = try recordLifecycleTransition(
                 to: .locallyReadyConnecting,
-                reasonCode: Self.admissionPendingLifecycleReasonCode,
+                reasonCode: reasonCode,
                 compatibilitySetID: installedCompatibilitySetID()
             )
         } catch {}
-        print("Coordinator session accepted; buyer serving held while model admission is pending")
     }
 
     /// One readiness poll for an accepted session. Returns true when the watch
@@ -4035,28 +4083,27 @@ actor CoordinatorClient {
         }
         switch await coordinatorReadiness(providerID, assignedProviderID, expected) {
         case .confirmed:
-            if admissionPendingHoldActive {
-                admissionPendingHoldActive = false
+            if let endedHold = activeBuyerServingHold {
+                activeBuyerServingHold = nil
+                let ended = Self.buyerServingHoldEnded(endedHold)
                 _ = try? recordLifecycleTransition(
                     to: .servingBuyers,
-                    reasonCode: Self.admissionConfirmedLifecycleReasonCode,
+                    reasonCode: ended.lifecycleReasonCode,
                     compatibilitySetID: installedCompatibilitySetID()
                 )
-                await finalizeAdmissionBoundaryAfterServingProof(
-                    successReason: "coordinator_admitted_serving_capability_confirmed_after_admission"
-                )
-                print("Coordinator confirmed buyer serving after model admission")
+                await finalizeAdmissionBoundaryAfterServingProof(successReason: ended.autoupdateSuccessReason)
+                print(ended.consoleMessage)
             }
             return false
-        case .notServing(hold: .modelAdmissionPending):
-            if !admissionPendingHoldActive {
-                enterAdmissionPendingHold()
+        case .notServing(hold: .some(let hold)):
+            if activeBuyerServingHold != hold {
+                enterAdmissionPendingHold(hold)
             }
             return false
         case .indeterminate:
             return false
         case .notServing(hold: nil):
-            admissionPendingHoldActive = false
+            activeBuyerServingHold = nil
             _ = try? recordLifecycleTransition(
                 to: .locallyReadyConnecting,
                 reasonCode: "buyer_serving_readiness_unconfirmed",
@@ -6100,6 +6147,9 @@ actor CoordinatorClient {
                 "aead_suites": [Tier2ProviderSession.aeadSuite],
                 "response_chunk_plaintext_envelope": true,
                 "in_band_aead_rekey_v1": true,
+                // SPEC-001 v1.9.21: this build holds its session through
+                // buyer_serving_hold=catalog_material_missing.
+                "catalog_material_hold_v1": true,
             ],
         ]
         let resolvedCatalog: [String]
@@ -6137,6 +6187,13 @@ actor CoordinatorClient {
         }
         if let compatibilitySetID {
             message["compatibility_set_id"] = compatibilitySetID
+        }
+        // SPEC-047 v0.1.6 auth `runtime_source` (#1690 M6): the WS-tunneled
+        // session must declare its SPEC-046 loopback adapter exactly as the
+        // legacy hello does, or the coordinator records it as a native session
+        // (no FR-HG8 sandbox, and no SPEC-042-R004 runtime-allowlist binding).
+        if let runtimeSource {
+            message["runtime_source"] = runtimeSource
         }
         if let endpointURL {
             message["endpoint_url"] = endpointURL

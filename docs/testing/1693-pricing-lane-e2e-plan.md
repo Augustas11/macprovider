@@ -83,7 +83,7 @@ Scenarios (each ends with O1–O6):
 |---|---|---|
 | V1 | Happy path: reviewed PR changes 3 rows, adds 1, removes 1 (acked) | GO → deploy with ack → verified → finalized; floor marker written |
 | V2 | Every preflight NO_GO: foreign deploy marker, stale installed updater, overlay pricing keys, pre-#1693 record, commit block mismatch, dry-load parity mismatch, unacked move (catalog key and request-log-only name), Unicode/bidi name | NO_GO, nothing on the host changed (hash the whole `/opt/macprovider` + `/etc/macprovider` before/after) |
-| V3 | Ack mismatch; new request-log name between preflight and deploy (with and without `--preflight-verdict`) | refused / accepted per R018 rule 2 |
+| V3 | Ack mismatch; new request-log name between preflight and deploy (with and without `--preflight-verdict`) | refused / accepted per R019 rule 2 |
 | V4 | Kill -9 the lane at each journal phase (poll `txn.json` phase, kill on transition) | `--recover-pricing-txn` restores or finalizes per phase; O1–O6 |
 | V5 | Hard power-off the VM (`limactl stop -f`) at each phase, boot | pre-start restores / finalizes; closer finalizes `restored-unverified` from the boot record; coordinator serves a consistent pair |
 | V6 | Lease loss (kill the lease runner) | no rollback, journal kept, every writer refuses (75/76, deploy 12), recover restores |
@@ -102,7 +102,7 @@ Scenarios (each ends with O1–O6):
    row fix) through the lane; evidence (a)–(e); gateway convergence.
 3. A strict-pin buyer request on the changed model: ledger row at the new rate,
    identity row linked to the recorded snapshot id.
-4. Record the evidence and promote `SPEC-005-R013` / `SPEC-023-R018` CONFORMANCE
+4. Record the evidence and promote `SPEC-005-R013` / `SPEC-023-R019` CONFORMANCE
    from `pending` only on this evidence.
 
 ## Bug handling

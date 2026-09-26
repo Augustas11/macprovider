@@ -35,7 +35,7 @@ the e2e plan (`docs/testing/1693-pricing-lane-e2e-plan.md`).
   `coordinator-pricing-recover --resolve-deploy-conflict`.
 - HIGH ARCH-001: downgrade to a pre-#1693 runtime re-prices wholesale history →
   runtime-floor marker enforced by deploy, deploy recovery and the updater;
-  SPEC-023-R018 rule 12; operator rule for old tags.
+  SPEC-023-R019 rule 12; operator rule for old tags.
 - MEDIUM CODE-R2-2: recovery mutated before full compare-and-swap → whole-tuple
   preflight.
 - LOW SEC-L1 (Unicode format/bidi escaping), SEC-L2 (runbook wholesale wording),
@@ -48,7 +48,7 @@ the e2e plan (`docs/testing/1693-pricing-lane-e2e-plan.md`).
   validation and drift checks. This diff does not change those lines. Follow-up:
   do normalization, secret removal and comparison on the host and transfer only a
   secret-free projection or digest.
-- **Operator-rule gap (documented, R018 rule 12).** A deploy script from a tag
+- **Operator-rule gap (documented, R019 rule 12).** A deploy script from a tag
   older than #1693 cannot enforce the runtime floor; running one after
   enablement is prohibited by the runbook. E2 scenario V10 tests the documented
   marker check.
@@ -73,4 +73,4 @@ the e2e plan (`docs/testing/1693-pricing-lane-e2e-plan.md`).
 ## Open for testing (from the plan, not audit findings)
 
 Everything in the e2e plan's E1/E2 tiers; live evidence (E3) gates CONFORMANCE
-promotion of SPEC-005-R013 and SPEC-023-R018.
+promotion of SPEC-005-R013 and SPEC-023-R019.

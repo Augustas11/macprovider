@@ -278,6 +278,108 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(config.continuousBatchQueueLimit, 4)
     }
 
+    // SPEC-038 AC-25 bounded admission wait. Same triple source as the queue
+    // limit: CLI over env over YAML, absent ⇒ the scheduler's 30s default.
+    func testContinuousBatchQueueWaitTimeoutCLIOverridesEnvironmentOverridesYAML() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(continuousBatchQueueWaitTimeoutMS: 9_000),
+            environment: ["MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS": "5000"],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batch_queue_wait_timeout_ms: 3000\n" }
+        )
+        XCTAssertEqual(config.continuousBatchQueueWaitTimeoutMS, 9_000)
+    }
+
+    func testMLXCacheLimitReadsYAMLAndEnvironmentOverridesIt() throws {
+        let fromYAML = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "mlx_cache_limit_mb: 4096\n" }
+        )
+        XCTAssertEqual(fromYAML.mlxCacheLimitMB, 4096)
+        let fromEnvironment = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_MLX_CACHE_LIMIT_MB": "0"],
+            fileExists: { _ in true },
+            readFile: { _ in "mlx_cache_limit_mb: 4096\n" }
+        )
+        XCTAssertEqual(fromEnvironment.mlxCacheLimitMB, 0, "0 is valid: it disables the MLX cache")
+        let unset = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "" }
+        )
+        XCTAssertNil(unset.mlxCacheLimitMB, "unset keeps MLX's own default")
+    }
+
+    func testApplyMLXCacheLimitIgnoresUnsetOrOutOfRange() {
+        XCTAssertNil(ModelRuntime.applyMLXCacheLimit(megabytes: nil))
+        XCTAssertNil(ModelRuntime.applyMLXCacheLimit(megabytes: -1))
+        XCTAssertNil(ModelRuntime.applyMLXCacheLimit(megabytes: Int.max), "an overflowing value must not be converted")
+    }
+
+    func testMLXCacheLimitPreflightRejectsOutOfRangeWhateverTheBatchingMode() throws {
+        for mode in [ContinuousBatchingMode.off, .canary] {
+            var config = AppConfig.defaults()
+            config.continuousBatching = mode
+            for invalid in [-1, ModelRuntime.maximumMLXCacheLimitMB + 1, Int.max] {
+                config.mlxCacheLimitMB = invalid
+                XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config), "mode=\(mode) value=\(invalid)")
+            }
+            for valid in [0, 2048, ModelRuntime.maximumMLXCacheLimitMB] {
+                config.mlxCacheLimitMB = valid
+                XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config), "mode=\(mode) value=\(valid)")
+            }
+        }
+    }
+
+    func testApplyMLXCacheLimitConvertsMegabytes() throws {
+        // Setting the limit initializes the Metal device.
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+        XCTAssertEqual(ModelRuntime.applyMLXCacheLimit(megabytes: 2), 2 * 1024 * 1024)
+    }
+
+    func testContinuousBatchQueueWaitTimeoutEnvironmentOverridesYAML() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS": "5000"],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batch_queue_wait_timeout_ms: 3000\n" }
+        )
+        XCTAssertEqual(config.continuousBatchQueueWaitTimeoutMS, 5_000)
+    }
+
+    func testContinuousBatchQueueWaitTimeoutYAMLAppliedAndDefaultsToUnset() throws {
+        let yaml = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batch_queue_wait_timeout_ms: 3000\n" }
+        )
+        XCTAssertEqual(yaml.continuousBatchQueueWaitTimeoutMS, 3_000)
+        XCTAssertNil(AppConfig.defaults().continuousBatchQueueWaitTimeoutMS)
+    }
+
+    func testContinuousBatchQueueWaitTimeoutPreflightRejectsOutOfRangeWhateverTheBatchingMode() throws {
+        let maximum = ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS
+        for mode in [ContinuousBatchingMode.off, .canary] {
+            var config = AppConfig.defaults()
+            config.continuousBatching = mode
+            for invalid in [0, -1, maximum + 1, Int.max] {
+                config.continuousBatchQueueWaitTimeoutMS = invalid
+                XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config), "mode=\(mode) value=\(invalid)")
+            }
+            for valid in [1, 600_000, maximum] {
+                config.continuousBatchQueueWaitTimeoutMS = valid
+                XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config), "mode=\(mode) value=\(valid)")
+            }
+        }
+    }
+
     func testContinuousBatchingPlainYAMLOnAndOffPreserveRawThreeStateMode() throws {
         for (raw, expected) in [("on", ContinuousBatchingMode.on), ("off", .off)] {
             let config = try ConfigLoader.load(
@@ -611,6 +713,183 @@ final class ServingKnobsConfigTests: XCTestCase {
         var config = AppConfig.defaults()
         config.continuousBatching = .canary
         config.maxConcurrencyOverride = 2
+        XCTAssertNoThrow(try ServeCommand.runContinuousBatchingPreflight(config))
+    }
+
+    // SPEC-038 AC-26: a positive cached hit batches only with the flag on, a
+    // usable retained handoff, AND `cached_turns_accepted` on the covering
+    // accepted tuple. Every other combination keeps the fence, with a reason
+    // that says which condition failed.
+    func testCachedTurnsFenceNeedsFlagHandoffAndAcceptedTuple() {
+        for mode in [ContinuousBatchingMode.canary, .on] {
+            func reason(handoff: Bool, flag: Bool, accepted: Bool, cached: Int = 32) -> ContinuousBatchingUnsupportedReason? {
+                ModelRuntime.cachedHitFenceReason(
+                    mode: mode, cachedPromptTokens: cached, hasRetainedPagedKVHandoff: handoff,
+                    cachedTurnsEnabled: flag, cachedTurnsAccepted: accepted)
+            }
+            XCTAssertNil(reason(handoff: true, flag: true, accepted: true), "flag on + accepted tuple admits in \(mode)")
+            XCTAssertEqual(reason(handoff: true, flag: true, accepted: false), .cachedTurnsNotAccepted,
+                           "flag on but tuple not accepted stays fenced in \(mode)")
+            XCTAssertEqual(reason(handoff: true, flag: false, accepted: true), .stickyCacheHandoffUnavailable,
+                           "tuple accepted but flag off stays fenced in \(mode)")
+            XCTAssertEqual(reason(handoff: false, flag: true, accepted: true), .stickyCacheHandoffUnavailable,
+                           "no usable handoff stays fenced in \(mode)")
+            XCTAssertNil(reason(handoff: false, flag: false, accepted: false, cached: 0))
+            XCTAssertTrue(ModelRuntime.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+                mode: mode, cachedPromptTokens: 32, hasRetainedPagedKVHandoff: true, cachedTurnsEnabled: true
+            ), "the accepted-tuple grant defaults to absent")
+        }
+        XCTAssertNil(ModelRuntime.cachedHitFenceReason(
+            mode: .off, cachedPromptTokens: 32, hasRetainedPagedKVHandoff: false,
+            cachedTurnsEnabled: false, cachedTurnsAccepted: false))
+
+        let notAccepted = ContinuousBatchingCapability(
+            mode: .canary, maxActiveRows: 2, queueLimit: 4, descriptor: nil,
+            unsupportedReason: .cachedTurnsNotAccepted)
+        XCTAssertEqual(
+            ContinuousBatchingPolicy.serialRouteTelemetryLine(notAccepted),
+            "event=batching_unsupported action=serial_routed reason=cached_turns_not_accepted\n")
+        let strict = ContinuousBatchingCapability(
+            mode: .on, maxActiveRows: 2, queueLimit: 4, descriptor: nil,
+            unsupportedReason: .cachedTurnsNotAccepted)
+        XCTAssertThrowsError(try ContinuousBatchingPolicy.validateStrictStartup(strict)) { error in
+            XCTAssertEqual((error as? APIError)?.code, "continuous_batching_cached_turns_not_accepted")
+        }
+    }
+
+    func testCachedTurnsAcceptanceIsPerTupleAndRevisionBound() {
+        let tuple = Self.continuousBatchingTuple()
+        func accepted(metallib: String, grant: Bool) -> ContinuousBatchingAcceptedTuple {
+            ContinuousBatchingAcceptedTuple(
+                modelID: tuple.modelID, modelSHA256: tuple.modelSHA256, cacheClass: tuple.cacheClass,
+                kvDType: tuple.kvDType, requiresMoE: tuple.requiresMoE, hardwareClass: tuple.hardwareClass,
+                metallibSHA256: metallib, kernelIdentifier: tuple.kernelIdentifier, cachedTurnsAccepted: grant)
+        }
+        let granted = ContinuousBatchingAcceptanceCoverage(acceptedTuples: [accepted(metallib: tuple.metallibSHA256, grant: true)])
+        XCTAssertTrue(granted.covers(tuple))
+        XCTAssertTrue(granted.coversCachedTurns(tuple))
+        let firstTurnOnly = ContinuousBatchingAcceptanceCoverage(acceptedTuples: [accepted(metallib: tuple.metallibSHA256, grant: false)])
+        XCTAssertTrue(firstTurnOnly.covers(tuple))
+        XCTAssertFalse(firstTurnOnly.coversCachedTurns(tuple))
+        let otherRevision = ContinuousBatchingAcceptanceCoverage(acceptedTuples: [
+            accepted(metallib: String(repeating: "e", count: 64), grant: true),
+            accepted(metallib: tuple.metallibSHA256, grant: false),
+        ])
+        XCTAssertFalse(otherRevision.coversCachedTurns(tuple), "a grant on another runtime revision does not carry over")
+        XCTAssertFalse(ContinuousBatchingAcceptanceCoverage.empty.coversCachedTurns(tuple))
+    }
+
+    func testConfigLoaderParsesOptionalCachedTurnsAccepted() throws {
+        func yaml(_ extra: String) -> String {
+            """
+            continuous_batching_accepted_tuples:
+              - model_id: mlx-community/Qwen-Test
+                model_sha256: \(String(repeating: "a", count: 64))
+                cache_class: KVCacheSimple
+                kv_dtype: fp16
+                requires_moe: false
+                hardware_class: apple-silicon-test
+                metallib_sha256: \(String(repeating: "b", count: 64))
+                kernel_identifier: macprovider_paged_kv_gather_v1
+            \(extra)
+            """
+        }
+        func load(_ extra: String) throws -> AppConfig {
+            try ConfigLoader.load(cli: CLIOverrides(), environment: [:], fileExists: { _ in true }, readFile: { _ in yaml(extra) })
+        }
+        XCTAssertEqual(try load("").continuousBatchingAcceptedTuples.first?.cachedTurnsAccepted, false, "absent means false")
+        XCTAssertEqual(try load("    cached_turns_accepted: true").continuousBatchingAcceptedTuples.first?.cachedTurnsAccepted, true)
+        XCTAssertEqual(try load("    cached_turns_accepted: false").continuousBatchingAcceptedTuples.first?.cachedTurnsAccepted, false)
+        for invalid in ["    cached_turns_accepted: \"true\"", "    cached_turns_accepted: yes please", "    cached_turns_accepted: 1"] {
+            XCTAssertThrowsError(try load(invalid), invalid)
+        }
+    }
+
+    func testUsableRetainedHandoffRequiresCheckpointAtCachedLengthOnHybridModels() async throws {
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let handle = try await allocator.allocate(
+            conversationKey: "conv", initialCapacityTokens: 40, maxLogicalTokens: 48, initialTokens: 40)
+        let retained = try await allocator.retain(handle)
+        let checkpoint = RecurrentStateCheckpoint(tokenCount: 36, states: [1: []])
+        func lease(
+            retained: PagedKVRetainedSequence?, checkpoints: [RecurrentStateCheckpoint], chosen: RecurrentStateCheckpoint?
+        ) -> ConversationCacheLease {
+            ConversationCacheLease(
+                key: "conv", keyHash: "h", incomingTokens: [], modelID: "m", kvBits: nil,
+                reusableCache: ConversationCacheLayers([], retainedPagedKVSequence: retained, recurrentCheckpoints: checkpoints),
+                cachedPromptTokens: 36, lcp: 36, trimBy: 4, recurrentCheckpoint: chosen)
+        }
+        let hybridHit = lease(retained: retained, checkpoints: [checkpoint], chosen: checkpoint)
+        XCTAssertTrue(ModelRuntime.leaseHasUsableRetainedHandoff(hybridHit, modelHasRecurrentLayers: true))
+        XCTAssertEqual(ModelRuntime.retainedRecurrentCheckpoints(for: hybridHit), [checkpoint])
+        let noCheckpoint = lease(retained: retained, checkpoints: [], chosen: nil)
+        XCTAssertFalse(ModelRuntime.leaseHasUsableRetainedHandoff(noCheckpoint, modelHasRecurrentLayers: true))
+        XCTAssertTrue(ModelRuntime.leaseHasUsableRetainedHandoff(noCheckpoint, modelHasRecurrentLayers: false))
+        XCTAssertTrue(ModelRuntime.retainedRecurrentCheckpoints(for: noCheckpoint).isEmpty)
+        let serialFormat = lease(retained: nil, checkpoints: [checkpoint], chosen: nil)
+        XCTAssertFalse(ModelRuntime.leaseHasUsableRetainedHandoff(serialFormat, modelHasRecurrentLayers: true))
+        XCTAssertFalse(ModelRuntime.leaseHasUsableRetainedHandoff(serialFormat, modelHasRecurrentLayers: false))
+        XCTAssertTrue(ModelRuntime.retainedRecurrentCheckpoints(for: serialFormat).isEmpty)
+
+        let bare = ContinuousBatchRetainedCache(retainedSequence: retained, layers: [])
+        XCTAssertFalse(ModelRuntime.retainedCacheIsCommittable(bare, modelHasRecurrentLayers: true))
+        XCTAssertTrue(ModelRuntime.retainedCacheIsCommittable(bare, modelHasRecurrentLayers: false))
+        let withCheckpoint = ContinuousBatchRetainedCache(
+            retainedSequence: retained, layers: [], recurrentCheckpoints: [checkpoint])
+        XCTAssertTrue(ModelRuntime.retainedCacheIsCommittable(withCheckpoint, modelHasRecurrentLayers: true))
+        XCTAssertEqual(withCheckpoint.withDeliveryID(UUID()).recurrentCheckpoints, [checkpoint])
+        try await allocator.discardRetained(retained)
+    }
+
+    func testContinuousBatchingCachedTurnsDefaultsOffAndResolvesCLIOverEnvironmentOverYAML() throws {
+        XCTAssertFalse(AppConfig.defaults().continuousBatchingCachedTurns)
+        let yaml = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching_cached_turns: true\n" }
+        )
+        XCTAssertTrue(yaml.continuousBatchingCachedTurns)
+        let environment = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS": "false"],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching_cached_turns: true\n" }
+        )
+        XCTAssertFalse(environment.continuousBatchingCachedTurns)
+        let cli = try ConfigLoader.load(
+            cli: CLIOverrides(continuousBatchingCachedTurns: true),
+            environment: ["MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS": "false"],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching_cached_turns: false\n" }
+        )
+        XCTAssertTrue(cli.continuousBatchingCachedTurns)
+        XCTAssertThrowsError(try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batching_cached_turns: sometimes\n" }
+        ))
+    }
+
+    func testContinuousBatchingCachedTurnsCLIFlagAndPreflightLine() throws {
+        XCTAssertNil(try ServeCommand.parse([]).continuousBatchingCachedTurns)
+        XCTAssertEqual(try ServeCommand.parse(["--continuous-batching-cached-turns"]).continuousBatchingCachedTurns, true)
+        XCTAssertEqual(try ServeCommand.parse(["--no-continuous-batching-cached-turns"]).continuousBatchingCachedTurns, false)
+
+        var config = AppConfig.defaults()
+        XCTAssertNil(ServeCommand.continuousBatchingCachedTurnsPreflightLine(config))
+        config.continuousBatchingCachedTurns = true
+        XCTAssertEqual(
+            ServeCommand.continuousBatchingCachedTurnsPreflightLine(config),
+            "event=batching_cached_turns action=inert reason=continuous_batching_off\n"
+        )
+        config.continuousBatching = .canary
+        config.maxConcurrencyOverride = 2
+        XCTAssertEqual(
+            ServeCommand.continuousBatchingCachedTurnsPreflightLine(config),
+            "event=batching_cached_turns action=enabled mode=canary\n"
+        )
         XCTAssertNoThrow(try ServeCommand.runContinuousBatchingPreflight(config))
     }
 
@@ -972,27 +1251,19 @@ final class ServingKnobsConfigTests: XCTestCase {
     }
 
     func testRequestStateRepresentableGateOnParsedRequests() throws {
-        // Defaults are not enough for Increment 1 attach: the shared-forward proof
-        // only covers explicitly greedy rows.
-        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([:])))
+        // SPEC-038 AC-6b: sampled rows batch with the serial path's sampler and a
+        // row-local seed, so plain sampling parameters no longer force serial.
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([:])))
 
         let greedy: [String: Any] = ["temperature": 0, "top_p": 1.0]
-
-        // Explicit greedy request → representable.
         XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest(greedy)))
-
-        // Non-greedy sampling / penalties → not representable by this increment.
-        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
-            "temperature": 0.2, "top_p": 1.0
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0.7, "top_p": 0.9
         ])))
-        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
-            "temperature": 0, "top_p": 0.9
-        ])))
-        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
-            "temperature": 0, "top_p": 1.0, "presence_penalty": 0.1
-        ])))
-        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
-            "temperature": 0, "top_p": 1.0, "frequency_penalty": 0.1
+        // The serial path ignores presence/frequency penalties, so they do not
+        // change what a batched row must represent.
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0.7, "presence_penalty": 0.5, "frequency_penalty": 0.5
         ])))
 
         // Structured output (json_schema) → not representable.
@@ -1385,7 +1656,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: tuple.cacheClass,
                 kvDType: tuple.kvDType,
                 requiresMoE: tuple.requiresMoE,
-                hardwareClass: tuple.hardwareClass
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
             )),
             ("model_sha256", ContinuousBatchingAcceptedTuple(
                 modelID: tuple.modelID,
@@ -1393,7 +1666,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: tuple.cacheClass,
                 kvDType: tuple.kvDType,
                 requiresMoE: tuple.requiresMoE,
-                hardwareClass: tuple.hardwareClass
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
             )),
             ("cache_class", ContinuousBatchingAcceptedTuple(
                 modelID: tuple.modelID,
@@ -1401,7 +1676,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: "KVCacheQuantized",
                 kvDType: tuple.kvDType,
                 requiresMoE: tuple.requiresMoE,
-                hardwareClass: tuple.hardwareClass
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
             )),
             ("kv_dtype", ContinuousBatchingAcceptedTuple(
                 modelID: tuple.modelID,
@@ -1409,7 +1686,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: tuple.cacheClass,
                 kvDType: .bf16,
                 requiresMoE: tuple.requiresMoE,
-                hardwareClass: tuple.hardwareClass
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
             )),
             ("requires_moe", ContinuousBatchingAcceptedTuple(
                 modelID: tuple.modelID,
@@ -1417,7 +1696,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: tuple.cacheClass,
                 kvDType: tuple.kvDType,
                 requiresMoE: !tuple.requiresMoE,
-                hardwareClass: tuple.hardwareClass
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
             )),
             ("hardware_class", ContinuousBatchingAcceptedTuple(
                 modelID: tuple.modelID,
@@ -1425,7 +1706,29 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: tuple.cacheClass,
                 kvDType: tuple.kvDType,
                 requiresMoE: tuple.requiresMoE,
-                hardwareClass: "apple-silicon-other"
+                hardwareClass: "apple-silicon-other",
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
+            )),
+            ("metallib_sha256", ContinuousBatchingAcceptedTuple(
+                modelID: tuple.modelID,
+                modelSHA256: tuple.modelSHA256,
+                cacheClass: tuple.cacheClass,
+                kvDType: tuple.kvDType,
+                requiresMoE: tuple.requiresMoE,
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: String(repeating: "c", count: 64),
+                kernelIdentifier: tuple.kernelIdentifier
+            )),
+            ("kernel_identifier", ContinuousBatchingAcceptedTuple(
+                modelID: tuple.modelID,
+                modelSHA256: tuple.modelSHA256,
+                cacheClass: tuple.cacheClass,
+                kvDType: tuple.kvDType,
+                requiresMoE: tuple.requiresMoE,
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: "macprovider_paged_kv_gather_v2"
             ))
         ]
         for (field, accepted) in mutations {
@@ -1582,6 +1885,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             kv_dtype: fp16
             requires_moe: false
             hardware_class: apple-silicon-test
+            metallib_sha256: \(String(repeating: "b", count: 64))
+            kernel_identifier: macprovider_paged_kv_gather_v1
         """
         let config = try ConfigLoader.load(
             cli: CLIOverrides(),
@@ -1595,7 +1900,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: "KVCacheSimple",
                 kvDType: .fp16,
                 requiresMoE: false,
-                hardwareClass: "apple-silicon-test"
+                hardwareClass: "apple-silicon-test",
+                metallibSHA256: String(repeating: "b", count: 64),
+                kernelIdentifier: "macprovider_paged_kv_gather_v1"
             )
         ])
     }
@@ -1609,6 +1916,8 @@ final class ServingKnobsConfigTests: XCTestCase {
             kv_dtype: int4
             requires_moe: false
             hardware_class: apple-silicon-test
+            metallib_sha256: \(String(repeating: "b", count: 64))
+            kernel_identifier: macprovider_paged_kv_gather_v1
         """
         XCTAssertThrowsError(try ConfigLoader.load(
             cli: CLIOverrides(),
@@ -1645,6 +1954,8 @@ final class ServingKnobsConfigTests: XCTestCase {
                 kv_dtype: fp16
                 requires_moe: false
                 hardware_class: apple-silicon-test
+                metallib_sha256: \(String(repeating: "b", count: 64))
+                kernel_identifier: macprovider_paged_kv_gather_v1
             """
         }
         for sha in [
@@ -1675,12 +1986,39 @@ final class ServingKnobsConfigTests: XCTestCase {
             kv_dtype: fp16
             requires_moe: false
             hardware_class: "apple-silicon-test "
+            metallib_sha256: \(String(repeating: "b", count: 64))
+            kernel_identifier: macprovider_paged_kv_gather_v1
         """
         XCTAssertThrowsError(try ConfigLoader.load(
             cli: CLIOverrides(),
             environment: [:],
             fileExists: { _ in true },
             readFile: { _ in yaml }))
+    }
+
+    /// Acceptance evidence is bound to the runtime revision it was measured
+    /// on; an entry that omits it must not load as if it covered every build.
+    func testConfigLoaderRequiresAcceptedTupleRuntimeRevision() throws {
+        let base = """
+        continuous_batching_accepted_tuples:
+          - model_id: mlx-community/Qwen-Test
+            model_sha256: \(String(repeating: "a", count: 64))
+            cache_class: KVCacheSimple
+            kv_dtype: fp16
+            requires_moe: false
+            hardware_class: apple-silicon-test
+        """
+        for yaml in [
+            base + "\n    kernel_identifier: macprovider_paged_kv_gather_v1\n",
+            base + "\n    metallib_sha256: \(String(repeating: "b", count: 64))\n",
+            base + "\n    metallib_sha256: \(String(repeating: "B", count: 64))\n    kernel_identifier: macprovider_paged_kv_gather_v1\n"
+        ] {
+            XCTAssertThrowsError(try ConfigLoader.load(
+                cli: CLIOverrides(),
+                environment: [:],
+                fileExists: { _ in true },
+                readFile: { _ in yaml }))
+        }
     }
 
     func testConfigLoaderDefaultsAcceptedTuplesToEmpty() throws {
@@ -1820,7 +2158,10 @@ final class ServingKnobsConfigTests: XCTestCase {
         } catch let error as APIError {
             await runtime.unregisterInFlight(handle.registrationID)
             XCTAssertNotEqual(error.code, "continuous_batching_conversation_key_rollout_unavailable")
-            XCTAssertEqual(error.status, 400)
+            // A default (sampled) request is representable since SPEC-038 AC-6b,
+            // so strict `on` now fails closed on the missing local capability
+            // (503) rather than on request representability (400).
+            XCTAssertEqual(error.status, 503)
         }
     }
 
@@ -2050,7 +2391,7 @@ final class ServingKnobsConfigTests: XCTestCase {
         )
     }
 
-    /// FR-CB10 coverage that exactly matches `tuple` on the six evidence
+    /// FR-CB10 coverage that exactly matches `tuple` on the eight evidence
     /// fields, so a gating test proves the descriptor gate rather than the
     /// acceptance gate.
     private static func acceptanceCoverage(
@@ -2063,7 +2404,9 @@ final class ServingKnobsConfigTests: XCTestCase {
                 cacheClass: tuple.cacheClass,
                 kvDType: tuple.kvDType,
                 requiresMoE: tuple.requiresMoE,
-                hardwareClass: tuple.hardwareClass
+                hardwareClass: tuple.hardwareClass,
+                metallibSHA256: tuple.metallibSHA256,
+                kernelIdentifier: tuple.kernelIdentifier
             )
         ])
     }

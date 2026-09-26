@@ -17,7 +17,7 @@ import (
 )
 
 // autotuneReleaseValidationOptions are the pricing-lane extensions of
-// --validate-autotune-release (SPEC-023-R018).
+// --validate-autotune-release (SPEC-023-R019).
 type autotuneReleaseValidationOptions struct {
 	// ExpectBaseEquivalent is the live base config path. The --config
 	// candidate must equal it as a YAML node tree everywhere except the

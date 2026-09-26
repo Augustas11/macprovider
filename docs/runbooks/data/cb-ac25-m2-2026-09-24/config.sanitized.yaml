@@ -1,0 +1,23 @@
+model: qwen3-coder-30b-a3b-instruct
+model_artifact_path: <catalog snapshot mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit@6e302ea6>
+model_artifact_sha256: 10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0
+model_catalog_model_id: mlx-community/Qwen3-Coder-30B-A3B-Instruct-4bit
+model_catalog_revision: 6e302ea604ad9ab206367e2c501d1571023e7b6d
+model_catalog_sha256: 10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0
+port: 18080
+max_concurrency_override: 1
+continuous_batch_queue_limit: 1
+continuous_batch_queue_wait_timeout_ms: 3000
+max_context_override: 200000
+enable_receipts: true
+credential_store: protected_file
+continuous_batching: canary
+paged_kv:
+  enabled: true
+continuous_batching_accepted_tuples:
+  - model_id: qwen3-coder-30b-a3b-instruct
+    model_sha256: 10adb5da9840c8fe0e3036b10f6e2f8f34b41c615f3925b4132302e9cdbab9c0
+    cache_class: KVCacheSimple
+    kv_dtype: fp16
+    requires_moe: true
+    hardware_class: "apple-silicon:Apple M3 Ultra:ram-256gb"

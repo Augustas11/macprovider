@@ -54,6 +54,106 @@ struct ReceiptInput {
     let modelHash: String?
 }
 
+/// SPEC-015 §N.12 (v0.4.10, SPEC-015-R006, #1690 M5): the coordinator's
+/// per-request authorization for a runtime that is not settlement eligible (a
+/// SPEC-046 loopback runtime) to sign one v0.4 receipt inside a SPEC-022-R012
+/// Trusted Pool attempt. Request metadata, never a receipt field: the v0.4
+/// tuple and wire are unchanged. Parsed tolerantly: an absent or malformed
+/// member is nil, which means not authorized (fail-closed).
+struct PoolRuntimeAuthorization: Sendable, Equatable {
+    static let wireKey = "pool_runtime_authorization"
+    /// §N.12 item 1: a closed object with exactly these members.
+    static let wireFields: Set<String> = [
+        "pool_id", "manifest_core_digest", "runtime_source", "request_id",
+        "attempt_n", "provider_id", "route_snapshot_digest",
+    ]
+
+    let poolID: String
+    let manifestCoreDigest: String
+    let runtimeSource: String
+    let requestID: String
+    let attemptN: Int64
+    let providerID: String
+    let routeSnapshotDigest: String
+
+    init?(wire value: Any?) {
+        guard let wire = value as? [String: Any],
+              Set(wire.keys) == Self.wireFields,
+              let poolID = Self.nonEmptyString(wire["pool_id"]),
+              let manifestCoreDigest = Self.lowercaseHex64(wire["manifest_core_digest"]),
+              let runtimeSource = Self.nonEmptyString(wire["runtime_source"]),
+              let requestID = Self.nonEmptyString(wire["request_id"]),
+              let attemptN = Self.jsonInteger(wire["attempt_n"]),
+              let providerID = Self.nonEmptyString(wire["provider_id"]),
+              let routeSnapshotDigest = Self.lowercaseHex64(wire["route_snapshot_digest"]) else {
+            return nil
+        }
+        self.poolID = poolID
+        self.manifestCoreDigest = manifestCoreDigest
+        self.runtimeSource = runtimeSource
+        self.requestID = requestID
+        self.attemptN = attemptN
+        self.providerID = providerID
+        self.routeSnapshotDigest = routeSnapshotDigest
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let string = value as? String, !string.isEmpty else { return nil }
+        return string
+    }
+
+    private static func lowercaseHex64(_ value: Any?) -> String? {
+        guard let string = value as? String,
+              string.utf8.count == 64,
+              string.utf8.allSatisfy({ (0x30...0x39).contains($0) || (0x61...0x66).contains($0) }) else {
+            return nil
+        }
+        return string
+    }
+
+    /// A JSON integer only. JSONSerialization hands back booleans and
+    /// fractions as NSNumber too; neither is an `attempt_n`.
+    private static func jsonInteger(_ value: Any?) -> Int64? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else {
+            return nil
+        }
+        let integer = number.int64Value
+        guard number.isEqual(to: NSNumber(value: integer)) else { return nil }
+        return integer
+    }
+}
+
+/// SPEC-015 §6.4 case 7 / §N.12: whether this request may carry a signed
+/// receipt from a runtime whose `isSettlementReceiptEligible` is false. The
+/// decision is per request: only a well-formed `pool_runtime_authorization`
+/// in this request's v0.4 settlement metadata that names the serving
+/// runtime's own `runtime_source`, this request's `request_id`, `attempt_n`,
+/// and `route_snapshot_digest`, and this provider enables it. An
+/// authorization copied from another request, attempt, or provider never
+/// does. Like #1695 this is a provider-side accident guard; the coordinator's
+/// SPEC-022-R012 usage-source check is the control.
+enum SettlementReceiptEligibility {
+    static func poolAuthorizes(
+        runtimeSource: String?,
+        settlementMetadata: SettlementReceiptMetadata?,
+        providerID: String?
+    ) -> Bool {
+        guard let runtimeSource, !runtimeSource.isEmpty,
+              let settlementMetadata,
+              let authorization = settlementMetadata.poolRuntimeAuthorization,
+              let providerID, !providerID.isEmpty else {
+            return false
+        }
+        return authorization.runtimeSource == runtimeSource
+            && authorization.requestID == settlementMetadata.requestID
+            && authorization.attemptN == settlementMetadata.attemptN
+            && authorization.providerID == settlementMetadata.providerID
+            && authorization.providerID == providerID
+            && authorization.routeSnapshotDigest == settlementMetadata.routeSnapshotDigest
+    }
+}
+
 struct SettlementReceiptMetadata: Sendable, Equatable {
     let accountScope: String
     let requestID: String
@@ -70,6 +170,8 @@ struct SettlementReceiptMetadata: Sendable, Equatable {
     let promptHash: String
     let outputPrefixStartByte: Int64
     let pendingDeadlineSeconds: Int64
+    /// §N.12: nil when absent or malformed (not authorized).
+    let poolRuntimeAuthorization: PoolRuntimeAuthorization?
 
     init?(wire: [String: Any]) {
         guard let accountScope = wire["account_scope"] as? String,
@@ -104,6 +206,7 @@ struct SettlementReceiptMetadata: Sendable, Equatable {
         self.promptHash = promptHash
         self.outputPrefixStartByte = outputPrefixStartByte
         self.pendingDeadlineSeconds = pendingDeadlineSeconds
+        self.poolRuntimeAuthorization = PoolRuntimeAuthorization(wire: wire[PoolRuntimeAuthorization.wireKey])
     }
 
     private static func int64(_ value: Any?) -> Int64? {
@@ -278,9 +381,14 @@ struct ReceiptBuilder: Sendable {
             outputPrefixEndByte: outputEnd
         )
         let outputHash = try RFC8785JCS.sha256Hex(of: output)
+        // SPEC-015 §N.7: a non-normal_done attempt that delivered no output
+        // bills nothing; observed usage is still reported.
+        let billsNothing = input.terminalState != "normal_done" && deliveredBytes == 0
+        let billableInputTokens = billsNothing ? 0 : input.promptTokens
+        let billableOutputTokens = billsNothing ? 0 : input.completionTokens
         let usage = RFC8785JCS.Value.object([
-            "billable_input_tokens": .int(try checkedInt(input.promptTokens, field: "billable_input_tokens")),
-            "billable_output_tokens": .int(try checkedInt(input.completionTokens, field: "billable_output_tokens")),
+            "billable_input_tokens": .int(try checkedInt(billableInputTokens, field: "billable_input_tokens")),
+            "billable_output_tokens": .int(try checkedInt(billableOutputTokens, field: "billable_output_tokens")),
             "delivered_output_bytes": .int(try checkedInt(deliveredBytes, field: "delivered_output_bytes")),
             "observed_input_tokens": .int(try checkedInt(input.promptTokens, field: "observed_input_tokens")),
             "observed_output_tokens": .int(try checkedInt(input.completionTokens, field: "observed_output_tokens")),

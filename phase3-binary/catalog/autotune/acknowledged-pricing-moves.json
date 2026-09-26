@@ -1,5 +1,5 @@
 {
   "schema_version": "macprovider.acknowledged-pricing-moves.v1",
-  "description": "#1693 / SPEC-023-R018: served models a pricing release may move onto a different resolved rate row (a removed row falls to default; an added row can capture a normalized key). Each entry is {model, from_row, to_row} and acknowledges exactly that move; any unlisted move is refused by content-gate / pricing-effective-diff. Read from the reviewed commit; CODEOWNERS-covered.",
+  "description": "#1693 / SPEC-023-R019: served models a pricing release may move onto a different resolved rate row (a removed row falls to default; an added row can capture a normalized key). Each entry is {model, from_row, to_row} and acknowledges exactly that move; any unlisted move is refused by content-gate / pricing-effective-diff. Read from the reviewed commit; CODEOWNERS-covered.",
   "moves": []
 }

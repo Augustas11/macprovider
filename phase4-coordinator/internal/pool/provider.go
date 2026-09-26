@@ -184,6 +184,11 @@ type Provider struct {
 	// member whose current session advertised this capability; global traffic
 	// remains unaffected.
 	TrustedPoolV1 bool `json:"trusted_pool_v1,omitempty"`
+	// CatalogMaterialHoldV1 records that this session's CLI advertised
+	// tier2_capabilities.catalog_material_hold_v1: it holds its accepted
+	// session through buyer_serving_hold=catalog_material_missing instead of
+	// reconnecting (SPEC-001 v1.9.21, SPEC-022-R002 R-2.7).
+	CatalogMaterialHoldV1 bool `json:"catalog_material_hold_v1,omitempty"`
 	// Catalog admission captures the exact signed recommendation envelope that
 	// was accepted for this live session. Deployment canaries use these fields
 	// to distinguish a current catalog-aware provider from a legacy bridge
@@ -579,6 +584,17 @@ func (p Provider) RoutingEligible() bool {
 		return false
 	}
 	return (p.State == StateReady || p.State == StateBusy) && p.SlotsFree > 0 && !p.capacitySafetyHold
+}
+
+// PoolExternalRuntimeRoutingEligible is RoutingEligible without the SPEC-032
+// FR-HG8 admission_sandboxed term. It is the separate pool-scoped predicate of
+// SPEC-042-R005 site (2) / SPEC-032-R004: only a SPEC-042 pool route that has
+// already established the SPEC-042-R004 runtime-allowlist predicate may use
+// it, and the sandbox flag itself stays set. RoutingEligible keeps its global
+// answer for every other caller.
+func (p Provider) PoolExternalRuntimeRoutingEligible() bool {
+	p.AdmissionSandboxed = false
+	return p.RoutingEligible()
 }
 
 // ServingCapable reports whether an admitted provider is still part of the

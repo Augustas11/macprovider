@@ -1,10 +1,10 @@
 # SPEC-037 — KV survival across provider restarts (encrypted provider-local disk tier)
 
-Version: v0.1.3
+Version: v0.1.4
 Status: draft (normative design; IMPL landed behind a disabled-by-default flag)
 Owner: provider runtime / prefix-cache persistence
 Decision source: `docs/research/RESEARCH_233_KV_SURVIVAL_RESTART_MEMO.md` (landed decision memo, commit `d6881b14`)
-Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds. v0.1.2: Keychain mode for the shipped naked Developer ID CLI is the process-default / login keychain (same store as provider credentials); Data Protection Keychain is used only when a named access group is set on a profiled bundle. v0.1.3: RESEARCH_233 Q6 on the live Qwen3-Coder-30B-A3B 4-bit tuple is unquantized `KVCacheSimple` (`kv_bits=null`, ~98 KiB/token; KVS-01a evidence). Q7 q4 KV is not the active representation. FR-KVP9 promotion hard ceiling rises to 1 GiB so the memo's 8k FP16 class is configurable; the default stays 256 MiB. Codec stays `kvsurv-codec-v1`. KVS-01b evidence is not claimed here.
+Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds. v0.1.2: Keychain mode for the shipped naked Developer ID CLI is the process-default / login keychain (same store as provider credentials); Data Protection Keychain is used only when a named access group is set on a profiled bundle. v0.1.3: RESEARCH_233 Q6 on the live Qwen3-Coder-30B-A3B 4-bit tuple is unquantized `KVCacheSimple` (`kv_bits=null`, ~98 KiB/token; KVS-01a evidence). Q7 q4 KV is not the active representation. FR-KVP9 promotion hard ceiling rises to 1 GiB so the memo's 8k FP16 class is configurable; the default stays 256 MiB. Codec stays `kvsurv-codec-v1`. KVS-01b evidence is not claimed here. v0.1.4: hybrid entries (any recurrent `ArraysCache`/`MambaCache` layer, with SPEC-024 v0.2.5 recurrent-state checkpoints) are hot-tier only and never persisted or promoted.
 
 ## 1. Purpose and scope
 
@@ -900,7 +900,10 @@ tombstones, or unsafe ownership/permissions → `disk_store_quarantined`
   (`disk_write_skipped` / `unsupported_cache_class`). Q6 on the live Qwen
   tuple is `KVCacheSimple`, so the KVS-01b 8k gate uses this allowlist
   under the v0.1.3 1 GiB promotion ceiling rather than a codec v2
-  extension. **Codec evolution rule (aligned with §8):** any payload-semantic
+  extension. **(v0.1.4)** A hybrid entry (any recurrent `ArraysCache` /
+  `MambaCache` layer) is outside the allowlist: it MUST NOT be persisted
+  (`disk_write_skipped` / `unsupported_cache_class`), and its SPEC-024
+  recurrent-state checkpoints live in the hot tier only. **Codec evolution rule (aligned with §8):** any payload-semantic
   change, allowlist extension, or incompatible class/layout change
   requires a **new codec ID and an ABI-epoch bump**, with fixtures;
   existing codec IDs are immutable and never reinterpreted.

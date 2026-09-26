@@ -141,6 +141,68 @@ final class ControlSocketTests: XCTestCase {
         )
     }
 
+    func testSwitchProgressLoadedCarriesServedContextOnlyWhenLoaded() throws {
+        let loaded = ControlSocketFrame.switchProgress(
+            state: .loaded, elapsedMs: 5, reason: nil, maxContextTokens: 200_000, maxContextSource: "recommendation_adoption"
+        )
+        try assertRoundTrip(loaded)
+        let text = String(decoding: try ControlSocketCodec.encode(loaded), as: UTF8.self)
+        XCTAssertTrue(text.contains(#""max_context_tokens":200000"#), text)
+        XCTAssertTrue(text.contains(#""max_context_source":"recommendation_adoption""#), text)
+
+        // Additive: a loaded frame from an older serve decodes without them,
+        // and no other state ever carries them.
+        XCTAssertEqual(
+            try ControlSocketCodec.decode(Data(#"{"type":"switch_progress","state":"loaded","elapsed_ms":5}"#.utf8)),
+            .switchProgress(state: .loaded, elapsedMs: 5, reason: nil)
+        )
+        let loading = String(decoding: try ControlSocketCodec.encode(.switchProgress(
+            state: .loading, elapsedMs: 1, reason: nil, maxContextTokens: 1, maxContextSource: "operator_config"
+        )), as: UTF8.self)
+        XCTAssertFalse(loading.contains("max_context"), loading)
+    }
+
+    func testServerSwitchLoadedFrameReportsTheContextTheRuntimeApplied() async throws {
+        let socketPath = try makeSocketPath()
+        let providerStatus = ProviderStatus(
+            modelID: "old-model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 32_768, maxConcurrencyOverride: 1, maxContextSource: .recommendationApply),
+            modelHash: "hash"
+        )
+        let runtime = ModelRuntime(
+            modelID: "old-model",
+            maxContextTokensOverride: 32_768,
+            warmSwapEnabled: true,
+            switchMaxContextByTarget: ["new-model": 200_000],
+            loader: { _ in throw ControlSocketTestError.unexpectedContainerLoader },
+            testLoader: { target in (target, "hash") }
+        )
+        await runtime.setProviderStatus(providerStatus)
+        let server = makeServer(socketPath: socketPath, modelRuntime: runtime)
+        try await server.start()
+
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.switchRequest(targetModelID: "new-model", requestedAtMs: Int64(Date().timeIntervalSince1970 * 1000)))
+        var terminal: ControlSocketFrame?
+        for _ in 0..<8 {
+            let frame = try await connection.receive(timeout: 5)
+            if case let .switchProgress(state, _, _, _, _) = frame, state == .loaded || state == .failed {
+                terminal = frame
+                break
+            }
+        }
+        await connection.close()
+        await server.stop()
+
+        guard case let .switchProgress(state, _, _, tokens, source) = try XCTUnwrap(terminal) else {
+            return XCTFail("no terminal switch frame")
+        }
+        XCTAssertEqual(state, .loaded)
+        XCTAssertEqual(tokens, 200_000)
+        XCTAssertEqual(source, "recommendation_adoption")
+    }
+
     func testEncodeDecodeStatusResponseReady() throws {
         try assertRoundTrip(.statusResponse(currentModelID: "model-A", runtimeState: .ready))
         try assertRoundTrip(.modelsRequest)

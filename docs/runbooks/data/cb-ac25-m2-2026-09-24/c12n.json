@@ -1,0 +1,55 @@
+{
+ "case": "c12n",
+ "run": "5f195512",
+ "result": [
+  {
+   "rid": "ac25-5f195512-c12n-A",
+   "status": 200,
+   "stream": false,
+   "elapsed_s": 18.629,
+   "headers_present": [],
+   "retry_after_header": null,
+   "finish_reason": "length",
+   "content_len": 1024,
+   "usage": {
+    "prompt_tokens": 21,
+    "completion_tokens": 1024
+   },
+   "response_id": "chatcmpl-d5c85289fdad49d29320c4e204b93482"
+  },
+  {
+   "rid": "ac25-5f195512-c12n-B",
+   "status": 503,
+   "stream": false,
+   "elapsed_s": 3.022,
+   "headers_present": [
+    "retry-after"
+   ],
+   "retry_after_header": "3",
+   "error": {
+    "code": "continuous_batching_queue_wait_timeout",
+    "type": "server_error",
+    "retryable": true,
+    "inference_ran": false,
+    "settlement_ran": false
+   }
+  },
+  {
+   "rid": "ac25-5f195512-c12n-C",
+   "status": 503,
+   "stream": false,
+   "elapsed_s": 0.018,
+   "headers_present": [
+    "retry-after"
+   ],
+   "retry_after_header": "3",
+   "error": {
+    "code": "continuous_batching_stream_backpressure",
+    "type": "server_error",
+    "retryable": true,
+    "inference_ran": false,
+    "settlement_ran": false
+   }
+  }
+ ]
+}

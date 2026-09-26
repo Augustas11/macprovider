@@ -2,7 +2,7 @@
 
 Pick the lane from what changed against the **live** release, not from what the
 PR title says. Every lane below fails closed; none of them re-signs on Pearl.
-Normative rules: `SPEC-023-R013` to `SPEC-023-R018` in
+Normative rules: `SPEC-023-R013` to `SPEC-023-R019` in
 `specs/SPEC-023-installer-autotune-recommend.md`; the money invariants of a
 price change are `SPEC-005-R013` (`specs/SPEC-005-billing.md` §5.6).
 
@@ -185,7 +185,7 @@ stranding its adopters. It never evicts a retained release that has adopters.
 ## Pricing corrections: operator procedure
 
 A rows-only rate-card correction (item 2) goes live through the content lane
-without a runtime release (`SPEC-023-R018`). Billing reads the base-yaml
+without a runtime release (`SPEC-023-R019`). Billing reads the base-yaml
 `rewards.rate_card` rows and refuses any load whose rows differ from the
 signed `rate-card.json` (`SPEC-005-R011`), so the lane changes both in one
 journaled host transaction: Pearl's live `coordinator.yaml` gets the reviewed

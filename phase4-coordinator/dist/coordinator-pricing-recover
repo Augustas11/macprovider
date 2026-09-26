@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""Pearl pricing transaction journal and recovery (#1693, SPEC-023-R018 L4/L4b/L7).
+"""Pearl pricing transaction journal and recovery (#1693, SPEC-023-R019 L4/L4b/L7).
 
 A catalog-content release that changes rate-card rows replaces the
 `rewards.rate_card` block of the live base coordinator.yaml together with the

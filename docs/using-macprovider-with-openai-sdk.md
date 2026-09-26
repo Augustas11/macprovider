@@ -62,7 +62,7 @@ Server-Sent Events, OpenAI-compatible chunks. No MacProvider-specific handling n
 
 ## Tool calling
 
-MacProvider ships OpenAI-shape `tools` + `tool_choice` per [SPEC-018](../specs/SPEC-018-*.md). Multi-turn tool loops, streamed tool-call deltas, and `tool_call_id` back-references all work.
+MacProvider ships OpenAI-shape `tools` + `tool_choice` per [SPEC-018](../specs/SPEC-018-agentic-tool-calling.md). Multi-turn tool loops, streamed tool-call deltas, and `tool_call_id` back-references all work.
 
 ```python
 resp = client.chat.completions.create(
@@ -94,7 +94,7 @@ A complete multi-turn tool demo lives at [`examples/tool_calling_demo.py`](../ex
 
 ## Structured output (JSON schema)
 
-Grammar-constrained sampling via [SPEC-019](../specs/SPEC-019-*.md). Works in both streaming and non-streaming.
+Grammar-constrained sampling via [SPEC-019](../specs/SPEC-019-structured-output.md). Works in both streaming and non-streaming.
 
 ```python
 resp = client.chat.completions.create(
@@ -267,12 +267,43 @@ print("receipt:    ", raw.headers.get("X-MacProvider-Receipt")[:60], "...")
 print("payload:    ", json.loads(resp.choices[0].message.content))
 ```
 
+## Choosing an inference engine
+
+Trusted Pool routes can be served by more than one inference engine. Name one with `X-MacProvider-Engine-Select`:
+
+| Value | Engine | Where it can serve |
+|---|---|---|
+| `native` | Malibu's native MLX engine | Every route |
+| `llamacpp` | llama.cpp `llama-server` | A Trusted Pool whose signed policy allows it |
+| `ollama` | Ollama | A Trusted Pool whose signed policy allows it |
+
+```python
+client_llama = OpenAI(
+    base_url="https://api.malibu.tech/v1",
+    api_key="<your-macprovider-api-key>",
+    default_headers={
+        "X-MacProvider-Pool-Select": "<pool-id>",
+        "X-MacProvider-Engine-Select": "llamacpp",
+    },
+)
+```
+
+- **No header:** any engine the route allows. The global network (no pool) serves native only.
+- **Exact match:** a request that names an engine is served by that engine or refused. It is never quietly served by another engine.
+  - `400 invalid_engine_selection`: the value is not one of the three above (matching is case-sensitive).
+  - `503 engine_unavailable`: `llamacpp` or `ollama` without a Trusted Pool, a pool whose policy does not allow that engine, or no provider in the pool runs it for your model. Retrying the same request will not help.
+- **Disclosure:** every response names the engine that served it in `X-MacProvider-Engine`: `mlx_cache` (native), `llamacpp_loopback`, or `ollama_loopback`. This is the engine the provider declared and the coordinator recorded, not an attestation of the process running on the Mac. For a pool request served by an external engine, the settlement record stores the same value with the served model file's identity.
+
+**Engines differ.** On a Mac Studio (M3 Ultra) serving Qwen3.6 27B, llama-server (Q4_K_M) reached 0.80x, 0.85x, and 0.70x of native throughput at 1, 4, and 8 concurrent requests. Under bursts it had a shorter time to first token than native serial decoding, because it interleaves requests. Quality follows the quantization: wikitext-2 perplexity 6.618 for Q4_K_M against 6.747 for native MLX 4-bit. The full numbers and method are in the [M0 benchmark evidence](runbooks/runtime-agnostic-m0-benchmark-evidence-2026-09-24.md). **Pricing does not depend on the engine:** a request is priced by its model.
+
 ## Header reference
 
 | Header | Direction | Purpose | Ref |
 |---|---|---|---|
 | `X-MacProvider-Conversation` | Request | Sticky-affinity tag for prefix-cache reuse | SPEC-004, SPEC-024 |
 | `X-MacProvider-Pin-Provider` | Request | Strict-pin to specific provider | SPEC-004 |
+| `X-MacProvider-Engine-Select` | Request | Choose the inference engine (`native`, `llamacpp`, `ollama`) | SPEC-006-R016, SPEC-042-R014 |
+| `X-MacProvider-Engine` | Response | Engine that served this (`mlx_cache`, `llamacpp_loopback`, `ollama_loopback`) | SPEC-006-R016 |
 | `X-MacProvider-Provider` | Response | Which provider actually served this | SPEC-002 |
 | `X-MacProvider-Receipt` | Response | ed25519-signed inference receipt | SPEC-015 v0.3 |
 
@@ -299,7 +330,7 @@ Any framework built on `openai-python` or `openai-node` works out of the box. Te
 - **LlamaIndex.** `OpenAI(base_url=..., api_key=...)` — same story.
 - **Instructor.** Structured output via `response_format` works; Instructor's `patch()` layer sees MacProvider as plain OpenAI.
 - **Aider.** Point `OPENAI_API_BASE` at `https://api.malibu.tech/v1`; existing config keys work.
-- **Cline / Continue.** Per [SPEC-018 v0.2.4](../specs/SPEC-018-*.md) MacProvider is a Cline drop-in target — set the OpenAI-compatible endpoint to `https://api.malibu.tech/v1`.
+- **Cline / Continue.** Per [SPEC-018 v0.2.4](../specs/SPEC-018-agentic-tool-calling.md) MacProvider is a Cline drop-in target — set the OpenAI-compatible endpoint to `https://api.malibu.tech/v1`.
 
 If you find a framework where the OpenAI SDK works but MacProvider doesn't, that's a wire-shape bug — file an issue with a minimal repro.
 

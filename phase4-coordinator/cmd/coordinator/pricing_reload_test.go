@@ -23,7 +23,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// SPEC-005-R013 / SPEC-023-R018 coordinator side of the pricing lane: the
+// SPEC-005-R013 / SPEC-023-R019 coordinator side of the pricing lane: the
 // reload transition table, the applied-config pricing fields, and the
 // validator's pricing extensions.
 

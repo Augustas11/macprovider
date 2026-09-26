@@ -80,6 +80,31 @@ commit_line="$(grep -nF 'touch /opt/macprovider/.coordinator-deploy-rollback/com
 [ -n "$provenance_check_line" ] && [ -n "$commit_line" ] && [ "$provenance_check_line" -lt "$commit_line" ] ||
   fail "deploy must verify exact release provenance before committing rollback state"
 
+# Issue #1721: production exact-copy inputs come from the verified signed Pearl
+# runtime release (which the updater installs), so a local dist/ build that the
+# gates can never match cannot deadlock the full deploy.
+grep -qF -- '--deploy-artifacts-dir "$PINNED_RUNTIME_ARTIFACT_DIR"' "$DEPLOY_SH" ||
+  fail "deploy must stage exact-copy binaries from the verified Pearl runtime release"
+grep -qF 'PINNED_RUNTIME_ARTIFACT_DIR="$PINNED_DEPLOY_INPUT_DIR/pearl-runtime-release"' "$DEPLOY_SH" ||
+  fail "deploy must stage verified release binaries inside the cleaned-up pinned input dir"
+for binary_var in \
+  'BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/coordinator-linux-amd64"' \
+  'CLI_BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/coordinator-cli-linux-amd64"' \
+  'STATS_INVENTORY_BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/stats-inventory-sync-linux-amd64"' \
+  'STATS_BILLING_MIRROR_BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/stats-billing-mirror-linux-amd64"' \
+  'STATS_HARDWARE_VERIFIER_BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/stats-hardware-verifier-linux-amd64"'; do
+  grep -qxF "$binary_var" "$DEPLOY_SH" ||
+    fail "deploy exact-copy input must come from the verified release: $binary_var"
+done
+! grep -qE '^(BINARY|CLI_BINARY|STATS_[A-Z_]+_BINARY)="\$DIST_DIR/' "$DEPLOY_SH" ||
+  fail "deploy exact-copy inputs must not read local dist/ builds"
+release_stage_line="$(grep -nF -- '--deploy-artifacts-dir "$PINNED_RUNTIME_ARTIFACT_DIR"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)"
+binary_line="$(grep -nxF 'BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/coordinator-linux-amd64"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)"
+ssh_line="$(grep -nF 'SSH="ssh -i $SSH_KEY' "$DEPLOY_SH" | head -n1 | cut -d: -f1)"
+[ -n "$release_stage_line" ] && [ -n "$binary_line" ] && [ -n "$ssh_line" ] &&
+  [ "$release_stage_line" -lt "$binary_line" ] && [ "$binary_line" -lt "$ssh_line" ] ||
+  fail "deploy must stage verified release binaries before resolving inputs or opening SSH"
+
 work="$(mktemp -d "${TMPDIR:-/tmp}/coordinator-release-tag-guard.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 real_git="$(command -v git)"

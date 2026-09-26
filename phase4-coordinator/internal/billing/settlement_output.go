@@ -21,6 +21,11 @@ const (
 
 	UsageSourceCoordinatorObserved = "coordinator_observed"
 	UsageSourceByteEstimated       = "byte_estimated"
+	// UsageSourcePoolOperatorAttested is the SPEC-022-R012 pool-scoped usage
+	// source: the pool operator's own reported usage, signed in its v0.4
+	// receipt, trusted administratively under the pool's signed policy. It is
+	// never coordinator_observed and never described as coordinator-verified.
+	UsageSourcePoolOperatorAttested = "pool_operator_attested"
 )
 
 var terminalStatePattern = regexp.MustCompile(`^(normal_done|provider_error|buyer_cancel|gateway_timeout|upstream_transport_disconnect)$`)
@@ -41,6 +46,12 @@ type SettlementOutput struct {
 	TerminalState         string
 	TerminalStateTSUnixMS int64
 	ToolCalls             []SettlementToolCall
+	// ObservedInputTokens and ObservedOutputTokens are the attempt's observed
+	// usage when its ledger row bills none of it: a buyer_cancel that delivered
+	// nothing (SPEC-015 §N.6/§N.7). They are evidence only and are not part of
+	// settlement_output_v1.
+	ObservedInputTokens  *int64
+	ObservedOutputTokens *int64
 }
 
 type SettlementUsage struct {
@@ -218,7 +229,7 @@ func (a SettlementAttemptOutput) Validate() error {
 
 func validUsageSource(value string) bool {
 	switch value {
-	case UsageSourceCoordinatorObserved, UsageSourceByteEstimated:
+	case UsageSourceCoordinatorObserved, UsageSourceByteEstimated, UsageSourcePoolOperatorAttested:
 		return true
 	default:
 		return false
@@ -256,13 +267,15 @@ LIMIT 1`, accountScope, requestID, attemptN, providerID).Scan(&one)
 
 // MarkSettlementOutputMissing records that a credited request has no
 // settlement evidence. The credit amount is left unchanged and the row stays
-// unquarantined so a later evidence write can still settle it. Callers filter
-// on this reason when measuring provider revenue.
-func (s *Store) MarkSettlementOutputMissing(ctx context.Context, requestID string, attemptN int, providerID string) error {
+// unquarantined here; a negotiated enforce attempt's credit is quarantined
+// separately (QuarantineUndeliveredSettlementCredit). Callers filter on this
+// reason when measuring provider revenue. It reports whether a credited row
+// was marked: an uncredited attempt (a 502, a zero credit) has none.
+func (s *Store) MarkSettlementOutputMissing(ctx context.Context, requestID string, attemptN int, providerID string) (bool, error) {
 	if s == nil || requestID == "" || providerID == "" || attemptN < 0 {
-		return nil
+		return false, nil
 	}
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 UPDATE ledger_request_credits
 SET quarantine_reason = 'settlement_attempt_output_missing'
 WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
@@ -271,7 +284,108 @@ WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
   AND quarantined = 0
   AND (quarantine_reason IS NULL OR quarantine_reason = '')`,
 		requestID, attemptN, providerID)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// QuarantineUndeliveredSettlementCredit quarantines an unsettled provider
+// credit whose settlement evidence failed after the buyer response was
+// delivered and the buyer reservation was refunded (SPEC-022 v0.2.2 enforce
+// mode). A quarantined row leaves spec022_payable_request_credits unless an
+// operator force-credits it. The credit amount is kept for that review. The
+// reason replaces MarkSettlementOutputMissing's informational reason so the
+// finality lookup recognises it (UndeliveredSettlementQuarantineReasons). A
+// credit whose attempt already has a closed verified verdict is never
+// quarantined (UndeliveredQuarantineVerified).
+// UndeliveredSettlementQuarantineReasons are the coordinator reasons a
+// credit is quarantined with after a delivered attempt's settlement evidence
+// failed (SPEC-022 v0.2.2). The finality lookup reports such an attempt as
+// closed quarantined, so a gateway that never received the refund trailer
+// still refunds instead of holding.
+var UndeliveredSettlementQuarantineReasons = []string{
+	"settlement_record_failed_after_delivery",
+	"settlement_output_missing_after_credit",
+	"settlement_finality_unset_after_delivery",
+}
+
+// UndeliveredQuarantineResult is what QuarantineUndeliveredSettlementCredit
+// found.
+type UndeliveredQuarantineResult int
+
+const (
+	// UndeliveredQuarantineNoCredit: no unsettled, unquarantined credit row
+	// for the attempt and no verified verdict for it.
+	UndeliveredQuarantineNoCredit UndeliveredQuarantineResult = iota
+	// UndeliveredQuarantineQuarantined: the credit row is now quarantined.
+	UndeliveredQuarantineQuarantined
+	// UndeliveredQuarantineVerified: the attempt already has a closed
+	// verified verdict, so its credit is legitimately payable and was left
+	// alone.
+	UndeliveredQuarantineVerified
+)
+
+func (s *Store) QuarantineUndeliveredSettlementCredit(ctx context.Context, accountScope, requestID string, attemptN int, providerID, reason string) (UndeliveredQuarantineResult, error) {
+	if s == nil || requestID == "" || providerID == "" || attemptN < 0 || reason == "" {
+		return UndeliveredQuarantineNoCredit, nil
+	}
+	scopeHash := SettlementAccountScopeHash(accountScope)
+	res, err := s.db.ExecContext(ctx, `
+UPDATE ledger_request_credits
+   SET quarantined = 1,
+       quarantine_reason = CASE
+           WHEN quarantine_reason IS NULL OR quarantine_reason IN ('', 'settlement_attempt_output_missing') THEN ?
+           ELSE quarantine_reason END,
+       updated_at_utc = ?
+ WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
+   AND quarantined = 0
+   AND settled = 0
+   AND NOT EXISTS (
+       SELECT 1 FROM settlement_receipt_verdicts srv
+        WHERE srv.account_scope_hash = ?
+          AND srv.request_id = ledger_request_credits.request_id
+          AND srv.provider_id = ledger_request_credits.provider_id
+          AND srv.closed = 1
+          AND srv.settlement_outcome = 'verified')`,
+		reason, time.Now().UTC().Format(time.RFC3339Nano), requestID, attemptN, providerID, scopeHash)
+	if err != nil {
+		return UndeliveredQuarantineNoCredit, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return UndeliveredQuarantineNoCredit, err
+	} else if n > 0 {
+		return UndeliveredQuarantineQuarantined, nil
+	}
+	_, verified, err := s.SettlementAttemptEvidence(ctx, accountScope, requestID, providerID)
+	if err != nil {
+		return UndeliveredQuarantineNoCredit, err
+	}
+	if verified {
+		return UndeliveredQuarantineVerified, nil
+	}
+	return UndeliveredQuarantineNoCredit, nil
+}
+
+// SettlementAttemptEvidence reports whether the request's attempt on
+// providerID has a settlement attempt output and a closed verified verdict.
+// Only the in-request recorder writes an attempt output, and an enforce
+// credit is payable only with both (spec022_payable_request_credits).
+func (s *Store) SettlementAttemptEvidence(ctx context.Context, accountScope, requestID, providerID string) (hasOutput, verified bool, err error) {
+	if s == nil {
+		return false, false, nil
+	}
+	err = s.db.QueryRowContext(ctx, `
+SELECT
+    EXISTS (SELECT 1 FROM settlement_attempt_outputs
+             WHERE account_scope = ? AND request_id = ? AND provider_id = ?),
+    EXISTS (SELECT 1 FROM settlement_receipt_verdicts
+             WHERE account_scope_hash = ? AND request_id = ? AND provider_id = ?
+               AND closed = 1 AND settlement_outcome = 'verified')`,
+		accountScope, requestID, providerID,
+		SettlementAccountScopeHash(accountScope), requestID, providerID).Scan(&hasOutput, &verified)
+	return hasOutput, verified, err
 }
 
 func (s *Store) InsertSettlementAttemptOutput(ctx context.Context, attempt SettlementAttemptOutput) (string, error) {

@@ -161,7 +161,7 @@ func TestRequireOnCallReadinessForPromotion(t *testing.T) {
 		}
 	})
 
-	t.Run("missing production record fails closed and PromotePool still succeeds", func(t *testing.T) {
+	t.Run("missing production record fails closed in wrapper and PromotePool", func(t *testing.T) {
 		t.Parallel()
 		db := openTrustPoolDB(t)
 		store := newProductionActivationStore(t, db)
@@ -169,15 +169,12 @@ func TestRequireOnCallReadinessForPromotion(t *testing.T) {
 		if err := store.RequireOnCallReadinessForPromotion(ctx, root.poolID); err == nil || !errors.Is(err, trustpool.ErrOnCallReadiness) {
 			t.Fatalf("missing on-call err=%v, want ErrOnCallReadiness", err)
 		}
-		state, _, _, err := store.PromotePool(ctx, trustpool.DurableEvent{
+		// The mapped validatePromotion path now enforces on-call too.
+		if _, _, _, err := store.PromotePool(ctx, trustpool.DurableEvent{
 			OperationID: "op-promote-store-bypass",
 			PoolID:      root.poolID,
-		})
-		if err != nil {
-			t.Fatalf("PromotePool without on-call: %v", err)
-		}
-		if got := state.Pools[root.poolID].Lifecycle; got != trustpool.LifecycleActive {
-			t.Fatalf("in-process PromotePool lifecycle=%q, want active", got)
+		}); !errors.Is(err, trustpool.ErrOnCallReadiness) {
+			t.Fatalf("PromotePool without on-call err=%v, want ErrOnCallReadiness", err)
 		}
 	})
 
@@ -295,6 +292,7 @@ func TestRequireReviewedArtifactLifecycleForPromotion(t *testing.T) {
 		if err := store.RequireReviewedArtifactLifecycleForPromotion(ctx, root.poolID); err == nil || !errors.Is(err, trustpool.ErrReviewedArtifactLifecycle) {
 			t.Fatalf("missing lifecycle err=%v, want ErrReviewedArtifactLifecycle", err)
 		}
+		upsertSignedOnCall(t, store, "op-oncall-lifecycle-bypass", "production")
 		state, _, _, err := store.PromotePool(ctx, trustpool.DurableEvent{
 			OperationID: "op-promote-store-bypass-lifecycle",
 			PoolID:      root.poolID,
@@ -712,6 +710,7 @@ func newProductionActivationStore(t *testing.T, db *sql.DB) *trustpool.Store {
 	store, err := trustpool.NewStore(db, trustpool.WithProductionActivationGate(trustpool.ProductionActivationGate{
 		AllowedLaunchEnvironments: []string{"production"},
 		RootCustodyHashes:         []string{hexDigest("custody")},
+		RootCustodyClasses:        map[string]string{hexDigest("custody"): trustpool.RootCustodyClassHSM},
 		EvidenceSHA256:            strings.Repeat("b", 64),
 	}))
 	if err != nil {
@@ -828,5 +827,51 @@ func assertAdminErrorCode(t *testing.T, rec *httptest.ResponseRecorder, want str
 	}
 	if body.Error.Code != want {
 		t.Fatalf("admin error code=%q, want %q body=%s", body.Error.Code, want, rec.Body.String())
+	}
+}
+
+// A replaced on-call record that shortens the gate must republish the routing
+// registry immediately, not wait for the next refresh tick.
+func TestAdminHandler_OnCallReadinessUpdateRepublishesRouteGate(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	t.Setenv("MACPROVIDER_SPEC043_ONCALL_AUTHORITY_KEY_SHA256", trustpool.OnCallAuthorityKeySHA256(priv.Public().(ed25519.PublicKey)))
+
+	db := openTrustPoolDB(t)
+	store := newProductionActivationStore(t, db)
+	registry := trustpool.NewRegistry()
+	handler := trustpool.NewAdminHandler(trustpool.AdminDeps{
+		Store:       store,
+		Registry:    registry,
+		OperatorKey: "operator-secret",
+	})
+	root := seedProductionPromotablePool(t, store)
+	long, err := trustpool.SignOnCallReadiness(priv, validOnCallReadiness("op-oncall-long", "production"))
+	if err != nil {
+		t.Fatalf("SignOnCallReadiness: %v", err)
+	}
+	postAdminOnCall(t, handler, "operator-secret", long, http.StatusOK)
+	upsertProductionArtifactLifecycle(t, handler, "operator-secret", root.poolID, "op-lifecycle-republish")
+	postAdminPromote(t, handler, "operator-secret", root.poolID, "op-promote-republish", http.StatusAccepted)
+	before := registry.Snapshot(root.poolID)
+	if !before.Routeable || !before.RouteableUntilUTC.After(time.Now().UTC().Add(2*time.Hour)) {
+		t.Fatalf("before shortening: routeable=%v until=%s, want routeable beyond 2h", before.Routeable, before.RouteableUntilUTC)
+	}
+
+	short := validOnCallReadiness("op-oncall-short", "production")
+	short.ConfirmationTTLSeconds = int64(time.Hour / time.Second)
+	short, err = trustpool.SignOnCallReadiness(priv, short)
+	if err != nil {
+		t.Fatalf("SignOnCallReadiness short: %v", err)
+	}
+	postAdminOnCall(t, handler, "operator-secret", short, http.StatusOK)
+	after := registry.Snapshot(root.poolID)
+	if after.RouteableUntilUTC.IsZero() || after.RouteableUntilUTC.After(time.Now().UTC().Add(time.Hour)) {
+		t.Fatalf("after shortening: until=%s, want the shortened on-call gate (<= 1h)", after.RouteableUntilUTC)
+	}
+	if after.Revision != before.Revision {
+		t.Fatalf("revision changed %d -> %d; on-call is a same-revision route-gate input", before.Revision, after.Revision)
 	}
 }

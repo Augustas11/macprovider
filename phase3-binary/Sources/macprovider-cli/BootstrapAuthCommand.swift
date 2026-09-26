@@ -109,7 +109,8 @@ struct BootstrapAuthCommand: AsyncParsableCommand {
             modelLoaded: false,
             capacity: ProviderCapacity(
                 maxContextOverride: resolved.maxContextOverride,
-                maxConcurrencyOverride: resolved.maxConcurrencyOverride
+                maxConcurrencyOverride: resolved.maxConcurrencyOverride,
+                maxContextSource: resolved.maxContextSource
             )
         )
         // Persist the Ed25519 receipt identity before opening the socket. If

@@ -272,7 +272,7 @@ class EffectiveDiffTests(unittest.TestCase):
         candidate["some-new-model"] = dict(self.live["qwen3-8b"])
         served = "mlx-community/Some-New-Model-4bit"
         diff, _ = self.diff(candidate, pinned={served})
-        # SPEC-023-R018 rule 2 (v0.16.1): the added row's own key moving off
+        # SPEC-023-R019 rule 2 (v0.18.1): the added row's own key moving off
         # `default` is the addition itself (listed, no ack); a normalized name
         # it captures is a move that needs one.
         self.assertEqual(diff["unacknowledged_moves"], [served])

@@ -27,6 +27,12 @@ import (
 
 const manifestSnapshotTag = "macprovider/spec042/manifest-snapshot/v1"
 
+// manifestSnapshotTagV2 is used only when some policy core names an explicit
+// encoding (SPEC-042-R001 0.0.32). Each core is then preceded by its encoding
+// byte, and a v2 core is followed by its runtime_allowlist and extensions.
+// A snapshot whose cores all use the zero encoding keeps the v1 tag and bytes.
+const manifestSnapshotTagV2 = "macprovider/spec042/manifest-snapshot/v2"
+
 // maxSnapshotElements caps any single length-prefixed list in a snapshot. It is far
 // above any realistic pool (authority-log entries, accepted policies, signers, or
 // signatures) yet bounds a malformed durable blob from claiming a pathological count
@@ -240,6 +246,27 @@ func encodePolicyCore(e *encoder, pc PolicyCore) {
 	e.u64(pc.ExpiresAtUnix)
 }
 
+func encodePolicyCoreV2Fields(e *encoder, pc PolicyCore) {
+	e.u32count(len(pc.RuntimeAllowlist))
+	for _, source := range pc.RuntimeAllowlist {
+		e.str(source)
+	}
+	e.u32count(len(pc.Extensions))
+	for _, ext := range pc.Extensions {
+		e.str(ext.ID)
+		e.bytesf(ext.Body)
+	}
+}
+
+func decodePolicyCoreV2Fields(d *decoder, pc *PolicyCore) {
+	for n, i := d.count(), 0; i < n && d.err == nil; i++ {
+		pc.RuntimeAllowlist = append(pc.RuntimeAllowlist, d.str())
+	}
+	for n, i := d.count(), 0; i < n && d.err == nil; i++ {
+		pc.Extensions = append(pc.Extensions, PolicyExtension{ID: d.str(), Body: d.lenPrefixed()})
+	}
+}
+
 // u32count writes a 32-bit element count (errors if it exceeds 2^32-1).
 func (e *encoder) u32count(n int) {
 	if e.err != nil {
@@ -258,8 +285,19 @@ func (e *encoder) u32count(n int) {
 // snapshot. Unlike the signed-preimage encodings it preserves field order exactly
 // (so Parse(CanonicalBytes(x)) == x) and carries signatures + the acceptance epoch.
 func (s ManifestSnapshot) CanonicalBytes() ([]byte, error) {
+	tagged := false
+	for _, p := range s.Policies {
+		if p.SignedCore.Core.Encoding != 0 {
+			tagged = true
+			break
+		}
+	}
 	e := &encoder{}
-	e.tag(manifestSnapshotTag)
+	if tagged {
+		e.tag(manifestSnapshotTagV2)
+	} else {
+		e.tag(manifestSnapshotTag)
+	}
 	e.str(s.IdentityCore.RootIssuerKeyID)
 	e.bytesf(s.IdentityCore.GenesisNonce)
 	encodeSigner(e, s.RootIssuerKey)
@@ -269,7 +307,13 @@ func (s ManifestSnapshot) CanonicalBytes() ([]byte, error) {
 	}
 	e.u32count(len(s.Policies))
 	for _, p := range s.Policies {
+		if tagged {
+			e.buf = append(e.buf, p.SignedCore.Core.Encoding)
+		}
 		encodePolicyCore(e, p.SignedCore.Core)
+		if tagged && p.SignedCore.Core.IsV2() {
+			encodePolicyCoreV2Fields(e, p.SignedCore.Core)
+		}
 		encodeSignatures(e, p.SignedCore.Signatures)
 		e.u64(p.AcceptedAtUnix)
 	}
@@ -346,7 +390,12 @@ func decodePolicyCore(d *decoder) PolicyCore {
 // ParseManifestSnapshot is the strict inverse of CanonicalBytes.
 func ParseManifestSnapshot(b []byte) (ManifestSnapshot, error) {
 	d := &decoder{buf: b}
-	d.expectTag(manifestSnapshotTag)
+	tagged := len(b) >= len(manifestSnapshotTagV2) && string(b[:len(manifestSnapshotTagV2)]) == manifestSnapshotTagV2
+	if tagged {
+		d.expectTag(manifestSnapshotTagV2)
+	} else {
+		d.expectTag(manifestSnapshotTag)
+	}
 	var s ManifestSnapshot
 	s.IdentityCore = IdentityCore{RootIssuerKeyID: d.str(), GenesisNonce: d.lenPrefixed()}
 	s.RootIssuerKey = decodeSigner(d)
@@ -354,7 +403,20 @@ func ParseManifestSnapshot(b []byte) (ManifestSnapshot, error) {
 		s.AuthorityLog = append(s.AuthorityLog, decodeAuthEntry(d))
 	}
 	for n, i := d.count(), 0; i < n && d.err == nil; i++ {
+		var encoding uint8
+		if tagged {
+			if raw := d.take(1); raw != nil {
+				encoding = raw[0]
+			}
+			if d.err == nil && encoding > PolicyCoreEncodingV2 {
+				d.fail(errPolicyEncoding)
+			}
+		}
 		core := decodePolicyCore(d)
+		core.Encoding = encoding
+		if core.IsV2() {
+			decodePolicyCoreV2Fields(d, &core)
+		}
 		sigs := decodeSignatures(d)
 		s.Policies = append(s.Policies, AcceptedPolicyRecord{
 			SignedCore:     SignedPolicyCore{Core: core, Signatures: sigs},
@@ -399,4 +461,26 @@ func ReconstructPool(snapshot ManifestSnapshot) (*ReconstructedPool, error) {
 		return nil, fmt.Errorf("poolmanifest: policy-history reconstruction failed: %w", err)
 	}
 	return &ReconstructedPool{AuthorityLog: authLog, PolicyHistory: history}, nil
+}
+
+// VerifyNewestPolicyAcceptance applies the ONLINE acceptance gate
+// (VerifyPolicyCore: the signer set it names must be unrevoked and its window
+// must contain the core's not_before) to the newest policy of a snapshot that is
+// being accepted NOW. ReconstructPool replays earlier verdicts with the timeless
+// verifier; a new acceptance must never be grandfathered that way, or a policy
+// signed by a revoked or inactive signer set would be accepted (SPEC-042-R012).
+func VerifyNewestPolicyAcceptance(snapshot ManifestSnapshot) error {
+	if len(snapshot.Policies) == 0 {
+		return errPolicyUnknownSignerSet
+	}
+	authLog, err := BuildAuthorityLog(snapshot.IdentityCore, snapshot.RootIssuerKey, snapshot.AuthorityLog)
+	if err != nil {
+		return err
+	}
+	newest := snapshot.Policies[len(snapshot.Policies)-1].SignedCore
+	ss, ok := authLog.SignerSet(newest.Core.SignerSetVersion)
+	if !ok {
+		return errPolicyUnknownSignerSet
+	}
+	return VerifyPolicyCore(newest.Core, newest.Signatures, ss)
 }

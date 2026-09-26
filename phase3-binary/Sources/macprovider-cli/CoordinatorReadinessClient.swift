@@ -33,6 +33,13 @@ enum CoordinatorReadinessClient {
         /// coordinator derives the hold from its registry binding and the
         /// admission store; it is never provider-asserted.
         case modelAdmissionPending = "model_admission_pending"
+        /// SPEC-022-R002 R-2.7 / SPEC-001 v1.9.21: verified-model settlement is
+        /// in `enforce` and the network Tier-2 catalog carries no route-snapshot
+        /// material for the served model, so the coordinator cannot route
+        /// buyers to it. Only a catalog update clears it; reconnecting cannot.
+        /// The coordinator names it only to a session that advertised
+        /// `tier2_capabilities.catalog_material_hold_v1`.
+        case catalogMaterialMissing = "catalog_material_missing"
     }
 
     /// The coordinator's buyer-routing verdict for one accepted session.

@@ -824,7 +824,7 @@ elif mode == "move":
     card["rows"]["foo-model"] = row
     yaml = yaml.replace("    default:\n", "    foo-model:\n      prompt_credits_per_mtok: 70000\n"
                         "      prompt_cache_hit_credits_per_mtok: 17500\n      completion_credits_per_mtok: 140000\n    default:\n", 1)
-    # SPEC-023-R018 rule 2 (v0.16.1): an added row capturing exactly its own
+    # SPEC-023-R019 rule 2 (v0.18.1): an added row capturing exactly its own
     # key from `default` needs no acknowledgement (no self-ack entry here).
     ack_p = r / "phase3-binary/catalog/autotune/acknowledged-pricing-moves.json"
     ack = json.loads(ack_p.read_bytes())

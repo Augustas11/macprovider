@@ -45,7 +45,14 @@ protocol ModelRuntimeServing: Actor {
     /// protocol-extension default) so a new loopback or fixture runtime cannot
     /// inherit receipt eligibility by omission. This is a CLI accident guard,
     /// not a security boundary: the coordinator settlement gate is the control.
+    /// SPEC-015 §N.12 (#1690 M5) lifts it for one request at a time, only
+    /// through a matching coordinator `pool_runtime_authorization`.
     nonisolated var isSettlementReceiptEligible: Bool { get }
+    /// SPEC-015 §N.12: the SPEC-046 `runtime_source` a request's
+    /// `pool_runtime_authorization` must name to let this runtime sign that
+    /// request's v0.4 receipt. Nil for a runtime no pool authorization can
+    /// enable. Declared explicitly by every conformer, as above.
+    nonisolated var settlementRuntimeSource: String? { get }
 }
 
 struct RelayBlindPreparedRequest: @unchecked Sendable {
@@ -240,6 +247,23 @@ extension ModelRuntimeServing {
     }
 }
 
+public struct RuntimeContinuousBatchingSchedulerSnapshot: Sendable, Equatable {
+    public let activeDecodeRows: Int
+    public let waitingCount: Int
+    public let maxObservedBatchDepth: Int
+    public let slotsTotal: Int
+    public let slotsFree: Int
+}
+
+public struct RuntimeContinuousBatchingSnapshot: Sendable, Equatable {
+    public let mode: ContinuousBatchingMode
+    public let active: Bool
+    public let unsupportedReason: String?
+    public let pagedKVDecision: String
+    public let cacheClass: String
+    public let scheduler: RuntimeContinuousBatchingSchedulerSnapshot?
+}
+
 public struct RuntimeSnapshot: @unchecked Sendable {
     public let state: SwapState
     public let container: ModelContainer?
@@ -254,6 +278,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     public let numDraftTokens: Int?
     public let templateSupportsThinkingToggle: Bool
     public let specDecodeGeneration: Int
+    public let continuousBatching: RuntimeContinuousBatchingSnapshot?
 
     init(
         state: SwapState,
@@ -268,7 +293,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         draftContainer: ModelContainer? = nil,
         numDraftTokens: Int? = nil,
         templateSupportsThinkingToggle: Bool = false,
-        specDecodeGeneration: Int = 0
+        specDecodeGeneration: Int = 0,
+        continuousBatching: RuntimeContinuousBatchingSnapshot? = nil
     ) {
         self.state = state
         self.container = container
@@ -285,6 +311,7 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         self.numDraftTokens = numDraftTokens
         self.templateSupportsThinkingToggle = templateSupportsThinkingToggle
         self.specDecodeGeneration = specDecodeGeneration
+        self.continuousBatching = continuousBatching
     }
 
     var hasTargetCompatibleDraft: Bool {
@@ -321,6 +348,8 @@ struct ModelRuntimeAdoptionServeKnobs: Sendable, Equatable {
     let kvBits: Int?
     let maxContext: Int
     let maxBatch: Int
+    /// The FR-17 source `/v1/status` reports for `maxContext` after the swap.
+    var contextSource: MaxContextSource = .recommendationAdoption
 }
 
 enum ModelRuntimeAdoptionError: Error, CustomStringConvertible, Equatable {
@@ -370,6 +399,13 @@ enum ModelRuntimeAdoptionError: Error, CustomStringConvertible, Equatable {
 struct PagedKVRuntimeModelCapabilities: Equatable, Sendable {
     let modelFamily: String
     let requiresMoEDispatch: Bool
+    let hybridDecoderArchitectureVerified: Bool
+
+    init(modelFamily: String, requiresMoEDispatch: Bool, hybridDecoderArchitectureVerified: Bool = false) {
+        self.modelFamily = modelFamily
+        self.requiresMoEDispatch = requiresMoEDispatch
+        self.hybridDecoderArchitectureVerified = hybridDecoderArchitectureVerified
+    }
 }
 
 struct PagedKVRuntimeMeasurementEnvironment: Sendable {
@@ -412,7 +448,8 @@ struct PagedKVRuntimeProber: Sendable {
         _ poolEpoch: Int,
         _ layerCount: Int,
         _ promptA: [Int],
-        _ promptB: [Int]
+        _ promptB: [Int],
+        _ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) async -> PagedKVRuntimeMoEProbeResult
 
     static let live = PagedKVRuntimeProber(
@@ -426,7 +463,7 @@ struct PagedKVRuntimeProber: Sendable {
                 nNew: nNew
             )
         },
-        moe: { container, blockSizeTokens, maxPhysicalBlocks, poolEpoch, layerCount, promptA, promptB in
+        moe: { container, blockSizeTokens, maxPhysicalBlocks, poolEpoch, layerCount, promptA, promptB, cacheKinds in
             await PagedKVRuntimeParityProbe.runMoEInputIsolationProbe(
                 container: container,
                 blockSizeTokens: blockSizeTokens,
@@ -434,7 +471,8 @@ struct PagedKVRuntimeProber: Sendable {
                 poolEpoch: poolEpoch,
                 layerCount: layerCount,
                 promptA: promptA,
-                promptB: promptB
+                promptB: promptB,
+                cacheKinds: cacheKinds
             )
         }
     )
@@ -580,6 +618,30 @@ final class ContinuousBatchRuntimeReplayAuthority: ContinuousBatchSchedulerRepla
         }
         fingerprintsByRequestIDHash[requestIDHash] = key.fingerprintSHA256
         return .claimed
+    }
+
+    /// SPEC-038 AC-25: drop a claim whose request never reached admission.
+    /// Fingerprint-guarded so a concurrent re-claim of the same ID with a
+    /// different body is left alone, and best-effort on the durable tier — a
+    /// store error leaves the claim in place, which fails toward the
+    /// pre-existing 409 rather than toward permitting a second execution.
+    func release(_ key: ContinuousBatchSchedulerReplayKey) {
+        let requestIDHash = Self.requestIDHash(key.requestID)
+        lock.lock()
+        defer { lock.unlock() }
+        if let storeURL {
+            try? Self.withStoreLock(for: storeURL) {
+                let claimURL = try Self.claimURL(for: requestIDHash, in: storeURL)
+                guard let existing = try? readClaim(at: claimURL, requestIDHash: requestIDHash),
+                      existing == key.fingerprintSHA256 else { return }
+                try FileManager.default.removeItem(at: claimURL)
+                try Self.syncDirectory(claimURL.deletingLastPathComponent())
+                fingerprintsByRequestIDHash.removeValue(forKey: requestIDHash)
+            }
+            return
+        }
+        guard fingerprintsByRequestIDHash[requestIDHash] == key.fingerprintSHA256 else { return }
+        fingerprintsByRequestIDHash.removeValue(forKey: requestIDHash)
     }
 
     private static func defaultStoreURL(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
@@ -1126,6 +1188,19 @@ actor ModelRuntime: ModelRuntimeServing {
     private let targetAuthorities: [String: ModelRuntimeTargetAuthority]
     private let targetTemplateSupportsThinkingToggleByArtifactSHA256: [String: Bool]
     private let authorizedSwitchModelIDs: [String]
+    /// #1689 FR-20b: context to serve per warm-switch target (lowercased id)
+    /// when the configured context was generated by a recommendation. Empty
+    /// for an operator-owned context, which then applies to every model.
+    private let switchMaxContextByTarget: [String: Int]
+    /// SPEC-023-R018 item 9: the slot count each generated switch target
+    /// serves; below the served count only when its floor context does not fit.
+    private let switchMaxBatchByTarget: [String: Int]
+    /// Lowercased ids of the model the configured value's provenance record
+    /// names; only a switch back to one of them serves `recommendation_apply`.
+    private let switchContextProvenanceModelIDs: Set<String>
+    /// The configured `max_context_override` serve started with; a switch that
+    /// serves exactly it serves the config value, not a recomputed one.
+    private let configuredMaxContextTokens: Int?
     private var preparedAdoptions: [String: ModelRuntimePreparedAdoption] = [:]
     private var preparedAdoptionReservationID: String?
     private var applyingAdoptionTransactionID: String?
@@ -1174,6 +1249,12 @@ actor ModelRuntime: ModelRuntimeServing {
     private var maxBatch: Int
     private let continuousBatchingMode: ContinuousBatchingMode
     private let continuousBatchQueueLimit: Int?
+    /// SPEC-038 AC-25 bounded admission wait, in milliseconds. Nil ⇒ the
+    /// scheduler configuration default.
+    private let continuousBatchQueueWaitTimeoutMS: Int?
+    /// SPEC-038 AC-26 opt-in: positive-cached turns with a usable retained
+    /// handoff batch instead of serial-routing. Off keeps the fence.
+    private let continuousBatchingCachedTurns: Bool
     /// SPEC-038 FR-CB10 operator-declared per-tuple acceptance coverage.
     private let continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage
     private let warmSwapEnabled: Bool
@@ -1211,6 +1292,7 @@ actor ModelRuntime: ModelRuntimeServing {
     /// Native MLX catalog serving settles through SPEC-015 receipts; it has no
     /// SPEC-047 admission rows, so eligibility is never gated on admission.
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
 
     private nonisolated static func makeServeGenerateParameters(
         maxTokens: Int?,
@@ -1295,6 +1377,7 @@ actor ModelRuntime: ModelRuntimeServing {
             chatTemplateSHA256: chatTemplateSHA256,
             modelFamily: capabilities.modelFamily,
             requiresMoEDispatch: capabilities.requiresMoEDispatch,
+            hybridDecoderArchitectureVerified: capabilities.hybridDecoderArchitectureVerified,
             gates: modelHash?.isEmpty == false ? gates : .closed
         )
     }
@@ -1532,6 +1615,9 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         PagedKVRuntimeDiagnostics.log("measure OK: runtime measurement complete, paged-KV attach eligible for model=\(modelID)")
+        // The runtime-revision fields an operator copies into
+        // `continuous_batching_accepted_tuples` after this build passes acceptance.
+        PagedKVRuntimeDiagnostics.log("runtime-identity model=\(modelID) model_sha256=\(modelSHA256) hardware_class=\(hardwareClass) metallib_sha256=\(metallibSHA256) kernel_identifier=\(kernelIdentifier)")
         return PagedKVRuntimeMeasurement(
             observedRuntimeIdentity: observedIdentity,
             hardwareSizingProof: proof
@@ -1570,6 +1656,18 @@ actor ModelRuntime: ModelRuntimeServing {
     private static let pagedKVRuntimeMoEProbePromptA = "Draft a short summary of today's shipping forecast."
     private static let pagedKVRuntimeMoEProbePromptB = "List three ingredients commonly used in a simple tomato soup."
 
+    /// Ordered challenge pairs for the isolation probe. The proof needs the two
+    /// rows' serial greedy tokens to differ at every checked step, or a leak
+    /// could hide behind identical references. Raw-prose prompts can share a
+    /// first token (Studio 2026-09-24: Qwen3.6-27B), so later pairs force
+    /// different continuations. Each pair is still checked against its own
+    /// serial references, so trying another pair cannot weaken the proof.
+    private static let pagedKVRuntimeIsolationProbePromptPairs: [(String, String)] = [
+        (pagedKVRuntimeMoEProbePromptA, pagedKVRuntimeMoEProbePromptB),
+        ("Count upward in words: one, two, three,", "The first letters of the alphabet are A, B, C,"),
+        ("def add(a, b):\n    return", "<html>\n  <head>\n    <title>"),
+    ]
+
     /// Runs the SPEC-039 on-device self-measurement probes (parity, and MoE input
     /// isolation when the resident model requires MoE dispatch) against `container`.
     /// Returns `(nil, nil)` immediately, without touching the model, unless paged KV is
@@ -1589,10 +1687,20 @@ actor ModelRuntime: ModelRuntimeServing {
         guard pagedKVConfig.effectiveEnabled,
               kvBitsOverride == nil,
               PagedKVAttachGate.recognizedModelFamilies.contains(modelCapabilities.modelFamily),
-              PagedKVAttachGate.allowedCacheClasses.contains(runtimeCacheClass)
+              PagedKVAttachGate.supportsCacheClass(
+                  runtimeCacheClass,
+                  hybridDecoderArchitectureVerified: modelCapabilities.hybridDecoderArchitectureVerified
+              )
         else {
             return (nil, nil)
         }
+        let cacheKinds = await container.perform { context in
+            Self.pagedKVCacheKinds(model: context.model)
+        }
+        guard let cacheKinds,
+              runtimeCacheClass != "mixed"
+                || (cacheKinds.contains(.recurrentMamba) && cacheKinds.contains(.pagedAttention))
+        else { return (nil, nil) }
         let promptTokens = await container.perform { context in
             context.tokenizer.encode(text: Self.pagedKVRuntimeParityProbePrompt, addSpecialTokens: true)
         }
@@ -1615,21 +1723,34 @@ actor ModelRuntime: ModelRuntimeServing {
         let layerCount = await container.perform { context in
             context.model.newCache(parameters: nil).count
         }
-        let promptA = await container.perform { context in
-            context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptA, addSpecialTokens: true)
+        let pairs = Self.pagedKVRuntimeIsolationProbePromptPairs
+        let prober = pagedKVRuntimeProber
+        let blockSizeTokens = pagedKVConfig.blockSizeTokens
+        let maxPhysicalBlocks = pagedKVConfig.maxPhysicalBlocks
+        let moeProbe = await Self.firstDistinguishingIsolationProbe(pairCount: pairs.count) { pairIndex in
+            let pair = pairs[pairIndex]
+            let promptA = await container.perform { context in
+                context.tokenizer.encode(text: pair.0, addSpecialTokens: true)
+            }
+            let promptB = await container.perform { context in
+                context.tokenizer.encode(text: pair.1, addSpecialTokens: true)
+            }
+            return await prober.moe(
+                container,
+                blockSizeTokens,
+                maxPhysicalBlocks,
+                1,
+                layerCount,
+                promptA,
+                promptB,
+                cacheKinds
+            )
+        } onIndistinguishable: { pairIndex in
+            PagedKVRuntimeDiagnostics.log(
+                "batched-isolation model=\(modelID) challenge pair \(pairIndex) not distinguishing; trying next"
+            )
         }
-        let promptB = await container.perform { context in
-            context.tokenizer.encode(text: Self.pagedKVRuntimeMoEProbePromptB, addSpecialTokens: true)
-        }
-        let moeProbe = await pagedKVRuntimeProber.moe(
-            container,
-            pagedKVConfig.blockSizeTokens,
-            pagedKVConfig.maxPhysicalBlocks,
-            1,
-            layerCount,
-            promptA,
-            promptB
-        )
+        guard let moeProbe else { return (nil, nil) }
         let p = parityProbe
         PagedKVRuntimeDiagnostics.log(
             "parity model=\(modelID) established=\(p.established) nLayers=\(p.nLayers) nNew=\(p.nNew) gatherKernelCalls=\(p.gatherKernelCalls) expectCalls=\(p.nLayers * p.nNew * 2) maxLogicalBlocks=\(p.maxLogicalBlocks) nonIdentityPermutation=\(p.nonIdentityPermutation)"
@@ -1639,6 +1760,57 @@ actor ModelRuntime: ModelRuntimeServing {
             "batched-isolation model=\(modelID) requiresMoE=\(modelCapabilities.requiresMoEDispatch) proven=\(m.proven) rowsDecoded=\(m.rowsDecodedInSharedForward) rowFailures=\(m.rowFailures) crossRowDivergences=\(m.crossRowDivergences) challengeDistinguishing=\(m.challengeDistinguishing)"
         )
         return (parityProbe, moeProbe)
+    }
+
+    /// Runs challenge pairs in order and returns the first verdict. Only a
+    /// clean indistinguishable run (both rows decoded, no row failure, no
+    /// divergence, serial references merely identical) moves on to the next
+    /// pair. Anything else — a distinguishing pass, a real divergence, a probe
+    /// failure or exception (`.failClosed`), an incomplete decode — is final,
+    /// so a failure can never be retried away by a later passing pair. If no
+    /// pair distinguishes, the last result is returned, which is never
+    /// `proven`, so the attach gate fails closed.
+    static func firstDistinguishingIsolationProbe(
+        pairCount: Int,
+        attempt: (Int) async -> PagedKVRuntimeMoEProbeResult,
+        onIndistinguishable: (Int) -> Void = { _ in }
+    ) async -> PagedKVRuntimeMoEProbeResult? {
+        var last: PagedKVRuntimeMoEProbeResult?
+        for pairIndex in 0 ..< pairCount {
+            let result = await attempt(pairIndex)
+            last = result
+            guard isCleanIndistinguishableIsolationRun(result) else { return result }
+            onIndistinguishable(pairIndex)
+        }
+        return last
+    }
+
+    private static func isCleanIndistinguishableIsolationRun(_ result: PagedKVRuntimeMoEProbeResult) -> Bool {
+        !result.challengeDistinguishing
+            && !result.proven
+            && result.rowsDecodedInSharedForward == 2
+            && result.rowFailures == 0
+            && result.crossRowDivergences == 0
+    }
+
+    /// Upper bound for `mlx_cache_limit_mb` (1 TiB). Far above any Mac's
+    /// unified memory, and small enough that the byte conversion cannot overflow.
+    nonisolated static let maximumMLXCacheLimitMB = 1_048_576
+
+    nonisolated static func isValidMLXCacheLimitMB(_ megabytes: Int) -> Bool {
+        (0 ... maximumMLXCacheLimitMB).contains(megabytes)
+    }
+
+    /// Bounds MLX's buffer cache. Must run before the model loads; see
+    /// `AppConfig.mlxCacheLimitMB`. Serve startup rejects an out-of-range value
+    /// first (`isValidMLXCacheLimitMB`), so `nil` here only means "not set".
+    /// Returns the applied byte limit.
+    @discardableResult
+    nonisolated static func applyMLXCacheLimit(megabytes: Int?) -> Int? {
+        guard let megabytes, isValidMLXCacheLimitMB(megabytes) else { return nil }
+        let bytes = megabytes * 1024 * 1024
+        Memory.cacheLimit = bytes
+        return bytes
     }
 
     private static let pagedKVUnavailableCacheClass = "unavailable"
@@ -1688,6 +1860,24 @@ actor ModelRuntime: ModelRuntimeServing {
         return firstClass
     }
 
+    private nonisolated static func pagedKVCacheKinds(
+        model: any LanguageModel
+    ) -> [PagedKVSharedForwardBackend.CacheKind]? {
+        let caches = model.newCache(parameters: nil)
+        guard !caches.isEmpty else { return nil }
+        var kinds: [PagedKVSharedForwardBackend.CacheKind] = []
+        for cache in caches {
+            if cache is KVCacheSimple {
+                kinds.append(.pagedAttention)
+            } else if cache is MambaCache {
+                kinds.append(.recurrentMamba)
+            } else {
+                return nil
+            }
+        }
+        return kinds.contains(.pagedAttention) ? kinds : nil
+    }
+
     nonisolated static func pagedKVModelFamily(_ modelID: String?) -> String {
         let lower = modelID?.lowercased() ?? ""
         if lower.contains("qwen") { return "qwen" }
@@ -1734,10 +1924,19 @@ actor ModelRuntime: ModelRuntimeServing {
         modelID: String?,
         configJSONData: Data?
     ) -> PagedKVRuntimeModelCapabilities {
-        PagedKVRuntimeModelCapabilities(
+        let architectureVerified: Bool = {
+            guard modelID?.lowercased() == "qwen/qwen3.6-27b",
+                  let configJSONData,
+                  let object = try? JSONSerialization.jsonObject(with: configJSONData) as? [String: Any],
+                  let architectures = object["architectures"] as? [String]
+            else { return false }
+            return architectures.contains("Qwen3_5ForConditionalGeneration")
+        }()
+        return PagedKVRuntimeModelCapabilities(
             modelFamily: Self.pagedKVModelFamily(modelID: modelID, configJSONData: configJSONData),
             requiresMoEDispatch: (configJSONData.flatMap(Self.pagedKVConfigRequiresMoE) ?? false)
-                || Self.pagedKVModelIDLooksLikeExpertModel(modelID)
+                || Self.pagedKVModelIDLooksLikeExpertModel(modelID),
+            hybridDecoderArchitectureVerified: architectureVerified
         )
     }
 
@@ -1845,6 +2044,8 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch: Int = 1,
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
+        continuousBatchQueueWaitTimeoutMS: Int? = nil,
+        continuousBatchingCachedTurns: Bool = false,
         continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage = .empty,
         continuousBatchingDurableReplayAuthorityAvailable: Bool = false,
         warmSwapEnabled: Bool = false,
@@ -1853,7 +2054,10 @@ actor ModelRuntime: ModelRuntimeServing {
         verifiedModelArtifactSHA256: String? = nil,
         verifiedModelCatalogRevision: String? = nil,
         targetAuthorities: [String: ModelRuntimeTargetAuthority] = [:],
-        authorizedSwitchModelIDs: [String] = []
+        authorizedSwitchModelIDs: [String] = [],
+        switchMaxContextByTarget: [String: Int] = [:],
+        switchMaxBatchByTarget: [String: Int] = [:],
+        switchContextProvenanceModelIDs: Set<String> = []
     ) async throws {
         let normalizedDraftModelID = Self.nonEmpty(draftModelID)
         let normalizedDraftModelLoadPath = Self.nonEmpty(draftModelLoadPath)
@@ -1897,6 +2101,8 @@ actor ModelRuntime: ModelRuntimeServing {
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
+        self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
+        self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingDurableReplayAuthorityAvailable = false
         self.warmSwapEnabled = warmSwapEnabled
@@ -1908,6 +2114,10 @@ actor ModelRuntime: ModelRuntimeServing {
             for: targetAuthorities
         )
         self.authorizedSwitchModelIDs = authorizedSwitchModelIDs
+        self.switchMaxContextByTarget = switchMaxContextByTarget
+        self.switchMaxBatchByTarget = switchMaxBatchByTarget
+        self.switchContextProvenanceModelIDs = Set(switchContextProvenanceModelIDs.map { $0.lowercased() })
+        self.configuredMaxContextTokens = maxContextTokensOverride
         self.loader = { targetModelID in
             let (container, directory) = try await Self.loadLocalContainer(from: targetModelID)
             let modelHash = try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
@@ -2016,13 +2226,15 @@ actor ModelRuntime: ModelRuntimeServing {
             backendOverride: self.testContinuousBatchingBackend,
             maxBatch: self.maxBatch,
             queueLimit: self.continuousBatchQueueLimit,
+            queueWaitTimeoutMS: self.continuousBatchQueueWaitTimeoutMS,
             maxContextTokens: self.maxContextTokens,
             modelID: modelID,
             modelSHA256: self.currentModelHash,
             weightsGeneration: self.currentSpecDecodeGeneration,
             kvBitsOverride: self.kvBitsOverride,
             prefillStepSize: self.prefillStepSize,
-            replayAuthority: self.continuousBatchReplayAuthority
+            replayAuthority: self.continuousBatchReplayAuthority,
+            cachedTurns: self.continuousBatchingCachedTurns
         )
         if self.continuousBatchScheduler == nil {
             self.pagedKVSchedulerBackendInstalled = false
@@ -2093,6 +2305,8 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch: Int = 1,
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
+        continuousBatchQueueWaitTimeoutMS: Int? = nil,
+        continuousBatchingCachedTurns: Bool = false,
         // Test-only init: mirrors `ContinuousBatchRuntimeReplayAuthority
         // .inMemoryForTests` — coverage is unrestricted unless a test asserts
         // on the FR-CB10 gate itself.
@@ -2104,6 +2318,9 @@ actor ModelRuntime: ModelRuntimeServing {
         catalogModelIDAlias: String? = nil,
         targetAuthorities: [String: ModelRuntimeTargetAuthority] = [:],
         authorizedSwitchModelIDs: [String] = [],
+        switchMaxContextByTarget: [String: Int] = [:],
+        switchMaxBatchByTarget: [String: Int] = [:],
+        switchContextProvenanceModelIDs: Set<String> = [],
         pagedKVObservedRuntimeIdentity: PagedKVObservedRuntimeIdentity? = nil,
         pagedKVHardwareSizingProof: PagedKVHardwareSizingProof? = nil,
         pagedKVRuntimeCacheClass: String = ModelRuntime.pagedKVUnavailableCacheClass,
@@ -2148,6 +2365,10 @@ actor ModelRuntime: ModelRuntimeServing {
             for: targetAuthorities
         )
         self.authorizedSwitchModelIDs = authorizedSwitchModelIDs
+        self.switchMaxContextByTarget = switchMaxContextByTarget
+        self.switchMaxBatchByTarget = switchMaxBatchByTarget
+        self.switchContextProvenanceModelIDs = Set(switchContextProvenanceModelIDs.map { $0.lowercased() })
+        self.configuredMaxContextTokens = maxContextTokensOverride
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
         self.kvBitsOverride = kvBitsOverride
@@ -2215,6 +2436,8 @@ actor ModelRuntime: ModelRuntimeServing {
         self.blockingInferenceExecutor = BlockingInferenceExecutor(label: "live.malibu.provider.inference")
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
+        self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
+        self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingDurableReplayAuthorityAvailable = false
         self.warmSwapEnabled = warmSwapEnabled
@@ -2231,6 +2454,7 @@ actor ModelRuntime: ModelRuntimeServing {
             backend: continuousBatchingBackend,
             maxBatch: boundedMaxBatch,
             queueLimit: continuousBatchQueueLimit,
+            queueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
             maxContextTokens: self.maxContextTokens,
             modelID: modelID,
             modelSHA256: modelHash,
@@ -2252,7 +2476,16 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func currentSnapshot() async -> RuntimeSnapshot {
-        RuntimeSnapshot(
+        let capability = continuousBatchingCapability(draftConfigured: currentDraftModelID != nil)
+        let schedulerMetrics = await continuousBatchScheduler?.metrics()
+        let decisionLabel: String
+        switch pagedKVAttachDecision {
+        case .disabled: decisionLabel = "disabled"
+        case .attached: decisionLabel = "attached"
+        case .fallback(let reason): decisionLabel = "fallback_\(reason.rawValue)"
+        case .rejected(let reason): decisionLabel = "rejected_\(reason.rawValue)"
+        }
+        return RuntimeSnapshot(
             state: state,
             container: currentContainer,
             modelID: currentModelID,
@@ -2264,7 +2497,25 @@ actor ModelRuntime: ModelRuntimeServing {
             draftContainer: currentDraftContainer,
             numDraftTokens: currentDraftModelID == nil ? nil : numDraftTokens,
             templateSupportsThinkingToggle: currentTemplateSupportsThinkingToggle,
-            specDecodeGeneration: currentSpecDecodeGeneration
+            specDecodeGeneration: currentSpecDecodeGeneration,
+            continuousBatching: RuntimeContinuousBatchingSnapshot(
+                mode: continuousBatchingMode,
+                active: continuousBatchingMode != .off
+                    && capability.unsupportedReason == nil
+                    && continuousBatchScheduler != nil,
+                unsupportedReason: capability.unsupportedReason?.rawValue,
+                pagedKVDecision: decisionLabel,
+                cacheClass: pagedKVRuntimeCacheClass,
+                scheduler: schedulerMetrics.map {
+                    RuntimeContinuousBatchingSchedulerSnapshot(
+                        activeDecodeRows: $0.activeDecodeRows,
+                        waitingCount: $0.waitingCount,
+                        maxObservedBatchDepth: $0.maxObservedBatchDepth,
+                        slotsTotal: $0.slotsTotal,
+                        slotsFree: $0.slotsFree
+                    )
+                }
+            )
         )
     }
 
@@ -2309,6 +2560,36 @@ actor ModelRuntime: ModelRuntimeServing {
             Task { await self?.removeSignalContinuation(id) }
         }
         return pair.stream
+    }
+
+    /// #1689 FR-20b: the knobs a plain warm switch carries so a
+    /// recommendation-generated context follows the served model, through the
+    /// same knob path an adoption uses. KV bits stay as they are; slots follow
+    /// the target's entry (SPEC-023-R018 item 9), else stay as they are.
+    /// Nil keeps the current context (operator-owned, or no generated value).
+    func switchKnobs(for targetModelID: String) -> ModelRuntimeAdoptionServeKnobs? {
+        switchMaxContextByTarget[targetModelID.lowercased()].map {
+            ModelRuntimeAdoptionServeKnobs(
+                kvBits: kvBitsOverride,
+                maxContext: $0,
+                maxBatch: switchMaxBatchByTarget[targetModelID.lowercased()] ?? maxBatch,
+                // The configured value only for the model its provenance record
+                // names; an equal number recomputed for another model (e.g. a
+                // draft-capped one) is still an adoption.
+                contextSource: $0 == configuredMaxContextTokens
+                    && switchContextProvenanceModelIDs.contains(targetModelID.lowercased())
+                    ? .recommendationApply
+                    : .recommendationAdoption
+            )
+        }
+    }
+
+    /// #1689 FR-20b: the context served now and its FR-17 source, exactly as
+    /// `/v1/status` reports them. `models switch` describes the switch from
+    /// this instead of recomputing it. Nil without a status owner.
+    func servedContext() async -> (tokens: Int, source: MaxContextSource)? {
+        guard let capacity = await providerStatus?.snapshot().capacity else { return nil }
+        return (capacity.maxContextTokens, capacity.maxContextSource)
     }
 
     func beginSwap(
@@ -2902,12 +3183,26 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    /// Milliseconds → nanoseconds for the bounded admission wait. Absent or
+    /// non-positive falls back to the scheduler default rather than disabling
+    /// the bound: an unbounded serve-path queue wait is the defect AC-25 names.
+    private nonisolated static func queueWaitTimeoutNanoseconds(_ milliseconds: Int?) -> UInt64 {
+        guard let milliseconds, milliseconds > 0 else {
+            return ContinuousBatchSchedulerConfiguration.defaultQueueWaitTimeoutNanoseconds
+        }
+        // Serve startup rejects values above the maximum; clamp anyway so no
+        // path can turn an oversized value into an effectively unbounded wait.
+        let bounded = min(milliseconds, ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS)
+        return UInt64(bounded) * 1_000_000
+    }
+
     private nonisolated static func makeContinuousBatchScheduler(
         decision: PagedKVAttachDecision,
         tuple: ContinuousBatchingRequestedTuple?,
         backend: (any ContinuousBatchSchedulerBackend)?,
         maxBatch: Int,
         queueLimit: Int?,
+        queueWaitTimeoutMS: Int?,
         maxContextTokens: Int,
         modelID: String?,
         modelSHA256: String?,
@@ -2942,12 +3237,14 @@ actor ModelRuntime: ModelRuntimeServing {
                 decodeHeadroomTokens: 1,
                 maxPromptChunkTokens: max(1, prefillStepSize),
                 tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
+                queueWaitTimeoutNanoseconds: Self.queueWaitTimeoutNanoseconds(queueWaitTimeoutMS),
                 snapshot: ContinuousBatchSchedulerSnapshot(
                     modelID: modelID,
                     modelSHA256: modelSHA256,
                     weightsGeneration: weightsGeneration
                 ),
-                maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
+                maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
+                maxDecodeStepsWhilePrefilling: ContinuousBatchSchedulerConfiguration.defaultDecodeStepsWhilePrefilling
             ),
             allocator: allocator,
             backend: backend,
@@ -2963,13 +3260,15 @@ actor ModelRuntime: ModelRuntimeServing {
         backendOverride: (any ContinuousBatchSchedulerBackend)?,
         maxBatch: Int,
         queueLimit: Int?,
+        queueWaitTimeoutMS: Int?,
         maxContextTokens: Int,
         modelID: String?,
         modelSHA256: String?,
         weightsGeneration: Int,
         kvBitsOverride: Int?,
         prefillStepSize: Int,
-        replayAuthority: any ContinuousBatchSchedulerReplayAuthority
+        replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
+        cachedTurns: Bool
     ) async -> ContinuousBatchScheduler? {
         if let backendOverride {
             return makeContinuousBatchScheduler(
@@ -2978,6 +3277,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 backend: backendOverride,
                 maxBatch: maxBatch,
                 queueLimit: queueLimit,
+                queueWaitTimeoutMS: queueWaitTimeoutMS,
                 maxContextTokens: maxContextTokens,
                 modelID: modelID,
                 modelSHA256: modelSHA256,
@@ -2988,28 +3288,39 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         guard case .attached(let descriptor) = decision,
               let container,
-              let layerCount = await pagedKVLayerCount(
-                  container: container,
-                  maxContextTokens: maxContextTokens,
-                  kvBitsOverride: kvBitsOverride,
-                  prefillStepSize: prefillStepSize
-              )
+              let cacheKinds = await pagedKVCacheKinds(container: container)
         else {
             return nil
         }
-        let contiguousCacheBridge = PagedKVRuntimeContiguousCacheBridge()
+        // A hybrid (Qwen3.6) row retains its paged KV only when cached-turn
+        // batching is on (SPEC-038 AC-26): the next turn then restores the
+        // recurrent layers from a checkpoint. Off, a keyed hybrid row keeps the
+        // serial-format materialize at terminal instead.
+        let isHybrid = cacheKinds.contains(.recurrentMamba)
+        let contiguousCacheBridge = isHybrid && !cachedTurns ? nil : PagedKVRuntimeContiguousCacheBridge()
         return makeContinuousBatchScheduler(
             decision: decision,
             tuple: tuple,
             backend: PagedKVSharedForwardBackend(
                 container: container,
                 descriptor: descriptor,
-                layerCount: layerCount,
+                layerCount: cacheKinds.count,
+                cacheKinds: cacheKinds,
                 contiguousCacheBridge: contiguousCacheBridge,
-                compiledDecode: true
+                // Off on the serve path. A replayed `MLX.compile` step never
+                // re-runs `KVCacheSimple.update`'s Swift offset/grow logic, so
+                // every step after the trace writes the same KV slot at the
+                // same RoPE position: greedy rows loop on the prompt within a
+                // few tokens and fail `continuous_batching_invalid_cache_layout`
+                // once the traced buffer (seed + 256) is full. Measured on
+                // Studio 2026-09-24: signed 176, 181 and main all degenerate
+                // with this on and are coherent with it off. Applies to
+                // hybrid (Qwen3.6) and KV-only layouts alike.
+                compiledDecode: false
             ),
             maxBatch: maxBatch,
             queueLimit: queueLimit,
+            queueWaitTimeoutMS: queueWaitTimeoutMS,
             maxContextTokens: maxContextTokens,
             modelID: modelID,
             modelSHA256: modelSHA256,
@@ -3020,23 +3331,11 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
-    private static func pagedKVLayerCount(
-        container: ModelContainer,
-        maxContextTokens: Int,
-        kvBitsOverride: Int?,
-        prefillStepSize: Int
-    ) async -> Int? {
+    private static func pagedKVCacheKinds(
+        container: ModelContainer
+    ) async -> [PagedKVSharedForwardBackend.CacheKind]? {
         await container.perform { context in
-            let parameters = Self.makeServeGenerateParameters(
-                maxTokens: 1,
-                maxContextTokens: maxContextTokens,
-                kvBitsOverride: kvBitsOverride,
-                prefillStepSize: prefillStepSize,
-                temperature: 0,
-                topP: 1
-            )
-            let layerCount = context.model.newCache(parameters: Self.cacheParameters(parameters, forceSimpleKV: true)).count
-            return layerCount > 0 ? layerCount : nil
+            return Self.pagedKVCacheKinds(model: context.model)
         }
     }
 
@@ -3048,13 +3347,15 @@ actor ModelRuntime: ModelRuntimeServing {
             backendOverride: testContinuousBatchingBackend,
             maxBatch: maxBatch,
             queueLimit: continuousBatchQueueLimit,
+            queueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
             maxContextTokens: maxContextTokens,
             modelID: currentModelID,
             modelSHA256: currentModelHash,
             weightsGeneration: currentSpecDecodeGeneration,
             kvBitsOverride: kvBitsOverride,
             prefillStepSize: prefillStepSize,
-            replayAuthority: continuousBatchReplayAuthority
+            replayAuthority: continuousBatchReplayAuthority,
+            cachedTurns: continuousBatchingCachedTurns
         )
         continuousBatchingDurableReplayAuthorityAvailable =
             continuousBatchScheduler != nil && continuousBatchReplayAuthority.durableAvailable
@@ -3082,17 +3383,14 @@ actor ModelRuntime: ModelRuntimeServing {
         if isActiveJSONValue(request.promptSource.logitBias) { return false }
         if isRequestedLogprobs(request.promptSource.logprobs) { return false }
         if isActiveJSONValue(request.promptSource.topLogprobs) { return false }
-        // Increment 1 proves exact greedy shared-forward parity only. Keep
-        // non-greedy or penalty-shaped requests on the existing serial path
-        // until a later sampler-isolated batching increment carries them.
-        guard request.temperature == 0.0,
-              request.topP == 1.0,
-              request.presencePenalty == 0.0,
-              request.frequencyPenalty == 0.0
-        else {
-            return false
-        }
-        return true
+        // SPEC-038 AC-6b: each batched row samples with the serial path's own
+        // sampler for its temperature/top_p and a row-local seed
+        // (`ContinuousBatchRowSampler`). The serial path ignores presence and
+        // frequency penalties, so they do not change what a row can represent.
+        return ContinuousBatchRowSampler.supports(
+            temperature: request.temperature,
+            topP: request.topP
+        )
     }
 
     nonisolated static func requestHasStableRequestID(_ request: ChatCompletionRequest) -> Bool {
@@ -3347,6 +3645,7 @@ actor ModelRuntime: ModelRuntimeServing {
             modelHashAlgorithm: currentModelHashAlgorithm,
             weightsManifestSHA256: weightsManifestSHA256,
             maxContextTokens: adoptionKnobs?.maxContext,
+            maxContextSource: adoptionKnobs?.contextSource,
             maxConcurrency: adoptionKnobs?.maxBatch,
             specDecodeDraftModelID: speculativeCacheWrapValidated ? draftModelID : nil,
             specDecodeNumDraftTokens: speculativeCacheWrapValidated && draftModelID != nil ? numDraftTokens : nil
@@ -3564,6 +3863,38 @@ actor ModelRuntime: ModelRuntimeServing {
     private struct ContinuousBatchPreparedRequest: Sendable {
         let promptTokens: [Int]
         let stopTokenSequences: [[Int]]
+        let modelStopTokenIDs: Set<Int>
+        let recurrentCheckpointPositions: [Int]
+        /// The loaded model has recurrent (hybrid) layers; computed for keyed
+        /// requests only, false otherwise.
+        let modelHasRecurrentLayers: Bool
+    }
+
+    /// Keyed hybrid requests only: where the batched row snapshots recurrent
+    /// state, identical to the serial path's `prefillRecurrentCheckpoints`.
+    private nonisolated static func continuousBatchRecurrentCheckpointPositions(
+        promptTokens: [Int],
+        conversationKey: String?,
+        hybrid: Bool,
+        context: ModelContext
+    ) -> [Int] {
+        guard nonEmpty(conversationKey) != nil else { return [] }
+        return ConversationCache.recurrentCheckpointPositions(
+            promptTokenIds: promptTokens.map(Int32.init),
+            imStartTokenID: context.tokenizer.convertTokenToId("<|im_start|>").map(Int32.init),
+            hybrid: hybrid,
+            decode: { context.tokenizer.decode(tokenIds: $0) })
+    }
+
+    /// The tokens a batched hybrid entry commits: the canonical list cut to the
+    /// length its attention layers cover, so `begin`'s trim lands exactly on a
+    /// checkpoint. Nil if the canonical list is shorter (never expected).
+    nonisolated static func serialConversationCacheCommitTokens(
+        canonicalTokens: [Int32],
+        coveredTokenCount: Int
+    ) -> [Int32]? {
+        guard coveredTokenCount <= canonicalTokens.count else { return nil }
+        return Array(canonicalTokens.prefix(coveredTokenCount))
     }
 
     /// Tokenizer decode for CB streaming. Must not take `ModelContainer`:
@@ -3590,8 +3921,7 @@ actor ModelRuntime: ModelRuntimeServing {
         func delta(to candidateText: String) -> String {
             lock.lock()
             defer { lock.unlock() }
-            guard candidateText.hasPrefix(emittedText) else { return "" }
-            let delta = String(candidateText.dropFirst(emittedText.count))
+            let delta = ModelRuntime.streamDelta(from: emittedText, to: candidateText)
             if !delta.isEmpty {
                 emittedText = candidateText
             }
@@ -3615,24 +3945,36 @@ actor ModelRuntime: ModelRuntimeServing {
 
     private func serialRouteCanaryCachedHitMissingRetainedHandoff(
         _ lease: ConversationCacheLease?,
-        capability: ContinuousBatchingCapability
+        capability: ContinuousBatchingCapability,
+        modelHasRecurrentLayers: Bool
     ) async throws -> Bool {
         guard let lease,
-              Self.canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
+              let reason = Self.cachedHitFenceReason(
                   mode: capability.mode,
                   cachedPromptTokens: lease.cachedPromptTokens,
-                  hasRetainedPagedKVHandoff: lease.reusableCache?.retainedPagedKVSequence != nil
+                  hasRetainedPagedKVHandoff: Self.leaseHasUsableRetainedHandoff(
+                      lease,
+                      modelHasRecurrentLayers: modelHasRecurrentLayers
+                  ),
+                  cachedTurnsEnabled: continuousBatchingCachedTurns,
+                  cachedTurnsAccepted: continuousBatchingCachedTurns
+                      && continuousBatchingRequestedTuple().map {
+                          continuousBatchingAcceptanceCoverage.coversCachedTurns($0)
+                      } == true
               )
         else {
             return false
         }
+        // A retained entry (hybrid or not) cannot serve the serial path, so
+        // this discards it and the serial request misses; a serial-format entry
+        // is put back for the serial path to reuse.
         await conversationCache.abortForSerialFallback(lease)
         let blocked = ContinuousBatchingCapability(
             mode: capability.mode,
             maxActiveRows: capability.maxActiveRows,
             queueLimit: capability.queueLimit,
             descriptor: capability.descriptor,
-            unsupportedReason: .stickyCacheHandoffUnavailable
+            unsupportedReason: reason
         )
         // Strict `.on` must fail closed with the named reason (FR-CB8). Canary
         // serial-routes the same AC-26 fence with reason-coded telemetry.
@@ -3644,13 +3986,70 @@ actor ModelRuntime: ModelRuntimeServing {
     static func canaryShouldSerialRouteCachedHitMissingRetainedHandoff(
         mode: ContinuousBatchingMode,
         cachedPromptTokens: Int,
-        hasRetainedPagedKVHandoff: Bool
+        hasRetainedPagedKVHandoff: Bool,
+        cachedTurnsEnabled: Bool = false,
+        cachedTurnsAccepted: Bool = false
     ) -> Bool {
-        // AC-26: any positive cached-token hit stays out of the scheduler until
-        // packaged sticky/cross-turn proof. A retained paged-KV handoff is
-        // capability, not authorization.
-        _ = hasRetainedPagedKVHandoff
-        return mode != .off && cachedPromptTokens > 0
+        cachedHitFenceReason(
+            mode: mode,
+            cachedPromptTokens: cachedPromptTokens,
+            hasRetainedPagedKVHandoff: hasRetainedPagedKVHandoff,
+            cachedTurnsEnabled: cachedTurnsEnabled,
+            cachedTurnsAccepted: cachedTurnsAccepted
+        ) != nil
+    }
+
+    /// AC-26 fence for a positive cached-token hit. It stays out of the
+    /// scheduler unless the operator opted into `continuous_batching_cached_turns`,
+    /// the lease carries a usable retained handoff, AND the accepted tuple
+    /// covering this runtime records `cached_turns_accepted` (the per-tuple,
+    /// revision-bound packaged proof). A retained handoff alone is capability,
+    /// not authorization. Nil means the request may enter the scheduler.
+    static func cachedHitFenceReason(
+        mode: ContinuousBatchingMode,
+        cachedPromptTokens: Int,
+        hasRetainedPagedKVHandoff: Bool,
+        cachedTurnsEnabled: Bool,
+        cachedTurnsAccepted: Bool
+    ) -> ContinuousBatchingUnsupportedReason? {
+        guard mode != .off, cachedPromptTokens > 0 else { return nil }
+        guard cachedTurnsEnabled, hasRetainedPagedKVHandoff else { return .stickyCacheHandoffUnavailable }
+        return cachedTurnsAccepted ? nil : .cachedTurnsNotAccepted
+    }
+
+    /// A hybrid retained delivery is resumable only from a recurrent checkpoint;
+    /// one without any is discarded instead of committed as an entry no turn
+    /// could resume (SPEC-038 AC-26).
+    nonisolated static func retainedCacheIsCommittable(
+        _ retainedCache: ContinuousBatchRetainedCache,
+        modelHasRecurrentLayers: Bool
+    ) -> Bool {
+        !modelHasRecurrentLayers || !retainedCache.recurrentCheckpoints.isEmpty
+    }
+
+    /// A retained paged-KV sequence, plus on a hybrid model the recurrent
+    /// checkpoint at exactly the cached length (SPEC-038 AC-26).
+    nonisolated static func leaseHasUsableRetainedHandoff(
+        _ lease: ConversationCacheLease,
+        modelHasRecurrentLayers: Bool
+    ) -> Bool {
+        guard lease.reusableCache?.retainedPagedKVSequence != nil else { return false }
+        guard modelHasRecurrentLayers else { return true }
+        return lease.recurrentCheckpoint?.tokenCount == lease.cachedPromptTokens
+    }
+
+    /// The stored checkpoints a hybrid cached turn hands the scheduler: every
+    /// one at or below the cached length (they are a prefix of this prompt).
+    /// Empty unless the lease resumes a retained hybrid entry.
+    nonisolated static func retainedRecurrentCheckpoints(
+        for lease: ConversationCacheLease?
+    ) -> [RecurrentStateCheckpoint] {
+        guard let lease,
+              lease.recurrentCheckpoint != nil,
+              let reusable = lease.reusableCache,
+              reusable.retainedPagedKVSequence != nil
+        else { return [] }
+        return reusable.recurrentCheckpoints.filter { $0.tokenCount <= lease.cachedPromptTokens }
     }
 
     private func attachedContinuousBatchCompletion(
@@ -3681,6 +4080,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxContextTokens = maxContextTokens
         let stopTokenFilter = stopTokenFilter
         let templateSupportsThinkingToggle = snapshot.templateSupportsThinkingToggle
+        CBTrace.log(schedulerRequestID, "rt_cb_prepare")
         let prepared = try await container.perform { context -> ContinuousBatchPreparedRequest in
             try drainCancelled.check()
             try Task.checkCancellation()
@@ -3691,12 +4091,26 @@ actor ModelRuntime: ModelRuntimeServing {
             let lmInput = try await context.processor.prepare(input: input)
             let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
             try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
-            let stopTokenSequences = request.stop.map {
-                context.tokenizer.encode(text: $0, addSpecialTokens: false)
-            }.filter { !$0.isEmpty }
+            let stopTokenSequences = Self.continuousBatchStopTokenSequences(
+                requestStops: request.stop,
+                context: context
+            )
+            // Only keyed requests can hold or reuse conversation state.
+            let hybrid = Self.nonEmpty(request.conversationKey) != nil
+                && ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
             return ContinuousBatchPreparedRequest(
                 promptTokens: promptTokens,
-                stopTokenSequences: stopTokenSequences
+                stopTokenSequences: stopTokenSequences,
+                modelStopTokenIDs: Self.generationStopTokenIDs(
+                    for: Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
+                ),
+                recurrentCheckpointPositions: Self.continuousBatchRecurrentCheckpointPositions(
+                    promptTokens: promptTokens,
+                    conversationKey: request.conversationKey,
+                    hybrid: hybrid,
+                    context: context
+                ),
+                modelHasRecurrentLayers: hybrid
             )
         }
 
@@ -3716,11 +4130,17 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBits: batchKVBits,
             allowRetainedPagedKVHandoff: true
         )
-        if try await serialRouteCanaryCachedHitMissingRetainedHandoff(lease, capability: capability) {
+        CBTrace.log(schedulerRequestID, "rt_cb_lease cached=\(lease?.cachedPromptTokens ?? -1)")
+        if try await serialRouteCanaryCachedHitMissingRetainedHandoff(
+            lease,
+            capability: capability,
+            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+        ) {
             return nil
         }
         let result: ContinuousBatchSchedulerResult
         do {
+            CBTrace.log(schedulerRequestID, "rt_cb_submit")
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
                 try await scheduler.submit(ContinuousBatchSchedulerRequest(
                     id: schedulerRequestID,
@@ -3728,28 +4148,46 @@ actor ModelRuntime: ModelRuntimeServing {
                     promptTokens: prepared.promptTokens,
                     maxOutputTokens: maxOutputTokens,
                     stopTokenSequences: prepared.stopTokenSequences,
+                    samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: schedulerRequestID),
                     temperature: request.temperature,
                     topP: request.topP,
                     presencePenalty: request.presencePenalty,
                     frequencyPenalty: request.frequencyPenalty,
                     cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
-                    retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence
+                    retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
+                    recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
+                    retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease)
                 ))
             }
         } catch {
             if let lease {
                 await conversationCache.abort(lease)
             }
-            throw error
+            // SPEC-038 AC-25: one shared scheduler-error map, so the
+            // non-streaming and streaming paths cannot drift.
+            CBTrace.log(schedulerRequestID, "rt_cb_threw \(type(of: error))")
+            throw (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error
         }
+        CBTrace.log(schedulerRequestID, "rt_cb_returned status=\(result.terminalStatus)")
         do {
             try drainCancelled.check()
             try Task.checkCancellation()
             if shouldCancel() { throw CancellationError() }
             guard result.terminalStatus == .stop || result.terminalStatus == .length else {
-                throw Self.attachedPagedKVUnavailableError(code: result.errorCode ?? "continuous_batching_request_failed")
+                throw Self.terminalFailureError(code: result.errorCode ?? "continuous_batching_request_failed")
             }
             let completionEndedAt = Date()
+            // The serial path discards the model's end-of-generation token
+            // before counting it; bill and cache the batched row the same way.
+            // Harmony `<|return|>`/`<|call|>` are excluded from this set, as
+            // they are from the serial stop set: the parser reads and counts them.
+            let generatedTokens = Self.droppingTrailingModelStop(
+                result.generatedTokens,
+                terminalStatus: result.terminalStatus,
+                modelStopTokenIDs: prepared.modelStopTokenIDs
+            )
+            let completionTokenCount = result.completionTokens
+                - (result.generatedTokens.count - generatedTokens.count)
             let completion = try await container.perform { context in
                 let decoded = context.tokenizer.decode(tokenIds: result.outputTokens)
                 guard decoded.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
@@ -3772,11 +4210,11 @@ actor ModelRuntime: ModelRuntimeServing {
                     : (filtered.hitStop ? "request_stop" : "stop")
                 let parsed = try Self.parseGeneratedOutput(
                     filteredText: filtered.text,
-                    generatedTokenIDs: result.generatedTokens,
+                    generatedTokenIDs: generatedTokens,
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     request: request,
                     mode: .complete(finishReason: parserFinishReason),
-                    defaultCompletionTokens: result.completionTokens,
+                    defaultCompletionTokens: completionTokenCount,
                     stopTokenFilter: stopTokenFilter,
                     requestStops: request.stop,
                     globalHitStop: filtered.hitStop
@@ -3809,7 +4247,11 @@ actor ModelRuntime: ModelRuntimeServing {
                     settlementDisposition: result.settlementDisposition
                 ), request: request)
             }
-            if let lease, let retainedCache = result.retainedCache {
+            if let lease, let retainedCache = result.retainedCache,
+               Self.retainedCacheIsCommittable(
+                   retainedCache,
+                   modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+               ) {
                 await conversationCache.commit(
                     lease,
                     cache: ConversationCacheLayers(
@@ -3817,16 +4259,35 @@ actor ModelRuntime: ModelRuntimeServing {
                         retainedPagedKVSequence: retainedCache.retainedSequence,
                         discardRetainedPagedKVSequence: { retained, key in
                             await scheduler.discardRetainedCache(retained, conversationKey: key)
-                        }
+                        },
+                        recurrentCheckpoints: retainedCache.recurrentCheckpoints
                     ),
-                    fullTokens: preparedPromptTokenIDs + result.generatedTokens.map(Int32.init)
+                    fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
                 await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
+            } else if let lease, let serialCache = result.serialConversationCache,
+                      let fullTokens = Self.serialConversationCacheCommitTokens(
+                          canonicalTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init),
+                          coveredTokenCount: serialCache.tokenCount
+                      ) {
+                // SPEC-038 FR-CB4 hybrid first turn: the next keyed turn serial-
+                // routes (AC-26) and reuses this entry from its checkpoints.
+                await conversationCache.commit(
+                    lease,
+                    cache: ConversationCacheLayers(
+                        serialCache.layers,
+                        recurrentCheckpoints: serialCache.recurrentCheckpoints
+                    ),
+                    fullTokens: fullTokens
+                )
             } else if let retainedCache = result.retainedCache {
                 await scheduler.cancelRetainedCacheDelivery(
                     retainedCache,
                     conversationKey: result.conversationKey
                 )
+                if let lease {
+                    await conversationCache.abort(lease)
+                }
             } else if let lease {
                 await conversationCache.abort(lease)
             }
@@ -3891,14 +4352,28 @@ actor ModelRuntime: ModelRuntimeServing {
             let lmInput = try await context.processor.prepare(input: input)
             let promptTokens = lmInput.text.tokens.asArray(Int32.self).map(Int.init)
             try Self.validatePromptTokenCount(promptTokens.count, maxContextTokens: maxContextTokens)
-            let stopTokenSequences = requestStops.map {
-                context.tokenizer.encode(text: $0, addSpecialTokens: false)
-            }.filter { !$0.isEmpty }
+            let stopTokenSequences = Self.continuousBatchStopTokenSequences(
+                requestStops: requestStops,
+                context: context
+            )
             let tokenizer = context.tokenizer
+            // Only keyed requests can hold or reuse conversation state.
+            let hybrid = Self.nonEmpty(request.conversationKey) != nil
+                && ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
             return (
                 ContinuousBatchPreparedRequest(
                     promptTokens: promptTokens,
-                    stopTokenSequences: stopTokenSequences
+                    stopTokenSequences: stopTokenSequences,
+                    modelStopTokenIDs: Self.generationStopTokenIDs(
+                    for: Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
+                ),
+                    recurrentCheckpointPositions: Self.continuousBatchRecurrentCheckpointPositions(
+                        promptTokens: promptTokens,
+                        conversationKey: request.conversationKey,
+                        hybrid: hybrid,
+                        context: context
+                    ),
+                    modelHasRecurrentLayers: hybrid
                 ),
                 StreamingDetokenizer { tokenizer.decode(tokenIds: $0) }
             )
@@ -3921,7 +4396,11 @@ actor ModelRuntime: ModelRuntimeServing {
             kvBits: batchKVBits,
             allowRetainedPagedKVHandoff: true
         )
-        if try await serialRouteCanaryCachedHitMissingRetainedHandoff(lease, capability: capability) {
+        if try await serialRouteCanaryCachedHitMissingRetainedHandoff(
+            lease,
+            capability: capability,
+            modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+        ) {
             return nil
         }
         let result: ContinuousBatchSchedulerResult
@@ -3933,12 +4412,15 @@ actor ModelRuntime: ModelRuntimeServing {
                     promptTokens: prepared.promptTokens,
                     maxOutputTokens: maxOutputTokens,
                     stopTokenSequences: prepared.stopTokenSequences,
+                    samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: schedulerRequestID),
                     temperature: request.temperature,
                     topP: request.topP,
                     presencePenalty: request.presencePenalty,
                     frequencyPenalty: request.frequencyPenalty,
                     cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
-                    retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence
+                    retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
+                    recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
+                    retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease)
                 ), tokenSink: { event in
                     let eventTokens = event.replayTokens ?? [event.token]
                     guard !eventTokens.isEmpty else { return }
@@ -3958,22 +4440,13 @@ actor ModelRuntime: ModelRuntimeServing {
                     onChunk(.content(delta))
                 })
             }
-        } catch ContinuousBatchSchedulerError.backpressure {
-            if let lease {
-                await conversationCache.abort(lease)
-            }
-            throw APIError(
-                status: 503,
-                message: "Inference engine unavailable",
-                type: "server_error",
-                code: "continuous_batching_stream_backpressure",
-                inferenceRan: true
-            )
         } catch {
             if let lease {
                 await conversationCache.abort(lease)
             }
-            throw error
+            // SPEC-038 AC-25: one shared scheduler-error map, so the
+            // streaming and non-streaming paths cannot drift.
+            throw (error as? ContinuousBatchSchedulerError)?.asAPIError() ?? error
         }
         do {
             if let error = streamState.error() {
@@ -3983,9 +4456,20 @@ actor ModelRuntime: ModelRuntimeServing {
             try Task.checkCancellation()
             if shouldCancel() { throw CancellationError() }
             guard result.terminalStatus == .stop || result.terminalStatus == .length else {
-                throw Self.attachedPagedKVUnavailableError(code: result.errorCode ?? "continuous_batching_request_failed")
+                throw Self.terminalFailureError(code: result.errorCode ?? "continuous_batching_request_failed")
             }
             let completionEndedAt = Date()
+            // The serial path discards the model's end-of-generation token
+            // before counting it; bill and cache the batched row the same way.
+            // Harmony `<|return|>`/`<|call|>` are excluded from this set, as
+            // they are from the serial stop set: the parser reads and counts them.
+            let generatedTokens = Self.droppingTrailingModelStop(
+                result.generatedTokens,
+                terminalStatus: result.terminalStatus,
+                modelStopTokenIDs: prepared.modelStopTokenIDs
+            )
+            let completionTokenCount = result.completionTokens
+                - (result.generatedTokens.count - generatedTokens.count)
             let completion = try await container.perform { context in
                 let decoded = context.tokenizer.decode(tokenIds: result.outputTokens)
                 guard decoded.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
@@ -4008,11 +4492,11 @@ actor ModelRuntime: ModelRuntimeServing {
                     : (filtered.hitStop ? "request_stop" : "stop")
                 let parsed = try Self.parseGeneratedOutput(
                     filteredText: filtered.text,
-                    generatedTokenIDs: result.generatedTokens,
+                    generatedTokenIDs: generatedTokens,
                     decode: { context.tokenizer.decode(tokenIds: $0) },
                     request: request,
                     mode: .complete(finishReason: parserFinishReason),
-                    defaultCompletionTokens: result.completionTokens,
+                    defaultCompletionTokens: completionTokenCount,
                     stopTokenFilter: stopTokenFilter,
                     requestStops: requestStops,
                     globalHitStop: filtered.hitStop
@@ -4045,12 +4529,29 @@ actor ModelRuntime: ModelRuntimeServing {
                     settlementDisposition: result.settlementDisposition
                 ), request: request)
             }
+            // #1690 E2E-F13: the stream held back an incomplete UTF-8 tail
+            // and any stop-string prefix; send the remainder as the final
+            // text renders it, so the buyer's bytes equal the receipt's.
+            if completion.toolCalls?.isEmpty != false {
+                let remainder = streamState.delta(to: completion.content)
+                if !remainder.isEmpty {
+                    if let error = structuredAccumulator.append(remainder) {
+                        throw error
+                    }
+                    idleState.noteContent()
+                    onChunk(.content(remainder))
+                }
+            }
             let validated = try Self.validateStructuredStreamingCompletion(
                 completion,
                 request: request,
                 buyerVisibleContent: structuredAccumulator.content
             )
-            if let lease, let retainedCache = result.retainedCache {
+            if let lease, let retainedCache = result.retainedCache,
+               Self.retainedCacheIsCommittable(
+                   retainedCache,
+                   modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
+               ) {
                 await conversationCache.commit(
                     lease,
                     cache: ConversationCacheLayers(
@@ -4058,16 +4559,35 @@ actor ModelRuntime: ModelRuntimeServing {
                         retainedPagedKVSequence: retainedCache.retainedSequence,
                         discardRetainedPagedKVSequence: { retained, key in
                             await scheduler.discardRetainedCache(retained, conversationKey: key)
-                        }
+                        },
+                        recurrentCheckpoints: retainedCache.recurrentCheckpoints
                     ),
-                    fullTokens: preparedPromptTokenIDs + result.generatedTokens.map(Int32.init)
+                    fullTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init)
                 )
                 await scheduler.acknowledgeRetainedCacheDelivery(retainedCache)
+            } else if let lease, let serialCache = result.serialConversationCache,
+                      let fullTokens = Self.serialConversationCacheCommitTokens(
+                          canonicalTokens: preparedPromptTokenIDs + generatedTokens.map(Int32.init),
+                          coveredTokenCount: serialCache.tokenCount
+                      ) {
+                // SPEC-038 FR-CB4 hybrid first turn: the next keyed turn serial-
+                // routes (AC-26) and reuses this entry from its checkpoints.
+                await conversationCache.commit(
+                    lease,
+                    cache: ConversationCacheLayers(
+                        serialCache.layers,
+                        recurrentCheckpoints: serialCache.recurrentCheckpoints
+                    ),
+                    fullTokens: fullTokens
+                )
             } else if let retainedCache = result.retainedCache {
                 await scheduler.cancelRetainedCacheDelivery(
                     retainedCache,
                     conversationKey: result.conversationKey
                 )
+                if let lease {
+                    await conversationCache.abort(lease)
+                }
             } else if let lease {
                 await conversationCache.abort(lease)
             }
@@ -4084,6 +4604,20 @@ actor ModelRuntime: ModelRuntimeServing {
             }
             throw error
         }
+    }
+
+    /// SPEC-038 AC-25: a non-terminal scheduler *result*, as distinct from a
+    /// thrown scheduler error. Most carried codes are pre-inference, so they
+    /// take the `inferenceRan: false` shape. The one that is not is
+    /// post-token delivery backpressure — the row was decoding and the buyer
+    /// may already hold partial output — so it reuses the single
+    /// `.deliveryBackpressure` mapping rather than a second, divergent copy.
+    private nonisolated static func terminalFailureError(code: String) -> APIError {
+        if code == ContinuousBatchSchedulerError.deliveryBackpressureCode,
+           let mapped = ContinuousBatchSchedulerError.deliveryBackpressure.asAPIError() {
+            return mapped
+        }
+        return attachedPagedKVUnavailableError(code: code)
     }
 
     private nonisolated static func attachedPagedKVUnavailableError(code: String) -> APIError {
@@ -4256,6 +4790,7 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try drainCancelled.check()
+        CBTrace.log(request.requestID, "rt_complete_enter")
         if let completion = try await attachedContinuousBatchCompletion(
             request: request,
             snapshot: snapshot,
@@ -4266,6 +4801,7 @@ actor ModelRuntime: ModelRuntimeServing {
         ) {
             return (completion, snapshot)
         }
+        CBTrace.log(request.requestID, "rt_serial_path")
         if speculativeCacheWrapValidated,
            let testSpeculativeCompletion,
            Self.speculativeRoute(
@@ -4387,7 +4923,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         do {
                             let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
                             let kvCache: [KVCache]
-                            let iteratorInput: LMInput
+                            var iteratorInput: LMInput
                             if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
                                 kvCache = reusableCache.layers
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
@@ -4403,6 +4939,12 @@ actor ModelRuntime: ModelRuntimeServing {
                                         eligible: coldContext?.eligible == true,
                                         conversationKey: request.conversationKey))
                                 iteratorInput = lmInput
+                            }
+                            let recurrent = Self.prefillRecurrentCheckpoints(
+                                lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
+                                context: generationContext, prefillStepSize: parameters.prefillStepSize)
+                            if let resumeAt = recurrent.resumeAt {
+                                iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                             }
 
                             let iterator = try TokenIterator(input: iteratorInput, model: generationContext.model, cache: kvCache, parameters: parameters)
@@ -4513,7 +5055,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             settlementDisposition: .eligibleOwner
                         ), request: request)
                         if let lease {
-                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
+                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache, recurrentCheckpoints: recurrent.checkpoints), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
                         }
                         return completion
                     } catch {
@@ -4695,6 +5237,35 @@ actor ModelRuntime: ModelRuntimeServing {
         } catch {
             throw SpeculativeGenerationFailure(reason: "generation_threw")
         }
+    }
+
+    /// Stop sequences for a batched row: the model's end-of-generation
+    /// tokens plus the buyer's `stop` strings. The scheduler stops a row only
+    /// on these, so omitting the model EOS set made every batched row run to
+    /// `max_tokens` and emit text past the end of the answer, where the serial
+    /// path stops on `generationStopTokenIDs`.
+    static func continuousBatchStopTokenSequences(
+        requestStops: [String],
+        context: ModelContext
+    ) -> [[Int]] {
+        let modelStops = generationStopTokenIDs(for: context).sorted().map { [$0] }
+        let buyerStops = requestStops.map {
+            context.tokenizer.encode(text: $0, addSpecialTokens: false)
+        }.filter { !$0.isEmpty }
+        return modelStops + buyerStops
+    }
+
+    static func droppingTrailingModelStop(
+        _ generatedTokens: [Int],
+        terminalStatus: ContinuousBatchSchedulerTerminalStatus,
+        modelStopTokenIDs: Set<Int>
+    ) -> [Int] {
+        guard terminalStatus == .stop,
+              let last = generatedTokens.last,
+              modelStopTokenIDs.contains(last) else {
+            return generatedTokens
+        }
+        return Array(generatedTokens.dropLast())
     }
 
     private static func generationStopTokenIDs(for context: ModelContext) -> Set<Int> {
@@ -4966,7 +5537,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         cold: coldContext
                     )
                     let kvCache: [KVCache]
-                    let iteratorInput: LMInput
+                    var iteratorInput: LMInput
                     if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
                         kvCache = reusableCache.layers
                         iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[lcp...])))
@@ -4979,6 +5550,12 @@ actor ModelRuntime: ModelRuntimeServing {
                                 eligible: coldContext?.eligible == true,
                                 conversationKey: request.conversationKey))
                         iteratorInput = lmInput
+                    }
+                    let recurrent = Self.prefillRecurrentCheckpoints(
+                        lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
+                        context: generationContext, prefillStepSize: parameters.prefillStepSize)
+                    if let resumeAt = recurrent.resumeAt {
+                        iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                     }
 
                     var emittedText = ""
@@ -5225,7 +5802,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             buyerVisibleContent: structuredAccumulator.content
                         )
                         if let lease {
-                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
+                            await conversationCache.commit(lease, cache: ConversationCacheLayers(kvCache, recurrentCheckpoints: recurrent.checkpoints), fullTokens: promptTokenIds + resultTokenIDs.map(Int32.init), cold: coldContext)
                         }
                         return validated
                     } catch {
@@ -5422,7 +5999,12 @@ actor ModelRuntime: ModelRuntimeServing {
             chatTemplateSHA256: currentChatTemplateSHA256)
     }
 
-    func measureStartupThroughput(maxTokens: Int = 8) async -> Double {
+    /// Token budget of the serve-time startup probe behind
+    /// `capacity.throughput_tps_estimate`; the elapsed time includes prefill,
+    /// so it is not a sustained decode benchmark (#1689).
+    static let startupThroughputProbeMaxTokens = 8
+
+    func measureStartupThroughput(maxTokens: Int = ModelRuntime.startupThroughputProbeMaxTokens) async -> Double {
         guard let container = currentContainer else {
             return 0.0
         }
@@ -6058,6 +6640,59 @@ actor ModelRuntime: ModelRuntimeServing {
         return (stripped, false)
     }
 
+    /// SPEC-024 FR-CI2 hybrid reuse. For a keyed serial request on a model with
+    /// recurrent layers, prefill `cache` from the tokens it already holds up to each
+    /// recurrent checkpoint position (`ConversationCache.recurrentCheckpointPositions`)
+    /// and snapshot the recurrent states there. Checkpoint positions the restored
+    /// cache is already past reuse the stored checkpoint at that exact length (still
+    /// a prefix of this prompt). `resumeAt` is the prompt index the TokenIterator
+    /// must continue from, or nil when nothing was prefilled here.
+    static func prefillRecurrentCheckpoints(
+        lease: ConversationCacheLease?,
+        cache: [KVCache],
+        promptTokenIds: [Int32],
+        context: ModelContext,
+        prefillStepSize: Int
+    ) -> (checkpoints: [RecurrentStateCheckpoint], resumeAt: Int?) {
+        guard let lease else { return ([], nil) }
+        let positions = ConversationCache.recurrentCheckpointPositions(
+            promptTokenIds: promptTokenIds,
+            imStartTokenID: context.tokenizer.convertTokenToId("<|im_start|>").map(Int32.init),
+            hybrid: ConversationCacheLayers.hasRecurrentLayers(cache),
+            decode: { context.tokenizer.decode(tokenIds: $0) })
+        guard !positions.isEmpty else { return ([], nil) }
+        let cachedTokens = lease.reusableCache == nil ? 0 : lease.lcp
+        let reusable = lease.reusableCache?.recurrentCheckpoints ?? []
+        var cursor = cachedTokens
+        var checkpoints: [RecurrentStateCheckpoint] = []
+        for position in positions {
+            if position < cursor {
+                if let stored = reusable.first(where: { $0.tokenCount == position }) {
+                    checkpoints.append(stored)
+                }
+                continue
+            }
+            var start = cursor
+            while start < position {
+                let end = min(start + max(1, prefillStepSize), position)
+                let chunk = LMInput.Text(tokens: MLXArray(Array(promptTokenIds[start..<end])))
+                _ = context.model(chunk[text: .newAxis], cache: cache, state: nil)
+                asyncEval(cache)
+                start = end
+            }
+            eval(cache)
+            cursor = position
+            var states: [Int: [MLXArray]] = [:]
+            for (index, layer) in cache.enumerated() where layer is ArraysCache {
+                let state = layer.state
+                guard !state.isEmpty else { return (checkpoints, cursor > cachedTokens ? cursor : nil) }
+                states[index] = state
+            }
+            checkpoints.append(RecurrentStateCheckpoint(tokenCount: position, states: states))
+        }
+        return (checkpoints, cursor > cachedTokens ? cursor : nil)
+    }
+
     static func cachedPromptUTF8Bytes(
         promptTokenIds: [Int32],
         cachedPromptTokens: Int,
@@ -6085,10 +6720,34 @@ actor ModelRuntime: ModelRuntimeServing {
 
         let candidates = stopTokenFilter.tokens + requestStops.filter { !$0.isEmpty }
         let holdback = longestSuffixPrefixLength(in: filtered.text, candidates: candidates)
-        guard holdback > 0 else {
-            return filtered
+        let safe = holdback > 0 ? String(filtered.text.dropLast(holdback)) : filtered.text
+        return (withoutIncompleteUTF8Tail(safe), false)
+    }
+
+    /// #1690 E2E-F13: a decode of a token prefix that ends inside a
+    /// multi-byte UTF-8 character renders the partial bytes as trailing
+    /// U+FFFD, which the next token replaces with the real character. Such a
+    /// tail is never streamed; the final decode flushes it as it renders.
+    static func withoutIncompleteUTF8Tail(_ text: String) -> String {
+        var scalars = text.unicodeScalars
+        while scalars.last == "\u{FFFD}" {
+            scalars.removeLast()
         }
-        return (String(filtered.text.dropLast(holdback)), false)
+        return String(scalars)
+    }
+
+    /// The text to append so the streamed bytes become `current`: exact on
+    /// Unicode scalars, not Characters, so a combining mark or a completed
+    /// grapheme cluster never makes `emitted` look like a non-prefix or a
+    /// dropped Character eat scalars. Empty when `current` does not extend
+    /// `emitted` (never a lossy or out-of-order fragment).
+    static func streamDelta(from emitted: String, to current: String) -> String {
+        let emittedScalars = emitted.unicodeScalars
+        let currentScalars = current.unicodeScalars
+        guard currentScalars.starts(with: emittedScalars) else { return "" }
+        var appended = String.UnicodeScalarView()
+        appended.append(contentsOf: currentScalars.dropFirst(emittedScalars.count))
+        return String(appended)
     }
 
     private static func longestSuffixPrefixLength(in text: String, candidates: [String]) -> Int {
@@ -6107,8 +6766,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     private static func delta(from emitted: String, to current: String) -> String {
-        guard current.hasPrefix(emitted) else { return "" }
-        return String(current.dropFirst(emitted.count))
+        streamDelta(from: emitted, to: current)
     }
 
     struct ParsedGeneratedOutput: Sendable {
@@ -7030,6 +7688,11 @@ struct CompletionResult: Sendable {
     let specDecodeDraftedTokens: Int
     let specDecodeAcceptedTokens: Int
     let specDecodeGeneration: Int?
+    /// #1690 E2E-F3: set on every loopback stream result, nil otherwise.
+    /// Maps each content UTF-8 byte length at an upstream chunk boundary to
+    /// the completion tokens generated through it, as the upstream attested
+    /// them per token; empty when it did not.
+    let loopbackPrefixCompletionTokens: [Int: Int]?
 
     init(
         content: String,
@@ -7046,8 +7709,10 @@ struct CompletionResult: Sendable {
         settlementDisposition: ContinuousBatchSettlementDisposition,
         specDecodeDraftedTokens: Int = 0,
         specDecodeAcceptedTokens: Int = 0,
-        specDecodeGeneration: Int? = nil
+        specDecodeGeneration: Int? = nil,
+        loopbackPrefixCompletionTokens: [Int: Int]? = nil
     ) {
+        self.loopbackPrefixCompletionTokens = loopbackPrefixCompletionTokens
         self.content = content
         self.finishReason = finishReason
         self.promptTokens = promptTokens
@@ -7083,6 +7748,37 @@ struct CompletionResult: Sendable {
             toolCalls: toolCalls,
             modelHashObserved: observed,
             settlementDisposition: settlementDisposition,
+            specDecodeDraftedTokens: specDecodeDraftedTokens,
+            specDecodeAcceptedTokens: specDecodeAcceptedTokens,
+            specDecodeGeneration: specDecodeGeneration,
+            loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens
+        )
+    }
+
+    /// #1690 E2E-F3: the usage a buyer_cancel end frame and receipt carry for
+    /// a cancelled loopback stream: the upstream's prompt tokens and the
+    /// completion tokens generated through exactly the delivered content.
+    /// Without an attested count for that prefix the usage is unattested, so
+    /// it is relayed empty and never signed. A native completion, or a
+    /// loopback one whose whole content was delivered, is returned unchanged.
+    func cancelledPrefixUsage(deliveredContent: String?) -> CompletionResult {
+        guard let table = loopbackPrefixCompletionTokens, deliveredContent != content else { return self }
+        let tokens = deliveredContent.flatMap { delivered in
+            content.utf8.starts(with: delivered.utf8) ? table[delivered.utf8.count] : nil
+        }
+        return CompletionResult(
+            content: deliveredContent ?? content,
+            finishReason: finishReason,
+            promptTokens: promptTokens,
+            cachedPromptTokens: cachedPromptTokens,
+            kvCacheBytesReused: kvCacheBytesReused,
+            completionTokens: tokens ?? completionTokens,
+            generatedCompletionTokens: tokens ?? generatedCompletionTokens,
+            ttftMilliseconds: ttftMilliseconds,
+            generationMilliseconds: generationMilliseconds,
+            toolCalls: toolCalls,
+            modelHashObserved: modelHashObserved,
+            settlementDisposition: tokens == nil ? .usageUnattested : settlementDisposition,
             specDecodeDraftedTokens: specDecodeDraftedTokens,
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration

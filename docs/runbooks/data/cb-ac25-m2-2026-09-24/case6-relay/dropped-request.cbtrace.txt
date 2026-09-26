@@ -1,0 +1,12 @@
+cbtrace t=445272151 rid=req-bb7b06f2-6d4b-4c73-9ce6-23fffc6901ae ev=rt_complete_enter
+cbtrace t=445272151 rid=req-bb7b06f2-6d4b-4c73-9ce6-23fffc6901ae ev=rt_cb_prepare
+cbtrace t=445272151 rid=req-bb7b06f2-6d4b-4c73-9ce6-23fffc6901ae ev=rt_cb_lease cached=-1
+cbtrace t=445272151 rid=req-bb7b06f2-6d4b-4c73-9ce6-23fffc6901ae ev=rt_cb_submit
+cbtrace t=445272151 rid=req-bb7b06f2-6d4b-4c73-9ce6-23fffc6901ae ev=sch_submit seq=1 cur=1 active=0
+cbtrace t=445272151 rid=req-bb7b06f2-6d4b-4c73-9ce6-23fffc6901ae ev=sch_bindings
+cbtrace t=445272151 rid=req-bb7b06f2-6d4b-4c73-9ce6-23fffc6901ae ev=sch_turn
+cbtrace t=445272152 rid=req-bb7b06f2-6d4b-4c73-9ce6-23fffc6901ae ev=sch_enqueued waiting=1 active=0
+cbtrace t=445272917 rid=req-bb7b06f2-6d4b-4c73-9ce6-23fffc6901ae ev=sch_complete status=stop waiters=1 stopping=false
+cbtrace t=445272917 rid=req-bb7b06f2-6d4b-4c73-9ce6-23fffc6901ae ev=sch_ftd delivered=true remaining=0
+cbtrace t=445272917 rid=req-bb7b06f2-6d4b-4c73-9ce6-23fffc6901ae ev=sch_resumed
+cbtrace t=445272917 rid=req-bb7b06f2-6d4b-4c73-9ce6-23fffc6901ae ev=rt_cb_returned status=stop

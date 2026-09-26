@@ -37,6 +37,17 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
     public let kvDType: PagedKVDType
     public let requiresMoE: Bool
     public let hardwareClass: String
+    /// The runtime revision the acceptance evidence was measured on. A new
+    /// build with a different Metal library or paged-KV kernel is a different
+    /// runtime: it must be re-measured (including the SPEC-039 FR-PKV13
+    /// overhead ceiling) and re-accepted, not inherit this entry.
+    public let metallibSHA256: String
+    public let kernelIdentifier: String
+    /// SPEC-038 AC-26: the operator recorded the packaged gateway/relay proof
+    /// for positive-cached turns on exactly this tuple and runtime revision.
+    /// Only then may `continuous_batching_cached_turns` batch such turns here.
+    /// Optional in config; absent means false.
+    public let cachedTurnsAccepted: Bool
 
     public init(
         modelID: String,
@@ -44,7 +55,10 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
         cacheClass: String,
         kvDType: PagedKVDType,
         requiresMoE: Bool,
-        hardwareClass: String
+        hardwareClass: String,
+        metallibSHA256: String,
+        kernelIdentifier: String,
+        cachedTurnsAccepted: Bool = false
     ) {
         self.modelID = modelID
         self.modelSHA256 = modelSHA256
@@ -52,6 +66,98 @@ public struct ContinuousBatchingAcceptedTuple: Sendable, Equatable {
         self.kvDType = kvDType
         self.requiresMoE = requiresMoE
         self.hardwareClass = hardwareClass
+        self.metallibSHA256 = metallibSHA256
+        self.kernelIdentifier = kernelIdentifier
+        self.cachedTurnsAccepted = cachedTurnsAccepted
+    }
+}
+
+/// Where the effective serve context cap came from (#1689, SPEC-001 FR-17
+/// `capacity.max_context_source`). Recorded where the value is resolved;
+/// `nil` on `AppConfig` means nothing overrode the RAM-tier default.
+public enum MaxContextSource: String, Sendable {
+    case operatorConfig = "operator_config"
+    case environment
+    case cliFlag = "cli_flag"
+    case ramTierDefault = "ram_tier_default"
+    case draftClamp = "draft_clamp"
+    case recommendationAdoption = "recommendation_adoption"
+    /// Config `max_context_override` written by `autotune --recommend --apply`
+    /// (or a recommendation adoption), per its `max_context_override_provenance`.
+    case recommendationApply = "recommendation_apply"
+}
+
+/// Which recommendation generated `max_context_override` (#1689, SPEC-001
+/// FR-20b). It lives in config.yaml itself, as the one-line mapping
+/// `max_context_override_provenance: {…}`, so the config lock, atomic write,
+/// `.bak-` backups, rollback, and the adoption journal carry it together with
+/// the value. Older CLIs ignore the unknown key.
+///
+/// The binding is field-scoped: the config value is generated iff the record
+/// says `source: recommendation_apply`, names a model, and records exactly
+/// the current `max_context_override`. Edits to other keys do not change
+/// ownership. `provider context set` removes the record in the same write, and
+/// a hand edit to a different value no longer matches it. Accepted trade-off:
+/// a hand edit to exactly the generated number stays generated, so a later
+/// model switch recomputes it. An absent, malformed, or mismatched record
+/// leaves the value operator-owned; it never fails the config load.
+public struct MaxContextProvenance: Equatable, Sendable {
+    public static let configKey = "max_context_override_provenance"
+
+    public var source: String
+    public var value: Int
+    /// The model the value was generated for; required.
+    public var model: String
+    public var benchmarkID: String?
+    public var generatedAt: String?
+
+    public init(source: String, value: Int, model: String, benchmarkID: String?, generatedAt: String?) {
+        self.source = source
+        self.value = value
+        self.model = model
+        self.benchmarkID = benchmarkID
+        self.generatedAt = generatedAt
+    }
+
+    /// Tolerant: anything other than a mapping with a string `source`, an
+    /// integer `value`, and a string `model` is no record.
+    public static func parse(_ raw: Any?) -> MaxContextProvenance? {
+        guard let map = raw as? [String: Any],
+              let source = map["source"] as? String,
+              let value = map["value"] as? Int,
+              let model = map["model"] as? String
+        else { return nil }
+        return MaxContextProvenance(
+            source: source,
+            value: value,
+            model: model,
+            benchmarkID: map["benchmark_id"] as? String,
+            generatedAt: map["generated_at"] as? String
+        )
+    }
+
+    /// True when this record marks `value` as generated.
+    public func generatedMaxContext(_ value: Int?) -> Bool {
+        guard let value else { return false }
+        return source == MaxContextSource.recommendationApply.rawValue
+            && !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && self.value == value
+    }
+
+    /// The single-line YAML flow mapping written after the key. Strings are
+    /// always double-quoted so YAML never reads a model id or timestamp as
+    /// another type.
+    public var yamlFlowValue: String {
+        var fields = ["source: \(Self.quoted(source))", "value: \(value)", "model: \(Self.quoted(model))"]
+        if let benchmarkID { fields.append("benchmark_id: \(Self.quoted(benchmarkID))") }
+        if let generatedAt { fields.append("generated_at: \(Self.quoted(generatedAt))") }
+        return "{" + fields.joined(separator: ", ") + "}"
+    }
+
+    private static func quoted(_ value: String) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .withoutEscapingSlashes
+        return (try? encoder.encode(value)).map { String(decoding: $0, as: UTF8.self) } ?? "\"\""
     }
 }
 
@@ -100,6 +206,10 @@ public struct AppConfig: Equatable, Sendable {
     public var logFormat: LogFormat
     public var logFile: String?
     public var maxContextOverride: Int?
+    public var maxContextSource: MaxContextSource? = nil
+    /// Set only when it marks `maxContextOverride` generated (source
+    /// `recommendationApply`).
+    public var maxContextProvenance: MaxContextProvenance? = nil
     public var maxConcurrencyOverride: Int?
     // SPEC-013 (autoresearch serving knobs): KV-cache quantization bits
     // forwarded to mlx-swift `GenerateParameters.kvBits`. nil ⇒ no
@@ -158,6 +268,23 @@ public struct AppConfig: Equatable, Sendable {
     public var prefillStepSize: Int
     public var continuousBatching: ContinuousBatchingMode
     public var continuousBatchQueueLimit: Int?
+    // SPEC-038 AC-25: bounded continuous-batching admission wait, in
+    // milliseconds. Unset ⇒ the scheduler's 30s default. A request still
+    // queued when it expires is rejected pre-admission, non-settling.
+    public var continuousBatchQueueWaitTimeoutMS: Int?
+    // SPEC-038 AC-26: let positive-cached follow-up turns that carry a usable
+    // retained paged-KV handoff (plus a recurrent checkpoint on hybrid models)
+    // batch instead of serial-routing. Default off; inert while
+    // `continuous_batching` is off. Triple-exposed: yaml key
+    // `continuous_batching_cached_turns`, env
+    // `MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS`, CLI
+    // `--[no-]continuous-batching-cached-turns`.
+    public var continuousBatchingCachedTurns: Bool
+    // MLX buffer-cache ceiling in MiB. MLX defaults it to its memory limit, so
+    // freed GPU buffers accumulate for the life of the process (Studio live
+    // provider 2026-09-24: 50 GB fresh -> ~130 GB under traffic -> kernel
+    // memory kill). Unset keeps MLX's default; 0 disables the cache.
+    public var mlxCacheLimitMB: Int?
 
     // SPEC-038 FR-CB10: per-tuple acceptance coverage. Descriptor membership
     // alone is not support; a tuple may only batch when the operator has
@@ -174,6 +301,13 @@ public struct AppConfig: Equatable, Sendable {
     // resolved fail-closed (invalid value ⇒ paged mode disabled + `errors`
     // populated, never a partial enable).
     public var pagedKV: PagedKVConfig
+
+    // SPEC-046-R002 loopback serving (#1690 M2): origin of the loopback
+    // runtime a `--model ollama:<tag>` / `llamacpp:<stem>` serve proxies to.
+    // yaml key `loopback_origin`, env `MACPROVIDER_LOOPBACK_ORIGIN`. nil keeps
+    // the per-runtime default (and `MACPROVIDER_OLLAMA_ORIGIN`, which still
+    // wins for Ollama). Loopback-validated when the runtime is constructed.
+    public var loopbackOrigin: String? = nil
 
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
@@ -236,6 +370,9 @@ public struct AppConfig: Equatable, Sendable {
             prefillStepSize: 512,
             continuousBatching: .off,
             continuousBatchQueueLimit: nil,
+            continuousBatchQueueWaitTimeoutMS: nil,
+            continuousBatchingCachedTurns: false,
+            mlxCacheLimitMB: nil,
             continuousBatchingAcceptedTuples: [],
             kvDiskCache: .defaults(),
             pagedKV: .defaults()
@@ -286,6 +423,8 @@ public struct CLIOverrides: Equatable, Sendable {
     public var prefillStepSize: Int?
     public var continuousBatching: String?
     public var continuousBatchQueueLimit: Int?
+    public var continuousBatchQueueWaitTimeoutMS: Int?
+    public var continuousBatchingCachedTurns: Bool?
     // SPEC-037 FR-KVP11: KV disk-tier CLI flags (`--kv-disk-cache-*`).
     public var kvDiskCache: KVDiskCacheCLIOverrides
     // SPEC-039 FR-PKV14: paged KV CLI flags (`--paged-kv-*`).
@@ -332,6 +471,8 @@ public struct CLIOverrides: Equatable, Sendable {
         kvDiskCache: KVDiskCacheCLIOverrides = KVDiskCacheCLIOverrides(),
         continuousBatching: String? = nil,
         continuousBatchQueueLimit: Int? = nil,
+        continuousBatchQueueWaitTimeoutMS: Int? = nil,
+        continuousBatchingCachedTurns: Bool? = nil,
         pagedKV: PagedKVCLIOverrides = PagedKVCLIOverrides()
     ) {
         self.port = port
@@ -373,6 +514,8 @@ public struct CLIOverrides: Equatable, Sendable {
         self.prefillStepSize = prefillStepSize
         self.continuousBatching = continuousBatching
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
+        self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
+        self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.kvDiskCache = kvDiskCache
         self.pagedKV = pagedKV
     }
@@ -506,6 +649,7 @@ public enum ConfigLoader {
         try assign(&config.modelCatalogVersion, from: dict, key: "model_catalog_version", expected: "string")
         try assign(&config.modelCatalogHash, from: dict, key: "model_catalog_hash", expected: "string")
         try assign(&config.modelArtifactRoot, from: dict, key: "model_artifact_root", expected: "string")
+        try assign(&config.loopbackOrigin, from: dict, key: "loopback_origin", expected: "string")
         try assign(&config.coordinatorURL, from: dict, key: "coordinator_url", expected: "string")
         try assign(&config.providerID, from: dict, key: "provider_id", expected: "string")
         try assign(&config.endpointURL, from: dict, key: "endpoint_url", expected: "string")
@@ -519,6 +663,15 @@ public enum ConfigLoader {
         try assign(&config.logFormat, from: dict, key: "log_format", expected: "json or text")
         try assign(&config.logFile, from: dict, key: "log_file", expected: "string")
         try assign(&config.maxContextOverride, from: dict, key: "max_context_override", expected: "integer")
+        if let value = dict["max_context_override"], !(value is NSNull) {
+            let provenance = MaxContextProvenance.parse(dict[MaxContextProvenance.configKey])
+            if provenance?.generatedMaxContext(config.maxContextOverride) == true {
+                config.maxContextSource = .recommendationApply
+                config.maxContextProvenance = provenance
+            } else {
+                config.maxContextSource = .operatorConfig
+            }
+        }
         try assign(&config.maxConcurrencyOverride, from: dict, key: "max_concurrency_override", expected: "integer")
         try assign(&config.kvBitsOverride, from: dict, key: "kv_bits", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: dict, key: "drain_timeout_s", expected: "integer")
@@ -571,6 +724,19 @@ public enum ConfigLoader {
             config.continuousBatching = mode
         }
         try assign(&config.continuousBatchQueueLimit, from: dict, key: "continuous_batch_queue_limit", expected: "integer >= 1")
+        try assign(
+            &config.continuousBatchQueueWaitTimeoutMS,
+            from: dict,
+            key: "continuous_batch_queue_wait_timeout_ms",
+            expected: "integer >= 1"
+        )
+        try assign(
+            &config.continuousBatchingCachedTurns,
+            from: dict,
+            key: "continuous_batching_cached_turns",
+            expected: "boolean"
+        )
+        try assign(&config.mlxCacheLimitMB, from: dict, key: "mlx_cache_limit_mb", expected: "integer >= 0")
         if let rawTuples = dict["continuous_batching_accepted_tuples"] {
             config.continuousBatchingAcceptedTuples = try parseContinuousBatchingAcceptedTuples(rawTuples)
         }
@@ -598,7 +764,7 @@ public enum ConfigLoader {
                 throw ConfigError.invalidValue(
                     key: entryKey,
                     value: String(describing: entry),
-                    expected: "map with model_id, model_sha256, cache_class, kv_dtype, requires_moe, hardware_class"
+                    expected: "map with model_id, model_sha256, cache_class, kv_dtype, requires_moe, hardware_class, metallib_sha256, kernel_identifier, optional cached_turns_accepted"
                 )
             }
             // Coverage matching in `ContinuousBatchingAcceptanceCoverage.covers(_:)`
@@ -655,13 +821,29 @@ public enum ConfigLoader {
                     expected: "boolean"
                 )
             }
+            // Optional, but a present value must be a real boolean: a quoted
+            // "true" or a typo must not silently grant (or drop) the grant.
+            var cachedTurnsAccepted = false
+            if let rawCachedTurns = fields["cached_turns_accepted"] {
+                guard let value = rawCachedTurns as? Bool else {
+                    throw ConfigError.invalidValue(
+                        key: "\(entryKey).cached_turns_accepted",
+                        value: String(describing: rawCachedTurns),
+                        expected: "boolean"
+                    )
+                }
+                cachedTurnsAccepted = value
+            }
             return ContinuousBatchingAcceptedTuple(
                 modelID: try requiredString("model_id"),
                 modelSHA256: try requiredSHA256("model_sha256"),
                 cacheClass: try requiredString("cache_class"),
                 kvDType: kvDType,
                 requiresMoE: requiresMoE,
-                hardwareClass: try requiredString("hardware_class")
+                hardwareClass: try requiredString("hardware_class"),
+                metallibSHA256: try requiredSHA256("metallib_sha256"),
+                kernelIdentifier: try requiredString("kernel_identifier"),
+                cachedTurnsAccepted: cachedTurnsAccepted
             )
         }
     }
@@ -686,10 +868,15 @@ public enum ConfigLoader {
         try assign(&config.autoupdateEnabled, from: environment, env: "MACPROVIDER_AUTOUPDATE", expected: "boolean")
         try assign(&config.autoUpdateAcceptProvisional, from: environment, env: "MACPROVIDER_AUTO_UPDATE_ACCEPT_PROVISIONAL", expected: "boolean")
         try assign(&config.modelArtifactRoot, from: environment, env: "MACPROVIDER_MODEL_ARTIFACT_ROOT", expected: "string")
+        try assign(&config.loopbackOrigin, from: environment, env: "MACPROVIDER_LOOPBACK_ORIGIN", expected: "string")
         try assign(&config.logLevel, from: environment, env: "MACPROVIDER_LOG_LEVEL", expected: "valid log level")
         try assign(&config.logFormat, from: environment, env: "MACPROVIDER_LOG_FORMAT", expected: "json or text")
         try assign(&config.logFile, from: environment, env: "MACPROVIDER_LOG_FILE", expected: "string")
         try assign(&config.maxContextOverride, from: environment, env: "MACPROVIDER_MAX_CONTEXT_OVERRIDE", expected: "integer")
+        if environment["MACPROVIDER_MAX_CONTEXT_OVERRIDE"] != nil {
+            config.maxContextSource = .environment
+            config.maxContextProvenance = nil
+        }
         try assign(&config.maxConcurrencyOverride, from: environment, env: "MACPROVIDER_MAX_CONCURRENCY_OVERRIDE", expected: "integer")
         try assign(&config.kvBitsOverride, from: environment, env: "MACPROVIDER_KV_BITS", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: environment, env: "MACPROVIDER_DRAIN_TIMEOUT_S", expected: "integer")
@@ -729,6 +916,19 @@ public enum ConfigLoader {
         try assign(&config.prefillStepSize, from: environment, env: "MACPROVIDER_PREFILL_STEP_SIZE", expected: "integer >= 1")
         try assign(&config.continuousBatching, from: environment, env: "MACPROVIDER_CONTINUOUS_BATCHING", expected: "off, canary, or on")
         try assign(&config.continuousBatchQueueLimit, from: environment, env: "MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT", expected: "integer >= 1")
+        try assign(
+            &config.continuousBatchQueueWaitTimeoutMS,
+            from: environment,
+            env: "MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS",
+            expected: "integer >= 1"
+        )
+        try assign(
+            &config.continuousBatchingCachedTurns,
+            from: environment,
+            env: "MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS",
+            expected: "boolean"
+        )
+        try assign(&config.mlxCacheLimitMB, from: environment, env: "MACPROVIDER_MLX_CACHE_LIMIT_MB", expected: "integer >= 0")
         return config
     }
 
@@ -863,6 +1063,8 @@ public enum ConfigLoader {
         }
         if let maxContext = cli.maxContext {
             config.maxContextOverride = maxContext
+            config.maxContextSource = .cliFlag
+            config.maxContextProvenance = nil
         }
         if let maxBatch = cli.maxBatch {
             config.maxConcurrencyOverride = maxBatch
@@ -903,6 +1105,12 @@ public enum ConfigLoader {
         }
         if let continuousBatchQueueLimit = cli.continuousBatchQueueLimit {
             config.continuousBatchQueueLimit = continuousBatchQueueLimit
+        }
+        if let continuousBatchQueueWaitTimeoutMS = cli.continuousBatchQueueWaitTimeoutMS {
+            config.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
+        }
+        if let continuousBatchingCachedTurns = cli.continuousBatchingCachedTurns {
+            config.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         }
         return config
     }

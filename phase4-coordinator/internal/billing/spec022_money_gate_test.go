@@ -567,8 +567,8 @@ func TestSPEC022RecoveryCountersExcludeReceiptSyncCacheQuarantine(t *testing.T) 
 	if _, err := store.db.Exec(`
 INSERT INTO ledger_provider_identity_snapshots (
     request_id, attempt_n, provider_assigned_id, provider_id,
-    resolved_from, config_snapshot_id, created_at_utc
-) VALUES (?, 0, 'assigned', ?, 'pool_entry', ?, ?)`,
+    resolved_from, config_snapshot_id, runtime_source, created_at_utc
+) VALUES (?, 0, 'assigned', ?, 'pool_entry', ?, '', ?)`,
 		input.RequestID,
 		input.ProviderID,
 		snapshotID,

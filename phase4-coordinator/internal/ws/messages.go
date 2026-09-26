@@ -152,6 +152,7 @@ type Tier2Caps struct {
 	ResponseChunkPlaintextEnvelope bool     `json:"response_chunk_plaintext_envelope,omitempty"`
 	InBandAEADRekeyV1              bool     `json:"in_band_aead_rekey_v1,omitempty"`
 	TrustedPoolV1                  bool     `json:"trusted_pool_v1,omitempty"`
+	CatalogMaterialHoldV1          bool     `json:"catalog_material_hold_v1,omitempty"`
 }
 
 type AuthChallenge struct {
@@ -462,6 +463,25 @@ type SettlementReceiptMetadata struct {
 	PromptHash                 string `json:"prompt_hash"`
 	OutputPrefixStartByte      int64  `json:"output_prefix_start_byte"`
 	PendingDeadlineSeconds     int64  `json:"pending_deadline_seconds"`
+	// PoolRuntimeAuthorization is the SPEC-015 §N.12 per-request authorization
+	// for a runtime that is not settlement eligible (a SPEC-046 loopback
+	// runtime) to sign one v0.4 receipt. The coordinator attaches it only for a
+	// SPEC-022-R012 pool attempt; it is absent from every other frame.
+	PoolRuntimeAuthorization *PoolRuntimeAuthorization `json:"pool_runtime_authorization,omitempty"`
+}
+
+// PoolRuntimeAuthorization is the closed SPEC-015 §N.12 member. Its values
+// equal the route snapshot's digested pool_id, manifest_core_digest, and
+// runtime_source, and bind it to one request attempt, provider, and route
+// snapshot digest. It is request metadata, never a receipt field.
+type PoolRuntimeAuthorization struct {
+	PoolID              string `json:"pool_id"`
+	ManifestCoreDigest  string `json:"manifest_core_digest"`
+	RuntimeSource       string `json:"runtime_source"`
+	RequestID           string `json:"request_id"`
+	AttemptN            int64  `json:"attempt_n"`
+	ProviderID          string `json:"provider_id"`
+	RouteSnapshotDigest string `json:"route_snapshot_digest"`
 }
 
 type InferenceResponseChunk struct {

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# V3 (SPEC-023-R018 rule 2): acknowledgement binding.
+# V3 (SPEC-023-R019 rule 2): acknowledgement binding.
 #  a) --pricing-diff-sha256 of a different table -> exit 3, host unchanged
 #  b) a NEW request-log name that moves rows appears between preflight and deploy,
 #     deploy WITH --preflight-verdict -> refused (unacked move of a new name), unchanged.

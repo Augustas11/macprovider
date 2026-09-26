@@ -259,7 +259,7 @@ func TestSecurityInvalidFacadeResponsePreservesFinality(t *testing.T) {
 
 func TestSecurityStreamingFinalityHeaderWithoutTrailer(t *testing.T) {
 	h := settlementFinalityTrailerForTest("enforce", settlementPolicyVersion, "pending", "inconclusive", "false", "pending")
-	if got := coordinatorStreamingSettlementFinality(&http.Response{Header: h}); got.Action != settlementFinalityHold {
+	if got := coordinatorStreamingSettlementFinality(&http.Response{Header: h}, settlementFinalityBinding{}); got.Action != settlementFinalityHold {
 		t.Fatalf("enforce header was treated as legacy: %+v", got)
 	}
 }

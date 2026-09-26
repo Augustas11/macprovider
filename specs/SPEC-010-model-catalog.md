@@ -1,8 +1,11 @@
 # SPEC-010 — Provider Model Catalog
 
-**Version:** 1.9
-**Status:** v1.9 row-continuity admission clarification (#1615,
-2026-09-20) over v1.8 R004 composite-proof clarification (BYOM v0.2 epic #1453,
+**Version:** 1.12
+**Status:** v1.12 MLX-snapshot identity leg for `mlxlm_loopback` (R009, #1690
+M8, 2026-09-24) over v1.11 GGUF `huggingface_revision` source and pool-scoped
+settlement scope for R007 (#1690, 2026-09-24) over v1.10 operator artifact
+diagnostics (#1689 part 4, 2026-09-23) over v1.9 row-continuity
+admission clarification (#1615, 2026-09-20) over v1.8 R004 composite-proof clarification (BYOM v0.2 epic #1453,
 slice 4, 2026-09-10) over the v1.7 multi-artifact identity amendment (slice 3,
 2026-09-10) over the v1.6 canonical model-identity amendment proposed by issue #609
 (2026-07-18). The supported-model catalog contract remains **LOCKED** at
@@ -40,6 +43,51 @@ SPEC-023 owns candidate-catalog `bench_gate` provenance, including
   artifact-derived identity across a scheduled catalog re-stamp by resolving
   in its own release's set (slice-4 implementation). Bounded
   `model-catalog-identity` amendment.
+
+**Change log v1.12 (issue #1690 M8 — MLX-snapshot identity leg):**
+- New **SPEC-010-R009**: an external MLX runtime, `mlx_lm.server` served
+  through `mlxlm_loopback` (SPEC-046-R009 `mlxlm:`), binds a catalog MLX
+  row by the same `macprovider.snapshot-manifest.v1` pair the native
+  `mlx_cache` path reports, computed by the CLI over the operator-declared
+  snapshot directory. The pair is valid for `mlxlm_loopback` only when the
+  release-bound artifact the pair names allows that runtime (SPEC-023
+  v0.17.0), and it settles only as R007(f) allows a GGUF member: at route
+  time on an allowlisting SPEC-042 Trusted Pool route. R007(h) is
+  superseded for this one runtime.
+- oMLX, mlx-serve, and LM Studio stay without an identity leg: oMLX and
+  mlx-serve need their own proof that the process serves the declared
+  snapshot, and LM Studio is a GUI app with no serving-time binding to the
+  file it loads. Each needs its own amendment.
+
+**Change log v1.11 (issue #1690 M3 — external runtimes on Trusted Pools):**
+- R007(f): a GGUF member served by a loopback runtime MAY settle only at
+  route time on a SPEC-042 Trusted Pool route whose signed v2 policy core
+  allowlists that runtime (SPEC-047-R003(iv) pool clause, SPEC-022-R012).
+  It never settles through global admission. This supersedes the
+  2026-09-23 compatibility note for pool routes only.
+- R007(g): a GGUF artifact MAY be sourced by `huggingface_revision` as well
+  as `ollama_library_tag` (SPEC-023 v0.16.0 §3.7.4). The source kind
+  describes where the bytes come from and never changes identity.
+- R007(h): the MLX-snapshot identity leg for external runtimes (oMLX,
+  `mlx_lm.server`) is explicitly deferred.
+
+**Change log v1.10 (issue #1689 part 4 — operator artifact diagnostics):**
+- Adds §3.8 and **SPEC-010-R008 — Operator artifact diagnostics**: the
+  provider CLI's `models verify-artifact` compares local bytes against the
+  R001 identity of the signed row resolved through the serve trust path, and
+  names one likely source for a mismatch (`revision_pin`, `local_download`, or
+  `catalog_row`) with a redacted report. `models prepare --profile catalog`
+  (implied by `--repair-cache`) prepares that snapshot with the existing
+  serve/autotune downloader and ends in one of three final states;
+  `--repair-cache` removes only that model's interrupted-download leftovers.
+  An existing configured or durable copy is decisive exactly as in serve: a
+  failing durable copy is reported, never masked by valid fallback bytes.
+  A snapshot that verifies only in the Hugging Face cache is adopted into the
+  durable store before `prepare` reports it ready, and a partial
+  `--repair-cache` could not remove stays a warning after the artifact
+  verifies.
+- Diagnostics only: no wire, admission, settlement, pricing, or R001–R007
+  semantics change.
 
 **Change log v1.9 (issue #1615 — row-continuity admission):**
 - R004 now distinguishes the signed catalog document a provider selected at
@@ -1185,7 +1233,134 @@ algorithm.
   the identity lift is not a settlement lift for loopback runtimes.
   SPEC-047-R003(iv) v0.1.10 keeps every loopback `runtime_source` out of
   `settlement_capable` until a trusted usage source exists, and implementing
-  the runtime path does not change that.
+  the runtime path does not change that. (v1.11: still true for global
+  admission; (f) states the only exception.)
+  (f) **Pool-scoped settlement (v1.11, #1690).** A member whose
+  `runtime_format` is `gguf`, served by a loopback `runtime_source`, MAY
+  bind a SPEC-022 route-time settlement snapshot only at route time, on a
+  SPEC-042 Trusted Pool route whose signed v2 policy core allowlists that
+  `runtime_source`, under the SPEC-047-R003(iv) pool route-time clause and
+  SPEC-022-R012. Its candidate never reaches `settlement_capable`, and the
+  member never settles on a global route. (a)–(d) apply to it unchanged: the
+  CLI recomputes the complete-file digest, the pair matches one member
+  exactly, and the route snapshot carries the six (d) values.
+  (g) **GGUF source kinds (v1.11).** A GGUF member MAY be published with
+  `source_ref.kind` `ollama_library_tag` or `huggingface_revision` (SPEC-023
+  v0.16.0 §3.7.4). The source kind describes where the bytes come from and
+  never changes identity: the pair is always `macprovider.gguf-file.v1`
+  over the complete file bytes the CLI holds, per (a).
+  (h) **Deferred MLX-snapshot leg (v1.11; superseded for `mlxlm_loopback`
+  by R009 in v1.12).** No loopback `runtime_source` other than
+  `mlxlm_loopback` may bind an `mlx_safetensors` member. `mlxlm_loopback`
+  binds one only under R009. Every other external runtime that serves MLX
+  safetensors (oMLX, mlx-serve) has no identity leg until an amendment
+  defines how the CLI binds that runtime process to a snapshot manifest.
+
+- **SPEC-010-R009 — MLX-snapshot identity leg for `mlxlm_loopback` (v1.12,
+  #1690 M8).** An `mlx_lm.server` process served through the SPEC-046-R009
+  `mlxlm:<ref>` selector reports and binds an MLX identity as follows.
+  (a) **Identity.** The reported pair is `macprovider.snapshot-manifest.v1`
+  (R001/R002), computed by the CLI over the complete bytes of the snapshot
+  directory the operator declares (`MACPROVIDER_MLXLM_MODEL_PATH`), with the
+  same algorithm and the same path policy the native `mlx_cache` path uses
+  (regular files only; no symlink, hardlink, or path escape). It is never a
+  runtime-reported value. The CLI records every file's relative path, size,
+  inode, and modification time when it hashes, and re-checks them before
+  every identity-binding report and every request; any change fails closed
+  (the R007(a) rule, applied to a directory).
+  (b) **Runtime binding.** At startup and before every request the CLI
+  requires the runtime's `GET /v1/models` to list the declared snapshot's
+  resolved path, the model the process was started with. Chat requests name
+  the model `default_model`, so the runtime never loads another model by
+  name on the CLI's behalf. The process's weights are administrative trust
+  (SPEC-042-R004), exactly as for a GGUF loopback runtime.
+  (c) **Binding.** The pair binds exactly as a native pair does: the
+  primary-row path, when it equals the row's `model_sha256`, or a
+  non-primary verified `mlx_safetensors` feed member. In both cases it is
+  admissible for `mlxlm_loopback` only when the release-bound SPEC-023 §3.7
+  artifact carrying that pair (the row's primary artifact for the
+  primary-row path) lists `mlxlm_loopback` in `allowed_runtime_sources`.
+  A missing, stale, or integrity-failed feed admits nothing for
+  `mlxlm_loopback`. A GGUF member is never valid for `mlxlm_loopback`, and a
+  snapshot-manifest pair served by `mlxlm_loopback` is valid only for an
+  offer whose signed `runtime_source` is `mlxlm_loopback` (the SPEC-042-R004
+  derived class).
+  (d) **Settlement.** As R007(f) for a GGUF member: only at route time on a
+  SPEC-042 Trusted Pool route whose signed v2 policy core allowlists
+  `mlxlm_loopback`, under the SPEC-047-R003(iv) pool route-time clause and
+  SPEC-022-R012. The candidate never reaches `settlement_capable`, and the
+  session never settles on a global route. A primary-row binding carries no
+  R007(d) six values (the primary exemption); a feed-member binding carries
+  all six.
+  (e) **Scope.** `mlx_cache` is unchanged. oMLX, mlx-serve, and LM Studio
+  (`lmstudio_loopback`) have no identity leg and are not selectable for
+  serving; each needs its own amendment.
+
+### 3.8 Operator artifact diagnostics (v1.10 amendment)
+
+- **SPEC-010-R008 — Operator artifact diagnostics.** `models verify-artifact
+  <catalog-key-or-model-id>` MUST resolve the expected identity only from a
+  signed candidate-catalog row selected by the same loader and trust-blocking
+  warnings the serve catalog preflight uses (a live feed that fails signature,
+  schema, or policy checks is never compared against), and MUST compute the
+  local digest with the R001 `macprovider.snapshot-manifest.v1` algorithm over
+  the bytes serve would load, resolved in serve's order: a configured artifact
+  path bound to the same catalog key, when it exists as a directory, is the
+  only location checked, because serve loads it and never falls back to
+  another copy; otherwise the durable-store copy of the pinned snapshot, which
+  is likewise the only location checked when it exists because serve loads it
+  and fails on its hash rather than fall back, then (only when it does not
+  exist) the pinned Hugging Face snapshot and the isolated prefetch snapshot
+  that `prepare` adopts into the durable store. Valid fallback bytes MUST NOT
+  turn a failing existing configured or durable copy into a match. A digest
+  that differs MUST be reported with
+  exactly one likely source: `local_download` when the bytes carry local
+  evidence of incompleteness (download markers, a safetensors index shard that
+  is absent, a safetensors file shorter than its header declares, no weight
+  file, no `config.json`, or total bytes well below a bound artifact-feed
+  `size_bytes`), or when they are the durable-store copy (stored under the
+  signed hash it verified on adoption, so different bytes drifted locally);
+  otherwise `revision_pin` when the bytes are not at the row's
+  pinned revision; otherwise `catalog_row`. When no location exists, it
+  reports `local_download` if interrupted-download leftovers exist,
+  `revision_pin` if only other revisions are held, else `not_downloaded`. The
+  report block it prints for filing MUST carry the row, revision, hash, and
+  catalog-release fields and MUST NOT carry a home-directory or cache-root
+  path, a provider id, or a credential; the human and `--json` outputs apply
+  the same redaction to local paths and evidence (a path outside the known
+  roots is shown as `<external>/<name>`). A config that fails to load (an
+  explicit `--config` or `MACPROVIDER_CONFIG` that is malformed or unreadable)
+  refuses both commands with exit 2 before any diagnosis, deletion, or
+  download, never falling back to the default roots. `models prepare --profile catalog`
+  (implied by `--repair-cache`) MUST acquire bytes only through the existing
+  serve/autotune downloader and durable-store adoption, MUST NOT download
+  when a bound size exceeds free space, MUST NOT delete or replace an
+  existing pinned snapshot or durable copy that fails verification unless
+  `--repair-cache` is given (without it a failing durable copy ends
+  `incomplete`; with it the durable copy is replaced from verified bytes
+  through durable-store adoption and verified again), and
+  under `--repair-cache` MUST remove only that model's interrupted-download
+  leftovers (its cache repo's `.download-*` staging directories and
+  `*.incomplete` blobs, and its durable `.tmp-<uuid>` copy staging) — never
+  another model's files, a verified snapshot, or a parked `.tmp-replaced-*`
+  copy. A leftover it could not remove is reported, even when the artifact
+  then verifies: the final state stays `ready (verified)` with exit 0, the
+  human output adds a `warning:` line naming each leftover, and `--json`
+  carries them in `cleanup_failed` (redacted like every other path); the hint
+  to pass `--repair-cache` is printed only when it was not passed. It ends in exactly one final state: `ready (verified)` only after an
+  R001 match at the location serve loads (a configured artifact path that
+  exists, else the durable-store copy; a match found only in the Hugging Face
+  cache or prefetch snapshot is first adopted into the durable store through
+  the same resolver, without a download, and verified there again), `downloaded but hash mismatch (see verify-artifact)` when the
+  source is `catalog_row`, else `incomplete (retry: <command>)`, where every
+  argument of `<command>` that is not a plain word is POSIX single-quoted so
+  it can be pasted into a shell. The catalog
+  profile refuses (exit 2) options that apply only to the `build1-lane-a`
+  profile (`--yes`, `--coordinator-url`, `--timeout-seconds`). A dedicated
+  `models prepare-catalog` command is the intended future home of this
+  behavior; the `--profile catalog` form MUST NOT accrue further
+  profile-specific behavior. Neither
+  command changes config, the active model, admission, or settlement.
 
 ---
 

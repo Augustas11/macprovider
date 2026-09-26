@@ -581,6 +581,74 @@ final class ProviderStatusTests: XCTestCase {
         XCTAssertEqual(body["model_loaded"] as? Bool, true)
     }
 
+    func testStatusResponsePublishesInactiveContinuousBatchingBlockWithoutRuntimeSnapshot() async throws {
+        let status = ProviderStatus(modelID: "model-a", modelLoaded: true, capacity: makeCapacity())
+        let body = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: nil
+        )
+
+        let continuousBatching = try XCTUnwrap(body["continuous_batching"] as? [String: Any])
+        XCTAssertEqual(continuousBatching["mode"] as? String, "off")
+        XCTAssertEqual(continuousBatching["active"] as? Bool, false)
+        XCTAssertTrue(continuousBatching["unsupported_reason"] is NSNull)
+        XCTAssertTrue(continuousBatching["paged_kv_decision"] is NSNull)
+        XCTAssertTrue(continuousBatching["cache_class"] is NSNull)
+
+        let scheduler = try XCTUnwrap(continuousBatching["scheduler"] as? [String: Any])
+        XCTAssertEqual(scheduler["active_decode_rows"] as? Int, 0)
+        XCTAssertEqual(scheduler["waiting_count"] as? Int, 0)
+        XCTAssertEqual(scheduler["max_observed_batch_depth"] as? Int, 0)
+        XCTAssertEqual(scheduler["slots_total"] as? Int, 0)
+        XCTAssertEqual(scheduler["slots_free"] as? Int, 0)
+    }
+
+    func testStatusResponsePublishesContinuousBatchingRuntimeSnapshot() async throws {
+        let status = ProviderStatus(modelID: "model-a", modelLoaded: true, capacity: makeCapacity())
+        let runtimeSnapshot = RuntimeSnapshot(
+            state: .ready,
+            container: nil,
+            modelID: "model-a",
+            modelHash: "hash-a",
+            continuousBatching: RuntimeContinuousBatchingSnapshot(
+                mode: .canary,
+                active: true,
+                unsupportedReason: nil,
+                pagedKVDecision: "attached",
+                cacheClass: "mixed",
+                scheduler: RuntimeContinuousBatchingSchedulerSnapshot(
+                    activeDecodeRows: 3,
+                    waitingCount: 2,
+                    maxObservedBatchDepth: 4,
+                    slotsTotal: 8,
+                    slotsFree: 5
+                )
+            )
+        )
+
+        let body = RouterHandler.statusResponse(
+            await status.snapshot(),
+            providerID: "provider-a",
+            coordinatorURL: nil,
+            runtimeSnapshot: runtimeSnapshot
+        )
+
+        let continuousBatching = try XCTUnwrap(body["continuous_batching"] as? [String: Any])
+        XCTAssertEqual(continuousBatching["mode"] as? String, "canary")
+        XCTAssertEqual(continuousBatching["active"] as? Bool, true)
+        XCTAssertTrue(continuousBatching["unsupported_reason"] is NSNull)
+        XCTAssertEqual(continuousBatching["paged_kv_decision"] as? String, "attached")
+        XCTAssertEqual(continuousBatching["cache_class"] as? String, "mixed")
+
+        let scheduler = try XCTUnwrap(continuousBatching["scheduler"] as? [String: Any])
+        XCTAssertEqual(scheduler["active_decode_rows"] as? Int, 3)
+        XCTAssertEqual(scheduler["waiting_count"] as? Int, 2)
+        XCTAssertEqual(scheduler["max_observed_batch_depth"] as? Int, 4)
+        XCTAssertEqual(scheduler["slots_total"] as? Int, 8)
+        XCTAssertEqual(scheduler["slots_free"] as? Int, 5)
+    }
+
     func testStatusSeparatesLiveCatalogTrustFromBuyerServing() async {
         let status = ProviderStatus(modelID: "model-key", modelLoaded: true, capacity: makeCapacity())
         await status.setCoordinatorSession(connected: true, assignedID: "session-a")
@@ -661,6 +729,17 @@ final class ProviderStatusTests: XCTestCase {
         )
         XCTAssertEqual(held["network_state"] as? String, "not_buyer_serving")
         XCTAssertEqual(held["buyer_serving_hold"] as? String, "model_admission_pending")
+
+        let catalogHeld = RouterHandler.statusResponse(
+            snapshot,
+            providerID: "provider-a",
+            coordinatorURL: "wss://coordinator.malibu.tech/provider/ws",
+            catalogStatus: context,
+            coordinatorBuyerServing: false,
+            coordinatorBuyerServingHold: .catalogMaterialMissing
+        )
+        XCTAssertEqual(catalogHeld["network_state"] as? String, "not_buyer_serving")
+        XCTAssertEqual(catalogHeld["buyer_serving_hold"] as? String, "catalog_material_missing")
 
         // An authoritative not-serving with no coordinator reason is explicitly
         // null, never a locally invented one.
@@ -1058,6 +1137,9 @@ final class ProviderStatusTests: XCTestCase {
         // SPEC-047-R003(iv): the coordinator's admission hold rides on an
         // authoritative not-serving verdict.
         XCTAssertEqual(readiness(try body(serving: false, hold: "model_admission_pending")), .notServing(hold: .modelAdmissionPending))
+        // SPEC-001 v1.9.21: missing network catalog material is a closed hold too.
+        XCTAssertEqual(readiness(try body(serving: false, hold: "catalog_material_missing")), .notServing(hold: .catalogMaterialMissing))
+        XCTAssertEqual(readiness(try body(serving: true, hold: "catalog_material_missing")), .confirmed)
         // No hold, or a hold outside the closed set, is the plain fail-closed false.
         XCTAssertEqual(readiness(try body(serving: false, hold: nil)), .notServing(hold: nil))
         XCTAssertEqual(readiness(try body(serving: false, hold: "something_else")), .notServing(hold: nil))

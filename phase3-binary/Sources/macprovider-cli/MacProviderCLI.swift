@@ -40,7 +40,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "malibu-cli",
         abstract: "OpenAI-compatible Malibu (Mac Provider) inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, MSBThroughputCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self, RelayBlindFixtureCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ProviderCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, BootstrapAuthCommand.self, RotateKeyCommand.self, CredentialsCommand.self, LifecycleStateCommand.self, RecoverUpdateCommand.self, LifecycleLeaseCommand.self, Spec028CanaryCommand.self, Spec028BenchmarkCommand.self, LegacySpec028CanaryCommand.self, LegacySpec028BenchmarkCommand.self, DecodeBenchCommand.self, MSBThroughputCommand.self, MSBLoopbackCommand.self, MSBPerplexityCommand.self, EnrollCommand.self, ReleasePayloadPreflightCommand.self, KVCacheCommand.self, DoctorCommand.self, PayoutAddressCommand.self, ConsumeCommand.self, RelayBlindKeyCommand.self, RelayBlindFixtureCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
@@ -396,6 +396,12 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Bounded continuous-batching waiting queue limit. Default 2 * active slots. Overrides MACPROVIDER_CONTINUOUS_BATCH_QUEUE_LIMIT and config key continuous_batch_queue_limit.")
     var continuousBatchQueueLimit: Int?
 
+    @Option(help: "Bounded continuous-batching admission wait in milliseconds. Default 30000. A request still queued when it expires is rejected pre-admission and never settles. Overrides MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS and config key continuous_batch_queue_wait_timeout_ms.")
+    var continuousBatchQueueWaitTimeoutMS: Int?
+
+    @Flag(name: .customLong("continuous-batching-cached-turns"), inversion: .prefixedNo, help: "Let a positive-cached follow-up turn with a usable retained paged-KV handoff (plus a recurrent checkpoint on hybrid models) batch instead of serial-routing. Default off. Inert while continuous batching is off. Overrides MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS and config key continuous_batching_cached_turns.")
+    var continuousBatchingCachedTurns: Bool?
+
     // SPEC-037 FR-KVP11 — encrypted KV survival disk-tier CLI flags (MEDIUM-5). Each is
     // an Optional so absence defers to the environment / YAML / default; the resolver
     // (KVDiskCacheConfigResolver) applies CLI-wins precedence and fails closed on any
@@ -520,7 +526,8 @@ struct ServeCommand: AsyncParsableCommand {
     /// command and the runtime from disagreeing about what Ready means.
     static func localRuntimeTargetAuthorities(
         supportedModels: [String]?,
-        artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver()
+        artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
+        onVerifiedTarget: ((_ ids: [String], _ row: CandidateCatalog.Row, _ artifact: VerifiedModelArtifact) -> Void)? = nil
     ) -> [String: ModelRuntimeTargetAuthority] {
         guard let supportedModels, !supportedModels.isEmpty,
               let catalog = try? AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(
@@ -550,6 +557,7 @@ struct ServeCommand: AsyncParsableCommand {
             authorities[catalogEntry.value.modelID.lowercased(with: nil)] = authority
             authorities[catalogEntry.key] = authority
             authorities[catalogEntry.key.lowercased(with: nil)] = authority
+            onVerifiedTarget?([target, catalogEntry.value.modelID, catalogEntry.key], catalogEntry.value, artifact)
         }
         return authorities
     }
@@ -658,7 +666,7 @@ struct ServeCommand: AsyncParsableCommand {
                 throw ExitCode(2)
             }
             let maximumContinuousBatchQueueLimit = ContinuousBatchingPolicy.maximumQueueLimit(
-                maxActiveRows: resolved.maxConcurrencyOverride ?? 1
+                maxActiveRows: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
             )
             if let queueLimit = resolved.continuousBatchQueueLimit,
                queueLimit > maximumContinuousBatchQueueLimit {
@@ -667,6 +675,23 @@ struct ServeCommand: AsyncParsableCommand {
                 ).utf8))
                 throw ExitCode(2)
             }
+        }
+        // Validated whether or not batching is on: a supplied value that cannot
+        // be applied must stop startup, never fall back to MLX's unbounded
+        // default cache or an effectively unbounded admission wait.
+        if let cacheLimitMB = resolved.mlxCacheLimitMB,
+           !ModelRuntime.isValidMLXCacheLimitMB(cacheLimitMB) {
+            FileHandle.standardError.write(Data((
+                "mlx_cache_limit_mb \(cacheLimitMB) must be in 0...\(ModelRuntime.maximumMLXCacheLimitMB)\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
+        if let queueWaitTimeoutMS = resolved.continuousBatchQueueWaitTimeoutMS,
+           !(1 ... ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS).contains(queueWaitTimeoutMS) {
+            FileHandle.standardError.write(Data((
+                "--continuous-batch-queue-wait-timeout-ms \(queueWaitTimeoutMS) must be in 1...\(ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS)\n"
+            ).utf8))
+            throw ExitCode(2)
         }
         if let draftModel = resolved.draftModel,
            draftModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -693,7 +718,7 @@ struct ServeCommand: AsyncParsableCommand {
     static func runContinuousBatchingPreflight(_ resolved: AppConfig) throws {
         let capability = ContinuousBatchingPolicy.configurationCapability(
             mode: resolved.continuousBatching,
-            maxBatch: resolved.maxConcurrencyOverride ?? 1,
+            maxBatch: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
             queueLimit: resolved.continuousBatchQueueLimit,
             kvBits: resolved.kvBitsOverride,
             draftConfigured: resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
@@ -701,12 +726,26 @@ struct ServeCommand: AsyncParsableCommand {
         if resolved.continuousBatching == .canary {
             ContinuousBatchingPolicy.logSerialRouteIfNeeded(capability)
         }
+        if let line = continuousBatchingCachedTurnsPreflightLine(resolved) {
+            FileHandle.standardError.write(Data(line.utf8))
+        }
         do {
             try ContinuousBatchingPolicy.validateStrictStartup(capability)
         } catch let error as APIError {
             FileHandle.standardError.write(Data("\(error.code): \(error.message)\n".utf8))
             throw ExitCode(2)
         }
+    }
+
+    /// SPEC-038 AC-26: an opt-in cached-turns flag is always announced, and
+    /// named inert when batching itself is off, so an operator never mistakes a
+    /// no-op flag for enabled cached-turn batching.
+    static func continuousBatchingCachedTurnsPreflightLine(_ resolved: AppConfig) -> String? {
+        guard resolved.continuousBatchingCachedTurns else { return nil }
+        if resolved.continuousBatching == .off {
+            return "event=batching_cached_turns action=inert reason=continuous_batching_off\n"
+        }
+        return "event=batching_cached_turns action=enabled mode=\(resolved.continuousBatching.rawValue)\n"
     }
 
     static func runSpecDecodeHeartbeatCompatibilityPreflight(
@@ -724,23 +763,27 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
-    static func runSpecDecodeCapacityPreflight(_ resolved: inout AppConfig) throws {
+    static func runSpecDecodeCapacityPreflight(
+        _ resolved: inout AppConfig,
+        physicalMemoryGB: Int = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
+    ) throws {
         guard resolved.draftModel?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
             return
         }
-        let defaultContext = ProviderCapacity.defaultContextTokensForCurrentHost()
-        let requestedContext = resolved.maxContextOverride ?? defaultContext
-        let draftCap = ProviderCapacity.draftContextCapForCurrentHost()
-        let effectiveContext = min(requestedContext, draftCap)
-        if let explicit = resolved.maxContextOverride, explicit > effectiveContext {
-            FileHandle.standardError.write(Data("draft_model_capacity_shortfall: --max-context \(explicit) exceeds draft-enabled cap \(effectiveContext)\n".utf8))
+        let draftCap = ProviderCapacity.draftContextCap(forPhysicalMemoryGB: physicalMemoryGB)
+        if let explicit = resolved.maxContextOverride, explicit > draftCap {
+            FileHandle.standardError.write(Data("draft_model_capacity_shortfall: --max-context \(explicit) exceeds draft-enabled cap \(draftCap)\n".utf8))
             throw ExitCode(2)
         }
         if let explicit = resolved.maxConcurrencyOverride, explicit > 1 {
             FileHandle.standardError.write(Data("draft_model_capacity_shortfall: --max-batch \(explicit) exceeds draft-enabled cap 1\n".utf8))
             throw ExitCode(2)
         }
-        resolved.maxContextOverride = effectiveContext
+        if resolved.maxContextOverride == nil {
+            let unset = ProviderCapacity.unsetOverrideContext(physicalMemoryGB: physicalMemoryGB, draftModelConfigured: true)
+            resolved.maxContextOverride = unset.tokens
+            resolved.maxContextSource = unset.source
+        }
         resolved.maxConcurrencyOverride = 1
     }
 
@@ -818,9 +861,11 @@ struct ServeCommand: AsyncParsableCommand {
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
         persistConfigMigration: Bool = false
     ) async throws -> CatalogRuntimeTrust? {
-        // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569): an
-        // `ollama_loopback` model carries a `macprovider.gguf-file.v1` identity
-        // resolved from the local Ollama store at serve time, not a catalog
+        // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569, #1690): an
+        // `ollama_loopback` / `llamacpp_loopback` model carries a
+        // `macprovider.gguf-file.v1` identity resolved from the local GGUF
+        // file at serve time (an `mlxlm_loopback` model the CLI-computed
+        // snapshot-manifest pair of its declared snapshot), not a catalog
         // artifact SHA. It is intentionally uncatalogued and non-earning, so it
         // neither requires nor runs the MLX catalog-artifact preflight. Returning
         // nil (no catalog trust) lets the daemon stay connected instead of
@@ -831,8 +876,13 @@ struct ServeCommand: AsyncParsableCommand {
         // `ReasonBYOMNonSettlement`) excludes it. That money-path gate, not the
         // SPEC-032 hello-gate ceiling flag (which is set only when the gate is
         // ON), is what holds in the gate-off E2E posture (SPEC-047-R003/R005).
-        if OllamaLoopbackServeModel.isOllamaLoopbackRef(resolved.model ?? "") {
-            return nil
+        if LoopbackServeSelection.select(resolved.model) != nil {
+            return try await runLoopbackPoolCatalogPreflight(
+                resolved,
+                joiningCoordinator: joiningCoordinator,
+                isolateLifecycle: isolateLifecycle,
+                staticInputs: staticInputs
+            )
         }
         var artifactResolver = artifactResolver
         if let root = resolved.modelArtifactRoot, root.hasPrefix("/") {
@@ -905,6 +955,62 @@ struct ServeCommand: AsyncParsableCommand {
         return nil
     }
 
+    /// SPEC-042-R013 / SPEC-047-R003(iv) pool route-time clause (#1690 M6): a
+    /// loopback model the operator pins to a signed catalog row
+    /// (`model_catalog_key` + `model_catalog_model_id`) is a Trusted Pool
+    /// member candidate. The coordinator binds its GGUF identity only for a
+    /// session admitted on a current or compatible catalog release, so the
+    /// hello must carry the release envelope of that row. Without the pin the
+    /// loopback path stays envelope-less and non-earning, as before. The row
+    /// check is the same one the MLX preflight applies; the weights are proven
+    /// by the GGUF file digest, never by the row's MLX `model_sha256`, so no
+    /// served-model refresher is attached (`modelSHA256` is nil).
+    static func runLoopbackPoolCatalogPreflight(
+        _ resolved: AppConfig,
+        joiningCoordinator: Bool,
+        isolateLifecycle: Bool,
+        staticInputs: AutotuneStaticInputs
+    ) async throws -> CatalogRuntimeTrust? {
+        guard joiningCoordinator, !resolved.donorMode,
+              let key = LoopbackServeSelection.nonEmpty(resolved.modelCatalogKey),
+              let modelID = LoopbackServeSelection.nonEmpty(resolved.modelCatalogModelID)
+        else {
+            return nil
+        }
+        // A lab join (isolated lifecycle, loopback coordinator) binds the
+        // compiled-in release and never fetches the production static feeds.
+        var inputs = staticInputs
+        if relaxesJoinAdmissionForLab(isolateLifecycle: isolateLifecycle, coordinatorURL: resolved.coordinatorURL) {
+            inputs.fetch = { _ in throw AutotuneRecommendError.invalidStaticJSON("lab join: static feed fetch disabled") }
+        }
+        let catalog = await inputs.loadCandidateCatalog()
+        if !catalog.warnings.isDisjoint(with: [.candidateCatalogIntegrityFailure, .candidateCatalogUpdateRequired]) {
+            let state = catalog.warnings.contains(.candidateCatalogIntegrityFailure)
+                ? "catalog_integrity_failure"
+                : "catalog_update_required"
+            FileHandle.standardError.write(Data("\(state): refusing coordinator join with an untrusted or incompatible catalog release\n".utf8))
+            throw ExitCode(2)
+        }
+        guard let row = catalog.value.rows[key],
+              row.runtimeStatus == "recommendable",
+              row.modelID == modelID,
+              let rowIdentity = catalog.value.rowIdentity(for: key)
+        else {
+            FileHandle.standardError.write(Data("loopback model_catalog_key/model_catalog_model_id is not a recommendable row of the signed candidate catalog\n".utf8))
+            throw ExitCode(2)
+        }
+        return CatalogRuntimeTrust(
+            state: catalog.usedFallback ? "safe_offline_fallback" : "live_verified",
+            releaseID: catalog.value.version,
+            digest: AutotuneStaticInputs.candidateCatalogSHA256(bytes: catalog.selectedBytes),
+            signerKeyID: catalog.signerKeyID,
+            source: catalog.usedFallback ? "baked" : "coordinator",
+            policyVersion: catalog.value.policyVersion,
+            rowIdentity: rowIdentity,
+            modelSHA256: nil
+        )
+    }
+
     private static func isExistingDirectory(_ path: String) -> Bool {
         var info = stat()
         return lstat(path, &info) == 0 && (info.st_mode & S_IFMT) == S_IFDIR
@@ -929,13 +1035,56 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
+    /// Where serve looks for a pinned artifact, in order: an existing
+    /// configured directory, with no fallback when it fails to verify; else
+    /// the durable-store copy of the pinned snapshot. `models verify-artifact`
+    /// (SPEC-010-R008) resolves through this so it checks the bytes serve loads.
+    enum PinnedArtifactLoadCandidate {
+        case configured(String)
+        case durable(String)
+        case missingPin
+        case invalidDurablePath(Error)
+    }
+
+    static func pinnedArtifactLoadCandidate(
+        configuredPath: String,
+        modelID: String?,
+        revision: String?,
+        expectedSHA256: String,
+        artifactResolver: CachedModelArtifactResolver
+    ) -> PinnedArtifactLoadCandidate {
+        if isExistingDirectory(configuredPath) {
+            return .configured(configuredPath)
+        }
+        guard let modelID, !modelID.isEmpty, let revision, !revision.isEmpty else {
+            return .missingPin
+        }
+        do {
+            return .durable(try artifactResolver.durableStore.artifactURL(
+                modelID: modelID,
+                revision: revision,
+                sha256: expectedSHA256
+            ).standardizedFileURL.path)
+        } catch {
+            return .invalidDurablePath(error)
+        }
+    }
+
     private static func resolveVerifiedLoadPath(
         configuredPath: String,
         expectedSHA256: String,
         resolved: AppConfig,
         artifactResolver: CachedModelArtifactResolver
     ) throws -> (path: String, persistFrom: String?) {
-        if isExistingDirectory(configuredPath) {
+        let durablePath: String
+        switch pinnedArtifactLoadCandidate(
+            configuredPath: configuredPath,
+            modelID: resolved.modelCatalogModelID,
+            revision: resolved.modelCatalogRevision,
+            expectedSHA256: expectedSHA256,
+            artifactResolver: artifactResolver
+        ) {
+        case .configured:
             try requireContainedDurablePathIfOwned(configuredPath, artifactResolver: artifactResolver)
             let actual = try ModelArtifactVerifier.canonicalArtifactHash(
                 directory: URL(fileURLWithPath: configuredPath)
@@ -945,25 +1094,16 @@ struct ServeCommand: AsyncParsableCommand {
                 throw ExitCode(2)
             }
             return (configuredPath, nil)
-        }
-        guard let modelID = resolved.modelCatalogModelID, !modelID.isEmpty,
-              let revision = resolved.modelCatalogRevision, !revision.isEmpty
-        else {
+        case .missingPin:
             FileHandle.standardError.write(
                 Data("model artifact verification failed for \(configuredPath): missing pinned snapshot\n".utf8)
             )
             throw ExitCode(2)
-        }
-        let durablePath: String
-        do {
-            durablePath = try artifactResolver.durableStore.artifactURL(
-                modelID: modelID,
-                revision: revision,
-                sha256: expectedSHA256
-            ).standardizedFileURL.path
-        } catch {
+        case .invalidDurablePath(let error):
             FileHandle.standardError.write(Data("model durable artifact path is invalid: \(error)\n".utf8))
             throw ExitCode(2)
+        case .durable(let path):
+            durablePath = path
         }
         guard isExistingDirectory(durablePath) else {
             FileHandle.standardError.write(
@@ -1519,6 +1659,21 @@ struct ServeCommand: AsyncParsableCommand {
         isolateLifecycle && isLoopbackCoordinatorURL(coordinatorURL)
     }
 
+    /// The isolated lab join skips the catalog preflight (`relaxesJoinAdmissionForLab`),
+    /// so it can never present the catalog envelope the buyer-serving
+    /// readiness gate requires. Waive only that gate, only for that join.
+    static func waivesLabLoopbackCatalogReadiness(
+        isolateLifecycle: Bool,
+        credentialStore: ProviderCredentialStoreKind,
+        coordinatorURL: String?,
+        hasCatalogTrust: Bool
+    ) -> Bool {
+        isolateLifecycle
+            && credentialStore == .protectedFile
+            && relaxesJoinAdmissionForLab(isolateLifecycle: isolateLifecycle, coordinatorURL: coordinatorURL)
+            && !hasCatalogTrust
+    }
+
     static func isLoopbackCoordinatorURL(_ raw: String?) -> Bool {
         guard let raw, let url = URL(string: raw), let host = url.host?.lowercased(), !host.isEmpty else {
             return false
@@ -1571,6 +1726,8 @@ struct ServeCommand: AsyncParsableCommand {
                 kvDiskCache: kvDiskCacheCLIOverrides,
                 continuousBatching: continuousBatching,
                 continuousBatchQueueLimit: continuousBatchQueueLimit,
+                continuousBatchQueueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
+                continuousBatchingCachedTurns: continuousBatchingCachedTurns,
                 pagedKV: pagedKVCLIOverrides
             )
         )
@@ -1916,10 +2073,82 @@ struct ServeCommand: AsyncParsableCommand {
         if let root = resolved.modelArtifactRoot, root.hasPrefix("/") {
             targetResolver.durableRoot = URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
         }
+        // #1689 FR-20b: a recommendation-generated context is recomputed for
+        // each verified switch target from the same verified config.json.
+        let switchMemoryGB = ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB
+        var switchTargets: [(ids: [String], recomputed: Int, slots: Int)] = []
         let targetAuthorities = Self.localRuntimeTargetAuthorities(
             supportedModels: resolved.supportedModels,
-            artifactResolver: targetResolver
+            artifactResolver: targetResolver,
+            onVerifiedTarget: { ids, row, artifact in
+                guard resolved.maxContextSource == .recommendationApply else { return }
+                let knobs = ModelSwitchContext.recomputedServeKnobs(
+                    memoryGB: switchMemoryGB,
+                    modelID: row.modelID,
+                    catalogMinRAMGB: row.minRAMGB,
+                    configJSONData: artifact.configJSONData,
+                    configSHA256: artifact.configSHA256,
+                    draftModel: ProviderCapacity.servedDraftModel(configured: resolved.draftModel),
+                    // The slot count this serve runs (`maxBatch` below).
+                    slots: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
+                )
+                switchTargets.append((ids, knobs.context, knobs.slots))
+            }
         )
+        // SPEC-023-R018 item 9: a generated context gives way when the slot
+        // count this serve runs (config, environment, or --max-batch) would
+        // not fit memory at it; an operator value is kept (status warns).
+        let servedSlots = ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride)
+        let startupBound = ModelSwitchContext.startupBoundedContext(
+            config: resolved,
+            slots: servedSlots,
+            memoryGB: switchMemoryGB,
+            configJSONData: resolved.modelArtifactPath.flatMap {
+                try? Data(contentsOf: URL(fileURLWithPath: $0, isDirectory: true).appendingPathComponent("config.json"))
+            },
+            catalogMinRAMGB: (try? AutotuneStaticInputs.decodeSignedStaticCandidateCatalog(
+                Data(AutotuneStaticInputs.bakedCandidateCatalogJSON.utf8)
+            )).flatMap { catalog in
+                [resolved.modelCatalogKey, resolved.modelCatalogModelID, resolved.model]
+                    .compactMap { $0 }
+                    .lazy
+                    .compactMap { ModelArtifactSignedRowResolver.lookup($0, in: catalog)?.1.minRAMGB }
+                    .first
+            }
+        )
+        let switchMaxContextByTarget = ModelSwitchContext.serveContextsByTarget(
+            config: resolved,
+            configuredModelIDs: [resolved.model, catalogModelIDAlias].compactMap { $0 },
+            targets: switchTargets.map { ($0.ids, $0.recomputed) },
+            configuredContext: startupBound?.context
+        )
+        let switchMaxBatchByTarget = ModelSwitchContext.serveSlotsByTarget(
+            config: resolved,
+            configuredModelIDs: [resolved.model, catalogModelIDAlias].compactMap { $0 },
+            targets: switchTargets.map { ($0.ids, $0.slots) },
+            configuredSlots: startupBound?.slots ?? servedSlots
+        )
+        let switchContextProvenanceModelIDs = ModelSwitchContext.provenanceModelIDs(
+            config: resolved,
+            configuredModelIDs: [resolved.model, catalogModelIDAlias].compactMap { $0 },
+            targets: switchTargets.map { ($0.ids, $0.recomputed) }
+        )
+        if let startupBound, let configured = resolved.maxContextOverride {
+            if startupBound.slots < servedSlots {
+                // SPEC-023-R018 item 9: even the minimum context does not fit
+                // the configured slots, so serve runs fewer rather than an
+                // over-envelope pair.
+                FileHandle.standardError.write(Data(
+                    "max_context_override \(configured) was generated by a recommendation; even the \(AutotuneModelContextCap.minimumServeContext)-token minimum context does not fit \(servedSlots) slots in memory, so serving \(startupBound.context) tokens with \(startupBound.slots) slots\n".utf8
+                ))
+                resolved.maxConcurrencyOverride = startupBound.slots
+            } else {
+                FileHandle.standardError.write(Data(
+                    "max_context_override \(configured) was generated by a recommendation; lowered to \(startupBound.context) tokens so \(servedSlots) slots fit in memory\n".utf8
+                ))
+            }
+            resolved.maxContextOverride = startupBound.context
+        }
         let authorizedSwitchModelIDs = Self.localRuntimeTargetModelIDs(
             supportedModels: resolved.supportedModels,
             authorities: targetAuthorities
@@ -1941,19 +2170,49 @@ struct ServeCommand: AsyncParsableCommand {
         // execution and advertised heartbeat capability until the tagged fix and
         // cache-wrap parity gate are green.
         do {
-            if let ollamaServedRef = resolved.model, OllamaLoopbackServeModel.isOllamaLoopbackRef(ollamaServedRef) {
-                // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569):
-                // proxy inference to the validated loopback Ollama origin. ONE
-                // process, ONE model — no MLX weights are loaded. Non-earning:
-                // relay-blind and signed receipts are disabled on this path.
-                helloRuntimeSource = OllamaLoopbackServeModel.runtimeSource
-                modelRuntime = try OllamaLoopbackRuntime(
-                    servedModelRef: ollamaServedRef,
-                    origin: OllamaLoopbackServeModel.resolveOrigin(),
-                    catalogModelIDAlias: catalogModelIDAlias
-                )
+            if let loopbackServedRef = resolved.model, let loopback = LoopbackServeSelection.select(loopbackServedRef) {
+                // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569,
+                // #1690 M2): proxy inference to the validated loopback
+                // OpenAI-compatible origin. ONE process, ONE model — no MLX
+                // weights are loaded. Relay-blind is disabled on this path, and
+                // signed receipts are disabled outside the authorized pool
+                // path: a receipt is signed only for a request whose
+                // coordinator-issued pool runtime authorization matches
+                // (SPEC-015-R006, #1690 M5); global traffic stays non-earning.
+                helloRuntimeSource = loopback.runtimeSource
+                switch loopback {
+                case .ollama:
+                    modelRuntime = try OpenAICompatibleLoopbackRuntime(
+                        servedModelRef: loopbackServedRef,
+                        origin: OllamaLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
+                        catalogModelIDAlias: catalogModelIDAlias
+                    )
+                case .llamaCpp:
+                    // The GGUF file llama.cpp serves is named by the operator
+                    // (MACPROVIDER_LLAMACPP_MODEL_ROOT / _PATH, as for
+                    // `models discover`), never by the runtime.
+                    modelRuntime = try await OpenAICompatibleLoopbackRuntime.llamaCpp(
+                        servedModelRef: loopbackServedRef,
+                        origin: LlamaCppLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
+                        selector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: nil, cliPath: nil),
+                        catalogModelIDAlias: catalogModelIDAlias
+                    )
+                case .mlxLM:
+                    // SPEC-010-R009: the MLX snapshot mlx_lm.server serves is
+                    // named by the operator (MACPROVIDER_MLXLM_MODEL_PATH) and
+                    // hashed by the CLI, never reported by the runtime.
+                    modelRuntime = try await OpenAICompatibleLoopbackRuntime.mlxLM(
+                        servedModelRef: loopbackServedRef,
+                        origin: MLXLMLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
+                        snapshotDirectory: MLXLMLoopbackServeModel.snapshotDirectory(),
+                        catalogModelIDAlias: catalogModelIDAlias
+                    )
+                }
             } else {
                 helloRuntimeSource = nil
+                if let applied = ModelRuntime.applyMLXCacheLimit(megabytes: resolved.mlxCacheLimitMB) {
+                    FileHandle.standardError.write(Data("mlx_cache_limit_bytes=\(applied)\n".utf8))
+                }
                 modelRuntime = try await ModelRuntime(
                     modelID: resolved.model,
                     modelLoadPath: resolved.modelArtifactPath,
@@ -1965,9 +2224,11 @@ struct ServeCommand: AsyncParsableCommand {
                     kvBitsOverride: effectiveKVBits,
                     pagedKVConfig: resolved.pagedKV,
                     prefillStepSize: resolved.prefillStepSize,
-                    maxBatch: resolved.maxConcurrencyOverride ?? 1,
+                    maxBatch: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
                     continuousBatchingMode: resolved.continuousBatching,
                     continuousBatchQueueLimit: resolved.continuousBatchQueueLimit,
+                    continuousBatchQueueWaitTimeoutMS: resolved.continuousBatchQueueWaitTimeoutMS,
+                    continuousBatchingCachedTurns: resolved.continuousBatchingCachedTurns,
                     continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage(
                         acceptedTuples: resolved.continuousBatchingAcceptedTuples
                     ),
@@ -1980,7 +2241,10 @@ struct ServeCommand: AsyncParsableCommand {
                     // fields; nil ⇒ cold tier treats identity as unavailable (no promote/persist).
                     verifiedModelCatalogRevision: resolved.modelCatalogRevision,
                     targetAuthorities: targetAuthorities,
-                    authorizedSwitchModelIDs: authorizedSwitchModelIDs
+                    authorizedSwitchModelIDs: authorizedSwitchModelIDs,
+                    switchMaxContextByTarget: switchMaxContextByTarget,
+                    switchMaxBatchByTarget: switchMaxBatchByTarget,
+                    switchContextProvenanceModelIDs: switchContextProvenanceModelIDs
                 )
             }
         } catch {
@@ -2047,7 +2311,8 @@ struct ServeCommand: AsyncParsableCommand {
         // capacity so the coordinator's view stays consistent.
         let capacityDefaults = ProviderCapacity(
             maxContextOverride: resolved.maxContextOverride,
-            maxConcurrencyOverride: resolved.maxConcurrencyOverride ?? 1
+            maxConcurrencyOverride: ProviderCapacity.servedSlotCount(maxConcurrencyOverride: resolved.maxConcurrencyOverride),
+            maxContextSource: resolved.maxContextSource
         )
         let throughputEstimate = await Self.startupThroughputEstimate(
             autotuneCandidate: autotuneCandidate,
@@ -2055,11 +2320,22 @@ struct ServeCommand: AsyncParsableCommand {
             // it reports a 0 startup estimate (advisory capacity only).
             measure: {
                 if let mlxRuntime = modelRuntime as? ModelRuntime {
-                    return await mlxRuntime.measureStartupThroughput()
+                    return await mlxRuntime.measureStartupThroughput(
+                        maxTokens: ModelRuntime.startupThroughputProbeMaxTokens
+                    )
                 }
                 return 0
             }
         )
+        // #1689: operator-visible provenance for the estimate above. `nil`
+        // means no probe ran (autotune candidate or loopback runtime).
+        var startupThroughputProbe: StartupThroughputProbe?
+        if !autotuneCandidate, let mlxRuntime = modelRuntime as? ModelRuntime {
+            startupThroughputProbe = StartupThroughputProbe(
+                maxTokens: ModelRuntime.startupThroughputProbeMaxTokens,
+                modelID: await mlxRuntime.loadedModelID ?? resolved.model
+            )
+        }
         let thermalGate = ThermalGate()
         // `slots_free` in the log reflects the throttle-driven free-slot
         // ceiling (configured `maxConcurrency` when unthrottled, 0 when
@@ -2075,7 +2351,7 @@ struct ServeCommand: AsyncParsableCommand {
         let providerStatus = ProviderStatus(
             modelID: resolved.model,
             modelLoaded: await modelRuntime.isLoaded,
-            capacity: capacityDefaults.withThroughputEstimate(throughputEstimate),
+            capacity: capacityDefaults.withThroughputEstimate(throughputEstimate, probe: startupThroughputProbe),
             modelHash: await modelRuntime.loadedModelHash,
             modelHashAlgorithm: await modelRuntime.loadedModelHashAlgorithm,
             weightsManifestSHA256: await modelRuntime.loadedWeightsManifestSHA256,
@@ -2337,6 +2613,12 @@ struct ServeCommand: AsyncParsableCommand {
                 providerAdmissionRecovery: providerAdmissionRecovery,
                 commitAdmissionIdentityPublicKey: commitAdmissionIdentityPublicKey,
                 receiptBuilder: receiptRuntime.builder,
+                labLoopbackCatalogReadinessWaived: Self.waivesLabLoopbackCatalogReadiness(
+                    isolateLifecycle: isolateLifecycle,
+                    credentialStore: resolved.credentialStore,
+                    coordinatorURL: resolved.coordinatorURL,
+                    hasCatalogTrust: startupPreflight.catalogTrust != nil
+                ),
                 catalogReleaseID: startupPreflight.catalogTrust?.releaseID,
                 catalogPolicyVersion: startupPreflight.catalogTrust?.policyVersion,
                 catalogCandidateSHA256: startupPreflight.catalogTrust?.digest,
@@ -2388,11 +2670,12 @@ struct ServeCommand: AsyncParsableCommand {
         if resolved.enableReceipts,
            let providerID = resolved.providerID,
            !providerID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let receiptSigningKeyStore = receiptRuntime.signingKeyStore,
            let coordinatorClient {
             receiptRotator = {
                 try await RotateKeyCommand.rotateActiveProvider(
                     providerID: providerID,
-                    keyStore: receiptKeyStore,
+                    keyStore: receiptSigningKeyStore,
                     coordinatorClient: coordinatorClient
                 )
             }
@@ -3101,11 +3384,11 @@ struct ServeCommand: AsyncParsableCommand {
     static func makeReceiptRuntime(
         config: AppConfig,
         keyStore: ReceiptKeyStoring = KeychainReceiptKeyStore()
-    ) throws -> (builder: ReceiptBuilder?, publicKeyBase64: String?) {
+    ) throws -> (builder: ReceiptBuilder?, publicKeyBase64: String?, signingKeyStore: ReceiptKeyStoring?) {
         guard config.enableReceipts,
               let providerID = config.providerID,
               !providerID.isEmpty else {
-            return (nil, nil)
+            return (nil, nil, nil)
         }
         let cachingStore = CachedReceiptKeyStore(keyStore)
         let privateKey: Curve25519.Signing.PrivateKey
@@ -3117,9 +3400,14 @@ struct ServeCommand: AsyncParsableCommand {
         } else {
             privateKey = try cachingStore.loadOrGenerate(providerId: providerID)
         }
+        // The builder caches the signing key for the process lifetime, so a
+        // receipt-key rotation MUST swap through this same caching store
+        // (signingKeyStore). Swapping the underlying store alone leaves the
+        // builder signing with the retired key (#1690 E2E-F9).
         return (
             ReceiptBuilder(keyStore: cachingStore),
-            Data(privateKey.publicKey.rawRepresentation).base64EncodedString()
+            Data(privateKey.publicKey.rawRepresentation).base64EncodedString(),
+            cachingStore
         )
     }
 
@@ -3174,8 +3462,30 @@ struct StatusCommand: AsyncParsableCommand {
             donorMode: resolved.donorMode,
             staleRecommendationSince: staleSince,
             configPath: resolved.configPath,
-            advanced: advanced
+            advanced: advanced,
+            coordinatorURL: resolved.coordinatorURL,
+            sustainedBenchmarks: advanced ? Self.sustainedBenchmarks() : [],
+            contextWarnings: advanced ? Self.contextWarnings(status: status, configPath: resolved.configPath) : []
         ))
+    }
+
+    /// Best effort, from the config file alone (the launchd service does not
+    /// inherit this shell) and the served model's local `config.json`.
+    static func contextWarnings(status: [String: Any], configPath: String) -> [String] {
+        let fileConfig = try? ConfigLoader.load(cli: CLIOverrides(configPath: configPath), environment: [:])
+        let artifactPath = ProviderContextWorkflow.servedModelArtifactPath(modelID: status["model"] as? String, config: fileConfig)
+        return ProviderContextWorkflow.statusContextWarnings(
+            status: status,
+            config: fileConfig,
+            physicalMemoryGB: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).ramGB,
+            facts: ProviderContextWorkflow.liveModelFacts(artifactPath: artifactPath)
+        )
+    }
+
+    /// Best effort: a missing, unsafe, or undecodable recommendation state
+    /// yields no benchmarks and never fails `status`.
+    static func sustainedBenchmarks(stateURL: URL = RecommendationStateStore.defaultURL) -> [BenchmarkPayload] {
+        (try? RecommendationStateStore.read(from: stateURL))?.hardwareEvidence?.benchmarks ?? []
     }
 
     static func writeJSON(_ payload: [String: Any]) throws {
@@ -3515,6 +3825,8 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  max_batch: \(config.maxConcurrencyOverride.map(String.init) ?? "1")")
     print("  continuous_batching: \(config.continuousBatching.rawValue)")
     print("  continuous_batch_queue_limit: \(config.continuousBatchQueueLimit.map(String.init) ?? "<unset, 2 * max_batch>")")
+    print("  continuous_batch_queue_wait_timeout_ms: \(config.continuousBatchQueueWaitTimeoutMS.map(String.init) ?? "<unset, 30000>")")
+    print("  continuous_batching_cached_turns: \(config.continuousBatchingCachedTurns)")
     print("  enable_receipts: \(config.enableReceipts)")
     print("  relay_blind_enabled: \(config.relayBlindEnabled)")
     print("  idle_prewarm.enabled: \(config.idlePrewarmEnabled)")

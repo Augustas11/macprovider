@@ -1,6 +1,6 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2.3
+Version: v0.2.10
 Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
@@ -12,6 +12,81 @@ clarifies the API-visible admission/replay/terminal contract, records
 decode-first scheduling as a conservative v0.2 choice rather than a claim of
 vLLM/SGLang-style unified-token scheduling, and tightens the real-serving
 evidence gate for retained paged-KV reuse.
+
+**Change log v0.2.10 (2026-09-25, bounded decode windows):** FR-CB2 now
+describes the decode hop as the implementation runs it. One hop advances every
+active decode row by a bounded window of W tokens, applying sampling, stop and
+emission to each token in order. W is at most the lockstep window (16 in
+production) and is capped by each row's remaining output budget.
+
+- W is 1 whenever a request waits for a free slot or is being admitted, so it
+  joins at the next hop boundary.
+- While a prompt is mid-prefill and nothing else waits to join, W is at most
+  the prefill decode window (8 in production). The rule was one token per
+  prefill chunk, which left active rows at about 0.6 tok/s behind a long
+  prompt on the M3 Ultra, because a 512-token chunk costs about as much as
+  30–50 decode steps.
+
+Prefill evaluates only the caches, never the vocabulary projection, because
+prefill never samples.
+
+**Change log v0.2.9 (2026-09-24, per-tuple cached-turn acceptance):** AC-26
+is satisfied per tuple and per runtime revision. The FR-CB10 accepted-tuple
+entry gains an optional boolean `cached_turns_accepted` (default false). A
+positive-`cached_prompt_tokens` turn enters the scheduler only when
+`continuous_batching_cached_turns` is on, the lease carries a usable retained
+handoff, AND the accepted tuple covering the requested runtime tuple records
+`cached_turns_accepted: true`. Without that grant the fence holds with reason
+`cached_turns_not_accepted`: canary serial-routes and `on` fails closed. The
+operator records the grant only after the AC-26 packaged proof on that exact
+revision. A hybrid retained install also validates the checkpoint's state
+layout (slot count, rank, batch 1, floating-point dtype, identical across
+recurrent layers) and fails closed before installing anything.
+
+**Change log v0.2.8 (2026-09-24, opt-in cached-turn batching):** A new
+provider config flag `continuous_batching_cached_turns` (default off; env
+`MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS`, CLI
+`--[no-]continuous-batching-cached-turns`) lets a positive
+`cached_prompt_tokens` turn enter the scheduler in `canary`/`on` when its
+conversation-cache lease carries a usable retained FR-PKV10 handoff. For a
+hybrid model the handoff is usable only with a recurrent checkpoint at exactly
+the cached length. With the flag on, a keyed hybrid row retains its paged KV
+plus its checkpoints instead of committing the v0.2.7 serial-format entry.
+Everything else keeps today's behaviour: the flag off, or a lease without a
+usable handoff, still serial-routes in canary and fails closed in `on`. The
+AC-26 packaged real-serving proof is still required before the flag is enabled
+on a live provider.
+
+**Change log v0.2.7 (2026-09-24, hybrid first-turn conversation cache):**
+FR-CB4 now covers hybrid models (attention plus recurrent layers, e.g.
+Qwen3.6). A keyed batched first turn snapshots its own recurrent state at the
+SPEC-024 FR-CI2 checkpoint positions during prefill. At a normal terminal it
+commits a serial-format conversation-cache entry. Keyless, cancelled and
+failed rows commit nothing. A positive-`cached_prompt_tokens` follow-up still
+serial-routes until AC-26 and reuses that entry on the serial path.
+
+**Change log v0.2.6 (2026-09-24, sampled batched rows):** FR-CB6 and AC-6b
+admit sampled (non-greedy) requests into the shared forward. Each row samples
+from its own logits with the serial path's sampler for its temperature and
+top_p, using row-local randomness seeded from its request identity and step. No
+random state is shared across rows or carried between steps. Presence and
+frequency penalties are ignored because the serial path ignores them.
+Increment 1's greedy-only admission is lifted. Tool-bearing, structured-output,
+logit-bias and logprob requests still serial-route.
+
+**Change log v0.2.5 (2026-09-24, runtime-revision-bound acceptance):** FR-CB10
+acceptance coverage now binds the runtime revision the evidence was measured
+on (Metal library SHA-256 and paged-KV kernel identifier) in addition to model,
+cache, KV dtype, MoE and hardware identity. A build with a different metallib
+or kernel does not inherit an earlier acceptance entry; it must be re-measured,
+including the SPEC-039 FR-PKV13 overhead ceiling, and re-accepted. This is how
+the FR-PKV13 ceiling is enforced for real traffic.
+
+**Change log v0.2.4 (2026-09-24, relay backpressure surface):** Names the
+existing client-visible surface for the queue-full and queue-wait-timeout rows
+on the coordinator-relayed path: SPEC-001 FR-27 `error_queue_full`, which
+SPEC-002 FR-P14.1 re-routes to the next candidate and otherwise answers with a
+503 carrying the gateway's bounded `Retry-After`. No new wire code or status.
 
 **Change log v0.2.3 (2026-09-21, keyed first-turn canary):**
 - A conversation key alone MUST NOT keep a request out of canary/`on`
@@ -247,11 +322,22 @@ phases; it MUST NOT combine arbitrary prefill and one-token decode work into
 one heterogeneous model call in v0.2. A request joins the shared decode batch
 only after its prompt prefill completes and its request-private block table is
 initialized over `SPEC-039` blocks. Scheduling MUST be decode-first: each
-iteration advances the current decode batch by one token, applies per-row
-sampling and stop conditions, emits tokens, removes terminal rows, processes
+iteration advances the current decode batch by a bounded window of `W >= 1`
+tokens. Per-row sampling, stop conditions and emission are applied to every
+token in order. The iteration then removes terminal rows, processes
 cancellation at a safe boundary, and only then admits and prefills new prompt
-work into free capacity. Prefill MUST be bounded or chunked so a long prompt
-cannot block existing decode rows for an unbounded interval.
+work into free capacity.
+
+`W` is capped by each row's remaining output budget and by the configured
+lockstep window. It MUST be 1 while a request is waiting for a free slot or
+being admitted, so that request joins at the next hop boundary (FR-CB5). While
+a prompt is mid-prefill and nothing else is waiting to join, `W` MUST NOT
+exceed the prefill decode window. The prefill decode window gives active rows
+several tokens per prefill chunk rather than one, so a long prompt slows them
+by a bounded factor instead of stalling them. Prefill MUST be bounded or
+chunked (one chunk per iteration) so a long prompt cannot block existing
+decode rows for an unbounded interval. Prefill never samples, so it evaluates
+only the prompt's cache state, not the vocabulary projection.
 
 This decode-first split is a v0.2 safety choice. It preserves simple
 per-request accounting, cancellation, and receipt boundaries while the shared
@@ -288,6 +374,59 @@ FR-PKV11). Per-request extraction back into standalone conversation-cache state
 MUST use the SPEC-039 **cache-extraction / same-conversation retention
 primitive** (SPEC-039 FR-PKV10) and MUST preserve exact SPEC-024 LCP/trim
 semantics (including a mid-block LCP boundary).
+
+For a hybrid model (paged attention plus recurrent layers), whose recurrent
+state cannot be retained or trimmed as paged KV, a conversation-keyed batched
+row with zero cached tokens MUST end a prefill chunk exactly on each SPEC-024
+FR-CI2 recurrent checkpoint position (at most two) and snapshot only its own
+recurrent-layer state there. At a normal terminal (stop or length), before
+releasing its blocks, it MUST commit a serial-format conversation-cache entry:
+its attention KV materialized through FR-PKV10 into contiguous caches covering
+a prefix of the canonical token list (prompt plus generated tokens, trailing
+model stop dropped), and the snapshots as that entry's recurrent checkpoints.
+Keyless, cancelled and failed rows MUST commit nothing and MUST release every
+block and snapshot they hold. A later turn with positive
+`cached_prompt_tokens` still serial-routes until AC-26.
+
+**Opt-in cached turns (v0.2.8).** A positive-`cached_prompt_tokens` turn MAY
+enter the scheduler only when the provider flag
+`continuous_batching_cached_turns` is on (default off) AND its lease carries a
+usable retained handoff. A usable handoff is a retained FR-PKV10 paged-KV
+sequence and, for a hybrid model, the recurrent checkpoint the lease resumes
+from. **(v0.2.9)** It additionally requires AC-26 acceptance for the tuple:
+the FR-CB10 accepted-tuple entry covering the requested runtime tuple MUST
+record `cached_turns_accepted: true`. Any other positive-cached turn MUST keep
+the AC-26 fence: canary serial-routes and `on` fails closed (FR-CB8), with
+reason `cached_turns_not_accepted` when only the acceptance grant is missing
+and `sticky_cache_handoff_unavailable` otherwise. With the flag off, behaviour MUST be identical to v0.2.7 for every
+model. With the flag on, for a hybrid model:
+- A conversation-keyed row that reached at least one checkpoint MUST, at a
+  normal terminal, retain its paged attention KV through FR-PKV10 together with
+  those checkpoints, in place of the serial-format entry above. A retained
+  delivery without any checkpoint MUST be discarded, not committed.
+- `begin` on a retained hybrid entry MUST resume from the largest checkpoint C
+  with `lcpThreshold <= C <= lcp` and report `cached_prompt_tokens = C`, which
+  is the value the serial path reports for the same checkpoint hit (SPEC-024
+  FR-CI2). If no checkpoint qualifies, the turn misses with
+  `recurrent_checkpoint_diverged` and the retained sequence is discarded.
+- Admission MUST reattach the retained sequence trimmed to exactly C. The
+  backend MUST install the paged attention layers from the handoff and restore
+  every recurrent layer from the checkpoint at exactly C. It MUST fail closed
+  when that checkpoint is missing, has another length, or lacks a recurrent
+  layer, and (v0.2.9) when any recurrent layer's state has the wrong slot
+  count, a rank below 2, a batch dimension other than 1, a non-floating-point
+  dtype, or a shape or dtype that differs from the other recurrent layers. The
+  check runs before any row state is installed. It MUST NOT install a zero
+  recurrent state. Prefill resumes at C.
+- Stored checkpoints below C that fall on the new prompt's checkpoint
+  positions carry forward into the row's checkpoints; the row snapshots the
+  rest itself and retains again at terminal, so the conversation keeps
+  chaining.
+- A cancel recorded during the reattach or install awaits MUST win: the row
+  never prefills and its blocks are released.
+- A positive-cached request that is serial-routed anyway (for example a
+  tool-bearing request) discards the retained entry, and the serial path
+  misses.
 
 ### FR-CB5 - dynamic insertion and removal between decode steps (SPEC-038-R005)
 
@@ -331,6 +470,20 @@ non-receipt diagnostic telemetry (FR-CB14) and MUST NOT alter buyer-visible
 token accounting. Deterministic (temperature-0) output for a request under
 batching MUST match its serial-path output within the accepted numerical
 tolerance.
+
+A sampled (non-greedy) request MAY batch. Its row MUST select each token with
+exactly the sampling algorithm the serial path uses for the same request
+parameters (temperature, top_p), applied only to that row's own logits. The
+row's randomness MUST be row-local:
+- it is derived from that request's identity and the step index;
+- it is never shared with another row;
+- it is never carried in hidden cross-step state.
+
+Sampled output is therefore equal in distribution to the serial path, not
+token-identical to a particular serial run (the serial path is not seeded). A
+replay of the same request identity reproduces the same draws. Parameters the
+serial path ignores (presence and frequency penalties) MUST be ignored on the
+batched path too, so batching never changes what a request asks for.
 
 The accepted numerical tolerance recognizes that a shared batched forward and
 a serial forward differ only in floating-point ACCUMULATION ORDER (batched
@@ -418,6 +571,24 @@ local capability; permissive/canary modes MAY route to serial only with
 explicit operator policy and reason-coded telemetry. The activation reason
 MUST reference the local capability and MUST NOT cite a missing upstream pin
 as the path to success.
+
+Acceptance coverage MUST bind the runtime revision the acceptance evidence was
+measured on: the Metal library SHA-256 and the paged-KV kernel identifier, as
+well as model id and SHA, cache class, KV dtype, MoE requirement and hardware
+class. An entry missing any of these fields MUST be rejected at configuration
+load, and an entry recorded on a different runtime revision MUST NOT cover the
+requested tuple. An operator MUST NOT record acceptance for a tuple until that
+exact runtime revision has met the SPEC-039 FR-PKV13 overhead ceiling on the
+packaged build. Acceptance coverage is therefore the per-tuple gate that keeps
+a path over the ceiling from serving real traffic. Derived or per-boot
+descriptor fields (parity label, pool epoch) remain the descriptor's job.
+
+**(v0.2.9)** An accepted-tuple entry MAY carry `cached_turns_accepted`
+(boolean, default false; any non-boolean value MUST be rejected at
+configuration load). It is the per-tuple, revision-bound AC-26 grant for
+positive-`cached_prompt_tokens` batching (FR-CB4). An operator MUST NOT set it
+until the AC-26 packaged proof has been recorded on that exact tuple and
+runtime revision. A grant on a different revision MUST NOT carry over.
 
 ### FR-CB11 - Entry 110 capacity mapping (SPEC-038-R011)
 
@@ -611,8 +782,8 @@ snapshot-binding requirements to buyer-visible behavior:
 
 | Lifecycle point | Required API-visible behavior | Settlement / receipt rule |
 |---|---|---|
-| Queue full before admission | Reject through the existing client-visible backpressure/error surface; include bounded retry guidance (`Retry-After` or equivalent) when the gateway surface supports it. No request state may be retained except non-receipt diagnostics. | Non-settling; no receipt. |
-| Queue wait timeout before admission | Reject as queue timeout, not model failure. The response/log MUST distinguish timeout from scheduler crash and from unsupported tuple. | Non-settling; no receipt. |
+| Queue full before admission | Reject through the existing client-visible backpressure/error surface; include bounded retry guidance (`Retry-After` or equivalent) when the gateway surface supports it. On direct HTTP that is `continuous_batching_stream_backpressure` with `Retry-After`; on the coordinator relay it is SPEC-001 FR-27 `error_queue_full` (re-route, else 503 with the gateway's `Retry-After`). No request state may be retained except non-receipt diagnostics. | Non-settling; no receipt. |
+| Queue wait timeout before admission | Reject as queue timeout, not model failure. The response/log MUST distinguish timeout from scheduler crash and from unsupported tuple. On direct HTTP the code is `continuous_batching_queue_wait_timeout`; on the coordinator relay it is SPEC-001 FR-27 `error_queue_full`, and the provider log keeps the distinct code. | Non-settling; no receipt. |
 | Unsupported tuple before admission | Strict mode fails preflight; explicit permissive/canary mode MAY serial-route with reason-coded telemetry. | Serial route settles only if the serial request succeeds; rejected path emits no receipt. |
 | Duplicate stable request ID before acceptance | Deterministically attach to the existing queued request or reject as duplicate; MUST NOT create a second accepted unit of work. | At most one settling owner. |
 | Duplicate stable request ID after acceptance | Deterministically reattach/replay the existing terminal result, or reject as non-settling replay when retention has rolled; MUST NOT duplicate inference or settlement. | At most one receipt. |
@@ -711,6 +882,22 @@ hardware-capability run or a static-review obligation. Every
   decoding the sampled token sequence MUST be identical (byte/token-identical);
   a numerical tolerance applies only where the fixture explicitly compares raw
   logits, and then the exact threshold MUST be stated in the fixture.
+- **AC-6b sampled-row equivalence and isolation (FR-CB6):** a unit fixture
+  shows three things. With identical logits, parameters and seed, a batched
+  row's token equals the serial sampler's token (same algorithm). A row's token
+  is unchanged by its batch neighbours. A nucleus small enough to keep only the
+  argmax yields the greedy token.
+  On hardware, three things hold:
+  - a sampled request's output for a given request identity is identical as a
+    lone row and as one row among concurrent sampled rows;
+  - it is identical across repeats;
+  - there is no cross-row leak signal.
+  Against the serial path's own sampler for the same parameters it matches
+  within the FR-CB6 numerical tolerance. Differences are allowed only where the
+  batched forward's logits differ by accumulation order, or at exact bf16 logit
+  ties that sampling filters and argmax break differently. A tiny top_p is NOT
+  equivalent to greedy even on the serial path, because of those ties.
+  Distinct concurrent requests MUST NOT share a sampler seed.
 - **AC-7 unsupported cache/`kv_bits`/local capability rejection (FR-CB8,
   FR-CB10):** a `newCache`-overriding model family, an unsupported
   `SPEC-039` tuple, an unsupported MoE expert-dispatch surface, and an
@@ -860,7 +1047,15 @@ hardware-capability run or a static-review obligation. Every
   emit sticky cached-token credit. A retained paged-KV handoff produced by a
   first-turn MUST NOT admit a later positive-`cached_prompt_tokens` turn until
   this AC is satisfied. A keyless loopback 200 is not proof that Pearl-routed
-  keyed traffic entered the batch.
+  keyed traffic entered the batch. The v0.2.8 `continuous_batching_cached_turns`
+  flag (FR-CB4) implements the admission path, but it does not satisfy this AC.
+  **(v0.2.9)** This AC is satisfied per tuple and per runtime revision by the
+  FR-CB10 accepted-tuple field `cached_turns_accepted: true`. The operator
+  records it only after this packaged proof, covering the relay path and the
+  usage, receipt and settlement fields, passes on that exact tuple and
+  revision. A hybrid tuple's proof MUST include a checkpoint-resumed turn. The
+  runtime admits positive-cached turns only where the grant is present, so the
+  flag alone never lets such a turn into canary.
 
 ## 8. Go/no-go gates
 

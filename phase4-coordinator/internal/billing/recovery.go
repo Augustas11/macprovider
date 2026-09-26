@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	"strings"
 	"time"
 )
@@ -18,6 +19,12 @@ type RecoverInput struct {
 func (s *Store) RecoverLedger(ctx context.Context, in RecoverInput) (retErr error) {
 	if in.Source == "" {
 		in.Source = "startup_scan"
+	}
+	// SPEC-022-R012.3 and the R006 label are decided before the transaction
+	// opens: the durable pool authority reads this same database.
+	poolAttested, err := s.recoveryPoolAttestedRoutes(ctx, in)
+	if err != nil {
+		return err
 	}
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 	if err != nil {
@@ -190,10 +197,11 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		ambiguousAttempt := attemptN == 1 && retried == 0
 		var providerID string
 		var identityConfigSnapshotID, providerReportedPrompt sql.NullInt64
+		var identityRuntimeSource sql.NullString
 		err = tx.QueryRowContext(ctx, `
-	SELECT provider_id, config_snapshot_id, provider_reported_prompt_tokens FROM ledger_provider_identity_snapshots
+	SELECT provider_id, config_snapshot_id, provider_reported_prompt_tokens, runtime_source FROM ledger_provider_identity_snapshots
 	 WHERE request_id = ? AND attempt_n = ? AND provider_assigned_id = ?
-		 ORDER BY id DESC LIMIT 1`, requestID, attemptN, assignedID).Scan(&providerID, &identityConfigSnapshotID, &providerReportedPrompt)
+		 ORDER BY id DESC LIMIT 1`, requestID, attemptN, assignedID).Scan(&providerID, &identityConfigSnapshotID, &providerReportedPrompt, &identityRuntimeSource)
 		if err != nil {
 			reason := "missing_provider_identity"
 			if ambiguousAttempt {
@@ -349,6 +357,20 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 			quarantined++
 			continue
 		}
+		// The hot path's SPEC-047-R003(iv) / SPEC-022-R012 loopback rule
+		// holds for a re-created row too: never a byte-estimated credit.
+		if !s.recoveredLoopbackAttemptBillable(ctx, tx, identityRuntimeSource, SettlementReceiptIdentity{
+			AccountScope: AccountScopeForSettlement(accountID.String),
+			RequestID:    requestID,
+			AttemptN:     int64(attemptN),
+			ProviderID:   providerID,
+		}, pp, cp, poolAttested) {
+			if _, err := insertRequestCreditTx(ctx, tx, input, zeroCredits(result), in.Source, now, true, LoopbackRuntimeNotSettlementEligible); err != nil {
+				return err
+			}
+			quarantined++
+			continue
+		}
 		id, err := insertRequestCreditTx(ctx, tx, input, result, in.Source, now, false, "")
 		if err != nil {
 			return err
@@ -397,6 +419,132 @@ INSERT INTO ledger_reconciliation_runs (
 		return err
 	}
 	return tx.Commit()
+}
+
+// recoveredLoopbackAttemptBillable applies the hot path's loopback rule to a
+// ledger row recovery re-creates, failing closed on every unknown:
+//   - a recorded native runtime ("" or mlx_cache) is billable as before;
+//   - a recorded loopback runtime is billable only with the runtime's reported
+//     prompt and completion tokens, when recoveryPoolAttestedRoutes verified
+//     SPEC-022-R012.3 and the R006 label for this attempt before the
+//     transaction and the route snapshot read here is still that digest;
+//   - anything else, including a row written before runtime_source existed
+//     (NULL) and an unrecognised runtime, is never billable.
+func (s *Store) recoveredLoopbackAttemptBillable(ctx context.Context, tx *sql.Tx, runtimeSource sql.NullString, id SettlementReceiptIdentity, prompt, completion *int64, poolAttested map[SettlementReceiptIdentity]recoveryPoolAttestation) bool {
+	if !runtimeSource.Valid {
+		return false
+	}
+	if IsNativeRuntimeSource(runtimeSource.String) {
+		return true
+	}
+	if !IsLoopbackRuntimeSource(runtimeSource.String) || prompt == nil || completion == nil {
+		return false
+	}
+	verified, ok := poolAttested[id]
+	if !ok {
+		return false
+	}
+	route, routeHash, err := loadSettlementRouteSnapshotConn(ctx, tx, id)
+	if err != nil || routeHash != verified.routeHash || route.RuntimeSource != runtimeSource.String {
+		return false
+	}
+	// Loopback usage is billable only behind a bound receipt, which the
+	// recorder evidences as a pool_operator_attested attempt output.
+	if !poolAttestedAttemptOutputRecorded(ctx, tx, id) {
+		return false
+	}
+	// The pool state the pre-read decided on must still hold inside this
+	// transaction.
+	return s.poolAttestationFenceHolds(ctx, tx, &verified.fence)
+}
+
+// recoveryPoolAttestation is one pre-read pool_operator_attested decision:
+// the route snapshot digest and the pool fence it was made against.
+type recoveryPoolAttestation struct {
+	routeHash string
+	fence     PoolAttestationFence
+}
+
+// recoveryPoolAttestedRoutes finds, outside any transaction, the loopback
+// attempts in the recovery window that have no ledger row and whose route
+// snapshot satisfies SPEC-022-R012: every R-12.1 member for the recorded
+// runtime, enforce mode, the durable pool authority (R-12.3), and a verified
+// R006 label against the settlement-time pool view. It returns the snapshot
+// digest each was verified against. Any attempt that cannot be verified is
+// left out, so recovery zero-bills it.
+func (s *Store) recoveryPoolAttestedRoutes(ctx context.Context, in RecoverInput) (map[SettlementReceiptIdentity]recoveryPoolAttestation, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT DISTINCT COALESCE(rl.account_id, ''), lpis.request_id, lpis.attempt_n, lpis.provider_id, lpis.runtime_source
+  FROM ledger_provider_identity_snapshots lpis
+  JOIN request_log rl
+    ON rl.request_id = lpis.request_id
+   AND rl.provider_assigned_id = lpis.provider_assigned_id
+ WHERE `+sqliteTimeRange("rl.ts_utc")+`
+   AND lpis.runtime_source IN ('ollama_loopback','lmstudio_loopback','llamacpp_loopback','openai_compatible_loopback','mlxlm_loopback')
+   AND NOT EXISTS (
+       SELECT 1 FROM ledger_request_credits lrc
+        WHERE lrc.request_id = lpis.request_id
+          AND lrc.attempt_n = lpis.attempt_n
+          AND lrc.provider_id = lpis.provider_id
+   )`,
+		sqliteTimeText(in.ScanFrom),
+		sqliteTimeText(in.ScanTo),
+	)
+	if err != nil {
+		return nil, err
+	}
+	type candidate struct {
+		id            SettlementReceiptIdentity
+		runtimeSource string
+	}
+	var candidates []candidate
+	for rows.Next() {
+		var accountID string
+		var c candidate
+		if err := rows.Scan(&accountID, &c.id.RequestID, &c.id.AttemptN, &c.id.ProviderID, &c.runtimeSource); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		c.id.AccountScope = AccountScopeForSettlement(accountID)
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+	verified := make(map[SettlementReceiptIdentity]recoveryPoolAttestation, len(candidates))
+	for _, c := range candidates {
+		var route RouteSnapshot
+		var routeHash string
+		if err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+			var err error
+			route, routeHash, err = loadSettlementRouteSnapshotConn(ctx, conn, c.id)
+			return err
+		}); err != nil {
+			continue
+		}
+		if route.RuntimeSource != c.runtimeSource || route.RouteSnapshotMode != RouteSnapshotModeEnforce || !poolOperatorAttestationSnapshotComplete(route) {
+			continue
+		}
+		if !poolAttestedAttemptOutputRecorded(ctx, s.db, c.id) {
+			continue
+		}
+		// The fence is read before the durable checks, so any pool change
+		// after it makes the in-transaction re-read differ.
+		fence, ok := s.PoolAttestationFenceFor(ctx, route.PoolID)
+		if !ok || !PoolAttestationFenceMatchesRoute(fence, route) {
+			continue
+		}
+		if err := s.PoolOperatorAttestationEligible(ctx, route); err != nil {
+			continue
+		}
+		if !PoolOperatorAttestedLabelVerified(route, routeHash, s.settlementPoolLabels(route.PoolID, routeHash)) {
+			continue
+		}
+		verified[c.id] = recoveryPoolAttestation{routeHash: routeHash, fence: *fence}
+	}
+	return verified, nil
 }
 
 func (s *Store) StartStartupScan(ctx context.Context, cfg SettlementConfig, now time.Time) error {

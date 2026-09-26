@@ -17,6 +17,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 )
 
@@ -26,7 +27,30 @@ import (
 const (
 	identityCoreTag = "macprovider/spec042/identity-core/v1"
 	policyCoreTag   = "macprovider/spec042/policy-core/v1"
+	// policyCoreTagV2 prefixes the SPEC-042-R001 v2 preimage (0.0.32, #1690):
+	// the v1 field list, then runtime_allowlist, then extensions.
+	policyCoreTagV2 = "macprovider/spec042/policy-core/v2"
 )
+
+// Policy-core encodings (SPEC-042-R001). The zero value is v1, so every core
+// built before v2 existed keeps its bytes, digest, and signing tag.
+const (
+	PolicyCoreEncodingV1 uint8 = 1
+	PolicyCoreEncodingV2 uint8 = 2
+)
+
+// The closed SPEC-042-R001 0.0.34 runtime_allowlist vocabulary: the SPEC-046
+// loopback adapters with a serving selector and a SPEC-010 identity leg (GGUF
+// for llama.cpp and Ollama, the MLX snapshot for mlx_lm.server). Native MLX
+// (mlx_cache) is always allowed and is never listed.
+const (
+	RuntimeSourceLlamacppLoopback = "llamacpp_loopback"
+	RuntimeSourceMLXLMLoopback    = "mlxlm_loopback"
+	RuntimeSourceOllamaLoopback   = "ollama_loopback"
+)
+
+// extensionIDPattern is the SPEC-042-R001 extension_id grammar.
+var extensionIDPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,47}/v[1-9][0-9]{0,3}$`)
 
 // manifestCoreHashLen is the fixed length of prev_manifest_core_hash and of
 // manifest_core_digest (SHA-256).
@@ -40,6 +64,15 @@ var (
 	errFieldTooLong     = errors.New("poolmanifest: field exceeds 2^32-1 bytes")
 	errPrevHashLen      = fmt.Errorf("poolmanifest: prev_manifest_core_hash must be %d bytes", manifestCoreHashLen)
 	errDuplicateAllowed = errors.New("poolmanifest: duplicate model allowlist entry")
+
+	errPolicyEncoding          = errors.New("poolmanifest: unknown policy core encoding")
+	errV1CarriesV2Fields       = errors.New("poolmanifest: a v1 policy core cannot carry runtime_allowlist or extensions")
+	errRuntimeAllowlistOrder   = errors.New("poolmanifest: runtime_allowlist must be byte-lexicographically ascending with no duplicates")
+	errRuntimeAllowlistValue   = errors.New("poolmanifest: runtime_allowlist carries a runtime_source outside the closed vocabulary")
+	errRuntimeAllowlistObserve = errors.New("poolmanifest: a non-empty runtime_allowlist requires settlement mode enforce")
+	errExtensionGrammar        = errors.New("poolmanifest: extension_id does not match the SPEC-042-R001 grammar")
+	errExtensionOrder          = errors.New("poolmanifest: extensions must be strictly ascending by extension_id with no duplicates")
+	errExtensionUnknown        = errors.New("poolmanifest: extension_id is not implemented by this coordinator")
 )
 
 // IdentityCore fixes the stable pool identity (SPEC-042-R001). It contains ONLY
@@ -80,6 +113,51 @@ type PolicyCore struct {
 	StickyRoutingAllowed bool // default false for trust-sensitive pools
 	NotBeforeUnix        uint64
 	ExpiresAtUnix        uint64
+	// Encoding selects the canonical preimage: 0 or PolicyCoreEncodingV1 is
+	// the frozen v1 grammar; PolicyCoreEncodingV2 appends RuntimeAllowlist and
+	// Extensions (SPEC-042-R001 0.0.32). A v1 core means native MLX only.
+	Encoding uint8
+	// RuntimeAllowlist is the signed set of external runtime_source values a
+	// v2 core authorizes to serve the pool. Empty means native MLX only.
+	RuntimeAllowlist []string
+	// Extensions is the reserved, versioned v2 extension field. No
+	// extension_id is implemented yet, so an accepted core carries none.
+	Extensions []PolicyExtension
+}
+
+// PolicyExtension is one entry of the v2 reserved extensions field.
+type PolicyExtension struct {
+	ID   string
+	Body []byte
+}
+
+// IsV2 reports whether the core uses the v2 preimage.
+func (pc PolicyCore) IsV2() bool { return pc.Encoding == PolicyCoreEncodingV2 }
+
+// AllowsRuntimeSource reports whether the core authorizes an external runtime
+// to serve the pool: only a v2 core whose runtime_allowlist names it. A v1
+// core, an empty list, or an unlisted value is native MLX only.
+func (pc PolicyCore) AllowsRuntimeSource(runtimeSource string) bool {
+	if !pc.IsV2() || runtimeSource == "" {
+		return false
+	}
+	for _, allowed := range pc.RuntimeAllowlist {
+		if allowed == runtimeSource {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidRuntimeAllowlistSource reports whether a runtime_source belongs to the
+// closed SPEC-042-R001 0.0.34 runtime_allowlist vocabulary.
+func ValidRuntimeAllowlistSource(runtimeSource string) bool {
+	switch runtimeSource {
+	case RuntimeSourceLlamacppLoopback, RuntimeSourceMLXLMLoopback, RuntimeSourceOllamaLoopback:
+		return true
+	default:
+		return false
+	}
 }
 
 // GenesisPrevHash returns the defined genesis value for prev_manifest_core_hash:
@@ -159,6 +237,54 @@ func setOrdered(xs []string) ([]string, error) {
 	return out, nil
 }
 
+// validateV2Grammar applies the SPEC-042-R001 v2 byte grammar: a strictly
+// ascending runtime_allowlist and grammatical, strictly ascending extensions.
+// A core that fails it has no canonical preimage.
+func (pc PolicyCore) validateV2Grammar() error {
+	for i, source := range pc.RuntimeAllowlist {
+		if i > 0 && source <= pc.RuntimeAllowlist[i-1] {
+			return errRuntimeAllowlistOrder
+		}
+	}
+	for _, ext := range pc.Extensions {
+		if !extensionIDPattern.MatchString(ext.ID) {
+			return errExtensionGrammar
+		}
+	}
+	for i := 1; i < len(pc.Extensions); i++ {
+		if pc.Extensions[i].ID <= pc.Extensions[i-1].ID {
+			return errExtensionOrder
+		}
+	}
+	return nil
+}
+
+// ValidateAcceptance applies the SPEC-042-R001 0.0.32 acceptance rules on top
+// of the grammar: the runtime_allowlist vocabulary is closed, a non-empty
+// allowlist requires settlement mode enforce, and a coordinator rejects every
+// extension_id it does not implement (0.0.32 implements none). Signature
+// verification runs it, so no core that fails it is ever accepted or replayed.
+func (pc PolicyCore) ValidateAcceptance() error {
+	if _, err := pc.CanonicalBytes(); err != nil {
+		return err
+	}
+	if !pc.IsV2() {
+		return nil
+	}
+	for _, source := range pc.RuntimeAllowlist {
+		if !ValidRuntimeAllowlistSource(source) {
+			return errRuntimeAllowlistValue
+		}
+	}
+	if len(pc.RuntimeAllowlist) > 0 && pc.SettlementMode != "enforce" {
+		return errRuntimeAllowlistObserve
+	}
+	if len(pc.Extensions) > 0 {
+		return errExtensionUnknown
+	}
+	return nil
+}
+
 // CanonicalBytes returns the SPEC-042-R001 versioned policy-core preimage.
 func (pc PolicyCore) CanonicalBytes() ([]byte, error) {
 	if len(pc.PrevManifestCoreHash) != manifestCoreHashLen {
@@ -168,8 +294,22 @@ func (pc PolicyCore) CanonicalBytes() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	tag := policyCoreTag
+	switch pc.Encoding {
+	case 0, PolicyCoreEncodingV1:
+		if len(pc.RuntimeAllowlist) > 0 || len(pc.Extensions) > 0 {
+			return nil, errV1CarriesV2Fields
+		}
+	case PolicyCoreEncodingV2:
+		if err := pc.validateV2Grammar(); err != nil {
+			return nil, err
+		}
+		tag = policyCoreTagV2
+	default:
+		return nil, errPolicyEncoding
+	}
 	e := &encoder{}
-	e.tag(policyCoreTag)
+	e.tag(tag)
 	e.str(pc.PoolID)
 	e.u64(pc.ManifestVersion)
 	e.bytesf(pc.PrevManifestCoreHash)
@@ -201,6 +341,18 @@ func (pc PolicyCore) CanonicalBytes() ([]byte, error) {
 	e.boolean(pc.StickyRoutingAllowed)
 	e.u64(pc.NotBeforeUnix)
 	e.u64(pc.ExpiresAtUnix)
+	if pc.IsV2() {
+		// runtime_allowlist then extensions, in this order (SPEC-042-R001).
+		e.u32count(len(pc.RuntimeAllowlist))
+		for _, source := range pc.RuntimeAllowlist {
+			e.str(source)
+		}
+		e.u32count(len(pc.Extensions))
+		for _, ext := range pc.Extensions {
+			e.str(ext.ID)
+			e.bytesf(ext.Body)
+		}
+	}
 	if e.err != nil {
 		return nil, e.err
 	}

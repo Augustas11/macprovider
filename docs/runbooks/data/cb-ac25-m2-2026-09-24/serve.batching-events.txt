@@ -1,0 +1,7 @@
+event=batching_unsupported action=serial_routed reason=local_batching_capability_unavailable
+[paged-kv] parity model=qwen3-coder-30b-a3b-instruct established=true nLayers=48 nNew=32 gatherKernelCalls=3072 expectCalls=3072 maxLogicalBlocks=18 nonIdentityPermutation=true
+[paged-kv] batched-isolation model=qwen3-coder-30b-a3b-instruct requiresMoE=true proven=true rowsDecoded=2 rowFailures=0 crossRowDivergences=0 challengeDistinguishing=true
+[paged-kv] measure OK: runtime measurement complete, paged-KV attach eligible for model=qwen3-coder-30b-a3b-instruct
+event=batching_unsupported action=serial_routed reason=stable_request_id_unavailable
+event=batching_unsupported action=serial_routed reason=stable_request_id_unavailable
+event=batching_unsupported action=serial_routed reason=stable_request_id_unavailable

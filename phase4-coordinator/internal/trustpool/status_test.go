@@ -388,7 +388,10 @@ func TestBuildPublicStatusDocumentRequiresMatchingAnnouncementApproval(t *testin
 	if !found {
 		t.Fatal("BuildPublicStatusDocumentWithLiveProviders missing registry snapshot found=false, want true")
 	}
-	if doc.Pool.Readiness != "unavailable" || doc.Pool.ReadinessReason != "routeable_snapshot_stale" || doc.Membership.CurrentEligibleMemberCount != 0 || doc.Routeability.Routeable {
+	// The fixture activates a non-candidate root on a store without a
+	// production activation gate; publication re-checks the current gate, so
+	// that reason now wins over the missing registry snapshot (freeze audit H3).
+	if doc.Pool.Readiness != "unavailable" || doc.Pool.ReadinessReason != "launch_environment_not_candidate" || doc.Membership.CurrentEligibleMemberCount != 0 || doc.Routeability.Routeable {
 		t.Fatalf("missing registry snapshot readiness=%q reason=%q eligible=%d routeable=%v", doc.Pool.Readiness, doc.Pool.ReadinessReason, doc.Membership.CurrentEligibleMemberCount, doc.Routeability.Routeable)
 	}
 }

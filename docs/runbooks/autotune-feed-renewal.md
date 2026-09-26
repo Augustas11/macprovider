@@ -112,7 +112,7 @@ dry-run):
      rows-only price correction ships through the catalog-content lane's
      pricing path; a `usd_per_million_credits`, `provider_share_bps`, or
      `global_multiplier_ppm` change needs a runtime release
-     (`docs/runbooks/catalog-release-decision-tree.md`, SPEC-023-R016/R018);
+     (`docs/runbooks/catalog-release-decision-tree.md`, SPEC-023-R016/R019);
    - rsyncs the signed dir into `releases/`;
    - holds the same Pearl deploy locks as `deploy-pearl-vps.sh`
      (`/run/lock/macprovider-pearl-updater.lock` then

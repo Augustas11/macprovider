@@ -57,6 +57,47 @@ struct PagedKVGatherKernel {
     }
 }
 
+/// Pure block/capacity arithmetic for `PagedKVCache` storage, kept free of MLX
+/// so it is testable on hosts without the Metal library.
+enum PagedKVBlockLayout {
+    static func blockCount(tokens: Int, blockSizeTokens: Int) -> Int {
+        guard tokens > 0, blockSizeTokens > 0 else { return 0 }
+        return (tokens - 1) / blockSizeTokens + 1
+    }
+
+    /// Half-open token ranges of each logical block over `tokens` stored tokens;
+    /// every block is full except possibly the last.
+    static func blockRanges(tokens: Int, blockSizeTokens: Int) -> [Range<Int>] {
+        (0 ..< blockCount(tokens: tokens, blockSizeTokens: blockSizeTokens)).map { index in
+            let start = index * blockSizeTokens
+            return start ..< min(start + blockSizeTokens, tokens)
+        }
+    }
+
+    /// Capacity after growing a buffer so it fits `needed` tokens: `needed`
+    /// rounded up to whole allocator blocks, never above `maxTokens` unless
+    /// `needed` itself is larger (callers reject that case first). Physical
+    /// capacity therefore never exceeds the blocks SPEC-039 FR-PKV2 accounts
+    /// for the stored tokens.
+    static func grownCapacity(
+        needed: Int,
+        maxTokens: Int,
+        blockSizeTokens: Int
+    ) -> Int {
+        let alignedTo = alignedCapacity(tokens: needed, blockSizeTokens: blockSizeTokens)
+        return max(needed, min(alignedTo, maxTokens))
+    }
+
+    /// `tokens` rounded up to whole blocks of `blockSizeTokens`.
+    static func alignedCapacity(tokens: Int, blockSizeTokens: Int) -> Int {
+        guard tokens > 0 else { return 0 }
+        guard blockSizeTokens > 1 else { return tokens }
+        let blocks = blockCount(tokens: tokens, blockSizeTokens: blockSizeTokens)
+        let (capacity, overflow) = blocks.multipliedReportingOverflow(by: blockSizeTokens)
+        return overflow ? tokens : capacity
+    }
+}
+
 /// Compile-time `KVCache` seam for the future installed paged runtime bridge.
 ///
 /// Production `ModelRuntime` attempts measured observation and instantiates this
@@ -80,8 +121,20 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     /// construction of the seam (the SPEC-038-facing metadata surface) still runs no
     /// Metal — only driving the cache through a real forward pass executes the kernel.
     private var registeredKernel: MLXFast.MLXFastKernel?
-    private var keyBlocks: [MLXArray] = []
-    private var valueBlocks: [MLXArray] = []
+    /// Contiguous `[B, H, capacity, D]` backing buffers. Only the first
+    /// `storedTokens` positions are logical K/V; block views are derived from
+    /// that prefix on demand (record/materialize, description). Appending per
+    /// decode step writes in place instead of re-concatenating and re-splitting
+    /// the whole history, which made batched decode O(context) per step.
+    private var keyBuffer: MLXArray?
+    private var valueBuffer: MLXArray?
+    /// Logical tokens held in the buffers. Tracks what the old block list held,
+    /// which can be less than `offset` when the cache starts at a nonzero
+    /// `initialOffset` with no stored K/V.
+    private(set) var storedTokens = 0
+    /// Bumped on every mutation of stored K/V or `offset`. Lets a batch view
+    /// detect that a row changed outside it (for example a bridge trim).
+    private(set) var mutationCount = 0
     var offset: Int
 
     /// Number of times the paged Metal gather kernel actually executed. Proof, for the
@@ -141,6 +194,9 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
 
     var maxSize: Int? { maxResidentTokens }
 
+    /// Allocated sequence capacity of the backing buffers (>= `storedTokens`).
+    var bufferCapacityTokens: Int { keyBuffer?.dim(2) ?? 0 }
+
     func innerState() -> [MLXArray] {
         state
     }
@@ -158,11 +214,17 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         let (projectedOffset, offsetOverflow) = offset.addingReportingOverflow(incomingTokens)
         guard !offsetOverflow, projectedOffset <= maxResidentTokens else { return (keys, values) }
 
-        let mergedKeys = append(keys, to: keyBlocks)
-        let mergedValues = append(values, to: valueBlocks)
+        let start = storedTokens
+        let end = start + incomingTokens
+        let nextKeys = Self.write(keys, into: keyBuffer, stored: start, maxTokens: maxResidentTokens, blockSizeTokens: blockSizeTokens)
+        let nextValues = Self.write(values, into: valueBuffer, stored: start, maxTokens: maxResidentTokens, blockSizeTokens: blockSizeTokens)
+        keyBuffer = nextKeys
+        valueBuffer = nextValues
+        storedTokens = end
         offset += incomingTokens
-        keyBlocks = splitIntoBlocks(mergedKeys)
-        valueBlocks = splitIntoBlocks(mergedValues)
+        mutationCount &+= 1
+        let mergedKeys = Self.prefix(nextKeys, end)
+        let mergedValues = Self.prefix(nextValues, end)
         guard reconstructViaGather else {
             return (mergedKeys, mergedValues)
         }
@@ -255,12 +317,10 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
 
     var state: [MLXArray] {
         get {
-            guard let keys = materialized(keyBlocks),
-                  let values = materialized(valueBlocks)
-            else {
+            guard storedTokens > 0, let keyBuffer, let valueBuffer else {
                 return []
             }
-            return [keys, values]
+            return [Self.prefix(keyBuffer, storedTokens), Self.prefix(valueBuffer, storedTokens)]
         }
         set {
             // Controlled handling (inert seam): ignore malformed state assignments rather
@@ -271,8 +331,13 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
             let values = newValue[1]
             guard keys.ndim == 4, values.ndim == 4, keys.dim(2) == values.dim(2) else { return }
             offset = keys.dim(2)
-            keyBlocks = splitIntoBlocks(keys)
-            valueBlocks = splitIntoBlocks(values)
+            // Adopt as exact-capacity buffers without copying data. Wrap in new
+            // slice objects: after a `trim` frees capacity, `update` writes in
+            // place, and that must never touch the caller's `MLXArray` objects.
+            keyBuffer = Self.prefix(keys, keys.dim(2))
+            valueBuffer = Self.prefix(values, values.dim(2))
+            storedTokens = keys.dim(2)
+            mutationCount &+= 1
         }
     }
 
@@ -300,10 +365,18 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         let trimmed = min(offset, max(n, 0))
         guard trimmed > 0 else { return 0 }
         offset -= trimmed
-        if let keys = materialized(keyBlocks), let values = materialized(valueBlocks) {
-            keyBlocks = splitIntoBlocks(keys[.ellipsis, ..<offset, 0...])
-            valueBlocks = splitIntoBlocks(values[.ellipsis, ..<offset, 0...])
+        storedTokens = min(storedTokens, offset)
+        // Keep capacity within the blocks the allocator still accounts for
+        // (SPEC-039 FR-PKV2): a trim that frees whole blocks copies the kept
+        // prefix into a right-sized buffer so the freed memory is released.
+        // Positions past `storedTokens` inside the kept blocks are overwritten
+        // by the next `update`.
+        let keep = PagedKVBlockLayout.alignedCapacity(tokens: storedTokens, blockSizeTokens: blockSizeTokens)
+        if let keyBuffer, let valueBuffer, keyBuffer.dim(2) > keep {
+            self.keyBuffer = Self.resized(keyBuffer, stored: storedTokens, capacity: keep)
+            self.valueBuffer = Self.resized(valueBuffer, stored: storedTokens, capacity: keep)
         }
+        mutationCount &+= 1
         return trimmed
     }
 
@@ -324,10 +397,43 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         return copied
     }
 
+    /// The structural guards of `physicalLayerBlocks` without copying any KV
+    /// to host memory. Recording runs after every decode window, so it must
+    /// not pay a full-history device-to-host copy per row per window.
+    func validateRecordable(table: PagedKVBlockTable) throws {
+        // Same checks as `physicalLayerBlocks`, computed from the buffers'
+        // metadata so recording does not build per-block views every window.
+        let blockCount = PagedKVBlockLayout.blockCount(tokens: storedTokens, blockSizeTokens: blockSizeTokens)
+        guard offset == table.logicalTokenCount,
+              table.blockSizeTokens == blockSizeTokens,
+              blockCount == table.physicalBlocks.count
+        else {
+            throw PagedKVContiguousCacheBridgeError.blockTableMismatch
+        }
+        guard blockCount > 0,
+              let keyBuffer,
+              let valueBuffer,
+              keyBuffer.ndim >= 3,
+              valueBuffer.ndim >= 3,
+              Self.firstBlockShape(keyBuffer, storedTokens: storedTokens, blockSizeTokens: blockSizeTokens)
+                == Self.firstBlockShape(valueBuffer, storedTokens: storedTokens, blockSizeTokens: blockSizeTokens),
+              keyBuffer.dtype == valueBuffer.dtype
+        else {
+            throw PagedKVContiguousCacheBridgeError.invalidLayerState
+        }
+        do {
+            _ = try Self.pagedDType(for: keyBuffer.dtype)
+        } catch {
+            throw PagedKVContiguousCacheBridgeError.invalidLayerState
+        }
+    }
+
     func physicalLayerBlocks(
         layerIndex: Int,
         table: PagedKVBlockTable
     ) throws -> PagedKVRuntimePhysicalLayerBlocks {
+        let keyBlocks = blockViews(keyBuffer)
+        let valueBlocks = blockViews(valueBuffer)
         guard offset == table.logicalTokenCount,
               table.blockSizeTokens == blockSizeTokens,
               keyBlocks.count == valueBlocks.count,
@@ -389,7 +495,7 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
     }
 
     var debugDescription: String {
-        "PagedKVCache(offset=\(offset), blockSizeTokens=\(blockSizeTokens), blocks=\(keyBlocks.count))"
+        "PagedKVCache(offset=\(offset), blockSizeTokens=\(blockSizeTokens), blocks=\(PagedKVBlockLayout.blockCount(tokens: storedTokens, blockSizeTokens: blockSizeTokens)))"
     }
 
     private var maxResidentTokens: Int {
@@ -397,31 +503,89 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         return overflow ? Int.max : value
     }
 
-    private func append(_ array: MLXArray, to blocks: [MLXArray]) -> MLXArray {
-        guard let current = materialized(blocks) else { return array }
-        return concatenated([current, array], axis: 2)
+    /// A new buffer of `capacity` tokens holding `buffer`'s first `stored`
+    /// tokens; nil when nothing is kept. Always fresh memory, never a view.
+    private static func resized(_ buffer: MLXArray, stored: Int, capacity: Int) -> MLXArray? {
+        guard capacity > 0 else { return nil }
+        var shape = buffer.shape
+        shape[2] = capacity - stored
+        let extra = MLXArray.zeros(shape, dtype: buffer.dtype)
+        guard stored > 0 else { return extra }
+        return concatenated([prefix(buffer, stored), extra], axis: 2)
     }
 
-    private func materialized(_ blocks: [MLXArray]) -> MLXArray? {
-        guard !blocks.isEmpty else { return nil }
-        // Storage retrieval only (logical accumulation). The paged Metal gather runs in
-        // `update()` via `pagedGather`, which reconstructs logical order from a non-identity
-        // physical block layout; this helper just returns the accumulated logical K/V.
-        _ = gatherKernel
-        return blocks.count == 1 ? blocks[0] : concatenated(blocks, axis: 2)
-    }
-
-    private func splitIntoBlocks(_ array: MLXArray) -> [MLXArray] {
-        let tokens = array.dim(2)
-        guard tokens > 0 else { return [] }
-        var blocks: [MLXArray] = []
-        var start = 0
-        while start < tokens {
-            let end = min(start + blockSizeTokens, tokens)
-            blocks.append(array[.ellipsis, start ..< end, 0...])
-            start = end
+    /// Appends `incoming` at `[stored ..< stored + n]` of `buffer`, growing it
+    /// to whole allocator blocks (capped at `maxTokens`). A buffer whose dtype
+    /// or non-sequence dims differ from `incoming` falls back to the old exact
+    /// concatenation, so promotion and shape behavior stay unchanged.
+    private static func write(
+        _ incoming: MLXArray,
+        into buffer: MLXArray?,
+        stored: Int,
+        maxTokens: Int,
+        blockSizeTokens: Int
+    ) -> MLXArray {
+        let n = incoming.dim(2)
+        guard let buffer else {
+            guard n > 0 else { return prefix(incoming, 0) }
+            var target = grown(nil, like: incoming, stored: 0, needed: n, maxTokens: maxTokens, blockSizeTokens: blockSizeTokens)
+            target[.ellipsis, 0 ..< n, 0...] = incoming
+            return target
         }
-        return blocks
+        guard n > 0 else { return buffer }
+        guard buffer.ndim == 4,
+              buffer.dim(0) == incoming.dim(0),
+              buffer.dim(1) == incoming.dim(1),
+              buffer.dim(3) == incoming.dim(3),
+              buffer.dtype == incoming.dtype
+        else {
+            return concatenated([prefix(buffer, stored), incoming], axis: 2)
+        }
+        var target = buffer.dim(2) >= stored + n
+            ? buffer
+            : grown(buffer, like: incoming, stored: stored, needed: stored + n, maxTokens: maxTokens, blockSizeTokens: blockSizeTokens)
+        target[.ellipsis, stored ..< stored + n, 0...] = incoming
+        return target
+    }
+
+    private static func grown(
+        _ buffer: MLXArray?,
+        like incoming: MLXArray,
+        stored: Int,
+        needed: Int,
+        maxTokens: Int,
+        blockSizeTokens: Int
+    ) -> MLXArray {
+        let capacity = PagedKVBlockLayout.grownCapacity(needed: needed, maxTokens: maxTokens, blockSizeTokens: blockSizeTokens)
+        let extra = MLXArray.zeros(
+            [incoming.dim(0), incoming.dim(1), capacity - stored, incoming.dim(3)],
+            dtype: incoming.dtype
+        )
+        guard let buffer, stored > 0 else { return extra }
+        return concatenated([prefix(buffer, stored), extra], axis: 2)
+    }
+
+    /// Always a new slice, never the buffer object: MLX slice assignment
+    /// mutates the `MLXArray` object in place, so handing out the buffer itself
+    /// would let a later write alias into K/V the caller still holds.
+    private static func prefix(_ buffer: MLXArray, _ tokens: Int) -> MLXArray {
+        buffer[.ellipsis, ..<tokens, 0...]
+    }
+
+    private static func firstBlockShape(_ buffer: MLXArray, storedTokens: Int, blockSizeTokens: Int) -> [Int] {
+        var shape = buffer.shape
+        shape[shape.count - 2] = min(blockSizeTokens, storedTokens)
+        return shape
+    }
+
+    /// Block views over the logical prefix, built only when a caller needs
+    /// per-block arrays (FR-PKV10 record/materialize).
+    private func blockViews(_ buffer: MLXArray?) -> [MLXArray] {
+        guard storedTokens > 0, let buffer else { return [] }
+        let logical = Self.prefix(buffer, storedTokens)
+        return PagedKVBlockLayout.blockRanges(tokens: storedTokens, blockSizeTokens: blockSizeTokens).map {
+            logical[.ellipsis, $0, 0...]
+        }
     }
 
     private static func physicalBlocks(

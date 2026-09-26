@@ -4030,6 +4030,39 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(supportedModels, [catalogModelID])
     }
 
+    func testTunneledAuthDeclaresLoopbackRuntimeSourceLikeLegacyHello() async throws {
+        // #1690 M6: the default WS-tunneled session sends auth, not hello. A
+        // loopback runtime must declare runtime_source there too, or the
+        // coordinator records it as a native session and no Trusted Pool
+        // runtime-allowlist binding can ever select it.
+        for source in ["llamacpp_loopback", "ollama_loopback"] {
+            let client = try await makeClient(
+                status: ProviderStatus(
+                    modelID: "model-a",
+                    modelLoaded: true,
+                    capacity: ProviderCapacity(maxContextOverride: 2048, maxConcurrencyOverride: 1)
+                ),
+                recorder: CoordinatorFrameRecorder(),
+                runtimeSource: source
+            )
+            let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+            let hello = await client.helloMessage()
+            XCTAssertEqual(auth["runtime_source"] as? String, source)
+            XCTAssertEqual(hello["runtime_source"] as? String, source)
+        }
+        // The MLX path keeps its wire shape: no runtime_source field.
+        let native = try await makeClient(
+            status: ProviderStatus(
+                modelID: "model-a",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: 2048, maxConcurrencyOverride: 1)
+            ),
+            recorder: CoordinatorFrameRecorder()
+        )
+        let nativeAuth = await native.authInitialMessage(attempt: Tier2AuthAttempt())
+        XCTAssertNil(nativeAuth["runtime_source"])
+    }
+
     func testCatalogModelIDDoesNotMaskCompletedWarmSwapRuntimeModelID() async throws {
         let recorder = CoordinatorFrameRecorder()
         let runtime = makeRuntime(modelID: "model-b", modelHash: "runtime-hash", warmSwapEnabled: true)
@@ -5227,6 +5260,8 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(caps["aead_suites"] as? [String], [Tier2ProviderSession.aeadSuite])
         XCTAssertEqual(caps["response_chunk_plaintext_envelope"] as? Bool, true)
         XCTAssertEqual(caps["in_band_aead_rekey_v1"] as? Bool, true)
+        // SPEC-001 v1.9.21: this build holds through catalog_material_missing.
+        XCTAssertEqual(caps["catalog_material_hold_v1"] as? Bool, true)
     }
 
     func testInBandAEADRekeyProvesFreshKeysBeforeSameSessionCutover() async throws {
@@ -6628,6 +6663,44 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(promoted.state, .servingBuyers)
         XCTAssertEqual(promoted.reasonCode, CoordinatorClient.admissionConfirmedLifecycleReasonCode)
         await client.cleanupConnectionForTest()
+    }
+
+    func testCoordinatorSessionHoldsThroughMissingCatalogMaterialThenPromotes() async throws {
+        let fixture = try LifecycleFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let script = ReadinessScript(
+            [.notServing(hold: .catalogMaterialMissing), .notServing(hold: .catalogMaterialMissing)],
+            then: .confirmed
+        )
+        let client = try await makeHeldSessionClient(fixture: fixture, script: script)
+
+        // SPEC-001 v1.9.21: only a network catalog update clears the hold, so
+        // the accept path holds the session instead of throwing to reconnect.
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "catalog_compatible": true,
+        ])
+        let held = try fixture.record()
+        XCTAssertEqual(held.state, .locallyReadyConnecting)
+        XCTAssertEqual(held.reasonCode, CoordinatorClient.catalogMaterialMissingLifecycleReasonCode)
+        let callsAtHold = await script.calls
+        XCTAssertEqual(callsAtHold, 1)
+
+        let promoted = try await waitForLifecycleReason(fixture, CoordinatorClient.catalogMaterialConfirmedLifecycleReasonCode)
+        XCTAssertEqual(promoted.state, .servingBuyers)
+        await client.cleanupConnectionForTest()
+
+        // The console line and autoupdate success reason name the hold that
+        // ended, not model admission.
+        let ended = CoordinatorClient.buyerServingHoldEnded(.catalogMaterialMissing)
+        XCTAssertEqual(ended.lifecycleReasonCode, CoordinatorClient.catalogMaterialConfirmedLifecycleReasonCode)
+        XCTAssertEqual(ended.autoupdateSuccessReason, "coordinator_admitted_serving_capability_confirmed_after_catalog_material")
+        XCTAssertFalse(ended.consoleMessage.contains("model admission"), ended.consoleMessage)
+        let admission = CoordinatorClient.buyerServingHoldEnded(.modelAdmissionPending)
+        XCTAssertEqual(admission.autoupdateSuccessReason, "coordinator_admitted_serving_capability_confirmed_after_admission")
+        XCTAssertEqual(admission.consoleMessage, "Coordinator confirmed buyer serving after model admission")
     }
 
     func testCoordinatorSessionStillFailsClosedWhenReadinessIsUnconfirmedWithoutAdmissionHold() async throws {

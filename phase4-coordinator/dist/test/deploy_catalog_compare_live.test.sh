@@ -75,7 +75,7 @@ grep -q 'cwo_override_remote_command' "$TMP/append-helper.sh" || fail "could not
 # --- Fake Pearl --------------------------------------------------------------
 BASE_FILES="demand-rank.json demand-rank.json.sig autotune-candidates.json autotune-candidates.json.sig rate-card.json rate-card.json.sig tier2-catalog.json release.json trusted-keys.json"
 BOUND_FILES="$BASE_FILES autotune-artifacts.json autotune-artifacts.json.sig"
-COMMITTED_ID="published-2026-09-23-tier2-buyer-closure-v1"
+COMMITTED_ID="published-2026-09-25-artifact-hash-correction-v1"
 BOUND_ID="published-2026-09-30-artifact-bound-v1"
 # BOUND=1 switches every fixture to the artifact-bound (eleven-file) release.
 BOUND=0
@@ -174,7 +174,7 @@ PY
 ROOT="$TMP/opt/macprovider"
 VAR="$TMP/var/lib/macprovider"
 DEPLOY_TMP="$TMP/deploy-tmp"
-INCOMING_DIR="published-2026-09-23-tier2-buyer-closure-v1-0123456789abcdef"
+INCOMING_DIR="published-2026-09-25-artifact-hash-correction-v1-0123456789abcdef"
 
 fake_ssh() {
   local script
@@ -358,7 +358,7 @@ lines = open(sys.argv[1]).read().splitlines()
 assert len(lines) == 1, lines
 r = json.loads(lines[0])
 assert r["reason"] == sys.argv[2] and r["incoming"] == sys.argv[3], r
-assert r["live"] == {"target": "releases/newer-live", "release_id": "published-2026-09-23-tier2-buyer-closure-v1"}, r
+assert r["live"] == {"target": "releases/newer-live", "release_id": "published-2026-09-25-artifact-hash-correction-v1"}, r
 assert r["tag"] == "v9.9.9" and r["commit"].startswith("0123"), r
 assert set(r) == {"ts", "reason", "incoming", "live", "tag", "commit"}, r
 PY

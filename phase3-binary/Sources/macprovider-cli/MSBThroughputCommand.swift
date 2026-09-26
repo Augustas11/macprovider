@@ -168,11 +168,16 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             throw ExitCode(1)
         }
 
-        let layerCount = await container.perform { context in
-            context.model.newCache(parameters: nil).count
+        let cacheKinds = await container.perform { context in
+            Self.msbCacheKinds(model: context.model)
         }
+        guard let cacheKinds, !cacheKinds.isEmpty else {
+            FileHandle.standardError.write(Data("msb-throughput: model reports unsupported cache topology\n".utf8))
+            throw ExitCode(1)
+        }
+        let layerCount = Self.pagedAttentionLayerCount(cacheKinds)
         guard layerCount > 0 else {
-            FileHandle.standardError.write(Data("msb-throughput: model reports zero KV layers\n".utf8))
+            FileHandle.standardError.write(Data("msb-throughput: model reports zero paged attention layers\n".utf8))
             throw ExitCode(1)
         }
 
@@ -183,28 +188,28 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 return
             }
         case .msb03:
-            try await runMSB03(modelID: modelID, container: container, layerCount: layerCount)
+            try await runMSB03(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
             return
         case .msb05:
             try await runMSB05(modelID: modelID, container: container, layerCount: layerCount)
             return
         case .parity:
-            try await runParity(modelID: modelID, container: container, layerCount: layerCount)
+            try await runParity(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
             return
         case .isolation:
-            try await runIsolation(modelID: modelID, container: container, layerCount: layerCount)
+            try await runIsolation(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
             return
         case .replay:
-            try await runReplay(modelID: modelID, container: container, layerCount: layerCount)
+            try await runReplay(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
             return
         case .drain:
-            try await runDrain(modelID: modelID, container: container, layerCount: layerCount)
+            try await runDrain(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
             return
         case .leftovers:
-            try await runIsolation(modelID: modelID, container: container, layerCount: layerCount)
-            try await runReplay(modelID: modelID, container: container, layerCount: layerCount)
-            try await runDrain(modelID: modelID, container: container, layerCount: layerCount)
-            try await runParity(modelID: modelID, container: container, layerCount: layerCount)
+            try await runIsolation(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
+            try await runReplay(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
+            try await runDrain(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
+            try await runParity(modelID: modelID, container: container, layerCount: layerCount, cacheKinds: cacheKinds)
             return
         }
 
@@ -228,6 +233,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         // `aggregateVsProductionSerial` ratio is token-comparable, not skewed by
         // a different prompt length.
         var serialRunTPS: [Double] = []
+        var serialRunTTFTSeconds: [Double] = []
         _ = try await runProductionSerialOnce(
             container: container, promptTokens: baselinePrompt, timedDecodeTokens: decodeTokens
         ) // warmup
@@ -236,6 +242,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 container: container, promptTokens: baselinePrompt, timedDecodeTokens: decodeTokens
             )
             serialRunTPS.append(serial.timedTokensPerSecond)
+            serialRunTTFTSeconds.append(serial.ttftSeconds)
             peakRSSMB = max(peakRSSMB, memoryRSSMB())
         }
 
@@ -266,7 +273,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     container: container,
                     prompts: prompts,
                     decodeSteps: decodeTokens,
-                    compiled: compiledThisRun
+                    compiled: compiledThisRun,
+                    cacheKinds: cacheKinds
                 )
             case .scheduler:
                 return try await runSchedulerDecode(
@@ -274,7 +282,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     prompts: prompts,
                     decodeSteps: decodeTokens,
                     compiled: compiledThisRun,
-                    layerCount: layerCount
+                    cacheKinds: cacheKinds
                 ).batched
             case .serialParallel:
                 FileHandle.standardError.write(Data(
@@ -343,7 +351,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             perRowFractionOfPagedSingleRow: perRowFraction,
             peakRSSMB: peakRSSMB,
             leftovers: nil,
-            timestamp: ISO8601DateFormatter().string(from: Date())
+            timestamp: ISO8601DateFormatter().string(from: Date()),
+            productionSerialTTFTSecondsRuns: serialRunTTFTSeconds,
+            peakPhysFootprintMB: msbLifetimePeakPhysFootprintMB(pid: getpid())
         )
 
         let encoder = JSONEncoder()
@@ -426,6 +436,31 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         var currentToken: Int
     }
 
+    private static func msbCacheKinds(model: any LanguageModel) -> [PagedKVSharedForwardBackend.CacheKind]? {
+        let caches = model.newCache(parameters: nil)
+        guard !caches.isEmpty else { return nil }
+        var kinds: [PagedKVSharedForwardBackend.CacheKind] = []
+        kinds.reserveCapacity(caches.count)
+        for cache in caches {
+            if cache is KVCacheSimple {
+                kinds.append(.pagedAttention)
+            } else if cache is MambaCache {
+                kinds.append(.recurrentMamba)
+            } else {
+                return nil
+            }
+        }
+        return kinds.contains(.pagedAttention) ? kinds : nil
+    }
+
+    private static func pagedAttentionLayerCount(_ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]) -> Int {
+        cacheKinds.filter { $0 == .pagedAttention }.count
+    }
+
+    private static func msbCacheClass(_ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]) -> String {
+        cacheKinds.contains(.recurrentMamba) ? "mixed" : "KVCacheSimple"
+    }
+
     /// Drive `PagedKVSharedForwardBackend.prefill` + a decode loop over
     /// `prompts.count` rows, mirroring `ContinuousBatchScheduler.runDecodeStep`
     /// bookkeeping exactly. Prefill (untimed) commits each prompt minus its last
@@ -436,15 +471,16 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         container: ModelContainer,
         prompts: [[Int]],
         decodeSteps: Int,
-        compiled: Bool
+        compiled: Bool,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) async throws -> BatchedRunResult {
-        let layers = await container.perform { $0.model.newCache(parameters: nil).count }
         let backend = PagedKVSharedForwardBackend(
             container: container,
             blockSizeTokens: blockSizeTokens,
             maxPhysicalBlocks: maxPhysicalBlocks,
             poolEpoch: 1,
-            layerCount: layers,
+            layerCount: cacheKinds.count,
+            cacheKinds: cacheKinds,
             compiledDecode: compiled
         )
         let allocator = try PagedKVBlockAllocator(
@@ -530,13 +566,13 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         prompts: [[Int]],
         decodeSteps: Int,
         compiled: Bool,
-        layerCount: Int,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
         maxPromptChunkTokens: Int? = nil,
         maxDecodeLockstepWindow: Int? = nil
     ) async throws -> SchedulerRunDetail {
         let (scheduler, backend) = try makeHarnessScheduler(
             container: container,
-            layerCount: layerCount,
+            cacheKinds: cacheKinds,
             compiled: compiled,
             maxActiveRows: max(1, prompts.count),
             maxPromptChunkTokens: maxPromptChunkTokens ?? max(1, promptTokens),
@@ -613,7 +649,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
     private func makeHarnessScheduler(
         container: ModelContainer,
-        layerCount: Int,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
         compiled: Bool,
         maxActiveRows: Int,
         maxPromptChunkTokens: Int,
@@ -621,6 +657,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         replayAuthority: MSBThroughputReplayAuthority = MSBThroughputReplayAuthority()
     ) throws -> (ContinuousBatchScheduler, MSBSchedulerWindowTimingBackend) {
         let sha = String(repeating: "a", count: 64)
+        let cacheClass = Self.msbCacheClass(cacheKinds)
         let descriptor = PagedKVDescriptor(
             blockSizeTokens: blockSizeTokens,
             maxPhysicalBlocks: maxPhysicalBlocks,
@@ -629,6 +666,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             tokenizerSHA256: sha,
             chatTemplateSHA256: sha,
             supportedModelFamilies: ["qwen", "llama"],
+            allowedCacheClasses: [cacheClass],
             supportsMoEDispatch: true,
             hardwareClass: "apple-silicon-harness",
             metallibSHA256: sha,
@@ -640,7 +678,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             modelSHA256: descriptor.modelSHA256,
             tokenizerSHA256: descriptor.tokenizerSHA256,
             chatTemplateSHA256: descriptor.chatTemplateSHA256,
-            cacheClass: "KVCacheSimple",
+            cacheClass: cacheClass,
             kvDType: .fp16,
             requiresMoE: false,
             hardwareClass: "apple-silicon-harness",
@@ -654,7 +692,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             blockSizeTokens: blockSizeTokens,
             maxPhysicalBlocks: maxPhysicalBlocks,
             poolEpoch: 1,
-            layerCount: layerCount,
+            layerCount: cacheKinds.count,
+            cacheKinds: cacheKinds,
             compiledDecode: compiled
         )
         let backend = MSBSchedulerWindowTimingBackend(inner: inner)
@@ -887,7 +926,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     private func runMSB03(
         modelID: String,
         container: ModelContainer,
-        layerCount: Int
+        layerCount: Int,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) async throws {
         let lengths = msb03PromptLengths()
         let prompts = try await buildPrompts(container: container, lengths: lengths)
@@ -917,7 +957,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             prompts: [shortPrompt],
             decodeSteps: decodeTokens,
             compiled: compile,
-            layerCount: layerCount,
+            cacheKinds: cacheKinds,
             maxPromptChunkTokens: 512
         )
         for _ in 0..<runs {
@@ -926,7 +966,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 prompts: [shortPrompt],
                 decodeSteps: decodeTokens,
                 compiled: compile,
-                layerCount: layerCount,
+                cacheKinds: cacheKinds,
                 maxPromptChunkTokens: 512
             )
             try assertHealthy(single.batched, expectedRows: 1, expectedTokens: decodeTokens, label: "msb03-single")
@@ -938,7 +978,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             prompts: prompts,
             decodeSteps: decodeTokens,
             compiled: compile,
-            layerCount: layerCount,
+            cacheKinds: cacheKinds,
             maxPromptChunkTokens: 512
         )
         for _ in 0..<runs {
@@ -947,7 +987,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 prompts: prompts,
                 decodeSteps: decodeTokens,
                 compiled: compile,
-                layerCount: layerCount,
+                cacheKinds: cacheKinds,
                 maxPromptChunkTokens: 512
             )
             try assertHealthy(batched.batched, expectedRows: lengths.count, expectedTokens: decodeTokens, label: "msb03-ragged")
@@ -1110,7 +1150,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     private func runParity(
         modelID: String,
         container: ModelContainer,
-        layerCount: Int
+        layerCount: Int,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) async throws {
         let compared = parityTokens
         let prompts = try await buildDistinctPrompts(container: container, count: 2, tokens: promptTokens)
@@ -1126,14 +1167,14 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             prompts: [prompts[0]],
             decodeSteps: compared,
             compiled: compile,
-            layerCount: layerCount
+            cacheKinds: cacheKinds
         )
         let twoRow = try await runSchedulerDecode(
             container: container,
             prompts: prompts,
             decodeSteps: compared,
             compiled: compile,
-            layerCount: layerCount
+            cacheKinds: cacheKinds
         )
         peakRSSMB = max(peakRSSMB, memoryRSSMB())
         let oneMatch = msbTemp0ParityMatch(
@@ -1192,13 +1233,14 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     private func runIsolation(
         modelID: String,
         container: ModelContainer,
-        layerCount: Int
+        layerCount: Int,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) async throws {
         let prompts = try await buildDistinctPrompts(container: container, count: 2, tokens: promptTokens)
         let decodeSteps = max(8, min(decodeTokens, 32))
         let (scheduler, _) = try makeHarnessScheduler(
             container: container,
-            layerCount: layerCount,
+            cacheKinds: cacheKinds,
             compiled: compile,
             maxActiveRows: 2,
             maxPromptChunkTokens: max(1, promptTokens),
@@ -1285,14 +1327,15 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     private func runReplay(
         modelID: String,
         container: ModelContainer,
-        layerCount: Int
+        layerCount: Int,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) async throws {
         let prompt = try await buildDistinctPrompts(container: container, count: 1, tokens: promptTokens)[0]
         let decodeSteps = max(8, min(decodeTokens, 32))
         let replayAuthority = MSBThroughputReplayAuthority()
         let (scheduler, _) = try makeHarnessScheduler(
             container: container,
-            layerCount: layerCount,
+            cacheKinds: cacheKinds,
             compiled: compile,
             maxActiveRows: 1,
             maxPromptChunkTokens: max(1, promptTokens),
@@ -1364,13 +1407,14 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     private func runDrain(
         modelID: String,
         container: ModelContainer,
-        layerCount: Int
+        layerCount: Int,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) async throws {
         let prompts = try await buildDistinctPrompts(container: container, count: 3, tokens: promptTokens)
         let decodeSteps = max(8, min(decodeTokens, 32))
         let (scheduler, _) = try makeHarnessScheduler(
             container: container,
-            layerCount: layerCount,
+            cacheKinds: cacheKinds,
             compiled: compile,
             maxActiveRows: 2,
             maxPromptChunkTokens: max(1, promptTokens),
@@ -1594,7 +1638,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             var prompts: [[Int]] = []
             prompts.reserveCapacity(count)
             for index in 0..<count {
-                let text = buildPromptText(index: index, targetTokens: tokens)
+                let text = Self.buildPromptText(index: index, targetTokens: tokens)
                 var encoded = context.tokenizer.encode(text: text, addSpecialTokens: true)
                 // Extend deterministically if the corpus text under-shot the target.
                 var salt = 0
@@ -1617,7 +1661,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             var prompts: [[Int]] = []
             prompts.reserveCapacity(lengths.count)
             for (index, tokens) in lengths.enumerated() {
-                let text = self.buildPromptText(index: index, targetTokens: tokens)
+                let text = Self.buildPromptText(index: index, targetTokens: tokens)
                 var encoded = context.tokenizer.encode(text: text, addSpecialTokens: true)
                 var salt = 0
                 while encoded.count < tokens {
@@ -1636,7 +1680,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
     /// A distinct, topically-varied prompt string seeded by `index`, long enough
     /// to tokenize past `targetTokens`.
-    private func buildPromptText(index: Int, targetTokens: Int) -> String {
+    static func buildPromptText(index: Int, targetTokens: Int) -> String {
         var text = "Document \(index) revision \(index * 7 + 3): "
         var salt = 0
         // Roughly 1 token per ~0.75 words; over-generate then the caller truncates.
@@ -1649,7 +1693,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
     /// Distinct topical paragraphs so concurrent rows exercise different MoE
     /// expert routing rather than a shared repeated filler.
-    private static let corpus: [String] = [
+    static let corpus: [String] = [
         "The distributed ledger reconciled every settlement receipt against the coordinator's canonical usage log before payout.",
         "Photosynthesis converts sunlight, water, and carbon dioxide into glucose while releasing oxygen through the stomata of leaves.",
         "The compiler lowered the intermediate representation into register-allocated machine code and scheduled the instructions for the pipeline.",
@@ -1718,6 +1762,12 @@ struct MSBThroughputReport: Codable, Sendable {
     let peakRSSMB: Int
     let leftovers: MSBLeftoversEvidence?
     let timestamp: String
+    /// Serial-path TTFT per timed run, so `msb-loopback` c=1 TTFT has a
+    /// native counterpart (#1690 benchmark). Absent on leftover scenarios.
+    var productionSerialTTFTSecondsRuns: [Double]? = nil
+    /// Lifetime max phys footprint (includes Metal buffers, unlike RSS); the
+    /// same measure `msb-loopback` reads from the external server pid.
+    var peakPhysFootprintMB: Int? = nil
 }
 
 /// Times `decodeLockstepWindow` so scheduler-path MSB numbers exclude prefill.
@@ -1791,12 +1841,14 @@ private final class MSBSchedulerWindowTimingBackend: ContinuousBatchSchedulerBac
     func installRetainedPagedKVCache(
         requestID: String,
         handoff: PagedKVPagedCacheHandoff,
-        binding: PagedKVStorageBinding
+        binding: PagedKVStorageBinding,
+        recurrentCheckpoint: RecurrentStateCheckpoint?
     ) async throws {
         try await inner.installRetainedPagedKVCache(
             requestID: requestID,
             handoff: handoff,
-            binding: binding
+            binding: binding,
+            recurrentCheckpoint: recurrentCheckpoint
         )
     }
 
@@ -1825,6 +1877,13 @@ private final class MSBThroughputReplayAuthority: ContinuousBatchSchedulerReplay
         }
         fingerprints[key.requestID] = key.fingerprintSHA256
         return .claimed
+    }
+
+    func release(_ key: ContinuousBatchSchedulerReplayKey) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard fingerprints[key.requestID] == key.fingerprintSHA256 else { return }
+        fingerprints.removeValue(forKey: key.requestID)
     }
 }
 

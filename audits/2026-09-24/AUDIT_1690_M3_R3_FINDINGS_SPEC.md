@@ -1,0 +1,5 @@
+1. **LOW — The artifact-feed runbook still describes GGUF serving as unavailable.** [catalog-artifact-feed-release.md:187](/private/tmp/claude-501/-Users-augstar-macprovider-poc/f4d8bfef-6c99-4d60-933e-ef541d705004/scratchpad/audit-m3-snapshot/docs/runbooks/catalog-artifact-feed-release.md:187) says the CLI has no GGUF serving runtime, while [SPEC-046-R009](/private/tmp/claude-501/-Users-augstar-macprovider-poc/f4d8bfef-6c99-4d60-933e-ef541d705004/scratchpad/audit-m3-snapshot/specs/SPEC-046-provider-byom-discovery.md:151) defines `llamacpp:` and `ollama:` serving selectors. An operator using the runbook could miss the current pool-only serving checks. Mark the statement as historical slice context and point to R009 and the Trusted Pool route rules.
+
+The round 2 findings are resolved. The pool route-time member derivation is implementable against the cited anchors, with global routing unchanged. Conformance registrations remain pending where new implementation is required; `gen_spec_index.py --check` and `git diff --check` passed.
+
+VERDICT: 0 CRITICAL / 0 HIGH / 0 MEDIUM / 1 LOW

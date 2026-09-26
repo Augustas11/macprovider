@@ -26,7 +26,7 @@ for f in "$DEPLOY_SH" "$SERVICE" "$TIMER" "$ENV_EXAMPLE" "$INVENTORY_EXAMPLE" "$
   [ -f "$f" ] || fail "missing required file: $f"
 done
 
-grep -qF 'STATS_INVENTORY_BINARY="$DIST_DIR/stats-inventory-sync-linux-amd64"' "$DEPLOY_SH" ||
+grep -qF 'STATS_INVENTORY_BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/stats-inventory-sync-linux-amd64"' "$DEPLOY_SH" ||
   fail "deploy script missing sidecar binary variable"
 grep -qF 'STATS_INVENTORY_SERVICE="$PINNED_DIST_DIR/stats-inventory-sync.service"' "$DEPLOY_SH" ||
   fail "deploy script missing sidecar service variable"

@@ -126,6 +126,7 @@ func TestPoolPredicateErrors_SettlementPolicyRequiresEnforceMode(t *testing.T) {
 }
 
 func TestPoolPredicateErrors_SettlementPolicyEnforceModeRoutesWithReceiptKey(t *testing.T) {
+	withModelACatalogMaterial(t)
 	enforceServer, _ := enforceReceiptServer(t)
 	billingStore, billingCfg, _ := enforceServer.billingState()
 	s, registry, tp := poolIsolationServer(t)

@@ -25,7 +25,7 @@
 #   line is printed to stdout among the step logs), requires GO, then
 #   activates and verifies; every step logs to stdout.
 #
-# Pricing releases (#1693, SPEC-023-R018): a release whose rate-card rows
+# Pricing releases (#1693, SPEC-023-R019): a release whose rate-card rows
 # differ from live also replaces the rewards.rate_card block of Pearl's live
 # base coordinator.yaml with the reviewed commit's tracked block, in one
 # journaled transaction with `current` and the window, applied by one SIGHUP.

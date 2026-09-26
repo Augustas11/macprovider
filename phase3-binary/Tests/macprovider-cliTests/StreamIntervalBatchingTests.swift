@@ -234,6 +234,7 @@ private actor CountingTokenRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func complete(
@@ -286,6 +287,7 @@ private actor NullRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { true }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
     func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult {
         CompletionResult(content: "", finishReason: "stop", promptTokens: 0, completionTokens: 0, settlementDisposition: .eligibleOwner)

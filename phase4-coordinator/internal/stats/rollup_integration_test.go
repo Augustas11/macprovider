@@ -295,6 +295,64 @@ func TestRollupOverviewTick(t *testing.T) {
 	}
 }
 
+func TestRollupDailySeriesKeepsCompleteDaysOnly(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	logger := zerolog.Nop()
+
+	seedProviderTokens(t, adminDB, "p1")
+	now := time.Now().UTC()
+	yesterday := time.Date(now.Year(), now.Month(), now.Day(), 15, 0, 0, 0, time.UTC).AddDate(0, 0, -1)
+	seedLedgerRow(t, adminDB, "p1", yesterday, 100, 40, 1)
+	seedLedgerRow(t, adminDB, "p1", now.Add(-time.Minute), 999, 999, 1)
+
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), fixedOverviewSnapshot{snap: statsrollup.OverviewSnapshot{
+		NodesOnline: 1,
+		At:          now,
+	}}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	var day time.Time
+	var requests, inTok, outTok int64
+	if err := adminDB.QueryRowContext(context.Background(), `
+        SELECT day_start, requests, input_tokens, output_tokens
+          FROM stats_timeseries_daily
+         WHERE requests > 0
+    `).Scan(&day, &requests, &inTok, &outTok); err != nil {
+		t.Fatalf("scan busy day: %v", err)
+	}
+	if requests != 1 || inTok != 100 || outTok != 40 {
+		t.Fatalf("busy day = requests %d in %d out %d, want 1/100/40", requests, inTok, outTok)
+	}
+	if day.UTC().Format("2006-01-02") != yesterday.Format("2006-01-02") {
+		t.Fatalf("busy day = %s, want %s", day.UTC().Format("2006-01-02"), yesterday.Format("2006-01-02"))
+	}
+	var todayRows int
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	if err := adminDB.QueryRowContext(context.Background(), `
+        SELECT COUNT(*) FROM stats_timeseries_daily WHERE day_start = $1
+    `, today).Scan(&todayRows); err != nil {
+		t.Fatalf("count today: %v", err)
+	}
+	if todayRows != 0 {
+		t.Fatalf("open UTC day rows = %d, want 0", todayRows)
+	}
+	var n int
+	if err := adminDB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM stats_timeseries_daily`).Scan(&n); err != nil {
+		t.Fatalf("count days: %v", err)
+	}
+	if n != 90 {
+		t.Fatalf("daily rows = %d, want 90", n)
+	}
+}
+
 func TestRollupOverviewIdlePrewarmFailureLogsAndKeepsPrimaryOverview(t *testing.T) {
 	fx, adminDB := setupRollupFixture(t)
 	rdb := rollupDB(t, fx)

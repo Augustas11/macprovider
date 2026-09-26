@@ -2080,6 +2080,31 @@ func TestEncryptedRelayRekeysAfterActiveCancelWithoutUnpublishing(t *testing.T) 
 	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
 		t.Fatalf("read cancel_request b: %v", err)
 	}
+	// Audit R1 ARCH M: the provider answers each cancel with a "cancelled"
+	// terminal encrypted under the current key, so the rekey must wait for
+	// those terminals instead of starting once no request is active.
+	if err := providerConn.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err == nil {
+		t.Fatal("rekey started while cancel terminals were still owed under the current key")
+	}
+	if err := providerConn.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	for i, id := range []string{"req-rekey-cancel-a", "req-rekey-cancel-b"} {
+		s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, id, false, uint64(i), InferenceResponseEnd{
+			Type: "inference_response_end", RequestID: id, Status: "cancelled", Receipt: "receipt-" + id,
+		}))
+	}
+	for _, relay := range []*RelayStream{relayA, relayB} {
+		if end, ok := relay.AwaitCancelTerminal(time.Second); !ok || end.Receipt != "receipt-"+relay.RequestID {
+			t.Fatalf("cancel terminal for %s = %#v ok=%v", relay.RequestID, end, ok)
+		}
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
+		t.Fatal("session closed on a late encrypted cancel terminal")
+	}
 	rekeyedProvider := completeTestTier2Rekey(t, s, providerConn, provider)
 	select {
 	case err := <-thirdResult:

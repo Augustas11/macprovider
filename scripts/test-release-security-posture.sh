@@ -1909,12 +1909,33 @@ git -C "$work/reviewed" add .
 git -C "$work/reviewed" commit -qm reviewed
 reviewed_commit="$(git -C "$work/reviewed" rev-parse HEAD)"
 bash "$work/reviewed/scripts/verify-app-build-inputs.sh" "$reviewed_commit" >/dev/null
+# A trusted copy outside the checkout must verify it via the explicit root, and
+# must leave no reviewed-byte temp files behind.
+mkdir -p "$work/verify-tmp"
+TMPDIR="$work/verify-tmp" bash "$root/scripts/verify-app-build-inputs.sh" "$reviewed_commit" "$work/reviewed" >/dev/null
+ln -s "$work/reviewed" "$work/reviewed-link"
+for link_root in "$work/reviewed-link" "$work/reviewed-link/" "$work/reviewed-link//"; do
+  if bash "$root/scripts/verify-app-build-inputs.sh" "$reviewed_commit" "$link_root" >/dev/null 2>&1; then
+    echo "app build input guard accepted a symlinked checkout root: $link_root" >&2
+    exit 1
+  fi
+done
 printf '\n# unreviewed mutation\n' >> "$work/reviewed/phase3-binary/app/project.yml"
 if bash "$work/reviewed/scripts/verify-app-build-inputs.sh" "$reviewed_commit" >"$work/reviewed.out" 2>&1; then
   echo "app build input guard accepted bytes outside the reviewed commit" >&2
   exit 1
 fi
 grep -q 'working-tree bytes differ from reviewed commit' "$work/reviewed.out"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$work/reviewed/scripts/verify-app-build-inputs.sh"
+if TMPDIR="$work/verify-tmp" bash "$root/scripts/verify-app-build-inputs.sh" "$reviewed_commit" "$work/reviewed" >"$work/reviewed-root.out" 2>&1; then
+  echo "trusted app build input guard accepted a mutated candidate checkout" >&2
+  exit 1
+fi
+grep -q 'working-tree bytes differ from reviewed commit' "$work/reviewed-root.out"
+if [ -n "$(ls -A "$work/verify-tmp")" ]; then
+  echo "app build input guard leaked reviewed-byte temp files" >&2
+  exit 1
+fi
 
 mkdir -p "$work/checksums"
 printf 'release asset\n' > "$work/checksums/asset.bin"

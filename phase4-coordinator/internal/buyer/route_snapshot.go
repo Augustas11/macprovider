@@ -25,6 +25,42 @@ const (
 	statusClientClosedRequest    = 499
 )
 
+// routeSnapshotCatalogMaterial is the ONE Tier-2 route-snapshot material
+// lookup. Dispatch (recordRouteSnapshot) and paid-routing eligibility both key
+// it by the admitted row (byomMaterialHash), so routing can never select a
+// session that dispatch then fails for missing material (#1689).
+func routeSnapshotCatalogMaterial(p pool.Provider) (tier2.RouteSnapshotMaterial, bool) {
+	return tier2.SnapshotMaterial(p.ModelID, byomMaterialHash(p))
+}
+
+// catalogMaterialMissing is the SPEC-022-R002 R-2.7 predicate: the session is
+// not bound to a BYOM candidate and its served model has no Tier-2
+// route-snapshot material, so under enforce recordRouteSnapshot must fail it
+// ("missing catalog material"). BYOM-bound sessions fail closed without
+// material on their own paths (dispatch and byomDefaultPaidRoutingEligibility),
+// so they are not counted here.
+func catalogMaterialMissing(p pool.Provider) bool {
+	if byomAdmissionCandidate(p) {
+		return false
+	}
+	_, ok := routeSnapshotCatalogMaterial(p)
+	return !ok
+}
+
+// catalogMaterialMissingUnderEnforce applies R-2.7 with the live settlement
+// mode, read from the same source dispatch reads (a nil billing store is not
+// enforce, exactly as dispatch treats it).
+func (s *Server) catalogMaterialMissingUnderEnforce(p pool.Provider) bool {
+	return s != nil && catalogMaterialMissing(p) && s.settlementEnforceMode()
+}
+
+// CatalogMaterialMissingUnderEnforce exports the R-2.7 verdict so the
+// provider WS server's /poolz.routing_eligible projection applies the same
+// gate buyer routing does (wired in cmd/coordinator).
+func (s *Server) CatalogMaterialMissingUnderEnforce(p pool.Provider) bool {
+	return s.catalogMaterialMissingUnderEnforce(p)
+}
+
 func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool.Provider) (*providerws.SettlementReceiptMetadata, error) {
 	attemptN := b.routeSnapshotAttemptN
 	b.routeSnapshotAttemptN++
@@ -33,6 +69,11 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	b.routeSnapshotStorePressure = false
 	b.settlementPolicyMode = ""
 	b.settlementPolicyVersion = ""
+	b.settlementRouteSnapshot = nil
+	b.settlementRouteSnapshotDigest = ""
+	// A new dispatch: the delivered attempt's own recordRow names the credit
+	// an evidence failure may quarantine, never an earlier attempt's.
+	b.hasLastProviderAttempt = false
 
 	reportedHash := strings.TrimSpace(provider.ModelHash)
 	expectedHash := strings.TrimSpace(provider.ExpectedModelHash)
@@ -87,11 +128,13 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	// up by the row the session was admitted against (byomMaterialHash, the
 	// same derivation the routing-eligibility path uses).
 	materialHash := byomMaterialHash(provider)
-	material, ok := tier2.SnapshotMaterial(provider.ModelID, materialHash)
+	material, ok := routeSnapshotCatalogMaterial(provider)
 	if !ok {
 		if byomAdmissionCandidate(provider) {
 			return nil, fmt.Errorf("BYOM model admission requires trusted catalog material")
 		}
+		// catalogMaterialMissing(provider): routing already excludes this
+		// session under enforce (R-2.7); this is the fail-closed backstop.
 		return skipOrEnforceError("missing catalog material")
 	}
 	// The tier-2 row must agree with the ROW the session was admitted for
@@ -104,9 +147,18 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	if material.HashStatus != pool.HashStatusVerified || material.ExpectedModelHash != admittedRowHash {
 		return nil, fmt.Errorf("tier2 catalog does not match signed admission row")
 	}
-	byomBinding, err := b.server.requireBYOMRouteSnapshotBinding(ctx, provider, material)
+	poolView := b.state.poolRouteView()
+	byomBinding, err := b.server.requireBYOMRouteSnapshotBindingForRoute(ctx, provider, material, poolView)
 	if err != nil {
 		return nil, wrapRouteSnapshotGuardPressure(err)
+	}
+	// SPEC-022-R012.1: a pool-route external-runtime attempt records the
+	// coordinator-derived runtime class (the binding verified that the hello
+	// equals the candidate's signed offer class), the fenced generation, and
+	// the operator account. Such an attempt requires enforce mode (R-12.3).
+	externalRuntime := poolView.externalRuntimeCandidate(provider)
+	if externalRuntime && routeMode != billing.RouteSnapshotModeEnforce {
+		return nil, fmt.Errorf("pool external runtime attempt requires enforce-mode settlement")
 	}
 	// SPEC-010-R007(d): a session whose identity resolved through the feed —
 	// a GGUF member OR a secondary snapshot member — settles only with the
@@ -167,8 +219,16 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		PromptHashBasis:                    promptHashBasisCoordinatorV1,
 		PromptHash:                         promptHash,
 		// SPEC-042 R006: label the settlement route-snapshot with the pool
-		// that served the request ("" for global -> omitted from the digest).
-		PoolID: b.state.poolID,
+		// that served the request and its routing-time manifest labels (all
+		// empty for global -> omitted from the digest).
+		PoolID:             b.state.poolID,
+		ManifestVersion:    b.state.poolManifestVersion,
+		ManifestCoreDigest: b.state.poolManifestCoreDigest,
+	}
+	if externalRuntime {
+		snapshot.RuntimeSource = provider.RuntimeSource
+		snapshot.PoolGeneration = b.state.poolGeneration
+		snapshot.PoolOperatorAccountID = poolView.creatorAccountID
 	}
 	applyBYOMRouteSnapshotBinding(&snapshot, byomBinding)
 	computeIntegrityRequired, computeIntegrityCovered, computeIntegrityHardwareDigest, err := computeIntegrityRouteBinding(provider, routeMode)
@@ -180,12 +240,19 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	snapshot.ComputeIntegrityHardwareDigest = computeIntegrityHardwareDigest
 	var digest string
 	insertStorePressure := false
-	if err := b.server.insertBYOMRouteSnapshot(ctx, provider, byomBinding, b.state, func() error {
+	insertSnapshot := func() error {
 		inserted, err := store.InsertRouteSnapshot(ctx, snapshot)
 		insertStorePressure = errors.Is(wrapRouteSnapshotGuardPressure(err), billing.ErrRouteSnapshotStorePressure)
 		digest = inserted
 		return err
-	}); err != nil {
+	}
+	var insertErr error
+	if externalRuntime {
+		insertErr = b.server.insertPoolBYOMRouteSnapshot(ctx, provider, byomBinding, insertSnapshot)
+	} else {
+		insertErr = b.server.insertBYOMRouteSnapshot(ctx, provider, byomBinding, b.state, insertSnapshot)
+	}
+	if err := insertErr; err != nil {
 		err = wrapRouteSnapshotGuardPressure(err)
 		if routeSnapshotCanSkipStorePressure(routeMode, err, insertStorePressure) {
 			b.routeSnapshotStorePressure = true
@@ -203,9 +270,15 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 	}
 	b.settlementAttemptN = attemptN
 	b.hasSettlementAttemptN = true
+	b.settlementRouteSnapshotDigest = digest
 	b.settlementPolicyMode = snapshot.RouteSnapshotMode
 	b.settlementPolicyVersion = snapshot.RouteSnapshotPolicyVersion
-	return &providerws.SettlementReceiptMetadata{
+	b.settlementRouteSnapshot = nil
+	if snapshot.RuntimeSource != "" {
+		recorded := snapshot
+		b.settlementRouteSnapshot = &recorded
+	}
+	meta := &providerws.SettlementReceiptMetadata{
 		AccountScope:               snapshot.AccountScope,
 		RequestID:                  snapshot.RequestID,
 		AttemptN:                   snapshot.AttemptN,
@@ -221,7 +294,22 @@ func (b *billingRecorder) recordRouteSnapshot(providerBody []byte, provider pool
 		PromptHash:                 snapshot.PromptHash,
 		OutputPrefixStartByte:      b.outputCursorByte,
 		PendingDeadlineSeconds:     snapshot.PendingDeadlineSeconds,
-	}, nil
+	}
+	// SPEC-015 §N.12: only a SPEC-022-R012 pool attempt carries the
+	// per-request authorization, bound to this request attempt, provider, and
+	// route snapshot digest. Every other frame is unchanged.
+	if snapshot.RuntimeSource != "" {
+		meta.PoolRuntimeAuthorization = &providerws.PoolRuntimeAuthorization{
+			PoolID:              snapshot.PoolID,
+			ManifestCoreDigest:  snapshot.ManifestCoreDigest,
+			RuntimeSource:       snapshot.RuntimeSource,
+			RequestID:           snapshot.RequestID,
+			AttemptN:            snapshot.AttemptN,
+			ProviderID:          snapshot.ProviderID,
+			RouteSnapshotDigest: digest,
+		}
+	}
+	return meta, nil
 }
 
 func isLowerHex64(value string) bool {
@@ -420,6 +508,8 @@ func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header
 		identity:              identity,
 		header:                header,
 		providerReceiptPubkey: append([]byte(nil), provider.ReceiptPubkey...),
+		poolLabels:            b.settlementPoolLabels(),
+		receivedAtUnixMS:      store.ReceiptObservedAtUnixMS(),
 	}
 	if header == "" {
 		// #1578: a leg the coordinator deliberately never settled — a 503
@@ -448,7 +538,7 @@ func (b *billingRecorder) ingestSettlementReceipt(provider pool.Provider, header
 	}
 	state, err := b.server.persistSettlementReceipt(ctx, store, input)
 	if err != nil {
-		if settlementOutputPersistFailedAfterCredit(err) {
+		if settlementReceiptRetryable(err) {
 			if b.server.deferSettlementReceiptRecovery(input) {
 				b.server.log.Warn().Err(err).Str("request_id", b.requestID).Str("provider_id", provider.ProviderID).Msg("settlement receipt ingestion deferred")
 				return b.deferredSettlementReceiptState(input), true, nil
@@ -478,6 +568,7 @@ func setInternalSettlementOutcomeHeaders(dst http.Header, rec *billingRecorder, 
 		return
 	}
 	setSettlementOutcomeHeaders(dst, state)
+	setSettlementFinalityMAC(dst, rec)
 }
 
 func declareInternalSettlementOutcomeTrailers(dst http.Header, rec *billingRecorder) {

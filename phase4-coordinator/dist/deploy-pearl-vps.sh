@@ -539,11 +539,6 @@ if [ "$DRY_RUN_LOCAL" != "1" ]; then
   COORDINATOR_RELEASE_VERSION="${COORDINATOR_RELEASE_IDENTITY%% *}"
   COORDINATOR_RELEASE_COMMIT="${COORDINATOR_RELEASE_IDENTITY#* }"
   echo "  release tag OK: $COORDINATOR_RELEASE_VERSION @ $COORDINATOR_RELEASE_COMMIT"
-  GH_HOST=github.com bash "$REPO_ROOT/scripts/verify-pearl-runtime-release.sh" \
-    --tag "$COORDINATOR_RELEASE_VERSION" \
-    --expected-commit "$COORDINATOR_RELEASE_COMMIT" \
-    --repository "Augustas11/macprovider" \
-    --remote "origin"
 fi
 
 # #1688: scripts/catalog-verifier-bundle.txt is the one list of files every
@@ -579,6 +574,7 @@ _parse_catalog_verifier_bundle() {
 PINNED_DEPLOY_INPUT_DIR=""
 PINNED_REPOSITORY_DIR=""
 PINNED_DIST_DIR="$DIST_DIR"
+PINNED_RUNTIME_ARTIFACT_DIR="$DIST_DIR"
 PINNED_STATIC_FEEDS_DIR="$DIST_DIR/../../phase3-binary/dist/static"
 PINNED_AUTOTUNE_DIR="$DIST_DIR/../../phase3-binary/catalog/autotune"
 PINNED_SCRIPTS_DIR="$DIST_DIR/../../scripts"
@@ -607,6 +603,18 @@ if [ "$DRY_RUN_LOCAL" != "1" ]; then
   GIT_NO_REPLACE_OBJECTS=1 git -C "$REPO_ROOT" archive --format=tar "$COORDINATOR_RELEASE_COMMIT" \
     | tar -xf - -C "$PINNED_REPOSITORY_DIR"
   PINNED_DIST_DIR="$PINNED_DEPLOY_INPUT_DIR/phase4-coordinator/dist"
+  # Issue #1721: the exact-copy gates below compare Pearl's live coordinator,
+  # coordinator-cli, and stats sidecars with these bytes and never install
+  # different ones. Take them from the verified signed Pearl runtime release
+  # that macprovider-pearl-update installs, never from a local dist/ build.
+  PINNED_RUNTIME_ARTIFACT_DIR="$PINNED_DEPLOY_INPUT_DIR/pearl-runtime-release"
+  install -d -m 0700 "$PINNED_RUNTIME_ARTIFACT_DIR"
+  GH_HOST=github.com bash "$REPO_ROOT/scripts/verify-pearl-runtime-release.sh" \
+    --tag "$COORDINATOR_RELEASE_VERSION" \
+    --expected-commit "$COORDINATOR_RELEASE_COMMIT" \
+    --repository "Augustas11/macprovider" \
+    --remote "origin" \
+    --deploy-artifacts-dir "$PINNED_RUNTIME_ARTIFACT_DIR"
   PINNED_STATIC_FEEDS_DIR="$PINNED_DEPLOY_INPUT_DIR/phase3-binary/dist/static"
   PINNED_AUTOTUNE_DIR="$PINNED_DEPLOY_INPUT_DIR/phase3-binary/catalog/autotune"
   PINNED_SCRIPTS_DIR="$PINNED_DEPLOY_INPUT_DIR/scripts"
@@ -665,11 +673,11 @@ if [ "${STATS_DOMAIN:-stats.malibu.tech}" != "stats.malibu.tech" ]; then
   exit 1
 fi
 
-BINARY="$DIST_DIR/coordinator-linux-amd64"
-CLI_BINARY="$DIST_DIR/coordinator-cli-linux-amd64"
-STATS_INVENTORY_BINARY="$DIST_DIR/stats-inventory-sync-linux-amd64"
-STATS_BILLING_MIRROR_BINARY="$DIST_DIR/stats-billing-mirror-linux-amd64"
-STATS_HARDWARE_VERIFIER_BINARY="$DIST_DIR/stats-hardware-verifier-linux-amd64"
+BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/coordinator-linux-amd64"
+CLI_BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/coordinator-cli-linux-amd64"
+STATS_INVENTORY_BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/stats-inventory-sync-linux-amd64"
+STATS_BILLING_MIRROR_BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/stats-billing-mirror-linux-amd64"
+STATS_HARDWARE_VERIFIER_BINARY="$PINNED_RUNTIME_ARTIFACT_DIR/stats-hardware-verifier-linux-amd64"
 CONFIG="$PINNED_DIST_DIR/coordinator.yaml"
 DEPLOY_CONFIG="$CONFIG"
 SERVICE="$PINNED_DIST_DIR/macprovider-coordinator.service"
@@ -905,9 +913,10 @@ _append_catalog_window_override() {
 # coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
 # FR-C9.4 strict-reject path still requires `coordinator-cli
 # revoke-token` for the used-token-persist-failure case; routine
-# prune-tokens / list-tokens also belong on Pearl). If absent, the
-# operator forgot to run build-linux.sh after the M2 update that
-# extended it. Fail closed — do NOT silently deploy with a stale CLI.
+# prune-tokens / list-tokens also belong on Pearl). Production deploys
+# stage it and the stats sidecars from the verified signed release above;
+# DRY_RUN_LOCAL reads dist/. Fail closed — do NOT silently deploy with a
+# stale CLI.
 for f in "$BINARY" "$CLI_BINARY" "$STATS_INVENTORY_BINARY" "$STATS_BILLING_MIRROR_BINARY" "$STATS_HARDWARE_VERIFIER_BINARY" \
          "$CONFIG" "$SERVICE" "$DEPLOY_RECOVER" "$DEPLOY_GUARD" "$DEPLOY_RECOVERY_SERVICE" "$DEPLOY_WATCHDOG_SERVICE" "$STATS_INVENTORY_SERVICE" "$STATS_INVENTORY_TIMER" \
          "$STATS_BILLING_MIRROR_SERVICE" "$STATS_BILLING_MIRROR_TIMER" \
@@ -2166,7 +2175,9 @@ fi
 # in-flight reconciliation run drains before we return; disabling the .timer
 # stops a scheduled fire (or a daemon-reload/reboot) from re-launching the old
 # binary during the migrate->install window. The NEW 3-col binary is installed
-# in step 4 and the timer is re-enabled in step 9. This quiesce runs BEFORE the
+# by macprovider-pearl-update from the signed release (issue #1721), which holds
+# its timer disabled until this deploy; step 4 only proves byte parity and step 9
+# re-enables the timer after the migration. This quiesce runs BEFORE the
 # rollback transaction is armed, so its inactive state is what the step-4
 # snapshot records: a rollback restores the pre-019 binary but deliberately
 # leaves the sidecar stopped (see coordinator-deploy-recover.sh) so the old
@@ -3231,9 +3242,9 @@ $SSH "set -e
 
   if command -v setfacl >/dev/null 2>&1 && command -v getfacl >/dev/null 2>&1; then
     snapshot_acl /var/lib/macprovider request-log-dir.acl had-request-log-dir-acl
-    snapshot_acl /var/lib/macprovider/request-log.sqlite request-log-db.acl had-request-log-db-acl
-    snapshot_acl /var/lib/macprovider/request-log.sqlite-wal request-log-wal.acl had-request-log-wal-acl
-    snapshot_acl /var/lib/macprovider/request-log.sqlite-shm request-log-shm.acl had-request-log-shm-acl
+    snapshot_acl /var/lib/macprovider/coordinator.db request-log-db.acl had-request-log-db-acl
+    snapshot_acl /var/lib/macprovider/coordinator.db-wal request-log-wal.acl had-request-log-wal-acl
+    snapshot_acl /var/lib/macprovider/coordinator.db-shm request-log-shm.acl had-request-log-shm-acl
   fi
   if [ -e /etc/systemd/system/multi-user.target.wants/macprovider-coordinator.service ] || [ -L /etc/systemd/system/multi-user.target.wants/macprovider-coordinator.service ]; then
     cp -a /etc/systemd/system/multi-user.target.wants/macprovider-coordinator.service \"\$_rollback_stage/macprovider-coordinator.wants\"
@@ -3680,6 +3691,7 @@ $SSH "set -e
   # and therefore has an exact durable snapshot like the daemon binary.
   if [ ! -x /opt/macprovider/coordinator-cli ] || ! cmp -s $DEPLOY_TMP/coordinator-cli-linux-amd64 /opt/macprovider/coordinator-cli; then
     echo 'refusing coordinator-cli replacement from direct deploy: install the signed matching Pearl runtime release first' >&2
+    echo '  macprovider-pearl-update --apply --tag $COORDINATOR_RELEASE_VERSION installs the signed coordinator-cli and stats sidecars' >&2
     exit 1
   fi
   install -o root -g macprovider -m 0750 $DEPLOY_TMP/coordinator-cli-linux-amd64 /opt/macprovider/coordinator-cli
@@ -3761,10 +3773,10 @@ $SSH "set -e
     # to a newly appeared, unsnapshotted file would make exact rollback
     # impossible.
     [ -f /opt/macprovider/.coordinator-deploy-rollback/had-request-log-dir-acl ] && setfacl -m u:macprovider-stats:--x /var/lib/macprovider
-    setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite
-    [ -f /opt/macprovider/.coordinator-deploy-rollback/had-request-log-wal-acl ] && setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite-wal
-    [ -f /opt/macprovider/.coordinator-deploy-rollback/had-request-log-shm-acl ] && setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/request-log.sqlite-shm
-  elif [ -f /var/lib/macprovider/request-log.sqlite ]; then
+    setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/coordinator.db
+    [ -f /opt/macprovider/.coordinator-deploy-rollback/had-request-log-wal-acl ] && setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/coordinator.db-wal
+    [ -f /opt/macprovider/.coordinator-deploy-rollback/had-request-log-shm-acl ] && setfacl -m u:macprovider-stats:r-- /var/lib/macprovider/coordinator.db-shm
+  elif [ -f /var/lib/macprovider/coordinator.db ]; then
     echo '  warning: setfacl/getfacl not available; stats billing mirror will remain disabled until rollback-safe ACL management is available'
   fi
   # Stage the complete immutable catalog release. Activation happens only
@@ -4895,9 +4907,19 @@ if [ "$STATS_ENABLED_LOCAL" = "true" ]; then
 
   echo "  GET https://$STATS_DOMAIN/v1/stats/overview?deploy_smoke=<nonce> with Malibu Origin -> expect 200 + CORS"
   STATS_HEADERS="$(mktemp -t macprovider-stats-headers.XXXXXX)"
-  if ! STATS_OVERVIEW_STATUS=$(curl -sS -D "$STATS_HEADERS" -o /dev/null -w '%{http_code}' --max-time 10 -H "Origin: https://www.malibu.tech" "https://$STATS_DOMAIN/v1/stats/overview?deploy_smoke=$STATS_SMOKE_NONCE" 2>/dev/null); then
-    STATS_OVERVIEW_STATUS="000"
-  fi
+  # A just-restarted coordinator serves 503 stats_stale until its first
+  # overview rollup lands, and the money-SQLite gate may defer that rollup
+  # for up to moneySQLiteMaintenanceMaxDeferral (2m) under buyer traffic.
+  # Retry 503 for a bounded window instead of rolling back a healthy deploy.
+  STATS_OVERVIEW_DEADLINE=$((SECONDS + ${STATS_OVERVIEW_FRESH_TIMEOUT_S:-360}))
+  while :; do
+    if ! STATS_OVERVIEW_STATUS=$(curl -sS -D "$STATS_HEADERS" -o /dev/null -w '%{http_code}' --max-time 10 -H "Origin: https://www.malibu.tech" "https://$STATS_DOMAIN/v1/stats/overview?deploy_smoke=$STATS_SMOKE_NONCE" 2>/dev/null); then
+      STATS_OVERVIEW_STATUS="000"
+    fi
+    [ "$STATS_OVERVIEW_STATUS" = "503" ] && [ "$SECONDS" -lt "$STATS_OVERVIEW_DEADLINE" ] || break
+    echo "  waiting for the first overview rollup after restart (status=503)" >&2
+    sleep 15
+  done
   if [ "$STATS_OVERVIEW_STATUS" != "200" ]; then
     echo "  ABORT: $STATS_DOMAIN /v1/stats/overview returned status=$STATS_OVERVIEW_STATUS (expected 200)" >&2
     rm -f "$STATS_HEADERS"
@@ -4999,11 +5021,13 @@ $SSH 'set -e
   elif [ "$_parity_required" = absent ]; then
     echo "stats inventory timer not enabled: missing /etc/macprovider-stats/stats-hardware-inventory.yaml or stats-inventory-sync.env"
   fi
-  if [ -f /etc/macprovider-stats/stats-billing-mirror.env ] && [ -f /var/lib/macprovider/request-log.sqlite ] && su -s /bin/sh -c "test -r /var/lib/macprovider/request-log.sqlite" macprovider-stats; then
+  if [ -f /etc/macprovider-stats/stats-billing-mirror.env ] && [ -f /var/lib/macprovider/coordinator.db ] && su -s /bin/sh -c "test -r /var/lib/macprovider/coordinator.db" macprovider-stats; then
     systemctl enable --now stats-billing-mirror.timer
     if ! systemctl start stats-billing-mirror.service; then
-      echo "warning: stats-billing-mirror.service failed; leaving coordinator deploy running"
+      systemctl disable --now stats-billing-mirror.timer
+      echo "aborting deploy: stats-billing-mirror.service failed its initial schema/binary parity run" >&2
       journalctl -u stats-billing-mirror.service -n 30 --no-pager || true
+      exit 13
     fi
     systemctl is-active stats-billing-mirror.timer
   elif [ -f /opt/macprovider/.coordinator-deploy-rollback/stats-billing-timer-was-active ]; then

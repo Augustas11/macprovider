@@ -114,6 +114,12 @@ jobs:
               go build -mod=readonly -trimpath -buildvcs=true \
               -ldflags "-s -w" \
               -o "$artifact_dir/coordinator-cli-linux-amd64" ./cmd/coordinator-cli
+            for sidecar in stats-inventory-sync stats-billing-mirror stats-hardware-verifier; do
+              GOTOOLCHAIN=local CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+                go build -mod=readonly -trimpath -buildvcs=true \
+                -ldflags "-s -w" \
+                -o "$artifact_dir/$sidecar-linux-amd64" "./cmd/$sidecar"
+            done
           )
           (
             cd phase5-gateway
@@ -125,10 +131,16 @@ jobs:
           file \
             "$artifact_dir/coordinator-linux-amd64" \
             "$artifact_dir/coordinator-cli-linux-amd64" \
-            "$artifact_dir/gateway-linux-amd64" | tee "$artifact_dir/pearl-file.txt"
+            "$artifact_dir/gateway-linux-amd64" \
+            "$artifact_dir/stats-inventory-sync-linux-amd64" \
+            "$artifact_dir/stats-billing-mirror-linux-amd64" \
+            "$artifact_dir/stats-hardware-verifier-linux-amd64" | tee "$artifact_dir/pearl-file.txt"
           grep -Eq "coordinator-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$artifact_dir/pearl-file.txt"
           grep -Eq "coordinator-cli-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$artifact_dir/pearl-file.txt"
           grep -Eq "gateway-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$artifact_dir/pearl-file.txt"
+          grep -Eq "stats-inventory-sync-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$artifact_dir/pearl-file.txt"
+          grep -Eq "stats-billing-mirror-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$artifact_dir/pearl-file.txt"
+          grep -Eq "stats-hardware-verifier-linux-amd64:[[:space:]]+ELF 64-bit.*x86-64" "$artifact_dir/pearl-file.txt"
           strings "$artifact_dir/coordinator-linux-amd64" > "$artifact_dir/coordinator-linux-amd64.strings"
           strings "$artifact_dir/gateway-linux-amd64" > "$artifact_dir/gateway-linux-amd64.strings"
           grep -Fq "$tag" "$artifact_dir/coordinator-linux-amd64.strings"
@@ -137,10 +149,16 @@ jobs:
             python3 scripts/verify-pearl-go-binaries.py \
             "$artifact_dir/coordinator-linux-amd64" \
             "$artifact_dir/coordinator-cli-linux-amd64" \
-            "$artifact_dir/gateway-linux-amd64"
+            "$artifact_dir/gateway-linux-amd64" \
+            "$artifact_dir/stats-inventory-sync-linux-amd64" \
+            "$artifact_dir/stats-billing-mirror-linux-amd64" \
+            "$artifact_dir/stats-hardware-verifier-linux-amd64"
           install -m 0755 "$artifact_dir/coordinator-linux-amd64" coordinator-linux-amd64
           install -m 0755 "$artifact_dir/coordinator-cli-linux-amd64" coordinator-cli-linux-amd64
           install -m 0755 "$artifact_dir/gateway-linux-amd64" gateway-linux-amd64
+          install -m 0755 "$artifact_dir/stats-inventory-sync-linux-amd64" stats-inventory-sync-linux-amd64
+          install -m 0755 "$artifact_dir/stats-billing-mirror-linux-amd64" stats-billing-mirror-linux-amd64
+          install -m 0755 "$artifact_dir/stats-hardware-verifier-linux-amd64" stats-hardware-verifier-linux-amd64
 
       - name: Sign Pearl runtime metadata and checksums
         id: assets
@@ -167,11 +185,17 @@ jobs:
           coordinator_sha="$(shasum -a 256 coordinator-linux-amd64 | awk '{print $1}')"
           coordinator_cli_sha="$(shasum -a 256 coordinator-cli-linux-amd64 | awk '{print $1}')"
           gateway_sha="$(shasum -a 256 gateway-linux-amd64 | awk '{print $1}')"
+          stats_inventory_sync_sha="$(shasum -a 256 stats-inventory-sync-linux-amd64 | awk '{print $1}')"
+          stats_billing_mirror_sha="$(shasum -a 256 stats-billing-mirror-linux-amd64 | awk '{print $1}')"
+          stats_hardware_verifier_sha="$(shasum -a 256 stats-hardware-verifier-linux-amd64 | awk '{print $1}')"
           RELEASE_TAG="$tag" \
           RELEASE_COMMIT="$commit" \
           COORDINATOR_SHA="$coordinator_sha" \
           COORDINATOR_CLI_SHA="$coordinator_cli_sha" \
           GATEWAY_SHA="$gateway_sha" \
+          STATS_INVENTORY_SYNC_SHA="$stats_inventory_sync_sha" \
+          STATS_BILLING_MIRROR_SHA="$stats_billing_mirror_sha" \
+          STATS_HARDWARE_VERIFIER_SHA="$stats_hardware_verifier_sha" \
           python3 - <<'PY'
           import json
           import os
@@ -209,6 +233,18 @@ jobs:
                       "asset": "coordinator-cli-linux-amd64",
                       "sha256": os.environ["COORDINATOR_CLI_SHA"],
                   },
+                  "stats_inventory_sync": {
+                      "asset": "stats-inventory-sync-linux-amd64",
+                      "sha256": os.environ["STATS_INVENTORY_SYNC_SHA"],
+                  },
+                  "stats_billing_mirror": {
+                      "asset": "stats-billing-mirror-linux-amd64",
+                      "sha256": os.environ["STATS_BILLING_MIRROR_SHA"],
+                  },
+                  "stats_hardware_verifier": {
+                      "asset": "stats-hardware-verifier-linux-amd64",
+                      "sha256": os.environ["STATS_HARDWARE_VERIFIER_SHA"],
+                  },
               },
           }
           with open("pearl-release.json", "w", encoding="utf-8") as output:
@@ -224,6 +260,9 @@ jobs:
             coordinator-linux-amd64
             coordinator-cli-linux-amd64
             gateway-linux-amd64
+            stats-inventory-sync-linux-amd64
+            stats-billing-mirror-linux-amd64
+            stats-hardware-verifier-linux-amd64
             pearl-release.json
             pearl-release.json.sig
           )
@@ -248,7 +287,8 @@ jobs:
           cat > release-notes.md <<EOF
           # Pearl runtime $tag
 
-          Signed Pearl coordinator/gateway runtime bundle. This release lane
+          Signed Pearl coordinator/gateway runtime bundle with the
+          coordinator CLI and stats sidecars. This release lane
           intentionally excludes provider app, Malibu.app, catalog, and
           static-feed assets.
           EOF

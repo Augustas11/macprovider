@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.16.2
+version: v0.18.2
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-09-24
@@ -8,7 +8,7 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
 
 ## Change log
 
-- **v0.16.2 (2026-09-25)** — `SPEC-023-R018` rules 7 and 12 tightened after
+- **v0.18.2 (2026-09-25)** — `SPEC-023-R019` rules 7 and 12 tightened after
   the #1693 E2 re-run. Rule 7: State S also carries owner, group and mode of
   the base yaml, the window and every file of the `current` release; bytes
   equal to the prior with another owner or mode are reinstalled with the
@@ -19,15 +19,15 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   catalog-regression override is refused when the incoming release's rate rows
   differ from the live release's. No other normative change.
 
-- **v0.16.1 (2026-09-24)** — `SPEC-023-R018` rule 2 clarified after the #1693
+- **v0.18.1 (2026-09-24)** — `SPEC-023-R019` rule 2 clarified after the #1693
   fake-Pearl end-to-end run: a served name that resolved to `default` and
   now resolves to an added row whose key is exactly that name is the intended
   effect of adding the row and needs no acknowledgement; every other move (a
   removal, a capture of a normalized or differently spelled name, a move off a
   non-`default` row) still does. AC-CAT-28 follows. No other normative change.
 
-- **v0.16.0 (2026-09-24)** — Pricing corrections through the catalog-content
-  lane (#1693). New §3.7.10 registers `SPEC-023-R018`: a committed release
+- **v0.18.0 (2026-09-24)** — Pricing corrections through the catalog-content
+  lane (#1693). New §3.7.10 registers `SPEC-023-R019`: a committed release
   whose rate-card change is limited to the three credit fields of `rows`
   entries, row additions, and row removals (never `default`) goes live without
   a runtime release, as one journaled, reversible host transaction that
@@ -39,15 +39,81 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   one-writer rule, on-host splice with a yaml base-equivalence proof, operator
   diff acknowledgement, journal phases with recovery, pre-start recovery and a
   post-start closer, live evidence (gateway convergence alert-only), and
-  rollback. `SPEC-023-R017` amended: rows-only pricing is eligible under R018
+  rollback. `SPEC-023-R017` amended: rows-only pricing is eligible under R019
   (`catalog-content` plus a `pricing` object) instead of the `pricing` refusal
   lane; `usd_per_million_credits`, per-row `provider_share_bps` /
   `global_multiplier_ppm` changes are refused as `pricing-globals` (runtime
   lane); removing `default` is `invalid-release`; `policy_version` and schema
   changes stay `full-provider-app`. `SPEC-023-R016` amended to direct rows-only
-  pricing drift to R018; renewal continuity, `SPEC-023-R013` retention, and
-  `SPEC-023-R015` coverage are unchanged. §3.3.1 rule 9 cross-references R018.
-  AC-CAT-27 is amended and AC-CAT-28 pins R018.
+  pricing drift to R019; renewal continuity, `SPEC-023-R013` retention, and
+  `SPEC-023-R015` coverage are unchanged. §3.3.1 rule 9 cross-references R019.
+  AC-CAT-27 is amended and AC-CAT-28 pins R019.
+
+- **v0.17.1 (2026-09-25)** — The v0.17.0 rollout rule is mechanical (#1690 M8
+  audit R1). The release generator carries a consumer floor
+  (`ARTIFACT_FEED_CONSUMER_FLOOR` in `scripts/catalog-release.py`, v0.16.0)
+  and refuses to emit an artifact that allows `mlxlm_loopback` while the
+  floor is below v0.17.0. The floor is raised in a reviewed change only
+  after every consumer implements v0.17.0. Consumers keep accepting the
+  tuple. No schema or consumer change.
+
+- **v0.17.0 (2026-09-24)** — `mlxlm_loopback` on `mlx_safetensors`
+  artifacts (#1690 M8, SPEC-010 1.12 R009). §3.7.4: the adapter enum gains
+  `mlxlm_loopback`, and the closed matrix lets an `mlx_safetensors` artifact
+  allow `{mlx_cache, mlxlm_loopback}`. A `gguf` artifact MUST NOT allow
+  `mlxlm_loopback`, and an `mlx_safetensors` artifact still MUST NOT allow
+  any other loopback adapter. AC-CAT-16 moves `mlx_safetensors` with
+  `mlxlm_loopback` from illegal to legal. Listing `mlxlm_loopback` on the
+  row's primary artifact is what admits the row's own snapshot pair for
+  that runtime. Rollout: consumers older than v0.17.0 reject a feed with
+  the new value as `catalog_artifact_feed_integrity_failure`, so no release
+  may publish one before every consumer implements v0.17.0.
+
+- **v0.16.0 (2026-09-24)** — GGUF `huggingface_revision` source and a
+  pool-scoped settlement exception (#1690 M3). §3.7.3/§3.7.4: a `gguf`
+  artifact MAY carry `source_ref.kind: "huggingface_revision"` with a
+  REQUIRED repository-relative `file_path` (forbidden on `mlx_safetensors`).
+  The closed matrix gains that pairing, and AC-CAT-16 moves the tuple from
+  illegal to legal. The `"sha256:" + hash` digest binding stays scoped to
+  `ollama_library_tag`. "gguf cannot reach `settlement_capable`" stays true
+  for global admission. A `gguf` member served by an allowlisted runtime MAY
+  settle only at route time on a SPEC-042 Trusted Pool route
+  (SPEC-047-R003(iv) pool clause, SPEC-022-R012), never through global
+  admission. Rollout: current consumers reject a feed with the new tuple
+  (`buyer/catalog_artifacts_feed.go:41-56`, `scripts/catalog-release.py`), so
+  no release may publish one before every consumer implements v0.16.0. The
+  MLX-snapshot leg for external runtimes stays deferred (SPEC-010 1.11
+  R007(h)).
+
+- **v0.15.2 (2026-09-23)** — No 4,000-token production context from an
+  unknown bound (#1689). The live Qwen3.6-27B apply on a 256 GB Mac Studio wrote
+  `max_context_override: 4000` because the KV-geometry reader required
+  `hidden_size` to divide by `num_attention_heads` even when `head_dim` is
+  declared (5120 / 24), so the memory bound was treated as unknown and the
+  implementation fell back to its 4,000-token floor. §6 now defines the
+  `serve_config.max_context_override` derivation: an unknown model or memory
+  bound drops out of the minimum instead of becoming 4,000, a declared `head_dim`
+  is used as declared, and hybrid stacks count only full-attention layers. An
+  apply also records the generated value's provenance (SPEC-001 v1.9.23).
+  Registers `SPEC-023-R018` (§9.3) and AC-47 for the derivation
+  (`SPEC-023-R012` and AC-46 stay reserved for open PR #1677). AC-40 and
+  R003 now name the R018 default as the uncalibrated context instead of the
+  pre-v0.9.5 cap. R018 item 9 bounds the generated pair jointly: the context
+  is sized for one full-context KV cache, so the emitted
+  `max_concurrency_override` is the chip/RAM tier constant (or a calibrated
+  depth) lowered to `memoryFitBatchDepth` at that context (signed GLM-4.5-Air
+  on a 256 GB Ultra: 131,072 tokens × 5 slots, not × 8). Adoption refuses a
+  signed pair above that cap (checked before the artifact is adopted into the
+  durable store), a warm switch keeps the operator's slots and lowers the
+  recomputed context instead, and `serve` lowers a generated context at start
+  when the slots it runs do not fit; when even the 4,000-token floor does not
+  fit those slots, both paths serve the floor with the slot count that fits
+  there. The classic measured sweep writes its
+  pair operator-owned, without a provenance record. `--check-only
+  --installed-only` reads artifacts where they are and never adopts them. R009's "tier constant unchanged"
+  and AC-44 now read through item 9; AC-47 adds a catalog-wide assertion. No
+  JSON field, schema, or calibration rule changes.
+
 - **v0.15.1 (2026-09-23)** — `SPEC-023-R010` implementation contract (#1705).
   The 2026-09-23 content cut rotated the fleet's CLI-baked document
   (`published-2026-09-02-gpt-oss-120b-v1`) out of the 3-deep `.previous-target`
@@ -97,7 +163,6 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   loopback from settlement until a later SPEC-047-R003 amendment names a
   coordinator-recorded trust binding and a trusted usage source. No feed
   schema, matrix, generator, or consumer change.
-
 - **v0.14.2 (2026-09-22)** — Ultra ≥256 GB default `recommendedMaxBatch` is 8
   (#1669). Studio M3 Ultra 256 GB proved keyed 8-wide Coder-30B on live 8080
   (8/8 HTTP 200, overlap ~6s vs serial ~41s, memory pressure normal). Ultra
@@ -655,7 +720,7 @@ Pricing is expressed by **model class**, market-pegged per the `RESEARCH_224` ex
 6. **Lookup order is unchanged; the money-table owner is SPEC-005-R011.** Because the published rate card still contains one concrete row per model key, SPEC-005 §5.5 resolution **order** — exact key, then `NormalizeModelKey`, then the `default` row — is unchanged. `rate_class` is never sent on the wire, never stored on a ledger row, and never read by `RateFor`. MoneyTable-A/B (SPEC-005 §5.6) name the **source** of that map. The v0.10.0 sentence "this revision does not amend SPEC-005" is historical.
 7. **Invariant: a `recommendable` row MUST resolve to a rate row.** For every candidate-catalog row with `runtime_status == "recommendable"`, the published rate card MUST contain a row reachable by exact key or by `NormalizeModelKey` for that model key. Reaching only the `default` row does not satisfy this invariant at authoring time, even though §3.3 and AC-15 keep the `default` fallback available at runtime for fresh-install recovery. A release that violates this invariant MUST fail closed at generation.
 8. **No silent class-expansion repricing.** The first catalog release that introduces class expansion as an **authoring refactor only** MUST publish a `rate-card.json` whose `rows` map is byte-identical to the immediately preceding release's `rows` map. A v0.12.0 **market-pegged** cut is a separate, explicitly reviewed **repricing** release and is exempt from that byte-identical invariant. On a market-pegged cut, `classes` MUST be `{}` or the generator MUST fail closed if any `recommendable` published row was materialised from a class rather than from the engine proposal. Retaining the previous rate-card row because a key is absent from the proposal is forbidden.
-9. **Generated-feed / billing-config parity is a release gate, scoped by MoneyTable belt.** MoneyTable-A: before signing, the published `rate-card.json` `rows` map and coordinator `rewards.rate_card` MUST agree row-for-row under the rule-4 mapping (same key set, same three credit values), including extra/missing keys. MoneyTable-B: yaml MAY contain only `default`; extra per-model yaml keys fail config load; parity is signed feed vs the in-memory card `RateFor` uses. Either belt: `provider_share_bps` / `global_multiplier_ppm` MUST equal yaml globals after unit conversion. Under MoneyTable-A a committed release that changes only rate-card rows MAY go live without a runtime release only through `SPEC-023-R018` (§3.7.10), which installs the commit's yaml block verbatim and applies it with the signed card in one SIGHUP (SPEC-005-R013); a change to the globals stays a runtime release.
+9. **Generated-feed / billing-config parity is a release gate, scoped by MoneyTable belt.** MoneyTable-A: before signing, the published `rate-card.json` `rows` map and coordinator `rewards.rate_card` MUST agree row-for-row under the rule-4 mapping (same key set, same three credit values), including extra/missing keys. MoneyTable-B: yaml MAY contain only `default`; extra per-model yaml keys fail config load; parity is signed feed vs the in-memory card `RateFor` uses. Either belt: `provider_share_bps` / `global_multiplier_ppm` MUST equal yaml globals after unit conversion. Under MoneyTable-A a committed release that changes only rate-card rows MAY go live without a runtime release only through `SPEC-023-R019` (§3.7.10), which installs the commit's yaml block verbatim and applies it with the signed card in one SIGHUP (SPEC-005-R013); a change to the globals stays a runtime release.
 
 The intended v0.10.0 class assignment for the current signed catalog is recorded here as an illustrative operator mapping, not as normative catalog content: `class-3b` — `meta-llama/llama-3.2-3b-instruct`; `class-8b` — `meta-llama/llama-3.1-8b-instruct`, `qwen3-8b`; `class-20b-moe` — `openai/gpt-oss-20b`; `class-30b-moe` — `google-gemma-4-26b-a4b-it`, `qwen3-coder-30b-a3b-instruct`, `nvidia/nemotron-3-nano-30b-a3b`; `class-32b` — `qwen3-32b`, `qwen2.5-coder-32b-instruct`; `class-120b-moe` — `openai/gpt-oss-120b`; `class-70b` is reserved. **v0.12.0:** those class credit tables MUST NOT price a market-pegged recommendable row.
 
@@ -909,7 +974,9 @@ normalized name contains `ultra` and `memoryGB >= 256`,
 clamped by `ProviderCapacity.maxConcurrencyOverrideLimit`. Ultra 128–255 GB
 stays 4. This is the uncalibrated hardware-tier constant after Studio M3
 Ultra 256 GB Coder-30B keyed 8-wide proof. `--calibrate-concurrency` MAY
-still emit a lower value in `[1, 8]`.
+still emit a lower value in `[1, 8]`, and the emitted uncalibrated value is
+lowered by `SPEC-023-R018` item 9 when 8 full-context slots do not fit memory
+(v0.15.2).
 
 ### 3.7 Catalog artifact feed (v0.10.0)
 
@@ -1004,7 +1071,7 @@ All values above are illustrative, not normative catalog content.
 - **Top-level object.** REQUIRED: `version` (string), `generated_at` (string, RFC3339), `policy_version` (string), `source` (string), `release_id` (string), `candidate_catalog_sha256` (string, 64-hex lowercase), `models` (object). No other top-level field is permitted.
 - **`models.<model_key>` object.** REQUIRED: `primary_artifact_id` (string), `artifacts` (object, non-empty). OPTIONAL: `rate_class` (string, a §3.3.1 enum value). No other field is permitted. `models` itself MUST be an object whose keys are normalized model keys and whose values are these objects.
 - **`artifacts.<artifact_id>` object.** REQUIRED: `runtime_format` (string enum), `quantization` (string), `source_ref` (object), `hash_algorithm` (string enum), `hash` (string, 64-hex lowercase), `size_bytes` (integer > 0), `min_ram_gb` (number > 0), `allowed_runtime_sources` (array of strings, non-empty), `verification_status` (string enum), `verified_at` (string, RFC3339 `full-date` — exactly `YYYY-MM-DD`, ten characters, no time-of-day and no zone offset — or `null` exactly when `verification_status != "verified"`). OPTIONAL: `notes` (string). No other field is permitted.
-- **`source_ref` object, `kind: "huggingface_revision"`.** REQUIRED: `kind` (string), `repo_id` (string), `revision` (string, 40-hex lowercase). No other field is permitted.
+- **`source_ref` object, `kind: "huggingface_revision"`.** REQUIRED: `kind` (string), `repo_id` (string), `revision` (string, 40-hex lowercase). **(v0.16.0)** `file_path` (string) is REQUIRED when the artifact's `runtime_format` is `gguf` and forbidden when it is `mlx_safetensors`. It is the repository-relative path of one complete single-file GGUF at `revision`, and MUST match `^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\.gguf$` in full, be at most 255 bytes, and contain no `.` or `..` path segment. No other field is permitted.
 - **`source_ref` object, `kind: "ollama_library_tag"`.** REQUIRED: `kind` (string), `library_tag` (string), `digest` (string, `sha256:` followed by 64-hex lowercase). No other field is permitted.
 - `source_ref.kind` is itself a closed enum. A `source_ref` whose `kind` is neither of the two variants above, or which carries one variant's fields under the other variant's `kind`, is a schema failure — not an unknown-but-tolerable reference type.
 
@@ -1024,25 +1091,29 @@ The release generator MUST apply these same closed field sets before signing, so
   The authority for that comparison is durable and reproducible. The release ledger's artifact-bound feed-set row (§3.7.8) MUST record, for the release it describes, every `(model_key, artifact_id, hash_algorithm, hash)` binding the artifact feed publishes. The generator's prior-binding lookup is therefore reconstructible from the named release inputs alone — the ledger plus the previous release's signed feed bytes — so an auditor holding those inputs can detect a rebinding without trusting the generator that produced the release.
 - `runtime_format` is a closed enum. v0.10.0 values are `mlx_safetensors` and `gguf`.
 - `quantization` is an operator-curated label such as `4bit`, `8bit`, `MXFP4-Q8`, or `Q4_K_M`. It is descriptive metadata for display and fit reasoning; it is never an identity or trust input on its own.
-- `source_ref` is a closed, content-addressed reference. `kind: "huggingface_revision"` requires `repo_id` and an immutable 40-hex `revision`. `kind: "ollama_library_tag"` requires `library_tag` and an immutable `digest`. Mutable branches, tags without a digest, and any network location the coordinator could dereference are forbidden; `source_ref` is an identity descriptor, exactly as SPEC-047-R002 requires of `served_model_ref`.
+- `source_ref` is a closed, content-addressed reference. `kind: "huggingface_revision"` requires `repo_id` and an immutable 40-hex `revision`, plus `file_path` for a `gguf` artifact (v0.16.0). `kind: "ollama_library_tag"` requires `library_tag` and an immutable `digest`. Mutable branches, tags without a digest, and any network location the coordinator could dereference are forbidden; `source_ref` is an identity descriptor, exactly as SPEC-047-R002 requires of `served_model_ref`.
 - `hash_algorithm` is a closed enum. `macprovider.snapshot-manifest.v1` is the existing SPEC-010-R001 identifier, and its `hash` is the §3.2 canonical artifact-set manifest digest for the snapshot at `source_ref.revision` — for the primary artifact this is byte-identical to the candidate row's `model_sha256`. `macprovider.gguf-file.v1` is a canonical SPEC-010-R002 wire pair (v1.7, R007) and its `hash` is the lowercase hex SHA-256 of the complete GGUF file bytes — the value Ollama exposes as the model layer digest, which the CLI MUST recompute over the local bytes rather than adopt (SPEC-010-R007(a)). `hash` MUST be lowercase 64-hex.
 - **Global artifact-hash uniqueness (normative).** Within one artifact feed, a `(hash_algorithm, hash)` pair MUST appear under **exactly one** model key and, within that model key, under exactly one `artifact_id`. A feed in which the same pair appears twice — under two model keys, or twice under one model key — is `catalog_artifact_feed_integrity_failure` (§3.7.6 class 2): the release generator MUST reject it before signing, and a consumer MUST reject the feed before any artifact from it binds anything. **This is a NEW check.** It is not supplied by the release generator's existing candidate-catalog conflicting-hash check, which rejects two DIFFERENT `model_sha256` values under one normalized `model_id` and says nothing about one hash appearing under two model identities (`scripts/catalog-release.py`); the two checks close opposite directions of the same seam and both MUST run. The invariant is what makes artifact matching resolvable: pricing is resolved by model key (§3.3, §3.3.1) while SPEC-047 `catalog_matched` is resolved by verified `(hash_algorithm, hash)`, so without it identical bytes could resolve to two model keys carrying two different rate rows and the price of a matched candidate would depend on an implementation's tie-break. With it, a verified `(hash_algorithm, hash)` resolves to exactly one `(model_key, artifact_id)`; that resolved `model_key` is the candidate's catalog pricing identity, and a provider-offered `catalog_model_key` is **advisory only** and MUST equal the resolved key or the match fails closed (SPEC-047-R001/R003 as amended in 0.1.3).
-- **GGUF source digest binds the artifact hash (normative).** For an artifact whose `runtime_format` is `gguf`, `source_ref.digest` MUST equal `"sha256:" + hash` — the same 64-hex lowercase digest, prefixed. Both fields describe the same bytes (the GGUF file, which is what Ollama exposes as its layer digest), so a feed in which they disagree binds two incompatible identities to one artifact even under a valid signature: the source reference would identify one blob while catalog matching trusted another digest. A mismatch is `catalog_artifact_feed_integrity_failure`, rejected by the release generator before signing and by the consumer **before** the artifact may satisfy SPEC-047 `catalog_matched` or any other artifact-derived capability. The closed identity matrix below validates field types and enum combinations; this rule is the value-level equality the matrix cannot express.
+- **GGUF source digest binds the artifact hash (normative).** For an artifact whose `runtime_format` is `gguf` and whose `source_ref.kind` is `ollama_library_tag`, `source_ref.digest` MUST equal `"sha256:" + hash` — the same 64-hex lowercase digest, prefixed. Both fields describe the same bytes (the GGUF file, which is what Ollama exposes as its layer digest), so a feed in which they disagree binds two incompatible identities to one artifact even under a valid signature: the source reference would identify one blob while catalog matching trusted another digest. A mismatch is `catalog_artifact_feed_integrity_failure`, rejected by the release generator before signing and by the consumer **before** the artifact may satisfy SPEC-047 `catalog_matched` or any other artifact-derived capability. The closed identity matrix below validates field types and enum combinations; this rule is the value-level equality the matrix cannot express. **(v0.16.0)** A `gguf` artifact whose `source_ref.kind` is `huggingface_revision` has no source digest field. For it, `verified` means the operator confirmed that `hash` is the SHA-256 of the complete file at `file_path` in `revision`, which is that file's Hugging Face LFS `oid`. A GGUF split across several files is not one complete-file pair and MUST NOT be published.
 - `size_bytes` is a positive integer count of the artifact's on-disk bytes, used for preparation estimates and SPEC-044 confirmation copy only.
 - `min_ram_gb` is per-artifact, not per-model, because resident memory follows the quantization, not the parameter count. It has the same §5 semantics as the candidate row's `min_ram_gb`: it is the resident-fit floor excluding the fixed `safety_margin_gb = 4`. The primary artifact's `min_ram_gb` MUST equal the candidate row's `min_ram_gb`. A non-primary artifact MAY declare a different value.
-- `allowed_runtime_sources` is a non-empty array drawn from the SPEC-046-R002 adapter enum (`mlx_cache`, `ollama_loopback`, `lmstudio_loopback`, `llamacpp_loopback`, `openai_compatible_loopback`). It names which SPEC-046 discovery adapters MAY produce a candidate that matches this artifact. An `mlx_safetensors` artifact MUST allow only `mlx_cache`. An artifact MUST NOT allow `openai_compatible_loopback` while carrying `verification_status: "verified"`, because an opaque OpenAI-compatible endpoint supplies no artifact bytes to hash.
-- **Closed artifact-identity matrix (normative).** The four identity fields above are NOT independently valid: `runtime_format` determines the only legal `hash_algorithm`, the only legal `source_ref.kind`, and the only legal `allowed_runtime_sources` values. The complete v0.10.0 cross-product is:
+- `allowed_runtime_sources` is a non-empty array drawn from the SPEC-046-R002 adapter enum (`mlx_cache`, `ollama_loopback`, `lmstudio_loopback`, `llamacpp_loopback`, `openai_compatible_loopback`, and (v0.17.0) `mlxlm_loopback`). It names which SPEC-046 discovery adapters MAY produce a candidate that matches this artifact. An `mlx_safetensors` artifact MUST allow only `mlx_cache` and (v0.17.0) `mlxlm_loopback` (SPEC-010-R009). An artifact MUST NOT allow `openai_compatible_loopback` while carrying `verification_status: "verified"`, because an opaque OpenAI-compatible endpoint supplies no artifact bytes to hash.
+- **Closed artifact-identity matrix (normative).** The four identity fields above are NOT independently valid: `runtime_format` determines the only legal `hash_algorithm`, the only legal `source_ref.kind`, and the only legal `allowed_runtime_sources` values. The complete cross-product (introduced in v0.10.0; v0.16.0 added the `gguf` `huggingface_revision` pairing and v0.17.0 added `mlxlm_loopback` to `mlx_safetensors`) is:
 
   | `runtime_format` | `hash_algorithm` | `source_ref.kind` | `allowed_runtime_sources` ⊆ |
   |---|---|---|---|
-  | `mlx_safetensors` | `macprovider.snapshot-manifest.v1` | `huggingface_revision` | `{mlx_cache}` |
-  | `gguf` | `macprovider.gguf-file.v1` | `ollama_library_tag` | `{ollama_loopback, llamacpp_loopback, lmstudio_loopback, openai_compatible_loopback}` |
+  | `mlx_safetensors` | `macprovider.snapshot-manifest.v1` | `huggingface_revision` | `{mlx_cache, mlxlm_loopback}` (v0.17.0 adds `mlxlm_loopback`) |
+  | `gguf` | `macprovider.gguf-file.v1` | `ollama_library_tag` or (v0.16.0) `huggingface_revision` with `file_path` | `{ollama_loopback, llamacpp_loopback, lmstudio_loopback, openai_compatible_loopback}` |
 
-  Every artifact entry MUST match exactly one row of this table on all four fields. **Any other tuple is `catalog_artifact_feed_integrity_failure`**, rejected by the release generator before signing and by the consumer before any artifact from that feed binds anything — including, specifically, a `gguf` artifact declaring `macprovider.snapshot-manifest.v1`, an `mlx_safetensors` artifact declaring `macprovider.gguf-file.v1`, either format carrying the other's `source_ref.kind`, an `mlx_safetensors` artifact allowing any loopback source, and a `gguf` artifact allowing `mlx_cache`. The matrix is closed in both directions: adding a runtime format, a hash algorithm, a source-reference kind, or a format/source pairing is a SPEC-023 revision plus a generator and consumer release, exactly as §3.7.3 requires of the schema itself. The two independent constraints stated elsewhere in this section — that an `mlx_safetensors` artifact MUST allow only `mlx_cache`, and that a `verified` artifact MUST NOT allow `openai_compatible_loopback` (an opaque OpenAI-compatible endpoint supplies no artifact bytes to hash) — are restatements of and additions to this matrix, not exceptions to it: the second means the fourth column's `openai_compatible_loopback` entry is reachable only by a `declared` artifact.
+  Every artifact entry MUST match exactly one row of this table on all four fields. **Any other tuple is `catalog_artifact_feed_integrity_failure`**, rejected by the release generator before signing and by the consumer before any artifact from that feed binds anything — including, specifically, a `gguf` artifact declaring `macprovider.snapshot-manifest.v1`, an `mlx_safetensors` artifact declaring `macprovider.gguf-file.v1`, an `mlx_safetensors` artifact carrying `ollama_library_tag`, a `huggingface_revision` reference whose `file_path` presence does not match its format (present on `mlx_safetensors`, absent on `gguf`), an `mlx_safetensors` artifact allowing any loopback source other than `mlxlm_loopback`, and a `gguf` artifact allowing `mlx_cache` or `mlxlm_loopback`. The matrix is closed in both directions: adding a runtime format, a hash algorithm, a source-reference kind, or a format/source pairing is a SPEC-023 revision plus a generator and consumer release, exactly as §3.7.3 requires of the schema itself. The two independent constraints stated elsewhere in this section — that an `mlx_safetensors` artifact MUST allow only `mlx_cache` and `mlxlm_loopback`, and that a `verified` artifact MUST NOT allow `openai_compatible_loopback` (an opaque OpenAI-compatible endpoint supplies no artifact bytes to hash) — are restatements of and additions to this matrix, not exceptions to it: the second means the fourth column's `openai_compatible_loopback` entry is reachable only by a `declared` artifact.
+
+  **Rollout of the v0.17.0 tuple (enforced, v0.17.1).** The release generator MUST refuse to emit an artifact whose `allowed_runtime_sources` contains `mlxlm_loopback` while its consumer floor (`ARTIFACT_FEED_CONSUMER_FLOOR`, `scripts/catalog-release.py`) is below v0.17.0. The floor MUST be raised only in a reviewed change, after every provider CLI and coordinator that reads the release implements v0.17.0. A consumer older than v0.17.0 rejects such a feed as `catalog_artifact_feed_integrity_failure`, which fails closed for artifact-derived use only.
+
+  **Rollout of the v0.16.0 tuple.** Current consumers accept a `gguf` artifact only with `ollama_library_tag` (`phase4-coordinator/internal/buyer/catalog_artifacts_feed.go:41-56`; the generator's matrix in `scripts/catalog-release.py` likewise). Because the feed schema is closed, a consumer older than v0.16.0 rejects a whole feed that carries a `huggingface_revision` GGUF artifact as `catalog_artifact_feed_integrity_failure`. That fails closed for artifact-derived use only (§3.7.6 rule 6). A release MUST NOT publish such an artifact until the generator and every consumer that reads that release implement v0.16.0.
 
 - `verification_status` is a closed enum: `declared`, `verified`, or `blocked`. `declared` means the operator has recorded the artifact's identity but has not confirmed the hash against real bytes. `verified` means the operator has confirmed that the recorded `hash` is the digest of the artifact obtained from `source_ref` under `hash_algorithm`. `blocked` means the artifact is withdrawn for safety, licensing, runtime, or economics reasons. `verified_at` is an RFC3339 `full-date`: exactly `YYYY-MM-DD` (the `2026-09-08` form used in the §3.7.3 example), never a full RFC3339 timestamp. A consumer MUST parse it as a date and MUST reject a value carrying time-of-day or a zone offset. It MUST be non-null exactly when `verification_status == "verified"`.
 - **`verified` is necessary for every artifact-derived capability, and never sufficient for settlement.** Settlement additionally requires the SPEC-010-R007 expected-identity conditions (v0.10.3; primary-only before) (next bullet); this bullet states what `declared` and `blocked` exclude. A `declared` artifact MAY appear in operator backlog and review material only — the working list of artifacts an operator has recorded but not yet confirmed. It MUST NOT satisfy the §16.1 P1 intake precondition, MUST NOT contribute to admission at any tier, MUST NOT satisfy SPEC-047 `catalog_matched`, MUST NOT support `catalog_priced` or `settlement_capable`, MUST NOT be priced, and MUST NOT be downloaded or prepared as a catalog artifact. A key whose artifacts are all `declared` MUST NOT enter `listed` or `recommendable` (§16.1 P1, AC-CAT-11); it may exist only as an operator-staged `candidate` row, which reaches no SPEC-047 admission tier at all (§3.2). A `blocked` artifact MUST NOT be matched, displayed as available, downloaded, prepared, probed, or settled.
-- **Which artifacts are identity members is SPEC-010's decision; which runtime sources may settle is SPEC-047-R003(iv)'s (v0.14.3).** In v0.10.0–v0.10.2 SPEC-010 v1.6 recognized exactly one identity per model key (the row's `model_sha256`), so only the artifact named by `primary_artifact_id` could reach `catalog_priced` or `settlement_capable`, be reported as the SPEC-010 wire pair, or bind a SPEC-022 route-time snapshot. SPEC-010 v1.7 **R007** recognizes every `verified` artifact of the release-bound feed as a member of the key's identity set — `macprovider.gguf-file.v1` is a canonical pair from v1.7 — so from v0.10.3 a non-primary artifact of either format may do all three when the R007 conditions hold (exact pair match, single resolution, six-value route-time evidence for every feed-derived binding). **(v0.14.3)** Identity is not settlement for loopback runtimes: every `gguf` artifact's sources are loopback (matrix above), and SPEC-047-R003(iv) v0.1.10 bars every loopback `runtime_source` from `settlement_capable` until a later SPEC-047-R003 amendment names a coordinator-recorded trust binding and a trusted usage source. Until then only an `mlx_safetensors` artifact served by `mlx_cache` can settle, and a `gguf` artifact's R007 identity reaches at most `catalog_priced`. Every gate in this SPEC — `recommendable` for paid defaults, `listed` as unpriced intake, §5, §12 — is unchanged; the widening is one of identity, not of tier.
+- **Which artifacts are identity members is SPEC-010's decision; which runtime sources may settle is SPEC-047-R003(iv)'s (v0.14.3).** In v0.10.0–v0.10.2 SPEC-010 v1.6 recognized exactly one identity per model key (the row's `model_sha256`), so only the artifact named by `primary_artifact_id` could reach `catalog_priced` or `settlement_capable`, be reported as the SPEC-010 wire pair, or bind a SPEC-022 route-time snapshot. SPEC-010 v1.7 **R007** recognizes every `verified` artifact of the release-bound feed as a member of the key's identity set — `macprovider.gguf-file.v1` is a canonical pair from v1.7 — so from v0.10.3 a non-primary artifact of either format may do all three when the R007 conditions hold (exact pair match, single resolution, six-value route-time evidence for every feed-derived binding). **(v0.14.3)** Identity is not settlement for loopback runtimes: every `gguf` artifact's sources are loopback (matrix above), and SPEC-047-R003(iv) v0.1.10 bars every loopback `runtime_source` from `settlement_capable` until a later SPEC-047-R003 amendment names a coordinator-recorded trust binding and a trusted usage source. Until then only an `mlx_safetensors` artifact served by `mlx_cache` can settle, and a `gguf` artifact's R007 identity reaches at most `catalog_priced`. **(v0.16.0, #1690) Pool-scoped exception.** That remains the global rule: a `gguf` artifact's candidate still never reaches `settlement_capable`. The one exception is route-time and pool-scoped. A `gguf` member served by a loopback runtime MAY bind a route-time settlement snapshot on a SPEC-042 Trusted Pool route whose signed v2 policy core allowlists that runtime, under the SPEC-047-R003(iv) pool route-time clause and SPEC-022-R012. It never settles on a global route and never through global admission. Every gate in this SPEC — `recommendable` for paid defaults, `listed` as unpriced intake, §5, §12 — is unchanged; the widening is one of identity, not of tier.
 
 #### 3.7.5 Consistency with the candidate catalog
 
@@ -1074,9 +1145,9 @@ The artifact feed is a first-class release-manifest member. Its `release.json` b
 
 #### 3.7.7 Requirement
 
-**SPEC-023-R004:** A catalog release MUST publish a signed artifact feed satisfying §3.7.2 through §3.7.8. Every artifact entry MUST match exactly one row of the §3.7.4 closed artifact-identity matrix on `runtime_format`, `hash_algorithm`, `source_ref.kind`, and `allowed_runtime_sources`; any other tuple is `catalog_artifact_feed_integrity_failure` at generation and at consumption. Every candidate-catalog row whose `runtime_status` is `listed` or `recommendable` MUST have a model entry whose primary artifact is `verified` and byte-identical in identity to that row (§3.7.5), checked at generation and at consumption; a `candidate` row is out of that scope (§3.2). Within one artifact feed a `(hash_algorithm, hash)` pair MUST appear under exactly one model key and exactly one `artifact_id`; a duplicate is `catalog_artifact_feed_integrity_failure` at generation and at consumption, so a verified hash resolves to exactly one `(model_key, artifact_id)` and therefore to exactly one pricing identity, and a provider-offered `catalog_model_key` is advisory and MUST equal the resolved key or the match fails closed. For a `gguf` artifact, `source_ref.digest` MUST equal `"sha256:" + hash`; a mismatch is the same integrity failure, checked before `catalog_matched`. `artifact_id` MUST match `^[a-z0-9][a-z0-9-]{0,63}$` and MUST NOT be rebound to different bytes within or across releases; the generator MUST take the previous release's signed artifact feed as an input and reject any changed `(model_key, artifact_id)` binding, and the release ledger MUST record every `(model_key, artifact_id, hash_algorithm, hash)` binding so that check is reproducible from named release inputs (§3.7.4, §3.7.8). Only artifacts with `verification_status == "verified"` may satisfy a SPEC-047 catalog match, and settlement MUST bind the artifact `hash` together with its `hash_algorithm` — for any `verified` artifact that satisfies SPEC-010-R007 (v0.10.3; primary-only before, see the paragraph below).
+**SPEC-023-R004:** A catalog release MUST publish a signed artifact feed satisfying §3.7.2 through §3.7.8. Every artifact entry MUST match exactly one row of the §3.7.4 closed artifact-identity matrix on `runtime_format`, `hash_algorithm`, `source_ref.kind`, and `allowed_runtime_sources`; any other tuple is `catalog_artifact_feed_integrity_failure` at generation and at consumption. Every candidate-catalog row whose `runtime_status` is `listed` or `recommendable` MUST have a model entry whose primary artifact is `verified` and byte-identical in identity to that row (§3.7.5), checked at generation and at consumption; a `candidate` row is out of that scope (§3.2). Within one artifact feed a `(hash_algorithm, hash)` pair MUST appear under exactly one model key and exactly one `artifact_id`; a duplicate is `catalog_artifact_feed_integrity_failure` at generation and at consumption, so a verified hash resolves to exactly one `(model_key, artifact_id)` and therefore to exactly one pricing identity, and a provider-offered `catalog_model_key` is advisory and MUST equal the resolved key or the match fails closed. For a `gguf` artifact whose `source_ref.kind` is `ollama_library_tag`, `source_ref.digest` MUST equal `"sha256:" + hash`; a mismatch is the same integrity failure, checked before `catalog_matched`. (v0.16.0) A `gguf` artifact whose `source_ref.kind` is `huggingface_revision` has no `source_ref.digest`; it MUST carry a valid `file_path`, and `verified` asserts that `hash` is the SHA-256 of that file at `revision`. `artifact_id` MUST match `^[a-z0-9][a-z0-9-]{0,63}$` and MUST NOT be rebound to different bytes within or across releases; the generator MUST take the previous release's signed artifact feed as an input and reject any changed `(model_key, artifact_id)` binding, and the release ledger MUST record every `(model_key, artifact_id, hash_algorithm, hash)` binding so that check is reproducible from named release inputs (§3.7.4, §3.7.8). Only artifacts with `verification_status == "verified"` may satisfy a SPEC-047 catalog match, and settlement MUST bind the artifact `hash` together with its `hash_algorithm` — for any `verified` artifact that satisfies SPEC-010-R007 (v0.10.3; primary-only before, see the paragraph below).
 
-**From v0.10.3, any `verified` artifact of a `listed`/`recommendable` model key is an identity member under SPEC-010 v1.7 R007 and may bind `catalog_priced`; it may bind `settlement_capable` only when its runtime source is not a loopback adapter (v0.14.3: SPEC-047-R003(iv) v0.1.10 loopback settlement bar, so a `gguf` artifact never settles while that bar holds).** SPEC-010-R001 still defines the canonical row identity and R004 keeps the admitted row as session authority; R007 adds the release-bound feed's `verified` artifacts as members of that key's identity set, names `macprovider.gguf-file.v1` as a canonical wire pair, and requires an exact pair match resolving to exactly one `(model_key, artifact_id)`, with the SPEC-047-R003 six values in the immutable route-time record for every feed-derived binding. Which artifacts are excluded, and what a failed artifact-derived verification leaves standing (the independent primary-row path), is stated once in SPEC-010-R007(b) and not restated here. Widening identity further is a SPEC-010 decision, never a SPEC-023 change.
+**From v0.10.3, any `verified` artifact of a `listed`/`recommendable` model key is an identity member under SPEC-010 v1.7 R007 and may bind `catalog_priced`; it may bind `settlement_capable` only when its runtime source is not a loopback adapter (v0.14.3: SPEC-047-R003(iv) v0.1.10 loopback settlement bar, so a `gguf` artifact never settles through global admission while that bar holds; v0.16.0: it MAY settle at route time on an allowlisting SPEC-042 Trusted Pool route only, under the SPEC-047-R003(iv) pool route-time clause).** SPEC-010-R001 still defines the canonical row identity and R004 keeps the admitted row as session authority; R007 adds the release-bound feed's `verified` artifacts as members of that key's identity set, names `macprovider.gguf-file.v1` as a canonical wire pair, and requires an exact pair match resolving to exactly one `(model_key, artifact_id)`, with the SPEC-047-R003 six values in the immutable route-time record for every feed-derived binding. Which artifacts are excluded, and what a failed artifact-derived verification leaves standing (the independent primary-row path), is stated once in SPEC-010-R007(b) and not restated here. Widening identity further is a SPEC-010 decision, never a SPEC-023 change.
 
 **Artifact evidence is signer-bound at generation and snapshot-bound at settlement.** At generation and at consumption the authenticated artifact sidecar `key_id` MUST equal the authenticated candidate-feed signer `key_id` of that release, and wherever the consumer holds the authenticated `release.json` (generation, `verify`, the acceptance signer, the live coordinator release gate) it MUST also equal `release.json.feeds["autotune-artifacts.json"].signer_key_id` (§3.7.2, v0.10.2 scoping); any mismatch, including a valid signature by a different concurrently trusted key, is `catalog_artifact_feed_integrity_failure` (§3.7.2, AC-CAT-1). When a SPEC-047-R003 trusted binding references an artifact of this feed, the SPEC-022 route-time verification snapshot — or a separate immutable record the snapshot references by digest — MUST carry `artifact_feed_sha256`, `artifact_id`, the artifact `hash`, its `hash_algorithm`, `artifact_feed_signer_key_id`, and the candidate-catalog body digest, and settlement MUST fail closed on missing, changed, cross-release, or wrong-signer artifact evidence (AC-CAT-20). That snapshot extension is a **SPEC-047-owned optional record**; **SPEC-022's minimum route-time snapshot field list is unchanged and SPEC-022 is NOT amended by this revision.**
 
@@ -1226,12 +1297,12 @@ and presence; for `tier2-catalog.json`, only `issued_at`, `expires_at`,
 equal); and `trusted-keys.json` MUST be byte-equal. The check MUST run both
 before and under the host lock, using the same shipped, sha-verified
 implementation on both sides. Drift names the file and directs the operator to
-the catalog-content lane (`SPEC-023-R017`) — its pricing path (`SPEC-023-R018`)
+the catalog-content lane (`SPEC-023-R017`) — its pricing path (`SPEC-023-R019`)
 when the rate-card drift is limited to `rows` credit fields, row additions, and
 non-`default` row removals — or to a runtime or full release (a
 `usd_per_million_credits`, `provider_share_bps`, or `global_multiplier_ppm`
 change). A renewal never carries a price change; the continuity rule above is
-unchanged by v0.16.0.
+unchanged by v0.18.0.
 
 **SPEC-023-R017 — Catalog-content release lane.** A committed catalog release
 whose change is catalog content only MAY go live without a runtime or provider
@@ -1248,12 +1319,12 @@ app release, through the operator-local catalog-content lane
      schema versions, feed `source`, signer key ids (including the Tier-2
      signature key), `trusted-keys.json` bytes, or whether the release is
      artifact-bound.
-   - `pricing` (v0.15.0 only; retired by v0.16.0) — v0.15.0 refused every
-     rate-card row change here. From v0.16.0 a rate-card diff limited to the
+   - `pricing` (v0.15.0 only; retired by v0.18.0) — v0.15.0 refused every
+     rate-card row change here. From v0.18.0 a rate-card diff limited to the
      three credit fields of `rows` entries, row additions, and non-`default`
      row removals is eligible: the gate yields `catalog-content` together with
      a `pricing` object `{changed, added, removed}` and the release proceeds
-     only under `SPEC-023-R018`. Pricing MAY ride with non-pricing content in
+     only under `SPEC-023-R019`. Pricing MAY ride with non-pricing content in
      one release.
    - `unknown-predecessor` — the live content is not reconstructible, modulo
      renewal restamp, from a row of the release ledger.
@@ -1266,12 +1337,12 @@ app release, through the operator-local catalog-content lane
      protection.
    - `stale-or-future` — the candidate feed `generated_at` is older than 30
      days or more than 10 minutes in the future.
-   - `pricing-globals` (v0.16.0) — the rate-card diff changes
+   - `pricing-globals` (v0.18.0) — the rate-card diff changes
      `usd_per_million_credits` or any row's `provider_share_bps` or
      `global_multiplier_ppm`. These are coordinator globals (§3.3.1 rule 4,
      SPEC-005-R013 rule 5) and need a runtime release.
-   - `pricing-unacked-move` (v0.16.0) — the effective-price diff
-     (`SPEC-023-R018` rule 2) moves a served model onto `default` or onto a
+   - `pricing-unacked-move` (v0.18.0) — the effective-price diff
+     (`SPEC-023-R019` rule 2) moves a served model onto `default` or onto a
      different rate row without a reviewed acknowledgement.
    - `freshness-or-noop` — no content change against live (use renewal, or do
      nothing).
@@ -1335,7 +1406,7 @@ Every override, refusal, and rollback MUST leave an audit record naming the
 release ids and the reason. Nothing in this requirement relaxes §3.7.8
 release-id binding, `SPEC-023-R004` artifact rules, or `SPEC-023-R010`.
 
-#### 3.7.10 Pricing corrections through the catalog-content lane (v0.16.0)
+#### 3.7.10 Pricing corrections through the catalog-content lane (v0.18.0)
 
 Under MoneyTable-A (SPEC-005 §5.6) the coordinator bills from the base-yaml
 `rewards.rate_card` rows and refuses any load whose rows differ from the
@@ -1343,7 +1414,7 @@ verified signed `rate-card.json` (SPEC-005-R011). A price correction therefore
 changes two host artifacts that MUST move together. SPEC-005-R013 owns the
 money invariants (I1–I5); this subsection owns the host procedure.
 
-**SPEC-023-R018 — Rows-only pricing is one journaled, reversible host
+**SPEC-023-R019 — Rows-only pricing is one journaled, reversible host
 transaction.** A committed catalog release whose rate-card change is eligible
 under rule 1 MAY go live through the catalog-content lane
 (`SPEC-023-R017`) without a runtime release only when every rule below holds.
@@ -1377,7 +1448,7 @@ continuity, and every `SPEC-023-R017` rule not amended here apply unchanged.
    `pricing-unacked-move` unless m is listed in
    `phase3-binary/catalog/autotune/acknowledged-pricing-moves.json`, read from
    the reviewed commit (CODEOWNERS-covered) and included in the shipped byte
-   manifest. One move is exempt (v0.16.1): m resolved to `default` in the live
+   manifest. One move is exempt (v0.18.1): m resolved to `default` in the live
    table and resolves in the candidate to an added row whose key is exactly m
    (byte-equal, not normalized). That is the effect of adding the row; it is
    still listed in the diff. Under the lease the diff is recomputed over the pinned set plus
@@ -1449,10 +1520,10 @@ continuity, and every `SPEC-023-R017` rule not amended here apply unchanged.
    prior window bytes or `absent`, and a manifest of every digest needed to
    recognize the prior and candidate states: yaml, overlay presence and
    digest, `current` target, window, and the full file-digest set of both
-   releases, plus (v0.16.2) the Tier-2 trust root the gate verified with
+   releases, plus (v0.18.2) the Tier-2 trust root the gate verified with
    (bytes and sha256). State S is (base digest, overlay presence and digest,
    `current` target, window bytes, digest set of the `current` release), each
-   file member with its owner, group, and mode (v0.16.2). Phases are
+   file member with its owner, group, and mode (v0.18.2). Phases are
    written durably before each step: `prepared` → `mutating` → `hup-intent`
    → `verifying` → `verified`, or `rolling-back` → `rolled-back`, plus
    `restored-unverified` (rule 8). Every yaml install (forward, rollback,
@@ -1536,7 +1607,7 @@ continuity, and every `SPEC-023-R017` rule not amended here apply unchanged.
     scripts from tags older than #1693 cannot enforce this, so running one
     after enablement is prohibited by operator rule. While the marker exists,
     a deploy's catalog-regression override MUST also be refused when the
-    incoming release's rate rows differ from the live release's (v0.16.2): it
+    incoming release's rate rows differ from the live release's (v0.18.2): it
     would move prices outside this lane.
 
 Every refusal, override, recovery, and rollback MUST leave an audit record
@@ -1806,6 +1877,7 @@ Schema rules:
 - `recommended_model` is a model key string when at least one eligible row exists; otherwise `null`.
 - `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` are USD/M rates for the selected recommendation, derived from rate-card credits and `usd_per_million_credits`. Both are `null` when `recommended_model` is `null`.
 - `serve_config` is `null` in recommendation-only output when no apply-ready serving configuration has been attached. When present, it is the exact model/knob payload the installer can apply for the selected recommendation; donor outcomes keep `donor_mode = true`.
+- Without `--calibrate-context`, `serve_config.max_context_override` is the `SPEC-023-R018` default (§9.3, v0.15.2): `min(RAM-tier default, declared model maximum, memory-safe context, SPEC-028 draft cap when a draft model is configured)`, where an unknown bound drops out and the 4,000-token floor never stands in for one. `serve_config.max_concurrency_override` is then bounded jointly with it (R018 item 9): at most `memoryFitBatchDepth` at that context. `--apply` records that the written value was generated in the config's `max_context_override_provenance` key (SPEC-001 v1.9.23 FR-20b).
 - `candidates[]` default length is at most 5. It is sorted by eligibility first, then `raw_score` descending, then `model` lexicographically for deterministic ties. It MAY contain one additional donor fallback candidate when `donor_fallback_explanation` is present and the fallback is outside the default 5 rows.
 - Candidate `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` are USD display rates from the rate-card row used for that candidate.
 - Top-level `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` MUST be finite, non-negative, and equal to the selected candidate's candidate-level rates. When `selected_explanation` is present, they MUST also equal `selected_explanation.rate_signal.prompt_rate_usd_per_million_tokens` and `selected_explanation.rate_signal.completion_rate_usd_per_million_tokens`.
@@ -1990,13 +2062,13 @@ Run: malibu-cli autotune --recommend
 
 ### 9.1 Guarded interactive-context calibration
 
-**SPEC-023-R003:** When `autotune --recommend --calibrate-context` is explicitly requested, the CLI MUST calibrate only the selected, already-verified signed model artifact. It MUST keep the existing RAM/model context cap as a hard upper bound, use 4,000 tokens as the minimum, search in 1,000-token cells, and select the largest cell whose uncached-prefill p95 TTFT is no greater than 8,000 ms. Each measured request MUST use a one-token completion and fill the candidate context to its advertised boundary minus an explicit 256-token reserve for chat-template/token-estimation overhead. Search MAY use one sample per cell, but the final selected cell MUST pass three distinct uncached prompts. Prompt identity MUST differ between measured samples; the model/JIT MAY be warmed with a separate short prompt, but the measured long prompt MUST NOT be prewarmed. Sustained memory-pressure or thermal-throttle vetoes, malformed results, timeouts, interruption, a failing minimum, or a failing final validation MUST fail closed before recommendation state or config mutation. JSON and stored recommendation state MUST carry the calibration policy, prompt reserve, completion-token count, measurements, safe upper bound, and selected context. Without `--calibrate-context`, behavior and output shape MUST remain unchanged.
+**SPEC-023-R003:** When `autotune --recommend --calibrate-context` is explicitly requested, the CLI MUST calibrate only the selected, already-verified signed model artifact. It MUST keep the `SPEC-023-R018` default context (§9.3) as a hard upper bound, use 4,000 tokens as the minimum, search in 1,000-token cells, and select the largest cell whose uncached-prefill p95 TTFT is no greater than 8,000 ms. Each measured request MUST use a one-token completion and fill the candidate context to its advertised boundary minus an explicit 256-token reserve for chat-template/token-estimation overhead. Search MAY use one sample per cell, but the final selected cell MUST pass three distinct uncached prompts. Prompt identity MUST differ between measured samples; the model/JIT MAY be warmed with a separate short prompt, but the measured long prompt MUST NOT be prewarmed. Sustained memory-pressure or thermal-throttle vetoes, malformed results, timeouts, interruption, a failing minimum, or a failing final validation MUST fail closed before recommendation state or config mutation. JSON and stored recommendation state MUST carry the calibration policy, prompt reserve, completion-token count, measurements, safe upper bound, and selected context. Without `--calibrate-context`, output shape MUST remain unchanged and the emitted context is the `SPEC-023-R018` default.
 
 Automatic installer use of this requirement is not authorized by v0.9.5. It remains pending a signed `JOURNEY-PROVIDER-PREBETA-ADMISSION` result covering the selected hardware/model/context and an owner decision under issue #1201.
 
 ### 9.2 Guarded concurrency calibration
 
-The served provider's concurrent request capacity — `max_concurrency_override`, which sizes the serve `--max-batch` semaphore and is advertised 1:1 to the coordinator as `slots_total` — is emitted by `autotune --recommend` from a fixed chip/RAM tier constant (`AutotuneRecommendHardware.recommendedMaxBatch`). That constant is not measured: it returns the same value for every box of a chip class regardless of installed memory, the selected model's weight and KV footprint, or the box's real GPU-compute and tail-latency ceiling. Memory is rarely the binding constraint at realistic contexts; the binding constraint is aggregate decode throughput under concurrency subject to acceptable tail latency, which can only be measured on the specific box. §9.2 makes that value measurable while keeping the tier constant as the default (when calibration is not run) and the conservative fallback (when the memory-fit bound cannot be computed).
+The served provider's concurrent request capacity — `max_concurrency_override`, which sizes the serve `--max-batch` semaphore and is advertised 1:1 to the coordinator as `slots_total` — is emitted by `autotune --recommend` from a fixed chip/RAM tier constant (`AutotuneRecommendHardware.recommendedMaxBatch`). That constant is not measured: it returns the same value for every box of a chip class regardless of installed memory, the selected model's weight and KV footprint, or the box's real GPU-compute and tail-latency ceiling. Memory is rarely the binding constraint at realistic contexts; the binding constraint is aggregate decode throughput under concurrency subject to acceptable tail latency, which can only be measured on the specific box. §9.2 makes that value measurable while keeping the tier constant as the default (when calibration is not run, bounded by `SPEC-023-R018` item 9) and the conservative fallback (when the memory-fit bound cannot be computed).
 
 **SPEC-023-R009:** When `autotune --recommend --calibrate-concurrency` is explicitly requested, the CLI MUST calibrate only the selected, already-verified signed model artifact, after selection, before recommendation-state or config mutation. It MUST:
 
@@ -2008,9 +2080,105 @@ The served provider's concurrent request capacity — `max_concurrency_override`
 6. **Fail closed.** Sustained memory-pressure or thermal-throttle vetoes (the same § v0.9.0 probe-safety assessment used elsewhere), malformed or non-finite metrics, timeouts, interruption, a failing `B = 1` baseline, or a serve/process failure MUST fail closed before recommendation state or config mutation, leaving the tier-constant recommendation unchanged.
 7. **Persist the evidence.** JSON and stored recommendation state MUST carry the calibration policy (the memory-fit cap, hard cap, TTFT ceiling, TTFT regression factor, minimum aggregate-gain fraction, calibration context, prompt reserve, completion-token count), the tier-constant value it was compared against, the per-depth measurements, and the selected `recommended_max_batch`. When `--apply` is combined with `--calibrate-concurrency`, the applied `max_concurrency_override` MUST be the calibrated `recommended_max_batch`; otherwise the emitted `serve_config` value is unchanged.
 
-Without `--calibrate-concurrency`, behavior and output shape MUST remain unchanged: the RAM/chip tier constant emits and applies exactly as before, and the §6 `concurrency_calibration` field is absent. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both run, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against.
+Without `--calibrate-concurrency`, output shape MUST remain unchanged: the RAM/chip tier constant emits and applies, lowered only by `SPEC-023-R018` item 9 when that many full-context KV caches do not fit memory at the emitted context (v0.15.2), and the §6 `concurrency_calibration` field is absent. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both run, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against.
 
 Automatic installer use of this requirement is not authorized by v0.13.0. It remains pending signed physical-hardware evidence (including a `JOURNEY-PROVIDER-PREBETA-ADMISSION`-class result on a representative multi-slot box, such as the live 256 GB M3 Ultra) and an owner decision under issue #1589. The pre-existing default path — the tier constant — is unchanged and remains the fleet default until that evidence and decision land.
+
+### 9.3 Default serve context (v0.15.2)
+
+**SPEC-023-R018 — Default serve context.** Without `--calibrate-context`,
+`serve_config.max_context_override` MUST be `min(RAM-tier default, declared
+model maximum, memory-safe context, draft cap)`, where:
+
+1. The RAM-tier default is the context `serve` uses with no override for this
+   Mac's memory.
+2. The declared model maximum is read from the verified artifact `config.json`
+   (top-level or `text_config` context fields), else a CLI-known bound for the
+   model id.
+3. The memory-safe context is `4000 + floor(usable_kv_bytes /
+   kv_bytes_per_token)`, capped at 1,000,000, where `usable_kv_bytes` is three
+   quarters of the RAM left after the catalog `min_ram_gb` and the §5 safety
+   margin, and `kv_bytes_per_token = layers × kv_heads × head_dim × 2 × 2`.
+   It is computed only from `config.json` bytes whose SHA-256 matches the
+   verified artifact.
+4. A declared `head_dim` MUST be used as declared; only a `head_dim` derived as
+   `hidden_size / num_attention_heads` must divide exactly.
+5. When the config declares `layer_types` for every layer, `layers` counts only
+   the `full_attention` entries. A complete stack with no `full_attention`
+   entry has `kv_bytes_per_token = 0`: the memory-safe term binds nothing and
+   drops out of the minimum, like an unknown bound.
+6. An unknown bound (no declared maximum, unverified or duplicated config bytes,
+   unreadable or overflowing geometry) drops out of the minimum. The
+   4,000-token floor is emitted only when the memory-safe term itself is 4,000;
+   it MUST NOT stand in for an unknown model or memory bound.
+7. `--apply` records the written value's provenance in the same config write,
+   as the `max_context_override_provenance` key of `config.yaml` (SPEC-001
+   v1.9.23 FR-20b, `recommendation_apply`); `serve_config` never carries it.
+   A warm model switch recomputes a generated value with this same function
+   (SPEC-001 FR-20b).
+8. The draft cap is the SPEC-028 draft-enabled context cap for this Mac's
+   memory tier (8,192 / 20,000 / 50,000 / 120,000 tokens), and applies only
+   when the config names a `draft_model`; with none it drops out. With one,
+   `serve_config.max_concurrency_override` is 1. Serve's spec-decode preflight
+   exits `draft_model_capacity_shortfall` on a larger explicit override or more
+   than one slot, so every writer of the value (this apply, the
+   `models adopt-recommendation` context check, SPEC-001 FR-20b
+   `provider context set` and the warm-switch recompute) applies the same term.
+9. The context and slot count are bounded jointly. The context above is sized
+   for ONE full-context KV cache, so `serve_config.max_concurrency_override`
+   MUST be `max(1, min(slots, memory_fit_cap))`, where `slots` is the chip/RAM
+   tier constant (§9.2), the calibrated depth, or 1 with a draft model, and
+   `memory_fit_cap` is the R009 `memoryFitBatchDepth` at the emitted context:
+   `floor(usable_kv_bytes / (kv_bytes_per_token × context))`, the same
+   `usable_kv_bytes` as item 3, from the same verified `config.json`. The
+   context is never lowered to make room for slots on this path. When the
+   memory fit is unknown (item 6, or `kv_bytes_per_token = 0`), the slot count
+   stays at most the tier constant. Every path that writes or validates a
+   generated pair uses this same function:
+   - `models adopt-recommendation` refuses, before the runtime prepares
+     anything or a byte is written, a signed recommendation whose
+     `max_concurrency_override` exceeds `memory_fit_cap` at its signed context
+     (or the tier constant when the fit is unknown); it never rewrites a
+     signed value. Every signed identity, context, slot, and draft check runs
+     on the verified artifact where it already is (a valid durable copy, else
+     the Hugging Face snapshot); only an adoption that passes them copies a
+     Hugging Face snapshot into the durable store.
+   - `autotune --recommend --check-only --installed-only` reads the same
+     identity without adoption and MUST NOT create or replace anything in the
+     durable store (background checks never populate shared caches).
+   - A warm-switch recompute (SPEC-001 FR-20b) keeps the operator's configured
+     slot count (serve's `max_concurrency_override`, 1 with a draft model) and
+     lowers the recomputed context to the largest one at which that many slots
+     fit, never below 4,000.
+   - `serve` start (SPEC-001 FR-20b) applies the same context bound to a
+     `recommendation_apply` value for the configured model when the slot
+     count it runs (`max_concurrency_override` after `--max-batch` and the
+     environment, else 1) does not fit at the recorded value, and a switch
+     back to that model serves the lowered value. An operator-owned value is
+     never lowered.
+   - Floor exception (warm switch and `serve` start). When that many slots do
+     not fit even at `min(context, 4000)`, the context MUST NOT be served as if
+     it fit: it stays at `min(context, 4000)` and the served slot count is
+     lowered to `max(1, memory_fit_cap)` at that context. `serve` writes a
+     stderr warning naming both values and runs with the lowered count;
+     `status --advanced` warns that slots were lowered while `config.yaml`
+     keeps the configured count. A warm switch carries the lowered count for
+     that target through the same knob path an adoption uses, and a switch
+     back to the configured model restores the count serve started with. No
+     over-envelope pair is ever served on either path.
+   - The classic measured sweep (`autotune --apply` without `--recommend`)
+     emits a measured (context, slots) cell, not this generated pair, so its
+     config write carries no provenance record (and removes an earlier one):
+     the pair is operator-owned, kept across switches and restarts, and
+     `provider context explain` and `status --advanced` warn when it does not
+     fit memory.
+   - `provider context set`/`explain` (SPEC-001 FR-20b) check the same
+     three-quarters envelope for operator-chosen values, with the artifact's
+     measured weight bytes in place of the catalog `min_ram_gb`. Where a
+     signed row's `min_ram_gb` is at least its weights, a generated pair of
+     more than one slot also passes that check; a single slot at the
+     memory-safe context can exceed the three-quarters share by the KV of the
+     4,000-token floor (item 3) while still fitting physical memory.
 
 ## 10. Goodhart mitigations
 
@@ -2110,7 +2278,7 @@ AC-38: `rate_card_version` changes when the recommendation projection rows, prov
 
 AC-39: `candidate_catalog_sha256` is computed over the exact selected catalog JSON bytes, so changing catalog whitespace changes the stored hash while preserving schema validation behavior.
 
-AC-40 (`SPEC-023-R003`): An explicit context-calibration run never exceeds the RAM/model upper bound, measures near the advertised boundary with one completion token and a 256-token overhead reserve, uses unique measured prompts, validates the final context with three samples, persists the evidence, and fails before state/config mutation when interrupted or when the minimum, safety checks, deadline, response validation, or final p95 TTFT ceiling fails. The same recommendation command without `--calibrate-context` preserves the pre-v0.9.5 output shape and emits/applies the pre-v0.9.5 RAM/model-derived cap unchanged.
+AC-40 (`SPEC-023-R003`): An explicit context-calibration run never exceeds the `SPEC-023-R018` default context as its upper bound, measures near the advertised boundary with one completion token and a 256-token overhead reserve, uses unique measured prompts, validates the final context with three samples, persists the evidence, and fails before state/config mutation when interrupted or when the minimum, safety checks, deadline, response validation, or final p95 TTFT ceiling fails. The same recommendation command without `--calibrate-context` preserves the pre-v0.9.5 output shape and emits/applies the `SPEC-023-R018` default context (AC-47).
 
 AC-41 (`SPEC-023-R007`, RAM-class rule): On a Mac with `ram_gb >= 16` where the Llama 3.1 8B (`min_ram_gb = 12`) row is eligible under §5, `autotune --recommend` selects it — not the Llama 3.2 3B onboarding SKU (`min_ram_gb = 4`) — as `recommended_model`, even when the 3B row has the higher §4 `raw_score` from its ~2× measured TPS at equal `$0.027/M` payout. The 3B row remains eligible and carries `lost_reason = "deprioritized_ram_class_onboarding_sku"` in `all_candidates` (and in the displayed `candidates[]` when it ranks within the §4 top-5 set — always so among a 16 GB Mac's three eligible rows), and the selected 8B row keeps the stable `lost_reason = "selected_best_expected_earning_potential"` (no distinct winner slug). Among eligible RAM-class-matched rows (fixed floor `min_ram_gb >= 12`) the §4 argmax and tiebreakers are unchanged, so Llama 3.1 8B (demand weight `0.45`, higher measured TPS) is preferred over Qwen3-8B on M3-class 16 GB hardware, and Qwen3-8B stays eligible as an alternate. No rate-card row, candidate catalog row, or signed feed changes to produce this pick.
 
@@ -2118,9 +2286,11 @@ AC-42 (`SPEC-023-R007`, hard-gate carve-out and 8 GB path): When every eligible 
 
 AC-43 (`SPEC-023-R009`, concurrency calibration measures aggregate throughput under bounds): An explicit `--calibrate-concurrency` run measures the selected already-verified artifact by driving `B` genuinely concurrent uncached streams at each swept batch depth `B` (never serialized single-stream replicates), records per-depth aggregate tokens/sec and per-stream p95 TTFT, and selects the feasible depth with the highest aggregate tokens/sec — tie-broken toward the lower depth within the aggregate-gain fraction. The selected `recommended_max_batch` never exceeds `min(memory_fit_cap, max_concurrency_override_limit = 8)` and is never below `1`. A depth is feasible only when all `B` streams succeed with measurable throughput, no stop-token leak occurs, its per-stream p95 TTFT is within the buyer-facing ceiling, and it does not regress the `B = 1` p95 TTFT beyond the bounded factor; `B = 1` is measured first and must pass. Sustained memory-pressure/thermal vetoes, malformed/non-finite metrics, timeout, interruption, or a serve/process failure fail closed before recommendation-state or config mutation, leaving the tier-constant recommendation intact. JSON and stored state carry the policy, the tier-constant comparison value, the per-depth measurements, and the selected value; with `--apply`, the applied `max_concurrency_override` equals `recommended_max_batch`. When a draft model is configured, the run emits `recommended_max_batch = 1` with `draft_pinned = true` and performs no sweep (SPEC-028 FR-4).
 
-AC-44 (`SPEC-023-R009`, opt-in and byte-shape preservation): The same recommendation command without `--calibrate-concurrency` preserves the pre-v0.13.0 output shape exactly — the `concurrency_calibration` field is absent — and emits and applies the `AutotuneRecommendHardware.recommendedMaxBatch` chip/RAM tier constant as `max_concurrency_override` unchanged. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both are requested, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against, and both optional fields appear in the fixed §6 order (`context_calibration` then `concurrency_calibration`).
+AC-44 (`SPEC-023-R009`, opt-in and byte-shape preservation): The same recommendation command without `--calibrate-concurrency` preserves the pre-v0.13.0 output shape exactly — the `concurrency_calibration` field is absent — and emits and applies the `AutotuneRecommendHardware.recommendedMaxBatch` chip/RAM tier constant as `max_concurrency_override`, lowered only by `SPEC-023-R018` item 9 (v0.15.2) when that many slots do not fit memory at the emitted context. `--calibrate-concurrency` MAY be combined with `--calibrate-context`; when both are requested, context calibration completes first and its selected context is the calibration context the concurrency sweep measures against, and both optional fields appear in the fixed §6 order (`context_calibration` then `concurrency_calibration`).
 
 AC-45 (`SPEC-023-R011`, Ultra ≥256 GB default 8): `AutotuneRecommendHardware` for an Ultra chip with 256 GB or more returns `recommendedMaxBatch = 8`. The same Ultra chip with 128 GB or 192 GB still returns 4. The served hard cap remains 8. A `--calibrate-concurrency` run MAY still emit a lower value.
+
+AC-47 (`SPEC-023-R018`, default serve context): On a 256 GB M3 Ultra with the pinned Qwen3.6-27B artifact (`head_dim` 256 declared over 24 heads and `hidden_size` 5120, a `layer_types` stack with 16 `full_attention` layers, declared maximum 262,144), `autotune --recommend --apply` without calibration writes `max_context_override: 200000` (the RAM-tier default, the smallest term), never 4,000, and records `recommendation_apply` provenance as the config's `max_context_override_provenance` key. `kv_bytes_per_token` for that config counts 16 layers × 4 KV heads × 256 × 2 × 2. With no declared maximum and unprovable memory fit on a high-memory Mac the value is the RAM-tier default; with a known model bound below it, that bound. The 4,000-token value appears only when the memory-safe term is exactly 4,000 (no spare KV memory after weights and the safety margin). With a `draft_model` configured on the same Mac the apply writes `max_context_override: 120000` (the SPEC-028 draft cap) and `max_concurrency_override: 1`, and serve's spec-decode preflight accepts the written config. For every signed row of `autotune-candidates.json` on 256, 128, and 64 GB Macs (rows whose `min_ram_gb` plus the safety margin fit), the generated pair satisfies `kv_bytes_per_token × context × slots + (min_ram_gb + safety margin) GB ≤ physical memory` and, above one slot, `slots ≤ memoryFitBatchDepth(context)`; signed GLM-4.5-Air on a 256 GB Ultra emits 131,072 tokens × 5 slots (tier constant 8) and the pinned Qwen3.6-27B still emits 200,000 × 8. `models adopt-recommendation` refuses GLM-4.5-Air at 131,072 × 6 on that Mac, and a warm switch to it with 8 configured slots serves the largest context that fits 8 slots.
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
 
@@ -2172,7 +2342,7 @@ AC-CAT-5 (`SPEC-023-R004`, primary-artifact consistency): For every candidate ro
 
 AC-CAT-6 (`SPEC-023-R004`, verified-only settlement): A `declared` or `blocked` artifact never satisfies a SPEC-047 catalog match, never supports `catalog_priced` or `settlement_capable`, and is never downloaded or prepared as a catalog artifact. A settlement binding records the artifact `hash` together with its `hash_algorithm`, never the hash alone.
 
-AC-CAT-7 (`SPEC-023-R004`, GGUF identity under SPEC-010-R007 — v0.10.3), three separable assertions: **(i) reporting** — the CLI computes `macprovider.gguf-file.v1` over the complete local GGUF bytes it resolved for the runtime instance and reports it as the SPEC-010 `model_hash`/`model_hash_algorithm` wire pair in the offer (`artifact_hashes`), and in hello once a serving runtime path binds a GGUF file (SPEC-010-R007(a), (e) — the v0.10.3 CLI has no such runtime path, so its hello reports the primary row only); this holds before any request snapshot or settlement exists, and a digest adopted from a runtime report rather than recomputed is a reporting failure on its own. **(ii) matching** — an artifact with that algorithm AND `verification_status == "verified"`, whose `hash` exactly equals the reported digest, of a candidate row whose `runtime_status` is `listed` or `recommendable`, is the candidate's catalog identity (SPEC-010-R007(b)(c)) and reaches `catalog_matched`, `listed` intake, `sandbox_probe_only`, and `network_visible_unpriced`; a `declared` or `blocked` artifact, an inexact digest, a `candidate` or `blocked` row, or a feed that is stale, integrity-failed, or of another release yields no artifact-derived match at all (AC-CAT-6, §3.2, §3.7.6 rule 5) — the independent primary-row path keeps its own outcome. **(iii) settlement** — on a `recommendable` row that identity may further reach `catalog_priced`; it reaches `settlement_capable` and binds a SPEC-022 route-time settlement snapshot only when its `runtime_source` is not a loopback adapter (v0.14.3: never, for a `gguf` artifact, until the SPEC-047-R003(iv) v0.1.10 loopback bar is lifted), and only when the route-time record carries the SPEC-047-R003 six values, settlement re-verifies them, and every other SPEC-047/SPEC-022 admission and receipt gate holds; missing settlement evidence prevents settlement without invalidating a valid (ii) match, and a `listed` row stops at `network_visible_unpriced` regardless.
+AC-CAT-7 (`SPEC-023-R004`, GGUF identity under SPEC-010-R007 — v0.10.3), three separable assertions: **(i) reporting** — the CLI computes `macprovider.gguf-file.v1` over the complete local GGUF bytes it resolved for the runtime instance and reports it as the SPEC-010 `model_hash`/`model_hash_algorithm` wire pair in the offer (`artifact_hashes`), and in hello once a serving runtime path binds a GGUF file (SPEC-010-R007(a), (e) — the v0.10.3 CLI has no such runtime path, so its hello reports the primary row only); this holds before any request snapshot or settlement exists, and a digest adopted from a runtime report rather than recomputed is a reporting failure on its own. **(ii) matching** — an artifact with that algorithm AND `verification_status == "verified"`, whose `hash` exactly equals the reported digest, of a candidate row whose `runtime_status` is `listed` or `recommendable`, is the candidate's catalog identity (SPEC-010-R007(b)(c)) and reaches `catalog_matched`, `listed` intake, `sandbox_probe_only`, and `network_visible_unpriced`; a `declared` or `blocked` artifact, an inexact digest, a `candidate` or `blocked` row, or a feed that is stale, integrity-failed, or of another release yields no artifact-derived match at all (AC-CAT-6, §3.2, §3.7.6 rule 5) — the independent primary-row path keeps its own outcome. **(iii) settlement** — on a `recommendable` row that identity may further reach `catalog_priced`. Two cases are separate. **Global admission:** it reaches `settlement_capable` and binds a global SPEC-022 route-time settlement snapshot only when its `runtime_source` is not a loopback adapter (v0.14.3: never, for a `gguf` artifact). **Pool route (v0.16.0):** a `gguf` member served by a loopback runtime that an active SPEC-042 v2 policy allowlists binds a route-time settlement snapshot on that pool's routes only, through the SPEC-047-R003(iv) pool route-time member derivation, while its candidate stays `catalog_priced`. In both cases it binds only when the route-time record carries the SPEC-047-R003 six values, settlement re-verifies them, and every other SPEC-047/SPEC-022 admission and receipt gate holds; missing settlement evidence prevents settlement without invalidating a valid (ii) match, and a `listed` row stops at `network_visible_unpriced` regardless.
 
 AC-CAT-8 (`SPEC-023-R005`, published schema unchanged): The published `rate-card.json` of a class-expanded release validates against the §3.3 schema with no `classes` key and no per-row class field, and its recommendation-projection `version` is computed by the unchanged §3.3 algorithm.
 
@@ -2190,7 +2360,7 @@ AC-CAT-14 (`SPEC-023-R005`, generated-feed / billing-config parity): For a class
 
 AC-CAT-15 (`SPEC-023-R004`, staged activation and previous-stable self-update): A v0.10.0 release payload — artifact feed generated, signed, served, baked, bound in `release.json`, and recorded in the §3.7.8 artifact-bound ledger feed set — is validated and installed by the LAST pre-v0.10 updater through the previous-stable self-update path, with no compatibility-set-manifest rejection and no rollback. The signed compatibility-set manifest of that release carries the unchanged exact nine-name `components.catalog.files` set, and a release that adds `autotune-artifacts.json` to that map is rejected at generation while Stage B is ungated. Stage B is permitted only when a bridge CLI accepting the widened map has shipped as stable AND the previous-stable release is at or after that bridge version; a Stage-B release cut with either condition unmet fails closed. The ledger accepts the legacy two-feed, Tier-2-bound three-feed, and rate-card-bound four-feed historical sets unchanged, accepts the artifact-bound five-feed set, and rejects a mixed or partial set, a post-activation release that reverts to the four-feed set, and a `release_id` observed bound to two differing feed digest sets.
 
-AC-CAT-16 (`SPEC-023-R004`, closed artifact-identity tuple): Every artifact entry matches exactly one row of the §3.7.4 matrix. Each of the following illegal tuples emits `catalog_artifact_feed_integrity_failure` at consumption and is rejected by the generator before signing, even with a valid signature over the bytes: `mlx_safetensors` with `macprovider.gguf-file.v1`; `gguf` with `macprovider.snapshot-manifest.v1`; `mlx_safetensors` with `source_ref.kind == "ollama_library_tag"`; `gguf` with `source_ref.kind == "huggingface_revision"`; `mlx_safetensors` whose `allowed_runtime_sources` contains any loopback adapter; `gguf` whose `allowed_runtime_sources` contains `mlx_cache`; and any `verified` artifact whose `allowed_runtime_sources` contains `openai_compatible_loopback`. A legal `mlx_safetensors` tuple and a legal `gguf` tuple both validate. **Value-level source binding is tested alongside the tuple:** a `gguf` artifact whose `source_ref.digest` is not exactly `"sha256:" + hash` — a differing digest, a missing `sha256:` prefix, an uppercase digest, or a digest naming a different blob — emits `catalog_artifact_feed_integrity_failure` at consumption BEFORE the artifact may satisfy `catalog_matched`, and is rejected by the generator before signing; a `gguf` artifact whose `source_ref.digest` equals `"sha256:" + hash` validates.
+AC-CAT-16 (`SPEC-023-R004`, closed artifact-identity tuple): Every artifact entry matches exactly one row of the §3.7.4 matrix. Each of the following illegal tuples emits `catalog_artifact_feed_integrity_failure` at consumption and is rejected by the generator before signing, even with a valid signature over the bytes: `mlx_safetensors` with `macprovider.gguf-file.v1`; `gguf` with `macprovider.snapshot-manifest.v1`; `mlx_safetensors` with `source_ref.kind == "ollama_library_tag"`; `gguf` with `source_ref.kind == "huggingface_revision"` and no `file_path` (v0.16.0); `mlx_safetensors` whose `huggingface_revision` reference carries `file_path` (v0.16.0); `mlx_safetensors` whose `allowed_runtime_sources` contains any loopback adapter other than `mlxlm_loopback` (v0.17.0); `gguf` whose `allowed_runtime_sources` contains `mlx_cache` or `mlxlm_loopback`; and any `verified` artifact whose `allowed_runtime_sources` contains `openai_compatible_loopback`. A legal `mlx_safetensors` tuple (including one allowing `mlxlm_loopback`, v0.17.0), a legal `gguf` tuple under `ollama_library_tag`, and (v0.16.0) a legal `gguf` tuple under `huggingface_revision` with a valid `file_path` all validate. A `file_path` that is absolute, contains a `.` or `..` segment, or does not end in `.gguf` is the same integrity failure. **Value-level source binding is tested alongside the tuple:** a `gguf` artifact with `source_ref.kind == "ollama_library_tag"` whose `source_ref.digest` is not exactly `"sha256:" + hash` — a differing digest, a missing `sha256:` prefix, an uppercase digest, or a digest naming a different blob — emits `catalog_artifact_feed_integrity_failure` at consumption BEFORE the artifact may satisfy `catalog_matched`, and is rejected by the generator before signing; such an artifact whose `source_ref.digest` equals `"sha256:" + hash` validates. **(v0.16.0)** A `gguf` artifact with `source_ref.kind == "huggingface_revision"` and a valid `file_path` validates with no `source_ref.digest`. The same artifact carrying a `digest` field is rejected as a closed-schema failure. The generator's verification step records that `hash` equals the SHA-256 of `file_path` at `revision` (the file's LFS `oid`), and a mismatch fails the release before signing.
 
 AC-CAT-17 (`SPEC-023-R004`, artifact-set settlement identity — v0.10.3): A **secondary `mlx_safetensors` artifact** — `verified`, correctly declaring `macprovider.snapshot-manifest.v1`, differing from the primary only in quantization and therefore in `hash` — is a member of its key's identity set under SPEC-010-R007 exactly as the primary is: with an exact pair match and the six-value route-time evidence it reaches `catalog_priced`, `settlement_capable`, the SPEC-010 wire pair, and the SPEC-022 binding on a `recommendable` row. A primary identity bound directly through the signed candidate row needs no six-value record (SPEC-010-R001); a binding that references the artifact feed — the feed's primary entry included — carries and re-verifies all six (SPEC-047-R003, AC-CAT-20). A stale or unavailable feed leaves the row-bound primary path verifying exactly as before while every artifact-derived verification fails (SPEC-010-R007(b), §3.7.6 rules 5–6). A provider pair that matches no member — a hash of neither the primary nor any `verified` secondary — is unverified, and a provider-asserted `catalog_model_key` that disagrees with the key the pair resolves to fails closed (SPEC-010-R007(c)).
 
@@ -2286,7 +2456,7 @@ shipped implementation.
 AC-CAT-27 (`SPEC-023-R017`, catalog-content lane): A non-pricing content change
 committed on `origin/main` whose live predecessor is in the ledger is
 `catalog-content`. Each of: an unsigned change, a policy, signer, or keyring
-change, a rate-card globals change or `default` removal (v0.16.0; a rows-only
+change, a rate-card globals change or `default` removal (v0.18.0; a rows-only
 rate-card change is AC-CAT-28), a stale or future candidate feed, an unknown
 predecessor, a serving-closure failure, a commit off `origin/main`, bytes
 differing from the commit, an extra uncommitted file, or a commit lacking the
@@ -2296,14 +2466,14 @@ NO_GO. A renewal or deploy attempted while the lane holds the lease is refused.
 Each evidence failure (a)–(e) and a rejected post-rollback SIGHUP drive the
 rollback path, and a failed release is retained only under rule 6.
 
-AC-CAT-28 (`SPEC-023-R018`, pricing through the content lane): A committed
+AC-CAT-28 (`SPEC-023-R019`, pricing through the content lane): A committed
 release changing only row credits, adding a row, or removing a non-`default`
 row is `catalog-content` with a `pricing` object; removing `default` is
 `invalid-release`; a `usd_per_million_credits`, `provider_share_bps`, or
 `global_multiplier_ppm` change is `pricing-globals`; a `policy_version` or
 schema change is `full-provider-app`; a removal that moves a served model onto
 `default`, or an added row that captures a served model other than its own
-key moving off `default` (v0.16.1), is
+key moving off `default` (v0.18.1), is
 `pricing-unacked-move` unless acknowledged in the reviewed file; an added row
 whose only capture is its own key is `catalog-content` with no
 acknowledgement; a commit
@@ -2605,6 +2775,8 @@ Q14 **[new v0.10.0, broadened; RESOLVED v0.10.3 by SPEC-010 v1.7 R007 (epic #145
 - **(b) Non-primary-artifact gap.** Even an artifact using a SPEC-010-named algorithm is not the SPEC-010 identity unless its digest IS the candidate row's `model_sha256`. A **secondary `mlx_safetensors` quantization** has different bytes and therefore a different snapshot-manifest digest, so it fails SPEC-010-R001/R004 for the same structural reason a GGUF artifact does — the algorithm exclusion does not cover it, and naming a GGUF algorithm would not fix it.
 
 v0.10.0 therefore restricts `catalog_priced` and `settlement_capable` to the **primary artifact only** (§3.7.4, §3.7.7 R004, AC-CAT-7, AC-CAT-17, SPEC-047-R003 as amended in 0.1.3), which makes this revision strictly consistent with SPEC-010 as it stands and requires no SPEC-010 amendment. Every non-primary artifact of every format reaches at most identity, discovery, `listed` intake, `sandbox_probe_only`, and `network_visible_unpriced`. The open question is whether SPEC-010 should be amended — naming a GGUF algorithm under R002 **and** recognizing a release-bound, `verified` artifact-feed entry as an expected identity under R001/R004 — so that non-primary artifacts can settle. That is a SPEC-010 decision, owned by the BYOM v0.2 epic's SPEC-010 slice, not a SPEC-023 or SPEC-047 one.
+
+*Status (v0.16.0):* a `gguf` member served by an allowlisted runtime may settle at route time on a SPEC-042 Trusted Pool route only (#1690). Global admission is unchanged.
 
 *Status (v0.14.3):* resolved for identity by SPEC-010 v1.7 R007 in v0.10.3, which closes gaps (a) and (b). Settlement is further bounded by runtime source: SPEC-047-R003(iv) v0.1.10 keeps loopback-served members, and so every `gguf` artifact, out of `settlement_capable` until a trusted usage source exists (#1694).
 

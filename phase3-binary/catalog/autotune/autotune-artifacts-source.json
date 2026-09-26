@@ -6,7 +6,7 @@
           "allowed_runtime_sources": [
             "mlx_cache"
           ],
-          "hash": "436ce68d2ac5a27dde3b54569736fb7a69dc3b7a175d2f633147c7802b3bc88a",
+          "hash": "b245e39f1476907653e3fe1897bba36b0e2a90c471828a9e13b5fdf3e1b6db01",
           "hash_algorithm": "macprovider.snapshot-manifest.v1",
           "min_ram_gb": 28,
           "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row.",
@@ -106,7 +106,7 @@
           "allowed_runtime_sources": [
             "mlx_cache"
           ],
-          "hash": "5003c9196bd6664b22227d687472ba2eb50c2c4daa224b36c230edbbe36b18fb",
+          "hash": "c8b99b694c6730ebcb86a8b2277f8c441c99c6275d4bedf9d3913b7e9d2b6156",
           "hash_algorithm": "macprovider.snapshot-manifest.v1",
           "min_ram_gb": 90,
           "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row.",
@@ -156,7 +156,7 @@
           "allowed_runtime_sources": [
             "mlx_cache"
           ],
-          "hash": "6ed599e763ccfcf2731b2c383e81e6638375f62359ccb8bf730e1f17f583e3e7",
+          "hash": "a0ca3d59f301f08ae4c4c2010b07f80b890d35f4e8562c213b1d01aed8328e42",
           "hash_algorithm": "macprovider.snapshot-manifest.v1",
           "min_ram_gb": 28,
           "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",
@@ -181,7 +181,7 @@
           "allowed_runtime_sources": [
             "mlx_cache"
           ],
-          "hash": "01b20ff61b8f635d25515287bd6d2ac26877eab0de2fb2056b3d8b314ab4e2a3",
+          "hash": "7777cf15fbd096d66ccec5f0f76ec915eb4800f4f3e8dd899d1b4ae3041387ae",
           "hash_algorithm": "macprovider.snapshot-manifest.v1",
           "min_ram_gb": 24,
           "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",
@@ -206,7 +206,7 @@
           "allowed_runtime_sources": [
             "mlx_cache"
           ],
-          "hash": "58f00ca2bc7bb007b69145143d8a3fee90a3e5839a5a06e6443e8a7ef3906ad2",
+          "hash": "893c5fd5a4f6adf19a97faeff19d67f2b7a5d8c29e81cd857bd5949ce0b31e43",
           "hash_algorithm": "macprovider.snapshot-manifest.v1",
           "min_ram_gb": 28,
           "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",
@@ -256,7 +256,7 @@
           "allowed_runtime_sources": [
             "mlx_cache"
           ],
-          "hash": "c4d82befa782da05bea1bdc4000ab9422a7173d9cd96bab739374d28d9ad4827",
+          "hash": "3fed776d41b6883888541d19f71a3866acc3bc6e628402066b67e5ac0a676ff1",
           "hash_algorithm": "macprovider.snapshot-manifest.v1",
           "min_ram_gb": 28,
           "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",
@@ -281,7 +281,7 @@
           "allowed_runtime_sources": [
             "mlx_cache"
           ],
-          "hash": "1a955b957b75d2e3264bd914600048cc8047b7cfc08117e82fa4c8272e7e8086",
+          "hash": "8a8786e902127e9175f5be0d7c8bcf4dd32323a0521e4d9a20761608a07a6d05",
           "hash_algorithm": "macprovider.snapshot-manifest.v1",
           "min_ram_gb": 24,
           "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",
@@ -406,7 +406,7 @@
           "allowed_runtime_sources": [
             "mlx_cache"
           ],
-          "hash": "350c018e8a3397a753bcb7c22c839a5c5a24041e6dee014bb42c2d766d6db57d",
+          "hash": "7fbf8e5005fbdadbf1d345a04b7d283ad20aec959ee001bc4b0dc902ea7f11ed",
           "hash_algorithm": "macprovider.snapshot-manifest.v1",
           "min_ram_gb": 80,
           "notes": "Primary MLX artifact; identity mirrors this release's signed candidate row. size_bytes unmeasured (artifact feed pre-activation).",

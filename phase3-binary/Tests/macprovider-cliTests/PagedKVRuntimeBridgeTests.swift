@@ -29,6 +29,23 @@ private final class RuntimeBridgeChunkRecorder: @unchecked Sendable {
 }
 
 final class PagedKVRuntimeBridgeTests: XCTestCase {
+    func testQwen36HybridArchitectureRequiresExactTupleAndConfigMetadata() {
+        let supported = Data(#"{"model_type":"qwen3_5","architectures":["Qwen3_5ForConditionalGeneration"]}"#.utf8)
+        let unrelated = Data(#"{"model_type":"qwen3_5","architectures":["AnotherDecoder"]}"#.utf8)
+
+        XCTAssertTrue(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "qwen/qwen3.6-27b", configJSONData: supported
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "qwen/qwen3.6-27b", configJSONData: nil
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "qwen/qwen3.6-27b", configJSONData: unrelated
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "qwen/qwen3.8-27b", configJSONData: supported
+        ).hybridDecoderArchitectureVerified)
+    }
     func testProductionRuntimeMeasurementMissingMetallibStaysNil() {
         let measurement = ModelRuntime.measurePagedKVRuntime(
             config: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
@@ -569,6 +586,55 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let noBackendCapability = await noBackend.continuousBatchingCapabilityForTest()
         XCTAssertNil(noBackendDecision.descriptor)
         XCTAssertNotNil(noBackendCapability.unsupportedReason)
+    }
+
+    func testQwen36MixedRuntimeAttachesOnlyWithVerifiedArchitecture() async {
+        let modelID = "qwen/qwen3.6-27b"
+        let modelSHA = String(repeating: "a", count: 64)
+        let proof = Self.sizingProof(modelID: modelID, modelSHA: modelSHA)
+        let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
+
+        func runtime(verified: Bool) -> ModelRuntime {
+            ModelRuntime(
+                modelID: modelID,
+                modelHash: modelSHA,
+                pagedKVConfig: config,
+                maxBatch: 8,
+                continuousBatchingMode: .on,
+                continuousBatchingDurableReplayAuthorityAvailable: true,
+                warmSwapEnabled: false,
+                pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
+                pagedKVHardwareSizingProof: proof,
+                pagedKVRuntimeCacheClass: "mixed",
+                pagedKVSchedulerBackendInstalled: true,
+                pagedKVModelCapabilities: PagedKVRuntimeModelCapabilities(
+                    modelFamily: "qwen",
+                    requiresMoEDispatch: false,
+                    hybridDecoderArchitectureVerified: verified
+                ),
+                continuousBatchingBackend: RuntimeBridgeScriptedBackend(scripts: [:]),
+                loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
+            )
+        }
+
+        let admitted = runtime(verified: true)
+        let admittedDecision = await admitted.pagedKVDecisionForTest()
+        let admittedCapability = await admitted.continuousBatchingCapabilityForTest()
+        let admittedStatus = await admitted.currentSnapshot().continuousBatching
+        XCTAssertNotNil(admittedDecision.descriptor)
+        XCTAssertNil(admittedCapability.unsupportedReason)
+        XCTAssertEqual(admittedStatus?.active, true)
+        XCTAssertEqual(admittedStatus?.cacheClass, "mixed")
+        XCTAssertEqual(admittedStatus?.scheduler?.slotsTotal, 8)
+
+        let rejected = runtime(verified: false)
+        let rejectedDecision = await rejected.pagedKVDecisionForTest()
+        let rejectedCapability = await rejected.continuousBatchingCapabilityForTest()
+        let rejectedStatus = await rejected.currentSnapshot().continuousBatching
+        XCTAssertNil(rejectedDecision.descriptor)
+        XCTAssertNotNil(rejectedCapability.unsupportedReason)
+        XCTAssertEqual(rejectedStatus?.active, false)
+        XCTAssertEqual(rejectedStatus?.unsupportedReason, rejectedCapability.unsupportedReason?.rawValue)
     }
 
     func testSharedForwardGreedyMatchesSerialLoneAndFullBatchWithUsageAndStops() async throws {
@@ -2021,5 +2087,11 @@ private final class RuntimeBridgeReplayAuthority: ContinuousBatchSchedulerReplay
         defer { lock.unlock() }
         let storageKey = "\(key.requestID):\(key.fingerprintSHA256.base64EncodedString())"
         return keys.insert(storageKey).inserted ? .claimed : .duplicateSameRequest
+    }
+
+    func release(_ key: ContinuousBatchSchedulerReplayKey) {
+        lock.lock()
+        defer { lock.unlock() }
+        keys.remove("\(key.requestID):\(key.fingerprintSHA256.base64EncodedString())")
     }
 }

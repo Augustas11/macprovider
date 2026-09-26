@@ -10,8 +10,28 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/routing"
+	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	"github.com/rs/zerolog"
 )
+
+// withModelACatalogMaterial installs a signed Tier-2 catalog carrying
+// route-snapshot material for model-a. Under enforce a session without that
+// material is excluded by SPEC-022-R002 R-2.7, so a receipt-key gate test
+// needs it to isolate the receipt-key precondition (a with-key session whose
+// served model had no material could never be dispatched either).
+func withModelACatalogMaterial(t *testing.T) {
+	t.Helper()
+	tier2.ResetForTest()
+	t.Cleanup(tier2.ResetForTest)
+	raw, pubkey := buyerCatalogFixture(t, "receipt-gate-catalog", time.Now().UTC().Add(time.Hour))
+	if err := tier2.Configure(config.Tier2Config{
+		CatalogPath:      writeBuyerCatalog(t, raw),
+		CatalogPublicKey: pubkey,
+		ObserveEnabled:   true,
+	}, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+}
 
 // enforceReceiptServer builds a buyer.Server whose billing store is in
 // verified_model_settlement_mode=enforce, so settlementEnforceMode()
@@ -68,6 +88,7 @@ func receiptGateProvider(providerID string, receiptPubkey []byte) pool.Provider 
 // receipt-key gate — a hard pin to an empty-key provider must be refused
 // with 503 no_provider_available (retryable), not routed to the guard (500).
 func TestReceiptKeyGate_ExcludesFromPinnedRoute(t *testing.T) {
+	withModelACatalogMaterial(t)
 	s, _ := enforceReceiptServer(t)
 
 	noKey := receiptGateProvider("no-key", nil)
@@ -88,6 +109,7 @@ func TestReceiptKeyGate_ExcludesFromPinnedRoute(t *testing.T) {
 // TestReceiptKeyGate_ExcludesFromSlotQueue: slotQueueCandidates re-derives
 // the routing gate by hand, so it must apply the receipt-key predicate too.
 func TestReceiptKeyGate_ExcludesFromSlotQueue(t *testing.T) {
+	withModelACatalogMaterial(t)
 	s, _ := enforceReceiptServer(t)
 	checker := &eligibilityCtx{s: s, model: "model-a", estimatedTokens: 100, tier2Cfg: s.tier2Config(), settlementEnforce: true}
 	busy := func(id string, key []byte) pool.Provider {

@@ -11796,7 +11796,7 @@ $provider_watchdog_state_entry
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>ProcessType</key>
-  <string>Adaptive</string>
+  <string>Standard</string>
 </dict>
 </plist>
 EOF

@@ -119,6 +119,7 @@ actor RelayBlindFixtureRuntime: ModelRuntimeServing {
     var loadedWeightsManifestSHA256: String? { nil }
     var isLoaded: Bool { true }
     nonisolated var isSettlementReceiptEligible: Bool { false }
+    nonisolated var settlementRuntimeSource: String? { nil }
     func setProviderStatus(_ providerStatus: ProviderStatus) {}
 
     func currentSnapshot() -> RuntimeSnapshot {

@@ -85,6 +85,26 @@ func h4RegisterWSProvider(reg *pool.Registry, providerID, assignedID, modelID st
 	}, nil)
 }
 
+const (
+	h4GatewayToken = "h4-gateway-service-token"
+	h4RequestID    = "req-h4"
+)
+
+// h4PostChatNegotiated posts as a gateway that advertised non-streaming
+// settlement trailers.
+func h4PostChatNegotiated(t *testing.T, s *Server, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+h4GatewayToken)
+	req.Header.Set("X-MacProvider-Account", "acct_h4")
+	req.Header.Set("X-Request-ID", h4RequestID)
+	req.Header.Set(settlementTrailersCapabilityHeader, "1")
+	rr := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rr, req)
+	_, _ = io.Copy(io.Discard, rr.Result().Body)
+	return rr
+}
+
 func h4PostChat(t *testing.T, s *Server, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
@@ -145,6 +165,7 @@ func h4Server(t *testing.T, reqLog *requestlog.Store, relay RelayFunc, observed 
 		WithBilling(billingStore, h4Rewards()),
 		WithRoutingConfig(config.RoutingConfig{MaxRetries: 0, StickyTTLS: 1800, StickyMaxEntries: 10000}),
 		WithRelay(relay, time.Second),
+		WithGatewayServiceToken(h4GatewayToken),
 	)
 	s.terminalObserver = func(rt *requestTerminal) { *observed = rt }
 	return s
@@ -291,7 +312,8 @@ func TestSeamH4_PostTerminalBillingRowIsOrderedAndAgrees(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // H4-3 · THE TRIPWIRE: provider credited while the buyer was told the request
-// failed (INV-6 / I-1).
+// failed (INV-6 / I-1). This is the record-before-write order a caller that
+// did not negotiate settlement trailers keeps (pre-#1690 gateways).
 //
 // Forced deterministically without touching production code: the credit write
 // succeeds, then the settlement-output write returns a hard error. The WS
@@ -353,6 +375,68 @@ func TestSeamH4_CreditedWhileBuyerToldFailedIsAConflict(t *testing.T) {
 	// arbiter. Suppressing it would erase a real provider credit.
 	if !observed.Rows()[0].Conflicted {
 		t.Fatal("conflicting row not marked Conflicted")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// H4-3b · delivered-only ordering (SPEC-022 R-5.6): for a gateway that
+// negotiated settlement trailers, the WS non-streaming success is recorded
+// only after the body reached the buyer.
+//
+// Forced deterministically: the credit write succeeds, then the
+// settlement-output write returns a hard error. Before delivered-only
+// billing, the success was logged before the write, so this failure turned
+// into a 500 request_log_failed for a credited provider (INV-6). Now the
+// buyer already holds the 200 body when the row is written: the credit and
+// the buyer terminal agree, and a failed evidence write cannot rewrite what
+// the buyer received. The INV-6 predicate itself stays pinned by H4-4.
+// ---------------------------------------------------------------------------
+func TestSeamH4_WSNonStreamingCreditFollowsDeliveredBodyNegotiated(t *testing.T) {
+	prev := settlementOutputWriteErrForTest
+	settlementOutputWriteErrForTest = errors.New("settlement attempt output table missing")
+	t.Cleanup(func() { settlementOutputWriteErrForTest = prev })
+
+	reqLog, dbPath := h4OpenRequestLog(t)
+	var observed *requestTerminal
+	s := h4Server(t, reqLog, h4RelaySuccess(), &observed)
+
+	before := buyerTerminalConflictTotal.Load()
+	rr := h4PostChatNegotiated(t, s, []byte(h4ChatBody))
+
+	if rr.Code != http.StatusOK || strings.Contains(rr.Body.String(), "request_log_failed") {
+		t.Fatalf("buyer status = %d, want the delivered 200 body; body=%s", rr.Code, rr.Body.String())
+	}
+	// Review R3 MEDIUM-2: this attempt has no enforce route snapshot, so its
+	// credit stays payable and the buyer is debited too: the failed evidence
+	// write reaches the gateway as the signed legacy tuple, not a refund
+	// (the enforce refund is TestHTTPEnforceRecordFailureRefundsAndQuarantinesCredit).
+	res := rr.Result()
+	trailer := res.Trailer
+	if trailer.Get(settlementModeHeader) != settlementLegacyMode || trailer.Get(settlementOutcomeHeader) != "" {
+		t.Fatalf("trailers=%v, want the signed legacy tuple", trailer)
+	}
+	values := make([]string, 0, len(settlementOutcomeHeaderNames))
+	for _, name := range settlementOutcomeHeaderNames {
+		values = append(values, trailer.Get(name))
+	}
+	if want := settlementFinalityMAC(h4GatewayToken, "acct_h4", h4RequestID, res.Header.Get(internalRequestIDHeader), values); trailer.Get(settlementFinalityMACHeader) != want {
+		t.Fatalf("legacy MAC=%q, want %q", trailer.Get(settlementFinalityMACHeader), want)
+	}
+	if statuses := h4RequestLogStatuses(t, dbPath); len(statuses) != 1 || statuses[0] != http.StatusOK {
+		t.Fatalf("request_log statuses = %v, want exactly [200] (the provider WAS credited)", statuses)
+	}
+	if observed == nil {
+		t.Fatal("terminal arbiter was never evaluated")
+	}
+	rows := observed.Rows()
+	if len(rows) != 1 || rows[0].Status != http.StatusOK {
+		t.Fatalf("credited rows = %#v, want one 200 row", rows)
+	}
+	if got := observed.Conflicts(); got != 0 {
+		t.Fatalf("conflicts = %d, want 0: the credited 200 follows the delivered 200", got)
+	}
+	if delta := buyerTerminalConflictTotal.Load() - before; delta != 0 {
+		t.Fatalf("buyerTerminalConflictTotal delta = %d, want 0", delta)
 	}
 }
 
@@ -531,6 +615,50 @@ func TestSeamH4_HotPathDeadlineDoesNotPretendPaid(t *testing.T) {
 	if observed != nil {
 		if got := observed.Conflicts(); got != 0 {
 			t.Fatalf("conflicts = %d, want 0 — no credit was recorded", got)
+		}
+		for _, row := range observed.Rows() {
+			t.Fatalf("credited row was noted without a ledger credit: %+v", row)
+		}
+	}
+}
+
+// TestSeamH4_HotPathDeadlineDoesNotPretendPaidNegotiated is the same check
+// in the delivered-only order a gateway gets by negotiating trailers.
+func TestSeamH4_HotPathDeadlineDoesNotPretendPaidNegotiated(t *testing.T) {
+	prev := hotPathWriteContextForTest
+	hotPathWriteContextForTest = func(int, context.Context) context.Context {
+		dead, cancel := context.WithCancel(context.Background())
+		cancel()
+		return dead
+	}
+	t.Cleanup(func() { hotPathWriteContextForTest = prev })
+
+	reqLog, dbPath := h4OpenRequestLog(t)
+	var observed *requestTerminal
+	s := h4Server(t, reqLog, h4RelaySuccess(), &observed)
+	rr := h4PostChatNegotiated(t, s, []byte(h4ChatBody))
+	// Delivered-only (SPEC-022 R-5.6): the body reached the buyer before the
+	// credit write, so the buyer holds a 200 and the provider is not paid.
+	if rr.Code != http.StatusOK {
+		t.Fatalf("buyer status = %d, want the delivered 200; body=%s", rr.Code, rr.Body.String())
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	var credits int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM ledger_request_credits`).Scan(&credits); err != nil {
+		t.Fatalf("count credits: %v", err)
+	}
+	if credits != 0 {
+		t.Fatalf("credited rows = %d, want 0", credits)
+	}
+	if observed != nil {
+		// The buyer holds a delivered 200 the ledger did not credit: the
+		// arbiter reports it served-but-unpaid (I-2), once.
+		if got := observed.Conflicts(); got != 1 {
+			t.Fatalf("conflicts = %d, want 1 (served without credit)", got)
 		}
 		for _, row := range observed.Rows() {
 			t.Fatalf("credited row was noted without a ledger credit: %+v", row)

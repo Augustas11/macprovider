@@ -190,11 +190,15 @@ final class HTTPServerReceiptTests: XCTestCase {
         let parsed = try parseReceiptHeader(receipt, publicKey: key.publicKey)
 
         XCTAssertEqual(response.status, .ok, response.body)
+        // `Retry-After` is declared on every SSE head (SPEC-038 `:614`): a
+        // stream can end in a queue-pressure error long after the head is
+        // committed, and an undeclared trailer is one a reader may drop.
         XCTAssertEqual(response.headers.first(name: "trailer"), [
             RouterHandler.receiptHeaderName,
             RouterHandler.receiptTerminalStateTSHeaderName,
             RouterHandler.receiptPendingDeadlineHeaderName,
             RouterHandler.lateReceiptSettlementHeaderName,
+            "Retry-After",
         ].joined(separator: ", "))
         XCTAssertTrue(response.body.contains("data: [DONE]"), response.body)
         XCTAssertEqual(parsed.tuple["receipt_version"] as? String, "4")
@@ -1590,5 +1594,198 @@ private extension HTTPHeaders {
 
     var canonicalPairs: [String] {
         map { "\($0.name.lowercased()): \($0.value)" }
+    }
+}
+
+// SPEC-015 §N.12 / AC-12b (#1690 M5): the HTTP receipt decision for a runtime
+// that is not settlement eligible is made per request from the settlement
+// metadata's pool_runtime_authorization.
+extension HTTPServerReceiptTests {
+    private static let poolServedModelHash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+
+    private func poolReceiptDecision(
+        authorization: [String: Any]?,
+        runtimeSource: String? = LlamaCppLoopbackServeModel.runtimeSource,
+        disposition: ContinuousBatchSettlementDisposition = .notEligible
+    ) throws -> (issued: Bool, omitted: ReceiptOmissionReason?) {
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        var wire = httpSettlementMetadataWire(
+            receiptKeyID: httpReceiptKeyID(key.publicKey.rawRepresentation),
+            expectedModelHash: Self.poolServedModelHash
+        )
+        if let authorization {
+            wire[PoolRuntimeAuthorization.wireKey] = authorization
+        }
+        let metadata = try XCTUnwrap(SettlementReceiptMetadata(wire: wire))
+        let request = try parseRequest([
+            "model": "fixture-model",
+            "messages": [["role": "user", "content": "hello"]],
+        ])
+        let result = try RouterHandler.receiptHeaderResult(
+            providerID: "provider-a",
+            receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+            request: request,
+            outputContent: "answer",
+            outputToolCalls: nil,
+            finishReason: "stop",
+            promptTokens: 8,
+            ttftMs: 7,
+            tokensOut: 3,
+            unixTsSeconds: 1_800_000_000,
+            modelHashSource: .captured(Self.poolServedModelHash),
+            requestID: "req-http-receipt",
+            settlementMetadata: metadata,
+            runtimeSettlementEligible: false,
+            settlementRuntimeSource: runtimeSource,
+            settlementDisposition: disposition,
+            terminalStateTSUnixMS: 1_800_000_000_000
+        )
+        switch result {
+        case .issued:
+            return (true, nil)
+        case .omitted(let reason):
+            return (false, reason)
+        }
+    }
+
+    private func httpPoolAuthorization(
+        runtimeSource: String = LlamaCppLoopbackServeModel.runtimeSource,
+        requestID: String = "req-http-receipt",
+        providerID: String = "provider-a",
+        attemptN: Int = 0,
+        routeSnapshotDigest: String = String(repeating: "3", count: 64)
+    ) -> [String: Any] {
+        ReceiptEligibilityFixtures.poolRuntimeAuthorizationWire(
+            runtimeSource: runtimeSource,
+            requestID: requestID,
+            providerID: providerID,
+            attemptN: attemptN,
+            routeSnapshotDigest: routeSnapshotDigest
+        )
+    }
+
+    func testHTTPPoolAuthorizedLoopbackSignsV04Receipt() throws {
+        let decision = try poolReceiptDecision(authorization: httpPoolAuthorization())
+        XCTAssertTrue(decision.issued)
+        XCTAssertNil(decision.omitted)
+    }
+
+    func testHTTPLoopbackWithoutMatchingPoolAuthorizationSignsNothing() throws {
+        var malformed = httpPoolAuthorization()
+        malformed["attempt_n"] = true
+        let cases: [(label: String, authorization: [String: Any]?, runtimeSource: String?)] = [
+            ("absent", nil, LlamaCppLoopbackServeModel.runtimeSource),
+            ("malformed", malformed, LlamaCppLoopbackServeModel.runtimeSource),
+            ("other_runtime_source", httpPoolAuthorization(runtimeSource: OllamaLoopbackServeModel.runtimeSource), LlamaCppLoopbackServeModel.runtimeSource),
+            ("other_request", httpPoolAuthorization(requestID: "req-other"), LlamaCppLoopbackServeModel.runtimeSource),
+            ("other_attempt", httpPoolAuthorization(attemptN: 2), LlamaCppLoopbackServeModel.runtimeSource),
+            ("other_provider", httpPoolAuthorization(providerID: "provider-b"), LlamaCppLoopbackServeModel.runtimeSource),
+            ("other_route_snapshot", httpPoolAuthorization(routeSnapshotDigest: String(repeating: "5", count: 64)), LlamaCppLoopbackServeModel.runtimeSource),
+            ("runtime_without_source", httpPoolAuthorization(), nil),
+        ]
+        for testCase in cases {
+            let decision = try poolReceiptDecision(authorization: testCase.authorization, runtimeSource: testCase.runtimeSource)
+            XCTAssertFalse(decision.issued, testCase.label)
+            XCTAssertEqual(decision.omitted, .runtimeNotSettlementEligible, testCase.label)
+        }
+    }
+
+    func testHTTPPoolAuthorizedReplayWaiterStillSignsNothing() throws {
+        let decision = try poolReceiptDecision(authorization: httpPoolAuthorization(), disposition: .nonSettlingReplay)
+        XCTAssertFalse(decision.issued)
+        XCTAssertEqual(decision.omitted, .nonSettlingReplay)
+    }
+
+    // #1690 final audit R1 CODE-5: usage the upstream did not report is never
+    // signed, even under a matching pool runtime authorization.
+    func testHTTPPoolAuthorizedLoopbackWithoutUpstreamUsageSignsNothing() throws {
+        let decision = try poolReceiptDecision(authorization: httpPoolAuthorization(), disposition: .usageUnattested)
+        XCTAssertFalse(decision.issued)
+        XCTAssertEqual(decision.omitted, .runtimeNotSettlementEligible)
+    }
+}
+
+// #1690 freeze audit R1 CODE-1/CODE-2: a buyer that disconnects mid-stream
+// cancels generation. Like the relay's `cancelled` status, that is not a
+// provider failure, and no receipt is issued for output nobody received.
+extension HTTPServerReceiptTests {
+    func testHTTPStreamingClientDisconnectIsBuyerCancelNotProviderFailure() async throws {
+        let capture = ReceiptAuditCapture()
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let modelHash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let metadata = httpSettlementMetadataHeader(
+            receiptKeyID: httpReceiptKeyID(key.publicKey.rawRepresentation),
+            expectedModelHash: modelHash
+        )
+        let disconnected = HTTPDisconnectFlag()
+        let runtime = ModelRuntime(
+            modelID: "fixture-model",
+            modelHash: modelHash,
+            warmSwapEnabled: true,
+            loader: { _ in throw HTTPReceiptFixtureError.inferenceFailed },
+            testCompletion: { _, _ in
+                // Generation outlives the buyer, then observes the cancel.
+                while !disconnected.isSet {
+                    try await Task.sleep(nanoseconds: 10_000_000)
+                }
+                try await Task.sleep(nanoseconds: 300_000_000)
+                throw CancellationError()
+            }
+        )
+        let status = ProviderStatus(
+            modelID: "fixture-model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        try await ReceiptAudit.withSink({ record in capture.append(record) }) {
+            try await withReceiptHTTPServer(
+                runtime: runtime,
+                providerStatus: status,
+                providerID: "provider-a",
+                receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+                warmSwapEnabled: true
+            ) { port in
+                let response = try rawChatCompletionRoundTrip(
+                    port: port,
+                    body: [
+                        "model": "fixture-model",
+                        "stream": true,
+                        "messages": [["role": "user", "content": "hello"]],
+                    ],
+                    headerOnly: true,
+                    requestID: "req-http-receipt",
+                    requestHeaders: [(RouterHandler.settlementMetadataHeaderName, metadata)]
+                )
+                XCTAssertEqual(response.status, .ok)
+                // The round trip closed the client socket on return.
+                disconnected.set()
+                for _ in 0..<500 where (try? capture.events().isEmpty) ?? true {
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
+            }
+        }
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.requestsTotal, 1)
+        XCTAssertEqual(snapshot.errorsTotal, 0, "a buyer disconnect is not a provider failure")
+        let event = try capture.singleEvent()
+        XCTAssertEqual(event["event"] as? String, "receipt_omitted")
+        XCTAssertEqual(event["reason"] as? String, "write_failed")
+    }
+}
+
+private final class HTTPDisconnectFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
     }
 }

@@ -32,6 +32,10 @@ func runOverviewTick(ctx context.Context, db *sql.DB, cfg Config, snap SnapshotP
 	if err := queryOverviewCumulatives(ctx, db, cfg.PartialHistorySinceUnix, &tokensIn, &tokensOut, &requests); err != nil {
 		return fmt.Errorf("overview cumulatives: %w", err)
 	}
+	days, err := queryDailySeries(ctx, db, cfg.PartialHistorySinceUnix, now)
+	if err != nil {
+		return fmt.Errorf("overview daily: %w", err)
+	}
 	if err := pruneIdlePrewarmEvents(ctx, db); err != nil {
 		// Idle-prewarm telemetry is additive. A lock or grant issue on this
 		// optional table must not stale the primary overview component.
@@ -107,6 +111,9 @@ func runOverviewTick(ctx context.Context, db *sql.DB, cfg Config, snap SnapshotP
 		return fmt.Errorf("overview upsert: %w", err)
 	}
 
+	if err := writeDailySeries(ctx, tx, days); err != nil {
+		return err
+	}
 	if err := healthOK(ctx, tx, componentOverview, now); err != nil {
 		return fmt.Errorf("overview health: %w", err)
 	}
