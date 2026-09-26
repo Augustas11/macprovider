@@ -346,7 +346,7 @@ jobs:
   dist-tooling:
     name: deploy tooling (check-deploy-config gate)
     runs-on: ubuntu-latest
-    timeout-minutes: 20  # #1688 adds ~4 min of catalog-lane/lease harness tests to make test-dist
+    timeout-minutes: 30  # #1688 adds ~4 min of catalog-lane/lease harness tests to make test-dist; #1693's pricing-lane cases add ~5 more (main runs ~13 min)
     # Guards the fail-closed C2 pre-deploy gate
     # (phase4-coordinator/dist/check-deploy-config.sh), also invoked by
     # phase5-gateway/dist/deploy-pearl-vps.sh. Bash + python3 only — no Go
