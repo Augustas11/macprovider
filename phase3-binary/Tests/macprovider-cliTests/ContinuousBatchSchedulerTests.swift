@@ -4022,6 +4022,358 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         return windows
     }
 
+    func testPrefillBatchesCompatibleChunksWithinRowAndTokenBudgets() async throws {
+        let prefillGate = AsyncGate()
+        let backend = ScriptedBackend(
+            scripts: [
+                "row-1": [101], "row-2": [102], "row-3": [103], "row-4": [104], "row-5": [105],
+            ],
+            prefillGate: prefillGate
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 5,
+            maxPromptChunkTokens: 2,
+            maxPrefillRowsPerIteration: 2,
+            maxPrefillTokensPerIteration: 4,
+            backend: backend
+        )
+
+        let first = Task {
+            try await scheduler.submit(.init(
+                id: "row-1",
+                conversationKey: "",
+                promptTokens: [1, 2, 3],
+                maxOutputTokens: 1,
+                temperature: 0.0,
+                topP: 1.0
+            ))
+        }
+        try await eventually { await backend.prefillCallCount() == 1 }
+
+        let rest = (2...5).map { index in
+            Task {
+                try await scheduler.submit(.init(
+                    id: "row-\(index)",
+                    conversationKey: "",
+                    promptTokens: [index * 10 + 1, index * 10 + 2, index * 10 + 3],
+                    maxOutputTokens: 1,
+                    temperature: 0.0,
+                    topP: 1.0
+                ))
+            }
+        }
+        try await eventually { await scheduler.metrics().waitingCount >= 4 }
+        await prefillGate.open()
+
+        let firstResult = try await first.value
+        var restResults: [ContinuousBatchSchedulerResult] = []
+        for task in rest {
+            restResults.append(try await task.value)
+        }
+
+        XCTAssertEqual(firstResult.outputTokens, [101])
+        XCTAssertEqual(restResults.map(\.outputTokens), [[102], [103], [104], [105]])
+
+        let prefillOrder = await backend.prefillOrder()
+        let pairedPrefills = prefillOrder.filter { $0.count == 2 }
+        XCTAssertGreaterThanOrEqual(pairedPrefills.count, 2)
+        XCTAssertEqual(
+            Set(pairedPrefills.flatMap { $0 }),
+            Set(["row-2", "row-3", "row-4", "row-5"])
+        )
+        XCTAssertTrue(prefillOrder.allSatisfy { $0.count <= 2 })
+        let tokenCounts = await backend.prefillTokenCountsByCall()
+        XCTAssertTrue(tokenCounts.allSatisfy { $0 <= 4 })
+
+        let committed = await backend.prefillCommittedCounts()
+        let pairedCommitted = committed.filter { $0.count == 2 }
+        XCTAssertGreaterThanOrEqual(pairedCommitted.count, 2)
+        XCTAssertTrue(pairedCommitted.allSatisfy { $0.values.allSatisfy { $0 == 0 } })
+        let metrics = await scheduler.metrics()
+        XCTAssertEqual(metrics.slotsFree, metrics.slotsTotal)
+    }
+
+    func testBatchedPrefillPreservesDecodeOrderFallbackFairnessAndCancellationIsolation() async throws {
+        let decodeGate = AsyncGate()
+        let prefillGate = AsyncGate()
+        let backend = ScriptedBackend(
+            scripts: [
+                "active": [90, 91, 92],
+                "row-a": [101],
+                "row-b": [102],
+                "row-c": [103],
+                "row-d": [104],
+                "cancel-before": [105],
+            ],
+            prefillGate: prefillGate,
+            decodeGate: decodeGate
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 6,
+            maxPromptChunkTokens: 2,
+            maxPrefillRowsPerIteration: 3,
+            maxPrefillTokensPerIteration: 6,
+            backend: backend
+        )
+
+        let active = Task {
+            try await scheduler.submit(.init(
+                id: "active",
+                conversationKey: "",
+                promptTokens: [1],
+                maxOutputTokens: 3,
+                temperature: 0.0,
+                topP: 1.0
+            ))
+        }
+        try await eventually { await backend.decodeCallCount() == 1 }
+
+        func queued(_ id: String, promptTokens: [Int]) -> Task<ContinuousBatchSchedulerResult, Error> {
+            Task {
+                try await scheduler.submit(.init(
+                    id: id,
+                    conversationKey: "",
+                    promptTokens: promptTokens,
+                    maxOutputTokens: 1,
+                    temperature: 0.0,
+                    topP: 1.0
+                ))
+            }
+        }
+
+        let rowA = queued("row-a", promptTokens: [11, 12, 13])
+        try await eventually { await scheduler.metrics().waitingCount == 1 }
+        let rowB = queued("row-b", promptTokens: [21, 22])
+        try await eventually { await scheduler.metrics().waitingCount == 2 }
+        let rowC = queued("row-c", promptTokens: [31, 32, 33])
+        try await eventually { await scheduler.metrics().waitingCount == 3 }
+        let rowD = queued("row-d", promptTokens: [41, 42, 43])
+        try await eventually { await scheduler.metrics().waitingCount == 4 }
+        let cancelBefore = queued("cancel-before", promptTokens: [51, 52, 53])
+        try await eventually { await scheduler.metrics().waitingCount == 5 }
+        await scheduler.cancel(requestID: "cancel-before")
+
+        await decodeGate.open()
+        try await eventually { await backend.prefillCallCount() == 1 }
+        await scheduler.cancel(requestID: "row-c")
+        await prefillGate.open()
+
+        let activeResult = try await active.value
+        let aResult = try await rowA.value
+        let bResult = try await rowB.value
+        let cResult = try await rowC.value
+        let dResult = try await rowD.value
+        let beforeResult = try await cancelBefore.value
+
+        XCTAssertEqual(activeResult.outputTokens, [90, 91, 92])
+        XCTAssertEqual(aResult.outputTokens, [101])
+        XCTAssertEqual(bResult.outputTokens, [102])
+        XCTAssertEqual(dResult.outputTokens, [104])
+        XCTAssertEqual(cResult.terminalStatus, .cancelled)
+        XCTAssertEqual(beforeResult.terminalStatus, .cancelled)
+
+        let prefillOrder = await backend.prefillOrder()
+        let firstPrefillRows = try XCTUnwrap(prefillOrder.first)
+        XCTAssertGreaterThanOrEqual(firstPrefillRows.count, 2)
+        XCTAssertTrue(firstPrefillRows.contains("row-a"), "\(prefillOrder)")
+        XCTAssertTrue(firstPrefillRows.contains("row-c"), "\(prefillOrder)")
+        XCTAssertTrue(prefillOrder.flatMap { $0 }.contains("row-b"), "\(prefillOrder)")
+        XCTAssertTrue(prefillOrder.flatMap { $0 }.contains("row-d"), "\(prefillOrder)")
+        XCTAssertGreaterThan(
+            try XCTUnwrap(prefillOrder.firstIndex(where: { $0.contains("row-b") })),
+            0,
+            "\(prefillOrder)"
+        )
+        XCTAssertFalse(prefillOrder.flatMap { $0 }.contains("cancel-before"))
+
+        let events = await backend.events()
+        let firstPrefill = try XCTUnwrap(events.firstIndex(where: { $0.hasPrefix("prefill:") }))
+        let firstActiveDecode = try XCTUnwrap(events.firstIndex(of: "decode:active"))
+        XCTAssertLessThan(firstActiveDecode, firstPrefill)
+
+        let decodedRows = await backend.decodeBatches().flatMap { $0 }
+        XCTAssertFalse(decodedRows.contains("row-c"))
+        XCTAssertFalse(decodedRows.contains("cancel-before"))
+        XCTAssertTrue(decodedRows.contains("row-a"))
+        XCTAssertTrue(decodedRows.contains("row-b"))
+        XCTAssertTrue(decodedRows.contains("row-d"))
+        let finishedRequests = await backend.finishedRequests()
+        XCTAssertEqual(finishedRequests.filter { $0 == "row-c" }.count, 1)
+        XCTAssertEqual(finishedRequests.filter { $0 == "cancel-before" }.count, 1)
+        let terminalCommits = await backend.terminalCommits()
+        let retainedInstalls = await backend.retainedInstalls()
+        let serialMaterializations = await backend.serialMaterializations()
+        XCTAssertNil(terminalCommits["row-c"])
+        XCTAssertNil(terminalCommits["cancel-before"])
+        XCTAssertNil(retainedInstalls["row-c"])
+        XCTAssertNil(retainedInstalls["cancel-before"])
+        XCTAssertNil(serialMaterializations["row-c"])
+        XCTAssertNil(serialMaterializations["cancel-before"])
+        let metrics = await scheduler.metrics()
+        XCTAssertEqual(metrics.slotsFree, metrics.slotsTotal)
+    }
+
+    func testSerialPrefillFallbackFailureIsRequestLocal() async throws {
+        let backend = ScriptedBackend(
+            scripts: ["failed": [101], "healthy": [102]],
+            prefillRowFailures: ["failed"]
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            maxPromptChunkTokens: 2,
+            maxPrefillRowsPerIteration: 2,
+            maxPrefillTokensPerIteration: 4,
+            backend: backend
+        )
+
+        async let failed = scheduler.submit(.init(
+            id: "failed",
+            conversationKey: "",
+            promptTokens: [1, 2, 3],
+            maxOutputTokens: 1
+        ))
+        async let healthy = scheduler.submit(.init(
+            id: "healthy",
+            conversationKey: "",
+            promptTokens: [11, 12, 13],
+            maxOutputTokens: 1
+        ))
+
+        let (failedResult, healthyResult) = try await (failed, healthy)
+        XCTAssertEqual(failedResult.terminalStatus, .requestFailed)
+        XCTAssertEqual(failedResult.errorCode, "continuous_batching_prefill_failed")
+        XCTAssertEqual(healthyResult.terminalStatus, .length)
+        XCTAssertEqual(healthyResult.outputTokens, [102])
+        let metrics = await scheduler.metrics()
+        XCTAssertEqual(metrics.slotsFree, metrics.slotsTotal)
+    }
+
+    func testCancellationDuringFailingPrefillWinsTerminalRace() async throws {
+        let prefillGate = AsyncGate()
+        let backend = ScriptedBackend(
+            scripts: ["cancelled": [101]],
+            prefillGate: prefillGate,
+            prefillRowFailures: ["cancelled"]
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 2,
+            backend: backend
+        )
+        let request = Task {
+            try await scheduler.submit(.init(
+                id: "cancelled",
+                conversationKey: "",
+                promptTokens: [1, 2, 3],
+                maxOutputTokens: 1
+            ))
+        }
+
+        try await eventually { await backend.prefillCallCount() == 1 }
+        await scheduler.cancel(requestID: "cancelled")
+        await prefillGate.open()
+
+        let result = try await request.value
+        XCTAssertEqual(result.terminalStatus, .cancelled)
+        XCTAssertEqual(result.errorCode, "request_cancelled")
+        let finishedRequests = await backend.finishedRequests()
+        let decodeBatches = await backend.decodeBatches()
+        XCTAssertEqual(finishedRequests, ["cancelled"])
+        XCTAssertTrue(decodeBatches.isEmpty)
+        let metrics = await scheduler.metrics()
+        XCTAssertEqual(metrics.slotsFree, metrics.slotsTotal)
+    }
+
+    func testCancellationDuringThrownGroupPrefillFailureWinsOnlyForCancelledRow() async throws {
+        let prefillGate = AsyncGate()
+        let backend = ScriptedBackend(
+            scripts: ["cancelled": [101], "peer": [102]],
+            prefillGate: prefillGate,
+            prefillError: BackendFailure()
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            maxPromptChunkTokens: 2,
+            maxPrefillRowsPerIteration: 2,
+            maxPrefillTokensPerIteration: 4,
+            backend: backend
+        )
+        async let cancelled = scheduler.submit(.init(
+            id: "cancelled",
+            conversationKey: "",
+            promptTokens: [1, 2, 3],
+            maxOutputTokens: 1
+        ))
+        async let peer = scheduler.submit(.init(
+            id: "peer",
+            conversationKey: "",
+            promptTokens: [11, 12, 13],
+            maxOutputTokens: 1
+        ))
+
+        try await eventually { await backend.prefillCallCount() == 1 }
+        await scheduler.cancel(requestID: "cancelled")
+        await prefillGate.open()
+
+        let (cancelledResult, peerResult) = try await (cancelled, peer)
+        XCTAssertEqual(cancelledResult.terminalStatus, .cancelled)
+        XCTAssertEqual(cancelledResult.errorCode, "request_cancelled")
+        XCTAssertEqual(peerResult.terminalStatus, .requestFailed)
+        XCTAssertEqual(peerResult.errorCode, "continuous_batching_prefill_failed")
+        let finishedRequests = await backend.finishedRequests()
+        XCTAssertEqual(finishedRequests.filter { $0 == "cancelled" }.count, 1)
+        XCTAssertEqual(finishedRequests.filter { $0 == "peer" }.count, 1)
+        let metrics = await scheduler.metrics()
+        XCTAssertEqual(metrics.slotsFree, metrics.slotsTotal)
+    }
+
+    func testPoolPressureWithPromptAndDecodeHeadroomQueuesLongPromptWorkWithoutExtensionFailure() async throws {
+        let backend = ScriptedBackend(scripts: [
+            "long-1": [101, 111],
+            "long-2": [102, 112],
+            "long-3": [103, 113],
+        ])
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 6)
+        let scheduler = try await makeScheduler(
+            descriptor: Self.descriptor(blockSizeTokens: 4, maxPhysicalBlocks: 6),
+            maxActiveRows: 3,
+            queueLimit: 3,
+            decodeHeadroomTokens: 2,
+            maxPromptChunkTokens: 2,
+            maxPrefillRowsPerIteration: 3,
+            maxPrefillTokensPerIteration: 6,
+            backend: backend,
+            allocator: allocator
+        )
+
+        let tasks = (1...3).map { index in
+            Task {
+                try await scheduler.submit(.init(
+                    id: "long-\(index)",
+                    conversationKey: "",
+                    promptTokens: Array((index * 100)..<(index * 100 + 9)),
+                    maxOutputTokens: 2,
+                    temperature: 0.0,
+                    topP: 1.0
+                ))
+            }
+        }
+
+        var results: [ContinuousBatchSchedulerResult] = []
+        for task in tasks {
+            results.append(try await task.value)
+        }
+
+        XCTAssertEqual(results.map(\.terminalStatus), [.length, .length, .length])
+        XCTAssertEqual(results.map(\.outputTokens), [[101, 111], [102, 112], [103, 113]])
+        XCTAssertFalse(results.contains { $0.errorCode == "continuous_batching_block_extension_failed" })
+        let freeBlocks = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocks, 6)
+        let metrics = await scheduler.metrics()
+        XCTAssertFalse(metrics.diagnostics.contains(.localExtensionFailed))
+        XCTAssertTrue(metrics.diagnostics.contains(.promptHeadroomReserved))
+    }
+
     func testLockstepWindowStopSequenceAppliesTokensSequentially() async throws {
         let backend = WindowRecordingBackend(scripts: [
             "stopped": [1, 2, 5, 6, 9],
@@ -4149,6 +4501,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         maxDecodeLockstepWindow: Int = 1,
         maxDecodeStepsWhilePrefilling: Int = 1,
         maxPrefillRowsPerIteration: Int = 1,
+        maxPrefillTokensPerIteration: Int? = nil,
         backend: any ContinuousBatchSchedulerBackend,
         allocator: PagedKVBlockAllocator? = nil,
         contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil,
@@ -4163,6 +4516,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             queueLimit: queueLimit,
             decodeHeadroomTokens: decodeHeadroomTokens,
             maxPrefillRowsPerIteration: maxPrefillRowsPerIteration,
+            maxPrefillTokensPerIteration: maxPrefillTokensPerIteration,
             maxPromptChunkTokens: maxPromptChunkTokens,
             tokenDeliveryBufferLimit: tokenDeliveryBufferLimit,
             tokenDeliveryTimeoutNanoseconds: tokenDeliveryTimeoutNanoseconds,
@@ -4466,11 +4820,13 @@ private struct HeadlessRetainedCacheBridge: ContinuousBatchRetainedCacheBridge {
 }
 
 private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
+    private nonisolated let finishRecorder = RequestFinishRecorder()
     private let scripts: [String: [Int]]
     private let prefillGate: AsyncGate?
     private let decodeGate: AsyncGate?
     private let failDecodeCall: Int?
     private let prefillError: (any Error)?
+    private let prefillRowFailures: Set<String>
     private let rowFailures: Set<String>
     private let terminalCommitBridge: PagedKVRuntimeContiguousCacheBridge?
     private let terminalCommitCaches: [PagedKVCache]
@@ -4501,6 +4857,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private var retainedCheckpointInstallLog: [String: Int] = [:]
     private var terminalCommitLog: [String: Int] = [:]
     private var promptChunks: [[Int]] = []
+    private var promptChunksByCall: [[[Int]]] = []
     private var eventLog: [String] = []
     private var decodeCalls = 0
 
@@ -4510,6 +4867,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         decodeGate: AsyncGate? = nil,
         failDecodeCall: Int? = nil,
         prefillError: (any Error)? = nil,
+        prefillRowFailures: Set<String> = [],
         rowFailures: Set<String> = [],
         terminalCommitBridge: PagedKVRuntimeContiguousCacheBridge? = nil,
         terminalCommitCaches: [PagedKVCache] = [],
@@ -4527,6 +4885,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         self.decodeGate = decodeGate
         self.failDecodeCall = failDecodeCall
         self.prefillError = prefillError
+        self.prefillRowFailures = prefillRowFailures
         self.rowFailures = rowFailures
         self.terminalCommitBridge = terminalCommitBridge
         self.terminalCommitCaches = terminalCommitCaches
@@ -4543,6 +4902,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
             ($0.requestID, $0.targetKVTokenCount)
         }))
         promptChunks.append(contentsOf: rows.map(\.promptTokens))
+        promptChunksByCall.append(rows.map(\.promptTokens))
         eventLog.append(contentsOf: rows.map { "prefill:\($0.requestID):\($0.promptTokens.count)" })
         if let prefillGate {
             await prefillGate.wait()
@@ -4550,7 +4910,14 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         if let prefillError {
             throw prefillError
         }
-        return rows.map { ContinuousBatchPrefillOutput(requestID: $0.requestID) }
+        return rows.map {
+            ContinuousBatchPrefillOutput(
+                requestID: $0.requestID,
+                failureCode: prefillRowFailures.contains($0.requestID)
+                    ? "continuous_batching_prefill_failed"
+                    : nil
+            )
+        }
     }
 
     func installRetainedPagedKVCache(
@@ -4668,6 +5035,10 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         await decodeGate?.open()
     }
 
+    nonisolated func finish(requestID: String) {
+        finishRecorder.record(requestID)
+    }
+
     func recurrentSnapshots() -> [String: [Int]] { recurrentSnapshotLog }
     func serialMaterializations() -> [String: [Int]] { serialMaterializeLog }
     func prefillCallCount() -> Int { prefillRowsLog.count }
@@ -4679,12 +5050,15 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     func currentTokensByDecodeBatch() -> [[String: Int]] { currentTokenLog }
     func prefillCommittedCounts() -> [[String: Int]] { prefillCommittedLog }
     func prefillTargetCounts() -> [[String: Int]] { prefillTargetLog }
+    func prefillTokenCountsByCall() -> [Int] { promptChunksByCall.map { $0.reduce(0) { $0 + $1.count } } }
     func decodeCommittedCounts() -> [[String: Int]] { decodeCommittedLog }
     func decodeTargetCounts() -> [[String: Int]] { decodeTargetLog }
     func blockTableLengthsByDecodeBatch() -> [[String: Int]] { blockTableLengthLog }
     func maxObservedPrefillChunkSize() -> Int? { promptChunks.map(\.count).max() }
     func events() -> [String] { eventLog }
     func retainedInstalls() -> [String: Int] { retainedInstallLog }
+    func terminalCommits() -> [String: Int] { terminalCommitLog }
+    func finishedRequests() -> [String] { finishRecorder.snapshot() }
     func terminalCommitTargets() -> [String: Int] { terminalCommitLog }
 
     private static func fp16Bytes(_ values: [UInt16]) -> Data {
@@ -4695,6 +5069,23 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
             withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
         }
         return data
+    }
+}
+
+private final class RequestFinishRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var requestIDs: [String] = []
+
+    func record(_ requestID: String) {
+        lock.lock()
+        requestIDs.append(requestID)
+        lock.unlock()
+    }
+
+    func snapshot() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return requestIDs
     }
 }
 

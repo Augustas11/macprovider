@@ -1,11 +1,19 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.2.15
-Status: draft (normative design; no IMPL in this SPEC - implementation is a separate PR behind a disabled-by-default flag)
+Version: v0.3
+Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3 (2026-09-27, batched prefill):** FR-CB2 now admits
+separate-phase, decode-first batched prefill for compatible prompt rows. The
+scheduler may prefill multiple compatible rows in one backend shared forward
+under a bounded per-iteration token budget, while preserving FCFS fairness,
+bounded cancellation and receipt boundaries, cross-row isolation, serial
+fallback for incompatible or ragged groups, and paged-pool backpressure for
+concurrent long prompts. AC-16 expands from chunked single-row prefill to the
+multi-row prefill acceptance gate.
 **Change log v0.2.15 (2026-09-26):** Gate A5 schema v4 binds a closed
 candidate frame and per-stratum order, derives focal row-zero events from raw
 source captures, requires an independently signed post-run source review, and
@@ -177,12 +185,16 @@ gated on the acceptance criteria of §7 and, decisively, on the real-hardware
 enable gate of FR-CB15. A green CI/audit/unit-test pass is not the enable gate
 for this runtime feature.
 
-In scope for v0.2:
+In scope for v0.3:
 
 - An actor-isolated batch scheduler behind the existing generation path
   (`ModelRuntime`), with FCFS admission, bounded queues, prefill/decode phase
   separation, one shared decode forward, and dynamic per-row insert/remove
   (FR-CB1..FR-CB5).
+- Separate-phase batched prefill for compatible prompt rows: multiple admitted
+  rows MAY share one prompt-phase backend forward when their model/cache/runtime
+  shape is compatible, but prefill and decode remain distinct scheduler phases
+  and the per-iteration prefill token budget remains bounded (FR-CB2).
 - Scheduler-owned per-request block tables over the `SPEC-039` paged engine.
   `SPEC-039` owns paged KV storage, block allocation internals, and the
   attention kernel; `SPEC-038` owns which request maps to which blocks and
@@ -214,7 +226,7 @@ In scope for v0.2:
   obligations over existing SPEC-001/SPEC-006 error/streaming envelopes, not
   new receipt or billing fields.
 
-Out of scope for v0.2:
+Out of scope for v0.3:
 
 - Any change to LOCKED SPEC-015 receipts, or to the SPEC-024
   `cached_prompt_tokens` / prefix-reuse wire semantics, the reuse predicate,
@@ -229,11 +241,13 @@ Out of scope for v0.2:
   reason-coded serial-routed only when the operator explicitly selects
   permissive behavior (FR-CB8).
 - Mixed-phase (prefill-plus-decode in one heterogeneous model call) batching;
-  v0.2 keeps prompt and decode phases separate (FR-CB2). This is a deliberate
-  conservative first-serving contract, not a claim that v0.2 matches
+  v0.3 keeps prompt and decode phases separate (FR-CB2). Compatible prompt
+  rows may share a prompt-phase forward, but a prompt-phase forward and a
+  decode-phase forward are never merged into one heterogeneous call. This is a
+  deliberate conservative first-serving contract, not a claim that v0.3 matches
   unified-token or mixed-phase schedulers in vLLM/SGLang/TensorRT-LLM under
   highly mixed prompt lengths.
-- Priority, deadline, or buyer-class scheduling economics; v0.2 is FCFS
+- Priority, deadline, or buyer-class scheduling economics; v0.3 is FCFS
   (FR-CB1).
 - Disaggregated prefill/decode, preemptive KV eviction/recompute,
   cross-request prefix-aware scheduling, and scheduler-owned prefix sharing.
@@ -302,8 +316,10 @@ SPEC-001 remains the provider wire/streaming envelope authority.
 | Serial path | Today's shipped behavior: one `AsyncSemaphore` permit per request, each running an independent `TokenIterator`. The flag-off fallback. |
 | Batch scheduler | The single-owner actor that owns admission, the prompt-processing set, the active decode batch, per-row lifecycle, and request-to-block-table mappings. |
 | Shared forward | One model call whose input carries one current token for every active decode row (conceptually `[B, 1]`), producing per-row logits in one pass. |
+| Shared prefill forward | One prompt-phase backend call that advances multiple compatible prompt rows together, without producing sampled output tokens. |
 | Decode row | An admitted request that has completed prefill and is participating in the shared decode forward. |
 | Prompt-processing batch | The bounded set of newly admitted requests undergoing prefill before they become decode rows. |
+| Compatible prefill group | A subset of the prompt-processing batch whose rows can share one prompt-phase backend forward without changing model semantics, cache representation, runtime revision, prompt-offset shape required by the backend, or per-row accounting. |
 | Active rows | Requests currently consuming inference capacity (prefill or decode). Capped by Entry 110 (FR-CB11). |
 | Waiting queue | Received work not yet admitted to an active phase; entries are either pre-admission queued or accepted queued per FR-CB13. Only accepted queued work is snapshot-bound and drain-obligated. Bounded (FR-CB1); never counted as capacity. |
 | Queue-full rejection | A pre-admission outcome where no queue slot is available; it is client-visible backpressure, carries no settlement/receipt side effect, and MAY include `Retry-After` / retry guidance through the existing API error surface. |
@@ -351,11 +367,11 @@ reconciles the Entry-110 active-row cap (FR-CB11) with real pool state: the cap
 is an upper bound on rows, and pool availability is the admission-time gate
 underneath it (FR-CB17).
 
-### FR-CB2 - separate prompt and decode batches, decode-first (SPEC-038-R002)
+### FR-CB2 - decode-first separate phases with bounded batched prefill (SPEC-038-R002)
 
 The scheduler MUST keep prompt processing (prefill) and decode as separate
 phases; it MUST NOT combine arbitrary prefill and one-token decode work into
-one heterogeneous model call in v0.2. A request joins the shared decode batch
+one heterogeneous model call in v0.3. A request joins the shared decode batch
 only after its prompt prefill completes and its request-private block table is
 initialized over `SPEC-039` blocks. Scheduling MUST be decode-first: each
 iteration advances the current decode batch by a bounded window of `W >= 1`
@@ -369,15 +385,47 @@ lockstep window. It MUST be 1 while a request is waiting for a free slot or
 being admitted, so that request joins at the next hop boundary (FR-CB5). While
 a prompt is mid-prefill and nothing else is waiting to join, `W` MUST NOT
 exceed the prefill decode window. The prefill decode window gives active rows
-several tokens per prefill chunk rather than one, so a long prompt slows them
-by a bounded factor instead of stalling them. Prefill MUST be bounded or
-chunked (one chunk per iteration) so a long prompt cannot block existing
-decode rows for an unbounded interval. Prefill never samples, so it evaluates
-only the prompt's cache state, not the vocabulary projection.
+several tokens per prefill turn rather than one, so long prompts slow them by
+a bounded factor instead of stalling them.
 
-This decode-first split is a v0.2 safety choice. It preserves simple
-per-request accounting, cancellation, and receipt boundaries while the shared
-forward is first enabled. It MUST NOT be described as equivalent to a
+Prefill MUST be bounded by a configured per-iteration prefill token budget. A
+single row MUST NOT consume more than its configured per-row chunk limit in one
+iteration, and a compatible prefill group MUST NOT consume more than the
+configured group token budget in one iteration. The scheduler MUST preserve
+FCFS fairness across admitted prompt work: older rows are not bypassed by newer
+compatible rows except when the older row is incompatible with the current
+backend prefill group, cannot be funded by the paged pool, is cancelled, or is
+otherwise in a reason-coded fallback/rejection state. A row that cannot join
+one compatible prefill group MUST continue to make progress through a later
+compatible group, a safe serial prefill path, or a client-visible
+backpressure/rejection outcome; starvation is non-conformant.
+
+Rows in one compatible prefill group MUST be processed by one backend shared
+prefill forward. An implementation MUST NOT claim batched prefill when it
+serially prefills compatible rows one at a time. When the backend cannot prove
+that a set of rows is compatible - including ragged prompt offsets, cache
+classes, runtime revisions, model shapes, recurrent-state boundaries, or
+adapter/tooling constraints that the backend cannot represent safely - the
+scheduler MUST split the group or use the serial fallback path. Fallback MUST
+preserve FCFS accounting, cancellation boundaries, receipt boundaries,
+request-local block-table isolation, and every FR-CB6 per-request isolation
+rule.
+
+Paged-pool pressure during concurrent long prompts MUST degrade gracefully. The
+scheduler MUST apply the FR-CB1/FR-CB17 admission and pool-availability gates
+before admitting prefill work, MUST keep unfunded rows in the bounded queue or
+reject them with the existing client-visible backpressure surface, and MUST
+NOT convert pool pressure into cross-row state mutation, duplicate terminal
+events, or stitched receipts. Cancellation observed before or during a prefill
+turn MUST take effect at a bounded scheduler boundary and release only that
+row's reservations.
+
+Prefill never samples, so it evaluates only the prompt's cache state, not the
+vocabulary projection.
+
+This decode-first split is a v0.3 safety choice. It preserves simple
+per-request accounting, cancellation, and receipt boundaries while adding
+same-phase prefill batching. It MUST NOT be described as equivalent to a
 unified-token, mixed-phase, priority, or disaggregated-prefill scheduler: those
 may improve utilization under mixed prompt lengths, but they are future
 optimization work and require new correctness/evidence gates before serving
@@ -1131,11 +1179,25 @@ hardware-capability run or a static-review obligation. Every
   local-HTTP paths exercise the same admission policy and capacity accounting
   (a fixture drives both surfaces and asserts one shared queue, not two
   independent ones).
-- **AC-16 decode-first scheduling + bounded/chunked prefill (FR-CB2):** a
-  long-prompt request admitted alongside active decode rows does not block
-  those rows for an unbounded interval (its prefill is bounded/chunked and
-  interleaves with decode steps); prefill and decode never merge into one
-  heterogeneous model call.
+- **AC-16 decode-first scheduling + bounded batched prefill (FR-CB2):** a
+  fixture with active decode rows and at least two compatible admitted prompt
+  rows proves that every scheduler iteration first advances decode, then
+  removes terminal/cancelled rows, then runs prefill under the configured
+  group token budget and per-row chunk limit. Compatible prompt rows MUST
+  advance through one backend shared prefill forward; a path that serially
+  prefills those compatible rows one at a time does not satisfy this AC.
+  The fixture MUST prove FCFS progress and no starvation, including an older
+  row that is temporarily incompatible with a younger compatible group. It
+  MUST inject cancellation before and during a prefill turn and prove bounded
+  cleanup with no duplicate terminal event, no cache commit for the cancelled
+  row unless the serial path would commit it, and no receipt or token
+  attribution change for any other row. It MUST include an incompatible or
+  ragged-offset prompt group that takes the safe split/serial fallback path,
+  preserving receipt/accounting/cancellation boundaries. It MUST include
+  concurrent long prompts that exceed the available paged-pool headroom and
+  prove bounded queueing or reason-coded backpressure/rejection rather than
+  `block_extension_failed`, cross-row mutation, or a stitched receipt.
+  Prefill and decode MUST never merge into one heterogeneous model call.
 - **AC-17 request block-table lifecycle over SPEC-039 blocks (FR-CB4):**
   request-allocation, bind, extension, release-completed-rows, cancellation
   cleanup, extract-to-standalone (via the SPEC-039 FR-PKV10 primitive), and
@@ -1276,7 +1338,7 @@ hardware-capability run or a static-review obligation. Every
 - Inlining or redefining the `SPEC-039` paged KV / paged-attention engine in
   scheduler code or in this scheduler spec (FR-CB16).
 
-## 10. Open questions carried (non-blocking for v0.2)
+## 10. Open questions carried (non-blocking for v0.3)
 
 These questions must be resolved before a production default but do not block
 this SPEC:

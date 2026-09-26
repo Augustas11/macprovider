@@ -3234,8 +3234,17 @@ actor ModelRuntime: ModelRuntimeServing {
                 moePromotionEvidenceAvailable: ContinuousBatchingPolicy.productionMoEPromotionEvidenceAvailable,
                 maxActiveRows: maxBatch,
                 queueLimit: queueLimit,
-                decodeHeadroomTokens: 1,
-                maxPromptChunkTokens: max(1, prefillStepSize),
+                decodeHeadroomTokens: ContinuousBatchSchedulerConfiguration.defaultDecodeHeadroomTokens,
+                maxPrefillRowsPerIteration: min(
+                    maxBatch,
+                    ContinuousBatchSchedulerConfiguration.defaultPrefillRowsPerIteration
+                ),
+                maxPrefillTokensPerIteration: ContinuousBatchSchedulerConfiguration
+                    .defaultPrefillTokensPerIteration,
+                maxPromptChunkTokens: min(
+                    max(1, prefillStepSize),
+                    ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
+                ),
                 tokenDeliveryBufferLimit: ContinuousBatchSchedulerConfiguration.productionTokenDeliveryBufferLimit,
                 queueWaitTimeoutNanoseconds: Self.queueWaitTimeoutNanoseconds(queueWaitTimeoutMS),
                 snapshot: ContinuousBatchSchedulerSnapshot(

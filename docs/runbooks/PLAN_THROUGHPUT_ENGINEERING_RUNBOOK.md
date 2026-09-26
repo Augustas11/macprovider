@@ -1,8 +1,8 @@
 # PLAN — MacProvider Throughput Engineering Runbook
 
-**Version:** 0.1.10  
-**Date:** 2026-07-07  
-**Status:** ACTIVE — **T0–T3 merged** (TG0/TG3 closed); upstream watch (#364, #406) or operator T4-01  
+**Version:** 0.1.11
+**Date:** 2026-09-27
+**Status:** ACTIVE — **T0–T3 merged** (TG0/TG3 closed); T4-01 chose incremental batched prefill for #1758
 **Source analysis:** Throughput engineering exploration (2026-07-07 Cursor session)  
 **Pinned session role:** Single plan-of-record for MLX/engine/egress throughput work. Executor agents update task status here; the pinned planning session verifies gates and revises sequencing.
 
@@ -45,10 +45,12 @@ beta/throughput-engineering/
   T3-01-stream-interval.md
   T3-02-adaptive-prefill-spike.md
   T3-03-kv-quant-scheme.md
-  T4-01-cbv2-feasibility.md          # architecture spike only until GO
-  T4-02-cbv2-impl.md                 # if T4-01 GO
+  T4-02-batched-prefill-impl.md      # implementation and campaign evidence
   DEFERRED.md                        # explicit non-adopts (NWConnection cluster)
 ```
+
+T4-01 feasibility and architecture evidence lives in
+`docs/runbooks/T4-01-batched-prefill-feasibility-2026-09-27.md`.
 
 ---
 
@@ -60,7 +62,7 @@ beta/throughput-engineering/
 | **TG1** | T1 pin bump GREEN + token-exact regression | Compiled decode wire-in (T2) |
 | **TG2** | T2 compiled decode GREEN on Gemma-4 + gpt-oss | Catalog TPS gate raises |
 | **TG3** | T3 provider opts measured ≥3% win OR explicit WAIVE | Prod config defaults change |
-| **TG4** | T4-01 feasibility GO + operator sign-off | Engine V2 / CBv2 port (T4-02) |
+| **TG4** | T4-01 feasibility GO + operator sign-off | Incremental batched-prefill implementation and Studio campaign (#1758) |
 
 ---
 
@@ -459,7 +461,7 @@ Executor writes `beta/throughput-engineering/T0_SUMMARY.md` with TG0 recommendat
 
 ---
 
-# T4 — Continuous batching / Engine V2 (bucket A+B, major)
+# T4 — Continuous batching throughput (bucket A+B, major)
 
 > **Goal:** Multi-stream **aggregate** TPS. **Do not start** until TG2 or operator explicitly prioritizes concurrency over single-stream polish.
 
@@ -470,49 +472,49 @@ Executor writes `beta/throughput-engineering/T0_SUMMARY.md` with TG0 recommendat
 | Field | Value |
 |-------|-------|
 | **ID** | `T4-01` |
-| **Question** | Can MacProvider adopt `MLXLMCommon.CBv2Engine` without breaking Tier-2 relay, warm-swap, conversation cache, spec-decode? |
+| **Question** | Should MacProvider port `MLXLMCommon.CBv2Engine`, or extend the current scheduler with bounded separate-phase batched prefill? |
 | **Prerequisites** | TG2 recommended; T1 merged |
 | **Time box** | 1 week read-only + prototype branch |
 
 ### Procedure
 
-1. Map only Engine V2 APIs present in tagged upstream `ml-explore` releases; if the required APIs are unreleased, record **BLOCKED** without inspecting forks.
+1. Map the current bottleneck and the minimum scheduler/runtime integration surface needed to remove it.
 2. List MacProvider integration points: `ModelRuntime`, `InferenceRelay`, `ConversationCache`, `ProviderStatus.throughputTPSSinceLast`.
-3. Prototype: load Gemma in CBv2 on branch; single-stream parity vs current path.
-4. Decision record: **GO** / **NO-GO** / **DEFER** with cost estimate.
+3. Compare an incremental shared-prefill forward with a CBv2 port against relay, warm-swap, cache, receipt, and block-table boundaries.
+4. Decision record: **GO** / **NO-GO** / **DEFER** with bounded implementation and validation gates.
 
 ### Artifacts
 
-- `beta/throughput-engineering/T4-01-cbv2-feasibility.md`
+- `docs/runbooks/T4-01-batched-prefill-feasibility-2026-09-27.md`
 
 ---
 
-## T4-02 — Engine V2 implementation
+## T4-02 — Bounded batched-prefill implementation
 
 | Field | Value |
 |-------|-------|
 | **ID** | `T4-02` |
-| **Question** | Ship CBv2 behind flag for MoE catalog models |
+| **Question** | Ship compatible-row shared prefill through the existing SPEC-038 scheduler and SPEC-039 block tables |
 | **Prerequisites** | TG4; T4-01 **GO** |
-| **Effort** | Multi-PR (4–8 weeks) — split: bridge → admission → warm-swap → prod flag |
+| **Effort** | One campaign PR — SPEC contract → scheduler/runtime bridge → Studio validation → reviewed release candidate |
 
 ### Procedure (high level)
 
-1. PR-A: `EngineV2Bridge` port + factory; kill switch env `MACPROVIDER_ENGINE_V2=0`.
-2. PR-B: Replace `maxBatch` semaphore semantics with scheduler capacity (KV budget).
-3. PR-C: Relay multi-request lifecycle + cancel.
-4. PR-D: Network harness scenario 07 sustained throughput re-baseline.
+1. Extend SPEC-038 with bounded compatible-row batched prefill and serial fallback.
+2. Add one shared prompt forward to the existing paged/hybrid backend under row and token budgets.
+3. Size admission headroom so 8k concurrency queues or backpressures instead of failing block extension.
+4. Run the Studio campaign gates for 1.5k x 4, 4k x 4, 8k x 4, parity, and isolation before release review.
 
 ### Pass / fail
 
 | Result | Criteria |
 |--------|----------|
-| **GREEN** | 2 concurrent streams ≥1.6× single-stream aggregate TPS on Gemma (**measure** on 32 GB) |
+| **GREEN** | Studio gates in the T4-01 decision record pass, including materially lower worst TTFT and no 8k `block_extension_failed` |
 | **RED** | Correctness/cancel/settlement regression |
 
 ### Artifacts
 
-- `beta/throughput-engineering/T4-02-cbv2-impl.md`
+- `beta/throughput-engineering/T4-02-batched-prefill-impl.md`
 
 ---
 
@@ -579,7 +581,7 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL.
 # Status tracker
 
 > **Maintained by:** executor agents + pinned planning session.  
-> Last updated: 2026-07-07 (T3 merged)
+> Last updated: 2026-09-27 (T4-01 incremental-path GO for #1758)
 
 | Task ID | Phase | Status | Gate | Artifact | Notes |
 |---------|-------|--------|------|----------|-------|
@@ -595,8 +597,8 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL.
 | T3-01 | T3 | **`WAIVE`** | TG3 | `T3-01-stream-interval.md` | Merged #473 — default 1; egress not bottleneck |
 | T3-02 | T3 | **`GREEN` (wire-in) / WAIVE default** | TG3 | `T3-02-adaptive-prefill-spike.md`, `T3-02-prefill-step-sweep.json` | Wire-in #474; 4k sweep flat — keep default 512 |
 | T3-03 | T3 | **`GREEN`** | TG3 | `T3-03-kv-quant-scheme.md` | Merged #472 — Gemma/gpt-oss → kvBits 8 |
-| T4-01 | T4 | `PENDING` | TG4 | — | Operator priority |
-| T4-02 | T4 | `BLOCKED` | — | — | Needs T4-01 GO |
+| T4-01 | T4 | **`GO`** | TG4 | `docs/runbooks/T4-01-batched-prefill-feasibility-2026-09-27.md` | Incremental SPEC-038 path; CBv2 rejected for this slice |
+| T4-02 | T4 | **`IN PROGRESS`** | TG4 | Issue #1758 campaign PR | Studio evidence remains required before release review |
 
 ### Gate summary
 
@@ -606,7 +608,7 @@ Do NOT update this plan unless asked — post artifact paths and PASS/FAIL.
 | TG1 | **`OPEN`** | T1-01 BLOCKED on #364/#518/#312/#424 and protected-toolchain/matrix gates |
 | TG2 | **`OPEN`** | T2-01 blocked on [mlx-swift-lm#406](https://github.com/ml-explore/mlx-swift-lm/issues/406) |
 | TG3 | **`CLOSED`** | 2026-07-07 (#472+#473 + T3-02 wire-in) |
-| TG4 | `OPEN` | — |
+| TG4 | **`OPEN` (implementation/campaign)** | T4-01 decision recorded 2026-09-27; Studio gates pending |
 
 ---
 

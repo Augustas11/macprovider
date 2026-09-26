@@ -556,28 +556,112 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
         defer { endOperation() }
         return try await container.perform(nonSendable: inputs) { context, inputs in
+            if Self.canSharePrefillForward(inputs) {
+                let rowStates = inputs.map {
+                    self.rowState(
+                        for: $0.requestID,
+                        binding: $0.binding,
+                        initialOffset: $0.committedKVTokenCount
+                    )
+                }
+                // Generic LMOutput.State cannot be split safely by row. The
+                // supported paged and hybrid runtimes keep recurrent state in
+                // their cache layers; any backend-level state uses the proven
+                // serial fallback instead.
+                if rowStates.allSatisfy({ $0.state == nil }),
+                   let batchedCaches = self.makeBatchedCachesIfCompatible(
+                       from: rowStates.map(\.caches)
+                   ) {
+                    let cachesAsKV = batchedCaches.map(\.cache)
+                    let chunkLength = inputs[0].promptTokens.count
+                    let prompt = MLXArray(
+                        inputs.flatMap(\.promptTokens).map(Int32.init)
+                    ).reshaped([inputs.count, chunkLength])
+                    let text = LMInput.Text(tokens: prompt)
+                    let output = withPreparedCache(cachesAsKV, lengths: text.sequenceLengths) {
+                        context.model(text, cache: cachesAsKV, state: nil)
+                    }
+                    if output.state == nil,
+                       Self.hasValidBatchState(batchedCaches) {
+                        eval(cachesAsKV)
+                        batchedCaches.forEach { $0.syncRowsFromBatch() }
+                        for (index, input) in inputs.enumerated() {
+                            try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
+                        }
+                        self.clearDecodeSession()
+                        return inputs.map { ContinuousBatchPrefillOutput(requestID: $0.requestID) }
+                    }
+                    // Backend-level LMOutput.State cannot be split safely by
+                    // row. The speculative batched caches have not been synced
+                    // back, so discard them and use the isolated serial path.
+                }
+            }
+
             var outputs: [ContinuousBatchPrefillOutput] = []
             outputs.reserveCapacity(inputs.count)
             for input in inputs {
-                var state = self.rowState(for: input.requestID, binding: input.binding, initialOffset: input.committedKVTokenCount)
-                if !input.promptTokens.isEmpty {
-                    let prompt = MLXArray(input.promptTokens.map(Int32.init)).reshaped([1, input.promptTokens.count])
-                    let text = LMInput.Text(tokens: prompt)
-                    let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
-                        context.model(text, cache: state.caches, state: state.state)
+                do {
+                    var state = self.rowState(
+                        for: input.requestID,
+                        binding: input.binding,
+                        initialOffset: input.committedKVTokenCount
+                    )
+                    if !input.promptTokens.isEmpty {
+                        let prompt = MLXArray(input.promptTokens.map(Int32.init))
+                            .reshaped([1, input.promptTokens.count])
+                        let text = LMInput.Text(tokens: prompt)
+                        let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
+                            context.model(text, cache: state.caches, state: state.state)
+                        }
+                        // Prefill never samples: the last prompt token is fed by the
+                        // first decode step. Evaluate only the caches, as
+                        // `LLMModel.prepare` does, so the vocabulary projection over
+                        // every chunk position is never computed.
+                        eval(state.caches)
+                        state.state = output.state
                     }
-                    // Prefill never samples: the last prompt token is fed by the
-                    // first decode step. Evaluate only the caches, as
-                    // `LLMModel.prepare` does, so the vocabulary projection over
-                    // every chunk position is never computed.
-                    eval(state.caches)
-                    state.state = output.state
+                    try self.setRowState(state, for: input.requestID, binding: input.binding)
+                    outputs.append(ContinuousBatchPrefillOutput(requestID: input.requestID))
+                } catch {
+                    self.removeRowState(for: input.requestID)
+                    outputs.append(ContinuousBatchPrefillOutput(
+                        requestID: input.requestID,
+                        failureCode: "continuous_batching_prefill_failed"
+                    ))
                 }
-                try self.setRowState(state, for: input.requestID, binding: input.binding)
-                outputs.append(ContinuousBatchPrefillOutput(requestID: input.requestID))
             }
             self.clearDecodeSession()
             return outputs
+        }
+    }
+
+    private func makeBatchedCachesIfCompatible(
+        from rowCaches: [[KVCache]]
+    ) -> [PagedKVSharedLayerBatch]? {
+        try? makeBatchedCaches(from: rowCaches)
+    }
+
+    private static func hasValidBatchState(_ batches: [PagedKVSharedLayerBatch]) -> Bool {
+        do {
+            try batches.forEach { try $0.validateBatchState() }
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    private static func canSharePrefillForward(_ inputs: [ContinuousBatchPrefillInput]) -> Bool {
+        guard inputs.count > 1, let first = inputs.first, !first.promptTokens.isEmpty else {
+            return false
+        }
+        let chunkLength = first.promptTokens.count
+        return inputs.allSatisfy {
+            $0.promptTokens.count == chunkLength
+                && $0.promptTokenOffset == first.promptTokenOffset
+                && $0.committedKVTokenCount == first.committedKVTokenCount
+                && $0.targetKVTokenCount == first.targetKVTokenCount
+                && $0.committedKVTokenCount == $0.promptTokenOffset
+                && $0.targetKVTokenCount == $0.promptTokenOffset + chunkLength
         }
     }
 
@@ -1085,7 +1169,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     }
 
     func installRowStateForTest(
-        caches: [PagedKVCache],
+        caches: [KVCache],
         requestID: String,
         binding: PagedKVStorageBinding
     ) throws {

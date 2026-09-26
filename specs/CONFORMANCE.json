@@ -1100,7 +1100,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.2.15",
+      "version": "v0.3",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1129,7 +1129,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC v0.2 reframes activation from the falsified upstream batch API pin to a locally owned scheduler plus forward-referenced SPEC-039 paged-engine capability; IMPL follows in a separate PR behind a disabled-by-default flag, with MSB-01-05 and the FR-CB15 real-hardware enable gate pending."
+        "rationale": "SPEC v0.3 adds the spec-first batched-prefill contract for issue #1758: decode-first separate phases, backend shared prefill for compatible rows, bounded per-iteration prefill token budget, FCFS/no-starvation fairness, isolated serial fallback for incompatible/ragged groups, and graceful paged-pool backpressure. Implementation and unit-test paths are linked from SPEC-038-R002; Studio TTFT validation, packaged-runtime Metal evidence, MSB-01-05, and the FR-CB15 real-hardware enable gate remain pending."
       }
     },
     {
@@ -4147,14 +4147,30 @@
       "requirement_id": "SPEC-038-R002",
       "spec_id": "SPEC-038",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift:runPrefillStep",
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeBridge.swift:prefill",
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:private nonisolated static func makeContinuousBatchScheduler"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPrefillBatchesCompatibleChunksWithinRowAndTokenBudgets",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testBatchedPrefillPreservesDecodeOrderFallbackFairnessAndCancellationIsolation",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testCancellationDuringFailingPrefillWinsTerminalRace",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testCancellationDuringThrownGroupPrefillFailureWinsOnlyForCancelledRow",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testSerialPrefillFallbackFailureIsRequestLocal",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPoolPressureWithPromptAndDecodeHeadroomQueuesLongPromptWorkWithoutExtensionFailure",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testEqualOffsetEqualLengthPrefillUsesSharedForwardForMixedCacheAndIsolatesRows",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testIncompatibleOrRaggedPrefillUsesSerialForwardsForMixedCache",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testCachePackingIncompatibilityFallsBackToIsolatedSerialPrefill",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testBackendLevelStateDiscardsSharedAttemptAndFallsBackPerRow"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614"
+        "issue": "https://github.com/Augustas11/macprovider/issues/1758",
+        "rationale": "FR-CB2 v0.3 batched-prefill scheduling is implemented for compatible rows with bounded group/per-row token budgets, isolated serial fallback for incompatible or backend-state rows, and long-prompt pool backpressure. Studio TTFT and packaged-runtime Metal evidence remain pending in issue #1758 before release review."
       }
     },
     {
@@ -4365,7 +4381,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-CB17 (paged-pool pressure handled by admission back-pressure + deterministic request-local failure, not true preemption at Entry-110 depths <= 4): normative in SPEC-038 v0.2; implementation and tests land in the follow-up IMPL PR."
+        "rationale": "FR-CB17 (paged-pool pressure handled by admission back-pressure + deterministic request-local failure, not true preemption at Entry-110 depths <= 4): normative in SPEC-038 v0.3 and exercised by AC-16/AC-24 for concurrent long prompts; implementation and tests land in the follow-up IMPL PR."
       }
     },
     {
