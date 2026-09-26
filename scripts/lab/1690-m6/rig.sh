@@ -190,7 +190,15 @@ PY
 }
 
 cmd_static() {
-  [[ -f "$LAB/static/tier2-catalog.json" && -f "$LAB/static/AutotuneCatalog.generated.swift" ]] && return 0
+  if [[ -f "$LAB/static/tier2-catalog.json" && -f "$LAB/static/AutotuneCatalog.generated.swift" \
+        && -f "$LAB/static/autotune-candidates.json" ]] \
+      && python3 - "$LAB/static/autotune-candidates.json" "$STATIC_RELEASE" <<'PY'
+import json, sys
+raise SystemExit(0 if json.load(open(sys.argv[1], encoding="utf-8")).get("version") == sys.argv[2] else 1)
+PY
+  then
+    return 0
+  fi
   # MLX_SHA (#1690 M8): the real snapshot-manifest digest of MLXLM_SNAPSHOT,
   # so mlx_lm.server can bind the row; else the M6 placeholder.
   local mlx_sha="${MLX_SHA:-$(printf 'lab-1690-m6 placeholder mlx primary' | shasum -a 256 | cut -c1-64)}"

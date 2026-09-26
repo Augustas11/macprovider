@@ -17,7 +17,7 @@ export LAB_MLX_ID=orcarouter/Qwen3.8-27B-Uncensored-MLX
 export LAB_MLX_REV=38d0ad4e02031658fadd3828634a0174e0b8a282
 export LAB_MLX_SHA=8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88dcd
 export MLX_SHA="$LAB_MLX_SHA"
-export LAB_STATIC_RELEASE=build1-private-staging-2026-09-27-v1
+export LAB_STATIC_RELEASE=build1-orcarouter-private-2026-09-26-v1
 export E2E_NATIVE_CLEAR_ADMISSION=1
 
 : "${BUILD1_PRIVATE_SNAPSHOT:?set BUILD1_PRIVATE_SNAPSHOT to the verified durable snapshot root}"
