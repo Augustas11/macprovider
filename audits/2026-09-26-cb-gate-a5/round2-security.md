@@ -1,0 +1,7 @@
+Security-review the complete current uncommitted Gate A5 diff in /Users/augstar/macprovider-1646-rest against HEAD as the round-2 security lane, including the untracked Python counter/tests. Do not edit files.
+
+Round 1 found HIGH provenance/authentication and replay/sample-sufficiency gaps, plus MEDIUM SPEC-032 inconsistency, duplicate keys, unbounded resources, broken-pipe success, and a mutated Swift lockfile. The remediation claims closed bounded schemas, minimum samples plus exact confidence bounds, complete signed scheduling, replay-resistant identities, shared-forward versus serial assertions, distinct pre-window manifest and post-run evidence signatures, create-only durable output, an observability-only SPEC-032 boundary, and a restored unchanged lockfile. Verify all claims directly.
+
+Threat model hostile, malformed, misleading, duplicated, reordered, huge, mixed-provenance, replayed, and partially fabricated evidence. Pay special attention to whether the two signer identities are actually independent, whether signed digests sufficiently bind reviewable raw evidence, whether signature preparation and verification canonicalize identical bytes, symlink/path/race handling, subprocess behavior, denial of service within campaign bounds, and any false-green path. This must remain offline and disconnected from all money/live-provider paths.
+
+Rank every concrete finding CRITICAL/HIGH/MEDIUM/LOW/INFO with file:line evidence and an actionable fix. If there are no CRITICAL/HIGH/MEDIUM findings, begin the verdict with PASS and list LOW/INFO separately.
