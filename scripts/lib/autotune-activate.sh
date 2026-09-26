@@ -42,6 +42,16 @@
 #                       canonical `uncovered` list the operator's override
 #                       record describes; the publish aborts pre-mutation when
 #                       its own under-lock coverage differs.
+#   AA_PRICING_TXN      0 (default) or 1 (lease mode only; #1693 SPEC-023-R019):
+#                       the release also replaces the live base coordinator.yaml
+#                       rate_card block. The gate snippet must leave the spliced
+#                       candidate at $pricing_candidate (macprovider-readable) and
+#                       the L2 verdict at $pricing_dir/verdict.json; the publish
+#                       journals through /opt/macprovider/coordinator-pricing-recover
+#                       before its first mutation, installs the yaml durably,
+#                       swaps window + current, re-checks S == candidate, then
+#                       HUPs; the rollback restores yaml, current, window from
+#                       the journal (compare-and-swap) and re-HUPs.
 #
 # Interface globals written here: CURRENT_TARGET, ORIG_PREVIOUS_TARGET (the
 # window's entries), ORIG_PREVIOUS_TARGET_B64 (the exact .previous-target
@@ -72,6 +82,13 @@ AA_COVERAGE_EXPECT=""
 AA_EVIDENCE_FAILURE=""
 AA_ROLLBACK_WINDOW="${AA_ROLLBACK_WINDOW:-}"
 AA_ROLLBACK_POST_HOOK="${AA_ROLLBACK_POST_HOOK:-}"
+AA_PRICING_TXN="${AA_PRICING_TXN:-0}"
+# #1693 E2 V8: how long a remote publish/rollback waits for a booting
+# coordinator to become ready (active + /healthz) before it would SIGHUP it.
+AA_COORDINATOR_READY_SECONDS="${AA_COORDINATOR_READY_SECONDS:-900}"
+# #1693 L0: the shared one-writer guard, embedded verbatim into the remote
+# publish/rollback so the pricing-journal refusal runs UNDER the locks.
+_AA_CONFIG_GUARD_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/coordinator-config-guard.sh"
 AA_ROLLBACK_RC=""
 AA_ROLLBACK_OUT=""
 
@@ -234,6 +251,8 @@ aa_check_params() {
   case "$AA_LOCK_MODE" in flock|lease) ;; *) fatal "AA_LOCK_MODE must be flock or lease (got $AA_LOCK_MODE)" ;; esac
   case "$AA_COVERAGE_POLICY" in warn|refuse) ;; *) fatal "AA_COVERAGE_POLICY must be warn or refuse (got $AA_COVERAGE_POLICY)" ;; esac
   case "$AA_COVERAGE_OVERRIDE" in 0|1) ;; *) fatal "AA_COVERAGE_OVERRIDE must be 0 or 1 (got $AA_COVERAGE_OVERRIDE)" ;; esac
+  case "$AA_PRICING_TXN" in 0) ;; 1) [ "$AA_LOCK_MODE" = lease ] || fatal "AA_PRICING_TXN=1 requires AA_LOCK_MODE=lease" ;; *) fatal "AA_PRICING_TXN must be 0 or 1 (got $AA_PRICING_TXN)" ;; esac
+  case "$AA_COORDINATOR_READY_SECONDS" in ""|*[!0-9]*) fatal "AA_COORDINATOR_READY_SECONDS must be a whole number of seconds" ;; esac
   [ -n "$AA_GATE_SNIPPET" ] || fatal "AA_GATE_SNIPPET (the under-lock pre-mutation gate) is required"
   [ -n "${AA_WORK_DIR:-}" ] && [ -d "$AA_WORK_DIR" ] || fatal "AA_WORK_DIR must name an existing local directory"
 }
@@ -401,10 +420,14 @@ aa_lease_probe_activation() {
   local probe="$AA_WORK_DIR/probe.remote.sh" cur win
   # shellcheck disable=SC2016
   printf '%s\n' 'set -eu' 'readlink "$1/current"' \
-    'if [ -e "$1/.previous-target" ]; then base64 < "$1/.previous-target" | tr -d "\n"; fi' 'echo' >"$probe"
+    'if [ -e "$1/.previous-target" ]; then base64 < "$1/.previous-target" | tr -d "\n"; fi' 'echo' \
+    'if [ -e /opt/macprovider/.pricing-txn ] || [ -L /opt/macprovider/.pricing-txn ]; then echo PRICING-TXN; fi' >"$probe"
   aa_lease_run "$probe" "$AA_WORK_DIR/probe.out" "$AA_WORK_DIR/probe.err" "$REMOTE_AUTOTUNE_DIR" || return 2
   cur="$(sed -n 1p "$AA_WORK_DIR/probe.out")"
   win="$(sed -n 2p "$AA_WORK_DIR/probe.out")"
+  # #1693: a pricing journal means the publish reached its first mutation
+  # boundary; the journal-driven rollback restores exactly what changed.
+  [ "$AA_PRICING_TXN" != 1 ] || ! grep -qx PRICING-TXN "$AA_WORK_DIR/probe.out" || return 0
   [ "${cur#./}" = "$CURRENT_TARGET" ] && [ "$win" = "${ORIG_PREVIOUS_TARGET_B64:-}" ] && return 1
   return 0
 }
@@ -546,7 +569,8 @@ aa_install_helpers() {
 
 aa_cleanup_remote_helpers() {
   if [ -n "${LOCK_HELPER_DIR:-}" ]; then
-    SSH "rm -rf '$LOCK_HELPER_DIR'" >/dev/null 2>&1 || true
+    # #1693: the pricing candidate's dedicated service-readable dir beside it.
+    SSH "rm -rf '$LOCK_HELPER_DIR' '/tmp/macprovider-pricing-candidate.${LOCK_HELPER_DIR##*/macprovider-autotune-lock.}'" >/dev/null 2>&1 || true
   elif [ -n "${LOCK_HELPER:-}" ]; then
     SSH "rm -f '$LOCK_HELPER'" >/dev/null 2>&1 || true
   fi
@@ -583,11 +607,54 @@ lease_fds_held() {
 FDS
 _AA_LEASE_FDS_FN="${_AA_LEASE_FDS_FN%$'\n'}"
 
+# #1693 E2 V8: SIGHUP only a READY coordinator. A SIGHUP that reaches a
+# coordinator before it installs its handler kills it, and systemd counts that
+# as a clean exit. Ready = unit active and MainPID stable across a /healthz 200
+# (the coordinator registers its SIGHUP handler before its listeners start). A
+# booting coordinator is waited for (bounded); a stopped one is reported at
+# once. Prints the MainPID.
+IFS= read -r -d '' _AA_COORD_READY_FN <<'READY' || true
+coord_ready_pid() { # <unit>
+  local deadline=$(( $(date +%s) + @AA_READY_SECONDS@ )) state pid
+  while :; do
+    state="$(systemctl show -p ActiveState --value "$1" 2>/dev/null || true)"
+    pid="$(systemctl show -p MainPID --value "$1" 2>/dev/null || true)"
+    case "$state" in active|activating|reloading) ;; *) echo "$1 is not running (ActiveState=${state:-?})" >&2; return 1 ;; esac
+    case "$pid" in ""|0|*[!0-9]*) echo "$1 has no MainPID" >&2; return 1 ;; esac
+    if curl --noproxy '*' -fsS --max-time 5 --max-filesize 65536 -o /dev/null http://127.0.0.1:8444/healthz 2>/dev/null &&
+       [ "$(systemctl show -p MainPID --value "$1" 2>/dev/null || true)" = "$pid" ]; then
+      echo "$pid"
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "$1 (pid $pid) is still booting: /healthz does not answer 200" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+READY
+_AA_COORD_READY_FN="${_AA_COORD_READY_FN%$'\n'}"
+_aa_coord_ready_fn() { printf '%s\n' "${_AA_COORD_READY_FN//@AA_READY_SECONDS@/$AA_COORDINATOR_READY_SECONDS}"; }
+
 # ---------------------------------------------------------------------------
 # Remote scripts. Rendered from fixed pieces; the flock/warn rendering is the
 # exact script renew has always sent (golden:
 # scripts/tests/fixtures/renew-remote-{publish,rollback}.golden.sh).
 # ---------------------------------------------------------------------------
+# ccg_refuse_if_pricing_txn verbatim from the shared guard library (its exit
+# constants through the end of that function), for the remote script to call
+# once it holds the locks. Only the refusal: the remote scripts already hold
+# the lock set, so the library's lock-taking function is not embedded.
+_aa_config_guard_fns() {
+  local fn
+  [ -r "$_AA_CONFIG_GUARD_LIB" ] || fatal "missing $_AA_CONFIG_GUARD_LIB"
+  # shellcheck disable=SC2016 # awk program, not shell
+  fn="$(awk '/^CCG_EX_REFUSED=/{p=1} p{print} p&&/^}$/{exit}' "$_AA_CONFIG_GUARD_LIB")"
+  case "$fn" in *"ccg_refuse_if_pricing_txn() {"*) ;; *) fatal "cannot extract ccg_refuse_if_pricing_txn from $_AA_CONFIG_GUARD_LIB" ;; esac
+  printf '%s\n' '# ---- from scripts/lib/coordinator-config-guard.sh ----' "$fn" '# ---- end ----'
+}
+
 _aa_publish_lock_block() {
   if [ "$AA_LOCK_MODE" = flock ]; then
     cat <<'LOCK'
@@ -608,31 +675,15 @@ LOCK
 lease_why="$(lease_fds_held)" || abort_pre_mutation "activation lease locks not inherited ($lease_why); not mutating"
 LOCK
   fi
+  _aa_config_guard_fns
+  cat <<'LOCK'
+# #1693 L0: under the locks, refuse while a pricing transaction journal exists
+# (a pricing publish creates its own journal only after this point).
+ccg_refuse_if_pricing_txn /opt/macprovider/ || abort_pre_mutation "pricing transaction journal present; not mutating"
+LOCK
 }
 
-aa_render_publish_script() {
-  cat <<'HEAD'
-set -euo pipefail
-root="$1"; incoming="$2"; final="$3"; prev="$4"; unit="$5"; helper="$6"; window="$7"; verifier="$8"
-incoming_path="$root/releases/$incoming"
-mutated=0
-abort_pre_mutation() {
-  echo "$1" >&2
-  rm -rf "$incoming_path" >/dev/null 2>&1 || true
-  exit 2
-}
-trap 'if [ "$mutated" -eq 1 ]; then exit 1; else rm -rf "$incoming_path" >/dev/null 2>&1 || true; exit 2; fi' ERR
-# Resolve the reload target BEFORE mutating anything, so a dead daemon aborts clean.
-pid="$(systemctl show -p MainPID --value "$unit")"
-[ -n "$pid" ] && [ "$pid" != "0" ] || abort_pre_mutation "coordinator MainPID unavailable; not mutating"
-HEAD
-  _aa_publish_lock_block
-  cat <<'LIVE'
-live_current="$(readlink "$root/current")" || abort_pre_mutation "cannot read current under lock"
-live_current="${live_current#./}"
-[ "$live_current" = "$prev" ] || abort_pre_mutation "current moved under lock ($live_current != $prev); not mutating"
-LIVE
-  printf '%s\n' "$AA_GATE_SNIPPET"
+_aa_publish_stage_body() {
   cat <<'BODY'
 cd "$root/releases"
 chown -R root:macprovider "$incoming"
@@ -681,6 +732,49 @@ cov_json="$(renewal_coverage)" || cov_rc=$?
 echo "RENEW_COVERAGE_RC=$cov_rc"
 echo "RENEW_COVERAGE_JSON=$cov_json"
 BODY
+}
+
+aa_render_publish_script() {
+  cat <<'HEAD'
+set -euo pipefail
+root="$1"; incoming="$2"; final="$3"; prev="$4"; unit="$5"; helper="$6"; window="$7"; verifier="$8"
+incoming_path="$root/releases/$incoming"
+mutated=0
+abort_pre_mutation() {
+  echo "$1" >&2
+  rm -rf "$incoming_path" >/dev/null 2>&1 || true
+  exit 2
+}
+trap 'if [ "$mutated" -eq 1 ]; then exit 1; else rm -rf "$incoming_path" >/dev/null 2>&1 || true; exit 2; fi' ERR
+HEAD
+  _aa_coord_ready_fn
+  cat <<'HEAD'
+# Resolve the reload target BEFORE mutating anything, so a dead or still
+# booting daemon aborts clean.
+pid="$(coord_ready_pid "$unit")" || abort_pre_mutation "coordinator is not running and ready (active, serving /healthz); not mutating"
+HEAD
+  _aa_publish_lock_block
+  cat <<'LIVE'
+live_current="$(readlink "$root/current")" || abort_pre_mutation "cannot read current under lock"
+live_current="${live_current#./}"
+[ "$live_current" = "$prev" ] || abort_pre_mutation "current moved under lock ($live_current != $prev); not mutating"
+LIVE
+  printf '%s\n' "$AA_GATE_SNIPPET"
+  if [ "$AA_PRICING_TXN" = 1 ]; then
+    # #1693: the coverage dry-load must validate the release against the
+    # spliced candidate yaml (the live yaml still has the prior rows) and prove
+    # it base-equivalent to the live yaml.
+    local stage old new
+    stage="$(_aa_publish_stage_body)"
+    # shellcheck disable=SC2016 # literal remote shell text
+    old='/opt/macprovider/coordinator --config /opt/macprovider/coordinator.yaml $overlay --validate-autotune-release "$root/releases/$final"'
+    # shellcheck disable=SC2016 # literal remote shell text
+    new='/opt/macprovider/coordinator --config "$pricing_candidate" $overlay --expect-base-equivalent /opt/macprovider/coordinator.yaml --validate-autotune-release "$root/releases/$final"'
+    [ "${stage//"$old"/$new}" != "$stage" ] || fatal "cannot render the pricing coverage dry-load"
+    printf '%s\n' "${stage//"$old"/$new}"
+  else
+    _aa_publish_stage_body
+  fi
   if [ "$AA_COVERAGE_POLICY" = refuse ]; then
     cat <<'COVERAGE'
 # Coverage policy refuse: a release that would strand an advertised catalog
@@ -701,6 +795,10 @@ if [ "$cov_rc" -ne 0 ] && [ -n "${10:-}" ]; then
 fi
 COVERAGE
   fi
+  if [ "$AA_PRICING_TXN" = 1 ]; then
+    _aa_pricing_publish_body
+    return 0
+  fi
   cat <<'BODY'
 # Persistent autotune metadata starts here. Set mutated before the first write so
 # a failure after .previous-target (and before current swap) still rollbacks.
@@ -715,8 +813,56 @@ ln -sfn "releases/$final" "$root/.current.next"
 mv -Tf "$root/.current.next" "$root/current"
 echo "retargeted current -> releases/$final (previous-target=$prev)"
 # SIGHUP the running coordinator: in-process config reload (#1268), NOT a restart.
+# Only a ready one (a restart since the pre-mutation check re-waits, bounded).
+pid="$(coord_ready_pid "$unit")" || { echo "coordinator not ready for the SIGHUP after mutating; rolling back" >&2; exit 1; }
 kill -HUP "$pid"
 echo "sent SIGHUP to $unit (pid $pid)"
+BODY
+}
+
+# #1693 L4/L5: the pricing publish tail. The journal is committed before the
+# first mutation; every later step records its phase before it runs.
+_aa_pricing_publish_body() {
+  cat <<'BODY'
+# #1693 SPEC-023-R019 L4/L5. The spliced candidate yaml, the window and the
+# release move together; the journal is committed (atomic rename + fsync)
+# before the first mutation, each phase is written before its step, and the
+# ERR trap (mutated=1) sends the controller to the journal-driven rollback.
+ptx=/opt/macprovider/coordinator-pricing-recover
+python3 -I "$window" plan --root "$root" --incoming "releases/$final" > "$pricing_dir/plan.json" \
+  || { rm -rf "$root/releases/$final"; abort_pre_mutation "cannot plan the retained window; not mutating"; }
+python3 -I -c 'import json, sys; w = json.load(open(sys.argv[1]))["window_after"]; open(sys.argv[2], "w").write("".join(e + "\n" for e in w))' \
+  "$pricing_dir/plan.json" "$pricing_dir/candidate-window" \
+  || { rm -rf "$root/releases/$final"; abort_pre_mutation "cannot render the planned window; not mutating"; }
+# Durability: the release bytes and its directory entry before the journal names it.
+python3 -I -c 'import os, sys
+d = sys.argv[1]
+for n in os.listdir(d):
+    fd = os.open(os.path.join(d, n), os.O_RDONLY | os.O_NOFOLLOW)
+    os.fsync(fd); os.close(fd)
+for p in (d, os.path.dirname(d)):
+    fd = os.open(p, os.O_RDONLY); os.fsync(fd); os.close(fd)' "$root/releases/$final" \
+  || { rm -rf "$root/releases/$final"; abort_pre_mutation "cannot fsync the staged release; not mutating"; }
+# The journal keeps the gate's sha-pinned Tier-2 trust root ($t2_root), so a
+# later recovery verifies with it and never with the operator's checkout.
+python3 -I "$ptx" begin --candidate-yaml "$pricing_candidate" --new-current "releases/$final" --prior-current "$prev" \
+  --candidate-window "$pricing_dir/candidate-window" --verdict "$pricing_dir/verdict.json" --tier2-trust-root "$t2_root" \
+  || { rm -rf "$root/releases/$final"; abort_pre_mutation "pricing transaction journal refused; not mutating"; }
+mutated=1
+python3 -I "$ptx" phase mutating
+python3 -I "$ptx" install-candidate
+python3 -I "$window" apply --root "$root" --incoming "releases/$final" --expect-current "$prev"
+ln -sfn "releases/$final" "$root/.current.next"
+mv -Tf "$root/.current.next" "$root/current"
+python3 -I -c 'import os, sys; fd = os.open(sys.argv[1], os.O_RDONLY); os.fsync(fd); os.close(fd)' "$root"
+echo "retargeted current -> releases/$final (previous-target=$prev)"
+# Final pre-signal compare-and-swap: S must be exactly the journal's candidate.
+python3 -I "$ptx" check-state candidate
+python3 -I "$ptx" phase hup-intent
+pid="$(coord_ready_pid "$unit")" || { echo "coordinator not ready for the SIGHUP; rolling back the pricing transaction" >&2; exit 1; }
+kill -HUP "$pid"
+echo "sent SIGHUP to $unit (pid $pid)"
+python3 -I "$ptx" phase verifying
 BODY
 }
 
@@ -730,6 +876,7 @@ root="$1"; cur="$2"; prev_b64="$3"; unit="$4"; helper="$5"; expected="$6"; windo
 prior_window="$(dirname "$window")/prior-window"
 if [ "$prev_b64" = "__EMPTY__" ]; then : > "$prior_window"; else printf '%s' "$prev_b64" | base64 -d > "$prior_window"; fi
 HEAD
+  _aa_coord_ready_fn
   if [ "$1" = flock ]; then
     cat <<'LOCK'
 python3 "$helper" validate || { echo "rollback: lock validation failed; not mutating" >&2; exit 1; }
@@ -737,6 +884,11 @@ exec 8</run/lock/macprovider-pearl-updater.lock || { echo "rollback: cannot open
 flock -n 8 || { echo "rollback: Pearl updater lock held; not mutating" >&2; exit 1; }
 exec 9</opt/macprovider/.coordinator-deploy.lock || { echo "rollback: cannot open coordinator lock; not mutating" >&2; exit 1; }
 flock -n 9 || { echo "rollback: coordinator deploy lock held; not mutating" >&2; exit 1; }
+LOCK
+    _aa_config_guard_fns
+    cat <<'LOCK'
+# #1693 L0: a renewal rollback never writes under a pricing transaction journal.
+ccg_refuse_if_pricing_txn /opt/macprovider/ || { echo "rollback: pricing transaction journal present; not mutating" >&2; exit 1; }
 LOCK
   else
     cat <<'LOCK'
@@ -748,6 +900,31 @@ LOCK
 lease_why="$(lease_fds_held)" || { echo "rollback: activation lease locks not inherited ($lease_why); not mutating" >&2; exit 1; }
 LOCK
   fi
+  if [ "$AA_PRICING_TXN" = 1 ]; then
+    cat <<'PRICING'
+# #1693 L7: restore from the journal (yaml, then current, then window, each by
+# compare-and-swap), prove S == prior, then one re-HUP. The controller proves
+# the prior pair live before it finalizes the journal.
+ptx=/opt/macprovider/coordinator-pricing-recover
+# A durable `verified` is terminal: a verified price is never rolled back.
+# Validate the on-disk pair against the journal's candidate and finalize it.
+ptx_phase="$(python3 -I "$ptx" status | python3 -I -c 'import json,sys; v=json.load(sys.stdin); print(v["phase"] if v else "")')" \
+  || { echo "rollback: cannot read the pricing journal phase; not mutating" >&2; exit 1; }
+if [ "$ptx_phase" = verified ]; then
+  python3 -I "$ptx" finalize candidate \
+    || { echo "rollback: pricing journal verified but the candidate did not validate/finalize; journal kept, not rolled back" >&2; exit 1; }
+  echo "rollback: pricing journal verified; candidate finalized, not rolled back"
+  exit 0
+fi
+python3 -I "$ptx" phase rolling-back || { echo "rollback: no pricing journal to roll back from; not mutating" >&2; exit 1; }
+python3 -I "$ptx" restore-disk || { echo "rollback: pricing restore refused (state differs from the journal); journal kept" >&2; exit 1; }
+# Re-HUP only a ready coordinator; a stopped or still-booting one is proven by
+# the lane after it boots (controlled restart), never signalled.
+if pid="$(coord_ready_pid "$unit")"; then kill -HUP "$pid"; else echo "rollback: coordinator not ready; SIGHUP not sent" >&2; fi
+echo "rolled back to $cur"
+PRICING
+    return 0
+  fi
   cat <<'TAIL'
 live="$(readlink "$root/current")" || { echo "rollback: cannot read current; not mutating" >&2; exit 1; }
 live="${live#./}"
@@ -756,8 +933,7 @@ if [ "$live" = "$expected" ]; then
   mv -Tf "$root/.current.rollback" "$root/current"
   window_rc=0
   python3 -I "$window" restore --root "$root" --from-file "$prior_window" --expect-current "$cur" || window_rc=$?
-  pid="$(systemctl show -p MainPID --value "$unit")"
-  [ -n "$pid" ] && [ "$pid" != "0" ] && kill -HUP "$pid" || true
+  if pid="$(coord_ready_pid "$unit")"; then kill -HUP "$pid"; else echo "rollback: coordinator not ready; SIGHUP not sent" >&2; fi
   [ "$window_rc" -eq 0 ] || { echo "rollback: rolled back current to $cur but .previous-target restore failed" >&2; exit 1; }
   echo "rolled back to $cur"
 elif [ "$live" = "$cur" ]; then

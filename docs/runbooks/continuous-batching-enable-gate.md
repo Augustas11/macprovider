@@ -199,29 +199,217 @@ If set, `continuous_batch_queue_limit` may be raised only within the measured
 Entry 110 tier. Queued work never increases advertised capacity; `slots_total`
 remains the validated Entry 110 value.
 
-Do not promote `canary` to production-default `on` until Gate A5 is also green:
+Gate A5 may establish eligibility for a future reviewed package/feature release.
+It never authorizes production-default `on` or an OPoI-driven provider/model
+tier transition. Any eventual `on` rollout is a separate reviewed release and
+configuration decision. Before that decision, Gate A5 evidence must show:
 
 - `sku-econ` is green for the tier;
 - sustained provider upside is material — throughput ratios versus the serial
   path are necessary but not sufficient; A5 asks for provider economics, so the
   bundle must convert measured aggregate TG into tier earnings terms;
 - tail latency and rejection rate are acceptable;
-- OPoI false-positive rate is below 5%. **No implementation computes this
-  number today.** The OPoI v0 signal exists (coordinator canary probes plus
-  `phase4-coordinator/internal/pow/drift.go`), but nothing counts
-  CB-attributable false positives against a defined denominator, and the `< 5%`
-  figure entered the gate from a research prompt rather than a measured series.
-  Before A5 can be claimed, define the numerator (canary/drift failures
-  attributable to batching on the enabled tuple), the denominator, and the
-  measurement window, then build the counter. Per SPEC-031 / SPEC-032 the OPoI
-  signal stays observability-only: it may gate this promotion decision, and it
-  must never gate routing, tiering, sanctions, or payout;
+- focal row-zero OPoI false-positive rate is below 5%, measured by the offline
+  `scripts/measure_gate_a5_opoi_false_positives.py` counter described below;
 - the tuple still passes the same descriptor, usage, receipt, warm-swap, and
   rollback evidence after any package or model change.
 
 Gate A5 is normative (SPEC-038 FR-CB15, §8 G5) and is a **separate gate**, not
 a byproduct of the evidence rows above. Track it as its own item: a checklist
 that carries only the serving-path and lifecycle proofs is incomplete.
+
+### Gate A5 OPoI false-positive measurement
+
+The input is schema-v4 durable JSON or JSONL. It embeds the exact canonical,
+signed pre-window PLAN envelope and declares one campaign/provider/
+run, one exact hardware/model/quantization/KV/runtime/binary tuple, packaged
+artifact and runtime-bundle SHA-256 values, canonical evaluator and challenge-
+bank revisions, a half-open UTC window no longer than 3,600 seconds, and a pair
+gap no greater than 60 seconds. The schema is closed and strictly typed at every
+object level. Duplicate JSON keys, Boolean versions, strings longer than 4,096
+characters, nesting deeper than 12 levels, more than 4,096 pairs, completed
+JSON/JSONL input above 4 MiB, raw-event bundles above 8 MiB, JSONL lines above
+256 KiB, non-regular input paths, and reports above 16 MiB fail closed. Stdin
+is byte-bounded by the same 4 MiB completed-input limit.
+
+Before the window opens, the reviewer controls and commits the selection seed,
+then the plan author signs the complete PLAN envelope. It binds campaign,
+tuple, artifact, evaluator, window, gap, a closed canonical candidate frame,
+its digest/revision, the seed, and schedule. The counter ranks the whole frame
+without replacement, requires every scheduled focal challenge to equal the
+derived selection, and derives arm order from the within-stratum ordinal plus
+seed/stratum. Both orders must be balanced within every stratum (difference at
+most one). This custody and pre-signing commitment is a manual reviewer control;
+the counter cannot prove that the reviewer did not seed-shop. An
+independent reviewer then signs a receipt binding the plan SHA-256 and a
+pre-window time; retain it in reviewer-controlled append-only storage. It contains
+60 to 4,096 scheduled pairs and globally unique pair, challenge-issuance,
+request, and event identities for both measured arms and all companions. Every
+scheduled pair must be present exactly once; unscheduled, extra, replayed, or
+missing observations fail the whole measurement. Both arms must occur within
+the declared pair gap of their signed scheduled time and in the predeclared
+strict order: `batch_then_serial` requires batch time before serial time, while
+`serial_then_batch` requires serial time before batch time. Equal times fail.
+The reviewer-controlled receipt store and its append timing are also external
+manual trust assumptions.
+
+Each raw source capture is a closed bounded record with a unique stable locator,
+actual challenge payload and digest, actual response transcript and digest, a
+closed evaluator output (`pass` or `fail`) and evaluator revisions, runtime
+mode/forward/full membership, artifact/runtime/campaign provenance, identities,
+and observed time. The counter derives normalized `opoi_pass` solely from this
+closed output; normalized duplicates are not trusted.
+The batching capture must record `continuous_batching` execution with one globally
+unique measured forward, the declared row count, distinct event/request IDs and
+row indexes, the measured row, and every predeclared companion. Every companion
+source capture must bind the same campaign, tuple, artifact, evaluator, pair and
+challenge issuance; its own predeclared challenge, workload, request, event and
+`batch_companion` arm; its own execution row index; and the identical complete
+membership record. Derived companion `opoi_pass` is semantically ignored by the
+paired numerator and denominator. Serial evidence
+records one row, no shared forward, and row index zero. The counter reads the
+bounded raw bundle, recomputes its exact file digest and derived events, requires
+the source identity set to equal the complete predeclared set, and requires
+each completed observation to equal its derived event. It never accepts a
+precomputed `false_positive` value.
+
+The metric is explicitly limited to the predeclared focal row-zero observation
+in each shared forward. Companion outcomes are audit and membership evidence,
+not observations in this metric. All-row promotion requires separate per-row
+evidence and is outside this Gate A5 counter. The denominator is every
+otherwise-valid focal pair whose serial control passes. A
+batching pass counts only when its serial control also passes. The numerator is
+the subset where batching fails and the serial control passes — the only
+automatically batching-attributable false positive. Batch fail plus serial fail
+is inconclusive/upstream and excluded from both counts. Batch pass plus serial
+fail is also inconclusive; it cannot improve the rate. Any invalid or
+inconclusive pair fails the complete measurement closed, as do duplicate pair
+IDs, tuple/challenge mismatch, malformed or non-finite fields, observations
+outside the window, excess pairing gap, and a zero denominator.
+
+The threshold is strict: `numerator / denominator < 0.05`; exactly `0.05`
+fails. At least 60 eligible pairs are required. In addition, the one-sided exact
+Clopper-Pearson 95% upper confidence bound on the false-positive probability
+must be below 5%. Thus a small cherry-picked sample cannot pass even when its
+observed rate is zero.
+
+Authenticity uses `/usr/bin/ssh-keygen -Y`. The plan author, independent reviewer,
+and evidence custodian are separate principals with separate keys. The reviewer
+controls the reviewer key and append-only receipt/source-review store; do not put
+all keys in operator secret storage. Use strict one-line trust files; each line is exactly
+`principal key-type base64-key`, without options, wildcard, principal list, or
+comment. The counter records fingerprints and rejects equality across the three
+roles. After collection the reviewer inspects source locators, payloads,
+transcripts, evaluator outputs, runtime membership, provenance, and times, then
+signs an `approved` source-review object binding plan and exact raw-file SHA-256
+under its own namespace. The custodian signature covers that review object.
+Reviewer custody, review quality, seed commitment, and append-only timing remain
+manual external trust assumptions; counter success does not establish them and
+does not alone satisfy Gate A5.
+
+```bash
+# Before the window, author standalone closed PLAN and receipt envelopes,
+# extract their canonical payloads to new paths, and sign those exact bytes.
+python3 scripts/measure_gate_a5_opoi_false_positives.py \
+  gate-a5-opoi-plan-envelope.json \
+  --prepare-plan-payload gate-a5-opoi-plan.json
+
+ssh-keygen -Y sign \
+  -f /path/to/plan-secret-key -n malibu-gate-a5-opoi-plan-v4 \
+  gate-a5-opoi-plan.json
+
+python3 scripts/measure_gate_a5_opoi_false_positives.py \
+  gate-a5-opoi-receipt-envelope.json \
+  --prepare-receipt-payload gate-a5-opoi-receipt.json
+ssh-keygen -Y sign -f /path/to/reviewer-secret-key \
+  -n malibu-gate-a5-opoi-plan-receipt-v4 gate-a5-opoi-receipt.json
+
+# After collection, review and sign the source-review object first.
+python3 scripts/measure_gate_a5_opoi_false_positives.py \
+  gate-a5-opoi-completed.json --raw-bundle gate-a5-raw-events.json \
+  --prepare-source-review-payload gate-a5-opoi-source-review.json
+/usr/bin/ssh-keygen -Y sign -f /path/to/reviewer-secret-key \
+  -n malibu-gate-a5-opoi-source-review-v4 gate-a5-opoi-source-review.json
+
+# Then preflight the same raw bundle and sign completed evidence.
+python3 scripts/measure_gate_a5_opoi_false_positives.py \
+  gate-a5-opoi-completed.json --raw-bundle gate-a5-raw-events.json \
+  --prepare-evidence-payload gate-a5-opoi-canonical.json
+
+ssh-keygen -Y sign \
+  -f /path/to/evidence-secret-key \
+  -n malibu-gate-a5-opoi-evidence-v4 \
+  gate-a5-opoi-canonical.json
+
+python3 scripts/measure_gate_a5_opoi_false_positives.py \
+  gate-a5-opoi-completed.json --raw-bundle gate-a5-raw-events.json \
+  --plan-signature gate-a5-opoi-plan.json.sig \
+  --plan-trust /path/to/plan-trust --plan-principal gate-a5-plan \
+  --receipt-signature gate-a5-opoi-receipt.json.sig \
+  --source-review-signature gate-a5-opoi-source-review.json.sig \
+  --reviewer-trust /path/to/reviewer-trust --reviewer-principal gate-a5-reviewer \
+  --evidence-signature gate-a5-opoi-canonical.json.sig \
+  --evidence-trust /path/to/evidence-trust --evidence-principal gate-a5-evidence \
+  --output gate-a5-opoi-report.json
+```
+
+The canonical payload and report paths are create-only; choose new paths for a
+rerun. Report success occurs only after the complete report is flushed, fsynced,
+atomically linked at `--output`, and its directory fsynced. `--also-stdout` may
+copy that durable report to stdout; a broken stdout pipe returns nonzero.
+
+The report binds the canonical input, plan, receipt, raw-bundle digest, signed
+source review, counter, four signatures, three trust snapshots/principals, and
+key fingerprints. Preserve
+them in append-only storage. Reviewers rerun the pinned counter, compare report
+bytes, recompute its SHA-256, and publish that digest; mismatch is tamper evidence.
+
+For JSON, the completed schema-v4 document has this top-level shape. The
+embedded `plan` is the byte-identical signed PLAN envelope; each pair event must
+equal the event independently derived from the separately supplied source capture:
+
+```json
+{
+  "schema": "malibu.gate_a5_opoi_completed_evidence",
+  "version": 4,
+  "plan": {
+    "schema": "malibu.gate_a5_opoi_plan",
+    "version": 4,
+    "campaign": "<closed campaign object>",
+    "tuple": "<closed tuple object>",
+    "artifact": "<closed artifact object>",
+    "evaluator": "<closed evaluator object>",
+    "window": "<closed UTC window object>",
+    "max_pair_gap_seconds": 60,
+    "sampling_design": "<closed seed, frame revision/digest, full candidate frame, strata, and methods>",
+    "scheduled_pairs": ["<complete predeclared manifest>"]
+  },
+  "plan_sha256": "<64 lowercase hex>",
+  "plan_receipt": {
+    "schema": "malibu.gate_a5_opoi_plan_receipt",
+    "version": 4,
+    "plan_sha256": "<same plan digest>",
+    "received_at": "<UTC time before plan.window.start>"
+  },
+  "raw_bundle_sha256": "<digest of exact raw-bundle file bytes>",
+  "source_review": "<closed approved post-collection review object binding plan/raw SHA and reviewer identity>",
+  "pairs": [
+    {
+      "pair_id": "probe-0001",
+      "batching": "<closed normalized event derived from source capture>",
+      "serial_control": "<closed normalized event derived from source capture>"
+    }
+  ]
+}
+```
+
+This tool is offline campaign evidence for M6/manual release-quality feature
+promotion review only. It does not call the coordinator or provider, change
+live configuration, promote or demote a provider/model tier, or feed routing,
+tiering, admission, degrade/sanction, payout, billing, receipt, settlement, or
+other money logic. SPEC-032 FR-PW2/FR-TD1 remains the enforcement ceiling;
+building this counter does not make OPoI weight-binding evidence and does not
+claim A5 green.
 
 ## Rollback
 
@@ -286,7 +474,13 @@ Successful usage-finalization proof:
 Gate A5 `sku-econ` result:
 Gate A5 provider upside in tier earnings terms:
 Gate A5 tail latency / rejection rate:
-Gate A5 OPoI false-positive rate (numerator / denominator / window):
+Gate A5 focal row-zero OPoI rate / eligible count / exact 95% upper bound / window:
+Gate A5 all-row evidence status (separate; outside this counter):
+Gate A5 plan SHA-256 / reviewer-controlled seed commitment / receipt time and append-only location:
+Gate A5 plan-author / independent-reviewer / evidence-custodian identities and key fingerprints:
+Gate A5 raw-bundle location / SHA-256 / signed source-review disposition and signature:
+Gate A5 manual reviewer custody / review-quality / append-only-timing confirmation:
+Gate A5 canonical-input / report SHA-256 / byte-for-byte recomputation result:
 Secrets redaction check:
 Decision: canary / keep off / rollback
 Follow-up:

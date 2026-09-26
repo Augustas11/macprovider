@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# E2E transport shim: scp to the Pearl alias goes to the Lima VM.
+set -euo pipefail
+: "${E2E_SSH_CONFIG:?}" "${E2E_PEARL:?}"
+for a in "$@"; do
+  case "$a" in
+    *:*) case "$a" in *"$E2E_PEARL":*) ;; *) echo "scp shim: refusing remote '$a'" >&2; exit 1 ;; esac ;;
+  esac
+done
+exec /usr/bin/scp -F "$E2E_SSH_CONFIG" "$@"

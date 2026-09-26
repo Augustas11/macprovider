@@ -1,0 +1,16 @@
+# E2E fake provider %i on the tier E2 VM (test scaffolding, never production).
+# Port of the integration harness's fake provider: it serves priced, settled
+# completions and re-derives its catalog identity from the coordinator before
+# every connect, as the real CLI adopts the coordinator catalog on restart.
+[Unit]
+Description=E2E fake provider %i
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/macprovider/e2e-fakeprov -coord-ws ws://127.0.0.1:8444/ws/provider -provider-id e2e-prov-%i -token-file /root/e2e/token-e2e-prov-%i -http-listen 127.0.0.1:1910%i -catalog-from-coordinator http://127.0.0.1:8443 -settlement
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

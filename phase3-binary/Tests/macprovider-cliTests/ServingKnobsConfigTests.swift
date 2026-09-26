@@ -1266,22 +1266,45 @@ final class ServingKnobsConfigTests: XCTestCase {
             "temperature": 0.7, "presence_penalty": 0.5, "frequency_penalty": 0.5
         ])))
 
-        // Structured output (json_schema) → not representable.
-        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
-            "temperature": 0,
-            "top_p": 1.0,
-            "response_format": ["type": "json_schema",
-                                "json_schema": ["name": "s",
-                                                "schema": ["type": "object",
-                                                           "additionalProperties": false]]]
+        // SPEC-038 AC-6c: structured output and tools constrain no logit; the
+        // batched row reuses the serial prompt rendering and finalize.
+        let jsonSchema: [String: Any] = ["type": "json_schema",
+                                         "json_schema": ["name": "s",
+                                                         "schema": ["type": "object",
+                                                                    "additionalProperties": false]]]
+        let tools: [[String: Any]] = [["type": "function",
+                                       "function": ["name": "f", "parameters": ["type": "object"]]]]
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0, "top_p": 1.0, "response_format": jsonSchema
         ])))
-
-        // Tools present WITHOUT tool_choice → not representable (the HIGH the gate missed).
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0.7, "response_format": ["type": "json_object"]
+        ])))
+        // Tools present WITHOUT tool_choice, and with a serial or parallel tool turn.
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0, "top_p": 1.0, "tools": tools
+        ])))
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0, "tools": tools, "parallel_tool_calls": true
+        ])))
+        // Harmony (gpt-oss) with tools or structured output stays serial: the
+        // batched stream has no Harmony channel parser. Plain Harmony is unchanged.
+        let harmony = "mlx-community/gpt-oss-20b-MXFP4-Q8"
         XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
-            "temperature": 0,
-            "top_p": 1.0,
-            "tools": [["type": "function",
-                       "function": ["name": "f", "parameters": ["type": "object"]]]]
+            "model": harmony, "temperature": 0, "tools": tools
+        ])))
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "model": harmony, "temperature": 0, "response_format": jsonSchema
+        ])))
+        XCTAssertTrue(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "model": harmony, "temperature": 0
+        ])))
+        // logit_bias / logprobs stay gated even alongside tools or structured output.
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0, "tools": tools, "logit_bias": ["123": -100]
+        ])))
+        XCTAssertFalse(ModelRuntime.requestStateRepresentable(try parsedRequest([
+            "temperature": 0, "response_format": jsonSchema, "logprobs": true
         ])))
 
         // Explicit JSON null tool_choice, no tools → representable (must NOT false-positive).

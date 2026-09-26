@@ -1,0 +1,29 @@
+{"accepted": true, "type": "pause_ack"}
+LIVE_PAUSED 15:34:56
+binary 95d9b943cee6c7cd
+L=32 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=1 block=16 serial_tps_p50=38.1 engine_1row_tps_p50=37.9 aggregate_tps_p50=38.0 uplift_vs_1row=1.00x aggregate_vs_serial=1.00x peak_rss_mb=30075
+L=32 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=2 block=16 serial_tps_p50=38.0 engine_1row_tps_p50=38.0 aggregate_tps_p50=62.8 uplift_vs_1row=1.65x aggregate_vs_serial=1.65x peak_rss_mb=30075
+L=32 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=4 block=16 serial_tps_p50=38.2 engine_1row_tps_p50=38.0 aggregate_tps_p50=71.3 uplift_vs_1row=1.87x aggregate_vs_serial=1.87x peak_rss_mb=30071
+L=32 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=8 block=16 serial_tps_p50=37.8 engine_1row_tps_p50=38.1 aggregate_tps_p50=81.3 uplift_vs_1row=2.13x aggregate_vs_serial=2.15x peak_rss_mb=30076
+L=1536 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=1 block=16 serial_tps_p50=36.6 engine_1row_tps_p50=37.3 aggregate_tps_p50=37.4 uplift_vs_1row=1.00x aggregate_vs_serial=1.02x peak_rss_mb=30093
+L=1536 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=2 block=16 serial_tps_p50=37.8 engine_1row_tps_p50=36.9 aggregate_tps_p50=61.8 uplift_vs_1row=1.67x aggregate_vs_serial=1.63x peak_rss_mb=30107
+L=1536 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=4 block=16 serial_tps_p50=37.7 engine_1row_tps_p50=37.4 aggregate_tps_p50=70.7 uplift_vs_1row=1.89x aggregate_vs_serial=1.88x peak_rss_mb=30110
+L=1536 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=8 block=16 serial_tps_p50=37.7 engine_1row_tps_p50=37.3 aggregate_tps_p50=79.4 uplift_vs_1row=2.13x aggregate_vs_serial=2.11x peak_rss_mb=30091
+L=4096 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=1 block=16 serial_tps_p50=36.8 engine_1row_tps_p50=36.2 aggregate_tps_p50=36.2 uplift_vs_1row=1.00x aggregate_vs_serial=0.98x peak_rss_mb=30089
+L=4096 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=2 block=16 serial_tps_p50=36.7 engine_1row_tps_p50=36.3 aggregate_tps_p50=59.4 uplift_vs_1row=1.64x aggregate_vs_serial=1.62x peak_rss_mb=30094
+L=4096 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=4 block=16 serial_tps_p50=36.6 engine_1row_tps_p50=36.3 aggregate_tps_p50=68.9 uplift_vs_1row=1.90x aggregate_vs_serial=1.88x peak_rss_mb=30092
+L=4096 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=contiguous compile=true rows=8 block=16 serial_tps_p50=36.8 engine_1row_tps_p50=36.3 aggregate_tps_p50=78.2 uplift_vs_1row=2.15x aggregate_vs_serial=2.13x peak_rss_mb=30097
+L=32 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=1 block=16 serial_tps_p50=38.0 engine_1row_tps_p50=34.3 aggregate_tps_p50=34.4 uplift_vs_1row=1.00x aggregate_vs_serial=0.90x peak_rss_mb=30060
+L=32 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=2 block=16 serial_tps_p50=38.2 engine_1row_tps_p50=34.6 aggregate_tps_p50=57.4 uplift_vs_1row=1.66x aggregate_vs_serial=1.50x peak_rss_mb=30056
+L=32 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=4 block=16 serial_tps_p50=38.4 engine_1row_tps_p50=34.7 aggregate_tps_p50=68.5 uplift_vs_1row=1.97x aggregate_vs_serial=1.78x peak_rss_mb=30074
+L=32 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=8 block=16 serial_tps_p50=38.2 engine_1row_tps_p50=34.4 aggregate_tps_p50=79.2 uplift_vs_1row=2.30x aggregate_vs_serial=2.07x peak_rss_mb=30077
+L=1536 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=1 block=16 serial_tps_p50=37.6 engine_1row_tps_p50=33.8 aggregate_tps_p50=33.9 uplift_vs_1row=1.00x aggregate_vs_serial=0.90x peak_rss_mb=30058
+L=1536 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=2 block=16 serial_tps_p50=37.7 engine_1row_tps_p50=33.9 aggregate_tps_p50=56.1 uplift_vs_1row=1.66x aggregate_vs_serial=1.49x peak_rss_mb=30073
+L=1536 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=4 block=16 serial_tps_p50=37.8 engine_1row_tps_p50=34.0 aggregate_tps_p50=66.3 uplift_vs_1row=1.95x aggregate_vs_serial=1.75x peak_rss_mb=30074
+L=1536 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=8 block=16 serial_tps_p50=37.7 engine_1row_tps_p50=34.0 aggregate_tps_p50=76.7 uplift_vs_1row=2.26x aggregate_vs_serial=2.03x peak_rss_mb=30066
+L=4096 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=1 block=16 serial_tps_p50=36.6 engine_1row_tps_p50=32.9 aggregate_tps_p50=32.9 uplift_vs_1row=1.00x aggregate_vs_serial=0.90x peak_rss_mb=30059
+L=4096 msb-throughput: model=c000ac2c2057d94be3fa931000c31723aac53282 engine=paged compile=true rows=2 block=16 serial_tps_p50=36.8 engine_1row_tps_p50=33.0 aggregate_tps_p50=54.3 uplift_vs_1row=1.65x aggregate_vs_serial=1.48x peak_rss_mb=30060
+Terminated: 15
+{"type": "resume_ack", "accepted": true}
+LIVE_RESUME_UNCONFIRMED 16:30:49; restarting provider
+LIVE_RESUMED_AFTER_RESTART 16:31:35

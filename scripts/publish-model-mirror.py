@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Lay out one signed catalog snapshot for a content-addressed weight mirror.
 
-Issue #1737, SPEC-023-R019. Provider Macs that cannot reach huggingface.co
+Issue #1737, SPEC-023-R020. Provider Macs that cannot reach huggingface.co
 fetch catalog bytes from `https://models.malibu.tech` (or an operator mirror)
 in this layout:
 

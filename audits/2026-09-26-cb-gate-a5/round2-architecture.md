@@ -1,0 +1,7 @@
+Architecture-review the complete current uncommitted Gate A5 diff in /Users/augstar/macprovider-1646-rest against HEAD as the round-2 architecture lane, including the untracked Python counter/tests. Do not edit files.
+
+Round 1 found HIGH gaps because the batching arm did not prove continuous batching and sampling was insufficient, plus MEDIUM provenance and duplicate-key gaps. The remediation claims explicit shared-forward batch proof versus serial control, 60+ predeclared scheduled/eligible pairs, an exact one-sided 95% Clopper-Pearson upper bound below 5%, complete anti-replay bindings, distinct manifest/evidence signatures, deterministic durable output, and an explicit SPEC-032 offline/manual/non-weight-binding ceiling. Verify these boundaries and invariants rather than accepting the claim.
+
+Evaluate whether this counter is a sound Gate A5 evidence boundary without coupling OPoI to live enforcement. Check numerator/denominator semantics, schedule timing, batch/serial comparability, artifact/runtime/evaluator/challenge provenance, signer roles, raw-evidence reviewability, governance versions, runbook operability, and whether the architecture can claim production-worthy continuous batching without actually measuring it. Do not propose live enforcement.
+
+Rank every concrete finding CRITICAL/HIGH/MEDIUM/LOW/INFO with file:line evidence and an actionable fix. If there are no CRITICAL/HIGH/MEDIUM findings, begin the verdict with PASS and list LOW/INFO separately.

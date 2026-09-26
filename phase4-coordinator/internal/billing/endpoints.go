@@ -965,12 +965,7 @@ SELECT rl.request_id, rl.ts_utc, rl.model, COALESCE(rl.provider_assigned_id, '')
        -- SPEC-002 v1.5.2 / SPEC-005 v0.3.3 (issue #168): prefer
        -- persisted rl.attempt_n when non-NULL; fall back to v0.3.1
        -- id-ASC derivation for legacy NULL rows during rollout.
-       COALESCE(rl.attempt_n, (
-         SELECT COUNT(*) - 1 FROM request_log prior
-          WHERE prior.account_id IS rl.account_id
-            AND prior.request_id = rl.request_id
-            AND prior.id <= rl.id
-       ), 0) AS attempt_n
+       `+requestLogAttemptOrdinalSQL("rl")+` AS attempt_n
   FROM request_log rl
  WHERE `+sqliteTimeRange("rl.ts_utc")+`
  ORDER BY rl.ts_utc, rl.id`, sqliteTimeText(from), sqliteTimeText(to))

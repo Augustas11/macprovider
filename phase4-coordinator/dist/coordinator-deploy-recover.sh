@@ -25,6 +25,9 @@ RECOVERY_HELPER="$ROOT/coordinator-deploy-recover"
 RECOVERY_UNIT="$SYSTEMD_ROOT/macprovider-coordinator-deploy-recovery.service"
 WATCHDOG_UNIT="$SYSTEMD_ROOT/macprovider-coordinator-deploy-watchdog.service"
 GUARD_DROPIN="$SYSTEMD_ROOT/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf"
+PRICING_CLOSE_UNIT="$SYSTEMD_ROOT/macprovider-coordinator-pricing-close.service"
+PRICING_RECOVER_HELPER="$ROOT/coordinator-pricing-recover"
+CONFIG_GUARD_LIB_PATH="$ROOT/coordinator-config-guard.sh"
 TIER2_CATALOG="$ROOT/tier2-catalog.json"
 OVERLAY="$ETC_MACPROVIDER_ROOT/coordinator.pearl-overlays.yaml"
 MODE=${1:---recover}
@@ -102,6 +105,52 @@ if [ -f "$ROLLBACK/committed" ]; then
   exit 0
 fi
 
+# #1693 L0/L4b: a restore rewrites coordinator.yaml and autotune/current, so it
+# must not run while a pricing transaction journal exists. With nothing to
+# restore this script already exited above (pre-start with only a pricing
+# journal is a no-op; coordinator-pricing-recover --pre-start ran first and
+# owns that journal). A deploy snapshot to restore AND a pricing journal is a
+# genuine conflict: block, preserve both, follow the runbook.
+PRICING_GUARD_LIB=${MACPROVIDER_PRICING_GUARD_LIB:-$ROOT/coordinator-config-guard.sh}
+pricing_guard_rc=0
+if [ -r "$PRICING_GUARD_LIB" ]; then
+  if [ "$MODE" = "--pre-start" ]; then
+    # shellcheck source=/dev/null
+    ( . "$PRICING_GUARD_LIB"; ccg_refuse_if_pricing_txn "$ROOT" --pre-start ) || pricing_guard_rc=$?
+  else
+    # shellcheck source=/dev/null
+    ( . "$PRICING_GUARD_LIB"; ccg_refuse_if_pricing_txn "$ROOT" ) || pricing_guard_rc=$?
+  fi
+elif [ -e "$ROOT/.pricing-txn" ] || [ -L "$ROOT/.pricing-txn" ]; then
+  pricing_guard_rc=75
+fi
+if [ "$pricing_guard_rc" -ne 0 ]; then
+  echo "coordinator deploy rollback snapshot AND pricing transaction journal ($ROOT/.pricing-txn) present; not restoring either. Follow docs/runbooks/catalog-release-decision-tree.md §pricing-txn (deploy-and-pricing conflict)" >&2
+  exit 1
+fi
+
+# #1693 pricing runtime floor: once a pricing transaction has begun
+# ($ROOT/.pricing-runtime-floor exists), wholesale history spans more than one
+# rate generation, and a coordinator without per-generation pricing would
+# re-price it. Never restore such a binary; preserve the snapshot instead.
+# Capable = its offline validator accepts --expect-base-equivalent (prints the
+# JSON verdict with model_resolutions and exits 1 on nonexistent paths).
+pricing_runtime_supported() {
+  _probe_rc=0
+  _probe_out=$("$1" --config /nonexistent/macprovider-pricing-floor-probe.yaml \
+    --validate-autotune-release /nonexistent/macprovider-pricing-floor-probe \
+    --expect-base-equivalent /nonexistent/macprovider-pricing-floor-probe.yaml </dev/null 2>/dev/null) || _probe_rc=$?
+  [ "$_probe_rc" -eq 1 ] || return 1
+  case "$_probe_out" in *'"model_resolutions":['*) return 0 ;; esac
+  return 1
+}
+if { [ -e "$ROOT/.pricing-runtime-floor" ] || [ -L "$ROOT/.pricing-runtime-floor" ]; } && [ -f "$ROLLBACK/had-coordinator" ]; then
+  if ! pricing_runtime_supported "$ROLLBACK/coordinator"; then
+    echo "pricing runtime floor ($ROOT/.pricing-runtime-floor): the rollback target coordinator lacks per-generation wholesale pricing (--validate-autotune-release --expect-base-equivalent); not restoring, snapshot preserved. Follow docs/runbooks/catalog-release-decision-tree.md §Pricing runtime floor" >&2
+    exit 1
+  fi
+fi
+
 restore_regular() {
   marker=$1
   snapshot=$2
@@ -135,11 +184,32 @@ restore_link_or_file() {
 restore_acl() {
   marker=$1
   snapshot=$2
+  sqlite_sidecar=${3:-}
   if [ -f "$ROLLBACK/$marker" ]; then
     [ -f "$ROLLBACK/$snapshot" ] || {
       echo "rollback snapshot missing $snapshot" >&2
       exit 1
     }
+    # A SQLite -wal/-shm file exists only while a connection has the database
+    # open: a clean coordinator stop between the snapshot and this recovery
+    # deletes it, and SQLite recreates it on the next open. setfacl --restore on
+    # a dump naming an absent sidecar fails, so skip exactly that case: a
+    # single-entry dump for a plain absolute path ending in the expected
+    # suffix. Anything else (the database, the directory, a present sidecar, a
+    # malformed dump) still goes through setfacl and fails closed.
+    if [ -n "$sqlite_sidecar" ]; then
+      acl_entries=$(grep -c '^# file: ' "$ROLLBACK/$snapshot" || true)
+      acl_target=$(sed -n 's/^# file: //p' "$ROLLBACK/$snapshot")
+      case "$acl_entries:$acl_target" in
+        *\\*) ;;
+        "1:/"*"$sqlite_sidecar")
+          if [ ! -e "$acl_target" ] && [ ! -L "$acl_target" ]; then
+            echo "skipping ACL restore for absent SQLite sidecar $acl_target (SQLite recreates it on next open)" >&2
+            return 0
+          fi
+          ;;
+      esac
+    fi
     "$SETFACL" --restore="$ROLLBACK/$snapshot"
   fi
 }
@@ -228,8 +298,8 @@ restore_link_or_file had-nginx-coordinator-full nginx-coordinator.full "$NGINX_R
 
 restore_acl had-request-log-dir-acl request-log-dir.acl
 restore_acl had-request-log-db-acl request-log-db.acl
-restore_acl had-request-log-wal-acl request-log-wal.acl
-restore_acl had-request-log-shm-acl request-log-shm.acl
+restore_acl had-request-log-wal-acl request-log-wal.acl -wal
+restore_acl had-request-log-shm-acl request-log-shm.acl -shm
 
 previous=$(cat "$ROLLBACK/catalog-current-target" 2>/dev/null || true)
 case "$previous" in
@@ -261,6 +331,9 @@ fi
 restore_link_or_file had-recovery-unit macprovider-coordinator-deploy-recovery.service "$RECOVERY_UNIT"
 restore_link_or_file had-watchdog-unit macprovider-coordinator-deploy-watchdog.service "$WATCHDOG_UNIT"
 restore_link_or_file had-guard-dropin 10-deploy-transaction-guard.conf "$GUARD_DROPIN"
+restore_link_or_file had-pricing-close-unit macprovider-coordinator-pricing-close.service "$PRICING_CLOSE_UNIT"
+restore_link_or_file had-pricing-recover-helper coordinator-pricing-recover "$PRICING_RECOVER_HELPER"
+restore_link_or_file had-config-guard-lib coordinator-config-guard.sh "$CONFIG_GUARD_LIB_PATH"
 
 if [ "$MODE" = "--recover" ]; then
   $SYSTEMCTL daemon-reload

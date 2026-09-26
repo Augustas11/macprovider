@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import types
+import unicodedata
 from datetime import datetime, timezone
 
 
@@ -1424,6 +1425,203 @@ def coordinator_rate_card_yaml(rate_card_obj: dict) -> str:
         for field, coordinator_field in COORDINATOR_RATE_FIELD_MAP.items():
             lines.append(f"      {coordinator_field}: {rate_card_obj['rows'][key][field]}")
     return "\n".join(lines) + "\n"
+
+
+# #1693 L1: the pricing lane replaces exactly the `rewards.rate_card` block of the
+# live base yaml with the block bytes of the reviewed commit's tracked config.
+# One character class refuses tabs, CR (CRLF), a BOM anywhere, every other C0/C1
+# control and DEL, and the Unicode line separators: `str.splitlines` (used by
+# `parse_coordinator_rewards`) and YAML disagree on those, so the pre-filter and
+# the coordinator could otherwise see different line structures.
+COORDINATOR_YAML_FORBIDDEN_CHARS = re.compile("[\x00-\x09\x0b-\x1f\x7f-\x9f  ﻿]")
+# Inside `rewards`: anchors, aliases, tags, flow collections and block scalars.
+COORDINATOR_REWARDS_FORBIDDEN_SYNTAX = frozenset("&*!{}[]|>")
+SPLICE_PREFILTER_PROBE = "rewards:\n  provider_share: 0\n  global_multiplier: 0\n"
+
+
+def _yaml_code(line: str) -> str:
+    """The line with its comment removed (same rule as `parse_coordinator_rewards`)."""
+    return re.sub(r"(?:(?<=\s)|^)#.*$", "", line).rstrip()
+
+
+def _yaml_key(code: str) -> str:
+    return code.partition(":")[0].strip().strip("\"'")
+
+
+def coordinator_rate_card_block_span(data: bytes, label: str) -> tuple[int, int]:
+    """Byte span `[start, end)` of the `rewards.rate_card` block (#1693 L1 boundary).
+
+    Exactly one column-0 `rewards:` and exactly one `rate_card:` child. The block
+    runs from the `rate_card:` line through the line before the first following
+    non-blank line (comment or not) indented at or above the child indent, or to
+    EOF; deeper-indented comments belong to the block and blank lines directly
+    before the boundary stay outside. Anything this line-based reader cannot
+    model unambiguously is refused rather than guessed; the coordinator's
+    `--expect-base-equivalent` dry-load is the authoritative splice proof.
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        fail(f"{label}: not UTF-8: {exc}")
+    forbidden = COORDINATOR_YAML_FORBIDDEN_CHARS.search(text)
+    if forbidden:
+        line_no = text.count("\n", 0, forbidden.start()) + 1
+        fail(
+            f"{label}: line {line_no}: character U+{ord(forbidden.group()):04X} is refused "
+            "(tabs, CR/CRLF, BOM, control characters and Unicode line separators)"
+        )
+    lines = text.split("\n")
+    starts = [0]
+    for line in lines[:-1]:
+        starts.append(starts[-1] + len(line) + 1)
+
+    def indent(line: str) -> int:
+        return len(line) - len(line.lstrip(" "))
+
+    top_keys: set[str] = set()
+    rewards_at: list[int] = []
+    for index, line in enumerate(lines):
+        code = _yaml_code(line)
+        if not code or indent(line) != 0:
+            continue
+        if code in ("---", "...") or code.startswith(("--- ", "... ", "%")):
+            fail(f"{label}: line {index + 1}: multi-document markers and directives are refused")
+        key = _yaml_key(code)
+        if key in top_keys:
+            fail(f"{label}: line {index + 1}: duplicate top-level key {key!r}")
+        top_keys.add(key)
+        if key == "rewards":
+            rewards_at.append(index)
+    if len(rewards_at) != 1:
+        fail(f"{label}: expected exactly one column-0 rewards: key, found {len(rewards_at)}")
+    rewards = rewards_at[0]
+    if _yaml_code(lines[rewards]) != "rewards:":
+        fail(f"{label}: line {rewards + 1}: rewards must be a block mapping (`rewards:`)")
+
+    child_indent: int | None = None
+    child_keys: set[str] = set()
+    rate_card_at: list[int] = []
+    for index in range(rewards + 1, len(lines)):
+        line = lines[index]
+        code = _yaml_code(line)
+        if not code:
+            continue
+        if indent(line) == 0:
+            break
+        bad = sorted(COORDINATOR_REWARDS_FORBIDDEN_SYNTAX & set(code))
+        if bad:
+            fail(
+                f"{label}: line {index + 1}: {''.join(bad)!r} in rewards is refused "
+                "(anchors, aliases, tags, flow collections, block scalars)"
+            )
+        if child_indent is None:
+            child_indent = indent(line)
+        if indent(line) < child_indent:
+            fail(f"{label}: line {index + 1}: inconsistent indentation in rewards")
+        if indent(line) == child_indent:
+            key = _yaml_key(code)
+            if key in child_keys:
+                fail(f"{label}: line {index + 1}: duplicate rewards key {key!r}")
+            child_keys.add(key)
+            if key == "rate_card":
+                rate_card_at.append(index)
+    if len(rate_card_at) != 1 or child_indent is None:
+        fail(f"{label}: expected exactly one rewards.rate_card child, found {len(rate_card_at)}")
+    head = rate_card_at[0]
+    if _yaml_code(lines[head]).strip() != "rate_card:":
+        fail(f"{label}: line {head + 1}: rewards.rate_card must be a block mapping (`rate_card:`)")
+    last = head
+    for index in range(head + 1, len(lines)):
+        line = lines[index]
+        if not line.strip():
+            continue
+        if indent(line) <= child_indent:
+            break
+        last = index
+    start = starts[head]
+    end = starts[last] + len(lines[last]) + (1 if last < len(lines) - 1 else 0)
+    return len(text[:start].encode("utf-8")), len(text[:end].encode("utf-8"))
+
+
+def extract_coordinator_rate_card_block(data: bytes, label: str) -> bytes:
+    """The L1 `rewards.rate_card` block bytes, pre-filtered by `parse_coordinator_rewards`.
+
+    The rows parsed from the block alone must equal the rows parsed from the
+    whole file, so a comment at or above the child indent that splits the rate
+    card (leaving rows outside the extracted bytes) is refused, not truncated.
+    """
+    start, end = coordinator_rate_card_block_span(data, label)
+    block = data[start:end]
+    _, _, file_rows = parse_coordinator_rewards(data.decode("utf-8"))
+    _, _, block_rows = parse_coordinator_rewards(SPLICE_PREFILTER_PROBE + block.decode("utf-8"))
+    if file_rows != block_rows:
+        fail(f"{label}: rewards.rate_card rows lie outside the extracted block; refusing an ambiguous boundary")
+    return block
+
+
+def splice_coordinator_rate_card(live: bytes, block: bytes) -> bytes:
+    """Output = live prefix + `block` + live suffix, with byte identity asserted (#1693 L1)."""
+    start, end = coordinator_rate_card_block_span(live, "live config")
+    extract_coordinator_rate_card_block(live, "live config")
+    if not block.endswith(b"\n"):
+        fail("block: must end with a newline")
+    prefix, suffix = live[:start], live[end:]
+    output = prefix + block + suffix
+    spliced = extract_coordinator_rate_card_block(output, "spliced config")
+    if output[:start] != prefix or output[start + len(block):] != suffix or spliced != block:
+        fail("block: does not re-extract as exactly the supplied bytes under the L1 boundary rules")
+    live_share, live_multiplier, _ = parse_coordinator_rewards(live.decode("utf-8"))
+    out_share, out_multiplier, rows = parse_coordinator_rewards(output.decode("utf-8"))
+    if (live_share, live_multiplier) != (out_share, out_multiplier):
+        fail("spliced config: rewards globals changed; the splice may replace only rewards.rate_card")
+    if "default" not in rows:
+        fail("block: rewards.rate_card.default is required")
+    for key, row in sorted(rows.items()):
+        missing = sorted(set(COORDINATOR_RATE_FIELD_MAP.values()) - set(row))
+        if missing:
+            fail(f"block: rewards.rate_card.{key} is missing {missing}")
+    return output
+
+
+def write_new_file(path: pathlib.Path, data: bytes) -> None:
+    """Create `path` exclusively (never follows or replaces an existing entry), mode 0600, fsynced."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def cmd_splice_coordinator_rate_card(live_config: pathlib.Path, block_path: pathlib.Path, output: pathlib.Path) -> None:
+    live = live_config.read_bytes()
+    block = block_path.read_bytes()
+    spliced = splice_coordinator_rate_card(live, block)
+    start, _ = coordinator_rate_card_block_span(live, "live config")
+    write_new_file(output, spliced)
+    print(json.dumps({
+        "live_config_sha256": sha256(live),
+        "block_sha256": sha256(block),
+        "output_sha256": sha256(spliced),
+        "prefix_bytes": start,
+        "suffix_bytes": len(spliced) - start - len(block),
+    }, sort_keys=True))
+
+
+def cmd_extract_coordinator_rate_card_block(config: pathlib.Path, output: pathlib.Path | None) -> None:
+    data = config.read_bytes()
+    block = extract_coordinator_rate_card_block(data, str(config))
+    if output is not None:
+        write_new_file(output, block)
+    _, _, rows = parse_coordinator_rewards(data.decode("utf-8"))
+    print(json.dumps({
+        "config_sha256": sha256(data),
+        "block_sha256": sha256(block),
+        "block_bytes": len(block),
+        "rows": len(rows),
+    }, sort_keys=True))
 
 
 def _validate_artifact_source_ref(entry: dict, expected_kind: str, label: str) -> None:
@@ -5253,9 +5451,13 @@ CONTENT_GATE_MAX_AGE = _dt.timedelta(days=30)
 CONTENT_GATE_MAX_FUTURE = _dt.timedelta(minutes=10)
 # Most-restrictive lane first: a release that is both a keyring change and a
 # pricing change is a full provider-app release, not a pricing correction.
+# #1693: an eligible rows-only pricing diff is `ok` in the catalog-content lane;
+# the pricing refusals rank after `unverified-commit` / `stale-or-future` so
+# those still win the reported lane.
 CONTENT_GATE_LANE_ORDER = (
-    "invalid-release", "full-provider-app", "pricing", "unknown-predecessor",
-    "unverified-commit", "stale-or-future", "freshness-or-noop",
+    "invalid-release", "full-provider-app", "unknown-predecessor",
+    "unverified-commit", "stale-or-future", "pricing-globals", "pricing-unacked-move",
+    "freshness-or-noop",
 )
 # Committed location of every release-directory file (repo-relative).
 _CONTENT_GATE_STATIC_FILES = tuple(
@@ -5335,6 +5537,436 @@ def _rate_card_rows_content(directory: pathlib.Path) -> str:
     return json.dumps(obj, sort_keys=True)
 
 
+# #1693 effective-price diff. A pricing release may move a SERVED model onto a
+# different rate row (a removal drops it to `default`; an addition can shadow a
+# normalized key). Such a move is refused unless the reviewed commit lists it.
+ACKNOWLEDGED_PRICING_MOVES_PATH = CATALOG_DIR / "acknowledged-pricing-moves.json"
+ACKNOWLEDGED_PRICING_MOVES_SCHEMA = "macprovider.acknowledged-pricing-moves.v1"
+PRICING_EFFECTIVE_DIFF_SCHEMA = "macprovider.pricing-effective-diff.v1"
+COORDINATOR_CONFIG_REPO_PATH = "phase4-coordinator/dist/coordinator.yaml"
+# `MODEL_KEY` modulo ASCII case: on these names Python and Go `NormalizeModelKey`
+# agree exactly (ASCII only, no whitespace, so strip/lower cannot diverge). Any
+# other name is left to the Go validator (C2) and reported as unresolved.
+PRICING_RESOLVABLE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+
+
+# Unicode general categories that must never reach an operator's terminal raw:
+# controls, format characters (every bidi embedding/override/isolate and mark,
+# U+061C, U+200E/U+200F, U+202A-U+202E, U+2066-U+2069, zero-width characters)
+# and line/paragraph separators.
+ESCAPED_UNICODE_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
+
+
+def escape_model_name(name: str) -> str:
+    """Render a buyer-controlled name for the diff and terminal. C0, DEL, C1 and the
+    backslash itself become `\\xNN`; any other Cc/Cf/Zl/Zp code point becomes
+    `\\uXXXX` (`\\UXXXXXXXX` above U+FFFF). Every escape starts with a backslash
+    and its letter fixes its length, and a literal backslash is always escaped,
+    so the encoding is injective and its output has no control, format or
+    separator character."""
+    out = []
+    for ch in name:
+        code = ord(ch)
+        if code < 0x20 or 0x7F <= code <= 0x9F or ch == "\\":
+            out.append(f"\\x{code:02x}")
+        elif unicodedata.category(ch) in ESCAPED_UNICODE_CATEGORIES:
+            out.append(f"\\u{code:04x}" if code <= 0xFFFF else f"\\U{code:08x}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def pricing_canonical_bytes(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+
+
+def pricing_credit_rows(rows: dict) -> dict:
+    """Published rate-card rows projected onto the three credit fields."""
+    return {key: {field: row[field] for field in RATE_CREDIT_FIELDS} for key, row in rows.items()}
+
+
+def coordinator_credit_rows(text: str) -> dict:
+    """`rewards.rate_card` of a coordinator yaml mapped onto the published credit fields (rule 4)."""
+    _, _, rows = parse_coordinator_rewards(text)
+    out = {}
+    for key, row in rows.items():
+        missing = sorted(set(COORDINATOR_RATE_FIELD_MAP.values()) - set(row))
+        if missing:
+            fail(f"coordinator.yaml: rewards.rate_card.{key} is missing {missing}")
+        out[key] = {field: row[coordinator_field] for field, coordinator_field in COORDINATOR_RATE_FIELD_MAP.items()}
+    if "default" not in out:
+        fail("coordinator.yaml: rewards.rate_card.default is required")
+    return out
+
+
+def pricing_table_sha256(credit_rows: dict) -> str:
+    return sha256(pricing_canonical_bytes(credit_rows))
+
+
+def pricing_rows_diff(live: dict, candidate: dict) -> dict:
+    """Row-level credit diff: {changed, added, removed} (the gate's `pricing` object)."""
+    return {
+        "changed": [
+            {"row": escape_model_name(key), "old": live[key], "new": candidate[key]}
+            for key in sorted(live.keys() & candidate.keys())
+            if live[key] != candidate[key]
+        ],
+        "added": [{"row": escape_model_name(key), "new": candidate[key]} for key in sorted(candidate.keys() - live.keys())],
+        "removed": [{"row": escape_model_name(key), "old": live[key]} for key in sorted(live.keys() - candidate.keys())],
+    }
+
+
+def rate_row_for(rows: dict, model: str) -> str | None:
+    """Port of `billing.RateFor` returning the resolved ROW KEY: exact, else
+    normalized (when it differs), else `default`."""
+    if model in rows:
+        return model
+    normalized = normalize_model_key(model)
+    if normalized != model and normalized in rows:
+        return normalized
+    return "default" if "default" in rows else None
+
+
+def load_pricing_move_acks(data: bytes, label: str) -> set[tuple[str, str, str]]:
+    """`acknowledged-pricing-moves.json`: {schema_version, description?, moves: [{model, from_row, to_row}]}.
+
+    An entry acknowledges exactly one served model moving from one resolved rate
+    row to another; it never covers a different origin or destination row.
+    """
+    obj = strict_json(data, label)
+    exact_keys(obj, {"schema_version", "description", "moves"}, {"schema_version", "moves"}, label)
+    if obj["schema_version"] != ACKNOWLEDGED_PRICING_MOVES_SCHEMA:
+        fail(f"{label}: schema_version must be {ACKNOWLEDGED_PRICING_MOVES_SCHEMA!r}")
+    if "description" in obj and not isinstance(obj["description"], str):
+        fail(f"{label}: description must be a string")
+    if not isinstance(obj["moves"], list):
+        fail(f"{label}: moves must be a list")
+    acks: set[tuple[str, str, str]] = set()
+    for index, entry in enumerate(obj["moves"]):
+        entry_label = f"{label}: moves[{index}]"
+        if not isinstance(entry, dict):
+            fail(f"{entry_label}: must be an object")
+        exact_keys(entry, {"model", "from_row", "to_row"}, {"model", "from_row", "to_row"}, entry_label)
+        if not all(isinstance(entry[field], str) and entry[field] for field in ("model", "from_row", "to_row")):
+            fail(f"{entry_label}: model, from_row and to_row must be non-empty strings")
+        if entry["from_row"] == entry["to_row"]:
+            fail(f"{entry_label}: from_row equals to_row; that is not a move")
+        triple = (entry["model"], entry["from_row"], entry["to_row"])
+        if triple in acks:
+            fail(f"{entry_label}: duplicate acknowledgement")
+        acks.add(triple)
+    return acks
+
+
+def pricing_move_is_own_row(name: str, old_row: str, new_row: str) -> bool:
+    """SPEC-023-R019 rule 2 (v0.18.1): a served name that resolved to `default`
+    and now resolves to an added row whose key is exactly that name is the
+    intended effect of adding the row, not an unreviewed move. Every other move
+    (a removal, a row capturing a different or normalized name, a move between
+    two non-default rows) still needs an acknowledgement."""
+    return old_row == "default" and new_row != "default" and new_row == name
+
+
+def release_model_names(directory: pathlib.Path) -> set[str]:
+    """Every catalog key and served `model_id` of a release directory."""
+    obj = strict_json((directory / "autotune-candidates.json").read_bytes(), f"{directory}/autotune-candidates.json")
+    names = set()
+    for key, row in obj["rows"].items():
+        names.add(key)
+        if isinstance(row.get("model_id"), str) and row["model_id"]:
+            names.add(row["model_id"])
+    return names
+
+
+def pricing_model_moves(live: dict, candidate: dict, names: set[str], acks: set[tuple[str, str, str]]) -> dict:
+    """Per served name: the rows RateFor resolves before and after, when row or credits move."""
+    models, unresolved, unacknowledged = [], [], []
+    for name in sorted(names, key=escape_model_name):
+        if not PRICING_RESOLVABLE_NAME.fullmatch(name):
+            unresolved.append(escape_model_name(name))
+            continue
+        old_row, new_row = rate_row_for(live, name), rate_row_for(candidate, name)
+        if old_row is None or new_row is None:
+            fail(f"pricing diff: {escape_model_name(name)!r} resolves to no row (default row missing)")
+        if old_row == new_row and live[old_row] == candidate[new_row]:
+            continue
+        move = old_row != new_row
+        models.append({
+            "model": escape_model_name(name),
+            "old_row": escape_model_name(old_row),
+            "new_row": escape_model_name(new_row),
+            "old": live[old_row],
+            "new": candidate[new_row],
+            "move": move,
+        })
+        if move and (name, old_row, new_row) not in acks and not pricing_move_is_own_row(name, old_row, new_row):
+            unacknowledged.append(escape_model_name(name))
+    return {"models": models, "unresolved_names": unresolved, "unacknowledged_moves": unacknowledged}
+
+
+def load_model_name_list(data: bytes, label: str) -> set[str]:
+    try:
+        value = json.loads(data.decode("utf-8"), object_pairs_hook=lambda pairs: fail(f"{label}: must be a JSON array of strings"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(f"{label}: invalid JSON: {exc}")
+    if not isinstance(value, list) or not all(isinstance(name, str) for name in value):
+        fail(f"{label}: must be a JSON array of strings")
+    return set(value)
+
+
+def names_sha256(names: set[str]) -> str:
+    return sha256(pricing_canonical_bytes(sorted(escape_model_name(name) for name in names)))
+
+
+def pricing_effective_diff(
+    live: dict,
+    candidate: dict,
+    base_names: set[str],
+    pinned_names: set[str],
+    ack_data: bytes,
+    new_names: set[str] = frozenset(),
+) -> tuple[dict, dict]:
+    """(diff, new): `diff` is the operator-acked object over table keys ∪ release
+    names ∪ PINNED names; `new` covers only names first seen after pinning and is
+    kept out of the digest, so a name leaving the window never invalidates the
+    ack while a new name that creates an unacknowledged move still refuses."""
+    acks = load_pricing_move_acks(ack_data, "acknowledged-pricing-moves.json")
+    names = set(base_names) | set(live) | set(candidate) | set(pinned_names)
+    moves = pricing_model_moves(live, candidate, names, acks)
+    diff = {
+        "schema_version": PRICING_EFFECTIVE_DIFF_SCHEMA,
+        "live_table_sha256": pricing_table_sha256(live),
+        "candidate_table_sha256": pricing_table_sha256(candidate),
+        "acknowledged_moves_sha256": sha256(ack_data),
+        "pinned_names_sha256": names_sha256(set(pinned_names)),
+        "names_sha256": names_sha256(names),
+        "rows": pricing_rows_diff(live, candidate),
+        **moves,
+    }
+    return diff, pricing_model_moves(live, candidate, set(new_names) - names, acks)
+
+
+PRICING_ACKNOWLEDGED_SCHEMA = "macprovider.pricing-acknowledged.v1"
+# The coordinator validator's resolved-rate fields (`autotuneResolvedRate`).
+PRICING_RESOLVED_RATE_FIELDS = ("completion_credits_per_mtok", "prompt_cache_hit_credits_per_mtok", "prompt_credits_per_mtok")
+
+
+def _pricing_resolved_rate(value: object, label: str) -> dict:
+    if not isinstance(value, dict):
+        fail(f"{label}: must be an object")
+    fields = {"row_key", *PRICING_RESOLVED_RATE_FIELDS}
+    exact_keys(value, fields, fields, label)
+    if not isinstance(value["row_key"], str) or not value["row_key"]:
+        fail(f"{label}: row_key must be a non-empty string (no matching row and no default)")
+    for field in PRICING_RESOLVED_RATE_FIELDS:
+        if type(value[field]) is not int or value[field] < 0:
+            fail(f"{label}: {field} must be a non-negative integer")
+    return {"row_key": value["row_key"], **{field: value[field] for field in PRICING_RESOLVED_RATE_FIELDS}}
+
+
+def _pricing_resolution_entry(value: object, label: str) -> dict:
+    if not isinstance(value, dict):
+        fail(f"{label}: must be an object")
+    exact_keys(value, {"name", "old", "new"}, {"name", "old", "new"}, label)
+    if not isinstance(value["name"], str):
+        fail(f"{label}: name must be a string")
+    return {
+        "name": value["name"],
+        "old": _pricing_resolved_rate(value["old"], f"{label}.old"),
+        "new": _pricing_resolved_rate(value["new"], f"{label}.new"),
+    }
+
+
+def pricing_acknowledged_object(diff: dict, resolutions: object) -> dict:
+    """The object the operator acknowledges (#1693 L3): the effective diff plus
+    the coordinator binary's resolution of every digested name outside the
+    Python key grammar (`diff.unresolved_names`), with old/new row key and all
+    three credits, escaped and sorted. Resolutions of names first seen after
+    pinning stay out of it (judged only by the move check), so a name leaving
+    or entering the 30-day window never changes the acknowledged digest."""
+    digested = diff.get("unresolved_names")
+    if not isinstance(digested, list) or not all(isinstance(name, str) for name in digested):
+        fail("pricing diff: unresolved_names must be a list of strings")
+    if not isinstance(resolutions, list):
+        fail("model_resolutions must be a list")
+    wanted = set(digested)
+    entries: dict[str, dict] = {}
+    for index, value in enumerate(resolutions):
+        entry = _pricing_resolution_entry(value, f"model_resolutions[{index}]")
+        name = escape_model_name(entry["name"])
+        if name not in wanted:
+            continue
+        if name in entries:
+            fail(f"model_resolutions: duplicate resolution for {name!r}")
+        entries[name] = {
+            "name": name,
+            **{side: dict(entry[side], row_key=escape_model_name(entry[side]["row_key"])) for side in ("old", "new")},
+        }
+    missing = sorted(wanted - entries.keys())
+    if missing:
+        fail(f"model_resolutions: the coordinator binary did not resolve {missing}")
+    return {
+        "schema_version": PRICING_ACKNOWLEDGED_SCHEMA,
+        "effective_diff": diff,
+        "model_resolutions": [entries[name] for name in sorted(entries)],
+    }
+
+
+def cmd_pricing_effective_diff(
+    live_config: pathlib.Path | None,
+    live_rate_card: pathlib.Path | None,
+    candidate_rate_card: pathlib.Path,
+    releases: list[pathlib.Path],
+    pinned_names_path: pathlib.Path,
+    new_names_path: pathlib.Path | None,
+    ack_path: pathlib.Path,
+    output: pathlib.Path,
+) -> int:
+    if (live_config is None) == (live_rate_card is None):
+        fail("pricing-effective-diff: exactly one of --live-config / --live-rate-card is required")
+    if live_config is not None:
+        try:
+            live_text = live_config.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as exc:
+            fail(f"{live_config}: not UTF-8: {exc}")
+        live = coordinator_credit_rows(live_text)
+    else:
+        live = pricing_credit_rows(validate_rate_card(live_rate_card.read_bytes())["rows"])
+    candidate = pricing_credit_rows(validate_rate_card(candidate_rate_card.read_bytes())["rows"])
+    base_names: set[str] = set()
+    try:
+        for release in releases:
+            base_names |= release_model_names(release)
+    except (KeyError, TypeError, AttributeError) as exc:
+        fail(f"pricing-effective-diff: malformed release input: {exc!r}")
+    pinned = load_model_name_list(pinned_names_path.read_bytes(), str(pinned_names_path))
+    new = set() if new_names_path is None else load_model_name_list(new_names_path.read_bytes(), str(new_names_path))
+    diff, new_moves = pricing_effective_diff(live, candidate, base_names, pinned, ack_path.read_bytes(), new)
+    data = pricing_canonical_bytes(diff)
+    write_new_file(output, data)
+    ok = not diff["unacknowledged_moves"] and not new_moves["unacknowledged_moves"]
+    print(json.dumps({
+        "ok": ok,
+        "pricing_diff_sha256": sha256(data),
+        "pinned_names_sha256": diff["pinned_names_sha256"],
+        "unresolved_names": diff["unresolved_names"],
+        "unacknowledged_moves": diff["unacknowledged_moves"],
+        "new_names": new_moves,
+        "output": str(output),
+    }, sort_keys=True, ensure_ascii=True))
+    return 0 if ok else CONTENT_GATE_EXIT_NOT_ELIGIBLE
+
+
+def _content_gate_pricing(
+    release: pathlib.Path,
+    live: pathlib.Path,
+    by_lane: dict[str, list[str]],
+    ack_data: bytes | None,
+    pricing_diff: bytes | None,
+    pricing_diff_sha256: str | None,
+) -> dict:
+    """#1693 pricing scope. Returns the `pricing` rows diff; appends refusals to `by_lane`."""
+    release_obj = strict_json((release / RATE_CARD_FEED_NAME).read_bytes(), f"{release}/{RATE_CARD_FEED_NAME}")
+    live_obj = strict_json((live / RATE_CARD_FEED_NAME).read_bytes(), f"{live}/{RATE_CARD_FEED_NAME}")
+    live_rows, release_rows = live_obj["rows"], release_obj["rows"]
+    if "default" not in release_rows:
+        by_lane["invalid-release"].append("rate-card.json removes the default row")
+        return {"changed": [], "added": [], "removed": []}
+    if release_obj["usd_per_million_credits"] != live_obj["usd_per_million_credits"]:
+        by_lane["pricing-globals"].append(
+            f"rate-card usd_per_million_credits changed vs live "
+            f"({live_obj['usd_per_million_credits']} -> {release_obj['usd_per_million_credits']}); runtime lane"
+        )
+    for field in ("provider_share_bps", "global_multiplier_ppm"):
+        changed_rows = sorted(key for key, row in release_rows.items() if row[field] != live_rows["default"][field])
+        if changed_rows:
+            by_lane["pricing-globals"].append(
+                f"rate-card {field} differs from live on rows {changed_rows}; runtime lane"
+            )
+    live_credits, release_credits = pricing_credit_rows(live_rows), pricing_credit_rows(release_rows)
+    rows_diff = pricing_rows_diff(live_credits, release_credits)
+    if not any(rows_diff.values()):
+        return rows_diff
+    if ack_data is None:
+        by_lane["pricing-unacked-move"].append("acknowledged-pricing-moves.json is unavailable; a pricing release needs it")
+        return rows_diff
+    try:
+        acks = load_pricing_move_acks(ack_data, "acknowledged-pricing-moves.json")
+    except CatalogError as exc:
+        by_lane["pricing-unacked-move"].append(str(exc))
+        return rows_diff
+    names = release_model_names(release) | release_model_names(live)
+    offline = pricing_model_moves(live_credits, release_credits, names | set(live_credits) | set(release_credits), acks)
+    for name in offline["unacknowledged_moves"]:
+        by_lane["pricing-unacked-move"].append(
+            f"served model {name!r} moves rate row without an entry in acknowledged-pricing-moves.json"
+        )
+    if pricing_diff is None:
+        return rows_diff
+    reasons = by_lane["pricing-unacked-move"]
+    if sha256(pricing_diff) != pricing_diff_sha256:
+        reasons.append("pricing-diff.json sha256 does not match --pricing-diff-sha256")
+        return rows_diff
+    try:
+        acknowledged = strict_json(pricing_diff, "pricing-diff.json")
+        top = {"schema_version", "effective_diff", "model_resolutions"}
+        exact_keys(acknowledged, top, top, "pricing-diff.json")
+        if acknowledged["schema_version"] != PRICING_ACKNOWLEDGED_SCHEMA:
+            fail(f"pricing-diff.json: schema_version must be {PRICING_ACKNOWLEDGED_SCHEMA!r}")
+        diff = acknowledged["effective_diff"]
+        if not isinstance(diff, dict) or diff.get("schema_version") != PRICING_EFFECTIVE_DIFF_SCHEMA:
+            fail(f"pricing-diff.json: schema_version must be {PRICING_EFFECTIVE_DIFF_SCHEMA!r}")
+        expected = {
+            "live_table_sha256": pricing_table_sha256(live_credits),
+            "candidate_table_sha256": pricing_table_sha256(release_credits),
+            "acknowledged_moves_sha256": sha256(ack_data),
+            "rows": rows_diff,
+        }
+        for field, value in expected.items():
+            if diff.get(field) != value:
+                reasons.append(f"pricing-diff.json {field} does not match this release, live and acknowledgements")
+        escaped_acks = {tuple(escape_model_name(part) for part in ack) for ack in acks}
+        models = diff.get("models")
+        if not isinstance(models, list) or not isinstance(diff.get("unacknowledged_moves"), list):
+            fail("pricing-diff.json: models and unacknowledged_moves must be lists")
+        for name in diff["unacknowledged_moves"]:
+            reasons.append(f"pricing-diff.json lists unacknowledged move {name!r}")
+        for entry in models:
+            if (entry["old_row"] != entry["new_row"] and (entry["model"], entry["old_row"], entry["new_row"]) not in escaped_acks
+                    and not pricing_move_is_own_row(entry["model"], entry["old_row"], entry["new_row"])):
+                reasons.append(f"pricing-diff.json move {entry['model']!r} is not acknowledged")
+        # The coordinator-resolved names: exactly the digested unresolved names,
+        # each in the validator's shape, every row move acknowledged.
+        resolutions = acknowledged["model_resolutions"]
+        if not isinstance(resolutions, list):
+            fail("pricing-diff.json: model_resolutions must be a list")
+        checked = [_pricing_resolution_entry(value, f"pricing-diff.json model_resolutions[{index}]") for index, value in enumerate(resolutions)]
+        if [entry["name"] for entry in checked] != diff.get("unresolved_names"):
+            reasons.append("pricing-diff.json model_resolutions do not cover exactly the digested unresolved names")
+        for entry in checked:
+            if entry["old"]["row_key"] != entry["new"]["row_key"] and (
+                entry["name"], entry["old"]["row_key"], entry["new"]["row_key"]
+            ) not in escaped_acks and not pricing_move_is_own_row(entry["name"], entry["old"]["row_key"], entry["new"]["row_key"]):
+                reasons.append(f"pricing-diff.json coordinator-resolved move {entry['name']!r} is not acknowledged")
+    except (CatalogError, KeyError, TypeError) as exc:
+        reasons.append(f"pricing-diff.json malformed: {exc}")
+    return rows_diff
+
+
+def content_gate_commit_block(release: pathlib.Path, commit: str, repo: pathlib.Path) -> tuple[str | None, list[str]]:
+    """The commit's tracked coordinator `rate_card` block must equal the release rows (#1693)."""
+    committed = _git_show(repo, commit, COORDINATOR_CONFIG_REPO_PATH)
+    if committed is None:
+        return None, [f"commit {commit} lacks {COORDINATOR_CONFIG_REPO_PATH}"]
+    try:
+        block = extract_coordinator_rate_card_block(committed, f"{COORDINATOR_CONFIG_REPO_PATH}@{commit}")
+        release_obj = strict_json((release / RATE_CARD_FEED_NAME).read_bytes(), f"{release}/{RATE_CARD_FEED_NAME}")
+        check_rate_card_parity(release_obj, committed.decode("utf-8"))
+    except CatalogError as exc:
+        return None, [f"{COORDINATOR_CONFIG_REPO_PATH} at {commit} does not bind the release rate card: {exc}"]
+    return sha256(block), []
+
+
 def content_gate(
     release: pathlib.Path,
     live: pathlib.Path,
@@ -5345,13 +5977,23 @@ def content_gate(
     exclusions_data: bytes | None = None,
     repo: pathlib.Path = ROOT,
     tier2_index_path: pathlib.Path | None = None,
+    ack_data: bytes | None = None,
+    pricing_diff: bytes | None = None,
+    pricing_diff_sha256: str | None = None,
+    tier2_coordinator_config: pathlib.Path | None = None,
 ) -> dict:
     now = now or datetime.now(timezone.utc)
     by_lane: dict[str, list[str]] = {lane: [] for lane in CONTENT_GATE_LANE_ORDER}
     try:
         # stdout carries exactly one JSON verdict; verify-directory's progress lines go to stderr.
         with contextlib.redirect_stdout(sys.stderr):
-            verify_directory(release)
+            # An explicit Tier-2 trust root (#1693): a shipped verifier bundle
+            # has no repository coordinator.yaml beside it, so the lane passes
+            # the reviewed commit's bytes (sha-pinned) instead.
+            if tier2_coordinator_config is None:
+                verify_directory(release)
+            else:
+                verify_directory(release, tier2_coordinator_config=tier2_coordinator_config)
     except CatalogError as exc:
         by_lane["invalid-release"].append(f"verify-directory: {exc}")
     manifest_obj = _load_release_manifest(release)
@@ -5369,10 +6011,6 @@ def content_gate(
         by_lane["full-provider-app"].append("trusted-keys.json bytes changed vs live")
 
     rate_card_changed = _rate_card_rows_content(release) != _rate_card_rows_content(live)
-    if rate_card_changed:
-        by_lane["pricing"].append(
-            "rate-card.json rows changed vs live; pricing corrections go through #1693 / runtime lane"
-        )
 
     candidate_obj = strict_json((release / "autotune-candidates.json").read_bytes(), f"{release}/autotune-candidates.json")
     generated_at = parse_timestamp(candidate_obj.get("generated_at"), "autotune-candidates.json generated_at")
@@ -5384,6 +6022,7 @@ def content_gate(
         )
 
     committed_ledger: tempfile._TemporaryFileWrapper | None = None
+    ack_missing = False
     if commit is not None:
         commit_reasons = content_gate_commit_reasons(release, commit, repo)
         by_lane["unverified-commit"].extend(commit_reasons)
@@ -5401,6 +6040,19 @@ def content_gate(
                 committed_ledger.write(ledger_bytes)
                 committed_ledger.flush()
                 ledger_path = pathlib.Path(committed_ledger.name)
+            # #1693: the reviewed commit, not the working tree, supplies the acknowledgements.
+            ack_data = _git_show(repo, commit, str(ACKNOWLEDGED_PRICING_MOVES_PATH.relative_to(ROOT)))
+            ack_missing = ack_data is None
+
+    if ack_data is None and commit is None and ACKNOWLEDGED_PRICING_MOVES_PATH.exists():
+        ack_data = ACKNOWLEDGED_PRICING_MOVES_PATH.read_bytes()
+    pricing = _content_gate_pricing(release, live, by_lane, ack_data, pricing_diff, pricing_diff_sha256)
+    if ack_missing and any(pricing.values()):
+        by_lane["unverified-commit"].append(f"commit {commit} lacks {ACKNOWLEDGED_PRICING_MOVES_PATH.relative_to(ROOT)}")
+    commit_block_sha256 = None
+    if commit is not None and any(pricing.values()) and not by_lane["unverified-commit"]:
+        commit_block_sha256, block_reasons = content_gate_commit_block(release, commit, repo)
+        by_lane["unverified-commit"].extend(block_reasons)
 
     try:
         if compare_live(release, live, ledger_path, tier2_index_path)["verdict"] == "regression":
@@ -5441,18 +6093,37 @@ def content_gate(
             "trusted_keys_changed": keyring_changed,
             "release_manifest_changed": manifest_changed,
         },
+        "pricing": pricing,
+        "commit_block_sha256": commit_block_sha256,
+        "acknowledged_moves_sha256": None if ack_data is None else sha256(ack_data),
+        "pricing_diff_sha256": pricing_diff_sha256 if pricing_diff is not None else None,
     }
 
 
 def cmd_content_gate(
     release: pathlib.Path, live: pathlib.Path, ledger: pathlib.Path | None, commit: str | None, now_raw: str | None,
     tier2_index_path: pathlib.Path | None = None,
+    ack_path: pathlib.Path | None = None,
+    pricing_diff_path: pathlib.Path | None = None,
+    pricing_diff_sha256: str | None = None,
+    tier2_coordinator_config: pathlib.Path | None = None,
 ) -> int:
+    if (pricing_diff_path is None) != (pricing_diff_sha256 is None):
+        fail("content-gate: --pricing-diff and --pricing-diff-sha256 go together")
+    if pricing_diff_sha256 is not None and not HEX64.fullmatch(pricing_diff_sha256):
+        fail("content-gate: --pricing-diff-sha256 must be 64 lowercase hex")
+    if ack_path is not None and commit is not None:
+        fail("content-gate: --acknowledged-moves is read from --commit when a commit is given")
     try:
         now = parse_timestamp(now_raw, "--now") if now_raw is not None else None
         if ledger is None:
             ledger = release / "release-ledger.json" if (release / "release-ledger.json").exists() else LEDGER_PATH
-        result = content_gate(release, live, ledger, commit=commit, now=now, tier2_index_path=tier2_index_path)
+        result = content_gate(
+            release, live, ledger, commit=commit, now=now, tier2_index_path=tier2_index_path,
+            ack_data=None if ack_path is None else ack_path.read_bytes(),
+            pricing_diff=None if pricing_diff_path is None else pricing_diff_path.read_bytes(),
+            pricing_diff_sha256=pricing_diff_sha256, tier2_coordinator_config=tier2_coordinator_config,
+        )
     except (KeyError, TypeError, ValueError, AttributeError, OSError) as exc:
         fail(f"content-gate: malformed release input: {exc!r}")
     print(json.dumps(result, sort_keys=True))
@@ -5818,6 +6489,58 @@ def main() -> int:
         type=pathlib.Path,
         help="tier2-content-index output for the predecessor check (as compare-live)",
     )
+    gate_parser.add_argument(
+        "--acknowledged-moves",
+        type=pathlib.Path,
+        help="acknowledged-pricing-moves.json (default: the repository file; with --commit, the committed one)",
+    )
+    gate_parser.add_argument("--pricing-diff", type=pathlib.Path, help="pricing-effective-diff output to bind (#1693)")
+    gate_parser.add_argument("--pricing-diff-sha256", help="sha256 of --pricing-diff the operator acknowledged")
+    gate_parser.add_argument(
+        "--tier2-coordinator-config",
+        type=pathlib.Path,
+        help=(
+            "coordinator.yaml whose tier2.catalog_public_key authenticates --release's tier2-catalog.json "
+            "(default: the repository phase4-coordinator/dist/coordinator.yaml)"
+        ),
+    )
+    splice_parser = sub.add_parser(
+        "splice-coordinator-rate-card",
+        help=(
+            "#1693 L1: write --output = --live-config with its rewards.rate_card block replaced by "
+            "--block, byte-identical elsewhere. Exit 0 = written; exit 1 = refused/malformed (nothing written)"
+        ),
+    )
+    splice_parser.add_argument("--live-config", required=True, type=pathlib.Path)
+    splice_parser.add_argument("--block", required=True, type=pathlib.Path)
+    splice_parser.add_argument("--output", required=True, type=pathlib.Path, help="created exclusively (must not exist), mode 0600")
+    extract_parser = sub.add_parser(
+        "extract-coordinator-rate-card-block",
+        help="#1693: print the sha256 of a coordinator yaml's rewards.rate_card block (L1 boundary); exit 1 = refused",
+    )
+    extract_parser.add_argument("--config", required=True, type=pathlib.Path)
+    extract_parser.add_argument("--output", type=pathlib.Path, help="also write the block bytes (created exclusively, mode 0600)")
+    diff_parser = sub.add_parser(
+        "pricing-effective-diff",
+        help=(
+            "#1693: effective-price diff per served model; writes canonical JSON to --output. "
+            "Exit 0 = no unacknowledged move; exit 3 = unacknowledged move; exit 1 = malformed input"
+        ),
+    )
+    diff_parser.add_argument("--live-config", type=pathlib.Path, help="live coordinator yaml (MoneyTable-A)")
+    diff_parser.add_argument("--live-rate-card", type=pathlib.Path, help="live rate-card.json instead of --live-config")
+    diff_parser.add_argument("--candidate-rate-card", required=True, type=pathlib.Path)
+    diff_parser.add_argument(
+        "--release", action="append", default=[], type=pathlib.Path,
+        help="release dir whose catalog keys and model_ids are served (candidate, current, retained window); repeatable",
+    )
+    diff_parser.add_argument("--pinned-names", required=True, type=pathlib.Path, help="JSON array of model names pinned at preflight")
+    diff_parser.add_argument(
+        "--new-names", type=pathlib.Path,
+        help="JSON array of names seen since pinning; checked for unacknowledged moves, kept out of the digest",
+    )
+    diff_parser.add_argument("--acknowledged-moves", required=True, type=pathlib.Path)
+    diff_parser.add_argument("--output", required=True, type=pathlib.Path, help="created exclusively (must not exist), mode 0600")
     derive_parser = sub.add_parser("derive-tier2")
     derive_parser.add_argument(
         "--candidate",
@@ -5887,7 +6610,19 @@ def main() -> int:
         elif args.command == "buyer-serving-set":
             cmd_buyer_serving_set(args.release, args.exclusions, args.diff_live, args.live_exclusions)
         elif args.command == "content-gate":
-            return cmd_content_gate(args.release, args.live, args.ledger, args.commit, args.now, args.tier2_content_index)
+            return cmd_content_gate(
+                args.release, args.live, args.ledger, args.commit, args.now, args.tier2_content_index,
+                args.acknowledged_moves, args.pricing_diff, args.pricing_diff_sha256, args.tier2_coordinator_config,
+            )
+        elif args.command == "splice-coordinator-rate-card":
+            cmd_splice_coordinator_rate_card(args.live_config, args.block, args.output)
+        elif args.command == "extract-coordinator-rate-card-block":
+            cmd_extract_coordinator_rate_card_block(args.config, args.output)
+        elif args.command == "pricing-effective-diff":
+            return cmd_pricing_effective_diff(
+                args.live_config, args.live_rate_card, args.candidate_rate_card, args.release,
+                args.pinned_names, args.new_names, args.acknowledged_moves, args.output,
+            )
         elif args.command == "derive-tier2":
             cmd_derive_tier2(
                 args.candidate,

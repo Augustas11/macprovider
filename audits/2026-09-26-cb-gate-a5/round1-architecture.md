@@ -1,0 +1,5 @@
+Architecture-review the complete uncommitted Gate A5 diff in /Users/augstar/macprovider-1646-rest against HEAD, including the two untracked Python files.
+
+Evaluate whether the offline paired batch/serial counter is the correct boundary for SPEC-038 Gate A5 and preserves SPEC-032 OPoI as observability-only. Check that numerator, denominator, window, exact tuple/challenge binding, bounded pair gap, strict <5% comparison, fail-closed invalid/inconclusive handling, deterministic durable output, governance versioning, and documentation all agree. Identify any missing provenance or sampling invariant that would let the counter claim a production-worthy result without actually measuring continuous batching. Do not propose live enforcement unless necessary; the campaign explicitly forbids coupling OPoI to routing, tiering, sanctions, payout, billing, receipts, or settlement.
+
+Rank every concrete finding CRITICAL/HIGH/MEDIUM/LOW/INFO with file:line evidence and an actionable fix. If there are no CRITICAL/HIGH/MEDIUM findings, say PASS and list any LOW/INFO separately. Do not edit files.

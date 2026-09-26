@@ -3607,11 +3607,18 @@ struct HuggingFaceSnapshotDownloader {
     /// in front of object storage); nothing it returns is trusted before the
     /// signed-hash check. Test initializers reuse `fetch`.
     var mirrorFetch: @Sendable (URLRequest) async throws -> (Data, URLResponse)
+    /// Mirror artifact transfer bounded by the signed manifest size. Production
+    /// streams at most `maximumBytes`; test initializers adapt their injected
+    /// downloader and verify the resulting temporary file before returning it.
+    var boundedMirrorDownload: @Sendable (URLRequest, Date?, UInt64) async throws -> (URL, URLResponse)
     /// Byte sources tried in order after huggingface.co fails. The signed
     /// row hash stays the only authority, so none of these hosts is trusted
     /// (SPEC-023 §3.2 artifact byte sources, #1737). Test initializers leave
     /// this empty so a failure keeps its original error.
     var fallbackSources: [ModelArtifactSource] = []
+    /// Invalid operator mirror entries are retained as sanitized diagnostics
+    /// so a final source-walk failure does not imply they were attempted.
+    var fallbackConfigurationDiagnostics: [String] = []
     /// Shared by every copy of this downloader (one recommend run): once
     /// huggingface.co fails at the transport level, later snapshots try the
     /// fallback sources first instead of waiting on the same timeout again.
@@ -3642,11 +3649,23 @@ struct HuggingFaceSnapshotDownloader {
             try await HuggingFaceSnapshotDownloader.defaultDownload($0, deadline: $1)
         }
         mirrorFetch = {
-            try await HuggingFaceSnapshotDownloader.guardedSession.data(for: $0, delegate: HFAssetRedirectGuard())
+            try await HuggingFaceSnapshotDownloader.defaultBoundedFetch(
+                $0,
+                maximumBytes: UInt64(ContentAddressedManifest.maxManifestBytes)
+            )
         }
-        fallbackSources = ModelArtifactSource.productionFallbacks(
+        boundedMirrorDownload = {
+            try await HuggingFaceSnapshotDownloader.defaultBoundedDownload(
+                $0,
+                deadline: $1,
+                maximumBytes: $2
+            )
+        }
+        let configuration = ModelArtifactSource.productionConfiguration(
             environment: ProcessInfo.processInfo.environment
         )
+        fallbackSources = configuration.sources
+        fallbackConfigurationDiagnostics = configuration.diagnostics
     }
 
     init(
@@ -3662,6 +3681,11 @@ struct HuggingFaceSnapshotDownloader {
         self.download = { request, _ in
             try await download(request)
         }
+        self.boundedMirrorDownload = { request, _, maximumBytes in
+            let result = try await download(request)
+            try HuggingFaceSnapshotDownloader.enforceDownloadedSize(result.0, maximumBytes: maximumBytes)
+            return result
+        }
     }
 
     init(
@@ -3673,6 +3697,70 @@ struct HuggingFaceSnapshotDownloader {
         self.fetch = fetch
         self.mirrorFetch = fetch
         self.download = downloadWithDeadline
+        self.boundedMirrorDownload = { request, deadline, maximumBytes in
+            let result = try await downloadWithDeadline(request, deadline)
+            try HuggingFaceSnapshotDownloader.enforceDownloadedSize(result.0, maximumBytes: maximumBytes)
+            return result
+        }
+    }
+
+    private static func defaultBoundedFetch(
+        _ request: URLRequest,
+        maximumBytes: UInt64
+    ) async throws -> (Data, URLResponse) {
+        let (bytes, response) = try await guardedSession.bytes(for: request, delegate: HFAssetRedirectGuard())
+        try rejectOversizedContentLength(response, maximumBytes: maximumBytes, description: "mirror manifest")
+        var data = Data()
+        data.reserveCapacity(Int(min(maximumBytes, 64 * 1024)))
+        for try await byte in bytes {
+            guard UInt64(data.count) < maximumBytes else {
+                throw AutotuneRecommendError.invalidArtifact("mirror manifest too large")
+            }
+            data.append(byte)
+        }
+        return (data, response)
+    }
+
+    private static func defaultBoundedDownload(
+        _ request: URLRequest,
+        deadline: Date?,
+        maximumBytes: UInt64
+    ) async throws -> (URL, URLResponse) {
+        let delegate = BoundedHFAssetDownloadDelegate(maximumBytes: maximumBytes)
+        do {
+            let result = try await guardedSession.download(for: request, delegate: delegate)
+            if delegate.exceededLimit {
+                try? FileManager.default.removeItem(at: result.0)
+                throw AutotuneRecommendError.invalidArtifact("mirror file exceeds signed size")
+            }
+            try enforceDownloadedSize(result.0, maximumBytes: maximumBytes)
+            try assertDeadlineActive(deadline)
+            return result
+        } catch {
+            if delegate.exceededLimit {
+                throw AutotuneRecommendError.invalidArtifact("mirror file exceeds signed size")
+            }
+            throw error
+        }
+    }
+
+    private static func rejectOversizedContentLength(
+        _ response: URLResponse,
+        maximumBytes: UInt64,
+        description: String
+    ) throws {
+        let declared = response.expectedContentLength
+        if declared >= 0, UInt64(declared) > maximumBytes {
+            throw AutotuneRecommendError.invalidArtifact("\(description) exceeds its allowed size")
+        }
+    }
+
+    private static func enforceDownloadedSize(_ url: URL, maximumBytes: UInt64) throws {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        guard let size = values.fileSize, size >= 0, UInt64(size) <= maximumBytes else {
+            try? FileManager.default.removeItem(at: url)
+            throw AutotuneRecommendError.invalidArtifact("mirror file exceeds signed size")
+        }
     }
 
     private static func defaultDownload(_ request: URLRequest, deadline: Date?) async throws -> (URL, URLResponse) {
@@ -3791,7 +3879,7 @@ struct HuggingFaceSnapshotDownloader {
         deadline: Date? = nil
     ) async throws {
         try Self.assertDeadlineActive(deadline)
-        var failures: [String] = []
+        var failures = fallbackConfigurationDiagnostics
         let huggingFaceLast = !fallbackSources.isEmpty && reachability.preferFallbacks
         if !huggingFaceLast {
             do {
@@ -3951,7 +4039,11 @@ struct HuggingFaceSnapshotDownloader {
                     url: ModelArtifactSource.contentAddressedFileURL(base: base, sha256: expectedSHA256, path: entry.path)
                 )
                 request.timeoutInterval = try Self.boundedInterval(60, deadline: deadline)
-                let downloaded = try await downloadFile(request, deadline: deadline)
+                let downloaded = try await downloadMirrorFile(
+                    request,
+                    deadline: deadline,
+                    maximumBytes: entry.size
+                )
                 guard (downloaded.response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true else {
                     try? FileManager.default.removeItem(at: downloaded.url)
                     throw AutotuneRecommendError.invalidArtifact("mirror download failed \(entry.path)")
@@ -4018,6 +4110,20 @@ struct HuggingFaceSnapshotDownloader {
         let download = self.download
         let result = try await Self.withDeadline(deadline) {
             let (temporary, response) = try await download(request, deadline)
+            return DownloadResponseBox(url: temporary, response: response)
+        }
+        try Self.assertDeadlineActive(deadline)
+        return result
+    }
+
+    private func downloadMirrorFile(
+        _ request: URLRequest,
+        deadline: Date?,
+        maximumBytes: UInt64
+    ) async throws -> DownloadResponseBox {
+        let download = self.boundedMirrorDownload
+        let result = try await Self.withDeadline(deadline) {
+            let (temporary, response) = try await download(request, deadline, maximumBytes)
             return DownloadResponseBox(url: temporary, response: response)
         }
         try Self.assertDeadlineActive(deadline)
@@ -4192,6 +4298,83 @@ final class HFAssetRedirectGuard: NSObject, URLSessionTaskDelegate {
         stripped.setValue(nil, forHTTPHeaderField: "Authorization")
         completionHandler(stripped)
     }
+
+    private static func allowedAssetHost(_ host: String) -> Bool {
+        host == "cdn-lfs.huggingface.co"
+            || host == "cas-bridge.xethub.hf.co"
+            || host == "transfer.xethub.hf.co"
+            || host.hasSuffix(".aws.cdn.hf.co")
+    }
+}
+
+/// Cancels an untrusted mirror transfer as soon as either the declared or
+/// observed byte count exceeds the size authorized by the signed manifest.
+final class BoundedHFAssetDownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let maximumBytes: Int64
+    private let lock = NSLock()
+    private var limitExceeded = false
+
+    init(maximumBytes: UInt64) {
+        self.maximumBytes = maximumBytes > UInt64(Int64.max) ? Int64.max : Int64(maximumBytes)
+    }
+
+    var exceededLimit: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return limitExceeded
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let originalURL = task.originalRequest?.url,
+              let newURL = request.url,
+              originalURL.scheme == "https",
+              newURL.scheme == "https",
+              let originalHost = originalURL.host,
+              let newHost = newURL.host
+        else {
+            completionHandler(nil)
+            return
+        }
+        if originalHost == newHost {
+            completionHandler(request)
+            return
+        }
+        guard originalHost != "huggingface.co" || Self.allowedAssetHost(newHost) else {
+            completionHandler(nil)
+            return
+        }
+        var stripped = request
+        stripped.setValue(nil, forHTTPHeaderField: "Authorization")
+        completionHandler(stripped)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didWriteData bytesWritten: Int64,
+        totalBytesWritten: Int64,
+        totalBytesExpectedToWrite: Int64
+    ) {
+        guard totalBytesWritten > maximumBytes
+            || (totalBytesExpectedToWrite >= 0 && totalBytesExpectedToWrite > maximumBytes)
+        else { return }
+        lock.lock()
+        limitExceeded = true
+        lock.unlock()
+        downloadTask.cancel()
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        downloadTask: URLSessionDownloadTask,
+        didFinishDownloadingTo location: URL
+    ) {}
 
     private static func allowedAssetHost(_ host: String) -> Bool {
         host == "cdn-lfs.huggingface.co"

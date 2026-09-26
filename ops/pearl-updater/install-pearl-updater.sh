@@ -91,6 +91,9 @@ case "$bundle_seen" in
     exit 1
     ;;
 esac
+# #1693 L0: the updater and the Tier-2 enforcement watchdog load the shared
+# one-writer guard from here and fail closed without it.
+install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/../../scripts/lib/coordinator_config_guard.py" "$INSTALL_PREFIX/usr/local/share/macprovider/scripts/coordinator_config_guard.py"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/catalog-canary-proof.py" "$INSTALL_PREFIX/usr/local/share/macprovider/catalog-canary-proof.py"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/macprovider-pearl-updater.service" "$INSTALL_PREFIX/etc/systemd/system/macprovider-pearl-updater.service"
 install -o "$INSTALL_OWNER" -g "$INSTALL_ROOT_GROUP" -m 0644 "$HERE/macprovider-pearl-updater.timer" "$INSTALL_PREFIX/etc/systemd/system/macprovider-pearl-updater.timer"

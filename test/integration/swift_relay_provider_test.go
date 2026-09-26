@@ -3,6 +3,8 @@ package integration
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +14,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -28,12 +32,19 @@ var (
 )
 
 type swiftRelayDescriptor struct {
-	Type              string         `json:"type"`
-	Version           string         `json:"version"`
-	BodyEncoding      string         `json:"body_encoding"`
-	AssignedSession   string         `json:"assigned_session"`
-	IdentityPublicKey string         `json:"identity_public_key"`
-	KeyRecord         map[string]any `json:"relay_blind_key_record"`
+	Type                  string         `json:"type"`
+	Version               string         `json:"version"`
+	BodyEncoding          string         `json:"body_encoding"`
+	AssignedSession       string         `json:"assigned_session"`
+	IdentityPublicKey     string         `json:"identity_public_key"`
+	KeyRecord             map[string]any `json:"relay_blind_key_record"`
+	ContinuousBatchReplay bool           `json:"continuous_batch_replay"`
+	ProviderID            string         `json:"provider_id"`
+	ModelID               string         `json:"model_id"`
+	ModelHash             string         `json:"model_hash"`
+	ReceiptPublicKey      string         `json:"provider_receipt_public_key"`
+	ReceiptKeyID          string         `json:"provider_receipt_key_id"`
+	ReplayStore           string         `json:"replay_store"`
 }
 
 type swiftRelayFixture struct {
@@ -102,7 +113,19 @@ func startSwiftRelayFixtureWithDelay(t *testing.T, stateDir, model string, strea
 	return fixture
 }
 
+func startSwiftContinuousBatchReplayFixture(t *testing.T, stateDir, model string) *swiftRelayFixture {
+	t.Helper()
+	fixture := &swiftRelayFixture{t: t, stateDir: stateDir, model: model}
+	fixture.startWithMode("", true)
+	t.Cleanup(fixture.stop)
+	return fixture
+}
+
 func (f *swiftRelayFixture) start(assignedSession string) {
+	f.startWithMode(assignedSession, false)
+}
+
+func (f *swiftRelayFixture) startWithMode(assignedSession string, continuousBatchReplay bool) {
 	f.t.Helper()
 	args := []string{"relay-blind-fixture", "--state-dir", f.stateDir, "--model", f.model}
 	if f.streamDelayMS > 0 {
@@ -110,6 +133,9 @@ func (f *swiftRelayFixture) start(assignedSession string) {
 	}
 	if assignedSession != "" {
 		args = append(args, "--assigned-session", assignedSession)
+	}
+	if continuousBatchReplay {
+		args = append(args, "--continuous-batch-replay")
 	}
 	cmd := exec.Command(buildSwiftRelayBinary(f.t), args...)
 	cmd.Env = append(os.Environ(), "MACPROVIDER_ALLOW_TEST_FIXTURES=1")
@@ -148,6 +174,227 @@ func (f *swiftRelayFixture) start(assignedSession string) {
 	f.stdin = stdin
 	f.stdout = scanner
 	f.descriptor = descriptor
+}
+
+func (f *swiftRelayFixture) reconnectRelayBoundary() {
+	f.t.Helper()
+	f.inputMu.Lock()
+	defer f.inputMu.Unlock()
+	if _, err := f.stdin.Write([]byte("{\"type\":\"relay_fixture_reconnect\"}\n")); err != nil {
+		f.t.Fatalf("write Swift relay reconnect control: %v", err)
+	}
+	if !f.stdout.Scan() {
+		f.t.Fatalf("Swift relay reconnect control produced no response: %v", f.stdout.Err())
+	}
+	var response struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(f.stdout.Bytes(), &response); err != nil || response.Type != "relay_fixture_reconnected" {
+		f.t.Fatalf("invalid Swift relay reconnect response: err=%v body=%s", err, f.stdout.Bytes())
+	}
+}
+
+func TestSwiftRelayContinuousBatchDurableTerminalReplay(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("real Swift InferenceRelay fixture requires macOS")
+	}
+	stateDir := t.TempDir()
+	if err := os.Chmod(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const model = "mlx-community/Qwen-Test"
+	fixture := startSwiftContinuousBatchReplayFixture(t, stateDir, model)
+	if !fixture.descriptor.ContinuousBatchReplay || fixture.descriptor.ProviderID == "" ||
+		fixture.descriptor.ModelID != model ||
+		fixture.descriptor.ModelHash == "" || fixture.descriptor.ReceiptPublicKey == "" ||
+		fixture.descriptor.ReceiptKeyID == "" || fixture.descriptor.ReplayStore == "" {
+		t.Fatalf("incomplete continuous-batch replay descriptor: %+v", fixture.descriptor)
+	}
+
+	const requestID = "relay-stable-m5-terminal-replay"
+	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"M5 durable replay"}],"stream":false,"max_tokens":2,"temperature":0,"top_p":1}`, model)
+	frame, err := json.Marshal(map[string]any{
+		"type":       "inference_request",
+		"request_id": requestID,
+		"stream":     false,
+		"body":       body,
+		"settlement": map[string]any{
+			"account_scope":                 "integration-account",
+			"request_id":                    requestID,
+			"attempt_n":                     1,
+			"provider_id":                   fixture.descriptor.ProviderID,
+			"provider_receipt_key_id":       fixture.descriptor.ReceiptKeyID,
+			"model_id":                      model,
+			"expected_catalog_model_hash":   fixture.descriptor.ModelHash,
+			"catalog_id":                    "integration-catalog",
+			"catalog_body_digest":           strings.Repeat("c", 64),
+			"route_snapshot_digest":         strings.Repeat("d", 64),
+			"route_snapshot_policy_version": "integration-v1",
+			"route_snapshot_mode":           "observe",
+			"prompt_hash":                   strings.Repeat("e", 64),
+			"output_prefix_start_byte":      0,
+			"pending_deadline_seconds":      120,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := collectSwiftRelayFrames(t, fixture, frame)
+	firstEnd := terminalSwiftRelayFrame(t, first)
+	if got := intJSON(firstEnd["fixture_generation_count"]); got != 1 {
+		t.Fatalf("first generation count=%d, want 1: terminal=%v", got, firstEnd)
+	}
+	if got := firstEnd["fixture_settlement_disposition"]; got != "eligible_owner" {
+		t.Fatalf("first settlement disposition=%v, want eligible_owner", got)
+	}
+	firstReceipt, ok := firstEnd["receipt"].(string)
+	if !ok || firstReceipt == "" {
+		t.Fatalf("first terminal omitted settlement receipt: %v", firstEnd)
+	}
+	verifySwiftFixtureReceipt(t, firstReceipt, fixture.descriptor, requestID, firstEnd)
+
+	fixture.reconnectRelayBoundary()
+	replay := collectSwiftRelayFrames(t, fixture, frame)
+	replayEnd := terminalSwiftRelayFrame(t, replay)
+	if got := intJSON(replayEnd["fixture_generation_count"]); got != 1 {
+		t.Fatalf("replay generation count=%d, want retained result without re-inference: terminal=%v", got, replayEnd)
+	}
+	if got := replayEnd["fixture_settlement_disposition"]; got != "non_settling_replay" {
+		t.Fatalf("replay settlement disposition=%v, want non_settling_replay", got)
+	}
+	if receipt, present := replayEnd["receipt"]; present {
+		t.Fatalf("non-settling replay emitted duplicate receipt: %v", receipt)
+	}
+	firstUsage, firstUsagePresent := firstEnd["usage"].(map[string]any)
+	replayUsage, replayUsagePresent := replayEnd["usage"].(map[string]any)
+	if !firstUsagePresent || !replayUsagePresent || !reflect.DeepEqual(firstUsage, replayUsage) {
+		t.Fatalf("replay usage=%v, want retained first usage=%v", replayEnd["usage"], firstEnd["usage"])
+	}
+	assertDurableReplayClaim(t, fixture.descriptor.ReplayStore)
+}
+
+func collectSwiftRelayFrames(t *testing.T, fixture *swiftRelayFixture, frame []byte) []map[string]any {
+	t.Helper()
+	var frames []map[string]any
+	if err := fixture.serveFrame(frame, func(raw []byte) error {
+		var decoded map[string]any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			return err
+		}
+		frames = append(frames, decoded)
+		return nil
+	}); err != nil {
+		t.Fatalf("serve Swift relay frame: %v", err)
+	}
+	return frames
+}
+
+func terminalSwiftRelayFrame(t *testing.T, frames []map[string]any) map[string]any {
+	t.Helper()
+	for i := len(frames) - 1; i >= 0; i-- {
+		if frames[i]["type"] == "inference_response_end" {
+			return frames[i]
+		}
+	}
+	t.Fatalf("missing terminal frame: %+v", frames)
+	return nil
+}
+
+func verifySwiftFixtureReceipt(t *testing.T, receipt string, descriptor swiftRelayDescriptor, requestID string, terminal map[string]any) {
+	t.Helper()
+	parts := strings.Split(receipt, ".")
+	if len(parts) != 2 {
+		t.Fatalf("receipt envelope has %d parts, want 2", len(parts))
+	}
+	tuple, err := base64.StdEncoding.DecodeString(parts[0])
+	if err != nil {
+		t.Fatalf("decode receipt tuple: %v", err)
+	}
+	signature, err := base64.StdEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode receipt signature: %v", err)
+	}
+	publicKey, err := base64.StdEncoding.DecodeString(descriptor.ReceiptPublicKey)
+	if err != nil || len(publicKey) != ed25519.PublicKeySize {
+		t.Fatalf("decode receipt public key: len=%d err=%v", len(publicKey), err)
+	}
+	if !ed25519.Verify(ed25519.PublicKey(publicKey), tuple, signature) {
+		t.Fatal("first settlement receipt signature is invalid")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(tuple, &payload); err != nil {
+		t.Fatalf("decode receipt tuple JSON: %v", err)
+	}
+	if payload["receipt_version"] != "4" || payload["request_id"] != requestID {
+		t.Fatalf("receipt tuple version/request=%v/%v, want 4/%s", payload["receipt_version"], payload["request_id"], requestID)
+	}
+	if payload["provider_id"] != descriptor.ProviderID || payload["model_id"] != descriptor.ModelID ||
+		payload["model_hash"] != descriptor.ModelHash || payload["expected_catalog_model_hash"] != descriptor.ModelHash {
+		t.Fatalf("receipt identity provider/model/hash=%v/%v/%v expected_hash=%v, want %s/%s/%s",
+			payload["provider_id"], payload["model_id"], payload["model_hash"], payload["expected_catalog_model_hash"],
+			descriptor.ProviderID, descriptor.ModelID, descriptor.ModelHash)
+	}
+	if payload["terminal_state"] != "normal_done" || intJSON(payload["terminal_state_ts_unix_ms"]) != intJSON(terminal["terminal_state_ts_unix_ms"]) {
+		t.Fatalf("receipt terminal state/timestamp=%v/%v, want normal_done/%v",
+			payload["terminal_state"], payload["terminal_state_ts_unix_ms"], terminal["terminal_state_ts_unix_ms"])
+	}
+	terminalUsage, ok := terminal["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("first terminal omitted usage: %v", terminal)
+	}
+	receiptUsage, ok := payload["usage"].(map[string]any)
+	if !ok {
+		t.Fatalf("receipt omitted signed usage: %v", payload)
+	}
+	wantPrompt := intJSON(terminalUsage["prompt_tokens"])
+	wantCompletion := intJSON(terminalUsage["completion_tokens"])
+	if intJSON(receiptUsage["observed_input_tokens"]) != wantPrompt ||
+		intJSON(receiptUsage["billable_input_tokens"]) != wantPrompt ||
+		intJSON(receiptUsage["observed_output_tokens"]) != wantCompletion ||
+		intJSON(receiptUsage["billable_output_tokens"]) != wantCompletion {
+		t.Fatalf("receipt usage=%v, want observed/billable input=%d output=%d from first terminal", receiptUsage, wantPrompt, wantCompletion)
+	}
+}
+
+func assertDurableReplayClaim(t *testing.T, store string) {
+	t.Helper()
+	claims := 0
+	err := filepath.WalkDir(store, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if info.Mode().Perm() != 0o700 {
+				return fmt.Errorf("replay directory %s mode=%#o, want 0700", path, info.Mode().Perm())
+			}
+			return nil
+		}
+		if filepath.Ext(path) == ".json" {
+			claims++
+			if info.Mode().Perm() != 0o600 {
+				return fmt.Errorf("replay claim %s mode=%#o, want 0600", path, info.Mode().Perm())
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("inspect durable replay store: %v", err)
+	}
+	if claims != 1 {
+		t.Fatalf("durable replay claim count=%d, want 1", claims)
+	}
+}
+
+func intJSON(value any) int {
+	if number, ok := value.(float64); ok {
+		return int(number)
+	}
+	return 0
 }
 
 func (f *swiftRelayFixture) stop() {

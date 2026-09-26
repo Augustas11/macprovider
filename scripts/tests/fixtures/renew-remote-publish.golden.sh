@@ -8,14 +8,62 @@ abort_pre_mutation() {
   exit 2
 }
 trap 'if [ "$mutated" -eq 1 ]; then exit 1; else rm -rf "$incoming_path" >/dev/null 2>&1 || true; exit 2; fi' ERR
-# Resolve the reload target BEFORE mutating anything, so a dead daemon aborts clean.
-pid="$(systemctl show -p MainPID --value "$unit")"
-[ -n "$pid" ] && [ "$pid" != "0" ] || abort_pre_mutation "coordinator MainPID unavailable; not mutating"
+coord_ready_pid() { # <unit>
+  local deadline=$(( $(date +%s) + 900 )) state pid
+  while :; do
+    state="$(systemctl show -p ActiveState --value "$1" 2>/dev/null || true)"
+    pid="$(systemctl show -p MainPID --value "$1" 2>/dev/null || true)"
+    case "$state" in active|activating|reloading) ;; *) echo "$1 is not running (ActiveState=${state:-?})" >&2; return 1 ;; esac
+    case "$pid" in ""|0|*[!0-9]*) echo "$1 has no MainPID" >&2; return 1 ;; esac
+    if curl --noproxy '*' -fsS --max-time 5 --max-filesize 65536 -o /dev/null http://127.0.0.1:8444/healthz 2>/dev/null &&
+       [ "$(systemctl show -p MainPID --value "$1" 2>/dev/null || true)" = "$pid" ]; then
+      echo "$pid"
+      return 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "$1 (pid $pid) is still booting: /healthz does not answer 200" >&2
+      return 1
+    fi
+    sleep 2
+  done
+}
+# Resolve the reload target BEFORE mutating anything, so a dead or still
+# booting daemon aborts clean.
+pid="$(coord_ready_pid "$unit")" || abort_pre_mutation "coordinator is not running and ready (active, serving /healthz); not mutating"
 python3 "$helper" validate || abort_pre_mutation "Pearl deploy lock files failed validation; not mutating"
 exec 8</run/lock/macprovider-pearl-updater.lock || abort_pre_mutation "cannot open /run/lock/macprovider-pearl-updater.lock; not mutating"
 flock -n 8 || abort_pre_mutation "Pearl updater lock held; not mutating"
 exec 9</opt/macprovider/.coordinator-deploy.lock || abort_pre_mutation "cannot open /opt/macprovider/.coordinator-deploy.lock; not mutating"
 flock -n 9 || abort_pre_mutation "coordinator deploy lock held; not mutating"
+# ---- from scripts/lib/coordinator-config-guard.sh ----
+CCG_EX_REFUSED=75
+CCG_EX_PRE_START_JOURNAL=76
+
+# ccg_refuse_if_pricing_txn <install_root> [--pre-start]
+#   0 when <install_root>/.pricing-txn is absent (as a path entry: a dangling
+#   symlink counts as present); otherwise prints the refusal and returns 75, or
+#   76 with --pre-start.
+ccg_refuse_if_pricing_txn() {
+  ccg_txn_root=${1:?ccg_refuse_if_pricing_txn: install root required}
+  ccg_txn_mode=${2:-}
+  case "$ccg_txn_mode" in
+    ""|--pre-start) ;;
+    *) printf 'ccg_refuse_if_pricing_txn: unknown flag %s\n' "$ccg_txn_mode" >&2; return 2 ;;
+  esac
+  ccg_txn_path="${ccg_txn_root%/}/.pricing-txn"
+  if [ -e "$ccg_txn_path" ] || [ -L "$ccg_txn_path" ]; then
+    printf 'refusing: pricing transaction journal present at %s; run scripts/catalog-content-release.sh --recover-pricing-txn\n' "$ccg_txn_path" >&2
+    if [ "$ccg_txn_mode" = --pre-start ]; then
+      return "$CCG_EX_PRE_START_JOURNAL"
+    fi
+    return "$CCG_EX_REFUSED"
+  fi
+  return 0
+}
+# ---- end ----
+# #1693 L0: under the locks, refuse while a pricing transaction journal exists
+# (a pricing publish creates its own journal only after this point).
+ccg_refuse_if_pricing_txn /opt/macprovider/ || abort_pre_mutation "pricing transaction journal present; not mutating"
 live_current="$(readlink "$root/current")" || abort_pre_mutation "cannot read current under lock"
 live_current="${live_current#./}"
 [ "$live_current" = "$prev" ] || abort_pre_mutation "current moved under lock ($live_current != $prev); not mutating"
@@ -83,5 +131,7 @@ ln -sfn "releases/$final" "$root/.current.next"
 mv -Tf "$root/.current.next" "$root/current"
 echo "retargeted current -> releases/$final (previous-target=$prev)"
 # SIGHUP the running coordinator: in-process config reload (#1268), NOT a restart.
+# Only a ready one (a restart since the pre-mutation check re-waits, bounded).
+pid="$(coord_ready_pid "$unit")" || { echo "coordinator not ready for the SIGHUP after mutating; rolling back" >&2; exit 1; }
 kill -HUP "$pid"
 echo "sent SIGHUP to $unit (pid $pid)"

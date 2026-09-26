@@ -228,6 +228,37 @@ directory aside on Pearl (`sudo mv /var/www/malibu-download/releases/<tag>
 the tag, and confirm `releases/<tag>/release.json` matches `checksums.txt`.
 v1.8.123 was migrated this way on 2026-09-25.
 
+## China supply acceptance boundary
+
+`MACPROVIDER_MODEL_MIRRORS` configures fallback sources; it does not force the
+first snapshot to bypass Hugging Face. When Hugging Face is reachable, the CLI
+tries it first. A successful download with that variable set therefore proves
+nothing about the mirror by itself.
+
+For the China supply acceptance run:
+
+1. Start with no target snapshot in either the Hugging Face cache or the
+   MacProvider durable store, and record that state before launching the CLI.
+2. Install a resolver-level deny boundary for GitHub, Hugging Face, their API,
+   raw-content, object, CDN, LFS, Xet and CAS hosts. Verify the boundary before
+   and after the run, and restore the resolver configuration byte-identically.
+   `HTTP_PROXY` / `HTTPS_PROXY` are not a sufficient boundary: URLSession and
+   Network.framework traffic may bypass them.
+3. Keep strict TLS verification enabled. The model mirror must use a publicly
+   trusted certificate or an approved machine trust configuration; never use
+   `-k` or weaken system TLS to complete the test.
+4. Capture the mirror's access log and provider connection endpoints. A pass
+   requires the manifest and every file, including the full weight payload, to
+   arrive through the approved mirror and the adopted snapshot to reproduce the
+   signed catalog `model_sha256`. Small-file requests followed by a stalled
+   weight download are partial evidence, not a pass.
+5. Do not implement a launchd safety check as `launchctl list | grep -q ...`
+   under `set -o pipefail`: `grep -q` may exit early and make `launchctl` fail
+   with SIGPIPE. Capture `launchctl list` first, then search the captured text.
+
+The released-run gate still applies: only a reviewed, signed CLI may join the
+live coordinator. A local or ad-hoc build stays isolated with `--no-join`.
+
 ## What not to count as release proof
 
 - matching `malibu-cli --version`

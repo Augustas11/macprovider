@@ -1,7 +1,13 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.8 (2026-09-20, auto-prefix cache reports re-price not quarantine)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.30, SPEC-024 v0.2.3 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.12.0 / SPEC-005-R011 is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+**Version:** 0.6.9 (2026-09-24, MoneyTable-A price changes as one reversible signed transaction; per-generation wholesale pricing)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.36, SPEC-024 v0.2.3 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.9 (2026-09-24, issue #1693 — MoneyTable-A pricing corrections without a runtime release):**
+- §5.6 registers `SPEC-005-R013`: the money invariants I1–I5 for a MoneyTable-A price change. At runtime the request money table changes only through one SIGHUP that applies a verified signed `rate-card.json` together with base-yaml `rewards.rate_card` rows that match it byte-for-byte under SPEC-023 §3.3.1; the request table and the coordinator-served signed card switch in one critical section (I2); `usd_per_million_credits`, `rewards.provider_share`, and `rewards.global_multiplier` stay runtime-lane; rollback is the same transaction reversed; history is never re-priced. The operator lane that performs the change is SPEC-023-R019.
+- §11.7 wholesale statements price every source row at its own rate generation (linked `config_snapshot_id`, else the snapshot in effect at `ts_utc`) instead of the current in-memory table, group by `(model, resolved rate row, global_multiplier_ppm)`, and compute aggregate gross in arbitrary precision without the per-request 10M-token cap; an int64 overflow fails the statement closed. This fixes the pre-existing re-pricing of earlier requests (a violation of §13 "config changes affect only new request-credit rows") and the pre-existing zeroing of a model-month above 10M tokens. List-price semantics (provider-reported prompt/completion at the generation's prompt/completion rates; no cache discount; no completion clamp) are made normative; they are today's behavior.
+- §13.2 states the price-change propagation contract (I3): bounded only on the coordinator → gateway → one direct client path (≤ 600 s); every other cache is unbounded and the feed is informational. SPEC-006-R008 carries the gateway half.
+- Formula, ledger columns, lookup order, `default` fallback, and the 90/10 split are unchanged. MoneyTable-B (§5.6) is not implemented by this revision; when it lands, R013 is re-stated against signed-feed bytes in the same PR.
 
 **Change log v0.6.8 (2026-09-20, issue #1636 — auto-prefix cache reports):**
 - §5.3.1 gate 4 carve-out: a positive `cached_prompt_tokens` on a conversation-cache-only auto-prefix request (`X-MacProvider-Internal-Conv-Cache`, no sticky key) is **cleared** and priced at the full prompt rate. It MUST NOT quarantine `ambiguous_cache` / whole-row-zero. Sticky-miss and keyless positive reports keep gate 4 quarantine. The cache-hit **discount** remains sticky-hit only. Registers `SPEC-005-R012`. Buyer-visible OpenAI nested `cached_tokens` is SPEC-024-R002 / SPEC-006-R013.
@@ -39,11 +45,13 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-005 v0.6.7 registers `SPEC-005-R001`..`SPEC-005-R011` in
+SPEC-005 v0.6.9 registers `SPEC-005-R001`..`SPEC-005-R013` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path formula, hot-path,
 and crash-recovery units. R004–R009 group additional existing obligation
 areas without changing them. R010 is the D1a wholesale statement unit.
-R011 is the v0.6.7 signed-feed money-table unit:
+R011 is the v0.6.7 signed-feed money-table unit. R012 is the v0.6.8
+auto-prefix cache carve-out. R013 is the v0.6.9 MoneyTable-A price-change
+invariant unit:
 
 - `SPEC-005-R001` — closed-form credit formula, units, rounding, and rate-card
   resolution (§5).
@@ -64,8 +72,14 @@ R011 is the v0.6.7 signed-feed money-table unit:
 - `SPEC-005-R011` — MoneyTable-A then MoneyTable-B: signed feed authors
   per-model rates; yaml is a parity copy until `RateFor` reads signed
   bytes (§5.6, D3 storage/authoring).
+- `SPEC-005-R012` — auto-prefix conversation-cache positive cache reports are
+  re-priced at the full prompt rate, not quarantined (§5.3.1 gate 4).
+- `SPEC-005-R013` — MoneyTable-A price-change invariants I1–I5: runtime table
+  change only via one SIGHUP applying a signed card plus byte-matching yaml
+  rows, one-step publication of table and served card, runtime-lane globals,
+  reversible transaction, per-generation history (§5.6, §11.7, §13.2).
 
-`requirement_id_migration` is `complete`. R004–R011 are not promoted from
+`requirement_id_migration` is `complete`. R004–R013 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -1463,6 +1477,19 @@ config snapshot, not `ledger_request_credits`.
 
 Lookup **order** (§5.5) is unchanged. Ledger snapshots still freeze resolved rates. Unknown models still fall back to `default`. Small-dense overlays MUST NOT appear as yaml-only rates. The engine MUST NOT apply. A snapshot whose digest-bound ranking window is older than 48 hours MUST NOT mint a new signed cut.
 
+**SPEC-005-R013 — A MoneyTable-A price change is one reviewed, signed, reversible transaction.** While MoneyTable-A is in force (R011), the coordinator MUST uphold the invariants below at every instant — forward activation, rollback, boot, and crash — and MUST change the request money table only through the path they describe. The operator lane that performs such a change is SPEC-023-R019; this requirement owns the money semantics, SPEC-023-R019 owns the host procedure.
+
+1. **Single runtime change path.** Outside a process start, the MoneyTable-A request table MUST change only through one SIGHUP that loads a verified signed `rate-card.json` together with base-yaml `rewards.rate_card` rows that match it under SPEC-023 §3.3.1 rules 4 and 9 (the reviewed block, taken verbatim from the release commit — SPEC-023-R019). A reload that fails any check, parity included, MUST keep the prior request table and the prior served card (§13.2 "invalid reload keeps prior valid config"). A process start applies the same parity check to the on-disk pair and MUST refuse to start on a mismatch (R011).
+2. **I1 — Billing integrity.** Every request-credit row MUST be priced by a table that (a) passed the runtime rate-card parity check against a signed card verified in the same load — `usd_per_million_credits`, per-row `provider_share_bps` / `global_multiplier_ppm`, row-set equality in both directions, the settlement lookup, and alias drift; (b) was committed as a `ledger_config_snapshots` row (§4.7) before it could price any request; and (c) is the table named by the row's linked `ledger_provider_identity_snapshots.config_snapshot_id` (§4.8). The order is parity → snapshot commit → publish. A crash between commit and publish MAY leave an unreferenced snapshot row; it MUST NOT leave any request priced by a table that was never published. No path MAY make the coordinator bill a table that has no parity-matching signed card.
+3. **I2 — Coordinator publication.** After parity passes, the request-pricing table (rows, multiplier, share, `usd_per_million_credits`, snapshot id) and the coordinator-served signed card (`/v1/rate-card` and `/v1/rate-card.sig`) MUST switch in one critical section. Every request-pricing read — the rate row, multiplier, share, and snapshot id resolved together, before the billing write begins — and every served-card read MUST be ordered entirely before or entirely after that switch, so no request is priced at a table the coordinator is not serving at that instant. The critical section MUST contain only in-memory assignments; feed loading, snapshot commit, and response I/O run outside it. Bytes already read and in flight, and downstream cached copies (I3), MAY trail the switch and are informational.
+4. **I3 — Downstream convergence** is bounded only on the path stated in §13.2 and is otherwise informational. A slow downstream cache is never a billing fault and MUST NOT by itself cause a correct price change to be rolled back.
+5. **Globals stay runtime-lane.** `usd_per_million_credits` (the USD peg, `stats.rollup.usd_per_million_credits`), `rewards.provider_share` / per-row `provider_share_bps`, and `rewards.global_multiplier` / per-row `global_multiplier_ppm` MUST NOT change through the catalog-content lane; they change only through a coordinator runtime release. The `default` row MUST NOT be removed (§13.2 cold-start rule).
+6. **I4 — Disk pair.** Outside a journaled pricing transaction (SPEC-023-R019), the on-disk base-yaml `rewards.rate_card` MUST equal the on-disk `current` signed card under parity. Inside one, exactly two mixed intervals MAY exist, each inside one host script: forward, between the yaml install and the `current` swap; rollback or recovery, between the yaml restore and the `current` restore (restore order is always yaml, then `current`, then the retained window). A process start inside a mixed interval fails boot parity closed — an outage, never mis-billing — and pre-start recovery restores the prior pair.
+7. **Rollback is the same transaction reversed.** Restoring the prior pair is itself a MoneyTable-A change under rules 1–6: the prior yaml rows and the prior signed card are restored, one SIGHUP applies them, and the reload inserts a new snapshot row whose table equals the prior table. Rollback MUST NOT delete, edit, or re-point earlier snapshot rows or request rows.
+8. **I5 — History.** A price change MUST NOT re-price earlier requests. `ledger_request_credits` rates and credits are frozen at record time (§4.3; the §7.5/§7.5b exceptions are unchanged), recovery prices from the historical snapshot (§4.7, §13.2), and wholesale statements price each row at its own generation (§11.7).
+
+Invariant check: every `ledger_config_snapshots` row inserted by a pricing reload equals a reviewed table (the candidate or the prior), and every provider-bound request row links to a snapshot id whose table was published when the row was priced.
+
 ## 6. Credit calculation: D8 mapping
 
 SPEC-006 **v0.9.8** section  17.7 is the source of truth for buyer debits. (v0.8.2 introduced this section; v0.9.1 added the X-MacProvider-Account forward contract; v0.9.8 narrowed the Tier-2 survivability invariant for the SPEC-024 provider-visibility carve-out. The 200 row now records the streaming symmetric token clamp — downward to gateway-observed, upward to provider-reported — which is buyer-debit accounting on the SPEC-006 side and does not change SPEC-005's provider-credit byte math.)
@@ -2482,6 +2509,13 @@ a bare INSERT) is the correct shape.
 
 **HTTP 402:** these endpoints never cause live partner inference to return 402.
 
+**Rate generation and aggregate arithmetic (v0.6.9, SPEC-005-R013 I5):**
+- A statement MUST NOT price from the current in-memory table. Each source row is priced at its own **generation**: the rate row and `global_multiplier_ppm` of the `ledger_config_snapshots` row linked to that request through `ledger_provider_identity_snapshots.config_snapshot_id`, joined on the identity key `(request_id, attempt_n, provider_assigned_id)` (§4.8). A NULL `request_log.attempt_n` is derived by the one shared ordinal expression that recovery and the admin reconcile use; every copy of that expression MUST be the same definition. An identity persisted at a hot-path-derived ordinal that differs from `request_log.attempt_n` (an ambiguous-attempt row) is matched by trying both ordinals. Any linked non-null id wins; only when no linked id exists is the snapshot in effect at the row's `ts_utc` used (the §4.7 fallback). The rate row is resolved within that generation's `rate_card_json` by the §5.5 lookup.
+- If the identities of one request attempt resolve to different `(rate row, global_multiplier_ppm)` pairs, statement generation MUST fail closed with a named error and issue no line.
+- Rows are grouped by `(model, resolved rate row, global_multiplier_ppm)`. Group gross is the exact §5.3 numerator over the group's summed tokens — `(Σprompt × prompt_rate + Σcompletion × completion_rate) × global_multiplier_ppm` — computed in arbitrary precision and rounded half-even by `1_000_000 × 1_000_000` exactly as §5.2. The per-request 10,000,000-token bound and int64-overflow zeroing (§5.3 gate 3) are request-scoped guards and MUST NOT apply to the statement aggregate. A group or line gross that exceeds int64 MUST fail the statement closed; it MUST NOT be zeroed, clamped, or truncated. Line gross is the sum of its group grosses; USD is line gross × `usd_per_million_credits` in integer micro-dollars (unchanged conversion, process peg).
+- For any group whose totals lie within the request-scoped bounds, group gross MUST equal `ComputeCredits` over the summed tokens. For a period with one `(rate row, multiplier)` per model and at most 10,000,000 tokens per model, the statement output is byte-identical to pre-v0.6.9 output. Pre-v0.6.9 statements zeroed a model-month above 10,000,000 tokens (partner under-billing); v0.6.9 corrects it.
+- **List-price semantics.** The billed tokens are the persisted `request_log.prompt_tokens` and `request_log.completion_tokens` columns (provider-reported, as bounded by the hot path before the row is written), priced at the generation's prompt and completion rates. No cache-hit discount and no completion clamp apply to a statement; those apply to provider credits only (§5.3). The free-SKU rule and quarantine treatment are unchanged.
+
 ## 12. Buyer-balance interaction (D7)
 
 This section implements the locked buyer-balance decision (D7) by leaving buyer balance enforcement to SPEC-006 and crediting providers for legitimate completed work regardless of buyer quota state.
@@ -2538,6 +2572,8 @@ The coordinator MUST insert a `ledger_config_snapshots` row on startup and after
 Invalid reload keeps prior valid config.
 Cold start without default rate-card row fails.
 Recovery MUST use historical `ledger_config_snapshots`; it MUST NOT price old request_log rows from a newer acknowledged config.
+
+**Price-change propagation contract (v0.6.9, SPEC-005-R013 I3).** A MoneyTable-A price change takes effect for billing at the SIGHUP publication step (R013 I2); it never waits for downstream convergence. The public signed card converges downstream on a bounded schedule for exactly one path: coordinator → buyer gateway public-feed cache (at most 300 s, body and signature cached as one unit) → one direct client that honors the forwarded `Cache-Control: public, max-age=300` (at most 300 s more), so such a client observes the new card within 600 s of publication (SPEC-006-R008). Further intermediary caches, provider CLIs (next scheduled fetch), and partner ingest (their own cadence) have no bound. The published card is a recommendation feed and is informational for every consumer except the coordinator's own billing: a stale downstream copy is never a billing fault. The same contract applies to runtime-lane price changes.
 
 **v0.5 route-layer flags and hold (issue #253).** The
 `billing.quarantine_resolution_force_void_enabled` and

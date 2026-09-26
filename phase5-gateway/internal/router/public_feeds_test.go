@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/config"
 )
@@ -651,6 +652,17 @@ func TestAPINginxKeepsPublicFeedsOnGatewayMux(t *testing.T) {
 	} {
 		if strings.Contains(cfg, path) {
 			t.Fatalf("buyer nginx must not split public feeds off the gateway mux; found %q", path)
+		}
+	}
+}
+
+// SPEC-006-R008 / SPEC-005-R013 I3: the gateway holds a public rate card and
+// its signature for at most 300 s, so gateway plus one client honouring the
+// forwarded max-age=300 trails a coordinator price switch by at most 600 s.
+func TestPublicRateCardCacheBoundIsFiveMinutes(t *testing.T) {
+	for _, path := range []string{publicRateCardPath, publicRateCardSigPath} {
+		if got := publicFeedCacheTTL(path); got != 300*time.Second {
+			t.Fatalf("%s gateway cache TTL=%s want 300s", path, got)
 		}
 	}
 }

@@ -51,6 +51,12 @@ case "${1:---plan}" in
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# #1693 L0 one-writer guard: the config patch + SIGHUP and the rollback each
+# run in ONE remote shell that holds the Pearl lock set (updater lock, then
+# deploy lock) and refuses while a pricing transaction journal exists.
+CCG_LIB="$SCRIPT_DIR/lib/coordinator-config-guard.sh"
+# shellcheck source=scripts/lib/coordinator-config-guard.sh
+. "$CCG_LIB"
 
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/pearl_operator_ed25519}"
 VPS_HOST="${VPS_HOST:-159.223.165.194}"
@@ -250,7 +256,9 @@ PY
 remote_patch_config() {
   local q_remote_config
   q_remote_config="$(shell_quote "$REMOTE_CONFIG")"
-  "${SSH[@]}" "REMOTE_CONFIG=$q_remote_config python3 - <<'PY'
+  "${SSH[@]}" "$(ccg_remote_guard_script "$CCG_LIB" "${REMOTE_CONFIG%/*}")
+REMOTE_CONFIG=$q_remote_config python3 - <<'PY'
+import hashlib
 import os
 import re
 import shutil
@@ -331,16 +339,12 @@ with open(tmp, 'w', encoding='utf-8') as f:
 os.chown(tmp, st.st_uid, st.st_gid)
 os.chmod(tmp, st.st_mode & 0o777)
 os.replace(tmp, path)
+print('config_sha256=' + hashlib.sha256(updated.encode('utf-8')).hexdigest(), flush=True)
 print('updated require_encrypted_leg=true')
-PY"
-}
-
-reload_remote_config() {
-  "${SSH[@]}" "set -euo pipefail
-    systemctl kill -s HUP $(shell_quote "$SERVICE")
-    sleep 2
-    systemctl is-active $(shell_quote "$SERVICE")
-  "
+PY
+systemctl kill -s HUP $(shell_quote "$SERVICE")
+sleep 2
+systemctl is-active $(shell_quote "$SERVICE")"
 }
 
 verify_reload_journal() {
@@ -350,9 +354,15 @@ verify_reload_journal() {
 
 rollback_config() {
   local config_backup="$1"
+  local config_sha="${2:-}"
   [ -n "$config_backup" ] || return 0
   log "restoring previous coordinator config from $config_backup"
-  "${SSH[@]}" "set -uo pipefail
+  # Guarded (waits up to 120s for the lock set) and compare-and-swap: restore
+  # only while the live config is still exactly the bytes this run wrote.
+  "${SSH[@]}" "$(ccg_remote_guard_script "$CCG_LIB" "${REMOTE_CONFIG%/*}" 120)
+    set -uo pipefail
+    test -n $(shell_quote "$config_sha") || { echo 'refusing rollback: the patched config digest is unknown' >&2; exit 1; }
+    test \"\$(sha256sum $(shell_quote "$REMOTE_CONFIG") | awk '{print \$1}')\" = $(shell_quote "$config_sha") || { echo 'refusing rollback: live coordinator config changed since this run patched it' >&2; exit 1; }
     cp -a $(shell_quote "$config_backup") $(shell_quote "$REMOTE_CONFIG")
     systemctl kill -s HUP $(shell_quote "$SERVICE") || true
     sleep 2
@@ -363,8 +373,9 @@ rollback_config() {
 rollback_and_exit() {
   local reason="$1"
   local config_backup="$2"
+  local config_sha="${3:-}"
   log "$reason"
-  rollback_config "$config_backup"
+  rollback_config "$config_backup" "$config_sha" || log "rollback refused or failed; live config left as patched"
   exit 1
 }
 
@@ -385,28 +396,29 @@ apply_changes() {
   log "verifying encrypted provider-leg readiness before mutation"
   verify_encrypted_leg_state
 
-  log "patching live config"
-  local patch_output config_backup
+  log "patching live config and sending SIGHUP under the coordinator config lock set"
+  local patch_output config_backup config_sha
   if ! patch_output="$(remote_patch_config)"; then
     printf '%s\n' "$patch_output" >&2
+    config_backup="$(printf '%s\n' "$patch_output" | output_value config_backup)"
+    config_sha="$(printf '%s\n' "$patch_output" | output_value config_sha256)"
+    if [ -n "$config_backup" ]; then
+      rollback_and_exit "live config patch or coordinator SIGHUP reload failed" "$config_backup" "$config_sha"
+    fi
     die "live config encrypted-leg patch failed"
   fi
   printf '%s\n' "$patch_output" >&2
   config_backup="$(printf '%s\n' "$patch_output" | output_value config_backup)"
-
-  log "sending SIGHUP to coordinator"
-  if ! reload_remote_config; then
-    rollback_and_exit "coordinator SIGHUP reload failed" "$config_backup"
-  fi
+  config_sha="$(printf '%s\n' "$patch_output" | output_value config_sha256)"
 
   log "checking reload journal evidence"
   if ! verify_reload_journal; then
-    rollback_and_exit "missing recent tier2 config reload journal evidence" "$config_backup"
+    rollback_and_exit "missing recent tier2 config reload journal evidence" "$config_backup" "$config_sha"
   fi
 
   log "verifying encrypted provider-leg disclosure"
   if ! verify_encrypted_leg_state; then
-    rollback_and_exit "gateway encrypted-leg disclosure verification failed" "$config_backup"
+    rollback_and_exit "gateway encrypted-leg disclosure verification failed" "$config_backup" "$config_sha"
   fi
 
   log "C4a encrypted-leg enforcement verified"

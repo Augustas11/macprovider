@@ -375,10 +375,24 @@ no process restart is required.
        rpc_url_primary_pin_spki:   "<new 64-hex-char SHA-256 SPKI>"
        rpc_url_secondary_pin_spki: "<new 64-hex-char SHA-256 SPKI>"
    ```
-3. Send SIGHUP to the coordinator process:
+3. Send SIGHUP to the coordinator process — **refuse while a pricing
+   transaction journal (`/opt/macprovider/.pricing-txn`) exists** (#1693 L0
+   one-writer rule). Run the HUP under the Pearl lock set (updater lock, then
+   deploy lock) with the journal check inside it:
    ```bash
-   kill -HUP "$(systemctl show -p MainPID --value macprovider-coordinator)"
+   flock -n /run/lock/macprovider-pearl-updater.lock \
+     flock -n /opt/macprovider/.coordinator-deploy.lock sh -c '
+       if [ -e /opt/macprovider/.pricing-txn ] || [ -L /opt/macprovider/.pricing-txn ]; then
+         echo "refusing: pricing transaction journal present at /opt/macprovider/.pricing-txn; run scripts/catalog-content-release.sh --recover-pricing-txn" >&2
+         exit 75
+       fi
+       kill -HUP "$(systemctl show -p MainPID --value macprovider-coordinator)"'
    ```
+   A non-zero exit means nothing was signalled: exit 75 = a pricing journal
+   exists (resolve it with `scripts/catalog-content-release.sh
+   --recover-pricing-txn` from the operator checkout, then retry); exit 1 = a
+   deploy, updater run or pricing lane holds the lock set (wait, then retry).
+   The same applies to the rollback SIGHUP below.
 4. Watch journalctl for `payout_config_reloaded` events with
    `key=payout.tuning.rpc_url_primary_pin_spki` and
    `key=payout.tuning.rpc_url_secondary_pin_spki` to confirm

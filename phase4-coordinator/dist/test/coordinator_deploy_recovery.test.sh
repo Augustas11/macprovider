@@ -65,9 +65,17 @@ while [ -f "$MACPROVIDER_OPERATION_BLOCK_SENTINEL" ]; do
   sleep 0.05
 done
 SH
+# Like GNU setfacl --restore: every "# file:" entry of the dump must exist.
 cat >"$TMP/bin/setfacl" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "$MACPROVIDER_SETFACL_LOG"
+case "$1" in
+  --restore=*)
+    sed -n 's/^# file: //p' "${1#--restore=}" | while IFS= read -r acl_file; do
+      [ -e "$acl_file" ] || { echo "setfacl: $acl_file: No such file or directory" >&2; exit 1; }
+    done
+    ;;
+esac
 SH
 cat >"$TMP/bin/nginx" <<'SH'
 #!/bin/sh
@@ -363,5 +371,67 @@ rm -f "$GLOBAL_BLOCK_SENTINEL"
 wait "$watchdog_pid"
 [ "$(cat "$ROOT/coordinator")" = old-binary ] || fail "watchdog did not restore the snapshot published behind its lease"
 [ ! -e "$ROLLBACK" ] || fail "watchdog did not consume the restored snapshot"
+
+# E2 V9 r1: the snapshot dumped the request-log -wal/-shm ACLs while the
+# coordinator ran; a clean stop before recovery deleted both (SQLite recreates
+# them on the next open). Recovery skips exactly those absent sidecars and
+# still restores the database and directory ACLs.
+REQUEST_LOG_DIR="$TMP/var/lib/macprovider"
+mkdir -p "$REQUEST_LOG_DIR"
+seed_request_log_acls() {
+  : >"$REQUEST_LOG_DIR/coordinator.db"
+  rm -f "$REQUEST_LOG_DIR/coordinator.db-wal" "$REQUEST_LOG_DIR/coordinator.db-shm"
+  printf '# file: %s\nuser::rw-\n' "$REQUEST_LOG_DIR" >"$ROLLBACK/request-log-dir.acl"
+  printf '# file: %s\nuser::rw-\n' "$REQUEST_LOG_DIR/coordinator.db" >"$ROLLBACK/request-log-db.acl"
+  printf '# file: %s\nuser::rw-\n' "$REQUEST_LOG_DIR/coordinator.db-wal" >"$ROLLBACK/request-log-wal.acl"
+  printf '# file: %s\nuser::rw-\n' "$REQUEST_LOG_DIR/coordinator.db-shm" >"$ROLLBACK/request-log-shm.acl"
+  touch "$ROLLBACK/had-request-log-dir-acl" "$ROLLBACK/had-request-log-wal-acl" "$ROLLBACK/had-request-log-shm-acl"
+}
+
+seed_transaction
+seed_request_log_acls
+recover_err="$TMP/recover-acl.err"
+run_recover 2>"$recover_err" || fail "recovery aborted on absent SQLite -wal/-shm files: $(cat "$recover_err")"
+[ ! -e "$ROLLBACK" ] || fail "recovery with absent -wal/-shm did not consume the snapshot"
+grep -qx -- "--restore=$ROLLBACK/request-log-dir.acl" "$SETFACL_LOG" || fail "directory ACL was not restored"
+grep -qx -- "--restore=$ROLLBACK/request-log-db.acl" "$SETFACL_LOG" || fail "database ACL was not restored"
+! grep -q 'request-log-wal.acl\|request-log-shm.acl' "$SETFACL_LOG" || fail "setfacl ran on an absent -wal/-shm dump"
+grep -q "skipping ACL restore for absent SQLite sidecar $REQUEST_LOG_DIR/coordinator.db-wal" "$recover_err" || fail "absent -wal skip was not logged"
+grep -q "skipping ACL restore for absent SQLite sidecar $REQUEST_LOG_DIR/coordinator.db-shm" "$recover_err" || fail "absent -shm skip was not logged"
+
+# A present -wal/-shm still gets its ACL restored.
+seed_transaction
+seed_request_log_acls
+: >"$REQUEST_LOG_DIR/coordinator.db-wal"
+: >"$REQUEST_LOG_DIR/coordinator.db-shm"
+run_recover 2>/dev/null || fail "recovery with present -wal/-shm failed"
+grep -qx -- "--restore=$ROLLBACK/request-log-wal.acl" "$SETFACL_LOG" || fail "present -wal ACL was not restored"
+grep -qx -- "--restore=$ROLLBACK/request-log-shm.acl" "$SETFACL_LOG" || fail "present -shm ACL was not restored"
+
+# The database itself is never skipped: an absent database fails closed.
+seed_transaction
+seed_request_log_acls
+rm -f "$REQUEST_LOG_DIR/coordinator.db"
+if run_recover >/dev/null 2>&1; then
+  fail "recovery skipped the ACL restore of an absent database"
+fi
+[ -d "$ROLLBACK" ] || fail "failed database ACL restore did not preserve the snapshot"
+
+# Only a single-entry dump for a path with the sidecar suffix is skippable: a
+# -wal marker whose dump names another (absent) file still fails closed.
+seed_transaction
+seed_request_log_acls
+printf '# file: %s\nuser::rw-\n' "$REQUEST_LOG_DIR/coordinator.db-journal" >"$ROLLBACK/request-log-wal.acl"
+if run_recover >/dev/null 2>&1; then
+  fail "recovery skipped a -wal ACL dump naming a non-sidecar path"
+fi
+[ -d "$ROLLBACK" ] || fail "foreign -wal dump did not preserve the snapshot"
+seed_transaction
+seed_request_log_acls
+printf '# file: %s\nuser::rw-\n\n# file: %s\nuser::rw-\n' "$REQUEST_LOG_DIR/coordinator.db-wal" "$REQUEST_LOG_DIR/coordinator.db" >"$ROLLBACK/request-log-wal.acl"
+if run_recover >/dev/null 2>&1; then
+  fail "recovery skipped a multi-entry -wal ACL dump"
+fi
+[ -d "$ROLLBACK" ] || fail "multi-entry -wal dump did not preserve the snapshot"
 
 echo "PASS: coordinator deploy recovery is durable and state-exact"

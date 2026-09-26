@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.35 (2026-09-24, `mlxlm` engine)
+**Version:** 0.9.36 (2026-09-24, public rate-card staleness bound)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.36 (2026-09-24, issue #1693 — public rate-card staleness bound):**
+- `SPEC-006-R008` (public rate-card) now states the gateway half of the SPEC-005-R013 I3 propagation contract (SPEC-005 §13.2): the gateway caches `/v1/rate-card` and `/v1/rate-card.sig` as one unit for at most 300 s and forwards the coordinator's `Cache-Control: public, max-age=300`, so the gateway plus one direct client cache trail a coordinator price change by at most 600 s. No other cache is bounded; the feed stays a recommendation feed and buyer billing never reads it. No wire change; this pins today's behavior.
 
 **Change log v0.9.35 (2026-09-24, issue #1690 M8 — more engines):**
 - §5.4.2: the closed selector vocabulary gains `mlxlm`, mapped to the runtime class `mlxlm_loopback` (`mlx_lm.server`, SPEC-046-R009, SPEC-010-R009). Like `llamacpp` and `ollama`, it is non-native: 503 `engine_unavailable` without a Trusted Pool, and on a pool route only where the active allowlist has the class (SPEC-042-R014).
@@ -296,7 +299,8 @@ changing them:
 - `SPEC-006-R006` — public `GET /v1/status` (§5.6).
 - `SPEC-006-R007` — gateway kill switches (§2.7).
 - `SPEC-006-R008` — unauthenticated public rate-card and stats overview
-  (§2.2, §4.2).
+  (§2.2, §4.2); public rate-card cache bound of at most 300 s at the gateway
+  plus the forwarded `max-age=300` (§2.2, v0.9.36; SPEC-005-R013 I3).
 - `SPEC-006-R009` — demo-token traffic isolation from paid quota (§3.6).
 - `SPEC-006-R010` — OpenRouter schema-2.4 models document, wholesale
   partner chat flags, dual SKU alias ids (§2.2, §5.3.2, §7.8, §17.9).
@@ -632,6 +636,7 @@ This section is read-only design input and MUST NOT be treated as a place to pro
   - `GET /v1/receipts/{request_id}` (authenticated metadata-only retrieval; owner API-key or operator)
   - `GET /v1/status`
   - `GET /v1/rate-card` and `GET /v1/rate-card.sig` (unauthenticated public recommendation feed; same bytes as coordinator)
+    - **Staleness bound (v0.9.36, `SPEC-006-R008`).** The gateway MUST NOT serve a cached rate-card body or signature older than 300 s, MUST cache and refresh the body and its signature as one unit, and MUST forward the coordinator's `Cache-Control` header (`public, max-age=300`) unchanged. A coordinator price change is therefore visible through the gateway plus one direct client cache that honors `max-age` within 600 s. This is the gateway half of the SPEC-005 §13.2 propagation contract (SPEC-005-R013 I3), which SPEC-005 owns; further caches are unbounded, and the feed is informational — buyer billing never reads it.
   - `GET /v1/stats/overview` (unauthenticated public SPEC-017 snapshot; same body as stats host)
   - `GET /v1/network-stats` (compatibility alias for `/v1/stats/overview`)
   - `POST /v1/feedback`

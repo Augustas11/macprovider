@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# E2E DNS shim: the production hostnames resolve to the VM alias only.
+for a in "$@"; do
+  case "$a" in
+    coordinator.malibu.tech|stats.malibu.tech|api.malibu.tech) printf '%s\n' "${E2E_PEARL:?}"; exit 0 ;;
+  esac
+done
+echo "dig shim: refusing lookup outside the tier E2 names: $*" >&2
+exit 9

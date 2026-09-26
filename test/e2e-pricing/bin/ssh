@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# E2E transport shim (tier E2, #1693). The operator lane and deploy script run
+# `ssh ... pearl` / `ssh ... <canary>` unmodified; this shim
+#  - routes the Pearl alias to the Lima VM through $E2E_SSH_CONFIG, and
+#  - runs the canary host's commands locally in the sandboxed canary HOME
+#    ($E2E_CANARY_HOME), never against this Mac's real provider LaunchAgent.
+# Any other destination is refused so nothing can reach production.
+set -euo pipefail
+: "${E2E_SSH_CONFIG:?}" "${E2E_PEARL:?}" "${E2E_CANARY:?}"
+# Find the destination: the first non-option word (skipping option values).
+args=("$@"); i=0; dest=""; n=${#args[@]}
+while [ $i -lt $n ]; do
+  a="${args[$i]}"
+  case "$a" in
+    -[bcDEeFIiJLlmOoPpQRSWw]) i=$((i+2)); continue ;;
+    -*) i=$((i+1)); continue ;;
+    *) dest="$a"; break ;;
+  esac
+done
+host="${dest#*@}"
+case "$host" in
+  "$E2E_PEARL")
+    exec /usr/bin/ssh -F "$E2E_SSH_CONFIG" "$@" ;;
+  "$E2E_CANARY")
+    : "${E2E_CANARY_HOME:?}"
+    cmd=("${args[@]:$((i+1))}")
+    [ ${#cmd[@]} -gt 0 ] || { echo "ssh shim: interactive canary login is not supported" >&2; exit 255; }
+    exec env -i HOME="$E2E_CANARY_HOME" USER="${USER:-e2e}" LOGNAME="${USER:-e2e}" \
+      E2E_CANARY_HOME="$E2E_CANARY_HOME" \
+      PATH="$E2E_HARNESS/canary-bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin" \
+      /bin/bash -c "cd \"\$HOME\" && ${cmd[*]}" ;;
+  *)
+    echo "ssh shim: refusing destination '$dest' (only $E2E_PEARL and $E2E_CANARY exist in tier E2)" >&2
+    exit 255 ;;
+esac

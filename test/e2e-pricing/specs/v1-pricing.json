@@ -1,0 +1,43 @@
+{
+  "release_id": "e2e-2026-09-24-release-b",
+  "message": "E2E V1: reviewed pricing correction (3 rows changed, 1 added, 1 removed)",
+  "change": {
+    "meta-llama/llama-3.2-3b-instruct": [
+      15000,
+      3750,
+      30000
+    ],
+    "qwen3-8b": [
+      14000,
+      3500,
+      28000
+    ],
+    "openai/gpt-oss-20b": [
+      55000,
+      13750,
+      110000
+    ]
+  },
+  "add": {
+    "qwen3-4b": [
+      12000,
+      3000,
+      24000
+    ]
+  },
+  "remove": [
+    "e2e-legacy-model"
+  ],
+  "acks": [
+    {
+      "model": "e2e-legacy-model",
+      "from_row": "e2e-legacy-model",
+      "to_row": "default"
+    },
+    {
+      "model": "qwen3-4b",
+      "from_row": "default",
+      "to_row": "qwen3-4b"
+    }
+  ]
+}

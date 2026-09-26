@@ -4,4 +4,8 @@ Before=macprovider-coordinator.service
 
 [Service]
 Type=oneshot
+# #1693 L4b: an abandoned pricing transaction journal is restored to its prior
+# (yaml, current, window) pair FIRST; the deploy recovery runs second and is a
+# no-op when only a pricing journal exists.
+ExecStart=/usr/bin/python3 -I /opt/macprovider/coordinator-pricing-recover --pre-start
 ExecStart=/opt/macprovider/coordinator-deploy-recover --pre-start

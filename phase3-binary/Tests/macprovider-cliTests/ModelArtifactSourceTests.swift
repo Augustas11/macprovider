@@ -26,12 +26,43 @@ final class ModelArtifactSourceTests: XCTestCase {
         ])
     }
 
-    func testProductionFallbacksIgnoreHuggingFaceEndpointAndUnsafeURLs() {
-        let sources = ModelArtifactSource.productionFallbacks(environment: [
+    func testProductionFallbacksReportRejectedOperatorMirrorsWithoutCredentials() {
+        let configuration = ModelArtifactSource.productionConfiguration(environment: [
             "MACPROVIDER_MODEL_MIRRORS": "https://user:pw@evil.example https://q.example/?x=1 ftp://f.example",
             "HF_ENDPOINT": "https://huggingface.co",
         ])
-        XCTAssertEqual(sources, [.contentAddressed(ModelArtifactSource.malibuMirror)])
+        XCTAssertEqual(configuration.sources, [.contentAddressed(ModelArtifactSource.malibuMirror)])
+        XCTAssertEqual(configuration.diagnostics, [
+            "MACPROVIDER_MODEL_MIRRORS entry 1 rejected: expected an HTTPS URL without credentials, query, or fragment",
+            "MACPROVIDER_MODEL_MIRRORS entry 2 rejected: expected an HTTPS URL without credentials, query, or fragment",
+            "MACPROVIDER_MODEL_MIRRORS entry 3 rejected: expected an HTTPS URL without credentials, query, or fragment",
+        ])
+        XCTAssertFalse(configuration.diagnostics.joined().contains("user:pw"))
+    }
+
+    func testDownloaderFailureIncludesRejectedOperatorMirrorDiagnostic() async throws {
+        var downloader = HuggingFaceSnapshotDownloader(
+            fetch: { _ in throw URLError(.cannotConnectToHost) },
+            download: { _ in throw URLError(.cannotConnectToHost) }
+        )
+        downloader.fallbackSources = [.contentAddressed(mirror)]
+        downloader.fallbackConfigurationDiagnostics = [
+            "MACPROVIDER_MODEL_MIRRORS entry 1 rejected: expected an HTTPS URL without credentials, query, or fragment"
+        ]
+
+        do {
+            try await downloader.downloadSnapshot(
+                modelID: modelID,
+                revision: revision,
+                expectedSHA256: String(repeating: "b", count: 64),
+                to: try tempDir().appendingPathComponent("snapshot", isDirectory: true)
+            )
+            XCTFail("download unexpectedly succeeded")
+        } catch {
+            let message = String(describing: error)
+            XCTAssertTrue(message.contains("MACPROVIDER_MODEL_MIRRORS entry 1 rejected"), message)
+            XCTAssertTrue(message.contains("mirror.example"), message)
+        }
     }
 
     // MARK: - manifest
@@ -52,6 +83,23 @@ final class ModelArtifactSourceTests: XCTestCase {
         let manifest = Data("../escape\n1\n\(sha("a"))\n".utf8)
         let expected = ContentAddressedManifest.sha256Hex(manifest)
         XCTAssertThrowsError(try ContentAddressedManifest.parse(manifest, expectedSHA256: expected))
+    }
+
+    func testManifestReaderRejectsOversizedFileBeforeParsing() throws {
+        let url = try tempDir().appendingPathComponent("manifest")
+        XCTAssertTrue(FileManager.default.createFile(atPath: url.path, contents: nil))
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(ContentAddressedManifest.maxManifestBytes + 1))
+        try handle.close()
+
+        XCTAssertThrowsError(
+            try ContentAddressedManifest.readAndParse(
+                url,
+                expectedSHA256: String(repeating: "0", count: 64)
+            )
+        ) { error in
+            XCTAssertTrue(String(describing: error).contains("manifest too large"), "\(error)")
+        }
     }
 
     func testMirrorManifestIsTheCanonicalSnapshotManifest() throws {
@@ -140,7 +188,7 @@ final class ModelArtifactSourceTests: XCTestCase {
             download: { request in
                 let temporary = FileManager.default.temporaryDirectory
                     .appendingPathComponent("tampered-\(UUID().uuidString)")
-                try Data("tampered".utf8).write(to: temporary)
+                try Data("garbage".utf8).write(to: temporary)
                 return (temporary, Self.ok(request.url!))
             }
         )
@@ -154,6 +202,36 @@ final class ModelArtifactSourceTests: XCTestCase {
             XCTAssertTrue(String(describing: error).contains("does not match its manifest"), "\(error)")
         }
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.path))
+    }
+
+    func testDownloaderRejectsMirrorFileLargerThanSignedManifestSize() async throws {
+        let source = try makeSnapshot(["w.bin": "weights"])
+        let (manifest, expected) = try canonicalManifest(of: source)
+        var downloader = HuggingFaceSnapshotDownloader(
+            fetch: { request in
+                guard request.url?.host == "mirror.example" else { throw URLError(.cannotConnectToHost) }
+                return (manifest, Self.ok(request.url!))
+            },
+            download: { request in
+                let temporary = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("oversized-\(UUID().uuidString)")
+                try Data("weights-plus-untrusted-padding".utf8).write(to: temporary)
+                return (temporary, Self.ok(request.url!))
+            }
+        )
+        downloader.fallbackSources = [.contentAddressed(mirror)]
+
+        do {
+            try await downloader.downloadSnapshot(
+                modelID: modelID,
+                revision: revision,
+                expectedSHA256: expected,
+                to: try tempDir().appendingPathComponent("snapshot", isDirectory: true)
+            )
+            XCTFail("oversized mirror bytes were accepted")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("exceeds signed size"), "\(error)")
+        }
     }
 
     func testDownloaderSkipsContentMirrorWithoutSignedHash() async throws {

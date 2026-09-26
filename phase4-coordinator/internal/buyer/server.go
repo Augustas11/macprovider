@@ -291,7 +291,16 @@ type Server struct {
 	// construction (config.go TrustedProxyPrefixes) so the hot path
 	// never re-parses. Default loopback-only — see WithTrustedProxies.
 	// Issue #125.
-	trustedProxies    []netip.Prefix
+	trustedProxies []netip.Prefix
+	// economicsMu makes the request pricing inputs (billingCfg,
+	// billingSnapshotID, rateCardUSDPerM) and the served signed feed bytes
+	// switch as ONE step (SPEC-005-R013 I2). Readers: economicsSnapshotForModel
+	// and rateCardServeSnapshot, which take nothing else but billingMu /
+	// autotuneFeedsMu and never run under the ws release read lock. Writer:
+	// SetBillingConfig / PublishEconomics / the SetAutotuneFeeds commit, pure
+	// in-memory assignments only. Lock order: ws release write lock →
+	// economicsMu → billingMu | autotuneFeedsMu; never reversed.
+	economicsMu       sync.RWMutex
 	billingMu         sync.RWMutex
 	billing           *billing.Store
 	billingCfg        config.RewardsConfig
@@ -778,7 +787,17 @@ func WithSlotQueueConfig(maxPendingPerProvider int, deadline, pollInterval time.
 	}
 }
 
+// SetBillingConfig publishes a request pricing table and its committed
+// snapshot id. A reload that also publishes feeds uses PublishEconomics so the
+// table and the served signed card switch together.
 func (s *Server) SetBillingConfig(cfg config.RewardsConfig, snapshotID int64, usdPerMillionCredits float64) {
+	s.economicsMu.Lock()
+	defer s.economicsMu.Unlock()
+	s.setBillingConfigLocked(cfg, snapshotID, usdPerMillionCredits)
+}
+
+// setBillingConfigLocked requires economicsMu held for writing.
+func (s *Server) setBillingConfigLocked(cfg config.RewardsConfig, snapshotID int64, usdPerMillionCredits float64) {
 	s.billingMu.Lock()
 	defer s.billingMu.Unlock()
 	s.billingCfg = cfg

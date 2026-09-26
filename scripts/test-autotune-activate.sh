@@ -20,6 +20,11 @@
 #   E. Lease deadline: a command still running at MAX + ROLLBACK seconds is
 #      killed (process group, TERM then KILL) by the remote runner, the
 #      controller ends lease-lost, and both locks free within a bounded grace.
+#   F. #1693 L0: renewal's publish and rollback refuse under the locks while a
+#      pricing transaction journal exists.
+#   G. #1693 E2 V8: a coordinator that is still booting (no SIGHUP handler yet,
+#      /healthz not answering) is never signalled: publish aborts pre-mutation,
+#      rollback restores without the SIGHUP; a stopped one is not waited for.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -90,8 +95,23 @@ FLOCK
 # The "coordinator": a process that ignores the SIGHUPs publish/rollback send.
 (python3 -c 'import signal, time; signal.signal(signal.SIGHUP, signal.SIG_IGN); time.sleep(600)' </dev/null >/dev/null 2>&1 &
   echo "$!" >"$T/coordinator.pid")
-printf '#!/bin/sh\ncat "%s"\n' "$T/coordinator.pid" >"$T/bin/systemctl"
-chmod 0755 "$T/bin/ssh" "$T/bin/pearl-rw" "$T/bin/flock" "$T/bin/systemctl"
+# systemctl: the coordinator's MainPID, and its ActiveState (coord-stopped).
+cat >"$T/bin/systemctl" <<SYSTEMCTL
+#!/bin/sh
+case "\$*" in
+  *ActiveState*) if [ -e "$T/fake/coord-stopped" ]; then echo inactive; else echo active; fi ;;
+  *) cat "$T/coordinator.pid" ;;
+esac
+SYSTEMCTL
+# curl: the coordinator's /healthz answers unless it is still booting.
+cat >"$T/bin/curl" <<CURL
+#!/bin/sh
+case "\$*" in
+  *127.0.0.1:8444/healthz*) [ ! -e "$T/fake/coord-booting" ] ;;
+  *) exec "$(command -v curl)" "\$@" ;;
+esac
+CURL
+chmod 0755 "$T/bin/ssh" "$T/bin/pearl-rw" "$T/bin/flock" "$T/bin/systemctl" "$T/bin/curl"
 mkdir -p "$T/fake/tmp"
 printf 'import sys\nsys.exit(0)\n' >"$T/lock-validate-ok.py"
 printf 'import sys\nsys.exit(0)\n' >"$T/rbwin/autotune_window.py"
@@ -390,5 +410,48 @@ exit 0
   || fail "lease watchdog must TERM the controller past AA_LEASE_MAX_SECONDS (rc=$rc): $(cat "$T/wd.err")"
 rc=0; run_publish flock || rc=$?
 grep -q "content drift under lock" "$T/pub.err" || fail "watchdog exit must release the lease: $(cat "$T/pub.err")"
+
+# ---------------------------------------------------------------------------
+# F. #1693 L0: under the locks, renewal's publish and rollback refuse while a
+# pricing transaction journal exists (the lane owns /opt/macprovider/.pricing-txn).
+# ---------------------------------------------------------------------------
+mkdir -m 0700 "$T/fake/opt/macprovider/.pricing-txn"
+rc=0; run_publish flock || rc=$?
+[ "$rc" -eq 2 ] && grep -q "pricing transaction journal present; not mutating" "$T/pub.err" \
+  || fail "F: renewal publish must refuse under the lock while a pricing journal exists (rc=$rc): $(cat "$T/pub.err")"
+[ "$(readlink "$A/current")" = releases/old ] || fail "F: refused renewal mutated current"
+rc=0; run_rollback || rc=$?
+[ "$rc" -eq 1 ] && grep -q "rollback: pricing transaction journal present; not mutating" "$T/rb.err" \
+  || fail "F: renewal rollback must refuse under the lock while a pricing journal exists (rc=$rc): $(cat "$T/rb.err")"
+rmdir "$T/fake/opt/macprovider/.pricing-txn"
+rc=0; run_publish flock || rc=$?
+grep -q "content drift under lock" "$T/pub.err" || fail "F: without a journal renewal must reach its gate: $(cat "$T/pub.err")"
+
+# ---------------------------------------------------------------------------
+# G. #1693 E2 V8: never SIGHUP a booting coordinator. This "coordinator" has
+# the default SIGHUP disposition, like a real one before its handler exists.
+# ---------------------------------------------------------------------------
+(python3 -c 'import time; time.sleep(600)' </dev/null >/dev/null 2>&1 & echo "$!" >"$T/booting.pid")
+cp "$T/coordinator.pid" "$T/ready.pid"; cp "$T/booting.pid" "$T/coordinator.pid"
+touch "$T/fake/coord-booting"
+ln -sfn releases/new "$A/current"
+rc=0; AA_COORDINATOR_READY_SECONDS=2 run_rollback || rc=$?
+kill -0 "$(cat "$T/booting.pid")" 2>/dev/null || fail "G: the rollback SIGHUPed a booting coordinator and killed it"
+[ "$rc" -eq 0 ] && grep -q "rollback: coordinator not ready; SIGHUP not sent" "$T/rb.err" \
+  || fail "G: the rollback must restore without signalling a booting coordinator (rc=$rc): $(cat "$T/rb.err")"
+[ "$(readlink "$A/current")" = releases/old ] || fail "G: the rollback must still restore current"
+rc=0; AA_COORDINATOR_READY_SECONDS=2 run_publish flock || rc=$?
+kill -0 "$(cat "$T/booting.pid")" 2>/dev/null || fail "G: the publish SIGHUPed a booting coordinator"
+[ "$rc" -eq 2 ] && grep -q "still booting" "$T/pub.err" && grep -q "coordinator is not running and ready" "$T/pub.err" \
+  || fail "G: publish against a booting coordinator must abort pre-mutation (rc=$rc): $(cat "$T/pub.err")"
+touch "$T/fake/coord-stopped"
+g_start=$SECONDS; rc=0; AA_COORDINATOR_READY_SECONDS=60 run_publish flock || rc=$?
+[ "$rc" -eq 2 ] && grep -q "is not running (ActiveState=inactive)" "$T/pub.err" && [ $((SECONDS - g_start)) -lt 20 ] \
+  || fail "G: a stopped coordinator is reported at once, not waited for (rc=$rc): $(cat "$T/pub.err")"
+rm -f "$T/fake/coord-booting" "$T/fake/coord-stopped"
+kill "$(cat "$T/booting.pid")" 2>/dev/null || true
+cp "$T/ready.pid" "$T/coordinator.pid"
+rc=0; run_publish flock || rc=$?
+grep -q "content drift under lock" "$T/pub.err" || fail "G: a ready coordinator lets renewal reach its gate: $(cat "$T/pub.err")"
 
 printf '[test-autotune-activate] ok: shared activation keeps renew bytes, mutates only through the lease runner, and treats channel loss as lease loss\n'

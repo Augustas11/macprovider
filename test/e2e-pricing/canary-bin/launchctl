@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Canary stand-in's launchctl (tier E2). Only the canary sandbox HOME's
+# "live.malibu.provider" job exists here; it is a plain background process
+# started from the sandbox LaunchAgent plist, never the Mac's real launchd job.
+set -euo pipefail
+: "${E2E_CANARY_HOME:?}"
+D="$E2E_CANARY_HOME/.e2e"; mkdir -p "$D"
+PIDF="$D/canary.pid"; LOG="$D/canary.log"
+PLIST="$E2E_CANARY_HOME/Library/LaunchAgents/live.malibu.provider.plist"
+running() { [ -f "$PIDF" ] && kill -0 "$(cat "$PIDF")" 2>/dev/null; }
+start() {
+  running && return 0
+  # shellcheck disable=SC2046
+  set -- $(/usr/bin/python3 -c 'import plistlib,sys; print(" ".join(plistlib.load(open(sys.argv[1],"rb"))["ProgramArguments"]))' "$PLIST")
+  # Close every inherited descriptor > 2: a real canary is a remote launchd job
+  # and never inherits the operator lane's descriptors (e.g. the lease FIFO,
+  # whose EOF releases the Pearl lease).
+  nohup /usr/bin/perl -e 'use POSIX (); POSIX::setsid(); POSIX::close($_) for 3..1023; exec @ARGV or die $!' "$@" >>"$LOG" 2>&1 </dev/null &
+  echo $! >"$PIDF"
+}
+stop() {
+  running || return 0
+  kill "$(cat "$PIDF")" 2>/dev/null || true
+  for _ in $(seq 1 50); do running || break; sleep 0.1; done
+  running && kill -9 "$(cat "$PIDF")" 2>/dev/null || true
+  rm -f "$PIDF"
+}
+case "${1:-}" in
+  print)
+    running || { echo "Could not find service \"live.malibu.provider\" in domain" >&2; exit 113; }
+    printf '%s = {\n\tstate = running\n\tpid = %s\n}\n' "${2:-gui/0/live.malibu.provider}" "$(cat "$PIDF")" ;;
+  kickstart) stop; start ;;
+  bootstrap) start ;;
+  bootout|stop) stop ;;
+  *) echo "launchctl (e2e canary stand-in): unsupported: $*" >&2; exit 64 ;;
+esac

@@ -1,0 +1,30 @@
+# Tier E2 "fake Pearl" VM for the #1693 pricing-lane e2e harness.
+# x86_64 under qemu so the linux-amd64 coordinator/gateway run unmodified.
+vmType: qemu
+arch: x86_64
+cpus: 4
+memory: 6GiB
+disk: 20GiB
+images:
+- location: "https://cloud-images.ubuntu.com/releases/resolute/release-20260720/ubuntu-26.04-server-cloudimg-amd64.img"
+  arch: "x86_64"
+  digest: "sha256:117816726abbdefc5ef3e38902e81a76f1c76c3610e709999d0885f9d5d9b477"
+# No host mounts: the host (operator Mac) talks to the VM only over SSH,
+# exactly like the operator lane talks to Pearl.
+mounts: []
+containerd:
+  system: false
+  user: false
+param:
+  internal_netplanOptional: "true"
+portForwards:
+# nginx TLS vhost (coordinator.malibu.tech / stats.malibu.tech stand-ins)
+- guestPort: 443
+  hostIP: 127.0.0.1
+  hostPort: 18443
+# gateway (api.malibu.tech stand-in), plain HTTP on loopback
+- guestPort: 8443
+  hostIP: 127.0.0.1
+  hostPort: 18543
+- guestPortRange: [1, 65535]
+  ignore: true

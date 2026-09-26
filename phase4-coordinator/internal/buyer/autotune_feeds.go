@@ -1187,10 +1187,23 @@ func WithAutotuneFeeds(feeds AutotuneFeeds) Option {
 // (LoadAutotuneFeeds); on any failure the caller keeps the prior feeds
 // (fail-closed), so /v1/rate-card etc. never serve unverified bytes.
 func (s *Server) SetAutotuneFeeds(feeds AutotuneFeeds) {
+	s.publishAutotuneFeeds(feeds, nil)
+}
+
+// publishAutotuneFeeds installs feeds through the release observer. Its
+// commit takes economicsMu for writing and runs alsoCommit (PublishEconomics'
+// pricing table) and the feed swap in that one hold, so a request price and
+// the served signed card never disagree (SPEC-005-R013 I2).
+func (s *Server) publishAutotuneFeeds(feeds AutotuneFeeds, alsoCommit func()) {
 	s.autotuneFeedsMu.Lock()
 	observer := s.autotuneFeedsObserver
 	s.autotuneFeedsMu.Unlock()
 	commit := func() {
+		s.economicsMu.Lock()
+		defer s.economicsMu.Unlock()
+		if alsoCommit != nil {
+			alsoCommit()
+		}
 		s.autotuneFeedsMu.Lock()
 		s.autotuneFeeds = feeds
 		s.autotuneFeedsMu.Unlock()

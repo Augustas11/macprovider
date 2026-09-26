@@ -57,7 +57,6 @@ type Store struct {
 	forceCreditEnabled     atomic.Bool
 	forceCreditHoldSeconds atomic.Int64
 	wholesaleMu            sync.RWMutex
-	wholesaleRewards       RewardsConfig
 	usdPerMillionCredits   float64
 }
 
@@ -1379,10 +1378,12 @@ func (s *Store) SetSettlementConfig(cfg SettlementConfig) {
 	s.settlement = cfg
 }
 
-func (s *Store) SetWholesalePricing(rewards RewardsConfig, usdPerMillionCredits float64) {
+// SetWholesalePricing sets the credits→USD peg wholesale statements convert
+// at. Statement rates come from each row's billing generation
+// (wholesaleLineTotals), never from an in-memory table.
+func (s *Store) SetWholesalePricing(usdPerMillionCredits float64) {
 	s.wholesaleMu.Lock()
 	defer s.wholesaleMu.Unlock()
-	s.wholesaleRewards = rewards
 	s.usdPerMillionCredits = usdPerMillionCredits
 }
 

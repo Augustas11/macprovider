@@ -23,6 +23,10 @@ phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift @Augustas11
 # branch protection with owner review is the lane's review anchor.
 phase3-binary/catalog/** @Augustas11
 phase3-binary/dist/static/** @Augustas11
+# #1693 pricing lane: the committed rate_card block is spliced into Pearl's live
+# MoneyTable-A, and the acknowledgement file authorizes served-model row moves.
+phase4-coordinator/dist/coordinator.yaml @Augustas11
+phase3-binary/catalog/autotune/acknowledged-pricing-moves.json @Augustas11
 
 # CI and agent-rule controls for the sensitive paths.
 .github/CODEOWNERS @Augustas11

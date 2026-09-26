@@ -161,8 +161,10 @@ enum ModelArtifactImporter {
 
     /// Copy exactly the files a hash-verified mirror manifest names.
     private static func copyMirrorTree(_ source: URL, expectedSHA256: String, to staging: URL) throws {
-        let manifestData = try Data(contentsOf: source.appendingPathComponent("manifest"))
-        let entries = try ContentAddressedManifest.parse(manifestData, expectedSHA256: expectedSHA256)
+        let entries = try ContentAddressedManifest.readAndParse(
+            source.appendingPathComponent("manifest"),
+            expectedSHA256: expectedSHA256
+        )
         let filesRoot = source.appendingPathComponent("files", isDirectory: true)
         for entry in entries {
             try copyRegularFile(

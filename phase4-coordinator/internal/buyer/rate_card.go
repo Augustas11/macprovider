@@ -38,13 +38,13 @@ type recommendationRateCardVersionProjection struct {
 }
 
 func (s *Server) handleRateCard(w http.ResponseWriter, r *http.Request) {
-	feeds := s.autotuneFeedsSnapshot()
-	if feeds.rateCardEnabled() {
-		s.serveAutotuneFeedBytes(w, r, feeds.RateCardJSON, true)
+	served := s.rateCardServeSnapshot()
+	if served.feeds.rateCardEnabled() {
+		s.serveAutotuneFeedBytes(w, r, served.feeds.RateCardJSON, true)
 		return
 	}
 
-	rewards, usdPerMillionCredits := s.recommendationRateCardState()
+	rewards, usdPerMillionCredits := served.rewards, served.usdPerM
 	rows := buildRecommendationRateCardRows(rewards)
 	version := recommendationRateCardVersion(rows, billing.ParseShareBps(rewards.ProviderShare), billing.ParseMultiplierPPM(rewards.GlobalMultiplier), usdPerMillionCredits)
 
@@ -59,8 +59,8 @@ func (s *Server) handleRateCard(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRateCardSig(w http.ResponseWriter, r *http.Request) {
-	feeds := s.autotuneFeedsSnapshot()
-	s.serveAutotuneFeedBytes(w, r, feeds.RateCardSig, feeds.rateCardEnabled())
+	served := s.rateCardServeSnapshot()
+	s.serveAutotuneFeedBytes(w, r, served.feeds.RateCardSig, served.feeds.rateCardEnabled())
 }
 
 func buildRecommendationRateCardRows(rewards config.RewardsConfig) map[string]recommendationRateCardRow {

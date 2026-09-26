@@ -29,7 +29,14 @@ enum ModelArtifactSource: Equatable, Sendable {
     /// separated HTTPS base URLs), then the Malibu mirror, then an
     /// `HF_ENDPOINT` that is not huggingface.co. Unusable entries are dropped.
     static func productionFallbacks(environment: [String: String]) -> [ModelArtifactSource] {
+        productionConfiguration(environment: environment).sources
+    }
+
+    static func productionConfiguration(
+        environment: [String: String]
+    ) -> (sources: [ModelArtifactSource], diagnostics: [String]) {
         var sources: [ModelArtifactSource] = []
+        var diagnostics: [String] = []
         func append(_ source: ModelArtifactSource) {
             if !sources.contains(source) {
                 sources.append(source)
@@ -38,9 +45,13 @@ enum ModelArtifactSource: Equatable, Sendable {
         let configured = (environment[mirrorsEnvironmentKey] ?? "")
             .split(whereSeparator: { $0 == "," || $0.isWhitespace })
             .map(String.init)
-        for raw in configured {
+        for (index, raw) in configured.enumerated() {
             if let base = normalizedBase(raw) {
                 append(.contentAddressed(base))
+            } else {
+                diagnostics.append(
+                    "\(mirrorsEnvironmentKey) entry \(index + 1) rejected: expected an HTTPS URL without credentials, query, or fragment"
+                )
             }
         }
         append(.contentAddressed(malibuMirror))
@@ -50,7 +61,7 @@ enum ModelArtifactSource: Equatable, Sendable {
         {
             append(.huggingFaceCompatible(endpoint))
         }
-        return sources
+        return (sources, diagnostics)
     }
 
     /// HTTPS only, no credentials, query, or fragment; trailing slashes dropped.
@@ -149,6 +160,29 @@ enum ContentAddressedManifest {
             entries.append(Entry(path: path, size: size, sha256: lines[index + 2]))
         }
         return entries
+    }
+
+    static func readAndParse(_ url: URL, expectedSHA256: String) throws -> [Entry] {
+        let values = try url.resourceValues(forKeys: [.fileSizeKey])
+        if let size = values.fileSize, size > maxManifestBytes {
+            throw AutotuneRecommendError.invalidArtifact("mirror manifest too large")
+        }
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var data = Data()
+        data.reserveCapacity(min(values.fileSize ?? 0, maxManifestBytes))
+        while data.count <= maxManifestBytes {
+            let remaining = maxManifestBytes + 1 - data.count
+            let chunk = try handle.read(upToCount: min(64 * 1024, remaining)) ?? Data()
+            if chunk.isEmpty {
+                break
+            }
+            data.append(chunk)
+        }
+        guard data.count <= maxManifestBytes else {
+            throw AutotuneRecommendError.invalidArtifact("mirror manifest too large")
+        }
+        return try parse(data, expectedSHA256: expectedSHA256)
     }
 }
 

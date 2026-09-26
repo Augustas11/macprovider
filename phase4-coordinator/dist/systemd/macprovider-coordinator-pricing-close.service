@@ -1,0 +1,17 @@
+[Unit]
+Description=Close a pricing transaction restored before coordinator start (#1693)
+After=macprovider-coordinator.service
+OnFailure=macprovider-pearl-updater-alert@%n.service
+
+[Service]
+Type=oneshot
+# No-op unless the journal is restored-unverified. Waits WITHOUT the lane lock
+# set for the coordinator started after the restore to serve /healthz and
+# write the source=boot applied-config record of THIS boot proving the
+# restored prior pair: 8 windows of 900 s, raising the alert after each window
+# that ends unproven (a slow boot, e.g. SQLite WAL recovery, is waited out and
+# closes itself). Then it takes the lock set (bounded, 300 s), re-proves the
+# pair and finalizes. After the last window it fails (OnFailure alert); the
+# next boot's pre-start + closer, or --recover-pricing-txn, retry.
+TimeoutStartSec=7800
+ExecStart=/usr/bin/python3 -I /opt/macprovider/coordinator-pricing-recover --close-restored

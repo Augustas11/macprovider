@@ -2,13 +2,17 @@ import importlib.machinery
 import importlib.util
 import os
 from pathlib import Path
+import fcntl
 import stat
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("macprovider-tier2-enforcement-watchdog")
+CONFIG_GUARD = SCRIPT.parents[2] / "scripts" / "lib" / "coordinator_config_guard.py"
 LOADER = importlib.machinery.SourceFileLoader("tier2_enforcement_watchdog", str(SCRIPT))
 SPEC = importlib.util.spec_from_loader(LOADER.name, LOADER)
 watchdog = importlib.util.module_from_spec(SPEC)
@@ -52,6 +56,7 @@ class Tier2EnforcementWatchdogTests(unittest.TestCase):
             "BACKUP_ROOT": state_root / "tier2-enforcement-backups",
             "LOCK_PATH": root / "updater.lock",
             "SELF_PATH": root / "watchdog",
+            "CONFIG_GUARD_MODULE": CONFIG_GUARD,
             "TRUSTED_UID": os.getuid(),
             "TRUSTED_GID": os.getgid(),
         }
@@ -210,6 +215,75 @@ class Tier2EnforcementWatchdogTests(unittest.TestCase):
         self.assertIn("--property=Restart=on-failure", systemd_run)
         self.assertIn("--property=RestartSec=30s", systemd_run)
         self.assertIn("--collect", systemd_run)
+
+    def run_main(self, argv):
+        with mock.patch.object(watchdog.os, "geteuid", return_value=0):
+            return watchdog.main(argv)
+
+    def test_pricing_transaction_journal_refuses_arm_and_rollback(self):
+        # #1693 L0: every mode rewrites coordinator.yaml or clears enforcement
+        # state; an abandoned pricing journal refuses them with exit code 75.
+        transaction = watchdog.arm()
+        self.reload_mock.reset_mock()
+        enforced = self.config.read_bytes()
+        (self.config.parent / ".pricing-txn").mkdir(mode=0o700)
+        for argv in (
+            ["--rollback", "--transaction-id", transaction["transaction_id"]],
+            ["--reconcile"],
+            ["--commit", "--transaction-id", transaction["transaction_id"]],
+        ):
+            with self.subTest(argv=argv):
+                with self.assertRaisesRegex(
+                    watchdog.PricingTransactionRefused,
+                    "pricing transaction journal present at .*/\\.pricing-txn; "
+                    "run scripts/catalog-content-release.sh --recover-pricing-txn",
+                ) as raised:
+                    self.run_main(argv)
+                self.assertEqual(raised.exception.exit_code, 75)
+                self.assertEqual(self.config.read_bytes(), enforced)
+                self.assertTrue(watchdog.JOURNAL_PATH.exists())
+        self.rollback_reload_mock.assert_not_called()
+
+        watchdog.JOURNAL_PATH.unlink()
+        self.schedule_mock.reset_mock()
+        with self.assertRaises(watchdog.PricingTransactionRefused):
+            self.run_main(["--arm"])
+        self.schedule_mock.assert_not_called()
+        self.assertEqual(self.config.read_bytes(), enforced)
+
+    def test_arm_waits_for_the_deploy_lock_in_lease_order(self):
+        deploy_lock = self.config.parent / ".coordinator-deploy.lock"
+        descriptor = os.open(deploy_lock, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        outcome = {}
+
+        def arm():
+            try:
+                outcome["result"] = self.run_main(["--arm"])
+            except Exception as exc:  # pragma: no cover - surfaced below
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=arm)
+        with mock.patch("builtins.print"):
+            worker.start()
+            try:
+                time.sleep(0.3)
+                self.assertTrue(worker.is_alive())
+                self.assertIn("require_hash_verified: false", self.config.read_text(encoding="utf-8"))
+            finally:
+                os.close(descriptor)
+            worker.join(10)
+        self.assertFalse(worker.is_alive())
+        self.assertNotIn("error", outcome)
+        self.assertEqual(outcome["result"], 0)
+        self.assertIn("require_hash_verified: true", self.config.read_text(encoding="utf-8"))
+
+    def test_missing_config_guard_fails_closed(self):
+        with mock.patch.object(watchdog, "CONFIG_GUARD_MODULE", self.config.parent / "absent.py"):
+            with self.assertRaisesRegex(watchdog.EnforcementError, "coordinator config guard is missing"):
+                self.run_main(["--arm"])
+        self.assertIn("require_hash_verified: false", self.config.read_text(encoding="utf-8"))
+        self.schedule_mock.assert_not_called()
 
     def test_flip_requires_direct_tier2_enforcement_field(self):
         with self.assertRaisesRegex(watchdog.EnforcementError, "exactly false"):

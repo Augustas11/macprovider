@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/autotune"
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
@@ -35,8 +38,16 @@ type autotuneReleaseValidation struct {
 	// map keeps them (tombstones and current-duplicates dropped). Empty
 	// whenever ok is false: a reload that fails admits nothing new.
 	Admitted []autotuneAdmittedRef `json:"admitted"`
-	Errors   []string              `json:"errors"`
-	Notes    []string              `json:"notes"`
+	// RateTableSHA256 is billing.RateTableDigest of the effective config: the
+	// sha256 of the rate_card_json the reload's billing snapshot would store.
+	// SignedRateCardSHA256 is the sha256 of the release's rate-card feed body
+	// ("" for a release without one). Both "" when not loaded.
+	RateTableSHA256      string `json:"rate_table_sha256"`
+	SignedRateCardSHA256 string `json:"signed_rate_card_sha256"`
+	// ModelResolutions answers --resolve-model-names; [] otherwise.
+	ModelResolutions []autotuneModelResolution `json:"model_resolutions"`
+	Errors           []string                  `json:"errors"`
+	Notes            []string                  `json:"notes"`
 }
 
 type autotuneAdmittedRef struct {
@@ -55,8 +66,8 @@ type autotuneReleaseRef struct {
 // process's state or a database, which the validator must never touch.
 const validateAutotuneReleaseBoundaryNote = "not checked (needs the live process or a database): tier2 startup-only field drift vs the running process, proof_of_weights telemetry-drift/hello-gate evidence store, trusted_pools creator admin credentials, billing config snapshot write"
 
-func runValidateAutotuneRelease(out io.Writer, configPath, configOverlay, dir, previousTarget string) int {
-	result := validateAutotuneRelease(configPath, configOverlay, dir, previousTarget, zerolog.New(os.Stderr))
+func runValidateAutotuneRelease(out io.Writer, configPath, configOverlay, dir, previousTarget string, opts autotuneReleaseValidationOptions) int {
+	result := validateAutotuneRelease(configPath, configOverlay, dir, previousTarget, zerolog.New(os.Stderr), opts)
 	raw, err := json.Marshal(result)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "validate-autotune-release: encode result: %v\n", err)
@@ -73,8 +84,8 @@ func runValidateAutotuneRelease(out io.Writer, configPath, configOverlay, dir, p
 // every configured feed path and the Tier-2 catalog path into dir, and runs
 // the reload's own load/verify functions against it. It starts no server,
 // opens no database, and never publishes into the tier2 singleton.
-func validateAutotuneRelease(configPath, configOverlay, dir, previousTarget string, logger zerolog.Logger) autotuneReleaseValidation {
-	r := autotuneReleaseValidation{PreviousLoaded: []autotuneReleaseRef{}, Admitted: []autotuneAdmittedRef{}, Errors: []string{}, Notes: []string{}}
+func validateAutotuneRelease(configPath, configOverlay, dir, previousTarget string, logger zerolog.Logger, opts ...autotuneReleaseValidationOptions) autotuneReleaseValidation {
+	r := autotuneReleaseValidation{PreviousLoaded: []autotuneReleaseRef{}, Admitted: []autotuneAdmittedRef{}, ModelResolutions: []autotuneModelResolution{}, Errors: []string{}, Notes: []string{}}
 	fail := func(format string, args ...any) { r.Errors = append(r.Errors, fmt.Sprintf(format, args...)) }
 
 	cfg, digests, err := config.LoadForSIGHUPReloadWithOverlayDigests(configPath, configOverlay)
@@ -83,6 +94,11 @@ func validateAutotuneRelease(configPath, configOverlay, dir, previousTarget stri
 		return r
 	}
 	r.ConfigSHA256, r.OverlaySHA256 = digests.ConfigSHA256, digests.OverlaySHA256
+	if digest, err := billing.RateTableDigest(cfg.Rewards); err != nil {
+		fail("rate table digest: %v", err)
+	} else {
+		r.RateTableSHA256 = digest
+	}
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
 		fail("release dir %q is not a readable directory", dir)
 		return r
@@ -115,6 +131,10 @@ func validateAutotuneRelease(configPath, configOverlay, dir, previousTarget stri
 	}
 	r.ReleaseID = catalog.Version
 	r.CandidatesSHA256 = catalog.SHA256
+	if len(feeds.RateCardJSON) > 0 {
+		sum := sha256.Sum256(feeds.RateCardJSON)
+		r.SignedRateCardSHA256 = hex.EncodeToString(sum[:])
+	}
 	for _, previous := range compatible {
 		r.PreviousLoaded = append(r.PreviousLoaded, autotuneReleaseRef{ReleaseID: previous.Version, CandidatesSHA256: previous.SHA256})
 	}
@@ -138,6 +158,9 @@ func validateAutotuneRelease(configPath, configOverlay, dir, previousTarget stri
 	}
 	if err := validateAutotuneRuntimeEconomics(feeds, cfg); err != nil {
 		fail("autotune runtime economics: %v", err)
+	}
+	for _, o := range opts {
+		validatePricingRelease(&r, o, configPath, configOverlay, cfg, feeds)
 	}
 	next, err := tier2.BuildStrict(cfg.Tier2, logger, activeReleaseBindingGuard(catalog))
 	if err != nil {

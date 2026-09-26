@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for scripts/publish-model-mirror.py (issue #1737, SPEC-023-R019)."""
+"""Unit tests for scripts/publish-model-mirror.py (issue #1737, SPEC-023-R020)."""
 
 from __future__ import annotations
 

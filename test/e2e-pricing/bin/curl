@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# E2E HTTP shim: the production hostnames are remapped to the VM's nginx
+# (forwarded to 127.0.0.1:$E2E_TLS_PORT) and verified against the test CA.
+# Any URL naming another public host is refused, so no request can leave for
+# production.
+set -euo pipefail
+: "${E2E_KEYS:?}" "${E2E_TLS_PORT:?}"
+for a in "$@"; do
+  case "$a" in
+    http://127.0.0.1*|http://localhost*|https://coordinator.malibu.tech*|https://stats.malibu.tech*|https://api.malibu.tech*) ;;
+    http://*|https://*) echo "curl shim: refusing URL outside tier E2: $a" >&2; exit 7 ;;
+  esac
+done
+exec /usr/bin/curl \
+  --connect-to coordinator.malibu.tech:443:127.0.0.1:"$E2E_TLS_PORT" \
+  --connect-to stats.malibu.tech:443:127.0.0.1:"$E2E_TLS_PORT" \
+  --connect-to api.malibu.tech:443:127.0.0.1:"$E2E_TLS_PORT" \
+  --cacert "$E2E_KEYS/ca.pem" "$@"

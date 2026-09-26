@@ -1,0 +1,1630 @@
+#!/usr/bin/python3 -I
+"""Pearl pricing transaction journal and recovery (#1693, SPEC-023-R019 L4/L4b/L7).
+
+A catalog-content release that changes rate-card rows replaces the
+`rewards.rate_card` block of the live base coordinator.yaml together with the
+autotune `current` release and `.previous-target` window, then SIGHUPs once.
+This helper owns the on-host half of that transaction:
+
+  begin / phase / install-candidate / check-state / restore-disk / finalize
+      journal steps the lane runs, as children of its lease runner (the lane
+      holds the updater + coordinator-deploy locks for the whole run).
+  recover       operator recovery (catalog-content-release.sh
+                --recover-pricing-txn), same locks, journal-only state.
+  --pre-start   ExecStart of macprovider-coordinator-deploy-recovery.service,
+                FIRST: restore the prior disk pair before the coordinator boots.
+  --close-restored
+                macprovider-coordinator-pricing-close.service: finalize a
+                `restored-unverified` journal once the coordinator's boot
+                record proves the prior pair is live.
+  --resolve-deploy-conflict
+                operator break-glass for a coordinator deploy rollback
+                snapshot AND a pricing journal (docs/runbooks/
+                catalog-release-decision-tree.md §Deploy-and-pricing
+                conflict): takes the lock set, restores the deploy snapshot
+                only when it carries one coherent journal pair, and leaves the
+                journal for normal pricing recovery. The coordinator stays
+                stopped.
+
+`begin` also writes the pricing runtime floor marker
+(/opt/macprovider/.pricing-runtime-floor) before the first pricing journal:
+from then on no coordinator without per-generation wholesale pricing may be
+installed (deploy-pearl-vps.sh, coordinator-deploy-recover.sh and the Pearl
+updater refuse one).
+
+State S = (base yaml sha + owner:group:mode, overlay presence+sha, `current`
+target, window bytes|absent + owner:group:mode, digest set and owner:group:mode
+of the `current` release's files). Restore order is always yaml, then
+`current`, then window. Every yaml write is same-directory temp + file fsync +
+rename + parent fsync with explicit owner/group/mode.
+
+A full verify-directory of a terminal side (operator recovery) uses the Tier-2
+trust root the transaction was gated with: `begin` copies it into the journal
+and pins its sha256, so recovery never depends on the operator's checkout.
+
+Standard library only; run as `python3 -I`. Exit codes: 0 ok / nothing to do,
+1 usage or refusal before any change, 3 state differs from the journal
+(compare-and-swap refused; nothing further changed), 4 the coordinator is
+down or still booting (not serving /healthz), so the pair could not be proven
+yet (journal kept; not a foreign write), 5 stopped with the journal kept
+(follow docs/runbooks/catalog-release-decision-tree.md §pricing-txn).
+
+SIGHUP is only ever sent to a READY coordinator: its unit is active, its
+MainPID is stable and it answers /healthz. The coordinator installs its
+SIGHUP handler before its listeners start, so a ready coordinator never dies
+of the signal; a booting one is waited for (bounded), never signalled.
+"""
+
+from __future__ import annotations
+
+import errno
+import fcntl
+import hashlib
+import json
+import os
+import re
+import secrets
+import signal
+import stat
+import subprocess
+import sys
+import time
+import urllib.request
+from datetime import datetime, timezone
+
+ENV = os.environ
+ROOT = ENV.get("MACPROVIDER_ROOT", "/opt/macprovider")
+ETC_ROOT = ENV.get("MACPROVIDER_ETC_ROOT", "/etc/macprovider")
+RUN_ROOT = ENV.get("MACPROVIDER_RUN_ROOT", "/run/macprovider")
+UPDATER_STATE = ENV.get("MACPROVIDER_UPDATER_STATE_ROOT", "/var/lib/macprovider-pearl-updater")
+GLOBAL_LOCK = ENV.get("MACPROVIDER_GLOBAL_DEPLOY_LOCK_FILE", "/run/lock/macprovider-pearl-updater.lock")
+DEPLOY_LOCK = ENV.get("MACPROVIDER_DEPLOY_LOCK_FILE", os.path.join(ROOT, ".coordinator-deploy.lock"))
+SYSTEMCTL = ENV.get("MACPROVIDER_SYSTEMCTL", "systemctl")
+UNIT = ENV.get("MACPROVIDER_COORDINATOR_UNIT", "macprovider-coordinator")
+BUYER_URL = ENV.get("MACPROVIDER_COORDINATOR_URL", "http://127.0.0.1:8443")
+HEALTHZ_URL = ENV.get("MACPROVIDER_COORDINATOR_HEALTHZ_URL", "http://127.0.0.1:8444/healthz")
+ALERT_UNIT = "macprovider-pearl-updater-alert@macprovider-coordinator-pricing-close.service.service"
+BOOT_ID_FILE = ENV.get("MACPROVIDER_BOOT_ID_FILE", "/proc/sys/kernel/random/boot_id")
+REQUIRED_UID = int(ENV.get("MACPROVIDER_REQUIRED_UID", "0"))
+SYSTEMD_ROOT = ENV.get("MACPROVIDER_SYSTEMD_ROOT", "/etc/systemd/system")
+DEPLOY_RECOVER = ENV.get("MACPROVIDER_DEPLOY_RECOVER", os.path.join(ROOT, "coordinator-deploy-recover"))
+# Lock ownership, as coordinator-deploy-recover.sh and the shared guard
+# (scripts/lib/coordinator_config_guard.py) require it.
+LOCK_REQUIRED_UID = int(ENV.get("MACPROVIDER_DEPLOY_LOCK_REQUIRED_UID", "0"))
+LOCK_REQUIRED_GID = int(ENV.get("MACPROVIDER_DEPLOY_LOCK_REQUIRED_GID", "0"))
+
+JOURNAL_NAME = ".pricing-txn"
+JOURNAL = os.path.join(ROOT, JOURNAL_NAME)
+TMP_PREFIX = JOURNAL_NAME + ".tmp."
+DONE_PREFIX = JOURNAL_NAME + ".done."
+CONFIG_NAME = "coordinator.yaml"
+YAML_TMP_PREFIX = "." + CONFIG_NAME + ".pricing-next."
+CURRENT_TMP_PREFIX = ".current.pricing-restore."
+WINDOW_TMP_PREFIX = ".previous-target.pricing-restore."
+OVERLAY = os.path.join(ETC_ROOT, "coordinator.pearl-overlays.yaml")
+AUTOTUNE = os.path.join(ROOT, "autotune")
+RECORD = os.path.join(RUN_ROOT, "coordinator-applied-config.json")
+APPLIED_SCHEMA = "macprovider.coordinator-applied-config.v1"
+SCHEMA = "macprovider.pricing-txn.v1"
+RUNBOOK = "docs/runbooks/catalog-release-decision-tree.md §pricing-txn"
+RUNBOOK_CONFLICT = "docs/runbooks/catalog-release-decision-tree.md §Deploy-and-pricing conflict"
+# The deploy-and-pricing conflict resolution sets the journal aside under this
+# prefix + its (pid, starttime) tag, only while it runs deploy recovery.
+HELD_PREFIX = JOURNAL_NAME + ".conflict-held."
+ROLLBACK_NAME = ".coordinator-deploy-rollback"
+# Pricing runtime floor (#1693): present once any pricing transaction began.
+FLOOR_NAME = ".pricing-runtime-floor"
+FLOOR_TMP_PREFIX = FLOOR_NAME + ".tmp."
+# The Tier-2 trust root (tier2.catalog_public_key) the lane's gate used, copied
+# into the journal at begin and sha-pinned (#1693 E2 V4).
+TRUST_ROOT_NAME = "tier2-trust-root.yaml"
+# The candidate window's owner/mode: scripts/autotune_window.py, its single
+# writer, installs it REQUIRED_UID-owned 0640 (group: the service group).
+CANDIDATE_WINDOW_MODE = 0o640
+HEX40 = re.compile(r"[0-9a-f]{40}")
+# A coordinator supports per-generation wholesale pricing and the pricing lane
+# when its offline validator accepts --expect-base-equivalent: with nonexistent
+# paths it prints the one-line JSON verdict (which carries model_resolutions)
+# and exits 1. A runtime without it rejects the flag (exit 2).
+FLOOR_PROBE_ARGS = ("--config", "/nonexistent/macprovider-pricing-floor-probe.yaml",
+                    "--validate-autotune-release", "/nonexistent/macprovider-pricing-floor-probe",
+                    "--expect-base-equivalent", "/nonexistent/macprovider-pricing-floor-probe.yaml")
+
+PHASES = ("prepared", "mutating", "hup-intent", "verifying", "verified",
+          "rolling-back", "rolled-back", "restored-unverified")
+TERMINAL = {"verified": "candidate", "rolled-back": "prior"}
+NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | NOFOLLOW
+RELEASE_REF = re.compile(r"releases/[A-Za-z0-9][A-Za-z0-9._-]{0,191}")
+HEX64 = re.compile(r"[0-9a-f]{64}")
+VERDICT_FIELDS = ("pricing_diff_sha256", "candidate_config_sha256", "commit_block_sha256",
+                  "expected_rate_table_sha256", "expected_signed_rate_card_sha256",
+                  "prior_rate_table_sha256", "prior_signed_rate_card_sha256", "prior_config_sha256")
+MAX_FILE = 16 << 20
+
+
+class Refused(Exception):
+    """exit 1: refused before changing anything."""
+
+
+class Mismatch(Exception):
+    """exit 3: on-disk state is neither side the journal expects."""
+
+
+class NotReady(Exception):
+    """exit 4: the coordinator is down or still booting; the journal is kept."""
+
+
+class Stop(Exception):
+    """exit 5: stopped with the journal kept."""
+
+
+class Interrupted(Exception):
+    """A termination signal arrived during --resolve-deploy-conflict."""
+
+
+def log(msg: str) -> None:
+    print("coordinator-pricing-recover: " + msg, file=sys.stderr, flush=True)
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Safe filesystem primitives (NOFOLLOW directory fds, owner/type checks).
+# ---------------------------------------------------------------------------
+def open_dir(path: str, *, owner_only: bool = False) -> int:
+    fd = os.open(path, DIR_FLAGS)
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != REQUIRED_UID or info.st_mode & 0o022:
+        os.close(fd)
+        raise Refused(f"unsafe directory ownership or permissions: {path}")
+    if owner_only and stat.S_IMODE(info.st_mode) != 0o700:
+        os.close(fd)
+        raise Refused(f"journal directory must be mode 0700: {path}")
+    return fd
+
+
+def read_at(dir_fd: int, name: str, limit: int = MAX_FILE) -> bytes | None:
+    """Regular-file bytes via NOFOLLOW; None when absent."""
+    try:
+        fd = os.open(name, os.O_RDONLY | NOFOLLOW, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise Mismatch(f"{name} is not a regular file")
+        chunks, total = [], 0
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > limit:
+                raise Mismatch(f"{name} exceeds {limit} bytes")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(fd)
+
+
+def stat_at(dir_fd: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def write_new_at(dir_fd: int, name: str, data: bytes, mode: int = 0o600) -> None:
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW, mode, dir_fd=dir_fd)
+    try:
+        os.fchmod(fd, mode)
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def durable_install_at(dir_fd: int, name: str, data: bytes, uid: int, gid: int, mode: int, tmp_prefix: str) -> None:
+    """Same-dir temp + explicit owner/group/mode + fsync + rename + dir fsync."""
+    tmp = f"{tmp_prefix}{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | NOFOLLOW, 0o600, dir_fd=dir_fd)
+    try:
+        try:
+            os.fchown(fd, uid, gid)
+            os.fchmod(fd, mode)
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_gid != gid
+                    or stat.S_IMODE(info.st_mode) != mode or info.st_nlink != 1):
+                raise Refused(f"unsafe temp file for {name}")
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.rename(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        try:
+            os.unlink(tmp, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+        raise
+    os.fsync(dir_fd)
+
+
+def fsync_dir(path: str) -> None:
+    fd = os.open(path, DIR_FLAGS)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def read_current(autotune_fd: int) -> str | None:
+    info = stat_at(autotune_fd, "current")
+    if info is None:
+        return None
+    if not stat.S_ISLNK(info.st_mode):
+        raise Mismatch("autotune current is not a symlink")
+    target = os.readlink("current", dir_fd=autotune_fd)
+    target = target[2:] if target.startswith("./") else target
+    if not RELEASE_REF.fullmatch(target):
+        raise Mismatch(f"autotune current target is malformed: {target!r}")
+    return target
+
+
+def swap_current(autotune_fd: int, target: str) -> None:
+    tmp = f"{CURRENT_TMP_PREFIX}{os.getpid()}"
+    try:
+        os.unlink(tmp, dir_fd=autotune_fd)
+    except FileNotFoundError:
+        pass
+    os.symlink(target, tmp, dir_fd=autotune_fd)
+    os.rename(tmp, "current", src_dir_fd=autotune_fd, dst_dir_fd=autotune_fd)
+    os.fsync(autotune_fd)
+
+
+def release_digests(target: str) -> dict:
+    """sha256 of every regular file in the release directory (flat)."""
+    if not RELEASE_REF.fullmatch(target):
+        raise Mismatch(f"malformed release reference {target!r}")
+    out = {}
+    fd = open_dir(os.path.join(AUTOTUNE, target))
+    try:
+        for name in sorted(os.listdir(fd)):
+            data = read_at(fd, name)
+            if data is None:
+                continue
+            out[name] = sha256(data)
+    finally:
+        os.close(fd)
+    return out
+
+
+def starttime(pid: int) -> str | None:
+    """Process start time (clock ticks since boot on Linux); None when gone."""
+    if os.path.isdir("/proc/self"):
+        try:
+            raw = open(f"/proc/{pid}/stat", "rb").read().decode("ascii", "replace")
+            return raw[raw.rindex(")") + 2:].split()[19]
+        except (OSError, ValueError, IndexError):
+            return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass
+    out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True)
+    text = out.stdout.strip()
+    return sha256(text.encode())[:16] if text else None
+
+
+def self_tag() -> str:
+    return f"{os.getpid()}.{starttime(os.getpid())}"
+
+
+def tag_is_live(tag: str) -> bool:
+    pid, _, start = tag.partition(".")
+    if not pid.isdigit() or not start:
+        return False
+    return starttime(int(pid)) == start
+
+
+def remove_tree_at(dir_fd: int, name: str) -> None:
+    info = stat_at(dir_fd, name)
+    if info is None:
+        return
+    if stat.S_ISDIR(info.st_mode):
+        sub = os.open(name, DIR_FLAGS, dir_fd=dir_fd)
+        try:
+            for child in os.listdir(sub):
+                remove_tree_at(sub, child)
+        finally:
+            os.close(sub)
+        os.rmdir(name, dir_fd=dir_fd)
+    else:
+        os.unlink(name, dir_fd=dir_fd)
+
+
+def held_journals() -> list[str]:
+    try:
+        return sorted(n for n in os.listdir(ROOT) if n.startswith(HELD_PREFIX))
+    except FileNotFoundError:
+        return []
+
+
+def restore_orphan_held() -> None:
+    """Put back a journal that --resolve-deploy-conflict set aside and could not
+    restore (it was killed). A live holder's is left alone. Called with the
+    lock set held."""
+    for name in held_journals():
+        if tag_is_live(name[len(HELD_PREFIX):]):
+            continue
+        root_fd = open_dir(ROOT)
+        try:
+            if stat_at(root_fd, JOURNAL_NAME) is not None:
+                raise Stop(f"both {JOURNAL} and a set-aside journal {name} exist; keep both and escalate")
+            os.rename(name, JOURNAL_NAME, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+            os.fsync(root_fd)
+        finally:
+            os.close(root_fd)
+        log(f"restored the set-aside pricing journal {name} to {JOURNAL}")
+
+
+def cleanup_tmp() -> list[str]:
+    """Put back an orphaned set-aside journal, then remove journal temp dirs
+    whose (pid, starttime) is not a live process, leftover finalize renames,
+    and this helper's own stale temp files."""
+    restore_orphan_held()
+    removed = []
+    for base, prefixes in ((ROOT, (TMP_PREFIX, DONE_PREFIX, YAML_TMP_PREFIX, FLOOR_TMP_PREFIX)),
+                           (AUTOTUNE, (CURRENT_TMP_PREFIX, WINDOW_TMP_PREFIX))):
+        try:
+            fd = open_dir(base)
+        except FileNotFoundError:
+            continue
+        try:
+            for name in os.listdir(fd):
+                if name.startswith(TMP_PREFIX):
+                    if tag_is_live(name[len(TMP_PREFIX):]):
+                        continue
+                elif name.startswith(DONE_PREFIX):
+                    pass
+                elif any(name.startswith(p) for p in prefixes):
+                    pid = name.rsplit(".", 1)[-1]
+                    if pid.isdigit() and starttime(int(pid)) is not None:
+                        continue
+                else:
+                    continue
+                remove_tree_at(fd, name)
+                removed.append(os.path.join(base, name))
+            if removed:
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+    for path in removed:
+        log(f"removed stale {path}")
+    return removed
+
+
+def live_tmp_dirs() -> list[str]:
+    try:
+        names = os.listdir(ROOT)
+    except FileNotFoundError:
+        return []
+    return [n for n in names if n.startswith(TMP_PREFIX) and tag_is_live(n[len(TMP_PREFIX):])]
+
+
+# ---------------------------------------------------------------------------
+# Journal.
+# ---------------------------------------------------------------------------
+class Journal:
+    def __init__(self) -> None:
+        self.root_fd = open_dir(ROOT)
+        try:
+            self.fd = os.open(JOURNAL_NAME, DIR_FLAGS, dir_fd=self.root_fd)
+        except FileNotFoundError:
+            os.close(self.root_fd)
+            raise
+        info = os.fstat(self.fd)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != REQUIRED_UID or stat.S_IMODE(info.st_mode) != 0o700:
+            self.close()
+            raise Stop(f"journal {JOURNAL} has unsafe ownership or permissions")
+        raw = read_at(self.fd, "txn.json")
+        if raw is None:
+            self.close()
+            raise Stop(f"journal {JOURNAL} has no txn.json")
+        try:
+            self.txn = json.loads(raw)
+        except ValueError as exc:
+            self.close()
+            raise Stop(f"journal txn.json is malformed: {exc}") from exc
+        if self.txn.get("schema") != SCHEMA or self.txn.get("phase") not in PHASES:
+            self.close()
+            raise Stop("journal txn.json has an unknown schema or phase")
+
+    def close(self) -> None:
+        for fd in (getattr(self, "fd", None), getattr(self, "root_fd", None)):
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def file(self, name: str) -> bytes | None:
+        return read_at(self.fd, name)
+
+    def write_txn(self) -> None:
+        data = (json.dumps(self.txn, sort_keys=True, indent=1) + "\n").encode()
+        tmp = f".txn.json.{os.getpid()}"
+        try:
+            os.unlink(tmp, dir_fd=self.fd)
+        except FileNotFoundError:
+            pass
+        write_new_at(self.fd, tmp, data)
+        os.rename(tmp, "txn.json", src_dir_fd=self.fd, dst_dir_fd=self.fd)
+        os.fsync(self.fd)
+
+    def set_phase(self, phase: str) -> None:
+        if phase not in PHASES:
+            raise Refused(f"unknown phase {phase}")
+        # Terminal phases are monotonic: out of a durable `verified` or
+        # `rolled-back` the only step is finalize (a verified price is never
+        # rolled back). Re-setting the same phase is an idempotent no-op.
+        if self.phase in TERMINAL:
+            if phase == self.phase:
+                return
+            raise Refused(f"journal is {self.phase} (terminal); only finalize {TERMINAL[self.phase]} is allowed, not phase {phase}")
+        self.txn["phase"] = phase
+        self.txn.setdefault("history", []).append({"phase": phase, "at": now_iso()})
+        self.write_txn()
+        log(f"journal phase {phase}")
+
+    @property
+    def phase(self) -> str:
+        return self.txn["phase"]
+
+    def finalize(self) -> None:
+        done = f"{DONE_PREFIX}{int(time.time())}.{os.getpid()}"
+        os.close(self.fd)
+        self.fd = None
+        os.rename(JOURNAL_NAME, done, src_dir_fd=self.root_fd, dst_dir_fd=self.root_fd)
+        os.fsync(self.root_fd)
+        remove_tree_at(self.root_fd, done)
+        os.fsync(self.root_fd)
+        log(f"journal {self.txn['id']} finalized ({self.txn['phase']})")
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def load_journal() -> Journal | None:
+    try:
+        return Journal()
+    except FileNotFoundError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# State S.
+# ---------------------------------------------------------------------------
+def meta_of(info: os.stat_result | None) -> str | None:
+    """owner:group:mode of a file, None when absent."""
+    return None if info is None else f"{info.st_uid}:{info.st_gid}:{stat.S_IMODE(info.st_mode):04o}"
+
+
+def meta_str(uid: int, gid: int, mode: int) -> str:
+    return f"{uid}:{gid}:{mode:04o}"
+
+
+def disk_state() -> dict:
+    root_fd = open_dir(ROOT)
+    try:
+        yaml = read_at(root_fd, CONFIG_NAME)
+        yaml_meta = meta_of(stat_at(root_fd, CONFIG_NAME)) if yaml is not None else None
+    finally:
+        os.close(root_fd)
+    overlay = None
+    try:
+        etc_fd = open_dir(ETC_ROOT)
+        try:
+            overlay = read_at(etc_fd, os.path.basename(OVERLAY))
+        finally:
+            os.close(etc_fd)
+    except FileNotFoundError:
+        overlay = None
+    at_fd = open_dir(AUTOTUNE)
+    try:
+        current = read_current(at_fd)
+        window = read_at(at_fd, ".previous-target", 64 * 1024)
+        window_meta = meta_of(stat_at(at_fd, ".previous-target")) if window is not None else None
+    finally:
+        os.close(at_fd)
+    return {
+        "yaml_sha256": None if yaml is None else sha256(yaml),
+        "yaml_meta": yaml_meta,
+        "overlay": {"present": overlay is not None, "sha256": "" if overlay is None else sha256(overlay)},
+        "current": current,
+        "window_sha256": None if window is None else sha256(window),
+        "window_meta": window_meta,
+    }
+
+
+def prior_yaml_meta(j: Journal) -> str:
+    p = j.txn["prior"]
+    return meta_str(p["yaml_uid"], p["yaml_gid"], p["yaml_mode"])
+
+
+def prior_window_meta(j: Journal) -> str | None:
+    w = j.txn["prior"]["window"]
+    return meta_str(w["uid"], w["gid"], w["mode"]) if w["present"] else None
+
+
+def candidate_window_meta_ok(value: str | None) -> bool:
+    """The candidate window is the window helper's: REQUIRED_UID-owned 0640."""
+    if value is None:
+        return False
+    uid, _, mode = value.split(":")
+    return int(uid) == REQUIRED_UID and int(mode, 8) == CANDIDATE_WINDOW_MODE
+
+
+def side_state(j: Journal, side: str) -> dict:
+    s = j.txn[side]
+    # install-candidate writes the candidate yaml with the prior's owner/mode.
+    return {"yaml_sha256": s["yaml_sha256"], "yaml_meta": prior_yaml_meta(j), "overlay": j.txn["overlay"],
+            "current": s["current"], "window_sha256": s["window"]["sha256"] if s["window"]["present"] else None}
+
+
+def release_meta(target: str) -> dict:
+    """owner:group:mode of every regular file in the release directory (flat)."""
+    if not RELEASE_REF.fullmatch(target):
+        raise Mismatch(f"malformed release reference {target!r}")
+    out = {}
+    fd = open_dir(os.path.join(AUTOTUNE, target))
+    try:
+        for name in sorted(os.listdir(fd)):
+            info = stat_at(fd, name)
+            if info is not None and stat.S_ISREG(info.st_mode):
+                out[name] = meta_of(info)
+    finally:
+        os.close(fd)
+    return out
+
+
+def release_matches(j: Journal, side: str, target: str) -> str | None:
+    """None when the release's files hash (and, when the journal recorded it,
+    carry the owner/mode) as the journal's `side` recorded; else what differs."""
+    if release_digests(target) != j.txn[side]["release_digests"]:
+        return "release digest set of " + target
+    if "release_meta" in j.txn[side] and release_meta(target) != j.txn[side]["release_meta"]:
+        return "release owner/mode set of " + target
+    return None
+
+
+def trust_root_path(j: Journal, fallback: tuple[str, str] | None) -> str:
+    """The Tier-2 trust root a full verify-directory uses: the journal's own
+    sha-pinned copy; for a journal begun without one, the caller's sha-pinned
+    copy. Never the verifier's default (absent beside a shipped bundle)."""
+    want = j.txn.get("tier2_trust_root_sha256")
+    if want:
+        data = j.file(TRUST_ROOT_NAME)
+        if data is None or sha256(data) != want:
+            raise Stop(f"journal {TRUST_ROOT_NAME} is missing or is not its pinned sha256 {want}")
+        if fallback is not None and fallback[1] != want:
+            log(f"using the journal's Tier-2 trust root ({want[:12]}), not the supplied one ({fallback[1][:12]})")
+        return os.path.join(JOURNAL, TRUST_ROOT_NAME)
+    if fallback is None:
+        raise Stop("the journal pins no Tier-2 trust root and none was supplied (--tier2-trust-root + "
+                   "--tier2-trust-root-sha256); refusing a verify-directory without an explicit trust root")
+    path, want = fallback
+    if not HEX64.fullmatch(want):
+        raise Refused("--tier2-trust-root-sha256 must be 64 lowercase hex")
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read(MAX_FILE + 1)
+    except OSError as exc:
+        raise Stop(f"cannot read the supplied Tier-2 trust root {path}: {exc}") from exc
+    if sha256(data) != want:
+        raise Stop(f"the supplied Tier-2 trust root {path} is not its pinned sha256 {want}")
+    return path
+
+
+def check_state(j: Journal, side: str, verifier: str | None = None,
+                trust_root: tuple[str, str] | None = None) -> None:
+    want, got = side_state(j, side), disk_state()
+    diffs = [k for k in want if want[k] != got[k]]
+    if side == "prior" and prior_window_meta(j) != got["window_meta"]:
+        diffs.append("window owner/mode")
+    if side == "candidate" and not candidate_window_meta_ok(got["window_meta"]):
+        diffs.append(f"window owner/mode ({got['window_meta']})")
+    if not diffs:
+        why = release_matches(j, side, got["current"])
+        if why:
+            diffs.append(why)
+    if diffs:
+        raise Mismatch(f"state is not the journal's {side} pair: {', '.join(diffs)} differ")
+    if verifier:
+        root = trust_root_path(j, trust_root)
+        rc = subprocess.run([sys.executable, "-I", verifier, "verify-directory", "--allow-expired-tier2",
+                             "--tier2-coordinator-config", root,
+                             "--directory", os.path.join(AUTOTUNE, got["current"])],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if rc.returncode != 0:
+            raise Mismatch(f"verify-directory of {got['current']} failed: {rc.stderr.strip()[-400:]}")
+
+
+def restore_disk(j: Journal) -> None:
+    """Compare-and-swap yaml, `current` and window back to prior. The complete
+    tuple (overlay, yaml, current, window) and every journal payload the
+    restore needs are checked BEFORE the first write: any member that is
+    neither the journal's prior nor its candidate, or a missing/corrupt
+    payload, refuses with every member unchanged. Then, in order yaml,
+    current, window: candidate -> prior; prior bytes with the journal's
+    owner/mode -> skip; prior bytes with any other owner/mode -> reinstalled
+    with the journal's (a yaml the service user cannot read would not boot)."""
+    if j.phase in TERMINAL:
+        raise Refused(f"journal is {j.phase} (terminal); not restoring")
+    prior, cand = j.txn["prior"], j.txn["candidate"]
+    got = disk_state()
+    if got["overlay"] != j.txn["overlay"]:
+        raise Mismatch("overlay differs from the journal; not restoring")
+    psha = prior["window"]["sha256"] if prior["window"]["present"] else None
+    csha = cand["window"]["sha256"] if cand["window"]["present"] else None
+
+    def side(value, prior_value, cand_value, label):
+        if value == prior_value:
+            return "prior"
+        if value == cand_value:
+            return "candidate"
+        raise Mismatch(f"{label} is neither the journal's prior nor candidate; not restoring (nothing changed)")
+
+    yaml_side = side(got["yaml_sha256"], prior["yaml_sha256"], cand["yaml_sha256"], "coordinator.yaml")
+    current_side = side(got["current"], prior["current"], cand["current"], f"current ({got['current']!r})")
+    window_side = side(got["window_sha256"], psha, csha, ".previous-target")
+    # Prior bytes are prior only with the journal's owner/mode too.
+    if yaml_side == "prior" and got["yaml_meta"] != prior_yaml_meta(j):
+        yaml_side = "prior-meta"
+    if window_side == "prior" and psha is not None and got["window_meta"] != prior_window_meta(j):
+        window_side = "prior-meta"
+    prior_yaml = prior_window = None
+    if yaml_side != "prior":
+        prior_yaml = j.file("prior-coordinator.yaml")
+        if prior_yaml is None or sha256(prior_yaml) != prior["yaml_sha256"]:
+            raise Stop("journal prior-coordinator.yaml is missing or corrupt (nothing changed)")
+    if window_side != "prior" and prior["window"]["present"]:
+        prior_window = j.file("prior-window")
+        if prior_window is None or sha256(prior_window) != psha:
+            raise Stop("journal prior-window is missing or corrupt (nothing changed)")
+    # The prior release (current's target after the restore) must still hash
+    # (and carry the owner/mode) as the journal recorded it, or the final
+    # check_state would refuse after the writes.
+    why = release_matches(j, "prior", prior["current"])
+    if why:
+        raise Mismatch(f"{why} differs from the journal; not restoring (nothing changed)")
+
+    if prior_yaml is not None:
+        root_fd = open_dir(ROOT)
+        try:
+            durable_install_at(root_fd, CONFIG_NAME, prior_yaml, prior["yaml_uid"], prior["yaml_gid"],
+                               prior["yaml_mode"], YAML_TMP_PREFIX)
+        finally:
+            os.close(root_fd)
+        log("restored prior coordinator.yaml" + (" owner/mode" if yaml_side == "prior-meta" else ""))
+    at_fd = open_dir(AUTOTUNE)
+    try:
+        if current_side == "candidate":
+            swap_current(at_fd, prior["current"])
+            log(f"restored current -> {prior['current']}")
+        if window_side != "prior":
+            if prior_window is not None:
+                durable_install_at(at_fd, ".previous-target", prior_window, prior["window"]["uid"],
+                                   prior["window"]["gid"], prior["window"]["mode"], WINDOW_TMP_PREFIX)
+            else:
+                os.unlink(".previous-target", dir_fd=at_fd)
+                os.fsync(at_fd)
+            log("restored prior .previous-target" + (" owner/mode" if window_side == "prior-meta" else ""))
+    finally:
+        os.close(at_fd)
+    check_state(j, "prior")
+
+
+# ---------------------------------------------------------------------------
+# Coordinator liveness evidence.
+# ---------------------------------------------------------------------------
+def systemctl_show(prop: str) -> str:
+    out = subprocess.run([SYSTEMCTL, "show", "-p", prop, "--value", UNIT], capture_output=True, text=True)
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def coordinator_pid() -> int:
+    pid = systemctl_show("MainPID")
+    return int(pid) if pid.isdigit() else 0
+
+
+def parse_loaded_at(value: object) -> float | None:
+    m = re.fullmatch(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.\d+)?Z", str(value or ""))
+    if not m:
+        return None
+    base = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    return base + float(m.group(2) or 0)
+
+
+def fetch(path: str) -> bytes | None:
+    try:
+        with urllib.request.urlopen(BUYER_URL + path, timeout=10) as resp:
+            return resp.read(MAX_FILE + 1) if resp.status == 200 else None
+    except OSError:
+        return None
+
+
+def live_matches(j: Journal, side: str, since: float, source: str | None, snapshot_after: int) -> str | None:
+    """None when the applied-config record and the served card prove `side`
+    is live; otherwise why not."""
+    v = j.txn["verdict"]
+    want_rate, want_signed = ((v["prior_rate_table_sha256"], v["prior_signed_rate_card_sha256"]) if side == "prior"
+                              else (v["expected_rate_table_sha256"], v["expected_signed_rate_card_sha256"]))
+    try:
+        rec = json.loads(open(RECORD, "rb").read(65536))
+    except (OSError, ValueError):
+        return "no parseable applied-config record"
+    loaded = parse_loaded_at(rec.get("loaded_at"))
+    if rec.get("schema") != APPLIED_SCHEMA or loaded is None or loaded < since:
+        return f"no applied-config record since {since:.0f} (loaded_at={rec.get('loaded_at')})"
+    if source and rec.get("source") != source:
+        return f"record source is {rec.get('source')}, want {source}"
+    if rec.get("config_sha256") != j.txn[side]["yaml_sha256"]:
+        return f"record config_sha256 {rec.get('config_sha256')} is not the {side} yaml"
+    if (rec.get("overlay_sha256") or "") != j.txn["overlay"]["sha256"]:
+        return "record overlay_sha256 differs from the journal"
+    if rec.get("rate_table_sha256") != want_rate or rec.get("signed_rate_card_sha256") != want_signed:
+        return (f"record rate_table/signed card {rec.get('rate_table_sha256')}/{rec.get('signed_rate_card_sha256')} "
+                f"are not the {side} digests")
+    snap = rec.get("billing_snapshot_id")
+    if not isinstance(snap, int) or snap <= snapshot_after:
+        return f"record billing_snapshot_id {snap} did not advance past {snapshot_after}"
+    rel = os.path.join(AUTOTUNE, j.txn[side]["current"])
+    for path, name in (("/v1/rate-card", "rate-card.json"), ("/v1/rate-card.sig", "rate-card.json.sig")):
+        served = fetch(path)
+        if served is None or served != open(os.path.join(rel, name), "rb").read():
+            return f"coordinator-served {path} is not the {side} bytes"
+    return None
+
+
+def wait_live(j: Journal, side: str, since: float, source: str | None, snapshot_after: int, seconds: float,
+              extra=None) -> str | None:
+    deadline = time.monotonic() + seconds
+    while True:
+        why = extra() if extra else None
+        if why is None:
+            why = live_matches(j, side, since, source, snapshot_after)
+        if why is None or time.monotonic() >= deadline:
+            return why
+        time.sleep(1)
+
+
+def healthz_ok() -> bool:
+    try:
+        with urllib.request.urlopen(HEALTHZ_URL, timeout=5) as resp:
+            return resp.status == 200
+    except OSError:
+        return False
+
+
+def ready_pid(wait_seconds: float) -> tuple[int, str]:
+    """(MainPID, "") once the coordinator is ready for a SIGHUP: unit active,
+    MainPID stable across a /healthz 200. Waits (bounded) while it boots.
+    (0, why) when it is not running, or still booting at the deadline."""
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        state, pid = systemctl_show("ActiveState"), coordinator_pid()
+        if state not in ("active", "activating", "reloading") or not pid:
+            return 0, f"{UNIT} is not running (ActiveState={state or '?'})"
+        if healthz_ok() and coordinator_pid() == pid:
+            return pid, ""
+        why = f"{UNIT} (pid {pid}) is still booting: {HEALTHZ_URL} does not answer 200"
+        if time.monotonic() >= deadline:
+            return 0, why
+        time.sleep(2)
+
+
+def hup_and_verify(j: Journal, side: str, snapshot_after: int, seconds: float, ready_seconds: float) -> str | None:
+    pid, why = ready_pid(ready_seconds)
+    if not pid:
+        raise NotReady(f"SIGHUP not sent: {why}")
+    since = time.time()
+    os.kill(pid, signal.SIGHUP)
+    log(f"sent SIGHUP to {UNIT} (pid {pid})")
+    return wait_live(j, side, since, "sighup", snapshot_after, seconds)
+
+
+# ---------------------------------------------------------------------------
+# Locks.
+# ---------------------------------------------------------------------------
+def open_lock(path: str) -> int:
+    """Open one lock of the set exactly as the shared guard's acquire_lock does
+    (scripts/lib/coordinator_config_guard.py; this helper is installed
+    standalone, so the checks are replicated and a parity test pins them):
+    create 0600 when absent, never follow a symlink, then require a regular
+    root-owned (or LOCK_REQUIRED_UID/GID) 0600 file with one link. Refused
+    when unsafe."""
+    if not NOFOLLOW:
+        raise Refused("this platform cannot open locks without following symlinks")
+    flags = os.O_RDWR | os.O_CLOEXEC | NOFOLLOW
+    try:
+        fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        try:
+            fd = os.open(path, flags)
+        except OSError as exc:
+            raise Refused(f"unsafe coordinator config lock {path}: cannot open safely: {exc}") from exc
+    except OSError as exc:
+        raise Refused(f"unsafe coordinator config lock {path}: cannot open safely: {exc}") from exc
+    info = os.fstat(fd)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != LOCK_REQUIRED_UID
+        or info.st_gid != LOCK_REQUIRED_GID
+        or stat.S_IMODE(info.st_mode) != 0o600
+        or info.st_nlink != 1
+    ):
+        os.close(fd)
+        raise Refused(f"unsafe coordinator config lock {path}")
+    return fd
+
+
+def take_locks(wait_seconds: float) -> list[int] | None:
+    """The lane lock set (updater lock, then coordinator-deploy lock), in
+    lease order. None when a safely validated lock is not acquired within
+    wait_seconds (0 = -n); Refused (fail closed) when a lock is unsafe."""
+    fds: list[int] = []
+    deadline = time.monotonic() + wait_seconds
+    for path in (GLOBAL_LOCK, DEPLOY_LOCK):
+        try:
+            fd = open_lock(path)
+        except BaseException:
+            for f in fds:
+                os.close(f)
+            raise
+        fds.append(fd)
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN) or time.monotonic() >= deadline:
+                    for f in fds:
+                        os.close(f)
+                    return None
+                time.sleep(0.5)
+    return fds
+
+
+# ---------------------------------------------------------------------------
+# Subcommands.
+# ---------------------------------------------------------------------------
+def foreign_state(allow_journal: bool = False) -> list[str]:
+    problems = []
+    if os.path.lexists(os.path.join(ROOT, ".coordinator-deploy-rollback")):
+        problems.append("coordinator deploy rollback snapshot present (/opt/macprovider/.coordinator-deploy-rollback)")
+    for name in ("active-transaction.json", "tier2-enforcement-transaction.json"):
+        if os.path.lexists(os.path.join(UPDATER_STATE, name)):
+            problems.append(f"Pearl updater transaction present ({name})")
+    if not allow_journal and os.path.lexists(JOURNAL):
+        problems.append(f"pricing transaction journal present ({JOURNAL}); run --recover-pricing-txn")
+    for name in live_tmp_dirs():
+        problems.append(f"pricing journal being built by a live process ({name})")
+    for name in held_journals():
+        problems.append(f"pricing journal set aside by a deploy-and-pricing conflict resolution ({name}); "
+                        "rerun coordinator-pricing-recover --resolve-deploy-conflict")
+    return problems
+
+
+def ensure_runtime_floor(commit: str) -> None:
+    """Write <ROOT>/.pricing-runtime-floor (root-owned 0644, durable) unless it
+    already exists. Once a pricing correction can be live, wholesale history
+    spans more than one rate generation: a coordinator without per-generation
+    pricing (#1693) would re-price it, so deploy, deploy recovery and the Pearl
+    updater refuse to install one while this marker exists. Never removed."""
+    root_fd = open_dir(ROOT)
+    try:
+        info = stat_at(root_fd, FLOOR_NAME)
+        if info is not None:
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != REQUIRED_UID:
+                raise Refused(f"{os.path.join(ROOT, FLOOR_NAME)} is not a root-owned regular file")
+            return
+        body = f"commit={commit}\nwritten_at={now_iso()}\n".encode()
+        durable_install_at(root_fd, FLOOR_NAME, body, REQUIRED_UID, os.fstat(root_fd).st_gid, 0o644, FLOOR_TMP_PREFIX)
+    finally:
+        os.close(root_fd)
+    log(f"pricing runtime floor written ({os.path.join(ROOT, FLOOR_NAME)}, commit {commit})")
+
+
+def runtime_supports_pricing(binary: str) -> bool:
+    """True when `binary` is a coordinator with per-generation wholesale
+    pricing and the pricing lane's --expect-base-equivalent (FLOOR_PROBE_ARGS)."""
+    try:
+        out = subprocess.run([binary, *FLOOR_PROBE_ARGS], stdin=subprocess.DEVNULL, capture_output=True,
+                             text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    lines = out.stdout.strip().splitlines()
+    if out.returncode != 1 or not lines:
+        return False
+    try:
+        verdict = json.loads(lines[0])
+    except ValueError:
+        return False
+    return isinstance(verdict, dict) and isinstance(verdict.get("model_resolutions"), list)
+
+
+def cmd_begin(args: dict) -> int:
+    problems = foreign_state()
+    if problems:
+        raise Refused("; ".join(problems))
+    verdict = json.loads(open(args["--verdict"], "rb").read())
+    for field in VERDICT_FIELDS:
+        if not isinstance(verdict.get(field), str) or not HEX64.fullmatch(verdict[field]):
+            raise Refused(f"verdict {field} must be 64 lowercase hex")
+    if not isinstance(verdict.get("prior_billing_snapshot_id"), int):
+        raise Refused("verdict prior_billing_snapshot_id must be an integer")
+    floor_commit = verdict.get("runtime_floor_commit")
+    if not isinstance(floor_commit, str) or not HEX40.fullmatch(floor_commit):
+        raise Refused("verdict runtime_floor_commit must be a 40-hex commit")
+    candidate_yaml = open(args["--candidate-yaml"], "rb").read()
+    if sha256(candidate_yaml) != verdict["candidate_config_sha256"]:
+        raise Refused("candidate yaml is not the verdict's candidate_config_sha256")
+    new_current = args["--new-current"]
+    if not RELEASE_REF.fullmatch(new_current):
+        raise Refused("malformed --new-current")
+    candidate_window = open(args["--candidate-window"], "rb").read()
+    trust_root = open(args["--tier2-trust-root"], "rb").read(MAX_FILE + 1)
+    if not trust_root or len(trust_root) > MAX_FILE:
+        raise Refused("--tier2-trust-root must be a non-empty bounded file")
+
+    root_fd = open_dir(ROOT)
+    try:
+        yaml = read_at(root_fd, CONFIG_NAME)
+        yinfo = stat_at(root_fd, CONFIG_NAME)
+    finally:
+        os.close(root_fd)
+    if yaml is None or sha256(yaml) != verdict["prior_config_sha256"]:
+        raise Refused("live coordinator.yaml is not the verdict's prior config")
+    state = disk_state()
+    if state["overlay"]["sha256"] != verdict.get("overlay_sha256", ""):
+        raise Refused("live overlay is not the verdict's overlay")
+    at_fd = open_dir(AUTOTUNE)
+    try:
+        window = read_at(at_fd, ".previous-target", 64 * 1024)
+        winfo = stat_at(at_fd, ".previous-target")
+    finally:
+        os.close(at_fd)
+    prior_current = state["current"]
+    if prior_current is None or prior_current != args["--prior-current"]:
+        raise Refused(f"current is {prior_current!r}, not {args['--prior-current']!r}")
+    # Pricing runtime floor: durable before the journal (and so before the
+    # first mutation) of the first pricing transaction.
+    ensure_runtime_floor(floor_commit)
+    txn = {
+        "schema": SCHEMA,
+        "id": secrets.token_hex(16),
+        "phase": "prepared",
+        "created_at": now_iso(),
+        "history": [{"phase": "prepared", "at": now_iso()}],
+        "prior": {
+            "yaml_sha256": sha256(yaml), "yaml_uid": yinfo.st_uid, "yaml_gid": yinfo.st_gid,
+            "yaml_mode": stat.S_IMODE(yinfo.st_mode), "current": prior_current,
+            "window": ({"present": True, "sha256": sha256(window), "uid": winfo.st_uid, "gid": winfo.st_gid,
+                        "mode": stat.S_IMODE(winfo.st_mode)} if window is not None else {"present": False}),
+            "release_digests": release_digests(prior_current), "release_meta": release_meta(prior_current),
+        },
+        "candidate": {
+            "yaml_sha256": sha256(candidate_yaml), "current": new_current,
+            "window": {"present": True, "sha256": sha256(candidate_window)},
+            "release_digests": release_digests(new_current), "release_meta": release_meta(new_current),
+        },
+        "tier2_trust_root_sha256": sha256(trust_root),
+        "overlay": state["overlay"],
+        "verdict": dict({k: verdict[k] for k in VERDICT_FIELDS + ("prior_billing_snapshot_id",)},
+                        overlay_sha256=state["overlay"]["sha256"]),
+        "restore": None,
+    }
+    tmp = TMP_PREFIX + self_tag()
+    root_fd = open_dir(ROOT)
+    try:
+        os.mkdir(tmp, 0o700, dir_fd=root_fd)
+        tfd = os.open(tmp, DIR_FLAGS, dir_fd=root_fd)
+        try:
+            os.fchmod(tfd, 0o700)
+            write_new_at(tfd, "prior-coordinator.yaml", yaml)
+            write_new_at(tfd, "candidate-coordinator.yaml", candidate_yaml)
+            if window is not None:
+                write_new_at(tfd, "prior-window", window)
+            write_new_at(tfd, "candidate-window", candidate_window)
+            write_new_at(tfd, TRUST_ROOT_NAME, trust_root)
+            write_new_at(tfd, "txn.json", (json.dumps(txn, sort_keys=True, indent=1) + "\n").encode())
+            os.fsync(tfd)
+        finally:
+            os.close(tfd)
+        os.rename(tmp, JOURNAL_NAME, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        os.fsync(root_fd)
+    finally:
+        os.close(root_fd)
+    print(json.dumps({"journal": txn["id"], "phase": "prepared"}))
+    log(f"journal {txn['id']} committed (prepared)")
+    return 0
+
+
+def need_journal() -> Journal:
+    j = load_journal()
+    if j is None:
+        raise Refused(f"no pricing transaction journal at {JOURNAL}")
+    return j
+
+
+def cmd_install_candidate(j: Journal) -> int:
+    prior, cand = j.txn["prior"], j.txn["candidate"]
+    got = disk_state()
+    if got["overlay"] != j.txn["overlay"]:
+        raise Mismatch("overlay moved since the journal was written")
+    if got["yaml_sha256"] == cand["yaml_sha256"]:
+        return 0
+    if got["yaml_sha256"] != prior["yaml_sha256"]:
+        raise Mismatch("coordinator.yaml moved since the journal was written; not installing")
+    data = j.file("candidate-coordinator.yaml")
+    if data is None or sha256(data) != cand["yaml_sha256"]:
+        raise Stop("journal candidate-coordinator.yaml is missing or corrupt")
+    root_fd = open_dir(ROOT)
+    try:
+        durable_install_at(root_fd, CONFIG_NAME, data, prior["yaml_uid"], prior["yaml_gid"], prior["yaml_mode"],
+                           YAML_TMP_PREFIX)
+    finally:
+        os.close(root_fd)
+    log("installed candidate coordinator.yaml")
+    return 0
+
+
+def terminal_check(j: Journal, verifier: str | None, trust_root: tuple[str, str] | None = None) -> None:
+    side = TERMINAL[j.phase]
+    check_state(j, side, verifier, trust_root)
+
+
+def trust_root_arg(args: dict) -> tuple[str, str] | None:
+    path, want = args.get("--tier2-trust-root"), args.get("--tier2-trust-root-sha256")
+    if (path is None) != (want is None):
+        raise Refused("--tier2-trust-root and --tier2-trust-root-sha256 go together")
+    return None if path is None else (path, want)
+
+
+def cmd_recover(args: dict) -> int:
+    """Operator recovery: the caller holds the lane lock set."""
+    cleanup_tmp()
+    j = load_journal()
+    if j is None:
+        print("no pricing transaction journal")
+        return 0
+    verifier = args.get("--verifier")
+    trust_root = trust_root_arg(args)
+    wait = float(args.get("--wait-seconds", "60"))
+    ready_wait = float(args.get("--ready-seconds", "900"))
+    prior_snap = j.txn["verdict"]["prior_billing_snapshot_id"]
+    log(f"journal {j.txn['id']} phase {j.phase}")
+    if j.phase in TERMINAL:
+        terminal_check(j, verifier, trust_root)
+        j.finalize()
+        print(f"finalized {TERMINAL[j.txn['phase']]} ({j.txn['phase']})")
+        return 0
+    if j.phase == "restored-unverified":
+        restore_disk(j)
+        restore = j.txn.get("restore") or {}
+        why = live_matches(j, "prior", float(restore.get("wall", 0)), "boot", prior_snap)
+        if why is not None:
+            # A coordinator still booting proves the restore with its own boot
+            # record; one already up gets exactly one SIGHUP.
+            pid, not_ready = ready_pid(ready_wait)
+            if not pid:
+                raise NotReady(f"prior pair restored on disk; {not_ready}")
+            why = live_matches(j, "prior", float(restore.get("wall", 0)), "boot", prior_snap)
+            if why is not None:
+                why = hup_and_verify(j, "prior", prior_snap, wait, ready_wait)
+        if why is not None:
+            raise Stop(f"prior pair restored on disk but not proven live: {why}")
+        j.set_phase("rolled-back")
+        j.finalize()
+        print("finalized prior (restored-unverified)")
+        return 0
+    j.set_phase("rolling-back")
+    restore_disk(j)
+    if not coordinator_pid():
+        j.txn["restore"] = restore_stamp()
+        j.set_phase("restored-unverified")
+        raise Stop("prior pair restored on disk; the coordinator is not running, so its boot must prove it "
+                   "(macprovider-coordinator-pricing-close.service)")
+    why = hup_and_verify(j, "prior", prior_snap, wait, ready_wait)
+    if why is not None:
+        raise Stop(f"prior pair restored on disk and re-HUPed but not proven live: {why}")
+    j.set_phase("rolled-back")
+    j.finalize()
+    print("rolled back to the prior pair and finalized")
+    return 0
+
+
+def restore_stamp() -> dict:
+    boot_id = ""
+    try:
+        boot_id = open(BOOT_ID_FILE).read().strip()
+    except OSError:
+        pass
+    return {"boot_id": boot_id, "nonce": secrets.token_hex(16),
+            "monotonic_us": int(time.clock_gettime(time.CLOCK_MONOTONIC) * 1_000_000),
+            "wall": time.time(), "at": now_iso()}
+
+
+def cmd_pre_start() -> int:
+    if not os.path.lexists(JOURNAL) and not held_journals():
+        return 0
+    fds = take_locks(0)
+    if fds is None:
+        log("the lane lock set is held by a live holder; leaving the pricing journal to it")
+        return 0
+    try:
+        cleanup_tmp()
+        j = load_journal()
+        if j is None:
+            return 0
+        log(f"pre-start: journal {j.txn['id']} phase {j.phase}")
+        if j.phase in TERMINAL:
+            terminal_check(j, None)
+            j.finalize()
+            return 0
+        restore_disk(j)
+        j.txn["restore"] = restore_stamp()
+        j.set_phase("restored-unverified")
+        log("prior pair restored before coordinator start; macprovider-coordinator-pricing-close.service "
+            "finalizes it from the boot record")
+        return 0
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def cmd_close_restored(args: dict) -> int:
+    j = load_journal()
+    if j is None or j.phase != "restored-unverified":
+        return 0
+    restore = j.txn.get("restore") or {}
+    nonce = restore.get("nonce")
+    snap = j.txn["verdict"]["prior_billing_snapshot_id"]
+    try:
+        boot_id = ""
+        try:
+            boot_id = open(BOOT_ID_FILE).read().strip()
+        except OSError:
+            pass
+        if not boot_id or boot_id != restore.get("boot_id"):
+            raise Stop("the restore was not made in this boot; run --recover-pricing-txn")
+        stamp = int(restore.get("monotonic_us", 0))
+
+        def started_after_restore() -> str | None:
+            raw = systemctl_show("ActiveEnterTimestampMonotonic")
+            if not raw.isdigit() or int(raw) <= stamp:
+                return f"{UNIT} has not started since the restore (ActiveEnterTimestampMonotonic={raw or '?'})"
+            return None
+
+        def ready_since_restore() -> str | None:
+            why = started_after_restore()
+            if why is None:
+                pid, not_ready = ready_pid(0)
+                why = None if pid else not_ready
+            return why
+
+        # Read-only, WITHOUT the lane lock set (an operator can still run
+        # --recover-pricing-txn meanwhile): wait for the coordinator to be up
+        # and its boot record to prove the prior pair. A slow boot (SQLite WAL
+        # recovery after an unclean shutdown can take minutes) is waited for in
+        # windows; each window that ends unproven raises the alert and keeps
+        # waiting, so the journal closes itself once the coordinator is up.
+        # After the last window the closer stops (OnFailure alerts again; the
+        # next boot's pre-start + closer, or --recover-pricing-txn, retry).
+        window = float(args.get("--wait-seconds", "900"))
+        windows = int(args.get("--windows", "8"))
+        why = None
+        for attempt in range(1, windows + 1):
+            why = wait_live(j, "prior", float(restore.get("wall", 0)), "boot", snap, window, ready_since_restore)
+            if why is None:
+                break
+            log(f"ALERT: window {attempt}/{windows}: the coordinator boot has not proved the restored prior "
+                f"pair yet ({why}); still waiting")
+            if attempt < windows:
+                subprocess.run([SYSTEMCTL, "start", "--no-block", ALERT_UNIT], capture_output=True)
+        if why is not None:
+            raise Stop(f"the coordinator boot did not prove the restored prior pair: {why}")
+    finally:
+        j.close()
+    fds = take_locks(float(args.get("--lock-wait-seconds", "300")))
+    if fds is None:
+        # A lane that handed this journal over (hand-to-closer) may still hold
+        # its lease after finalizing the journal itself: nothing left to close.
+        j = load_journal()
+        closed = j is None or j.phase != "restored-unverified" or (j.txn.get("restore") or {}).get("nonce") != nonce
+        if j is not None:
+            j.close()
+        if closed:
+            return 0
+        raise Stop("could not take the lane lock set to close the restored pricing journal")
+    try:
+        j = load_journal()
+        if j is None or j.phase != "restored-unverified":
+            return 0
+        restore = j.txn.get("restore") or {}
+        if restore.get("nonce") != nonce:
+            raise Stop("the restored pricing journal changed while waiting for the lock set")
+        # Re-prove under the locks: nothing may have moved since.
+        why = wait_live(j, "prior", float(restore.get("wall", 0)), "boot", snap, 30, started_after_restore)
+        if why is not None:
+            raise Stop(f"the coordinator boot did not prove the restored prior pair: {why}")
+        j.set_phase("rolled-back")
+        j.finalize()
+        return 0
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+# ---------------------------------------------------------------------------
+# Deploy-and-pricing conflict (runbook §Deploy-and-pricing conflict).
+# ---------------------------------------------------------------------------
+SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT)
+# Snapshot "<unit>-was-active" markers deploy recovery acts on only in its
+# --recover mode; --recover-under-global leaves those sidecars stopped.
+SIDECAR_MARKERS = (("stats-inventory-timer-was-active", "stats-inventory-sync.timer"),
+                   ("stats-billing-timer-was-active", "stats-billing-mirror.timer"),
+                   ("stats-hardware-timer-was-active", "stats-hardware-verifier.timer"))
+
+
+def pricing_machinery() -> list[str]:
+    """The installed pricing recovery set that must survive deploy recovery
+    byte-for-byte: the helper, the shell guard, the closer unit, the recovery
+    unit (both ExecStart lines) and the guard drop-in (Wants= the closer)."""
+    return [os.path.join(ROOT, "coordinator-pricing-recover"),
+            os.path.join(ROOT, "coordinator-config-guard.sh"),
+            os.path.join(SYSTEMD_ROOT, "macprovider-coordinator-pricing-close.service"),
+            os.path.join(SYSTEMD_ROOT, "macprovider-coordinator-deploy-recovery.service"),
+            os.path.join(SYSTEMD_ROOT, "macprovider-coordinator.service.d", "10-deploy-transaction-guard.conf")]
+
+
+def file_sha(path: str) -> str | None:
+    try:
+        with open(path, "rb") as fh:
+            return sha256(fh.read(MAX_FILE + 1))
+    except FileNotFoundError:
+        return None
+
+
+def coordinator_running() -> str | None:
+    """None when the coordinator unit is stopped; otherwise its state."""
+    state = systemctl_show("ActiveState")
+    if state not in ("inactive", "failed"):
+        return f"{UNIT} ActiveState={state or 'unknown'}"
+    pid = coordinator_pid()
+    if pid:
+        return f"{UNIT} MainPID={pid}"
+    return None
+
+
+def snapshot_tuple(j: Journal) -> tuple[str, list[str]]:
+    """Validate the deploy rollback snapshot against the journal. Returns the
+    one journal side (prior|candidate) the snapshot restores coherently, and
+    the sidecar timers it recorded as active. Refused on anything else."""
+    path = os.path.join(ROOT, ROLLBACK_NAME)
+    try:
+        snap_fd = open_dir(path)
+    except FileNotFoundError:
+        raise Refused(f"no deploy rollback snapshot at {path}; nothing to resolve") from None
+    except OSError as exc:
+        raise Refused(f"deploy rollback snapshot {path} cannot be opened safely: {exc}") from exc
+    try:
+        def has(name: str) -> bool:
+            return stat_at(snap_fd, name) is not None
+
+        def need(name: str) -> bytes:
+            data = read_at(snap_fd, name)
+            if data is None:
+                raise Refused(f"deploy rollback snapshot lacks {name}")
+            return data
+
+        if not has("complete"):
+            raise Refused("deploy rollback snapshot is incomplete; preserve it and escalate")
+        if has("committed"):
+            raise Refused("deploy rollback snapshot is committed (deploy pre-start only removes it); "
+                          "not a conflict: start the coordinator")
+        if not has("had-config"):
+            raise Refused("deploy rollback snapshot restores no coordinator.yaml")
+        yaml_sha = sha256(need("coordinator.yaml"))
+        target = need("catalog-current-target").decode("utf-8", "replace").rstrip("\n")
+        window = need("catalog-previous-target") if has("had-previous-target") else None
+        window_sha = None if window is None else sha256(window)
+        overlay = need("coordinator.pearl-overlays.yaml") if has("had-overlay") else None
+        snap_overlay = {"present": overlay is not None, "sha256": "" if overlay is None else sha256(overlay)}
+        if snap_overlay != j.txn["overlay"]:
+            raise Refused("the snapshot's overlay is not the journal's overlay")
+        if has("release-was-absent"):
+            removed = "releases/" + need("release-id").decode("utf-8", "replace").strip()
+            if removed in (j.txn["prior"]["current"], j.txn["candidate"]["current"]):
+                raise Refused(f"deploy recovery would delete {removed}, a release the journal names")
+        allowed = [TERMINAL[j.phase]] if j.phase in TERMINAL else ["prior", "candidate"]
+        matches = []
+        for side in allowed:
+            s = j.txn[side]
+            want = (s["yaml_sha256"], s["current"], s["window"]["sha256"] if s["window"]["present"] else None)
+            if (yaml_sha, target, window_sha) == want:
+                matches.append(side)
+        if len(matches) != 1:
+            raise Refused(f"the snapshot (yaml {yaml_sha[:12]}, current {target!r}, window "
+                          f"{(window_sha or 'absent')[:12]}) is not one coherent journal pair "
+                          f"({' or '.join(allowed)}, journal phase {j.phase}); mixed or foreign: nothing changed")
+        # Deploy recovery restores these with `cp -p`: their owner/mode become
+        # live. A pair the service user cannot read (or anyone can write) is
+        # not the journal's pair; refuse rather than normalize it.
+        yaml_meta = meta_of(stat_at(snap_fd, "coordinator.yaml"))
+        if yaml_meta != prior_yaml_meta(j):
+            raise Refused(f"the snapshot's coordinator.yaml owner/mode {yaml_meta} is not the journal's "
+                          f"{prior_yaml_meta(j)}; deploy recovery would install it as is: nothing changed")
+        if window is not None:
+            window_meta = meta_of(stat_at(snap_fd, "catalog-previous-target"))
+            ok = (window_meta == prior_window_meta(j)) if matches[0] == "prior" else candidate_window_meta_ok(window_meta)
+            if not ok:
+                raise Refused(f"the snapshot's .previous-target owner/mode {window_meta} is not the journal's "
+                              f"{matches[0]} window's; deploy recovery would install it as is: nothing changed")
+        if not has("had-coordinator"):
+            raise Refused("deploy rollback snapshot restores no coordinator binary")
+        if not runtime_supports_pricing(os.path.join(path, "coordinator")):
+            raise Refused("the snapshot's coordinator binary lacks per-generation wholesale pricing "
+                          "(--validate-autotune-release --expect-base-equivalent); it must not run after pricing")
+        sidecars = [unit for marker, unit in SIDECAR_MARKERS if has(marker)]
+        return matches[0], sidecars
+    finally:
+        os.close(snap_fd)
+
+
+def _interrupt(signum, _frame):
+    raise Interrupted(signal.Signals(signum).name)
+
+
+def rename_in_root(src: str, dst: str) -> None:
+    root_fd = open_dir(ROOT)
+    try:
+        if stat_at(root_fd, dst) is not None:
+            raise Stop(f"{os.path.join(ROOT, dst)} already exists")
+        os.rename(src, dst, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        os.fsync(root_fd)
+    finally:
+        os.close(root_fd)
+
+
+def run_deploy_recover_with_journal_set_aside(fds: list[int]) -> tuple[int, str | None]:
+    """The critical section: set the journal aside, run deploy recovery under
+    the lock set this process holds (its descriptors are inherited, so deploy
+    recovery never re-takes them), and put the journal back on every exit path.
+    Termination signals are blocked around both renames; one during deploy
+    recovery terminates its process group first. Returns (rc, signal name)."""
+    held = HELD_PREFIX + self_tag()
+    interrupted = None
+    rc = 1
+    previous = {sig: signal.signal(sig, _interrupt) for sig in SIGNALS}
+    signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
+    try:
+        rename_in_root(JOURNAL_NAME, held)
+        log(f"journal set aside as {os.path.join(ROOT, held)} for deploy recovery")
+        proc = None
+        try:
+            try:
+                # Started with signals still blocked here (so `proc` always
+                # names it) and unblocked in the child before exec.
+                proc = subprocess.Popen([DEPLOY_RECOVER, "--recover-under-global"], pass_fds=tuple(fds),
+                                        stdin=subprocess.DEVNULL, start_new_session=True,
+                                        preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_UNBLOCK, SIGNALS))
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, SIGNALS)
+                rc = proc.wait()
+            except Interrupted as exc:
+                signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
+                interrupted = str(exc)
+                if proc is not None and proc.poll() is None:
+                    log(f"{interrupted}: stopping deploy recovery (pid {proc.pid})")
+                    try:
+                        os.killpg(proc.pid, signal.SIGTERM)
+                        proc.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                        proc.wait()
+                    except ProcessLookupError:
+                        proc.wait()
+            except OSError as exc:
+                log(f"cannot run {DEPLOY_RECOVER}: {exc}")
+                rc = 127
+        finally:
+            signal.pthread_sigmask(signal.SIG_BLOCK, SIGNALS)
+            try:
+                rename_in_root(held, JOURNAL_NAME)
+            except (OSError, Stop) as exc:
+                raise Stop(f"CANNOT restore the pricing journal from {os.path.join(ROOT, held)} ({exc}); "
+                           f"every writer is unguarded until it is back at {JOURNAL}") from exc
+            log(f"journal restored at {JOURNAL}")
+    finally:
+        try:
+            signal.pthread_sigmask(signal.SIG_UNBLOCK, SIGNALS)
+        except Interrupted as exc:
+            interrupted = interrupted or str(exc)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    return rc, interrupted
+
+
+def cmd_resolve_deploy_conflict() -> int:
+    fds = take_locks(0)
+    if fds is None:
+        raise Refused("the lock set (updater lock, coordinator deploy lock) is held; find the holder first")
+    j = None
+    try:
+        cleanup_tmp()
+        j = need_journal()
+        running = coordinator_running()
+        if running:
+            raise Refused(f"the coordinator must be stopped ({running}); this command never starts it")
+        side, sidecars = snapshot_tuple(j)
+        before = {path: file_sha(path) for path in pricing_machinery()}
+        missing = [path for path, digest in before.items() if digest is None]
+        if missing:
+            raise Refused(f"pricing recovery files are not installed: {', '.join(missing)}")
+        if not os.access(DEPLOY_RECOVER, os.X_OK):
+            raise Refused(f"{DEPLOY_RECOVER} is not executable")
+        log(f"journal {j.txn['id']} ({j.phase}); the deploy snapshot restores the journal's {side} pair")
+
+        rc, interrupted = run_deploy_recover_with_journal_set_aside(fds)
+        if interrupted:
+            raise Stop(f"interrupted ({interrupted}); deploy recovery stopped, journal restored; the snapshot is "
+                       f"kept unless deploy recovery had finished: rerun --resolve-deploy-conflict ({RUNBOOK_CONFLICT})")
+        if rc != 0:
+            raise Stop(f"coordinator-deploy-recover --recover-under-global failed (rc={rc}); journal restored, "
+                       f"snapshot kept: fix the cause it logged, then rerun ({RUNBOOK_CONFLICT})")
+        running = coordinator_running()
+        if running:
+            raise Stop(f"the coordinator started during deploy recovery ({running}); stop it ({RUNBOOK_CONFLICT})")
+        try:
+            check_state(j, side)
+        except Mismatch as exc:
+            raise Stop(f"after deploy recovery the disk is not the journal's {side} pair: {exc} "
+                       f"({RUNBOOK_CONFLICT})") from exc
+        if not runtime_supports_pricing(os.path.join(ROOT, "coordinator")):
+            raise Stop(f"the restored {os.path.join(ROOT, 'coordinator')} lacks per-generation wholesale pricing; "
+                       f"do not start it: install a #1693 coordinator binary first ({RUNBOOK_CONFLICT}, step 4)")
+        changed = [path for path, digest in before.items() if file_sha(path) != digest]
+        if changed:
+            raise Stop(f"deploy recovery changed pricing recovery files: {', '.join(changed)}; do not start the "
+                       f"coordinator: reinstall them from the reviewed tag ({RUNBOOK_CONFLICT}, step 4)")
+        print(json.dumps({"resolved": side, "journal": j.txn["id"], "phase": j.phase,
+                          "stopped_sidecar_timers": sidecars}))
+        log(f"deploy snapshot restored the journal's {side} pair; the journal is left for pricing recovery. "
+            "Start the coordinator (its pre-start recovers the journal) or run --recover-pricing-txn")
+        return 0
+    finally:
+        if j is not None:
+            j.close()
+        for fd in fds:
+            os.close(fd)
+
+
+def parse(argv: list[str], flags: tuple[str, ...]) -> dict:
+    out: dict = {}
+    i = 0
+    while i < len(argv):
+        if argv[i] not in flags or i + 1 >= len(argv):
+            raise Refused(f"unexpected argument {argv[i]!r}")
+        out[argv[i]] = argv[i + 1]
+        i += 2
+    return out
+
+
+def main(argv: list[str]) -> int:
+    if not argv:
+        raise Refused("usage: coordinator-pricing-recover <command> ...")
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "--pre-start":
+        return cmd_pre_start()
+    if cmd == "--resolve-deploy-conflict":
+        if rest:
+            raise Refused("--resolve-deploy-conflict takes no arguments")
+        return cmd_resolve_deploy_conflict()
+    if cmd == "--close-restored":
+        return cmd_close_restored(parse(rest, ("--wait-seconds", "--windows", "--lock-wait-seconds")))
+    if cmd in ("recover", "--recover"):
+        return cmd_recover(parse(rest, ("--verifier", "--wait-seconds", "--ready-seconds", "--tier2-trust-root",
+                                        "--tier2-trust-root-sha256")))
+    if cmd == "begin":
+        a = parse(rest, ("--candidate-yaml", "--new-current", "--prior-current", "--candidate-window", "--verdict",
+                         "--tier2-trust-root"))
+        if len(a) != 6:
+            raise Refused("begin needs --candidate-yaml --new-current --prior-current --candidate-window --verdict "
+                          "--tier2-trust-root")
+        return cmd_begin(a)
+    if cmd == "foreign-state":
+        problems = foreign_state(allow_journal="--allow-journal" in rest)
+        for p in problems:
+            print(p)
+        return 3 if problems else 0
+    if cmd == "cleanup-tmp":
+        cleanup_tmp()
+        return 0
+    if cmd == "status":
+        j = load_journal()
+        print(json.dumps(None if j is None else {"id": j.txn["id"], "phase": j.phase}))
+        return 0
+    j = need_journal()
+    try:
+        if cmd == "phase" and len(rest) == 1:
+            j.set_phase(rest[0])
+        elif cmd == "install-candidate" and not rest:
+            cmd_install_candidate(j)
+        elif cmd == "check-state" and rest and rest[0] in ("prior", "candidate"):
+            a = parse(rest[1:], ("--verifier", "--tier2-trust-root", "--tier2-trust-root-sha256"))
+            check_state(j, rest[0], a.get("--verifier"), trust_root_arg(a))
+        elif cmd == "restore-disk" and not rest:
+            restore_disk(j)
+        elif cmd == "hand-to-closer" and not rest:
+            # The lane's controlled restart after a rollback (#1693 E2 V8):
+            # the prior pair is already on disk, so stamp the restore exactly
+            # like a recovery with the coordinator down. The restart's closer
+            # then finalizes from the boot record however long the boot takes,
+            # also after the lane has given up on its own readiness budget.
+            if j.phase != "rolling-back":
+                raise Refused(f"hand-to-closer needs phase rolling-back, journal is {j.phase}")
+            check_state(j, "prior")
+            j.txn["restore"] = restore_stamp()
+            j.set_phase("restored-unverified")
+        elif cmd == "verify-live" and rest and rest[0] in ("prior", "candidate"):
+            a = parse(rest[1:], ("--since", "--source", "--snapshot-after", "--wait-seconds", "--ready-seconds"))
+            # A booting coordinator writes its record only once up: wait for
+            # readiness first (bounded), then for the record.
+            ready_pid(float(a.get("--ready-seconds", "0")))
+            why = wait_live(j, rest[0], float(a.get("--since", "0")), a.get("--source"),
+                            int(a.get("--snapshot-after", j.txn["verdict"]["prior_billing_snapshot_id"])),
+                            float(a.get("--wait-seconds", "30")))
+            if why is not None:
+                pid, not_ready = ready_pid(0)
+                if not pid:
+                    raise NotReady(f"{rest[0]} pair not proven live yet: {why}; {not_ready}")
+                raise Mismatch(f"{rest[0]} pair not proven live: {why}")
+        elif cmd == "finalize" and len(rest) == 1 and rest[0] in ("prior", "candidate"):
+            want = "verified" if rest[0] == "candidate" else "rolled-back"
+            if j.phase != want:
+                raise Refused(f"finalize {rest[0]} needs phase {want}, journal is {j.phase}")
+            check_state(j, rest[0])
+            j.finalize()
+        else:
+            raise Refused(f"unknown command {cmd!r}")
+    finally:
+        j.close()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except Refused as exc:
+        log(f"refused: {exc}")
+        sys.exit(1)
+    except Mismatch as exc:
+        log(f"state mismatch: {exc}; journal kept; follow {RUNBOOK}")
+        sys.exit(3)
+    except NotReady as exc:
+        log(f"coordinator not ready: {exc}; journal kept (not a foreign write): once {UNIT} serves /healthz run "
+            f"scripts/catalog-content-release.sh --recover-pricing-txn; follow {RUNBOOK}")
+        sys.exit(4)
+    except Stop as exc:
+        log(f"STOP: {exc}; journal kept; follow {RUNBOOK}")
+        sys.exit(5)

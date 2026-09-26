@@ -16,13 +16,17 @@ import (
 
 func TestGenerateWholesaleStatementPaidVersusFreeSKU(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
-	store.SetWholesalePricing(RewardsConfig{
+	rewards := RewardsConfig{
 		GlobalMultiplier: 1,
 		ProviderShare:    0.90,
 		RateCard: map[string]RateCardEntry{
 			"meta-llama/llama-3.2-3b-instruct": {PromptCreditsPerMtok: 13500, CompletionCreditsPerMtok: 27000},
 		},
-	}, 1.0)
+	}
+	store.SetWholesalePricing(1.0)
+	if _, err := store.InsertConfigSnapshot(context.Background(), rewards, time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
 
 	paidModel := "mlx-community/Llama-3.2-3B-Instruct-4bit"
 	freeModel := "mlx-community/Llama-3.2-3B-Instruct-4bit-free"
@@ -45,12 +49,12 @@ func TestGenerateWholesaleStatementPaidVersusFreeSKU(t *testing.T) {
 	}
 
 	paidBilled := ComputeCredits(&prompt, &completion, nil, UsageProviderReported, FaultNone,
-		RateFor(store.wholesaleRewards.RateCard, paidModel), ParseMultiplierPPM(1), ParseShareBps(0.90))
+		RateFor(rewards.RateCard, paidModel), ParseMultiplierPPM(1), ParseShareBps(0.90))
 	if paidBilled.ProviderCredits <= 0 || paidBilled.GrossCredits <= 0 {
 		t.Fatalf("paid ComputeCredits=%+v", paidBilled)
 	}
 	freeBilled := ComputeCredits(&prompt, &completion, nil, UsageProviderReported, FaultNone,
-		RateFor(store.wholesaleRewards.RateCard, freeModel), ParseMultiplierPPM(1), ParseShareBps(0.90))
+		RateFor(rewards.RateCard, freeModel), ParseMultiplierPPM(1), ParseShareBps(0.90))
 	if freeBilled.ProviderCredits != paidBilled.ProviderCredits {
 		t.Fatalf("free SKU must still earn provider credits: free=%d paid=%d", freeBilled.ProviderCredits, paidBilled.ProviderCredits)
 	}
@@ -134,7 +138,10 @@ func TestWholesaleStatementRetriesTransientStorePressure(t *testing.T) {
 
 func TestWholesaleStatementAdminExport(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
-	store.SetWholesalePricing(testRewards(), 1.0)
+	store.SetWholesalePricing(1.0)
+	if _, err := store.InsertConfigSnapshot(context.Background(), testRewards(), time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
 	prompt, completion := int64(100), int64(50)
 	if err := reqStore.Insert(context.Background(), requestlog.Row{
 		TSUtc: time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC), RequestID: "req-admin-ws",

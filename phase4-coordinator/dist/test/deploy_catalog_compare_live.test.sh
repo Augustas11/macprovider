@@ -372,6 +372,43 @@ change_content "$ROOT/autotune/releases/newer-live"
 run_deploy_slice "$(printf '%s' "$reason" | base64 | tr -d '\n')" || { cat "$TMP/out" >&2; fail "second override must proceed"; }
 [ "$(wc -l < "$log" | tr -d ' ')" = "2" ] || fail "override log must be append-only"
 
+# #1693 E2: after a pricing correction (floor marker present) the override must
+# not roll prices back. A live release whose rate rows differ from the tag's
+# (a pricing correction the tag predates) refuses; the remedy is a tag at or
+# after the live release's commit. Rows equal (only other content differs) or
+# no floor: the override still works.
+price_move() { # rewrite one rate row, re-stamp generated_at like a pricing release
+  python3 - "$1/rate-card.json" <<'PY2'
+import json, sys
+o = json.load(open(sys.argv[1]))
+o["rows"]["default"]["prompt_rate_per_mtok"] += 1
+o["generated_at"] = "2026-10-02T00:00:00Z"
+open(sys.argv[1], "w").write(json.dumps(o))
+PY2
+}
+reset
+live_release priced-live
+price_move "$ROOT/autotune/releases/priced-live"
+printf 'commit=%s\nwritten_at=2026-10-02T00:00:00Z\n' "$(printf 'c%.0s' $(seq 40))" >"$ROOT/.pricing-runtime-floor"
+if run_deploy_slice "$(printf '%s' "$reason" | base64 | tr -d '\n')"; then fail "the override must refuse to move prices after the pricing runtime floor"; fi
+grep -q "refusing CATALOG_REGRESSION_OVERRIDE_REASON: the pricing runtime floor exists" "$TMP/out" || { cat "$TMP/out" >&2; fail "the price-moving override refusal must say why"; }
+grep -q 'tag at or after the live release' "$TMP/out" || fail "the refusal must name the remedy"
+[ "$(current_target)" = "releases/priced-live" ] || fail "a refused override must not touch current"
+[ ! -e "$VAR/catalog-window-overrides.jsonl" ] || fail "a refused override must not be logged as used"
+# Same floor, rows equal (a content-only regression): the override proceeds.
+reset
+live_release newer-live
+change_content "$ROOT/autotune/releases/newer-live"
+touch "$ROOT/.pricing-runtime-floor"
+run_deploy_slice "$(printf '%s' "$reason" | base64 | tr -d '\n')" || { cat "$TMP/out" >&2; fail "a content-only override after the floor must proceed"; }
+[ "$(current_target)" = "releases/$INCOMING_DIR" ] || fail "a content-only override after the floor must activate"
+# No floor: price rows may differ (pre-#1693 override semantics).
+reset
+live_release priced-live
+price_move "$ROOT/autotune/releases/priced-live"
+run_deploy_slice "$(printf '%s' "$reason" | base64 | tr -d '\n')" || { cat "$TMP/out" >&2; fail "without the floor the override must proceed"; }
+[ "$(current_target)" = "releases/$INCOMING_DIR" ] || fail "without the floor the override must activate"
+
 # --- The live release passes verify-directory before it is classified --------
 reset
 live_release renewed-live
