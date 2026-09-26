@@ -297,7 +297,9 @@ def main() -> None:
     settlement = {
         "verified": True, "request_id": args.request_id, "provider_id": PROVIDER_ID,
         "model_id": MODEL_ID, "catalog_key": CATALOG_KEY, "artifact_hash": ARTIFACT_HASH,
-        "hardware_context_id": hardware_context_id, "attempt_n": route["attempt_n"], "usage": usage,
+        "hardware_context_id": hardware_context_id,
+        "route_snapshot_digest": validator._jcs_sha256(route),
+        "attempt_n": route["attempt_n"], "usage": usage,
         "cached_billable_input_tokens": 0, "credits": ledger["gross_credits"],
         "provider_share_credits": ledger["provider_credits"], "rate": rate,
     }
@@ -308,6 +310,7 @@ def main() -> None:
         "provider_reported_model_hash": route["provider_reported_model_hash"],
         "expected_catalog_model_hash": route["expected_catalog_model_hash"],
         "catalog_id": route["catalog_id"], "catalog_body_digest": route["catalog_body_digest"],
+        "route_snapshot_digest": validator._jcs_sha256(route),
         "route_snapshot_mode": route["route_snapshot_mode"], "receipt_version": verdict["receipt_version"],
         "terminal_state": attempt["terminal_state"], "hardware_context_id": hardware_context_id,
         "usage": usage, "cached_billable_input_tokens": 0, "credits": ledger["gross_credits"],
