@@ -25,7 +25,7 @@
     "source": "operator_curated_autotune_candidate_catalog",
     "version": "test-release"
   },
-  "case_count": 56,
+  "case_count": 68,
   "cases": [
     {
       "expect": "accept",
@@ -1246,6 +1246,154 @@
       "spec": "\u00a73.7.3 \u2014 whole-string anchoring in every consumer"
     },
     {
+      "expect": "accept",
+      "name": "gguf huggingface_revision accepts a top-level file_path",
+      "ops": [
+        {
+          "op": "set",
+          "path": ["models", "test-model", "artifacts", "gguf-q4", "source_ref", "file_path"],
+          "value": "Test-Model-Q4_K_M.gguf"
+        }
+      ],
+      "spec": "\u00a73.7.4 v0.16.0 file_path"
+    },
+    {
+      "expect": "accept",
+      "name": "gguf huggingface_revision accepts a nested file_path",
+      "ops": [
+        {
+          "op": "set",
+          "path": ["models", "test-model", "artifacts", "gguf-q4", "source_ref", "file_path"],
+          "value": "nested/Test-Model-Q4_K_M.gguf"
+        }
+      ],
+      "spec": "\u00a73.7.4 v0.16.0 file_path"
+    },
+    {
+      "expect": "reject",
+      "name": "gguf huggingface_revision requires file_path",
+      "ops": [
+        {
+          "op": "delete",
+          "path": ["models", "test-model", "artifacts", "gguf-q4", "source_ref", "file_path"]
+        }
+      ],
+      "spec": "\u00a73.7.4 v0.16.0 file_path"
+    },
+    {
+      "expect": "reject",
+      "name": "gguf huggingface_revision rejects an absolute file_path",
+      "ops": [
+        {
+          "op": "set",
+          "path": ["models", "test-model", "artifacts", "gguf-q4", "source_ref", "file_path"],
+          "value": "/Test-Model-Q4_K_M.gguf"
+        }
+      ],
+      "spec": "\u00a73.7.4 v0.16.0 file_path"
+    },
+    {
+      "expect": "reject",
+      "name": "gguf huggingface_revision rejects a dot segment",
+      "ops": [
+        {
+          "op": "set",
+          "path": ["models", "test-model", "artifacts", "gguf-q4", "source_ref", "file_path"],
+          "value": "./Test-Model-Q4_K_M.gguf"
+        }
+      ],
+      "spec": "\u00a73.7.4 v0.16.0 file_path"
+    },
+    {
+      "expect": "reject",
+      "name": "gguf huggingface_revision rejects a dot-dot segment",
+      "ops": [
+        {
+          "op": "set",
+          "path": ["models", "test-model", "artifacts", "gguf-q4", "source_ref", "file_path"],
+          "value": "nested/../Test-Model-Q4_K_M.gguf"
+        }
+      ],
+      "spec": "\u00a73.7.4 v0.16.0 file_path"
+    },
+    {
+      "expect": "reject",
+      "name": "gguf huggingface_revision requires a gguf extension",
+      "ops": [
+        {
+          "op": "set",
+          "path": ["models", "test-model", "artifacts", "gguf-q4", "source_ref", "file_path"],
+          "value": "Test-Model-Q4_K_M.bin"
+        }
+      ],
+      "spec": "\u00a73.7.4 v0.16.0 file_path"
+    },
+    {
+      "expect": "reject",
+      "name": "gguf huggingface_revision limits file_path to 255 bytes",
+      "ops": [
+        {
+          "op": "set",
+          "path": ["models", "test-model", "artifacts", "gguf-q4", "source_ref", "file_path"],
+          "value": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.gguf"
+        }
+      ],
+      "spec": "\u00a73.7.4 v0.16.0 file_path"
+    },
+    {
+      "expect": "reject",
+      "name": "gguf huggingface_revision forbids digest",
+      "ops": [
+        {
+          "op": "set",
+          "path": ["models", "test-model", "artifacts", "gguf-q4", "source_ref", "digest"],
+          "value": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+        }
+      ],
+      "spec": "\u00a73.7.4 closed source_ref"
+    },
+    {
+      "expect": "reject",
+      "name": "gguf huggingface_revision forbids library_tag",
+      "ops": [
+        {
+          "op": "set",
+          "path": ["models", "test-model", "artifacts", "gguf-q4", "source_ref", "library_tag"],
+          "value": "test-model:q4_k_m"
+        }
+      ],
+      "spec": "\u00a73.7.4 closed source_ref"
+    },
+    {
+      "expect": "reject",
+      "name": "ollama_library_tag forbids file_path",
+      "ops": [
+        {
+          "op": "set",
+          "path": ["models", "test-model", "artifacts", "gguf-q4", "source_ref"],
+          "value": {
+            "digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            "file_path": "Test-Model-Q4_K_M.gguf",
+            "kind": "ollama_library_tag",
+            "library_tag": "test-model:q4_k_m"
+          }
+        }
+      ],
+      "spec": "\u00a73.7.4 closed source_ref"
+    },
+    {
+      "expect": "reject",
+      "name": "mlx_safetensors huggingface_revision forbids file_path",
+      "ops": [
+        {
+          "op": "set",
+          "path": ["models", "test-model", "artifacts", "mlx-4bit", "source_ref", "file_path"],
+          "value": "model.gguf"
+        }
+      ],
+      "spec": "\u00a73.7.4 closed source_ref"
+    },
+    {
       "expect": "reject",
       "name": "generated_at with a trailing newline",
       "ops": [
@@ -1284,6 +1432,25 @@
             },
             "verification_status": "verified",
             "verified_at": "2026-09-01"
+          },
+          "gguf-q4": {
+            "allowed_runtime_sources": [
+              "llamacpp_loopback"
+            ],
+            "hash": "4444444444444444444444444444444444444444444444444444444444444444",
+            "hash_algorithm": "macprovider.gguf-file.v1",
+            "min_ram_gb": 4,
+            "quantization": "q4_k_m",
+            "runtime_format": "gguf",
+            "size_bytes": 654321,
+            "source_ref": {
+              "file_path": "Test-Model-Q4_K_M.gguf",
+              "kind": "huggingface_revision",
+              "repo_id": "bartowski/Test-Model-GGUF",
+              "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            },
+            "verification_status": "verified",
+            "verified_at": "2026-09-25"
           }
         },
         "primary_artifact_id": "mlx-4bit",

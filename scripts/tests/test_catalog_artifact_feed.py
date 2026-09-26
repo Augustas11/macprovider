@@ -99,8 +99,7 @@ CANDIDATE_OBJ = catalog_release.validate_candidate(CANDIDATE_BYTES)
 NORMALIZE_CASES_PATH = ROOT / "scripts" / "tests" / "fixtures" / "normalize_model_key_cases.json"
 ROUNDING_CASES_PATH = ROOT / "scripts" / "tests" / "fixtures" / "rate_global_rounding_cases.json"
 
-# A fixture-only measured size; the committed source deliberately carries
-# `size_bytes: null` until an operator measures each snapshot.
+# A fixture-only measured size used when a test needs uniform synthetic values.
 FIXTURE_SIZE_BYTES = 4_900_000_000
 GGUF_HASH = "b" * 64
 
@@ -148,6 +147,18 @@ def gguf_artifact(hash_hex: str = GGUF_HASH) -> dict:
         "verification_status": "declared",
         "verified_at": None,
     }
+
+
+def huggingface_gguf_artifact(file_path: str = "Test-Model-Q4_K_M.gguf") -> dict:
+    artifact = gguf_artifact()
+    artifact["source_ref"] = {
+        "kind": "huggingface_revision",
+        "repo_id": "bartowski/Test-Model-GGUF",
+        "revision": "5ab33fa94d1d04e903623ae72c95d1696f09f9e8",
+        "file_path": file_path,
+    }
+    artifact["allowed_runtime_sources"] = ["llamacpp_loopback"]
+    return artifact
 
 
 class ArtifactFeedValidationTest(unittest.TestCase):
@@ -330,21 +341,43 @@ class ArtifactFeedValidationTest(unittest.TestCase):
 
     def test_generator_refuses_mlxlm_loopback_below_the_consumer_floor(self):
         # SPEC-023 v0.17.1 rollout gate (#1690 M8 audit R1 ARCH M1).
-        models = {"qwen3-8b": {"artifacts": {"mlx-4bit": {"allowed_runtime_sources": ["mlx_cache", "mlxlm_loopback"]}}}}
+        models = {"qwen3-8b": {"artifacts": {"mlx-4bit": {
+            "runtime_format": "mlx_safetensors",
+            "source_ref": {"kind": "huggingface_revision"},
+            "allowed_runtime_sources": ["mlx_cache", "mlxlm_loopback"],
+        }}}}
         with self.assertRaises(catalog_release.CatalogError) as caught:
             catalog_release.require_feed_consumer_floor(models)
         self.assertIn("consumer floor", str(caught.exception))
         catalog_release.require_feed_consumer_floor(models, floor=(0, 17, 0))
-        native = {"qwen3-8b": {"artifacts": {"mlx-4bit": {"allowed_runtime_sources": ["mlx_cache"]}}}}
+        native = {"qwen3-8b": {"artifacts": {"mlx-4bit": {
+            "runtime_format": "mlx_safetensors",
+            "source_ref": {"kind": "huggingface_revision"},
+            "allowed_runtime_sources": ["mlx_cache"],
+        }}}}
         catalog_release.require_feed_consumer_floor(native)
         self.assertEqual(catalog_release.ARTIFACT_FEED_CONSUMER_FLOOR, (0, 16, 0))
 
     def test_generator_refuses_omlx_loopback_below_the_consumer_floor(self):
         # SPEC-023 v0.19.0 rollout gate (#1690 M9): the same rule as mlxlm.
-        models = {"qwen3-8b": {"artifacts": {"mlx-4bit": {"allowed_runtime_sources": ["mlx_cache", "omlx_loopback"]}}}}
+        models = {"qwen3-8b": {"artifacts": {"mlx-4bit": {
+            "runtime_format": "mlx_safetensors",
+            "source_ref": {"kind": "huggingface_revision"},
+            "allowed_runtime_sources": ["mlx_cache", "omlx_loopback"],
+        }}}}
         with self.assertRaises(catalog_release.CatalogError):
             catalog_release.require_feed_consumer_floor(models, floor=(0, 17, 0))
-        catalog_release.require_feed_consumer_floor(models, floor=(0, 18, 0))
+        with self.assertRaises(catalog_release.CatalogError):
+            catalog_release.require_feed_consumer_floor(models, floor=(0, 18, 0))
+        catalog_release.require_feed_consumer_floor(models, floor=(0, 19, 0))
+
+    def test_generator_refuses_huggingface_gguf_below_its_source_kind_floor(self):
+        artifact = huggingface_gguf_artifact()
+        models = {"qwen3-8b": {"artifacts": {"gguf-q4-k-m": artifact}}}
+        with self.assertRaises(catalog_release.CatalogError) as caught:
+            catalog_release.require_feed_consumer_floor(models, floor=(0, 15, 99))
+        self.assertIn("source_ref.kind", str(caught.exception))
+        catalog_release.require_feed_consumer_floor(models, floor=(0, 16, 0))
 
     def test_mlx_artifact_may_allow_omlx_loopback(self):
         # SPEC-023 v0.19.0 / SPEC-010 1.14 R009 (#1690 M9).
@@ -374,13 +407,6 @@ class ArtifactFeedValidationTest(unittest.TestCase):
             "gguf allowing mlx_cache": {"allowed_runtime_sources": ["mlx_cache"]},
             "gguf allowing mlxlm_loopback": {"allowed_runtime_sources": ["mlxlm_loopback"]},
             "gguf allowing omlx_loopback": {"allowed_runtime_sources": ["omlx_loopback"]},
-            "gguf with a huggingface source_ref": {
-                "source_ref": {
-                    "kind": "huggingface_revision",
-                    "repo_id": "mlx-community/Qwen3-8B-4bit",
-                    "revision": "545dc4251c05440727734bcd94334791f6ab0192",
-                }
-            },
             "unknown runtime_format": {"runtime_format": "onnx"},
         }
         for label, patch in gguf_cases.items():
@@ -390,6 +416,43 @@ class ArtifactFeedValidationTest(unittest.TestCase):
                 artifact.update(patch)
                 feed["models"]["qwen3-8b"]["artifacts"]["gguf-q4-k-m"] = artifact
                 self.rejects(feed)
+
+    def test_huggingface_gguf_file_path_contract(self):
+        for path in ("Test-Model-Q4_K_M.gguf", "nested/Test-Model-Q4_K_M.gguf"):
+            with self.subTest(accept=path):
+                feed = feed_from(artifact_source())
+                feed["models"]["qwen3-8b"]["artifacts"]["gguf-q4-k-m"] = huggingface_gguf_artifact(path)
+                self.validate(feed)
+
+        for path in (
+            "/Test-Model-Q4_K_M.gguf",
+            "./Test-Model-Q4_K_M.gguf",
+            "nested/../Test-Model-Q4_K_M.gguf",
+            "Test-Model-Q4_K_M.bin",
+            "a" * 251 + ".gguf",
+        ):
+            with self.subTest(reject=path[:32]):
+                feed = feed_from(artifact_source())
+                feed["models"]["qwen3-8b"]["artifacts"]["gguf-q4-k-m"] = huggingface_gguf_artifact(path)
+                self.assertIn("file_path", self.rejects(feed))
+
+        for forbidden in ("digest", "library_tag"):
+            with self.subTest(forbidden=forbidden):
+                feed = feed_from(artifact_source())
+                artifact = huggingface_gguf_artifact()
+                artifact["source_ref"][forbidden] = "sha256:" + GGUF_HASH if forbidden == "digest" else "test:q4"
+                feed["models"]["qwen3-8b"]["artifacts"]["gguf-q4-k-m"] = artifact
+                self.assertIn("unknown fields", self.rejects(feed))
+
+        feed = feed_from(artifact_source())
+        artifact = gguf_artifact()
+        artifact["source_ref"]["file_path"] = "Test-Model-Q4_K_M.gguf"
+        feed["models"]["qwen3-8b"]["artifacts"]["gguf-q4-k-m"] = artifact
+        self.assertIn("unknown fields", self.rejects(feed))
+
+        feed = feed_from(artifact_source())
+        feed["models"]["qwen3-8b"]["artifacts"]["mlx-4bit"]["source_ref"]["file_path"] = "model.gguf"
+        self.assertIn("unknown fields", self.rejects(feed))
 
     def test_verified_artifact_may_not_allow_openai_compatible_loopback(self):
         feed = feed_from(artifact_source())
@@ -479,8 +542,10 @@ class ArtifactSourceTest(unittest.TestCase):
         for key, model in source["models"].items():
             primary = model["artifacts"][model["primary_artifact_id"]]
             self.assertEqual(primary["hash"], CANDIDATE_OBJ["rows"][key]["model_sha256"])
-            self.assertIsNone(primary["size_bytes"], "seeded sizes await an operator measurement")
-            self.assertEqual(len(model["artifacts"]), 1, "no GGUF artifacts are seeded yet")
+            self.assertGreater(primary["size_bytes"], 0)
+        gguf = source["models"]["meta-llama/llama-3.2-3b-instruct"]["artifacts"]["gguf-q4-k-m"]
+        self.assertEqual(gguf["hash"], "6c1a2b41161032677be168d354123594c0e6e67d2b9227c84f296ad037c728ff")
+        self.assertEqual(gguf["source_ref"]["file_path"], "Llama-3.2-3B-Instruct-Q4_K_M.gguf")
 
     def test_source_schema_is_closed(self):
         base = json.loads(ARTIFACT_SOURCE_BYTES)
@@ -497,7 +562,9 @@ class ArtifactSourceTest(unittest.TestCase):
                     catalog_release.validate_artifact_source(canonical(value), CANDIDATE_OBJ)
 
     def test_generation_fails_closed_on_an_unmeasured_artifact(self):
-        source = catalog_release.validate_artifact_source(ARTIFACT_SOURCE_BYTES, CANDIDATE_OBJ)
+        source_obj = json.loads(ARTIFACT_SOURCE_BYTES)
+        source_obj["models"]["qwen3-8b"]["artifacts"]["mlx-4bit"]["size_bytes"] = None
+        source = catalog_release.validate_artifact_source(canonical(source_obj), CANDIDATE_OBJ)
         with self.assertRaises(catalog_release.CatalogError) as caught:
             catalog_release.build_artifact_feed(source, CANDIDATE_BYTES, CANDIDATE_OBJ)
         self.assertIn("size_bytes must be measured", str(caught.exception))
@@ -2246,6 +2313,12 @@ class HermeticRelease:
                 artifact["size_bytes"] = FIXTURE_SIZE_BYTES
         path.write_bytes(canonical(source))
 
+    def unmeasure_one_size(self) -> None:
+        path = self.catalog / "autotune-artifacts-source.json"
+        source = json.loads(path.read_text())
+        source["models"]["qwen3-8b"]["artifacts"]["mlx-4bit"]["size_bytes"] = None
+        path.write_bytes(canonical(source))
+
     def bump(self, release_id: str, generated_at: str) -> None:
         for name in ("autotune-candidates.json", "demand-rank.json"):
             path = self.catalog / name
@@ -2328,10 +2401,9 @@ class HermeticReleaseTest(unittest.TestCase):
             with HermeticRelease(pathlib.Path(raw) / "repo", self.openssl) as harness:
                 yield harness
 
-    def test_four_feed_release_is_unaffected_by_the_committed_unmeasured_source(self):
-        """The regression the committed source introduced: `resign` and the
-        scheduled freshness renewal both call `generate` unconditionally, and a
-        source-presence trigger made them fail on `size_bytes: null`."""
+    def test_four_feed_release_is_unaffected_by_the_committed_source(self):
+        """A committed source alone must not implicitly activate the fifth feed:
+        `resign` and scheduled freshness renewal call `generate` unconditionally."""
         with self.harness() as harness:
             self.assertTrue((harness.catalog / "autotune-artifacts-source.json").exists())
             harness.bump("published-2026-09-26-renewal-v1", "2026-09-26T00:00:00Z")
@@ -2447,6 +2519,7 @@ class HermeticReleaseTest(unittest.TestCase):
 
     def test_activation_is_refused_while_a_prerequisite_is_unmet(self):
         with self.harness() as harness:
+            harness.unmeasure_one_size()
             harness.bump("published-2026-09-26-activation-v1", "2026-09-26T00:00:00Z")
             with self.assertRaises(catalog_release.CatalogError) as caught:
                 catalog_release.generate(harness.KEY_ID, activate_artifact_feed=True)

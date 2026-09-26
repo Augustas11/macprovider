@@ -99,16 +99,17 @@ COORDINATOR_RATE_FIELD_MAP = {
 SNAPSHOT_MANIFEST_ALG = "macprovider.snapshot-manifest.v1"
 GGUF_FILE_ALG = "macprovider.gguf-file.v1"
 # SPEC-023 §3.7.4 closed artifact-identity matrix: runtime_format determines the
-# only legal hash_algorithm, source_ref.kind, and allowed_runtime_sources set.
+# only legal hash_algorithm, source_ref.kind set, and allowed_runtime_sources set.
 ARTIFACT_IDENTITY_MATRIX = {
     # SPEC-023 v0.17.0: mlx_lm.server (mlxlm_loopback) serves the same snapshot;
     # v0.19.0 (#1690 M9): so does oMLX (omlx_loopback).
-    "mlx_safetensors": (SNAPSHOT_MANIFEST_ALG, "huggingface_revision", frozenset({"mlx_cache", "mlxlm_loopback", "omlx_loopback"})),
-    "gguf": (GGUF_FILE_ALG, "ollama_library_tag", frozenset({
+    "mlx_safetensors": (SNAPSHOT_MANIFEST_ALG, frozenset({"huggingface_revision"}), frozenset({"mlx_cache", "mlxlm_loopback", "omlx_loopback"})),
+    "gguf": (GGUF_FILE_ALG, frozenset({"ollama_library_tag", "huggingface_revision"}), frozenset({
         "ollama_loopback", "llamacpp_loopback", "lmstudio_loopback", "openai_compatible_loopback",
     })),
 }
 ARTIFACT_VERIFICATION_STATUSES = frozenset({"declared", "verified", "blocked"})
+GGUF_FILE_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*\.gguf$")
 # SPEC-023 v0.17.1 rollout gate: the oldest SPEC-023 consumer (provider CLI
 # and coordinator) that must read every feed this generator emits. A tuple
 # introduced by a later revision is refused at generation until this floor is
@@ -116,6 +117,9 @@ ARTIFACT_VERIFICATION_STATUSES = frozenset({"declared", "verified", "blocked"})
 ARTIFACT_FEED_CONSUMER_FLOOR = (0, 16, 0)
 # allowed_runtime_sources value -> the SPEC-023 revision that made it legal.
 ARTIFACT_RUNTIME_SOURCE_MIN_CONSUMER = {"mlxlm_loopback": (0, 17, 0), "omlx_loopback": (0, 19, 0)}
+# (runtime_format, source_ref.kind) -> the SPEC-023 revision that made the
+# source tuple legal. This is independent of allowed_runtime_sources floors.
+ARTIFACT_SOURCE_KIND_MIN_CONSUMER = {("gguf", "huggingface_revision"): (0, 16, 0)}
 # SPEC-005 §5.5 NormalizeModelKey parity (phase4-coordinator/internal/billing/formula.go).
 KNOWN_MODEL_NAMESPACES = frozenset({"mlx-community", "openai", "google", "meta-llama", "nvidia", "qwen"})
 TIER2_HASH_SCOPES = {
@@ -1625,23 +1629,38 @@ def cmd_extract_coordinator_rate_card_block(config: pathlib.Path, output: pathli
     }, sort_keys=True))
 
 
-def _validate_artifact_source_ref(entry: dict, expected_kind: str, label: str) -> None:
+def _validate_artifact_source_ref(entry: dict, expected_kinds: frozenset[str], label: str) -> None:
     ref = entry["source_ref"]
     if not isinstance(ref, dict):
         fail(f"{label}: source_ref must be an object")
     kind = ref.get("kind")
-    if kind != expected_kind:
+    if kind not in expected_kinds:
         fail(
             f"{label}: runtime_format {entry['runtime_format']!r} requires "
-            f"source_ref.kind {expected_kind!r}, not {kind!r}"
+            f"source_ref.kind in {sorted(expected_kinds)!r}, not {kind!r}"
         )
     if kind == "huggingface_revision":
         fields = {"kind", "repo_id", "revision"}
+        if entry["runtime_format"] == "gguf":
+            fields.add("file_path")
         exact_keys(ref, fields, fields, f"{label} source_ref")
         if not isinstance(ref["repo_id"], str) or not MODEL_ID.fullmatch(ref["repo_id"]):
             fail(f"{label}: source_ref.repo_id must be a HuggingFace repo id")
         if not isinstance(ref["revision"], str) or not HEX40.fullmatch(ref["revision"]):
             fail(f"{label}: source_ref.revision must be an immutable lowercase 40-hex commit")
+        if entry["runtime_format"] == "gguf":
+            file_path = ref["file_path"]
+            segments = file_path.split("/") if isinstance(file_path, str) else []
+            if (
+                not isinstance(file_path, str)
+                or len(file_path.encode("utf-8")) > 255
+                or not GGUF_FILE_PATH_PATTERN.fullmatch(file_path)
+                or any(segment in {".", ".."} for segment in segments)
+            ):
+                fail(
+                    f"{label}: gguf source_ref.file_path must be at most 255 UTF-8 bytes and match "
+                    "^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\\.gguf$ with no '.' or '..' segment"
+                )
     else:
         fields = {"kind", "library_tag", "digest"}
         exact_keys(ref, fields, fields, f"{label} source_ref")
@@ -1674,7 +1693,7 @@ def validate_artifact_entry(entry: object, label: str, *, allow_unmeasured_size:
     runtime_format = entry["runtime_format"]
     if runtime_format not in ARTIFACT_IDENTITY_MATRIX:
         fail(f"{label}: unknown runtime_format {runtime_format!r}")
-    algorithm, kind, sources = ARTIFACT_IDENTITY_MATRIX[runtime_format]
+    algorithm, kinds, sources = ARTIFACT_IDENTITY_MATRIX[runtime_format]
     if entry["hash_algorithm"] != algorithm:
         fail(
             f"{label}: runtime_format {runtime_format!r} requires hash_algorithm "
@@ -1724,7 +1743,7 @@ def validate_artifact_entry(entry: object, label: str, *, allow_unmeasured_size:
         fail(f"{label}: verified_at must be null unless verification_status is 'verified'")
     if "notes" in entry and not isinstance(entry["notes"], str):
         fail(f"{label}: notes must be a string")
-    _validate_artifact_source_ref(entry, kind, label)
+    _validate_artifact_source_ref(entry, kinds, label)
 
 
 def validate_artifact_models(models: object, label: str, *, allow_unmeasured_size: bool) -> None:
@@ -1886,6 +1905,15 @@ def require_feed_consumer_floor(models: dict, floor: tuple = None) -> None:
     floor = ARTIFACT_FEED_CONSUMER_FLOOR if floor is None else floor
     for key, model in sorted(models.items()):
         for artifact_id, entry in sorted(model["artifacts"].items()):
+            source_kind = entry["source_ref"]["kind"]
+            needed = ARTIFACT_SOURCE_KIND_MIN_CONSUMER.get((entry["runtime_format"], source_kind))
+            if needed is not None and floor < needed:
+                fail(
+                    f"models.{key}.artifacts.{artifact_id}: runtime_format {entry['runtime_format']!r} with "
+                    f"source_ref.kind {source_kind!r} needs every consumer at SPEC-023 "
+                    f"v{'.'.join(map(str, needed))}; the generator consumer floor is "
+                    f"v{'.'.join(map(str, floor))} (raise ARTIFACT_FEED_CONSUMER_FLOOR only after the rollout)"
+                )
             for source in entry["allowed_runtime_sources"]:
                 needed = ARTIFACT_RUNTIME_SOURCE_MIN_CONSUMER.get(source)
                 if needed is not None and floor < needed:
@@ -3638,10 +3666,9 @@ def artifact_feed_activation_state(
     """Decide whether THIS generation builds an artifact feed (§3.7.8 Stage A).
 
     Activation is a deliberate operator release cut, never a side effect of a
-    file being committed. Committing `autotune-artifacts-source.json` — which is
-    seeded with unmeasured `size_bytes` on purpose — must leave `generate`,
-    `resign-autotune-static.sh`, and the scheduled freshness renewal producing the
-    same four-feed release they produce today.
+    file being committed. Committing `autotune-artifacts-source.json` must leave
+    `generate`, `resign-autotune-static.sh`, and the scheduled freshness renewal
+    producing the same four-feed release they produce today.
 
     The state is read from the release ledger, the published feed, and one
     explicit flag:

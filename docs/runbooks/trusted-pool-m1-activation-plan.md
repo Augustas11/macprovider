@@ -20,14 +20,16 @@ finality tokens, and produces the signed evidence that moves SPEC-022-R012 from
 Every Pearl write below is done by the single Pearl actor of the day, in the
 order given. Nothing here is executed by the author of this plan.
 
-**Execution order and the B3b gate.** The release generator cannot emit the
-§3.2 GGUF tuple until B3b (the `scripts/catalog-release.py` change that lands
-after #1732; §3.2 rollout state, §7 B3). Until B3b is merged, only these are
-executable: §1 checks P1-P6 and P8, §2 (read-only), and §4.3 steps 0-6
-(feature, creator approval, keys, root nonce, pool create, root
-registration, manifest v1; the pool stays `candidate` with no member).
-Everything that needs the artifact feed is **DEFERRED until B3b**, and then
-runs strictly in this order: §3.3 (catalog PR, signed cut, deploy) → P7 →
+**Execution order and the signed artifact-feed cut.** The generator and source
+preparation in B3 are implemented by #1754: the v0.16.0 GGUF tuple is accepted,
+all 17 MLX sizes are measured, and the GGUF entry is present. The remaining
+catalog step is the operator-owned signed activation cut with a new
+`release_id`, followed by deployment. Until that cut is deployed, only these
+are executable: §1 checks P1-P6 and P8, §2 (read-only), and §4.3 steps 0-6
+(feature, creator approval, keys, root nonce, pool create, root registration,
+manifest v1; the pool stays `candidate` with no member). Everything that needs
+the artifact feed remains **DEFERRED until the signed cut is deployed**, and
+then runs strictly in this order: §3.3 (signed cut, deploy) → P7 →
 §3.5 (CLI candidate baking that release) → §5 (member, including §3.4
 `catalog_priced`) → §4.3 steps 7-9 → §5A. Do not start a later step before
 the earlier one passes.
@@ -273,7 +275,7 @@ Feed-tuple requirements this satisfies: the closed identity matrix row
 `^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\.gguf$`; `(hash_algorithm, hash)` is
 unique in the feed; the artifact id is new, so no rebinding.
 
-Rollout state of this tuple (SPEC-023 v0.18.3), checked 2026-09-25:
+Rollout state of this tuple (SPEC-023 v0.19.0), checked 2026-09-27:
 
 - coordinator: implemented (`buyer/catalog_artifacts_feed.go`,
   `artifactIdentityMatrix`, since `747557cc`);
@@ -284,13 +286,11 @@ Rollout state of this tuple (SPEC-023 v0.18.3), checked 2026-09-25:
   the whole feed as `catalog_artifact_feed_integrity_failure`. That fails
   closed for artifact-derived capabilities only; native paid serving is
   unaffected (§3.7.6 rule 6);
-- release generator: NOT implemented. `ARTIFACT_IDENTITY_MATRIX` in
-  `scripts/catalog-release.py` maps `gguf` to `ollama_library_tag` only, so
-  `catalog-release.py status` stays NOT ACTIVATABLE on this entry. The
-  generator's `ARTIFACT_FEED_CONSUMER_FLOOR` `(0,16,0)` gates
-  `allowed_runtime_sources` only; it never made the generator emit this
-  tuple. The generator change (B3b) lands after #1732, which rewrites that
-  file.
+- release generator: implemented by #1754. `ARTIFACT_IDENTITY_MATRIX` accepts
+  both GGUF source kinds and validates the Hugging Face `file_path` exactly as
+  the coordinator and CLI do. `ARTIFACT_SOURCE_KIND_MIN_CONSUMER` independently
+  refuses this tuple below the v0.16.0 consumer floor. The source contains the
+  verified GGUF entry and measured `size_bytes` for all 17 MLX artifacts.
 
 Do not add `mlxlm_loopback` to the MLX primary in this release either: the
 generator refuses it until the floor is raised to v0.17.0.
@@ -300,17 +300,17 @@ A coordinator older than `v1.8.200` (the first deployable #1690 tag) cannot star
 
 ### 3.3 Catalog release (PR, then signed cut)
 
-**DEFERRED until B3b.** Do not run any step of §3.3 yet: until the generator
-change after #1732 (B3b, §3.2 rollout state, §7 B3) is merged,
-`catalog-release.py` maps `gguf` to `ollama_library_tag` only, `status`
-stays NOT ACTIVATABLE on the `gguf-q4-k-m` entry, and `generate
---activate-artifact-feed` cannot publish the tuple. Resume here only after
-B3b is on `origin/main`, then follow the order at the top of this plan.
+**Generator/source preparation complete; signed cut DEFERRED to the operator.**
+Do not activate, sign, or deploy from the preparatory PR. The current committed
+`release_id`, `published-2026-09-25-artifact-hash-correction-v1`, is already
+published and cannot be enriched, so `catalog-release.py status` correctly
+remains NOT ACTIVATABLE until the operator selects a new `release_id` for the
+signed activation cut. Then follow the order at the top of this plan.
 
 This is the first artifact-bound release, so it is also the artifact-feed
 activation (`catalog-artifact-feed-release.md`, "Activation state").
 
-1. PR in a fresh worktree off `origin/main`:
+1. Preparatory PR in a fresh worktree off `origin/main` (completed by #1754):
    - add the §3.2 `gguf-q4-k-m` entry under
      `models["meta-llama/llama-3.2-3b-instruct"].artifacts` in
      `phase3-binary/catalog/autotune/autotune-artifacts-source.json`;
@@ -318,10 +318,8 @@ activation (`catalog-artifact-feed-release.md`, "Activation state").
      status` lists them unmeasured; activation refuses until they are). Use
      the sum of the Hugging Face LFS/regular file sizes at each pinned
      revision, recorded with the query used;
-   - pick a new `release_id`; the repo's current release
-     `published-2026-09-25-artifact-hash-correction-v1` is already published
-     and may not be enriched.
-2. After merge, cut: `python3 scripts/catalog-release.py generate
+2. After merge, the operator picks a new `release_id` and cuts:
+   `python3 scripts/catalog-release.py generate
    --activate-artifact-feed --signer-key-id streamvc-autotune-static-v4 …`,
    sign with `scripts/resign-autotune-static.sh`, then
    `python3 scripts/catalog-release.py verify`. Signing key:
@@ -341,7 +339,7 @@ activation (`catalog-artifact-feed-release.md`, "Activation state").
 
 ### 3.4 Admission of the member's candidate
 
-DEFERRED until §3.3 is deployed and P7 passes (so, until B3b).
+DEFERRED until the §3.3 signed activation release is deployed and P7 passes.
 
 After the member serves (§4), `models offer` resolves the GGUF hash through
 the feed (`catalog_match_state: catalog_matched`, member
@@ -355,7 +353,8 @@ only way it earns.
 
 ### 3.5 CLI candidate ordering
 
-DEFERRED until §3.3 is deployed and P7 passes (so, until B3b): the candidate
+DEFERRED until the §3.3 signed activation release is deployed and P7 passes:
+the candidate
 must bake that release.
 
 `models offer` / `discover` / `evaluate` resolve BYOM identity against the
@@ -559,7 +558,7 @@ only.
 
 ## 5. The pool member
 
-DEFERRED until §3.5 has an accepted candidate (so, until B3b); see the
+DEFERRED until §3.5 has an accepted candidate; see the
 execution order at the top.
 
 ### 5.1 Separate provider identity on the Mac Studio
@@ -662,7 +661,7 @@ llama-server (flags proven in the lab, `rig.sh:350`):
 
 ### 5.4 Join and enrolment steps
 
-DEFERRED until §3.5 has an accepted candidate (so, until B3b).
+DEFERRED until §3.5 has an accepted candidate.
 
 1. Download the GGUF at the pinned revision; `shasum -a 256` must equal
    `6c1a2b41…c728ff`.
@@ -694,7 +693,7 @@ DEFERRED until §3.5 has an accepted candidate (so, until B3b).
 
 ## 5A. Paid production journey
 
-DEFERRED until §4.3 step 9 has promoted the pool (so, until B3b).
+DEFERRED until §4.3 step 9 has promoted the pool.
 
 Buyer: a dedicated operator gateway account (`$M1_BUYER_ACCOUNT`, the gateway
 `accounts.id`), with an API key issued through the normal console flow, never
@@ -905,7 +904,7 @@ deliveries; retry once they finish.
 |---|---|---|---|
 | B1 | RESOLVED 2026-09-25: `v1.8.200` live (gateway schema 14, paid non-stream and stream proof settled `spec022_verified`); `v1.8.199` had rolled back on the quick_check stall | #1646 Pearl actor | done |
 | B2 | Gateway pin off (`require_settlement_trailers` absent) | Pearl actor | runbook §9 step 2a after P1/P2 |
-| B3 | Generator does not emit the v0.16.0 GGUF tuple yet (B3b, after #1732; CLI side B3a done on `feat/1690-m1-catalog-gguf`); no artifact feed in production; activation blocked on 17 unmeasured MLX `size_bytes` and a new `release_id`; nginx route absent | operator (PR + signed cut with `streamvc-autotune-static-v4`, operator-held) + Pearl actor (deploy) | §3.3 |
+| B3 | PARTIALLY RESOLVED by #1754: generator and both consumers implement the v0.16.0 GGUF tuple, the source contains `gguf-q4-k-m`, and all 17 MLX `size_bytes` are measured. No artifact feed is in production; the already-published current `release_id` cannot be enriched, so the remaining block is an operator-owned signed activation cut with a new `release_id`, then the Pearl config/nginx deployment. | operator (signed cut with `streamvc-autotune-static-v4`, operator-held) + Pearl actor (deploy) | §3.3 |
 | B4 | No accepted CLI contains `747557cc`; the candidate must also bake the §3.3 release | operator (acceptance-candidate workflow, `production-release` secret) + Pearl actor (`accepted_ids`) | §3.5 |
 | B5 | Registration path for the second identity: does an operator-issued token clear the production hardware-trust / referral onboarding gates, or does it need a dual-control hardware-trust grant (SPEC-026 policy A+B)? | operator | confirm on a dry join; grant if `waiting_trust` |
 | B6 | RESOLVED: `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md`, `scripts/build-trusted-pool-external-runtime-journey-result.py` (`capture`, `payload`), `promote-signed-trusted-pool-external-runtime-journey.yml`, `check_spec_governance.py` validator, journey mapped on R012/R013/R014 (still `pending`) | repo | done; a real M1 capture is still needed |
