@@ -50,7 +50,7 @@ def main() -> None:
         str(cli), "models", "offer", MODEL_ID, "--yes", "--json",
         "--config", str(LAB / "provider" / "config.yaml"),
         "--coordinator-url", "http://127.0.0.1:19102",
-        "--mlx-cache-dir", str(HF_CACHE),
+        "--mlx-cache-dir", str(HF_CACHE / "hub"),
         "--skip-ollama", "--skip-openai-compatible", "--skip-lmstudio", "--skip-llamacpp",
     ]
     completed = subprocess.run(command, check=False, capture_output=True, text=True)
