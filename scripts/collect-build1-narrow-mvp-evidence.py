@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect a redacted Build 1 narrow MVP physical-staging evidence bundle.
+"""Collect a redacted Build 1 private-Qwen physical-staging evidence bundle.
 
 The collector intentionally does not run production services, mint payout
 material, or claim acceptance from fixtures. Operators provide a closed,
@@ -35,9 +35,9 @@ sys.modules[_spec.name] = validator
 _spec.loader.exec_module(validator)
 
 
-CAPTURE_MANIFEST_SCHEMA = "macprovider.build1-narrow-mvp-evidence-capture.v1"
-SOURCE_CAPTURE_SCHEMA = "macprovider.build1-narrow-mvp-source-capture.v1"
-BLOCKER_SCHEMA = "macprovider.build1-narrow-mvp-evidence-blockers.v1"
+CAPTURE_MANIFEST_SCHEMA = "macprovider.build1-private-qwen-evidence-capture.v1"
+SOURCE_CAPTURE_SCHEMA = "macprovider.build1-private-qwen-source-capture.v1"
+BLOCKER_SCHEMA = "macprovider.build1-private-qwen-evidence-blockers.v1"
 CAPTURE_COMMAND = "scripts/collect-build1-narrow-mvp-evidence --redacted"
 MAX_SOURCE_CAPTURE_BYTES = 16 * 1024 * 1024
 
@@ -499,6 +499,7 @@ def assemble_evidence(root: Path, manifest_path: Path, *, captured_at: str | Non
             "payout_jobs_enabled": False,
             "payout_execution_enabled": False,
             "release_published": False,
+            "public_catalog_published": False,
         },
         "capture": {
             "command": CAPTURE_COMMAND,
@@ -553,6 +554,7 @@ def assemble_evidence(root: Path, manifest_path: Path, *, captured_at: str | Non
             "payout_jobs_enabled": False,
             "payout_execution_enabled": False,
             "release_published": False,
+            "public_catalog_published": False,
             "qualification": "not_activated",
         },
     }
