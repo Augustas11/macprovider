@@ -53,8 +53,21 @@ enum ProviderBuild1LaneAStatusEvidence {
 
 struct ProviderBuild1LaneAStatusResolver: Sendable {
     let durableRoot: URL
+    let catalogKey: String
     let expectedArtifactSHA256: String
     let expectedReleaseID: String
+
+    init(
+        durableRoot: URL,
+        expectedArtifactSHA256: String,
+        expectedReleaseID: String,
+        catalogKey: String = Build1LaneAPrepareProfile.catalogKey
+    ) {
+        self.durableRoot = durableRoot
+        self.catalogKey = catalogKey
+        self.expectedArtifactSHA256 = expectedArtifactSHA256
+        self.expectedReleaseID = expectedReleaseID
+    }
 
     /// Builds the resolver only when the configured catalog tuple is exactly
     /// the Lane A profile tuple (key, artifact model id, revision), the
@@ -63,11 +76,14 @@ struct ProviderBuild1LaneAStatusResolver: Sendable {
     /// inconsistent tuple yields no resolver, so `GET /v1/status` never
     /// publishes Lane A evidence from an ambiguous configuration.
     static func make(config: AppConfig) -> ProviderBuild1LaneAStatusResolver? {
-        guard ProviderBuild1LaneAStatusContext.isLaneAConfig(config),
-              Build1LaneAPrepareProfile.coordinatorIsAllowedForStaging(config.coordinatorURL),
+        guard let catalogKey = ProviderBuild1LaneAStatusContext.supportedCatalogKey(config),
               let expectedArtifactSHA256 = nonEmpty(config.modelArtifactSHA256),
               let expectedReleaseID = nonEmpty(config.modelCatalogVersion)
         else { return nil }
+        if catalogKey == Build1LaneAPrepareProfile.catalogKey,
+           !Build1LaneAPrepareProfile.coordinatorIsAllowedForStaging(config.coordinatorURL) {
+            return nil
+        }
         // The catalog row digest and the verified artifact digest are the same
         // identity for the Lane A tuple; a config that disagrees with itself
         // is not evidence of anything.
@@ -77,7 +93,8 @@ struct ProviderBuild1LaneAStatusResolver: Sendable {
         return ProviderBuild1LaneAStatusResolver(
             durableRoot: durableRoot(config: config),
             expectedArtifactSHA256: expectedArtifactSHA256,
-            expectedReleaseID: expectedReleaseID
+            expectedReleaseID: expectedReleaseID,
+            catalogKey: catalogKey
         )
     }
 
@@ -95,7 +112,7 @@ struct ProviderBuild1LaneAStatusResolver: Sendable {
         do {
             let binding = try Build1LaneAPreparationRecorder(durableRoot: durableRoot)
                 .readStatusArtifactBinding(
-                    catalogKey: Build1LaneAPrepareProfile.catalogKey,
+                    catalogKey: catalogKey,
                     expectedArtifactSHA256: expectedArtifactSHA256,
                     expectedReleaseID: expectedReleaseID
                 )
@@ -156,14 +173,18 @@ struct ProviderBuild1LaneAStatusContext: Sendable {
     /// Lane A profile tuple. A matching catalog key or model alias alone is not
     /// enough: revision and artifact model id must agree as well.
     static func isLaneAConfig(_ config: AppConfig) -> Bool {
+        supportedCatalogKey(config) == Build1LaneAPrepareProfile.catalogKey
+    }
+
+    static func supportedCatalogKey(_ config: AppConfig) -> String? {
         guard let key = trimmedNonEmpty(config.modelCatalogKey),
-              Build1LaneAPrepareProfile.isApprovedCatalogKey(key),
-              trimmedNonEmpty(config.modelCatalogModelID) == Build1LaneAPrepareProfile.artifactModelID,
-              trimmedNonEmpty(config.modelCatalogRevision) == Build1LaneAPrepareProfile.artifactRevision
+              let expected = Build1PrepareProfileSupport.expectedTuple(for: key),
+              trimmedNonEmpty(config.modelCatalogModelID) == expected.modelID,
+              trimmedNonEmpty(config.modelCatalogRevision) == expected.revision
         else {
-            return false
+            return nil
         }
-        return true
+        return expected.catalogKey
     }
 
     private static func trimmedNonEmpty(_ value: String?) -> String? {
@@ -2342,7 +2363,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         // served model must be the approved Lane A catalog key or its artifact
         // alias, otherwise a matching hash on some other model id is not
         // evidence that the Lane A artifact is what status observed.
-        let effectiveModelMatchesLaneA = effectiveModelID.map(Build1LaneAPrepareProfile.isApprovedCatalogKey) ?? false
+        let effectiveModelMatchesLaneA = effectiveModelID.map {
+            $0.caseInsensitiveCompare(binding?.catalogKey ?? "") == .orderedSame
+                || $0.caseInsensitiveCompare(binding?.displayModelID ?? "") == .orderedSame
+        } ?? false
         let hashMatchesRecord = binding.map { $0.artifactSHA256 == modelHash }
         let hashMatchesConfig = configuredModelArtifactSHA256.map { $0 == modelHash }
         let weightsPresent = weightsManifestSHA256?.isEmpty == false
@@ -2377,7 +2401,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "state": state,
             "reason": reason,
             "record_state": context.recordState.rawValue,
-            "catalog_key": Build1LaneAPrepareProfile.catalogKey,
+            "catalog_key": jsonNullable(binding?.catalogKey),
             "effective_model": jsonNullable(effectiveModelID),
             "effective_model_matches_lane_a": effectiveModelMatchesLaneA,
             "model_hash": jsonNullable(modelHash),

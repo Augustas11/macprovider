@@ -171,6 +171,16 @@ struct Build1LaneAArtifactStager {
             try progress(.verified, reused, reused)
             try progress(.adopted, reused, reused)
             try checkCommitBoundary()
+            let fresh: Build1LaneAArtifactAuthority
+            do {
+                fresh = try await reauthorize()
+            } catch {
+                throw Self.mapReauthorizeError(error)
+            }
+            guard fresh == authority else {
+                throw Build1LaneAArtifactStagingError.authorityMismatch
+            }
+            try checkCommitBoundary()
             let record = try recordPrivateState(stateSession, authority: authority, adoptedBytes: reused)
             return Build1LaneAStagedArtifact(
                 sha256: authority.hash,

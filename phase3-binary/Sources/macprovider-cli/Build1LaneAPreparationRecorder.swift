@@ -72,7 +72,6 @@ struct Build1LaneAPreparationRecorder: Sendable {
     /// No `cleanup_published_artifact` transaction has landed, so the entry is
     /// projected as protected rather than advertising a cleanup it cannot run.
     static let protectedReason = "cleanup_transaction_unavailable"
-    static let tupleIDPrefix = Build1LaneAPrepareProfile.profile
 
     let durableRoot: URL
     let store: ModelPreparationPrivateStore
@@ -227,19 +226,22 @@ struct Build1LaneAPreparationRecorder: Sendable {
         expectedArtifactSHA256: String,
         expectedReleaseID: String
     ) -> Bool {
+        guard let expected = Build1PrepareProfileSupport.expectedTuple(for: catalogKey) else {
+            return false
+        }
         let tuple = receipt.tuple
-        let expectedTupleID = "\(tupleIDPrefix):\(catalogKey):\(Build1LaneAPrepareProfile.artifactID)@\(Build1LaneAPrepareProfile.artifactRevision)"
-        guard target.modelKey == catalogKey,
-              target.eventModelKey == catalogKey,
-              target.displayModelID == Build1LaneAPrepareProfile.artifactModelID,
-              target.modelRevision == Build1LaneAPrepareProfile.artifactRevision,
-              target.artifactID == Build1LaneAPrepareProfile.artifactID,
+        let expectedTupleID = "\(expected.profile):\(expected.catalogKey):\(expected.artifactID)@\(expected.revision)"
+        guard target.modelKey == expected.catalogKey,
+              target.eventModelKey == expected.catalogKey,
+              target.displayModelID == expected.modelID,
+              target.modelRevision == expected.revision,
+              target.artifactID == expected.artifactID,
               target.releaseID == expectedReleaseID,
               tuple.tupleID == expectedTupleID,
-              tuple.eventModelKey == catalogKey,
-              tuple.displayModelID == Build1LaneAPrepareProfile.artifactModelID,
-              tuple.modelRevision == Build1LaneAPrepareProfile.artifactRevision,
-              tuple.artifactID == Build1LaneAPrepareProfile.artifactID,
+              tuple.eventModelKey == expected.catalogKey,
+              tuple.displayModelID == expected.modelID,
+              tuple.modelRevision == expected.revision,
+              tuple.artifactID == expected.artifactID,
               tuple.releaseID == expectedReleaseID,
               tuple.artifactSHA256 == expectedArtifactSHA256
         else {
@@ -290,7 +292,10 @@ struct Build1LaneAPreparationRecorder: Sendable {
             adoptedSHA256: String,
             adoptedBytes: Int64
         ) throws -> Build1LaneAPreparationRecord {
-            guard adoptedSHA256 == authority.hash, adoptedBytes >= 0 else {
+            guard let profile = Build1PrepareProfileSupport.profile(for: authority),
+                  adoptedSHA256 == authority.hash,
+                  adoptedBytes >= 0
+            else {
                 throw Build1LaneAPreparationRecordError.adoptedArtifactMismatch
             }
             let durableStore = DurableModelArtifactStore(root: recorder.durableRoot)
@@ -351,7 +356,7 @@ struct Build1LaneAPreparationRecorder: Sendable {
             let payload: Data
             do {
                 tuple = try ModelPreparationTupleRecord(
-                    tupleID: "\(Build1LaneAPreparationRecorder.tupleIDPrefix):\(authority.catalogKey):\(authority.artifactID)@\(authority.revision)",
+                    tupleID: "\(profile):\(authority.catalogKey):\(authority.artifactID)@\(authority.revision)",
                     eventModelKey: authority.catalogKey,
                     displayModelID: authority.modelID,
                     modelRevision: authority.revision,
