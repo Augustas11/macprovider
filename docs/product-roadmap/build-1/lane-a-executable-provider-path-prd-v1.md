@@ -1,7 +1,8 @@
 # Build 1 Lane A executable provider path PRD v1
 
-Status: selected planning artifact. No executable behavior is changed by this
-document.
+Status: plumbing-control planning artifact. The Llama tuple in this document is
+not final Build 1 acceptance authority; `build1-control-recovery-plan-v2.md`
+requires a pinned non-catalog/private tuple for final acceptance.
 Date: 2026-09-15.
 Branch: `codex/build1-lane-a-provider-path`.
 Base: `origin/main` at `e7213fa1`.

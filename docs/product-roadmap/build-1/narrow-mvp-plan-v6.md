@@ -5,6 +5,11 @@ Base for this plan: dependent on unmerged PR #1510 (`codex/build1-v2-storage-pro
 
 Source roadmap: `/private/tmp/macprovider-roadmap/.omx/plans/product-roadmap-422fc2f1.md` was present and read. It is historical scope evidence; current decisions below are grounded in the code and branch state inspected on this worktree.
 
+> Current authority note (2026-09-26): the Llama tuple below is now the
+> plumbing-control target only. Final Build 1 acceptance is governed by
+> `build1-control-recovery-plan-v2.md` and requires a pinned
+> non-catalog/private tuple.
+
 ## MVP target
 
 Make Product Build 1 shippable through one constrained, physically testable path:
