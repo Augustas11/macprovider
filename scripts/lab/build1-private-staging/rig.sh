@@ -19,6 +19,10 @@ export LAB_MLX_SHA=8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88
 export MLX_SHA="$LAB_MLX_SHA"
 export LAB_STATIC_RELEASE=build1-orcarouter-private-2026-09-26-v1
 export LAB_STATIC_SIGNER_KEY_ID=streamvc-autotune-static-v4
+# The Studio receives only the public signed feed. If the base rig ever tries
+# to regenerate it instead of accepting the installed release, fail closed
+# rather than signing lab bytes under the v4 key identifier.
+export LAB_STATIC_SIGNING_KEY_FILE="$LAB/keys/v4-private-key-intentionally-absent"
 export LAB_MLX_ARTIFACT_ID=mlx-4bit
 export LAB_MLX_AUTHORITY_SHA="$LAB_MLX_SHA"
 export LAB_MLX_AUTHORITY_SIZE=94723099062
@@ -148,6 +152,35 @@ PY
     static-public-key.base64 AutotuneCatalog.generated.swift; do
     cp "$source/$name" "$LAB/static/$name"
   done
+  local tier2_signer="$WT/scripts/sign-catalog.go"
+  mkdir -p "$LAB/keys"
+  if [[ ! -f "$LAB/keys/tier2.priv" || ! -f "$LAB/keys/tier2.pub" ]]; then
+    (cd "$WT" && go run "$tier2_signer" keygen \
+      -public-out "$LAB/keys/tier2.pub" -private-out "$LAB/keys/tier2.priv")
+  fi
+  chmod 600 "$LAB/keys/tier2.priv"
+  python3 - "$LAB/static/tier2-unsigned.json" "$LAB_MLX_ID" "$LAB_CATALOG_MLX_SHA" <<'PY'
+import datetime, json, pathlib, sys
+now = datetime.datetime.now(datetime.timezone.utc)
+payload = {
+    "version": 1,
+    "catalog_id": "lab-1690-m6-tier2",
+    "issued_at": (now - datetime.timedelta(hours=1)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    "expires_at": (now + datetime.timedelta(days=7)).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    "models": [{
+        "artifact_kind": "mlx_weight_file",
+        "hash_scope": "macprovider.snapshot-manifest.v1",
+        "model_id": sys.argv[2],
+        "min_ram_gb": 8,
+        "sha256": sys.argv[3],
+        "source": "lab-1690-m6",
+    }],
+}
+pathlib.Path(sys.argv[1]).write_text(json.dumps(payload, separators=(",", ":")) + "\n")
+PY
+  (cd "$WT" && go run "$tier2_signer" sign -key "$LAB/keys/tier2.priv" \
+    -key-id lab-1690-m6-tier2 -out "$LAB/static/tier2-catalog.json" \
+    "$LAB/static/tier2-unsigned.json")
 }
 
 case "${1:-}" in
