@@ -887,7 +887,7 @@ def validate_build1_narrow_mvp_evidence(payload: dict[str, Any], *, now: _dt.dat
     _require_equal(admission, "verified_model_settlement_mode", "enforce", "$.admission", result)
     model_admission_candidate_id = _require_text(admission, "model_admission_candidate_id", "$.admission", result, pattern=REQUEST_ID_RE)
     model_admission_coordinator_event_id = _require_text(admission, "model_admission_coordinator_event_id", "$.admission", result, pattern=HEX64_RE)
-    model_admission_served_model_ref = _require_text(admission, "model_admission_served_model_ref", "$.admission", result, pattern=REQUEST_ID_RE)
+    model_admission_served_model_ref = _require_text(admission, "model_admission_served_model_ref", "$.admission", result, pattern=IDENTIFIER_RE)
     _require_equal(admission, "model_admission_catalog_model_key", CATALOG_KEY, "$.admission", result)
     model_admission_discovery_digest = _require_text(admission, "model_admission_discovery_digest_sha256", "$.admission", result, pattern=HEX64_RE)
     model_admission_evaluation_digest = _require_text(admission, "model_admission_evaluation_digest_sha256", "$.admission", result, pattern=HEX64_RE)
@@ -1029,16 +1029,27 @@ def validate_build1_narrow_mvp_evidence(payload: dict[str, Any], *, now: _dt.dat
     request_start_ts_unix_ms = _require_int(route_snapshot_v1, "request_start_ts_unix_ms", "$.route_snapshot.route_snapshot_v1", result, minimum=1)
     if catalog_expires_at_unix_ms is not None and route_decision_ts_unix_ms is not None and catalog_expires_at_unix_ms <= route_decision_ts_unix_ms:
         result.add("$.route_snapshot.route_snapshot_v1.catalog_expires_at_unix_ms", "must be after route_decision_ts_unix_ms")
-    if route_decision_ts_unix_ms is not None and request_start_ts_unix_ms is not None and route_decision_ts_unix_ms > request_start_ts_unix_ms:
-        result.add("$.route_snapshot.route_snapshot_v1.request_start_ts_unix_ms", "must be >= route_decision_ts_unix_ms")
+    if route_decision_ts_unix_ms is not None and request_start_ts_unix_ms is not None and route_decision_ts_unix_ms < request_start_ts_unix_ms:
+        result.add("$.route_snapshot.route_snapshot_v1.route_decision_ts_unix_ms", "must be >= request_start_ts_unix_ms")
     route_decision_at = _datetime_from_unix_ms(route_decision_ts_unix_ms, "$.route_snapshot.route_snapshot_v1.route_decision_ts_unix_ms", result)
     request_start_at = _datetime_from_unix_ms(request_start_ts_unix_ms, "$.route_snapshot.route_snapshot_v1.request_start_ts_unix_ms", result)
     catalog_expires_at = _datetime_from_unix_ms(catalog_expires_at_unix_ms, "$.route_snapshot.route_snapshot_v1.catalog_expires_at_unix_ms", result)
     _require_not_stale(route_decision_at, "$.route_snapshot.route_snapshot_v1.route_decision_ts_unix_ms", result)
     _require_not_stale(request_start_at, "$.route_snapshot.route_snapshot_v1.request_start_ts_unix_ms", result)
     _require_order(capture_started_at, route_decision_at, "$.capture.started_at", "$.route_snapshot.route_snapshot_v1.route_decision_ts_unix_ms", result)
-    _require_order(route_decision_at, request_start_at, "$.route_snapshot.route_snapshot_v1.route_decision_ts_unix_ms", "$.route_snapshot.route_snapshot_v1.request_start_ts_unix_ms", result)
-    _require_order(request_start_at, correlation_timestamp, "$.route_snapshot.route_snapshot_v1.request_start_ts_unix_ms", "$.provider.correlation.timestamp", result)
+    _require_order(request_start_at, route_decision_at, "$.route_snapshot.route_snapshot_v1.request_start_ts_unix_ms", "$.route_snapshot.route_snapshot_v1.route_decision_ts_unix_ms", result)
+    # Provider receipt audit records carry whole-second Unix timestamps while
+    # the immutable route uses milliseconds. Treat the receipt second as a
+    # one-second interval; it must overlap or follow the route decision.
+    if (
+        route_decision_at is not None
+        and correlation_timestamp is not None
+        and correlation_timestamp + _dt.timedelta(seconds=1) <= route_decision_at
+    ):
+        result.add(
+            "$.provider.correlation.timestamp",
+            "receipt second must overlap or follow route_decision_ts_unix_ms",
+        )
     _require_order(correlation_timestamp, capture_completed_at, "$.provider.correlation.timestamp", "$.capture.completed_at", result)
     _require_order(request_start_at, catalog_expires_at, "$.route_snapshot.route_snapshot_v1.request_start_ts_unix_ms", "$.route_snapshot.route_snapshot_v1.catalog_expires_at_unix_ms", result)
     _require_int(route_snapshot_v1, "pending_deadline_seconds", "$.route_snapshot.route_snapshot_v1", result, minimum=1)

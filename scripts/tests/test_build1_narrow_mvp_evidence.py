@@ -39,8 +39,8 @@ def valid_evidence() -> dict:
     staging_config_at = captured_at - dt.timedelta(minutes=6)
     receipt_at = captured_at - dt.timedelta(seconds=30)
     receipt_unix = int(receipt_at.timestamp())
-    route_decision_unix_ms = int((captured_at - dt.timedelta(seconds=50)).timestamp() * 1_000)
-    request_start_unix_ms = route_decision_unix_ms + 1_000
+    request_start_unix_ms = int((captured_at - dt.timedelta(seconds=50)).timestamp() * 1_000)
+    route_decision_unix_ms = request_start_unix_ms + 1_000
     catalog_expires_unix_ms = route_decision_unix_ms + 10 * 60 * 1_000
     evidence = {
         "schema_version": mod.SCHEMA_VERSION,
