@@ -2688,7 +2688,7 @@ func (s *Server) boundStreamingSettlementHoldWithCandidate(ctx context.Context, 
 func (s *Server) holdBodyReadFailure(r *http.Request, subject usageSubject, promptEstimate, maxUsageTokens int64, resp *http.Response) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	finality := missingSettlementFinality(s.settlementFinalityBinding(r, subject), "body read failed")
+	finality := missingSettlementFinality(s.settlementFinalityBinding(r, subject), "body read failed", "body_read_failed")
 	if strings.TrimSpace(resp.Header.Get(coordinatorInternalRequestIDHeader)) == "" ||
 		!s.persistSettlementReconcileCandidate(ctx, r, subject, finality, resp.Header,
 			promptEstimate, 0, maxUsageTokens, "gateway_estimated", bodyReadFailedOutcome, "") {
@@ -2804,7 +2804,13 @@ func (s *Server) boundStreamingSettlementHold(ctx context.Context, r *http.Reque
 		)
 		return false
 	}
-	slog.Info("gateway bounded streaming buyer settlement hold to receipt deadline",
+	// A verified finality is a routine deferral to the receipt deadline, not
+	// a fault hold; the log says so (#1750). The stored state is the same.
+	message := "gateway bounded streaming buyer settlement hold to receipt deadline"
+	if finality.Action == settlementFinalityDebit {
+		message = "gateway deferred verified streaming buyer settlement to receipt deadline (routine deferral, not a fault)"
+	}
+	slog.Info(message,
 		"request_id", requestID(r),
 		"account_id", subject.AccountID,
 		"settlement_outcome", finality.Outcome,

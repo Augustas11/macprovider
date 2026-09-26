@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -176,9 +178,10 @@ func TestPolicyAndStatusDiscloseRuntimeAllowlist(t *testing.T) {
 		wantScope string
 		wantList  []string
 		wantText  string
+		wantMode  string
 	}{
-		{"v2 allowlist", allowLlamacpp, trustpool.RuntimeScopeNativeAndExternalRuntimes, []string{poolmanifest.RuntimeSourceLlamacppLoopback}, "administrative trust"},
-		{"v1 native", nil, trustpool.RuntimeScopeNativeMLXOnly, []string{}, "native MLX only"},
+		{"v2 allowlist", allowLlamacpp, trustpool.RuntimeScopeNativeAndExternalRuntimes, []string{poolmanifest.RuntimeSourceLlamacppLoopback}, "administrative trust", "enforce"},
+		{"v1 native", nil, trustpool.RuntimeScopeNativeMLXOnly, []string{}, "native MLX only", "observe"},
 	} {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
@@ -227,6 +230,30 @@ func TestPolicyAndStatusDiscloseRuntimeAllowlist(t *testing.T) {
 			if strings.Join(policy.Policy.RuntimeAllowlist, ",") != strings.Join(tc.wantList, ",") ||
 				strings.Join(status.Policy.RuntimeAllowlist, ",") != strings.Join(tc.wantList, ",") {
 				t.Fatalf("runtime_allowlist policy=%v status=%v want %v", policy.Policy.RuntimeAllowlist, status.Policy.RuntimeAllowlist, tc.wantList)
+			}
+			// #1750 F-1: the operator get-pool read-back carries the same
+			// allowlist and scope, plus the settlement mode.
+			handler := trustpool.NewAdminHandler(trustpool.AdminDeps{Store: store, Registry: registry, OperatorKey: "operator-secret"})
+			req := httptest.NewRequest(http.MethodGet, "/admin/trust-pools/pools/"+root.poolID, nil)
+			req.Header.Set("Authorization", "Bearer operator-secret")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET pool status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			var got struct {
+				Pool struct {
+					RuntimeAllowlist *[]string `json:"runtime_allowlist"`
+					RuntimeScope     string    `json:"runtime_scope"`
+					SettlementMode   string    `json:"settlement_mode"`
+				} `json:"pool"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode GET pool: %v", err)
+			}
+			if got.Pool.RuntimeAllowlist == nil || strings.Join(*got.Pool.RuntimeAllowlist, ",") != strings.Join(tc.wantList, ",") ||
+				got.Pool.RuntimeScope != tc.wantScope || got.Pool.SettlementMode != tc.wantMode {
+				t.Fatalf("GET pool runtime fields = %s, want allowlist %v scope %q mode %q", rec.Body.String(), tc.wantList, tc.wantScope, tc.wantMode)
 			}
 			for _, doc := range []any{policy, status} {
 				raw, err := json.Marshal(doc)

@@ -2155,6 +2155,9 @@ type adminPoolState struct {
 	LaunchEnvironment              string   `json:"launch_environment,omitempty"`
 	RootCustodyClass               string   `json:"root_custody_class,omitempty"`
 	MinBinaryVersion               string   `json:"min_binary_version,omitempty"`
+	RuntimeAllowlist               []string `json:"runtime_allowlist"`
+	RuntimeScope                   string   `json:"runtime_scope,omitempty"`
+	SettlementMode                 string   `json:"settlement_mode,omitempty"`
 	Members                        []string `json:"members"`
 	Revoked                        []string `json:"revoked"`
 	BuyerAccounts                  []string `json:"buyer_accounts"`
@@ -2190,6 +2193,21 @@ func adminPoolResponse(p *ReconstructedPoolState, routeGateCheckedAt time.Time) 
 	if !routeGateCheckedAt.IsZero() {
 		routeGateCheckedAtRaw = routeGateCheckedAt.UTC().Format(time.RFC3339Nano)
 	}
+	// #1750 F-1: read back the accepted core named by ManifestVersion, as
+	// the buyer policy/status documents disclose it: the signed
+	// runtime_allowlist ([] for a v1 core or an empty list, null before any
+	// accepted core), its SPEC-043-R013 scope, and the settlement mode
+	// routing applies.
+	var runtimeAllowlist []string
+	runtimeScope, settlementMode := "", ""
+	if p.ManifestVersion > 0 {
+		runtimeAllowlist = policyRuntimeAllowlist(p)
+		if runtimeAllowlist == nil {
+			runtimeAllowlist = []string{}
+		}
+		runtimeScope, _ = policyRuntimeDisclosure(p)
+		settlementMode = routeablePoolSettlementMode(p.ManifestSettlementMode)
+	}
 	return adminPoolState{
 		PoolID:                         p.PoolID,
 		CreatorAccountID:               p.CreatorAccountID,
@@ -2203,6 +2221,9 @@ func adminPoolResponse(p *ReconstructedPoolState, routeGateCheckedAt time.Time) 
 		LaunchEnvironment:              rootIssuerLaunchEnvironment(p),
 		RootCustodyClass:               rootIssuerCustodyClass(p),
 		MinBinaryVersion:               policyMinBinaryVersion(p),
+		RuntimeAllowlist:               runtimeAllowlist,
+		RuntimeScope:                   runtimeScope,
+		SettlementMode:                 settlementMode,
 		Members:                        members,
 		Revoked:                        revoked,
 		BuyerAccounts:                  buyers,
