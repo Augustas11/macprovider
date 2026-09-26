@@ -1,9 +1,9 @@
 # Build 1 narrow MVP test specification v6
 
-> Current authority note (2026-09-26): this specification remains the Llama
-> plumbing-control matrix. It cannot establish final Build 1 acceptance;
-> `build1-control-recovery-plan-v2.md` requires the same proof shape for a
-> pinned non-catalog/private tuple.
+> Current authority note (2026-09-26): this specification is a Llama regression
+> matrix only and receives no physical campaign. Build 1 acceptance follows the
+> pinned non-catalog OrcaRouter tuple in
+> `build1-control-recovery-plan-v2.md`.
 
 Scope: one shippable Build 1 MVP path for `meta-llama/llama-3.2-3b-instruct` / `mlx-community/Llama-3.2-3B-Instruct-4bit` on MLX `mlx_cache`, through staging-only admission and verified settlement evidence under an isolated non-production staging `verified_model_settlement_mode=enforce` configuration. Rewards, payout jobs, production enforcement, and production economic activation are out of scope. This test specification is tied to `docs/product-roadmap/build-1/narrow-mvp-plan-v6.md` and the dependent branch on PR #1510 head `6a90f39bfd4b8917ae10169b3c760e03cd2dfd91`.
 

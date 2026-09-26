@@ -12,14 +12,16 @@ Continue Build 1 Lane A as a staging-only BYOM proof, but separate the existing
 catalog Llama implementation from the final acceptance target:
 
 - `meta-llama/llama-3.2-3b-instruct` /
-  `mlx-community/Llama-3.2-3B-Instruct-4bit` is the plumbing-control tuple. It
-  may prove preparation, private-record, status-correlation, staging-input, and
-  evidence-driver mechanics.
-- Final Build 1 acceptance requires one explicitly pinned non-catalog/private
-  MLX tuple. The tuple must be absent from the active public catalog and must be
-  carried by signed, measured staging authority.
-- Evidence from the plumbing-control tuple cannot be relabeled as final BYOM
-  acceptance.
+  `mlx-community/Llama-3.2-3B-Instruct-4bit` is retained only as legacy
+  regression scaffolding. It gets no physical hardware campaign and produces
+  no Build 1 progress evidence.
+- The Build 1 execution and acceptance tuple is
+  `orcarouter/qwen3.8-27b-uncensored` /
+  `orcarouter/Qwen3.8-27B-Uncensored-MLX` at revision
+  `38d0ad4e02031658fadd3828634a0174e0b8a282`.
+- The acceptance tuple is absent from the active public catalog and must be
+  carried by signed, measured staging authority. It must not be added to the
+  public catalog as part of Build 1.
 
 The selected surface remains standalone `macprovider-cli` on physical Apple
 Silicon. Production activation, public catalog publication, rewards, payouts,
@@ -29,7 +31,7 @@ disabled.
 ## Current Repository Truth
 
 - PR #1649 landed guarded staging, verification, and durable adoption for the
-  Llama plumbing-control tuple.
+  Llama regression tuple.
 - PR #1658 contains private preparation recording, local status correlation,
   and measured staging-input work, but its original branch was based on an old
   mainline, became conflicted, and failed the SPEC index after modifying mapped
@@ -57,27 +59,36 @@ disabled.
 Stop condition: current-base provider-side code builds, focused tests and SPEC
 governance pass, the PR is reviewable, and no physical acceptance is claimed.
 
-### M1 - Prove the Llama plumbing control
+### M1 - Retire the catalog Llama campaign
 
-- Generate signed, measured staging artifact authority for the Llama tuple.
-- Run `models prepare`, private-record verification, local status correlation,
-  and `models staging-input` on physical Apple Silicon.
-- Treat this as implementation preflight only.
+- Do not run the public-catalog Llama tuple on physical hardware for Build 1.
+- Keep its existing tests only where they protect recovered preparation,
+  private-record, status-correlation, and staging-input behavior.
+- Do not generate or promote Llama campaign evidence.
 
-Stop condition: a redacted control bundle proves the mechanics and records any
-defects without claiming final Build 1 acceptance.
+Stop condition: no execution milestone or evidence gate depends on Llama.
 
 ### M2 - Pin the private acceptance tuple
 
-Record one exact private tuple before implementing or running acceptance:
+The selected acceptance tuple is:
 
-- provider/model identifier and revision;
-- runtime format and source kind;
-- artifact identifier;
-- snapshot-manifest algorithm and digest;
-- measured positive size;
+- model key: `orcarouter/qwen3.8-27b-uncensored`;
+- model repository: `orcarouter/Qwen3.8-27B-Uncensored-MLX`;
+- revision: `38d0ad4e02031658fadd3828634a0174e0b8a282`;
+- runtime format: `mlx_safetensors` through native MLX;
+- source kind: `huggingface_revision`;
+- artifact identifier: `mlx-revision-snapshot`;
+- artifact scope: the complete pinned revision snapshot;
+- snapshot-manifest algorithm: `macprovider.snapshot-manifest.v1`.
+
+The repository dry-run currently reports 80 files totaling 94.7 GB. That is
+discovery evidence only, not the measured positive `size_bytes` or canonical
+snapshot-manifest digest. Complete M2 by recording:
+
+- the measured positive size and snapshot-manifest digest;
 - staging release and signer identity;
-- evidence that the tuple is not present in the active public catalog.
+- a fresh run-time check that the tuple remains absent from the active public
+  catalog. The 2026-09-26 repository check found no matching row.
 
 The authority must be source-reviewable without exposing private credentials,
 repository access tokens, local paths, or private key material.
@@ -146,11 +157,10 @@ evidence is non-proof.
 
 ## Current Next Action
 
-Complete M0. Do not begin the hardware campaign from the stale #1658 branch and
-do not connect a branch-built CLI to the live Malibu coordinator. Once the
-current-base recovery is reviewable, use the Llama control to validate the
-provider-side mechanics before pinning and implementing the private acceptance
-tuple.
+Complete M0, then finish M2 for the pinned OrcaRouter tuple and continue
+directly to M3. Do not run a Llama hardware preflight. Do not begin the hardware
+campaign from the stale #1658 branch and do not connect a branch-built CLI to
+the live Malibu coordinator.
 
 ## Final Stop Condition
 
