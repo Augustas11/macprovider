@@ -15,6 +15,9 @@ regression-only and must not receive a physical campaign. Execution and final
 acceptance use the pinned non-catalog OrcaRouter tuple from v2. Superseded
 coordinator commits and stale conformance evidence must not be replayed. A
 locally built or unsigned CLI must not connect to the live Malibu coordinator.
+This development Mac is not an E2E host. All physical/E2E evidence must run on
+the designated Mac Studio, which is already operating the live provider and
+therefore requires the isolation and rollback gates in the v2 M4 plan.
 
 ## Decision
 
@@ -63,6 +66,18 @@ The orchestrator must not:
 - Allow an executor to expand scope into Lane B, production activation,
   rewards, payouts, public earnings, or general BYOM.
 - Treat green CI for an internal milestone as Build 1 acceptance.
+- Run physical or E2E acceptance on this development Mac.
+- Stop, restart, replace, reconfigure, or resource-starve the Mac Studio live
+  provider as an incidental campaign step.
+
+Before assigning M4, the orchestrator must record a Mac Studio campaign
+preflight covering live binary provenance, coordinator target, process/launch
+identity, occupied ports, model and health, disk and memory headroom, isolated
+campaign roots/port/logs/credentials, and the tested rollback command. The
+campaign begins with a separate `--no-join` provider or local coordinator stack.
+If safe coexistence is not proven, M4 pauses until an explicitly authorized
+maintenance transition is scheduled; the live provider is never swapped as an
+automatic next step.
 
 ## Executor Contract
 
@@ -220,6 +235,9 @@ Rules:
 - Treat Lane A's exact Llama 3B tuple as regression-only and do not run it on
   physical hardware. Use the pinned OrcaRouter tuple only when the orchestrator
   assigns the M2/M3 milestone from the v2 recovery plan.
+- Do not run physical or E2E tests on the development Mac. Mac Studio execution
+  requires the recorded live-provider isolation/preflight gate and must begin
+  with a separate provider that cannot join the live coordinator.
 - Use existing repo patterns and targeted tests.
 - Return a summary, changed files, tests run, remaining risks, and any scope
   pressure. If you push or commit, report the exact commit SHA.

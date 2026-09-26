@@ -114,17 +114,37 @@ be confused and neither grants admission, settlement, or production status.
 
 ### M4 - Physical private-tuple preparation and serving
 
-- Prepare, verify, durably adopt, and serve the private tuple on physical Apple
-  Silicon.
+- This development Mac is planning, implementation, build, and hermetic-test
+  only. It cannot provide Build 1 physical or end-to-end evidence.
+- Run every physical and end-to-end step exclusively on the designated Mac
+  Studio.
+- Treat the Mac Studio as an active production-like host because it is already
+  running the live provider. Inventory and record the live provider binary
+  provenance, coordinator target, process identity, launch mechanism, ports,
+  model, current health, free disk, memory headroom, and rollback command before
+  installing, staging, starting, stopping, or replacing anything.
+- Prepare, verify, durably adopt, and serve the private tuple on the Mac Studio
+  only after the authority and host preflight gates pass.
 - Capture transaction events, private receipt digests, binary identity, local
   status, model hash, weights-manifest evidence, and the runtime proof boundary.
-- Use an isolated provider port and do not disturb the live `127.0.0.1:8080`
-  provider.
+- Keep the campaign provider isolated from the live `127.0.0.1:8080` provider:
+  separate process, port, state/cache roots, logs, credentials, and coordinator
+  target. Start with `--no-join` or a local coordinator/gateway stack.
+- Do not stop, restart, replace, reconfigure, or resource-starve the live
+  provider. If the Mac Studio lacks capacity to run both safely, stop the
+  campaign and schedule an explicitly authorized maintenance transition with a
+  tested rollback; do not improvise an in-place swap.
 
 An unsigned, ad-hoc-signed, locally built, or unreleased CLI must not connect to
 the live Malibu coordinator. Local builds may use `--no-join` or a local
 coordinator/gateway stack. Live network proof requires an appropriately
 reviewed and signed release candidate explicitly authorized for that path.
+
+Mac Studio preflight stop condition: the live provider remains healthy and
+unchanged, the campaign has sufficient isolated disk/memory/ports, the exact
+rollback path is recorded and tested without touching live traffic, and the
+candidate provenance/coordinator pairing is allowed. Any failed or uncertain
+check blocks M4.
 
 ### M5 - Staging admission and gateway routing
 
@@ -160,7 +180,9 @@ evidence is non-proof.
 Complete M0, then finish M2 for the pinned OrcaRouter tuple and continue
 directly to M3. Do not run a Llama hardware preflight. Do not begin the hardware
 campaign from the stale #1658 branch and do not connect a branch-built CLI to
-the live Malibu coordinator.
+the live Malibu coordinator. This development Mac must not be used for E2E;
+prepare the isolated Mac Studio campaign and its live-provider protection plan
+before M4.
 
 ## Final Stop Condition
 
