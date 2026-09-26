@@ -11,26 +11,62 @@
 # canary onto the prior release.
 #
 # Usage:
-#   scripts/catalog-content-release.sh --preflight --commit <40-hex sha>
-#   scripts/catalog-content-release.sh --deploy    --commit <40-hex sha>
+#   scripts/catalog-content-release.sh --preflight --commit <40-hex sha> [--preflight-verdict <file>]
+#   scripts/catalog-content-release.sh --deploy    --commit <40-hex sha> \
+#       [--pricing-diff-sha256 <hex> [--preflight-verdict <file>]]
+#   scripts/catalog-content-release.sh --recover-pricing-txn
+#   scripts/catalog-content-release.sh --host-check --commit <40-hex sha>
 #   scripts/catalog-content-release.sh --help
 #
 # --preflight prints exactly ONE JSON verdict on stdout
-#   {"go": bool, "checks": [{"name", "ok", "detail"}]}; progress goes to stderr.
+#   {"go": bool, "checks": [{"name", "ok", "detail"}], "pricing": {...}|null};
+#   progress goes to stderr.
 # --deploy runs the same preflight in the same invocation (its JSON verdict
 #   line is printed to stdout among the step logs), requires GO, then
 #   activates and verifies; every step logs to stdout.
+#
+# Pricing releases (#1693, SPEC-023-R019): a release whose rate-card rows
+# differ from live also replaces the rewards.rate_card block of Pearl's live
+# base coordinator.yaml with the reviewed commit's tracked block, in one
+# journaled transaction with `current` and the window, applied by one SIGHUP.
+# Preflight splices on Pearl (live yaml bytes never leave the host), computes
+# the effective-price diff over every served model name (catalog keys, table
+# rows, and the request_log model names of the last 30 days, pinned in the
+# verdict), dry-loads the candidate with the live binary, and prints the diff
+# (including the names the binary resolved) plus `pricing.pricing_diff_sha256`,
+# the digest of that complete acknowledged object. --deploy then requires
+# --pricing-diff-sha256 equal to that digest (the operator's acknowledgement of
+# the shown price table); --preflight-verdict <file> (the saved preflight
+# stdout) reuses its pinned name set, so a name that left the 30-day window
+# since does not invalidate the acknowledgement. The journal lives at
+# /opt/macprovider/.pricing-txn; any failure after it exists rolls yaml,
+# current and window back together.
+# --host-check (read-only, #1693 enabling rollout) proves Pearl is ready for a
+#   pricing release at <sha> without needing one: the commit is on origin/main
+#   and is this tooling, no lock or journal is held, the on-disk config is the
+#   applied one, and pricing_host_state passes (no foreign recovery state; the
+#   installed pricing helper/units/writers are the commit's; the recovery unit
+#   carries the pricing pre-start; the coordinator's applied-config record
+#   carries the pricing fields; served == on-disk == applied card). Prints one
+#   JSON verdict like --preflight; exit 0 = ready, 3 = not ready.
+# --recover-pricing-txn takes the Pearl lease and resolves an abandoned
+#   pricing journal (restore by compare-and-swap, re-HUP, prove the prior pair
+#   live, finalize); exit 0 when resolved or none exists.
 #
 # Exit codes:
 #   0   preflight GO / deploy activated and every evidence step passed
 #   1   usage, environment or operational error (no activation, or before it)
 #   3   preflight NO_GO (nothing was mutated)
 #   4   deploy activated, evidence failed, rolled back to the prior release
-#   5   rollback incomplete: follow docs/runbooks/catalog-release-decision-tree.md §rollback-failed
+#   5   rollback incomplete: follow docs/runbooks/catalog-release-decision-tree.md §rollback-failed;
+#       or (pricing) the journal could not be marked verified: it is kept in
+#       `verifying` and --recover-pricing-txn rolls it back (§pricing-txn)
 #   6   Pearl lease lost after activation may have started: state unknown, NOT
 #       rolled back; follow docs/runbooks/catalog-release-decision-tree.md §lease-lost
 #   71  interrupted, or lease lost before activation (rolled back first,
 #       through the lease, when already activated)
+#   (--recover-pricing-txn: 0 resolved or nothing to do; 5 stopped with the
+#       journal kept, docs/runbooks/catalog-release-decision-tree.md §pricing-txn)
 #
 # Env:
 #   PEARL_SSH, PEARL_SSH_IDENTITY, PEARL_SSH_KNOWN_HOSTS   as renew-autotune-static-feed.sh
@@ -46,7 +82,14 @@
 #   CATALOG_EVIDENCE_POLL_SECONDS   (d) poll interval, default 30
 #   CATALOG_CANARY_RECOVERY_SECONDS (c) canary proof deadline, default 180
 #   CATALOG_EVIDENCE_SETTLE_SECONDS (a)/(b)/rollback convergence deadline, default 30
+#   CATALOG_COORDINATOR_READY_SECONDS how long to wait for a booting coordinator
+#                             to be ready (unit active + /healthz) before any
+#                             SIGHUP and after a controlled restart, default 900
 #   AA_LEASE_MAX_SECONDS      lease bound, default 2700 for this lane
+#   CATALOG_GATEWAY_RATE_CARD_URL   public rate card the gateway serves
+#                             (default https://api.malibu.tech/v1/rate-card);
+#                             pricing releases poll it for convergence, alert-only
+#   CATALOG_GATEWAY_CONVERGENCE_SECONDS  that poll's deadline, default 660
 #
 # Secrets (the canary/operator bearer) only ever ride curl --config on stdin;
 # they are never printed, written to disk, or put in argv.
@@ -57,25 +100,42 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 RUNBOOK_ROLLBACK_FAILED="docs/runbooks/catalog-release-decision-tree.md §rollback-failed"
 RUNBOOK_LEASE_LOST="docs/runbooks/catalog-release-decision-tree.md §lease-lost"
+RUNBOOK_PRICING_TXN="docs/runbooks/catalog-release-decision-tree.md §pricing-txn"
 
 usage() { sed -n '2,/^set -euo pipefail$/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'; }
 
 MODE=""
 COMMIT=""
+PRICING_ACK=""
+PREFLIGHT_VERDICT_FILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --preflight) [ -z "$MODE" ] || { echo "choose one of --preflight / --deploy" >&2; exit 1; }; MODE=preflight ;;
-    --deploy) [ -z "$MODE" ] || { echo "choose one of --preflight / --deploy" >&2; exit 1; }; MODE=deploy ;;
+    --preflight|--deploy|--recover-pricing-txn|--host-check)
+      [ -z "$MODE" ] || { echo "choose one of --preflight / --deploy / --recover-pricing-txn / --host-check" >&2; exit 1; }
+      MODE="${1#--}" ;;
     --commit) [ $# -ge 2 ] || { echo "--commit needs a value" >&2; exit 1; }; COMMIT="$2"; shift ;;
+    --pricing-diff-sha256) [ $# -ge 2 ] || { echo "--pricing-diff-sha256 needs a value" >&2; exit 1; }; PRICING_ACK="$2"; shift ;;
+    --preflight-verdict) [ $# -ge 2 ] || { echo "--preflight-verdict needs a value" >&2; exit 1; }; PREFLIGHT_VERDICT_FILE="$2"; shift ;;
     --help|-h) usage; exit 0 ;;
     *) echo "unknown argument: $1 (see --help)" >&2; exit 1 ;;
   esac
   shift
 done
-[ -n "$MODE" ] || { echo "one of --preflight or --deploy is required (see --help)" >&2; exit 1; }
+[ -n "$MODE" ] || { echo "one of --preflight, --deploy, --recover-pricing-txn or --host-check is required (see --help)" >&2; exit 1; }
+if [ -n "$PRICING_ACK" ]; then
+  [ "$MODE" = deploy ] || { echo "--pricing-diff-sha256 is a --deploy acknowledgement" >&2; exit 1; }
+  printf '%s' "$PRICING_ACK" | grep -Eqx '[0-9a-f]{64}' || { echo "--pricing-diff-sha256 must be 64 lowercase hex" >&2; exit 1; }
+fi
+if [ -n "$PREFLIGHT_VERDICT_FILE" ]; then
+  case "$MODE" in recover-pricing-txn|host-check) echo "--preflight-verdict does not apply to --$MODE" >&2; exit 1 ;; esac
+  [ -f "$PREFLIGHT_VERDICT_FILE" ] || { echo "--preflight-verdict is not a file" >&2; exit 1; }
+fi
+if [ "$MODE" = recover-pricing-txn ] && [ -n "$COMMIT" ]; then
+  echo "--recover-pricing-txn takes no --commit (the journal carries the state)" >&2; exit 1
+fi
 
 # Preflight keeps stdout for the single JSON verdict; deploy logs to stdout.
-if [ "$MODE" = preflight ]; then exec 3>&2; else exec 3>&1; fi
+case "$MODE" in preflight|host-check) exec 3>&2 ;; *) exec 3>&1 ;; esac
 CCR_FATAL_RC=1
 log()   { printf '[catalog-content] %s\n' "$*" >&3; }
 fatal() { printf '[catalog-content] ERROR: %s\n' "$*" >&2; exit "$CCR_FATAL_RC"; }
@@ -98,14 +158,34 @@ APPLIED_CONFIG_RECORD=/run/macprovider/coordinator-applied-config.json
 APPLIED_CONFIG_SCHEMA=macprovider.coordinator-applied-config.v1
 BUYER_URL=http://127.0.0.1:8443
 PROVIDER_URL=http://127.0.0.1:8444
+# #1693 pricing lane: the on-host journal helper (installed by
+# deploy-pearl-vps.sh; its installed bytes must equal the reviewed copy),
+# the journal, and the installed units/helpers whose hashes preflight proves
+# (plus the writer list scripts/pricing-lane-installed-writers.txt at the
+# commit). The request_log whose model names are pinned read-only is found
+# from the coordinator's effective storage.db_path on Pearl (PF_REMOTE_STAGE).
+PRICING_HELPER=/opt/macprovider/coordinator-pricing-recover
+PRICING_JOURNAL=/opt/macprovider/.pricing-txn
+PRICING_INSTALLED_FILES="/opt/macprovider/coordinator-pricing-recover=phase4-coordinator/dist/coordinator-pricing-recover
+/etc/systemd/system/macprovider-coordinator-deploy-recovery.service=phase4-coordinator/dist/systemd/macprovider-coordinator-deploy-recovery.service
+/etc/systemd/system/macprovider-coordinator.service.d/10-deploy-transaction-guard.conf=phase4-coordinator/dist/systemd/macprovider-coordinator-deploy-guard.conf
+/etc/systemd/system/macprovider-coordinator-pricing-close.service=phase4-coordinator/dist/systemd/macprovider-coordinator-pricing-close.service
+/opt/macprovider/coordinator-config-guard.sh=scripts/lib/coordinator-config-guard.sh"
+PRICING_WRITERS_MANIFEST=scripts/pricing-lane-installed-writers.txt
 
 WATCH_SECONDS="${CATALOG_EVIDENCE_WATCH_SECONDS:-600}"
 POLL_SECONDS="${CATALOG_EVIDENCE_POLL_SECONDS:-30}"
 CANARY_RECOVERY_SECONDS="${CATALOG_CANARY_RECOVERY_SECONDS:-180}"
 SETTLE_SECONDS="${CATALOG_EVIDENCE_SETTLE_SECONDS:-30}"
-for _n in "$WATCH_SECONDS" "$POLL_SECONDS" "$CANARY_RECOVERY_SECONDS" "$SETTLE_SECONDS"; do
-  case "$_n" in ""|*[!0-9]*) fatal "CATALOG_EVIDENCE_*/CATALOG_CANARY_RECOVERY_SECONDS must be whole seconds" ;; esac
+READY_SECONDS="${CATALOG_COORDINATOR_READY_SECONDS:-900}"
+GATEWAY_RATE_CARD_URL="${CATALOG_GATEWAY_RATE_CARD_URL:-https://api.malibu.tech/v1/rate-card}"
+GATEWAY_CONVERGENCE_SECONDS="${CATALOG_GATEWAY_CONVERGENCE_SECONDS:-660}"
+for _n in "$WATCH_SECONDS" "$POLL_SECONDS" "$CANARY_RECOVERY_SECONDS" "$SETTLE_SECONDS" "$GATEWAY_CONVERGENCE_SECONDS" "$READY_SECONDS"; do
+  case "$_n" in ""|*[!0-9]*) fatal "CATALOG_EVIDENCE_*/CATALOG_CANARY_RECOVERY_SECONDS/CATALOG_GATEWAY_CONVERGENCE_SECONDS/CATALOG_COORDINATOR_READY_SECONDS must be whole seconds" ;; esac
 done
+# The remote publish/rollback wait the same bound before any SIGHUP.
+export AA_COORDINATOR_READY_SECONDS="$READY_SECONDS"
+case "$GATEWAY_RATE_CARD_URL" in https://*|http://127.0.0.1:*) ;; *) fatal "CATALOG_GATEWAY_RATE_CARD_URL must be https (or loopback http)" ;; esac
 [ "$POLL_SECONDS" -ge 1 ] || fatal "CATALOG_EVIDENCE_POLL_SECONDS must be at least 1"
 export AA_LEASE_MAX_SECONDS="${AA_LEASE_MAX_SECONDS:-2700}"
 
@@ -156,6 +236,11 @@ REMOTE_SCRATCH=""
 # 0 = nothing sent; maybe = the publish was (possibly) sent; 1 = activated.
 CCR_ACTIVATED=0
 CCR_DONE=0
+# #1693: 1 once the pricing journal's `verified` phase is durable (terminal:
+# never rolled back); 1 in CCR_PRICING_KEEP when marking it failed (journal
+# kept in `verifying` for --recover-pricing-txn, no in-lane rollback).
+PRICING_VERIFIED=0
+CCR_PRICING_KEEP=0
 CCR_ROLLED_BACK=0
 CCR_CANARY_TOUCHED=0
 CCR_PASSED_AB=0
@@ -169,6 +254,18 @@ RELEASE_DIRNAME=""
 # equal to the coordinator's applied-config record by pf_config_applied.
 CONFIG_DISK_SHA=""
 OVERLAY_DISK_SHA=""
+# #1693 pricing state (PRICING=1 when the release changes rate-card rows).
+PRICING=0
+PRICING_DIR=""
+COMMIT_BLOCK_SHA=""
+ACK_MOVES_SHA=""
+PRICING_DIFF_SHA=""
+CAND_CONFIG_SHA=""
+EXPECTED_RATE_SHA=""
+EXPECTED_SIGNED_SHA=""
+PRIOR_RATE_SHA=""
+PRIOR_SIGNED_SHA=""
+PRIOR_SNAPSHOT_ID=""
 
 ccr_cleanup() {
   local rc=$? probe
@@ -177,7 +274,14 @@ ccr_cleanup() {
   # the rollback short; channel loss is detected by aa_lease_run itself.
   trap '' HUP INT TERM
   set +e
-  if [ "$CCR_ACTIVATED" != 0 ] && [ "$CCR_DONE" = 0 ] && [ "$CCR_ROLLED_BACK" = 0 ] && ! aa_lease_lost; then
+  if [ "$PRICING" = 1 ] && [ "$PRICING_VERIFIED" = 1 ] && [ "$CCR_DONE" = 0 ] && [ "$CCR_ROLLED_BACK" = 0 ] && ! aa_lease_lost; then
+    # A verified price is never rolled back: only validate + finalize it.
+    log "run ended (rc=$rc) after the pricing journal was verified; finalizing the candidate (never rolled back)"
+    aa_lease_sh "{ [ ! -e '$PRICING_JOURNAL' ] && [ ! -L '$PRICING_JOURNAL' ]; } || python3 -I '$PRICING_HELPER' finalize candidate" >&3 2>&1 ||
+      log "ALERT: the verified pricing journal could not be finalized; the candidate is live. Run scripts/catalog-content-release.sh --recover-pricing-txn ($RUNBOOK_PRICING_TXN)"
+  elif [ "$CCR_PRICING_KEEP" = 1 ]; then
+    log "pricing: the journal at $PRICING_JOURNAL is kept in phase verifying; run scripts/catalog-content-release.sh --recover-pricing-txn, which rolls it back ($RUNBOOK_PRICING_TXN)"
+  elif [ "$CCR_ACTIVATED" != 0 ] && [ "$CCR_DONE" = 0 ] && [ "$CCR_ROLLED_BACK" = 0 ] && ! aa_lease_lost; then
     probe=0
     if [ "$CCR_ACTIVATED" = maybe ]; then
       # Interrupted while the publish may be running on Pearl: ask the lease
@@ -197,6 +301,7 @@ ccr_cleanup() {
   fi
   if [ "$CCR_ACTIVATED" != 0 ] && [ "$CCR_DONE" = 0 ] && [ "$AA_LEASE_LOST" = 1 ]; then
     log "LEASE LOST: the Pearl lease ended while activation may have started; Pearl state is UNKNOWN and was NOT rolled back from a separate session. Follow $RUNBOOK_LEASE_LOST"
+    [ "$PRICING" != 1 ] || log "pricing: the journal at $PRICING_JOURNAL is kept; after reacquiring the lock set run scripts/catalog-content-release.sh --recover-pricing-txn ($RUNBOOK_PRICING_TXN)"
     rc=6
   fi
   aa_lease_release
@@ -214,8 +319,10 @@ sha256_file() { python3 -c 'import hashlib,sys;print(hashlib.sha256(open(sys.arg
 
 # record <name> <0|1> <detail>: one preflight check row.
 record() {
-  local detail
-  detail="$(printf '%s' "$3" | LC_ALL=C tr -c '[:print:]' ' ' | cut -c1-600)"
+  local detail limit=600
+  # pricing_host_state lists every installed-file problem after its operator hint.
+  [ "$1" != pricing_host_state ] || limit=2000
+  detail="$(printf '%s' "$3" | LC_ALL=C tr -c '[:print:]' ' ' | cut -c1-"$limit")"
   printf '%s\t%s\t%s\n' "$1" "$2" "$detail" >>"$CHECKS"
   if [ "$2" = 1 ]; then log "check $1: ok ($detail)"; else log "check $1: FAIL ($detail)"; fi
 }
@@ -223,13 +330,17 @@ failed_checks() { awk -F '\t' '$2 != 1 {print $1}' "$CHECKS"; }
 check_ok() { awk -F '\t' -v n="$1" '$1 == n && $2 == 1 {found=1} END {exit found ? 0 : 1}' "$CHECKS"; }
 
 emit_verdict() {
-  python3 - "$CHECKS" <<'PY'
-import json, sys
+  python3 - "$CHECKS" "${PRICING_DIR:-}" <<'PY'
+import json, os, sys
 checks = []
 for line in open(sys.argv[1], encoding="utf-8"):
     name, ok, detail = line.rstrip("\n").split("\t", 2)
     checks.append({"name": name, "ok": ok == "1", "detail": detail})
-print(json.dumps({"go": bool(checks) and all(c["ok"] for c in checks), "checks": checks}, sort_keys=True))
+pricing = None
+if sys.argv[2] and os.path.exists(os.path.join(sys.argv[2], "verdict-pricing.json")):
+    pricing = json.load(open(os.path.join(sys.argv[2], "verdict-pricing.json")))
+print(json.dumps({"go": bool(checks) and all(c["ok"] for c in checks), "checks": checks, "pricing": pricing},
+                 sort_keys=True, ensure_ascii=True))
 PY
 }
 
@@ -328,7 +439,7 @@ PY
 # ---------------------------------------------------------------------------
 # Preflight.
 # ---------------------------------------------------------------------------
-TOOLING_FILES="scripts/catalog-content-release.sh scripts/lib/autotune-activate.sh scripts/lib/catalog-canary-token.sh scripts/pearl_autotune_deploy_lock.py scripts/catalog-verifier-bundle.txt ops/pearl-updater/catalog-canary-proof.py"
+TOOLING_FILES="scripts/catalog-content-release.sh scripts/lib/autotune-activate.sh scripts/lib/catalog-canary-token.sh scripts/lib/coordinator-config-guard.sh scripts/pearl_autotune_deploy_lock.py scripts/catalog-verifier-bundle.txt ops/pearl-updater/catalog-canary-proof.py phase4-coordinator/dist/coordinator-pricing-recover"
 
 pf_commit() {
   case "$COMMIT" in
@@ -378,13 +489,20 @@ pf_assemble() {
   cp "$a/phase3-binary/catalog/autotune/release-ledger.json" "$WORK/gate/release-ledger.json" 2>/dev/null &&
     cp "$a/phase3-binary/catalog/autotune/not-buyer-serving.json" "$WORK/gate/not-buyer-serving.json" 2>/dev/null ||
     { record release_assembled 0 "commit lacks release-ledger.json or not-buyer-serving.json"; return 1; }
+  # The Tier-2 trust root (tier2.catalog_public_key) every verify of this
+  # release uses, here and under the lock on Pearl: the reviewed commit's
+  # tracked coordinator.yaml, shipped sha-pinned beside the verifier (#1693 E2).
+  git -C "$REPO_ROOT" show "$COMMIT:phase4-coordinator/dist/coordinator.yaml" >"$WORK/gate/tier2-trust-root.yaml" 2>/dev/null &&
+    [ -s "$WORK/gate/tier2-trust-root.yaml" ] ||
+    { record release_assembled 0 "commit lacks phase4-coordinator/dist/coordinator.yaml (the Tier-2 trust root)"; return 1; }
   # A Tier-2 freshness re-sign of a ledger row is provable only from git
   # history (as deploy-pearl-vps.sh): build the index from the reviewed commit.
   if ! python3 -I "$SCRIPT_DIR/catalog-release.py" tier2-content-index --repo "$REPO_ROOT" \
       --ledger "$WORK/gate/release-ledger.json" --rev "$COMMIT" >"$WORK/gate/tier2-content-index.json" 2>"$WORK/t2index.err"; then
     record release_assembled 0 "cannot build the Tier-2 content index from $COMMIT history: $(tail -n 2 "$WORK/t2index.err")"; return 1
   fi
-  if ! python3 -I "$SCRIPT_DIR/catalog-release.py" verify-directory --directory "$REL" >"$WORK/verify.out" 2>&1; then
+  if ! python3 -I "$SCRIPT_DIR/catalog-release.py" verify-directory --directory "$REL" \
+      --tier2-coordinator-config "$WORK/gate/tier2-trust-root.yaml" >"$WORK/verify.out" 2>&1; then
     record release_assembled 0 "verify-directory failed: $(tail -n 3 "$WORK/verify.out")"; return 1
   fi
   RELEASE_DIRNAME="$(release_dirname "$REL")" || { record release_assembled 0 "cannot derive the release directory name"; return 1; }
@@ -451,6 +569,12 @@ pf_pearl() {
     record pearl_locks_free 0 "a coordinator deploy, renewal or Pearl update holds the Pearl lock"; return 1
   fi
   record pearl_locks_free 1 "no deploy, renewal, update or Tier-2 transaction in progress"
+  # #1693 L0: every config writer (this lane included) refuses while a pricing
+  # transaction journal exists; resolve it with --recover-pricing-txn first.
+  if SSH "test -e '$PRICING_JOURNAL' || test -L '$PRICING_JOURNAL'"; then
+    record pricing_txn_absent 0 "refusing: pricing transaction journal present at $PRICING_JOURNAL; run scripts/catalog-content-release.sh --recover-pricing-txn"; return 1
+  fi
+  record pricing_txn_absent 1 "no pricing transaction journal"
 }
 
 # Fetch the LIVE release read-only and prove the rollback target verifies.
@@ -461,7 +585,8 @@ pf_live() {
     record rollback_preconditions 0 "cannot read the live release $CURRENT_TARGET"; return 1
   fi
   release_identity "$LIVE" LIVE || { record rollback_preconditions 0 "live release identity is malformed"; return 1; }
-  if ! python3 -I "$SCRIPT_DIR/catalog-release.py" verify-directory --directory "$LIVE" >"$WORK/verify-live.out" 2>&1; then
+  if ! python3 -I "$SCRIPT_DIR/catalog-release.py" verify-directory --directory "$LIVE" \
+      --tier2-coordinator-config "$WORK/gate/tier2-trust-root.yaml" >"$WORK/verify-live.out" 2>&1; then
     record rollback_preconditions 0 "live release $CURRENT_TARGET does not verify: $(tail -n 3 "$WORK/verify-live.out")"; return 1
   fi
   for entry in $ORIG_PREVIOUS_TARGET; do
@@ -478,13 +603,177 @@ pf_live() {
 pf_content_gate() {
   local rc=0
   python3 -I "$SCRIPT_DIR/catalog-release.py" content-gate --release "$REL" --live "$LIVE" --commit "$COMMIT" \
-    --tier2-content-index "$WORK/gate/tier2-content-index.json" >"$WORK/gate.json" 2>"$WORK/gate.err" || rc=$?
+    --tier2-content-index "$WORK/gate/tier2-content-index.json" --tier2-coordinator-config "$WORK/gate/tier2-trust-root.yaml" \
+    >"$WORK/gate.json" 2>"$WORK/gate.err" || rc=$?
   GATE_LANE="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("lane",""))' "$WORK/gate.json" 2>/dev/null || true)"
   if [ "$rc" -ne 0 ] || [ "$GATE_LANE" != catalog-content ]; then
     record content_gate 0 "content-gate rc=$rc lane=${GATE_LANE:-?}: $(python3 -c 'import json,sys;print("; ".join(json.load(open(sys.argv[1])).get("reasons",[])))' "$WORK/gate.json" 2>/dev/null || tail -n 2 "$WORK/gate.err")"
     return 1
   fi
   record content_gate 1 "lane catalog-content vs live $LIVE_ID"
+  pf_pricing_detect
+}
+
+# #1693: a rows-only rate-card change makes this a pricing release. Bind the
+# commit's tracked coordinator rate_card block (the bytes the splice installs)
+# and its acknowledged-pricing-moves.json, both read with `git show`.
+pf_pricing_detect() {
+  local out
+  out="$(python3 -c '
+import json, re, sys
+v = json.load(open(sys.argv[1]))
+p = v.get("pricing") or {}
+changed = any(p.get(k) for k in ("changed", "added", "removed"))
+blk = v.get("commit_block_sha256") or ""
+if changed and not re.fullmatch(r"[0-9a-f]{64}", blk):
+    raise SystemExit("pricing release without a commit-bound rate_card block digest")
+print("1 " + blk if changed else "0 -")' "$WORK/gate.json" 2>&1)" || { record pricing_release 0 "$out"; return 1; }
+  [ "${out%% *}" = 1 ] || return 0
+  PRICING=1
+  COMMIT_BLOCK_SHA="${out#* }"
+  PRICING_DIR="$WORK/pricing"
+  rm -rf "$PRICING_DIR"; mkdir -m 0700 "$PRICING_DIR"
+  git -C "$REPO_ROOT" show "$COMMIT:phase4-coordinator/dist/coordinator.yaml" >"$PRICING_DIR/commit-coordinator.yaml" 2>/dev/null &&
+    git -C "$REPO_ROOT" show "$COMMIT:phase3-binary/catalog/autotune/acknowledged-pricing-moves.json" >"$PRICING_DIR/ack.json" 2>/dev/null ||
+    { record pricing_release 0 "commit lacks phase4-coordinator/dist/coordinator.yaml or acknowledged-pricing-moves.json"; return 1; }
+  if ! python3 -I "$SCRIPT_DIR/catalog-release.py" extract-coordinator-rate-card-block --config "$PRICING_DIR/commit-coordinator.yaml" \
+      --output "$PRICING_DIR/block.yaml" >"$PRICING_DIR/extract.json" 2>"$PRICING_DIR/extract.err"; then
+    record pricing_release 0 "cannot extract the commit's rate_card block: $(tail -n 1 "$PRICING_DIR/extract.err")"; return 1
+  fi
+  [ "$(sha256_file "$PRICING_DIR/block.yaml")" = "$COMMIT_BLOCK_SHA" ] ||
+    { record pricing_release 0 "the commit's rate_card block digest differs from the content gate's"; return 1; }
+  ACK_MOVES_SHA="$(sha256_file "$PRICING_DIR/ack.json")"
+  record pricing_release 1 "rate-card rows change vs live; commit rate_card block $COMMIT_BLOCK_SHA"
+}
+
+# #1693 L2 host state, read-only, as root on Pearl: no foreign recovery state,
+# no pricing keys in the overlay, the installed guard-bearing writers and the
+# pricing recovery helper/units hash to the commit's bytes, the coordinator
+# requires the recovery unit and wants the closer, the alert unit loads, and
+# the served card == on-disk current card == applied record card.
+IFS= read -r -d '' PF_REMOTE_PRICING_STATE <<'STATE' || true
+set -euo pipefail
+helper="$1"; overlay="$2"; record="$3"; buyer="$4"; root="$5"; cur="$6"
+shift 6
+for spec in "$@"; do
+  want="${spec%%=*}"; path="${spec#*=}"
+  if [ -f "$path" ] && [ ! -L "$path" ]; then got="$(sha256sum "$path" | cut -d' ' -f1)"; else got=MISSING; fi
+  if [ "$got" = "$want" ]; then echo "INSTALLED=ok $path"; else echo "INSTALLED=$got $path"; fi
+done
+echo "REQUIRES=$(systemctl show -p Requires --value macprovider-coordinator 2>/dev/null || true)"
+echo "WANTS=$(systemctl show -p Wants --value macprovider-coordinator 2>/dev/null || true)"
+echo "ALERT_LOADSTATE=$(systemctl show -p LoadState --value macprovider-pearl-updater-alert@macprovider-coordinator-pricing-close.service.service 2>/dev/null || true)"
+# A pre-#1693 deploy script (even an aborted one) reinstalls a recovery unit
+# without the pricing pre-start: journals would no longer be restored at boot.
+if grep -qE '^ExecStart=/usr/bin/python3 -I [^ ]*/coordinator-pricing-recover --pre-start$' /etc/systemd/system/macprovider-coordinator-deploy-recovery.service 2>/dev/null; then
+  echo PRESTART=ok
+else
+  echo PRESTART=missing
+fi
+if [ -f "$helper" ]; then python3 -I "$helper" foreign-state 2>&1 | sed 's/^/FOREIGN=/' || true; fi
+python3 -I - "$overlay" <<'PY' || true
+import re, sys
+try:
+    text = open(sys.argv[1], encoding="utf-8").read()
+except FileNotFoundError:
+    print("OVERLAY=ok"); raise SystemExit
+except (OSError, UnicodeDecodeError):
+    print("OVERLAY=unreadable"); raise SystemExit
+key = re.compile(r"""(^|[\s{,])["']?(rate_card|provider_share|global_multiplier|usd_per_million_credits)["']?\s*:""")
+hits = sorted({m.group(2) for line in text.splitlines() for m in [key.search(line.split("#", 1)[0])] if m})
+print("OVERLAY=" + ("ok" if not hits else "carries " + ",".join(hits)))
+PY
+served="$(curl -fsS --noproxy '*' --max-time 10 --max-filesize 16777216 "$buyer/v1/rate-card" | sha256sum | cut -d' ' -f1)" || served=unreadable
+echo "SERVED_CARD=$served"
+echo "DISK_CARD=$(sha256sum "$root/$cur/rate-card.json" | cut -d' ' -f1)"
+if [ -f "$record" ]; then echo "RECORD=$(head -c 65536 "$record" | head -n 1)"; else echo RECORD=; fi
+STATE
+
+commit_sha() { # <repo path>: sha256 of that file at $COMMIT, or empty
+  git -C "$REPO_ROOT" show "$COMMIT:$1" 2>/dev/null | python3 -c 'import hashlib,sys;d=sys.stdin.buffer.read();print(hashlib.sha256(d).hexdigest() if d else "")'
+}
+
+pf_pricing_host() {
+  local installed_specs=() line want repo_path installed writers out verdict
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    installed="${line%%=*}"; repo_path="${line#*=}"
+    want="$(commit_sha "$repo_path")"
+    [ -n "$want" ] || { record pricing_host_state 0 "commit lacks $repo_path (installed as $installed)"; return 1; }
+    installed_specs+=("$want=$installed")
+  done <<LIST
+$PRICING_INSTALLED_FILES
+LIST
+  # The guard-bearing live-config writers installed on Pearl (updater,
+  # watchdog, deploy-recover, ...), listed at the commit as "<installed> <repo>".
+  writers="$(git -C "$REPO_ROOT" show "$COMMIT:$PRICING_WRITERS_MANIFEST" 2>/dev/null)" ||
+    { record pricing_host_state 0 "commit lacks $PRICING_WRITERS_MANIFEST (installed-writer hashes unknown)"; return 1; }
+  while read -r installed repo_path; do
+    case "$installed" in ''|'#'*) continue ;; esac
+    case "$installed$repo_path" in *[!A-Za-z0-9._/@-]*) record pricing_host_state 0 "unsafe entry in $PRICING_WRITERS_MANIFEST"; return 1 ;; esac
+    want="$(commit_sha "$repo_path")"
+    [ -n "$want" ] || { record pricing_host_state 0 "commit lacks $repo_path (installed as $installed)"; return 1; }
+    installed_specs+=("$want=$installed")
+  done <<LIST
+$writers
+LIST
+  printf '%s' "$PF_REMOTE_PRICING_STATE" >"$WORK/pricing-state.remote.sh"
+  if ! out="$(SSH bash -s -- "$PRICING_HELPER" "$COORD_OVERLAY" "$APPLIED_CONFIG_RECORD" "$BUYER_URL" "$REMOTE_AUTOTUNE_DIR" \
+      "$CURRENT_TARGET" "${installed_specs[@]}" <"$WORK/pricing-state.remote.sh" 2>&1)"; then
+    record pricing_host_state 0 "cannot read the Pearl pricing state: $(printf '%s' "$out" | tail -n 2)"; return 1
+  fi
+  verdict="$(printf '%s\n' "$out" | python3 -c '
+import json, re, sys
+hexre = re.compile(r"[0-9a-f]{64}")
+# Operator hints lead: the detail is truncated for display.
+hints, problems, rec = [], [], None
+served = disk = None
+for line in sys.stdin:
+    key, _, val = line.rstrip("\n").partition("=")
+    if key == "INSTALLED" and not val.startswith("ok "):
+        got, _, path = val.partition(" ")
+        problems.append("%s is %s, not the commit%ss guard-bearing bytes" % (path, "missing" if got == "MISSING" else "sha " + got[:12], chr(39)))
+    elif key == "REQUIRES" and "macprovider-coordinator-deploy-recovery.service" not in val.split():
+        problems.append("macprovider-coordinator does not Require the deploy-recovery unit")
+    elif key == "WANTS" and "macprovider-coordinator-pricing-close.service" not in val.split():
+        problems.append("macprovider-coordinator does not Want macprovider-coordinator-pricing-close.service")
+    elif key == "PRESTART" and val != "ok":
+        hints.append("pricing recovery DISABLED: the recovery unit lacks the coordinator-pricing-recover --pre-start line "
+                     "(a pre-#1693 deploy script reinstalled its units); re-run the #1693 enabling rollout from a tag whose ledger carries the live release (runbook runtime floor rule)")
+    elif key == "ALERT_LOADSTATE" and val != "loaded":
+        problems.append("macprovider-pearl-updater-alert@.service is not loadable (%s)" % (val or "?"))
+    elif key == "FOREIGN" and val:
+        problems.append("foreign recovery state: " + val)
+    elif key == "OVERLAY" and val != "ok":
+        problems.append("overlay %s (pricing keys must stay base-owned)" % val)
+    elif key == "SERVED_CARD":
+        served = val
+    elif key == "DISK_CARD":
+        disk = val
+    elif key == "RECORD":
+        try:
+            rec = json.loads(val)
+        except ValueError:
+            rec = None
+if not isinstance(rec, dict):
+    problems.append("applied identity unknown: no parseable applied-config record")
+    rec = {}
+rate, signed, snap = rec.get("rate_table_sha256"), rec.get("signed_rate_card_sha256"), rec.get("billing_snapshot_id")
+if not (isinstance(rate, str) and hexre.fullmatch(rate) and isinstance(signed, str) and hexre.fullmatch(signed)
+        and isinstance(snap, int) and not isinstance(snap, bool) and snap > 0 and isinstance(rec.get("autotune_release_id"), str)):
+    hints.append("pricing needs the #1693 enabling runtime release: the coordinator applied-config record lacks "
+                 "rate_table_sha256, signed_rate_card_sha256, autotune_release_id or billing_snapshot_id")
+elif not (served == disk == signed):
+    problems.append("prior state not settled: served /v1/rate-card %s, on-disk current card %s, applied record card %s differ"
+                    % ((served or "?")[:12], (disk or "?")[:12], signed[:12]))
+if hints or problems:
+    print("; ".join(hints + problems)); raise SystemExit(1)
+print("%s %s %d" % (rate, signed, snap))
+')" || { record pricing_host_state 0 "$verdict"; return 1; }
+  read -r PRIOR_RATE_SHA PRIOR_SIGNED_SHA PRIOR_SNAPSHOT_ID <<VALS
+$verdict
+VALS
+  record pricing_host_state 1 "no foreign recovery state; installed helpers/units/writers are the commit's; served == disk == applied card ${PRIOR_SIGNED_SHA:0:12} (snapshot $PRIOR_SNAPSHOT_ID)"
 }
 
 # (e) A model that is newly buyer-serving vs live (added) or served at a new
@@ -583,6 +872,84 @@ for entry in $prev; do cp -a "$root/$entry" "$sroot/$entry"; done
 mv "$scratch/incoming" "$sroot/releases/$name"
 ln -s "$cur" "$sroot/current"
 if [ -n "$prev" ]; then printf '%s\n' "$prev" > "$sroot/.previous-target"; fi
+# #1693 L1/L2 pricing: splice the commit's rate_card block into the LIVE base
+# yaml here (its bytes never leave Pearl; only digests and the effective diff
+# return), pin the distinct request_log model names of the last 30 days
+# (read-only query, names only), and compute the effective-price diff.
+pricing="${10:-0}"
+config_arg="$config"; pricing_args=""
+if [ "$pricing" = 1 ]; then
+  p="$scratch/pricing"
+  verifier="$scratch/tools/scripts/catalog-release.py"
+  if python3 -I "$verifier" splice-coordinator-rate-card --live-config "$config" --block "$p/block.yaml" \
+      --output "$p/candidate-coordinator.yaml" >"$p/splice.json" 2>"$p/splice.err"; then
+    echo "SPLICE_JSON=$(cat "$p/splice.json")"
+  else
+    echo "PRICING_ERROR=the rate_card splice refused the live coordinator.yaml: $(tail -n 1 "$p/splice.err" | tr -cd '[:print:]' | head -c 400)"
+  fi
+  # The request_log lives in the coordinator's storage.db_path: the overlay's
+  # value over the base's (as the coordinator merges them), else its default,
+  # resolved against the unit's WorkingDirectory (/opt/macprovider) like the
+  # coordinator resolves it. An absent database is a refusal, never "no names".
+  db="$(python3 -I - "$verifier" "$config" "$overlay" /opt/macprovider/ <<'PY'
+import os, runpy, sys
+cr = runpy.run_path(sys.argv[1])
+config, overlay, workdir = sys.argv[2:]
+value = None
+if os.path.exists(overlay):
+    value = cr["_yaml_block_value"](open(overlay, encoding="utf-8").read(), "storage", "db_path")
+if not value:
+    value = cr["_yaml_block_value"](open(config, encoding="utf-8").read(), "storage", "db_path")
+value = value or "coordinator.db"  # the coordinator default storage.db_path
+path = os.path.normpath(os.path.join(workdir, value))
+if not os.path.isfile(path):
+    print("storage.db_path %r resolves to %s, which does not exist" % (value, path))
+    raise SystemExit(1)
+print(path)
+PY
+)" || { echo "PRICING_ERROR=cannot locate the request_log: $(printf '%s' "$db" | tr -cd '[:print:]' | head -c 400)"; db=""; }
+  [ -z "$db" ] || python3 -I - "$db" "$p/names-now.json" <<'PY' || echo "PRICING_ERROR=cannot read the request_log model names read-only from $db"
+import datetime, json, sqlite3, sys
+db, out = sys.argv[1:]
+cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S")
+con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+try:
+    rows = con.execute("SELECT DISTINCT model FROM request_log WHERE ts_utc >= ?", (cutoff,)).fetchall()
+finally:
+    con.close()
+json.dump(sorted({r[0] for r in rows if isinstance(r[0], str)}), open(out, "w"))
+PY
+  # Unreadable names were reported (PRICING_ERROR refuses the preflight); an
+  # empty list only lets the stage finish its report.
+  [ -f "$p/names-now.json" ] || echo '[]' >"$p/names-now.json"
+  new_arg=""
+  if [ -f "$p/pinned-names.json" ]; then new_arg="--new-names $p/names-now.json"; else cp "$p/names-now.json" "$p/pinned-names.json"; fi
+  rel_args="--release $sroot/releases/$name --release $sroot/$cur"
+  for entry in $prev; do rel_args="$rel_args --release $sroot/$entry"; done
+  diff_rc=0
+  # shellcheck disable=SC2086
+  python3 -I "$verifier" pricing-effective-diff --live-config "$config" --candidate-rate-card "$sroot/releases/$name/rate-card.json" \
+    $rel_args --pinned-names "$p/pinned-names.json" $new_arg --acknowledged-moves "$p/ack.json" \
+    --output "$p/pricing-diff.json" >"$p/diff.out" 2>"$p/diff.err" || diff_rc=$?
+  echo "PRICING_DIFF_RC=$diff_rc"
+  echo "PRICING_DIFF_OUT=$(head -c 262144 "$p/diff.out" | tr -d '\n')"
+  [ "$diff_rc" -eq 0 ] || [ "$diff_rc" -eq 3 ] || echo "PRICING_ERROR=pricing-effective-diff failed: $(tail -n 1 "$p/diff.err" | tr -cd '[:print:]' | head -c 400)"
+  if [ -f "$p/pricing-diff.json" ]; then echo "PRICING_DIFF_B64=$(base64 < "$p/pricing-diff.json" | tr -d '\n')"; fi
+  echo "PINNED_B64=$(base64 < "$p/pinned-names.json" | tr -d '\n')"
+  # Names outside the MODEL_KEY grammar are resolved by the live binary (C2).
+  python3 -I - "$verifier" "$p/unresolved.json" "$p/pinned-names.json" "$p/names-now.json" $rel_args <<'PY' || echo "PRICING_ERROR=cannot list the names the validator must resolve"
+import json, runpy, sys
+cr = runpy.run_path(sys.argv[1])
+names = set(json.load(open(sys.argv[3]))) | set(json.load(open(sys.argv[4])))
+args = sys.argv[5:]
+import pathlib
+for i in range(0, len(args), 2):
+    names |= cr["release_model_names"](pathlib.Path(args[i + 1]))
+json.dump(sorted(n for n in names if not cr["PRICING_RESOLVABLE_NAME"].fullmatch(n)), open(sys.argv[2], "w"))
+PY
+  config_arg="$p/candidate-coordinator.yaml"
+  pricing_args="--expect-base-equivalent $config --resolve-model-names $p/unresolved.json"
+fi
 chown -R root:macprovider "$scratch"
 chmod -R g+rX,g-w,o-rwx "$scratch"
 python3 -I "$window" plan --root "$sroot" --incoming "releases/$name" > "$scratch/plan.json"
@@ -601,10 +968,14 @@ echo "PLAN_JSON=$(cat "$scratch/plan.json")"
 overlay_args=""
 if [ -e "$overlay" ]; then overlay_args="--config-overlay $overlay"; fi
 rc=0
+if [ "$pricing" = 1 ] && [ ! -f "$config_arg" ]; then
+  rc=99; echo '{"ok": false, "errors": ["no spliced candidate to dry-load"]}' >"$scratch/dryload.json"
+else
 # shellcheck disable=SC2086
 systemd-run --quiet --wait --pipe --collect -p RuntimeMaxSec=300 -p "EnvironmentFile=-$env_file" -p User=macprovider -p Group=macprovider \
-  "$bin" --config "$config" $overlay_args --validate-autotune-release "$sroot/releases/$name" \
-  --previous-target "$scratch/check/.previous-target" </dev/null >"$scratch/dryload.json" 2>"$scratch/dryload.err" || rc=$?
+  "$bin" --config "$config_arg" $overlay_args --validate-autotune-release "$sroot/releases/$name" \
+  --previous-target "$scratch/check/.previous-target" $pricing_args </dev/null >"$scratch/dryload.json" 2>"$scratch/dryload.err" || rc=$?
+fi
 echo "DRYLOAD_RC=$rc"
 echo "DRYLOAD_JSON=$(tail -n 1 "$scratch/dryload.json" | head -c 65536)"
 STAGE
@@ -633,23 +1004,38 @@ pf_dry_load() {
     cp "$REPO_ROOT/$entry" "$WORK/upload/tools/$entry"
     printf '%s %s\n' "$(sha256_file "$REPO_ROOT/$entry")" "$entry" >>"$WORK/tools.expected"
   done
-  if ! tar -C "$WORK/upload" -cf - incoming tools | SSH "tar -xf - -C '$REMOTE_SCRATCH'"; then
+  local upload_dirs="incoming tools"
+  if [ "$PRICING" = 1 ]; then
+    mkdir -p "$WORK/upload/pricing"
+    cp "$PRICING_DIR/block.yaml" "$PRICING_DIR/ack.json" "$WORK/upload/pricing/"
+    # Pinned at preflight: the saved --preflight-verdict's set, or (under the
+    # lease) this run's preflight set; absent = pin now.
+    if [ -f "$PRICING_DIR/pinned-names.json" ]; then cp "$PRICING_DIR/pinned-names.json" "$WORK/upload/pricing/"; fi
+    upload_dirs="$upload_dirs pricing"
+  fi
+  # shellcheck disable=SC2086
+  if ! tar -C "$WORK/upload" -cf - $upload_dirs | SSH "tar -xf - -C '$REMOTE_SCRATCH'"; then
     record coordinator_dry_load 0 "cannot upload the candidate to the Pearl scratch dir"; return 1
   fi
   [ -z "$ORIG_PREVIOUS_TARGET" ] || prev_arg="$(printf '%s' "$ORIG_PREVIOUS_TARGET" | base64 | tr -d '\n')"
   printf '%s' "$PF_REMOTE_STAGE" >"$WORK/stage.remote.sh"
   if ! out="$(SSH bash -s -- "$REMOTE_SCRATCH" "$REMOTE_AUTOTUNE_DIR" "$CURRENT_TARGET" "$prev_arg" "$RELEASE_DIRNAME" \
-      "$COORD_ENV_FILE" "$COORD_BIN" "$COORD_CONFIG" "$COORD_OVERLAY" <"$WORK/stage.remote.sh" 2>&1)"; then
+      "$COORD_ENV_FILE" "$COORD_BIN" "$COORD_CONFIG" "$COORD_OVERLAY" "$PRICING" <"$WORK/stage.remote.sh" 2>&1)"; then
     record coordinator_dry_load 0 "staging on Pearl failed: $(printf '%s' "$out" | tail -n 3)"; return 1
   fi
+  printf '%s\n' "$out" >"$WORK/stage.out"
   if [ "$(printf '%s\n' "$out" | sed -n 's/^TOOL_SHA=//p')" != "$(LC_ALL=C sort -k2 "$WORK/tools.expected")" ]; then
     record coordinator_dry_load 0 "the window helper / verifier bundle on Pearl does not match the reviewed copies"; return 1
   fi
   printf '%s\n' "$out" | sed -n 's/^PLAN_JSON=//p' >"$WORK/plan.json"
   printf '%s\n' "$out" | sed -n 's/^DRYLOAD_JSON=//p' >"$WORK/dryload.json"
-  local verdict
+  local verdict want_cfg="$CONFIG_DISK_SHA"
+  if [ "$PRICING" = 1 ]; then
+    pf_pricing_stage_results || return 1
+    want_cfg="$CAND_CONFIG_SHA"
+  fi
   verdict="$(python3 - "$WORK/dryload.json" "$(printf '%s\n' "$out" | sed -n 's/^DRYLOAD_RC=//p')" \
-    "$REL_ID" "$REL_CAND_SHA" "$REL_TIER2_ID" "$REL_TIER2_SHA" "$WORK/plan.json" "$CONFIG_DISK_SHA" "$OVERLAY_DISK_SHA" <<'PY'
+    "$REL_ID" "$REL_CAND_SHA" "$REL_TIER2_ID" "$REL_TIER2_SHA" "$WORK/plan.json" "$want_cfg" "$OVERLAY_DISK_SHA" <<'PY'
 import json, sys
 path, rc, rid, sha, t2id, t2sha, plan, cfg_sha, ov_sha = sys.argv[1:]
 try:
@@ -666,7 +1052,8 @@ if v.get("tier2_catalog_id") != t2id or v.get("tier2_sha256") != t2sha:
     problems.append("dry-load Tier-2 %s/%s, expected %s/%s" % (v.get("tier2_catalog_id"), v.get("tier2_sha256"), t2id, t2sha))
 if len(v.get("previous_loaded") or []) != want:
     problems.append("dry-load retained %d of %d window releases" % (len(v.get("previous_loaded") or []), want))
-# The config the validator decoded must be the config the coordinator applied.
+# The config the validator decoded must be the config the coordinator applied
+# (pricing: the spliced candidate over the applied overlay).
 if not cfg_sha:
     problems.append("applied identity unknown (config_applied did not prove the on-disk config)")
 elif v.get("config_sha256") != cfg_sha or v.get("overlay_sha256") != ov_sha:
@@ -677,6 +1064,169 @@ raise SystemExit(1 if problems else 0)
 PY
 )" || { record coordinator_dry_load 0 "$verdict"; return 1; }
   record coordinator_dry_load 1 "$verdict"
+}
+
+# #1693: the on-host pricing results: the splice digests, the effective-price
+# diff, the pinned names, and the live binary's verdict digests and name
+# resolutions. pricing-diff.json is the acknowledged object (effective diff +
+# the binary's resolutions of the digested names outside the key grammar).
+pf_pricing_stage_results() {
+  local out
+  out="$(python3 - "$WORK/stage.out" "$WORK/dryload.json" "$PRICING_DIR" "$CONFIG_DISK_SHA" "$(sha256_file "$REL/rate-card.json")" \
+      "$SCRIPT_DIR/catalog-release.py" <<'PY'
+import base64, hashlib, json, os, re, runpy, sys
+stage, dryload, pdir, live_sha, card_sha, cr_path = sys.argv[1:]
+cr = runpy.run_path(cr_path)
+vals = {}
+for line in open(stage, encoding="utf-8", errors="replace"):
+    k, _, v = line.rstrip("\n").partition("=")
+    if k in ("SPLICE_JSON", "PRICING_ERROR", "PRICING_DIFF_RC", "PRICING_DIFF_OUT", "PRICING_DIFF_B64", "PINNED_B64"):
+        vals.setdefault(k, v)
+hexre = re.compile(r"[0-9a-f]{64}")
+def bad(msg):
+    print(msg); raise SystemExit(1)
+if "PRICING_ERROR" in vals:
+    bad(vals["PRICING_ERROR"])
+try:
+    splice = json.loads(vals.get("SPLICE_JSON", ""))
+    diff_out = json.loads(vals.get("PRICING_DIFF_OUT", ""))
+    diff = base64.b64decode(vals.get("PRICING_DIFF_B64", ""), validate=True)
+    pinned = base64.b64decode(vals.get("PINNED_B64", ""), validate=True)
+except ValueError as exc:
+    bad("malformed pricing stage output: %s" % exc)
+if splice.get("live_config_sha256") != live_sha:
+    bad("the splice read coordinator.yaml %s, applied/on-disk is %s" % (splice.get("live_config_sha256"), live_sha))
+cand = splice.get("output_sha256", "")
+if not hexre.fullmatch(cand):
+    bad("the splice returned no candidate digest")
+if diff_out.get("pricing_diff_sha256") != hashlib.sha256(diff).hexdigest():
+    bad("the fetched pricing-diff.json is not the bytes pricing-effective-diff digested")
+problems = []
+if vals.get("PRICING_DIFF_RC") != "0" or diff_out.get("ok") is not True:
+    problems.append("unacknowledged rate-row move(s) %s (new names: %s); list them in acknowledged-pricing-moves.json"
+                    % (diff_out.get("unacknowledged_moves"), (diff_out.get("new_names") or {}).get("unacknowledged_moves")))
+try:
+    v = json.loads(open(dryload).read())
+except ValueError:
+    v = {}
+rate, signed = v.get("rate_table_sha256", ""), v.get("signed_rate_card_sha256", "")
+if not (isinstance(rate, str) and hexre.fullmatch(rate)):
+    problems.append("the live binary reported no rate_table_sha256 (pricing needs the #1693 coordinator)")
+if signed != card_sha:
+    problems.append("the live binary loaded rate card %s, the release card is %s" % (signed, card_sha))
+d = json.loads(diff)
+acks = set()
+for m in json.load(open(os.path.join(pdir, "ack.json"))).get("moves", []):
+    acks.add((m["model"], m["from_row"], m["to_row"]))
+esc = lambda n: "".join("\\x%02x" % ord(c) if ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F or c == "\\" else c for c in n)
+resolutions = v.get("model_resolutions") or []
+for r in resolutions:
+    old, new = (r.get("old") or {}).get("row_key"), (r.get("new") or {}).get("row_key")
+    if old != new and (r.get("name"), old, new) not in acks and not cr["pricing_move_is_own_row"](r.get("name"), old, new):
+        problems.append("served name %r moves %s -> %s (resolved by the live binary) without an acknowledgement" % (esc(r.get("name", "")), old, new))
+open(os.path.join(pdir, "pinned-names.json"), "wb").write(pinned)
+# The acknowledged object: the effective diff plus the live binary
+# resolutions of every digested name outside the Python key grammar. Its
+# digest is what the operator acks and what the lease re-derives.
+try:
+    acknowledged = cr["pricing_acknowledged_object"](d, resolutions)
+except cr["CatalogError"] as exc:
+    problems.append("cannot build the acknowledged pricing object: %s" % exc)
+if problems:
+    bad("; ".join(problems))
+data = cr["pricing_canonical_bytes"](acknowledged)
+diff_sha = hashlib.sha256(data).hexdigest()
+open(os.path.join(pdir, "pricing-diff.json"), "wb").write(data)
+summary = {
+    "candidate_config_sha256": cand, "pricing_diff_sha256": diff_sha, "expected_rate_table_sha256": rate,
+    "expected_signed_rate_card_sha256": signed, "pinned_names_sha256": d.get("pinned_names_sha256"),
+    "rows": d.get("rows"), "models": d.get("models"), "unresolved_names": d.get("unresolved_names"),
+    "model_resolutions": acknowledged["model_resolutions"],
+}
+json.dump(summary, open(os.path.join(pdir, "stage-summary.json"), "w"), sort_keys=True)
+print("%s %s %s %s" % (cand, diff_sha, rate, signed))
+PY
+)" || { record pricing_effective_diff 0 "$out"; record coordinator_dry_load 0 "pricing stage refused: $out"; return 1; }
+  read -r CAND_CONFIG_SHA PRICING_DIFF_SHA EXPECTED_RATE_SHA EXPECTED_SIGNED_SHA <<VALS
+$out
+VALS
+  pricing_show_table >&3 || { record pricing_effective_diff 0 "the price table carries an unescaped label; not acknowledgeable"; return 1; }
+  record pricing_effective_diff 1 "effective-price diff $PRICING_DIFF_SHA over every served name; no unacknowledged row move; candidate yaml $CAND_CONFIG_SHA"
+}
+
+# The price table the operator acknowledges. Model and row labels arrive
+# escaped by catalog-release.py escape_model_name (no Cc/Cf/Zl/Zp code point
+# survives it); a label that still carries one is refused, never printed.
+pricing_show_table() {
+  python3 - "$PRICING_DIR/stage-summary.json" <<'PY'
+import json, sys, unicodedata
+s = json.load(open(sys.argv[1]))
+def label(value):
+    value = str(value)
+    if any(unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp") for ch in value):
+        raise SystemExit("[catalog-content] pricing: refusing to print an unescaped control/format character in a price-table label")
+    return value
+print("[catalog-content] pricing: effective price changes (credits per Mtok: prompt / cache-hit / completion)")
+fmt = lambda r: "%s / %s / %s" % (r["prompt_rate_per_mtok"], r["prompt_cache_hit_rate_per_mtok"], r["completion_rate_per_mtok"])
+for m in s.get("models") or []:
+    move = " (row %s -> %s)" % (label(m["old_row"]), label(m["new_row"])) if m.get("move") else ""
+    print("[catalog-content]   %s: %s -> %s%s" % (label(m["model"]), fmt(m["old"]), fmt(m["new"]), move))
+gofmt = lambda r: "%s / %s / %s" % (r["prompt_credits_per_mtok"], r["prompt_cache_hit_credits_per_mtok"], r["completion_credits_per_mtok"])
+for r in s.get("model_resolutions") or []:
+    if r["old"] != r["new"]:
+        move = " (row %s -> %s)" % (label(r["old"]["row_key"]), label(r["new"]["row_key"])) if r["old"]["row_key"] != r["new"]["row_key"] else ""
+        print("[catalog-content]   %s (resolved by the live binary): %s -> %s%s" % (label(r["name"]), gofmt(r["old"]), gofmt(r["new"]), move))
+print("[catalog-content] pricing: acknowledge with --pricing-diff-sha256 %s" % s["pricing_diff_sha256"])
+PY
+}
+
+# #1693: the content gate again, now bound to the fetched effective diff.
+pf_pricing_gate() {
+  local rc=0 detail
+  python3 -I "$SCRIPT_DIR/catalog-release.py" content-gate --release "$REL" --live "$LIVE" --commit "$COMMIT" \
+    --tier2-content-index "$WORK/gate/tier2-content-index.json" --tier2-coordinator-config "$WORK/gate/tier2-trust-root.yaml" \
+    --pricing-diff "$PRICING_DIR/pricing-diff.json" \
+    --pricing-diff-sha256 "$PRICING_DIFF_SHA" >"$WORK/gate-pricing.json" 2>"$WORK/gate-pricing.err" || rc=$?
+  if ! detail="$(python3 -c '
+import json, sys
+v = json.load(open(sys.argv[1]))
+ok = v.get("ok") is True and v.get("lane") == "catalog-content"
+ok = ok and v.get("commit_block_sha256") == sys.argv[2] and v.get("pricing_diff_sha256") == sys.argv[3]
+print("lane %s: %s" % (v.get("lane"), "; ".join(v.get("reasons") or []) or "commit block or diff digest mismatch"))
+raise SystemExit(0 if ok else 1)' "$WORK/gate-pricing.json" "$COMMIT_BLOCK_SHA" "$PRICING_DIFF_SHA" 2>/dev/null)" || [ "$rc" -ne 0 ]; then
+    record pricing_gate 0 "content-gate bound to the effective diff refused (rc=$rc): ${detail:-$(tail -n 2 "$WORK/gate-pricing.err")}"; return 1
+  fi
+  record pricing_gate 1 "content-gate accepts the commit block $COMMIT_BLOCK_SHA and the effective diff $PRICING_DIFF_SHA"
+  python3 - "$PRICING_DIR" "$COMMIT" "$COMMIT_BLOCK_SHA" "$PRIOR_RATE_SHA" "$PRIOR_SIGNED_SHA" "$PRIOR_SNAPSHOT_ID" \
+      "$CONFIG_DISK_SHA" "$OVERLAY_DISK_SHA" "$ACK_MOVES_SHA" <<'PY'
+import json, os, sys
+pdir, commit, block, prate, psigned, psnap, pcfg, ov, ack = sys.argv[1:]
+s = json.load(open(os.path.join(pdir, "stage-summary.json")))
+s.update(commit=commit, commit_block_sha256=block, prior_rate_table_sha256=prate, prior_signed_rate_card_sha256=psigned,
+         prior_billing_snapshot_id=int(psnap), prior_config_sha256=pcfg, overlay_sha256=ov, acknowledged_moves_sha256=ack,
+         pinned_names=json.load(open(os.path.join(pdir, "pinned-names.json"))))
+json.dump(s, open(os.path.join(pdir, "verdict-pricing.json"), "w"), sort_keys=True, ensure_ascii=True)
+PY
+}
+
+# --preflight-verdict: reuse the pinned name set the operator reviewed.
+load_preflight_pins() {
+  [ -n "$PREFLIGHT_VERDICT_FILE" ] || return 0
+  python3 - "$PREFLIGHT_VERDICT_FILE" "$COMMIT" "$PRICING_DIR/pinned-names.json" "$SCRIPT_DIR/catalog-release.py" <<'PY' || fatal "--preflight-verdict is not a pricing preflight verdict for $COMMIT"
+import json, runpy, sys
+path, commit, out, cr_path = sys.argv[1:]
+lines = [l for l in open(path, encoding="utf-8") if l.lstrip().startswith("{")]
+v = json.loads(lines[-1])
+p = v.get("pricing") or {}
+names = p.get("pinned_names")
+if p.get("commit") != commit or not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+    raise SystemExit(1)
+cr = runpy.run_path(cr_path)
+if cr["names_sha256"](set(names)) != p.get("pinned_names_sha256"):
+    raise SystemExit(1)
+json.dump(names, open(out, "w"))
+PY
+  log "pricing: reusing the $(python3 -c 'import json,sys;print(len(json.load(open(sys.argv[1]))))' "$PRICING_DIR/pinned-names.json") model names pinned by the saved preflight verdict"
 }
 
 # Coverage judges /poolz against EXACTLY the catalogs the live coordinator
@@ -791,7 +1341,16 @@ run_preflight() {
       if pf_live; then
         pf_content_gate || true
         pf_buyer_serving_e2e || true
-        pf_dry_load && check_ok canary_config && pf_coverage || true
+        if [ "$PRICING" = 1 ]; then
+          load_preflight_pins
+          pf_pricing_host || true
+          if check_ok pricing_host_state && check_ok config_applied; then
+            pf_dry_load && pf_pricing_gate || true
+            check_ok coordinator_dry_load && check_ok canary_config && pf_coverage || true
+          fi
+        else
+          pf_dry_load && check_ok canary_config && pf_coverage || true
+        fi
       fi
       if check_ok canary_config; then
         pf_operator_key || true
@@ -801,9 +1360,11 @@ run_preflight() {
   fi
   # Every named check must have run and passed.
   local name
-  for name in commit tooling_matches_commit release_assembled canary_config pearl_reachable pearl_locks_free \
-      rollback_preconditions content_gate buyer_serving_e2e coordinator_dry_load \
-      window_coverage config_applied canary_token_operator_key canary_reachable; do
+  local required="commit tooling_matches_commit release_assembled canary_config pearl_reachable pearl_locks_free
+      pricing_txn_absent rollback_preconditions content_gate buyer_serving_e2e coordinator_dry_load
+      window_coverage config_applied canary_token_operator_key canary_reachable"
+  [ "$PRICING" != 1 ] || required="$required pricing_release pricing_host_state pricing_effective_diff pricing_gate"
+  for name in $required; do
     grep -q "^$name	" "$CHECKS" || record "$name" 0 "not run: an earlier check failed"
   done
   emit_verdict >"$WORK/verdict.json"
@@ -848,7 +1409,8 @@ ev_b_journal() {
     verdict="$(python3 - "$WORK/journal-hup.txt" "$REL_ID" "$REL_TIER2_ID" "$REL_TIER2_SHA" <<'PY'
 import json, sys
 path, rid, t2id, t2sha = sys.argv[1:]
-rejects = ("autotune feed reload rejected", "tier2 config reload rejected", "billing config reload rejected")
+rejects = ("autotune feed reload rejected", "tier2 config reload rejected", "billing config reload rejected",
+           "autotune runtime economics reload rejected")
 ok = False
 for line in open(path, encoding="utf-8", errors="replace"):
     for r in rejects:
@@ -890,7 +1452,7 @@ applied_after_hup() {
   raw="$(SSH "head -c 65536 '$APPLIED_CONFIG_RECORD' 2>/dev/null | head -n 1")" || raw=""
   APPLIED_AFTER_HUP="$(printf '%s' "$raw" | python3 -c '
 import calendar, json, re, sys, time
-schema, t_hup, cfg, ov = sys.argv[1:]
+schema, t_hup, cfg, ov, pricing, rate, signed, psnap = sys.argv[1:]
 try:
     r = json.loads(sys.stdin.read())
 except ValueError:
@@ -901,7 +1463,15 @@ if r.get("schema") != schema or r.get("source") != "sighup" or loaded is None or
     print("no applied-config record from this SIGHUP (source=%s loaded_at=%s)" % (r.get("source"), r.get("loaded_at"))); raise SystemExit(1)
 if r.get("config_sha256") != cfg or (r.get("overlay_sha256") or "") != ov:
     print("the SIGHUP applied config %s/overlay %s, expected %s/%s" % (r.get("config_sha256"), r.get("overlay_sha256") or "-", cfg, ov or "-")); raise SystemExit(1)
-' "$APPLIED_CONFIG_SCHEMA" "$T_HUP" "$CONFIG_DISK_SHA" "$OVERLAY_DISK_SHA")"
+# #1693: the billing table and the served card this HUP committed.
+if pricing == "1":
+    snap = r.get("billing_snapshot_id")
+    if r.get("rate_table_sha256") != rate or r.get("signed_rate_card_sha256") != signed:
+        print("the SIGHUP applied rate table %s / served card %s, expected %s / %s" % (r.get("rate_table_sha256"), r.get("signed_rate_card_sha256"), rate, signed)); raise SystemExit(1)
+    if not isinstance(snap, int) or snap <= int(psnap):
+        print("the SIGHUP committed no new billing snapshot (billing_snapshot_id %s, prior %s)" % (snap, psnap)); raise SystemExit(1)
+' "$APPLIED_CONFIG_SCHEMA" "$T_HUP" "${CAND_CONFIG_SHA:-$CONFIG_DISK_SHA}" "$OVERLAY_DISK_SHA" "$PRICING" \
+    "${EXPECTED_RATE_SHA:--}" "${EXPECTED_SIGNED_SHA:--}" "${PRIOR_SNAPSHOT_ID:-0}")"
 }
 
 # Candidate row hash for the canary's catalog key in a release dir.
@@ -1053,6 +1623,8 @@ PY
 # retained release that has live adopters to make room.
 plan_retention() {
   AA_ROLLBACK_WINDOW=""
+  # #1693: a pricing rollback restores the journal's exact prior window.
+  [ "$PRICING" != 1 ] || return 0
   [ "$CCR_PASSED_AB" = 1 ] || return 0
   case "$CCR_FAILED_STEP" in c) ;; *) return 0 ;; esac
   fetch_poolz "$WORK/poolz-retain.json" || { log "retention: /poolz unreachable; restoring the exact prior window"; return 0; }
@@ -1086,18 +1658,72 @@ PY
   fi
 }
 
+# #1693: before `verified`, under the lease, re-open (O_NOFOLLOW) and hash S:
+# it must still be exactly the journal's candidate pair.
+ev_pricing_state() {
+  [ "$PRICING" = 1 ] || return 0
+  aa_lease_sh "python3 -I '$PRICING_HELPER' check-state candidate" >&3 2>&1 ||
+    { ev_fail s "the on-disk pair is not the journal's candidate (yaml, overlay, current, window or release bytes moved)"; return 1; }
+  log "evidence (s): on-disk yaml/overlay/current/window/release set equal the journal's candidate"
+}
+
 ccr_evidence() {
   ev_a_served_bytes || return 1
   ev_b_journal || return 1
   CCR_PASSED_AB=1
   ev_c_canary || { plan_retention; return 1; }
   ev_d_watch || return 1
+  ev_pricing_state || return 1
   return 0
+}
+
+# #1693: after every evidence step passed, the journal becomes `verified`
+# (durable, terminal) and then is finalized, as two separate steps. If marking
+# verified fails the lane does NOT report success: the journal stays in
+# `verifying` and --recover-pricing-txn rolls it back. Once verified, a
+# correct price is never rolled back: a finalize failure is an ALERT and
+# --recover-pricing-txn finalizes the candidate.
+pricing_finalize() {
+  if ! aa_lease_sh "python3 -I '$PRICING_HELPER' phase verified" >&3 2>&1; then
+    log "ALERT: the pricing journal could not be marked verified; it stays in phase verifying and this run does NOT succeed. Run scripts/catalog-content-release.sh --recover-pricing-txn, which rolls the unverified transaction back ($RUNBOOK_PRICING_TXN)"
+    return 1
+  fi
+  PRICING_VERIFIED=1
+  aa_lease_sh "python3 -I '$PRICING_HELPER' finalize candidate" >&3 2>&1 && return 0
+  log "ALERT: the pricing journal is verified but could not be finalized; the candidate is live and is never rolled back. Run scripts/catalog-content-release.sh --recover-pricing-txn to finalize it ($RUNBOOK_PRICING_TXN)"
+  return 0
+}
+
+# #1693 I3: the gateway serves the public card from a 300 s cache; convergence
+# within 660 s is informational and never rolls back a correct price.
+gateway_convergence() {
+  local deadline=$((SECONDS + GATEWAY_CONVERGENCE_SECONDS))
+  while :; do
+    if curl -fsS --max-time 10 --max-filesize 16777216 "$GATEWAY_RATE_CARD_URL" -o "$WORK/gw-card.json" 2>/dev/null &&
+       cmp -s "$WORK/gw-card.json" "$REL/rate-card.json"; then
+      log "gateway convergence: $GATEWAY_RATE_CARD_URL serves the release rate card"
+      return 0
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      log "ALERT (informational, not rolled back): $GATEWAY_RATE_CARD_URL did not serve the release rate card within ${GATEWAY_CONVERGENCE_SECONDS}s"
+      return 0
+    fi
+    sleep 5
+  done
 }
 
 # Runs inside aa_rollback after the remote rollback returned.
 ccr_after_rollback() {
   CCR_ROLLED_BACK=1
+  case "$AA_ROLLBACK_OUT" in
+    *"pricing journal verified; candidate finalized, not rolled back"*)
+      # The journal became verified before the rollback ran: terminal, the
+      # candidate stays live (a verified price is never rolled back).
+      PRICING_VERIFIED=1
+      log "ALERT: the pricing journal was already verified; the candidate stays live and was finalized, not rolled back"
+      return 0
+      ;;
+  esac
   CCR_FATAL_RC=4
   case "$AA_ROLLBACK_OUT" in
     *"rolled back to "*) ;;
@@ -1106,9 +1732,12 @@ ccr_after_rollback() {
       CCR_FATAL_RC=5
       ;;
   esac
-  if [ "$CCR_FATAL_RC" = 4 ] && ! rollback_hup_verified; then
+  if [ "$PRICING" = 1 ]; then
+    pricing_after_rollback
+  elif [ "$CCR_FATAL_RC" = 4 ] && ! rollback_hup_verified; then
     log "ALERT: the rollback re-HUP was rejected or not observed; restarting $COORDINATOR_UNIT (controlled)"
-    if aa_lease_sh "systemctl restart '$COORDINATOR_UNIT' && systemctl is-active --quiet '$COORDINATOR_UNIT'" && rollback_served_verified; then
+    if aa_lease_sh "systemctl restart '$COORDINATOR_UNIT' && systemctl is-active --quiet '$COORDINATOR_UNIT'" &&
+       coordinator_ready_after_restart && rollback_served_verified; then
       log "coordinator restarted onto $LIVE_ID"
     else
       log "ALERT: controlled coordinator restart did not restore $LIVE_ID"
@@ -1127,11 +1756,60 @@ ccr_after_rollback() {
   fi
 }
 
+# #1693 L7: the journal-driven rollback is proven by the coordinator itself —
+# an applied-config record since the rollback with the prior yaml, rate table
+# and served card digests and an advanced billing snapshot, plus the prior
+# served bytes — then the journal is finalized. A rejected re-HUP gets the
+# controlled restart (pre-start skips: this lease holds the lock set; the
+# journal is handed to the pricing closer first) and the boot record must
+# prove the same.
+pricing_prior_live() { # <since epoch> <source> [ready seconds]
+  aa_lease_sh "python3 -I '$PRICING_HELPER' verify-live prior --since '$1' --source '$2' --wait-seconds '$SETTLE_SECONDS' --ready-seconds '${3:-0}'" >&3 2>&1 &&
+    rollback_served_verified
+}
+# After a controlled restart: wait (bounded by CATALOG_COORDINATOR_READY_SECONDS)
+# for the coordinator to be ready before judging it. A slow boot is not a
+# failed rollback, and is never diagnosed as a foreign write.
+coordinator_ready_after_restart() {
+  log "waiting up to ${READY_SECONDS}s for $COORDINATOR_UNIT to be ready (active + /healthz)"
+  aa_lease_sh "$(_aa_coord_ready_fn)
+coord_ready_pid '$COORDINATOR_UNIT' >/dev/null" >&3 2>&1 ||
+    { log "ALERT: $COORDINATOR_UNIT was not ready within ${READY_SECONDS}s after the controlled restart"; return 1; }
+}
+pricing_after_rollback() {
+  local t_restart
+  if [ "$CCR_FATAL_RC" = 4 ] && ! pricing_prior_live "$T_RB" sighup; then
+    log "ALERT: the rollback re-HUP did not prove the prior pair live; restarting $COORDINATOR_UNIT (controlled)"
+    t_restart="$(remote_now 2>/dev/null || echo "$T_RB")"
+    # E2 V8: a boot can outlast READY_SECONDS (the pre-listen startup ledger
+    # scan grows with the day's traffic). Stamp the restored prior pair first,
+    # so the restart's pricing closer finalizes the journal from the boot
+    # record once the coordinator is up, even after this lane gives up.
+    if ! aa_lease_sh "python3 -I '$PRICING_HELPER' hand-to-closer" >&3 2>&1; then
+      log "ALERT: could not hand the restored pricing journal to $COORDINATOR_UNIT's pricing closer; restarting anyway"
+    fi
+    if ! aa_lease_sh "systemctl restart '$COORDINATOR_UNIT' && systemctl is-active --quiet '$COORDINATOR_UNIT'" ||
+       ! pricing_prior_live "$t_restart" boot "$READY_SECONDS"; then
+      log "ALERT: controlled coordinator restart did not prove the prior pair live within ${READY_SECONDS}s; the pricing journal is kept (a restored-unverified journal is finalized by macprovider-coordinator-pricing-close.service once the boot record proves the prior pair)"
+      CCR_FATAL_RC=5
+    fi
+  fi
+  if [ "$CCR_FATAL_RC" = 4 ]; then
+    if aa_lease_sh "python3 -I '$PRICING_HELPER' phase rolled-back && python3 -I '$PRICING_HELPER' finalize prior" >&3 2>&1; then
+      log "pricing journal rolled back and finalized: yaml, current and window are the prior pair"
+    else
+      log "ALERT: the pricing journal could not be finalized after the rollback; run --recover-pricing-txn"
+      CCR_FATAL_RC=5
+    fi
+  fi
+}
+
 rollback_hup_verified() {
   local deadline=$((SECONDS + SETTLE_SECONDS))
   while :; do
     if journal_since "$T_RB" "$WORK/journal-rb.txt"; then
-      if grep -qF -e 'autotune feed reload rejected' -e 'tier2 config reload rejected' -e 'billing config reload rejected' "$WORK/journal-rb.txt"; then
+      if grep -qF -e 'autotune feed reload rejected' -e 'tier2 config reload rejected' -e 'billing config reload rejected' \
+          -e 'autotune runtime economics reload rejected' "$WORK/journal-rb.txt"; then
         return 1
       fi
       if python3 - "$WORK/journal-rb.txt" "$LIVE_ID" <<'PY'
@@ -1179,6 +1857,56 @@ canary_back_on_live() {
 # ---------------------------------------------------------------------------
 # Main.
 # ---------------------------------------------------------------------------
+if [ "$MODE" = recover-pricing-txn ]; then
+  # Journal-only state: no commit, no canary. The installed helper must be the
+  # reviewed copy this tooling carries; full verify-directory
+  # (--allow-expired-tier2) of a terminal side runs from the shipped bundle
+  # with an explicit Tier-2 trust root: the one the journal pinned at begin,
+  # or (a journal begun without one) this checkout's HEAD coordinator.yaml,
+  # shipped beside the verifier and sha-pinned.
+  trap 'exit 71' HUP INT TERM
+  AA_LOCK_MODE=lease
+  aa_lease_acquire
+  aa_install_helpers
+  [ "$(SSH "sha256sum '$PRICING_HELPER' 2>/dev/null" | cut -d' ' -f1)" = "$(sha256_file "$REPO_ROOT/phase4-coordinator/dist/coordinator-pricing-recover")" ] ||
+    { CCR_FATAL_RC=5; fatal "the installed $PRICING_HELPER is not this tooling's reviewed copy; follow $RUNBOOK_PRICING_TXN"; }
+  mkdir -p "$WORK/gate"
+  git -C "$REPO_ROOT" show "HEAD:phase4-coordinator/dist/coordinator.yaml" >"$WORK/gate/tier2-trust-root.yaml" 2>/dev/null &&
+    [ -s "$WORK/gate/tier2-trust-root.yaml" ] ||
+    { CCR_FATAL_RC=5; fatal "cannot read the Tier-2 trust root (HEAD:phase4-coordinator/dist/coordinator.yaml); follow $RUNBOOK_PRICING_TXN"; }
+  T2_ROOT_SHA="$(sha256_file "$WORK/gate/tier2-trust-root.yaml")"
+  SSH "cat >'$LOCK_HELPER_DIR/tier2-trust-root.yaml'" <"$WORK/gate/tier2-trust-root.yaml" &&
+    [ "$(SSH "sha256sum '$LOCK_HELPER_DIR/tier2-trust-root.yaml'" | cut -d' ' -f1)" = "$T2_ROOT_SHA" ] ||
+    { CCR_FATAL_RC=5; fatal "cannot install the Tier-2 trust root on $PEARL_SSH; follow $RUNBOOK_PRICING_TXN"; }
+  rc=0
+  aa_lease_sh "python3 -I '$PRICING_HELPER' recover --verifier '$CONTINUITY_VERIFIER' --tier2-trust-root '$LOCK_HELPER_DIR/tier2-trust-root.yaml' --tier2-trust-root-sha256 '$T2_ROOT_SHA' --wait-seconds '$SETTLE_SECONDS' --ready-seconds '$READY_SECONDS'" || rc=$?
+  if [ "$rc" -eq 0 ]; then log "pricing transaction recovery: done"; exit 0; fi
+  if [ "$rc" -eq 4 ]; then
+    log "pricing transaction recovery WAITING: $COORDINATOR_UNIT is down or still booting (not a foreign write); the journal is kept; re-run --recover-pricing-txn once it serves /healthz ($RUNBOOK_PRICING_TXN)"
+    exit 5
+  fi
+  log "pricing transaction recovery STOPPED (rc=$rc): the journal is kept; follow $RUNBOOK_PRICING_TXN"
+  exit 5
+fi
+
+if [ "$MODE" = host-check ]; then
+  log "host-check: pricing readiness of $PEARL_SSH at commit $COMMIT (read-only)"
+  pf_commit && pf_tooling || true
+  if check_ok tooling_matches_commit; then
+    pf_pearl || true
+    if check_ok pearl_reachable; then
+      pf_config_applied || true
+      pf_pricing_host || true
+    fi
+  fi
+  for _name in commit tooling_matches_commit pearl_reachable pearl_locks_free pricing_txn_absent config_applied pricing_host_state; do
+    grep -q "^$_name	" "$CHECKS" || record "$_name" 0 "not run: an earlier check failed"
+  done
+  emit_verdict
+  [ -n "$(failed_checks)" ] || exit 0
+  exit 3
+fi
+
 if [ "$MODE" = preflight ]; then
   if run_preflight; then exit 0; fi
   exit 3
@@ -1187,6 +1915,22 @@ fi
 log "deploy: preflight"
 if ! run_preflight; then
   log "preflight NO_GO: $(failed_checks | tr '\n' ' ')"
+  exit 3
+fi
+# #1693 L3: the operator acknowledges exactly the effective diff shown.
+if [ "$PRICING" = 1 ]; then
+  if [ -z "$PRICING_ACK" ]; then
+    log "pricing release: re-run with --pricing-diff-sha256 $PRICING_DIFF_SHA after reviewing the price table above"
+    exit 3
+  fi
+  if [ "$PRICING_ACK" != "$PRICING_DIFF_SHA" ]; then
+    log "pricing release: --pricing-diff-sha256 $PRICING_ACK does not match this preflight's effective diff $PRICING_DIFF_SHA; review the table and re-acknowledge"
+    exit 3
+  fi
+  log "pricing: operator acknowledged effective diff $PRICING_DIFF_SHA"
+  PF_PRICING_DIGESTS="$CAND_CONFIG_SHA $PRICING_DIFF_SHA $EXPECTED_RATE_SHA $EXPECTED_SIGNED_SHA $PRIOR_RATE_SHA $PRIOR_SIGNED_SHA $PRIOR_SNAPSHOT_ID $CONFIG_DISK_SHA ${OVERLAY_DISK_SHA:--}"
+elif [ -n "$PRICING_ACK" ]; then
+  log "--pricing-diff-sha256 given but this release changes no rate-card rows"
   exit 3
 fi
 PREFLIGHT_CURRENT="$CURRENT_TARGET"
@@ -1200,13 +1944,38 @@ aa_read_live_targets
 [ "$CURRENT_TARGET" = "$PREFLIGHT_CURRENT" ] && [ "$ORIG_PREVIOUS_TARGET_B64" = "$PREFLIGHT_WINDOW_B64" ] ||
   fatal "live targets moved between preflight and the lease; re-run"
 aa_refuse_existing_release
+# Stale pricing-journal temp dirs of dead processes are removed at the start
+# of every lane run, under the lock set.
+aa_lease_sh "[ ! -f '$PRICING_HELPER' ] || python3 -I '$PRICING_HELPER' cleanup-tmp" >&3 2>&1 || fatal "cannot clean stale pricing journal temp dirs"
 # Re-run, under the lease and against the then-current live state, the checks
 # a SIGHUP depends on: applied-config identity, the LIVE binary's dry-load of
 # this release with the proposed window over that same config, and coverage.
 : >"$CHECKS"
 pf_config_applied || fatal "config identity under the lease: $(cut -f3 "$CHECKS")"
+if [ "$PRICING" = 1 ]; then
+  # L3: re-run L2 under the full lock set; refuse if any digest moved.
+  pf_pricing_host || fatal "pricing host state under the lease: $(cut -f3 "$CHECKS" | tail -n 1)"
+fi
 pf_dry_load || fatal "coordinator dry-load under the lease refused: $(cut -f3 "$CHECKS" | tail -n 1)"
 pf_coverage || fatal "window coverage under the lease: $(cut -f3 "$CHECKS" | tail -n 1)"
+if [ "$PRICING" = 1 ]; then
+  pf_pricing_gate || fatal "pricing gate under the lease: $(cut -f3 "$CHECKS" | tail -n 1)"
+  [ "$CAND_CONFIG_SHA $PRICING_DIFF_SHA $EXPECTED_RATE_SHA $EXPECTED_SIGNED_SHA $PRIOR_RATE_SHA $PRIOR_SIGNED_SHA $PRIOR_SNAPSHOT_ID $CONFIG_DISK_SHA ${OVERLAY_DISK_SHA:--}" = "$PF_PRICING_DIGESTS" ] ||
+    fatal "pricing digests moved between the acknowledged preflight and the lease; re-run preflight"
+  python3 - "$PRICING_DIR/verdict.json" "$PRICING_DIFF_SHA" "$CAND_CONFIG_SHA" "$COMMIT_BLOCK_SHA" "$EXPECTED_RATE_SHA" \
+      "$EXPECTED_SIGNED_SHA" "$PRIOR_RATE_SHA" "$PRIOR_SIGNED_SHA" "$CONFIG_DISK_SHA" "$PRIOR_SNAPSHOT_ID" "$OVERLAY_DISK_SHA" "$COMMIT" <<'PY' || fatal "cannot build the pricing journal verdict"
+import json, sys
+out = sys.argv[1]
+keys = ("pricing_diff_sha256", "candidate_config_sha256", "commit_block_sha256", "expected_rate_table_sha256",
+        "expected_signed_rate_card_sha256", "prior_rate_table_sha256", "prior_signed_rate_card_sha256", "prior_config_sha256")
+v = dict(zip(keys, sys.argv[2:10]))
+v["prior_billing_snapshot_id"] = int(sys.argv[10])
+v["overlay_sha256"] = sys.argv[11]
+# The pricing runtime floor marker names this commit (written by `begin`).
+v["runtime_floor_commit"] = sys.argv[12]
+json.dump(v, open(out, "w"), sort_keys=True)
+PY
+fi
 # The validated verdict of THIS release + window: evidence (d) judges
 # post-HUP rejections against its admitted set.
 cp "$WORK/dryload.json" "$WORK/admitted-prehup.json"
@@ -1249,13 +2018,20 @@ if [ -e /etc/macprovider/coordinator.pearl-overlays.yaml ]; then ov_sha="$(sha25
 python3 -c 'import json, sys; r = json.load(open(sys.argv[1])); sys.exit(0 if r.get("config_sha256") == sys.argv[2] and (r.get("overlay_sha256") or "") == sys.argv[3] else 1)' \
   /run/macprovider/coordinator-applied-config.json "$cfg_sha" "$ov_sha" \
   || abort_pre_mutation "the coordinator's applied config differs from the on-disk config; not mutating"
-# Re-run content-gate against the then-current live release with the reviewed
+@PRICING_GATE@# Re-run content-gate against the then-current live release with the reviewed
 # commit's ledger, exclusions and Tier-2 content index shipped beside the
 # verifier; the index is digest-pinned to the one the preflight gate used.
 t2_index="$(dirname "$verifier")/../tier2-content-index.json"
 [ "$(sha256sum "$t2_index" | cut -d' ' -f1)" = "@T2_INDEX_SHA@" ] \
   || abort_pre_mutation "the Tier-2 content index beside the verifier is not the preflight one; not mutating"
-gate_out="$(python3 -I "$verifier" content-gate --release "$incoming_path" --live "$root/current" --ledger "$(dirname "$verifier")/../phase3-binary/catalog/autotune/release-ledger.json" --tier2-content-index "$t2_index")" \
+# The Tier-2 trust root is the reviewed commit's coordinator.yaml the preflight
+# verified with, digest-pinned (a shipped verifier bundle has no repository
+# coordinator.yaml beside it; the default path would not exist). The verifier
+# requires an absolute normalized path to it.
+t2_root="$(cd "$(dirname "$verifier")/.." && pwd -P)/tier2-trust-root.yaml"
+[ "$(sha256sum "$t2_root" | cut -d' ' -f1)" = "@T2_ROOT_SHA@" ] \
+  || abort_pre_mutation "the Tier-2 trust root beside the verifier is not the preflight one; not mutating"
+gate_out="$(python3 -I "$verifier" content-gate --release "$incoming_path" --live "$root/current" --ledger "$(dirname "$verifier")/../phase3-binary/catalog/autotune/release-ledger.json" --tier2-content-index "$t2_index" --tier2-coordinator-config "$t2_root"@PRICING_GATE_ARGS@)" \
   || abort_pre_mutation "content-gate under lock refused: $gate_out"
 printf "%s" "$gate_out" | python3 -c "import json,sys; v=json.load(sys.stdin); sys.exit(0 if v.get(\"ok\") is True and v.get(\"lane\") == \"catalog-content\" else 1)" \
   || abort_pre_mutation "content-gate under lock is not lane catalog-content: $gate_out"
@@ -1264,6 +2040,53 @@ AA_GATE_SNIPPET="${AA_GATE_SNIPPET%$'\n'}"
 AA_GATE_SNIPPET="${AA_GATE_SNIPPET//@CONFIG_SHA@/$CONFIG_DISK_SHA}"
 AA_GATE_SNIPPET="${AA_GATE_SNIPPET//@OVERLAY_SHA@/$OVERLAY_DISK_SHA}"
 AA_GATE_SNIPPET="${AA_GATE_SNIPPET//@T2_INDEX_SHA@/$(sha256_file "$WORK/gate/tier2-content-index.json")}"
+AA_GATE_SNIPPET="${AA_GATE_SNIPPET//@T2_ROOT_SHA@/$(sha256_file "$WORK/gate/tier2-trust-root.yaml")}"
+# #1693: pricing inputs beside the verifier are the preflight's bytes; the
+# splice is re-run under the lock from the live yaml and must reproduce the
+# acknowledged candidate; the under-lock gate binds the effective diff.
+IFS= read -r -d '' PRICING_GATE <<'GATE' || true
+pricing_dir="$(dirname "$verifier")/../pricing"
+for spec in "block.yaml=@BLOCK_SHA@" "ack.json=@ACK_SHA@" "pricing-diff.json=@DIFF_SHA@" "verdict.json=@VERDICT_SHA@"; do
+  [ "$(sha256sum "$pricing_dir/${spec%%=*}" | cut -d' ' -f1)" = "${spec#*=}" ] \
+    || abort_pre_mutation "pricing input ${spec%%=*} beside the verifier is not the preflight's; not mutating"
+done
+# The coverage dry-load runs as macprovider, which cannot traverse the 0700
+# root helper dir (and must not be let in). The candidate lives in its own
+# fresh root:macprovider 0750 dir (mkdir fails closed on a squatted name) as a
+# 0640 file, as readable as the live yaml it replaces; its digest is pinned and
+# the service user's read access is proven before anything is mutated.
+helper_dir="$(cd "$(dirname "$verifier")/.." && pwd -P)"
+pricing_stage="/tmp/macprovider-pricing-candidate.${helper_dir##*/macprovider-autotune-lock.}"
+case "${pricing_stage#/tmp/macprovider-pricing-candidate.}" in ""|*[!A-Za-z0-9]*) abort_pre_mutation "cannot derive the pricing candidate dir; not mutating" ;; esac
+mkdir -m 0750 "$pricing_stage" || abort_pre_mutation "cannot create a fresh pricing candidate dir $pricing_stage; not mutating"
+chown root:macprovider "$pricing_stage"
+chmod 0750 "$pricing_stage"
+pricing_candidate="$pricing_stage/candidate-coordinator.yaml"
+python3 -I "$verifier" splice-coordinator-rate-card --live-config /opt/macprovider/coordinator.yaml --block "$pricing_dir/block.yaml" \
+  --output "$pricing_candidate" >/dev/null || abort_pre_mutation "the rate_card splice refused the live coordinator.yaml under lock; not mutating"
+chown root:macprovider "$pricing_candidate"; chmod 0640 "$pricing_candidate"
+[ "$(sha256sum "$pricing_candidate" | cut -d' ' -f1)" = "@CAND_SHA@" ] \
+  || abort_pre_mutation "the candidate spliced under lock differs from the acknowledged one; not mutating"
+systemd-run --quiet --wait --pipe --collect -p RuntimeMaxSec=60 -p User=macprovider -p Group=macprovider \
+  /bin/sh -c 'test -r "$1"' candidate-read-check "$pricing_candidate" </dev/null \
+  || abort_pre_mutation "the coordinator service user cannot read the pricing candidate $pricing_candidate; not mutating"
+GATE
+if [ "$PRICING" = 1 ]; then
+  PRICING_GATE="${PRICING_GATE%$'\n'}"
+  PRICING_GATE="${PRICING_GATE//@BLOCK_SHA@/$COMMIT_BLOCK_SHA}"
+  PRICING_GATE="${PRICING_GATE//@ACK_SHA@/$ACK_MOVES_SHA}"
+  PRICING_GATE="${PRICING_GATE//@DIFF_SHA@/$PRICING_DIFF_SHA}"
+  PRICING_GATE="${PRICING_GATE//@VERDICT_SHA@/$(sha256_file "$PRICING_DIR/verdict.json")}"
+  PRICING_GATE="${PRICING_GATE//@CAND_SHA@/$CAND_CONFIG_SHA}"
+  # Spliced in by prefix/suffix (not ${//}: the block carries backslashes).
+  AA_GATE_SNIPPET="${AA_GATE_SNIPPET%%@PRICING_GATE@*}$PRICING_GATE${AA_GATE_SNIPPET#*@PRICING_GATE@}"
+  AA_GATE_SNIPPET="${AA_GATE_SNIPPET//@PRICING_GATE_ARGS@/ --acknowledged-moves \"\$pricing_dir/ack.json\" --pricing-diff \"\$pricing_dir/pricing-diff.json\" --pricing-diff-sha256 $PRICING_DIFF_SHA}"
+  # shellcheck disable=SC2034 # read by scripts/lib/autotune-activate.sh
+  AA_PRICING_TXN=1
+else
+  AA_GATE_SNIPPET="${AA_GATE_SNIPPET%%@PRICING_GATE@*}${AA_GATE_SNIPPET#*@PRICING_GATE@}"
+  AA_GATE_SNIPPET="${AA_GATE_SNIPPET//@PRICING_GATE_ARGS@/}"
+fi
 AA_COVERAGE_POLICY=refuse
 AA_COVERAGE_OVERRIDE=0
 [ -z "$CATALOG_WINDOW_OVERRIDE_REASON" ] || AA_COVERAGE_OVERRIDE=1
@@ -1271,14 +2094,23 @@ AA_LOCK_MODE=lease
 AA_ROLLBACK_POST_HOOK=ccr_after_rollback
 
 aa_install_helpers
-log "installing the commit's release ledger, serving exclusions, Tier-2 content index and byte manifest beside the verifier"
-for _gate_file in phase3-binary/catalog/autotune/release-ledger.json phase3-binary/catalog/autotune/not-buyer-serving.json release-bytes.sha256 tier2-content-index.json; do
+log "installing the commit's release ledger, serving exclusions, Tier-2 content index, Tier-2 trust root and byte manifest beside the verifier"
+for _gate_file in phase3-binary/catalog/autotune/release-ledger.json phase3-binary/catalog/autotune/not-buyer-serving.json release-bytes.sha256 tier2-content-index.json tier2-trust-root.yaml; do
   case "$_gate_file" in release-bytes.sha256) _gate_src="$WORK/release-bytes.sha256" ;; *) _gate_src="$WORK/gate/${_gate_file##*/}" ;; esac
   SSH "mkdir -p -m 0700 '$LOCK_HELPER_DIR/phase3-binary/catalog/autotune' && cat >'$LOCK_HELPER_DIR/$_gate_file'" <"$_gate_src" ||
     fatal "cannot install $_gate_file on $PEARL_SSH"
   [ "$(SSH "sha256sum '$LOCK_HELPER_DIR/$_gate_file'" | cut -d' ' -f1)" = "$(sha256_file "$_gate_src")" ] ||
     fatal "$_gate_file on $PEARL_SSH does not match the commit"
 done
+if [ "$PRICING" = 1 ]; then
+  log "installing the commit's rate_card block, acknowledgements, the effective diff and the journal verdict beside the verifier"
+  for _pricing_file in block.yaml ack.json pricing-diff.json verdict.json; do
+    SSH "mkdir -p -m 0700 '$LOCK_HELPER_DIR/pricing' && cat >'$LOCK_HELPER_DIR/pricing/$_pricing_file'" <"$PRICING_DIR/$_pricing_file" ||
+      fatal "cannot install pricing/$_pricing_file on $PEARL_SSH"
+    [ "$(SSH "sha256sum '$LOCK_HELPER_DIR/pricing/$_pricing_file'" | cut -d' ' -f1)" = "$(sha256_file "$PRICING_DIR/$_pricing_file")" ] ||
+      fatal "pricing/$_pricing_file on $PEARL_SSH does not match"
+  done
+fi
 aa_upload_release "$REL"
 
 fetch_poolz "$WORK/poolz-before.json" || fatal "coordinator /poolz unreachable before activation"
@@ -1332,6 +2164,16 @@ ccr_evidence_hook() {
   return 1
 }
 aa_post_activation_evidence ccr_evidence_hook
+if [ "$PRICING" = 1 ] && ! pricing_finalize; then
+  CCR_PRICING_KEEP=1
+  CCR_FATAL_RC=5
+  fatal "pricing journal not marked verified; journal kept in phase verifying"
+fi
 CCR_DONE=1
 log "DONE: $REL_ID live via the catalog-content lane; evidence (a)-(d) passed; (e) not required (buyer-serving set adds or re-hashes nothing)"
+if [ "$PRICING" = 1 ]; then
+  log "pricing: rate table $EXPECTED_RATE_SHA and signed card $EXPECTED_SIGNED_SHA live (diff $PRICING_DIFF_SHA)"
+  aa_lease_release
+  gateway_convergence
+fi
 exit 0

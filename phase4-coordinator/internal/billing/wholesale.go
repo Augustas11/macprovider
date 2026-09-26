@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
@@ -102,14 +103,17 @@ CREATE INDEX IF NOT EXISTS idx_wsli_statement ON wholesale_statement_line_items(
 	return err
 }
 
-func (s *Store) wholesalePricing() (RewardsConfig, float64) {
+// wholesaleUSDPeg is the process-global credits→USD peg. Rates never come
+// from process memory: every row is priced at its own generation
+// (wholesaleLineTotals, SPEC-005 §11.7).
+func (s *Store) wholesaleUSDPeg() float64 {
 	s.wholesaleMu.RLock()
 	defer s.wholesaleMu.RUnlock()
 	usd := s.usdPerMillionCredits
 	if usd <= 0 {
 		usd = 1
 	}
-	return s.wholesaleRewards, usd
+	return usd
 }
 
 func parseWholesalePeriod(period string) (start, end time.Time, label string, err error) {
@@ -181,78 +185,48 @@ func (s *Store) generateWholesaleStatementOnce(ctx context.Context, accountID, p
 	if err != nil {
 		return WholesaleStatement{}, err
 	}
-	rewards, usdPeg := s.wholesalePricing()
+	usdPeg := s.wholesaleUSDPeg()
 	startText := start.UTC().Format(time.RFC3339Nano)
 	endText := end.UTC().Format(time.RFC3339Nano)
 	nowText := s.now().UTC().Format(time.RFC3339Nano)
 	id := wholesaleStatementID(accountID, startText)
 
-	type aggRow struct {
-		Model            string
-		RequestCount     int64
-		PromptTokens     int64
-		CompletionTokens int64
-	}
-	var aggs []aggRow
-	rows, err := s.db.QueryContext(ctx, `
-SELECT model,
-       COUNT(*) AS request_count,
-       COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
-       COALESCE(SUM(completion_tokens), 0) AS completion_tokens
-  FROM request_log
- WHERE account_id = ?
-   AND status = 200
-   AND julianday(ts_utc) >= julianday(?)
-   AND julianday(ts_utc) < julianday(?)
- GROUP BY model
- ORDER BY model`, accountID, startText, endText)
+	lines, err := s.wholesaleLineTotals(ctx, accountID, startText, endText)
 	if err != nil {
 		return WholesaleStatement{}, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var row aggRow
-		if err := rows.Scan(&row.Model, &row.RequestCount, &row.PromptTokens, &row.CompletionTokens); err != nil {
-			return WholesaleStatement{}, err
-		}
-		aggs = append(aggs, row)
-	}
-	if err := rows.Err(); err != nil {
-		return WholesaleStatement{}, err
-	}
-
-	items := make([]WholesaleStatementLineItem, 0, len(aggs))
+	items := make([]WholesaleStatementLineItem, 0, len(lines))
 	var totalRequests, totalPrompt, totalCompletion, totalGross, totalUSD int64
-	multiplierPPM := ParseMultiplierPPM(rewards.GlobalMultiplier)
-	if multiplierPPM == 0 {
-		multiplierPPM = globalMultiplierDenom
-	}
-	shareBps := ParseShareBps(rewards.ProviderShare)
-	if shareBps == 0 {
-		shareBps = 9000
-	}
-	for _, agg := range aggs {
-		prompt := agg.PromptTokens
-		completion := agg.CompletionTokens
-		billed := ComputeCredits(&prompt, &completion, nil, UsageProviderReported, FaultNone, RateFor(rewards.RateCard, agg.Model), multiplierPPM, shareBps)
+	for _, line := range lines {
 		item := WholesaleStatementLineItem{
-			Model:            agg.Model,
-			IsFree:           IsWholesaleFreeSKU(agg.Model),
-			RequestCount:     agg.RequestCount,
-			PromptTokens:     agg.PromptTokens,
-			CompletionTokens: agg.CompletionTokens,
-			GrossCredits:     billed.GrossCredits,
+			Model:            line.model,
+			IsFree:           IsWholesaleFreeSKU(line.model),
+			RequestCount:     line.requestCount,
+			PromptTokens:     line.promptTokens,
+			CompletionTokens: line.completionTokens,
+			GrossCredits:     line.grossCredits,
 		}
 		if !item.IsFree {
-			item.USDMicro = creditsToUSDMicro(billed.GrossCredits, usdPeg)
+			item.USDMicro = creditsToUSDMicro(line.grossCredits, usdPeg)
 		}
 		item.USD = usdMicroString(item.USDMicro)
 		items = append(items, item)
-		totalRequests += item.RequestCount
-		totalPrompt += item.PromptTokens
-		totalCompletion += item.CompletionTokens
-		totalGross += item.GrossCredits
-		totalUSD += item.USDMicro
+		var ok bool
+		if totalRequests, ok = checkedAdd(totalRequests, item.RequestCount); !ok {
+			return WholesaleStatement{}, ErrWholesaleGrossOverflow
+		}
+		if totalPrompt, ok = checkedAdd(totalPrompt, item.PromptTokens); !ok {
+			return WholesaleStatement{}, ErrWholesaleGrossOverflow
+		}
+		if totalCompletion, ok = checkedAdd(totalCompletion, item.CompletionTokens); !ok {
+			return WholesaleStatement{}, ErrWholesaleGrossOverflow
+		}
+		if totalGross, ok = checkedAdd(totalGross, item.GrossCredits); !ok {
+			return WholesaleStatement{}, ErrWholesaleGrossOverflow
+		}
+		if totalUSD, ok = checkedAdd(totalUSD, item.USDMicro); !ok {
+			return WholesaleStatement{}, ErrWholesaleGrossOverflow
+		}
 	}
 
 	err = sqliteutil.TransactObserved(ctx, s.db, "wholesale_statement", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
@@ -483,6 +457,17 @@ func (h *handler) wholesaleStatements(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 			case errors.Is(err, errWholesaleStatementIssued):
 				writeError(w, http.StatusConflict, "conflict", "wholesale statement already issued")
+			case errors.Is(err, ErrWholesaleConflictingGenerations), errors.Is(err, ErrWholesaleNoGeneration),
+				errors.Is(err, ErrWholesaleGrossOverflow), errors.Is(err, ErrWholesaleGrossNegative):
+				// Fail closed, but name the data problem so an operator can tell it
+				// from a store outage (SPEC-005 §11.7).
+				slog.Error("wholesale statement refused",
+					"event", "wholesale_statement_refused",
+					"account_id", req.AccountID,
+					"period", req.Period,
+					"error", err.Error(),
+				)
+				writeError(w, http.StatusUnprocessableEntity, "wholesale_statement_refused", err.Error())
 			default:
 				writeError(w, http.StatusInternalServerError, "internal_error", "could not generate wholesale statement")
 			}

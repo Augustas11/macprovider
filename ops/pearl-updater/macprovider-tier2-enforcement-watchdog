@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import time
+import types
 from typing import Any
 
 
@@ -25,6 +26,8 @@ STATE_ROOT = Path("/var/lib/macprovider-pearl-updater")
 JOURNAL_PATH = STATE_ROOT / "tier2-enforcement-transaction.json"
 BACKUP_ROOT = STATE_ROOT / "tier2-enforcement-backups"
 LOCK_PATH = Path("/run/lock/macprovider-pearl-updater.lock")
+# #1693 L0: the shared one-writer guard (scripts/lib/coordinator_config_guard.py).
+CONFIG_GUARD_MODULE = Path("/usr/local/share/macprovider/scripts/coordinator_config_guard.py")
 SERVICE = "macprovider-coordinator"
 SELF_PATH = Path("/usr/local/sbin/macprovider-tier2-enforcement-watchdog")
 WATCHDOG_UNIT = "macprovider-tier2-enforcement-watchdog"
@@ -38,7 +41,11 @@ TRUSTED_GID = 0
 
 
 class EnforcementError(RuntimeError):
-    pass
+    exit_code = 1
+
+
+class PricingTransactionRefused(EnforcementError):
+    exit_code = 75
 
 
 def digest(data: bytes) -> str:
@@ -483,6 +490,38 @@ class FileLock:
         os.close(self.descriptor)
 
 
+class ConfigGuard:
+    """#1693 L0: under the updater lock, take the coordinator deploy lock (lease
+    order) and refuse while a pricing transaction journal exists. Every mode
+    holds it: arm and rollback/reconcile rewrite coordinator.yaml and SIGHUP."""
+
+    def __enter__(self) -> "ConfigGuard":
+        try:
+            source, _ = read_trusted(CONFIG_GUARD_MODULE)
+        except FileNotFoundError as exc:
+            raise EnforcementError(f"coordinator config guard is missing: {CONFIG_GUARD_MODULE}") from exc
+        guard = types.ModuleType("macprovider_coordinator_config_guard")
+        guard.__file__ = str(CONFIG_GUARD_MODULE)
+        exec(compile(source, str(CONFIG_GUARD_MODULE), "exec"), guard.__dict__)
+        self.lock_set = guard.LockSet(
+            CONFIG_PATH.parent,
+            hold_updater=False,
+            required_uid=TRUSTED_UID,
+            required_gid=TRUSTED_GID,
+            blocking=True,
+        )
+        try:
+            self.lock_set.__enter__()
+        except guard.PricingTransactionActive as exc:
+            raise PricingTransactionRefused(str(exc)) from exc
+        except guard.GuardLockError as exc:
+            raise EnforcementError(str(exc)) from exc
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.lock_set.release()
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -503,7 +542,7 @@ def main(argv: list[str]) -> int:
     if os.geteuid() != 0:
         raise EnforcementError("Tier-2 enforcement watchdog must run as root")
     args = parse_args(argv)
-    with FileLock():
+    with FileLock(), ConfigGuard():
         if args.arm:
             result = arm()
             action = "armed"
@@ -534,4 +573,4 @@ if __name__ == "__main__":
         raise SystemExit(main(sys.argv[1:]))
     except EnforcementError as exc:
         print(f"tier2-enforcement-watchdog: ERROR: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(exc.exit_code)

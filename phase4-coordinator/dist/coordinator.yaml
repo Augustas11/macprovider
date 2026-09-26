@@ -271,18 +271,18 @@ autotune:
   autotune_candidates_path: "/opt/macprovider/autotune/current/autotune-candidates.json"
   autotune_candidates_sig_path: "/opt/macprovider/autotune/current/autotune-candidates.json.sig"
 
-# Wave 1 subset — Entry 92 v2 rate-card rows for canary rollout (2026-07-01).
-# Units: credits_per_mtok; stats_rollup.usd_per_million_credits=1.0 → 1M credits = $1.00.
-# Keys must match Wave 0b normalizeModelKey() output (phase4-coordinator/internal/billing/formula.go).
-#   mlx-community/Qwen3-32B-4bit          → normalized to `qwen3-32b`
-#   mlx-community/gpt-oss-20b-MXFP4-Q8    → normalized to `openai/gpt-oss-20b`
-# `default` row preserved for fall-through on unmatched buyer strings.
 rewards:
   global_multiplier: 1.0
   provider_share: 0.90
-  # Prefix-cache hit pricing is shown at 25% of prompt pricing.
-  # Omitted prompt_cache_hit_credits_per_mtok values default to prompt_credits_per_mtok.
   rate_card:
+    # Wave 1 subset — Entry 92 v2 rate-card rows for canary rollout (2026-07-01).
+    # Units: credits_per_mtok; stats_rollup.usd_per_million_credits=1.0 → 1M credits = $1.00.
+    # Keys must match Wave 0b normalizeModelKey() output (phase4-coordinator/internal/billing/formula.go).
+    #   mlx-community/Qwen3-32B-4bit          → normalized to `qwen3-32b`
+    #   mlx-community/gpt-oss-20b-MXFP4-Q8    → normalized to `openai/gpt-oss-20b`
+    # `default` row preserved for fall-through on unmatched buyer strings.
+    # Prefix-cache hit pricing is shown at 25% of prompt pricing.
+    # Omitted prompt_cache_hit_credits_per_mtok values default to prompt_credits_per_mtok.
     default:
       prompt_credits_per_mtok: 500000        # $0.50/M (preserved code default)
       prompt_cache_hit_credits_per_mtok: 125000 # $0.125/M prefix-cache hit

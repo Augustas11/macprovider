@@ -25,6 +25,11 @@ KillSignal=SIGTERM
 TimeoutStopSec=960
 Restart=on-failure
 RestartSec=5
+# #1693 E2 V8: a death by SIGHUP (a reload signal that arrived before an older
+# binary installed its handler) is not a clean stop: systemd counts SIGHUP as a
+# clean exit signal, so without this Restart=on-failure would leave the
+# coordinator down. A deliberate `systemctl stop` (SIGTERM) never restarts.
+RestartForceExitStatus=SIGHUP
 
 # Security hardening
 NoNewPrivileges=true

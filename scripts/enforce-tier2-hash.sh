@@ -28,7 +28,12 @@ Apply pins these proof programs and rejects substitutes:
   /usr/local/sbin/macprovider-tier2-enforcement-watchdog
   /usr/local/sbin/macprovider-pearl-update-gate
   /etc/systemd/system/macprovider-tier2-enforcement-reconcile.service
+  /usr/local/share/macprovider/scripts/coordinator_config_guard.py
   protected-service transaction gate drop-ins
+
+The watchdog performs every config write under the #1693 one-writer guard
+(Pearl lock set + refusal while /opt/macprovider/.pricing-txn exists); apply
+also refuses up front while that journal exists.
 
 The remote watchdog durably journals the exact config/release identity and
 restores require_hash_verified=false after 15 minutes unless every post-flip
@@ -76,6 +81,9 @@ PINNED_REMOTE_UPDATER="/usr/local/sbin/macprovider-pearl-update"
 PINNED_REMOTE_WATCHDOG="/usr/local/sbin/macprovider-tier2-enforcement-watchdog"
 PINNED_REMOTE_GATE="/usr/local/sbin/macprovider-pearl-update-gate"
 PINNED_REMOTE_RECONCILE_UNIT="/etc/systemd/system/macprovider-tier2-enforcement-reconcile.service"
+# #1693 L0: the watchdog and updater load this guard module; pin its bytes too.
+PINNED_LOCAL_CONFIG_GUARD="$SCRIPT_DIR/lib/coordinator_config_guard.py"
+PINNED_REMOTE_CONFIG_GUARD="/usr/local/share/macprovider/scripts/coordinator_config_guard.py"
 TRANSACTION_RE='^[0-9a-f]{64}$'
 
 SSH=()
@@ -279,6 +287,8 @@ remote_posture() {
     test \"\$(systemctl is-active $q_service)\" = active
     test \"\$(systemctl is-active macprovider-gateway.service)\" = active
     test ! -e /opt/macprovider/.coordinator-deploy-rollback
+    test ! -e /opt/macprovider/.pricing-txn
+    test ! -L /opt/macprovider/.pricing-txn
     test ! -e /var/lib/macprovider-pearl-updater/active-transaction.json
     if [ $q_transaction = active ]; then
       test -f /var/lib/macprovider-pearl-updater/tier2-enforcement-transaction.json
@@ -396,6 +406,7 @@ apply_changes() {
   require_file "$LOCAL_GATE"
   require_file "$LOCAL_RECONCILE_UNIT"
   require_file "$LOCAL_GATE_DROPIN"
+  require_file "$PINNED_LOCAL_CONFIG_GUARD"
   require_trusted_local_file "$SSH_KEY"
   require_trusted_local_file "$SSH_KNOWN_HOSTS"
   require_trusted_local_file "$VERIFY_SCRIPT"
@@ -404,6 +415,7 @@ apply_changes() {
   require_trusted_local_file "$LOCAL_GATE"
   require_trusted_local_file "$LOCAL_RECONCILE_UNIT"
   require_trusted_local_file "$LOCAL_GATE_DROPIN"
+  require_trusted_local_file "$PINNED_LOCAL_CONFIG_GUARD"
   [ "$VERIFY_SCRIPT" = "$PINNED_VERIFY_SCRIPT" ] || die "VERIFY_SCRIPT is pinned by --apply"
   [ "$LOCAL_UPDATER" = "$PINNED_LOCAL_UPDATER" ] || die "LOCAL_UPDATER is pinned by --apply"
   [ "$LOCAL_WATCHDOG" = "$PINNED_LOCAL_WATCHDOG" ] || die "LOCAL_WATCHDOG is pinned by --apply"
@@ -436,12 +448,13 @@ apply_changes() {
     "$VPS_USER@$VPS_HOST"
   )
 
-  local updater_sha watchdog_sha gate_sha reconcile_sha gate_dropin_sha
+  local updater_sha watchdog_sha gate_sha reconcile_sha gate_dropin_sha config_guard_sha
   updater_sha="$(sha256_file "$LOCAL_UPDATER")"
   watchdog_sha="$(sha256_file "$LOCAL_WATCHDOG")"
   gate_sha="$(sha256_file "$LOCAL_GATE")"
   reconcile_sha="$(sha256_file "$LOCAL_RECONCILE_UNIT")"
   gate_dropin_sha="$(sha256_file "$LOCAL_GATE_DROPIN")"
+  config_guard_sha="$(sha256_file "$PINNED_LOCAL_CONFIG_GUARD")"
   "${SSH[@]}" "set -euo pipefail
     test -f $(shell_quote "$REMOTE_UPDATER")
     test ! -L $(shell_quote "$REMOTE_UPDATER")
@@ -452,6 +465,10 @@ apply_changes() {
     test ! -L $(shell_quote "$REMOTE_WATCHDOG")
     test \"\$(stat -c '%U:%G:%a' $(shell_quote "$REMOTE_WATCHDOG"))\" = root:root:755
     test \"\$(sha256sum $(shell_quote "$REMOTE_WATCHDOG") | awk '{print \$1}')\" = $(shell_quote "$watchdog_sha")
+    test -f $(shell_quote "$PINNED_REMOTE_CONFIG_GUARD")
+    test ! -L $(shell_quote "$PINNED_REMOTE_CONFIG_GUARD")
+    test \"\$(stat -c '%U:%G:%a' $(shell_quote "$PINNED_REMOTE_CONFIG_GUARD"))\" = root:root:644
+    test \"\$(sha256sum $(shell_quote "$PINNED_REMOTE_CONFIG_GUARD") | awk '{print \$1}')\" = $(shell_quote "$config_guard_sha")
     test -x $(shell_quote "$REMOTE_GATE")
     test ! -L $(shell_quote "$REMOTE_GATE")
     test \"\$(stat -c '%U:%G:%a' $(shell_quote "$REMOTE_GATE"))\" = root:root:755

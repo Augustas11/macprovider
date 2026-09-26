@@ -390,6 +390,8 @@ func TestWriteHotPath_UsesFullRateCardForServedAlias(t *testing.T) {
 		Status:             200,
 		BuyerIP:            "127.0.0.1",
 	}
+	// The caller resolves the served alias (buyer economicsSnapshotForModel);
+	// the hot path bills that entry as-is and recovery must agree with it.
 	input := HotPathInput{
 		RequestID:                  row.RequestID,
 		AttemptN:                   0,
@@ -401,7 +403,7 @@ func TestWriteHotPath_UsesFullRateCardForServedAlias(t *testing.T) {
 		PromptTokens:               &prompt,
 		CompletionTokens:           &completion,
 		ConfigSnapshotID:           snapshotID,
-		RateEntry:                  cfg.RateCard["default"],
+		RateEntry:                  RateFor(cfg.RateCard, row.Model),
 		RateCard:                   cfg.RateCard,
 		MultiplierPPM:              ParseMultiplierPPM(cfg.GlobalMultiplier),
 		ProviderShareBps:           ParseShareBps(cfg.ProviderShare),
@@ -470,6 +472,8 @@ func TestWriteHotPath_UsesFullRateCardForLlama32ServedAlias(t *testing.T) {
 		Status:             200,
 		BuyerIP:            "127.0.0.1",
 	}
+	// The caller resolves the served alias (buyer economicsSnapshotForModel);
+	// the hot path bills that entry as-is and recovery must agree with it.
 	input := HotPathInput{
 		RequestID:                  row.RequestID,
 		AttemptN:                   0,
@@ -481,7 +485,7 @@ func TestWriteHotPath_UsesFullRateCardForLlama32ServedAlias(t *testing.T) {
 		PromptTokens:               &prompt,
 		CompletionTokens:           &completion,
 		ConfigSnapshotID:           snapshotID,
-		RateEntry:                  cfg.RateCard["default"],
+		RateEntry:                  RateFor(cfg.RateCard, row.Model),
 		RateCard:                   cfg.RateCard,
 		MultiplierPPM:              ParseMultiplierPPM(cfg.GlobalMultiplier),
 		ProviderShareBps:           ParseShareBps(cfg.ProviderShare),

@@ -1508,6 +1508,7 @@ type fakeProvider struct {
 	catalogReleaseID      string
 	catalogPolicy         string
 	catalogSHA256         string
+	catalogSignerKeyID    string // "" = the committed static feed signer
 	receiptPubkey         ed25519.PublicKey
 	receiptPrivkey        ed25519.PrivateKey
 	lastRequestBody       []byte
@@ -2292,7 +2293,11 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 			initial["catalog_release_id"] = p.catalogReleaseID
 			initial["catalog_policy_version"] = p.catalogPolicy
 			initial["catalog_candidate_sha256"] = p.catalogSHA256
-			initial["catalog_signer_key_id"] = staticAutotuneSignerKeyID
+			signerKeyID := staticAutotuneSignerKeyID
+			if p.catalogSignerKeyID != "" {
+				signerKeyID = p.catalogSignerKeyID
+			}
+			initial["catalog_signer_key_id"] = signerKeyID
 			initial["catalog_row_identity"] = staticLlama32CandidateRowID
 		}
 		if err := writeJSONFrame(conn, initial); err != nil {

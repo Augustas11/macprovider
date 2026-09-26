@@ -199,10 +199,15 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_autotune_window
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_compare_live
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_content_gate
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_catalog_pricing_lane
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_coordinator_config_guard
 	bash phase4-coordinator/dist/test/deploy_catalog_compare_live.test.sh
 	bash phase4-coordinator/dist/test/deploy_catalog_window_coverage.test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_restart_readiness.test.sh
 	bash phase4-coordinator/dist/test/coordinator_deploy_recovery.test.sh
+	bash phase4-coordinator/dist/test/coordinator_pricing_recover.test.sh
+	bash phase4-coordinator/dist/test/deploy_pricing_runtime_floor.test.sh
+	bash phase4-coordinator/dist/test/deploy_canary_byte_proof_names.test.sh
 	bash phase4-coordinator/dist/test/coordinator_archive_rotate.test.sh
 	bash phase4-coordinator/dist/test/coordinator_sqlite_relief.test.sh
 	bash phase4-coordinator/dist/test/coord_deploy_smoke_probe.test.sh

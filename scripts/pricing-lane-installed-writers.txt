@@ -1,0 +1,17 @@
+# #1693 L0/L2: Pearl-installed live coordinator config writers that must carry
+# the one-writer guard (scripts/lib/coordinator-config-guard.sh /
+# scripts/lib/coordinator_config_guard.py) before a pricing release may run.
+#
+# Format: one entry per line, `<installed path on Pearl> <repo path>`, separated
+# by a single space; `#` lines and blank lines are ignored. Paths contain no
+# spaces. The pricing lane's L2 preflight hashes each <repo path> at the lane's
+# own commit and refuses (NO_GO) unless the file at <installed path> exists and
+# its sha256 equals that digest: a missing or pre-guard installed copy could
+# rewrite coordinator.yaml underneath a journaled pricing transaction.
+# scripts/tests/test_coordinator_config_guard.py pins that every repo path here
+# bears the guard.
+/usr/local/sbin/macprovider-pearl-update ops/pearl-updater/macprovider-pearl-update
+/usr/local/sbin/macprovider-tier2-enforcement-watchdog ops/pearl-updater/macprovider-tier2-enforcement-watchdog
+/usr/local/share/macprovider/scripts/coordinator_config_guard.py scripts/lib/coordinator_config_guard.py
+/opt/macprovider/coordinator-deploy-recover phase4-coordinator/dist/coordinator-deploy-recover.sh
+/opt/macprovider/coordinator-config-guard.sh scripts/lib/coordinator-config-guard.sh

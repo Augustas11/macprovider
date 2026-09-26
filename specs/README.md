@@ -13,8 +13,8 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-002 | Phase 4 Coordinator: Mac Provider Request Router | 1.6.2 | normative | pending | pending: 2 | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
 | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.11.4 | normative | pending | pending: 2 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
 | SPEC-004 | Smart Router | 0.3.5 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
-| SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.8 | normative | complete | conformant: 2, pending: 10 | [SPEC-005-billing.md](SPEC-005-billing.md) |
-| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.35 | normative | complete | conformant: 2, pending: 14 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
+| SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.9 | normative | complete | conformant: 2, pending: 11 | [SPEC-005-billing.md](SPEC-005-billing.md) |
+| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.36 | normative | complete | conformant: 2, pending: 14 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5.1 | normative | pending | pending corpus migration | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
 | SPEC-008 | Tier-2 Trust Layer | 0.7.0 | normative | pending | pending: 4 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
 | SPEC-009 | MacProvider Console v2 | 0.1 | normative | pending | pending corpus migration | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
@@ -31,7 +31,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-020 | Provider autoupdate | v0.1.19 | normative | pending | pending: 5 | [SPEC-020-provider-autoupdate.md](SPEC-020-provider-autoupdate.md) |
 | SPEC-021 | MALIBU rewards emission ledger | 0.4.0 | draft | complete | pending: 10 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
 | SPEC-022 | Verified model settlement | v0.2.2 | draft | complete | conformant: 4, pending: 8 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
-| SPEC-023 | Installer-Integrated Autotune Recommend | v0.17.1 | normative | pending | conformant: 2, pending: 15 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
+| SPEC-023 | Installer-Integrated Autotune Recommend | v0.18.2 | normative | pending | conformant: 2, pending: 16 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
 | SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.6 | normative | pending | pending: 2 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.29 | draft | pending | pending corpus migration | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
 | SPEC-026 | Browserless Provider Onboarding (one-click Launch Provider) | v0.29 | draft | pending | pending corpus migration | [SPEC-026-browserless-provider-onboarding.md](SPEC-026-browserless-provider-onboarding.md) |
