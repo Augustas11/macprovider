@@ -212,6 +212,33 @@ the promotion event (`get-pool` shows it as `root_custody_class`).
   `trust-pool-admin set-lifecycle` to `paused` fails buyer chat closed without
   touching global traffic; `revoke-provider`, `upsert-creator` (suspend), and
   the root-compromise freeze remain available.
+- Retiring is two steps: `set-lifecycle --lifecycle paused` (or `draining`),
+  then `--lifecycle retired`. An `active` pool cannot be retired directly
+  (400 `invalid_event`). The transitions the coordinator accepts:
+
+  | From | To | How |
+  |---|---|---|
+  | `created` | `active` | `promote` only |
+  | `created` | `retired` | `set-lifecycle --lifecycle retired` |
+  | `active` | `paused`, `draining` | `set-lifecycle` |
+  | `paused` | `active` | `promote` only (re-runs the activation preflight) |
+  | `paused` | `draining`, `retired` | `set-lifecycle` |
+  | `draining` | `retired` | `set-lifecycle` |
+  | `retired` | none | terminal |
+
+  `active` never goes straight to `retired`: the coordinator answers 400
+  `invalid_event` (`validLifecycleTransition`,
+  `phase4-coordinator/internal/trustpool/durable_store.go`). `retired` also
+  fails with `delivery_drain_pending` while the pool still has in-flight
+  deliveries; retry once they finish.
+- Reading the ledger for a pool route: `ledger_request_credits.usage_source`
+  reads `provider_reported` on pool routes too. The attested source is
+  recorded beside it, in `settlement_attempt_outputs.usage_source` and the
+  gateway's `usage_events.token_source` (both `pool_operator_attested`), and
+  in the closed verdict in `settlement_receipt_verdicts`. An audit that reads
+  the ledger alone cannot tell a pool-attested credit from a global one, so
+  join on `request_id` / `attempt_n` to one of those (#1750). The ledger
+  vocabulary is unchanged.
 
 ## 9. External-runtime pools (#1690): rollout and rollback order
 

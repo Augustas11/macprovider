@@ -531,12 +531,21 @@ only.
 
    No `delegation_id`: a delegated member is disqualified from
    `pool_operator_attested` (`pool_operator_attestation.go:60-111`).
-8. R013 disclosure check (runbook §4 step 5): `get-pool` shows the one
-   member and a `manifest_core_digest` equal to `manifest-m1-v1.json`'s.
-   `get-pool` does not print `runtime_allowlist` or `settlement_mode`; the
-   digest binds them (§4.2), and the journey's route snapshots show them in
-   force. The pool's `trustpool_events` have no `delegation_granted`. No
-   distribution artifact is published for M1.
+8. R013 disclosure check (runbook §4 step 5), read directly from
+   `get-pool`:
+
+   ```bash
+   coordinator-cli trust-pool-admin get-pool --admin-url http://127.0.0.1:8444 --pool-id "$POOL_ID"
+   ```
+
+   Pass: `runtime_allowlist: ["llamacpp_loopback"]`, `runtime_scope:
+   native_mlx_and_allowlisted_external_runtimes`, `settlement_mode:
+   enforce`, the one member, the one buyer, and a `manifest_core_digest`
+   equal to `manifest-m1-v1.json`'s. These fields need a coordinator that
+   contains the #1750 F-1 fix (the #1690 M9 PR); a `get-pool` without a
+   `runtime_allowlist` key means the coordinator is too old: stop and deploy
+   before activating. The pool's `trustpool_events` have no
+   `delegation_granted`. No distribution artifact is published for M1.
 9. Activate:
 
    ```bash
@@ -545,7 +554,8 @@ only.
    coordinator-cli trust-pool-admin get-pool --admin-url http://127.0.0.1:8444 --pool-id "$POOL_ID"
    ```
 
-   Pass: lifecycle `active`, routeable, manifest 1, digest recorded.
+   Pass: lifecycle `active`, routeable, manifest 1, digest recorded, and the
+   step 8 `runtime_allowlist` / `settlement_mode` unchanged.
 
 ## 5. The pool member
 
@@ -849,7 +859,17 @@ Harder stops, in order of reach:
 
 - `revoke-provider --pool-id … --provider-id $M1_PROVIDER_ID` (member out; a
   generation bump; in-flight stays on its snapshot).
-- `set-lifecycle --lifecycle retired` (terminal for M1).
+- Retire (terminal for M1): `set-lifecycle --lifecycle paused` (or
+  `draining`) first, then `set-lifecycle --lifecycle retired`. An `active`
+  pool cannot be retired directly (400 `invalid_event`), and `retired` fails
+  with `delivery_drain_pending` until in-flight deliveries finish; retry.
+
+  ```bash
+  coordinator-cli trust-pool-admin set-lifecycle --admin-url http://127.0.0.1:8444 \
+    --pool-id "$POOL_ID" --lifecycle paused --reason "1690-M1 retire" --operation-id m1-pause-<n>
+  coordinator-cli trust-pool-admin set-lifecycle --admin-url http://127.0.0.1:8444 \
+    --pool-id "$POOL_ID" --lifecycle retired --reason "1690-M1 retire" --operation-id m1-retire-1
+  ```
 - Withdraw the allowlist: a manifest v2 with `runtime_allowlist: []`
   (`sign-manifest --prev manifest-m1-v1.json`, no `--manifest-authority-key`).
   `sign-manifest` refuses a `--not-before` earlier than the current window's
@@ -860,6 +880,24 @@ Harder stops, in order of reach:
 - Full #1690 rollback: runbook §9 rollback order, including step 4a (the
   catalog feed now carries `file_path`) and the gateway-rollback ban once any
   `usage_events.token_source='pool_operator_attested'` row exists.
+
+Pool lifecycle transitions the coordinator accepts:
+
+| From | To | How |
+|---|---|---|
+| `created` | `active` | `promote` only |
+| `created` | `retired` | `set-lifecycle --lifecycle retired` |
+| `active` | `paused`, `draining` | `set-lifecycle` |
+| `paused` | `active` | `promote` only (re-runs the activation preflight) |
+| `paused` | `draining`, `retired` | `set-lifecycle` |
+| `draining` | `retired` | `set-lifecycle` |
+| `retired` | none | terminal |
+
+`active` never goes straight to `retired`: the coordinator answers 400
+`invalid_event` (`validLifecycleTransition`,
+`phase4-coordinator/internal/trustpool/durable_store.go`). `retired` also
+fails with `delivery_drain_pending` while the pool still has in-flight
+deliveries; retry once they finish.
 
 ## 7. Blockers and open questions
 

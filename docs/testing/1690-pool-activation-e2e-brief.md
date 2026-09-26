@@ -47,11 +47,11 @@ Every one of them is overridable with an environment variable (§2).
 
 | Item | Version / note |
 |---|---|
-| Mac | Apple Silicon, macOS 14 or later, 16 GB RAM is enough (0.5B model) |
+| Mac | Apple Silicon, macOS 14 or later; 8 GB RAM works (0.5B model; on an M2 8 GB the `swift build -c release` took about 10 min, #1750) |
 | Xcode | with command-line tools, for `swift build -c release` (Swift tools 5.9) |
 | Go | exactly `1.26.6`; the rig sets `GOTOOLCHAIN=local` |
 | llama.cpp | a `llama-server` binary; the lab used release `b11149` (macOS arm64 zip from the llama.cpp GitHub releases) |
-| Python | 3.10 or later, standard library only |
+| Python | 3.10 or later, standard library only (3.14 is fine); the lab scripts run on macOS bash 3.2 |
 | `sqlite3`, `curl`, `git`, `shasum` | macOS built-ins are fine |
 | Disk | about 6 GB (source exports, Swift build cache, model) |
 | Network | GitHub and Hugging Face only, for the source and the model |
@@ -243,9 +243,19 @@ now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
    $CLI trust-pool-admin get-pool --admin-url $ADMIN --pool-id "$POOL_ID" | tee "$P/get-pool-active.json"
    ```
 
-   Pass: `runtime_allowlist: ["llamacpp_loopback"]`, settlement `enforce`,
-   one member, one buyer, lifecycle `active`. Any command that fails is a
-   finding: record the exact command, status and body.
+   Pass, read from `get-pool-active.json`: `runtime_allowlist:
+   ["llamacpp_loopback"]`, `runtime_scope:
+   native_mlx_and_allowlisted_external_runtimes`, `settlement_mode: enforce`,
+   one entry in `members`, one in `buyer_accounts`, `lifecycle: active`.
+   `get-pool-before.json` shows the same allowlist, scope and mode before the
+   promote. These fields need a coordinator that contains the #1750 F-1 fix;
+   if `get-pool` has no `runtime_allowlist` key, the coordinator is too old,
+   which is a finding. Any command that fails is a finding: record the exact
+   command, status and body.
+
+   ```bash
+   python3 -c 'import json,sys; p=json.load(open(sys.argv[1]))["pool"]; ok=(p["runtime_allowlist"]==["llamacpp_loopback"] and p["settlement_mode"]=="enforce" and len(p["members"])==1 and len(p["buyer_accounts"])==1 and p["lifecycle"]=="active"); print("disclosure", "PASS" if ok else "FAIL", {k: p.get(k) for k in ("runtime_allowlist","runtime_scope","settlement_mode","lifecycle")})' "$P/get-pool-active.json"
+   ```
 
 ## 5. Paid requests on pool P
 
@@ -426,11 +436,31 @@ python3 $B --pool P --engine llamacpp --n 1          # expect 200 again
 # remove the member
 $CLI trust-pool-admin revoke-provider --admin-url $ADMIN --pool-id "$POOL_ID" --provider-id lab-1690-m6-provider --operation-id e2e-revoke-1
 python3 $B --pool P --engine llamacpp --n 1          # expect 503
-# retire
+# retire: the pool is active again after the resume, and active cannot go
+# straight to retired (table below), so pause first, then retire
+$CLI trust-pool-admin set-lifecycle --admin-url $ADMIN --pool-id "$POOL_ID" --lifecycle paused --reason e2e-retire --operation-id e2e-pause-3
 $CLI trust-pool-admin set-lifecycle --admin-url $ADMIN --pool-id "$POOL_ID" --lifecycle retired --reason e2e-retire --operation-id e2e-retire-1
 # rollback gate (reads the lab DB only)
 $LAB/bin/coordinator pool-rollback-preflight --config $LAB/run/coordinator.yaml; echo "exit $?"
 ```
+
+Pool lifecycle transitions the coordinator accepts:
+
+| From | To | How |
+|---|---|---|
+| `created` | `active` | `promote` only |
+| `created` | `retired` | `set-lifecycle --lifecycle retired` |
+| `active` | `paused`, `draining` | `set-lifecycle` |
+| `paused` | `active` | `promote` only (re-runs the activation preflight) |
+| `paused` | `draining`, `retired` | `set-lifecycle` |
+| `draining` | `retired` | `set-lifecycle` |
+| `retired` | none | terminal |
+
+`active` never goes straight to `retired`: the coordinator answers 400
+`invalid_event` (`validLifecycleTransition`,
+`phase4-coordinator/internal/trustpool/durable_store.go`). `retired` also
+fails with `delivery_drain_pending` while the pool still has in-flight
+deliveries; retry once they finish.
 
 Record for the in-flight stream: its status, whether it completed, and its
 §7 rows. Expected: the stream keeps the route snapshot it started with and
