@@ -105,7 +105,7 @@ def main() -> None:
             "provider_id": PROVIDER_ID,
             "candidate_id": candidate_id,
             "next_state": "catalog_priced",
-            "reason_code": "build1_private_staging_catalog_priced",
+            "reason_code": "operator_lab_pool_priced",
             "expected_coordinator_event_id": status["coordinator_event_id"],
             "idempotency_key": f"build1-private-priced-{nonce}",
         })
@@ -124,7 +124,7 @@ def main() -> None:
             "provider_id": PROVIDER_ID,
             "candidate_id": candidate_id,
             "next_state": "settlement_capable",
-            "reason_code": "build1_private_staging_settlement_proposed",
+            "reason_code": "operator_settlement",
             "expected_coordinator_event_id": priced_head,
             "idempotency_key": f"build1-private-settle-{nonce}",
         })
