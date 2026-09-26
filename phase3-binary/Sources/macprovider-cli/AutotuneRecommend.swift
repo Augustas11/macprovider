@@ -3962,6 +3962,16 @@ struct CachedModelArtifactResolver {
             .appendingPathComponent(".cache/huggingface/hub", isDirectory: true)
     }
 
+    /// A first preparation run may point `HF_HOME` at a new private campaign
+    /// directory. Create that missing cache root through the same no-symlink,
+    /// owner-only filesystem path used by private preparation state before the
+    /// downloader is allowed to create repository children beneath it.
+    func ensureSafeCacheRoot() throws {
+        let opened = try ModelPreparationSecureFilesystem.openOrCreatePrivateDirectory(at: hubRoot)
+        opened.close()
+        try validateNoSymlinkCachePath(of: hubRoot, requireComplete: true)
+    }
+
     func verifiedArtifact(for row: CandidateCatalog.Row, deadline: Date? = nil) async throws -> VerifiedModelArtifact {
         try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
         guard let revision = row.modelRevision, row.modelSHA256 != nil else {
@@ -4788,6 +4798,7 @@ struct AutotuneRecommendationBenchmarker {
 enum ModelArtifactVerifier {
     struct CanonicalArtifactInspection {
         var sha256: String
+        var scopedSHA256: String?
         var configJSONData: Data?
         var configSHA256: String?
     }
@@ -4802,7 +4813,11 @@ enum ModelArtifactVerifier {
         try inspectCanonicalArtifact(directory: directory, deadline: deadline).sha256
     }
 
-    static func inspectCanonicalArtifact(directory: URL, deadline: Date? = nil) throws -> CanonicalArtifactInspection {
+    static func inspectCanonicalArtifact(
+        directory: URL,
+        deadline: Date? = nil,
+        scopedSubdirectory: String? = nil
+    ) throws -> CanonicalArtifactInspection {
         try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
         let fm = FileManager.default
         var root = stat()
@@ -4852,33 +4867,68 @@ enum ModelArtifactVerifier {
         let manifest = entries.sorted { $0.path < $1.path }
             .map { "\($0.path)\n\($0.size)\n\($0.sha)\n" }
             .joined()
+        let scopedSHA256 = scopedSubdirectory.map { scope in
+            let prefix = scope + "/"
+            let scopedManifest = entries.compactMap { entry -> (path: String, size: UInt64, sha: String)? in
+                guard entry.path.hasPrefix(prefix) else { return nil }
+                return (String(entry.path.dropFirst(prefix.count)), entry.size, entry.sha)
+            }
+            .sorted { $0.path < $1.path }
+            .map { "\($0.path)\n\($0.size)\n\($0.sha)\n" }
+            .joined()
+            return Data(SHA256.hash(data: Data(scopedManifest.utf8))).hexLower
+        }
         return CanonicalArtifactInspection(
             sha256: Data(SHA256.hash(data: Data(manifest.utf8))).hexLower,
+            scopedSHA256: scopedSHA256,
             configJSONData: configJSONData,
             configSHA256: configSHA256
         )
     }
 
     private static func hashFile(at url: URL, captureData: Bool, deadline: Date?) throws -> FileHashResult {
-        let chunkSize = 1024 * 1024
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
+        let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else {
+            throw AutotuneRecommendError.invalidArtifact("open \(url.lastPathComponent)")
+        }
+        defer { Darwin.close(fd) }
+        var opened = stat()
+        guard fstat(fd, &opened) == 0,
+              (opened.st_mode & S_IFMT) == S_IFREG,
+              opened.st_nlink <= 1
+        else {
+            throw AutotuneRecommendError.invalidArtifact("not a regular single-link file \(url.lastPathComponent)")
+        }
         var hasher = SHA256()
+        var buffer = [UInt8](repeating: 0, count: 4 * 1024 * 1024)
         var size: UInt64 = 0
         var capturedData = captureData ? Data() : nil
         while true {
             try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
-            let chunk = try handle.read(upToCount: chunkSize) ?? Data()
-            guard !chunk.isEmpty else {
-                break
+            let count = buffer.withUnsafeMutableBytes { raw in
+                Darwin.read(fd, raw.baseAddress, raw.count)
             }
-            hasher.update(data: chunk)
-            size += UInt64(chunk.count)
-            if captureData {
-                capturedData?.append(chunk)
+            if count < 0 {
+                if errno == EINTR { continue }
+                throw AutotuneRecommendError.invalidArtifact("read \(url.lastPathComponent)")
             }
+            if count == 0 { break }
+            buffer.withUnsafeBytes { raw in
+                hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: raw[0..<count]))
+            }
+            size += UInt64(count)
+            if captureData { capturedData?.append(contentsOf: buffer[0..<count]) }
         }
         try HuggingFaceSnapshotDownloader.assertDeadlineActive(deadline)
+        var closed = stat()
+        guard fstat(fd, &closed) == 0,
+              closed.st_dev == opened.st_dev,
+              closed.st_ino == opened.st_ino,
+              closed.st_size == opened.st_size,
+              UInt64(closed.st_size) == size
+        else {
+            throw AutotuneRecommendError.invalidArtifact("file changed while hashing \(url.lastPathComponent)")
+        }
         return FileHashResult(
             size: size,
             sha256: Data(hasher.finalize()).hexLower,

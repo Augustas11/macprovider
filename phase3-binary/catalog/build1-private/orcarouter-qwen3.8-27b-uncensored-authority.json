@@ -1,0 +1,37 @@
+{
+  "artifact": {
+    "artifact_id": "mlx-revision-snapshot",
+    "artifact_scope": "complete_revision_snapshot",
+    "file_count": 80,
+    "hash": "8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88dcd",
+    "hash_algorithm": "macprovider.snapshot-manifest.v1",
+    "runtime_format": "mlx_safetensors",
+    "runtime_source": "mlx_cache",
+    "size_bytes": 94723099062,
+    "source_kind": "huggingface_revision"
+  },
+  "catalog_guard": {
+    "absent": true,
+    "candidate_catalog_sha256": "f4977d19a0e09f488f9bb9f7f0f34b919aee76d0421b9a2ea4f289ce7c7510ab",
+    "candidate_release_id": "published-2026-09-25-artifact-hash-correction-v1",
+    "checked_at": "2026-09-26T09:08:43Z",
+    "model_key": "orcarouter/qwen3.8-27b-uncensored"
+  },
+  "constraints": {
+    "admission_granted": false,
+    "production_activation": false,
+    "public_catalog_publication": false,
+    "rewards_or_payouts": false,
+    "settlement_granted": false
+  },
+  "expires_at": "2026-10-10T09:08:43Z",
+  "generated_at": "2026-09-26T09:08:43Z",
+  "model": {
+    "model_id": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+    "model_key": "orcarouter/qwen3.8-27b-uncensored",
+    "revision": "38d0ad4e02031658fadd3828634a0174e0b8a282"
+  },
+  "profile": "build1-orcarouter-private",
+  "release_id": "build1-orcarouter-private-2026-09-26-v1",
+  "schema_version": "macprovider.build1-private-authority.v1"
+}

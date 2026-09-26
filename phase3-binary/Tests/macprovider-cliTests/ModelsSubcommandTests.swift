@@ -150,6 +150,70 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertNil(object["cleanup_targets"])
     }
 
+    func testModelsCatalogEconomicsV1OutputIgnoresPrivateLaneAPreparationRecord() async throws {
+        // A Lane A prepare that adopted and recorded an artifact under the
+        // configured durable root must not change the public v1 projection or
+        // leak any private digest, receipt, or path into it.
+        let roots = try makeLaneAStagingRoots()
+        let seed = roots.hub.appendingPathComponent("seed", isDirectory: true)
+        try FileManager.default.createDirectory(at: seed, withIntermediateDirectories: true)
+        try Data("recorded-lane-a-bytes".utf8).write(to: seed.appendingPathComponent("weights.bin"))
+        let hash = try ModelArtifactVerifier.canonicalArtifactHash(directory: seed)
+        let authority = Build1LaneAArtifactAuthority(
+            catalogKey: Build1LaneAPrepareProfile.catalogKey,
+            modelID: Build1LaneAPrepareProfile.artifactModelID,
+            revision: Build1LaneAPrepareProfile.artifactRevision,
+            artifactID: Build1LaneAPrepareProfile.artifactID,
+            hashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            hash: hash,
+            sizeBytes: 21,
+            feedSHA256: String(repeating: "f", count: 64),
+            feedSignerKeyID: "test-signer",
+            releaseID: "test-release"
+        )
+        let stager = Build1LaneAArtifactStager(
+            resolver: CachedModelArtifactResolver(
+                hubRoot: roots.hub,
+                durableRoot: roots.durable,
+                downloader: Self.laneAFakeDownloader(payload: "recorded-lane-a-bytes", counter: Build1LaneACounter())
+            ),
+            reauthorize: { authority },
+            diskProbe: { _ in Build1LaneADiskProbe(availableBytes: .max, deviceID: 1) }
+        )
+        let staged = try await stager.stageAndAdopt(authority: authority) { _, _, _ in }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: Self.privateInventoryURL(durable: roots.durable).path))
+
+        let previous = ProcessInfo.processInfo.environment["MACPROVIDER_MODEL_ARTIFACT_ROOT"]
+        setenv("MACPROVIDER_MODEL_ARTIFACT_ROOT", roots.durable.path, 1)
+        defer {
+            if let previous { setenv("MACPROVIDER_MODEL_ARTIFACT_ROOT", previous, 1) } else { unsetenv("MACPROVIDER_MODEL_ARTIFACT_ROOT") }
+        }
+        let command = try ModelsCatalogEconomicsCommand.parse([
+            "--json",
+            "--skip-coordinator-status",
+            "--skip-ollama",
+            "--skip-lmstudio",
+            "--skip-llamacpp",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertNil(capture.error)
+        let line = try XCTUnwrap(capture.stdout.split(whereSeparator: \.isNewline).first)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+        XCTAssertEqual(object["schema"] as? String, "model_catalog_economics.v1")
+        let source = try XCTUnwrap(object["source"] as? [String: Any])
+        XCTAssertEqual(source["projection_protocol_version"] as? String, "1")
+        XCTAssertNil(object["storage"])
+        XCTAssertNil(object["cleanup_targets"])
+        XCTAssertFalse(capture.stdout.contains(staged.privateRecord.artifactIdentityDigest))
+        XCTAssertFalse(capture.stdout.contains(staged.privateRecord.receiptSHA256))
+        XCTAssertFalse(capture.stdout.contains(staged.privateRecord.rootIdentityDigest))
+        XCTAssertFalse(capture.stdout.contains(roots.durable.path))
+        XCTAssertFalse(capture.stdout.contains(Build1LaneAPreparationRecorder.authorityLeaf))
+        XCTAssertFalse(capture.stdout.contains(ModelPreparationSecureFilesystem.namespaceLeaf))
+    }
+
     func testModelsCatalogEconomicsRejectsUnlandedActionFlagsAtParseTime() throws {
         XCTAssertThrowsError(try ModelsCatalogEconomicsCommand.parse([
             "--json",
@@ -239,6 +303,132 @@ final class ModelsSubcommandTests: XCTestCase {
         let event = try XCTUnwrap(events.first)
         XCTAssertEqual(event.modelKey, "unsupported")
         XCTAssertEqual(event.errorCode, .actionUnavailable)
+    }
+
+    func testModelsPreparePrivateProfileRequiresAuthorityFiles() async throws {
+        let command = try ModelsPrepareCommand.parse([
+            Build1PrivatePrepareProfile.modelKey,
+            "--json",
+            "--yes",
+            "--profile", Build1PrivatePrepareProfile.profile,
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("private_authority_required"), capture.stderr)
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.map(\.modelKey), [Build1PrivatePrepareProfile.modelKey])
+        XCTAssertEqual(events.map(\.state), [.failed])
+    }
+
+    func testModelsPreparePrivateProfileRejectsAnyCoordinator() async throws {
+        let command = try ModelsPrepareCommand.parse([
+            Build1PrivatePrepareProfile.modelKey,
+            "--json",
+            "--yes",
+            "--profile", Build1PrivatePrepareProfile.profile,
+            "--authority-file", "/tmp/authority.json",
+            "--authority-signature", "/tmp/authority.json.sig",
+            "--coordinator-url", "http://127.0.0.1:19090/ws/provider",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("coordinator_not_allowed_for_private_profile"), capture.stderr)
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.map(\.modelKey), [Build1PrivatePrepareProfile.modelKey])
+        XCTAssertEqual(events.map(\.state), [.failed])
+    }
+
+    func testModelsPreparePrivateProfileRejectsLlamaRegressionTuple() async throws {
+        let command = try ModelsPrepareCommand.parse([
+            Build1LaneAPrepareProfile.catalogKey,
+            "--json",
+            "--yes",
+            "--profile", Build1PrivatePrepareProfile.profile,
+            "--authority-file", "/tmp/authority.json",
+            "--authority-signature", "/tmp/authority.json.sig",
+        ])
+
+        let capture = await captureOutput { try await command.run() }
+
+        XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
+        XCTAssertTrue(capture.stderr.contains("unsupported_model_tuple"), capture.stderr)
+        let events = try decodePreparationEvents(capture.stdout)
+        XCTAssertEqual(events.map(\.modelKey), ["unsupported"])
+        XCTAssertEqual(events.map(\.state), [.failed])
+    }
+
+    func testModelsPreparePrivateProfileStagesExactQwenTupleWithoutCoordinator() async throws {
+        let roots = try makeLaneAStagingRoots()
+        let payload = "private-qwen-fixture"
+        let seed = roots.hub.appendingPathComponent("private-seed", isDirectory: true)
+        try FileManager.default.createDirectory(at: seed, withIntermediateDirectories: true)
+        try Data(payload.utf8).write(to: seed.appendingPathComponent("weights.bin"))
+        let hash = try ModelArtifactVerifier.canonicalArtifactHash(directory: seed)
+        let authority = Build1LaneAArtifactAuthority(
+            catalogKey: Build1PrivatePrepareProfile.modelKey,
+            modelID: Build1PrivatePrepareProfile.modelID,
+            revision: Build1PrivatePrepareProfile.revision,
+            artifactID: Build1PrivatePrepareProfile.artifactID,
+            hashAlgorithm: Build1PrivatePrepareProfile.hashAlgorithm,
+            hash: hash,
+            sizeBytes: payload.utf8.count,
+            feedSHA256: String(repeating: "a", count: 64),
+            feedSignerKeyID: Build1PrivatePrepareProfile.signerKeyID,
+            releaseID: "private-test-release"
+        )
+        let authorityLoads = Build1LaneACounter()
+        let transfers = Build1LaneACounter()
+        let resolver = CachedModelArtifactResolver(
+            hubRoot: roots.hub,
+            durableRoot: roots.durable,
+            downloader: Self.laneAFakeDownloader(
+                payload: payload,
+                counter: transfers,
+                revision: Build1PrivatePrepareProfile.revision
+            )
+        )
+
+        let captures = try await withPrivatePrepareAuthority({ _, _ in
+            authorityLoads.increment()
+            return authority
+        }) {
+            try await withPrepareResolver(resolver, diskProbe: { _ in
+                Build1LaneADiskProbe(availableBytes: .max, deviceID: 1)
+            }) {
+                var results: [CapturedOutput] = []
+                for _ in 0..<2 {
+                    let command = try ModelsPrepareCommand.parse([
+                        Build1PrivatePrepareProfile.modelID,
+                        "--json",
+                        "--yes",
+                        "--profile", Build1PrivatePrepareProfile.profile,
+                        "--authority-file", "/tmp/authority.json",
+                        "--authority-signature", "/tmp/authority.json.sig",
+                        "--config", roots.config.path,
+                    ])
+                    results.append(await captureOutput { try await command.run() })
+                }
+                return results
+            }
+        }
+
+        XCTAssertEqual(captures.count, 2)
+        XCTAssertTrue(captures.allSatisfy { $0.error == nil })
+        XCTAssertEqual(authorityLoads.value, 4, "fresh and reused paths must revalidate immediately before publication")
+        XCTAssertEqual(transfers.value, 1)
+        let events = try captures.flatMap { try decodePreparationEvents($0.stdout) }
+        XCTAssertTrue(events.allSatisfy { $0.modelKey == Build1PrivatePrepareProfile.modelKey })
+        XCTAssertEqual(events.first?.state, .queued)
+        XCTAssertEqual(events.last?.state, .succeeded)
+        XCTAssertTrue(captures.allSatisfy { $0.stderr.contains(Build1PrivatePrepareProfile.modelID) })
+        XCTAssertTrue(captures.allSatisfy { !$0.stderr.contains("coordinator.malibu.tech") })
+        XCTAssertTrue(captures[1].stderr.contains("private_record=reused"), captures[1].stderr)
+        XCTAssertTrue(DurableModelArtifactStore(root: roots.durable).isModelMaterialized(modelID: Build1PrivatePrepareProfile.modelID))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: Self.privateInventoryURL(durable: roots.durable).path))
     }
 
     func testModelsPrepareRejectsProductionCoordinator() async throws {
@@ -537,6 +727,10 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertFalse(DurableModelArtifactStore(root: roots.durable).isModelMaterialized(modelID: Build1LaneAPrepareProfile.artifactModelID))
         let hubContents = (try? FileManager.default.contentsOfDirectory(atPath: roots.hub.path)) ?? []
         XCTAssertTrue(hubContents.allSatisfy { !$0.contains("macprovider-prefetch") }, "\(hubContents)")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: Self.privateInventoryURL(durable: roots.durable).path),
+            "cancellation must not write the private preparation record"
+        )
     }
 
     func testModelsPrepareRejectsConcurrentPrepareOnSameDurableRoot() async throws {
@@ -2010,6 +2204,16 @@ final class ModelsSubcommandTests: XCTestCase {
         return try await body()
     }
 
+    private func withPrivatePrepareAuthority<T>(
+        _ loader: @escaping @Sendable (URL, URL) throws -> Build1LaneAArtifactAuthority,
+        _ body: () async throws -> T
+    ) async rethrows -> T {
+        let original = ModelsPrepareCommand.loadPrivateAuthority
+        ModelsPrepareCommand.loadPrivateAuthority = loader
+        defer { ModelsPrepareCommand.loadPrivateAuthority = original }
+        return try await body()
+    }
+
     private func withPrepareResolver<T>(
         _ resolver: CachedModelArtifactResolver,
         diskProbe: (@Sendable (URL) throws -> Build1LaneADiskProbe)? = nil,
@@ -2034,6 +2238,13 @@ final class ModelsSubcommandTests: XCTestCase {
         var config: URL
     }
 
+    private static func privateInventoryURL(durable: URL) -> URL {
+        durable
+            .appendingPathComponent(Build1LaneAPreparationRecorder.authorityLeaf, isDirectory: true)
+            .appendingPathComponent(ModelPreparationSecureFilesystem.stateLeaf, isDirectory: true)
+            .appendingPathComponent(ModelPreparationPrivateStateEnvelope.expectedTargetLeaf(for: .publishedInventory))
+    }
+
     /// Isolated staging (Hugging Face cache) and durable roots plus a YAML
     /// config that points `model_artifact_root` at the durable root, so the
     /// command resolves storage exactly like `serve` would.
@@ -2043,19 +2254,27 @@ final class ModelsSubcommandTests: XCTestCase {
         try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: base) }
         let hub = base.appendingPathComponent("hub", isDirectory: true)
-        try FileManager.default.createDirectory(at: hub, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: hub,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
         let durable = base.appendingPathComponent("durable", isDirectory: true)
         let config = base.appendingPathComponent("config.yaml")
         try Data("model_artifact_root: \(durable.path)\n".utf8).write(to: config)
         return LaneAStagingRoots(hub: hub, durable: durable, config: config)
     }
 
-    private static func laneAFakeDownloader(payload: String, counter: Build1LaneACounter) -> HuggingFaceSnapshotDownloader {
+    private static func laneAFakeDownloader(
+        payload: String,
+        counter: Build1LaneACounter,
+        revision: String = Build1LaneAPrepareProfile.artifactRevision
+    ) -> HuggingFaceSnapshotDownloader {
         HuggingFaceSnapshotDownloader(
             fetch: { request in
                 let url = try XCTUnwrap(request.url)
                 XCTAssertEqual(url.host, "huggingface.co")
-                XCTAssertTrue(url.path.contains(Build1LaneAPrepareProfile.artifactRevision), url.path)
+                XCTAssertTrue(url.path.contains(revision), url.path)
                 let response = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil))
                 return (Data(#"{"siblings":[{"rfilename":"weights.bin"}]}"#.utf8), response)
             },

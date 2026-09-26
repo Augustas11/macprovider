@@ -11,8 +11,189 @@ struct ProviderCatalogStatusContext: Sendable {
     let catalogModelID: String?
     let modelRevision: String?
     let artifactSHA256: String?
+    let modelArtifactSHA256: String?
     let configuredReleaseID: String?
     let configuredCatalogDigest: String?
+    let build1LaneA: ProviderBuild1LaneAStatusContext?
+    let build1LaneAResolver: ProviderBuild1LaneAStatusResolver?
+
+    init(
+        trust: ServeCommand.CatalogRuntimeTrust?,
+        donorMode: Bool,
+        catalogKey: String?,
+        catalogModelID: String?,
+        modelRevision: String?,
+        artifactSHA256: String?,
+        modelArtifactSHA256: String? = nil,
+        configuredReleaseID: String?,
+        configuredCatalogDigest: String?,
+        build1LaneA: ProviderBuild1LaneAStatusContext? = nil,
+        build1LaneAResolver: ProviderBuild1LaneAStatusResolver? = nil
+    ) {
+        self.trust = trust
+        self.donorMode = donorMode
+        self.catalogKey = catalogKey
+        self.catalogModelID = catalogModelID
+        self.modelRevision = modelRevision
+        self.artifactSHA256 = artifactSHA256
+        self.modelArtifactSHA256 = modelArtifactSHA256
+        self.configuredReleaseID = configuredReleaseID
+        self.configuredCatalogDigest = configuredCatalogDigest
+        self.build1LaneA = build1LaneA
+        self.build1LaneAResolver = build1LaneAResolver
+    }
+}
+
+/// Wire constants for the `build1_lane_a` block of `GET /v1/status`, shared
+/// with the `models staging-input` consumer so both sides name one contract.
+enum ProviderBuild1LaneAStatusEvidence {
+    static let schema = "build1_lane_a_status_evidence.v1"
+    static let correlatedState = "correlated"
+}
+
+struct ProviderBuild1LaneAStatusResolver: Sendable {
+    let durableRoot: URL
+    let catalogKey: String
+    let expectedArtifactSHA256: String
+    let expectedReleaseID: String
+
+    init(
+        durableRoot: URL,
+        expectedArtifactSHA256: String,
+        expectedReleaseID: String,
+        catalogKey: String = Build1LaneAPrepareProfile.catalogKey
+    ) {
+        self.durableRoot = durableRoot
+        self.catalogKey = catalogKey
+        self.expectedArtifactSHA256 = expectedArtifactSHA256
+        self.expectedReleaseID = expectedReleaseID
+    }
+
+    /// Builds the resolver only when the configured catalog tuple is exactly
+    /// the Lane A profile tuple (key, artifact model id, revision), the
+    /// coordinator is a staging/loopback target, and the config carries both
+    /// the verified artifact SHA and the catalog release id. Any partial or
+    /// inconsistent tuple yields no resolver, so `GET /v1/status` never
+    /// publishes Lane A evidence from an ambiguous configuration.
+    static func make(config: AppConfig) -> ProviderBuild1LaneAStatusResolver? {
+        guard let catalogKey = ProviderBuild1LaneAStatusContext.supportedCatalogKey(config),
+              let expectedArtifactSHA256 = nonEmpty(config.modelArtifactSHA256),
+              let expectedReleaseID = nonEmpty(config.modelCatalogVersion)
+        else { return nil }
+        if catalogKey == Build1LaneAPrepareProfile.catalogKey,
+           !Build1LaneAPrepareProfile.coordinatorIsAllowedForStaging(config.coordinatorURL) {
+            return nil
+        }
+        // The catalog row digest and the verified artifact digest are the same
+        // identity for the Lane A tuple; a config that disagrees with itself
+        // is not evidence of anything.
+        if let catalogSHA256 = nonEmpty(config.modelCatalogSHA256), catalogSHA256 != expectedArtifactSHA256 {
+            return nil
+        }
+        return ProviderBuild1LaneAStatusResolver(
+            durableRoot: durableRoot(config: config),
+            expectedArtifactSHA256: expectedArtifactSHA256,
+            expectedReleaseID: expectedReleaseID,
+            catalogKey: catalogKey
+        )
+    }
+
+    /// The durable root `serve` preflight binds to: an absolute configured
+    /// `model_artifact_root`, else the provider-owned default store.
+    static func durableRoot(config: AppConfig) -> URL {
+        if let root = config.modelArtifactRoot?.trimmingCharacters(in: .whitespacesAndNewlines),
+           root.hasPrefix("/") {
+            return URL(fileURLWithPath: root, isDirectory: true).standardizedFileURL
+        }
+        return DurableModelArtifactStore.defaultRoot
+    }
+
+    func resolve() -> ProviderBuild1LaneAStatusContext {
+        do {
+            let binding = try Build1LaneAPreparationRecorder(durableRoot: durableRoot)
+                .readStatusArtifactBinding(
+                    catalogKey: catalogKey,
+                    expectedArtifactSHA256: expectedArtifactSHA256,
+                    expectedReleaseID: expectedReleaseID
+                )
+            guard let binding else {
+                return ProviderBuild1LaneAStatusContext(
+                    recordState: .missing,
+                    reason: "private_record_missing",
+                    binding: nil
+                )
+            }
+            return ProviderBuild1LaneAStatusContext(
+                recordState: .recorded,
+                reason: "private_record_verified",
+                binding: binding
+            )
+        } catch let error as Build1LaneAPreparationRecordError {
+            switch error {
+            case .inventoryInvalid, .adoptedArtifactMismatch, .writeFailed:
+                return ProviderBuild1LaneAStatusContext(recordState: .invalid, reason: "private_record_invalid", binding: nil)
+            case .stateLocked, .stateUnavailable:
+                return ProviderBuild1LaneAStatusContext(recordState: .unavailable, reason: "private_record_unavailable", binding: nil)
+            }
+        } catch {
+            return ProviderBuild1LaneAStatusContext(
+                recordState: .unavailable,
+                reason: "private_record_unavailable",
+                binding: nil
+            )
+        }
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
+}
+
+struct ProviderBuild1LaneAStatusContext: Sendable {
+    enum RecordState: String, Sendable {
+        case recorded
+        case missing
+        case unavailable
+        case invalid
+    }
+
+    let recordState: RecordState
+    let reason: String
+    let binding: Build1LaneAStatusArtifactBinding?
+
+    static func resolve(config: AppConfig) -> ProviderBuild1LaneAStatusContext? {
+        ProviderBuild1LaneAStatusResolver.make(config: config)?.resolve()
+    }
+
+    /// `true` only when the configured `model_catalog_*` tuple names the exact
+    /// Lane A profile tuple. A matching catalog key or model alias alone is not
+    /// enough: revision and artifact model id must agree as well.
+    static func isLaneAConfig(_ config: AppConfig) -> Bool {
+        supportedCatalogKey(config) == Build1LaneAPrepareProfile.catalogKey
+    }
+
+    static func supportedCatalogKey(_ config: AppConfig) -> String? {
+        guard let key = trimmedNonEmpty(config.modelCatalogKey),
+              let expected = Build1PrepareProfileSupport.expectedTuple(for: key),
+              trimmedNonEmpty(config.modelCatalogModelID) == expected.modelID,
+              trimmedNonEmpty(config.modelCatalogRevision) == expected.revision
+        else {
+            return nil
+        }
+        return expected.catalogKey
+    }
+
+    private static func trimmedNonEmpty(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
 }
 
 struct ProviderAdmissionIdentityStatusContext: Sendable {
@@ -156,8 +337,10 @@ struct HTTPServer: Sendable {
             catalogModelID: config.modelCatalogModelID,
             modelRevision: config.modelCatalogRevision,
             artifactSHA256: config.modelCatalogSHA256,
+            modelArtifactSHA256: config.modelArtifactSHA256,
             configuredReleaseID: config.modelCatalogVersion,
-            configuredCatalogDigest: config.modelCatalogHash
+            configuredCatalogDigest: config.modelCatalogHash,
+            build1LaneAResolver: ProviderBuild1LaneAStatusResolver.make(config: config)
         )
     }
 
@@ -262,6 +445,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         "legacy_reader_fallback_v1",
         "service_instance_v1",
         "model_liveness_token_v1",
+        ProviderBuild1LaneAStatusEvidence.schema,
         "status_observation_v1",
         "provider_safety_telemetry_v1",
         "referral_bootstrap_v1",
@@ -2129,6 +2313,18 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "model_revision": jsonNullable(catalogStatus.modelRevision),
                 "artifact_sha256": jsonNullable(catalogStatus.artifactSHA256),
             ]
+            let build1LaneA = catalogStatus.build1LaneAResolver?.resolve() ?? catalogStatus.build1LaneA
+            if let build1LaneA {
+                body["build1_lane_a"] = build1LaneAStatusEvidence(
+                    build1LaneA,
+                    effectiveModelID: effectiveModelID,
+                    modelHash: runtimeSnapshot?.modelHash ?? snapshot.modelHash,
+                    modelHashAlgorithm: runtimeSnapshot?.modelHashAlgorithm ?? snapshot.modelHashAlgorithm,
+                    weightsManifestSHA256: runtimeSnapshot?.weightsManifestSHA256 ?? snapshot.weightsManifestSHA256,
+                    weightsManifestAlgorithm: runtimeSnapshot?.weightsManifestAlgorithm ?? snapshot.weightsManifestAlgorithm,
+                    configuredModelArtifactSHA256: catalogStatus.modelArtifactSHA256
+                )
+            }
         }
         return body
     }
@@ -2149,6 +2345,99 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "max_observed_batch_depth": scheduler?.maxObservedBatchDepth ?? 0,
                 "slots_total": scheduler?.slotsTotal ?? 0,
                 "slots_free": scheduler?.slotsFree ?? 0,
+            ],
+        ]
+    }
+
+    private static func build1LaneAStatusEvidence(
+        _ context: ProviderBuild1LaneAStatusContext,
+        effectiveModelID: String?,
+        modelHash: String?,
+        modelHashAlgorithm: String?,
+        weightsManifestSHA256: String?,
+        weightsManifestAlgorithm: String?,
+        configuredModelArtifactSHA256: String?
+    ) -> [String: Any] {
+        let binding = context.binding
+        // The runtime model identity is part of the correlation decision: the
+        // served model must be the approved Lane A catalog key or its artifact
+        // alias, otherwise a matching hash on some other model id is not
+        // evidence that the Lane A artifact is what status observed.
+        let effectiveModelMatchesLaneA = effectiveModelID.map {
+            $0.caseInsensitiveCompare(binding?.catalogKey ?? "") == .orderedSame
+                || $0.caseInsensitiveCompare(binding?.displayModelID ?? "") == .orderedSame
+        } ?? false
+        let hashMatchesRecord = binding.map { $0.artifactSHA256 == modelHash }
+        let hashMatchesConfig = configuredModelArtifactSHA256.map { $0 == modelHash }
+        let weightsPresent = weightsManifestSHA256?.isEmpty == false
+        let modelHashAlgorithmMatches = modelHashAlgorithm == ModelArtifactIdentity.snapshotManifestV1
+        let weightsManifestAlgorithmMatches = weightsManifestAlgorithm == ModelArtifactIdentity.safetensorsManifestV1
+        let state: String
+        let reason: String
+        if context.recordState != .recorded {
+            state = context.recordState.rawValue
+            reason = context.reason
+        } else if !effectiveModelMatchesLaneA {
+            state = "unbound"
+            reason = "effective_model_mismatch"
+        } else if hashMatchesRecord != true {
+            state = "unbound"
+            reason = "model_hash_mismatch"
+        } else if !modelHashAlgorithmMatches {
+            state = "unbound"
+            reason = "model_hash_algorithm_mismatch"
+        } else if !weightsPresent {
+            state = "unbound"
+            reason = "weights_manifest_unavailable"
+        } else if !weightsManifestAlgorithmMatches {
+            state = "unbound"
+            reason = "weights_manifest_algorithm_mismatch"
+        } else {
+            state = ProviderBuild1LaneAStatusEvidence.correlatedState
+            reason = "status_matches_private_record_path_observed"
+        }
+        return [
+            "schema": ProviderBuild1LaneAStatusEvidence.schema,
+            "state": state,
+            "reason": reason,
+            "record_state": context.recordState.rawValue,
+            "catalog_key": jsonNullable(binding?.catalogKey),
+            "effective_model": jsonNullable(effectiveModelID),
+            "effective_model_matches_lane_a": effectiveModelMatchesLaneA,
+            "model_hash": jsonNullable(modelHash),
+            "model_hash_algorithm": jsonNullable(modelHashAlgorithm),
+            "model_hash_matches_private_record": hashMatchesRecord.map { $0 as Any } ?? NSNull(),
+            "model_hash_matches_config": hashMatchesConfig.map { $0 as Any } ?? NSNull(),
+            "model_hash_algorithm_matches_private_record": modelHashAlgorithmMatches,
+            "weights_manifest_sha256": jsonNullable(weightsManifestSHA256),
+            "weights_manifest_algorithm": jsonNullable(weightsManifestAlgorithm),
+            "weights_manifest_present": weightsPresent,
+            "weights_manifest_algorithm_matches_expected": weightsManifestAlgorithmMatches,
+            "runtime_custody": [
+                "descriptor_pinned_runtime_custody": false,
+                "observation_scope": "path_observed",
+            ],
+            "private_record": [
+                "artifact_identity_digest": jsonNullable(binding?.artifactIdentityDigest),
+                "receipt_sha256": jsonNullable(binding?.receiptSHA256),
+                "root_identity_digest": jsonNullable(binding?.rootIdentityDigest),
+                "inventory_generation": binding.map { $0.inventoryGeneration as Any } ?? NSNull(),
+                "published_at": jsonNullable(binding?.publishedAt),
+            ],
+            "artifact": [
+                "model_id": jsonNullable(binding?.displayModelID),
+                "model_revision": jsonNullable(binding?.modelRevision),
+                "artifact_id": jsonNullable(binding?.artifactID),
+                "release_id": jsonNullable(binding?.releaseID),
+                "artifact_sha256": jsonNullable(binding?.artifactSHA256),
+                "estimated_bytes": binding.map { $0.estimatedBytes as Any } ?? NSNull(),
+            ],
+            "proof_boundary": [
+                "local_preparation_only": true,
+                "grants_admission": false,
+                "grants_settlement": false,
+                "production_activation": false,
+                "rewards_or_payouts": false,
             ],
         ]
     }

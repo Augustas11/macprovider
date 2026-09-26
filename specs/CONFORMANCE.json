@@ -8549,7 +8549,9 @@
       "spec_id": "SPEC-046",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:struct ModelsCommand",
+        "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:struct ModelsDiscoverCommand",
+        "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:struct ModelsEvaluateCommand",
+        "phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:struct ModelsOfferCommand",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMDiscoveryWire",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMEvaluationWire",
         "phase3-binary/Sources/macprovider-cli/BYOMDiscovery.swift:BYOMOfferDryRunWire"

@@ -260,25 +260,30 @@ final class Build1LaneAPrepareEventEmitter: @unchecked Sendable {
 }
 
 struct ModelsPrepareCommand: AsyncParsableCommand {
+    nonisolated(unsafe) static var loadPrivateAuthority: @Sendable (URL, URL) throws -> Build1LaneAArtifactAuthority = {
+        try Build1PrivateAuthorityLoader.load(authorityURL: $0, signatureURL: $1)
+    }
+
     static let configuration = CommandConfiguration(
         commandName: "prepare",
-        abstract: "Prepare a signed catalog model (--profile catalog) or the Build 1 Lane A model.",
+        abstract: "Prepare a signed catalog model or an explicitly authorized Build 1 model.",
         discussion: "--profile catalog (implied by --repair-cache) downloads the signed catalog row's pinned "
             + "snapshot with the serve/autotune downloader, verifies its canonical hash, and prints one final "
             + "state: ready (verified), downloaded but hash mismatch (see verify-artifact), or incomplete "
-            + "(retry: <command>). The default build1-lane-a profile is the JSON-only staging transaction."
+            + "(retry: <command>). The default build1-lane-a profile is the JSON-only Llama regression transaction. "
+            + "The build1-orcarouter-private profile accepts only the signed local Qwen authority and never connects to a coordinator."
     )
 
-    @Argument(help: "Catalog key or model id. The build1-lane-a profile accepts only the approved Build 1 Llama 3B tuple.")
+    @Argument(help: "Catalog key or model id. Build 1 profiles accept only their exact approved tuple.")
     var catalogKey: String
 
-    @Flag(name: .customLong("json"), help: "Emit model_catalog_transaction_event.v1 frames (build1-lane-a) or one model_prepare_result.v1 object (catalog) on stdout.")
+    @Flag(name: .customLong("json"), help: "Emit model_catalog_transaction_event.v1 frames (Build 1 profiles) or one model_prepare_result.v1 object (catalog) on stdout.")
     var emitJSON = false
 
-    @Flag(help: "build1-lane-a only: confirm a staging-only preparation attempt after reviewing models catalog-economics --json.")
+    @Flag(help: "Build 1 profiles: confirm a staging-only preparation attempt after reviewing models catalog-economics --json.")
     var yes = false
 
-    @Option(help: "Preparation profile: build1-lane-a (default) or catalog.")
+    @Option(help: "Preparation profile: build1-lane-a (default), build1-orcarouter-private, or catalog.")
     var profile: String?
 
     @Flag(help: "Catalog profile: remove only this model's interrupted-download leftovers and an unverifiable pinned cache snapshot, then download again. Implies --profile catalog.")
@@ -286,6 +291,12 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
 
     @Option(help: "build1-lane-a only: explicit staging coordinator URL. Only loopback and approved staging hosts are accepted.")
     var coordinatorURL: String?
+
+    @Option(help: "build1-orcarouter-private only: path to the signed private authority JSON.")
+    var authorityFile: String?
+
+    @Option(help: "build1-orcarouter-private only: path to the detached authority signature JSON.")
+    var authoritySignature: String?
 
     @Option(help: "YAML config path used to resolve model_artifact_root. Overrides MACPROVIDER_CONFIG.")
     var config: String?
@@ -298,10 +309,12 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
             let laneAOnly = [
                 yes ? "--yes" : nil,
                 coordinatorURL == nil ? nil : "--coordinator-url",
+                authorityFile == nil ? nil : "--authority-file",
+                authoritySignature == nil ? nil : "--authority-signature",
                 timeoutSeconds == nil ? nil : "--timeout-seconds",
             ].compactMap { $0 }
             guard laneAOnly.isEmpty else {
-                writePrepareStderr("models prepare refused: \(laneAOnly.joined(separator: ", ")) applies only to --profile \(Build1LaneAPrepareProfile.profile), not --profile \(ModelsCatalogPrepareRunner.profile)")
+                writePrepareStderr("models prepare refused: \(laneAOnly.joined(separator: ", ")) applies only to Build 1 profiles, not --profile \(ModelsCatalogPrepareRunner.profile)")
                 throw ExitCode(2)
             }
             try await ModelsCatalogPrepareRunner.run(
@@ -318,6 +331,8 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
         }
 
         let emitter = Build1LaneAPrepareEventEmitter(transactionID: UUID().uuidString.lowercased())
+        let selectedProfile = profile ?? Build1LaneAPrepareProfile.profile
+        let eventModelKey = normalizedModelKey(for: selectedProfile)
 
         func fail(
             reason: String,
@@ -330,33 +345,67 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
         }
 
         guard yes else {
-            try fail(reason: "confirmation_required", modelKey: normalizedModelKey())
+            try fail(reason: "confirmation_required", modelKey: eventModelKey)
         }
-        guard (profile ?? Build1LaneAPrepareProfile.profile) == Build1LaneAPrepareProfile.profile, !repairCache else {
-            try fail(reason: "unsupported_profile", modelKey: normalizedModelKey())
-        }
-        guard Build1LaneAPrepareProfile.isApprovedCatalogKey(catalogKey) else {
-            try fail(reason: "unsupported_model_tuple", modelKey: normalizedModelKey())
-        }
-        guard Build1LaneAPrepareProfile.coordinatorIsAllowedForStaging(coordinatorURL) else {
-            try fail(reason: "staging_coordinator_required", modelKey: normalizedModelKey())
+        guard [Build1LaneAPrepareProfile.profile, Build1PrivatePrepareProfile.profile].contains(selectedProfile), !repairCache else {
+            try fail(reason: "unsupported_profile", modelKey: eventModelKey)
         }
         if let timeoutSeconds, timeoutSeconds <= 0 {
-            try fail(reason: Build1LaneAPrepareProfile.invalidTimeoutReason, modelKey: normalizedModelKey())
+            try fail(reason: Build1LaneAPrepareProfile.invalidTimeoutReason, modelKey: eventModelKey)
         }
 
-        try emitter.emit(state: .queued)
+        let resolveAuthority: Build1LaneAArtifactStager.Reauthorize
+        switch selectedProfile {
+        case Build1LaneAPrepareProfile.profile:
+            guard Build1LaneAPrepareProfile.isApprovedCatalogKey(catalogKey) else {
+                try fail(reason: "unsupported_model_tuple", modelKey: eventModelKey)
+            }
+            guard authorityFile == nil, authoritySignature == nil else {
+                try fail(reason: "private_authority_not_allowed", modelKey: eventModelKey)
+            }
+            guard Build1LaneAPrepareProfile.coordinatorIsAllowedForStaging(coordinatorURL) else {
+                try fail(reason: "staging_coordinator_required", modelKey: eventModelKey)
+            }
+            let coordinatorURL = self.coordinatorURL
+            resolveAuthority = {
+                try await Build1LaneAArtifactAuthorityResolver.resolve(coordinatorURL: coordinatorURL)
+            }
+        case Build1PrivatePrepareProfile.profile:
+            guard Build1PrivatePrepareProfile.isApprovedModel(catalogKey) else {
+                try fail(reason: "unsupported_model_tuple", modelKey: eventModelKey)
+            }
+            guard coordinatorURL == nil else {
+                try fail(reason: "coordinator_not_allowed_for_private_profile", modelKey: eventModelKey)
+            }
+            guard let authorityFile, !authorityFile.isEmpty,
+                  let authoritySignature, !authoritySignature.isEmpty
+            else {
+                try fail(reason: "private_authority_required", modelKey: eventModelKey)
+            }
+            let authorityURL = URL(fileURLWithPath: authorityFile)
+            let signatureURL = URL(fileURLWithPath: authoritySignature)
+            resolveAuthority = {
+                try Self.loadPrivateAuthority(authorityURL, signatureURL)
+            }
+        default:
+            try fail(reason: "unsupported_profile", modelKey: eventModelKey)
+        }
+
+        try emitter.emit(modelKey: eventModelKey, state: .queued)
         let authority: Build1LaneAArtifactAuthority
         do {
-            authority = try await Build1LaneAArtifactAuthorityResolver.resolve(coordinatorURL: coordinatorURL)
+            authority = try await resolveAuthority()
         } catch {
             try fail(
-                reason: Build1LaneAPrepareProfile.unsupportedReason,
-                modelKey: Build1LaneAPrepareProfile.catalogKey,
+                reason: selectedProfile == Build1PrivatePrepareProfile.profile
+                    ? Build1PrivatePrepareProfile.authorityUnavailableReason
+                    : Build1LaneAPrepareProfile.unsupportedReason,
+                modelKey: eventModelKey,
                 errorCode: .authorityUnavailable
             )
         }
         try emitter.emit(
+            modelKey: eventModelKey,
             state: .running,
             progress: try ModelPreparationTransactionEvent.Progress(
                 stageLabelKey: "artifact_authority_verified",
@@ -376,20 +425,18 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
         } catch {
             try fail(
                 reason: Build1LaneAPrepareProfile.configUnavailableReason,
-                modelKey: Build1LaneAPrepareProfile.catalogKey,
+                modelKey: eventModelKey,
                 errorCode: .rootUnavailable
             )
         }
         writePrepareStderr(Self.disclosureLine(for: authority))
 
         let deadline = timeoutSeconds.map { Date().addingTimeInterval(TimeInterval($0)) }
-        let coordinatorURL = self.coordinatorURL
-        let stager = Build1LaneAArtifactStager.makeStager(appConfig, deadline) {
-            try await Build1LaneAArtifactAuthorityResolver.resolve(coordinatorURL: coordinatorURL)
-        }
+        let stager = Build1LaneAArtifactStager.makeStager(appConfig, deadline, resolveAuthority)
         let work = Task {
             try await stager.stageAndAdopt(authority: authority) { stage, bytesCompleted, bytesExpected in
                 try emitter.emit(
+                    modelKey: eventModelKey,
                     state: .running,
                     progress: try ModelPreparationTransactionEvent.Progress(
                         stageLabelKey: stage.rawValue,
@@ -408,42 +455,54 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
         do {
             staged = try await work.value
         } catch let error as Build1LaneAArtifactStagingError {
-            try Self.emitStagingFailure(error, emitter: emitter)
+            try Self.emitStagingFailure(error, emitter: emitter, modelKey: eventModelKey)
         } catch is CancellationError {
-            try Self.emitStagingFailure(.cancelled, emitter: emitter)
+            try Self.emitStagingFailure(.cancelled, emitter: emitter, modelKey: eventModelKey)
         } catch {
-            try Self.emitStagingFailure(.transferFailed(String(describing: error)), emitter: emitter)
+            try Self.emitStagingFailure(.transferFailed(String(describing: error)), emitter: emitter, modelKey: eventModelKey)
         }
 
-        try emitter.emit(state: .succeeded)
+        try emitter.emit(modelKey: eventModelKey, state: .succeeded)
         if staged.stagingCleanupRequired {
             writePrepareStderr("models prepare warning: \(ModelPreparationEventWarningCode.stagingCleanupRequired.rawValue)")
         }
         writePrepareStderr(
             "models prepare adopted \(authority.modelID)@\(authority.revision) "
                 + "\(authority.hashAlgorithm)=\(staged.sha256) adopted_bytes=\(staged.adoptedBytes) "
-                + "reused_durable_artifact=\(staged.reusedDurableArtifact); "
+                + "reused_durable_artifact=\(staged.reusedDurableArtifact) "
+                + "artifact_identity_digest=\(staged.privateRecord.artifactIdentityDigest) "
+                + "private_record=\(staged.privateRecord.reusedExistingRecord ? "reused" : "written"); "
                 + "preparation grants no admission, settlement, earnings, rewards, payouts, or production activation"
         )
     }
 
     private static func emitStagingFailure(
         _ error: Build1LaneAArtifactStagingError,
-        emitter: Build1LaneAPrepareEventEmitter
+        emitter: Build1LaneAPrepareEventEmitter,
+        modelKey: String
     ) throws -> Never {
         switch error {
         case .cancelled:
-            try emitter.emit(state: .cancelRequested)
-            try emitter.emit(state: .cancelled)
+            try emitter.emit(modelKey: modelKey, state: .cancelRequested)
+            try emitter.emit(modelKey: modelKey, state: .cancelled)
             writePrepareStderr("models prepare cancelled: active model unchanged; durable store left as found")
             throw ExitCode(130)
         case .timedOut:
-            try emitter.emit(state: .timedOut, errorCode: .timedOut)
+            try emitter.emit(modelKey: modelKey, state: .timedOut, errorCode: .timedOut)
             writePrepareStderr("models prepare timed out: active model unchanged; durable store left as found")
+            throw ExitCode(2)
+        case .cancelledAfterAdoption:
+            try emitter.emit(modelKey: modelKey, state: .cancelRequested)
+            try emitter.emit(modelKey: modelKey, state: .cancelled)
+            writePrepareStderr("models prepare cancelled: active model unchanged; durable artifact retained; private record not written; re-run prepare to record it")
+            throw ExitCode(130)
+        case .timedOutAfterAdoption:
+            try emitter.emit(modelKey: modelKey, state: .timedOut, errorCode: .timedOut)
+            writePrepareStderr("models prepare timed out: active model unchanged; durable artifact retained; private record not written; re-run prepare to record it")
             throw ExitCode(2)
         default:
             let code = errorCode(for: error)
-            try emitter.emit(state: .failed, errorCode: code)
+            try emitter.emit(modelKey: modelKey, state: .failed, errorCode: code)
             writePrepareStderr("models prepare failed: \(code.rawValue)\(detail(for: error))")
             throw ExitCode(2)
         }
@@ -459,8 +518,11 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
         case .transferFailed: return .transferFailed
         case .verificationFailed: return .verificationFailed
         case .publicationFailed: return .publicationFailed
-        case .timedOut: return .timedOut
-        case .cancelled: return .internalError
+        case .privateStateUnavailable: return .rootUnavailable
+        case .privateInventoryInvalid: return .managedInventoryInvalid
+        case .privateRecordFailed: return .publicationFailed
+        case .timedOut, .timedOutAfterAdoption: return .timedOut
+        case .cancelled, .cancelledAfterAdoption: return .internalError
         }
     }
 
@@ -472,15 +534,19 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
             return " required_bytes=\(required) available_bytes=\(available)"
         case .verificationFailed(let expected, let actual):
             return " expected=\(expected) actual=\(actual)"
+        case .privateRecordFailed:
+            return " durable artifact retained; re-run prepare to retry the private record"
         default:
             return ""
         }
     }
 
     private static func disclosureLine(for authority: Build1LaneAArtifactAuthority) -> String {
-        "models prepare staging \(authority.modelID)@\(authority.revision) "
+        let runtimeSource = Build1PrepareProfileSupport.expectedTuple(for: authority.catalogKey)?.runtimeSource
+            ?? "unsupported"
+        return "models prepare staging \(authority.modelID)@\(authority.revision) "
             + "artifact=\(authority.artifactID) \(authority.hashAlgorithm)=\(authority.hash) "
-            + "size_bytes=\(authority.sizeBytes) runtime_source=\(Build1LaneAPrepareProfile.runtimeSource) "
+            + "size_bytes=\(authority.sizeBytes) runtime_source=\(runtimeSource) "
             + "release=\(authority.releaseID) signer=\(authority.feedSignerKeyID) feed_sha256=\(authority.feedSHA256); "
             + "staging-only, no admission or earnings are granted"
     }
@@ -503,10 +569,16 @@ struct ModelsPrepareCommand: AsyncParsableCommand {
         }
     }
 
-    private func normalizedModelKey() -> String {
-        Build1LaneAPrepareProfile.isApprovedCatalogKey(catalogKey)
-            ? Build1LaneAPrepareProfile.catalogKey
-            : "unsupported"
+    private func normalizedModelKey(for profile: String) -> String {
+        if profile == Build1PrivatePrepareProfile.profile,
+           Build1PrivatePrepareProfile.isApprovedModel(catalogKey) {
+            return Build1PrivatePrepareProfile.modelKey
+        }
+        if profile == Build1LaneAPrepareProfile.profile,
+           Build1LaneAPrepareProfile.isApprovedCatalogKey(catalogKey) {
+            return Build1LaneAPrepareProfile.catalogKey
+        }
+        return "unsupported"
     }
 }
 
