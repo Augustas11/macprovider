@@ -11,6 +11,7 @@ export WT="${WT:-$(cd "$HERE/../../.." && pwd)}"
 BASE_RIG="$WT/scripts/lab/1690-m6/rig.sh"
 
 export LAB="${LAB:-/Users/a1/lab-build1-private-staging}"
+export PATH="${GO_BIN:-/Users/a1/sdk/go1.26.6/bin}:$PATH"
 export ENGINE=native
 export LAB_ROW_KEY=orcarouter/qwen3.8-27b-uncensored
 export LAB_MLX_ID=orcarouter/Qwen3.8-27B-Uncensored-MLX
