@@ -18,6 +18,8 @@ enum Build1PrivatePrepareProfile {
     static let artifactScope = "complete_revision_snapshot"
     static let signerKeyID = "streamvc-autotune-static-v4"
     static let schemaVersion = "macprovider.build1-private-authority.v1"
+    static let releaseID = "build1-orcarouter-private-2026-09-26-v1"
+    static let runtimeVariantDirectory = "4-bit"
     static let authorityUnavailableReason = "private_authority_unavailable"
 
     static func isApprovedModel(_ value: String) -> Bool {
@@ -120,7 +122,7 @@ enum Build1PrivateAuthorityLoader {
         )
         guard root["schema_version"] as? String == Build1PrivatePrepareProfile.schemaVersion,
               root["profile"] as? String == Build1PrivatePrepareProfile.profile,
-              let releaseID = nonempty(root["release_id"]),
+              root["release_id"] as? String == Build1PrivatePrepareProfile.releaseID,
               let generatedRaw = root["generated_at"] as? String,
               let expiresRaw = root["expires_at"] as? String,
               let generatedAt = timestamp(generatedRaw),
@@ -195,7 +197,7 @@ enum Build1PrivateAuthorityLoader {
             sizeBytes: Build1PrivatePrepareProfile.sizeBytes,
             feedSHA256: sha256Hex(authorityBytes),
             feedSignerKeyID: Build1PrivatePrepareProfile.signerKeyID,
-            releaseID: releaseID
+            releaseID: Build1PrivatePrepareProfile.releaseID
         )
     }
 

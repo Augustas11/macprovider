@@ -1012,6 +1012,73 @@ final class ServeCommandTests: XCTestCase {
         try await ServeCommand.runModelArtifactPreflight(&config, joiningCoordinator: false)
     }
 
+    func testBuild1PrivateRuntimeLoadsOnlyAuthorityBoundFourBitVariant() throws {
+        let durableRoot = try tempDir()
+        let artifact = durableRoot.appendingPathComponent("artifact", isDirectory: true)
+        let runtime = artifact.appendingPathComponent("4-bit", isDirectory: true)
+        try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: runtime.appendingPathComponent("config.json"))
+        try Data("{}".utf8).write(to: runtime.appendingPathComponent("model.safetensors.index.json"))
+        var config = AppConfig.defaults()
+        config.modelArtifactSHA256 = Build1PrivatePrepareProfile.hash
+        config.modelCatalogKey = Build1PrivatePrepareProfile.modelKey
+        config.modelCatalogModelID = Build1PrivatePrepareProfile.modelID
+        config.modelCatalogRevision = Build1PrivatePrepareProfile.revision
+        config.modelCatalogSHA256 = Build1PrivatePrepareProfile.hash
+        config.modelCatalogVersion = Build1PrivatePrepareProfile.releaseID
+        let resolver = CachedModelArtifactResolver(
+            hubRoot: durableRoot.appendingPathComponent("hub"),
+            durableRoot: durableRoot
+        )
+
+        let loadPath = try ServeCommand.runtimeModelLoadPath(
+            verifiedArtifactPath: artifact.path,
+            config: config,
+            artifactResolver: resolver
+        )
+        XCTAssertEqual(loadPath, runtime.path)
+        let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(
+            directory: artifact,
+            scopedSubdirectory: Build1PrivatePrepareProfile.runtimeVariantDirectory
+        )
+        XCTAssertEqual(
+            inspection.scopedSHA256,
+            try ModelArtifactVerifier.canonicalArtifactHash(directory: runtime)
+        )
+
+        let pinnedLoadSHA256 = try XCTUnwrap(inspection.scopedSHA256)
+        try Data("changed".utf8).write(to: runtime.appendingPathComponent("config.json"))
+        XCTAssertThrowsError(
+            try ModelRuntime.verifyLoadedArtifact(directory: runtime, expectedSHA256: pinnedLoadSHA256),
+            "a post-preflight mutation must fail closed against the authority-bound load hash"
+        )
+    }
+
+    func testBuild1PrivateRuntimeFailsClosedWhenFourBitVariantIsIncomplete() throws {
+        let durableRoot = try tempDir()
+        let artifact = durableRoot.appendingPathComponent("artifact", isDirectory: true)
+        let runtime = artifact.appendingPathComponent("4-bit", isDirectory: true)
+        try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: runtime.appendingPathComponent("config.json"))
+        var config = AppConfig.defaults()
+        config.modelArtifactSHA256 = Build1PrivatePrepareProfile.hash
+        config.modelCatalogKey = Build1PrivatePrepareProfile.modelKey
+        config.modelCatalogModelID = Build1PrivatePrepareProfile.modelID
+        config.modelCatalogRevision = Build1PrivatePrepareProfile.revision
+        config.modelCatalogSHA256 = Build1PrivatePrepareProfile.hash
+        config.modelCatalogVersion = Build1PrivatePrepareProfile.releaseID
+        let resolver = CachedModelArtifactResolver(
+            hubRoot: durableRoot.appendingPathComponent("hub"),
+            durableRoot: durableRoot
+        )
+
+        XCTAssertThrowsError(try ServeCommand.runtimeModelLoadPath(
+            verifiedArtifactPath: artifact.path,
+            config: config,
+            artifactResolver: resolver
+        ))
+    }
+
     func testSelfTestUsesVerifiedArtifactPathForRuntimeLoad() {
         var config = AppConfig.defaults()
         config.model = "test-public-model"
