@@ -35,7 +35,7 @@ The active Build 1 target remains Lane A from:
 - `narrow-mvp-test-spec-v6.md`
 - `lane-a-executable-provider-path-prd-v1.md`
 - `lane-a-executable-provider-path-test-spec-v1.md`
-- `build1-control-recovery-plan-v1.md`
+- `build1-control-recovery-plan-v2.md`
 
 This workflow changes PR mechanics only. It does not widen Build 1 scope and
 does not authorize production activation.
@@ -197,7 +197,7 @@ Branch: feat/build1-lane-a-private-prep-record
 Tracker: https://github.com/Augustas11/macprovider/issues/1642
 PR: https://github.com/Augustas11/macprovider/pull/1658
 
-Read AGENTS.md, CLAUDE.md, docs/product-roadmap/build-1/build1-control-recovery-plan-v1.md,
+Read AGENTS.md, CLAUDE.md, docs/product-roadmap/build-1/build1-control-recovery-plan-v2.md,
 docs/product-roadmap/build-1/build1-single-pr-orchestrator-workflow-v1.md,
 docs/product-roadmap/build-1/narrow-mvp-plan-v6.md,
 docs/product-roadmap/build-1/narrow-mvp-test-spec-v6.md,
@@ -217,8 +217,9 @@ Rules:
   auditable, scoped to Lane A, and cleaned up or withdrawn after evidence
   capture.
 - Do not touch secrets or operator key material.
-- Do not broaden beyond Lane A's exact Llama 3B tuple unless the orchestrator
-  explicitly updates this prompt.
+- Treat Lane A's exact Llama 3B tuple as plumbing-control evidence only. Do not
+  add a private acceptance tuple unless the orchestrator supplies the pinned
+  tuple and assigns the M2/M3 milestone from the v2 recovery plan.
 - Use existing repo patterns and targeted tests.
 - Return a summary, changed files, tests run, remaining risks, and any scope
   pressure. If you push or commit, report the exact commit SHA.

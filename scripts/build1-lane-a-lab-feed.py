@@ -457,8 +457,9 @@ def serve(args: argparse.Namespace) -> None:
         def log_message(self, format: str, *message_args: Any) -> None:
             sys.stderr.write("[build1-lab-feed] " + (format % message_args) + "\n")
 
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"serving Build 1 lab feed at http://{args.host}:{args.port}/v1/catalog-artifacts", flush=True)
+    host = "127.0.0.1"
+    server = ThreadingHTTPServer((host, args.port), Handler)
+    print(f"serving Build 1 lab feed at http://{host}:{args.port}/v1/catalog-artifacts", flush=True)
     try:
         server.serve_forever()
     finally:
@@ -495,7 +496,6 @@ def main(argv: list[str] | None = None) -> int:
 
     serve_cmd = sub.add_parser("serve", help="serve a materialized feed directory on loopback")
     serve_cmd.add_argument("--directory", type=pathlib.Path, required=True)
-    serve_cmd.add_argument("--host", default="127.0.0.1")
     serve_cmd.add_argument("--port", type=int, default=18082)
     serve_cmd.set_defaults(func=serve)
 

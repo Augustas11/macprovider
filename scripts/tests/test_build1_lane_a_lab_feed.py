@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import pathlib
 import tempfile
@@ -136,6 +138,21 @@ class Build1LaneALabFeedTests(unittest.TestCase):
             lab_feed.build_feed(CATALOG / "autotune-candidates.json", source_path, measurements)
 
         self.assertIn("positive integer", str(caught.exception))
+
+    def test_serve_has_no_non_loopback_host_override(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                lab_feed.main(
+                    [
+                        "serve",
+                        "--directory",
+                        str(self.root),
+                        "--host",
+                        "0.0.0.0",
+                    ]
+                )
+
+        self.assertEqual(2, caught.exception.code)
 
 
 if __name__ == "__main__":
