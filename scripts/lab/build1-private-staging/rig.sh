@@ -30,6 +30,11 @@ esac
   exit 2
 }
 export MLXLM_SNAPSHOT="$BUILD1_PRIVATE_SNAPSHOT"
+export LAB_MODEL_ARTIFACT_ROOT="${BUILD1_PRIVATE_SNAPSHOT%/orcarouter--Qwen3.8-27B-Uncensored-MLX/$LAB_MLX_REV/$LAB_MLX_SHA}"
+[[ "$BUILD1_PRIVATE_SNAPSHOT" == "$LAB_MODEL_ARTIFACT_ROOT/orcarouter--Qwen3.8-27B-Uncensored-MLX/$LAB_MLX_REV/$LAB_MLX_SHA" ]] || {
+  printf 'refusing: Build 1 private snapshot is outside the exact durable tuple path\n' >&2
+  exit 2
+}
 export BUILD1_PRIVATE_HF_CACHE="${BUILD1_PRIVATE_HF_CACHE:-$LAB/hf}"
 DISCOVERY_SNAPSHOT="$BUILD1_PRIVATE_HF_CACHE/hub/models--orcarouter--Qwen3.8-27B-Uncensored-MLX/snapshots/$LAB_MLX_REV"
 
