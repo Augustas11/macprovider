@@ -581,7 +581,10 @@ final class Build1LaneAStagingInputTests: XCTestCase {
         let inputs = AutotuneStaticInputs(
             fetch: { url in url.path.hasSuffix(".sig") ? fixture.sidecarBytes : fixture.feedBytes },
             trustedPublicKeys: fixture.trustedPublicKeys,
-            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-09-19T01:00:00Z")! }
+            // The baked catalog was regenerated on 2026-09-25. Keep the
+            // validator clock after that authority timestamp while remaining
+            // inside its freshness window.
+            now: { ISO8601DateFormatter.autotuneInternet.date(from: "2026-09-25T01:00:00Z")! }
         )
         let durable = try tempDir().appendingPathComponent("durable", isDirectory: true)
         let config = try writeConfig(durableRoot: durable)
