@@ -949,6 +949,12 @@ final class ProviderStatusTests: XCTestCase {
 
         XCTAssertNotNil(ProviderBuild1LaneAStatusResolver.make(config: config))
 
+        config.modelCatalogSHA256 = "4ec355cd7cd3f48f7b6403d14ef8064b84678eb51eb2b3471d23522d2678e49d"
+        XCTAssertNotNil(
+            ProviderBuild1LaneAStatusResolver.make(config: config),
+            "the private staging row may bind the scoped 4-bit member while status remains bound to the complete revision"
+        )
+
         config.modelCatalogKey = Build1LaneAPrepareProfile.catalogKey
         XCTAssertNil(ProviderBuild1LaneAStatusResolver.make(config: config), "a public catalog alias must not select the private record")
     }

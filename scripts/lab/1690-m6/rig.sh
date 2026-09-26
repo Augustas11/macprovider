@@ -215,8 +215,14 @@ PY
   fi
   local extra=()
   [[ -n "${MLX_RUNTIME_SOURCES:-}" ]] && extra+=(--mlx-runtime-sources "$MLX_RUNTIME_SOURCES")
+  [[ -n "${LAB_MLX_ARTIFACT_ID:-}" ]] && extra+=(--mlx-artifact-id "$LAB_MLX_ARTIFACT_ID")
+  [[ -n "${LAB_MLX_SIZE:-}" ]] && extra+=(--mlx-size "$LAB_MLX_SIZE")
+  if [[ -n "${LAB_MLX_AUTHORITY_SHA:-}" ]]; then
+    extra+=(--mlx-authority-sha256 "$LAB_MLX_AUTHORITY_SHA" --mlx-authority-size "$LAB_MLX_AUTHORITY_SIZE" --mlx-authority-artifact-id "$LAB_MLX_AUTHORITY_ARTIFACT_ID")
+  fi
   [[ -n "${OLLAMA_GGUF_SHA:-}" ]] && extra+=(--ollama-tag "$OLLAMA_TAG" --ollama-gguf-sha256 "$OLLAMA_GGUF_SHA" --ollama-gguf-size "$OLLAMA_GGUF_SIZE")
-  "$LAB/bin/labtool" static-release --out-dir "$LAB/static" --key-file "$LAB/keys/static-feed.ed25519" \
+  "$LAB/bin/labtool" static-release --out-dir "$LAB/static" --key-file "${LAB_STATIC_SIGNING_KEY_FILE:-$LAB/keys/static-feed.ed25519}" \
+    --key-id "${LAB_STATIC_SIGNER_KEY_ID:-lab-1690-m6-static}" \
     --release "$STATIC_RELEASE" --generated-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --row-key "$ROW_KEY" \
     --mlx-model-id "$MLX_ID" --mlx-revision "$MLX_REV" --mlx-sha256 "$mlx_sha" \
     --gguf-sha256 "$GGUF_SHA" --gguf-size "$gguf_size" --gguf-repo "$GGUF_REPO" \
@@ -277,9 +283,9 @@ EOF
   # provider). Loopback engines carry no artifact pin.
   python3 - "$LAB/provider/config.yaml" "$(engine_model_ref)" "$ENGINE" "${MLX_SHA:-}" \
     "$MLXLM_SNAPSHOT" "$MLX_REV" \
-    "$LAB/static/autotune-candidates.json" <<'EOF'
+    "$LAB/static/autotune-candidates.json" "${LAB_CATALOG_MLX_SHA:-${MLX_SHA:-}}" <<'EOF'
 import hashlib, json, re, sys
-path, ref, engine, sha, snap, rev, candidates = sys.argv[1:8]
+path, ref, engine, sha, snap, rev, candidates, catalog_sha = sys.argv[1:9]
 text = open(path).read()
 text = re.sub(r"(?m)^model: .*$", "model: " + ref, text, count=1)
 text = re.sub(r"(?m)^model_artifact_(sha256|path): .*\n", "", text)
@@ -289,7 +295,7 @@ if engine == "native":
         sys.exit("ENGINE=native needs MLX_SHA (scripts/lab/1690-e2e/env.sh)")
     raw = open(candidates, "rb").read()
     text += (f"model_artifact_sha256: {sha}\nmodel_artifact_path: {snap}\nmodel_catalog_revision: {rev}\n"
-             f"model_catalog_sha256: {sha}\nmodel_catalog_version: {json.loads(raw)['version']}\n"
+             f"model_catalog_sha256: {catalog_sha}\nmodel_catalog_version: {json.loads(raw)['version']}\n"
              f"model_catalog_hash: {hashlib.sha256(raw).hexdigest()}\n")
 open(path, "w").write(text)
 EOF

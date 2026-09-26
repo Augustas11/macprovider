@@ -1024,7 +1024,7 @@ final class ServeCommandTests: XCTestCase {
         config.modelCatalogKey = Build1PrivatePrepareProfile.modelKey
         config.modelCatalogModelID = Build1PrivatePrepareProfile.modelID
         config.modelCatalogRevision = Build1PrivatePrepareProfile.revision
-        config.modelCatalogSHA256 = Build1PrivatePrepareProfile.hash
+        config.modelCatalogSHA256 = "4ec355cd7cd3f48f7b6403d14ef8064b84678eb51eb2b3471d23522d2678e49d"
         config.modelCatalogVersion = Build1PrivatePrepareProfile.releaseID
         let resolver = CachedModelArtifactResolver(
             hubRoot: durableRoot.appendingPathComponent("hub"),
@@ -1065,7 +1065,7 @@ final class ServeCommandTests: XCTestCase {
         config.modelCatalogKey = Build1PrivatePrepareProfile.modelKey
         config.modelCatalogModelID = Build1PrivatePrepareProfile.modelID
         config.modelCatalogRevision = Build1PrivatePrepareProfile.revision
-        config.modelCatalogSHA256 = Build1PrivatePrepareProfile.hash
+        config.modelCatalogSHA256 = "4ec355cd7cd3f48f7b6403d14ef8064b84678eb51eb2b3471d23522d2678e49d"
         config.modelCatalogVersion = Build1PrivatePrepareProfile.releaseID
         let resolver = CachedModelArtifactResolver(
             hubRoot: durableRoot.appendingPathComponent("hub"),

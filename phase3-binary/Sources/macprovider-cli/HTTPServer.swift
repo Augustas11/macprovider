@@ -84,10 +84,14 @@ struct ProviderBuild1LaneAStatusResolver: Sendable {
            !Build1LaneAPrepareProfile.coordinatorIsAllowedForStaging(config.coordinatorURL) {
             return nil
         }
-        // The catalog row digest and the verified artifact digest are the same
-        // identity for the Lane A tuple; a config that disagrees with itself
-        // is not evidence of anything.
-        if let catalogSHA256 = nonEmpty(config.modelCatalogSHA256), catalogSHA256 != expectedArtifactSHA256 {
+        // Public Lane A uses one identity for the catalog row and the prepared
+        // artifact. The guarded private profile is different by design: its
+        // signed authority covers the complete revision while the staging row
+        // pins the single 4-bit runtime member. Status evidence remains bound
+        // to the complete authority digest through model_artifact_sha256.
+        if catalogKey != Build1PrivatePrepareProfile.modelKey,
+           let catalogSHA256 = nonEmpty(config.modelCatalogSHA256),
+           catalogSHA256 != expectedArtifactSHA256 {
             return nil
         }
         return ProviderBuild1LaneAStatusResolver(

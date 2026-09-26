@@ -999,10 +999,14 @@ struct ServeCommand: AsyncParsableCommand {
             // signed revision digest, so never feed that member path back into
             // full-artifact catalog verification. Restore the already verified
             // runtime load path after catalog trust has been established.
+            let catalogArtifactSHA256 = usesBuild1PrivateRuntimeVariant(resolved)
+                ? runtimeLoadSHA256
+                : actual
             let catalogTrust = try await runModelCatalogPreflight(
                 &resolved,
                 modelPath: authorityPath,
                 actualArtifactSHA256: actual,
+                catalogArtifactSHA256: catalogArtifactSHA256,
                 requireRecommendable: !resolved.donorMode,
                 staticInputs: staticInputs,
                 artifactResolver: artifactResolver,
@@ -1053,7 +1057,6 @@ struct ServeCommand: AsyncParsableCommand {
             && config.modelCatalogKey == Build1PrivatePrepareProfile.modelKey
             && config.modelCatalogModelID == Build1PrivatePrepareProfile.modelID
             && config.modelCatalogRevision == Build1PrivatePrepareProfile.revision
-            && config.modelCatalogSHA256 == Build1PrivatePrepareProfile.hash
             && config.modelCatalogVersion == Build1PrivatePrepareProfile.releaseID
     }
 
@@ -1233,6 +1236,7 @@ struct ServeCommand: AsyncParsableCommand {
         _ resolved: inout AppConfig,
         modelPath: String,
         actualArtifactSHA256: String,
+        catalogArtifactSHA256: String? = nil,
         requireRecommendable: Bool,
         staticInputs: AutotuneStaticInputs,
         artifactResolver: CachedModelArtifactResolver,
@@ -1240,6 +1244,7 @@ struct ServeCommand: AsyncParsableCommand {
         persistFrom: String?
     ) async throws -> CatalogRuntimeTrust {
         let actual = actualArtifactSHA256
+        let catalogActual = catalogArtifactSHA256 ?? actualArtifactSHA256
         guard let key = resolved.modelCatalogKey,
               let modelID = resolved.modelCatalogModelID,
               let revision = resolved.modelCatalogRevision,
@@ -1408,7 +1413,7 @@ struct ServeCommand: AsyncParsableCommand {
               row.modelID == modelID,
               row.modelRevision == revision,
               row.modelSHA256 == catalogSHA256,
-              catalogSHA256 == actualArtifactSHA256
+              catalogSHA256 == catalogActual
         else {
             FileHandle.standardError.write(Data("model artifact is not admitted by the signed candidate catalog\n".utf8))
             throw ExitCode(2)
