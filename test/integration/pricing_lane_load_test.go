@@ -17,7 +17,15 @@ import (
 // streams, the O2 sampler and a gateway-style rate-card pair prober, all
 // running while J1's SIGHUP moves the table A -> B.
 func TestPricingLaneJ2LoadAcrossSwitchRace(t *testing.T) {
-	p := newPricingLane(t, pricingLaneOpts{providerCount: 11, raceCoordinator: true, gatewayConcurrency: 64})
+	// Every buyer-stream worker and O2 sampler holds at most one routed
+	// request, and each fake provider advertises 2 slots. One provider per
+	// requester keeps routed capacity at twice peak demand, so a failed
+	// stream points at the switch rather than at the slot pool running dry
+	// during the opening burst (CI run
+	// 36235724367: 24 requesters on 22 slots shed one stream 5.7 s before
+	// the SIGHUP).
+	const j2Streams, j2Samplers = 20, 4
+	p := newPricingLane(t, pricingLaneOpts{providerCount: j2Streams + j2Samplers, raceCoordinator: true, gatewayConcurrency: 64})
 	tableA := p.cardA.table()
 	cardB, cardBRaw := p.cardB()
 	tableB := cardB.table()
@@ -50,7 +58,7 @@ func TestPricingLaneJ2LoadAcrossSwitchRace(t *testing.T) {
 		results []result
 		wg      sync.WaitGroup
 	)
-	for w := 0; w < 20; w++ {
+	for w := 0; w < j2Streams; w++ {
 		wg.Add(1)
 		go func(w int) {
 			defer wg.Done()
@@ -90,7 +98,7 @@ func TestPricingLaneJ2LoadAcrossSwitchRace(t *testing.T) {
 		samplerWG sync.WaitGroup
 		samplerEr atomic.Value
 	)
-	for sg := 0; sg < 4; sg++ {
+	for sg := 0; sg < j2Samplers; sg++ {
 		samplerWG.Add(1)
 		go func() {
 			defer samplerWG.Done()
