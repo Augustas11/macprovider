@@ -72,17 +72,20 @@ e2e_new_tag() {
 # tags (E2E_TAG_PRE/E2E_TAG_ENABLE). Leaves the checkout back where it started.
 e2e_build_and_release_tag() {
   local tag="$1" orig
-  orig="$(git -C "$E2E_REPO" rev-parse --abbrev-ref HEAD)"
+  orig="$(git -C "$E2E_REPO" symbolic-ref -q --short HEAD || git -C "$E2E_REPO" rev-parse HEAD)"
   grep -qx 'phase4-coordinator/dist/stats-hardware-verifier-linux-amd64' "$E2E_REPO/.git/info/exclude" ||
     echo 'phase4-coordinator/dist/stats-hardware-verifier-linux-amd64' >>"$E2E_REPO/.git/info/exclude"
+  # Restore the scratch checkout on every exit path, so a failed build never
+  # leaves later scenarios running tooling from the wrong tag.
+  _e2e_restore_checkout() { git -C "$E2E_REPO" checkout -q -f "$orig" 2>/dev/null || git -C "$E2E_REPO" checkout -q -f main; }
   git -C "$E2E_REPO" checkout -q "$tag"
   ( cd "$E2E_REPO" && make build-linux ) >"$E2E_LOGS/build-$tag.log" 2>&1 ||
-    { tail -20 "$E2E_LOGS/build-$tag.log"; e2e_die "build at $tag failed"; }
+    { tail -20 "$E2E_LOGS/build-$tag.log"; _e2e_restore_checkout; e2e_die "build at $tag failed"; }
   mkdir -p "$E2E_WORK/bins/$tag"
   cp "$E2E_REPO"/phase4-coordinator/dist/*-linux-amd64 "$E2E_REPO"/phase5-gateway/dist/gateway-linux-amd64 "$E2E_WORK/bins/$tag/"
-  [ -z "$(git -C "$E2E_REPO" status --porcelain)" ] || e2e_die "build dirtied the checkout at $tag"
-  bash "$E2E_HARNESS/lib/make-gh-release.sh" "$tag"
-  git -C "$E2E_REPO" checkout -q "$orig" 2>/dev/null || git -C "$E2E_REPO" checkout -q main
+  [ -z "$(git -C "$E2E_REPO" status --porcelain)" ] || { _e2e_restore_checkout; e2e_die "build dirtied the checkout at $tag"; }
+  bash "$E2E_HARNESS/lib/make-gh-release.sh" "$tag" || { _e2e_restore_checkout; e2e_die "release stand-in for $tag failed"; }
+  _e2e_restore_checkout
   e2e_log "built $tag: $(shasum -a 256 "$E2E_WORK/bins/$tag/coordinator-linux-amd64" | cut -c1-16)"
 }
 

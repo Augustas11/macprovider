@@ -9,6 +9,14 @@
 #   SNAP_YAML=<file>         the snapshot's coordinator.yaml
 #   SNAP_CURRENT=<releases/...> the snapshot's catalog-current-target
 #   SNAP_WINDOW=<file>       the snapshot's catalog-previous-target bytes
+#                            (set with SNAP_CURRENT to target a specific journal
+#                            side whose window is ABSENT: omitting both
+#                            SNAP_WINDOW and SNAP_CURRENT falls back to the
+#                            live .previous-target; setting SNAP_CURRENT alone
+#                            means that side's window is absent -- it does NOT
+#                            borrow whatever .previous-target happens to be
+#                            live, which may belong to a different side (a
+#                            resolved r4-style candidate leaves one behind))
 # Usage: synth-deploy-snapshot.sh   (refuses if a snapshot already exists)
 set -euo pipefail
 R=/opt/macprovider
@@ -65,10 +73,23 @@ snapshot_node /etc/nginx/sites-enabled/$DOMAIN nginx-coordinator.enabled had-ngi
 snapshot_node /etc/nginx/sites-enabled/$STATS_DOMAIN nginx-stats.enabled had-nginx-stats-enabled
 snapshot_node /etc/nginx/sites-available/$DOMAIN.full nginx-coordinator.full had-nginx-coordinator-full
 if command -v setfacl >/dev/null 2>&1 && command -v getfacl >/dev/null 2>&1; then
+  # deploy-pearl-vps.sh ~3245-3247 ACLs a literal /var/lib/macprovider/coordinator.db*
+  # (matches the tracked config default). That literal has drifted from the
+  # live storage.db_path before (c6c326927): read the VM's actual live config
+  # instead of hardcoding a name here too, so this port stays correct even if
+  # the two diverge again.
+  DB_PATH="$(python3 -c '
+import re, sys
+text = open(sys.argv[1]).read()
+m = re.search(r"(?m)^storage:\n((?:[ #].*\n|\n)*)", text)
+m2 = re.search(r"(?m)^  db_path:\s*\"?([^\"\n]+?)\"?\s*(#.*)?$", m.group(1)) if m else None
+print(m2.group(1).strip() if m2 else "")
+' "$R/coordinator.yaml" 2>/dev/null)"
+  [ -n "$DB_PATH" ] || DB_PATH=/var/lib/macprovider/coordinator.db
   snapshot_acl /var/lib/macprovider request-log-dir.acl had-request-log-dir-acl
-  snapshot_acl /var/lib/macprovider/request-log.sqlite request-log-db.acl had-request-log-db-acl
-  snapshot_acl /var/lib/macprovider/request-log.sqlite-wal request-log-wal.acl had-request-log-wal-acl
-  snapshot_acl /var/lib/macprovider/request-log.sqlite-shm request-log-shm.acl had-request-log-shm-acl
+  snapshot_acl "$DB_PATH" request-log-db.acl had-request-log-db-acl
+  snapshot_acl "$DB_PATH-wal" request-log-wal.acl had-request-log-wal-acl
+  snapshot_acl "$DB_PATH-shm" request-log-shm.acl had-request-log-shm-acl
 fi
 snapshot_node /etc/systemd/system/multi-user.target.wants/macprovider-coordinator.service macprovider-coordinator.wants had-wants-link
 snapshot_node $R/coordinator-deploy-recover coordinator-deploy-recover had-recovery-helper
@@ -79,8 +100,19 @@ snapshot_node $R/coordinator-pricing-recover coordinator-pricing-recover had-pri
 snapshot_node $R/coordinator-config-guard.sh coordinator-config-guard.sh had-config-guard-lib
 snapshot_node /etc/systemd/system/macprovider-coordinator-pricing-close.service macprovider-coordinator-pricing-close.service had-pricing-close-unit
 printf '%s' "${SNAP_CURRENT:-$(readlink $R/autotune/current 2>/dev/null || true)}" >"$_rollback_stage/catalog-current-target"
-if [ -f $R/autotune/.previous-target ]; then
-  cp -p "${SNAP_WINDOW:-$R/autotune/.previous-target}" "$_rollback_stage/catalog-previous-target"; touch "$_rollback_stage/had-previous-target"
+# The resolver's coherence check treats window presence/bytes as part of the
+# (yaml, current, window) tuple it matches against the journal's prior or
+# candidate side (coordinator-pricing-recover snapshot_tuple()). A targeted
+# side override (SNAP_CURRENT set) with no SNAP_WINDOW means that side's
+# window is explicitly absent -- falling back to whatever the LIVE
+# .previous-target happens to hold would silently borrow a DIFFERENT side's
+# window bytes (e.g. one a prior case's resolution left behind) and produce a
+# snapshot that matches neither side ("mixed or foreign").
+if [ -n "${SNAP_WINDOW:-}" ]; then
+  cp -p "$SNAP_WINDOW" "$_rollback_stage/catalog-previous-target"; touch "$_rollback_stage/had-previous-target"
+  chown --reference=$R/autotune/.previous-target "$_rollback_stage/catalog-previous-target"; chmod --reference=$R/autotune/.previous-target "$_rollback_stage/catalog-previous-target"
+elif [ -z "${SNAP_CURRENT:-}" ] && [ -f $R/autotune/.previous-target ]; then
+  cp -p $R/autotune/.previous-target "$_rollback_stage/catalog-previous-target"; touch "$_rollback_stage/had-previous-target"
   chown --reference=$R/autotune/.previous-target "$_rollback_stage/catalog-previous-target"; chmod --reference=$R/autotune/.previous-target "$_rollback_stage/catalog-previous-target"
 fi
 printf '%s' "$(basename "$(readlink $R/autotune/current)")" >"$_rollback_stage/release-id"

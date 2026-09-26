@@ -61,6 +61,36 @@ vm 'systemctl stop macprovider-pearl-updater.timer 2>/dev/null || true'
 vm 'python3 -c "import json;t=json.load(open(\"/opt/macprovider/.pricing-txn/txn.json\"));print(json.dumps({k:t[k] for k in (\"id\",\"phase\")}), t[\"prior\"][\"current\"], t[\"candidate\"][\"current\"], t[\"prior\"][\"window\"][\"present\"])"' >"$E2E_EVIDENCE/V9-txn.txt"
 PRIOR_CUR="$(awk '{print $(NF-2)}' "$E2E_EVIDENCE/V9-txn.txt")"; PRIOR_WIN="$(awk '{print $NF}' "$E2E_EVIDENCE/V9-txn.txt")"
 
+# r1 assumes "coordinator running (the crash left it up)" -- the phase-killer
+# only kill -9's the client-side lane, not the coordinator daemon, so this
+# should already hold; but if a prior run left it down/flapping, r1's refusal
+# message and the unchanged-digest check below are meaningless. Assert the
+# precondition explicitly (restart+wait once if needed) and record
+# INVALID-SETUP rather than FAIL if it still can't be established, since none
+# of the scenario's actual r1-r5 assertions have run yet.
+coordinator_stable_and_healthy() {
+  local active pid1 pid2 code
+  active="$(vm 'systemctl is-active macprovider-coordinator 2>/dev/null' || true)"
+  [ "$active" = active ] || return 1
+  pid1="$(vm 'systemctl show -p MainPID --value macprovider-coordinator' 2>/dev/null || true)"
+  [ -n "$pid1" ] && [ "$pid1" != 0 ] || return 1
+  sleep 3
+  pid2="$(vm 'systemctl show -p MainPID --value macprovider-coordinator' 2>/dev/null || true)"
+  [ "$pid1" = "$pid2" ] || return 1
+  code="$(vm 'curl -fsS -o /dev/null --max-time 5 -w "%{http_code}" http://127.0.0.1:8444/healthz' 2>/dev/null || true)"
+  [ "$code" = 200 ]
+}
+if ! coordinator_stable_and_healthy; then
+  vm 'systemctl restart macprovider-coordinator' 2>/dev/null || true
+  e2e_wait_coordinator
+  sleep 3
+fi
+if ! coordinator_stable_and_healthy; then
+  e2e_result "$S" INVALID-SETUP "r1 precondition: coordinator not active with a stable MainPID + /healthz 200 even after a restart+wait; not a scenario FAIL"
+  e2e_load_stop V9 >/dev/null
+  exit 1
+fi
+
 refused() { # <case> <expected message regex>
   local c="$1" want="$2" before after rc=0 out
   before="$(digest)"

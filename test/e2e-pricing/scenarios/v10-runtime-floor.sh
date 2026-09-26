@@ -68,14 +68,22 @@ if [ "${1:-}" != c ]; then
 # runbook says "Never use CATALOG_REGRESSION_OVERRIDE_REASON here" and the
 # script now refuses it once the floor marker exists and the tag's rows differ
 # from live.
+# FORCE_RESTART=1 bypasses the step 1c/6c connected-provider guard, so this
+# run legitimately reaches step 4/9 (upload binary/config/units + arm a
+# rollback snapshot) BEFORE it reaches the CATALOG_REGRESSION_OVERRIDE_REASON
+# refusal at ~3610-3620 -- the whole-host hash is expected to move (new files
+# staged, a rollback dir created and consumed by the EXIT trap) even on a
+# correct refusal. Assert what actually must not have moved instead: the live
+# coordinator binary/config/unit shas, and no leftover rollback transaction dir.
+override_digest() { vm 'sha256sum /opt/macprovider/coordinator /opt/macprovider/coordinator.yaml /etc/systemd/system/macprovider-coordinator.service 2>/dev/null | cut -c1-64 | tr "\n" " "; test -e /opt/macprovider/.coordinator-deploy-rollback && echo rollback-leftover || echo rollback-clean'; }
 e2e_checkout "$E2E_TAG_ENABLE"
-before="$(e2e_host_hash)"; rc=0
+before="$(override_digest)"; rc=0
 e2e_run_logged 1800 "$E2E_LOGS/V10b-override.log" bash -c "cd '$E2E_REPO' && . '$E2E_HARNESS/env.sh' && . '$E2E_HARNESS/lib/common.sh' && e2e_lane_env && CONFIG_MODE=preserve-live FORCE_RESTART=1 CATALOG_REGRESSION_OVERRIDE_REASON='e2e V10 b-fix override probe' bash phase4-coordinator/dist/deploy-pearl-vps.sh" || rc=$?
-after="$(e2e_host_hash)"
-if [ "$rc" != 0 ] && grep -q 'refusing CATALOG_REGRESSION_OVERRIDE_REASON: the pricing runtime floor exists' "$E2E_LOGS/V10b-override.log" && [ "$before" = "$after" ]; then
-  e2e_result "$S" PASS "b-fix-override-refused: CATALOG_REGRESSION_OVERRIDE_REASON refused after a pricing correction (rc=$rc), host unchanged: $(grep -m1 'refusing CATALOG_REGRESSION_OVERRIDE_REASON' "$E2E_LOGS/V10b-override.log" | cut -c1-240)"
+after="$(override_digest)"
+if [ "$rc" != 0 ] && grep -q 'refusing CATALOG_REGRESSION_OVERRIDE_REASON: the pricing runtime floor exists' "$E2E_LOGS/V10b-override.log" && [ "$before" = "$after" ] && grep -q 'rollback-clean' <<<"$after"; then
+  e2e_result "$S" PASS "b-fix-override-refused: CATALOG_REGRESSION_OVERRIDE_REASON refused after a pricing correction (rc=$rc), coordinator binary/config/unit shas unchanged and no leftover rollback dir: $(grep -m1 'refusing CATALOG_REGRESSION_OVERRIDE_REASON' "$E2E_LOGS/V10b-override.log" | cut -c1-240)"
 else
-  e2e_result "$S" FAIL "b-fix-override-refused: rc=$rc host_changed=$([ "$before" = "$after" ] && echo no || echo yes): $(grep -E 'aborting|refus' "$E2E_LOGS/V10b-override.log" | head -n 3 | tr '\n' '|')"
+  e2e_result "$S" FAIL "b-fix-override-refused: rc=$rc digest_changed=$([ "$before" = "$after" ] && echo no || echo yes) before=[$before] after=[$after]: $(grep -E 'aborting|refus' "$E2E_LOGS/V10b-override.log" | head -n 3 | tr '\n' '|')"
 fi
 
 # Runbook remedy: deploy a tag at or after the live release's commit (its
