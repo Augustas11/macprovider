@@ -224,10 +224,15 @@ case "$*" in
 esac
 SYSTEMCTL
 # systemd-run: runs the command locally. As User=macprovider it enforces the
-# service user's access to the real /tmp paths it is handed (the lock helper
-# dir and the pricing candidate dir are root-owned on Pearl): every directory
-# on the literal path must be group/other-traversable and the file
-# group/other-readable, else "permission denied" (#1693 E2 V1).
+# service user's access to the Pearl paths it is handed (the lock helper dir
+# and the pricing candidate dir are root-owned on Pearl): every directory on
+# the path below its Pearl root must be group/other-traversable and the file
+# group/other-readable, else "permission denied" (#1693 E2 V1). Pearl roots
+# are the real /tmp and the harness stand-ins for Pearl's / ($CCR_FAKE) and
+# /tmp ($CCR_RTMP); the harness dirs above a stand-in are not Pearl paths
+# (on Linux $T is a 0700 mktemp dir under /tmp). service-user-denied denies
+# the real /tmp paths only (the candidate), as the service user losing
+# access to the whole fake Pearl is not the scenario it models.
 cat >"$T/bin/systemd-run" <<'RUN'
 #!/usr/bin/env bash
 user=""
@@ -238,18 +243,20 @@ if [ "$user" = macprovider ]; then
   python3 - "$@" <<'PY' || exit 1
 import json, os, stat, sys
 denied = os.path.exists(os.path.join(os.environ.get("CCR_TEST_CTL", "/nonexistent"), "service-user-denied"))
+roots = [(os.environ[k], False) for k in ("CCR_FAKE", "CCR_RTMP") if os.environ.get(k)] + [("/tmp", True)]
+roots.sort(key=lambda r: -len(r[0]))
 for arg in sys.argv[1:]:
-    if not arg.startswith("/tmp/"):
+    match = next((r for r in roots if arg.startswith(r[0] + "/")), None)
+    if match is None:
         continue
-    parts = arg.split("/")[1:]
-    cur = ""
-    for i, part in enumerate(parts):
+    cur, real_tmp = match
+    for part in arg[len(cur) + 1:].split("/"):
         cur += "/" + part
-        if cur == "/tmp" or not os.path.exists(cur):
+        if not os.path.exists(cur):
             continue
         mode = os.stat(cur).st_mode
         need = 0o011 if stat.S_ISDIR(mode) else 0o044
-        if denied or not mode & need:
+        if (denied and real_tmp) or not mode & need:
             print(json.dumps({"ok": False, "errors": ["open %s: permission denied" % arg]}))
             sys.exit(1)
 PY
