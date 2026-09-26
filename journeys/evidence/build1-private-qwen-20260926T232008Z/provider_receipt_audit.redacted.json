@@ -1,0 +1,22 @@
+{
+  "capture_kind": "provider_receipt_audit",
+  "captured_at": "2026-09-26T23:28:09Z",
+  "event_id": "a0637ba0-b1e7-4483-9182-2be9396da11f",
+  "payload": {
+    "cursor": "serve-log-line-388",
+    "event_type": "receipt_issued",
+    "model_id": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+    "provider_id": "lab-1690-m6-provider",
+    "receipt_metadata_present": true,
+    "request_id": "a0637ba0-b1e7-4483-9182-2be9396da11f",
+    "served_count_supporting_only": true,
+    "source": "equivalent_provider_log",
+    "timestamp": "2026-09-26T23:20:08Z",
+    "tokens_out": 5,
+    "ttft_ms": 244,
+    "unix_ts": 1790464808
+  },
+  "payload_jcs_sha256": "ec7e6d5b7027ce82ddbe1e9f222c9ae0eab65f268a35e55d823ad24e4589266f",
+  "schema_version": "macprovider.build1-private-qwen-source-capture.v1",
+  "source_tool": "macprovider-cli-receipt-audit"
+}

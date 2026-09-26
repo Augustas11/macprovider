@@ -1,0 +1,11 @@
+{
+  "capture_kind": "redaction_report",
+  "captured_at": "2026-09-26T23:28:09Z",
+  "event_id": "a0637ba0-b1e7-4483-9182-2be9396da11f",
+  "payload": {
+    "redaction_passed": true
+  },
+  "payload_jcs_sha256": "d7e8d34656b448208bceea8e32ca6648a943319218749f37fc6f0e7abe59ba50",
+  "schema_version": "macprovider.build1-private-qwen-source-capture.v1",
+  "source_tool": "operator-redaction-review"
+}

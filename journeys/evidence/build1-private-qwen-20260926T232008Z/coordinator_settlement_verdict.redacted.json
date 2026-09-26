@@ -1,0 +1,44 @@
+{
+  "capture_kind": "coordinator_settlement_verdict",
+  "captured_at": "2026-09-26T23:28:09Z",
+  "event_id": "a0637ba0-b1e7-4483-9182-2be9396da11f",
+  "payload": {
+    "artifact_binding": {
+      "artifact_feed_sha256": "ecd48438c00f692cff60a31374edb03fd2b46fd9305c0f3e58a29d7f4a2871bf",
+      "artifact_feed_signer_key_id": "streamvc-autotune-static-v4",
+      "artifact_hash": "8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88dcd",
+      "artifact_hash_algorithm": "macprovider.snapshot-manifest.v1",
+      "artifact_id": "mlx-revision-snapshot",
+      "candidate_catalog_body_digest": "fdb445c9cdc8beb36a8be0b78061e42bf8386976aef4ba07540263dd761f00be"
+    },
+    "attempt_n": 0,
+    "cached_billable_input_tokens": 0,
+    "catalog_body_digest": "b3044533cdc529cdda633995a12aa9cedd6bf68db84160fcdf78284070001f34",
+    "catalog_id": "lab-1690-m6-tier2",
+    "credits": 18,
+    "expected_catalog_model_hash": "8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88dcd",
+    "hardware_context_id": "studio-cde289919bbec2fb99ae5581",
+    "model_id": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+    "outcome": "verified",
+    "provider_id": "lab-1690-m6-provider",
+    "provider_receipt_key_id": "ed25519-sha256:707cbe7db00952d757909d07241de27980aa6dfc69b842f1e82fb3cf4cefc82e",
+    "provider_reported_model_hash": "8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88dcd",
+    "provider_share_credits": 16,
+    "receipt_verification_outcome": "verified",
+    "receipt_version": "4",
+    "request_id": "a0637ba0-b1e7-4483-9182-2be9396da11f",
+    "route_snapshot_digest": "3f80bab337b2c5953c69ecc255fa3780bfa4b483394715a04e4da2ceeffff6d6",
+    "route_snapshot_mode": "enforce",
+    "terminal_state": "normal_done",
+    "usage": {
+      "billable_input_tokens": 27,
+      "billable_output_tokens": 5,
+      "delivered_output_bytes": 16,
+      "observed_input_tokens": 27,
+      "observed_output_tokens": 5
+    }
+  },
+  "payload_jcs_sha256": "93a9e2ae09dd3450df9d8a2977d155bc1ea067d718c21f664a7e38a50c228d7c",
+  "schema_version": "macprovider.build1-private-qwen-source-capture.v1",
+  "source_tool": "staging-coordinator-settlement-verdict"
+}
