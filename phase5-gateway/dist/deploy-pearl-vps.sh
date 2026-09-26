@@ -509,6 +509,29 @@ for k in ('in_flight_requests', 'inflight'):
         print(int(v)); sys.exit(0)
 print('unknown')
 " 2>/dev/null || echo "unknown")
+# #1690 VM e2e F-8: the gateway /healthz has never emitted an in-flight
+# metric, so the parse above always read "unknown" and every deploy needed
+# FORCE_RESTART=1 plus a bypass tombstone. Fall back to the live gateway DB
+# (read-only): an active, unheld, unexpired quota reservation is exactly a
+# buyer request that is being served now and that a restart would drop.
+# Held reservations wait for the reconciler and survive a restart. Any
+# failure (no DB, no sqlite3, query error) stays "unknown" and fails closed.
+# This count is a PRE-CHECK only (it refuses a deploy into a busy gateway);
+# buyer ingress stays open through the upload. What protects a request
+# admitted after it is the graceful restart at step 6: `systemctl restart`
+# sends SIGTERM (unit KillSignal), and the gateway closes its listener at
+# once (a new connection is refused before any reservation exists) and
+# drains in-flight requests for up to 40 s (cmd/gateway
+# gracefulShutdownTimeout, below the unit's TimeoutStopSec=45). A request
+# still running after the drain is cut, as on any crash. A reservation that
+# outlived a crashed request still counts here until its expires_at passes.
+# For a hard quiet window, stop buyer traffic at nginx first.
+# expires_at is RFC3339Nano text with a variable fraction; a lexical compare
+# against whole-second text sorts ...00.5Z below ...00Z, so compare instants.
+INFLIGHT_SQL="SELECT COUNT(*) FROM quota_reservations WHERE status = 'active' AND settlement_hold = 0 AND julianday(expires_at) > julianday('now');"
+if [ "$INFLIGHT" = "unknown" ]; then
+  INFLIGHT=$($SSH "DB='$REMOTE_GATEWAY_DB_PATH'; test -f \"\$DB\" || exit 1; sudo -u macprovider sqlite3 -readonly \"\$DB\" \"$INFLIGHT_SQL\"" 2>/dev/null) || INFLIGHT="unknown"
+fi
 # #290 R4 SEC HIGH — belt-and-braces shell-side validation. After the
 # Python parser, INFLIGHT MUST be either the literal string "unknown"
 # or a bounded ASCII digit string. Any other shape (whitespace, "True",
@@ -519,7 +542,7 @@ case "$INFLIGHT" in
   *) if [ "${#INFLIGHT}" -gt 10 ]; then INFLIGHT="unknown"; fi ;;
 esac
 if [ "${INFLIGHT}" = "unknown" ] && [ "${FORCE_RESTART:-0}" != "1" ]; then
-  log "  REFUSING TO PROCEED — gateway /healthz did not report a numeric in-flight metric."
+  log "  REFUSING TO PROCEED — neither gateway /healthz nor the gateway DB reported a numeric in-flight count."
   log "  Cannot verify quiet window; refusing EARLY (pre-scp) so no artifact is placed."
   log "  To proceed anyway:  FORCE_RESTART=1 bash $0"
   exit 4
@@ -716,6 +739,9 @@ $SSH "set -e
 # DB snapshot BEFORE binary swap). #290 R2 CODE+ARCH convergent HIGH.
 
 log "step 6/8: enable + start gateway service"
+# Graceful path only: `systemctl restart` stops with SIGTERM and waits up to
+# TimeoutStopSec while the old gateway drains its in-flight requests (see
+# the step 2c comment). Never kill the gateway here.
 $SSH 'set -e
   systemctl daemon-reload
   systemctl enable macprovider-gateway

@@ -988,6 +988,19 @@ func (b *coord503PrefixErrBody) Close() error { return nil }
 func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, retryExhausted, priorProviderDispatch bool, window string) {
 	body, err := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 	if err != nil {
+		// A coordinator that declared finality trailers records a 200 after
+		// its body write (SPEC-022 R-5.6), so a hop that broke after the body
+		// or while its trailers were read can already hold a delivered,
+		// credited attempt. Hold for the reconciler, which settles to the
+		// coordinator's finality; a local refund would contradict it. The
+		// candidate records 0 delivered completion under bodyReadFailedOutcome,
+		// so the buyer is debited at most the prompt (R-5.6), never the
+		// completion that did not reach them.
+		if resp.StatusCode == http.StatusOK && hasSettlementFinalityTrailerDeclaration(resp) &&
+			s.holdBodyReadFailure(r, subject, promptEstimate, maxUsageTokens, resp) {
+			writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
+			return
+		}
 		s.refundWalletAwareReservation(subject, requestID(r))
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
@@ -2664,6 +2677,37 @@ func (s *Server) boundStreamingSettlementHoldWithCandidate(ctx context.Context, 
 		s.nudgeBoundSettlementReconciler(r, subject, maxTotal, h, reservationWindow, candidateSaved)
 	}
 	return holdBound
+}
+
+// holdBodyReadFailure holds a body_read_failed reservation for the
+// reconciler, but only when the reconciler can resolve it: the coordinator's
+// internal request id binds the candidate and the candidate was persisted.
+// Otherwise the hold could never be settled or aged out (the reconciler keeps
+// an unbound hold forever), so it reports false and the caller falls back to
+// the pre-F-1 refund, logged as an error.
+func (s *Server) holdBodyReadFailure(r *http.Request, subject usageSubject, promptEstimate, maxUsageTokens int64, resp *http.Response) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	finality := missingSettlementFinality(s.settlementFinalityBinding(r, subject), "body read failed")
+	if strings.TrimSpace(resp.Header.Get(coordinatorInternalRequestIDHeader)) == "" ||
+		!s.persistSettlementReconcileCandidate(ctx, r, subject, finality, resp.Header,
+			promptEstimate, 0, maxUsageTokens, "gateway_estimated", bodyReadFailedOutcome, "") {
+		slog.Error("gateway refunded a body_read_failed response it cannot bind for reconciliation; the coordinator may have credited the provider",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"coordinator_internal_request_id_present", strings.TrimSpace(resp.Header.Get(coordinatorInternalRequestIDHeader)) != "",
+		)
+		return false
+	}
+	if !s.boundStreamingSettlementHold(ctx, r, subject, finality) {
+		slog.Error("gateway refunded a body_read_failed response whose settlement hold could not be persisted",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+		)
+		return false
+	}
+	s.nudgeBoundSettlementReconciler(r, subject, maxUsageTokens, resp.Header, "", true)
+	return true
 }
 
 func (s *Server) persistSettlementReconcileCandidate(ctx context.Context, r *http.Request, subject usageSubject,

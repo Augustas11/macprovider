@@ -489,11 +489,29 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 		// lookup could return a previous retry's otherwise valid finality.
 		return "held", nil
 	}
-	finality, found, err := s.fetchCoordinatorRequestSettlementFinality(ctx, reservation, candidate.RequiredInternalRequestID)
+	finality, found, authoritativeNotFound, err := s.fetchCoordinatorRequestSettlementFinalityDetail(ctx, reservation, candidate.RequiredInternalRequestID)
 	if err != nil {
 		return "", err
 	}
+	if found && candidate.Outcome == bodyReadFailedOutcome {
+		if err := s.store.ClearSettlementFinalityNotFound(ctx, reservation); err != nil {
+			return "", err
+		}
+	}
 	if !found {
+		// Only the coordinator's own "finality not found" answer counts
+		// toward the age-out, measured from the first such answer; a
+		// generic 404 (wrong operator URL, a proxy, an unavailable billing
+		// store) never ages a hold out.
+		if authoritativeNotFound && candidate.Outcome == bodyReadFailedOutcome {
+			first, err := s.store.RecordSettlementFinalityNotFound(ctx, reservation, s.now())
+			if err != nil {
+				return "", err
+			}
+			if s.now().Sub(first) >= bodyReadFailedCoordinator404StaleAge {
+				return s.staleHoldAgedBodyReadFailure(ctx, reservation, first)
+			}
+		}
 		// A missing coordinator lookup is not authority to discard local
 		// delivered usage. Keep this specific hold discoverable for retry.
 		return "coordinator_404_held", nil
@@ -647,13 +665,21 @@ func (s *Server) settleObserveFallbackCandidate(ctx context.Context, candidate s
 }
 
 func (s *Server) fetchCoordinatorRequestSettlementFinality(ctx context.Context, reservation storage.ActiveReservation, requiredInternalRequestID ...string) (coordinatorRequestSettlementFinality, bool, error) {
+	finality, found, _, err := s.fetchCoordinatorRequestSettlementFinalityDetail(ctx, reservation, requiredInternalRequestID...)
+	return finality, found, err
+}
+
+// fetchCoordinatorRequestSettlementFinalityDetail also reports whether a
+// not-found answer was the coordinator's authoritative "Settlement finality
+// not found" (coordinatorFinalityNotFoundBody).
+func (s *Server) fetchCoordinatorRequestSettlementFinalityDetail(ctx context.Context, reservation storage.ActiveReservation, requiredInternalRequestID ...string) (coordinatorRequestSettlementFinality, bool, bool, error) {
 	base := strings.TrimRight(s.cfg.Coordinator.OperatorURL, "/")
 	if base == "" {
-		return coordinatorRequestSettlementFinality{}, false, fmt.Errorf("coordinator operator URL is not configured")
+		return coordinatorRequestSettlementFinality{}, false, false, fmt.Errorf("coordinator operator URL is not configured")
 	}
 	u, err := url.Parse(base + "/internal/settlement/finality")
 	if err != nil {
-		return coordinatorRequestSettlementFinality{}, false, err
+		return coordinatorRequestSettlementFinality{}, false, false, err
 	}
 	q := u.Query()
 	q.Set("account_id", reservation.AccountID)
@@ -667,31 +693,32 @@ func (s *Server) fetchCoordinatorRequestSettlementFinality(ctx context.Context, 
 	u.RawQuery = q.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return coordinatorRequestSettlementFinality{}, false, err
+		return coordinatorRequestSettlementFinality{}, false, false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
 	req.Header.Set("X-Request-ID", reservation.RequestID)
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return coordinatorRequestSettlementFinality{}, false, err
+		return coordinatorRequestSettlementFinality{}, false, false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
+		notFoundBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		io.Copy(io.Discard, resp.Body)
-		return coordinatorRequestSettlementFinality{}, false, nil
+		return coordinatorRequestSettlementFinality{}, false, coordinatorFinalityNotFoundBody(notFoundBody), nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return coordinatorRequestSettlementFinality{}, false, coordinatorFinalityStatusError{statusCode: resp.StatusCode}
+		return coordinatorRequestSettlementFinality{}, false, false, coordinatorFinalityStatusError{statusCode: resp.StatusCode}
 	}
 	var finality coordinatorRequestSettlementFinality
 	if err := json.NewDecoder(resp.Body).Decode(&finality); err != nil {
-		return coordinatorRequestSettlementFinality{}, false, err
+		return coordinatorRequestSettlementFinality{}, false, false, err
 	}
 	if finality.RequestID != "" && finality.RequestID != reservation.RequestID {
-		return coordinatorRequestSettlementFinality{}, false, fmt.Errorf("coordinator finality request_id mismatch")
+		return coordinatorRequestSettlementFinality{}, false, false, fmt.Errorf("coordinator finality request_id mismatch")
 	}
-	return finality, true, nil
+	return finality, true, false, nil
 }
 
 func finalityHeaders(finality coordinatorRequestSettlementFinality) http.Header {
@@ -717,12 +744,17 @@ func finalityHeaders(finality coordinatorRequestSettlementFinality) http.Header 
 // debited the smaller of the two. The prompt stays the coordinator's figure:
 // the engine consumed it either way. The provider credit is the
 // coordinator's and is not touched here.
+//
+// bodyReadFailedOutcome (the gateway's hop to the coordinator broke after a
+// negotiated 200's body, so the buyer got a 502 and none of the completion)
+// is bounded the same way: its candidate records 0 delivered completion.
 func buyerDeliveredCompletionBound(reservation storage.ActiveReservation, candidate storage.SettlementFallbackCandidate, prompt, completion, total int64) (int64, int64) {
-	if candidate.Outcome != "client_disconnect" || candidate.CompletionTokens < 0 || candidate.CompletionTokens >= completion {
+	if !buyerDeliveredBoundOutcomes[candidate.Outcome] || candidate.CompletionTokens < 0 || candidate.CompletionTokens >= completion {
 		return completion, total
 	}
-	slog.Info("SPEC-022 reconciler bounded verified completion by buyer-delivered output after client disconnect",
+	slog.Info("SPEC-022 reconciler bounded verified completion by buyer-delivered output",
 		"request_id", reservation.RequestID,
+		"candidate_outcome", candidate.Outcome,
 		"account_id", reservation.AccountID,
 		"coordinator_completion_tokens", completion,
 		"buyer_delivered_completion_tokens", candidate.CompletionTokens,
@@ -752,4 +784,81 @@ func finalityTokenTotals(finality coordinatorRequestSettlementFinality) (int64, 
 		return 0, 0, 0, fmt.Errorf("coordinator finality token_source %q is not settlement-capable", source)
 	}
 	return prompt, completion, total, nil
+}
+
+// buyerDeliveredBoundOutcomes are the candidate outcomes whose candidate
+// completion is what the gateway actually delivered to the buyer, so a
+// verified finality above it is bounded by it (SPEC-022 R-5.6):
+//   - client_disconnect: the buyer left or a write to it failed;
+//   - body_read_failed: a negotiated 200 whose body read failed, 0 delivered;
+//   - stream_truncated: the coordinator stream broke (or a line overflowed)
+//     after the gateway forwarded part of it; the candidate is the forwarded
+//     estimate, or the provider-reported usage when its usage chunk had
+//     already been forwarded (then nothing was withheld and min() is a no-op);
+//   - provider_timeout: the gateway timed the stream out after forwarding
+//     part of it, or the coordinator answered 504 with nothing delivered (0).
+//
+// Outcomes where the buyer received the whole response ("ok",
+// "unverified_streaming", length-truncated terminals) are not bounded.
+var buyerDeliveredBoundOutcomes = map[string]bool{
+	"client_disconnect":   true,
+	bodyReadFailedOutcome: true,
+	"stream_truncated":    true,
+	"provider_timeout":    true,
+}
+
+// bodyReadFailedOutcome marks a hold the gateway took because its read of a
+// negotiated 200 failed after the coordinator may have recorded delivery
+// (#1690 VM F-1). Nothing of the completion reached the buyer.
+const bodyReadFailedOutcome = "body_read_failed"
+
+// bodyReadFailedCoordinator404StaleAge bounds the crash window of a
+// body_read_failed hold: a coordinator that never recorded the attempt (it
+// crashed between the write and the record) answers the finality lookup
+// "Settlement finality not found" forever. Once such answers span this long
+// (from the first one), the hold becomes a terminal stale_held with no
+// debit, for operator review, instead of staying held without end.
+const bodyReadFailedCoordinator404StaleAge = time.Hour
+
+// coordinatorFinalityNotFoundMessage is the coordinator's own answer for a
+// request with no settlement finality record (buyer.Server
+// handleInternalSettlementFinality). The same 404 code with any other
+// message ("Settlement finality is unavailable", a proxy page) is not
+// authoritative.
+const coordinatorFinalityNotFoundMessage = "Settlement finality not found"
+
+func coordinatorFinalityNotFoundBody(body []byte) bool {
+	var envelope struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return false
+	}
+	return envelope.Error.Code == "not_found" && envelope.Error.Message == coordinatorFinalityNotFoundMessage
+}
+
+func (s *Server) staleHoldAgedBodyReadFailure(ctx context.Context, reservation storage.ActiveReservation, firstNotFound time.Time) (string, error) {
+	var err error
+	if reservation.WalletSessionID != "" {
+		err = s.store.MarkWalletSessionReservationStaleHeld(ctx, reservation.AccountID, reservation.WalletSessionID, reservation.RequestID, s.now())
+	} else {
+		err = s.store.MarkReservationStaleHeld(ctx, reservation.AccountID, reservation.RequestID, s.now())
+	}
+	if err != nil {
+		if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
+			return "already_terminal", nil
+		}
+		return "", err
+	}
+	slog.Error("SPEC-022 reconciler moved an aged body_read_failed hold with no coordinator record to stale_held; no buyer debit, operator review required",
+		"request_id", reservation.RequestID,
+		"account_id", reservation.AccountID,
+		"reservation_created_at", reservation.CreatedAt,
+		"first_finality_not_found_at", firstNotFound,
+		"stale_age", bodyReadFailedCoordinator404StaleAge.String(),
+	)
+	return "coordinator_404_expired", nil
 }

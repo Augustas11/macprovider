@@ -147,13 +147,36 @@ func main() {
 		}
 	}()
 
-	<-ctx.Done()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		slog.Warn("gateway shutdown error", "error", err)
-	}
+	waitForShutdownSignal(ctx, stop)
+	drainHTTPServer(httpServer, gracefulShutdownTimeout)
 	slog.Info("gateway shutdown complete")
+}
+
+// gracefulShutdownTimeout bounds the SIGTERM drain: the listener closes at
+// once (new buyer connections are refused before any reservation exists)
+// and requests already in flight, streams included, get this long to finish
+// and settle. It must stay below the unit's TimeoutStopSec (45 s) so
+// systemd never SIGKILLs a draining gateway
+// (TestGracefulShutdownFitsTheSystemdStopTimeout). A deploy restart
+// (`systemctl restart`, KillSignal=SIGTERM) takes this path.
+const gracefulShutdownTimeout = 40 * time.Second
+
+// waitForShutdownSignal blocks until the first SIGINT/SIGTERM and then
+// restores default signal handling, so a second signal during the drain
+// terminates the process at once instead of being swallowed.
+func waitForShutdownSignal(ctx context.Context, stop context.CancelFunc) {
+	<-ctx.Done()
+	stop()
+}
+
+// drainHTTPServer stops accepting connections and waits, up to timeout, for
+// in-flight requests to complete.
+func drainHTTPServer(srv *http.Server, timeout time.Duration) {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("gateway shutdown did not drain every in-flight request", "error", err, "drain_timeout", timeout.String())
+	}
 }
 
 // newCoordinatorClient builds the coordinator-facing HTTP client.

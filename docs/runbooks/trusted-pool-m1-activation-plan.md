@@ -3,7 +3,7 @@
 **Status:** prepared 2026-09-25, not executed. **Issue:** #1690 (epic PR #1719,
 merged as `747557cc`). **Governing rules:** SPEC-022 v0.2.2 R-12 / R-12.8,
 SPEC-042 v0.0.34 (R001 policy-core/v2, R006 labels, R013, R014), SPEC-023
-v0.17.1 §3.7, SPEC-047-R003(iv), SPEC-015 0.4.10 R006. **Operator sequence
+v0.17.2 §3.7, SPEC-047-R003(iv), SPEC-015 0.4.10 R006. **Operator sequence
 this plan follows:** [`trusted-pool-production-launch.md`](trusted-pool-production-launch.md)
 §4 and §9. Lab rehearsals:
 [`runtime-agnostic-m6-lab-e2e-evidence-2026-09-24.md`](runtime-agnostic-m6-lab-e2e-evidence-2026-09-24.md),
@@ -19,6 +19,18 @@ finality tokens, and produces the signed evidence that moves SPEC-022-R012 from
 
 Every Pearl write below is done by the single Pearl actor of the day, in the
 order given. Nothing here is executed by the author of this plan.
+
+**Execution order and the B3b gate.** The release generator cannot emit the
+§3.2 GGUF tuple until B3b (the `scripts/catalog-release.py` change that lands
+after #1732; §3.2 rollout state, §7 B3). Until B3b is merged, only these are
+executable: §1 checks P1-P6 and P8, §2 (read-only), and §4.3 steps 0-6
+(feature, creator approval, keys, root nonce, pool create, root
+registration, manifest v1; the pool stays `candidate` with no member).
+Everything that needs the artifact feed is **DEFERRED until B3b**, and then
+runs strictly in this order: §3.3 (catalog PR, signed cut, deploy) → P7 →
+§3.5 (CLI candidate baking that release) → §5 (member, including §3.4
+`catalog_priced`) → §4.3 steps 7-9 → §5A. Do not start a later step before
+the earlier one passes.
 
 ## 0. Scope decision: M1 is an operator-internal pool, `launch_environment: candidate`
 
@@ -261,19 +273,39 @@ Feed-tuple requirements this satisfies: the closed identity matrix row
 `^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\.gguf$`; `(hash_algorithm, hash)` is
 unique in the feed; the artifact id is new, so no rebinding.
 
-Consumer floor: the generator's `ARTIFACT_FEED_CONSUMER_FLOOR` is `(0,16,0)`.
-A `llamacpp_loopback` GGUF on `huggingface_revision` needs v0.16.0, so the
-generator emits it. It does NOT need v0.17.0 (that is only
-`mlxlm_loopback`), so do not add `mlxlm_loopback` to the MLX primary in this
-release: the generator refuses it until the floor is raised after every
-consumer implements v0.17.0. Consumers older than v0.16.0 (every CLI before
-`747557cc`, including the live `1.8.192`/`1.8.195` candidates) reject the new
-feed as `catalog_artifact_feed_integrity_failure`, which fails closed for
-artifact-derived capabilities only; native paid serving is unaffected
-(§3.7.6 rule 6). A coordinator older than `v1.8.200` (the first deployable #1690 tag) cannot start on it
+Rollout state of this tuple (SPEC-023 v0.17.2), checked 2026-09-25:
+
+- coordinator: implemented (`buyer/catalog_artifacts_feed.go`,
+  `artifactIdentityMatrix`, since `747557cc`);
+- provider CLI: implemented by the B3a commit on
+  `feat/1690-m1-catalog-gguf` (`AutotuneArtifactFeed.swift` accepts the tuple
+  and resolves a llama.cpp GGUF by its file digest). Every CLI before it,
+  including `747557cc` and the live `1.8.192`/`1.8.195` candidates, rejects
+  the whole feed as `catalog_artifact_feed_integrity_failure`. That fails
+  closed for artifact-derived capabilities only; native paid serving is
+  unaffected (§3.7.6 rule 6);
+- release generator: NOT implemented. `ARTIFACT_IDENTITY_MATRIX` in
+  `scripts/catalog-release.py` maps `gguf` to `ollama_library_tag` only, so
+  `catalog-release.py status` stays NOT ACTIVATABLE on this entry. The
+  generator's `ARTIFACT_FEED_CONSUMER_FLOOR` `(0,16,0)` gates
+  `allowed_runtime_sources` only; it never made the generator emit this
+  tuple. The generator change (B3b) lands after #1732, which rewrites that
+  file.
+
+Do not add `mlxlm_loopback` to the MLX primary in this release either: the
+generator refuses it until the floor is raised to v0.17.0.
+
+A coordinator older than `v1.8.200` (the first deployable #1690 tag) cannot start on a feed carrying this tuple
 (E2E-F11): from this release on, a coordinator rollback needs §9 step 4a.
 
 ### 3.3 Catalog release (PR, then signed cut)
+
+**DEFERRED until B3b.** Do not run any step of §3.3 yet: until the generator
+change after #1732 (B3b, §3.2 rollout state, §7 B3) is merged,
+`catalog-release.py` maps `gguf` to `ollama_library_tag` only, `status`
+stays NOT ACTIVATABLE on the `gguf-q4-k-m` entry, and `generate
+--activate-artifact-feed` cannot publish the tuple. Resume here only after
+B3b is on `origin/main`, then follow the order at the top of this plan.
 
 This is the first artifact-bound release, so it is also the artifact-feed
 activation (`catalog-artifact-feed-release.md`, "Activation state").
@@ -309,6 +341,8 @@ activation (`catalog-artifact-feed-release.md`, "Activation state").
 
 ### 3.4 Admission of the member's candidate
 
+DEFERRED until §3.3 is deployed and P7 passes (so, until B3b).
+
 After the member serves (§4), `models offer` resolves the GGUF hash through
 the feed (`catalog_match_state: catalog_matched`, member
 `artifact_feed`/`gguf-q4-k-m`). An operator then records
@@ -320,6 +354,9 @@ never reaches `settlement_capable` globally; pool route-time settlement is the
 only way it earns.
 
 ### 3.5 CLI candidate ordering
+
+DEFERRED until §3.3 is deployed and P7 passes (so, until B3b): the candidate
+must bake that release.
 
 `models offer` / `discover` / `evaluate` resolve BYOM identity against the
 **compiled-in** release (`catalog-artifact-feed-release.md`, slice 2c). So the
@@ -335,62 +372,74 @@ native provider is not updated by this; it keeps its own candidate.
 
 ### 4.1 Signing tool and keys
 
-There is no reviewed production tool that builds `root_issuer_registered` /
-`manifest_accepted` events. The only builder is
-`scripts/lab/1690-m6/labtool` (`pool-keygen`, `pool-root`, `pool-manifest`),
-which hardcodes key ids `lab-manifest-root-1` / `lab-policy-signer-1` /
-`lab-root-key-1`, lab custody/display hashes, `launch_environment:
-candidate`, `MinAttestationTier: hardware`, `SignerSetVersion: 1`, 1-of-1
-policy signer. For a `candidate` M1 pool those hardcoded values are all
-accepted (`validateProductionPromotionGate` is not reached for `candidate`),
-so M1 uses labtool built from the `v1.8.200` tree, unmodified. The lab key-id
-names and placeholder custody hash will appear in the production pool's
-durable history; record that in the journey evidence. Before any external
-creator pool, promote labtool's three commands into a reviewed tool with
-explicit key ids, environment and custody hash (blocker B7).
+The reviewed tool is `coordinator-cli trust-pool-admin keygen`, `sign-root`
+and `sign-manifest` (`phase4-coordinator/cmd/coordinator-cli/trust_pool_sign.go`,
+B7). It replaces the lab-only `scripts/lab/1690-m6/labtool` pool commands:
+every key id, the launch environment, the custody disclosure and class, the
+signer-set version, the attestation tier, the retention policy, the member
+floor and the policy window are required flags with no defaults. Private keys
+are PKCS#8 PEM files that the tool creates `0600` in a new `0700` directory,
+and it reads them only when they are regular, owner-only files owned by the
+invoking user. Nothing it prints or writes contains private key material.
+Before writing, each command checks its own output with the coordinator's
+verifiers (`VerifyRootIssuerRegistrationEvent`,
+`VerifyNewestPolicyAcceptance`, `VerifyManifestAcceptedEvent`). It never uses
+the network; the Pearl actor submits the JSON events it writes.
 
-Three keys, all generated fresh by the operator on an offline Mac, kept in
-operator custody (mode 0600, never in the repo, never on Pearl, never
-printed):
-
-| Key | Algorithm | Signs | File |
-|---|---|---|---|
-| root issuer | ECDSA P-256 | `root_issuer_registered` proof, every `manifest_accepted` event | in `keys.json` from `pool-keygen` |
-| manifest authority root | Ed25519 | genesis authority-log entry (policy signer set 1-of-1); its key id derives `pool_id` | same file |
-| policy signer | Ed25519 | the policy core, `policy-core-sig/v2 ‖ manifest_core_digest` | same file |
-
-Build labtool exactly as the rig does (read-only for Pearl; on the operator
-Mac):
+The tool is not in `v1.8.200`. Build `coordinator-cli` on the operator Mac
+from the first `main` commit that contains it:
 
 ```bash
-git worktree add ../mp-m1-pooltool v1.8.200 --detach && cd ../mp-m1-pooltool
-printf '{"Replace":{"%s/phase4-coordinator/cmd/lab1690m6/main.go":"%s/scripts/lab/1690-m6/labtool/main.go"}}' "$PWD" "$PWD" > /tmp/m1-overlay.json
-(cd phase4-coordinator && GOTOOLCHAIN=local go build -overlay /tmp/m1-overlay.json -o "$M1/bin/labtool" ./cmd/lab1690m6)
+git worktree add ../mp-m1-pooltool <commit-with-trust_pool_sign.go> --detach && cd ../mp-m1-pooltool
+(cd phase4-coordinator && GOTOOLCHAIN=local go build -o "$M1/bin/coordinator-cli" ./cmd/coordinator-cli)
 ```
 
 `$M1` is an operator directory, mode 0700, e.g. on an encrypted volume.
+Submission on Pearl still uses the deployed `/opt/macprovider/coordinator-cli`
+(`append-event` and `submit-policy` are unchanged).
 
-### 4.2 Exact v2 policy-core fields (what `pool-manifest` produces)
+Three keys, all generated fresh by `keygen` on the offline operator Mac, kept
+in operator custody (never in the repo, never on Pearl, never printed):
+
+| Key | Algorithm | Signs | File in `$M1/keys` |
+|---|---|---|---|
+| root issuer | ECDSA P-256 | `root_issuer_registered` proof, every `manifest_accepted` event | `root-issuer-key.pem` |
+| manifest authority root | Ed25519 | genesis authority-log entry (policy signer set 1-of-1); its key id derives `pool_id` | `manifest-authority-key.pem` |
+| policy signer | Ed25519 | the policy core, `policy-core-sig/v2 ‖ manifest_core_digest` | `policy-signer-key.pem` |
+
+`keygen` also writes `pool-identity.json` (public: `pool_id`, genesis nonce,
+key ids, public keys, root fingerprint), which `sign-root` and
+`sign-manifest` read.
+
+M1 key ids and custody (recorded in the pool's durable history, so pick them
+once): `m1-manifest-authority-1`, `m1-policy-signer-1`, `m1-root-issuer-1`;
+custody disclosure `$M1/custody-m1.json` =
+`{"class":"software","description":"<operator Mac, encrypted volume, owner-only files>"}`
+with `--custody-class software` (allowed for a `candidate` pool,
+SPEC-043-R002). The event carries the sha256 of that file's exact bytes, so
+keep the file.
+
+### 4.2 Exact v2 policy-core fields (what `sign-manifest` produces)
 
 | Field | M1 value |
 |---|---|
 | `Encoding` | `2` (tag `macprovider/spec042/policy-core/v2`) |
-| `PoolID` | from `pool-keygen` |
+| `PoolID` | from `keygen` |
 | `ManifestVersion` | `1` |
 | `PrevManifestCoreHash` | 32 zero bytes (genesis) |
-| `SignerSetVersion` | `1` |
+| `SignerSetVersion` | `1` (`--signer-set-version 1`) |
 | `ModelAllowlist` | `["mlx-community/Llama-3.2-3B-Instruct-4bit"]` (the row's `model_id`; buyers name it) |
 | `MinBinaryVersion` | `1.8.123` (every candidate CLI reports the shared `binaryVersion` `1.8.123`; a higher floor would exclude the member) |
-| `MinAttestationTier` | `hardware` (labtool fixed value) |
-| `RequireEncryptedLeg` | `false` (labtool leaves it unset) |
+| `MinAttestationTier` | `hardware` (`--min-attestation-tier hardware`) |
+| `RequireEncryptedLeg` | `false` (the tool does not set it) |
 | `SettlementMode` | `enforce` (required: a non-empty allowlist in `observe` is `errRuntimeAllowlistObserve`) |
-| `RevenueSplitBps` | `0` (labtool leaves it unset) |
+| `RevenueSplitBps` | `0` (the tool does not set it) |
 | `SplitExecutionStatus` | `declared_not_executed` |
-| `RetentionPolicyID` | `standard` |
-| `MinEligibleMembers` | `1` |
+| `RetentionPolicyID` | `standard` (`--retention-policy-id standard`) |
+| `MinEligibleMembers` | `1` (`--min-eligible-members 1`) |
 | `PrivacyMode` / `RelayBlindCapable` / `ReceiptContract` | `none` / `false` / `""` |
 | `MetadataVisible` / `DowngradePolicy` / `StickyRoutingAllowed` | `standard` / `reject` / `false` |
-| `NotBeforeUnix` / `ExpiresAtUnix` | `now-60` / `now + 30 days` (`--window-seconds 2592000`) |
+| `NotBeforeUnix` / `ExpiresAtUnix` | `now-60` / `now + 30 days` (`--not-before` / `--expires-at`, RFC3339) |
 | `RuntimeAllowlist` | `["llamacpp_loopback"]` (strictly ascending, no `mlx_cache`) |
 | `Extensions` | `[]` |
 
@@ -422,8 +471,14 @@ only.
    agreement expiry/grace 30/31 days out, the hash fields computed with
    `sha256` over the operator's own text (same keys as
    `scripts/lab/1690-m6/pool_setup.py:ensure_creator`).
-2. Keys and pool id (operator Mac): `labtool pool-keygen --out "$M1/keys.json"`
-   prints `POOL_ID`.
+2. Keys and pool id (operator Mac):
+
+   ```bash
+   "$M1/bin/coordinator-cli" trust-pool-admin keygen --out-dir "$M1/keys" \
+     --manifest-authority-key-id m1-manifest-authority-1 --policy-signer-key-id m1-policy-signer-1
+   ```
+
+   prints `pool_id=` (`POOL_ID`) and the root fingerprint.
 3. Root nonce (Pearl):
 
    ```bash
@@ -442,18 +497,27 @@ only.
 5. Root registration (operator Mac signs, Pearl submits):
 
    ```bash
-   labtool pool-root --keys "$M1/keys.json" --op m1-root-1 --creator acct-malibu-ops-m1 \
-     --approval approval-m1-v1 --approval-version approval-version-1 \
-     --nonce <nonce> --nonce-expiry <expires_at_utc> > root-m1.json
+   "$M1/bin/coordinator-cli" trust-pool-admin sign-root --identity "$M1/keys/pool-identity.json" \
+     --root-issuer-key "$M1/keys/root-issuer-key.pem" --root-issuer-key-id m1-root-issuer-1 \
+     --operation-id m1-root-1 --creator-account-id acct-malibu-ops-m1 \
+     --approval-record-id approval-m1-v1 --approval-version approval-version-1 \
+     --launch-environment candidate --custody-disclosure "$M1/custody-m1.json" --custody-class software \
+     --display-name "Malibu M1 operator pool" \
+     --nonce <nonce> --nonce-expiry <expires_at_utc> --out root-m1.json
    coordinator-cli trust-pool-admin append-event --admin-url http://127.0.0.1:8444 --input root-m1.json
    ```
 6. Manifest v1 (encoding 2):
 
    ```bash
-   labtool pool-manifest --keys "$M1/keys.json" --op m1-manifest-1 --encoding 2 \
-     --settlement-mode enforce --runtime-allowlist llamacpp_loopback \
+   NB=$(date -u -v-60S +%Y-%m-%dT%H:%M:%SZ); EXP=$(date -u -v+30d -v-60S +%Y-%m-%dT%H:%M:%SZ)
+   "$M1/bin/coordinator-cli" trust-pool-admin sign-manifest --identity "$M1/keys/pool-identity.json" \
+     --root-issuer-key "$M1/keys/root-issuer-key.pem" --root-issuer-key-id m1-root-issuer-1 \
+     --manifest-authority-key "$M1/keys/manifest-authority-key.pem" \
+     --policy-signer-key "$M1/keys/policy-signer-key.pem" --operation-id m1-manifest-1 \
+     --encoding 2 --signer-set-version 1 --settlement-mode enforce --runtime-allowlist llamacpp_loopback \
      --models mlx-community/Llama-3.2-3B-Instruct-4bit --min-binary-version 1.8.123 \
-     --window-seconds 2592000 > manifest-m1-v1.json
+     --min-attestation-tier hardware --retention-policy-id standard --min-eligible-members 1 \
+     --not-before "$NB" --expires-at "$EXP" --out manifest-m1-v1.json
    coordinator-cli trust-pool-admin submit-policy --admin-url http://127.0.0.1:8444 --input manifest-m1-v1.json
    ```
 7. Member and buyer (after §5 has the member connected and priced):
@@ -467,10 +531,12 @@ only.
 
    No `delegation_id`: a delegated member is disqualified from
    `pool_operator_attested` (`pool_operator_attestation.go:60-111`).
-8. R013 disclosure check (runbook §4 step 5): `get-pool` shows
-   `runtime_allowlist: ["llamacpp_loopback"]`, `settlement_mode: enforce`,
-   the one member admitted without delegation. No distribution artifact is
-   published for M1.
+8. R013 disclosure check (runbook §4 step 5): `get-pool` shows the one
+   member and a `manifest_core_digest` equal to `manifest-m1-v1.json`'s.
+   `get-pool` does not print `runtime_allowlist` or `settlement_mode`; the
+   digest binds them (§4.2), and the journey's route snapshots show them in
+   force. The pool's `trustpool_events` have no `delegation_granted`. No
+   distribution artifact is published for M1.
 9. Activate:
 
    ```bash
@@ -482,6 +548,9 @@ only.
    Pass: lifecycle `active`, routeable, manifest 1, digest recorded.
 
 ## 5. The pool member
+
+DEFERRED until §3.5 has an accepted candidate (so, until B3b); see the
+execution order at the top.
 
 ### 5.1 Separate provider identity on the Mac Studio
 
@@ -583,6 +652,8 @@ llama-server (flags proven in the lab, `rig.sh:350`):
 
 ### 5.4 Join and enrolment steps
 
+DEFERRED until §3.5 has an accepted candidate (so, until B3b).
+
 1. Download the GGUF at the pinned revision; `shasum -a 256` must equal
    `6c1a2b41…c728ff`.
 2. Install the §3.5 candidate CLI into `$M1M/bin/` (flat asset dir from the
@@ -612,6 +683,8 @@ llama-server (flags proven in the lab, `rig.sh:350`):
 7. §4.3 step 7 admits it; step 9 promotes the pool.
 
 ## 5A. Paid production journey
+
+DEFERRED until §4.3 step 9 has promoted the pool (so, until B3b).
 
 Buyer: a dedicated operator gateway account (`$M1_BUYER_ACCOUNT`, the gateway
 `accounts.id`), with an API key issued through the normal console flow, never
@@ -702,8 +775,9 @@ holds; the negative controls left no rows. Wait at least one
 
 ### Evidence for SPEC-022-R012 (CONFORMANCE)
 
-`SPEC-022-R012` is `pending`, `journeys: []`; its rationale names "a signed
-enforce-mode pool journey (M6)". Signed journeys follow the
+`SPEC-022-R012` is `pending` and already maps
+`journeys: ["JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"]` (B6); what it lacks is
+the signed evidence from an enforce-mode pool run. Signed journeys follow the
 JOURNEY-BUYER-PAID-PATH pattern:
 
 - definition `journeys/JOURNEY-<ID>.md`;
@@ -717,13 +791,19 @@ JOURNEY-BUYER-PAID-PATH pattern:
   `macprovider.journey-result-envelope.v1`, validated by
   `validate-signed-journey-result.py` and promoted by
   `promote-signed-journey-result.py`;
-- CONFORMANCE row gets `journeys: ["JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"]`
-  and an `evidence[]` entry `{artifact: "sha256:<envelope>", source:
-  "journeys/evidence/<file>", captured_at, expires_at}`.
+- promotion adds to the CONFORMANCE row (whose `journeys` already names
+  the journey) an `evidence[]` entry `{artifact: "sha256:<envelope>",
+  source: "journeys/evidence/<file>", captured_at, expires_at}`.
 
-No pool/R012 journey definition, builder or promote workflow exists yet (B6).
-Capture now, into an operator-local directory, so the envelope can be built
-once the tooling lands:
+The journey is `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md` (B6). It
+maps SPEC-022-R012, SPEC-042-R013 and SPEC-042-R014 (all still `pending`) and
+fixes the capture layout: file names, the `-json` form of the SQL above, and
+`run.json` / `preconditions.json` / `gateway-holds.json`.
+`scripts/build-trusted-pool-external-runtime-journey-result.py capture` checks
+every pass criterion above and writes the redacted evidence;
+`.github/workflows/promote-signed-trusted-pool-external-runtime-journey.yml`
+builds (`payload`), signs and promotes it. Capture into an operator-local
+directory in that layout:
 
 1. P1-P8 outputs with timestamps; deployed commit; `accepted_ids` entry;
    member CLI binary sha256; llama-server build (`b11149`) and GGUF sha256.
@@ -760,17 +840,21 @@ coordinator-cli trust-pool-admin set-lifecycle --admin-url http://127.0.0.1:8444
   verdicts about a minute after their deadline; the gateway reconciler
   settles or refunds the reservation from finality.
 - Before any coordinator rollback: `coordinator pool-rollback-preflight
-  --config /opt/macprovider/coordinator.yaml` must exit 0 (runbook §9).
+  --config /opt/macprovider/coordinator.yaml --config-overlay
+  /etc/macprovider/coordinator.pearl-overlays.yaml`, with
+  `/etc/macprovider/coordinator.env` loaded, must exit 0 (runbook §9 has the
+  exact command).
 
 Harder stops, in order of reach:
 
 - `revoke-provider --pool-id … --provider-id $M1_PROVIDER_ID` (member out; a
   generation bump; in-flight stays on its snapshot).
 - `set-lifecycle --lifecycle retired` (terminal for M1).
-- Withdraw the allowlist: a manifest v2 with `runtime_allowlist: []`. Note
-  `labtool --prev` starts the new window when the current one ends, and
-  routing uses the ACTIVE window, so this does not take effect immediately.
-  Pause first.
+- Withdraw the allowlist: a manifest v2 with `runtime_allowlist: []`
+  (`sign-manifest --prev manifest-m1-v1.json`, no `--manifest-authority-key`).
+  `sign-manifest` refuses a `--not-before` earlier than the current window's
+  end, and routing uses the ACTIVE window, so this does not take effect
+  immediately. Pause first.
 - Stop the member process (by recorded PID) and llama-server. Live provider
   untouched.
 - Full #1690 rollback: runbook §9 rollback order, including step 4a (the
@@ -783,11 +867,11 @@ Harder stops, in order of reach:
 |---|---|---|---|
 | B1 | RESOLVED 2026-09-25: `v1.8.200` live (gateway schema 14, paid non-stream and stream proof settled `spec022_verified`); `v1.8.199` had rolled back on the quick_check stall | #1646 Pearl actor | done |
 | B2 | Gateway pin off (`require_settlement_trailers` absent) | Pearl actor | runbook §9 step 2a after P1/P2 |
-| B3 | No artifact feed in production; activation blocked on 17 unmeasured MLX `size_bytes` and a new `release_id`; nginx route absent | operator (PR + signed cut with `streamvc-autotune-static-v4`, operator-held) + Pearl actor (deploy) | §3.3 |
+| B3 | Generator does not emit the v0.16.0 GGUF tuple yet (B3b, after #1732; CLI side B3a done on `feat/1690-m1-catalog-gguf`); no artifact feed in production; activation blocked on 17 unmeasured MLX `size_bytes` and a new `release_id`; nginx route absent | operator (PR + signed cut with `streamvc-autotune-static-v4`, operator-held) + Pearl actor (deploy) | §3.3 |
 | B4 | No accepted CLI contains `747557cc`; the candidate must also bake the §3.3 release | operator (acceptance-candidate workflow, `production-release` secret) + Pearl actor (`accepted_ids`) | §3.5 |
 | B5 | Registration path for the second identity: does an operator-issued token clear the production hardware-trust / referral onboarding gates, or does it need a dual-control hardware-trust grant (SPEC-026 policy A+B)? | operator | confirm on a dry join; grant if `waiting_trust` |
-| B6 | No JOURNEY definition / builder / promote workflow for the pool journey | repo (PR: `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md`, `scripts/build-trusted-pool-external-runtime-journey-result.py`, `promote-signed-…` workflow, `check_spec_governance.py` ids) | before promoting R012 |
-| B7 | No reviewed pool-signing tool; M1 uses lab labtool with lab key ids and placeholder custody hash | repo | acceptable for a `candidate` operator pool; required before any external creator |
+| B6 | RESOLVED: `journeys/JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME.md`, `scripts/build-trusted-pool-external-runtime-journey-result.py` (`capture`, `payload`), `promote-signed-trusted-pool-external-runtime-journey.yml`, `check_spec_governance.py` validator, journey mapped on R012/R013/R014 (still `pending`) | repo | done; a real M1 capture is still needed |
+| B7 | RESOLVED: reviewed offline signer `coordinator-cli trust-pool-admin keygen` / `sign-root` / `sign-manifest` with explicit key ids, environment, custody disclosure and class, signer-set version and attestation tier (§4.1, §4.3) | repo | done; build it from `main` (not in `v1.8.200`) |
 | B8 | Trusted pools disabled on coordinator and gateway | Pearl actor | §4.3 step 0 |
 | B9 | `catalog_priced` decision is dual-control on Pearl | two operator key holders | §3.4 |
 

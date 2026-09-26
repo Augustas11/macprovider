@@ -3452,9 +3452,12 @@ struct BYOMCatalogMatcher: Sendable {
 
     /// `runtimeSource` is the adapter reporting the reference (`mlx_cache`,
     /// `ollama_loopback`, ...); `revisions` are the HuggingFace snapshot
-    /// revisions the adapter observed for an MLX cache entry and `digest` the
-    /// GGUF layer digest it observed for a loopback runtime (none is reported
-    /// yet).
+    /// revisions the adapter observed for an MLX cache entry, and `digest` is
+    /// the `macprovider.gguf-file.v1` digest (`"sha256:" + hash`) the CLI
+    /// computed over the served GGUF file for a loopback runtime, or nil when
+    /// none was computed. A gguf artifact sourced by `huggingface_revision`
+    /// (with a `file_path`) resolves by that digest alone; an
+    /// `ollama_library_tag` artifact needs the tag and the digest.
     ///
     /// Two legs, one authority. A catalog key the qualified artifact feed
     /// covers is decided by the ARTIFACT leg alone: the reference must answer

@@ -1780,7 +1780,10 @@ func (h *adminHandler) refreshRegistryIfAhead(w http.ResponseWriter, state *Reco
 		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
 		return false
 	}
-	if err := h.deps.Registry.LoadRouteableSnapshotsAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
+	// The periodic refresher may publish this revision (or a newer one)
+	// after the unlocked check above; the locked publish treats that as
+	// already published, so only a real load failure disables routing.
+	if err := h.deps.Registry.PublishRouteableSnapshotsIfAhead(state.Revision, state.RouteableSnapshots()); err != nil {
 		h.deps.Registry.Disable()
 		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
 		return false
@@ -1801,7 +1804,11 @@ func (h *adminHandler) republishRouteGates(ctx context.Context) error {
 		h.deps.Registry.Disable()
 		return err
 	}
-	if _, err := h.deps.Registry.RefreshRouteableSnapshotsAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
+	// A refresher or admin publish of a newer revision between the
+	// Reconstruct and this call already carries the current gates; the
+	// locked republish treats that as published, so only a real failure
+	// disables routing.
+	if err := h.deps.Registry.RepublishRouteGatesAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
 		h.deps.Registry.Disable()
 		return err
 	}

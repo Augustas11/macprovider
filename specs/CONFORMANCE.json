@@ -626,7 +626,7 @@
     {
       "spec_id": "SPEC-022",
       "title": "Verified model settlement",
-      "version": "v0.2.2",
+      "version": "v0.2.3",
       "path": "specs/SPEC-022-verified-model-settlement.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -664,7 +664,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.17.1",
+      "version": "v0.17.2",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1979,7 +1979,8 @@
         "phase4-coordinator/internal/billing/artifact_evidence_test.go:TestRouteSnapshotArtifactEvidenceDigestBindingAndRoundTrip",
         "phase4-coordinator/internal/billing/artifact_evidence_test.go:TestRouteSnapshotArtifactEvidenceIsAllSixOrNoneAndNamesTheExpectedPair",
         "phase3-binary/Tests/macprovider-cliTests/BYOMArtifactDigestTests.swift:testDigestIsComputedOverTheBytesNeverTheManifestLocator",
-        "phase3-binary/Tests/macprovider-cliTests/BYOMArtifactDigestTests.swift:testOllamaDiscoveryReportsHashAvailabilityAndMatchesByComputedDigestOnly"
+        "phase3-binary/Tests/macprovider-cliTests/BYOMArtifactDigestTests.swift:testOllamaDiscoveryReportsHashAvailabilityAndMatchesByComputedDigestOnly",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneArtifactFeedGGUFRevisionTests.swift:testLlamaCppDiscoveryIsCatalogMatchedThroughTheBakedFeed"
       ],
       "journeys": [
         "JOURNEY-NETWORK-MODEL-ADMISSION"
@@ -1989,7 +1990,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
-        "rationale": "SPEC-010 1.11 (#1690 M3) adds R007(f) pool-scoped settlement for loopback-served GGUF members, (g) the huggingface_revision GGUF source kind, and (h) defers the MLX-snapshot identity leg for external runtimes; (f) is implemented on the coordinator by the #1690 M4 pool route-time member derivation and (g) by the coordinator feed parser; the generator and CLI legs of (g) and the signed pool journey remain. SPEC-010 v1.7 specifies artifact-feed identity: `macprovider.gguf-file.v1` as a canonical wire pair computed by the CLI over the local GGUF bytes, a release-bound `verified` artifact-feed entry as an expected identity resolving by the globally unique (hash_algorithm, hash) pair to one (model_key, artifact_id), and six-value route-time evidence with fail-closed settlement re-verification for a non-primary member. Owner is the BYOM v0.2 epic (issue #1453), slice 3."
+        "rationale": "SPEC-010 1.11 (#1690 M3) adds R007(f) pool-scoped settlement for loopback-served GGUF members, (g) the huggingface_revision GGUF source kind, and (h) defers the MLX-snapshot identity leg for external runtimes; (f) is implemented on the coordinator by the #1690 M4 pool route-time member derivation and (g) by the coordinator feed parser and (#1690 M1 B3a) the CLI feed parser and catalog matcher; the generator leg of (g) and the signed pool journey remain. SPEC-010 v1.7 specifies artifact-feed identity: `macprovider.gguf-file.v1` as a canonical wire pair computed by the CLI over the local GGUF bytes, a release-bound `verified` artifact-feed entry as an expected identity resolving by the globally unique (hash_algorithm, hash) pair to one (model_key, artifact_id), and six-value route-time evidence with fail-closed settlement re-verification for a non-primary member. Owner is the BYOM v0.2 epic (issue #1453), slice 3."
       }
     },
     {
@@ -2519,7 +2520,9 @@
       "state": "pending",
       "implementation": [],
       "tests": [
-        "phase4-coordinator/internal/buyer/catalog_artifacts_feed_test.go:TestLoadAutotuneFeedsGGUFHuggingFaceRevisionTuple"
+        "phase4-coordinator/internal/buyer/catalog_artifacts_feed_test.go:TestLoadAutotuneFeedsGGUFHuggingFaceRevisionTuple",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneArtifactFeedGGUFRevisionTests.swift:testIllegalHuggingFaceGGUFTuplesAreIntegrityFailures",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneArtifactFeedGGUFRevisionTests.swift:testM1TupleDecodesAndBindsToTheCompiledInRelease"
       ],
       "journeys": [
         "JOURNEY-PROVIDER-PREBETA-ADMISSION"
@@ -2529,7 +2532,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1453",
-        "rationale": "SPEC-023 v0.16.0 (#1690 M3) adds a gguf huggingface_revision source kind (with file_path) and a route-time, pool-scoped settlement exception for gguf members served by an allowlisted runtime; global admission is unchanged. #1690 M4: the coordinator consumer (buyer/catalog_artifacts_feed.go) accepts the v0.16.0 gguf huggingface_revision tuple with a validated file_path; the generator (scripts/catalog-release.py) and the CLI do not, so under the rollout rule no release publishes the tuple yet. Current as of SPEC-023 v0.14.3: R004 settlement identity is the SPEC-010-R007 identity set (v0.10.3 lifted primary-only), minus loopback-served members, so no gguf artifact reaches settlement_capable while the SPEC-047-R003(iv) v0.1.10 loopback bar holds (#1694). Generator, coordinator, and CLI implementations now exist (SPEC-010-R007 and SPEC-047-R003 mappings); this entry stays pending because signed journey evidence is missing. Original v0.10.0 scope: SPEC-023 v0.10.0 specifies the signed catalog artifact feed, its closed artifact-identity matrix, its release.json binding and release-ledger feed-set evolution, the Stage-A/Stage-B activation that keeps the compatibility-set manifest's file map unchanged until a bridge CLI ships, primary-artifact consistency scoped to `listed`/`recommendable` rows, primary-artifact-only settlement identity, global `(hash_algorithm, hash)` uniqueness within a feed, GGUF source-digest equality, the closed `artifact_id` grammar with its ledger-backed cross-release rebinding check, artifact-feed signer-identity equality against the release binding and the candidate-feed signer, artifact evidence bound into the immutable SPEC-022 route-time record with settlement failing closed on missing, changed, cross-release, or wrong-signer evidence (a SPEC-047-owned optional record that leaves SPEC-022's minimum snapshot fields unchanged), release-ledger schema version 3 with its closed artifact-bound row and canonically ordered `artifact_bindings` array, and its fail-closed-without-fleet-fail-close failure classes, but no generator, coordinator, or CLI implementation exists yet. Owner is the BYOM v0.2 epic (issue #1453)."
+        "rationale": "Current state (SPEC-023 v0.17.2): the signed catalog artifact feed of the v0.10.0 scope below is implemented by the generator (scripts/catalog-release.py), the coordinator, and the CLI (SPEC-010-R007 and SPEC-047-R003 mappings). The v0.16.0 gguf huggingface_revision tuple with file_path (#1690 M3) is implemented by the coordinator consumer (buyer/catalog_artifacts_feed.go, #1690 M4) and the provider CLI (AutotuneArtifactFeed.swift, #1690 M1 B3a, which resolves a llama.cpp-served GGUF by the file digest it computes); the generator does not emit it until B3b (after #1732), so no release publishes the tuple yet. v0.16.0 also adds a route-time, pool-scoped settlement exception for gguf members served by an allowlisted runtime; global admission is unchanged: R004 settlement identity is the SPEC-010-R007 identity set (v0.10.3 lifted primary-only) minus loopback-served members, so no gguf artifact reaches settlement_capable globally while the SPEC-047-R003(iv) v0.1.10 loopback bar holds (#1694). This entry stays pending because signed journey evidence is missing. Original v0.10.0 scope: SPEC-023 v0.10.0 specifies the signed catalog artifact feed, its closed artifact-identity matrix, its release.json binding and release-ledger feed-set evolution, the Stage-A/Stage-B activation that keeps the compatibility-set manifest's file map unchanged until a bridge CLI ships, primary-artifact consistency scoped to `listed`/`recommendable` rows, primary-artifact-only settlement identity, global `(hash_algorithm, hash)` uniqueness within a feed, GGUF source-digest equality, the closed `artifact_id` grammar with its ledger-backed cross-release rebinding check, artifact-feed signer-identity equality against the release binding and the candidate-feed signer, artifact evidence bound into the immutable SPEC-022 route-time record with settlement failing closed on missing, changed, cross-release, or wrong-signer evidence (a SPEC-047-owned optional record that leaves SPEC-022's minimum snapshot fields unchanged), release-ledger schema version 3 with its closed artifact-bound row and canonically ordered `artifact_bindings` array, and its fail-closed-without-fleet-fail-close failure classes; at v0.10.0 no generator, coordinator, or CLI implementation existed. Owner is the BYOM v0.2 epic (issue #1453)."
       }
     },
     {
@@ -5777,11 +5780,17 @@
       "state": "pending",
       "implementation": [
         "phase5-gateway/internal/router/chat_proxy.go:forwardStreamingChat",
-        "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt"
+        "phase4-coordinator/internal/billing/settlement_receipts.go:IngestSettlementReceipt",
+        "phase5-gateway/internal/router/settlement_reconcile.go:buyerDeliveredCompletionBound",
+        "phase5-gateway/internal/router/chat_proxy.go:holdBodyReadFailure"
       ],
       "tests": [
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022StreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout",
-        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022StreamingPartialTerminalReceiptsCreateReceiptBoundSettlement"
+        "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022StreamingPartialTerminalReceiptsCreateReceiptBoundSettlement",
+        "phase5-gateway/internal/router/settlement_drop_after_body_test.go:TestDropAfterBodySettlesToCoordinatorFinality",
+        "phase5-gateway/internal/router/settlement_delivered_bound_test.go:TestTruncatedStreamDebitIsBoundedByForwardedOutput",
+        "phase5-gateway/internal/router/settlement_delivered_bound_test.go:TestProviderTimeoutDebitIsBoundedByDeliveredOutput",
+        "phase5-gateway/internal/router/settlement_body_read_unbound_test.go:TestBodyReadFailureWithoutResolvableCandidateRefunds"
       ],
       "journeys": [
         "JOURNEY-BUYER-PAID-PATH"
@@ -5804,7 +5813,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "Relay-blind integration changes mapped implementation selectors. Local regression checks pass, but historical signed deployment journeys bind earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+        "rationale": "Relay-blind integration changes mapped implementation selectors. Local regression checks pass, but historical signed deployment journeys bind earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement. SPEC-022 v0.2.3 (#1690): the R-5.6 delivered bound now also covers body_read_failed, stream_truncated and provider_timeout, and a body_read_failed response the gateway cannot bind for reconciliation is refunded with an error log; the new gateway tests are mapped, and the row stays pending for the same evidence reason."
       }
     },
     {
@@ -5877,12 +5886,15 @@
       "implementation": [
         "phase5-gateway/internal/storage/sqlite/store.go:ReserveQuota",
         "phase5-gateway/internal/storage/sqlite/store.go:SettleReservation",
-        "phase4-coordinator/internal/billing/hotpath.go:WriteHotPath"
+        "phase4-coordinator/internal/billing/hotpath.go:WriteHotPath",
+        "phase5-gateway/internal/router/settlement_reconcile.go:staleHoldAgedBodyReadFailure"
       ],
       "tests": [
         "phase5-gateway/internal/router/server_test.go:TestQuotaReservationLeakOnContextCancel",
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022NonStreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout",
-        "test/integration/buyer_enforce_journey_test.go:TestJourneyBuyerEnforceIsolatedCandidate"
+        "test/integration/buyer_enforce_journey_test.go:TestJourneyBuyerEnforceIsolatedCandidate",
+        "phase5-gateway/internal/router/settlement_drop_after_body_test.go:TestDropAfterBodyCoordinator404HoldAgesOutToStaleHeld",
+        "phase5-gateway/internal/storage/sqlite/settlement_not_found_test.go:TestSettlementFinalityNotFoundFirstTimeSurvivesReconcileAttempts"
       ],
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
@@ -5905,7 +5917,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "Relay-blind integration changes mapped implementation selectors. Local regression checks pass, but historical signed deployment journeys bind earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement."
+        "rationale": "Relay-blind integration changes mapped implementation selectors. Local regression checks pass, but historical signed deployment journeys bind earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement. SPEC-022 v0.2.3 (#1690): R-8.7 ages a body_read_failed hold out to stale_held after one hour of authoritative coordinator not-found answers counted from the first; the new tests are mapped, and the row stays pending for the same evidence reason."
       }
     },
     {
@@ -6077,7 +6089,9 @@
         "phase5-gateway/internal/router/coordinator_chat_context_test.go:TestEveryCoordinatorChatBuilderNegotiatesSignedFinality",
         "phase5-gateway/internal/router/coordinator_chat_context_test.go:TestRelayBlindNegotiatesSignedFinalityUnderPin"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -7233,7 +7247,9 @@
         "phase4-coordinator/internal/poolmanifest/manifest_test.go:TestPolicyCoreV2GoldenVectors",
         "phase4-coordinator/internal/buyer/pool_external_runtime_queue_internal_test.go:TestProviderForRouteMatchesCandidatePathSandboxView"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
@@ -7262,7 +7278,9 @@
         "phase4-coordinator/internal/buyer/spec042_engine_selection_test.go:TestSPEC042R014MixedPoolHonoursEachSelection",
         "phase4-coordinator/internal/buyer/spec042_engine_selection_test.go:TestSPEC042R014EngineFailClosedSet"
       ],
-      "journeys": [],
+      "journeys": [
+        "JOURNEY-TRUSTED-POOL-EXTERNAL-RUNTIME"
+      ],
       "evidence": [],
       "gap": {
         "verdict": "DECISION_REQUIRED",
