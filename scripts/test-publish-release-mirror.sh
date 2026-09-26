@@ -156,7 +156,10 @@ expect_refusal() { # <name> <out-dir> [env assignments...] -- [args...]
   local envs=()
   while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do envs+=("$1"); shift; done
   [ "${1:-}" != "--" ] || shift
-  if env "${envs[@]}" PATH="$BIN:$PATH" GITHUB_REPOSITORY="Augustas11/macprovider" \
+  # Bash 3.2 with nounset rejects expanding an empty array, so append the
+  # required environment after optional overrides before expanding it.
+  envs+=("PATH=$BIN:$PATH" "GITHUB_REPOSITORY=Augustas11/macprovider")
+  if env "${envs[@]}" \
     bash "$FAKE_ROOT/scripts/publish-release-mirror.sh" --tag "$TAG" --stage-only "$dir" "$@" >/dev/null 2>&1; then
     fail "$name: expected refusal"
   fi
@@ -231,6 +234,18 @@ done
 if [ "$dirs" = 1 ]; then mkdir -p "${args[@]}"; [ -z "$mode" ] || chmod "$mode" "${args[@]}"; exit 0; fi
 cp "${args[0]}" "${args[1]}"
 [ -z "$mode" ] || chmod "$mode" "${args[1]}"
+EOF
+cat > "$REMOTE_BIN/mv" <<'EOF'
+#!/usr/bin/env bash
+# Pearl is Linux and uses GNU mv -T. Preserve its two-path rename semantics in
+# the macOS-hosted fake remote, where BSD mv does not implement -T.
+set -euo pipefail
+args=()
+for arg in "$@"; do
+  case "$arg" in -T|-f|--) ;; *) args+=("$arg") ;; esac
+done
+[ "${#args[@]}" -eq 2 ]
+exec /bin/mv -f "${args[0]}" "${args[1]}"
 EOF
 cat > "$UP/bin/ssh" <<EOF
 #!/usr/bin/env bash
