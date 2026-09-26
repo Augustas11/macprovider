@@ -4288,6 +4288,55 @@ actor ModelRuntime: ModelRuntimeServing {
         let truncatedAtSerialStop: Bool
     }
 
+    struct ContinuousBatchSubmission: Sendable {
+        let requestID: String
+        let schedulerRequest: ContinuousBatchSchedulerRequest
+    }
+
+    /// The single relay-request to scheduler-row mapping used by both live
+    /// inference and the durable-replay fixture. Keeping stable identity,
+    /// sampling inputs, and conversation identity here makes the fixture fail
+    /// if the production mapping changes.
+    static func continuousBatchSubmission(
+        for request: ChatCompletionRequest,
+        promptTokens: [Int],
+        maxOutputTokens: Int,
+        stopTokenSequences: [[Int]] = [],
+        modelStopTokenIDs: [Int] = [],
+        cachedPromptTokens: Int = 0,
+        retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
+        recurrentCheckpointPositions: [Int] = [],
+        retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
+        serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil
+    ) throws -> ContinuousBatchSubmission {
+        guard let requestID = schedulerRequestID(for: request) else {
+            throw attachedPagedKVUnavailableError(
+                code: ContinuousBatchingUnsupportedReason.stableRequestIDUnavailable.apiCode
+            )
+        }
+        return ContinuousBatchSubmission(
+            requestID: requestID,
+            schedulerRequest: ContinuousBatchSchedulerRequest(
+                id: requestID,
+                conversationKey: request.conversationKey ?? "",
+                promptTokens: promptTokens,
+                maxOutputTokens: maxOutputTokens,
+                stopTokenSequences: stopTokenSequences,
+                modelStopTokenIDs: modelStopTokenIDs,
+                samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: requestID),
+                temperature: request.temperature,
+                topP: request.topP,
+                presencePenalty: request.presencePenalty,
+                frequencyPenalty: request.frequencyPenalty,
+                cachedPromptTokens: cachedPromptTokens,
+                retainedPagedKVSequence: retainedPagedKVSequence,
+                recurrentCheckpointPositions: recurrentCheckpointPositions,
+                retainedRecurrentCheckpoints: retainedRecurrentCheckpoints,
+                serialToolStopObserver: serialToolStopObserver
+            )
+        )
+    }
+
     /// Builds the one serial-tool observer owned by the canonical scheduler
     /// row. Its boundary is copied into the scheduler result for every waiter.
     static func continuousBatchSerialToolStopObserver(
@@ -4572,7 +4621,9 @@ actor ModelRuntime: ModelRuntimeServing {
             throw Self.attachedPagedKVUnavailableError(code: "continuous_batching_scheduler_unavailable")
         }
         guard let schedulerRequestID = Self.schedulerRequestID(for: request) else {
-            throw Self.attachedPagedKVUnavailableError(code: ContinuousBatchingUnsupportedReason.stableRequestIDUnavailable.apiCode)
+            throw Self.attachedPagedKVUnavailableError(
+                code: ContinuousBatchingUnsupportedReason.stableRequestIDUnavailable.apiCode
+            )
         }
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
@@ -4650,28 +4701,23 @@ actor ModelRuntime: ModelRuntimeServing {
             detokenizer: detokenizer,
             stopTokenFilter: stopTokenFilter
         )
+        let submission = try Self.continuousBatchSubmission(
+            for: request,
+            promptTokens: prepared.promptTokens,
+            maxOutputTokens: maxOutputTokens,
+            stopTokenSequences: prepared.stopTokenSequences,
+            modelStopTokenIDs: prepared.modelStopTokenIDs.sorted(),
+            cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
+            retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
+            recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
+            retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
+            serialToolStopObserver: serialToolStop
+        )
         let result: ContinuousBatchSchedulerResult
         do {
             CBTrace.log(schedulerRequestID, "rt_cb_submit")
             result = try await Self.withDrainAndClientCancellation(drainCancelled, shouldCancel: shouldCancel) {
-                try await scheduler.submit(ContinuousBatchSchedulerRequest(
-                    id: schedulerRequestID,
-                    conversationKey: request.conversationKey ?? "",
-                    promptTokens: prepared.promptTokens,
-                    maxOutputTokens: maxOutputTokens,
-                    stopTokenSequences: prepared.stopTokenSequences,
-                    modelStopTokenIDs: prepared.modelStopTokenIDs.sorted(),
-                    samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: schedulerRequestID),
-                    temperature: request.temperature,
-                    topP: request.topP,
-                    presencePenalty: request.presencePenalty,
-                    frequencyPenalty: request.frequencyPenalty,
-                    cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
-                    retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
-                    recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
-                    retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
-                    serialToolStopObserver: serialToolStop
-                ))
+                try await scheduler.submit(submission.schedulerRequest)
             }
         } catch {
             if let lease {
@@ -4793,7 +4839,9 @@ actor ModelRuntime: ModelRuntimeServing {
             throw Self.attachedPagedKVUnavailableError(code: "continuous_batching_scheduler_unavailable")
         }
         guard let schedulerRequestID = Self.schedulerRequestID(for: request) else {
-            throw Self.attachedPagedKVUnavailableError(code: ContinuousBatchingUnsupportedReason.stableRequestIDUnavailable.apiCode)
+            throw Self.attachedPagedKVUnavailableError(
+                code: ContinuousBatchingUnsupportedReason.stableRequestIDUnavailable.apiCode
+            )
         }
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
@@ -4872,6 +4920,18 @@ actor ModelRuntime: ModelRuntimeServing {
         ) {
             return nil
         }
+        let submission = try Self.continuousBatchSubmission(
+            for: request,
+            promptTokens: prepared.promptTokens,
+            maxOutputTokens: maxOutputTokens,
+            stopTokenSequences: prepared.stopTokenSequences,
+            modelStopTokenIDs: prepared.modelStopTokenIDs.sorted(),
+            cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
+            retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
+            recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
+            retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
+            serialToolStopObserver: serialToolStop
+        )
         let result: ContinuousBatchSchedulerResult
         do {
             // The SPEC-019 structured idle timeout ends the row as it ends the
@@ -4880,24 +4940,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 drainCancelled,
                 shouldCancel: { shouldCancel() || idleCancellation.isFired }
             ) {
-                try await scheduler.submit(ContinuousBatchSchedulerRequest(
-                    id: schedulerRequestID,
-                    conversationKey: request.conversationKey ?? "",
-                    promptTokens: prepared.promptTokens,
-                    maxOutputTokens: maxOutputTokens,
-                    stopTokenSequences: prepared.stopTokenSequences,
-                    modelStopTokenIDs: prepared.modelStopTokenIDs.sorted(),
-                    samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: schedulerRequestID),
-                    temperature: request.temperature,
-                    topP: request.topP,
-                    presencePenalty: request.presencePenalty,
-                    frequencyPenalty: request.frequencyPenalty,
-                    cachedPromptTokens: lease?.cachedPromptTokens ?? 0,
-                    retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
-                    recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
-                    retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
-                    serialToolStopObserver: serialToolStop
-                ), tokenSink: { event in
+                try await scheduler.submit(submission.schedulerRequest, tokenSink: { event in
                     guard !idleCancellation.isFired else { return }
                     if streamState.step(
                         eventTokens: event.replayTokens ?? [event.token],

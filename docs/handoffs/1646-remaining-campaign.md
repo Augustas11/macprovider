@@ -11,11 +11,12 @@ You are continuing the #1646 continuous-batching campaign. Before starting, read
   - Tool-bearing and structured-output rows batch (SPEC-038 v0.2.11 AC-6c): commits `dd5a7d88`..`23429b7d`. Audit trail and results: `audits/2026-09-25-cb-tools-structured/README.md`.
   - M3, the FR-PKV13 overhead ceiling: PASS. See `docs/runbooks/continuous-batching-m3-overhead-ceiling-2026-09-25.md`.
   - M2 leftovers, AC-25 case 6 receipt/finalization and case 10 warm-swap drain: PASS. See `docs/runbooks/continuous-batching-ac25-m2-leftovers-evidence-2026-09-26.md`.
+  - M5, durable relay replay on the Mac Studio: PASS. The test-only relay fixture proved stable request identity, one generation across relay reconstruction, signed v4 receipt binding, identical replay usage, `non_settling_replay`, no duplicate receipt, and one permission-hardened durable claim. See `docs/runbooks/continuous-batching-m5-durable-replay-evidence-2026-09-26.md`. This is real-Mac lab regression evidence, not packaged or signed enable evidence.
 - **Live Studio** (`ssh macstudio`, provider `mp-5aad…`): runs signed CLI candidate v1.8.195. **Pearl** runs v1.8.200 with catalog `published-2026-09-25-artifact-hash-correction-v1`. The operator canary Mac (this Mac, `mp-26592d…`) also runs 195.
 
 ## Remaining milestones, in order
-1. **M5 (next):** durable replay through relay identity. A reconnect after a terminal result must carry the correct settlement disposition.
-2. **Gate A5**, before `continuous_batching: on` can be used. Carried from the #1716 audit.
+1. **M5 Studio validation:** complete. This does not claim enablement.
+2. **Gate A5 (next)**, before `continuous_batching: on` can be used. Carried from the #1716 audit.
 3. **M6:** promotion economics, on the re-measured batched numbers.
 4. **M7:** a recorded, reviewed decision: keep off, or a narrow canary per exact tuple.
 
