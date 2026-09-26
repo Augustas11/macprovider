@@ -44,7 +44,7 @@ COMPLETION_RATE = 1_000_000
 PROVIDER_SHARE_BPS = 9_000
 GLOBAL_MULTIPLIER_PPM = 1_000_000
 USD_PER_MILLION_CREDITS = 1.0
-MIN_EVIDENCE_CAPTURED_AT = _dt.datetime(2026, 9, 14, 0, 0, 0, tzinfo=_dt.UTC)
+MIN_EVIDENCE_CAPTURED_AT = _dt.datetime(2026, 9, 14, 0, 0, 0, tzinfo=_dt.timezone.utc)
 MAX_EVIDENCE_AGE_SECONDS = 7 * 24 * 60 * 60
 MAX_FUTURE_SKEW_SECONDS = 5 * 60
 
@@ -335,7 +335,7 @@ def _parse_iso_z(value: str, path: str, result: ValidationResult) -> _dt.datetim
         result.add(path, "has invalid timestamp shape")
         return None
     try:
-        return _dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.UTC)
+        return _dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_dt.timezone.utc)
     except ValueError:
         result.add(path, "has invalid timestamp value")
         return None
@@ -371,7 +371,7 @@ def _datetime_from_unix_ms(value: int | None, path: str, result: ValidationResul
     if value is None:
         return None
     try:
-        return _dt.datetime.fromtimestamp(value / 1000, tz=_dt.UTC)
+        return _dt.datetime.fromtimestamp(value / 1000, tz=_dt.timezone.utc)
     except (OverflowError, OSError, ValueError):
         result.add(path, "is outside supported timestamp range")
         return None
@@ -601,7 +601,7 @@ def _walk_forbidden(value: Any, path: str, result: ValidationResult, *, key_hint
 
 def validate_build1_narrow_mvp_evidence(payload: dict[str, Any], *, now: _dt.datetime | None = None) -> ValidationResult:
     if now is None:
-        now = _dt.datetime.now(_dt.UTC)
+        now = _dt.datetime.now(_dt.timezone.utc)
     result = ValidationResult()
     _walk_forbidden(payload, "$", result)
 

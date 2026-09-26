@@ -114,7 +114,7 @@ def die(message: str) -> None:
 
 
 def utc_now_z() -> str:
-    return _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def load_json_object(path: Path, label: str) -> dict[str, Any]:
