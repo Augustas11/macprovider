@@ -223,6 +223,7 @@ struct Build1LaneAArtifactStager {
             try requireDiskSpace(stagingRoot: stagingRoot, durableRoot: store.root, expected: expected)
             try progress(.staging, 0, expected)
             do {
+                try resolver.ensureSafeCacheRoot()
                 try resolver.validateNoSymlinkCachePath(of: staged, requireComplete: false)
                 try await resolver.downloader.downloadSnapshot(
                     modelID: authority.modelID,

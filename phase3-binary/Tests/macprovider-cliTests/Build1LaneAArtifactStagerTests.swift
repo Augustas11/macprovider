@@ -110,6 +110,32 @@ final class Build1LaneAArtifactStagerTests: XCTestCase {
         XCTAssertFalse(String(decoding: inventoryBytes, as: UTF8.self).contains(roots.hub.path))
     }
 
+    func testStageCreatesMissingPrivateHubRootBeforeDownload() async throws {
+        let base = try tempDir()
+        let hub = base
+            .appendingPathComponent("fresh-hf-home", isDirectory: true)
+            .appendingPathComponent("hub", isDirectory: true)
+        let durable = base.appendingPathComponent("durable", isDirectory: true)
+        let (authority, payload) = try makeAuthority(payload: "fresh-cache-root")
+        let counter = Build1LaneACounter()
+        let stager = Build1LaneAArtifactStager(
+            resolver: CachedModelArtifactResolver(
+                hubRoot: hub,
+                durableRoot: durable,
+                downloader: Self.fakeDownloader(payload: payload, counter: counter)
+            ),
+            reauthorize: { authority },
+            diskProbe: { _ in Build1LaneADiskProbe(availableBytes: .max, deviceID: 1) }
+        )
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: hub.path))
+        let result = try await stager.stageAndAdopt(authority: authority) { _, _, _ in }
+
+        XCTAssertEqual(counter.value, 1)
+        XCTAssertEqual(result.sha256, authority.hash)
+        try assertMode(hub, type: S_IFDIR, mode: 0o700)
+    }
+
     func testReuseWritesMissingPrivateRecordAndSecondRunReusesIt() async throws {
         let roots = try makeRoots()
         let (authority, payload) = try makeAuthority(payload: "recorded-on-reuse")
@@ -486,7 +512,11 @@ final class Build1LaneAArtifactStagerTests: XCTestCase {
         try FileManager.default.createDirectory(at: ancestor, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try addDenyDeleteACLEntry(to: ancestor)
         let hub = base.appendingPathComponent("hub", isDirectory: true)
-        try FileManager.default.createDirectory(at: hub, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: hub,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
         let durable = ancestor.appendingPathComponent("durable", isDirectory: true)
         let (authority, payload) = try makeAuthority(payload: "deny-acl-ancestor")
         let counter = Build1LaneACounter()
@@ -845,7 +875,11 @@ final class Build1LaneAArtifactStagerTests: XCTestCase {
     private func makeRoots() throws -> Roots {
         let base = try tempDir()
         let hub = base.appendingPathComponent("hub", isDirectory: true)
-        try FileManager.default.createDirectory(at: hub, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(
+            at: hub,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
         return Roots(hub: hub, durable: base.appendingPathComponent("durable", isDirectory: true))
     }
 

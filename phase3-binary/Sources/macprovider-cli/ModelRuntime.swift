@@ -1033,6 +1033,17 @@ struct GenerationConfigStopStringFilter: Sendable {
 }
 
 actor ModelRuntime: ModelRuntimeServing {
+    static func verifyLoadedArtifact(directory: URL, expectedSHA256: String) throws {
+        let loadedArtifactHash = try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
+        guard loadedArtifactHash == expectedSHA256 else {
+            let observedArtifactHash = loadedArtifactHash ?? "unavailable"
+            throw ModelRuntimeLoadError(
+                target: directory.path,
+                reason: "verified model artifact changed during load: expected \(expectedSHA256), observed \(observedArtifactHash)"
+            )
+        }
+    }
+
     // AC-V2-9b (LOCKED): SPEC-019 v0.2.4 §6 normative 2 MiB streaming
     // content cap. Byte domain is post-stop-token-filter buyer-visible
     // content delta concatenation.
@@ -2052,6 +2063,7 @@ actor ModelRuntime: ModelRuntimeServing {
         swapDrainTimeoutSeconds: Int = 30,
         catalogModelIDAlias: String? = nil,
         verifiedModelArtifactSHA256: String? = nil,
+        verifiedModelLoadSHA256: String? = nil,
         verifiedModelCatalogRevision: String? = nil,
         targetAuthorities: [String: ModelRuntimeTargetAuthority] = [:],
         authorizedSwitchModelIDs: [String] = [],
@@ -2143,15 +2155,8 @@ actor ModelRuntime: ModelRuntimeServing {
         }
 
         let (container, directory) = try await Self.loadLocalContainer(from: modelLoadPath ?? modelID)
-        if let expectedArtifactHash = verifiedModelArtifactSHA256 {
-            let loadedArtifactHash = try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
-            guard loadedArtifactHash == expectedArtifactHash else {
-                let observedArtifactHash = loadedArtifactHash ?? "unavailable"
-                throw ModelRuntimeLoadError(
-                    target: directory.path,
-                    reason: "verified model artifact changed during load: expected \(expectedArtifactHash), observed \(observedArtifactHash)"
-                )
-            }
+        if let expectedArtifactHash = verifiedModelLoadSHA256 ?? verifiedModelArtifactSHA256 {
+            try Self.verifyLoadedArtifact(directory: directory, expectedSHA256: expectedArtifactHash)
         }
         self.currentContainer = container
 
