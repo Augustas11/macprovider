@@ -257,7 +257,7 @@ and silently never matching.
 | Field | Value |
 |---|---|
 | Last built candidate | Signed private candidate **201**, cut from final `main` @ `9848bfc2d2d932c14935cb95f28ed7ed024e9616` on branch `release/candidate-1.8.201`, run [36291384231](https://github.com/Augustas11/macprovider/actions/runs/36291384231), `promotion_ready=false`. It includes #1745 China supply, #1762 batched prefill, #1658 Build 1 private staging, and #1754 trusted-pool external-runtime follow-up. The protected signer, notarization/binding step, remote-state recheck, and short-lived private artifact upload all passed. It reports `binaryVersion` 1.8.123. |
-| Mac Studio serving canary | Signed private candidate **201** @ `9848bfc2`, live since 2026-09-27 04:23Z. Installed CLI SHA-256 `b7bada06ab3cefe7af8d2b2e96f9cb7975b0f462e0c1e4dc976848688236c546`; Pearl reports the exact 201 compatibility set connected, ready, routing-eligible, and `catalog_admission_mode=current`. Provider identity, Qwen 3.6 27B config, 200k context cap, and catalog release were preserved. Backup `~/macprovider.bak-195-20260927T042239Z`; rollback `~/.config/macprovider/operator-tools/rollback-201.sh 20260927T042239Z`. Candidate 195 remains live on the catalog canary Mac mp-26592d… (rollback `rollback-canary-195.sh`). |
+| Mac Studio serving canary | Signed private candidate **201** @ `9848bfc2`, live since 2026-09-27 04:23Z. Installed CLI SHA-256 `b7bada06ab3cefe7af8d2b2e96f9cb7975b0f462e0c1e4dc976848688236c546`; Pearl reports the exact 201 compatibility set connected, ready, routing-eligible, and `catalog_admission_mode=current`. Provider identity, 200k context cap, and catalog release were preserved; the current live workload is `qwen/qwen3.6-35b-a3b` / `mlx-community/Qwen3.6-35B-A3B-4bit` with continuous-batching canary. Backup `~/macprovider.bak-195-20260927T042239Z`; rollback `~/.config/macprovider/operator-tools/rollback-201.sh 20260927T042239Z`. Candidate 195 remains live on the catalog canary Mac mp-26592d… (rollback `rollback-canary-195.sh`). |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` @ `eb30981c` (BYOM #1576 `cdbb0257` + #1591 + #1590 + #1593); CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
 | Status | **Do not promote 201.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 201 remains the Studio-only serving canary; Pearl accepts its exact compatibility set while retaining 195 and 192 rollback admission. It was cut from `9848bfc2` before #1753 merged as `9636a125`, so it does not contain the signed-release discovery required for the public installer/China path and cannot be the promoted build under the current-main rule. Continuous batching remains off by default after #1757. |
@@ -292,6 +292,16 @@ combined candidate**.
   2×200 + 6×429. Ladder clean only through conc=2; conc=4 sheds 5/8.
   Same shape as 175 (49/100). Keyed first-turn CB did not lift Pearl 4-wide
   success. Do not raise slots. Do not set CB `on`. Do not promote.
+- **Candidate 201 prequalification (2026-09-28):** live signed 201 serving
+  Qwen3.6 35B-A3B passed the applicable public buyer surfaces: chat, models,
+  privacy, and health; a clean 16-request idle repeat was 16/16 with TTFT p50
+  1765 ms, p95 4546 ms (gate 5000 ms), and 108.475 output tok/s. A true
+  16-simultaneous overload produced 8 successful streams plus 8 early 429
+  `account_concurrency_exceeded`, with no 5xx or non-capacity failures. The
+  earlier sample taken immediately around the load campaign measured 6024 ms
+  p95, so retain both results as contention evidence. This is prequalification,
+  not filing evidence: paid+free chat and the wholesale statement were not
+  rerun, and the final Track A campaign belongs on candidate 202.
 
 ### Track B — BYOM Ollama / Gemma
 
@@ -334,6 +344,11 @@ combined candidate**.
   `bash scripts/test-openai-wire-compat.sh` and PR 1638 MERGED). OpenRouter
   **PASS** 29.97s. `~/.pi/agent/settings.json` untouched. Do not promote. Do
   not set CB `on`.
+- **Candidate 201 prequalification (2026-09-28):** Pi 0.85.1 json against the
+  live Qwen3.6 35B-A3B route executed `read` and `bash`, returned the correct
+  `test-dist` first command and repository commit, and exited cleanly in
+  24.78s. The run used an isolated Pi config; the real
+  `~/.pi/agent/settings.json` mtime was unchanged. Repeat on candidate 202.
 
 ### Track D — Studio Qwen final-answer and settlement recovery
 
@@ -363,6 +378,18 @@ combined candidate**.
   2026-09-24 05:23Z), so the settlement-complete rerun is unblocked — run it
   against this runtime before closing Track D. Keep fleet recommendation and
   `binaryVersion` at 1.8.123.
+- **Candidate 201 prequalification (2026-09-28):** Qwen3.6 35B-A3B completed
+  100/100 buyer requests at concurrency 4 with 12,800 completion tokens, zero
+  non-capacity failures, and valid usage. The adjacent c8 harness window was
+  16/16 HTTP 200; the topology-correct 16-simultaneous overload admitted eight
+  and shed eight cleanly. Pearl read-only evidence for the 110-request campaign
+  window was 110/110 HTTP 200/no-error, `normal_done`, output available, and
+  valid canonical usage JSON, with zero quarantine and zero billing faults.
+  Pi supplied the final-answer/tool execution proof. This substantially
+  prequalifies the path but does not close Track D: repeat the exact-candidate
+  quality/multi-turn assertions and directly observe eight in flight on 202.
+  Prefix-cache billing is separately deferred until the #1768 coordinator fix
+  is deployed.
 
 ### Track E — China install and Qwen3 8B without GitHub or Hugging Face
 
@@ -398,9 +425,16 @@ combined candidate**.
   bounded queueing/backpressure if the block pool cannot admit all rows.
   Decode parity, cross-row isolation, cancellation, duplicate-terminal,
   receipt, and warm-swap boundaries must remain green.
-- **Status:** **OPEN.** Source and SPEC-038 v0.3 are merged, but no signed
-  post-#1762 candidate or packaged-runtime Studio evidence exists. Do not
-  promote the prefill change from local loopback results alone.
+- **Status:** **OPEN, core prefill prequalified on candidate 201.** On
+  2026-09-28 the signed packaged candidate, serving Qwen3.6 35B-A3B, completed
+  1.5k×4 at 4/4 with 9.189s worst TTFT, 4k×4 at 4/4 with 16.042s worst
+  TTFT, and 8k×4 at 4/4 with 25.730s worst TTFT. All rows produced 128 output
+  tokens; no block-extension, OOM, queue, or backpressure failure appeared,
+  and the provider returned ready/idle with stable RSS. Candidate 201 contains
+  #1762, so this is valid performance prequalification, but the full track
+  remains open: cancellation, duplicate-terminal, receipt, and warm-swap
+  boundaries were not repeated in this live pass, and every applicable Track F
+  assertion must be confirmed on the combined candidate 202.
 
 ## Promotion gate (checklist)
 
