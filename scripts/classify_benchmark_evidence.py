@@ -21,6 +21,41 @@ def one(db, sql, args):
     return db.execute(sql, args).fetchone()
 
 
+_MODEL_ALIAS_CACHE = None
+
+
+def buyer_model_aliases():
+    """Buyer-facing model id -> canonical catalog model_id.
+
+    A route snapshot stores the catalog model_id (e.g. ``mlx-community/Qwen3.6-27B-4bit``)
+    while a buyer request names the OpenRouter slug (e.g. ``qwen/qwen3.6-27b``). Those
+    are the same model; the served artifact identity is already proven by the
+    catalog-hash check (``provider_reported_model_hash == expected_catalog_model_hash``),
+    so the model-name comparison must normalize slug and catalog forms rather than
+    reject every slug-based request. Source of truth for the mapping is
+    ``openrouter_readiness_probe.CATALOG_OPENROUTER_ROWS``; when that module is not
+    importable the map is empty and the comparison stays strict (exact match only).
+    """
+    global _MODEL_ALIAS_CACHE
+    if _MODEL_ALIAS_CACHE is None:
+        alias = {}
+        try:
+            import sys
+
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from openrouter_readiness_probe import CATALOG_OPENROUTER_ROWS
+
+            for catalog_key, model_id, slug, _dual_free in CATALOG_OPENROUTER_ROWS:
+                if model_id and slug:
+                    alias[slug] = model_id
+                if model_id and catalog_key:
+                    alias[catalog_key] = model_id
+        except Exception:
+            pass
+        _MODEL_ALIAS_CACHE = alias
+    return _MODEL_ALIAS_CACHE
+
+
 def parse_utc(timestamp):
     created = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     if created.tzinfo is None:
@@ -121,7 +156,10 @@ def classify(coordinator, gateway, account_id, external_request_id, journal=None
                 reasons.append("route_snapshot_missing")
         elif route["provider_reported_model_hash"] != route["expected_catalog_model_hash"]:
             reasons.append("route_snapshot_model_hash_mismatch")
-        elif route["model_id"] != request["model"] or route["spec008_hash_status"] != "hash_verified":
+        elif (
+            route["model_id"] != request["model"]
+            and route["model_id"] != buyer_model_aliases().get(request["model"])
+        ) or route["spec008_hash_status"] != "hash_verified":
             reasons.append("route_snapshot_model_unverified")
         if not output:
             if credit and credit["quarantine_reason"] == "settlement_attempt_output_missing":
