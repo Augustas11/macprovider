@@ -251,7 +251,7 @@ and silently never matching.
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` @ `eb30981c` (BYOM #1576 `cdbb0257` + #1591 + #1590 + #1593); CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
 | Status | **Do not promote.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 195 is the Studio-only serving canary. Continuous batching remains off by default after #1757. |
-| Next candidate | None reserved. The cancelled unsigned `v1.8.201` dispatch for #1757 produced no artifacts and did not reach the protected signer; retain `v1.8.201` or later. Do not cut while the in-scope `in progress` rows above are unresolved; cut one combined candidate only after their merge/leave-out decisions and required campaigns are complete. |
+| Next candidate | None reserved. The cancelled unsigned `v1.8.201` dispatch for #1757 produced no artifacts and did not reach the protected signer; retain `v1.8.201` or later. The next provider candidate must be cut from `main` at or after `95a6563d` so it includes #1762 batched prefill. Do not cut while the in-scope `in progress` rows above are unresolved; cut one combined candidate only after their merge/leave-out decisions and required campaigns are complete. |
 | Merged after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`). Coordinator/gateway settlement recovery continued separately through #1728, now live in Pearl runtime `v1.8.191`. |
 | Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build (soak proof; live seats since reduced to one — see Mac Studio serving canary above). |
 
@@ -371,6 +371,24 @@ combined candidate**.
   #1745, and no released-binary mainland run has passed. Do not substitute the
   earlier ad-hoc local build or Vietnam boundary exercise for this gate.
 
+### Track F — Studio batched-prefill qualification
+
+- **Owner / tracker:** #1758, implementation #1762 (`95a6563d`).
+- **Candidate floor:** a reviewed, signed provider CLI cut from `main` at or
+  after `95a6563d`. Candidate 195 predates the batched-prefill implementation
+  and cannot satisfy this track.
+- **Gate:** on the Studio and the exact packaged Metal runtime tuple, run four
+  concurrent 1.5k-token prompts with 128 output tokens and keep worst first
+  token under 20 seconds; run four concurrent 4k-token prompts with 128 output
+  tokens and keep worst first token under 45 seconds; run four concurrent
+  8k-token prompts without `continuous_batching_block_extension_failed`, using
+  bounded queueing/backpressure if the block pool cannot admit all rows.
+  Decode parity, cross-row isolation, cancellation, duplicate-terminal,
+  receipt, and warm-swap boundaries must remain green.
+- **Status:** **OPEN.** Source and SPEC-038 v0.3 are merged, but no signed
+  post-#1762 candidate or packaged-runtime Studio evidence exists. Do not
+  promote the prefill change from local loopback results alone.
+
 ## Promotion gate (checklist)
 
 1. All in-scope CLI rows above are `merged`.
@@ -379,7 +397,8 @@ combined candidate**.
 3. In-scope e2e green on **that** candidate (Track A this cut; Track B on the
    next candidate, which includes #1609, before promoting a BYOM-serve CLI;
    Track B is not #1453 close; Track E is mandatory for any candidate that
-   includes #1745).
+   includes #1745; Track F is mandatory for any candidate that includes
+   #1762).
 4. Live smoke on the candidate (not a substitute for Track A): Pi/Qwen3-Coder
    stream+tools concat is one JSON object (never `{}` / `{}{`); unclosed
    function-XML becomes a real `bash` tool call; 257+ messages are not rejected
