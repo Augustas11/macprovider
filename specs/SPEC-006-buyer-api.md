@@ -1,7 +1,15 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.9.38 (2026-09-25, `omlx` engine)
+**Version:** 0.9.39 (2026-09-27, auto-prefix cached-token billing)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.4, SPEC-003 v0.7, SPEC-004 v0.3.2
+
+**Change log v0.9.39 (2026-09-27, issue #1768 — auto-prefix cached-token billing):**
+- Authenticated non-demo auto-prefix reuse remains non-sticky and continues to use
+  `X-MacProvider-Internal-Conv-Cache`, but a valid first-attempt provider report now appears in
+  both OpenAI `prompt_tokens_details.cached_tokens` and the billing-aligned flat
+  `cached_prompt_tokens`. The coordinator prices those tokens at the SPEC-005 cache-hit rate.
+- Demo, retry, invalid-count, and unmarked non-hit behavior is unchanged. Registers
+  `SPEC-006-R017`.
 
 **Change log v0.9.38 (2026-09-25, issue #1690 M9 — oMLX):**
 - §5.4.2: the closed selector vocabulary gains `omlx`, mapped to the runtime class `omlx_loopback` (oMLX, SPEC-046-R009, SPEC-010-R009(f)). It is non-native like the other external engines.
@@ -293,7 +301,7 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-006 v0.9.23 registers `SPEC-006-R001`..`SPEC-006-R010` in
+SPEC-006 v0.9.39 registers `SPEC-006-R001`..`SPEC-006-R017` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path chat, error, and
 quota units. R004–R009 group additional existing obligation areas without
 changing them:
@@ -333,8 +341,11 @@ changing them:
   internal `X-MacProvider-Internal-Engine` transport, and the
   `X-MacProvider-Engine` served-class disclosure (§5.4.2, §8.3, v0.9.34;
   SPEC-042-R014).
+- `SPEC-006-R017` — Buyer usage exposes an authenticated auto-prefix cache hit
+  in both the OpenAI nested field and the billing-aligned flat field (§5.4,
+  v0.9.39; SPEC-024-R003).
 
-`requirement_id_migration` is `complete`. R004–R016 are not promoted from
+`requirement_id_migration` is `complete`. R004–R017 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -1642,7 +1653,7 @@ Supported request fields:
 
 `stream_options` MUST be accepted and forwarded to the provider. When `stream_options.include_usage = true`, the final SSE chunk MUST include a `usage` field so OpenAI SDK streaming token accounting works. `stream_options.include_usage = false` MUST be tolerated and MAY be ignored if the provider always emits usage.
 
-Completion `usage` MUST include OpenAI `prompt_tokens_details.cached_tokens` (observed provider prefix reuse, including auto-prefix ConversationCache hits) and the billing-aligned flat `cached_prompt_tokens` field per SPEC-024 §8. Nested `cached_tokens` MAY be positive when flat `cached_prompt_tokens` is `0`.
+Completion `usage` MUST include OpenAI `prompt_tokens_details.cached_tokens` (observed provider prefix reuse, including auto-prefix ConversationCache hits) and the billing-aligned flat `cached_prompt_tokens` field per SPEC-024 §8. For a valid first-attempt sticky hit or authenticated auto-prefix ConversationCache hit, both fields carry the accepted reused-token count. A valid observed count MAY still differ from the flat field only when SPEC-024 billing eligibility rejects it (for example a retry or unmarked non-hit report, which surfaces zero rather than an untrusted discount).
 
 Wholesale partner accounts MUST always receive a final stream `usage` chunk even when `stream_options.include_usage` is omitted. If the provider stream omitted usage, the gateway MUST inject a gateway-estimated usage chunk before `[DONE]`. Public accounts are unchanged.
 

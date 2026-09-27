@@ -331,12 +331,12 @@ func normalizeCachedPromptTokens(in *HotPathInput) string {
 		in.CachedPromptTokens = nil
 		return ""
 	}
+	if in.ConversationCacheOnly {
+		return ""
+	}
 	if in.StickyResult != "hit" {
 		if cached > 0 {
 			in.CachedPromptTokens = nil
-			if in.ConversationCacheOnly {
-				return ""
-			}
 			return "ambiguous_cache"
 		}
 		in.CachedPromptTokens = nil

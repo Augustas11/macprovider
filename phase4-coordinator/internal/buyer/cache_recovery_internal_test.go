@@ -31,14 +31,14 @@ func TestRequestLogCacheRecoveryFieldsDropsNonHitZero(t *testing.T) {
 	}
 }
 
-func TestRequestLogCacheRecoveryFieldsAutoPrefixDoesNotQuarantine(t *testing.T) {
+func TestRequestLogCacheRecoveryFieldsAutoPrefixPreservesCachedTokens(t *testing.T) {
 	prompt, cached := int64(10), int64(4)
 	got, reason := requestLogCacheRecoveryFields(&cached, &prompt, &forwardState{stickyResult: "miss", conversationCacheOnly: true}, 0)
 	if reason != "" {
 		t.Fatalf("reason=%q want empty for auto-prefix cache hit", reason)
 	}
-	if got != nil {
-		t.Fatalf("cached=%v want nil (non-creditable, not quarantined)", got)
+	if got == nil || *got != 4 {
+		t.Fatalf("cached=%v want 4 (creditable auto-prefix reuse)", got)
 	}
 }
 
@@ -113,6 +113,17 @@ func TestSSELineWithCachedPromptTokensWritesNestedCachedTokens(t *testing.T) {
 	}
 	if !bytes.Contains(got, []byte(`"cached_tokens":4`)) {
 		t.Fatalf("nested observed cache missing: %s", string(got))
+	}
+}
+
+func TestSSEBlockCreditsAutoPrefixCachedTokens(t *testing.T) {
+	block := []byte("data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":10,\"cached_prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":12}}\n\n")
+	got, _, _, _ := sseBlockWithCachedPromptTokens(block, &forwardState{stickyResult: "no_key", conversationCacheOnly: true}, 0)
+	if !bytes.Contains(got, []byte(`"cached_prompt_tokens":4`)) {
+		t.Fatalf("flat auto-prefix cached tokens missing: %s", string(got))
+	}
+	if !bytes.Contains(got, []byte(`"cached_tokens":4`)) {
+		t.Fatalf("nested auto-prefix cached tokens missing: %s", string(got))
 	}
 }
 
