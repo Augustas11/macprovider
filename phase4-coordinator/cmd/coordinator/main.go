@@ -1494,7 +1494,6 @@ func main() {
 	buyerHTTP := newHTTPServer(buyerAddr, buyerHandler)
 	errs := make(chan error, 2)
 
-	startSettlementStartupScan(context.Background(), billingStore, cfg.Settlement, time.Now().UTC(), logger)
 	startRouteSnapshotJournalMirror(shutdownCtx, billingStore, moneySQLiteActivity, logger)
 	billingStore.StartNightlyReconcile(shutdownCtx, cfg.Settlement)
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
@@ -1521,6 +1520,7 @@ func main() {
 		logger.Info().Str("addr", buyerAddr).Msg("buyer http server listening")
 		errs <- buyerHTTP.ListenAndServe()
 	}()
+	startSettlementStartupScanInBackground(shutdownCtx, billingStore, cfg.Settlement, time.Now().UTC(), logger)
 
 	// Boot init succeeded: record the content identity of the config this
 	// process applied before SIGHUP handling starts.
@@ -1864,6 +1864,7 @@ const (
 	// TRUNCATE returns a busy result and retries on a later idle poll instead
 	// of holding the writer lock through the six-second buyer write budget.
 	moneySQLiteCheckpointBusyTimeout = 100 * time.Millisecond
+	settlementStartupScanTimeout     = 30 * time.Second
 	routeSnapshotSQLiteMaxOpenConns  = 4
 	// SQLite has one writer. Keep the pre-dispatch journal on one connection so
 	// concurrent buyer requests queue in database/sql instead of competing for
@@ -2147,9 +2148,27 @@ func startSettlementStartupScan(ctx context.Context, scanner settlementStartupSc
 	if scanner == nil {
 		return
 	}
+	started := time.Now()
 	if err := scanner.StartStartupScan(ctx, settlement, now); err != nil {
-		logger.Warn().Err(err).Msg("billing startup scan failed")
+		logger.Warn().Err(err).Dur("duration", time.Since(started)).Msg("billing startup scan failed")
+		return
 	}
+	logger.Info().Dur("duration", time.Since(started)).Msg("billing startup scan completed")
+}
+
+func startSettlementStartupScanInBackground(ctx context.Context, scanner settlementStartupScanner, settlement config.SettlementConfig, now time.Time, logger zerolog.Logger) {
+	if scanner == nil {
+		return
+	}
+	go func() {
+		scanCtx := ctx
+		cancel := func() {}
+		if settlementStartupScanTimeout > 0 {
+			scanCtx, cancel = context.WithTimeout(ctx, settlementStartupScanTimeout)
+		}
+		defer cancel()
+		startSettlementStartupScan(scanCtx, scanner, settlement, now, logger)
+	}()
 }
 
 func startRouteSnapshotJournalMirror(ctx context.Context, mirror routeSnapshotJournalMirror, idle moneySQLiteIdleTracker, logger zerolog.Logger) {

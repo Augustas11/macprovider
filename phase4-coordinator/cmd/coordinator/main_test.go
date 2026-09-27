@@ -186,6 +186,33 @@ func TestSettlementStartupScanRunsRecoveryWhenSettlementJobDisabled(t *testing.T
 	}
 }
 
+func TestSettlementStartupScanBackgroundDoesNotBlockListenerStartup(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	scanner := startupScanFunc(func(ctx context.Context, _ config.SettlementConfig, _ time.Time) error {
+		close(entered)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil
+	})
+
+	started := time.Now()
+	startSettlementStartupScanInBackground(ctx, scanner, config.Default().Settlement, time.Unix(100, 0).UTC(), zerolog.Nop())
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("background startup scan returned after %s, want non-blocking start", elapsed)
+	}
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("background startup scan did not start")
+	}
+	close(release)
+}
+
 func TestRetentionPrunersCanDeferStartupDelete(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -314,6 +341,106 @@ func TestMoneySQLiteActiveCheckpointDoesNotEscalateToTruncate(t *testing.T) {
 	})
 	if size := sqliteutil.WALFileSize(dbPath); size == 0 {
 		t.Fatal("active PASSIVE checkpoint truncated WAL; want truncation deferred until idle")
+	}
+}
+
+func TestMoneySQLiteWALCheckpointerKeepsCheckpointingUnderSustainedWrites(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "sustained-checkpoint.db")
+	checkpointDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatalf("open checkpoint db: %v", err)
+	}
+	t.Cleanup(func() { _ = checkpointDB.Close() })
+	checkpointDB.SetMaxOpenConns(1)
+	if _, err := checkpointDB.Exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	writerDB, err := sql.Open("sqlite", sqliteutil.WithManualWALCheckpointPragmas(dbPath))
+	if err != nil {
+		t.Fatalf("open writer db: %v", err)
+	}
+	t.Cleanup(func() { _ = writerDB.Close() })
+	writerDB.SetMaxOpenConns(1)
+
+	checkpointCtx, cancelCheckpoint := context.WithCancel(context.Background())
+	defer cancelCheckpoint()
+	observer := &walProgressObserver{checkpointed: make(chan int64, 64)}
+	startMoneySQLiteWALCheckpointerWithConfig(checkpointCtx, checkpointDB, observer, zerolog.Nop(), fixedIdleTracker{idleFor: 0}, moneySQLiteWALCheckpointerConfig{
+		PollInterval:   10 * time.Millisecond,
+		IdleInterval:   time.Hour,
+		MinTimeout:     250 * time.Millisecond,
+		MaxTimeout:     250 * time.Millisecond,
+		BusyTimeout:    5 * time.Millisecond,
+		BytesPerSecond: moneySQLiteCheckpointBytesPerSecond,
+		DBPath:         dbPath,
+	})
+
+	writerCtx, stopWriter := context.WithCancel(context.Background())
+	defer stopWriter()
+	writerDone := make(chan struct{})
+	writerErr := make(chan error, 1)
+	var writes atomic.Int64
+	go func() {
+		defer close(writerDone)
+		for {
+			select {
+			case <-writerCtx.Done():
+				return
+			default:
+			}
+			insertCtx, cancel := context.WithTimeout(writerCtx, time.Second)
+			_, err := writerDB.ExecContext(insertCtx, `INSERT INTO t (v) VALUES ('buyer')`)
+			cancel()
+			if err != nil {
+				if writerCtx.Err() != nil {
+					return
+				}
+				select {
+				case writerErr <- err:
+				default:
+				}
+				return
+			}
+			writes.Add(1)
+		}
+	}()
+
+	deadline := time.After(2 * time.Second)
+	for observer.positiveCheckpointed.Load() < 3 {
+		select {
+		case err := <-writerErr:
+			t.Fatalf("sustained writer failed after %d writes: %v", writes.Load(), err)
+		case <-observer.checkpointed:
+		case <-deadline:
+			t.Fatalf("checkpointed positive frames %d times after %d writes; latest busy=%d log=%d checkpointed=%d",
+				observer.positiveCheckpointed.Load(),
+				writes.Load(),
+				observer.latestBusy.Load(),
+				observer.latestLog.Load(),
+				observer.latestCheckpointed.Load(),
+			)
+		}
+	}
+	stopWriter()
+	<-writerDone
+	cancelCheckpoint()
+	select {
+	case err := <-writerErr:
+		t.Fatalf("sustained writer failed after %d writes: %v", writes.Load(), err)
+	default:
+	}
+	if got := writes.Load(); got < 20 {
+		t.Fatalf("sustained writer completed %d writes, want continuous load across checkpoint intervals", got)
+	}
+	if backlog := observer.latestLog.Load() - observer.latestCheckpointed.Load(); backlog > 128 {
+		t.Fatalf("latest checkpoint backlog=%d pages, want PASSIVE to keep live frames bounded under load; log=%d checkpointed=%d",
+			backlog,
+			observer.latestLog.Load(),
+			observer.latestCheckpointed.Load(),
+		)
+	}
+	if size := sqliteutil.WALFileSize(dbPath); size == 0 {
+		t.Fatal("sustained active checkpointer truncated WAL; want active PASSIVE checkpoints with idle-only truncate")
 	}
 }
 
@@ -746,6 +873,12 @@ func (s *startupScanStub) StartStartupScan(_ context.Context, settlement config.
 	return nil
 }
 
+type startupScanFunc func(context.Context, config.SettlementConfig, time.Time) error
+
+func (f startupScanFunc) StartStartupScan(ctx context.Context, settlement config.SettlementConfig, now time.Time) error {
+	return f(ctx, settlement, now)
+}
+
 type retentionPrunerStub struct {
 	called chan time.Time
 }
@@ -758,6 +891,14 @@ func (s *retentionPrunerStub) PruneBefore(_ context.Context, cutoff time.Time) (
 type walObserverStub struct {
 	called    chan string
 	durations chan struct{}
+}
+
+type walProgressObserver struct {
+	checkpointed         chan int64
+	latestBusy           atomic.Int64
+	latestLog            atomic.Int64
+	latestCheckpointed   atomic.Int64
+	positiveCheckpointed atomic.Int64
 }
 
 type blockingWALObserver struct {
@@ -792,6 +933,29 @@ func (s *walObserverStub) ObserveSQLiteWALCheckpointDuration(component, outcome 
 		}
 	}
 }
+
+func (o *walProgressObserver) ObserveSQLiteWALCheckpoint(component, pageClass, outcome string, pages int64) {
+	if component != "wal_checkpoint" || outcome != "success" {
+		return
+	}
+	switch pageClass {
+	case "busy":
+		o.latestBusy.Store(pages)
+	case "log":
+		o.latestLog.Store(pages)
+	case "checkpointed":
+		o.latestCheckpointed.Store(pages)
+		if pages > 0 {
+			o.positiveCheckpointed.Add(1)
+		}
+		select {
+		case o.checkpointed <- pages:
+		default:
+		}
+	}
+}
+
+func (o *walProgressObserver) ObserveSQLiteWALCheckpointDuration(string, string, time.Duration) {}
 
 type fixedIdleTracker struct {
 	idleFor time.Duration

@@ -37,21 +37,21 @@ grep -q 'C2_TIMER_CONFIG_MIGRATION="${C2_TIMER_CONFIG_MIGRATION:-0}"' "$DEPLOY_S
   fail "deploy script does not declare the reviewed C2 timer migration switch"
 grep -q 'RATE_CARD_CONFIG_MIGRATION_SCRIPT=' "$DEPLOY_SH" ||
   fail "deploy script does not declare the reviewed rate-card config migration helper"
-grep -q 'python3 "$C2_TIMER_MIGRATION_SCRIPT" "${LIVE_COORDINATOR_CONFIG_RAW_TMP:-$DEPLOY_CONFIG}" "$CONFIG"' "$DEPLOY_SH" ||
-  fail "production C2 path does not render the field-scoped base timer migration from raw config input"
-grep -q 'python3 "$C2_TIMER_MIGRATION_SCRIPT" --only-existing "$COORDINATOR_OVERLAY_CONFIG_RAW_TMP" "$CONFIG"' "$DEPLOY_SH" ||
-  fail "production C2 path does not render the field-scoped overlay timer migration from raw overlay input"
-grep -q 'python3 "$RATE_CARD_CONFIG_MIGRATION_SCRIPT" "$RATE_CARD_MIGRATION_INPUT" "$CONFIG"' "$DEPLOY_SH" ||
-  fail "production path does not render the field-scoped base rate-card migration from raw config input"
-grep -q 'python3 "$RATE_CARD_CONFIG_MIGRATION_SCRIPT" --only-static-feed-overlays "$RATE_CARD_OVERLAY_MIGRATION_INPUT" "$CONFIG"' "$DEPLOY_SH" ||
-  fail "production path does not render the field-scoped overlay rate-card migration from raw overlay input"
-grep -q 'reject_redacted_install_candidate "$C2_TIMER_MIGRATED_CONFIG_TMP" "coordinator.yaml"' "$DEPLOY_SH" ||
+grep -Fq "python3 '\$REMOTE_C2_TIMER_MIGRATION_SCRIPT' '\$C2_TIMER_MIGRATION_INPUT_REMOTE' '\$REMOTE_TRACKED_CONFIG' > '\$C2_TIMER_MIGRATED_CONFIG_REMOTE'" "$DEPLOY_SH" ||
+  fail "production C2 path does not render the field-scoped base timer migration on Pearl from raw config input"
+grep -Fq "python3 '\$REMOTE_C2_TIMER_MIGRATION_SCRIPT' --only-existing '\$COORDINATOR_REMOTE_OVERLAY' '\$REMOTE_TRACKED_CONFIG' > '\$C2_TIMER_MIGRATED_OVERLAY_REMOTE'" "$DEPLOY_SH" ||
+  fail "production C2 path does not render the field-scoped overlay timer migration on Pearl from raw overlay input"
+grep -Fq "python3 '\$REMOTE_RATE_CARD_CONFIG_MIGRATION_SCRIPT' '\$RATE_CARD_MIGRATION_INPUT_REMOTE' '\$REMOTE_TRACKED_CONFIG' > '\$RATE_CARD_MIGRATED_CONFIG_REMOTE'" "$DEPLOY_SH" ||
+  fail "production path does not render the field-scoped base rate-card migration on Pearl from raw config input"
+grep -Fq "python3 '\$REMOTE_RATE_CARD_CONFIG_MIGRATION_SCRIPT' --only-static-feed-overlays '\$RATE_CARD_OVERLAY_MIGRATION_INPUT_REMOTE' '\$REMOTE_TRACKED_CONFIG' > '\$RATE_CARD_MIGRATED_OVERLAY_REMOTE'" "$DEPLOY_SH" ||
+  fail "production path does not render the field-scoped overlay rate-card migration on Pearl from raw overlay input"
+grep -q 'remote_reject_redacted_install_candidate "$C2_TIMER_MIGRATED_CONFIG_REMOTE" "coordinator.yaml"' "$DEPLOY_SH" ||
   fail "production C2 path does not reject redacted base install candidates"
-grep -q 'reject_redacted_install_candidate "$C2_TIMER_MIGRATED_OVERLAY_TMP" "coordinator.pearl-overlays.yaml"' "$DEPLOY_SH" ||
+grep -q 'remote_reject_redacted_install_candidate "$C2_TIMER_MIGRATED_OVERLAY_REMOTE" "coordinator.pearl-overlays.yaml"' "$DEPLOY_SH" ||
   fail "production C2 path does not reject redacted overlay install candidates"
-grep -q 'reject_redacted_install_candidate "$RATE_CARD_MIGRATED_CONFIG_TMP" "coordinator.yaml"' "$DEPLOY_SH" ||
+grep -q 'remote_reject_redacted_install_candidate "$RATE_CARD_MIGRATED_CONFIG_REMOTE" "coordinator.yaml"' "$DEPLOY_SH" ||
   fail "production rate-card path does not reject redacted base install candidates"
-grep -q 'reject_redacted_install_candidate "$RATE_CARD_MIGRATED_OVERLAY_TMP" "coordinator.pearl-overlays.yaml"' "$DEPLOY_SH" ||
+grep -q 'remote_reject_redacted_install_candidate "$RATE_CARD_MIGRATED_OVERLAY_REMOTE" "coordinator.pearl-overlays.yaml"' "$DEPLOY_SH" ||
   fail "production rate-card path does not reject redacted overlay install candidates"
 grep -q 'coordinator.c2-timer-migration.yaml' "$DEPLOY_SH" ||
   fail "deploy script does not stage the migrated coordinator config for remote install"
@@ -62,9 +62,9 @@ grep -q 'if \[ "${RATE_CARD_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" \]; then' "$DEPL
   fail "deploy script does not independently stage an overlay-only rate-card migration"
 grep -q "if \\[ '\\\${RATE_CARD_MIGRATION_OVERLAY_ACTIVE:-0}' = '1' \\]; then" "$DEPLOY_SH" ||
   fail "remote install does not independently apply an overlay-only rate-card migration"
-base_upload_line=$(grep -nF '$SCP "$RATE_CARD_MIGRATED_CONFIG_TMP"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
-overlay_upload_line=$(grep -nF '$SCP "$RATE_CARD_MIGRATED_OVERLAY_TMP"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
-c2_base_upload_line=$(grep -nF '$SCP "$C2_TIMER_MIGRATED_CONFIG_TMP"' "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+base_upload_line=$(grep -nF "cp '\$RATE_CARD_MIGRATED_CONFIG_REMOTE' '\$DEPLOY_TMP/coordinator.rate-card-migration.yaml'" "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+overlay_upload_line=$(grep -nF "cp '\$RATE_CARD_MIGRATED_OVERLAY_REMOTE' '\$DEPLOY_TMP/coordinator.pearl-overlays.rate-card-migration.yaml'" "$DEPLOY_SH" | head -n1 | cut -d: -f1)
+c2_base_upload_line=$(grep -nF "cp '\$C2_TIMER_MIGRATED_CONFIG_REMOTE' '\$DEPLOY_TMP/coordinator.c2-timer-migration.yaml'" "$DEPLOY_SH" | head -n1 | cut -d: -f1)
 [ -n "$base_upload_line" ] && [ -n "$overlay_upload_line" ] && [ -n "$c2_base_upload_line" ] &&
   [ "$base_upload_line" -lt "$overlay_upload_line" ] &&
   [ "$c2_base_upload_line" -lt "$overlay_upload_line" ] ||
@@ -93,30 +93,26 @@ grep -q 'python3 - coordinator-deploy' "$DEPLOY_SH" ||
 [ -r "$SCRIPT_DIR/../lib/c2c_runtime_proof.py" ] ||
   fail "shared runtime proof helper is missing or unreadable"
 
-grep -q 'rm -f "${LIVE_COORDINATOR_CONFIG_RAW_TMP:-}"' "$DEPLOY_SH" ||
-  fail "EXIT trap does not clean raw installed coordinator config temp copy"
+if grep -Eq 'LIVE_COORDINATOR_CONFIG_RAW_TMP=|COORDINATOR_OVERLAY_CONFIG_RAW_TMP=' "$DEPLOY_SH"; then
+  fail "deploy script must not create local raw live coordinator config temp copies"
+fi
+grep -q 'rm -rf $REMOTE_CONFIG_WORKDIR' "$DEPLOY_SH" ||
+  fail "EXIT trap does not clean remote raw config workspace"
 grep -q 'rm -f "${GATEWAY_REMOTE_CONFIG_TMP:-}"' "$DEPLOY_SH" ||
   fail "EXIT trap does not clean installed gateway config temp copy"
-grep -q 'rm -f "${COORDINATOR_OVERLAY_CONFIG_RAW_TMP:-}"' "$DEPLOY_SH" ||
-  fail "EXIT trap does not clean raw installed coordinator overlay temp copy"
 grep -q 'rm -f "${COORDINATOR_OVERLAY_CONFIG_TMP:-}"' "$DEPLOY_SH" ||
   fail "EXIT trap does not clean installed coordinator overlay temp copy"
 grep -q 'rm -f "${DEPLOY_EFFECTIVE_CONFIG_TMP:-}"' "$DEPLOY_SH" ||
   fail "EXIT trap does not clean merged effective coordinator temp copy"
-grep -q 'rm -f "${C2_TIMER_MIGRATED_CONFIG_TMP:-}"' "$DEPLOY_SH" ||
-  fail "EXIT trap does not clean C2 timer migrated coordinator temp copy"
+if grep -Eq 'C2_TIMER_MIGRATED_CONFIG_TMP=|C2_TIMER_MIGRATED_OVERLAY_TMP=|RATE_CARD_MIGRATED_CONFIG_TMP=|RATE_CARD_MIGRATED_OVERLAY_TMP=' "$DEPLOY_SH"; then
+  fail "deploy script must not create local raw migrated config temp copies"
+fi
 grep -q 'rm -f "${C2_TIMER_MIGRATED_CONFIG_VALIDATION_TMP:-}"' "$DEPLOY_SH" ||
   fail "EXIT trap does not clean sanitized C2 timer migrated coordinator temp copy"
-grep -q 'rm -f "${C2_TIMER_MIGRATED_OVERLAY_TMP:-}"' "$DEPLOY_SH" ||
-  fail "EXIT trap does not clean C2 timer migrated overlay temp copy"
 grep -q 'rm -f "${C2_TIMER_MIGRATED_OVERLAY_VALIDATION_TMP:-}"' "$DEPLOY_SH" ||
   fail "EXIT trap does not clean sanitized C2 timer migrated overlay temp copy"
-grep -q 'rm -f "${RATE_CARD_MIGRATED_CONFIG_TMP:-}"' "$DEPLOY_SH" ||
-  fail "EXIT trap does not clean rate-card migrated coordinator temp copy"
 grep -q 'rm -f "${RATE_CARD_MIGRATED_CONFIG_VALIDATION_TMP:-}"' "$DEPLOY_SH" ||
   fail "EXIT trap does not clean sanitized rate-card migrated coordinator temp copy"
-grep -q 'rm -f "${RATE_CARD_MIGRATED_OVERLAY_TMP:-}"' "$DEPLOY_SH" ||
-  fail "EXIT trap does not clean rate-card migrated overlay temp copy"
 grep -q 'rm -f "${RATE_CARD_MIGRATED_OVERLAY_VALIDATION_TMP:-}"' "$DEPLOY_SH" ||
   fail "EXIT trap does not clean sanitized rate-card migrated overlay temp copy"
 

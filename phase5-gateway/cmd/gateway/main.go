@@ -313,6 +313,10 @@ func runSettlementReconciler(ctx context.Context, reconciler settlementReconcile
 				"skipped", summary.Skipped,
 				"errors", summary.Errors,
 				"coordinator_404", summary.Coordinator404,
+				"active_held_backlog", summary.ActiveHeldBacklog,
+				"due_held_backlog", summary.DueHeldBacklog,
+				"operator_review_held_backlog", summary.OperatorReviewHeldBacklog,
+				"oldest_held_age_seconds", summary.OldestHeldAgeSeconds,
 			)
 		}
 	}
