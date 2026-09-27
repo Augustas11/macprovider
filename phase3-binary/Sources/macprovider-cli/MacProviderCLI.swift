@@ -951,6 +951,7 @@ struct ServeCommand: AsyncParsableCommand {
         let actual: String
         let runtimeLoadSHA256: String
         let authorityPath: String
+        let privateRuntime = usesBuild1PrivateRuntimeVariant(resolved)
         do {
             let resolvedLoad = try resolveVerifiedLoadPath(
                 configuredPath: configuredPath,
@@ -960,7 +961,6 @@ struct ServeCommand: AsyncParsableCommand {
             )
             persistFrom = resolvedLoad.persistFrom
             authorityPath = resolvedLoad.path
-            let privateRuntime = usesBuild1PrivateRuntimeVariant(resolved)
             let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(
                 directory: URL(fileURLWithPath: resolvedLoad.path),
                 scopedSubdirectory: privateRuntime ? Build1PrivatePrepareProfile.runtimeVariantDirectory : nil
@@ -983,12 +983,6 @@ struct ServeCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
         resolved.modelArtifactPath = loadPath
-        let runtimeBinding = VerifiedModelRuntimeBinding(
-            authorityPath: authorityPath,
-            authoritySHA256: actual,
-            loadPath: loadPath,
-            loadSHA256: runtimeLoadSHA256
-        )
         if resolved.donorMode || (joiningCoordinator && !relaxesJoinAdmissionForLab(
             isolateLifecycle: isolateLifecycle,
             coordinatorURL: resolved.coordinatorURL
@@ -997,9 +991,10 @@ struct ServeCommand: AsyncParsableCommand {
             // artifact root. The private Build 1 runtime loads only its 4-bit
             // member, whose scoped digest intentionally differs from the full
             // signed revision digest, so never feed that member path back into
-            // full-artifact catalog verification. Restore the already verified
-            // runtime load path after catalog trust has been established.
-            let catalogArtifactSHA256 = usesBuild1PrivateRuntimeVariant(resolved)
+            // full-artifact catalog verification. Keep the canonical authority
+            // root in config and carry the scoped member only in the verified
+            // runtime binding used by the model loader.
+            let catalogArtifactSHA256 = privateRuntime
                 ? runtimeLoadSHA256
                 : actual
             let catalogTrust = try await runModelCatalogPreflight(
@@ -1013,13 +1008,31 @@ struct ServeCommand: AsyncParsableCommand {
                 persistConfigMigration: persistConfigMigration,
                 persistFrom: persistFrom
             )
-            resolved.modelArtifactPath = loadPath
+            let canonicalAuthorityPath = resolved.modelArtifactPath ?? authorityPath
+            let canonicalLoadPath = try runtimeModelLoadPath(
+                verifiedArtifactPath: canonicalAuthorityPath,
+                config: resolved,
+                artifactResolver: artifactResolver
+            )
             return ModelArtifactPreflightOutcome(
                 catalogTrust: catalogTrust,
-                runtimeBinding: runtimeBinding
+                runtimeBinding: VerifiedModelRuntimeBinding(
+                    authorityPath: canonicalAuthorityPath,
+                    authoritySHA256: actual,
+                    loadPath: canonicalLoadPath,
+                    loadSHA256: runtimeLoadSHA256
+                )
             )
         }
-        return ModelArtifactPreflightOutcome(catalogTrust: nil, runtimeBinding: runtimeBinding)
+        return ModelArtifactPreflightOutcome(
+            catalogTrust: nil,
+            runtimeBinding: VerifiedModelRuntimeBinding(
+                authorityPath: authorityPath,
+                authoritySHA256: actual,
+                loadPath: loadPath,
+                loadSHA256: runtimeLoadSHA256
+            )
+        )
     }
 
     /// The Build 1 private authority covers the complete upstream revision,
@@ -2322,7 +2335,7 @@ struct ServeCommand: AsyncParsableCommand {
                 }
                 modelRuntime = try await ModelRuntime(
                     modelID: resolved.model,
-                    modelLoadPath: resolved.modelArtifactPath,
+                    modelLoadPath: startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath,
                     draftModelID: resolved.draftModel,
                     draftModelLoadPath: verifiedDraftModelLoadPath,
                     numDraftTokens: resolved.numDraftTokens,
@@ -3649,7 +3662,7 @@ struct SelfTestCommand: AsyncParsableCommand {
         )
         let runtime = try await ModelRuntime(
             modelID: resolved.model,
-            modelLoadPath: Self.modelLoadPath(for: resolved),
+            modelLoadPath: preflight.runtimeBinding?.loadPath ?? Self.modelLoadPath(for: resolved),
             maxContextTokensOverride: resolved.maxContextOverride,
             verifiedModelArtifactSHA256: resolved.modelArtifactSHA256,
             verifiedModelLoadSHA256: preflight.runtimeBinding?.loadSHA256
