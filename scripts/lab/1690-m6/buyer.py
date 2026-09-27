@@ -21,7 +21,7 @@ import urllib.error
 import urllib.request
 
 LAB = pathlib.Path(os.environ.get("LAB", "/Users/a1/lab-1690-m6"))
-MODEL = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+MODEL = os.environ.get("LAB_MLX_ID", "mlx-community/Qwen2.5-0.5B-Instruct-4bit")
 PROMPTS = ["Name three colors.", "Count from one to five in words.", "Say hello in French.", "List two fruits.",
            "What is two plus two? Answer in one word.", "Name a planet.", "Give one synonym for happy.", "Name a month."]
 

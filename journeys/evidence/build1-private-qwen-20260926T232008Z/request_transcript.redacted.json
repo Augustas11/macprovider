@@ -1,0 +1,24 @@
+{
+  "capture_kind": "request_transcript",
+  "captured_at": "2026-09-26T23:28:09Z",
+  "event_id": "a0637ba0-b1e7-4483-9182-2be9396da11f",
+  "payload": {
+    "actual_mlx_inference": true,
+    "admission_event_id": "1857962fd60b9d8c2b3a2febb592e21f5a0f61065bd6dd870add6abf6390578a",
+    "model": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+    "request_id": "a0637ba0-b1e7-4483-9182-2be9396da11f",
+    "response_status": 200,
+    "route_provider_id": "lab-1690-m6-provider",
+    "streaming": false,
+    "usage": {
+      "billable_input_tokens": 27,
+      "billable_output_tokens": 5,
+      "delivered_output_bytes": 16,
+      "observed_input_tokens": 27,
+      "observed_output_tokens": 5
+    }
+  },
+  "payload_jcs_sha256": "5950641f8348605772992c9360e97fd9543356789c7563fdccf24d64b6cfb85d",
+  "schema_version": "macprovider.build1-private-qwen-source-capture.v1",
+  "source_tool": "staging-gateway-request-transcript"
+}

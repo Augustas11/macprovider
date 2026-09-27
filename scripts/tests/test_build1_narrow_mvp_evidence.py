@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import sys
 import unittest
@@ -28,13 +29,25 @@ USAGE = {
 }
 
 
+def iso_z(value: dt.datetime) -> str:
+    return value.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def valid_evidence() -> dict:
+    captured_at = dt.datetime.now(dt.UTC).replace(microsecond=0)
+    started_at = captured_at - dt.timedelta(minutes=5)
+    staging_config_at = captured_at - dt.timedelta(minutes=6)
+    receipt_at = captured_at - dt.timedelta(seconds=30)
+    receipt_unix = int(receipt_at.timestamp())
+    request_start_unix_ms = int((captured_at - dt.timedelta(seconds=50)).timestamp() * 1_000)
+    route_decision_unix_ms = request_start_unix_ms + 1_000
+    catalog_expires_unix_ms = route_decision_unix_ms + 10 * 60 * 1_000
     evidence = {
         "schema_version": mod.SCHEMA_VERSION,
         "build_id": mod.BUILD_ID,
         "validation_scope": "schema_valid_structural_only",
         "evidence_class": "physical_staging",
-        "captured_at": "2026-09-14T10:00:00Z",
+        "captured_at": iso_z(captured_at),
         "repository": {"name": "Augustas11/macprovider", "commit": "1" * 40, "branch": "codex/build1-mvp-narrow"},
         "scope": {
             "production_activation_enabled": False,
@@ -43,11 +56,12 @@ def valid_evidence() -> dict:
             "payout_jobs_enabled": False,
             "payout_execution_enabled": False,
             "release_published": False,
+            "public_catalog_published": False,
         },
         "capture": {
             "command": "scripts/collect-build1-narrow-mvp-evidence --redacted",
-            "started_at": "2026-09-14T09:55:00Z",
-            "completed_at": "2026-09-14T10:00:00Z",
+            "started_at": iso_z(started_at),
+            "completed_at": iso_z(captured_at),
             "binary_version": "0.4.0-test",
             "binary_sha256": "5" * 64,
             "redaction_passed": True,
@@ -105,7 +119,7 @@ def valid_evidence() -> dict:
             "config_source_kind": "deploy_config_snapshot",
             "config_digest": "c" * 64,
             "deploy_event_id": "deploy-build1-mvp-1",
-            "captured_at": "2026-09-14T09:54:00Z",
+            "captured_at": iso_z(staging_config_at),
             "settlement_mode_source": "redacted staging coordinator config capture",
             "rewards_disabled_source": "redacted staging job config capture",
             "operator_payment_jobs_disabled_source": "redacted staging job config capture",
@@ -137,13 +151,13 @@ def valid_evidence() -> dict:
             "signature_verified": True,
             "release_bound": True,
             "measured_size": True,
-            "size_bytes": 4_900_000_000,
+            "size_bytes": mod.ARTIFACT_SIZE_BYTES,
             "feed_sha256": "2" * 64,
             "candidate_catalog_sha256": CANDIDATE_CATALOG_DIGEST,
-            "release_id": "build1-mvp-staging-release-20260914",
+            "release_id": mod.ARTIFACT_RELEASE_ID,
             "artifact_feed_signer_key_id": mod.TRUSTED_ARTIFACT_FEED_SIGNER_KEY_ID,
             "verification_status": "verified",
-            "primary_artifact_id": mod.ARTIFACT_ID,
+            "primary_artifact_id": mod.RUNTIME_ARTIFACT_ID,
             "artifact_hash_algorithm": mod.ARTIFACT_HASH_ALGORITHM,
             "artifact_hash": mod.ARTIFACT_HASH,
             "route_binding": {
@@ -158,9 +172,9 @@ def valid_evidence() -> dict:
         "preparation": {
             "status": "adopted",
             "artifact_hash": mod.ARTIFACT_HASH,
-            "size_bytes": 4_900_000_000,
+            "size_bytes": mod.ARTIFACT_SIZE_BYTES,
             "available_disk_bytes": 100_000_000_000,
-            "staged_bytes": 4_900_000_000,
+            "staged_bytes": mod.ARTIFACT_SIZE_BYTES,
             "snapshot_manifest_verified": True,
             "cancellation_preserves_active_model": True,
             "recovery_safe": True,
@@ -202,7 +216,7 @@ def valid_evidence() -> dict:
             "correlation": {
                 "source": "receipt_audit",
                 "event_type": "receipt_issued",
-                "timestamp": "2026-09-14T09:59:00Z",
+                "timestamp": iso_z(receipt_at),
                 "cursor": "cursor-redacted-2",
                 "served_count_supporting_only": True,
                 "request_id": REQUEST_ID,
@@ -210,7 +224,7 @@ def valid_evidence() -> dict:
                 "model_id": mod.MODEL_ID,
                 "tokens_out": USAGE["billable_output_tokens"],
                 "ttft_ms": 125,
-                "unix_ts": 1789379940,
+                "unix_ts": receipt_unix,
                 "receipt_metadata_present": True,
             },
         },
@@ -228,7 +242,7 @@ def valid_evidence() -> dict:
             "rate_card_key": mod.RATE_CARD_KEY,
             "model_admission_candidate_id": "byom-build1-mvp-candidate",
             "model_admission_coordinator_event_id": "7" * 64,
-            "model_admission_served_model_ref": "mlx-cache:llama-3.2-3b-instruct-4bit",
+            "model_admission_served_model_ref": "mlx-cache:orcarouter-qwen3.8-27b-uncensored",
             "model_admission_catalog_model_key": mod.CATALOG_KEY,
             "model_admission_discovery_digest_sha256": "8" * 64,
             "model_admission_evaluation_digest_sha256": "9" * 64,
@@ -270,11 +284,11 @@ def valid_evidence() -> dict:
                 "provider_reported_model_hash_algorithm": mod.ARTIFACT_HASH_ALGORITHM,
                 "expected_catalog_model_hash": mod.ARTIFACT_HASH,
                 "expected_catalog_model_hash_algorithm": mod.ARTIFACT_HASH_ALGORITHM,
-                "catalog_id": mod.CATALOG_KEY,
-                "catalog_body_digest": CANDIDATE_CATALOG_DIGEST,
+                "catalog_id": "lab-build1-tier2",
+                "catalog_body_digest": "b" * 64,
                 "model_admission_candidate_id": "byom-build1-mvp-candidate",
                 "model_admission_coordinator_event_id": "7" * 64,
-                "model_admission_served_model_ref": "mlx-cache:llama-3.2-3b-instruct-4bit",
+                "model_admission_served_model_ref": "mlx-cache:orcarouter-qwen3.8-27b-uncensored",
                 "model_admission_catalog_model_key": mod.CATALOG_KEY,
                 "model_admission_discovery_digest_sha256": "8" * 64,
                 "model_admission_evaluation_digest_sha256": "9" * 64,
@@ -286,12 +300,12 @@ def valid_evidence() -> dict:
                 "artifact_candidate_catalog_sha256": CANDIDATE_CATALOG_DIGEST,
                 "catalog_signature_key_id": "candidate-catalog-staging-key",
                 "catalog_signature_pubkey_fingerprint": "ed25519-sha256:" + "2" * 64,
-                "catalog_expires_at_unix_ms": 1_789_380_600_000,
+                "catalog_expires_at_unix_ms": catalog_expires_unix_ms,
                 "spec008_hash_status": "hash_verified",
                 "route_snapshot_policy_version": mod.ROUTE_SNAPSHOT_POLICY_VERSION,
                 "route_snapshot_mode": "enforce",
-                "route_decision_ts_unix_ms": 1_789_379_910_000,
-                "request_start_ts_unix_ms": 1_789_379_911_000,
+                "route_decision_ts_unix_ms": route_decision_unix_ms,
+                "request_start_ts_unix_ms": request_start_unix_ms,
                 "pending_deadline_seconds": 300,
                 "prompt_hash_basis": "gateway-canonical-request-v1",
                 "prompt_hash": "a" * 64,
@@ -309,8 +323,8 @@ def valid_evidence() -> dict:
             "attempt_n": 0,
             "usage": dict(USAGE),
             "cached_billable_input_tokens": 0,
-            "credits": 4,
-            "provider_share_credits": 4,
+            "credits": 160,
+            "provider_share_credits": 144,
             "rate": {
                 "rate_card_key": mod.RATE_CARD_KEY,
                 "prompt_rate_per_mtok": mod.PROMPT_RATE,
@@ -331,8 +345,8 @@ def valid_evidence() -> dict:
             "model_id": mod.MODEL_ID,
             "provider_reported_model_hash": mod.ARTIFACT_HASH,
             "expected_catalog_model_hash": mod.ARTIFACT_HASH,
-            "catalog_id": mod.CATALOG_KEY,
-            "catalog_body_digest": CANDIDATE_CATALOG_DIGEST,
+            "catalog_id": "lab-build1-tier2",
+            "catalog_body_digest": "b" * 64,
             "route_snapshot_digest": ROUTE_SNAPSHOT_DIGEST,
             "route_snapshot_mode": "enforce",
             "receipt_version": "4",
@@ -340,8 +354,8 @@ def valid_evidence() -> dict:
             "hardware_context_id": HARDWARE_CONTEXT_ID,
             "usage": dict(USAGE),
             "cached_billable_input_tokens": 0,
-            "credits": 4,
-            "provider_share_credits": 4,
+            "credits": 160,
+            "provider_share_credits": 144,
             "artifact_binding": {
                 "artifact_feed_sha256": "2" * 64,
                 "artifact_id": mod.ARTIFACT_ID,
@@ -358,6 +372,7 @@ def valid_evidence() -> dict:
             "payout_jobs_enabled": False,
             "payout_execution_enabled": False,
             "release_published": False,
+            "public_catalog_published": False,
             "qualification": "not_activated",
         },
     }
@@ -514,11 +529,11 @@ class Build1NarrowMVPEvidenceTests(unittest.TestCase):
         payload["request"]["usage"] = dict(usage)
         payload["provider"]["correlation"]["tokens_out"] = 150
         payload["settlement"]["usage"] = dict(usage)
-        payload["settlement"]["credits"] = 5
-        payload["settlement"]["provider_share_credits"] = 4
+        payload["settlement"]["credits"] = 195
+        payload["settlement"]["provider_share_credits"] = 176
         payload["settlement_verdict"]["usage"] = dict(usage)
-        payload["settlement_verdict"]["credits"] = 5
-        payload["settlement_verdict"]["provider_share_credits"] = 4
+        payload["settlement_verdict"]["credits"] = 195
+        payload["settlement_verdict"]["provider_share_credits"] = 176
         self.assert_valid(payload)
 
     def test_rejects_raw_secret_or_endpoint_values(self) -> None:
@@ -551,7 +566,7 @@ class Build1NarrowMVPEvidenceTests(unittest.TestCase):
         payload = valid_evidence()
         payload["settlement"]["credits"] = 999999999
         payload["settlement_verdict"]["credits"] = 999999999
-        self.assert_invalid_contains(payload, "must equal 4")
+        self.assert_invalid_contains(payload, "must equal 160")
 
     def test_prices_cached_billable_input_tokens_with_cache_rate(self) -> None:
         payload = valid_evidence()
@@ -566,16 +581,16 @@ class Build1NarrowMVPEvidenceTests(unittest.TestCase):
         payload["provider"]["correlation"]["tokens_out"] = 100
         payload["settlement"]["usage"] = dict(usage)
         payload["settlement"]["cached_billable_input_tokens"] = 80
-        payload["settlement"]["credits"] = 3
-        payload["settlement"]["provider_share_credits"] = 3
+        payload["settlement"]["credits"] = 110
+        payload["settlement"]["provider_share_credits"] = 99
         payload["settlement_verdict"]["usage"] = dict(usage)
         payload["settlement_verdict"]["cached_billable_input_tokens"] = 80
-        payload["settlement_verdict"]["credits"] = 3
-        payload["settlement_verdict"]["provider_share_credits"] = 3
+        payload["settlement_verdict"]["credits"] = 110
+        payload["settlement_verdict"]["provider_share_credits"] = 99
         self.assert_valid(payload)
 
-        payload["settlement"]["credits"] = 4
-        payload["settlement_verdict"]["credits"] = 4
+        payload["settlement"]["credits"] = 111
+        payload["settlement_verdict"]["credits"] = 111
         self.assert_invalid_contains(payload, "settlement.credits")
 
     def test_rejects_under_floor_physical_ram(self) -> None:
@@ -641,7 +656,7 @@ class Build1NarrowMVPEvidenceTests(unittest.TestCase):
         ):
             payload = valid_evidence()
             payload["diagnostics"] = {key: value}
-            self.assert_invalid_contains(payload, "Build 1 narrow MVP evidence fields")
+            self.assert_invalid_contains(payload, "Build 1 private-Qwen evidence fields")
 
     def test_rejects_route_time_artifact_binding_drift(self) -> None:
         payload = valid_evidence()
@@ -649,6 +664,15 @@ class Build1NarrowMVPEvidenceTests(unittest.TestCase):
         payload["settlement_verdict"]["artifact_binding"]["candidate_catalog_body_digest"] = "0" * 64
         self.assert_invalid_contains(payload, "artifact_feed_signer_key_id")
         self.assert_invalid_contains(payload, "candidate_catalog_body_digest")
+
+    def test_accepts_distinct_tier2_and_candidate_catalog_authorities(self) -> None:
+        result = mod.validate_build1_narrow_mvp_evidence(valid_evidence())
+        self.assertTrue(result.ok, result.errors)
+
+    def test_rejects_settlement_verdict_tier2_catalog_drift(self) -> None:
+        payload = valid_evidence()
+        payload["settlement_verdict"]["catalog_body_digest"] = "c" * 64
+        self.assert_invalid_contains(payload, "catalog_body_digest")
 
     def test_rejects_consistently_wrong_artifact_feed_signer(self) -> None:
         payload = valid_evidence()
@@ -744,6 +768,12 @@ class Build1NarrowMVPEvidenceTests(unittest.TestCase):
             payload["production_blockers"]["qualification"] = value
             self.assert_invalid_contains(payload, "production_blockers.qualification")
 
+    def test_rejects_public_catalog_publication_claims(self) -> None:
+        for container in ("scope", "production_blockers"):
+            payload = valid_evidence()
+            payload[container]["public_catalog_published"] = True
+            self.assert_invalid_contains(payload, f"{container}.public_catalog_published")
+
     def test_rejects_missing_or_mutated_byom_admission_route_binding(self) -> None:
         payload = valid_evidence()
         del payload["route_snapshot"]["route_snapshot_v1"]["model_admission_candidate_id"]
@@ -788,7 +818,10 @@ class Build1NarrowMVPEvidenceTests(unittest.TestCase):
         self.assert_invalid_contains(payload, "must be after route_decision_ts_unix_ms")
 
         payload = valid_evidence()
-        payload["capture"]["started_at"] = "2026-09-14T10:01:00Z"
+        payload["capture"]["started_at"] = iso_z(
+            dt.datetime.fromisoformat(payload["capture"]["completed_at"].replace("Z", "+00:00"))
+            + dt.timedelta(minutes=1)
+        )
         self.assert_invalid_contains(payload, "capture.completed_at")
 
         payload = valid_evidence()
@@ -951,7 +984,7 @@ class Build1NarrowMVPEvidenceTests(unittest.TestCase):
         ):
             payload = valid_evidence()
             payload["operator_summary"] = {"note": text}
-            self.assert_invalid_contains(payload, "Build 1 narrow MVP evidence fields")
+            self.assert_invalid_contains(payload, "Build 1 private-Qwen evidence fields")
 
     def test_rejects_overclaim_text_in_required_string_fields(self) -> None:
         cases = (
@@ -1099,7 +1132,7 @@ class Build1NarrowMVPEvidenceTests(unittest.TestCase):
             if path[0] == "staging_config":
                 self.assertIn("must match required value", joined)
             else:
-                self.assertIn("invalid shape", joined)
+                self.assertIn("must match required value", joined)
 
 
 if __name__ == "__main__":

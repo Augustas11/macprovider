@@ -458,7 +458,7 @@ enum ModelPreparationSecureFilesystem {
             guard (info.st_mode & (S_IWGRP | S_IWOTH)) == 0 else {
                 throw ModelPreparationSecureFilesystemError.unsafe(path: path, reason: "ancestor writable by non-owner")
             }
-            try rejectExtendedACL(fd: fd, path: path)
+            try rejectExtendedAllowACL(fd: fd, path: path)
         }
     }
 
@@ -577,6 +577,41 @@ enum ModelPreparationSecureFilesystem {
         guard result == 0 else { throw openError(path: path, operation: "inspect ACL") }
         guard entry == nil else {
             throw ModelPreparationSecureFilesystemError.unsafe(path: path, reason: "extended ACL")
+        }
+    }
+
+    /// Ancestors are not private root components: an extended entry that only
+    /// denies (macOS stamps `group:everyone deny delete` on `~`, `~/Library`,
+    /// and `~/Library/Application Support`) grants nothing and cannot widen
+    /// traversal or rename authority. Any `allow` entry can, so it still fails.
+    static func rejectExtendedAllowACL(fd: Int32, path: String) throws {
+        errno = 0
+        guard let acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED) else {
+            if errno == 0 || errno == ENOENT { return }
+            throw openError(path: path, operation: "inspect ACL")
+        }
+        defer { _ = acl_free(UnsafeMutableRawPointer(acl)) }
+        var entry: acl_entry_t?
+        var entryID = ACL_FIRST_ENTRY.rawValue
+        while true {
+            errno = 0
+            let result = acl_get_entry(acl, entryID, &entry)
+            if result != 0 {
+                // -1/EINVAL is the documented end-of-list signal.
+                guard errno == EINVAL || errno == 0 else {
+                    throw openError(path: path, operation: "inspect ACL")
+                }
+                return
+            }
+            guard let current = entry else { return }
+            var tag = ACL_UNDEFINED_TAG
+            guard acl_get_tag_type(current, &tag) == 0 else {
+                throw openError(path: path, operation: "inspect ACL")
+            }
+            guard tag == ACL_EXTENDED_DENY else {
+                throw ModelPreparationSecureFilesystemError.unsafe(path: path, reason: "extended ACL")
+            }
+            entryID = ACL_NEXT_ENTRY.rawValue
         }
     }
 

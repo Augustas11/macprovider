@@ -1,0 +1,127 @@
+{
+  "capture_kind": "physical_run_log",
+  "captured_at": "2026-09-26T23:28:09Z",
+  "event_id": "lab-1690-m6-provider",
+  "payload": {
+    "admission": {
+      "artifact_hash": "8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88dcd",
+      "catalog_key": "orcarouter/qwen3.8-27b-uncensored",
+      "environment_id": "staging-build1-mvp",
+      "event_id": "1857962fd60b9d8c2b3a2febb592e21f5a0f61065bd6dd870add6abf6390578a",
+      "model_admission_candidate_id": "byom_i2nx6io2eouzkg4hkt3y523edluu6inpq7afby4xhf5lpmn2nouq",
+      "model_admission_catalog_model_key": "orcarouter/qwen3.8-27b-uncensored",
+      "model_admission_coordinator_event_id": "1857962fd60b9d8c2b3a2febb592e21f5a0f61065bd6dd870add6abf6390578a",
+      "model_admission_discovery_digest_sha256": "f0eba59070eaafd01b77aa6c7bf74e49894a76bcf757cae295446f046bf60428",
+      "model_admission_evaluation_digest_sha256": "a217ca691d501b23355a04af165485e9963ac50afcd2cb030cb5db0226a4d796",
+      "model_admission_served_model_ref": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+      "model_id": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+      "provider_id": "lab-1690-m6-provider",
+      "rate_card_key": "orcarouter/qwen3.8-27b-uncensored",
+      "receipt_key_available": true,
+      "source": "coordinator",
+      "state": "settlement_capable",
+      "verified_model_settlement_mode": "enforce"
+    },
+    "artifact_feed": {
+      "artifact_feed_signer_key_id": "streamvc-autotune-static-v4",
+      "artifact_hash": "8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88dcd",
+      "artifact_hash_algorithm": "macprovider.snapshot-manifest.v1",
+      "candidate_catalog_sha256": "fdb445c9cdc8beb36a8be0b78061e42bf8386976aef4ba07540263dd761f00be",
+      "feed_sha256": "ecd48438c00f692cff60a31374edb03fd2b46fd9305c0f3e58a29d7f4a2871bf",
+      "freshness": "fresh",
+      "measured_size": true,
+      "primary_artifact_id": "mlx-4bit",
+      "release_bound": true,
+      "release_id": "build1-orcarouter-private-2026-09-26-v1",
+      "route_binding": {
+        "artifact_feed_sha256": "ecd48438c00f692cff60a31374edb03fd2b46fd9305c0f3e58a29d7f4a2871bf",
+        "artifact_feed_signer_key_id": "streamvc-autotune-static-v4",
+        "artifact_hash": "8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88dcd",
+        "artifact_hash_algorithm": "macprovider.snapshot-manifest.v1",
+        "artifact_id": "mlx-revision-snapshot",
+        "candidate_catalog_body_digest": "fdb445c9cdc8beb36a8be0b78061e42bf8386976aef4ba07540263dd761f00be"
+      },
+      "signature_verified": true,
+      "size_bytes": 94723099062,
+      "verification_status": "verified"
+    },
+    "hardware": {
+      "binary_sha256": "b672c2242b2fb004332a51602a41bbea4735dcc11fb4a8660b168b3ea3bb05c8",
+      "binary_version": "1.8.123",
+      "chip": "Apple M3 Ultra",
+      "context_id": "studio-cde289919bbec2fb99ae5581",
+      "free_disk_bytes": 1260572971008,
+      "os_version": "macOS 26.4.1",
+      "ram_gb": 256
+    },
+    "preparation": {
+      "adopted_model_id": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+      "artifact_hash": "8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88dcd",
+      "available_disk_bytes": 1260572971008,
+      "cancellation_preserves_active_model": true,
+      "inventory_digest": "c83a33149052318c7ecca3d619800ca99cb81ccb8ee822f726572846e696c57e",
+      "recovery_safe": true,
+      "size_bytes": 94723099062,
+      "snapshot_manifest_verified": true,
+      "staged_bytes": 94723099062,
+      "status": "adopted",
+      "weights_manifest_sha256": "74de2a522bb9b670065f3d62a8ec912ff0abacf6570d0f00765b2b47be7cf739"
+    },
+    "provider": {
+      "binary_sha256": "b672c2242b2fb004332a51602a41bbea4735dcc11fb4a8660b168b3ea3bb05c8",
+      "binary_version": "1.8.123",
+      "correlation": {
+        "cursor": "serve-log-line-388",
+        "event_type": "receipt_issued",
+        "model_id": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+        "provider_id": "lab-1690-m6-provider",
+        "receipt_metadata_present": true,
+        "request_id": "a0637ba0-b1e7-4483-9182-2be9396da11f",
+        "served_count_supporting_only": true,
+        "source": "equivalent_provider_log",
+        "timestamp": "2026-09-26T23:20:08Z",
+        "tokens_out": 5,
+        "ttft_ms": 244,
+        "unix_ts": 1790464808
+      },
+      "fake_provider": false,
+      "hardware_context_id": "studio-cde289919bbec2fb99ae5581",
+      "kind": "physical_mlx_cli",
+      "pid": 25048,
+      "provider_id": "lab-1690-m6-provider",
+      "receipt_audit_cursor_before": "a9be6cda-de75-4ac1-8a2c-d7af96285971",
+      "receipt_key_available": true,
+      "runtime_source": "mlx_cache",
+      "status_after": {
+        "endpoint": "GET /v1/status",
+        "model": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+        "model_hash": "8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88dcd",
+        "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+        "model_loaded": true,
+        "status": "ready",
+        "weights_manifest_algorithm": "macprovider.safetensors-manifest.v1",
+        "weights_manifest_sha256": "74de2a522bb9b670065f3d62a8ec912ff0abacf6570d0f00765b2b47be7cf739"
+      },
+      "status_before": {
+        "endpoint": "GET /v1/status",
+        "model": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+        "model_hash": "8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88dcd",
+        "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+        "model_loaded": true,
+        "status": "ready",
+        "weights_manifest_algorithm": "macprovider.safetensors-manifest.v1",
+        "weights_manifest_sha256": "74de2a522bb9b670065f3d62a8ec912ff0abacf6570d0f00765b2b47be7cf739"
+      }
+    },
+    "runtime": {
+      "context_profile": "batch-1-context-4096",
+      "hardware_context_id": "studio-cde289919bbec2fb99ae5581",
+      "max_concurrency": 1,
+      "mlx_version": "0.31.4",
+      "source": "mlx_cache"
+    }
+  },
+  "payload_jcs_sha256": "589a18538d05161b8836fa898af5786fbb5e395c8082bb40b23a2c1a26c5848b",
+  "schema_version": "macprovider.build1-private-qwen-source-capture.v1",
+  "source_tool": "macprovider-cli-physical-run-summary"
+}

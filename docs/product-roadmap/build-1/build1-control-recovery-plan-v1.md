@@ -1,9 +1,13 @@
 # Build 1 Control Recovery Plan v1
 
-Status: active control ledger
+Status: superseded for current execution by `build1-control-recovery-plan-v2.md`
 Date: 2026-09-15
-Base evidence: `origin/main` at `12de7aea` plus PR #1649
-Decision: freeze new Build 1 implementation slices unless they name one Build 1 lane from this document.
+Base evidence: `origin/main` at `7c2e4d97` plus PR #1658
+Decision: retained as historical control evidence. The v2 ledger owns the
+private-tuple acceptance correction and current recovery sequence.
+Execution overlay: `build1-single-pr-orchestrator-workflow-v1.md` keeps Lane A
+work in one orchestrator-owned PR (#1658) until the Lane A stop condition is
+met and the owner explicitly greenlights merge.
 
 ## Purpose
 
@@ -26,14 +30,19 @@ Recommended current lane. Deliver one constrained physical staging proof for:
 
 - Canonical model: `meta-llama/llama-3.2-3b-instruct`
 - Provider artifact: `mlx-community/Llama-3.2-3B-Instruct-4bit`
-- Environment: staging coordinator/gateway only
-- Boundary: no production activation, rewards, payouts, public earnings claims,
-  or automatic paid-provider qualification
+- Environment: Pearl coordinator/gateway network when the currently deployed
+  binaries include the BYOM admission and verified-settlement path; local/mock
+  evidence is a fallback only if Pearl lacks that deployed path.
+- Boundary: no release publication, payout/reward enablement, public earnings
+  claims, or automatic paid-provider qualification. Any Pearl admission used
+  for the proof must be explicit, temporary, auditable, and scoped to the Lane A
+  tuple and provider.
 
 This lane stops when a schema-valid evidence bundle proves the selected model
-tuple ran through the intended provider path in staging, and a human can review
-the source captures. It does not stop on fixture-only, skipped, timed-out, or
-local-only evidence.
+tuple ran through the intended provider path on the real coordinator/gateway
+network, and a human can review the source captures. It does not stop on
+fixture-only, skipped, timed-out, or local-only evidence while Pearl has the
+required BYOM path deployed.
 
 ### Lane B - Full SPEC-044 v2 Experience
 
@@ -62,7 +71,8 @@ future sessions will keep interpreting stale handoffs as active work.
 | #1519 | `82e8f7c7` | Configured v2 storage budget groundwork is landed behind private boundaries. | No public v2 status, env/YAML runtime parser, preparation action, admission, settlement, payout, release, or production activation. |
 | #1525 | `68b90269` | Lane A `macprovider-cli models prepare` exists behind exact tuple, staging coordinator, `--json`, and `--yes` guards, and fails closed with transaction events. | No signed artifact authority, artifact download, staging, durable adoption, physical provider run, admission, settlement, payout, release, or production activation. |
 | #1530 | `4913590c` | The guarded `models prepare` path verifies the exact Lane A signed artifact authority tuple from the staging artifact feed before doing anything else. | No artifact download, staging, durable adoption, physical provider run, admission, settlement, payout, release, or production activation. |
-| #1649 | open, head `1971e7a6` | `models prepare` stages the exact MLX snapshot into an isolated hash-qualified directory, verifies the snapshot-manifest digest against the signed authority, and adopts it into the provider-owned durable store; failure, timeout, and cancellation leave the active model and durable store unchanged. | No private preparation-state record, `serve`/status evidence binding, staging admission, gateway request, receipt/audit correlation, settlement, payout, release, physical run, or production activation. |
+| #1649 | `4cf73a6f` | `models prepare` stages the exact MLX snapshot into an isolated hash-qualified directory, verifies the snapshot-manifest digest against the signed authority, and adopts it into the provider-owned durable store; failure, timeout, and cancellation leave the active model and durable store unchanged. | No private preparation-state record, `serve`/status evidence binding, staging admission, gateway request, receipt/audit correlation, settlement, payout, release, physical run, or production activation. |
+| #1658 | open | After durable adoption, `models prepare` writes the exact adopted Lane A tuple into the private published-inventory record through the existing `ModelPreparationPrivateStore` envelope contracts, with a persisted publication receipt under the managed-v3 namespace; the private state bootstraps before any transfer and fails closed; failure, timeout, and cancellation never write or mutate the record; public `models catalog-economics --json` v1 output is unchanged. The same PR now also correlates `GET /v1/status` diagnostic evidence for Lane A to the exact private receipt and configured release: the observed `model_hash` is matched to the receipt `artifact_sha256` and the configured artifact SHA; the receipt `artifact_identity_digest`, receipt digest, and root identity digest are published as digests only; `weights_manifest_sha256` is reported as observed (presence and algorithm only, not bound to the receipt). The correlation is path-observed and states `descriptor_pinned_runtime_custody=false`, while explicitly preserving no admission, settlement, payout, rewards, or production activation semantics. The same PR now also adds `models staging-input`, a read-only Lane A command that assembles one `build1_lane_a_staging_input.v1` handoff from the signed staging artifact authority (measured `size_bytes`, trusted signer, release binding), the private publication receipt for the adopted artifact, and the local `GET /v1/status` Lane A evidence; it is `staging_input_ready` only when all three name the same tuple, release, digest, declared size, and private record, and otherwise reports explicit blockers (`artifact_feed_not_served`, `artifact_feed_rejected`, `private_record_*`, `status_*`) with exit 2. | No signed measured artifact feed served by the staging coordinator yet (operator release action), no staging admission, descriptor-pinned runtime load custody, gateway request, receipt/audit correlation, settlement, payout, release, physical run, public v2 projection, cleanup transaction, or production activation. A `staging_input_ready` report is a staging input, not acceptance; local preparation/status evidence alone never implies admission, settlement, or earnings. |
 
 Current open PRs as of 2026-09-15 are not Build 1 control blockers:
 
@@ -91,19 +101,25 @@ Current open PRs as of 2026-09-15 are not Build 1 control blockers:
 
 Lane A blockers:
 
-- Record private preparation state for the adopted Lane A artifact through the
-  existing `ModelPreparationPrivateStore` contracts so `models catalog-economics`
-  can project it without touching public v1 output.
-- Bind `serve` local status evidence (`model_hash`, `weights_manifest_sha256`)
-  to the adopted Lane A artifact for the evidence validator.
-- Produce a measured, artifact-bound staging release or equivalent staging
-  input for the selected Llama 3B tuple.
-- Run the physical Apple Silicon staging journey against staging
-  coordinator/gateway.
+- Produce measured artifact-feed authority for the selected Llama 3B tuple
+  without faking byte counts: the lab/staging path must measure every published
+  primary artifact from real artifact files or Hugging Face snapshots, sign the
+  full artifact feed with the trusted static-feed key, and serve
+  `/v1/catalog-artifacts` plus its detached signature on loopback or approved
+  staging authority. PR #1658 now owns the operator-local loopback helper for
+  this path; production release publication remains out of scope.
+- Add descriptor-pinned runtime load custody if the physical staging journey
+  needs more than path-observed local status correlation.
+- Run the physical Apple Silicon journey against the Pearl coordinator/gateway
+  network when Pearl has the BYOM admission and settlement path deployed. Use
+  local/mock coordinator or gateway evidence only as an explicitly labeled
+  fallback if that deployed path is absent.
 - Collect validator-accepted evidence that is not fixture-only, skipped,
   timed out, or local-only.
 - Preserve the boundary that local preparation alone never grants paid
-  admission, settlement, earnings, rewards, payouts, or production activation.
+  admission, settlement, earnings, rewards, payouts, or production activation;
+  any Pearl admission/request proof must be temporary, auditable, and cleaned up
+  or withdrawn when the proof is complete.
 
 Lane B blockers:
 
@@ -117,14 +133,23 @@ Lane B blockers:
 
 ## Next Authorized Action
 
-The next implementation work, if Build 1 continues, is the Lane A private
-preparation-state record for the adopted artifact: after `models prepare`
-adopts the verified Lane A tuple (#1649), write the private published-inventory
-record through the existing `ModelPreparationPrivateStore` envelope contracts
-and keep public `models catalog-economics` v1 output unchanged. After that, the
-`serve` local status evidence binding for the same artifact.
+The next work, if Build 1 continues, is to use the measured artifact-feed
+helper output as preflight evidence, then run the physical Apple Silicon journey
+against Pearl because Pearl has BYOM admission and verified-settlement code
+deployed: start a dedicated Lane A provider on MacStudio without disturbing the
+existing Qwen provider, submit the Lane A offer, perform the operator decision
+sequence through `settlement_capable`, route one non-streaming gateway request,
+capture receipt/audit and settlement evidence, and assemble the validator
+bundle. Local/mock coordinator or gateway evidence is acceptable only if Pearl
+is proven not to have the deployed BYOM path. Public v1
+`models catalog-economics` output stays unchanged until Lane B.
 
-That PR or handoff must state:
+Per `build1-single-pr-orchestrator-workflow-v1.md`, this work should continue
+inside PR #1658 as an internal milestone. #1658 should not merge merely because
+the private preparation-state record or `serve`/status evidence-binding
+milestone has green CI.
+
+That PR milestone or handoff must state:
 
 - Selected lane: Lane A.
 - Requirement source: `SPEC-044`, `narrow-mvp-plan-v6.md`,
@@ -137,15 +162,18 @@ That PR or handoff must state:
 
 ## Future Session Gate
 
-Before opening any Build 1 PR, a session must:
+Before opening any Build 1 PR, or before adding a Build 1 milestone to PR
+#1658, a session must:
 
 1. Read this control recovery plan.
 2. Confirm no newer Build 1 control plan supersedes it.
-3. State the selected lane in the PR body or handoff.
+3. State the selected lane in the PR body, milestone note, or handoff.
 4. Cite the current requirement source.
 5. Explain how the diff reduces a named remaining blocker.
 6. Preserve the no-production-activation boundary unless the owner explicitly
-   approves production activation in that same session.
+   approves production activation in that same session. A scoped Pearl network
+   proof is not a release, payout, reward, or public earnings activation, but
+   it must remain temporary, auditable, and limited to Lane A.
 
 If these fields cannot be filled, stop and recover control instead of creating
 another slice.
