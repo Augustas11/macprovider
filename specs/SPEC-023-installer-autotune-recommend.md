@@ -1,12 +1,19 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.20.0
+version: v0.20.1
 status: LOCKED
 owner: operator (a11)
-last-locked: 2026-09-25
+last-locked: 2026-09-27
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.20.1 (2026-09-27)** — Safe recommendation probing (#1723).
+  Registers `SPEC-023-R022`: a benchmarking `autotune --recommend` run stops
+  an existing local provider before loading its first candidate and restores
+  the launchd job afterward. `--apply` does not restart an old foreground
+  serve, while `--check-only`, `--prefetch`, and `--freshness-check` remain
+  read/download-only and never drain. AC-48 pins those boundaries.
 
 - **v0.20.0 (2026-09-25)** — `omlx_loopback` on `mlx_safetensors`
   artifacts (#1690 M9, SPEC-010 1.14 R009(f)). §3.7.4: the adapter enum
@@ -2124,6 +2131,18 @@ DONOR MODE: {selected_model} does not meet rate-card or hardware requirements on
 
 ## 9. Re-tune cadence + UX
 
+**SPEC-023-R022 — Exclusive model residency during recommendation probes.**
+A benchmarking `autotune --recommend` invocation MUST detect and stop a live
+local provider before Stage 1 loads any candidate model, without requiring the
+classic `--drain` flag. It MUST fail before probing when the live provider
+cannot be stopped or its port remains occupied. At command exit it MUST restore
+a launchd-managed provider, MUST arm an out-of-process launchd restore guard
+before bootout, and MUST fail the command if in-process restoration fails. It
+MAY restart a foreground serve only when
+`--apply` was not requested, so applying a new recommendation cannot reload the
+old foreground model. `--recommend --check-only`, `--prefetch`, and
+`--freshness-check` MUST NOT stop or restart a provider.
+
 `autotune --recommend` re-runs or prompts the operator in exactly these v0.4 cases:
 
 1. Manual invocation: `malibu-cli autotune --recommend`.
@@ -2405,6 +2424,14 @@ AC-44 (`SPEC-023-R009`, opt-in and byte-shape preservation): The same recommenda
 AC-45 (`SPEC-023-R011`, Ultra ≥256 GB default 8): `AutotuneRecommendHardware` for an Ultra chip with 256 GB or more returns `recommendedMaxBatch = 8`. The same Ultra chip with 128 GB or 192 GB still returns 4. The served hard cap remains 8. A `--calibrate-concurrency` run MAY still emit a lower value.
 
 AC-47 (`SPEC-023-R018`, default serve context): On a 256 GB M3 Ultra with the pinned Qwen3.6-27B artifact (`head_dim` 256 declared over 24 heads and `hidden_size` 5120, a `layer_types` stack with 16 `full_attention` layers, declared maximum 262,144), `autotune --recommend --apply` without calibration writes `max_context_override: 200000` (the RAM-tier default, the smallest term), never 4,000, and records `recommendation_apply` provenance as the config's `max_context_override_provenance` key. `kv_bytes_per_token` for that config counts 16 layers × 4 KV heads × 256 × 2 × 2. With no declared maximum and unprovable memory fit on a high-memory Mac the value is the RAM-tier default; with a known model bound below it, that bound. The 4,000-token value appears only when the memory-safe term is exactly 4,000 (no spare KV memory after weights and the safety margin). With a `draft_model` configured on the same Mac the apply writes `max_context_override: 120000` (the SPEC-028 draft cap) and `max_concurrency_override: 1`, and serve's spec-decode preflight accepts the written config. For every signed row of `autotune-candidates.json` on 256, 128, and 64 GB Macs (rows whose `min_ram_gb` plus the safety margin fit), the generated pair satisfies `kv_bytes_per_token × context × slots + (min_ram_gb + safety margin) GB ≤ physical memory` and, above one slot, `slots ≤ memoryFitBatchDepth(context)`; signed GLM-4.5-Air on a 256 GB Ultra emits 131,072 tokens × 5 slots (tier constant 8) and the pinned Qwen3.6-27B still emits 200,000 × 8. `models adopt-recommendation` refuses GLM-4.5-Air at 131,072 × 6 on that Mac, and a warm switch to it with 8 configured slots serves the largest context that fits 8 slots.
+
+AC-48 (`SPEC-023-R022`, exclusive model residency): Plain benchmarking
+`autotune --recommend` stops a detected launchd-managed or foreground provider
+before Stage 1 even when `--drain` is absent, fails before probing if the port
+stays open, and restores the provider afterward. Launchd restoration is guarded
+across abrupt CLI exit and an in-process restore error fails the command. An
+applying run never restarts the old foreground model. `--check-only`, `--prefetch`, and
+`--freshness-check` do not invoke the stop/restore path.
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
 

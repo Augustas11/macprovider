@@ -122,7 +122,7 @@ struct AutotuneCommand: AsyncParsableCommand {
     @Flag(help: "Write the final recommendation to config.yaml.")
     var apply = false
 
-    @Flag(help: "Drain an already-running serve process before tuning.")
+    @Flag(help: "Classic autotune: drain a live serve before tuning. `--recommend` always stops a live serve before probing; this flag is not required there.")
     var drain = false
 
     @Flag(help: "After draining a foreground serve process, restart it at exit.")
@@ -195,7 +195,14 @@ struct AutotuneCommand: AsyncParsableCommand {
                 try await runAutotuneRecommendCheckOnly()
                 return
             }
-            try await runAutotuneRecommend()
+            // Paid recommendation loads candidate models into Metal. Stop an
+            // existing provider before Stage 1 so a small-memory Mac never
+            // holds the serving model and the probe model at the same time.
+            // The non-mutating freshness, prefetch, and check-only paths have
+            // already returned above and deliberately do not drain.
+            try await withRecommendLiveServeIsolation(dependencies: dependencies) {
+                try await runAutotuneRecommend()
+            }
             return
         }
 
@@ -914,6 +921,93 @@ struct AutotuneCommand: AsyncParsableCommand {
         _ = try Self.parseKvBitsAxis(kvBitsAxis)
         _ = try Self.parsePositiveIntAxis(maxBatchAxis, flag: "--max-batch-axis")
         _ = try Self.parseMaxContextAxis(maxContextAxis, targetContext: targetContext)
+    }
+
+    /// Runs a benchmarking recommendation with exclusive ownership of the
+    /// provider port and model residency. A launchd guard is armed before
+    /// bootout so abrupt process death still restores service.
+    func withRecommendLiveServeIsolation(
+        dependencies: AutotuneRunDependencies,
+        startLaunchdRestoreGuard: (ProviderConflict) throws -> ProviderLaunchdRestoreGuard? = {
+            try ProviderDrainer().startLaunchdCrashRestoreGuard(for: $0)
+        },
+        operation: () async throws -> Void
+    ) async throws {
+        let conflict = try dependencies.detectConflict()
+        guard conflict != .none else {
+            try await operation()
+            return
+        }
+
+        let interruptFlag = dependencies.makeInterruptFlag()
+        let signalSources = dependencies.installSignalSources(interruptFlag)
+        defer { _ = signalSources }
+
+        let restoreGuard = try startLaunchdRestoreGuard(conflict)
+        dependencies.writeStderr(
+            "autotune: stopping the live provider first so this Mac does not load two models at once.\n"
+        )
+
+        var primaryError: Error?
+        var drainCompleted = false
+        var portStillOpen = false
+        do {
+            let drainResult = try dependencies.drainConflict(conflict, port, TimeInterval(drainGrace))
+            drainCompleted = true
+            if case .portStillOpen(let heldPort) = drainResult {
+                portStillOpen = true
+                primaryError = ValidationError(
+                    "live provider still occupies port \(heldPort) after stop; quit Malibu and retry"
+                )
+            } else if interruptFlag.isSet() {
+                primaryError = ExitCode(130)
+            } else {
+                do {
+                    try await operation()
+                } catch {
+                    primaryError = error
+                }
+            }
+        } catch {
+            primaryError = ValidationError("could not stop the live provider: \(error)")
+        }
+
+        // A returned launchd drain result means bootout succeeded even when
+        // the port stayed occupied. Restore in that partial-stop case too.
+        // For a foreground process, only restart after a fully drained result;
+        // restarting while its port is still held could create a duplicate.
+        let shouldRestore: Bool
+        switch conflict {
+        case .none:
+            shouldRestore = false
+        case .launchdManaged:
+            shouldRestore = drainCompleted
+        case .foreground:
+            shouldRestore = drainCompleted && !portStillOpen
+        }
+
+        var restoreError: Error?
+        if shouldRestore {
+            do {
+                _ = try dependencies.restoreConflict(conflict, !apply)
+                restoreGuard?.dismiss()
+            } catch {
+                restoreError = error
+            }
+        }
+
+        if let restoreError {
+            if let primaryError {
+                dependencies.writeStderr("autotune recommend failed before provider restoration: \(primaryError)\n")
+            }
+            dependencies.writeStderr(
+                "autotune: could not restart the provider after recommend: \(restoreError)\n"
+            )
+            throw restoreError
+        }
+        if let primaryError {
+            throw primaryError
+        }
     }
 
     private func runAutotuneRecommend() async throws {

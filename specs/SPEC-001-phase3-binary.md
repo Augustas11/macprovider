@@ -1,6 +1,16 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.24 (2026-09-24, continuous-batching queue pressure on the WS relay)
+**Version:** 1.9.25 (2026-09-27, operator resume fresh-session recovery)
+
+**Change log v1.9.25 (2026-09-27, operator resume fresh-session recovery):**
+Adds `SPEC-001-R004`. A provider paused by the local operator is represented to
+the coordinator as unavailable. Because provider-originated ready updates are
+intentionally unable to recover an unavailable session, resume closes the
+accepted WebSocket after publishing `operator_resumed`; the ordinary reconnect
+loop performs a fresh authenticated registration and buyer-serving readiness is
+confirmed on that new session. This preserves the coordinator's anti-laundering
+rule for faulted/breaker-held sessions while removing the restart requirement
+reported in #1755.
 
 **Change log v1.9.24 (2026-09-24, continuous-batching queue pressure on the WS
 relay):** FR-27 maps the two SPEC-038 pre-admission queue-pressure outcomes
@@ -3402,6 +3412,16 @@ here as owner of last resort:
 - `pause_ack` / `resume_ack` — `{type, accepted: bool}` plus optional
   `reason` (string).
 - `shutdown_request` — `{type, grace_seconds: int}`; `shutdown_ack` — `{type}`.
+
+**SPEC-001-R004 — Operator resume crosses a fresh-session boundary.** After a
+successful local `resume_request`, the CLI MUST make the local provider ready,
+publish an `operator_resumed` state update when an accepted coordinator session
+exists, and close that accepted WebSocket so the ordinary reconnect loop performs
+a fresh authenticated registration. It MUST NOT treat the old session's
+provider-originated `ready` update as buyer-serving proof. Buyer-serving
+readiness and any pending admission-boundary finalization MUST be derived from
+the newly accepted session. Resume without an accepted coordinator session
+MUST remain locally successful and reconnect through the ordinary loop.
 
 #### 6.9.3. Detection precedence
 
