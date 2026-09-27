@@ -103,7 +103,14 @@ def cases_by_id(doc):
 
 def request_id(doc, run_id, candidate_id, case_id, repetition):
     name = "{}/v{}/{}/{}/{}/{}".format(doc["workload_id"], doc["version"], run_id, candidate_id, case_id, repetition)
-    return str(uuid.uuid5(REQUEST_ID_NAMESPACE, name))
+    # Deterministic, but emitted as a version-4 UUID: the gateway only preserves
+    # a buyer X-Request-ID whose version nibble is 4 (router isUUIDLike). A v5 id
+    # is replaced with a fresh gateway id, so the benchmark could never join its
+    # manifest rows to the durable coordinator/gateway settlement evidence. The
+    # bytes are still derived from the pinned REQUEST_ID_NAMESPACE + name, so the
+    # mapping stays reproducible run-over-run.
+    digest = hashlib.sha256(REQUEST_ID_NAMESPACE.bytes + name.encode()).digest()
+    return str(uuid.UUID(bytes=digest[:16], version=4))
 
 
 def request_body(doc, case, model):

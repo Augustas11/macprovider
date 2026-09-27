@@ -84,6 +84,13 @@ class WorkloadDefinitionTests(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
         self.assertEqual(ids, [r["request_id"] for r in again])
         self.assertFalse(set(ids) & {r["request_id"] for r in other})
+        # The gateway only preserves a buyer X-Request-ID whose version nibble is
+        # 4 (router isUUIDLike); a non-v4 id is replaced and the manifest can no
+        # longer join to durable settlement rows. Every request id must be v4.
+        for rid in ids:
+            self.assertEqual(len(rid), 36)
+            self.assertEqual(rid[14], "4", rid)
+            self.assertIn(rid[19].lower(), "89ab", rid)
 
     def test_plan_rejects_bad_run_and_candidate_ids(self):
         with self.assertRaises(ValueError):
