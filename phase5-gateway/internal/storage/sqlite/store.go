@@ -113,6 +113,8 @@ func (s *Store) Ping(ctx context.Context) error {
 //	v13 — SPEC-041 relay-blind accounting metadata and independent clear caps.
 //	v14 — SPEC-022 v0.2.0 (#1690): usage_events accepts pool_operator_attested
 //	     rows from coordinator finality for SPEC-042 Trusted Pool attempts.
+//	v15 — SPEC-022 long-held settlement backlog state: due/backoff,
+//	     first-not-found, and operator-review metadata for attempts.
 //
 // At Open time the store reads the current applied version; if it
 // exceeds this constant the binary is older than the DB and refuses
@@ -123,7 +125,7 @@ func (s *Store) Ping(ctx context.Context) error {
 // Operators rolling back the gateway binary on a DB at a higher
 // version must restore /var/lib/macprovider/gateway.db from the
 // pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
-const maxKnownSchemaVersion = 14
+const maxKnownSchemaVersion = 15
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -197,6 +199,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, settlementFallbackCandidatesDDL); err != nil {
 		return err
 	}
+	if err := s.ensureSettlementReconcileBacklogColumns(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureRelayBlindAccountingColumns(ctx); err != nil {
 		return err
 	}
@@ -254,6 +259,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(14, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(15, ?)", now); err != nil {
 		return err
 	}
 	return nil
@@ -359,6 +367,65 @@ func (s *Store) ensureRelayBlindAccountingColumns(ctx context.Context) error {
 				return fmt.Errorf("add %s.%s: %w", table, column.name, err)
 			}
 		}
+	}
+	return nil
+}
+
+func (s *Store) ensureSettlementReconcileBacklogColumns(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_quota_active_settlement_hold_created
+		ON quota_reservations(created_at)
+		WHERE status = 'active' AND settlement_hold = 1`); err != nil {
+		return fmt.Errorf("create active settlement hold backlog index: %w", err)
+	}
+	columns := []struct {
+		name string
+		ddl  string
+	}{
+		{"attempt_count", "INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0)"},
+		{"first_attempt_at", "TEXT NOT NULL DEFAULT ''"},
+		{"last_attempt_at", "TEXT NOT NULL DEFAULT ''"},
+		{"first_not_found_at", "TEXT NOT NULL DEFAULT ''"},
+		{"last_result", "TEXT NOT NULL DEFAULT ''"},
+		{"next_attempt_after", "TEXT NOT NULL DEFAULT ''"},
+		{"operator_review", "INTEGER NOT NULL DEFAULT 0 CHECK (operator_review IN (0, 1))"},
+		{"operator_review_reason", "TEXT NOT NULL DEFAULT ''"},
+	}
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info(settlement_reconcile_attempts)")
+	if err != nil {
+		return err
+	}
+	existing := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[name] = true
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, column := range columns {
+		if existing[column.name] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE settlement_reconcile_attempts ADD COLUMN "+column.name+" "+column.ddl); err != nil {
+			return fmt.Errorf("add settlement_reconcile_attempts.%s: %w", column.name, err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_settlement_reconcile_next_attempt
+		ON settlement_reconcile_attempts(operator_review, next_attempt_after)`); err != nil {
+		return fmt.Errorf("create settlement_reconcile_attempts next-attempt index: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(15, ?)`,
+		encodeTime(time.Now().UTC())); err != nil {
+		return fmt.Errorf("stamp schema_migrations v15 with settlement reconcile backlog metadata: %w", err)
 	}
 	return nil
 }
@@ -1835,6 +1902,44 @@ func (s *Store) ListSettlementHeldReservations(ctx context.Context, limit int) (
 	return out, rows.Err()
 }
 
+func (s *Store) ListDueSettlementHeldReservations(ctx context.Context, limit int, now time.Time) ([]storage.ActiveReservation, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT qr.account_id, qr.request_id, COALESCE(wrm.session_id, ''), qr.window_date,
+			qr.reserved_tokens, qr.expires_at, qr.created_at,
+			qr.requested_privacy_mode, qr.effective_privacy_outcome, qr.relay_blind_envelope_digest,
+			qr.relay_blind_key_record_digest, qr.relay_blind_kid, qr.relay_blind_provider_binding_digest,
+			qr.input_token_upper_bound, qr.max_output_tokens
+		FROM quota_reservations qr
+		LEFT JOIN wallet_session_request_map wrm
+			ON wrm.account_id = qr.account_id AND wrm.request_id = qr.request_id
+		LEFT JOIN settlement_reconcile_attempts sra
+			ON sra.account_id = qr.account_id AND sra.request_id = qr.request_id AND sra.reservation_created_at = qr.created_at
+		WHERE qr.status = 'active' AND qr.settlement_hold = 1
+			AND COALESCE(sra.operator_review, 0) = 0
+			AND (COALESCE(sra.next_attempt_after, '') = '' OR sra.next_attempt_after <= ?)
+		ORDER BY COALESCE(sra.attempt_sequence, 0) ASC, qr.expires_at ASC, qr.created_at ASC
+		LIMIT ?`, encodeTime(now.UTC()), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]storage.ActiveReservation, 0, limit)
+	for rows.Next() {
+		reservation, err := scanSettlementHeldReservation(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, reservation)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) LookupSettlementHeldReservation(ctx context.Context, accountID, requestID string) (storage.ActiveReservation, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT qr.account_id, qr.request_id, COALESCE(wrm.session_id, ''), qr.window_date,
@@ -1874,6 +1979,101 @@ func scanSettlementHeldReservation(row settlementHeldReservationScanner) (storag
 	reservation.CreatedAt = decodeTime(createdAt)
 	reservation.RelayBlind = relayBlindFromValues(requested, effective, envelope, keyRecord, kid, providerBinding, inputCap, outputCap)
 	return reservation, nil
+}
+
+func (s *Store) MarkSettlementHoldOperatorReview(ctx context.Context, reservation storage.ActiveReservation, reason string, reviewedAt time.Time) error {
+	if reservation.CreatedAt.IsZero() {
+		return storage.ErrReservationNotFound
+	}
+	if reason == "" || len(reason) > 128 || strings.TrimSpace(reason) != reason {
+		return fmt.Errorf("invalid settlement operator-review reason")
+	}
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var active int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM quota_reservations
+		WHERE account_id = ? AND request_id = ? AND created_at = ? AND status = 'active' AND settlement_hold = 1`,
+		reservation.AccountID, reservation.RequestID, encodeTime(reservation.CreatedAt.UTC())).Scan(&active); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.ErrReservationNotFound
+		}
+		return err
+	}
+	reviewed := encodeTime(reviewedAt.UTC())
+	if _, err := tx.ExecContext(ctx, `
+		INSERT OR REPLACE INTO settlement_reconcile_attempts
+			(account_id, request_id, reservation_created_at, attempt_count, first_attempt_at, last_attempt_at,
+				first_not_found_at, last_result, next_attempt_after, operator_review, operator_review_reason)
+		VALUES(?, ?, ?,
+			COALESCE((SELECT attempt_count FROM settlement_reconcile_attempts
+				WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?), 0),
+			COALESCE((SELECT first_attempt_at FROM settlement_reconcile_attempts
+				WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?), ''),
+			COALESCE((SELECT last_attempt_at FROM settlement_reconcile_attempts
+				WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?), ''),
+			COALESCE((SELECT first_not_found_at FROM settlement_reconcile_attempts
+				WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?), ''),
+			?,
+			'',
+			1,
+			?)`,
+		reservation.AccountID, reservation.RequestID, encodeTime(reservation.CreatedAt.UTC()),
+		reservation.AccountID, reservation.RequestID, encodeTime(reservation.CreatedAt.UTC()),
+		reservation.AccountID, reservation.RequestID, encodeTime(reservation.CreatedAt.UTC()),
+		reservation.AccountID, reservation.RequestID, encodeTime(reservation.CreatedAt.UTC()),
+		reservation.AccountID, reservation.RequestID, encodeTime(reservation.CreatedAt.UTC()),
+		"operator_review_"+reason+"@"+reviewed,
+		reason); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) SettlementHoldBacklogStats(ctx context.Context, now time.Time) (storage.SettlementHoldBacklogStats, error) {
+	var stats storage.SettlementHoldBacklogStats
+	var oldestActive, oldestDue, oldestReview string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT
+			COUNT(*),
+			COALESCE(MIN(qr.created_at), ''),
+			COALESCE(SUM(CASE WHEN COALESCE(sra.operator_review, 0) = 0
+				AND (COALESCE(sra.next_attempt_after, '') = '' OR sra.next_attempt_after <= ?) THEN 1 ELSE 0 END), 0),
+			COALESCE(MIN(CASE WHEN COALESCE(sra.operator_review, 0) = 0
+				AND (COALESCE(sra.next_attempt_after, '') = '' OR sra.next_attempt_after <= ?) THEN qr.created_at END), '')
+		FROM quota_reservations qr
+		LEFT JOIN settlement_reconcile_attempts sra
+			ON sra.account_id = qr.account_id AND sra.request_id = qr.request_id AND sra.reservation_created_at = qr.created_at
+		WHERE qr.status = 'active' AND qr.settlement_hold = 1`,
+		encodeTime(now.UTC()), encodeTime(now.UTC())).
+		Scan(&stats.TotalActiveHeld, &oldestActive, &stats.DueActiveHeld, &oldestDue)
+	if err != nil {
+		return storage.SettlementHoldBacklogStats{}, err
+	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*), COALESCE(MIN(qr.created_at), '')
+		FROM quota_reservations qr
+		JOIN settlement_reconcile_attempts sra
+			ON sra.account_id = qr.account_id AND sra.request_id = qr.request_id AND sra.reservation_created_at = qr.created_at
+		WHERE qr.status = 'active' AND qr.settlement_hold = 1 AND sra.operator_review = 1`).
+		Scan(&stats.OperatorReviewHeld, &oldestReview); err != nil {
+		return storage.SettlementHoldBacklogStats{}, err
+	}
+	stats.OldestActiveHeldCreated = decodeTime(oldestActive)
+	stats.OldestDueHeldCreated = decodeTime(oldestDue)
+	stats.OldestReviewHeldCreated = decodeTime(oldestReview)
+	if !stats.OldestActiveHeldCreated.IsZero() {
+		stats.OldestActiveHeldAge = now.Sub(stats.OldestActiveHeldCreated)
+	}
+	if !stats.OldestDueHeldCreated.IsZero() {
+		stats.OldestDueActiveHeldAge = now.Sub(stats.OldestDueHeldCreated)
+	}
+	if !stats.OldestReviewHeldCreated.IsZero() {
+		stats.OldestReviewHeldAge = now.Sub(stats.OldestReviewHeldCreated)
+	}
+	return stats, nil
 }
 
 func (s *Store) AcquireConcurrency(ctx context.Context, req storage.ConcurrencyRequest) (storage.ConcurrencyDecision, error) {

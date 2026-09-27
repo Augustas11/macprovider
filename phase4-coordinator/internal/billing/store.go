@@ -135,6 +135,13 @@ func (s *Store) migrate(ctx context.Context) error {
 		return fmt.Errorf("sqlite journal_mode must be WAL, got %s", mode)
 	}
 	if _, err := s.db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS billing_maintenance_runs (
+    name TEXT PRIMARY KEY,
+    completed_at_utc TEXT NOT NULL
+);`); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS ledger_request_credits (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     request_id TEXT NOT NULL,
@@ -943,42 +950,60 @@ func (s *Store) ensureLedgerRequestCreditPromptSplitColumns(ctx context.Context)
 			return err
 		}
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE ledger_request_credits SET charged_prompt_tokens = prompt_tokens WHERE charged_prompt_tokens IS NULL AND prompt_tokens IS NOT NULL`); err != nil {
-		return err
-	}
 	if !cols["provider_reported_prompt_tokens"] {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE ledger_request_credits ADD COLUMN provider_reported_prompt_tokens INTEGER NULL CHECK(provider_reported_prompt_tokens IS NULL OR provider_reported_prompt_tokens >= 0)`); err != nil {
 			return err
 		}
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE ledger_request_credits SET provider_reported_prompt_tokens = prompt_tokens WHERE provider_reported_prompt_tokens IS NULL AND prompt_tokens IS NOT NULL`); err != nil {
-		return err
-	}
-	return nil
+	return s.runBillingMaintenanceOnce(ctx, "ledger_request_credit_prompt_split_backfill_v1", func(ctx context.Context) error {
+		if _, err := s.db.ExecContext(ctx, `UPDATE ledger_request_credits SET charged_prompt_tokens = prompt_tokens WHERE charged_prompt_tokens IS NULL AND prompt_tokens IS NOT NULL`); err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE ledger_request_credits SET provider_reported_prompt_tokens = prompt_tokens WHERE provider_reported_prompt_tokens IS NULL AND prompt_tokens IS NOT NULL`); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func (s *Store) normalizeBillingTimeTextColumns(ctx context.Context) error {
-	for _, target := range []struct {
-		table  string
-		column string
-	}{
-		{"request_log", "ts_utc"},
-		{"ledger_request_credits", "ts_utc"},
-		{"ledger_request_credits", "created_at_utc"},
-		{"ledger_request_credits", "updated_at_utc"},
-		{"ledger_provider_identity_snapshots", "created_at_utc"},
-		{"ledger_config_snapshots", "effective_at_utc"},
-		{"ledger_config_audit_events", "created_at_utc"},
-		{"ledger_payout_ready", "window_start_utc"},
-		{"ledger_payout_ready", "window_end_utc"},
-		{"ledger_payout_ready", "created_at_utc"},
-		{"ledger_payout_ready", "updated_at_utc"},
-	} {
-		if err := s.normalizeTimeColumn(ctx, target.table, target.column); err != nil {
-			return err
+	return s.runBillingMaintenanceOnce(ctx, "billing_time_text_normalization_v1", func(ctx context.Context) error {
+		for _, target := range []struct {
+			table  string
+			column string
+		}{
+			{"request_log", "ts_utc"},
+			{"ledger_request_credits", "ts_utc"},
+			{"ledger_request_credits", "created_at_utc"},
+			{"ledger_request_credits", "updated_at_utc"},
+			{"ledger_provider_identity_snapshots", "created_at_utc"},
+			{"ledger_config_snapshots", "effective_at_utc"},
+			{"ledger_config_audit_events", "created_at_utc"},
+			{"ledger_payout_ready", "window_start_utc"},
+			{"ledger_payout_ready", "window_end_utc"},
+			{"ledger_payout_ready", "created_at_utc"},
+			{"ledger_payout_ready", "updated_at_utc"},
+		} {
+			if err := s.normalizeTimeColumn(ctx, target.table, target.column); err != nil {
+				return err
+			}
 		}
+		return nil
+	})
+}
+
+func (s *Store) runBillingMaintenanceOnce(ctx context.Context, name string, fn func(context.Context) error) error {
+	var done int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM billing_maintenance_runs WHERE name = ?`, name).Scan(&done); err == nil {
+		return nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
 	}
-	return nil
+	if err := fn(ctx); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT OR REPLACE INTO billing_maintenance_runs(name, completed_at_utc) VALUES(?, ?)`, name, time.Now().UTC().Format(time.RFC3339Nano))
+	return err
 }
 
 type timeColumnUpdate struct {
