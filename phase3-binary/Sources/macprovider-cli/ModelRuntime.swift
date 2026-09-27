@@ -1935,13 +1935,34 @@ actor ModelRuntime: ModelRuntimeServing {
         modelID: String?,
         configJSONData: Data?
     ) -> PagedKVRuntimeModelCapabilities {
+        // SPEC-039 FR-PKV12 mixed-layout exception allowlist. Each entry is an
+        // exact (serving identity → required `config.json` architecture) pair
+        // whose hybrid Mamba(recurrent)+KVCacheSimple(attention) topology has
+        // been measured to pass the token-parity and batched row-isolation
+        // gates on the packaged runtime. This stays an explicit per-identity
+        // allowlist by design: the SPEC forbids expanding hybrid support by
+        // family/architecture guesswork. That is not hypothetical here — the
+        // qwen3.5 (dense + MoE) and qwen3.8-27b hybrids share these exact
+        // architecture strings yet FAIL batched token parity (serial vs batched
+        // token hashes diverge), so paging them would bill wrong tokens as
+        // correct; only the qwen3.6 pair is bit-exact. Non-hybrid Qwen models do
+        // not appear here; they are admitted by the base `KVCacheSimple`
+        // allowlist. Adding a future measured hybrid is one entry here plus the
+        // matching SPEC-039 line. The runtime parity/MoE probes still gate every
+        // attach; this only lets a measured hybrid be evaluated instead of
+        // rejected outright as an unproven `mixed` class.
+        let hybridArchitectureAllowlist: [String: String] = [
+            "qwen/qwen3.6-27b": "Qwen3_5ForConditionalGeneration",
+            "qwen/qwen3.6-35b-a3b": "Qwen3_5MoeForConditionalGeneration",
+        ]
         let architectureVerified: Bool = {
-            guard modelID?.lowercased() == "qwen/qwen3.6-27b",
+            guard let id = modelID?.lowercased(),
+                  let expectedArchitecture = hybridArchitectureAllowlist[id],
                   let configJSONData,
                   let object = try? JSONSerialization.jsonObject(with: configJSONData) as? [String: Any],
                   let architectures = object["architectures"] as? [String]
             else { return false }
-            return architectures.contains("Qwen3_5ForConditionalGeneration")
+            return architectures.contains(expectedArchitecture)
         }()
         return PagedKVRuntimeModelCapabilities(
             modelFamily: Self.pagedKVModelFamily(modelID: modelID, configJSONData: configJSONData),

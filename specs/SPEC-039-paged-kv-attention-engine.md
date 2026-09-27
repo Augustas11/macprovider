@@ -1,7 +1,14 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.6
-Status: draft (normative design). v0.1.6 lets a retained or positive-cache-credit
+Version: v0.1.7
+Status: draft (normative design). v0.1.7 makes the FR-PKV12 mixed-layout
+exception an explicit per-identity allowlist and adds the measured MoE hybrid
+`qwen/qwen3.6-35b-a3b` (`Qwen3_5MoeForConditionalGeneration`) alongside the
+dense `qwen/qwen3.6-27b` entry. Support is never generalized by family or
+architecture prefix: the same-architecture `qwen3.5` (dense + MoE) and
+`qwen3.8-27b` hybrids were measured and FAILED batched token parity, so they
+stay excluded.
+v0.1.6 lets a retained or positive-cache-credit
 hybrid request batch only where the SPEC-038 FR-CB10 accepted tuple covering it
 records `cached_turns_accepted` (the SPEC-038 AC-26 recurrent-handoff proof).
 v0.1.5 names how the FR-PKV13 overhead
@@ -543,14 +550,33 @@ all runtime measurement gates pass.
 At model attach, the engine MUST inspect the runtime `newCache()` class and the
 `kv_bits` setting against a **paged allowlist**. The v1 allowlist is:
 **non-rotating contiguous `KVCacheSimple`-equivalent, fp16, `kv_bits` unset.**
-The sole mixed-layout exception requires the exact `qwen/qwen3.6-27b` serving
-identity, `Qwen3_5ForConditionalGeneration` in the artifact's `config.json`
-architectures, and a runtime cache topology measured as `MambaCache` on
-recurrent layers and `KVCacheSimple` on full-attention layers. The engine MUST preserve each row's
-Mamba convolution and delta state independently, page only attention KV, and
-pass token-parity and multi-step batched row-isolation gates, including row
-leave and join, before advertising
-the exact tuple. This exception covers first-turn/cache-miss requests only;
+Mixed-layout support is an **explicit per-identity allowlist**, never a
+family- or architecture-prefix generalization: an unmeasured variant (for
+example a sliding-window Qwen layout) paged through the v0.1 gather-feeds-SDPA
+path would produce wrong-but-billed tokens, so each admitted hybrid tuple MUST
+be individually measured before it is added. The v1 allowlist is:
+
+- `qwen/qwen3.6-27b` with `Qwen3_5ForConditionalGeneration` in the artifact's
+  `config.json` architectures (dense hybrid decoder);
+- `qwen/qwen3.6-35b-a3b` with `Qwen3_5MoeForConditionalGeneration` in the
+  artifact's `config.json` architectures (MoE hybrid decoder; the paged path
+  MUST additionally pass cross-row MoE expert-dispatch isolation).
+
+Membership is per identity and evidence-gated, never per architecture: the
+`qwen/qwen3.5-27b`, `qwen/qwen3.5-35b-a3b`, and `qwen/qwen3.8-27b` hybrids carry
+these same architecture strings but FAILED measured batched token parity (their
+serial and batched greedy token hashes diverge) and are therefore excluded. A
+same-architecture identity is admitted only after it individually passes the
+parity and isolation gates on the packaged runtime.
+
+Each allowlisted identity requires a runtime cache topology measured as
+`MambaCache` on recurrent layers and `KVCacheSimple` on full-attention layers.
+The engine MUST preserve each row's Mamba convolution and delta state
+independently, page only attention KV, and pass token-parity and multi-step
+batched row-isolation gates, including row leave and join, before advertising
+the exact tuple. Adding a further hybrid identity to this allowlist is a
+reviewed SPEC change plus the matching per-identity code entry, gated on that
+tuple passing the same measured parity and isolation proof. This exception covers first-turn/cache-miss requests only;
 retained or positive-cache-credit hybrid requests MUST stay on the serial path
 unless the SPEC-038 FR-CB10 accepted tuple covering the requested runtime tuple
 records `cached_turns_accepted: true`. That grant is the recurrent-state
