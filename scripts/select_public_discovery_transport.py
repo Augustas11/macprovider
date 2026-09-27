@@ -13,6 +13,8 @@ import pathlib
 import re
 import sys
 
+from discovery_listing_page_state import transport_sequence
+
 
 RETRY = 2
 FAIL = 1
@@ -34,6 +36,8 @@ def main(argv: list[str]) -> int:
     if expected_match is None:
         return fail("invalid expected discovery transport tag")
     expected_sequence = int(expected_match.group(1))
+    if transport_sequence({"tag_name": expected_transport}) is None:
+        return fail("invalid expected discovery transport tag")
     releases = json.loads(pathlib.Path(releases_path).read_text(encoding="utf-8"))
     if not isinstance(releases, list):
         return fail("public discovery listing is not an array")
@@ -43,10 +47,9 @@ def main(argv: list[str]) -> int:
         if not isinstance(release, dict):
             continue
         tag_name = str(release.get("tag_name", ""))
-        match = re.fullmatch(r"release-discovery-v1-([1-9][0-9]*)", tag_name)
-        if match is None:
+        sequence = transport_sequence(release)
+        if sequence is None:
             continue
-        sequence = int(match.group(1))
         candidates.append((sequence, release))
         if tag_name == expected_transport:
             expected_release = release

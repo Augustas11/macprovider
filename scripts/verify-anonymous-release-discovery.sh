@@ -47,9 +47,27 @@ listing_attempts="${MACPROVIDER_DISCOVERY_LISTING_ATTEMPTS:-15}"
 listing_retry_seconds="${MACPROVIDER_DISCOVERY_LISTING_RETRY_SECONDS:-2}"
 [[ "$listing_attempts" =~ ^[1-9][0-9]*$ ]] || die "invalid discovery listing attempt budget"
 [[ "$listing_retry_seconds" =~ ^[1-9][0-9]*$ ]] || die "invalid discovery listing retry interval"
+# Walk the listing exactly as the CLI does (SPEC-020-R001): numbered pages of
+# 100, at most 10, stopping at the first page holding a transport or at a short
+# page. The selector then sees only the page the client would select from.
+fetch_client_visible_listing_page() {
+  local page state max_pages
+  max_pages="$(python3 "$root/scripts/discovery_listing_page_state.py" --max-pages)"
+  for page in $(seq 1 "$max_pages"); do
+    curl "${github_api_curl_args[@]}" "$api/releases?per_page=100&page=$page" -o "$work/releases.json"
+    state="$(python3 "$root/scripts/discovery_listing_page_state.py" "$work/releases.json")" ||
+      die "public discovery listing page $page is invalid"
+    case "$state" in
+      transport | end) return 0 ;;
+      next) ;;
+      *) die "unexpected discovery listing page state" ;;
+    esac
+  done
+  die "no discovery transport within the client-visible listing bound"
+}
 listing_attempt=1
 while true; do
-  curl "${github_api_curl_args[@]}" "$api/releases?per_page=100" -o "$work/releases.json"
+  fetch_client_visible_listing_page
   set +e
   python3 "$root/scripts/select_public_discovery_transport.py" \
     "$work/releases.json" \
