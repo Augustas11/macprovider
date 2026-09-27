@@ -78,7 +78,7 @@ Probed 2026-09-25 about 10:20Z (`/healthz`, catalog routes and read-only host ch
 | Field | Value |
 |---|---|
 | Coordinator | **v1.8.200** @ `ca809589`. Applied 2026-09-25 about 10:03Z by the signed updater, then the full `deploy-pearl-vps.sh` (DEPLOY_EXIT 0, exact-byte canary OK) |
-| Gateway | **v1.8.200** (`gateway.db` schema 14 from #1719; `coordinator.require_settlement_trailers` off) |
+| Gateway | **v1.8.200** (`gateway.db` schema 14 from #1719; `coordinator.require_settlement_trailers: true` since 2026-09-25 about 10:21Z, runbook §9 step 2a) |
 | Release | [Pearl runtime v1.8.200](https://github.com/Augustas11/macprovider/releases/tag/v1.8.200), run [36120742231](https://github.com/Augustas11/macprovider/actions/runs/36120742231); updater transaction `1790330246291811116-v1.8.200` |
 | `recommended_binary_version` | 1.8.123 (CLI train owns this) |
 | Includes | Everything on `main` through `ca809589`: #1738 (90-day stats overview), #1741 (#1721: CLI and stats sidecars from the release), #1744 (#1735 catalog), #1719 (#1690 engine-agnostic Trusted Pools), and the 2026-09-25 deploy-tooling fixes: #1746, `c6c32692`, `ee061fc3`, `4936a062`, `ca809589` (see the note below) |
@@ -134,6 +134,25 @@ The canary Mac mp-26592d… now runs signed CLI candidate v1.8.195, whose payloa
 
 Renew the Tier-2 catalog before 2026-12-25. An expiry-only re-sign stays in
 the freshness lane.
+
+**First artifact-feed activation (GGUF), pending — held.** #1754 put the first
+GGUF catalog artifact in the source: `gguf-q4-k-m` for
+`meta-llama/llama-3.2-3b-instruct`, the verified
+`bartowski/Llama-3.2-3B-Instruct-GGUF@5ab33fa9` Q4_K_M file. It also added the
+17 measured MLX `size_bytes`. `catalog-release.py status` passes every check
+except "current release_id is new". Activation is a **full-provider-app**
+lane cut:
+1. Choose a new `release_id`.
+2. Cut and sign with the operator-held `streamvc-autotune-static-v4` key.
+3. Deploy with `autotune.catalog_artifacts_path` and the additive
+   `/v1/catalog-artifacts` nginx route.
+
+A coordinator older than the #1719 build cannot start on a feed that carries
+`file_path`, so every coordinator rollback afterwards needs runbook §9 step 4a.
+CLIs before #1754 (SPEC-023 v0.19.1) reject a feed with the GGUF Hugging Face
+tuple as `catalog_artifact_feed_integrity_failure`. That fails closed for
+artifact-derived features only, but the CLI train should ship a #1754-bearing
+candidate first. Not started: the user holds Pearl changes.
 
 The scheduled feed renewal on 2026-09-23 **failed closed**, with no mutation. The
 renewal shipped only `catalog-release.py` to Pearl, so the under-lock
