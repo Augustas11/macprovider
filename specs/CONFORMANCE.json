@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.24",
+      "version": "1.9.25",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.20.0",
+      "version": "v0.20.1",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1537,6 +1537,25 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "SPEC-001-R003 freezes category-aware manifest declarations and exact flat-status catalog-economics v1/v2 trios, exact read/run/cancel grammar, bounded attached-worker output, exit statuses, refresh/action-worker isolation, and the byte-exact production-boundary matrix. The v2 implementation and built-CLI-through-production-Malibu integration evidence remain pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-001-R004",
+      "spec_id": "SPEC-001",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:func resumeByOperator()"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/CoordinatorClientTests.swift:testOperatorResumeClosesAcceptedSessionSoFreshRegistrationCanRestoreBuyerServing"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1755",
+        "rationale": "SPEC-001 v1.9.25 requires operator resume to close the old unavailable coordinator session and recover through a fresh authenticated registration. The CLI implementation and regression test are present; a released CLI plus live pause/resume/buyer-serving journey is still required before promotion."
       }
     },
     {
@@ -3059,6 +3078,30 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1737",
         "rationale": "SPEC-023 v0.19.0 (SPEC-023-R021): models import adopts a signed snapshot from a local directory or mirror tree with no network access. Implemented and unit-tested; physical import and self-test evidence exists, but the released production supply journey remains pending."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R022",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:func withRecommendLiveServeIsolation("
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneCommandTests.swift:testRecommendDrainsLiveServeWithoutDrainFlag",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneCommandTests.swift:testRecommendDoesNotDrainWhenNoLiveServe",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneCommandTests.swift:testRecommendFailsClosedIfDrainLeavesPortOpenAndRestoresLaunchd",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneCommandTests.swift:testRecommendRestoreRestartsForegroundWhenNotApplying",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneCommandTests.swift:testRecommendRestoreDoesNotRestartForegroundAfterApply",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneCommandTests.swift:testRecommendRestoreFailureOverridesSuccessfulRecommendation"
+      ],
+      "journeys": [],
+      "evidence": [],
+      "gap": {
+        "verdict": "CODE_BUG",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1723",
+        "rationale": "SPEC-023 v0.20.1 requires benchmarking recommend runs to stop a live provider before Stage 1 and restore it afterward while leaving read/download-only recommendation modes non-mutating. The CLI implementation and unit tests are present; a released CLI plus physical Malibu/live-serve recommendation run is still required before promotion."
       }
     },
     {

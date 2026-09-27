@@ -4779,35 +4779,27 @@ actor CoordinatorClient {
             return .accepted
         }
 
-        guard lifecycleOperationID != nil, coordinatorSessionAccepted else {
+        guard coordinatorSessionAccepted else {
             return .accepted
         }
-        if await waitForCoordinatorServingCapability() {
-            _ = try? recordLifecycleTransition(
-                to: .servingBuyers,
-                reasonCode: "operator_resume_buyer_serving_confirmed",
-                compatibilitySetID: installedCompatibilitySetID(),
-                writer: .operatorCommand,
-                operationID: operationID,
-                operatorPaused: false
-            )
-            // A provider may restart into a durable paused state while an
-            // installer-owned update transaction is awaiting buyer-serving
-            // proof. Resume supplies that proof, so it must cross the same
-            // commit/credential-cleanup boundary as ordinary admission.
-            await finalizeAdmissionBoundaryAfterServingProof(
-                successReason: "operator_resume_serving_capability_confirmed"
-            )
-        } else {
+        // The coordinator deliberately refuses provider-originated `ready`
+        // transitions from `unavailable`; otherwise a faulted provider could
+        // launder itself back into routing. Operator pause uses that same
+        // unavailable state, so resume must cross the coordinator's safe
+        // recovery boundary: a fresh authenticated registration. Closing this
+        // accepted socket lets the existing reconnect loop re-authenticate and
+        // re-register without weakening the coordinator's anti-laundering rule.
+        if lifecycleOperationID != nil {
             _ = try? recordLifecycleTransition(
                 to: .locallyReadyConnecting,
-                reasonCode: "operator_resume_readiness_unconfirmed",
+                reasonCode: "operator_resume_reconnect_requested",
                 compatibilitySetID: installedCompatibilitySetID(),
                 writer: .operatorCommand,
                 operationID: operationID,
                 operatorPaused: false
             )
         }
+        closeWebSocketAfterKeepaliveFailure()
         return .accepted
     }
 

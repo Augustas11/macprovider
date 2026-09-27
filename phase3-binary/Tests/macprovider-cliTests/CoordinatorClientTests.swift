@@ -343,6 +343,37 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(states, ["draining", "unavailable", "ready"])
     }
 
+    func testOperatorResumeClosesAcceptedSessionSoFreshRegistrationCanRestoreBuyerServing() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let socket = FakeProviderWebSocketTask(receiveResults: [])
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        await client.setWebSocketForTest(socket)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-v1",
+            "heartbeat_interval_s": 30,
+        ])
+
+        let pauseResult = await client.pauseByOperator()
+        XCTAssertEqual(pauseResult, .accepted)
+        let resumeResult = await client.resumeByOperator()
+        XCTAssertEqual(resumeResult, .accepted)
+
+        let frames = await recorder.frames
+        XCTAssertTrue(frames.contains { frame in
+            frame["type"] as? String == "state_update" &&
+                frame["reason"] as? String == "operator_resumed"
+        })
+        XCTAssertGreaterThan(socket.cancelCountSnapshot(), 0)
+        let snapshot = await status.snapshot()
+        XCTAssertEqual(snapshot.status, .ready)
+    }
+
     func testAcceptedStateUpdateAlsoPublishesDiagnosticStatus() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(

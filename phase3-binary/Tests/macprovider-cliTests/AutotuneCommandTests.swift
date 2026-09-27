@@ -516,6 +516,173 @@ final class AutotuneCommandTests: XCTestCase {
         XCTAssertEqual(operations, ["state", "evidence", "config", "summary:applied test summary"])
     }
 
+    func testRecommendDrainsLiveServeWithoutDrainFlag() async throws {
+        let command = try AutotuneCommand.parse(["--recommend"])
+        var drainCalls: [(ProviderConflict, Int)] = []
+        var restoreCalls: [(ProviderConflict, Bool)] = []
+        var operationCalls = 0
+        var guardDismissals = 0
+        var events: [String] = []
+        var stderr = ""
+        var deps = AutotuneRunDependencies.production
+        deps.installSignalSources = { _ in
+            events.append("signals")
+            return nil
+        }
+        deps.detectConflict = { .launchdManaged(pid: 42) }
+        deps.drainConflict = { conflict, port, _ in
+            events.append("drain")
+            drainCalls.append((conflict, port))
+            return .drained
+        }
+        deps.restoreConflict = { conflict, restartForeground in
+            events.append("restore")
+            restoreCalls.append((conflict, restartForeground))
+            return .restored
+        }
+        deps.writeStderr = { stderr += $0 }
+
+        try await command.withRecommendLiveServeIsolation(
+            dependencies: deps,
+            startLaunchdRestoreGuard: { _ in
+                events.append("guard")
+                return ProviderLaunchdRestoreGuard {
+                    events.append("dismiss")
+                    guardDismissals += 1
+                }
+            }
+        ) {
+            events.append("operation")
+            operationCalls += 1
+        }
+        XCTAssertEqual(drainCalls.count, 1)
+        XCTAssertEqual(drainCalls[0].0, .launchdManaged(pid: 42))
+        XCTAssertEqual(drainCalls[0].1, 18_080)
+        XCTAssertEqual(restoreCalls.count, 1)
+        XCTAssertEqual(restoreCalls[0].0, .launchdManaged(pid: 42))
+        XCTAssertEqual(operationCalls, 1)
+        XCTAssertEqual(guardDismissals, 1)
+        XCTAssertEqual(events, ["signals", "guard", "drain", "operation", "restore", "dismiss"])
+        XCTAssertTrue(stderr.contains("stopping the live provider first"))
+    }
+
+    func testRecommendDoesNotDrainWhenNoLiveServe() async throws {
+        let command = try AutotuneCommand.parse(["--recommend"])
+        var drainCalls = 0
+        var operationCalls = 0
+        var deps = AutotuneRunDependencies.production
+        deps.detectConflict = { .none }
+        deps.drainConflict = { _, _, _ in
+            drainCalls += 1
+            return .drained
+        }
+
+        try await command.withRecommendLiveServeIsolation(
+            dependencies: deps,
+            startLaunchdRestoreGuard: { _ in nil }
+        ) {
+            operationCalls += 1
+        }
+        XCTAssertEqual(drainCalls, 0)
+        XCTAssertEqual(operationCalls, 1)
+    }
+
+    func testRecommendFailsClosedIfDrainLeavesPortOpenAndRestoresLaunchd() async throws {
+        let command = try AutotuneCommand.parse(["--recommend"])
+        var restoreCalls = 0
+        var operationCalls = 0
+        var deps = AutotuneRunDependencies.production
+        deps.installSignalSources = { _ in nil }
+        deps.detectConflict = { .launchdManaged(pid: 9) }
+        deps.drainConflict = { _, _, _ in .portStillOpen(port: 18_080) }
+        deps.restoreConflict = { conflict, _ in
+            XCTAssertEqual(conflict, .launchdManaged(pid: 9))
+            restoreCalls += 1
+            return .restored
+        }
+
+        do {
+            try await command.withRecommendLiveServeIsolation(
+                dependencies: deps,
+                startLaunchdRestoreGuard: { _ in nil }
+            ) {
+                operationCalls += 1
+            }
+            XCTFail("expected occupied provider port to fail closed")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("18080"), String(describing: error))
+        }
+        XCTAssertEqual(restoreCalls, 1)
+        XCTAssertEqual(operationCalls, 0)
+    }
+
+    func testRecommendRestoreRestartsForegroundWhenNotApplying() async throws {
+        let command = try AutotuneCommand.parse(["--recommend"])
+        var restored: (ProviderConflict, Bool)?
+        var deps = AutotuneRunDependencies.production
+        deps.installSignalSources = { _ in nil }
+        deps.detectConflict = { .foreground(pid: 7, argv: ["macprovider-cli", "serve"]) }
+        deps.drainConflict = { _, _, _ in .drained }
+        deps.restoreConflict = { conflict, restartForeground in
+            restored = (conflict, restartForeground)
+            return .restored
+        }
+        let conflict = ProviderConflict.foreground(pid: 7, argv: ["macprovider-cli", "serve"])
+        try await command.withRecommendLiveServeIsolation(
+            dependencies: deps,
+            startLaunchdRestoreGuard: { _ in nil },
+            operation: {}
+        )
+        XCTAssertEqual(restored?.0, conflict)
+        XCTAssertEqual(restored?.1, true)
+    }
+
+    func testRecommendRestoreDoesNotRestartForegroundAfterApply() async throws {
+        let command = try AutotuneCommand.parse(["--recommend", "--apply"])
+        var restored: (ProviderConflict, Bool)?
+        var deps = AutotuneRunDependencies.production
+        deps.installSignalSources = { _ in nil }
+        deps.detectConflict = { .foreground(pid: 42, argv: ["macprovider-cli", "serve"]) }
+        deps.drainConflict = { _, _, _ in .drained }
+        deps.restoreConflict = { conflict, restartForeground in
+            restored = (conflict, restartForeground)
+            return .restored
+        }
+        try await command.withRecommendLiveServeIsolation(
+            dependencies: deps,
+            startLaunchdRestoreGuard: { _ in nil },
+            operation: {}
+        )
+        XCTAssertEqual(restored?.0, .foreground(pid: 42, argv: ["macprovider-cli", "serve"]))
+        XCTAssertEqual(restored?.1, false)
+    }
+
+    func testRecommendRestoreFailureOverridesSuccessfulRecommendation() async throws {
+        let command = try AutotuneCommand.parse(["--recommend"])
+        var guardDismissals = 0
+        var deps = AutotuneRunDependencies.production
+        deps.installSignalSources = { _ in nil }
+        deps.detectConflict = { .launchdManaged(pid: 42) }
+        deps.drainConflict = { _, _, _ in .drained }
+        deps.restoreConflict = { _, _ in
+            throw NSError(domain: "test", code: 17)
+        }
+
+        do {
+            try await command.withRecommendLiveServeIsolation(
+                dependencies: deps,
+                startLaunchdRestoreGuard: { _ in
+                    ProviderLaunchdRestoreGuard { guardDismissals += 1 }
+                },
+                operation: {}
+            )
+            XCTFail("expected restore failure")
+        } catch {
+            XCTAssertEqual((error as NSError).code, 17)
+        }
+        XCTAssertEqual(guardDismissals, 0)
+    }
+
     private static func appliedConfig() -> ConfigApplier.AppliedConfig {
         ConfigApplier.AppliedConfig(
             backupPath: URL(fileURLWithPath: "/tmp/config.yaml.bak"),
