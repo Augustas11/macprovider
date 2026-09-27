@@ -1,6 +1,6 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.20.1
+version: v0.20.2
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-09-27
@@ -46,6 +46,59 @@ lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-
   the generator emit it. The rollout rule is unchanged: no release publishes
   the tuple until the generator implements it and every consumer reading that
   release is a v0.16.0 consumer. No schema or matching-rule change.
+- **v0.20.2 (2026-09-27)** — Full-economics payout ranking (#1734 Step 4/5).
+  Registers new requirement **`SPEC-023-R023`** (§4, acceptance criterion
+  AC-49) and amends the v0.5 payout-first §4 Score-A `raw_score` payout term
+  (the change-log line beginning "Rank by provider payout, not buyer
+  throughput"; that rule owns no requirement ID, and R006/R007/R008 are the
+  intake, RAM-class, and authoring rules respectively). That rule made the
+  payout term `completion_rate_per_mtok × provider_share`: completion credits
+  only, and it never applied `global_multiplier_ppm`. Live coding-agent traffic
+  bills prompt and cached-prompt tokens alongside completion, so a
+  completion-only rank underweights models whose earnings come substantially
+  from prompt tokens and ignores the release-global multiplier entirely. The
+  Score-A payout term becomes the provider's full economics — completion plus
+  prompt today, with the cached-prompt term wired but dormant at C = 0.0:
+
+  ```text
+  payout = (completion_rate_per_mtok + R × effective_prompt_rate)
+         × global_multiplier
+         × provider_share
+  effective_prompt_rate = (1 − C) × prompt_rate_per_mtok
+                        + C × prompt_cache_hit_rate_per_mtok
+  global_multiplier     = global_multiplier_ppm / 1_000_000
+  provider_share        = provider_share_bps / 10_000
+  ```
+
+  Two named SPEC-023 constants:
+  - **R** (prompt:completion token ratio) `= 0.5`. A representative
+    coding-agent ratio: a live 9-case coding-agent workload measured prompt
+    14,472 : completion 26,880 tokens ≈ 0.538, rounded to a stable documented
+    `0.5`. R is a compile-time constant; recommendation stays deterministic,
+    installed-only, and non-mutating — no live per-run benchmark number is ever
+    threaded into the score.
+  - **C** (prompt cache-hit fraction) `= 0.0` for this revision. The
+    cached-prompt economics path is wired and present (agent traffic reuses a
+    system-prompt prefix), but conservatively weighted at zero pending a
+    measured cache-hit-rate signal, so `effective_prompt_rate ==
+    prompt_rate_per_mtok` today.
+
+  BOTH `global_multiplier_ppm` and `provider_share_bps` are applied to the
+  payout term (the multiplier was previously ignored). Ranking is on the
+  unrounded internal economics; the existing 6-decimal rounding is unchanged
+  and still applied only at the `raw_score` / earning-potential JSON sinks.
+  `measured_sustained_tps` and `max(demand_weight, cold_start_floor)` are
+  multiplicative inputs to `raw_score` (not merely tiebreakers); rows with a
+  genuinely equal unrounded `raw_score` fall through to `measured_sustained_tps`,
+  then `max(demand_weight, cold_start_floor)`, then model key ascending; the §4.1 RAM-class demotion, §5 eligibility
+  gates, tiebreak ordering, and every JSON output field are unchanged.
+  Ranking uses this unrounded payout term throughout: the internal ordering
+  score is compared unrounded, so two rows whose true economics differ by less
+  than the 6-decimal JSON precision do not collapse into a rounded tie
+  (`SPEC-023-R023`). Selector-policy only: reprices nothing, adds no catalog
+  model, needs no signed-feed republish, and requires no coordinator/gateway
+  (Go) change. AC-9 (highest `raw_score` eligible row) is unaffected in shape;
+  the new acceptance criterion is AC-49.
 
 - **v0.19.0 (2026-09-27)** — Catalog bytes from any host, verified only by
   the signed hash (#1737). Provider Macs in mainland China cannot reach
@@ -1737,15 +1790,27 @@ this requirement lets the lane sign, re-sign, or edit a feed on the host.
 
 ## 4. Formula (updated v0.12.0)
 
-**Score-A (shipped CLI, through v0.10.3):** unchanged:
+**Score-A (shipped CLI):** payout term amended by v0.20.2 (#1734) to full
+unrounded economics — completion plus prompt (and cached-prompt behind C) with
+both `global_multiplier_ppm` and `provider_share_bps` applied; the throughput,
+demand-floor, and supply-deficit multipliers are unchanged:
 
 ```text
-raw_score = completion_rate_per_mtok × provider_share × measured_sustained_tps
+payout    = (completion_rate_per_mtok + R × effective_prompt_rate)
+          × global_multiplier × provider_share
+          # R = 0.5, C = 0.0 (see v0.20.2 change log)
+          # effective_prompt_rate = (1 − C) × prompt_rate_per_mtok
+          #                       + C × prompt_cache_hit_rate_per_mtok
+          # global_multiplier = global_multiplier_ppm / 1_000_000
+          # provider_share    = provider_share_bps / 10_000
+raw_score = payout × measured_sustained_tps
           × max(demand_weight, cold_start_floor)
           × effective_supply_deficit_multiplier
 ```
 
 Rewriting published `demand_weight` is **not** a 16 GB guarantee: `cold_start_floor = 0.15` lifts any global max-norm `< 0.15` back to 0.15, so Llama 8B and 3B can flatten again. #1483 is the Score-A belt.
+
+**SPEC-023-R023 — Full-economics payout ranking.** The Score-A `raw_score` payout term MUST be the provider's full unrounded economics `(completion_rate_per_mtok + R × effective_prompt_rate) × global_multiplier × provider_share`, where `R` (the prompt:completion token ratio, a compile-time constant `= 0.5`) and `C` (the prompt cache-hit fraction, `= 0.0` for this revision) are named constants, `effective_prompt_rate = (1 − C) × prompt_rate_per_mtok + C × prompt_cache_hit_rate_per_mtok`, `global_multiplier = global_multiplier_ppm / 1_000_000`, and `provider_share = provider_share_bps / 10_000`. Both `global_multiplier_ppm` and `provider_share_bps` MUST be applied. Ranking MUST compare this payout (and the derived `raw_score`) on its **unrounded** value: two rows whose true economics differ by less than the 6-decimal JSON precision MUST NOT collapse into a rounded tie. The 6-decimal rounding is applied ONLY at the JSON-visible `raw_score` / earning-potential output fields, never to the ordering key. The full `raw_score` is this payout term multiplied by `measured_sustained_tps`, `max(demand_weight, cold_start_floor)`, and the bounded supply-deficit multiplier — throughput and demand are multiplicative score inputs, not merely tiebreakers. Ranking MUST compare the unrounded `raw_score`; rows with a genuinely equal unrounded `raw_score` then break by `measured_sustained_tps`, then `max(demand_weight, cold_start_floor)`, then model key ascending (the §4.1 RAM-class demotion is the only override of this order). At `C = 0.0` the cached-prompt term is present but contributes nothing; a future revision setting `C > 0` from a measured cache-hit signal activates it without a formula change. Selector-policy only: this reprices nothing and requires no signed-feed or coordinator change.
 
 **Score-B (FeedSchema-B CLI, later belt):** MUST NOT activate until FeedSchema-B has published `or_completion_tokens_30d` on every recommendable row (same bridge CLI + coordinator parser + previous-stable gate as AC-MKT-9). Until then the shipped CLI remains Score-A. When Score-B is active it ranks §4 `eligible_rows` using published `or_completion_tokens_30d`. If Score-B is active and that field is missing on any `eligible_row`, fail closed (do not 0-fill, do not emit `1/|n|`).
 
@@ -1811,7 +1876,7 @@ Displayed candidate capacity is a per-token throughput estimate:
 
 ### 4.1 RAM-class recommendation rule (v0.11.0 / #1483)
 
-The §4 `raw_score` is `completion_rate_per_mtok × provider_share × measured_sustained_tps × max(demand_weight, cold_start_floor) × effective_supply_deficit_multiplier` — throughput is a first-order multiplicative term (§4). The small-dense onboarding lane is priced at a single `$0.027/M` completion parity across RAM classes on purpose: Llama 3.2 3B (Entry 116, the 8 GB onboarding SKU), Llama 3.1 8B (RESEARCH_227), and Qwen3-8B (P2-02) all pay `completion_rate_per_mtok = 27000`. With payout equal and the supply-deficit multiplier at its `1.0` default for rows with no supply data, the score reduces to `tps × demand_weight`. On a 16 GB Mac the 3 GB SKU runs roughly twice the tokens/s of a dense 8B row, and that throughput advantage dominates even the 8B row's *higher* buyer demand weight (Llama 3.1 8B `demand_weight = 0.45` vs Llama 3.2 3B `0.42`), so a pure argmax hands a 16 GB Mac the 8 GB onboarding SKU. That is wrong: the 8 GB SKU exists so 8 GB Macs receive a paid recommendation (Entry 116 / SPEC-003), not as the default for a Mac with headroom for a full dense 8B row.
+The §4 `raw_score` is `payout × measured_sustained_tps × max(demand_weight, cold_start_floor) × effective_supply_deficit_multiplier`, where `payout = (completion_rate_per_mtok + R × effective_prompt_rate) × global_multiplier × provider_share` (v0.20.2 `SPEC-023-R023`; R = 0.5, C = 0.0 so `effective_prompt_rate = prompt_rate_per_mtok` today) — throughput is a first-order multiplicative term (§4). The small-dense onboarding lane is priced at a single `$0.027/M` completion parity across RAM classes on purpose: Llama 3.2 3B (Entry 116, the 8 GB onboarding SKU), Llama 3.1 8B (RESEARCH_227), and Qwen3-8B (P2-02) all pay `completion_rate_per_mtok = 27000`, and — sharing the same small-dense class — they also carry equal `prompt_rate_per_mtok` and `prompt_cache_hit_rate_per_mtok` and the release-global `global_multiplier`/`provider_share`, so their FULL payout is equal, not merely their completion rate. With full payout equal and the supply-deficit multiplier at its `1.0` default for rows with no supply data, the score reduces to `tps × demand_weight`. On a 16 GB Mac the 3 GB SKU runs roughly twice the tokens/s of a dense 8B row, and that throughput advantage dominates even the 8B row's *higher* buyer demand weight (Llama 3.1 8B `demand_weight = 0.45` vs Llama 3.2 3B `0.42`), so a pure argmax hands a 16 GB Mac the 8 GB onboarding SKU. That is wrong: the 8 GB SKU exists so 8 GB Macs receive a paid recommendation (Entry 116 / SPEC-003), not as the default for a Mac with headroom for a full dense 8B row.
 
 This is a selector-policy rule, not a rate-card or catalog change. It reprices nothing and admits no new model; it only constrains which already-eligible, already-priced row becomes the paid default on 16 GB-class hardware.
 
@@ -1999,7 +2064,7 @@ Schema rules:
 - `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` are USD/M rates for the selected recommendation, derived from rate-card credits and `usd_per_million_credits`. Both are `null` when `recommended_model` is `null`.
 - `serve_config` is `null` in recommendation-only output when no apply-ready serving configuration has been attached. When present, it is the exact model/knob payload the installer can apply for the selected recommendation; donor outcomes keep `donor_mode = true`.
 - Without `--calibrate-context`, `serve_config.max_context_override` is the `SPEC-023-R018` default (§9.3, v0.15.2): `min(RAM-tier default, declared model maximum, memory-safe context, SPEC-028 draft cap when a draft model is configured)`, where an unknown bound drops out and the 4,000-token floor never stands in for one. `serve_config.max_concurrency_override` is then bounded jointly with it (R018 item 9): at most `memoryFitBatchDepth` at that context. `--apply` records that the written value was generated in the config's `max_context_override_provenance` key (SPEC-001 v1.9.23 FR-20b).
-- `candidates[]` default length is at most 5. It is sorted by eligibility first, then `raw_score` descending, then `model` lexicographically for deterministic ties. It MAY contain one additional donor fallback candidate when `donor_fallback_explanation` is present and the fallback is outside the default 5 rows.
+- `candidates[]` default length is at most 5. It is sorted by eligibility first, then by the unrounded ordering score descending (the §4 `raw_score` economics compared before the 6-decimal JSON rounding, so two rows with an identical JSON-visible `raw_score` but different true economics still order by the true value), then `measured_sustained_tps`, then `max(demand_weight, cold_start_floor)`, then `model` lexicographically for deterministic ties; the §4.1 RAM-class demotion is the only override of this order. It MAY contain one additional donor fallback candidate when `donor_fallback_explanation` is present and the fallback is outside the default 5 rows.
 - Candidate `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` are USD display rates from the rate-card row used for that candidate.
 - Top-level `prompt_rate_usd_per_million_tokens` and `completion_rate_usd_per_million_tokens` MUST be finite, non-negative, and equal to the selected candidate's candidate-level rates. When `selected_explanation` is present, they MUST also equal `selected_explanation.rate_signal.prompt_rate_usd_per_million_tokens` and `selected_explanation.rate_signal.completion_rate_usd_per_million_tokens`.
 - `raw_score` is rounded to 6 decimal places in JSON.
@@ -2345,7 +2410,7 @@ AC-7 **[amended v0.5]**: Repeated runs with identical hardware, catalog, rate-ca
 
 AC-8 **[deferred v0.5]**: Diversification distribution across synthetic provider IDs is suspended until supply exceeds demand.
 
-AC-9 **[superseded v0.5]**: The 85% diversification band no longer applies. `recommended_model` is always the highest `raw_score` eligible row unless tiebreakers select among equal payout rows.
+AC-9 **[superseded v0.5]**: The 85% diversification band no longer applies. `recommended_model` is always the highest `raw_score` eligible row unless tiebreakers select among rows with a genuinely equal unrounded `raw_score`.
 
 AC-10: A row with demand `recommendable: false` or candidate `runtime_status != "recommendable"` is never selected as the default recommendation.
 
@@ -2387,7 +2452,7 @@ AC-35: A v5-bridge binary accepts both configured v4 and v5 key IDs, rejects eve
 
 AC-36: A candidate and demand pair with different `version`, `generated_at`, or `policy_version` is rejected as a mixed release.
 
-AC-37: Ranking multiplies provider completion payout, measured TPS, demand floor/weight, and bounded supply-deficit multiplier; an unrelated catalog-row edit does not invalidate stable benchmark evidence for an unchanged row.
+AC-37: Ranking multiplies the provider payout term `(completion_rate_per_mtok + R × effective_prompt_rate) × global_multiplier × provider_share` (v0.20.2 `SPEC-023-R023`), measured TPS, demand floor/weight, and bounded supply-deficit multiplier; an unrelated catalog-row edit does not invalidate stable benchmark evidence for an unchanged row.
 
 AC-38: `/v1/status` reports catalog trust and release identity. `buyer_serving` is emitted only when the model is locally ready, the live catalog is verified, and coordinator admission is active; Malibu update success uses that state rather than transport connectivity alone.
 
@@ -2432,6 +2497,7 @@ stays open, and restores the provider afterward. Launchd restoration is guarded
 across abrupt CLI exit and an in-process restore error fails the command. An
 applying run never restarts the old foreground model. `--check-only`, `--prefetch`, and
 `--freshness-check` do not invoke the stop/restore path.
+  AC-49 (`SPEC-023-R023`, full-economics payout ranking): The Score-A `raw_score` payout term is `(completion_rate_per_mtok + R × effective_prompt_rate) × global_multiplier × provider_share` with `R = 0.5`, `C = 0.0` (`effective_prompt_rate = prompt_rate_per_mtok`), `global_multiplier = global_multiplier_ppm / 1_000_000`, and `provider_share = provider_share_bps / 10_000`. A row with a higher `prompt_rate_per_mtok` but an equal `completion_rate_per_mtok`, equal measured TPS, equal demand, and equal `global_multiplier_ppm` ranks strictly higher than before (prompt economics now enter the score); scaling the whole card's `global_multiplier_ppm` scales every payout term by that factor without changing the eligible order; a row with a nil rate-card row scores `0`. Ranking compares the unrounded ordering score, so two rows whose true economics differ by less than `1e-6` (identical rounded `raw_score`) rank by true economics — the higher true payout wins even against a lower-payout peer with higher TPS — and only rows with a genuinely equal unrounded `raw_score` fall through to the tps → demand → model-key tiebreakers. The 6-decimal rounding is applied only to the JSON-visible `raw_score` / earning-potential fields.
 
 AC-OMLX-1: A row with `bench_gate.provenance.source == "omlx_seeded"` and `runtime_status == "recommendable"` is rejected by catalog validation.
 

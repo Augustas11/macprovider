@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.20.1",
+      "version": "v0.20.2",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -3112,6 +3112,34 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1723",
         "rationale": "SPEC-023 v0.20.1 requires benchmarking recommend runs to stop a live provider before Stage 1 and restore it afterward while leaving read/download-only recommendation modes non-mutating. The CLI implementation and unit tests are present; a released CLI plus physical Malibu/live-serve recommendation run is still required before promotion."
+      }
+    },
+    {
+      "requirement_id": "SPEC-023-R023",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static let payoutPromptCompletionRatio",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:static let payoutPromptCacheHitFraction",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:func recommend(",
+        "phase3-binary/Sources/macprovider-cli/AutotuneRecommend.swift:var orderingScore: Double"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testHigherPromptRateScoresStrictlyHigherAtEqualCompletionRate",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testGlobalMultiplierScalesWholeCardPayoutScores",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testEqualUnroundedScoresTiebreakByTpsThenDemandThenModel",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testUnroundedOrderingScoreBeatsRoundedTieRegardlessOfTps",
+        "phase3-binary/Tests/macprovider-cliTests/AutotuneRecommendTests.swift::testPayoutScoreExactFormulaAndNilRateScoresZero"
+      ],
+      "journeys": [
+        "JOURNEY-PROVIDER-PREBETA-ADMISSION"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1734",
+        "rationale": "SPEC-023 v0.20.2 (SPEC-023-R023): the Score-A raw_score payout term becomes the provider's full unrounded economics (completion + R x effective_prompt_rate) x global_multiplier x provider_share, with named constants R=0.5 and C=0.0 (cached-prompt term present but dormant), and ranking compares the unrounded ordering score so sub-1e-6 differences do not collapse into a rounded tie. Implemented in the CLI recommend engine and covered by unit tests (prompt economics enter ranking, whole-card global-multiplier scaling, unrounded-tie regression, exact-formula and nil-rate=0, tps/demand/model tiebreak on genuinely equal scores). Selector-policy only: reprices nothing, adds no catalog model, needs no signed-feed republish, no coordinator/gateway change. Remains pending until a signed JOURNEY-PROVIDER-PREBETA-ADMISSION result is promoted as evidence, matching sibling SPEC-023-R007."
       }
     },
     {

@@ -2005,6 +2005,339 @@ final class AutotuneRecommendTests: XCTestCase {
         )
     }
 
+    // MARK: - SPEC-023-R023 v0.20.2 full-economics payout ranking (#1734)
+
+    /// Installs a fully-eligible candidate (catalog row, demand row, rate-card
+    /// row, and passing benchmark) into `request`, cloned from `template`.
+    /// Used by the full-economics payout ranking tests below.
+    private func installFullEconomicsCandidate(
+        into request: inout AutotuneRecommendRequest,
+        key: String,
+        template: CandidateCatalog.Row,
+        demand: DemandRank.Row,
+        revisionChar: Character,
+        shaChar: Character,
+        promptRatePerMtok: Int64,
+        promptCacheHitRatePerMtok: Int64? = nil,
+        completionRatePerMtok: Int64,
+        providerShareBPS: Int64 = 9_000,
+        globalMultiplierPPM: Int64,
+        sustainedTPS: Double
+    ) {
+        var candidate = template
+        candidate.modelID = "test/\(key)"
+        candidate.modelRevision = String(repeating: revisionChar, count: 40)
+        candidate.modelSHA256 = String(repeating: shaChar, count: 64)
+        request.candidateCatalog.rows[key] = candidate
+        request.demandRank.rows[key] = demand
+        request.rateCard.rows[key] = RateCardProjection.Row(
+            promptRatePerMtok: promptRatePerMtok,
+            promptCacheHitRatePerMtok: promptCacheHitRatePerMtok,
+            completionRatePerMtok: completionRatePerMtok,
+            providerShareBPS: providerShareBPS,
+            globalMultiplierPPM: globalMultiplierPPM
+        )
+        request.benchmarks[key] = CandidateBenchmark(
+            modelKey: key,
+            sustainedTPS: sustainedTPS,
+            ttftMS: 1,
+            swapDetected: false,
+            thermalThrottleDetected: false,
+            artifactSHA256: candidate.modelSHA256!,
+            modelArtifactPath: "/tmp/\(key)",
+            benchmarkID: "bench-\(key)",
+            generatedAt: request.generatedAt,
+            candidateCatalogSHA256: request.candidateCatalogSHA256,
+            binaryVersion: request.hardware.binaryVersion,
+            modelID: candidate.modelID,
+            hardwareIdentityHash: request.hardware.hardwareIdentityHash
+        )
+    }
+
+    private func emptyEconomicsRequest() throws
+        -> (request: AutotuneRecommendRequest, template: CandidateCatalog.Row, demand: DemandRank.Row) {
+        var request = try makeRequest()
+        let template = try XCTUnwrap(request.candidateCatalog.rows.values.first)
+        let demand = try XCTUnwrap(request.demandRank.rows.values.first)
+        request.candidateCatalog.rows = [:]
+        request.demandRank.rows = [:]
+        request.rateCard.rows = [:]
+        request.benchmarks = [:]
+        return (request, template, demand)
+    }
+
+    /// A row with a HIGHER prompt rate but EQUAL completion rate (and equal
+    /// tps/demand/global-multiplier) must now score strictly higher, proving
+    /// prompt economics entered the ranking. Under the pre-0.20.0
+    /// completion-only rule the two rows tied.
+    func testHigherPromptRateScoresStrictlyHigherAtEqualCompletionRate() throws {
+        var (request, template, demand) = try emptyEconomicsRequest()
+
+        installFullEconomicsCandidate(
+            into: &request,
+            key: "high-prompt",
+            template: template,
+            demand: demand,
+            revisionChar: "1",
+            shaChar: "b",
+            promptRatePerMtok: 400_000,
+            completionRatePerMtok: 900_000,
+            globalMultiplierPPM: 1_000_000,
+            sustainedTPS: 100
+        )
+        installFullEconomicsCandidate(
+            into: &request,
+            key: "low-prompt",
+            template: template,
+            demand: demand,
+            revisionChar: "2",
+            shaChar: "c",
+            promptRatePerMtok: 100_000,
+            completionRatePerMtok: 900_000,
+            globalMultiplierPPM: 1_000_000,
+            sustainedTPS: 100
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+        let highPromptScore = try XCTUnwrap(result.allCandidates.first { $0.model == "high-prompt" }?.rawScore)
+        let lowPromptScore = try XCTUnwrap(result.allCandidates.first { $0.model == "low-prompt" }?.rawScore)
+        XCTAssertGreaterThan(highPromptScore, lowPromptScore)
+        XCTAssertEqual(result.recommendedModel, "high-prompt")
+    }
+
+    /// `global_multiplier_ppm` is a release-GLOBAL value (identical across every
+    /// row of one card), so scaling it means scaling the WHOLE card by one
+    /// factor. Doing so must scale every payout score by exactly that factor
+    /// and leave the eligible order unchanged. Before 0.20.0 the multiplier was
+    /// never applied to the payout term, so scaling the card left scores flat.
+    func testGlobalMultiplierScalesWholeCardPayoutScores() throws {
+        // Build the same two-row card at two whole-card multipliers and compare.
+        func scores(multiplierPPM: Int64) throws -> (a: Double, b: Double, recommended: String?) {
+            var (request, template, demand) = try emptyEconomicsRequest()
+            installFullEconomicsCandidate(
+                into: &request, key: "row-a", template: template, demand: demand,
+                revisionChar: "1", shaChar: "b",
+                promptRatePerMtok: 300_000, completionRatePerMtok: 600_000,
+                globalMultiplierPPM: multiplierPPM, sustainedTPS: 100
+            )
+            installFullEconomicsCandidate(
+                into: &request, key: "row-b", template: template, demand: demand,
+                revisionChar: "2", shaChar: "c",
+                promptRatePerMtok: 100_000, completionRatePerMtok: 300_000,
+                globalMultiplierPPM: multiplierPPM, sustainedTPS: 100
+            )
+            let result = AutotuneRecommendEngine().recommend(request)
+            let a = try XCTUnwrap(result.allCandidates.first { $0.model == "row-a" }?.orderingScore)
+            let b = try XCTUnwrap(result.allCandidates.first { $0.model == "row-b" }?.orderingScore)
+            return (a, b, result.recommendedModel)
+        }
+
+        let base = try scores(multiplierPPM: 1_000_000)   // 1.0x whole card
+        let scaled = try scores(multiplierPPM: 3_000_000) // 3.0x whole card
+
+        // Every payout score scales by the whole-card factor (3x)...
+        XCTAssertEqual(scaled.a, base.a * 3, accuracy: base.a * 1e-9)
+        XCTAssertEqual(scaled.b, base.b * 3, accuracy: base.b * 1e-9)
+        // ...and the order is unchanged (row-a outranks row-b at both scales).
+        XCTAssertGreaterThan(base.a, base.b)
+        XCTAssertGreaterThan(scaled.a, scaled.b)
+        XCTAssertEqual(base.recommended, "row-a")
+        XCTAssertEqual(scaled.recommended, "row-a")
+
+        // Arithmetic-only cross-check (not a production feed shape): the payout
+        // term is (completion + R × prompt) × global_multiplier × provider_share
+        // with C = 0.0, then × tps × demandScore × shortage. Assert row-a's base
+        // ordering score matches that closed form.
+        let R = AutotuneRecommendEngine.payoutPromptCompletionRatio
+        let share = 9_000.0 / 10_000.0
+        let payoutA = (600_000.0 + R * 300_000.0) * 1.0 * share
+        let demandScore = max(base.a / (payoutA * 100.0), 0) // recovered demand×shortage factor
+        XCTAssertEqual(base.a, payoutA * 100.0 * demandScore, accuracy: base.a * 1e-9)
+    }
+
+    /// When two rows have GENUINELY EQUAL unrounded ordering scores, ranking
+    /// must still break the tie by tps, then demand, then model key. Each
+    /// sub-case holds the ordering score exactly equal (compensating payout
+    /// against the varied field) so the fallback is actually exercised, and
+    /// names the rows so a wrong fallback would pick the other row.
+    func testEqualUnroundedScoresTiebreakByTpsThenDemandThenModel() throws {
+        // tps fallback: equal ordering score (payout×tps compensated), higher
+        // tps wins. "z-fast" is lexically last, so a model-key fallback would
+        // pick "a-slow" instead — asserting "z-fast" proves tps decided.
+        do {
+            var (request, template, demand) = try emptyEconomicsRequest()
+            // payout ∝ completion (prompt 0, mult 1, share 0.9).
+            // z-fast: completion 200_000, tps 200 → score ∝ 200_000×200
+            // a-slow: completion 400_000, tps 100 → score ∝ 400_000×100 (equal)
+            installFullEconomicsCandidate(
+                into: &request, key: "z-fast", template: template, demand: demand,
+                revisionChar: "1", shaChar: "b",
+                promptRatePerMtok: 0, completionRatePerMtok: 200_000,
+                globalMultiplierPPM: 1_000_000, sustainedTPS: 200
+            )
+            installFullEconomicsCandidate(
+                into: &request, key: "a-slow", template: template, demand: demand,
+                revisionChar: "2", shaChar: "c",
+                promptRatePerMtok: 0, completionRatePerMtok: 400_000,
+                globalMultiplierPPM: 1_000_000, sustainedTPS: 100
+            )
+            let result = AutotuneRecommendEngine().recommend(request)
+            let fast = try XCTUnwrap(result.allCandidates.first { $0.model == "z-fast" }?.orderingScore)
+            let slow = try XCTUnwrap(result.allCandidates.first { $0.model == "a-slow" }?.orderingScore)
+            XCTAssertEqual(fast, slow, accuracy: max(fast, slow) * 1e-9) // genuine tie
+            XCTAssertEqual(result.recommendedModel, "z-fast")
+        }
+
+        // demand fallback: equal ordering score (payout×demand compensated) and
+        // equal tps, higher demand weight wins. "z-high-demand" lexically last.
+        do {
+            var (request, template, demand) = try emptyEconomicsRequest()
+            var highDemand = demand
+            highDemand.demandWeight = 0.5
+            highDemand.supplyDeficitMultiplier = 1.0
+            var lowDemand = demand
+            lowDemand.demandWeight = 0.4
+            lowDemand.supplyDeficitMultiplier = 1.0
+            // score ∝ completion × demandWeight (tps equal, shortage equal).
+            // z-high-demand: 400_000 × 0.5 == a-low-demand: 500_000 × 0.4
+            installFullEconomicsCandidate(
+                into: &request, key: "z-high-demand", template: template, demand: highDemand,
+                revisionChar: "1", shaChar: "b",
+                promptRatePerMtok: 0, completionRatePerMtok: 400_000,
+                globalMultiplierPPM: 1_000_000, sustainedTPS: 100
+            )
+            installFullEconomicsCandidate(
+                into: &request, key: "a-low-demand", template: template, demand: lowDemand,
+                revisionChar: "2", shaChar: "c",
+                promptRatePerMtok: 0, completionRatePerMtok: 500_000,
+                globalMultiplierPPM: 1_000_000, sustainedTPS: 100
+            )
+            let result = AutotuneRecommendEngine().recommend(request)
+            let high = try XCTUnwrap(result.allCandidates.first { $0.model == "z-high-demand" }?.orderingScore)
+            let low = try XCTUnwrap(result.allCandidates.first { $0.model == "a-low-demand" }?.orderingScore)
+            XCTAssertEqual(high, low, accuracy: max(high, low) * 1e-9) // genuine tie
+            XCTAssertEqual(result.recommendedModel, "z-high-demand")
+        }
+
+        // model fallback: fully equal payout, tps, and demand fall back to the
+        // model key ordering (ascending).
+        do {
+            var (request, template, demand) = try emptyEconomicsRequest()
+            installFullEconomicsCandidate(
+                into: &request, key: "aaa-model", template: template, demand: demand,
+                revisionChar: "1", shaChar: "b",
+                promptRatePerMtok: 200_000, completionRatePerMtok: 400_000,
+                globalMultiplierPPM: 1_000_000, sustainedTPS: 100
+            )
+            installFullEconomicsCandidate(
+                into: &request, key: "zzz-model", template: template, demand: demand,
+                revisionChar: "2", shaChar: "c",
+                promptRatePerMtok: 200_000, completionRatePerMtok: 400_000,
+                globalMultiplierPPM: 1_000_000, sustainedTPS: 100
+            )
+            let result = AutotuneRecommendEngine().recommend(request)
+            let a = try XCTUnwrap(result.allCandidates.first { $0.model == "aaa-model" }?.orderingScore)
+            let z = try XCTUnwrap(result.allCandidates.first { $0.model == "zzz-model" }?.orderingScore)
+            XCTAssertEqual(a, z, accuracy: max(a, z) * 1e-9) // genuine tie
+            XCTAssertEqual(result.recommendedModel, "aaa-model")
+        }
+    }
+
+    /// Regression for the core defect: ranking must compare the UNROUNDED
+    /// ordering score, not the 6-decimal JSON `rawScore`. Two rows land in the
+    /// same rounded6 bucket (identical `rawScore`) but have different true
+    /// economics; the lower-true-score row is given a HIGHER tps. If ranking
+    /// sorted by the rounded value it would tie and the higher-tps row would
+    /// win — the fix must instead pick the higher true score.
+    func testUnroundedOrderingScoreBeatsRoundedTieRegardlessOfTps() throws {
+        var (request, template, demand) = try emptyEconomicsRequest()
+        var flatDemand = demand
+        flatDemand.demandWeight = 1.0            // demandScore = 1.0
+        flatDemand.supplyDeficitMultiplier = 1.0 // shortage = 1.0
+
+        // provider_share = 1.0, global_multiplier = 1.0, prompt = 0, so
+        // ordering score = completion × tps. Both land at rawScore 100.0.
+        // z-true-winner: 2 × 50.0000002 = 100.0000004 (LOWER tps)
+        // a-tps-decoy:   1 × 100.0000003 = 100.0000003 (HIGHER tps)
+        installFullEconomicsCandidate(
+            into: &request, key: "z-true-winner", template: template, demand: flatDemand,
+            revisionChar: "1", shaChar: "b",
+            promptRatePerMtok: 0, completionRatePerMtok: 2,
+            providerShareBPS: 10_000, globalMultiplierPPM: 1_000_000,
+            sustainedTPS: 50.0000002
+        )
+        installFullEconomicsCandidate(
+            into: &request, key: "a-tps-decoy", template: template, demand: flatDemand,
+            revisionChar: "2", shaChar: "c",
+            promptRatePerMtok: 0, completionRatePerMtok: 1,
+            providerShareBPS: 10_000, globalMultiplierPPM: 1_000_000,
+            sustainedTPS: 100.0000003
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+        let winner = try XCTUnwrap(result.allCandidates.first { $0.model == "z-true-winner" })
+        let decoy = try XCTUnwrap(result.allCandidates.first { $0.model == "a-tps-decoy" })
+        // Same rounded6 bucket (the JSON-visible values tie)...
+        XCTAssertEqual(winner.rawScore, decoy.rawScore)
+        // ...but true economics differ and the decoy has the higher tps.
+        XCTAssertGreaterThan(winner.orderingScore, decoy.orderingScore)
+        XCTAssertGreaterThan(decoy.tokensPerSecond, winner.tokensPerSecond)
+        // The higher TRUE score wins despite the lower tps and later model key.
+        XCTAssertEqual(result.recommendedModel, "z-true-winner")
+    }
+
+    /// Exact-formula assertion covering R, provider_share, global_multiplier,
+    /// and the nil-rate → score 0 case.
+    func testPayoutScoreExactFormulaAndNilRateScoresZero() throws {
+        var (request, template, demand) = try emptyEconomicsRequest()
+        var pricedDemand = demand
+        pricedDemand.demandWeight = 0.5            // demandScore = max(0.5, floor) = 0.5
+        pricedDemand.supplyDeficitMultiplier = 1.0 // shortage = 1.0
+
+        installFullEconomicsCandidate(
+            into: &request, key: "priced", template: template, demand: pricedDemand,
+            revisionChar: "1", shaChar: "b",
+            promptRatePerMtok: 100_000, completionRatePerMtok: 300_000,
+            providerShareBPS: 9_000, globalMultiplierPPM: 1_500_000,
+            sustainedTPS: 100
+        )
+
+        // A candidate with catalog + demand + benchmark but NO rate-card row.
+        var noRate = template
+        noRate.modelID = "test/no-rate"
+        noRate.modelRevision = String(repeating: "2", count: 40)
+        noRate.modelSHA256 = String(repeating: "c", count: 64)
+        request.candidateCatalog.rows["no-rate"] = noRate
+        request.demandRank.rows["no-rate"] = pricedDemand
+        request.benchmarks["no-rate"] = CandidateBenchmark(
+            modelKey: "no-rate", sustainedTPS: 100, ttftMS: 1,
+            swapDetected: false, thermalThrottleDetected: false,
+            artifactSHA256: noRate.modelSHA256!, modelArtifactPath: "/tmp/no-rate",
+            benchmarkID: "bench-no-rate", generatedAt: request.generatedAt,
+            candidateCatalogSHA256: request.candidateCatalogSHA256,
+            binaryVersion: request.hardware.binaryVersion, modelID: noRate.modelID,
+            hardwareIdentityHash: request.hardware.hardwareIdentityHash
+        )
+
+        let result = AutotuneRecommendEngine().recommend(request)
+
+        // Exact closed-form for the priced row.
+        let R = AutotuneRecommendEngine.payoutPromptCompletionRatio
+        let C = AutotuneRecommendEngine.payoutPromptCacheHitFraction
+        let effectivePrompt = (1.0 - C) * 100_000.0 + C * 100_000.0 // cache-hit rate defaults to prompt rate
+        let payout = (300_000.0 + R * effectivePrompt) * (1_500_000.0 / 1_000_000.0) * (9_000.0 / 10_000.0)
+        let expected = payout * 100.0 * 0.5 * 1.0
+        let priced = try XCTUnwrap(result.allCandidates.first { $0.model == "priced" })
+        XCTAssertEqual(priced.orderingScore, expected, accuracy: expected * 1e-9)
+        let expectedRounded6 = (expected * 1_000_000).rounded() / 1_000_000
+        XCTAssertEqual(priced.rawScore, expectedRounded6, accuracy: 1e-6)
+
+        // A row with no rate-card row scores exactly 0.
+        let noRateScore = try XCTUnwrap(result.allCandidates.first { $0.model == "no-rate" })
+        XCTAssertEqual(noRateScore.orderingScore, 0)
+        XCTAssertEqual(noRateScore.rawScore, 0)
+    }
+
     func testBuyerTTFTCeilingBlocksPaidRecommendationWithoutUsingCatalogGate() throws {
         var request = try makeRequest()
         request.buyerTTFTCeilingMS = 1_800

@@ -2231,6 +2231,11 @@ struct AutotuneCandidateScore: Equatable {
     var confidence: String
     var why: String
     var rawScore: Double
+    // SPEC-023-R023: the UNROUNDED expected-earnings score used only for
+    // deterministic ranking. `rawScore` above is the 6-decimal JSON-visible
+    // value; ranking must not collapse two rows whose true economics differ by
+    // less than 1e-6 into a rounded tie. Not encoded to JSON.
+    var orderingScore: Double
     var benchGateProvenance: CandidateCatalog.BenchGate.Provenance
     var benchGateDrift: [String]
     var buyerTTFTCeilingExceeded: Bool
@@ -2295,6 +2300,29 @@ struct AutotuneRecommendResult: Equatable {
 struct AutotuneRecommendEngine {
     static let safetyMarginGB = 4
     static let maxBenchmarkAge: TimeInterval = 7 * 24 * 3600
+    // SPEC-023-R023 v0.20.2 full-economics payout ranking (#1734 Step 4/5).
+    // The recommendation raw score ranks by the provider's full unrounded
+    // payout economics, not completion-only throughput:
+    //   payout = (completion_rate + R × effective_prompt_rate)
+    //            × global_multiplier × provider_share
+    // Active economics today are completion + prompt (× multiplier × share);
+    // the cached-prompt term is present but DORMANT because C = 0.0 (see below),
+    // so it contributes nothing until a measured cache-hit signal sets C > 0.
+    // `payoutPromptCompletionRatio` (R) is a representative coding-agent
+    // prompt:completion token ratio. Live 9-case coding-agent benchmark
+    // measured prompt 14,472 : completion 26,880 tokens ≈ 0.538; rounded to a
+    // stable documented 0.5. It is a compile-time constant so recommendation
+    // stays deterministic, installed-only, and non-mutating — live per-run
+    // benchmark numbers are never threaded into the score.
+    static let payoutPromptCompletionRatio = 0.5
+    // `payoutPromptCacheHitFraction` (C) blends the row's cached-prompt rate
+    // into the effective prompt rate for agent traffic that reuses a
+    // system-prompt prefix:
+    //   effective_prompt_rate = (1 - C) × prompt_rate + C × prompt_cache_hit_rate
+    // Set to 0.0 for this revision: the cached-prompt economics path is wired
+    // and present, but conservatively weighted at zero pending a measured
+    // cache-hit-rate signal, so effective_prompt_rate == prompt_rate today.
+    static let payoutPromptCacheHitFraction = 0.0
     // SPEC-023 §4.1 RAM-class recommendation rule (#1483). On a Mac at or above
     // `ramClassRuleMinMemoryGB`, the raw-score pick must not hand back an 8 GB
     // onboarding SKU when a RAM-class-matched dense row is still eligible: the
@@ -2427,7 +2455,24 @@ struct AutotuneRecommendEngine {
             let completionUSD = rateRow?.usdPerMillionCompletionTokens(creditsPerMillion: request.rateCard.usdPerMillionCredits) ?? 0
             let providerShareBPS = rateRow?.providerShareBPS ?? 0
             let providerShare = Double(providerShareBPS) / 10_000.0
-            let payoutScore = Double(rateRow?.completionRatePerMtok ?? 0) * providerShare
+            // SPEC-023-R023 v0.20.2: rank on the full unrounded provider
+            // economics (completion + prompt now; cached-prompt term wired but
+            // dormant while C = 0.0) with BOTH global_multiplier and
+            // provider_share applied. See constants above for R (prompt:
+            // completion ratio) and C (cache-hit fraction). Kept unrounded here;
+            // rounding happens only at the .rounded6 score sinks.
+            let completionRatePerMtok = Double(rateRow?.completionRatePerMtok ?? 0)
+            let promptRatePerMtok = Double(rateRow?.promptRatePerMtok ?? 0)
+            let promptCacheHitRatePerMtok = Double(rateRow?.promptCacheHitRatePerMtok ?? 0)
+            let effectivePromptRate =
+                (1.0 - Self.payoutPromptCacheHitFraction) * promptRatePerMtok
+                + Self.payoutPromptCacheHitFraction * promptCacheHitRatePerMtok
+            let globalMultiplierPPM = rateRow?.globalMultiplierPPM ?? 0
+            let globalMultiplier = Double(globalMultiplierPPM) / 1_000_000.0
+            let payoutScore =
+                (completionRatePerMtok + Self.payoutPromptCompletionRatio * effectivePromptRate)
+                * globalMultiplier
+                * providerShare
             let demandScore = demandAvailable ? max(demand.demandWeight, request.demandRank.coldStartFloor) : 0
             let shortageScore = demandAvailable ? demand.effectiveSupplyDeficitMultiplier : 0
             let expectedEarningsScore = payoutScore * max(tps, 0) * demandScore * shortageScore
@@ -2486,6 +2531,7 @@ struct AutotuneRecommendEngine {
                     buyerTTFTCeilingMS: request.buyerTTFTCeilingMS
                 ),
                 rawScore: expectedEarningsScore.rounded6,
+                orderingScore: expectedEarningsScore,
                 benchGateProvenance: candidate.benchGate.provenance,
                 benchGateDrift: benchGateDrift,
                 buyerTTFTCeilingExceeded: buyerTTFTCeilingExceeded,
@@ -2539,7 +2585,11 @@ struct AutotuneRecommendEngine {
         // The earning-potential tiebreakers shared by the sort and, below, the
         // §6 transcript. Kept identical so the two never diverge.
         func rawScoreOrdering(_ a: AutotuneCandidateScore, _ b: AutotuneCandidateScore) -> Bool {
-            if a.rawScore != b.rawScore { return a.rawScore > b.rawScore }
+            // SPEC-023-R023: rank on the UNROUNDED economics, not the 6-decimal
+            // JSON-visible `rawScore`, so two rows whose true scores differ by
+            // less than 1e-6 do not collapse into a rounded tie and fall through
+            // to the tps/demand/model tiebreakers.
+            if a.orderingScore != b.orderingScore { return a.orderingScore > b.orderingScore }
             if a.tokensPerSecond != b.tokensPerSecond { return a.tokensPerSecond > b.tokensPerSecond }
             let demandA = max(request.demandRank.rows[a.catalogKey]?.demandWeight ?? 0, request.demandRank.coldStartFloor)
             let demandB = max(request.demandRank.rows[b.catalogKey]?.demandWeight ?? 0, request.demandRank.coldStartFloor)
