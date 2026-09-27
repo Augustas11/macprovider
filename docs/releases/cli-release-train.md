@@ -131,6 +131,7 @@ now live on the Studio. Fleet recommendation stays at **1.8.123**.
 | install.sh: fail SSH installs before inaccessible Keychain work | merged | #1627 |
 | install.sh: preserve hardware-evidence retry guidance before rollback | merged | #1631 |
 | Stage Lane A artifact preparation path | merged | #1649 |
+| Build 1 Lane A private OrcaRouter/Qwen staging path: signed complete-revision authority, durable private preparation, scoped 4-bit runtime binding, isolated staging admission, and correlated route/receipt/settlement evidence. Staging-only: no public-catalog publication, production activation, payout, or automatic paid-provider qualification. | merged `3ec784c69` | #1658 (#1642) |
 | Raise FR-KVP9 promotion hard ceiling to 1 GiB for KVS-01b | merged | #1655 |
 | Close proved #1616 recovery-hardening gaps (installed identity, buyer-serving reason, evidence record, dangling launchd repair) | merged | #1668 |
 | Drop slot reservation once the Mac has the chat | merged | #1670 |
@@ -159,12 +160,20 @@ that only touches JSON sources under `phase3-binary/catalog/` still gets a
 row even though it does not change the Swift binary the fleet runs; #1461 and
 #1706 are rows on that basis, each noted as catalog-only above.
 
+#1658 is a compiled provider-CLI change and therefore belongs on this train,
+but its physical proof is deliberately staging-only. The committed evidence
+records staging commit `58ea66f17ac3a057c2f8cd3112f92226ae989101`; merged source
+`3ec784c6977bdbb8367dd29b0866b60393c5011a` passed the full GitHub matrix and
+three-lane audit but was not represented as a physically rerun binary. Its
+private OrcaRouter/Qwen tuple remains absent from the public catalog and does
+not by itself make the next CLI promotable.
+
 #1453 is **CLOSED** (2026-09-19); it does not gate a future promotion. #1569
 is a later CLI. Spec promotion #1583 is not a CLI change.
 
 Coordinator/gateway on live Pearl is **v1.8.191** @ `98e3e4af` (includes
 #1728). Fleet Macs and the coordinator recommendation remain on provider
-binary **1.8.123**. The Studio serves signed private candidate **186**; do
+binary **1.8.123**. The Studio serves signed private candidate **195**; do
 not promote the fleet from this campaign.
 
 #1632 / #1638 / #1639 (coordinator leftover rewrite + gateway R014) are
@@ -251,8 +260,8 @@ and silently never matching.
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` @ `eb30981c` (BYOM #1576 `cdbb0257` + #1591 + #1590 + #1593); CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
 | Status | **Do not promote.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 195 is the Studio-only serving canary. Continuous batching remains off by default after #1757. |
-| Next candidate | None reserved. The cancelled unsigned `v1.8.201` dispatch for #1757 produced no artifacts and did not reach the protected signer; retain `v1.8.201` or later. The next provider candidate must be cut from `main` at or after `95a6563d` so it includes #1762 batched prefill. Do not cut while the in-scope `in progress` rows above are unresolved; cut one combined candidate only after their merge/leave-out decisions and required campaigns are complete. |
-| Merged after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`). Coordinator/gateway settlement recovery continued separately through #1728, now live in Pearl runtime `v1.8.191`. |
+| Next candidate | None reserved. The cancelled unsigned `v1.8.201` dispatch for #1757 produced no artifacts and did not reach the protected signer; retain `v1.8.201` or later. The next provider candidate must be cut from `main` at or after `3ec784c69` so it includes #1762 batched prefill and the merged #1658 Build 1 private staging path. This is a source-inclusion floor, not production activation of the private tuple. Do not cut while the in-scope `in progress` rows above are unresolved; cut one combined candidate only after their merge/leave-out decisions and required campaigns are complete. |
+| Notable merges after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`); #1742 (`03627cda`, shipped in Studio candidate `v1.8.195`); #1757 (`0197f379`, CB qualification closeout); #1745 (`ddaa551b`, China supply path); #1762 (`95a6563d`, batched prefill); #1658 (`3ec784c69`, Build 1 private staging path). Coordinator/gateway settlement recovery continued separately through #1728, live in Pearl runtime `v1.8.191`. |
 | Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build (soak proof; live seats since reduced to one — see Mac Studio serving canary above). |
 
 ## E2E tracks (independent gates)
