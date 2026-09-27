@@ -6118,7 +6118,7 @@
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022NonStreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout",
         "test/integration/buyer_enforce_journey_test.go:TestJourneyBuyerEnforceIsolatedCandidate",
         "phase5-gateway/internal/router/settlement_drop_after_body_test.go:TestDropAfterBodyCoordinator404HoldMovesToOperatorReview",
-        "phase5-gateway/internal/storage/sqlite/settlement_not_found_test.go:TestSettlementFinalityNotFoundFirstTimeSurvivesReconcileAttempts"
+        "phase5-gateway/internal/storage/sqlite/settlement_fallback_test.go:TestSettlementFinalityNotFoundFirstTimeSurvivesReconcileAttempts"
       ],
       "journeys": [
         "JOURNEY-BUYER-ENFORCE"
