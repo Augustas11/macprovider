@@ -62,7 +62,7 @@ must carry that artifact (`runtime_format: gguf`) with the engine in
 the release-bound MLX artifact must list that engine itself: an artifact that
 allows `mlxlm_loopback` admits nothing for oMLX, and the reverse (SPEC-010-R009,
 SPEC-023 §3.7.4). A catalog release that lists `mlxlm_loopback` (v0.17.0)
-or `omlx_loopback` (v0.19.0) must not be cut before every consumer reads it
+or `omlx_loopback` (v0.20.0) must not be cut before every consumer reads it
 (the generator's per-runtime-source consumer floor enforces this).
 
 ## Steps

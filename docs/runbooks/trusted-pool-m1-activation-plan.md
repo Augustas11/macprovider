@@ -3,7 +3,7 @@
 **Status:** prepared 2026-09-25, not executed. **Issue:** #1690 (epic PR #1719,
 merged as `747557cc`). **Governing rules:** SPEC-022 v0.2.4 R-12 / R-12.8,
 SPEC-042 0.0.36 (R001 policy-core/v2, R006 labels, R013, R014), SPEC-023
-v0.19.0 §3.7 (v0.18.3 added the GGUF Hugging Face consumer rule; v0.19.0
+v0.20.0 §3.7 (v0.19.1 added the GGUF Hugging Face consumer rule; v0.20.0
 carries the generator rollout this plan relies on), SPEC-047-R003(iv),
 SPEC-015 0.4.11 R006. **Operator sequence
 this plan follows:** [`trusted-pool-production-launch.md`](trusted-pool-production-launch.md)
@@ -277,7 +277,7 @@ Feed-tuple requirements this satisfies: the closed identity matrix row
 `^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*\.gguf$`; `(hash_algorithm, hash)` is
 unique in the feed; the artifact id is new, so no rebinding.
 
-Rollout state of this tuple (SPEC-023 v0.19.0), checked 2026-09-27:
+Rollout state of this tuple (SPEC-023 v0.20.0), checked 2026-09-27:
 
 - coordinator: implemented (`buyer/catalog_artifacts_feed.go`,
   `artifactIdentityMatrix`, since `747557cc`);

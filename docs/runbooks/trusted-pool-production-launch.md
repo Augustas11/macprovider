@@ -428,8 +428,8 @@ settled, so traffic stops and holds drain first:
    this release strict-decodes the catalog artifact feed and exits at
    startup on `json: unknown field "file_path"` (a gguf artifact with a
    `huggingface_revision` source; SPEC-023 v0.16.0, rollout recorded at
-   v0.18.3) or on `runtime_format "mlx_safetensors" may not allow runtime
-   source "mlxlm_loopback"` (v0.17.0) or `"omlx_loopback"` (v0.19.0), which
+   v0.19.1) or on `runtime_format "mlx_safetensors" may not allow runtime
+   source "mlxlm_loopback"` (v0.17.0) or `"omlx_loopback"` (v0.20.0), which
    would leave no
    coordinator. The check fails closed: it parses the config (YAML or JSON,
    quoted or not) instead of matching text, and any error, a missing
@@ -528,7 +528,7 @@ settled, so traffic stops and holds drain first:
    database, an undecodable snapshot, a runtime class outside `CLASSES`
    (no known build replays it), or no `VERDICT` line means STOP.
    The `m9` target tier is the build that carries SPEC-042 0.0.36's
-   `omlx_loopback` manifest vocabulary and SPEC-023 v0.19.0's corresponding
+   `omlx_loopback` manifest vocabulary and SPEC-023 v0.20.0's corresponding
    artifact-feed runtime source. The manifest history is the only coordinator state an older build
    decodes strictly at start with a runtime class in it. Other tables that
    store `lmstudio_loopback` or `omlx_loopback` strings (route snapshots,
