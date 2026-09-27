@@ -40,6 +40,7 @@ def main():
     s = secret_bundle()
     static = LAB / "static"
     pub = (static / "static-public-key.base64").read_text().strip()
+    static_key_id = json.loads((static / "autotune-candidates.json.sig").read_text())["key_id"]
     tier2_pub = (LAB / "keys" / "tier2.pub").read_text().strip()
     rate_card = json.loads((static / "rate-card.json").read_text())
     rows = {k: {"prompt_credits_per_mtok": v["prompt_rate_per_mtok"],
@@ -61,7 +62,7 @@ def main():
                       "provisional_quota_per_hour": 100000, "provisional_tier_weight": 0.3, "provisional_retention_days": 30},
         "autotune": {
             "enforce_provider_admission": True,
-            "public_keys": {"lab-1690-m6-static": pub},
+            "public_keys": {static_key_id: pub},
             "rate_card_path": str(static / "rate-card.json"), "rate_card_sig_path": str(static / "rate-card.json.sig"),
             "demand_rank_path": str(static / "demand-rank.json"), "demand_rank_sig_path": str(static / "demand-rank.json.sig"),
             "autotune_candidates_path": str(static / "autotune-candidates.json"),

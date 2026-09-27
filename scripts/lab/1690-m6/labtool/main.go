@@ -147,6 +147,11 @@ func staticRelease(args []string) error {
 	mlxModelID := fs.String("mlx-model-id", "", "row model_id (MLX primary repo)")
 	mlxRevision := fs.String("mlx-revision", "", "row model_revision")
 	mlxSHA := fs.String("mlx-sha256", "", "row model_sha256 (MLX primary snapshot-manifest digest)")
+	mlxArtifactID := fs.String("mlx-artifact-id", "mlx-4bit", "primary MLX artifact id")
+	mlxSize := fs.Int64("mlx-size", 1, "primary MLX artifact size in bytes")
+	mlxAuthoritySHA := fs.String("mlx-authority-sha256", "", "optional non-primary complete-revision snapshot digest")
+	mlxAuthoritySize := fs.Int64("mlx-authority-size", 0, "optional complete-revision artifact size in bytes")
+	mlxAuthorityArtifactID := fs.String("mlx-authority-artifact-id", "mlx-revision-snapshot", "complete-revision artifact id")
 	minRAM := fs.Int("min-ram-gb", 8, "row min_ram_gb")
 	ggufSHA := fs.String("gguf-sha256", "", "GGUF file sha256 (macprovider.gguf-file.v1)")
 	ggufSize := fs.Int64("gguf-size", 0, "GGUF size in bytes")
@@ -232,6 +237,31 @@ func staticRelease(args []string) error {
 	}
 	candSum := sha256.Sum256(candBytes)
 	verifiedAt := (*generatedAt)[:10]
+	mlxArtifacts := map[string]any{
+		*mlxArtifactID: map[string]any{
+			"runtime_format": "mlx_safetensors", "hash_algorithm": "macprovider.snapshot-manifest.v1", "hash": *mlxSHA,
+			"quantization": "4bit", "size_bytes": *mlxSize, "min_ram_gb": *minRAM, "allowed_runtime_sources": splitCSV(*mlxSources),
+			"source_ref":          map[string]any{"kind": "huggingface_revision", "repo_id": *mlxModelID, "revision": *mlxRevision},
+			"verification_status": "verified", "verified_at": verifiedAt,
+		},
+		"gguf-q4-k-m": map[string]any{
+			"runtime_format": "gguf", "hash_algorithm": "macprovider.gguf-file.v1", "hash": *ggufSHA,
+			"quantization": "q4_k_m", "size_bytes": *ggufSize, "min_ram_gb": *minRAM, "allowed_runtime_sources": splitCSV(*ggufSources),
+			"source_ref":          map[string]any{"kind": "huggingface_revision", "repo_id": *ggufRepo, "revision": *ggufRevision, "file_path": *ggufFile},
+			"verification_status": "verified", "verified_at": verifiedAt,
+		},
+	}
+	if *mlxAuthoritySHA != "" {
+		if *mlxAuthoritySize <= 0 || *mlxAuthorityArtifactID == "" || *mlxAuthoritySHA == *mlxSHA {
+			return fmt.Errorf("complete-revision artifact requires a distinct digest, positive size, and artifact id")
+		}
+		mlxArtifacts[*mlxAuthorityArtifactID] = map[string]any{
+			"runtime_format": "mlx_safetensors", "hash_algorithm": "macprovider.snapshot-manifest.v1", "hash": *mlxAuthoritySHA,
+			"quantization": "mixed", "size_bytes": *mlxAuthoritySize, "min_ram_gb": *minRAM, "allowed_runtime_sources": splitCSV(*mlxSources),
+			"source_ref":          map[string]any{"kind": "huggingface_revision", "repo_id": *mlxModelID, "revision": *mlxRevision},
+			"verification_status": "verified", "verified_at": verifiedAt,
+		}
+	}
 	artifacts := map[string]any{
 		"candidate_catalog_sha256": hex.EncodeToString(candSum[:]),
 		"generated_at":             *generatedAt,
@@ -240,22 +270,9 @@ func staticRelease(args []string) error {
 		"version":                  *release,
 		"source":                   "operator_curated_autotune_artifact_catalog",
 		"models": map[string]any{*rowKey: map[string]any{
-			"primary_artifact_id": "mlx-4bit",
+			"primary_artifact_id": *mlxArtifactID,
 			"rate_class":          "class-3b",
-			"artifacts": map[string]any{
-				"mlx-4bit": map[string]any{
-					"runtime_format": "mlx_safetensors", "hash_algorithm": "macprovider.snapshot-manifest.v1", "hash": *mlxSHA,
-					"quantization": "4bit", "size_bytes": 1, "min_ram_gb": *minRAM, "allowed_runtime_sources": splitCSV(*mlxSources),
-					"source_ref":          map[string]any{"kind": "huggingface_revision", "repo_id": *mlxModelID, "revision": *mlxRevision},
-					"verification_status": "verified", "verified_at": verifiedAt,
-				},
-				"gguf-q4-k-m": map[string]any{
-					"runtime_format": "gguf", "hash_algorithm": "macprovider.gguf-file.v1", "hash": *ggufSHA,
-					"quantization": "q4_k_m", "size_bytes": *ggufSize, "min_ram_gb": *minRAM, "allowed_runtime_sources": splitCSV(*ggufSources),
-					"source_ref":          map[string]any{"kind": "huggingface_revision", "repo_id": *ggufRepo, "revision": *ggufRevision, "file_path": *ggufFile},
-					"verification_status": "verified", "verified_at": verifiedAt,
-				},
-			},
+			"artifacts":           mlxArtifacts,
 		}},
 	}
 	if *ollamaTag != "" {
@@ -300,8 +317,8 @@ func staticRelease(args []string) error {
 		"    static let bakedRateCardJSON = \"\"\"\n    " + string(rateBytes) + "\n    \"\"\"\n\n" +
 		"    static let generatedTrustedPublicKeys = [\n        \"" + *keyID + "\": \"" + pubB64 + "\",\n    ]\n\n" +
 		"    static let bakedCatalogSignerKeyID: String? = \"" + *keyID + "\"\n\n" +
-		"    static let bakedArtifactFeedBase64: String? = nil\n" +
-		"    static let bakedArtifactFeedSignerKeyID: String? = nil\n}\n"
+		"    static let bakedArtifactFeedBase64: String? = \"" + base64.StdEncoding.EncodeToString(artBytes) + "\"\n" +
+		"    static let bakedArtifactFeedSignerKeyID: String? = \"" + *keyID + "\"\n}\n"
 	if err := os.WriteFile(*swiftOut, []byte(swift), 0o644); err != nil {
 		return err
 	}

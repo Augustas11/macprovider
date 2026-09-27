@@ -14,6 +14,9 @@ final class ModelPreparationPrivateStoreTests: XCTestCase {
             let payload = try StorePayloadFactory.payload(for: kind, root: boot.snapshot.rootLocator)
             try fixture.store.writeRecord(kind: kind, payload: payload, generation: offset + 1, rootLocator: boot.snapshot.rootLocator, lockCustody: boot.lockCustody)
             XCTAssertEqual(try fixture.store.readRecord(kind: kind, rootLocator: boot.snapshot.rootLocator), payload)
+            let withGeneration = try XCTUnwrap(fixture.store.readRecordWithGeneration(kind: kind, rootLocator: boot.snapshot.rootLocator))
+            XCTAssertEqual(withGeneration.payload, payload)
+            XCTAssertEqual(withGeneration.generation, offset + 1)
             let target = fixture.authority.appendingPathComponent("state", isDirectory: true).appendingPathComponent(ModelPreparationPrivateStateEnvelope.expectedTargetLeaf(for: kind))
             try assertMode(target, type: S_IFREG, mode: 0o600, expectedLinkCount: 1)
             let durableData = try Data(contentsOf: target)
@@ -531,6 +534,16 @@ func addReadACLEntry(to url: URL) throws {
     let command = Process()
     command.executableURL = URL(fileURLWithPath: "/bin/chmod")
     command.arguments = ["+a", "\(NSUserName()) allow read", url.path]
+    try command.run()
+    command.waitUntilExit()
+    XCTAssertEqual(command.terminationStatus, 0)
+}
+
+/// The entry macOS stamps on `~`, `~/Library`, and `~/Library/Application Support`.
+func addDenyDeleteACLEntry(to url: URL) throws {
+    let command = Process()
+    command.executableURL = URL(fileURLWithPath: "/bin/chmod")
+    command.arguments = ["+a", "group:everyone deny delete", url.path]
     try command.run()
     command.waitUntilExit()
     XCTAssertEqual(command.terminationStatus, 0)

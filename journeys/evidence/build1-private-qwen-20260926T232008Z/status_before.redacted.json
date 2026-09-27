@@ -1,0 +1,18 @@
+{
+  "capture_kind": "status_before",
+  "captured_at": "2026-09-26T23:28:09Z",
+  "event_id": "lab-1690-m6-provider",
+  "payload": {
+    "endpoint": "GET /v1/status",
+    "model": "orcarouter/Qwen3.8-27B-Uncensored-MLX",
+    "model_hash": "8794a87d2041dce5e915809d9e6c16da709d1763e25c4289f279d929aea88dcd",
+    "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+    "model_loaded": true,
+    "status": "ready",
+    "weights_manifest_algorithm": "macprovider.safetensors-manifest.v1",
+    "weights_manifest_sha256": "74de2a522bb9b670065f3d62a8ec912ff0abacf6570d0f00765b2b47be7cf739"
+  },
+  "payload_jcs_sha256": "ad36a5591e0513db4735a87586e01f1d7976d02c3453e0bcbd97fb20d723e8f2",
+  "schema_version": "macprovider.build1-private-qwen-source-capture.v1",
+  "source_tool": "macprovider-cli-local-status"
+}

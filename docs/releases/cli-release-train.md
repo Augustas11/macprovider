@@ -44,8 +44,10 @@ since 2026-09-24 05:23Z (coordinator + gateway healthz report v1.8.191;
 [35958041007](https://github.com/Augustas11/macprovider/actions/runs/35958041007)).
 `v1.8.192` is the Studio-only CLI candidate from #1716, live on the Studio
 since 2026-09-24 10:08Z (see Active candidate below), so the next Pearl
-coordinator/gateway runtime tag must be `v1.8.193` or later. None of these tags is a provider CLI candidate,
-and none changes `binaryVersion` or the fleet recommendation from 1.8.123.
+coordinator/gateway runtime tag had to be `v1.8.193` or later. Public release
+`v1.8.200` is a Pearl Linux-only bundle with no Darwin provider CLI assets, so
+the next provider CLI candidate must be `v1.8.201` or later. None of these tags
+changes `binaryVersion` or the fleet recommendation from 1.8.123.
 
 ## Current promoted stable
 
@@ -129,6 +131,7 @@ now live on the Studio. Fleet recommendation stays at **1.8.123**.
 | install.sh: fail SSH installs before inaccessible Keychain work | merged | #1627 |
 | install.sh: preserve hardware-evidence retry guidance before rollback | merged | #1631 |
 | Stage Lane A artifact preparation path | merged | #1649 |
+| Build 1 Lane A private OrcaRouter/Qwen staging path: signed complete-revision authority, durable private preparation, scoped 4-bit runtime binding, isolated staging admission, and correlated route/receipt/settlement evidence. Staging-only: no public-catalog publication, production activation, payout, or automatic paid-provider qualification. | merged `3ec784c69` | #1658 (#1642) |
 | Raise FR-KVP9 promotion hard ceiling to 1 GiB for KVS-01b | merged | #1655 |
 | Close proved #1616 recovery-hardening gaps (installed identity, buyer-serving reason, evidence record, dangling launchd repair) | merged | #1668 |
 | Drop slot reservation once the Mac has the chat | merged | #1670 |
@@ -142,6 +145,11 @@ now live on the Studio. Fleet recommendation stays at **1.8.123**.
 | Qwen3.6 continuous batching (greedy rows): batched-output fixes (frozen compiled-decode offset, end-of-turn stops, drain-race hang, ragged rows, per-window host KV copy), Qwen3.6 hybrid cache (#1731), AC-25 lifecycle codes plus bounded admission wait, CB queue pressure relayed as `error_queue_full`, `mlx_cache_limit_mb`, revision-bound FR-CB10 acceptance (`metallib_sha256`, `kernel_identifier`). Default off; live on the Studio as `v1.8.192` | merged `36946873` | #1716 (#1646) |
 | Continuous batching follow-ups: batched sampled rows (AC-6b), Qwen3.6 hybrid cache reuse and batched cached turns (AC-26, flag off by default), in-place paged KV (steady 1.5k × 4 decode 43 → 65 tok/s), bounded decode window while prefilling, provider LaunchAgent `ProcessType` `Standard` (single-stream decode 22 → 38 tok/s). Studio candidate `v1.8.195` | merged `03627cda` | #1742 (#1646) |
 | Continuous-batching qualification closeout: AC-25 receipt and warm-swap lifecycle coverage, durable replay proof, falsifiable Gate A5 counter-evidence, and modeled promotion economics. Production default remains off because Gate A5 did not converge. | merged `0197f379` | #1757 (#1646) |
+| China supply path: release self-update mirror, pinned Python bootstrap mirror, content-addressed model mirror/import verification, sanitized rejected-mirror diagnostics, and signed-manifest transfer bounds. The production Qwen3 8B origin is seeded; the reviewed signed Darwin release, public installer/release mirror, and #1756 mainland hardware run remain gates. | merged `ddaa551b` | #1745 (#1737, #1756) |
+| Malibu app credential handoff no longer races stdout capture. | in progress | #1747 |
+| Signed provider release discovery pages past newer Pearl-only releases instead of treating the newest repository tag as the CLI release. | in progress | #1753 |
+| Trusted-pool external-runtime follow-up: LM Studio/oMLX engine selection, GGUF catalog feed, disconnect recovery, and production journey repairs. | in progress | #1754 (#1690) |
+| Compatible-row batched prefill with bounded prompt/decode headroom. Release eligibility remains gated on the isolated Studio campaign. | merged `95a6563d` | #1762 (#1758) |
 | Node-operator UX (#1689): honest `status --advanced` (readiness layers, probe-vs-sustained TPS, context source); `provider verify` bound to the live coordinator; `provider context explain | set --apply | rollback --no-restart` with installed-service-aware restart; 4K context fix (declared head_dim / hybrid layers) with context × slots memory bound and draft cap; in-config `max_context_override_provenance`; model-switch recompute; `models verify-artifact | identity | prepare --profile catalog`; CLI holds through coordinator `catalog_material_missing`. Studio lab E2E rounds 1–4 PASS. Operators with a stored 4K recommendation need a fresh `autotune --recommend`. Coordinator side (SPEC-022 R-2.7, `/poolz` gate) ships with the next Pearl runtime ≥ v1.8.193 | merged `57686a84` | #1713 (#1689) |
 | BYOM v0.2 slice 2a: catalog artifact feed generator, class rate rows, ledger v3 (catalog sources only, no Swift changes) | merged | #1461 (#1453) |
 | Ship catalog content release without a Pearl runtime cut (`not-buyer-serving.json` only, catalog-lane; binary unchanged) | merged | #1706 (#1688) |
@@ -152,12 +160,20 @@ that only touches JSON sources under `phase3-binary/catalog/` still gets a
 row even though it does not change the Swift binary the fleet runs; #1461 and
 #1706 are rows on that basis, each noted as catalog-only above.
 
+#1658 is a compiled provider-CLI change and therefore belongs on this train,
+but its physical proof is deliberately staging-only. The committed evidence
+records staging commit `58ea66f17ac3a057c2f8cd3112f92226ae989101`; merged source
+`3ec784c6977bdbb8367dd29b0866b60393c5011a` passed the full GitHub matrix and
+three-lane audit but was not represented as a physically rerun binary. Its
+private OrcaRouter/Qwen tuple remains absent from the public catalog and does
+not by itself make the next CLI promotable.
+
 #1453 is **CLOSED** (2026-09-19); it does not gate a future promotion. #1569
 is a later CLI. Spec promotion #1583 is not a CLI change.
 
 Coordinator/gateway on live Pearl is **v1.8.191** @ `98e3e4af` (includes
 #1728). Fleet Macs and the coordinator recommendation remain on provider
-binary **1.8.123**. The Studio serves signed private candidate **186**; do
+binary **1.8.123**. The Studio serves signed private candidate **195**; do
 not promote the fleet from this campaign.
 
 #1632 / #1638 / #1639 (coordinator leftover rewrite + gateway R014) are
@@ -176,9 +192,36 @@ and the tag's `install.sh` matches served (re-publish from that tag, or
 confirm bytes are unchanged).
 
 `install.sh` on `main` has moved past served bytes: #1613, #1620, #1625,
-#1627, and #1631 all touch `phase3-binary/dist/install.sh` after the
-2026-09-19 republish and are **not** in the served `c90fb44d…` bytes. Do not
-assume the curl-channel one-liner carries them until the next republish.
+#1627, #1631, and #1745 all touch `phase3-binary/dist/install.sh` after the
+2026-09-19 republish and are **not** in the served `c90fb44d…` bytes. As of
+2026-09-27, the public installer still has SHA-256
+`c90fb44d9a780041233928f4376d7d92b71af087d034ae44c3a275fd9381d7c4`
+and contains none of the #1745 release-mirror, Python-mirror, or
+`download.malibu.tech` markers. Do not assume the curl-channel one-liner
+carries them until the next republish.
+
+### China supply state after #1745
+
+The production Qwen3 8B model origin is live as of 2026-09-27. PR #1745
+merged as `ddaa551b24731ee8be3f92782b6ebb236ff4513e`; Malibu route PR #133
+merged as `ec82f738ffe512994dc242512930991856a2d0d1`; and
+`models.malibu.tech` resolves to `76.76.21.21` with valid Vercel TLS. The
+content-addressed snapshot for
+`mlx-community/Qwen3-8B-4bit@545dc4251c05440727734bcd94334791f6ab0192`
+is published at signed model hash
+`1f591f9c4fb38d05ea2d879d89a6eeab485c23a04eb75e3e0a289db9d95ec877`.
+All 11 payload sizes match the signed manifest, every non-weight payload was
+downloaded and hash-checked, and the full 4,607,835,174-byte public weights
+object streamed with SHA-256
+`f2d29621aab300336ad645567ff38c42aac755513006ef4e8a579cf7ef5256d8`.
+
+This closes only the production model-origin blocker. Public release
+`v1.8.200` has Linux Pearl assets only; it has no signed Darwin provider CLI.
+`download.malibu.tech/releases/` and
+`download.malibu.tech/releases/v1.8.200/checksums.txt` return 404. Do not call
+the China supply track green until a reviewed signed post-#1745 CLI and its
+installer/release mirror are published and #1756 passes from a clean mainland
+Mac with the prohibited resolver boundary active.
 
 ### Precondition for any candidate cut after #1672
 
@@ -217,8 +260,8 @@ and silently never matching.
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` @ `eb30981c` (BYOM #1576 `cdbb0257` + #1591 + #1590 + #1593); CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
 | Status | **Do not promote.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 195 is the Studio-only serving canary. Continuous batching remains off by default after #1757. |
-| Next candidate | None reserved. The cancelled unsigned `v1.8.201` dispatch for #1757 produced no artifacts and did not reach the protected signer; retain `v1.8.201` or later for the next combined candidate after any additional campaign changes land. |
-| Merged after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`). Coordinator/gateway settlement recovery continued separately through #1728, now live in Pearl runtime `v1.8.191`. |
+| Next candidate | None reserved. The cancelled unsigned `v1.8.201` dispatch for #1757 produced no artifacts and did not reach the protected signer; retain `v1.8.201` or later. The next provider candidate must be cut from `main` at or after `3ec784c69` so it includes #1762 batched prefill and the merged #1658 Build 1 private staging path. This is a source-inclusion floor, not production activation of the private tuple. Do not cut while the in-scope `in progress` rows above are unresolved; cut one combined candidate only after their merge/leave-out decisions and required campaigns are complete. |
+| Notable merges after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`); #1742 (`03627cda`, shipped in Studio candidate `v1.8.195`); #1757 (`0197f379`, CB qualification closeout); #1745 (`ddaa551b`, China supply path); #1762 (`95a6563d`, batched prefill); #1658 (`3ec784c69`, Build 1 private staging path). Coordinator/gateway settlement recovery continued separately through #1728, live in Pearl runtime `v1.8.191`. |
 | Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build (soak proof; live seats since reduced to one — see Mac Studio serving canary above). |
 
 ## E2E tracks (independent gates)
@@ -320,6 +363,41 @@ combined candidate**.
   against this runtime before closing Track D. Keep fleet recommendation and
   `binaryVersion` at 1.8.123.
 
+### Track E — China install and Qwen3 8B without GitHub or Hugging Face
+
+- **Owner / tracker:** #1756, implementation #1745.
+- **Gate:** on a clean Apple Silicon Mac under a mainland-China network
+  vantage, install from the public Malibu entrypoint using a reviewed signed
+  post-#1745 CLI; acquire the pinned Python bootstrap and Qwen3 8B through the
+  approved Malibu mirrors; reproduce the signed model hash; start the provider
+  and complete inference. A resolver-level deny/capture must prove zero GitHub,
+  Hugging Face, LFS, Xet, or CAS lookups/connections throughout install and
+  acquisition. A configured fallback variable or proxy is not proof.
+- **Status:** production model origin **GREEN**: `models.malibu.tech`, TLS,
+  immutable routing, manifest, sizes, and full weights hash are verified. The
+  track remains **OPEN** because the latest public release is Pearl-only,
+  `download.malibu.tech/releases/` is unseeded, the served installer predates
+  #1745, and no released-binary mainland run has passed. Do not substitute the
+  earlier ad-hoc local build or Vietnam boundary exercise for this gate.
+
+### Track F — Studio batched-prefill qualification
+
+- **Owner / tracker:** #1758, implementation #1762 (`95a6563d`).
+- **Candidate floor:** a reviewed, signed provider CLI cut from `main` at or
+  after `95a6563d`. Candidate 195 predates the batched-prefill implementation
+  and cannot satisfy this track.
+- **Gate:** on the Studio and the exact packaged Metal runtime tuple, run four
+  concurrent 1.5k-token prompts with 128 output tokens and keep worst first
+  token under 20 seconds; run four concurrent 4k-token prompts with 128 output
+  tokens and keep worst first token under 45 seconds; run four concurrent
+  8k-token prompts without `continuous_batching_block_extension_failed`, using
+  bounded queueing/backpressure if the block pool cannot admit all rows.
+  Decode parity, cross-row isolation, cancellation, duplicate-terminal,
+  receipt, and warm-swap boundaries must remain green.
+- **Status:** **OPEN.** Source and SPEC-038 v0.3 are merged, but no signed
+  post-#1762 candidate or packaged-runtime Studio evidence exists. Do not
+  promote the prefill change from local loopback results alone.
+
 ## Promotion gate (checklist)
 
 1. All in-scope CLI rows above are `merged`.
@@ -327,7 +405,9 @@ combined candidate**.
    `v1.8.163` / `v1.8.164` / `v1.8.167` / `v1.8.168`.
 3. In-scope e2e green on **that** candidate (Track A this cut; Track B on the
    next candidate, which includes #1609, before promoting a BYOM-serve CLI;
-   Track B is not #1453 close).
+   Track B is not #1453 close; Track E is mandatory for any candidate that
+   includes #1745; Track F is mandatory for any candidate that includes
+   #1762).
 4. Live smoke on the candidate (not a substitute for Track A): Pi/Qwen3-Coder
    stream+tools concat is one JSON object (never `{}` / `{}{`); unclosed
    function-XML becomes a real `bash` tool call; 257+ messages are not rejected

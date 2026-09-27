@@ -253,6 +253,332 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         XCTAssertNil(noneSerial)
     }
 
+    func testEqualOffsetEqualLengthPrefillUsesSharedForwardForMixedCacheAndIsolatesRows() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let recorder = MixedCacheRecorder()
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
+            model: MixedCacheFakeModel(recorder: recorder, nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention]
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let aHandle = try await allocator.allocate(conversationKey: "row-a", maxTokens: 8)
+        let bHandle = try await allocator.allocate(conversationKey: "row-b", maxTokens: 8)
+
+        _ = try await allocator.extend(aHandle, by: 3)
+        _ = try await allocator.extend(bHandle, by: 3)
+        let aBinding = try await allocator.binding(for: aHandle)
+        let bBinding = try await allocator.binding(for: bHandle)
+        _ = try await backend.prefill(rows: [
+            ContinuousBatchPrefillInput(
+                requestID: "row-a",
+                promptTokens: [1, 2, 3],
+                binding: aBinding,
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 3,
+                isFinalChunk: false
+            ),
+            ContinuousBatchPrefillInput(
+                requestID: "row-b",
+                promptTokens: [11, 12, 13],
+                binding: bBinding,
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 3,
+                isFinalChunk: false
+            ),
+        ])
+
+        XCTAssertTrue(recorder.forwardBatchSizes().contains(2))
+        XCTAssertTrue(recorder.sawMambaBatchSize(2))
+        XCTAssertTrue(recorder.sawPagedAttentionBatchSize(2))
+        let maybeASnapshot = await backend.snapshotRecurrentState(requestID: "row-a", tokenCount: 3)
+        let maybeBSnapshot = await backend.snapshotRecurrentState(requestID: "row-b", tokenCount: 3)
+        let aSnapshot = try XCTUnwrap(maybeASnapshot)
+        let bSnapshot = try XCTUnwrap(maybeBSnapshot)
+        XCTAssertEqual(aSnapshot.states[0]?.first?.asArray(Float.self), [201, 202, 203])
+        XCTAssertEqual(bSnapshot.states[0]?.first?.asArray(Float.self), [211, 212, 213])
+
+        backend.finish(requestID: "row-a")
+        let aSnapshotAfterFinish = await backend.snapshotRecurrentState(requestID: "row-a", tokenCount: 3)
+        let bSnapshotAfterFinish = await backend.snapshotRecurrentState(requestID: "row-b", tokenCount: 3)
+        XCTAssertNil(aSnapshotAfterFinish)
+        XCTAssertNotNil(bSnapshotAfterFinish)
+    }
+
+    func testIncompatibleOrRaggedPrefillUsesSerialForwardsForMixedCache() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let recorder = MixedCacheRecorder()
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
+            model: MixedCacheFakeModel(recorder: recorder, nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention]
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let aHandle = try await allocator.allocate(conversationKey: "row-a", maxTokens: 8)
+        let bHandle = try await allocator.allocate(conversationKey: "row-b", maxTokens: 8)
+
+        _ = try await allocator.extend(bHandle, by: 1)
+        _ = try await backend.prefill(rows: [
+            ContinuousBatchPrefillInput(
+                requestID: "row-b",
+                promptTokens: [10],
+                binding: try await allocator.binding(for: bHandle),
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 1,
+                isFinalChunk: false
+            ),
+        ])
+        let beforeIncompatible = recorder.forwardBatchSizes().count
+
+        _ = try await allocator.extend(aHandle, by: 2)
+        _ = try await allocator.extend(bHandle, by: 2)
+        _ = try await backend.prefill(rows: [
+            ContinuousBatchPrefillInput(
+                requestID: "row-a",
+                promptTokens: [1, 2],
+                binding: try await allocator.binding(for: aHandle),
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 2,
+                isFinalChunk: false
+            ),
+            ContinuousBatchPrefillInput(
+                requestID: "row-b",
+                promptTokens: [11, 12],
+                binding: try await allocator.binding(for: bHandle),
+                promptTokenOffset: 1,
+                committedKVTokenCount: 1,
+                targetKVTokenCount: 3,
+                isFinalChunk: false
+            ),
+        ])
+
+        let incompatibleForwards = Array(recorder.forwardBatchSizes().dropFirst(beforeIncompatible))
+        XCTAssertEqual(incompatibleForwards, [1, 1])
+        XCTAssertFalse(incompatibleForwards.contains(2))
+
+        let beforeRagged = recorder.forwardBatchSizes().count
+        let cHandle = try await allocator.allocate(conversationKey: "row-c", maxTokens: 8)
+        let dHandle = try await allocator.allocate(conversationKey: "row-d", maxTokens: 8)
+        _ = try await allocator.extend(cHandle, by: 2)
+        _ = try await allocator.extend(dHandle, by: 3)
+        _ = try await backend.prefill(rows: [
+            ContinuousBatchPrefillInput(
+                requestID: "row-c",
+                promptTokens: [21, 22],
+                binding: try await allocator.binding(for: cHandle),
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 2,
+                isFinalChunk: false
+            ),
+            ContinuousBatchPrefillInput(
+                requestID: "row-d",
+                promptTokens: [31, 32, 33],
+                binding: try await allocator.binding(for: dHandle),
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 3,
+                isFinalChunk: false
+            ),
+        ])
+
+        let raggedForwards = Array(recorder.forwardBatchSizes().dropFirst(beforeRagged))
+        XCTAssertEqual(raggedForwards, [1, 1])
+        XCTAssertFalse(raggedForwards.contains(2))
+        XCTAssertTrue(recorder.sawMambaBatchSize(1))
+        XCTAssertTrue(recorder.sawPagedAttentionBatchSize(1))
+    }
+
+    func testCachePackingIncompatibilityFallsBackToIsolatedSerialPrefill() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let descriptor = PagedKVDescriptor(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            modelID: "mlx-community/Qwen3.6-Test",
+            modelSHA256: String(repeating: "a", count: 64),
+            tokenizerSHA256: nil,
+            chatTemplateSHA256: nil,
+            supportedModelFamilies: ["qwen"],
+            supportsMoEDispatch: false,
+            hardwareClass: "apple-silicon-test",
+            metallibSHA256: String(repeating: "b", count: 64),
+            kernelIdentifier: "macprovider_paged_kv_gather_v1",
+            parityLabel: "sdpa-parity-v1"
+        )
+        let recorder = MixedCacheRecorder()
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: descriptor.modelID),
+            model: MixedCacheFakeModel(recorder: recorder, nextTokenByInput: [:], attentionDType: .float16),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            descriptor: descriptor,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention]
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let aHandle = try await allocator.allocate(conversationKey: "row-a", maxTokens: 8)
+        let bHandle = try await allocator.allocate(conversationKey: "row-b", maxTokens: 8)
+        _ = try await allocator.extend(aHandle, by: 2)
+        _ = try await allocator.extend(bHandle, by: 2)
+        let aBinding = try await allocator.binding(for: aHandle)
+        let bBinding = try await allocator.binding(for: bHandle)
+
+        let aMamba = MambaCache()
+        aMamba[0] = MLXArray([Float(1)], [1, 1, 1])
+        aMamba[1] = MLXArray([Float(2)], [1, 1, 1])
+        let bMamba = MambaCache()
+        bMamba[0] = MLXArray([Float(3), Float(4)], [1, 2, 1])
+        bMamba[1] = MLXArray([Float(5), Float(6)], [1, 2, 1])
+        let aCaches: [KVCache] = [
+            aMamba,
+            PagedKVCache(descriptor: descriptor, binding: aBinding),
+        ]
+        let bCaches: [KVCache] = [
+            bMamba,
+            PagedKVCache(descriptor: descriptor, binding: bBinding),
+        ]
+        try backend.installRowStateForTest(
+            caches: aCaches,
+            requestID: "row-a",
+            binding: aBinding
+        )
+        try backend.installRowStateForTest(
+            caches: bCaches,
+            requestID: "row-b",
+            binding: bBinding
+        )
+
+        let outputs = try await backend.prefill(rows: [
+            ContinuousBatchPrefillInput(
+                requestID: "row-a",
+                promptTokens: [1, 2],
+                binding: aBinding,
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 2,
+                isFinalChunk: false
+            ),
+            ContinuousBatchPrefillInput(
+                requestID: "row-b",
+                promptTokens: [11, 12],
+                binding: bBinding,
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 2,
+                isFinalChunk: false
+            ),
+        ])
+
+        XCTAssertEqual(outputs, [
+            ContinuousBatchPrefillOutput(requestID: "row-a"),
+            ContinuousBatchPrefillOutput(requestID: "row-b"),
+        ])
+        XCTAssertEqual(recorder.forwardBatchSizes(), [1, 1])
+    }
+
+    func testBackendLevelStateDiscardsSharedAttemptAndFallsBackPerRow() async throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+
+        let recorder = MixedCacheRecorder()
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: "mlx-community/Qwen3.6-Test"),
+            model: MixedCacheFakeModel(
+                recorder: recorder,
+                nextTokenByInput: [:],
+                attentionDType: .float16,
+                returnsBackendStateForBatches: true
+            ),
+            processor: MixedCacheUserInputProcessor(),
+            tokenizer: MixedCacheTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 16,
+            poolEpoch: 1,
+            layerCount: 2,
+            cacheKinds: [.recurrentMamba, .pagedAttention]
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let aHandle = try await allocator.allocate(conversationKey: "row-a", maxTokens: 8)
+        let bHandle = try await allocator.allocate(conversationKey: "row-b", maxTokens: 8)
+        _ = try await allocator.extend(aHandle, by: 2)
+        _ = try await allocator.extend(bHandle, by: 2)
+
+        let outputs = try await backend.prefill(rows: [
+            ContinuousBatchPrefillInput(
+                requestID: "row-a",
+                promptTokens: [1, 2],
+                binding: try await allocator.binding(for: aHandle),
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 2,
+                isFinalChunk: false
+            ),
+            ContinuousBatchPrefillInput(
+                requestID: "row-b",
+                promptTokens: [11, 12],
+                binding: try await allocator.binding(for: bHandle),
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 2,
+                isFinalChunk: false
+            ),
+        ])
+
+        XCTAssertEqual(outputs, [
+            ContinuousBatchPrefillOutput(requestID: "row-a"),
+            ContinuousBatchPrefillOutput(requestID: "row-b"),
+        ])
+        XCTAssertEqual(recorder.forwardBatchSizes(), [2, 1, 1])
+        let maybeASnapshot = await backend.snapshotRecurrentState(requestID: "row-a", tokenCount: 2)
+        let maybeBSnapshot = await backend.snapshotRecurrentState(requestID: "row-b", tokenCount: 2)
+        XCTAssertEqual(
+            try XCTUnwrap(maybeASnapshot).states[0]?.first?.asArray(Float.self),
+            [201, 202]
+        )
+        XCTAssertEqual(
+            try XCTUnwrap(maybeBSnapshot).states[0]?.first?.asArray(Float.self),
+            [211, 212]
+        )
+    }
+
     /// Pure layout gate for a hybrid checkpoint install; needs no Metal.
     func testRecurrentCheckpointLayoutValidationRejectsMalformedState() {
         typealias Slot = RecurrentStateSlotLayout
@@ -418,11 +744,18 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
     private let nextTokenByInput: [Int: Int]
     private let vocabularySize = 32
     private let attentionDType: DType
+    private let returnsBackendStateForBatches: Bool
 
-    init(recorder: MixedCacheRecorder, nextTokenByInput: [Int: Int], attentionDType: DType = .float32) {
+    init(
+        recorder: MixedCacheRecorder,
+        nextTokenByInput: [Int: Int],
+        attentionDType: DType = .float32,
+        returnsBackendStateForBatches: Bool = false
+    ) {
         self.recorder = recorder
         self.nextTokenByInput = nextTokenByInput
         self.attentionDType = attentionDType
+        self.returnsBackendStateForBatches = returnsBackendStateForBatches
         super.init()
     }
 
@@ -469,7 +802,10 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
                 logits[(row * sequenceLength + position) * vocabularySize + next] = 1_000
             }
         }
-        return LMOutput(logits: MLXArray(logits, [batch, sequenceLength, vocabularySize]))
+        return LMOutput(
+            logits: MLXArray(logits, [batch, sequenceLength, vocabularySize]),
+            state: returnsBackendStateForBatches && batch > 1 ? LMOutput.State() : nil
+        )
     }
 }
 

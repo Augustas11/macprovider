@@ -47,6 +47,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     let queueLimit: Int
     let decodeHeadroomTokens: Int
     let maxPrefillRowsPerIteration: Int
+    let maxPrefillTokensPerIteration: Int
     let maxPromptChunkTokens: Int
     let drainTimeoutNanoseconds: UInt64
     let drainCancellationGraceNanoseconds: UInt64
@@ -89,6 +90,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         queueLimit: Int? = nil,
         decodeHeadroomTokens: Int,
         maxPrefillRowsPerIteration: Int = 1,
+        maxPrefillTokensPerIteration: Int? = nil,
         maxPromptChunkTokens: Int = 256,
         drainTimeoutNanoseconds: UInt64 = 30_000_000_000,
         drainCancellationGraceNanoseconds: UInt64 = 5_000_000_000,
@@ -122,6 +124,10 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.decodeHeadroomTokens = max(0, decodeHeadroomTokens)
         self.maxPrefillRowsPerIteration = max(1, maxPrefillRowsPerIteration)
         self.maxPromptChunkTokens = max(1, maxPromptChunkTokens)
+        self.maxPrefillTokensPerIteration = max(
+            1,
+            maxPrefillTokensPerIteration ?? self.maxPromptChunkTokens
+        )
         self.drainTimeoutNanoseconds = drainTimeoutNanoseconds
         self.drainCancellationGraceNanoseconds = drainCancellationGraceNanoseconds
         let (scaledTerminalLimit, terminalOverflow) = self.queueLimit.multipliedReportingOverflow(by: 2)
@@ -170,6 +176,10 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// about 60 ms, so 8 steps give active rows about 4 tok/s instead of about
     /// 0.6 behind a long prompt, for about 25% slower prefill.
     static let defaultDecodeStepsWhilePrefilling = 8
+    static let defaultDecodeHeadroomTokens = 128
+    static let defaultPrefillRowsPerIteration = 4
+    static let defaultPrefillTokensPerIteration = 1_024
+    static let defaultPromptChunkTokens = 512
 
     /// Stream token delivery is non-blocking on the scheduler actor. Compiled
     /// lockstep offers a full window per hop, and the next hop can start while
@@ -509,6 +519,14 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
 
 struct ContinuousBatchPrefillOutput: Sendable, Equatable {
     let requestID: String
+    /// Serial fallback can fail one row without coupling healthy rows to that
+    /// failure. Shared-forward failures still throw and fail the whole group.
+    let failureCode: String?
+
+    init(requestID: String, failureCode: String? = nil) {
+        self.requestID = requestID
+        self.failureCode = failureCode
+    }
 }
 
 struct ContinuousBatchDecodeInput: Sendable, Equatable {
@@ -2612,42 +2630,66 @@ actor ContinuousBatchScheduler {
     }
 
     private func runPrefillStep() async -> Bool {
-        let selectedIDs = Array(promptOrder.prefix(configuration.maxPrefillRowsPerIteration))
-        guard !selectedIDs.isEmpty else { return false }
-
-        var prepared: [(row: Row, input: ContinuousBatchPrefillInput, chunkCount: Int)] = []
         var madeProgress = false
-        for id in selectedIDs {
+        // Completed prompt rows can be left behind by a zero-length retained
+        // suffix. Transition them before selecting a compatible prefill group.
+        for id in Array(promptOrder) {
             guard let row = activePrompt[id] else { continue }
             let prefixTokenCount = row.request.promptTokens.count - 1
             if row.prefillCursor >= prefixTokenCount {
                 await transitionPrefilledRow(row)
                 madeProgress = true
                 if cleanupFailedClosed { return true }
-                continue
             }
-            var end = min(prefixTokenCount, row.prefillCursor + configuration.maxPromptChunkTokens)
-            // A chunk ends exactly on the next recurrent checkpoint so its state
-            // can be snapshotted there.
-            if let checkpoint = pendingRecurrentCheckpointPositions(for: row).first(where: { $0 > row.prefillCursor }) {
-                end = min(end, checkpoint)
+        }
+
+        var selected: [(row: Row, end: Int)] = []
+        var selectedOffset: Int?
+        var selectedChunkCount: Int?
+        var selectedTokenCount = 0
+        for id in promptOrder {
+            guard selected.count < configuration.maxPrefillRowsPerIteration,
+                  let row = activePrompt[id]
+            else { continue }
+            let remainingBudget = configuration.maxPrefillTokensPerIteration - selectedTokenCount
+            guard remainingBudget > 0 else { break }
+            let chunkLimit = min(
+                configuration.maxPromptChunkTokens,
+                selectedChunkCount ?? remainingBudget
+            )
+            let end = prefillEnd(for: row, maxChunkTokens: chunkLimit)
+            let chunkCount = end - row.prefillCursor
+            guard chunkCount > 0 else { continue }
+            if let selectedOffset, let selectedChunkCount {
+                guard row.prefillCursor == selectedOffset,
+                      chunkCount == selectedChunkCount,
+                      selectedTokenCount + chunkCount <= configuration.maxPrefillTokensPerIteration
+                else { continue }
+            } else {
+                selectedOffset = row.prefillCursor
+                selectedChunkCount = chunkCount
             }
+            selected.append((row, end))
+            selectedTokenCount += chunkCount
+        }
+        guard !selected.isEmpty else { return madeProgress }
+
+        var prepared: [(row: Row, input: ContinuousBatchPrefillInput, chunkCount: Int)] = []
+        for item in selected {
+            let row = item.row
+            let id = row.request.id
+            let end = item.end
+            let prefixTokenCount = row.request.promptTokens.count - 1
             let chunk = Array(row.request.promptTokens[row.prefillCursor..<end])
             do {
                 _ = try await allocator.extend(row.handle, by: chunk.count)
             } catch {
                 record(.localExtensionFailed)
                 ContinuousBatchingPolicy.logPrefillFailed(error)
-                _ = removePromptRow(id)
-                let released = await release(row.handle)
-                finish(
+                if await finishPrefillFailure(
                     row,
-                    status: .requestFailed,
-                    errorCode: released
-                        ? "continuous_batching_prefill_extend_failed"
-                        : "continuous_batching_cleanup_failed"
-                )
-                if !released { return true }
+                    failureCode: "continuous_batching_prefill_extend_failed"
+                ) == false { return true }
                 continue
             }
             do {
@@ -2667,16 +2709,10 @@ actor ContinuousBatchScheduler {
             } catch {
                 record(.localPreparationFailed)
                 ContinuousBatchingPolicy.logPrefillFailed(error)
-                _ = removePromptRow(id)
-                let released = await release(row.handle)
-                finish(
+                if await finishPrefillFailure(
                     row,
-                    status: .requestFailed,
-                    errorCode: released
-                        ? "continuous_batching_prefill_prepare_failed"
-                        : "continuous_batching_cleanup_failed"
-                )
-                if !released { return true }
+                    failureCode: "continuous_batching_prefill_prepare_failed"
+                ) == false { return true }
             }
         }
         guard !prepared.isEmpty else { return madeProgress }
@@ -2690,16 +2726,11 @@ actor ContinuousBatchScheduler {
             record(.prefillFailed)
             ContinuousBatchingPolicy.logPrefillFailed(error)
             for item in prepared {
-                guard let row = removePromptRow(item.row.request.id) else { continue }
-                let released = await release(row.handle)
-                finish(
-                    row,
-                    status: .requestFailed,
-                    errorCode: released
-                        ? "continuous_batching_prefill_failed"
-                        : "continuous_batching_cleanup_failed"
-                )
-                if !released { return true }
+                guard activePrompt[item.row.request.id] != nil else { continue }
+                if await finishPrefillFailure(
+                    item.row,
+                    failureCode: "continuous_batching_prefill_failed"
+                ) == false { return true }
             }
             return true
         }
@@ -2707,7 +2738,7 @@ actor ContinuousBatchScheduler {
         let byID = Dictionary(uniqueKeysWithValues: outputs.map { ($0.requestID, $0) })
         for item in prepared {
             let id = item.row.request.id
-            guard var row = activePrompt[id], byID[id] != nil else { continue }
+            guard var row = activePrompt[id], let output = byID[id] else { continue }
             if cancelledIDs.remove(id) != nil {
                 _ = removePromptRow(id)
                 let released = await release(row.handle)
@@ -2715,6 +2746,10 @@ actor ContinuousBatchScheduler {
                     ? "request_cancelled"
                     : "continuous_batching_cleanup_failed")
                 if !released { return true }
+                continue
+            }
+            if let failureCode = output.failureCode {
+                if await finishPrefillFailure(row, failureCode: failureCode) == false { return true }
                 continue
             }
             row.prefillCursor += item.chunkCount
@@ -2744,7 +2779,45 @@ actor ContinuousBatchScheduler {
                 activePrompt[id] = row
             }
         }
+        // Round-robin prompt rows at chunk boundaries. This keeps a long or
+        // temporarily incompatible prompt from pinning the FCFS head forever,
+        // while admission order remains unchanged.
+        for id in prepared.map({ $0.row.request.id }) where activePrompt[id] != nil {
+            promptOrder.removeAll { $0 == id }
+            promptOrder.append(id)
+        }
         return true
+    }
+
+    /// A cancellation observed while a fallible prefill operation was
+    /// suspended wins over that operation's failure. Cleanup failure still
+    /// fails closed because allocator ownership could not be proven released.
+    private func finishPrefillFailure(_ row: Row, failureCode: String) async -> Bool {
+        let id = row.request.id
+        _ = removePromptRow(id)
+        let wasCancelled = cancelledIDs.remove(id) != nil
+        let released = await release(row.handle)
+        finish(
+            row,
+            status: released && wasCancelled ? .cancelled : .requestFailed,
+            errorCode: released
+                ? (wasCancelled ? "request_cancelled" : failureCode)
+                : "continuous_batching_cleanup_failed"
+        )
+        return released
+    }
+
+    private func prefillEnd(for row: Row, maxChunkTokens: Int) -> Int {
+        let prefixTokenCount = row.request.promptTokens.count - 1
+        var end = min(prefixTokenCount, row.prefillCursor + max(1, maxChunkTokens))
+        // Hybrid recurrent state may only be snapshotted on its declared
+        // boundary, so compatible groups split before crossing one.
+        if let checkpoint = pendingRecurrentCheckpointPositions(for: row).first(where: {
+            $0 > row.prefillCursor
+        }) {
+            end = min(end, checkpoint)
+        }
+        return end
     }
 
     private func transitionPrefilledRow(_ row: Row) async {

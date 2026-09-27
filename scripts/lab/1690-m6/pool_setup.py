@@ -29,7 +29,7 @@ APPROVAL = "approval-lab-1690-v1"
 APPROVAL_VERSION = "approval-version-1"
 PROVIDER = "lab-1690-m6-provider"
 BUYER = "acct-lab-1690-buyer"
-MODELS = "mlx-community/Qwen2.5-0.5B-Instruct-4bit"
+MODELS = os.environ.get("LAB_MLX_ID", "mlx-community/Qwen2.5-0.5B-Instruct-4bit")
 LABTOOL = str(LAB / "bin" / "labtool")
 
 

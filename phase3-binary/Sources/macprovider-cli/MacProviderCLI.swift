@@ -864,6 +864,18 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
+    struct VerifiedModelRuntimeBinding {
+        let authorityPath: String
+        let authoritySHA256: String
+        let loadPath: String
+        let loadSHA256: String
+    }
+
+    struct ModelArtifactPreflightOutcome {
+        let catalogTrust: CatalogRuntimeTrust?
+        let runtimeBinding: VerifiedModelRuntimeBinding?
+    }
+
     static func runModelArtifactPreflight(
         _ resolved: inout AppConfig,
         joiningCoordinator: Bool = true,
@@ -872,6 +884,24 @@ struct ServeCommand: AsyncParsableCommand {
         artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
         persistConfigMigration: Bool = false
     ) async throws -> CatalogRuntimeTrust? {
+        try await runModelArtifactPreflightOutcome(
+            &resolved,
+            joiningCoordinator: joiningCoordinator,
+            isolateLifecycle: isolateLifecycle,
+            staticInputs: staticInputs,
+            artifactResolver: artifactResolver,
+            persistConfigMigration: persistConfigMigration
+        ).catalogTrust
+    }
+
+    static func runModelArtifactPreflightOutcome(
+        _ resolved: inout AppConfig,
+        joiningCoordinator: Bool = true,
+        isolateLifecycle: Bool = false,
+        staticInputs: AutotuneStaticInputs = AutotuneStaticInputs(),
+        artifactResolver: CachedModelArtifactResolver = CachedModelArtifactResolver(),
+        persistConfigMigration: Bool = false
+    ) async throws -> ModelArtifactPreflightOutcome {
         // SPEC-046-R002 / SPEC-010-R007(e) loopback serving (#1569, #1690): an
         // `ollama_loopback` / `llamacpp_loopback` model carries a
         // `macprovider.gguf-file.v1` identity resolved from the local GGUF
@@ -888,11 +918,14 @@ struct ServeCommand: AsyncParsableCommand {
         // SPEC-032 hello-gate ceiling flag (which is set only when the gate is
         // ON), is what holds in the gate-off E2E posture (SPEC-047-R003/R005).
         if LoopbackServeSelection.select(resolved.model) != nil {
-            return try await runLoopbackPoolCatalogPreflight(
-                resolved,
-                joiningCoordinator: joiningCoordinator,
-                isolateLifecycle: isolateLifecycle,
-                staticInputs: staticInputs
+            return ModelArtifactPreflightOutcome(
+                catalogTrust: try await runLoopbackPoolCatalogPreflight(
+                    resolved,
+                    joiningCoordinator: joiningCoordinator,
+                    isolateLifecycle: isolateLifecycle,
+                    staticInputs: staticInputs
+                ),
+                runtimeBinding: nil
             )
         }
         var artifactResolver = artifactResolver
@@ -912,7 +945,7 @@ struct ServeCommand: AsyncParsableCommand {
                 FileHandle.standardError.write(Data("coordinator join requires model_artifact_sha256 from autotune --recommend --apply\n".utf8))
                 throw ExitCode(2)
             }
-            return nil
+            return ModelArtifactPreflightOutcome(catalogTrust: nil, runtimeBinding: nil)
         }
         guard expected.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil else {
             FileHandle.standardError.write(Data("model_artifact_sha256 must be 64 lowercase hex characters\n".utf8))
@@ -927,6 +960,9 @@ struct ServeCommand: AsyncParsableCommand {
         let loadPath: String
         let persistFrom: String?
         let actual: String
+        let runtimeLoadSHA256: String
+        let authorityPath: String
+        let privateRuntime = usesBuild1PrivateRuntimeVariant(resolved)
         do {
             let resolvedLoad = try resolveVerifiedLoadPath(
                 configuredPath: configuredPath,
@@ -934,13 +970,23 @@ struct ServeCommand: AsyncParsableCommand {
                 resolved: resolved,
                 artifactResolver: artifactResolver
             )
-            loadPath = resolvedLoad.path
             persistFrom = resolvedLoad.persistFrom
-            actual = try ModelArtifactVerifier.canonicalArtifactHash(directory: URL(fileURLWithPath: loadPath))
+            authorityPath = resolvedLoad.path
+            let inspection = try ModelArtifactVerifier.inspectCanonicalArtifact(
+                directory: URL(fileURLWithPath: resolvedLoad.path),
+                scopedSubdirectory: privateRuntime ? Build1PrivatePrepareProfile.runtimeVariantDirectory : nil
+            )
+            actual = inspection.sha256
             guard actual == expected else {
-                FileHandle.standardError.write(Data("model artifact hash mismatch for \(loadPath)\n".utf8))
+                FileHandle.standardError.write(Data("model artifact hash mismatch for \(resolvedLoad.path)\n".utf8))
                 throw ExitCode(2)
             }
+            loadPath = try runtimeModelLoadPath(
+                verifiedArtifactPath: resolvedLoad.path,
+                config: resolved,
+                artifactResolver: artifactResolver
+            )
+            runtimeLoadSHA256 = inspection.scopedSHA256 ?? actual
         } catch let exit as ExitCode {
             throw exit
         } catch {
@@ -952,18 +998,90 @@ struct ServeCommand: AsyncParsableCommand {
             isolateLifecycle: isolateLifecycle,
             coordinatorURL: resolved.coordinatorURL
         )) {
-            return try await runModelCatalogPreflight(
+            // Catalog admission verifies and canonicalizes the authority-bound
+            // artifact root. The private Build 1 runtime loads only its 4-bit
+            // member, whose scoped digest intentionally differs from the full
+            // signed revision digest, so never feed that member path back into
+            // full-artifact catalog verification. Keep the canonical authority
+            // root in config and carry the scoped member only in the verified
+            // runtime binding used by the model loader.
+            let catalogArtifactSHA256 = privateRuntime
+                ? runtimeLoadSHA256
+                : actual
+            let catalogTrust = try await runModelCatalogPreflight(
                 &resolved,
-                modelPath: loadPath,
+                modelPath: authorityPath,
                 actualArtifactSHA256: actual,
+                catalogArtifactSHA256: catalogArtifactSHA256,
                 requireRecommendable: !resolved.donorMode,
                 staticInputs: staticInputs,
                 artifactResolver: artifactResolver,
                 persistConfigMigration: persistConfigMigration,
                 persistFrom: persistFrom
             )
+            let canonicalAuthorityPath = resolved.modelArtifactPath ?? authorityPath
+            let canonicalLoadPath = try runtimeModelLoadPath(
+                verifiedArtifactPath: canonicalAuthorityPath,
+                config: resolved,
+                artifactResolver: artifactResolver
+            )
+            return ModelArtifactPreflightOutcome(
+                catalogTrust: catalogTrust,
+                runtimeBinding: VerifiedModelRuntimeBinding(
+                    authorityPath: canonicalAuthorityPath,
+                    authoritySHA256: actual,
+                    loadPath: canonicalLoadPath,
+                    loadSHA256: runtimeLoadSHA256
+                )
+            )
         }
-        return nil
+        return ModelArtifactPreflightOutcome(
+            catalogTrust: nil,
+            runtimeBinding: VerifiedModelRuntimeBinding(
+                authorityPath: authorityPath,
+                authoritySHA256: actual,
+                loadPath: loadPath,
+                loadSHA256: runtimeLoadSHA256
+            )
+        )
+    }
+
+    /// The Build 1 private authority covers the complete upstream revision,
+    /// which contains multiple quantization variants. mlx-swift-lm recursively
+    /// discovers safetensors below its load directory, so loading the revision
+    /// root mixes same-named tensors from 2/4/6/8-bit variants. Verify the full
+    /// authority-bound snapshot first, then load only its fixed 4-bit member.
+    static func runtimeModelLoadPath(
+        verifiedArtifactPath: String,
+        config: AppConfig,
+        artifactResolver: CachedModelArtifactResolver
+    ) throws -> String {
+        guard usesBuild1PrivateRuntimeVariant(config) else {
+            return verifiedArtifactPath
+        }
+
+        let runtimeDirectory = URL(fileURLWithPath: verifiedArtifactPath, isDirectory: true)
+            .appendingPathComponent(Build1PrivatePrepareProfile.runtimeVariantDirectory, isDirectory: true)
+            .standardizedFileURL
+        _ = try artifactResolver.durableStore.validatedContainedDirectory(runtimeDirectory.path)
+        for name in ["config.json", "model.safetensors.index.json"] {
+            var info = stat()
+            let path = runtimeDirectory.appendingPathComponent(name).path
+            guard lstat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+                throw AutotuneRecommendError.invalidArtifact(
+                    "Build 1 private runtime variant is incomplete: \(name)"
+                )
+            }
+        }
+        return runtimeDirectory.path
+    }
+
+    private static func usesBuild1PrivateRuntimeVariant(_ config: AppConfig) -> Bool {
+        config.modelArtifactSHA256 == Build1PrivatePrepareProfile.hash
+            && config.modelCatalogKey == Build1PrivatePrepareProfile.modelKey
+            && config.modelCatalogModelID == Build1PrivatePrepareProfile.modelID
+            && config.modelCatalogRevision == Build1PrivatePrepareProfile.revision
+            && config.modelCatalogVersion == Build1PrivatePrepareProfile.releaseID
     }
 
     /// SPEC-042-R013 / SPEC-047-R003(iv) pool route-time clause (#1690 M6): a
@@ -1161,6 +1279,7 @@ struct ServeCommand: AsyncParsableCommand {
         _ resolved: inout AppConfig,
         modelPath: String,
         actualArtifactSHA256: String,
+        catalogArtifactSHA256: String? = nil,
         requireRecommendable: Bool,
         staticInputs: AutotuneStaticInputs,
         artifactResolver: CachedModelArtifactResolver,
@@ -1168,6 +1287,7 @@ struct ServeCommand: AsyncParsableCommand {
         persistFrom: String?
     ) async throws -> CatalogRuntimeTrust {
         let actual = actualArtifactSHA256
+        let catalogActual = catalogArtifactSHA256 ?? actualArtifactSHA256
         guard let key = resolved.modelCatalogKey,
               let modelID = resolved.modelCatalogModelID,
               let revision = resolved.modelCatalogRevision,
@@ -1336,7 +1456,7 @@ struct ServeCommand: AsyncParsableCommand {
               row.modelID == modelID,
               row.modelRevision == revision,
               row.modelSHA256 == catalogSHA256,
-              catalogSHA256 == actualArtifactSHA256
+              catalogSHA256 == catalogActual
         else {
             FileHandle.standardError.write(Data("model artifact is not admitted by the signed candidate catalog\n".utf8))
             throw ExitCode(2)
@@ -2271,7 +2391,7 @@ struct ServeCommand: AsyncParsableCommand {
                 }
                 modelRuntime = try await ModelRuntime(
                     modelID: resolved.model,
-                    modelLoadPath: resolved.modelArtifactPath,
+                    modelLoadPath: startupPreflight.runtimeBinding?.loadPath ?? resolved.modelArtifactPath,
                     draftModelID: resolved.draftModel,
                     draftModelLoadPath: verifiedDraftModelLoadPath,
                     numDraftTokens: resolved.numDraftTokens,
@@ -2292,6 +2412,7 @@ struct ServeCommand: AsyncParsableCommand {
                     swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
                     catalogModelIDAlias: catalogModelIDAlias,
                     verifiedModelArtifactSHA256: resolved.modelArtifactSHA256,
+                    verifiedModelLoadSHA256: startupPreflight.runtimeBinding?.loadSHA256,
                     // MEDIUM-5 (FR-KVP4): thread the catalog REVISION separately from the
                     // artifact SHA so the cold-tier envelope carries both as distinct identity
                     // fields; nil ⇒ cold tier treats identity as unavailable (no promote/persist).
@@ -3339,6 +3460,7 @@ struct ServeCommand: AsyncParsableCommand {
         let serveLock: ProviderServeLock
         let verifiedDraftModelLoadPath: String?
         let catalogTrust: CatalogRuntimeTrust?
+        let runtimeBinding: VerifiedModelRuntimeBinding?
     }
 
     static func runServeStartupPreflights(
@@ -3362,9 +3484,9 @@ struct ServeCommand: AsyncParsableCommand {
         )
         do {
             try afterServeLockAcquired()
-            let catalogTrust: CatalogRuntimeTrust?
+            let modelPreflight: ModelArtifactPreflightOutcome
             do {
-                catalogTrust = try await Self.runModelArtifactPreflight(
+                modelPreflight = try await Self.runModelArtifactPreflightOutcome(
                     &resolved,
                     joiningCoordinator: joiningCoordinator,
                     isolateLifecycle: isolateLifecycle,
@@ -3382,7 +3504,8 @@ struct ServeCommand: AsyncParsableCommand {
             return ServeStartupPreflightResult(
                 serveLock: serveLock,
                 verifiedDraftModelLoadPath: verifiedDraftModelLoadPath,
-                catalogTrust: catalogTrust
+                catalogTrust: modelPreflight.catalogTrust,
+                runtimeBinding: modelPreflight.runtimeBinding
             )
         } catch {
             serveLock.release()
@@ -3589,11 +3712,16 @@ struct SelfTestCommand: AsyncParsableCommand {
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(model: model, configPath: config)
         )
-        _ = try await ServeCommand.runModelArtifactPreflight(&resolved, joiningCoordinator: false)
+        let preflight = try await ServeCommand.runModelArtifactPreflightOutcome(
+            &resolved,
+            joiningCoordinator: false
+        )
         let runtime = try await ModelRuntime(
             modelID: resolved.model,
-            modelLoadPath: Self.modelLoadPath(for: resolved),
-            maxContextTokensOverride: resolved.maxContextOverride
+            modelLoadPath: preflight.runtimeBinding?.loadPath ?? Self.modelLoadPath(for: resolved),
+            maxContextTokensOverride: resolved.maxContextOverride,
+            verifiedModelArtifactSHA256: resolved.modelArtifactSHA256,
+            verifiedModelLoadSHA256: preflight.runtimeBinding?.loadSHA256
         )
         guard await runtime.isLoaded else {
             throw ValidationError("Model not loaded")

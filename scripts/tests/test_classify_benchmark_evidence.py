@@ -163,6 +163,22 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         self.assertEqual(result["classification"], "complete")
         self.assertEqual(result["attempts"][0]["receipt_audit_outbox"], "pending")
 
+    def test_buyer_slug_matches_catalog_route_model(self):
+        # A buyer names the OpenRouter slug while the route snapshot stores the
+        # catalog model id for the same model; normalized, evidence is complete.
+        self.coord.execute("UPDATE request_log SET model='qwen/qwen3.6-27b'")
+        self.coord.execute("UPDATE settlement_route_snapshots SET model_id='mlx-community/Qwen3.6-27B-4bit'")
+        self.assertEqual(self.result()["classification"], "complete")
+
+    def test_wrong_catalog_route_model_still_flagged(self):
+        # A route serving a different catalog model than the buyer requested must
+        # still fail even though both are valid catalog ids.
+        self.coord.execute("UPDATE request_log SET model='qwen/qwen3.6-27b'")
+        self.coord.execute("UPDATE settlement_route_snapshots SET model_id='mlx-community/GLM-4.5-Air-4bit'")
+        result = self.result()
+        self.assertEqual(result["classification"], "incomplete")
+        self.assertIn("route_snapshot_model_unverified", result["missing"])
+
 
 if __name__ == "__main__":
     unittest.main()
