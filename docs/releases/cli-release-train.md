@@ -147,7 +147,7 @@ now live on the Studio. Fleet recommendation stays at **1.8.123**.
 | Continuous-batching qualification closeout: AC-25 receipt and warm-swap lifecycle coverage, durable replay proof, falsifiable Gate A5 counter-evidence, and modeled promotion economics. Production default remains off because Gate A5 did not converge. | merged `0197f379` | #1757 (#1646) |
 | China supply path: release self-update mirror, pinned Python bootstrap mirror, content-addressed model mirror/import verification, sanitized rejected-mirror diagnostics, and signed-manifest transfer bounds. The production Qwen3 8B origin is seeded; the reviewed signed Darwin release, public installer/release mirror, and #1756 mainland hardware run remain gates. | merged `ddaa551b` | #1745 (#1737, #1756) |
 | Malibu app credential handoff no longer races stdout capture. | in progress | #1747 |
-| Signed provider release discovery pages past newer Pearl-only releases instead of treating the newest repository tag as the CLI release. | in progress | #1753 |
+| Signed provider release discovery pages past newer Pearl-only releases instead of treating the newest repository tag as the CLI release; client, verifier, and freshness alarm share bounded pagination and UInt64 transport-sequence semantics. | merged `9636a125` | #1753 (#1737, #1756) |
 | Engine-agnostic serving on Trusted Pools (#1690), provider side: SPEC-015 0.4.10 pool-authorized loopback receipts (`PoolRuntimeAuthorization`, receipt eligibility), llama.cpp / Ollama / mlx_lm.server loopback runtimes with engine selection, delivered-only accounting, and lab e2e fixes: a llama.cpp buyer disconnect ends with a `buyer_cancel` receipt over the delivered prefix (E2E-F3); rotate-key swaps the signing key the process actually uses (E2E-F9, pre-existing); native streams stay byte-identical to the receipt across split UTF-8 characters (E2E-F13, pre-existing). | merged `747557cc` 2026-09-25 | #1719 (#1690) |
 | #1690 follow-up, provider side: the CLI consumes the SPEC-023 v0.19.1 GGUF `huggingface_revision` + `file_path` artifact tuple (older CLIs reject a feed that carries it); LM Studio (`lmstudio_loopback`) and oMLX (`omlx_loopback`) runtimes and engine-select values; cancelled-stream billing on every external engine (per-chunk logprobs/timings or a tokenizer pinned to the hash-verified snapshot, inside the coordinator's 2 s cancel window; a streamed tool call stays unattested); catalog source gains the Llama-3.2-3B `gguf-q4-k-m` artifact and 17 measured MLX sizes (catalog-lane JSON; activation is a separate signed cut). | merged `8d1880bc` 2026-09-27 | #1754 (#1690) |
 | Compatible-row batched prefill with bounded prompt/decode headroom. Release eligibility remains gated on the isolated Studio campaign. | merged `95a6563d` | #1762 (#1758) |
@@ -260,9 +260,9 @@ and silently never matching.
 | Mac Studio serving canary | Signed private candidate **201** @ `9848bfc2`, live since 2026-09-27 04:23Z. Installed CLI SHA-256 `b7bada06ab3cefe7af8d2b2e96f9cb7975b0f462e0c1e4dc976848688236c546`; Pearl reports the exact 201 compatibility set connected, ready, routing-eligible, and `catalog_admission_mode=current`. Provider identity, Qwen 3.6 27B config, 200k context cap, and catalog release were preserved. Backup `~/macprovider.bak-195-20260927T042239Z`; rollback `~/.config/macprovider/operator-tools/rollback-201.sh 20260927T042239Z`. Candidate 195 remains live on the catalog canary Mac mp-26592d… (rollback `rollback-canary-195.sh`). |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` @ `eb30981c` (BYOM #1576 `cdbb0257` + #1591 + #1590 + #1593); CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
-| Status | **Do not promote.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 201 is the Studio-only serving canary; Pearl accepts its exact compatibility set while retaining 195 and 192 rollback admission. Continuous batching remains off by default after #1757. |
-| Next candidate | None reserved. Candidate 201 is the current combined signed acceptance candidate. Do not cut a successor unless a later in-scope CLI change lands or candidate 201 fails a required physical track. |
-| Notable merges after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`); #1742 (`03627cda`, shipped in Studio candidate `v1.8.195`); #1757 (`0197f379`, CB qualification closeout); #1745 (`ddaa551b`, China supply path); #1762 (`95a6563d`, batched prefill); #1658 (`3ec784c69`, Build 1 private staging path). Coordinator/gateway settlement recovery continued separately through #1728, live in Pearl runtime `v1.8.191`. |
+| Status | **Do not promote 201.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 201 remains the Studio-only serving canary; Pearl accepts its exact compatibility set while retaining 195 and 192 rollback admission. It was cut from `9848bfc2` before #1753 merged as `9636a125`, so it does not contain the signed-release discovery required for the public installer/China path and cannot be the promoted build under the current-main rule. Continuous batching remains off by default after #1757. |
+| Next candidate | **v1.8.202** (not cut). Cut it from current `main` after the intended CLI scope is frozen. It must include #1753 and replace 201 for promotion, public Darwin assets, release-mirror seeding, and #1756 mainland acceptance. Keep 201 live as the Studio canary until 202 passes its applicable physical tracks. |
+| Notable merges after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`); #1742 (`03627cda`, shipped in Studio candidate `v1.8.195`); #1757 (`0197f379`, CB qualification closeout); #1745 (`ddaa551b`, China supply path); #1762 (`95a6563d`, batched prefill); #1658 (`3ec784c69`, Build 1 private staging path); #1753 (`9636a125`, signed provider-release discovery, merged after candidate 201). Coordinator/gateway settlement recovery continued separately through #1728, live in Pearl runtime `v1.8.191`. |
 | Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build (soak proof; live seats since reduced to one — see Mac Studio serving canary above). |
 
 ## E2E tracks (independent gates)
@@ -375,11 +375,14 @@ combined candidate**.
   Hugging Face, LFS, Xet, or CAS lookups/connections throughout install and
   acquisition. A configured fallback variable or proxy is not proof.
 - **Status:** production model origin **GREEN**: `models.malibu.tech`, TLS,
-  immutable routing, manifest, sizes, and full weights hash are verified. The
-  track remains **OPEN** because the latest public release is Pearl-only,
-  `download.malibu.tech/releases/` is unseeded, the served installer predates
-  #1745, and no released-binary mainland run has passed. Do not substitute the
-  earlier ad-hoc local build or Vietnam boundary exercise for this gate.
+  immutable routing, manifest, sizes, and full weights hash are verified.
+  Signed provider-release discovery #1753 is merged in `9636a125`, closing the
+  source-side newest-tag/CLI-selection gap. The track remains **OPEN** because
+  candidate 201 predates #1753 and is private, the latest public release is
+  Pearl-only, `download.malibu.tech/releases/` is unseeded, the served
+  installer predates #1745, and no released-binary mainland run has passed.
+  Cut candidate 202 from post-#1753 `main`; do not substitute the earlier
+  ad-hoc local build or Vietnam boundary exercise for this gate.
 
 ### Track F — Studio batched-prefill qualification
 
