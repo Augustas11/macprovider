@@ -1,6 +1,11 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.9.25 (2026-09-27, operator resume fresh-session recovery)
+**Version:** 1.9.26 (2026-09-27, native-MTP local control surface)
+
+**Change log v1.9.26 (2026-09-27, native-MTP local control surface):**
+Registers the default-off provider-local configuration and status boundary
+consumed by SPEC-048. The mode is locally selected only; it adds no coordinator
+heartbeat or state-update field and grants no production eligibility by itself.
 
 **Change log v1.9.25 (2026-09-27, operator resume fresh-session recovery):**
 Adds `SPEC-001-R004`. A provider paused by the local operator is represented to
@@ -1285,6 +1290,18 @@ Configuration is loaded in this precedence order (highest wins):
    override with `--config` or `MACPROVIDER_CONFIG`)
 4. Built-in defaults
 
+**Native-MTP mode (SPEC-048).** The closed configuration surface is YAML
+`native_mtp_mode`, environment `MACPROVIDER_NATIVE_MTP_MODE`, and CLI
+`--native-mtp`; the ordinary precedence above applies. The only values are
+`off` and `auto`, with default `off`. An absent value resolves silently to the
+default; an explicit empty or invalid value resolves to `off` and emits a local
+configuration error. `auto` only permits the
+SPEC-048 selector to choose `native_mtp` when every signed-artifact, tuple,
+request, memory, scheduler, and release gate in that spec passes. It is not a
+force flag and MUST NOT bypass an ineligible request or tuple. Config reload and
+warm-swap capture the resolved value in the served snapshot: accepted requests
+finish on their captured value, while newly accepted requests use the new one.
+
 **Provider-credential exception (v1.8.2).** After the general layering above is
 resolved, a non-empty `provider_id` selects the CLI-owned Keychain item. If that item
 exists, it is authoritative even when the layered config contains a different token.
@@ -1354,7 +1371,12 @@ only fields a reader may trust through these capabilities:
 `capacity_provenance_v1` (FR-17 local capacity provenance), `coordinator_origin_v1`
 (FR-20a coordinator origin), `referral_bootstrap_v1`, `referral_status_v1`, `referral_advocacy_v1`,
 `referral_fragment_links_v1`, `model_liveness_token_v1`, and
-`legacy_reader_fallback_v1`. `model_liveness_token_v1` gates the `model_liveness`
+`legacy_reader_fallback_v1`. A build implementing SPEC-048 additionally
+advertises `native_mtp_status_v1`, which gates exactly the closed local
+`native_mtp` object defined by SPEC-048-R010. The capability and object are
+local diagnostics only: this revision adds no `native_mtp` member to a
+coordinator heartbeat, `state_update`, receipt, or buyer response.
+`model_liveness_token_v1` gates the `model_liveness`
 object (a monotonic model-thread progress token + monotonic age; SPEC-025 §5.2), an
 advisory observability signal that carries no buyer-serving authority. A reader MUST suppress a typed field when its capability
 is absent and MUST suppress all typed fields when the minimum reader exceeds its

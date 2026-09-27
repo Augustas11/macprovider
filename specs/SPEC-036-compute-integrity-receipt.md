@@ -1,6 +1,6 @@
 # SPEC-036 — Compute-Integrity Receipt Companion
 
-**Status:** v0.1.1-draft
+**Status:** v0.1.2-draft
 **Date:** 2026-08-17
 **Depends on:** SPEC-015 v0.4.4, SPEC-022 v0.1.5, SPEC-026 v0.26, SPEC-030 v0.1-draft (Losslessness Probe — shared distribution-snapshot / support-selection / TV-interval / probe-transport primitive)
 **Companion research:** `docs/research/compute-integrity-receipt-2026-07.md`
@@ -12,6 +12,10 @@
   keyed to the same request attempt and provider-signed receipt tuple digest.
   A future SPEC-015 successor may reference that artifact only through a new
   `receipt_version`.
+
+**Change log v0.1.2 (2026-09-27, native-MTP path binding):** FR-18 adds a
+forced-native-path adapter whose path/tuple mismatch is inconclusive and never
+promotes compute-integrity or settlement state.
 
 **Numbering + dependency note (2026-07-22).** This spec was drafted as `SPEC-030`
 against `SPEC-029` before the 2026-07-10 corpus-hygiene renumber. It is now
@@ -2026,6 +2030,27 @@ The initial deployment budget MUST assume either:
   quorum; or
 - an equivalent self-hosted reference fleet with the same redundancy, sharding,
   freshness, and audit properties.
+
+### FR-18 Native-MTP claimed-path diagnostic adapter (SPEC-036-R018)
+
+An optional MTP variant of `compute_integrity_probe_v1` MUST bind
+`expected_decode_path: "native_mtp"` and the SPEC-023-R024
+`native_mtp_runtime_tuple_sha256` in its authenticated request. The result MUST
+echo `actual_decode_path`, the provider-reported runtime-tuple identity, target
+generation, and whether fallback occurred. A missing or mismatched binding,
+ordinary/classic execution, or fallback yields
+`inconclusive:native_path_untrusted`.
+
+The actual-path and tuple fields, including a correlated fresh SPEC-031-R033
+result, are provider-authored cooperative diagnostics rather than trusted
+execution evidence. Until a later SPEC defines an independently trusted
+execution-attestation binding, the MTP variant always remains observe-only and
+`inconclusive:native_path_untrusted`; it MUST NOT count as a TV or integrity
+pass, update an enforce window, clear a breaker, promote settlement state,
+affect already captured rows, or authorize settlement. It also does not replace
+FR-6 through FR-10 measurement and reference requirements. This adapter adds no
+receipt or usage field and retains FR-17's bounded non-billable
+capacity/funding rules.
 
 ## 6. Migration
 

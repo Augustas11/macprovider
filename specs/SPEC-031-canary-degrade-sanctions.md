@@ -1,9 +1,12 @@
 # SPEC-031 — Canary Probe, Degrade & Sanction Lifecycle
 
-**Status:** v0.2
+**Status:** v0.3
 **Date:** 2026-07-13
 **Depends on:** SPEC-002 (coordinator provider state machine: FR-P5 routing eligibility, FR-P8a admission warm-up, FR-P11a circuit-breaker; F-2 amendment defines provisional/pinned admission), SPEC-003 (open provider onboarding, tier semantics), SPEC-006 §5.2 / §17.2 (buyer error contract, 404/503), SPEC-008 (attestation — owns model/weight identity claims), SPEC-018/019 (buyer error envelope + `retryable`)
-**Related infrastructure:** SPEC-030 (losslessness probe) is a *distinct* probe subsystem; SPEC-031 does not govern it. Per SPEC-030 FR-1 the two **MAY** share generic scheduling/jitter/persistence infrastructure but **MUST** keep separate carriers, frames, verdicts, state, and sanction paths (see §17).
+**Related infrastructure:** SPEC-030 (losslessness probe) and SPEC-048 native
+MTP validation are distinct probe subsystems. They MAY share only generic
+scheduling/jitter/persistence infrastructure and MUST keep separate carriers,
+frames, verdicts, state, and sanction paths (see §17 and FR-CAN33).
 **Companion baseline (separate spec):** proof-of-weights / OPoI semantics + the autotune hello-gate are runbook item 9's normative baseline; this spec defines only the canary *mechanism* those features build on, and explicitly does **not** make weight-integrity claims (see §1, §2, and the CRITICAL reframing in the changelog).
 
 **Numbering note.** Assigned canonical **SPEC-031** on 2026-07-11 (Wave C of the
@@ -787,6 +790,80 @@ its **durable admission rejection** (the existing `DELETE /admin/reject/
 {provider_id}`, decision-log Entry 125), symmetric to FR-CAN31, so a false
 provisional ban on the sole provider is operator-recoverable without waiting for
 retention pruning.
+
+**FR-CAN33 — native-MTP tuple canary profile (SPEC-031-R033).** The coordinator
+MAY schedule `native_mtp_canary_v1` only for a tuple with current SPEC-048
+admission. Its dedicated request/result binds provider id, assigned id, model
+id/hash, target generation, tokenizer identity, artifact digest, MTP-manifest
+digest, sidecar digest, provider/MLX revisions, cache/state class, proposal
+depth, canonical SPEC-023-R024 `native_mtp_runtime_tuple_sha256`, challenge
+id/record/corpus digest,
+coordinator nonce, request/result digest, issued/expiry times, expected and
+actual token-ID digest, terminal reason, accepted/rejected/bonus counters,
+committed-state digest, `actual_decode_path`, and `fallback_used`.
+
+The release-bound challenge bank's decoded body is the exact closed object
+`{schema_version,release_id,issued_at,expires_at,signer_key_id,entries}`.
+`schema_version` is exactly `macprovider.native-mtp-challenge-bank.v1`;
+`release_id` equals the admission sidecar release; timestamps are RFC3339 UTC
+seconds and cannot exceed the sidecar validity interval; and `entries` is a
+bytewise challenge-id-sorted unique array of 1..256 closed records. Each record
+is exactly `{challenge_id,model_id,model_hash,tokenizer_sha256,artifact_sha256,
+mtp_manifest_sha256,prompt_token_ids,max_completion_tokens,
+fixed_proposal_depth,expected_token_ids,expected_token_id_sha256,
+expected_terminal_reason,expected_counters,expected_committed_state_sha256}`.
+IDs use the existing bounded wire grammars; digests are lowercase 64-hex;
+`prompt_token_ids` contains 1..2,048 unsigned 32-bit integers and its serialized
+JSON is at most 8 KiB; `max_completion_tokens` is `1..64`;
+`fixed_proposal_depth` is `1..16`; `expected_token_ids` contains at most 64
+unsigned 32-bit integers; terminal reason is 1..64 printable ASCII bytes; and
+`expected_counters` is the exact closed object `{accepted,rejected,bonus,
+committed}`, each an unsigned 64-bit integer consistent with the expected token
+sequence and fixed depth.
+
+SHA-256 of the exact authenticated bank JSON bytes MUST equal the selected
+admission entry's `challenge_bank_sha256`. The decoded body's `signer_key_id`
+and detached envelope `key_id` MUST both equal the admission sidecar's exact
+`challenge_bank_signer_key_id`; a valid signature by any other concurrently
+trusted key is an integrity failure. Unknown, missing, duplicate, unsorted,
+wrong-typed, over-bound, expired, cross-release, or identity-mismatched bank
+data disables only that admission tuple. A canary request MUST select one exact
+bank record and MUST NOT accept a caller-supplied prompt or expected value in
+its place.
+
+The profile uses synthetic coordinator-owned data; maximum completion is 64
+tokens, prompt input is at most 8 KiB and 2,048 tokens, and the release-bound
+signed challenge bank contains at most 256 entries. It never exceeds the signed
+challenge record. Requests/results use the existing authenticated provider
+control carrier. Each request carries a uniformly random unpredictable 128-bit
+nonce encoded as 32 lowercase hex characters. The coordinator atomically
+consumes `(provider_id, target_generation,native_mtp_runtime_tuple_sha256,
+challenge_id,nonce)` once, retains that replay key through result expiry, and rejects a
+duplicate, late, or differently digested result. One challenge per
+provider/tuple may be in flight, deadline is 60 seconds, and unavailable probe
+capacity reschedules without consuming buyer capacity or creating a failure.
+The dedicated interval defaults to 3,600 seconds, has a 900-second minimum,
+and uses FR-CAN1's 0.5–1.5 jitter. Freshness expires after twice the configured
+interval.
+
+A result passes only when identity/generation/tuple bindings match,
+`actual_decode_path == "native_mtp"`, `fallback_used == false`, and every
+expected digest/counter/terminal value matches. Failure or expiry disables only
+that exact native-MTP tuple. It MUST NOT increment generic `canary_fail_count`,
+degrade or ban the provider, alter routing for ordinary/classic paths, or create
+buyer usage, receipt, billing, settlement, reward, or payout activity. The
+profile has its own state and operator diagnostics. A provider-local SPEC-048
+self-test is a prerequisite but is not coordinator canary evidence.
+
+All actual-path, counter, token, and state fields are provider-authored. A pass
+is operational regression evidence for a conforming released binary, not
+cryptographic proof that native MTP ran and not evidence against a malicious
+provider. It MUST NOT independently satisfy SPEC-030 losslessness,
+SPEC-036 compute-integrity, attestation, trust-tier, or settlement gates.
+The request's challenge-bank digest MUST equal the selected admission entry's
+`challenge_bank_sha256`; a bank mismatch, bank entry outside the signed bound,
+or runtime identity reconstructed from fewer than all SPEC-023-R024 fields is a
+tuple-scoped failure.
 
 ## 14. Conformance status (honesty table)
 

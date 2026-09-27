@@ -1,10 +1,10 @@
 # SPEC-037 — KV survival across provider restarts (encrypted provider-local disk tier)
 
-Version: v0.1.4
+Version: v0.1.5
 Status: draft (normative design; IMPL landed behind a disabled-by-default flag)
 Owner: provider runtime / prefix-cache persistence
 Decision source: `docs/research/RESEARCH_233_KV_SURVIVAL_RESTART_MEMO.md` (landed decision memo, commit `d6881b14`)
-Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds. v0.1.2: Keychain mode for the shipped naked Developer ID CLI is the process-default / login keychain (same store as provider credentials); Data Protection Keychain is used only when a named access group is set on a profiled bundle. v0.1.3: RESEARCH_233 Q6 on the live Qwen3-Coder-30B-A3B 4-bit tuple is unquantized `KVCacheSimple` (`kv_bits=null`, ~98 KiB/token; KVS-01a evidence). Q7 q4 KV is not the active representation. FR-KVP9 promotion hard ceiling rises to 1 GiB so the memo's 8k FP16 class is configurable; the default stays 256 MiB. Codec stays `kvsurv-codec-v1`. KVS-01b evidence is not claimed here. v0.1.4: hybrid entries (any recurrent `ArraysCache`/`MambaCache` layer, with SPEC-024 v0.2.5 recurrent-state checkpoints) are hot-tier only and never persisted or promoted.
+Audit history: R1+R2+R3 five-lane audits (codex code/security/architect + adversarial verificator + product critic) reconciled in this text. R2 forced: positive synthetic-key sub-namespace (the shipped `conv:` validator makes prefix-exclusion gating unsatisfiable), per-entry Keychain DEKs as the rollback-proof revocation anchor, purge-generation stamping at lease acquisition, rotation-intent journal, byte-level format grammar, write-side staging caps, and `allow_buyer_keys` rejected in v0.1. R3 forced: non-circular AAD projection (blob hash out of AAD), single-key purge lease fencing, lock inode outside the deletable tree, incoming-vs-served model identity split, DEK lifecycle on eviction, and control-plane state bounds. v0.1.2: Keychain mode for the shipped naked Developer ID CLI is the process-default / login keychain (same store as provider credentials); Data Protection Keychain is used only when a named access group is set on a profiled bundle. v0.1.3: RESEARCH_233 Q6 on the live Qwen3-Coder-30B-A3B 4-bit tuple is unquantized `KVCacheSimple` (`kv_bits=null`, ~98 KiB/token; KVS-01a evidence). Q7 q4 KV is not the active representation. FR-KVP9 promotion hard ceiling rises to 1 GiB so the memo's 8k FP16 class is configurable; the default stays 256 MiB. Codec stays `kvsurv-codec-v1`. KVS-01b evidence is not claimed here. v0.1.4: hybrid entries (any recurrent `ArraysCache`/`MambaCache` layer, with SPEC-024 v0.2.5 recurrent-state checkpoints) are hot-tier only and never persisted or promoted. v0.1.5: decode-path exclusion is explicit for both `classic_draft_spec` and `native_mtp`; neither path may enter persistent or hot conversation-cache lifecycle.
 
 ## 1. Purpose and scope
 
@@ -168,11 +168,13 @@ mechanism:
 3. every KV layer must be trimmable and every trim must remove exactly the
    requested count — any shortfall is a miss;
 4. the incoming request still reports its full prompt length; and
-5. speculative decoding stays entirely outside this cache path. Normatively:
+5. every non-ordinary decode path stays entirely outside this cache path.
+   Normatively, this includes both SPEC-028 `classic_draft_spec` and SPEC-048
+   `native_mtp`:
    on **both** the streaming and non-streaming endpoints,
-   speculative-decode routing MUST be determined **before** any
+   decode-path routing MUST be determined **before** any
    conversation-cache `begin()`, promotion, or commit; a request routed to
-   speculative decode MUST NOT acquire a cache lease, trigger promotion, or
+   either non-ordinary path MUST NOT acquire a cache lease, trigger promotion, or
    commit cache state, and MUST NOT leave a key busy (fixture: AC-8).
 
 Promotion MUST materialize a cold entry into the same in-memory

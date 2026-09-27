@@ -9,7 +9,7 @@
     {
       "spec_id": "SPEC-001",
       "title": "Phase 3 Binary: Mac Provider Inference CLI",
-      "version": "1.9.25",
+      "version": "1.9.26",
       "path": "specs/SPEC-001-phase3-binary.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.20.2",
+      "version": "v0.21.0",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -694,7 +694,7 @@
     {
       "spec_id": "SPEC-024",
       "title": "Prefix-cache billing and provider-local cache isolation",
-      "version": "0.2.7",
+      "version": "0.2.8",
       "path": "specs/SPEC-024-prefix-cache-billing.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -801,8 +801,8 @@
     },
     {
       "spec_id": "SPEC-028",
-      "title": "MLX Speculative Decoding for Provider Serve",
-      "version": "0.2-draft",
+      "title": "Classic External-Draft MLX Speculative Decoding for Provider Serve",
+      "version": "0.3-draft",
       "path": "specs/SPEC-028-mlx-speculative-decoding.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -860,7 +860,7 @@
     {
       "spec_id": "SPEC-030",
       "title": "Losslessness Probe",
-      "version": "v0.1",
+      "version": "v0.1.1",
       "path": "specs/SPEC-030-losslessness-probe.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -888,7 +888,7 @@
     {
       "spec_id": "SPEC-031",
       "title": "Canary Probe, Degrade & Sanction Lifecycle",
-      "version": "v0.2",
+      "version": "v0.3",
       "path": "specs/SPEC-031-canary-degrade-sanctions.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1039,7 +1039,7 @@
     {
       "spec_id": "SPEC-037",
       "title": "KV survival across provider restarts (encrypted provider-local disk tier)",
-      "version": "v0.1.4",
+      "version": "v0.1.5",
       "path": "specs/SPEC-037-kv-survival-restart.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1071,7 +1071,7 @@
     {
       "spec_id": "SPEC-036",
       "title": "Compute-Integrity Receipt Companion",
-      "version": "v0.1.1",
+      "version": "v0.1.2",
       "path": "specs/SPEC-036-compute-integrity-receipt.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1100,7 +1100,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3",
+      "version": "v0.3.1",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1135,7 +1135,7 @@
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.6",
+      "version": "v0.1.7",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1469,6 +1469,52 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1240",
         "rationale": "SPEC-047 v0.2.0 adds the #1690 pool route-time clause for loopback runtimes on SPEC-042 Trusted Pool routes only; the global loopback bar is unchanged. v0.2.2 moves the unimplemented pool-qualified eligibility claim out of R004 into the pending SPEC-047-R010, so R004 keeps its 2026-09-16 journey evidence. SPEC-047 v0.1.10 bars loopback runtime sources from settlement_capable until a trusted usage source exists (#1694); v0.1.9 marks offer_rejected reserved/unreachable and drops the rejected-reoffer journey observation; v0.1.8 clarifies settlement-capable guidance as conditional eligibility, freezes coordinator-backed not-offered copy, and rejects catalog-only reuse of per-candidate admission authority. Local CLI/coordinator/routing/buyer safeguards exist and are mapped, but Issue #1240 still needs the full admission policy/probe lifecycle, updated copy evidence, and signed JOURNEY-NETWORK-MODEL-ADMISSION evidence before conformance or production status can be claimed."
+      }
+    },
+    {
+      "spec_id": "SPEC-048",
+      "title": "Native Multi-Token Prediction Serving",
+      "version": "0.1.0",
+      "path": "specs/SPEC-048-native-mtp-serving.md",
+      "status": "draft",
+      "owner": "@Augustas11",
+      "authority_domains": [
+        "native-mtp-serving"
+      ],
+      "supersedes": [],
+      "depends_on": [
+        "SPEC-001",
+        "SPEC-005",
+        "SPEC-010",
+        "SPEC-011",
+        "SPEC-015",
+        "SPEC-018",
+        "SPEC-019",
+        "SPEC-022",
+        "SPEC-023",
+        "SPEC-024",
+        "SPEC-028",
+        "SPEC-030",
+        "SPEC-031",
+        "SPEC-032",
+        "SPEC-033",
+        "SPEC-036",
+        "SPEC-037",
+        "SPEC-038",
+        "SPEC-039",
+        "SPEC-041"
+      ],
+      "implementation_status": "pending-reconciliation",
+      "production_status": "pending-verification",
+      "last_reconciled_commit": null,
+      "last_reconciled_at": null,
+      "evidence": [],
+      "requirement_id_migration": "complete",
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "Issue #1770 requires a native target-local MTP path, independent MXFP8 qualification, multi-row serving semantics, signed admission evidence, and real Apple-Silicon validation. No production implementation or signed journey evidence exists yet."
       }
     }
   ],
@@ -3143,6 +3189,23 @@
       }
     },
     {
+      "requirement_id": "SPEC-023-R024",
+      "spec_id": "SPEC-023",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "SPEC-023 v0.21.0 defines the closed signed native-MTP admission sidecar; generator, strict consumers, release-ledger binding, negative fixtures, and signed release evidence are not implemented."
+      }
+    },
+    {
       "requirement_id": "SPEC-024-R001",
       "spec_id": "SPEC-024",
       "state": "pending",
@@ -3963,6 +4026,36 @@
       }
     },
     {
+      "requirement_id": "SPEC-030-R021",
+      "spec_id": "SPEC-030",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "The native-MTP losslessness path-binding adapter is specified but not implemented or evidenced; it cannot substitute for the distribution/TV verdict."
+      }
+    },
+    {
+      "requirement_id": "SPEC-031-R033",
+      "spec_id": "SPEC-031",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "The dedicated bounded native-MTP tuple canary and tuple-only disablement lifecycle are specified but not implemented or evidenced."
+      }
+    },
+    {
       "requirement_id": "SPEC-036-R001",
       "spec_id": "SPEC-036",
       "state": "pending",
@@ -4254,6 +4347,21 @@
       }
     },
     {
+      "requirement_id": "SPEC-036-R018",
+      "spec_id": "SPEC-036",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "The compute-integrity forced-native-path adapter and inconclusive mismatch boundary are specified but not implemented or evidenced."
+      }
+    },
+    {
       "requirement_id": "SPEC-038-R001",
       "spec_id": "SPEC-038",
       "state": "pending",
@@ -4509,6 +4617,23 @@
       }
     },
     {
+      "requirement_id": "SPEC-038-R018",
+      "spec_id": "SPEC-038",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "FR-CB18 defines ragged native-MTP verification mapping, complete-window reservation, depth-zero degradation, fairness, and shared-forward proof; implementation and hardware evidence are pending."
+      }
+    },
+    {
       "requirement_id": "SPEC-039-R001",
       "spec_id": "SPEC-039",
       "state": "pending",
@@ -4716,6 +4841,23 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
         "rationale": "FR-PKV14 (operator configuration surface mirroring SPEC-037 FR-KVP11: triple-source precedence, default-off, block size, pool capacity, fallback policy): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+      }
+    },
+    {
+      "requirement_id": "SPEC-039-R015",
+      "spec_id": "SPEC-039",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": [
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "FR-PKV15 defines transactional native-MTP checkpoint, stage, partial commit, and abort over paged and allowlisted hybrid state; implementation and oracle evidence are pending."
       }
     },
     {
@@ -9648,6 +9790,246 @@
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1690",
         "rationale": "SPEC-047 v0.2.2 (#1690) gives the pool-qualified eligibility claim its own ID; v0.2.0 had stated it inside R004. A loopback candidate that earns on SPEC-042 pool routes while it stays catalog_priced MAY show a claim that names the pool, only while every pool route-time predicate holds. The claim is not implemented: no coordinator or CLI surface evaluates the pool route-time predicates for provider guidance or emits a pool-qualified claim, so provider surfaces keep the unqualified R004 catalog_priced rule. Pending until the claim is implemented with its predicate gating and a signed JOURNEY-NETWORK-MODEL-ADMISSION evidences it."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R001",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "The closed ordinary/classic/native decode-path contract and default-off selection gate are not implemented."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R002",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "No immutable native-MTP capability, manifest binding, or negative artifact fixtures exist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R003",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "The exact upstream release and stable row-mapped transaction API have not been selected or qualified."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R004",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "Native-MTP request eligibility, bounded fallback reasons, and pre-output restoration are not implemented."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R005",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "Target-authoritative prefix acceptance and exact greedy ordinary-decode parity are unimplemented and unproven."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R006",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "Row-local transactional KV and hybrid-state staging, prefix commit, discard, and exact rewind are not implemented."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R007",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "Variable-span multi-row native-MTP batching, capacity accounting, and mixed-path fairness are not implemented."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R008",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "Streaming, cross-boundary stop, cancellation, and terminal atomicity fixtures do not exist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R009",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "The native-MTP cache lease, promotion, reuse, and commit exclusion is not implemented or tested."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R010",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "Native-MTP local observability, warm-swap reset, and wire-schema omission gates are not implemented."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R011",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "Buyer, receipt, usage, billing, and settlement invariance has not been demonstrated."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R012",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "No MLX-native MXFP8 artifact has passed independent format, fit, quality, memory, thermal, and combined native-MTP qualification."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R013",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "Signed immutable native-MTP catalog/autotune admission and evidence binding do not exist."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R014",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-RELEASE"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "The complete production enablement, audit, signed journey, and release gate has not passed."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R015",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "No preregistered 256 GB Studio and advertised-tier benchmark campaign has passed the material production-economics gate."
+      }
+    },
+    {
+      "requirement_id": "SPEC-048-R016",
+      "spec_id": "SPEC-048",
+      "state": "pending",
+      "implementation": [],
+      "tests": [],
+      "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
+      "evidence": [],
+      "gap": {
+        "verdict": "DECISION_REQUIRED",
+        "owner": "@Augustas11",
+        "issue": "https://github.com/Augustas11/macprovider/issues/1770",
+        "rationale": "No signed native-path greedy integrity challenge or fail-closed canary adapter exists."
       }
     }
   ]

@@ -18,7 +18,8 @@
         "SPEC-044",
         "SPEC-045",
         "SPEC-046",
-        "SPEC-047"
+        "SPEC-047",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -102,7 +103,8 @@
         "SPEC-043",
         "SPEC-044",
         "SPEC-045",
-        "SPEC-047"
+        "SPEC-047",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -184,7 +186,8 @@
         "SPEC-044",
         "SPEC-045",
         "SPEC-046",
-        "SPEC-047"
+        "SPEC-047",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -199,7 +202,8 @@
         "SPEC-020",
         "SPEC-044",
         "SPEC-046",
-        "SPEC-047"
+        "SPEC-047",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -280,7 +284,8 @@
         "SPEC-042",
         "SPEC-043",
         "SPEC-045",
-        "SPEC-047"
+        "SPEC-047",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -321,7 +326,8 @@
         "SPEC-019",
         "SPEC-045",
         "SPEC-046",
-        "SPEC-047"
+        "SPEC-047",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
@@ -336,7 +342,8 @@
         "SPEC-018",
         "SPEC-045",
         "SPEC-046",
-        "SPEC-047"
+        "SPEC-047",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
@@ -384,7 +391,8 @@
         "SPEC-041",
         "SPEC-042",
         "SPEC-043",
-        "SPEC-047"
+        "SPEC-047",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -405,7 +413,8 @@
         "SPEC-044",
         "SPEC-045",
         "SPEC-046",
-        "SPEC-047"
+        "SPEC-047",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -423,7 +432,8 @@
         "SPEC-037",
         "SPEC-038",
         "SPEC-039",
-        "SPEC-045"
+        "SPEC-045",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -473,7 +483,8 @@
       "consumers": [
         "SPEC-001",
         "SPEC-030",
-        "SPEC-038"
+        "SPEC-038",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
@@ -497,7 +508,8 @@
       "consumers": [
         "SPEC-015",
         "SPEC-022",
-        "SPEC-028"
+        "SPEC-028",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": false,
@@ -510,7 +522,8 @@
       "consumers": [
         "SPEC-002",
         "SPEC-032",
-        "SPEC-033"
+        "SPEC-033",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -529,7 +542,8 @@
         "SPEC-042",
         "SPEC-044",
         "SPEC-046",
-        "SPEC-047"
+        "SPEC-047",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -545,7 +559,8 @@
         "SPEC-032",
         "SPEC-044",
         "SPEC-046",
-        "SPEC-047"
+        "SPEC-047",
+        "SPEC-048"
       ],
       "status": "pending-reconciliation",
       "requires_signed_journey_result": true,
@@ -583,7 +598,8 @@
       "owner_spec": "SPEC-037",
       "consumers": [
         "SPEC-038",
-        "SPEC-039"
+        "SPEC-039",
+        "SPEC-048"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -594,7 +610,8 @@
       "id": "compute-integrity-settlement",
       "owner_spec": "SPEC-036",
       "consumers": [
-        "SPEC-021"
+        "SPEC-021",
+        "SPEC-048"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -616,7 +633,9 @@
     {
       "id": "continuous-batching-serving",
       "owner_spec": "SPEC-038",
-      "consumers": [],
+      "consumers": [
+        "SPEC-048"
+      ],
       "status": "declared",
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
@@ -626,7 +645,8 @@
       "id": "paged-kv-attention",
       "owner_spec": "SPEC-039",
       "consumers": [
-        "SPEC-038"
+        "SPEC-038",
+        "SPEC-048"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -650,7 +670,8 @@
       "id": "relay-blind-request-encryption",
       "owner_spec": "SPEC-041",
       "consumers": [
-        "SPEC-042"
+        "SPEC-042",
+        "SPEC-048"
       ],
       "status": "declared",
       "requires_signed_journey_result": true,
@@ -737,6 +758,26 @@
       "requires_signed_journey_result": true,
       "owner": "@Augustas11",
       "issue": "https://github.com/Augustas11/macprovider/issues/1240"
+    },
+    {
+      "id": "native-mtp-serving",
+      "owner_spec": "SPEC-048",
+      "consumers": [
+        "SPEC-001",
+        "SPEC-023",
+        "SPEC-024",
+        "SPEC-028",
+        "SPEC-030",
+        "SPEC-031",
+        "SPEC-036",
+        "SPEC-037",
+        "SPEC-038",
+        "SPEC-039"
+      ],
+      "status": "declared",
+      "requires_signed_journey_result": true,
+      "owner": "@Augustas11",
+      "issue": "https://github.com/Augustas11/macprovider/issues/1770"
     }
   ]
 }

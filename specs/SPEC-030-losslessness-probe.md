@@ -1,8 +1,13 @@
 # SPEC-030 — Losslessness Probe
 
-**Status:** v0.1-draft
+**Status:** v0.1.1-draft
 **Date:** 2026-07-09
 **Depends on:** SPEC-015 v0.4.2, SPEC-022, SPEC-028
+
+**v0.1.1 amendment (2026-09-27):** FR-21 adds a native-MTP path-binding
+adapter. It never substitutes a deterministic self-test for this spec's
+distribution/TV verdict. SPEC-048 is a consumer cross-reference, not a
+`depends_on` edge, avoiding a cycle because SPEC-048 depends on this adapter.
 **Companion research:** `docs/research/losslessness-probe-2026-07.md`
 
 **Numbering note:** Promoted to canonical **SPEC-030** (2026-07-10, corpus-hygiene
@@ -586,6 +591,27 @@ Logs and dashboard views MUST NOT display raw prompt text by default. They MAY d
 V0.1 probes are overt. The provider MAY know it is handling a losslessness probe.
 
 Covert probes MUST be specified separately because they interact with buyer traffic, billing, receipts, and abuse resistance.
+
+### FR-21 Native-MTP path binding (SPEC-030-R021)
+
+An MTP losslessness profile MUST use `decode_path: "native_mtp"` and the
+SPEC-023-R024 `native_mtp_runtime_tuple_sha256`; the external-draft identity
+fields of FR-2 are absent and mutually exclusive with those fields. The request
+and result MUST echo the expected and provider-reported actual decode path and
+runtime-tuple identity. Ordinary fallback, a missing/mismatched identity, or an
+unbound path returns `inconclusive:native_path_untrusted`.
+
+A fresh SPEC-031 `native_mtp_canary_v1` result for the same provider, target
+generation, model, and runtime tuple MAY be correlated for operational
+diagnostics. Because both the canary and probe actual-path fields are authored
+by the provider, neither establishes that native MTP executed. Until a later
+SPEC defines an independently trusted execution-attestation binding, every MTP
+profile remains observe-only and `inconclusive:native_path_untrusted`; it MUST
+NOT become a TV pass, integrity/enforce input, or settlement eligibility
+signal. It also MUST NOT satisfy, replace, or weaken this spec's prompt
+distribution, support-selection, calibration, TV interval, profile freshness,
+or verdict requirements. Results remain non-billable and MUST NOT affect
+general provider readiness.
 
 ## 6. Non-Goals
 
