@@ -198,6 +198,20 @@ import sys
 PY
 [ "$(python3 "$page_state" "$work/page-overflow.json")" = end ] \
   || fail "transport sequence beyond UInt64 must not stop the walk"
+python3 - "$work/caught-up.json" "$work/page-overflow-mixed.json" <<'PY'
+import json
+import pathlib
+import sys
+releases = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+releases.append({"tag_name": "release-discovery-v1-18446744073709551616", "assets": []})
+pathlib.Path(sys.argv[2]).write_text(json.dumps(releases), encoding="utf-8")
+PY
+run_selector "$work/page-overflow-mixed.json" \
+  || fail "overflow transport must not outrank a valid client-visible transport"
+[ "$(python3 "$page_state" --highest-transport-tag "$work/page-overflow-mixed.json")" = "$expected" ] \
+  || fail "shared selector must ignore overflow transports"
+grep -Fq -- '--highest-transport-tag' "$root/.github/workflows/discovery-head-freshness-alarm.yml" \
+  || fail "freshness alarm must use the UInt64-bounded shared selector"
 grep -Fq 'no discovery transport within the client-visible listing bound' "$verifier" \
   || fail "anonymous verifier must fail without retrying once the page bound is exhausted"
 grep -Fq 'scripts/discovery_listing_page_state.py' "$verifier" \
