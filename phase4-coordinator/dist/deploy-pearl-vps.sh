@@ -1113,6 +1113,54 @@ normalize_yaml() {
 print_config_drift_diff() {
   redact_dsn | sed 's/^/    /' >&2
 }
+remote_config_projection() {
+  local remote_path="$1" transform="$2"
+  {
+    declare -f redact_dsn sanitize_live_config_for_local_validation normalize_yaml
+    cat <<'SH'
+remote_path="$1"
+transform="$2"
+case "$transform" in
+  sanitize_live_config_for_local_validation|normalize_yaml) ;;
+  *) echo "unsupported remote config projection transform: $transform" >&2; exit 2 ;;
+esac
+test -f "$remote_path" || { echo "missing remote coordinator config projection input: $remote_path" >&2; exit 1; }
+"$transform" < "$remote_path"
+SH
+  } | $SSH "bash -s -- '$remote_path' '$transform'"
+}
+create_remote_config_workspace() {
+  [ -n "${REMOTE_CONFIG_WORKDIR:-}" ] && return 0
+  REMOTE_CONFIG_WORKDIR="$($SSH 'umask 077 && mktemp -d -t macprovider-config-work.XXXXXXXX')" || {
+    echo "aborting deploy: mktemp failed for remote config workspace" >&2
+    exit 5
+  }
+  case "$REMOTE_CONFIG_WORKDIR" in
+    /tmp/macprovider-config-work.*) ;;
+    *)
+      echo "aborting deploy: mktemp produced unexpected config workspace path: '$REMOTE_CONFIG_WORKDIR'" >&2
+      exit 5
+      ;;
+  esac
+  $SCP "$CONFIG" "$C2_TIMER_MIGRATION_SCRIPT" "$RATE_CARD_CONFIG_MIGRATION_SCRIPT" \
+    "$VPS_USER@$VPS_HOST:$REMOTE_CONFIG_WORKDIR/"
+  REMOTE_TRACKED_CONFIG="$REMOTE_CONFIG_WORKDIR/tracked-coordinator.yaml"
+  REMOTE_C2_TIMER_MIGRATION_SCRIPT="$REMOTE_CONFIG_WORKDIR/$(basename "$C2_TIMER_MIGRATION_SCRIPT")"
+  REMOTE_RATE_CARD_CONFIG_MIGRATION_SCRIPT="$REMOTE_CONFIG_WORKDIR/$(basename "$RATE_CARD_CONFIG_MIGRATION_SCRIPT")"
+  $SSH "mv '$REMOTE_CONFIG_WORKDIR/$(basename "$CONFIG")' '$REMOTE_TRACKED_CONFIG' && chmod 0600 '$REMOTE_CONFIG_WORKDIR'/*"
+}
+remote_file_sha256() {
+  local remote_path="$1"
+  $SSH "sha256sum '$remote_path' | awk '{print \$1}'"
+}
+remote_reject_redacted_install_candidate() {
+  local remote_path="$1" label="$2"
+  if ! $SSH "! grep -Eq '(<MASKED>|postgres(ql)?://[^[:space:]]+:\*\*\*@)' '$remote_path'"; then
+    echo "aborting deploy: refusing to install redacted validation data as $label" >&2
+    echo "  Field-scoped config migration install candidates must stay raw on Pearl; local copies may only be sanitized projections." >&2
+    exit 5
+  fi
+}
 
 # R5 ARCH M1 — early coherence check: if the operator set
 # STATS_REQUIRED=1 but coordinator.yaml has stats.enabled=false (or
@@ -1208,18 +1256,12 @@ trap '
   rm -f "${TMP_CATALOG_PUBKEY:-}"
   rm -f "${TMP_CATALOG_PINNED:-}"
   rm -f "${CATALOG_SMOKE_TMP:-}"
-  rm -f "${LIVE_COORDINATOR_CONFIG_RAW_TMP:-}"
   rm -f "${LIVE_COORDINATOR_CONFIG_TMP:-}"
-  rm -f "${COORDINATOR_OVERLAY_CONFIG_RAW_TMP:-}"
   rm -f "${COORDINATOR_OVERLAY_CONFIG_TMP:-}"
   rm -f "${DEPLOY_EFFECTIVE_CONFIG_TMP:-}"
-  rm -f "${C2_TIMER_MIGRATED_CONFIG_TMP:-}"
   rm -f "${C2_TIMER_MIGRATED_CONFIG_VALIDATION_TMP:-}"
-  rm -f "${C2_TIMER_MIGRATED_OVERLAY_TMP:-}"
   rm -f "${C2_TIMER_MIGRATED_OVERLAY_VALIDATION_TMP:-}"
-  rm -f "${RATE_CARD_MIGRATED_CONFIG_TMP:-}"
   rm -f "${RATE_CARD_MIGRATED_CONFIG_VALIDATION_TMP:-}"
-  rm -f "${RATE_CARD_MIGRATED_OVERLAY_TMP:-}"
   rm -f "${RATE_CARD_MIGRATED_OVERLAY_VALIDATION_TMP:-}"
   rm -f "${GATEWAY_REMOTE_CONFIG_TMP:-}"
   rm -f "${DEPLOY_INPUT_MANIFEST_TMP:-}"
@@ -1232,6 +1274,9 @@ trap '
   fi
   if [ -n "${RECOVERY_DEPLOY_TMP:-}" ]; then
     $SSH "rm -rf $RECOVERY_DEPLOY_TMP" 2>/dev/null || true
+  fi
+  if [ -n "${REMOTE_CONFIG_WORKDIR:-}" ]; then
+    $SSH "rm -rf $REMOTE_CONFIG_WORKDIR" 2>/dev/null || true
   fi
   if [ "${DEPLOY_LOCK_HELD:-0}" = "1" ]; then
     touch "${DEPLOY_LOCK_RELEASE_SENTINEL:-}"
@@ -1495,9 +1540,6 @@ if [ "$DRY_RUN_LOCAL" = "1" ]; then
   exit 0
 else
   if [ "$CONFIG_MODE" = "preserve-live" ]; then
-    LIVE_COORDINATOR_CONFIG_RAW_TMP="$(umask 077 && mktemp -t macprovider-coordinator-live-config-raw.XXXXXXXX)" || {
-      echo "aborting deploy: mktemp failed for raw installed coordinator config copy" >&2; exit 5;
-    }
     LIVE_COORDINATOR_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-live-config.XXXXXXXX)" || {
       echo "aborting deploy: mktemp failed for installed coordinator config copy" >&2; exit 5;
     }
@@ -1505,13 +1547,8 @@ else
       echo "aborting deploy: could not hash installed coordinator config on Pearl" >&2
       exit 5
     }
-    $SSH 'test -f /opt/macprovider/coordinator.yaml || { echo "missing installed coordinator config: /opt/macprovider/coordinator.yaml" >&2; exit 1; }; cat /opt/macprovider/coordinator.yaml' \
-      > "$LIVE_COORDINATOR_CONFIG_RAW_TMP" || {
-      echo "aborting deploy: could not read installed coordinator config from Pearl" >&2
-      exit 5
-    }
-    sanitize_live_config_for_local_validation < "$LIVE_COORDINATOR_CONFIG_RAW_TMP" > "$LIVE_COORDINATOR_CONFIG_TMP" || {
-      echo "aborting deploy: could not sanitize installed coordinator config for local validation" >&2
+    remote_config_projection /opt/macprovider/coordinator.yaml sanitize_live_config_for_local_validation > "$LIVE_COORDINATOR_CONFIG_TMP" || {
+      echo "aborting deploy: could not render sanitized installed coordinator config projection from Pearl" >&2
       exit 5
     }
     LIVE_COORDINATOR_CONFIG_SHA=$(shasum -a 256 "$LIVE_COORDINATOR_CONFIG_TMP" | awk '{print $1}')
@@ -1523,42 +1560,53 @@ else
     DEPLOY_CONFIG="$CONFIG"
     echo "  CONFIG_MODE=apply-tracked — validating tracked coordinator config: $CONFIG"
   fi
+  create_remote_config_workspace
   if [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ]; then
-    C2_TIMER_MIGRATED_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-c2-timer-config.XXXXXXXX)" || {
-      echo "aborting deploy: mktemp failed for C2 timer migrated coordinator config" >&2; exit 5;
-    }
     C2_TIMER_MIGRATED_CONFIG_VALIDATION_TMP="$(umask 077 && mktemp -t macprovider-coordinator-c2-timer-config-validation.XXXXXXXX)" || {
       echo "aborting deploy: mktemp failed for sanitized C2 timer migrated coordinator config" >&2; exit 5;
     }
-    python3 "$C2_TIMER_MIGRATION_SCRIPT" "${LIVE_COORDINATOR_CONFIG_RAW_TMP:-$DEPLOY_CONFIG}" "$CONFIG" > "$C2_TIMER_MIGRATED_CONFIG_TMP" || {
+    C2_TIMER_MIGRATED_CONFIG_REMOTE="$REMOTE_CONFIG_WORKDIR/coordinator.c2-timer-migration.yaml"
+    if [ "$CONFIG_MODE" = "preserve-live" ]; then
+      C2_TIMER_MIGRATION_INPUT_REMOTE="/opt/macprovider/coordinator.yaml"
+    else
+      C2_TIMER_MIGRATION_INPUT_REMOTE="$REMOTE_TRACKED_CONFIG"
+    fi
+    $SSH "python3 '$REMOTE_C2_TIMER_MIGRATION_SCRIPT' '$C2_TIMER_MIGRATION_INPUT_REMOTE' '$REMOTE_TRACKED_CONFIG' > '$C2_TIMER_MIGRATED_CONFIG_REMOTE'" || {
       echo "aborting deploy: could not render reviewed C2 timer config migration" >&2
       exit 5
     }
-    reject_redacted_install_candidate "$C2_TIMER_MIGRATED_CONFIG_TMP" "coordinator.yaml"
-    sanitize_live_config_for_local_validation < "$C2_TIMER_MIGRATED_CONFIG_TMP" > "$C2_TIMER_MIGRATED_CONFIG_VALIDATION_TMP" || {
-      echo "aborting deploy: could not sanitize C2 timer migrated coordinator config for local validation" >&2
+    remote_reject_redacted_install_candidate "$C2_TIMER_MIGRATED_CONFIG_REMOTE" "coordinator.yaml"
+    C2_TIMER_MIGRATED_CONFIG_SHA="$(remote_file_sha256 "$C2_TIMER_MIGRATED_CONFIG_REMOTE")"
+    remote_config_projection "$C2_TIMER_MIGRATED_CONFIG_REMOTE" sanitize_live_config_for_local_validation > "$C2_TIMER_MIGRATED_CONFIG_VALIDATION_TMP" || {
+      echo "aborting deploy: could not render sanitized C2 timer migrated coordinator config projection from Pearl" >&2
       exit 5
     }
     DEPLOY_CONFIG="$C2_TIMER_MIGRATED_CONFIG_VALIDATION_TMP"
     echo "  C2_TIMER_CONFIG_MIGRATION=1 — validating reviewed field-scoped timer raise"
   fi
   RATE_CARD_CONFIG_MIGRATION_ACTIVE=0
-  RATE_CARD_MIGRATION_INPUT="${C2_TIMER_MIGRATED_CONFIG_TMP:-${LIVE_COORDINATOR_CONFIG_RAW_TMP:-$DEPLOY_CONFIG}}"
-  RATE_CARD_MIGRATED_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-rate-card-config.XXXXXXXX)" || {
-    echo "aborting deploy: mktemp failed for rate-card migrated coordinator config" >&2; exit 5;
-  }
+  RATE_CARD_MIGRATION_INPUT_REMOTE="${C2_TIMER_MIGRATED_CONFIG_REMOTE:-}"
+  if [ -z "$RATE_CARD_MIGRATION_INPUT_REMOTE" ]; then
+    if [ "$CONFIG_MODE" = "preserve-live" ]; then
+      RATE_CARD_MIGRATION_INPUT_REMOTE="/opt/macprovider/coordinator.yaml"
+    else
+      RATE_CARD_MIGRATION_INPUT_REMOTE="$REMOTE_TRACKED_CONFIG"
+    fi
+  fi
   RATE_CARD_MIGRATED_CONFIG_VALIDATION_TMP="$(umask 077 && mktemp -t macprovider-coordinator-rate-card-config-validation.XXXXXXXX)" || {
     echo "aborting deploy: mktemp failed for sanitized rate-card migrated coordinator config" >&2; exit 5;
   }
-  python3 "$RATE_CARD_CONFIG_MIGRATION_SCRIPT" "$RATE_CARD_MIGRATION_INPUT" "$CONFIG" > "$RATE_CARD_MIGRATED_CONFIG_TMP" || {
+  RATE_CARD_MIGRATED_CONFIG_REMOTE="$REMOTE_CONFIG_WORKDIR/coordinator.rate-card-migration.yaml"
+  $SSH "python3 '$REMOTE_RATE_CARD_CONFIG_MIGRATION_SCRIPT' '$RATE_CARD_MIGRATION_INPUT_REMOTE' '$REMOTE_TRACKED_CONFIG' > '$RATE_CARD_MIGRATED_CONFIG_REMOTE'" || {
     echo "aborting deploy: could not render reviewed rate-card feed config migration" >&2
     exit 5
   }
-  reject_redacted_install_candidate "$RATE_CARD_MIGRATED_CONFIG_TMP" "coordinator.yaml"
-  if ! cmp -s "$RATE_CARD_MIGRATION_INPUT" "$RATE_CARD_MIGRATED_CONFIG_TMP"; then
+  remote_reject_redacted_install_candidate "$RATE_CARD_MIGRATED_CONFIG_REMOTE" "coordinator.yaml"
+  if ! $SSH "cmp -s '$RATE_CARD_MIGRATION_INPUT_REMOTE' '$RATE_CARD_MIGRATED_CONFIG_REMOTE'"; then
     RATE_CARD_CONFIG_MIGRATION_ACTIVE=1
-    sanitize_live_config_for_local_validation < "$RATE_CARD_MIGRATED_CONFIG_TMP" > "$RATE_CARD_MIGRATED_CONFIG_VALIDATION_TMP" || {
-      echo "aborting deploy: could not sanitize rate-card migrated coordinator config for local validation" >&2
+    RATE_CARD_MIGRATED_CONFIG_SHA="$(remote_file_sha256 "$RATE_CARD_MIGRATED_CONFIG_REMOTE")"
+    remote_config_projection "$RATE_CARD_MIGRATED_CONFIG_REMOTE" sanitize_live_config_for_local_validation > "$RATE_CARD_MIGRATED_CONFIG_VALIDATION_TMP" || {
+      echo "aborting deploy: could not render sanitized rate-card migrated coordinator config projection from Pearl" >&2
       exit 5
     }
     DEPLOY_CONFIG="$RATE_CARD_MIGRATED_CONFIG_VALIDATION_TMP"
@@ -1569,61 +1617,52 @@ else
   RATE_CARD_MIGRATION_OVERLAY_ACTIVE=0
   COORDINATOR_EFFECTIVE_OVERLAY_TMP=""
   if $SSH "test -f '$COORDINATOR_REMOTE_OVERLAY'"; then
-    COORDINATOR_OVERLAY_CONFIG_RAW_TMP="$(umask 077 && mktemp -t macprovider-coordinator-live-overlay-raw.XXXXXXXX)" || {
-      echo "aborting deploy: mktemp failed for raw installed coordinator overlay copy" >&2; exit 5;
-    }
     COORDINATOR_OVERLAY_CONFIG_TMP="$(umask 077 && mktemp -t macprovider-coordinator-live-overlay.XXXXXXXX)" || {
       echo "aborting deploy: mktemp failed for installed coordinator overlay copy" >&2; exit 5;
     }
-    $SSH "cat '$COORDINATOR_REMOTE_OVERLAY'" > "$COORDINATOR_OVERLAY_CONFIG_RAW_TMP" || {
-      echo "aborting deploy: could not read installed coordinator overlay from Pearl: $COORDINATOR_REMOTE_OVERLAY" >&2
-      exit 5
-    }
-    sanitize_live_config_for_local_validation < "$COORDINATOR_OVERLAY_CONFIG_RAW_TMP" > "$COORDINATOR_OVERLAY_CONFIG_TMP" || {
-      echo "aborting deploy: could not sanitize installed coordinator overlay for local validation" >&2
+    remote_config_projection "$COORDINATOR_REMOTE_OVERLAY" sanitize_live_config_for_local_validation > "$COORDINATOR_OVERLAY_CONFIG_TMP" || {
+      echo "aborting deploy: could not render sanitized installed coordinator overlay projection from Pearl: $COORDINATOR_REMOTE_OVERLAY" >&2
       exit 5
     }
     COORDINATOR_OVERLAY_CONFIG_SHA=$(shasum -a 256 "$COORDINATOR_OVERLAY_CONFIG_TMP" | awk '{print $1}')
     echo "  validating effective coordinator config with Pearl overlay: $COORDINATOR_REMOTE_OVERLAY sha256=$COORDINATOR_OVERLAY_CONFIG_SHA"
     COORDINATOR_EFFECTIVE_OVERLAY_TMP="$COORDINATOR_OVERLAY_CONFIG_TMP"
     if [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ]; then
-      C2_TIMER_MIGRATED_OVERLAY_TMP="$(umask 077 && mktemp -t macprovider-coordinator-c2-timer-overlay.XXXXXXXX)" || {
-        echo "aborting deploy: mktemp failed for C2 timer migrated coordinator overlay" >&2; exit 5;
-      }
       C2_TIMER_MIGRATED_OVERLAY_VALIDATION_TMP="$(umask 077 && mktemp -t macprovider-coordinator-c2-timer-overlay-validation.XXXXXXXX)" || {
         echo "aborting deploy: mktemp failed for sanitized C2 timer migrated coordinator overlay" >&2; exit 5;
       }
-      python3 "$C2_TIMER_MIGRATION_SCRIPT" --only-existing "$COORDINATOR_OVERLAY_CONFIG_RAW_TMP" "$CONFIG" > "$C2_TIMER_MIGRATED_OVERLAY_TMP" || {
+      C2_TIMER_MIGRATED_OVERLAY_REMOTE="$REMOTE_CONFIG_WORKDIR/coordinator.pearl-overlays.c2-timer-migration.yaml"
+      $SSH "python3 '$REMOTE_C2_TIMER_MIGRATION_SCRIPT' --only-existing '$COORDINATOR_REMOTE_OVERLAY' '$REMOTE_TRACKED_CONFIG' > '$C2_TIMER_MIGRATED_OVERLAY_REMOTE'" || {
         echo "aborting deploy: could not render reviewed C2 timer overlay migration" >&2
         exit 5
       }
-      reject_redacted_install_candidate "$C2_TIMER_MIGRATED_OVERLAY_TMP" "coordinator.pearl-overlays.yaml"
-      if ! cmp -s "$COORDINATOR_OVERLAY_CONFIG_RAW_TMP" "$C2_TIMER_MIGRATED_OVERLAY_TMP"; then
+      remote_reject_redacted_install_candidate "$C2_TIMER_MIGRATED_OVERLAY_REMOTE" "coordinator.pearl-overlays.yaml"
+      if ! $SSH "cmp -s '$COORDINATOR_REMOTE_OVERLAY' '$C2_TIMER_MIGRATED_OVERLAY_REMOTE'"; then
         C2_TIMER_MIGRATION_OVERLAY_ACTIVE=1
-        sanitize_live_config_for_local_validation < "$C2_TIMER_MIGRATED_OVERLAY_TMP" > "$C2_TIMER_MIGRATED_OVERLAY_VALIDATION_TMP" || {
-          echo "aborting deploy: could not sanitize C2 timer migrated coordinator overlay for local validation" >&2
+        C2_TIMER_MIGRATED_OVERLAY_SHA="$(remote_file_sha256 "$C2_TIMER_MIGRATED_OVERLAY_REMOTE")"
+        remote_config_projection "$C2_TIMER_MIGRATED_OVERLAY_REMOTE" sanitize_live_config_for_local_validation > "$C2_TIMER_MIGRATED_OVERLAY_VALIDATION_TMP" || {
+          echo "aborting deploy: could not render sanitized C2 timer migrated coordinator overlay projection from Pearl" >&2
           exit 5
         }
         COORDINATOR_EFFECTIVE_OVERLAY_TMP="$C2_TIMER_MIGRATED_OVERLAY_VALIDATION_TMP"
         echo "  C2_TIMER_CONFIG_MIGRATION=1 — Pearl overlay carries timer fields and will be migrated field-scope"
       fi
     fi
-    RATE_CARD_OVERLAY_MIGRATION_INPUT="${C2_TIMER_MIGRATED_OVERLAY_TMP:-$COORDINATOR_OVERLAY_CONFIG_RAW_TMP}"
-    RATE_CARD_MIGRATED_OVERLAY_TMP="$(umask 077 && mktemp -t macprovider-coordinator-rate-card-overlay.XXXXXXXX)" || {
-      echo "aborting deploy: mktemp failed for rate-card migrated coordinator overlay" >&2; exit 5;
-    }
+    RATE_CARD_OVERLAY_MIGRATION_INPUT_REMOTE="${C2_TIMER_MIGRATED_OVERLAY_REMOTE:-$COORDINATOR_REMOTE_OVERLAY}"
     RATE_CARD_MIGRATED_OVERLAY_VALIDATION_TMP="$(umask 077 && mktemp -t macprovider-coordinator-rate-card-overlay-validation.XXXXXXXX)" || {
       echo "aborting deploy: mktemp failed for sanitized rate-card migrated coordinator overlay" >&2; exit 5;
     }
-    python3 "$RATE_CARD_CONFIG_MIGRATION_SCRIPT" --only-static-feed-overlays "$RATE_CARD_OVERLAY_MIGRATION_INPUT" "$CONFIG" > "$RATE_CARD_MIGRATED_OVERLAY_TMP" || {
+    RATE_CARD_MIGRATED_OVERLAY_REMOTE="$REMOTE_CONFIG_WORKDIR/coordinator.pearl-overlays.rate-card-migration.yaml"
+    $SSH "python3 '$REMOTE_RATE_CARD_CONFIG_MIGRATION_SCRIPT' --only-static-feed-overlays '$RATE_CARD_OVERLAY_MIGRATION_INPUT_REMOTE' '$REMOTE_TRACKED_CONFIG' > '$RATE_CARD_MIGRATED_OVERLAY_REMOTE'" || {
       echo "aborting deploy: could not render reviewed rate-card overlay migration" >&2
       exit 5
     }
-    reject_redacted_install_candidate "$RATE_CARD_MIGRATED_OVERLAY_TMP" "coordinator.pearl-overlays.yaml"
-    if ! cmp -s "$RATE_CARD_OVERLAY_MIGRATION_INPUT" "$RATE_CARD_MIGRATED_OVERLAY_TMP"; then
+    remote_reject_redacted_install_candidate "$RATE_CARD_MIGRATED_OVERLAY_REMOTE" "coordinator.pearl-overlays.yaml"
+    if ! $SSH "cmp -s '$RATE_CARD_OVERLAY_MIGRATION_INPUT_REMOTE' '$RATE_CARD_MIGRATED_OVERLAY_REMOTE'"; then
       RATE_CARD_MIGRATION_OVERLAY_ACTIVE=1
-      sanitize_live_config_for_local_validation < "$RATE_CARD_MIGRATED_OVERLAY_TMP" > "$RATE_CARD_MIGRATED_OVERLAY_VALIDATION_TMP" || {
-        echo "aborting deploy: could not sanitize rate-card migrated coordinator overlay for local validation" >&2
+      RATE_CARD_MIGRATED_OVERLAY_SHA="$(remote_file_sha256 "$RATE_CARD_MIGRATED_OVERLAY_REMOTE")"
+      remote_config_projection "$RATE_CARD_MIGRATED_OVERLAY_REMOTE" sanitize_live_config_for_local_validation > "$RATE_CARD_MIGRATED_OVERLAY_VALIDATION_TMP" || {
+        echo "aborting deploy: could not render sanitized rate-card migrated coordinator overlay projection from Pearl" >&2
         exit 5
       }
       COORDINATOR_EFFECTIVE_OVERLAY_TMP="$RATE_CARD_MIGRATED_OVERLAY_VALIDATION_TMP"
@@ -1941,8 +1980,8 @@ tier2_require_hash_verified() {
     }
   '
 }
-LIVE_NORM=$($SSH 'cat /opt/macprovider/coordinator.yaml' 2>/dev/null | normalize_yaml) || {
-  echo "could not pull live coordinator.yaml from Pearl for drift check" >&2; exit 6;
+LIVE_NORM=$(remote_config_projection /opt/macprovider/coordinator.yaml normalize_yaml) || {
+  echo "could not render normalized live coordinator.yaml projection from Pearl for drift check" >&2; exit 6;
 }
 LOCAL_NORM=$(normalize_yaml < "$CONFIG")
 if [ "$CONFIG_MODE" = "apply-tracked" ]; then
@@ -3351,6 +3390,10 @@ _append_deploy_input_digest() {
   local source_path="$1" remote_name="$2"
   shasum -a 256 "$source_path" | awk -v name="$remote_name" '{ print $1 "  " name }' >> "$DEPLOY_INPUT_MANIFEST_TMP"
 }
+_append_deploy_input_digest_value() {
+  local source_sha="$1" remote_name="$2"
+  printf '%s  %s\n' "$source_sha" "$remote_name" >> "$DEPLOY_INPUT_MANIFEST_TMP"
+}
 _append_deploy_input_digest "$BINARY" "coordinator-linux-amd64"
 _append_deploy_input_digest "$CLI_BINARY" "coordinator-cli-linux-amd64"
 _append_deploy_input_digest "$STATS_INVENTORY_BINARY" "stats-inventory-sync-linux-amd64"
@@ -3359,14 +3402,14 @@ _append_deploy_input_digest "$STATS_HARDWARE_VERIFIER_BINARY" "stats-hardware-ve
 if [ "$CONFIG_MODE" = "apply-tracked" ]; then
   _append_deploy_input_digest "$CONFIG" "coordinator.yaml"
 elif [ "${RATE_CARD_CONFIG_MIGRATION_ACTIVE:-0}" = "1" ]; then
-  _append_deploy_input_digest "$RATE_CARD_MIGRATED_CONFIG_TMP" "coordinator.rate-card-migration.yaml"
+  _append_deploy_input_digest_value "$RATE_CARD_MIGRATED_CONFIG_SHA" "coordinator.rate-card-migration.yaml"
 elif [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ]; then
-  _append_deploy_input_digest "$C2_TIMER_MIGRATED_CONFIG_TMP" "coordinator.c2-timer-migration.yaml"
+  _append_deploy_input_digest_value "$C2_TIMER_MIGRATED_CONFIG_SHA" "coordinator.c2-timer-migration.yaml"
 fi
 if [ "${RATE_CARD_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" ]; then
-  _append_deploy_input_digest "$RATE_CARD_MIGRATED_OVERLAY_TMP" "coordinator.pearl-overlays.rate-card-migration.yaml"
+  _append_deploy_input_digest_value "$RATE_CARD_MIGRATED_OVERLAY_SHA" "coordinator.pearl-overlays.rate-card-migration.yaml"
 elif [ "${C2_TIMER_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" ]; then
-  _append_deploy_input_digest "$C2_TIMER_MIGRATED_OVERLAY_TMP" "coordinator.pearl-overlays.c2-timer-migration.yaml"
+  _append_deploy_input_digest_value "$C2_TIMER_MIGRATED_OVERLAY_SHA" "coordinator.pearl-overlays.c2-timer-migration.yaml"
 fi
 for _deploy_input in \
   "$SERVICE=macprovider-coordinator.service" \
@@ -3417,16 +3460,16 @@ $SCP "$STATS_HARDWARE_VERIFIER_BINARY" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-ha
 if [ "$CONFIG_MODE" = "apply-tracked" ]; then
   $SCP "$CONFIG" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.yaml"
 elif [ "${RATE_CARD_CONFIG_MIGRATION_ACTIVE:-0}" = "1" ]; then
-  $SCP "$RATE_CARD_MIGRATED_CONFIG_TMP" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.rate-card-migration.yaml"
+  $SSH "cp '$RATE_CARD_MIGRATED_CONFIG_REMOTE' '$DEPLOY_TMP/coordinator.rate-card-migration.yaml' && chmod 0600 '$DEPLOY_TMP/coordinator.rate-card-migration.yaml'"
 elif [ "$C2_TIMER_CONFIG_MIGRATION" = "1" ]; then
-  $SCP "$C2_TIMER_MIGRATED_CONFIG_TMP" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.c2-timer-migration.yaml"
+  $SSH "cp '$C2_TIMER_MIGRATED_CONFIG_REMOTE' '$DEPLOY_TMP/coordinator.c2-timer-migration.yaml' && chmod 0600 '$DEPLOY_TMP/coordinator.c2-timer-migration.yaml'"
 else
   log "  CONFIG_MODE=preserve-live — not uploading tracked coordinator.yaml"
 fi
 if [ "${RATE_CARD_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" ]; then
-  $SCP "$RATE_CARD_MIGRATED_OVERLAY_TMP" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.pearl-overlays.rate-card-migration.yaml"
+  $SSH "cp '$RATE_CARD_MIGRATED_OVERLAY_REMOTE' '$DEPLOY_TMP/coordinator.pearl-overlays.rate-card-migration.yaml' && chmod 0600 '$DEPLOY_TMP/coordinator.pearl-overlays.rate-card-migration.yaml'"
 elif [ "${C2_TIMER_MIGRATION_OVERLAY_ACTIVE:-0}" = "1" ]; then
-  $SCP "$C2_TIMER_MIGRATED_OVERLAY_TMP" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/coordinator.pearl-overlays.c2-timer-migration.yaml"
+  $SSH "cp '$C2_TIMER_MIGRATED_OVERLAY_REMOTE' '$DEPLOY_TMP/coordinator.pearl-overlays.c2-timer-migration.yaml' && chmod 0600 '$DEPLOY_TMP/coordinator.pearl-overlays.c2-timer-migration.yaml'"
 fi
 $SCP "$SERVICE"     "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/macprovider-coordinator.service"
 $SCP "$STATS_INVENTORY_SERVICE" "$VPS_USER@$VPS_HOST:$DEPLOY_TMP/stats-inventory-sync.service"

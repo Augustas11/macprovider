@@ -33,14 +33,34 @@ func (s *Store) MarkSettlementReconcileAttempt(ctx context.Context, reservation 
 		return err
 	}
 	// REPLACE intentionally allocates a new AUTOINCREMENT sequence, including
-	// retries in the same clock tick or after a process restart.
-	// first_not_found_at survives the REPLACE (the age-out of a
-	// body_read_failed hold counts from the first authoritative 404).
+	// retries in the same clock tick or after a process restart. Backlog
+	// metadata survives so the due/backoff scheduler keeps its memory.
 	createdAt := encodeTime(reservation.CreatedAt.UTC())
+	now := encodeTime(time.Now().UTC())
 	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO settlement_reconcile_attempts
-		(account_id, request_id, reservation_created_at, first_not_found_at)
-		VALUES(?, ?, ?, COALESCE((SELECT first_not_found_at FROM settlement_reconcile_attempts
-			WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?), ''))`,
+		(account_id, request_id, reservation_created_at, attempt_count, first_attempt_at, last_attempt_at,
+			first_not_found_at, last_result, next_attempt_after, operator_review, operator_review_reason)
+		VALUES(?, ?, ?,
+			COALESCE((SELECT attempt_count FROM settlement_reconcile_attempts
+				WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?), 0) + 1,
+			COALESCE(NULLIF((SELECT first_attempt_at FROM settlement_reconcile_attempts
+				WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?), ''), ?),
+			?,
+			COALESCE((SELECT first_not_found_at FROM settlement_reconcile_attempts
+				WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?), ''),
+			COALESCE((SELECT last_result FROM settlement_reconcile_attempts
+				WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?), ''),
+			'',
+			COALESCE((SELECT operator_review FROM settlement_reconcile_attempts
+				WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?), 0),
+			COALESCE((SELECT operator_review_reason FROM settlement_reconcile_attempts
+				WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?), ''))`,
+		reservation.AccountID, reservation.RequestID, createdAt,
+		reservation.AccountID, reservation.RequestID, createdAt,
+		reservation.AccountID, reservation.RequestID, createdAt, now,
+		now,
+		reservation.AccountID, reservation.RequestID, createdAt,
+		reservation.AccountID, reservation.RequestID, createdAt,
 		reservation.AccountID, reservation.RequestID, createdAt,
 		reservation.AccountID, reservation.RequestID, createdAt); err != nil {
 		return err
@@ -48,9 +68,81 @@ func (s *Store) MarkSettlementReconcileAttempt(ctx context.Context, reservation 
 	return tx.Commit()
 }
 
+func (s *Store) RecordSettlementReconcileResult(ctx context.Context, reservation storage.ActiveReservation, result string, now time.Time) error {
+	if reservation.CreatedAt.IsZero() {
+		return storage.ErrReservationNotFound
+	}
+	if result == "" || len(result) > 128 || strings.TrimSpace(result) != result {
+		return fmt.Errorf("invalid settlement reconcile result")
+	}
+	delay := settlementReconcileBackoffDelay(result, settlementReconcileAttemptCount(ctx, s.db, reservation))
+	next := ""
+	if delay > 0 {
+		next = encodeTime(now.UTC().Add(delay))
+	}
+	createdAt := encodeTime(reservation.CreatedAt.UTC())
+	res, err := s.db.ExecContext(ctx, `UPDATE settlement_reconcile_attempts
+		SET last_result = ?, next_attempt_after = ?
+		WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?`,
+		result, next, reservation.AccountID, reservation.RequestID, createdAt)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return storage.ErrReservationNotFound
+	}
+	return nil
+}
+
+func settlementReconcileAttemptCount(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, reservation storage.ActiveReservation) int64 {
+	var attempts int64
+	_ = q.QueryRowContext(ctx, `SELECT attempt_count FROM settlement_reconcile_attempts
+		WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?`,
+		reservation.AccountID, reservation.RequestID, encodeTime(reservation.CreatedAt.UTC())).Scan(&attempts)
+	return attempts
+}
+
+func settlementReconcileBackoffDelay(result string, attempts int64) time.Duration {
+	if attempts < 1 {
+		attempts = 1
+	}
+	switch result {
+	case "coordinator_404_held":
+		return boundedSettlementReconcileBackoff(attempts, 15*time.Minute, 24*time.Hour)
+	case "held":
+		return boundedSettlementReconcileBackoff(attempts, 5*time.Minute, 6*time.Hour)
+	default:
+		return 0
+	}
+}
+
+func boundedSettlementReconcileBackoff(attempts int64, base, max time.Duration) time.Duration {
+	shift := attempts - 1
+	if shift > 8 {
+		shift = 8
+	}
+	delay := base
+	for i := int64(0); i < shift; i++ {
+		delay *= 2
+		if delay >= max {
+			return max
+		}
+	}
+	if delay > max {
+		return max
+	}
+	return delay
+}
+
 // RecordSettlementFinalityNotFound sets first_not_found_at the first time
 // only and returns the stored value. The attempt row exists because
-// MarkSettlementReconcileAttempt runs before every lookup.
+// MarkSettlementReconcileAttempt runs before every coordinator lookup.
 func (s *Store) RecordSettlementFinalityNotFound(ctx context.Context, reservation storage.ActiveReservation, at time.Time) (time.Time, error) {
 	if reservation.CreatedAt.IsZero() {
 		return time.Time{}, storage.ErrReservationNotFound

@@ -268,9 +268,19 @@ CREATE TABLE IF NOT EXISTS settlement_reconcile_attempts (
 	account_id TEXT NOT NULL,
 	request_id TEXT NOT NULL,
 	reservation_created_at TEXT NOT NULL,
+	attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+	first_attempt_at TEXT NOT NULL DEFAULT '',
+	last_attempt_at TEXT NOT NULL DEFAULT '',
+	first_not_found_at TEXT NOT NULL DEFAULT '',
+	last_result TEXT NOT NULL DEFAULT '',
+	next_attempt_after TEXT NOT NULL DEFAULT '',
+	operator_review INTEGER NOT NULL DEFAULT 0 CHECK (operator_review IN (0, 1)),
+	operator_review_reason TEXT NOT NULL DEFAULT '',
 	UNIQUE (account_id, request_id),
 	FOREIGN KEY (account_id, request_id) REFERENCES quota_reservations(account_id, request_id) ON DELETE CASCADE
 );
+CREATE INDEX IF NOT EXISTS idx_settlement_reconcile_next_attempt
+	ON settlement_reconcile_attempts(operator_review, next_attempt_after);
 CREATE TABLE IF NOT EXISTS settlement_fallback_candidates (
 	account_id TEXT NOT NULL,
 	request_id TEXT NOT NULL,

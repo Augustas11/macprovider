@@ -74,14 +74,14 @@ type UsageStore interface {
 	MarkReservationSettlementHold(ctx context.Context, accountID, requestID string) error
 	ClampReservationExpiry(ctx context.Context, accountID, requestID string, expiresAt time.Time) error
 	ListSettlementHeldReservations(ctx context.Context, limit int) ([]ActiveReservation, error)
+	ListDueSettlementHeldReservations(ctx context.Context, limit int, now time.Time) ([]ActiveReservation, error)
 	LookupSettlementHeldReservation(ctx context.Context, accountID, requestID string) (ActiveReservation, error)
 	MarkSettlementReconcileAttempt(ctx context.Context, reservation ActiveReservation) error
-	// RecordSettlementFinalityNotFound stores, once, when the coordinator
-	// first answered an authoritative "finality not found" for this hold and
-	// returns that first time; ClearSettlementFinalityNotFound forgets it
-	// once the coordinator answers with finality.
+	RecordSettlementReconcileResult(ctx context.Context, reservation ActiveReservation, result string, now time.Time) error
 	RecordSettlementFinalityNotFound(ctx context.Context, reservation ActiveReservation, at time.Time) (time.Time, error)
 	ClearSettlementFinalityNotFound(ctx context.Context, reservation ActiveReservation) error
+	MarkSettlementHoldOperatorReview(ctx context.Context, reservation ActiveReservation, reason string, reviewedAt time.Time) error
+	SettlementHoldBacklogStats(ctx context.Context, now time.Time) (SettlementHoldBacklogStats, error)
 	SaveSettlementFallbackCandidate(ctx context.Context, candidate SettlementFallbackCandidate) error
 	LookupSettlementFallbackCandidate(ctx context.Context, reservation ActiveReservation) (SettlementFallbackCandidate, error)
 	InsertUsageEvent(ctx context.Context, event UsageEvent) error

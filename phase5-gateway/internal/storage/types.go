@@ -154,6 +154,18 @@ type ActiveReservation struct {
 	RelayBlind      *RelayBlindMetadata
 }
 
+type SettlementHoldBacklogStats struct {
+	TotalActiveHeld         int
+	DueActiveHeld           int
+	OperatorReviewHeld      int
+	OldestActiveHeldAge     time.Duration
+	OldestDueActiveHeldAge  time.Duration
+	OldestReviewHeldAge     time.Duration
+	OldestActiveHeldCreated time.Time
+	OldestDueHeldCreated    time.Time
+	OldestReviewHeldCreated time.Time
+}
+
 // SettlementFallbackCandidate preserves local usage while request-scoped
 // coordinator mode is unavailable. It is not authority to debit on its own.
 type SettlementFallbackCandidate struct {

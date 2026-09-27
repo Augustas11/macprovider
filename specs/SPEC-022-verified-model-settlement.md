@@ -31,21 +31,20 @@ normative text: R-5.6 (v0.2.3) and R-8.7.
   the gateway cannot bind the hold for reconciliation (the response carries
   no coordinator internal request id, or the reconcile candidate or the hold
   cannot be persisted), it refunds and logs an error, because such a hold
-  could never settle or age out.
+  could never settle or reach operator review.
 - The same delivered bound covers every gateway-ended response whose
   candidate records what the gateway delivered: a stream the gateway ended
   `stream_truncated` (the hop broke or a frame overflowed after part was
   forwarded) or `provider_timeout` (a gateway stream timeout, or a
   coordinator 504 with nothing delivered).
 - A `body_read_failed` hold whose coordinator keeps answering its own
-  "finality not found" for at least one hour, counted from the first such
-  answer, becomes a terminal `stale_held` with no buyer debit, for operator
-  review. A generic 404 never counts.
-- A `stale_held` wallet-session reservation still counts toward the wallet
-  session cap until an operator resolves it.
+  "finality not found" follows the #1763 not-found rule: it stays held with
+  no debit or refund, is retried on backoff, and moves to operator review
+  after one hour counted from the first such answer. A generic 404 never
+  starts that hour.
 
-No wire, receipt, or schema-version change: the gateway records the first
-not-found time in an additive column that older gateways ignore.
+No wire, receipt, or schema-version change: the first not-found time and the
+operator-review state live in the reconcile-attempt columns #1763 added.
 
 ### v0.2.2
 
@@ -802,7 +801,7 @@ delivered:
   the hold for reconciliation (the response carries no coordinator internal
   request id, or the reconcile candidate or the hold cannot be persisted), it
   MUST refund and log an error instead of holding. Such a hold could never be
-  settled by finality or aged out (R-8.7), and a hold nothing can resolve is
+  settled by finality or reach operator review (R-8.7), and a hold nothing can resolve is
   worse than this bounded, logged disagreement with a coordinator that may
   already have credited the provider.
 - `stream_truncated` and `provider_timeout`: the gateway ended a stream after
@@ -939,22 +938,18 @@ many agentic requests are in flight, and release behavior after terminal
 outcomes. A terminal SPEC-022 row MUST NOT permanently reduce buyer available
 quota through a stale reservation.
 
-R-8.7. (v0.2.3) A `body_read_failed` hold (R-5.6) whose coordinator never
-recorded the attempt (it stopped between the buyer write and the record)
-would otherwise stay held forever. The gateway MUST move such a hold to the
-terminal `stale_held` state, with no buyer debit and an operator-visible
-record for review, once the coordinator's own "finality not found" answer for
-that request has persisted for at least one hour, measured from the first
-such answer the gateway recorded for the hold (not from the reservation's
-creation). Any other not-found answer (a wrong operator URL, an intermediary,
-a coordinator whose settlement store is unavailable) MUST NOT count toward
-that hour. A `stale_held` reservation releases the buyer's daily quota. A
-`stale_held` wallet-session reservation still counts toward that wallet
-session's reserved cap until an operator resolves it; this is the one
-bounded exception to the release rule of R-8.6, kept so an unresolved
-money-path ambiguity cannot be spent twice within the session. Holds on
-other paths keep their existing rules (carried: an unbounded hold outside
-this path is a known limitation).
+R-8.7. (v0.2.3, aligned with #1763) A `body_read_failed` hold (R-5.6) whose
+coordinator never recorded the attempt (it stopped between the buyer write
+and the record) gets no finality. The absence of a coordinator record is not
+authority to debit or refund. Such a hold follows the general coordinator
+not-found rule: it stays active and held, with no buyer debit and no refund,
+is retried on the reconciler's bounded backoff, and moves to operator review
+once the coordinator's own "finality not found" answer for that request has
+persisted for at least one hour, measured from the first such answer the
+gateway recorded for the hold (not from the reservation's creation). Any
+other not-found answer (a wrong operator URL, an intermediary, a coordinator
+whose settlement store is unavailable) MUST NOT start that hour; the hold is
+retried on backoff instead. An operator resolves an operator-review hold.
 
 ### R-9. Rollout, migration, and rollback (SPEC-022-R009)
 

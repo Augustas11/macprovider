@@ -209,6 +209,9 @@ func TestBillingMigration_BackfillsExistingPromptSplitColumns(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	ts := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	insertCreditWithRequest(t, store.db, "partial-prompt-split-migration", "provider-a", ts, 500)
+	if _, err := store.db.Exec(`DELETE FROM billing_maintenance_runs WHERE name = 'ledger_request_credit_prompt_split_backfill_v1'`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.db.Exec(`
 UPDATE ledger_request_credits
    SET prompt_tokens = 100,
@@ -229,6 +232,26 @@ SELECT prompt_tokens, charged_prompt_tokens, provider_reported_prompt_tokens
 	}
 	if prompt != 100 || charged != prompt || reported != prompt {
 		t.Fatalf("prompt split after rerun migration=%d/%d/%d want 100/100/100", prompt, charged, reported)
+	}
+	if _, err := store.db.Exec(`
+UPDATE ledger_request_credits
+   SET charged_prompt_tokens = NULL,
+       provider_reported_prompt_tokens = NULL
+ WHERE request_id = 'partial-prompt-split-migration'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(store.db); err != nil {
+		t.Fatal(err)
+	}
+	var chargedAfter, reportedAfter sql.NullInt64
+	if err := store.db.QueryRow(`
+SELECT charged_prompt_tokens, provider_reported_prompt_tokens
+  FROM ledger_request_credits
+ WHERE request_id = 'partial-prompt-split-migration'`).Scan(&chargedAfter, &reportedAfter); err != nil {
+		t.Fatal(err)
+	}
+	if chargedAfter.Valid || reportedAfter.Valid {
+		t.Fatalf("prompt split one-shot maintenance reran after success: charged=%v reported=%v", chargedAfter, reportedAfter)
 	}
 }
 

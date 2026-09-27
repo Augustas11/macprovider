@@ -6111,13 +6111,13 @@
         "phase5-gateway/internal/storage/sqlite/store.go:ReserveQuota",
         "phase5-gateway/internal/storage/sqlite/store.go:SettleReservation",
         "phase4-coordinator/internal/billing/hotpath.go:WriteHotPath",
-        "phase5-gateway/internal/router/settlement_reconcile.go:staleHoldAgedBodyReadFailure"
+        "phase5-gateway/internal/router/settlement_reconcile.go:markSettlementHoldOperatorReview"
       ],
       "tests": [
         "phase5-gateway/internal/router/server_test.go:TestQuotaReservationLeakOnContextCancel",
         "phase4-coordinator/internal/billing/spec022_money_gate_test.go:TestSPEC022NonStreamingVerifiedReceiptCreatesBuyerFinalityAndProviderPayout",
         "test/integration/buyer_enforce_journey_test.go:TestJourneyBuyerEnforceIsolatedCandidate",
-        "phase5-gateway/internal/router/settlement_drop_after_body_test.go:TestDropAfterBodyCoordinator404HoldAgesOutToStaleHeld",
+        "phase5-gateway/internal/router/settlement_drop_after_body_test.go:TestDropAfterBodyCoordinator404HoldMovesToOperatorReview",
         "phase5-gateway/internal/storage/sqlite/settlement_not_found_test.go:TestSettlementFinalityNotFoundFirstTimeSurvivesReconcileAttempts"
       ],
       "journeys": [
@@ -6141,7 +6141,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/928",
-        "rationale": "Relay-blind integration changes mapped implementation selectors. Local regression checks pass, but historical signed deployment journeys bind earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement. SPEC-022 v0.2.3 (#1690): R-8.7 ages a body_read_failed hold out to stale_held after one hour of authoritative coordinator not-found answers counted from the first; the new tests are mapped, and the row stays pending for the same evidence reason."
+        "rationale": "Relay-blind integration changes mapped implementation selectors. Local regression checks pass, but historical signed deployment journeys bind earlier selector bytes; fresh independently trusted journey evidence is required before restoring conformant status. Historical evidence is retained without redating or replacement. SPEC-022 v0.2.3 (#1690): R-8.7 keeps a body_read_failed hold on the #1763 not-found path (held, no debit or refund, bounded backoff) and moves it to operator review after one hour of authoritative coordinator not-found answers counted from the first; the new tests are mapped, and the row stays pending for the same evidence reason."
       }
     },
     {

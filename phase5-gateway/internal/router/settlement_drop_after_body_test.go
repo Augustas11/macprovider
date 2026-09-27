@@ -1,6 +1,7 @@
 package router
 
 import (
+	"database/sql"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -102,20 +103,21 @@ func TestDropAfterBodySettlesToCoordinatorFinality(t *testing.T) {
 
 // A body_read_failed hold whose coordinator never recorded the attempt (it
 // crashed between the write and the record) gets the coordinator's own
-// "Settlement finality not found" forever. It ages out to a terminal
-// stale_held, with no debit, only once such answers span
-// bodyReadFailedCoordinator404StaleAge from the FIRST one (#1690 review
-// L-1): not from the reservation's creation, and never on a generic 404.
-func TestDropAfterBodyCoordinator404HoldAgesOutToStaleHeld(t *testing.T) {
+// "Settlement finality not found" forever. Under the #1763 model it moves to
+// operator review, still active and held with no debit and no refund, once
+// such answers span settlementCoordinator404OperatorReviewAge from the FIRST
+// one: not from the reservation's creation. A generic 404 (a proxy, a wrong
+// operator URL, an unavailable billing store) never starts that clock.
+func TestDropAfterBodyCoordinator404HoldMovesToOperatorReview(t *testing.T) {
 	authoritative := func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"code": "not_found", "message": "Settlement finality not found"}})
 	}
 	for _, tc := range []struct {
 		name   string
 		lookup http.HandlerFunc
-		stale  bool
+		review bool
 	}{
-		{name: "authoritative not found", lookup: authoritative, stale: true},
+		{name: "authoritative not found", lookup: authoritative, review: true},
 		{name: "generic 404", lookup: func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) }},
 		{name: "billing store unavailable", lookup: func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"code": "not_found", "message": "Settlement finality is unavailable"}})
@@ -141,33 +143,44 @@ func TestDropAfterBodyCoordinator404HoldAgesOutToStaleHeld(t *testing.T) {
 			if resp := postChat(t, h, fullKey, dropAfterBodyChatBody(false), nil); resp.Code != http.StatusBadGateway {
 				t.Fatalf("status=%d body=%s, want 502", resp.Code, resp.Body.String())
 			}
-			held := func(when string) {
+			heldNoMoney := func(when string) {
 				t.Helper()
-				if snap := gatewaySettlementSnapshot(t, dbPath, accountID); snap.heldRows != 1 || snap.staleHeldRows != 0 || snap.usageRows != 0 {
-					t.Fatalf("%s: %+v, want the hold kept", when, snap)
+				if snap := gatewaySettlementSnapshot(t, dbPath, accountID); snap.heldRows != 1 || snap.staleHeldRows != 0 || snap.refundedRows != 0 || snap.usageRows != 0 {
+					t.Fatalf("%s: %+v, want the hold kept with no debit or refund", when, snap)
 				}
 			}
 			// The first 404 arrives on an already old reservation: that
-			// alone must not age it out.
+			// alone must not move it to review.
 			firstLookup := fixedNow().Add(2 * time.Hour)
 			clock.Store(firstLookup)
 			reconcileSettlementHolds(t, h)
-			held("first 404 on a 2 h old reservation")
-			clock.Store(firstLookup.Add(bodyReadFailedCoordinator404StaleAge - time.Minute))
-			reconcileSettlementHolds(t, h)
-			held("404s spanning less than the stale age")
-			clock.Store(firstLookup.Add(bodyReadFailedCoordinator404StaleAge + time.Minute))
-			reconcileSettlementHolds(t, h)
-			snap := gatewaySettlementSnapshot(t, dbPath, accountID)
-			if !tc.stale {
-				held("non-authoritative 404s spanning the stale age")
-				return
+			heldNoMoney("first 404 on a 2 h old reservation")
+			if dropAfterBodyOperatorReview(t, dbPath, accountID) {
+				t.Fatal("first 404 moved the hold to operator review")
 			}
-			if snap.staleHeldRows != 1 || snap.activeRows != 0 || snap.usageRows != 0 || snap.settledRows != 0 {
-				t.Fatalf("404s spanning the stale age: %+v, want a terminal stale_held with no debit", snap)
+			// Past the review age and past every backoff window.
+			clock.Store(firstLookup.Add(settlementCoordinator404OperatorReviewAge + 3*time.Hour))
+			reconcileSettlementHolds(t, h)
+			heldNoMoney("404s spanning the review age")
+			if got := dropAfterBodyOperatorReview(t, dbPath, accountID); got != tc.review {
+				t.Fatalf("operator_review=%v, want %v", got, tc.review)
 			}
 		})
 	}
+}
+
+func dropAfterBodyOperatorReview(t *testing.T, dbPath, accountID string) bool {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM settlement_reconcile_attempts WHERE account_id = ? AND operator_review = 1`, accountID).Scan(&n); err != nil {
+		t.Fatalf("query operator review: %v", err)
+	}
+	return n > 0
 }
 
 // dropAfterBodyCoordinator answers chat with a negotiated 200 (declared

@@ -101,6 +101,7 @@ func TestObserveFallbackRecoverySurvivesOutageAndRestart(t *testing.T) {
 			}
 			server = New(cfg, store, fakeOAuth{}, WithNow(func() time.Time { return now }))
 			status.Store(http.StatusOK)
+			now = now.Add(31 * time.Minute)
 			if summary, err := server.ReconcileSettlementHolds(ctx, 10); err != nil || summary.Observed != 1 || summary.Verified != 0 {
 				t.Fatalf("recovered summary=%+v err=%v", summary, err)
 			}
@@ -189,8 +190,9 @@ func TestSettlementReconcileWithoutCurrentAttemptBindingRejectsPriorFinality(t *
 			if err := json.Unmarshal(resp.Body.Bytes(), &summary); err != nil {
 				t.Fatal(err)
 			}
-			if summary.Scanned != 1 || summary.Held != 1 || summary.Verified != 0 || summary.Refunded != 0 || summary.Errors != 0 {
-				t.Fatalf("summary=%+v, want unbound reservation held without finality", summary)
+			if summary.Scanned != 1 || summary.Skipped != 1 || summary.OperatorReviewHeldBacklog != 1 ||
+				summary.Verified != 0 || summary.Refunded != 0 || summary.Errors != 0 {
+				t.Fatalf("summary=%+v, want unbound reservation in operator review without finality", summary)
 			}
 			if calls := coordinatorCalls.Load(); calls != 0 {
 				t.Fatalf("coordinator calls=%d want 0 for unbound current attempt", calls)
@@ -442,10 +444,11 @@ func TestObserveFallbackMissingCurrentHeaderQuarantinesBeforeLookup(t *testing.T
 	}
 	defer store.Close()
 	server := New(cfg, store, fakeOAuth{}, WithNow(func() time.Time { return fixedNow().Add(24 * time.Hour) }))
-	for pass := 0; pass < 2; pass++ {
-		if summary, err := server.ReconcileSettlementHolds(context.Background(), 10); err != nil || summary.Held != 1 || summary.Errors != 0 {
-			t.Fatalf("pass=%d summary=%+v err=%v", pass, summary, err)
-		}
+	if summary, err := server.ReconcileSettlementHolds(context.Background(), 10); err != nil || summary.Skipped != 1 || summary.Errors != 0 || summary.OperatorReviewHeldBacklog != 1 {
+		t.Fatalf("operator-review summary=%+v err=%v", summary, err)
+	}
+	if summary, err := server.ReconcileSettlementHolds(context.Background(), 10); err != nil || summary.Scanned != 0 || summary.Errors != 0 || summary.OperatorReviewHeldBacklog != 1 {
+		t.Fatalf("repeat summary=%+v err=%v", summary, err)
 	}
 	if lookups.Load() != 0 {
 		t.Fatalf("unbound coordinator lookup attempted %d times", lookups.Load())
@@ -600,10 +603,11 @@ func TestObserveFallbackReconciliationRotatesPastBatchLimitAcrossRestarts(t *tes
 			t.Fatal(err)
 		}
 	}
-	// Keep the clock fixed across all three processes. Expired, unanswered
-	// candidates stay held, but cannot monopolize the next bounded batch.
+	// Advance the clock across restarts so per-row reconcile backoff expires.
+	// Expired, unanswered candidates stay held, but cannot monopolize the next
+	// bounded batch.
 	now := created.Add(24 * time.Hour)
-	for pass := 0; pass < 3; pass++ {
+	for pass := 0; pass < 2; pass++ {
 		if pass > 0 {
 			if err := store.Close(); err != nil {
 				t.Fatal(err)
@@ -615,16 +619,18 @@ func TestObserveFallbackReconciliationRotatesPastBatchLimitAcrossRestarts(t *tes
 		}
 		server := New(cfg, store, fakeOAuth{}, WithNow(func() time.Time { return now }))
 		summary, err := server.ReconcileSettlementHolds(ctx, limit)
-		if err != nil || summary.Scanned != limit || summary.Errors != 0 || summary.StaleHeld != 0 {
+		wantScanned := limit
+		if err != nil || summary.Scanned != wantScanned || summary.Errors != 0 || summary.StaleHeld != 0 {
 			t.Fatalf("pass=%d summary=%+v err=%v", pass, summary, err)
 		}
 		wantObserved, wantVerified := 0, 0
 		if pass == 1 {
 			wantObserved, wantVerified = 1, 1
 		}
-		if summary.Observed != wantObserved || summary.Verified != wantVerified || summary.Held != limit-wantObserved-wantVerified {
+		if summary.Observed != wantObserved || summary.Verified != wantVerified || summary.Held != wantScanned-wantObserved-wantVerified {
 			t.Fatalf("pass=%d summary=%+v", pass, summary)
 		}
+		now = now.Add(31 * time.Minute)
 	}
 	used, reserved, err := store.DailyUsage(ctx, accountID, window)
 	if err != nil || used != 14 || reserved != blocked*10 {
@@ -635,10 +641,8 @@ func TestObserveFallbackReconciliationRotatesPastBatchLimitAcrossRestarts(t *tes
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	for i := 0; i < blocked; i++ {
-		if n := attempts["orphan_"+strconv.Itoa(i)]; n < 2 {
-			t.Fatalf("orphan=%d attempts=%d: retry did not rotate across restarts", i, n)
-		}
+	if attempts["orphan_0"] < 2 || attempts["orphan_"+strconv.Itoa(blocked-1)] != 1 {
+		t.Fatalf("orphan attempts did not cover both old and over-limit holds: first=%d last=%d", attempts["orphan_0"], attempts["orphan_"+strconv.Itoa(blocked-1)])
 	}
 	if attempts["recover_observe"] != 1 || attempts["recover_enforce"] != 1 {
 		t.Fatalf("terminal requests retried: observe=%d enforce=%d", attempts["recover_observe"], attempts["recover_enforce"])

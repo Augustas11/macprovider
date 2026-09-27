@@ -25,6 +25,7 @@ const maxSettlementReconcileNudgeQueue = 1024
 const maxSettlementReconcileNudgeWorkers = 4
 const maxSettlementReconcileNudgeAttempts = 4
 const maxSettlementReconcileOverflowCatchupPasses = maxSettlementReconcileNudgeQueue/maxSettlementReconcileLimit + 2
+const settlementCoordinator404OperatorReviewAge = time.Hour
 
 type settlementReconcileNudge struct {
 	reservation storage.ActiveReservation
@@ -62,16 +63,22 @@ type coordinatorRequestSettlementFinality struct {
 }
 
 type SettlementReconcileSummary struct {
-	Scanned        int `json:"scanned"`
-	Verified       int `json:"verified"`
-	Observed       int `json:"observed"`
-	Refunded       int `json:"refunded"`
-	Expired        int `json:"expired"`
-	StaleHeld      int `json:"stale_held"`
-	Held           int `json:"held"`
-	Skipped        int `json:"skipped"`
-	Errors         int `json:"errors"`
-	Coordinator404 int `json:"coordinator_404"`
+	Scanned                    int `json:"scanned"`
+	Verified                   int `json:"verified"`
+	Observed                   int `json:"observed"`
+	Refunded                   int `json:"refunded"`
+	Expired                    int `json:"expired"`
+	StaleHeld                  int `json:"stale_held"`
+	Held                       int `json:"held"`
+	Skipped                    int `json:"skipped"`
+	Errors                     int `json:"errors"`
+	Coordinator404             int `json:"coordinator_404"`
+	ActiveHeldBacklog          int `json:"active_held_backlog"`
+	DueHeldBacklog             int `json:"due_held_backlog"`
+	OperatorReviewHeldBacklog  int `json:"operator_review_held_backlog"`
+	OldestHeldAgeSeconds       int `json:"oldest_held_age_seconds"`
+	OldestDueHeldAgeSeconds    int `json:"oldest_due_held_age_seconds"`
+	OldestReviewHeldAgeSeconds int `json:"oldest_review_held_age_seconds"`
 }
 
 type settlementReconcileSummary = SettlementReconcileSummary
@@ -135,6 +142,7 @@ func (s *Server) ReconcileSettlementHold(ctx context.Context, accountID, request
 		return summary, err
 	}
 	summary.applyResult(result)
+	s.populateSettlementHoldBacklogStats(ctx, &summary)
 	return summary, nil
 }
 
@@ -145,7 +153,8 @@ func (s *Server) ReconcileSettlementHolds(ctx context.Context, limit int) (Settl
 	if limit > maxSettlementReconcileLimit {
 		limit = maxSettlementReconcileLimit
 	}
-	reservations, err := s.store.ListSettlementHeldReservations(ctx, limit)
+	now := s.now()
+	reservations, err := s.store.ListDueSettlementHeldReservations(ctx, limit, now)
 	if err != nil {
 		return SettlementReconcileSummary{}, err
 	}
@@ -170,6 +179,7 @@ func (s *Server) ReconcileSettlementHolds(ctx context.Context, limit int) (Settl
 		}
 		summary.applyResult(result)
 	}
+	s.populateSettlementHoldBacklogStats(ctx, &summary)
 	return summary, nil
 }
 
@@ -180,7 +190,8 @@ func (s *Server) CatchUpSettlementHolds(ctx context.Context, limit int) (Settlem
 	if limit > maxSettlementReconcileLimit {
 		limit = maxSettlementReconcileLimit
 	}
-	reservations, err := s.store.ListSettlementHeldReservations(ctx, limit)
+	now := s.now()
+	reservations, err := s.store.ListDueSettlementHeldReservations(ctx, limit, now)
 	if err != nil {
 		return SettlementReconcileSummary{}, err
 	}
@@ -209,7 +220,29 @@ func (s *Server) CatchUpSettlementHolds(ctx context.Context, limit int) (Settlem
 		}
 		summary.applyResult(result)
 	}
+	s.populateSettlementHoldBacklogStats(ctx, &summary)
 	return summary, nil
+}
+
+func (s *Server) populateSettlementHoldBacklogStats(ctx context.Context, summary *SettlementReconcileSummary) {
+	stats, err := s.store.SettlementHoldBacklogStats(ctx, s.now())
+	if err != nil {
+		slog.Warn("SPEC-022 settlement reconciler backlog stats failed", "error", err)
+		return
+	}
+	summary.ActiveHeldBacklog = stats.TotalActiveHeld
+	summary.DueHeldBacklog = stats.DueActiveHeld
+	summary.OperatorReviewHeldBacklog = stats.OperatorReviewHeld
+	summary.OldestHeldAgeSeconds = nonNegativeSeconds(stats.OldestActiveHeldAge)
+	summary.OldestDueHeldAgeSeconds = nonNegativeSeconds(stats.OldestDueActiveHeldAge)
+	summary.OldestReviewHeldAgeSeconds = nonNegativeSeconds(stats.OldestReviewHeldAge)
+}
+
+func nonNegativeSeconds(d time.Duration) int {
+	if d <= 0 {
+		return 0
+	}
+	return int(d / time.Second)
 }
 
 func (s *SettlementReconcileSummary) applyResult(result string) {
@@ -224,6 +257,8 @@ func (s *SettlementReconcileSummary) applyResult(result string) {
 		s.Expired++
 	case "stale_held":
 		s.StaleHeld++
+	case "operator_review":
+		s.Skipped++
 	case "held":
 		s.Held++
 	case "coordinator_404_expired":
@@ -408,7 +443,7 @@ func (s *Server) runSettlementReconcileCatchup() {
 	}
 	for pass := 0; pass < maxSettlementReconcileOverflowCatchupPasses; pass++ {
 		listCtx, cancel := context.WithTimeout(context.Background(), timeout)
-		reservations, err := s.store.ListSettlementHeldReservations(listCtx, maxSettlementReconcileLimit)
+		reservations, err := s.store.ListDueSettlementHeldReservations(listCtx, maxSettlementReconcileLimit, s.now())
 		cancel()
 		if err != nil {
 			slog.Warn("SPEC-022 settlement reconciler catch-up load failed", "error", err, "pass", pass+1)
@@ -477,9 +512,8 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 	if errors.Is(candidateErr, storage.ErrNotFound) {
 		// Reconciliation without the coordinator-owned current-attempt binding
 		// could apply an earlier retry's otherwise valid finality to this hold.
-		// Legacy and persistence-failure rows remain quarantined until an
-		// operator can establish that binding through a separate recovery path.
-		return "held", nil
+		// Legacy and persistence-failure rows require explicit operator review.
+		return s.markSettlementHoldOperatorReview(ctx, reservation, "missing_fallback_candidate")
 	}
 	if candidateErr != nil {
 		return "", candidateErr
@@ -487,37 +521,38 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 	if candidate.RequiredInternalRequestID == "" {
 		// A missing trusted header quarantines this delivery. An unbound
 		// lookup could return a previous retry's otherwise valid finality.
-		return "held", nil
+		return s.markSettlementHoldOperatorReview(ctx, reservation, "missing_internal_request_binding")
 	}
 	finality, found, authoritativeNotFound, err := s.fetchCoordinatorRequestSettlementFinalityDetail(ctx, reservation, candidate.RequiredInternalRequestID)
 	if err != nil {
 		return "", err
 	}
-	if found && candidate.Outcome == bodyReadFailedOutcome {
+	if found {
 		if err := s.store.ClearSettlementFinalityNotFound(ctx, reservation); err != nil {
 			return "", err
 		}
 	}
+	if !found && !authoritativeNotFound {
+		// Only the coordinator's own "finality not found" answer starts the
+		// operator-review clock; a generic 404 (a wrong operator URL, a proxy,
+		// an unavailable billing store) keeps the hold and backs it off.
+		return s.recordSettlementHeldResult(ctx, reservation, "coordinator_404_held")
+	}
 	if !found {
-		// Only the coordinator's own "finality not found" answer counts
-		// toward the age-out, measured from the first such answer; a
-		// generic 404 (wrong operator URL, a proxy, an unavailable billing
-		// store) never ages a hold out.
-		if authoritativeNotFound && candidate.Outcome == bodyReadFailedOutcome {
-			first, err := s.store.RecordSettlementFinalityNotFound(ctx, reservation, s.now())
-			if err != nil {
-				return "", err
-			}
-			if s.now().Sub(first) >= bodyReadFailedCoordinator404StaleAge {
-				return s.staleHoldAgedBodyReadFailure(ctx, reservation, first)
-			}
+		first, err := s.store.RecordSettlementFinalityNotFound(ctx, reservation, s.now())
+		if err != nil {
+			return "", err
+		}
+		if s.now().Sub(first) >= settlementCoordinator404OperatorReviewAge {
+			return s.markSettlementHoldOperatorReview(ctx, reservation, "coordinator_finality_not_found")
 		}
 		// A missing coordinator lookup is not authority to discard local
-		// delivered usage. Keep this specific hold discoverable for retry.
-		return "coordinator_404_held", nil
+		// delivered usage. Keep this hold discoverable, but back it off so
+		// sweeps do not re-query the full backlog every interval.
+		return s.recordSettlementHeldResult(ctx, reservation, "coordinator_404_held")
 	}
 	if finality.RequiredInternalRequestID != candidate.RequiredInternalRequestID {
-		return "held", nil
+		return s.recordSettlementHeldResult(ctx, reservation, "held")
 	}
 	if finality.RequestID == reservation.RequestID && !reservation.CreatedAt.IsZero() && coordinatorObserveFallbackAllowed(finality) {
 		if err := s.settleObserveFallbackCandidate(ctx, candidate); err != nil {
@@ -605,10 +640,27 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 		if !s.boundStreamingSettlementHold(ctx, req, usageSubject{AccountID: reservation.AccountID, WalletSessionID: reservation.WalletSessionID}, action) {
 			return "", fmt.Errorf("failed to bound settlement hold")
 		}
-		return "held", nil
+		return s.recordSettlementHeldResult(ctx, reservation, "held")
 	default:
 		return "legacy", nil
 	}
+}
+
+func (s *Server) recordSettlementHeldResult(ctx context.Context, reservation storage.ActiveReservation, result string) (string, error) {
+	if err := s.store.RecordSettlementReconcileResult(ctx, reservation, result, s.now()); err != nil {
+		return "", err
+	}
+	return result, nil
+}
+
+func (s *Server) markSettlementHoldOperatorReview(ctx context.Context, reservation storage.ActiveReservation, reason string) (string, error) {
+	if err := s.store.MarkSettlementHoldOperatorReview(ctx, reservation, reason, s.now()); err != nil {
+		if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
+			return "already_terminal", nil
+		}
+		return "", err
+	}
+	return "operator_review", nil
 }
 
 // Observe recovery needs positive, complete request-scoped mode authority.
@@ -812,14 +864,6 @@ var buyerDeliveredBoundOutcomes = map[string]bool{
 // (#1690 VM F-1). Nothing of the completion reached the buyer.
 const bodyReadFailedOutcome = "body_read_failed"
 
-// bodyReadFailedCoordinator404StaleAge bounds the crash window of a
-// body_read_failed hold: a coordinator that never recorded the attempt (it
-// crashed between the write and the record) answers the finality lookup
-// "Settlement finality not found" forever. Once such answers span this long
-// (from the first one), the hold becomes a terminal stale_held with no
-// debit, for operator review, instead of staying held without end.
-const bodyReadFailedCoordinator404StaleAge = time.Hour
-
 // coordinatorFinalityNotFoundMessage is the coordinator's own answer for a
 // request with no settlement finality record (buyer.Server
 // handleInternalSettlementFinality). The same 404 code with any other
@@ -838,27 +882,4 @@ func coordinatorFinalityNotFoundBody(body []byte) bool {
 		return false
 	}
 	return envelope.Error.Code == "not_found" && envelope.Error.Message == coordinatorFinalityNotFoundMessage
-}
-
-func (s *Server) staleHoldAgedBodyReadFailure(ctx context.Context, reservation storage.ActiveReservation, firstNotFound time.Time) (string, error) {
-	var err error
-	if reservation.WalletSessionID != "" {
-		err = s.store.MarkWalletSessionReservationStaleHeld(ctx, reservation.AccountID, reservation.WalletSessionID, reservation.RequestID, s.now())
-	} else {
-		err = s.store.MarkReservationStaleHeld(ctx, reservation.AccountID, reservation.RequestID, s.now())
-	}
-	if err != nil {
-		if errors.Is(err, storage.ErrReservationNotFound) || errors.Is(err, storage.ErrReservationTerminal) {
-			return "already_terminal", nil
-		}
-		return "", err
-	}
-	slog.Error("SPEC-022 reconciler moved an aged body_read_failed hold with no coordinator record to stale_held; no buyer debit, operator review required",
-		"request_id", reservation.RequestID,
-		"account_id", reservation.AccountID,
-		"reservation_created_at", reservation.CreatedAt,
-		"first_finality_not_found_at", firstNotFound,
-		"stale_age", bodyReadFailedCoordinator404StaleAge.String(),
-	)
-	return "coordinator_404_expired", nil
 }

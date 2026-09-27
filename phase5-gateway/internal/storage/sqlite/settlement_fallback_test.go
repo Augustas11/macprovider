@@ -299,3 +299,127 @@ func TestSettlementFallbackReconcileAttemptIsMonotonicAndGenerationBound(t *test
 		t.Fatalf("terminal mark changed sequence: %d -> %d", second, got)
 	}
 }
+
+func TestSettlementHeldDueListHonorsBackoff(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	candidate := fallbackTestCandidate(t, store)
+	if err := store.SaveSettlementFallbackCandidate(ctx, candidate); err != nil {
+		t.Fatal(err)
+	}
+	reservation := storage.ActiveReservation{
+		AccountID: candidate.AccountID, RequestID: candidate.RequestID, CreatedAt: candidate.ReservationCreatedAt,
+	}
+	if err := store.MarkSettlementReconcileAttempt(ctx, reservation); err != nil {
+		t.Fatal(err)
+	}
+	now := fixedTime().Add(10 * time.Minute)
+	if err := store.RecordSettlementReconcileResult(ctx, reservation, "coordinator_404_held", now); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := store.ListDueSettlementHeldReservations(ctx, 10, now.Add(14*time.Minute)); err != nil || len(rows) != 0 {
+		t.Fatalf("due before backoff rows=%d err=%v", len(rows), err)
+	}
+	rows, err := store.ListDueSettlementHeldReservations(ctx, 10, now.Add(15*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].RequestID != candidate.RequestID {
+		t.Fatalf("due rows=%+v, want original hold", rows)
+	}
+}
+
+func TestSettlementHoldBacklogUsesPartialIndex(t *testing.T) {
+	store := newTestStore(t)
+	var indexSQL string
+	if err := store.db.QueryRow(`SELECT sql FROM sqlite_master
+		WHERE type = 'index' AND name = 'idx_quota_active_settlement_hold_created'`).Scan(&indexSQL); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"quota_reservations", "created_at", "status = 'active'", "settlement_hold = 1"} {
+		if !strings.Contains(indexSQL, want) {
+			t.Fatalf("settlement hold index SQL %q missing %q", indexSQL, want)
+		}
+	}
+}
+
+func TestSettlementOperatorReviewIsVisibleAndExcludedWithoutQuotaRelease(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	candidate := fallbackTestCandidate(t, store)
+	if err := store.SaveSettlementFallbackCandidate(ctx, candidate); err != nil {
+		t.Fatal(err)
+	}
+	reservation := storage.ActiveReservation{
+		AccountID: candidate.AccountID, RequestID: candidate.RequestID, CreatedAt: candidate.ReservationCreatedAt,
+	}
+	if err := store.MarkSettlementReconcileAttempt(ctx, reservation); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkSettlementHoldOperatorReview(ctx, reservation, "coordinator_finality_not_found", fixedTime().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	allRows, err := store.ListSettlementHeldReservations(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allRows) != 1 {
+		t.Fatalf("all held rows=%+v, want operator-review hold still active", allRows)
+	}
+	dueRows, err := store.ListDueSettlementHeldReservations(ctx, 10, fixedTime().Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dueRows) != 0 {
+		t.Fatalf("due rows=%+v, want operator-review hold excluded from sweeps", dueRows)
+	}
+	_, reserved, err := store.DailyUsage(ctx, candidate.AccountID, candidate.WindowDate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reserved != candidate.MaxTotalTokens {
+		t.Fatalf("reserved=%d want quota unchanged at %d", reserved, candidate.MaxTotalTokens)
+	}
+	stats, err := store.SettlementHoldBacklogStats(ctx, fixedTime().Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.TotalActiveHeld != 1 || stats.DueActiveHeld != 0 || stats.OperatorReviewHeld != 1 {
+		t.Fatalf("stats=%+v want active=1 due=0 review=1", stats)
+	}
+}
+
+func TestSettlementFinalityNotFoundFirstTimeSurvivesReconcileAttempts(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	candidate := fallbackTestCandidate(t, store)
+	if err := store.SaveSettlementFallbackCandidate(ctx, candidate); err != nil {
+		t.Fatal(err)
+	}
+	reservation := storage.ActiveReservation{
+		AccountID: candidate.AccountID, RequestID: candidate.RequestID, CreatedAt: candidate.ReservationCreatedAt,
+	}
+	if err := store.MarkSettlementReconcileAttempt(ctx, reservation); err != nil {
+		t.Fatal(err)
+	}
+	t0 := time.Date(2026, 9, 25, 10, 0, 0, 0, time.UTC)
+	first, err := store.RecordSettlementFinalityNotFound(ctx, reservation, t0)
+	if err != nil || !first.Equal(t0) {
+		t.Fatalf("first record=%v err=%v, want %v", first, err, t0)
+	}
+	if err := store.MarkSettlementReconcileAttempt(ctx, reservation); err != nil {
+		t.Fatal(err)
+	}
+	again, err := store.RecordSettlementFinalityNotFound(ctx, reservation, t0.Add(30*time.Minute))
+	if err != nil || !again.Equal(t0) {
+		t.Fatalf("after another attempt: first=%v err=%v, want the original %v", again, err, t0)
+	}
+	if err := store.ClearSettlementFinalityNotFound(ctx, reservation); err != nil {
+		t.Fatal(err)
+	}
+	later := t0.Add(2 * time.Hour)
+	reset, err := store.RecordSettlementFinalityNotFound(ctx, reservation, later)
+	if err != nil || !reset.Equal(later) {
+		t.Fatalf("after clear: first=%v err=%v, want %v", reset, err, later)
+	}
+}
