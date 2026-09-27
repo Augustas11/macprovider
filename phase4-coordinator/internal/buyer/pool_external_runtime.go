@@ -179,7 +179,7 @@ func (s *Server) poolExternalRuntimeRouteBinding(ctx context.Context, p pool.Pro
 	}
 	// Step 1: the recorded member the session's pin names; its format must
 	// agree with the loopback class (GGUF feed member, or for mlxlm_loopback
-	// a snapshot-manifest feed member or the row's own pair).
+	// and omlx_loopback a snapshot-manifest feed member or the row's own pair).
 	member, ok := providerws.PoolRouteSessionBoundMember(p, event)
 	if !ok {
 		return providerws.ModelAdmissionSettlementBinding{}, false, nil
@@ -202,7 +202,8 @@ func (s *Server) poolExternalRuntimeRouteBinding(ctx context.Context, p pool.Pro
 	}
 	byomArtifactPredicate(p, &predicate)
 	if member.ArtifactID == "" {
-		// A row pair (mlxlm_loopback only): no feed binding, no six values.
+		// A row pair (MLX-snapshot loopback classes only): no feed binding, no
+		// six values.
 		if p.ArtifactIdentity != nil || predicate.ArtifactDerived() {
 			return providerws.ModelAdmissionSettlementBinding{}, false, nil
 		}

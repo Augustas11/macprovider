@@ -524,3 +524,32 @@ func TestMACOnlyDeclarationHeldOverRealWire(t *testing.T) {
 		t.Fatal("a MAC-only trailer declaration was not seen as a finality declaration")
 	}
 }
+
+// #1750: a held finality logs which fault it was (reason_detail); the held
+// reason itself stays missing_settlement_finality_trailer.
+func TestHeldFinalityLogsReasonDetail(t *testing.T) {
+	logs := captureRetryLogs(t)
+	b := testBinding(false)
+	tampered := quarantinedFinality()
+	signFinality(testKey, testAccount, testReqID, testInternal, tampered)
+	tampered.Set(settlementOutcomeHeader, "verified")
+	for _, tc := range []struct {
+		name   string
+		resp   *http.Response
+		detail string
+	}{
+		{"missing MAC", declaredTrailerResponse(quarantinedFinality()), "finality_mac_missing"},
+		{"tampered tuple", declaredTrailerResponse(tampered), "finality_mac_mismatch"},
+		{"declared, values stripped", declaredTrailerResponse(http.Header{}), "finality_trailers_missing"},
+	} {
+		logs.Reset()
+		got := coordinatorNonStreamingSettlementFinality(tc.resp, b)
+		if !isMissingHold(got) || got.Reason != missingSettlementFinalityTrailer {
+			t.Fatalf("%s: %+v, want a missing_settlement_finality_trailer hold", tc.name, got)
+		}
+		line := logs.String()
+		if !strings.Contains(line, "reason_detail="+tc.detail) || !strings.Contains(line, "reason="+missingSettlementFinalityTrailer) {
+			t.Fatalf("%s: log %q, want reason_detail=%s", tc.name, line, tc.detail)
+		}
+	}
+}

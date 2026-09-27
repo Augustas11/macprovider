@@ -133,3 +133,37 @@ func TestSPEC042R014EngineFailClosedSet(t *testing.T) {
 		})
 	}
 }
+
+// SPEC-042 0.0.35 / SPEC-006 0.9.37 (#1690 M9): an LM Studio GGUF member of a
+// pool whose v2 allowlist is lmstudio_loopback is selectable as
+// engine=lmstudio, discloses its class, records it in the route snapshot,
+// and settles pool_operator_attested. The same selection on a pool that
+// allowlists only llama.cpp is engine_unavailable.
+func TestSPEC042R014LMStudioOnAllowlistingPoolServedAndDisclosed(t *testing.T) {
+	fx := defaultExternalRuntimeFixture()
+	fx.helloSource = "lmstudio_loopback"
+	fx.offerSource = "lmstudio_loopback"
+	fx.allowedSources = "llamacpp_loopback,lmstudio_loopback"
+	fx.runtimeAllowlist = []string{"lmstudio_loopback"}
+	h := newExternalRuntimeHarness(t, fx)
+	rec := postChat(t, h.server, externalRuntimeBody, withEngine(externalRuntimePoolHeaders(h.poolID), "lmstudio_loopback"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-MacProvider-Engine"); got != "lmstudio_loopback" {
+		t.Fatalf("X-MacProvider-Engine=%q", got)
+	}
+	if got := queryRouteSnapshotBYOMBinding(t, h.dbPath)["runtime_source"]; got != "lmstudio_loopback" {
+		t.Fatalf("route snapshot runtime_source=%v", got)
+	}
+	ledger := externalRuntimeLedger(t, h.dbPath)
+	if ledger.usageSource != billing.UsageSourcePoolOperatorAttested || ledger.provider == 0 {
+		t.Fatalf("ledger=%+v", ledger)
+	}
+
+	other := newExternalRuntimeHarness(t, defaultExternalRuntimeFixture())
+	rec = postChat(t, other.server, externalRuntimeBody, withEngine(externalRuntimePoolHeaders(other.poolID), "lmstudio_loopback"))
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "engine_unavailable") {
+		t.Fatalf("lmstudio on a llama.cpp-only pool: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}

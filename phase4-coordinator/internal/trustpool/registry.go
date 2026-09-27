@@ -481,6 +481,44 @@ func (r *Registry) LoadRouteableSnapshotsAtRevision(revision uint64, snapshots [
 	return err
 }
 
+// PublishRouteableSnapshotsIfAhead is the admin post-mutation publish. It
+// replaces the registry when revision is newer than the current high-water
+// mark and is a no-op success otherwise: the check and the replace share one
+// lock, so a refresher that already published this revision (or a newer
+// one) between a caller's read and its publish is not an error.
+func (r *Registry) PublishRouteableSnapshotsIfAhead(revision uint64, snapshots []RouteableSnapshot) error {
+	next, err := buildRouteablePoolStates(snapshots)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.revision != 0 && revision <= r.revision {
+		return nil
+	}
+	_, err = r.applyRouteablePoolStatesLocked(revision, next, true, false)
+	return err
+}
+
+// RepublishRouteGatesAtRevision is the admin same-revision route-gate
+// republish. Like RefreshRouteableSnapshotsAtRevision it may replace the
+// registry at the current revision, but a revision older than the current
+// high-water mark is a no-op success under the same lock: a concurrent
+// publish of a newer revision already carries the current route gates.
+func (r *Registry) RepublishRouteGatesAtRevision(revision uint64, snapshots []RouteableSnapshot) error {
+	next, err := buildRouteablePoolStates(snapshots)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.revision != 0 && revision < r.revision {
+		return nil
+	}
+	_, err = r.applyRouteablePoolStatesLocked(revision, next, true, true)
+	return err
+}
+
 // RefreshRouteableSnapshotsAtRevision replaces the registry at the current
 // revision when the durable replay output changes due to time-based gates.
 // Event/approval mutation publishers should keep using LoadRouteableSnapshotsAtRevision.

@@ -83,6 +83,8 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_admission_journey_runner
 	node --test phase3-binary/app/Tests/MalibuTests/payout-signer-chain.test.mjs
 	bash scripts/test-production-exceptions.sh
+	bash phase5-gateway/dist/test/gateway_deploy_inflight.test.sh
+	bash test/e2e-1690/tools/no-credential-argv.test.sh
 	bash scripts/test-coordinator-advertised-version-test.sh
 	bash scripts/test-cli-se-entitlements.sh
 	bash scripts/test-malibu-independent-release.sh
@@ -105,6 +107,7 @@ test-dist:
 	bash scripts/test-signed-local-consumer-endpoint-journey-workflow.sh
 	bash scripts/test-signed-trusted-pool-creator-mvp-journey-workflow.sh
 	bash scripts/test-signed-trusted-pool-layer2-journey-workflow.sh
+	bash scripts/test-signed-trusted-pool-external-runtime-journey-workflow.sh
 	bash scripts/test-signed-pool-promotion-transition-workflow.sh
 	bash scripts/test-spec043-production-release-key-provision.sh
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_provider_prebeta_journey_result
@@ -115,6 +118,7 @@ test-dist:
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_local_consumer_endpoint_journey_result
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_trusted_pool_creator_mvp_journey_result
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_trusted_pool_layer2_journey_result
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_trusted_pool_external_runtime_journey_result
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pool_promotion_transition
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_pool_rejection_timing_floor
 	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v scripts.tests.test_journey_result_tools

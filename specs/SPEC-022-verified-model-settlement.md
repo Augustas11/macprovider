@@ -1,11 +1,50 @@
 # SPEC-022 - Verified model settlement
 
-Version: v0.2.2
+Version: v0.2.4
 Status: Draft, lock-ready after round-4 closure
 Date drafted: 2026-06-30
 Depends on: SPEC-001, SPEC-002, SPEC-005, SPEC-006, SPEC-008, SPEC-010, SPEC-011, SPEC-015, SPEC-016, SPEC-042, SPEC-046, SPEC-047
 
 ## Change log
+
+### v0.2.4
+
+Rollback notes for the #1690 M9 engines. A coordinator that predates v0.2.0
+also cannot load an artifact feed carrying the SPEC-023 v0.20.0
+`omlx_loopback` runtime source, so the R-12.8 rollback bullet names it next
+to `mlxlm_loopback`. A new R-12.8 rollback precondition: the target must
+replay every runtime class ever accepted in pool manifest history. No other
+change.
+
+### v0.2.3
+
+Delivered-only buyer debit on the gateway-to-coordinator hop and a bounded
+end for the holds it creates (#1690 fake-Pearl VM e2e F-1 and review). New
+normative text: R-5.6 (v0.2.3) and R-8.7.
+
+- A negotiated response whose body the gateway could not read in full
+  (`body_read_failed`: the hop broke after the body, before or while the
+  finality trailers were read) is held for coordinator finality instead of
+  refunded locally. The buyer, who received an error and none of the
+  completion, is debited at most the verified prompt; the provider keeps the
+  credit for what reached the gateway. One bounded, logged exception: when
+  the gateway cannot bind the hold for reconciliation (the response carries
+  no coordinator internal request id, or the reconcile candidate or the hold
+  cannot be persisted), it refunds and logs an error, because such a hold
+  could never settle or reach operator review.
+- The same delivered bound covers every gateway-ended response whose
+  candidate records what the gateway delivered: a stream the gateway ended
+  `stream_truncated` (the hop broke or a frame overflowed after part was
+  forwarded) or `provider_timeout` (a gateway stream timeout, or a
+  coordinator 504 with nothing delivered).
+- A `body_read_failed` hold whose coordinator keeps answering its own
+  "finality not found" follows the #1763 not-found rule: it stays held with
+  no debit or refund, is retried on backoff, and moves to operator review
+  after one hour counted from the first such answer. A generic 404 never
+  starts that hour.
+
+No wire, receipt, or schema-version change: the first not-found time and the
+operator-review state live in the reconcile-attempt columns #1763 added.
 
 ### v0.2.2
 
@@ -748,6 +787,35 @@ the smaller of the verified completion and its own delivered completion,
 with the verified prompt. Provider settlement stays the verified figure for
 the prefix delivered to the gateway, which the receipt binds; the difference
 is not billed to either party.
+(v0.2.3) The same bound applies wherever the gateway, not the buyer, ends
+the delivery short of the verified output, and its local record is what it
+delivered:
+- `body_read_failed`: the gateway could not read a negotiated response's
+  body in full (the gateway-to-coordinator hop broke after the body, before
+  or while its finality trailers were read). The gateway MUST NOT refund
+  locally, because the coordinator may already have recorded the attempt as
+  delivered and credited the provider; it MUST hold the reservation for
+  coordinator finality and answer the buyer an error. The buyer received none
+  of the completion, so its final debit is at most the verified prompt
+  (a refund when finality refunds). Exception: when the gateway cannot bind
+  the hold for reconciliation (the response carries no coordinator internal
+  request id, or the reconcile candidate or the hold cannot be persisted), it
+  MUST refund and log an error instead of holding. Such a hold could never be
+  settled by finality or reach operator review (R-8.7), and a hold nothing can resolve is
+  worse than this bounded, logged disagreement with a coordinator that may
+  already have credited the provider.
+- `stream_truncated` and `provider_timeout`: the gateway ended a stream after
+  forwarding part of it because the hop broke, a frame exceeded its limit, or
+  a stream timed out, or the coordinator answered 504 with nothing delivered.
+  The buyer's final debit is the verified prompt plus the smaller of the
+  verified completion and the completion the gateway forwarded.
+In each case the provider settlement stays the verified figure for the prefix
+delivered to the gateway, and the difference is billed to neither party. For
+`client_disconnect`, `stream_truncated` and `provider_timeout`, the forwarded
+completion is the provider-reported completion when the provider's usage
+chunk was already forwarded; otherwise it is the gateway's byte-based
+estimate, ceil(forwarded bytes / 4), capped at the request's completion
+limit.
 
 R-5.7. Synchronous buyer response completion and asynchronous receipt
 verification MAY be decoupled. Until verification returns `verified`, buyer
@@ -869,6 +937,19 @@ concurrent covered requests, including reservation caps, admission behavior when
 many agentic requests are in flight, and release behavior after terminal
 outcomes. A terminal SPEC-022 row MUST NOT permanently reduce buyer available
 quota through a stale reservation.
+
+R-8.7. (v0.2.3, aligned with #1763) A `body_read_failed` hold (R-5.6) whose
+coordinator never recorded the attempt (it stopped between the buyer write
+and the record) gets no finality. The absence of a coordinator record is not
+authority to debit or refund. Such a hold follows the general coordinator
+not-found rule: it stays active and held, with no buyer debit and no refund,
+is retried on the reconciler's bounded backoff, and moves to operator review
+once the coordinator's own "finality not found" answer for that request has
+persisted for at least one hour, measured from the first such answer the
+gateway recorded for the hold (not from the reservation's creation). Any
+other not-found answer (a wrong operator URL, an intermediary, a coordinator
+whose settlement store is unavailable) MUST NOT start that hour; the hold is
+retried on backoff instead. An operator resolves an operator-review hold.
 
 ### R-9. Rollout, migration, and rollback (SPEC-022-R009)
 
@@ -1200,11 +1281,25 @@ the pool attempts recorded before a downgrade.
   predates v0.2.0 strict-decodes the catalog artifact feed and allows only
   `mlx_cache` on an `mlx_safetensors` artifact, so it exits at startup on a
   feed that carries a gguf `huggingface_revision` source (`file_path`) or an
-  `mlxlm_loopback` runtime source. A rollback to such a coordinator MUST
-  first install a signed feed set without either tuple (a new catalog release
+  `mlxlm_loopback` or (v0.2.4) `omlx_loopback` runtime source. A rollback to
+  such a coordinator MUST first install a signed feed set without those
+  tuples (a new catalog release
   that withdraws them), after the v2 allowlists and the CLI are rolled back;
   the operator sequence is in `docs/runbooks/trusted-pool-production-launch.md`
   section 9.
+- Manifest-history compatibility on rollback (v0.2.4, #1690 M9 review M2):
+  a coordinator replays every accepted `manifest_accepted` event at start
+  and rejects a policy core outside its own closed SPEC-042-R001
+  vocabulary, so a target that cannot read one of them disables every
+  pool. Withdrawing an allowlist mints a new policy version and does not
+  remove the old one from history. A coordinator rollback target MUST
+  therefore be at or above the build that introduced every runtime class
+  ever accepted in any pool's manifest history (`llamacpp_loopback`,
+  `mlxlm_loopback`, `ollama_loopback` from #1719; `lmstudio_loopback`,
+  `omlx_loopback` from #1754), and MUST read `manifest-snapshot/v2` if any
+  v2 policy core was ever accepted. The runbook's read-only step 4b check
+  decides it and says STOP otherwise; the only way forward then is to roll
+  the coordinator forward.
 - A pool-authority read that cannot decide (a store or authority error) is
   not an eligibility verdict. Receipt ingestion returns a retryable error and
   keeps the receipt's first-observed arrival time for the retry; only a

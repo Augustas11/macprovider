@@ -696,10 +696,11 @@ CATALOG_ECONOMICS_ACTION_FIELDS = (
 # field's vocabulary to the implementation, the set is frozen from the CLI
 # encoder instead and says so.
 
-# SPEC-046-R002 adapter enum, exactly (v0.3.0 adds mlxlm_loopback).
+# SPEC-046-R002 adapter enum, exactly (v0.3.0 adds mlxlm_loopback, v0.5.0
+# omlx_loopback).
 RUNTIME_SOURCES = frozenset({
     "mlx_cache", "ollama_loopback", "lmstudio_loopback", "llamacpp_loopback",
-    "openai_compatible_loopback", "mlxlm_loopback",
+    "openai_compatible_loopback", "mlxlm_loopback", "omlx_loopback",
 })
 # SPEC-046-R003 candidate enums, exactly.
 IDENTITY_STATES = frozenset({

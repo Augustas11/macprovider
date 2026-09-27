@@ -271,11 +271,16 @@ print("payload:    ", json.loads(resp.choices[0].message.content))
 
 Trusted Pool routes can be served by more than one inference engine. Name one with `X-MacProvider-Engine-Select`:
 
-| Value | Engine | Where it can serve |
-|---|---|---|
-| `native` | Malibu's native MLX engine | Every route |
-| `llamacpp` | llama.cpp `llama-server` | A Trusted Pool whose signed policy allows it |
-| `ollama` | Ollama | A Trusted Pool whose signed policy allows it |
+| Value | Engine | Response `X-MacProvider-Engine` | Where it can serve |
+|---|---|---|---|
+| `native` | Malibu's native MLX engine | `mlx_cache` | Every route |
+| `llamacpp` | llama.cpp `llama-server` | `llamacpp_loopback` | A Trusted Pool whose signed policy allows it |
+| `lmstudio` | LM Studio (app server or headless `llmster`) | `lmstudio_loopback` | A Trusted Pool whose signed policy allows it |
+| `mlxlm` | `mlx_lm.server` | `mlxlm_loopback` | A Trusted Pool whose signed policy allows it |
+| `ollama` | Ollama | `ollama_loopback` | A Trusted Pool whose signed policy allows it |
+| `omlx` | oMLX | `omlx_loopback` | A Trusted Pool whose signed policy allows it |
+
+Every engine except `native` is an external engine that a pool operator runs on its own Macs. External engines serve buyers only inside a Trusted Pool: the global network (no `X-MacProvider-Pool-Select`) is always served by the native engine.
 
 ```python
 client_llama = OpenAI(
@@ -288,13 +293,27 @@ client_llama = OpenAI(
 )
 ```
 
-- **No header:** any engine the route allows. The global network (no pool) serves native only.
-- **Exact match:** a request that names an engine is served by that engine or refused. It is never quietly served by another engine.
-  - `400 invalid_engine_selection`: the value is not one of the three above (matching is case-sensitive).
-  - `503 engine_unavailable`: `llamacpp` or `ollama` without a Trusted Pool, a pool whose policy does not allow that engine, or no provider in the pool runs it for your model. Retrying the same request will not help.
-- **Disclosure:** every response names the engine that served it in `X-MacProvider-Engine`: `mlx_cache` (native), `llamacpp_loopback`, or `ollama_loopback`. This is the engine the provider declared and the coordinator recorded, not an attestation of the process running on the Mac. For a pool request served by an external engine, the settlement record stores the same value with the served model file's identity.
+```bash
+curl -sS https://api.malibu.tech/v1/chat/completions \
+  -H "Authorization: Bearer $MACPROVIDER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "X-MacProvider-Pool-Select: <pool-id>" \
+  -H "X-MacProvider-Engine-Select: lmstudio" \
+  -D - -o /dev/null \
+  -d '{"model":"<model-id>","messages":[{"role":"user","content":"hi"}]}' | grep -i x-macprovider-engine
+```
 
-**Engines differ.** On a Mac Studio (M3 Ultra) serving Qwen3.6 27B, llama-server (Q4_K_M) reached 0.80x, 0.85x, and 0.70x of native throughput at 1, 4, and 8 concurrent requests. Under bursts it had a shorter time to first token than native serial decoding, because it interleaves requests. Quality follows the quantization: wikitext-2 perplexity 6.618 for Q4_K_M against 6.747 for native MLX 4-bit. The full numbers and method are in the [M0 benchmark evidence](runbooks/runtime-agnostic-m0-benchmark-evidence-2026-09-24.md). **Pricing does not depend on the engine:** a request is priced by its model.
+- **No header:** any engine the route allows. On a pool route that can be any engine the pool's policy allows; the global network serves native only.
+- **Exact match:** a request that names an engine is served by that engine or refused. It is never quietly served by another engine, and a pool request is never moved to another pool or to the global network to find one.
+- **Errors.** Both are permanent for the same request (`retryable: false`); change the request instead of retrying it.
+  - `400 invalid_engine_selection`: the value is not one of the six above (matching is exact and case-sensitive), or the request carries two different values.
+  - `503 engine_unavailable`: an external engine without a Trusted Pool; a pool whose signed policy does not allow that engine; or no provider in the pool runs that engine for your model right now. A pool you are not authorized for still answers the generic `pool_unavailable` first, so this error never reveals anything about a pool you cannot use.
+- **Disclosure:** every response names the engine that served it in `X-MacProvider-Engine` (third column above). This is the engine the provider declared and the coordinator recorded, not an attestation of the process running on the Mac: the pool operator is trusted for that, under the pool's signed policy. For a pool request served by an external engine, the settlement record stores the same value with the served model file's identity.
+- **Billing on an external engine.** Usage on an external engine is the pool operator's own reported usage, signed in its receipt and bounded by the same ceilings as native usage. If you disconnect mid-stream you are billed for what reached you (prompt plus the delivered completion tokens), as on native; when an engine cannot state that count for the delivered part, the partial stream is not billed at all.
+
+**Engines differ.** On a Mac Studio (M3 Ultra) serving Qwen3.6 27B, llama-server (Q4_K_M) reached 0.80x, 0.85x, and 0.70x of native throughput at 1, 4, and 8 concurrent requests. Under bursts it had a shorter time to first token than native serial decoding, because it interleaves requests. Quality follows the quantization: wikitext-2 perplexity 6.618 for Q4_K_M against 6.747 for native MLX 4-bit. The full numbers and method are in the [M0 benchmark evidence](runbooks/runtime-agnostic-m0-benchmark-evidence-2026-09-24.md). The GGUF engines (llama.cpp, LM Studio, Ollama) serve the GGUF quantization of a model; the MLX engines (native, mlx_lm.server, oMLX) serve its MLX snapshot. **Pricing does not depend on the engine:** a request is priced by its model.
+
+Running a pool yourself and want to serve it with your own engine? See [Serving a Trusted Pool with your own engine](runbooks/trusted-pool-external-engines.md).
 
 ## Header reference
 
@@ -302,8 +321,8 @@ client_llama = OpenAI(
 |---|---|---|---|
 | `X-MacProvider-Conversation` | Request | Sticky-affinity tag for prefix-cache reuse | SPEC-004, SPEC-024 |
 | `X-MacProvider-Pin-Provider` | Request | Strict-pin to specific provider | SPEC-004 |
-| `X-MacProvider-Engine-Select` | Request | Choose the inference engine (`native`, `llamacpp`, `ollama`) | SPEC-006-R016, SPEC-042-R014 |
-| `X-MacProvider-Engine` | Response | Engine that served this (`mlx_cache`, `llamacpp_loopback`, `ollama_loopback`) | SPEC-006-R016 |
+| `X-MacProvider-Engine-Select` | Request | Choose the inference engine (`native`, `llamacpp`, `lmstudio`, `mlxlm`, `ollama`, `omlx`) | SPEC-006-R016, SPEC-042-R014 |
+| `X-MacProvider-Engine` | Response | Engine that served this (`mlx_cache`, `llamacpp_loopback`, `lmstudio_loopback`, `mlxlm_loopback`, `ollama_loopback`, `omlx_loopback`) | SPEC-006-R016 |
 | `X-MacProvider-Provider` | Response | Which provider actually served this | SPEC-002 |
 | `X-MacProvider-Receipt` | Response | ed25519-signed inference receipt | SPEC-015 v0.3 |
 

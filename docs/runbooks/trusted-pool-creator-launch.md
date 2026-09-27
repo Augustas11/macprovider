@@ -209,6 +209,12 @@ Root-compromise freeze, descendant-signer rejection,
 (SPEC-043-R007 floor + distribution bounds) are proven in the isolated
 candidate harness on new captures.
 
+## External engines
+
+A pool whose signed v2 policy allowlists them can be served by llama.cpp, LM
+Studio, Ollama, `mlx_lm.server`, or oMLX members instead of native MLX. The
+provider side is [Serving a Trusted Pool with your own engine](trusted-pool-external-engines.md).
+
 ## Settlement
 
 Pooled candidate traffic must keep `pool_id` on the route snapshot and must

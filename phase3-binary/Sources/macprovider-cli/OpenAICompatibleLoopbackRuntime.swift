@@ -13,9 +13,14 @@ import MacProviderCore
 //   - `--model mlxlm:<name>`    -> `mlxlm_loopback`    (operator-declared MLX
 //     snapshot, bound to the path mlx_lm.server lists in `/v1/models`;
 //     SPEC-010-R009, #1690 M8)
-// Other OpenAI-compatible runtimes (`lmstudio:`, `openai:`, oMLX) are
-// deliberately not selectable here: they arrive with their identity leg,
-// one at a time.
+//   - `--model lmstudio:<key>`  -> `lmstudio_loopback` (the GGUF the LM Studio
+//     models root resolves for the key, bound to LM Studio's `/api/v1/models`
+//     entry for it; SPEC-010-R007(i), #1690 M9)
+//   - `--model omlx:<name>`     -> `omlx_loopback`     (operator-declared MLX
+//     snapshot, bound to the oMLX `/v1/models/status` entry whose
+//     `model_path` it is; SPEC-010-R009, #1690 M9)
+// Other OpenAI-compatible runtimes (`openai:`) are deliberately not
+// selectable here: they arrive with their identity leg, one at a time.
 //
 // The adapter reports the `macprovider.gguf-file.v1` identity of the LOCAL
 // GGUF file (never a runtime-reported digest), keeps the loopback constraints
@@ -27,7 +32,8 @@ import MacProviderCore
 // (#1695), independent of coordinator buyer-serving state, except for one
 // request whose settlement metadata carries a matching SPEC-015 §N.12
 // `pool_runtime_authorization` (#1690 M5). Usage is copied from the
-// upstream runtime.
+// upstream runtime; a cancelled stream's usage covers exactly the content
+// received (SPEC-015 §N.12 item 7, #1690 E2E-F3 / M9).
 
 /// Serve-time recognition and normalization of an `ollama_loopback` model ref.
 enum OllamaLoopbackServeModel {
@@ -100,11 +106,15 @@ enum LoopbackServeSelection: Equatable {
     case ollama
     case llamaCpp
     case mlxLM
+    case lmStudio
+    case oMLX
 
     static func select(_ ref: String?) -> LoopbackServeSelection? {
         if OllamaLoopbackServeModel.isOllamaLoopbackRef(ref) { return .ollama }
         if LlamaCppLoopbackServeModel.isLlamaCppLoopbackRef(ref) { return .llamaCpp }
         if MLXLMLoopbackServeModel.isMLXLMLoopbackRef(ref) { return .mlxLM }
+        if LMStudioLoopbackServeModel.isLMStudioLoopbackRef(ref) { return .lmStudio }
+        if OMLXLoopbackServeModel.isOMLXLoopbackRef(ref) { return .oMLX }
         return nil
     }
 
@@ -113,6 +123,8 @@ enum LoopbackServeSelection: Equatable {
         case .ollama: return OllamaLoopbackServeModel.runtimeSource
         case .llamaCpp: return LlamaCppLoopbackServeModel.runtimeSource
         case .mlxLM: return MLXLMLoopbackServeModel.runtimeSource
+        case .lmStudio: return LMStudioLoopbackServeModel.runtimeSource
+        case .oMLX: return OMLXLoopbackServeModel.runtimeSource
         }
     }
 
@@ -212,12 +224,16 @@ struct LoopbackGenerationTimeouts: Equatable, Sendable {
 /// SPEC-046-R002 loopback HTTP leg for the serve proxy. Mirrors the discovery
 /// client's safety posture (loopback-literal host check, no redirects, bounded
 /// header/body) with a closed per-method path allowlist:
-///   POST /v1/chat/completions, /apply-template, /tokenize; GET /props.
-/// The last three are llama-server only (fingerprint, context window and the
-/// prompt-token preflight); the Ollama path only ever posts chat completions.
+///   POST /v1/chat/completions, /apply-template, /tokenize;
+///   GET /props, /v1/models, /api/v1/models, /v1/models/status.
+/// `/apply-template`, `/tokenize` and `/props` are llama-server only
+/// (fingerprint, context window and the prompt-token preflight); `/v1/models`
+/// binds mlx_lm.server, `/api/v1/models` binds LM Studio and
+/// `/v1/models/status` binds oMLX (#1690 M9); the Ollama path only ever
+/// posts chat completions.
 final class LoopbackServeHTTPClient: BYOMLoopbackStreamingHTTPClient, @unchecked Sendable {
     static let allowedPOSTPaths: Set<String> = ["/v1/chat/completions", "/apply-template", "/tokenize"]
-    static let allowedGETPaths: Set<String> = ["/props", "/v1/models"]
+    static let allowedGETPaths: Set<String> = ["/props", "/v1/models", "/api/v1/models", "/v1/models/status"]
     /// How much later than the runtime watchdog the URLSession timers fire.
     static let backstopSlackSeconds: TimeInterval = 30
 
@@ -493,11 +509,22 @@ struct OpenAICompatibleStreamAccumulator {
     private var promptTokens: Int?
     private var completionTokens: Int?
     private var deltaEvents = 0
-    /// #1690 E2E-F3: llama-server `timings_per_token` usage at each content
-    /// chunk (content UTF-8 bytes -> completion tokens through them) and the
-    /// prompt tokens it reports; nil once a content chunk arrives without it.
+    /// #1690 E2E-F3: the upstream's per-token usage at each content chunk
+    /// (content UTF-8 bytes -> completion tokens through them); nil once a
+    /// content chunk arrives without it. llama-server `timings_per_token`
+    /// also reports the prompt tokens; a per-chunk `logprobs` list (Ollama,
+    /// LM Studio; #1690 M9) counts only the completion tokens.
     private var prefixCompletionTokens: [Int: Int]? = [0: 0]
     private var prefixPromptTokens: Int?
+    private var prefixCountSource: PrefixCountSource?
+    /// Completion tokens the upstream listed in `logprobs` so far, on any
+    /// chunk (content, tool call, or none).
+    private var logprobTokens = 0
+
+    private enum PrefixCountSource {
+        case timings
+        case logprobs
+    }
     private var sawSSEData = false
     private var nonSSEBody = ""
     private(set) var isDone = false
@@ -563,22 +590,50 @@ struct OpenAICompatibleStreamAccumulator {
         return (result, late)
     }
 
+    /// The content received so far (#1690 M9: what a cancelled stream's
+    /// usage is counted over).
+    var receivedContent: String { content }
+
+    /// True when the upstream attested the completion tokens through every
+    /// content chunk so far (timings or `logprobs`).
+    var hasPerChunkCompletionCounts: Bool { prefixCompletionTokens != nil && prefixCountSource != nil }
+
+    /// True once a tool-call delta streamed; a content recount never covers it.
+    var streamedToolCall: Bool { !toolCalls.isEmpty }
+
     /// The result of a stream the buyer cancelled: the content received so
     /// far, and its per-prefix usage only when the upstream attested it for
     /// every content chunk (else unattested, so never signed).
-    func cancelledResult() -> CompletionResult {
+    ///
+    /// #1690 M9: a runtime whose stream carries no prompt count passes the
+    /// upstream's own prompt count for the same request
+    /// (`upstreamPromptTokens`). `recountedCompletionTokens` is the
+    /// `mlxlm_loopback` count of the whole received content with the served
+    /// snapshot's tokenizer; it binds only that content (and the empty
+    /// prefix). A streamed tool-call delta leaves the result unattested on
+    /// every count path (timings, `logprobs`, recount): the relay has no
+    /// delivered prefix for tool-call deltas (SPEC-015 item 7, R2 SECURITY).
+    func cancelledResult(upstreamPromptTokens: Int? = nil, recountedCompletionTokens: Int? = nil) -> CompletionResult {
         let calls = toolCalls.map { ToolCall(id: $0.id, functionName: $0.name, arguments: $0.arguments) }
-        let attested = prefixCompletionTokens != nil && prefixPromptTokens != nil
-        let generated = prefixCompletionTokens?[content.utf8.count] ?? deltaEvents
+        var table = prefixCompletionTokens
+        if let recountedCompletionTokens {
+            table = [0: 0, content.utf8.count: recountedCompletionTokens]
+        }
+        if !calls.isEmpty {
+            table = nil
+        }
+        let prompt = prefixPromptTokens ?? upstreamPromptTokens
+        let attested = table != nil && prompt != nil
+        let generated = table?[content.utf8.count] ?? deltaEvents
         return CompletionResult(
             content: content,
             finishReason: "",
-            promptTokens: prefixPromptTokens ?? 0,
+            promptTokens: prompt ?? 0,
             completionTokens: generated,
             generatedCompletionTokens: generated,
             toolCalls: calls.isEmpty ? nil : calls,
             settlementDisposition: attested ? .notEligible : .usageUnattested,
-            loopbackPrefixCompletionTokens: attested ? prefixCompletionTokens : [:]
+            loopbackPrefixCompletionTokens: attested ? table : [:]
         )
     }
 
@@ -640,6 +695,14 @@ struct OpenAICompatibleStreamAccumulator {
         if case .string(let reason)? = choice["finish_reason"], !reason.isEmpty {
             finishReason = reason
         }
+        // #1690 M9: a per-chunk `logprobs.content` list names each token the
+        // chunk carries, so its running length is the completion tokens
+        // generated through the chunk.
+        var chunkLogprobTokens: Int?
+        if case .object(let logprobs)? = choice["logprobs"], case .array(let entries)? = logprobs["content"] {
+            logprobTokens += entries.count
+            chunkLogprobTokens = logprobTokens
+        }
         guard case .object(let delta)? = choice["delta"] else { return [] }
         var chunks: [StreamChunk] = []
         if case .string(let text)? = delta["content"], !text.isEmpty {
@@ -648,9 +711,17 @@ struct OpenAICompatibleStreamAccumulator {
             }
             content += text
             deltaEvents += 1
-            if let chunkTimings, prefixCompletionTokens != nil {
-                prefixCompletionTokens?[content.utf8.count] = chunkTimings.completion
-                prefixPromptTokens = chunkTimings.prompt
+            // One source per stream: a chunk without it, or with the other
+            // one, leaves every later prefix unattested.
+            let source: PrefixCountSource? = chunkTimings != nil ? .timings : (chunkLogprobTokens != nil ? .logprobs : nil)
+            if prefixCompletionTokens != nil, let source, prefixCountSource == nil || prefixCountSource == source {
+                prefixCountSource = source
+                if let chunkTimings {
+                    prefixCompletionTokens?[content.utf8.count] = chunkTimings.completion
+                    prefixPromptTokens = chunkTimings.prompt
+                } else if let chunkLogprobTokens {
+                    prefixCompletionTokens?[content.utf8.count] = chunkLogprobTokens
+                }
             } else {
                 prefixCompletionTokens = nil
             }
@@ -753,8 +824,23 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
 
     /// The artifact identity bound at construction and re-validated before
     /// every identity-binding report: a GGUF file (SPEC-010-R007(a)) or, for
-    /// `mlxlm_loopback`, an MLX snapshot (SPEC-010-R009(a)).
+    /// `mlxlm_loopback` and `omlx_loopback`, an MLX snapshot
+    /// (SPEC-010-R009(a)).
     private let identity: LoopbackServedIdentity
+    /// `lmstudio_loopback`: the `/api/v1/models` entry the runtime must keep
+    /// listing for the bound file (SPEC-046-R009, #1690 M9).
+    private let lmStudioBinding: LMStudioLoopbackServeModel.Binding?
+    /// #1690 M9: the pinned tokenizer a cancelled stream's delivered content
+    /// is counted with when the upstream attests no per-chunk count. It is
+    /// loaded when serving starts from a hash-verified snapshot: the served
+    /// one (MLX runtimes) or, for a GGUF runtime, the catalog row's verified
+    /// plain MLX artifact directory (`siblingSnapshotDirectories`, the
+    /// durable-store copy then the macprovider-downloaded Hugging Face
+    /// snapshot, as native serving verifies them) whose snapshot-manifest
+    /// digest equals the signed row's (`siblingSnapshotSHA256`). A
+    /// symlinked huggingface_hub cache is refused, as native serving refuses
+    /// it. Nil when none is available.
+    private let recountTokenizer: Task<PinnedSnapshotTokenizer?, Never>?
     private var providerStatus: ProviderStatus?
     private var registrationCounter: Int = 0
 
@@ -776,6 +862,13 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
         digestResolver: BYOMArtifactDigestResolver? = nil,
         mlxSnapshot: MLXSnapshotIdentity? = nil,
+        lmStudioBinding: LMStudioLoopbackServeModel.Binding? = nil,
+        upstreamModelID: String? = nil,
+        siblingSnapshotSHA256: String? = nil,
+        siblingSnapshotDirectories: [URL] = [],
+        pinRecountTokenizer: @escaping @Sendable (MLXSnapshotIdentity) async -> PinnedSnapshotTokenizer? = { snapshot in
+            await PinnedSnapshotTokenizer.load(snapshot: snapshot)
+        },
         deadline: Date? = nil
     ) throws {
         let trimmedRef = servedModelRef.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -786,6 +879,14 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             self.upstreamModelName = LlamaCppLoopbackServeModel.upstreamModelName(fromServedRef: trimmedRef)
         case MLXLMLoopbackServeModel.runtimeSource:
             self.upstreamModelName = MLXLMLoopbackServeModel.upstreamModelName
+        case LMStudioLoopbackServeModel.runtimeSource:
+            self.upstreamModelName = LMStudioLoopbackServeModel.modelKey(fromServedRef: trimmedRef)
+        case OMLXLoopbackServeModel.runtimeSource:
+            // The model id oMLX lists for the bound snapshot directory.
+            guard let upstreamModelID, !upstreamModelID.isEmpty else {
+                throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("omlx_loopback requires the model id oMLX serves the snapshot under")
+            }
+            self.upstreamModelName = upstreamModelID
         default:
             self.upstreamModelName = OllamaLoopbackServeModel.upstreamModelName(fromServedRef: trimmedRef)
         }
@@ -800,16 +901,38 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             return trimmed.isEmpty ? nil : trimmed
         }
         self.httpClient = httpClient ?? LoopbackServeHTTPClient()
+        // An LM Studio runtime is always bound to its `/api/v1/models` entry;
+        // no other runtime has one.
+        guard (lmStudioBinding != nil) == (runtimeSource == LMStudioLoopbackServeModel.runtimeSource) else {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("lmstudio_loopback requires its LM Studio model binding")
+        }
+        self.lmStudioBinding = lmStudioBinding
         if let mlxSnapshot {
             // SPEC-010-R009: an MLX snapshot is never a GGUF file, and only
-            // mlxlm_loopback serves one.
-            guard runtimeSource == MLXLMLoopbackServeModel.runtimeSource else {
-                throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("an MLX snapshot is served only by mlxlm_loopback")
+            // mlxlm_loopback and omlx_loopback serve one.
+            guard Self.servesMLXSnapshots(runtimeSource) else {
+                throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("an MLX snapshot is served only by mlxlm_loopback or omlx_loopback")
             }
             self.identity = .mlxSnapshot(mlxSnapshot)
+            self.recountTokenizer = Task.detached(priority: .utility) { await pinRecountTokenizer(mlxSnapshot) }
         } else {
-            guard runtimeSource != MLXLMLoopbackServeModel.runtimeSource else {
-                throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("mlxlm_loopback requires an MLX snapshot identity")
+            let expected = siblingSnapshotSHA256.map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            if let expected, !expected.isEmpty, !siblingSnapshotDirectories.isEmpty {
+                self.recountTokenizer = Task.detached(priority: .utility) {
+                    // The first candidate whose canonical snapshot-manifest
+                    // digest (regular files only, as the catalog hash) equals
+                    // the signed row's is pinned.
+                    for directory in siblingSnapshotDirectories {
+                        guard let sibling = try? MLXSnapshotIdentity.compute(directory: directory), sibling.digest == expected else { continue }
+                        return await pinRecountTokenizer(sibling)
+                    }
+                    return nil
+                }
+            } else {
+                self.recountTokenizer = nil
+            }
+            guard !Self.servesMLXSnapshots(runtimeSource) else {
+                throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("\(runtimeSource) requires an MLX snapshot identity")
             }
             let resolver = digestResolver ?? BYOMArtifactDigestResolver(
                 store: BYOMOllamaModelStore(root: BYOMOllamaModelStore.defaultRoot()),
@@ -838,6 +961,8 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         origin: String,
         selector: BYOMLlamaCppArtifactSelector,
         catalogModelIDAlias: String? = nil,
+        siblingSnapshotSHA256: String? = nil,
+        siblingSnapshotDirectories: [URL] = [],
         httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
         cache: BYOMArtifactDigestCache = BYOMArtifactDigestCache(url: BYOMArtifactDigestCache.defaultURL()),
         deadline: Date? = nil
@@ -872,6 +997,8 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             catalogModelIDAlias: catalogModelIDAlias,
             httpClient: client,
             digestResolver: resolver,
+            siblingSnapshotSHA256: siblingSnapshotSHA256,
+            siblingSnapshotDirectories: siblingSnapshotDirectories,
             deadline: deadline
         )
     }
@@ -923,6 +1050,125 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             catalogModelIDAlias: catalogModelIDAlias,
             httpClient: client,
             mlxSnapshot: snapshot,
+            deadline: deadline
+        )
+    }
+
+    /// The runtimes whose identity is an MLX snapshot (SPEC-010-R009).
+    static func servesMLXSnapshots(_ runtimeSource: String) -> Bool {
+        runtimeSource == MLXLMLoopbackServeModel.runtimeSource || runtimeSource == OMLXLoopbackServeModel.runtimeSource
+    }
+
+    /// `omlx:<name>` (SPEC-010-R009, #1690 M9): require oMLX to list the
+    /// operator-declared snapshot directory as the `model_path` of exactly one
+    /// local `llm` entry, hash that directory with the native snapshot-manifest
+    /// algorithm, and serve that entry's model id. No declared directory, or a
+    /// runtime that does not list it, fails closed (no identity).
+    static func oMLX(
+        servedModelRef: String,
+        origin: String,
+        snapshotDirectory: URL?,
+        catalogModelIDAlias: String? = nil,
+        httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
+        deadline: Date = MLXLMLoopbackServeModel.snapshotHashingDeadline()
+    ) async throws -> OpenAICompatibleLoopbackRuntime {
+        guard let validatedOrigin = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
+            throw OpenAICompatibleLoopbackRuntimeError.invalidLoopbackOrigin(origin)
+        }
+        guard let snapshotDirectory else {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("\(OMLXLoopbackServeModel.snapshotPathEnvironmentKey) is not set to an absolute snapshot directory")
+        }
+        let client = httpClient ?? LoopbackServeHTTPClient()
+        let modelID: String?
+        do {
+            modelID = try await OMLXLoopbackServeModel.servedModelID(client, origin: validatedOrigin, directory: snapshotDirectory)
+        } catch {
+            throw OpenAICompatibleLoopbackRuntimeError.upstreamNotRecognized(OMLXLoopbackServeModel.runtimeSource)
+        }
+        guard let modelID else {
+            throw OpenAICompatibleLoopbackRuntimeError.upstreamNotRecognized(OMLXLoopbackServeModel.runtimeSource)
+        }
+        let snapshot: MLXSnapshotIdentity
+        do {
+            snapshot = try MLXSnapshotIdentity.compute(directory: snapshotDirectory, deadline: deadline)
+        } catch AutotuneContextCalibrationError.deadlineExceeded {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(
+                "MLX snapshot hashing exceeded the \(Int(BYOMModelAdmissionRuntime.artifactHashBudgetSeconds)) s artifact hashing budget; refusing to serve without an identity (SPEC-010-R009(a))"
+            )
+        } catch {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(String(describing: error))
+        }
+        return try OpenAICompatibleLoopbackRuntime(
+            servedModelRef: servedModelRef,
+            origin: origin,
+            runtimeSource: OMLXLoopbackServeModel.runtimeSource,
+            runtimeArtifactPath: snapshot.directory.path,
+            catalogModelIDAlias: catalogModelIDAlias,
+            httpClient: client,
+            mlxSnapshot: snapshot,
+            upstreamModelID: modelID,
+            deadline: deadline
+        )
+    }
+
+    /// `lmstudio:<key>` (SPEC-010-R007(i) / SPEC-046-R009, #1690 M9): hash
+    /// the one GGUF file the LM Studio models root resolves for the key, and
+    /// require LM Studio to list a loaded `gguf` model for that key with the
+    /// file's publisher and exact size. No file, an ambiguous key, or an entry
+    /// that does not match fails closed (no identity).
+    static func lmStudio(
+        servedModelRef: String,
+        origin: String,
+        modelsRoot: URL = BYOMLMStudioModelStore.defaultRoot(),
+        catalogModelIDAlias: String? = nil,
+        siblingSnapshotSHA256: String? = nil,
+        siblingSnapshotDirectories: [URL] = [],
+        httpClient: (any BYOMDiscoveryHTTPClient)? = nil,
+        cache: BYOMArtifactDigestCache = BYOMArtifactDigestCache(url: BYOMArtifactDigestCache.defaultURL()),
+        deadline: Date? = nil
+    ) async throws -> OpenAICompatibleLoopbackRuntime {
+        guard let validatedOrigin = BYOMLoopbackOriginValidator.validatedHTTPOrigin(origin) else {
+            throw OpenAICompatibleLoopbackRuntimeError.invalidLoopbackOrigin(origin)
+        }
+        let client = httpClient ?? LoopbackServeHTTPClient()
+        let resolver = BYOMArtifactDigestResolver(locators: [BYOMLMStudioModelStore(root: modelsRoot)], cache: cache)
+        let evidence: BYOMArtifactEvidence
+        do {
+            evidence = try resolver.computeEvidence(
+                runtimeSource: LMStudioLoopbackServeModel.runtimeSource,
+                servedModelRef: servedModelRef,
+                runtimeArtifactPath: nil,
+                deadline: deadline
+            )
+        } catch {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed(String(describing: error))
+        }
+        guard let binding = LMStudioLoopbackServeModel.binding(
+            modelKey: LMStudioLoopbackServeModel.modelKey(fromServedRef: servedModelRef),
+            locator: evidence.locatorDigest,
+            sizeBytes: evidence.file.sizeBytes
+        ) else {
+            throw OpenAICompatibleLoopbackRuntimeError.artifactResolutionFailed("the LM Studio model file has no publisher/repo/file locator")
+        }
+        let state: LMStudioLoopbackServeModel.BindingState
+        do {
+            state = try await LMStudioLoopbackServeModel.bindingState(client, origin: validatedOrigin, binding: binding)
+        } catch {
+            throw OpenAICompatibleLoopbackRuntimeError.upstreamNotRecognized(LMStudioLoopbackServeModel.runtimeSource)
+        }
+        guard case .bound = state else {
+            throw OpenAICompatibleLoopbackRuntimeError.upstreamNotRecognized(LMStudioLoopbackServeModel.runtimeSource)
+        }
+        return try OpenAICompatibleLoopbackRuntime(
+            servedModelRef: servedModelRef,
+            origin: origin,
+            runtimeSource: LMStudioLoopbackServeModel.runtimeSource,
+            catalogModelIDAlias: catalogModelIDAlias,
+            httpClient: client,
+            digestResolver: resolver,
+            lmStudioBinding: binding,
+            siblingSnapshotSHA256: siblingSnapshotSHA256,
+            siblingSnapshotDirectories: siblingSnapshotDirectories,
             deadline: deadline
         )
     }
@@ -1038,14 +1284,19 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
 
     private var isLlamaCpp: Bool { runtimeSource == LlamaCppLoopbackServeModel.runtimeSource }
 
-    /// mlxlm_loopback: before every request the runtime must still list the
-    /// bound snapshot directory (SPEC-010-R009(b)). mlx_lm.server reports no
-    /// context window, so an over-context request fails upstream.
+    /// mlxlm_loopback / omlx_loopback: before every request the runtime must
+    /// still list the bound snapshot directory, and oMLX under the same model
+    /// id (SPEC-010-R009(b)). Neither reports a context window here, so an
+    /// over-context request fails upstream.
     private func requireMLXLMServesBoundSnapshot() async throws {
         guard case .mlxSnapshot(let snapshot) = identity else { return }
         let listed: Bool
         do {
-            listed = try await MLXLMLoopbackServeModel.listsSnapshot(httpClient, origin: origin, directory: snapshot.directory)
+            if runtimeSource == OMLXLoopbackServeModel.runtimeSource {
+                listed = try await OMLXLoopbackServeModel.servedModelID(httpClient, origin: origin, directory: snapshot.directory) == upstreamModelName
+            } else {
+                listed = try await MLXLMLoopbackServeModel.listsSnapshot(httpClient, origin: origin, directory: snapshot.directory)
+            }
         } catch {
             throw APIError(status: 502, message: "Upstream loopback error", type: "server_error", code: "upstream_unavailable")
         }
@@ -1054,11 +1305,36 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         }
     }
 
-    /// llama.cpp only: re-read `/props`, require the bound file is still the
-    /// one served, then gate prompt + max_tokens against `n_ctx`. Returns the
-    /// context window used (nil when the runtime reports none).
+    /// lmstudio_loopback: before every request LM Studio must still list the
+    /// bound model loaded, with the bound file's publisher and size
+    /// (SPEC-046-R009, #1690 M9). Returns its loaded context window; nil for
+    /// every other runtime or when no instance reports one.
+    private func requireLMStudioServesBoundFile() async throws -> Int? {
+        guard let lmStudioBinding else { return nil }
+        let state: LMStudioLoopbackServeModel.BindingState
+        do {
+            state = try await LMStudioLoopbackServeModel.bindingState(httpClient, origin: origin, binding: lmStudioBinding)
+        } catch {
+            throw APIError(status: 502, message: "Upstream loopback error", type: "server_error", code: "upstream_unavailable")
+        }
+        guard case .bound(let contextWindow) = state else {
+            throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
+        }
+        return contextWindow
+    }
+
+    /// llama.cpp: re-read `/props`, require the bound file is still the one
+    /// served, then gate prompt + max_tokens against `n_ctx`. LM Studio:
+    /// require the bound entry, then gate max_tokens against its loaded
+    /// context. Returns the context window used (nil when the runtime
+    /// reports none).
     private func upstreamContextGate(_ request: ChatCompletionRequest) async throws -> Int? {
         try await requireMLXLMServesBoundSnapshot()
+        if lmStudioBinding != nil {
+            guard let contextWindow = try await requireLMStudioServesBoundFile() else { return nil }
+            try Self.contextGate(promptTokens: nil, maxTokens: request.maxTokens, contextWindow: contextWindow)
+            return contextWindow
+        }
         guard isLlamaCpp else { return nil }
         let props: BYOMHTTPResponse
         do {
@@ -1128,16 +1404,19 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         if shouldCancel() { throw CancellationError() }
         // The last check before any byte goes upstream, for streaming and
         // non-streaming alike: the bound artifact identity is unchanged and,
-        // for mlxlm_loopback, the runtime still lists the bound snapshot
-        // (SPEC-010-R007(a) / R009(a)(b)).
+        // for mlxlm_loopback, the runtime still lists the bound snapshot, and
+        // for lmstudio_loopback the bound model entry (SPEC-010-R007(a) /
+        // R009(a)(b), SPEC-046-R009).
         guard identityIsValid() else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
         try await requireMLXLMServesBoundSnapshot()
+        _ = try await requireLMStudioServesBoundFile()
         let body = try Self.encodeUpstreamRequest(
             request,
             upstreamModelName: upstreamModelName,
-            timingsPerToken: runtimeSource == LlamaCppLoopbackServeModel.runtimeSource
+            timingsPerToken: runtimeSource == LlamaCppLoopbackServeModel.runtimeSource,
+            logprobsPerToken: Self.streamsPerTokenLogprobs(runtimeSource, hasTools: ModelRuntime.hasEnabledTools(request.promptSource.tools))
         )
         let clock = LoopbackProgressClock()
         let timeouts = LoopbackGenerationTimeouts.forGeneration(maxTokens: request.maxTokens, contextWindow: contextWindow)
@@ -1229,7 +1508,157 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             // buyer_cancel receipt over the delivered prefix. The group has
             // finished, so the stream state is final.
             guard onChunk != nil else { throw CancellationError() }
+            return await cancelledStreamResult(request, stream: stream)
+        }
+    }
+
+    /// #1690 M9: the usage of a cancelled stream. llama-server's per-chunk
+    /// timings carry the whole count. Every other runtime's stream carries no
+    /// prompt count, so the upstream counts the same request's prompt once
+    /// more (`countUpstreamPromptTokens`). The completion tokens are the
+    /// upstream's per-chunk `logprobs` count (Ollama, LM Studio) when the
+    /// stream carried one for every content chunk; otherwise (mlx_lm.server,
+    /// oMLX, LM Studio with tools, an upstream that ignored `logprobs`) the
+    /// delivered content is counted with the pinned `recountTokenizer`. Both run concurrently inside `cancelUsageBudgetSeconds`.
+    /// Anything that fails or runs late leaves the usage unattested (relayed
+    /// empty, never signed), so a slow engine makes the cancel free, never
+    /// wrongly billed.
+    private func cancelledStreamResult(_ request: ChatCompletionRequest, stream: LoopbackStreamState) async -> CompletionResult {
+        let content = stream.receivedContent
+        guard !isLlamaCpp, !content.isEmpty else { return stream.cancelledResult() }
+        let deadline = Date().addingTimeInterval(Self.cancelUsageBudgetSeconds)
+        let needsRecount = !stream.hasPerChunkCompletionCounts
+        let pinned = needsRecount ? recountTokenizer : nil
+        // A streamed tool call is never attested, whatever the count source
+        // (SPEC-015 item 7; cancelledResult enforces it too).
+        if stream.streamedToolCall || (needsRecount && pinned == nil) {
             return stream.cancelledResult()
+        }
+        async let prompt: Int? = Self.bounded(until: deadline) { [self] () async -> Int? in
+            await self.boundPromptCount(request)
+        }
+        async let recount: Int? = Self.bounded(until: deadline) { () async -> Int? in
+            // The pinned tokenizer re-checks that its snapshot is still the
+            // verified one; a changed snapshot yields no count.
+            guard let tokenizer = await pinned?.value else { return nil }
+            return tokenizer.count(content)
+        }
+        let (promptTokens, recounted) = await (prompt, recount)
+        guard let promptTokens else { return stream.cancelledResult() }
+        if needsRecount {
+            guard let recounted else { return stream.cancelledResult() }
+            return stream.cancelledResult(upstreamPromptTokens: promptTokens, recountedCompletionTokens: recounted)
+        }
+        return stream.cancelledResult(upstreamPromptTokens: promptTokens)
+    }
+
+    /// The prompt count, only while the runtime is bound to the identity it
+    /// served the request under both before the count request and after its
+    /// response (review CODE MEDIUM, R2 TOCTOU): the file or snapshot is
+    /// unchanged against the pinned stamps, mlx_lm.server / oMLX still list
+    /// the snapshot, and LM Studio still lists the bound model. Nil
+    /// otherwise, so a swap during the re-query never yields a count. The
+    /// caller's deadline bounds both checks with the request.
+    private func boundPromptCount(_ request: ChatCompletionRequest) async -> Int? {
+        guard await servesBoundIdentity() else { return nil }
+        guard let count = await countUpstreamPromptTokens(request) else { return nil }
+        guard !Task.isCancelled, await servesBoundIdentity() else { return nil }
+        return count
+    }
+
+    private func servesBoundIdentity() async -> Bool {
+        guard identityIsValid() else { return false }
+        do {
+            try await requireMLXLMServesBoundSnapshot()
+            _ = try await requireLMStudioServesBoundFile()
+        } catch {
+            return false
+        }
+        return identityIsValid()
+    }
+
+    /// The upstream's `usage.prompt_tokens` for this request, from a
+    /// non-streamed one-token completion of the same body. The template and
+    /// tokenizer are the runtime's own, so it is the prompt count the
+    /// cancelled generation used. `tools` and `tool_choice` stay in the body
+    /// because the chat template renders them into the prompt. A 4xx on a
+    /// body with `response_format` is retried once without it: it constrains
+    /// sampling, not the templated prompt, and some engines refuse a format
+    /// with a one-token cap. Nil on any failure; the caller bounds the time
+    /// and cancels this task at its deadline, which cancels the URLSession
+    /// task; the socket's own timers are also short (`promptCountTimeoutSeconds`)
+    /// so an abandoned call never lingers.
+    private func countUpstreamPromptTokens(_ request: ChatCompletionRequest) async -> Int? {
+        guard let body = try? Self.encodePromptCountRequest(request, upstreamModelName: upstreamModelName) else { return nil }
+        let retryBody = request.promptSource.responseFormat.map { $0 != .null } == true
+            ? try? Self.encodePromptCountRequest(request, upstreamModelName: upstreamModelName, dropResponseFormat: true)
+            : nil
+        let client: any BYOMDiscoveryHTTPClient = httpClient is LoopbackServeHTTPClient
+            ? LoopbackServeHTTPClient(requestTimeout: Self.promptCountTimeoutSeconds, resourceTimeout: Self.promptCountTimeoutSeconds)
+            : httpClient
+        let url = chatCompletionsURL
+        func count(_ body: Data) async -> (status: Int, tokens: Int?)? {
+            guard let response = try? await client.post(
+                url,
+                jsonBody: body,
+                maxHeaderBytes: Self.maxHeaderBytes,
+                maxBodyBytes: Self.maxResponseBodyBytes
+            ) else { return nil }
+            return (response.statusCode, response.statusCode == 200 ? Self.decodeUsagePromptTokens(response.body) : nil)
+        }
+        guard let first = await count(body) else { return nil }
+        if first.status == 200 { return first.tokens }
+        guard (400..<500).contains(first.status), let retryBody else { return nil }
+        return await count(retryBody)?.tokens
+    }
+
+    /// Budget for the post-cancel usage work (the prompt count call and the
+    /// tokenizer recount, run concurrently). The coordinator waits
+    /// `CancelTerminalWait` (2 s, phase4-coordinator/internal/ws/relay.go)
+    /// for the cancelled frame after its cancel request; this budget plus the
+    /// cancel detection (at most one 100 ms watchdog tick) and the receipt
+    /// signing stays well inside it.
+    static let cancelUsageBudgetSeconds: Double = 1.25
+
+    /// URLSession request and resource timeouts for the post-cancel prompt
+    /// count call, just above `cancelUsageBudgetSeconds`.
+    static let promptCountTimeoutSeconds: TimeInterval = 2
+
+    /// Runs `work` and returns its value, or nil at `deadline` without
+    /// waiting for it: the work runs in an unstructured task, so a
+    /// non-cancellable step (a tokenizer encode, a stuck socket) can never
+    /// hold the caller past the deadline.
+    static func bounded<T: Sendable>(until deadline: Date, _ work: @escaping @Sendable () async -> T?) async -> T? {
+        let gate = LoopbackResumeOnce()
+        return await withCheckedContinuation { (continuation: CheckedContinuation<T?, Never>) in
+            let worker = Task {
+                let value = await work()
+                if gate.claim() { continuation.resume(returning: value) }
+            }
+            Task {
+                let wait = max(0, deadline.timeIntervalSinceNow)
+                try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                if gate.claim() {
+                    worker.cancel()
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+    }
+
+    /// Runtimes asked for a per-chunk `logprobs` list, whose entries count
+    /// the completion tokens each chunk carries (#1690 M9). LM Studio refuses
+    /// `logprobs` together with `tools` on a stream (its llama.cpp engine
+    /// answers 400 "logprobs is not supported with tools + stream"), so a
+    /// request with tools asks for none; a cancel of it stays unattested.
+    static func streamsPerTokenLogprobs(_ runtimeSource: String, hasTools: Bool = false) -> Bool {
+        switch runtimeSource {
+        case OllamaLoopbackServeModel.runtimeSource:
+            return true
+        case LMStudioLoopbackServeModel.runtimeSource:
+            return !hasTools
+        default:
+            return false
         }
     }
 
@@ -1281,7 +1710,8 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
     static func encodeUpstreamRequest(
         _ request: ChatCompletionRequest,
         upstreamModelName: String,
-        timingsPerToken: Bool = false
+        timingsPerToken: Bool = false,
+        logprobsPerToken: Bool = false
     ) throws -> Data {
         let source = request.promptSource
         var payload: [String: Any] = [
@@ -1303,8 +1733,11 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
             ("presence_penalty", source.presencePenalty),
             ("frequency_penalty", source.frequencyPenalty),
             ("response_format", source.responseFormat),
-            ("tools", source.tools),
-            ("tool_choice", source.toolChoice),
+            // An empty or function-less `tools` is no tools (the enabled-tools
+            // rule of ModelRuntime.hasEnabledTools); it is not forwarded, and
+            // neither is a `tool_choice` that would name no tool.
+            ("tools", ModelRuntime.hasEnabledTools(source.tools) ? source.tools : nil),
+            ("tool_choice", ModelRuntime.hasEnabledTools(source.tools) ? source.toolChoice : nil),
             ("logit_bias", source.logitBias),
         ]
         for (key, value) in passthrough {
@@ -1320,11 +1753,46 @@ actor OpenAICompatibleLoopbackRuntime: ModelRuntimeServing {
         if timingsPerToken {
             payload["timings_per_token"] = true
         }
+        // #1690 M9: Ollama and LM Studio list each streamed token in the
+        // chunk that carries it. The list is never relayed.
+        if logprobsPerToken {
+            payload["logprobs"] = true
+        }
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])
         guard data.count <= maxRequestBodyBytes else {
             throw APIError(status: 413, message: "Request body exceeds 4 MiB", code: "request_body_too_large")
         }
         return data
+    }
+
+    /// #1690 M9: the same request as `encodeUpstreamRequest`, non-streamed
+    /// and capped at one completion token, so its usage reports the prompt
+    /// tokens (`countUpstreamPromptTokens`).
+    static func encodePromptCountRequest(
+        _ request: ChatCompletionRequest,
+        upstreamModelName: String,
+        dropResponseFormat: Bool = false
+    ) throws -> Data {
+        let streamed = try encodeUpstreamRequest(request, upstreamModelName: upstreamModelName)
+        guard var payload = try JSONSerialization.jsonObject(with: streamed) as? [String: Any] else {
+            throw OpenAICompatibleLoopbackRuntimeError.malformedUpstreamResponse
+        }
+        payload["stream"] = false
+        payload.removeValue(forKey: "stream_options")
+        payload["max_tokens"] = 1
+        if dropResponseFormat {
+            payload.removeValue(forKey: "response_format")
+        }
+        return try JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])
+    }
+
+    /// `usage.prompt_tokens` of a non-streamed completion body.
+    static func decodeUsagePromptTokens(_ data: Data) -> Int? {
+        guard data.count <= maxResponseBodyBytes,
+              let text = String(data: data, encoding: .utf8),
+              case .object(let root)? = try? StrictJSONParser.parse(text),
+              case .object(let usage)? = root["usage"] else { return nil }
+        return intValue(usage["prompt_tokens"])
     }
 
     /// Context gate in the MLX runtime's vocabulary (413
@@ -1524,6 +1992,20 @@ enum LoopbackServedIdentity {
 /// The caller cancelled a loopback generation (buyer disconnect).
 private struct LoopbackCancelRequested: Error {}
 
+/// Resolves a race once: the first `claim()` wins.
+final class LoopbackResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var claimed = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !claimed else { return false }
+        claimed = true
+        return true
+    }
+}
+
 /// The stream accumulator shared by the reader and the cancel path.
 private final class LoopbackStreamState: @unchecked Sendable {
     private let lock = NSLock()
@@ -1547,9 +2029,30 @@ private final class LoopbackStreamState: @unchecked Sendable {
         return try accumulator.finish()
     }
 
-    func cancelledResult() -> CompletionResult {
+    var receivedContent: String {
         lock.lock()
         defer { lock.unlock() }
-        return accumulator.cancelledResult()
+        return accumulator.receivedContent
+    }
+
+    var hasPerChunkCompletionCounts: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return accumulator.hasPerChunkCompletionCounts
+    }
+
+    var streamedToolCall: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return accumulator.streamedToolCall
+    }
+
+    func cancelledResult(upstreamPromptTokens: Int? = nil, recountedCompletionTokens: Int? = nil) -> CompletionResult {
+        lock.lock()
+        defer { lock.unlock() }
+        return accumulator.cancelledResult(
+            upstreamPromptTokens: upstreamPromptTokens,
+            recountedCompletionTokens: recountedCompletionTokens
+        )
     }
 }

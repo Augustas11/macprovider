@@ -23,19 +23,24 @@ enum PoolLoopbackUsageGuard {
     static let absoluteTolerance: Int64 = 8
     static let relativeTolerance = 0.05
 
-    /// GGUF runtimes (SPEC-023 §3.7.4 identity matrix) and mlxlm_loopback,
-    /// which serves the catalog row's own MLX snapshot (SPEC-010-R009).
+    /// GGUF runtimes (SPEC-023 §3.7.4 identity matrix) and the MLX-snapshot
+    /// runtimes (mlxlm_loopback, omlx_loopback), which serve the catalog
+    /// row's own MLX snapshot (SPEC-010-R009).
     static func applies(to authorization: PoolRuntimeAuthorization) -> Bool {
-        authorization.runtimeSource == MLXLMLoopbackServeModel.runtimeSource ||
+        MLXSnapshotLoopbackKind.kind(forRuntimeSource: authorization.runtimeSource) != nil ||
             ArtifactFeed.identityMatrix["gguf"]?.runtimeSources.contains(authorization.runtimeSource) == true
     }
 
-    /// mlxlm_loopback re-counts with the tokenizer in the served snapshot
-    /// itself; every other runtime uses the catalog model id's local Hugging
-    /// Face snapshot.
+    /// The MLX-snapshot runtimes re-count with the tokenizer in the served
+    /// snapshot itself; every other runtime uses the catalog model id's
+    /// local Hugging Face snapshot.
     static func snapshotDirectory(for authorization: PoolRuntimeAuthorization) -> (String) -> URL? {
         if authorization.runtimeSource == MLXLMLoopbackServeModel.runtimeSource,
            let directory = MLXLMLoopbackServeModel.snapshotDirectory() {
+            return { _ in directory }
+        }
+        if authorization.runtimeSource == OMLXLoopbackServeModel.runtimeSource,
+           let directory = OMLXLoopbackServeModel.snapshotDirectory() {
             return { _ in directory }
         }
         return ModelRuntime.localHuggingFaceSnapshot(for:)
@@ -113,6 +118,57 @@ enum PoolLoopbackUsageGuard {
             let tokenizer = try? await AutoTokenizer.from(modelFolder: directory)
             loaded[directory.path] = .some(tokenizer)
             return tokenizer
+        }
+    }
+}
+
+/// #1690 M9 (review CODE HIGH): the tokenizer a cancelled loopback stream's
+/// delivered content is counted with, loaded from a hash-verified MLX
+/// snapshot and pinned in memory. It is loaded once, when serving starts, and
+/// kept only when the snapshot is still exactly the one that was hashed after
+/// the load, so the files it came from are the hashed files. A count is
+/// given only while the snapshot is still current: a snapshot changed after
+/// admission yields no count, so the cancel stays unattested.
+final class PinnedSnapshotTokenizer: @unchecked Sendable {
+    let snapshot: MLXSnapshotIdentity
+    private let encode: @Sendable (String) -> Int
+
+    init(snapshot: MLXSnapshotIdentity, encode: @escaping @Sendable (String) -> Int) {
+        self.snapshot = snapshot
+        self.encode = encode
+    }
+
+    /// Loads the tokenizer in `snapshot.directory`, or nil when it does not
+    /// load or the snapshot changed while it loaded.
+    static func load(snapshot: MLXSnapshotIdentity) async -> PinnedSnapshotTokenizer? {
+        guard let tokenizer = try? await AutoTokenizer.from(modelFolder: snapshot.directory), snapshot.isCurrent() else {
+            return nil
+        }
+        let box = TokenizerBox(tokenizer)
+        return PinnedSnapshotTokenizer(snapshot: snapshot) { text in box.count(text) }
+    }
+
+    /// The token count of `text` (no special tokens), or nil when the
+    /// snapshot is not the verified one both before and after the encode
+    /// (the stamps are compared with the pinned ones each time), so a swap
+    /// during the encode never yields a count.
+    func count(_ text: String) -> Int? {
+        guard snapshot.isCurrent() else { return nil }
+        let tokens = encode(text)
+        guard snapshot.isCurrent() else { return nil }
+        return tokens
+    }
+
+    /// Serializes encodes: swift-transformers does not document its
+    /// tokenizers as thread-safe, and concurrent cancels may count at once.
+    private final class TokenizerBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private let tokenizer: any Tokenizer
+        init(_ tokenizer: any Tokenizer) { self.tokenizer = tokenizer }
+        func count(_ text: String) -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return tokenizer.encode(text: text, addSpecialTokens: false).count
         }
     }
 }

@@ -1,6 +1,8 @@
 # SPEC-032 — Autotune Hardware-Evidence Admission Gate, OPoI & Proof-of-Weights Boundary
 
-**Status:** v0.3.3-draft
+**Status:** v0.3.4-draft
+**Amendment (v0.3.4, #1690 M9):** FR-HG8 lists `omlx_loopback`
+(oMLX, SPEC-046 v0.5.0). Its hello is sandboxed like the other loopback adapters.
 **Amendment (v0.3.3, Gate A5 source-review boundary):** Gate A5 is limited to
 predeclared focal row-zero observations and requires an independently signed
 post-collection source review. Counter success is not an unqualified all-row
@@ -401,7 +403,7 @@ proof-of-weights hello gate (FR-HG2–FR-HG4) governs admission of models the pr
 claims from the **signed autotune/model catalog** for catalog/earning routing. A hello
 whose `runtime_source` is a SPEC-046 bring-your-own-model **loopback adapter**
 (`ollama_loopback`, `lmstudio_loopback`, `llamacpp_loopback`,
-`openai_compatible_loopback`, or (v0.3.1) `mlxlm_loopback`) advertises a BYOM candidate that is, **by SPEC-046/047
+`openai_compatible_loopback`, (v0.3.1) `mlxlm_loopback`, or (v0.3.4) `omlx_loopback`) advertises a BYOM candidate that is, **by SPEC-046/047
 design, not expected to be in the signed catalog** — treating "not in the catalog" as
 the `autotune_model_uncatalogued` hard-close (FR-HG4) for such a hello contradicts the
 entire purpose of BYOM. Therefore, when the gate is active, a hello bearing a BYOM
@@ -783,6 +785,9 @@ smaller box), which is why v0.2.2 ships no automatic buyer-routable probation.
 
 ## Changelog
 
+- **v0.3.4-draft (2026-09-25, #1690 M9)** — FR-HG8 lists `omlx_loopback`
+  (oMLX, SPEC-046 v0.5.0). Its hello is sandboxed exactly like the other
+  loopback adapters. Docs-only.
 - **v0.3.1-draft (2026-09-24, #1690 M8)** — FR-HG8 lists `mlxlm_loopback`
   (`mlx_lm.server`, SPEC-046 v0.3.0). Its hello is sandboxed exactly like the
   other loopback adapters, even though it reports a catalog snapshot pair.

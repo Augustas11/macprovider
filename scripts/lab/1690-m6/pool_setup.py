@@ -2,6 +2,8 @@
 """Create, publish, and promote one lab SPEC-042 Trusted Pool.
 
   pool_setup.py create NAME --encoding 1|2 [--runtime-allowlist csv] [--window-seconds N]
+      (idempotent: a create that failed part way resumes from the coordinator's
+      state for the pool, with fresh per-attempt operation ids)
   pool_setup.py manifest NAME --encoding 1|2 [--runtime-allowlist csv] [--window-seconds N]
       (appends the next manifest version, starting when the current one ends)
   pool_setup.py event NAME EVENT_TYPE [--provider-id ID]   (member_revoked etc.)
@@ -84,8 +86,9 @@ def labtool(*args):
     return subprocess.run([LABTOOL, *args], check=True, capture_output=True, text=True).stdout.strip()
 
 
-def manifest_args(name, args, prev):
-    out = ["pool-manifest", "--keys", str(pool_dir(name) / "keys.json"), "--op", f"op-{name}-manifest-{len(list(pool_dir(name).glob('manifest-v*.json'))) + 1}",
+def manifest_args(name, args, prev, op=None):
+    op = op or f"op-{name}-manifest-{len(list(pool_dir(name).glob('manifest-v*.json'))) + 1}"
+    out = ["pool-manifest", "--keys", str(pool_dir(name) / "keys.json"), "--op", op,
            "--encoding", str(args.encoding), "--settlement-mode", args.settlement_mode, "--models", MODELS,
            "--window-seconds", str(args.window_seconds)]
     if args.runtime_allowlist:
@@ -99,33 +102,72 @@ def pool_dir(name):
     return LAB / "pools" / name
 
 
+def pool_state(pool_id):
+    """The coordinator's view of the pool (admin get-pool), or None before
+    pool_created."""
+    status, doc = admin("GET", f"/admin/trust-pools/pools/{pool_id}", expect=(200, 404))
+    return doc.get("pool") if status == 200 else None
+
+
+def next_attempt(d):
+    """A per-run suffix for this pool's operation ids, persisted in the pool
+    directory, so a retried create never reuses an operation id the
+    coordinator already holds for a different body (409 operation_conflict)."""
+    f = d / "attempt"
+    n = int(f.read_text().strip()) + 1 if f.exists() else 1
+    f.write_text(f"{n}\n")
+    return n
+
+
 def create(args):
+    """Idempotent and resumable (#1750 F-3): an existing pool directory is
+    reused, the pool keys are kept, and every step is decided from the
+    coordinator's own state for the pool, so a create that failed part way
+    finishes on the next run. pool_id is written only once the pool is
+    active."""
     d = pool_dir(args.name)
-    d.mkdir(parents=True, exist_ok=False)
+    d.mkdir(parents=True, exist_ok=True)
+    if (d / "pool_id").exists():
+        print(f"pool {args.name} already created: {(d / 'pool_id').read_text().strip()}")
+        return
     ensure_creator()
-    pool_id = labtool("pool-keygen", "--out", str(d / "keys.json"))
-    print(f"pool {args.name} pool_id={pool_id}")
-    _, nonce_doc = admin("POST", "/admin/trust-pools/root-registration-nonces", {
-        "operation_id": f"op-{args.name}-nonce", "creator_account_id": CREATOR, "approval_record_id": APPROVAL,
-        "current_approval_version": APPROVAL_VERSION, "launch_environment": "candidate", "purpose": "root_issuer_registration",
-        "expires_at_utc": (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")})
-    nonce = nonce_doc["root_registration_nonce"]
-    post_event({"operation_id": f"op-{args.name}-create", "timestamp_utc": now(), "event_type": "pool_created",
-                "pool_id": pool_id, "creator_account_id": CREATOR, "approval_record_id": APPROVAL})
-    root = json.loads(labtool("pool-root", "--keys", str(d / "keys.json"), "--op", f"op-{args.name}-root", "--creator", CREATOR,
-                              "--approval", APPROVAL, "--approval-version", APPROVAL_VERSION,
-                              "--nonce", nonce["nonce"], "--nonce-expiry", nonce["expires_at_utc"]))
-    (d / "root.json").write_text(json.dumps(root))
-    post_event(root)
-    manifest = json.loads(labtool(*manifest_args(args.name, args, None)))
-    (d / "manifest-v1.json").write_text(json.dumps(manifest))
-    post_event(manifest)
-    post_event({"operation_id": f"op-{args.name}-member", "timestamp_utc": now(), "event_type": "member_admitted",
-                "pool_id": pool_id, "provider_id": PROVIDER})
-    post_event({"operation_id": f"op-{args.name}-buyer", "timestamp_utc": now(), "event_type": "buyer_authorized",
-                "pool_id": pool_id, "buyer_account_id": BUYER})
-    status, doc = admin("POST", f"/admin/trust-pools/pools/{pool_id}/promote", {"operation_id": f"op-{args.name}-promote", "reason": "lab-1690-m6"})
-    print(f"  promote                -> {status}")
+    keys = d / "keys.json"
+    if not keys.exists():
+        labtool("pool-keygen", "--out", str(keys))
+    pool_id = json.loads(keys.read_text())["pool_id"]
+    op = f"op-{args.name}-a{next_attempt(d)}"
+    print(f"pool {args.name} pool_id={pool_id} ({op})")
+    state = pool_state(pool_id)
+    if state is None:
+        post_event({"operation_id": f"{op}-create", "timestamp_utc": now(), "event_type": "pool_created",
+                    "pool_id": pool_id, "creator_account_id": CREATOR, "approval_record_id": APPROVAL})
+        state = pool_state(pool_id)
+    if not state.get("root_issuer_key_id"):
+        _, nonce_doc = admin("POST", "/admin/trust-pools/root-registration-nonces", {
+            "operation_id": f"{op}-nonce", "creator_account_id": CREATOR, "approval_record_id": APPROVAL,
+            "current_approval_version": APPROVAL_VERSION, "launch_environment": "candidate", "purpose": "root_issuer_registration",
+            "expires_at_utc": (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")})
+        nonce = nonce_doc["root_registration_nonce"]
+        root = json.loads(labtool("pool-root", "--keys", str(keys), "--op", f"{op}-root", "--creator", CREATOR,
+                                  "--approval", APPROVAL, "--approval-version", APPROVAL_VERSION,
+                                  "--nonce", nonce["nonce"], "--nonce-expiry", nonce["expires_at_utc"]))
+        (d / "root.json").write_text(json.dumps(root))
+        post_event(root)
+        state = pool_state(pool_id)
+    if not state.get("manifest_version"):
+        manifest = json.loads(labtool(*manifest_args(args.name, args, None, op=f"{op}-manifest")))
+        (d / "manifest-v1.json").write_text(json.dumps(manifest))
+        post_event(manifest)
+        state = pool_state(pool_id)
+    if PROVIDER not in (state.get("members") or []):
+        post_event({"operation_id": f"{op}-member", "timestamp_utc": now(), "event_type": "member_admitted",
+                    "pool_id": pool_id, "provider_id": PROVIDER})
+    if BUYER not in (state.get("buyer_accounts") or []):
+        post_event({"operation_id": f"{op}-buyer", "timestamp_utc": now(), "event_type": "buyer_authorized",
+                    "pool_id": pool_id, "buyer_account_id": BUYER})
+    if pool_state(pool_id).get("lifecycle") != "active":
+        status, doc = admin("POST", f"/admin/trust-pools/pools/{pool_id}/promote", {"operation_id": f"{op}-promote", "reason": "lab-1690-m6"})
+        print(f"  promote                -> {status}")
     (d / "pool_id").write_text(pool_id + "\n")
 
 

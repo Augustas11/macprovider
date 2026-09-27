@@ -212,6 +212,33 @@ the promotion event (`get-pool` shows it as `root_custody_class`).
   `trust-pool-admin set-lifecycle` to `paused` fails buyer chat closed without
   touching global traffic; `revoke-provider`, `upsert-creator` (suspend), and
   the root-compromise freeze remain available.
+- Retiring is two steps: `set-lifecycle --lifecycle paused` (or `draining`),
+  then `--lifecycle retired`. An `active` pool cannot be retired directly
+  (400 `invalid_event`). The transitions the coordinator accepts:
+
+  | From | To | How |
+  |---|---|---|
+  | `created` | `active` | `promote` only |
+  | `created` | `retired` | `set-lifecycle --lifecycle retired` |
+  | `active` | `paused`, `draining` | `set-lifecycle` |
+  | `paused` | `active` | `promote` only (re-runs the activation preflight) |
+  | `paused` | `draining`, `retired` | `set-lifecycle` |
+  | `draining` | `retired` | `set-lifecycle` |
+  | `retired` | none | terminal |
+
+  `active` never goes straight to `retired`: the coordinator answers 400
+  `invalid_event` (`validLifecycleTransition`,
+  `phase4-coordinator/internal/trustpool/durable_store.go`). `retired` also
+  fails with `delivery_drain_pending` while the pool still has in-flight
+  deliveries; retry once they finish.
+- Reading the ledger for a pool route: `ledger_request_credits.usage_source`
+  reads `provider_reported` on pool routes too. The attested source is
+  recorded beside it, in `settlement_attempt_outputs.usage_source` and the
+  gateway's `usage_events.token_source` (both `pool_operator_attested`), and
+  in the closed verdict in `settlement_receipt_verdicts`. An audit that reads
+  the ledger alone cannot tell a pool-attested credit from a global one, so
+  join on `request_id` / `attempt_n` to one of those (#1750). The ledger
+  vocabulary is unchanged.
 
 ## 9. External-runtime pools (#1690): rollout and rollback order
 
@@ -220,9 +247,30 @@ SPEC-022-R012 (R-12.8) is normative; this is the operator sequence.
 Rollout, in this order (the R-12.8 order: coordinator, gateway, CLI, then v2
 allowlists):
 
-0. Drain ledger recovery on the OLD coordinator immediately before step 1:
-   let the startup/nightly ledger recovery run to completion (or trigger it)
-   and confirm no request is missing its ledger row. Provider identity rows
+0. Drain ledger recovery on the OLD coordinator immediately before step 1
+   and confirm no request is missing its ledger row. There is no admin
+   trigger: the recovery runs at every coordinator start (the startup scan
+   over `settlement.startup_reconcile_window_hours`, default 24, ending
+   `recovery_grace_seconds` ago; it logs only on failure) and nightly at
+   00:00 UTC. Confirm with this read-only check against the coordinator's
+   `storage.db_path` (from `/opt/macprovider/coordinator.yaml` or the Pearl
+   overlay), which must print `0`:
+
+   ```bash
+   sudo sqlite3 -readonly "$COORDINATOR_DB" "
+   SELECT COUNT(*) FROM request_log rl
+    WHERE rl.provider_assigned_id IS NOT NULL
+      AND rl.status != 503
+      AND rl.ts_utc >= strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '-7 days')
+      AND NOT EXISTS (
+        SELECT 1 FROM ledger_request_credits lrc
+         WHERE lrc.request_id = rl.request_id
+           AND (rl.attempt_n IS NULL OR lrc.attempt_n = rl.attempt_n));"
+   ```
+
+   Above `0`: restart the old coordinator (its startup scan backfills rows
+   inside its window) or wait for the nightly run, and re-run the check;
+   rows older than the window need a review before step 1. Provider identity rows
    written before this release carry no recorded `runtime_source`, so the new
    coordinator's recovery treats a still-missing ledger row as possibly
    loopback and fails closed: 0 credit, quarantined as
@@ -232,7 +280,10 @@ allowlists):
 1. Pause every pool, deploy the coordinator that implements SPEC-022 v0.2.2
    (the `pool_operator_attested` usage source and negotiated settlement
    trailers), confirm `/healthz` reports it and the updater transaction
-   committed, then resume the pools. The still-old gateway does not advertise
+   committed, then resume the pools. Pause is `coordinator-cli
+   trust-pool-admin set-lifecycle --pool-id <id> --lifecycle paused`; resume
+   is `coordinator-cli trust-pool-admin promote --pool-id <id>
+   --operation-id <op>` (paused to active). The still-old gateway does not advertise
    `X-MacProvider-Internal-Settlement-Trailers`, so the new coordinator answers
    it in the pre-#1690 order: non-streaming attempts are recorded before the
    write and their finality travels in headers, which that gateway reads.
@@ -241,9 +292,28 @@ allowlists):
    coordinator records non-streaming successes only after the buyer write and
    sends their finality as MAC'd trailers. On Pearl the gateway reaches the
    coordinator directly at `http://127.0.0.1:8443`; trailers cross no proxy.
-   If a proxy is ever put on that hop and drops trailers, the gateway holds
-   those settlements as `missing_settlement_finality_trailer` (fail closed)
-   instead of debiting; watch for that log reason after the deploy.
+   Until step 2a turns the pin on, this is not fail closed against a proxy
+   on that hop. A proxy that drops only the trailer values (the `Trailer`
+   declaration survives) makes the gateway hold the settlement as
+   `missing_settlement_finality_trailer`. A proxy that strips the
+   declaration too makes the response look like an older coordinator's:
+   the gateway settles it from header finality, and a stream with none is
+   debited the gateway's byte estimate (also when the buyer closes right
+   after `[DONE]`, which is otherwise delivered usage), with no matching
+   provider credit. Put nothing on that hop and keep the window between
+   step 2 and step 2a short; step 2a closes it.
+   The deploy's step 2c refuses a restart while buyer requests are in
+   flight, counted from the live `gateway.db` (active, unheld, unexpired
+   `quota_reservations`) when `/healthz` has no in-flight metric. That count
+   is only a pre-check: buyer ingress stays open through the upload. A
+   request admitted after it is protected by the graceful restart: the
+   deploy restarts with `systemctl restart` (SIGTERM), the gateway refuses
+   new connections at once and drains in-flight requests for up to 40 s
+   (below the unit's `TimeoutStopSec=45`); only a request still running
+   after that is cut. A reservation left by a crashed request counts until
+   it expires. For a guaranteed quiet window, stop buyer traffic at nginx
+   first (rollback step 1 shows how). `FORCE_RESTART=1` bypasses the
+   pre-check and leaves an audit tombstone.
 2a. Once the step 1 coordinator and the step 2 gateway are both confirmed
    (`/healthz` versions, updater transactions committed), set
    `coordinator.require_settlement_trailers: true` in the gateway config and
@@ -271,7 +341,7 @@ allowlists):
    credited.
    Record the first catalog release that publishes a gguf artifact with a
    `huggingface_revision` source (it carries `file_path`) or lists
-   `mlxlm_loopback` in an `allowed_runtime_sources`. From that release on, a
+   `mlxlm_loopback` or `omlx_loopback` in an `allowed_runtime_sources`. From that release on, a
    coordinator older than this release cannot start on the served feed; the
    coordinator rollback below has to replace the feed first.
 
@@ -319,39 +389,74 @@ settled, so traffic stops and holds drain first:
    is rolled back.
 3. Set `coordinator.require_settlement_trailers: false` and restart the
    gateway. A coordinator older than this release signs nothing, so with the
-   pin on every one of its 200s would be held.
+   pin on every one of its 200s is held as
+   `missing_settlement_finality_trailer`. The reconciler's request-scoped
+   finality lookup then settles each hold to the older coordinator's
+   finality, normally within seconds (the #1690 VM e2e saw every such hold
+   terminate correctly), so this is not money loss. It does put every
+   request through a hold and a reconcile, and a reconciler outage would
+   leave them held, so turn the pin off before the coordinator rollback.
 4. Roll back in the reverse of the rollout order: withdraw v2 allowlists (a
    policy core with an empty `runtime_allowlist`), then the CLI, then the
    gateway only if it must go (below), then the coordinator. The coordinator
    rollback needs nothing more from the gateway: a v0.2.2 gateway reads an
    older coordinator's header finality. It does need a feed the older
    coordinator can load (E2E-F11): before replacing the coordinator binary,
-   run the feed check below.
+   run the feed check below. It also needs a target that can replay the
+   pool manifest history (step 4b): withdrawing an allowlist mints a new
+   policy version, but every earlier `manifest_accepted` event stays in
+   history, and a coordinator replays all of them at start. A target that
+   cannot read one of them disables every pool.
+
+   **Rollback precondition (#1690 M9 review M2).** The coordinator rollback
+   target MUST be at or above the build that introduced every runtime class
+   ever accepted in any pool's manifest history, and it MUST read
+   `manifest-snapshot/v2` if any v2 policy core was ever accepted. The
+   builds, from the target's source commit:
+
+   | Target tier | Target contains | Replays |
+   |---|---|---|
+   | `v1-only` | not `747557cc` (#1719) | v1 policy cores only |
+   | `m8` | `747557cc`, not the #1754 merge | v2 cores listing `llamacpp_loopback`, `mlxlm_loopback`, `ollama_loopback` |
+   | `m9` | the #1754 merge | also `lmstudio_loopback` and `omlx_loopback` |
+
+   Decide the tier with `git merge-base --is-ancestor 747557cc <target>` and
+   the same check against the #1754 merge commit. When step 4b says STOP,
+   roll the coordinator forward instead: there is no supported way to drop
+   an accepted manifest from history.
 4a. Feed check before the coordinator rollback. A coordinator older than
    this release strict-decodes the catalog artifact feed and exits at
    startup on `json: unknown field "file_path"` (a gguf artifact with a
-   `huggingface_revision` source) or on `runtime_format "mlx_safetensors" may
-   not allow runtime source "mlxlm_loopback"`, which would leave no
+   `huggingface_revision` source; SPEC-023 v0.16.0, rollout recorded at
+   v0.19.1) or on `runtime_format "mlx_safetensors" may not allow runtime
+   source "mlxlm_loopback"` (v0.17.0) or `"omlx_loopback"` (v0.20.0), which
+   would leave no
    coordinator. The check fails closed: it parses the config (YAML or JSON,
    quoted or not) instead of matching text, and any error, a missing
    `python3`/`yaml`, a relative or unreadable path, or no `VERDICT` line
-   means STOP. On Pearl:
+   means STOP. It reads the live config and then the Pearl overlay (the
+   overlay wins, as for the coordinator); a missing overlay is STOP. On Pearl:
 
    ```bash
-   python3 - /etc/macprovider/coordinator.yaml <<'PY'
+   python3 - /opt/macprovider/coordinator.yaml /etc/macprovider/coordinator.pearl-overlays.yaml <<'PY'
    import os, sys
    try:
        import yaml
-       with open(sys.argv[1]) as f:
-           cfg = yaml.safe_load(f)
-       if not isinstance(cfg, dict):
-           raise ValueError("config is not a mapping")
-       auto = cfg.get("autotune")
-       if auto is None:
-           auto = {}
-       if not isinstance(auto, dict):
-           raise ValueError("autotune is not a mapping")
-       path = auto.get("catalog_artifacts_path")
+       path = None
+       for config_path in sys.argv[1:]:
+           with open(config_path) as f:
+               cfg = yaml.safe_load(f)
+           if cfg is None:
+               cfg = {}
+           if not isinstance(cfg, dict):
+               raise ValueError(f"{config_path} is not a mapping")
+           auto = cfg.get("autotune")
+           if auto is None:
+               auto = {}
+           if not isinstance(auto, dict):
+               raise ValueError(f"autotune in {config_path} is not a mapping")
+           if "catalog_artifacts_path" in auto:
+               path = auto.get("catalog_artifacts_path")
        if path is None or path == "":
            print("feed: none (autotune.catalog_artifacts_path unset)")
            print("VERDICT: no-feed")
@@ -360,7 +465,7 @@ settled, so traffic stops and holds drain first:
            raise ValueError(f"catalog_artifacts_path is not a clean absolute path: {path!r}")
        with open(path, encoding="utf-8") as f:
            body = f.read()
-       hits = body.count('"file_path"') + body.count("mlxlm_loopback")
+       hits = body.count('"file_path"') + body.count("mlxlm_loopback") + body.count("omlx_loopback")
        print(f"feed: {path}")
        print(f"older-coordinator blockers: {hits}")
        print("VERDICT: " + ("clean" if hits == 0 else "replace-feed"))
@@ -373,7 +478,7 @@ settled, so traffic stops and holds drain first:
    echo "exit: $?"
    code=$(curl -sS -o /tmp/served-catalog-artifacts.json -w '%{http_code}' https://coordinator.malibu.tech/v1/catalog-artifacts) || code=error
    echo "served: $code"
-   [ "$code" != 200 ] || grep -c -e '"file_path"' -e mlxlm_loopback /tmp/served-catalog-artifacts.json
+   [ "$code" != 200 ] || grep -c -e '"file_path"' -e mlxlm_loopback -e omlx_loopback /tmp/served-catalog-artifacts.json
    ```
 
    Read it strictly; anything not listed here is STOP (do not roll back the
@@ -397,7 +502,8 @@ settled, so traffic stops and holds drain first:
       `phase3-binary/catalog/autotune/autotune-artifacts-source.json`: delete
       every `gguf` artifact whose `source_ref.kind` is `huggingface_revision`
       (and repoint any `primary_artifact_id` that named one), and remove
-      `mlxlm_loopback` from every `allowed_runtime_sources`. Leave
+      `mlxlm_loopback` and `omlx_loopback` from every
+      `allowed_runtime_sources`. Leave
       `ollama_library_tag` gguf artifacts and `mlx_cache` as they are; the
       older coordinator accepts both.
    2. Cut the release exactly as `docs/runbooks/catalog-artifact-feed-release.md`
@@ -409,10 +515,148 @@ settled, so traffic stops and holds drain first:
    3. Deploy that catalog release to Pearl through the normal catalog deploy
       and re-run the check above against the new
       `catalog_artifacts_path`; also confirm the served bytes:
-      `curl -s https://coordinator.malibu.tech/v1/catalog-artifacts | grep -c -e '"file_path"' -e mlxlm_loopback`
+      `curl -s https://coordinator.malibu.tech/v1/catalog-artifacts | grep -c -e '"file_path"' -e mlxlm_loopback -e omlx_loopback`
       prints `0`.
-   Then roll back the coordinator binary and confirm it started (`/healthz`
-   reports the older version and `/v1/catalog-artifacts` answers 200).
+   Then run step 4b.
+4b. Manifest-history check before the coordinator rollback (read-only). It
+   reads every `manifest_accepted` event in the coordinator database
+   (`storage.db_path`, as in step 0), decodes each manifest snapshot, and
+   lists the policy-core encoding and every `runtime_allowlist` string it
+   carries (a strict decode of the snapshot, not a search for known names);
+   each snapshot holds its pool's whole accepted policy history. It fails
+   closed: a target tier other than the three in the table, an unreadable
+   database, an undecodable snapshot, a runtime class outside `CLASSES`
+   (no known build replays it), or no `VERDICT` line means STOP.
+   The `m9` target tier is the build that carries SPEC-042 0.0.36's
+   `omlx_loopback` manifest vocabulary and SPEC-023 v0.20.0's corresponding
+   artifact-feed runtime source. The manifest history is the only coordinator state an older build
+   decodes strictly at start with a runtime class in it. Other tables that
+   store `lmstudio_loopback` or `omlx_loopback` strings (route snapshots,
+   model admission events) either belong to a pool whose manifest allowlist
+   this check already covers or are read leniently, so they need no check.
+   On Pearl, with the tier of the rollback target:
+
+   ```bash
+   sudo python3 - "$COORDINATOR_DB" m8 <<'PY'
+   import base64, json, os, sqlite3, sys
+   CLASSES = ["llamacpp_loopback", "lmstudio_loopback", "mlxlm_loopback",
+              "ollama_loopback", "omlx_loopback", "openai_compatible_loopback"]
+   ACCEPTS = {
+       "v1-only": None,
+       "m8": {"llamacpp_loopback", "mlxlm_loopback", "ollama_loopback"},
+       "m9": {"llamacpp_loopback", "lmstudio_loopback", "mlxlm_loopback",
+              "ollama_loopback", "omlx_loopback"},
+   }
+   V1 = b"macprovider/spec042/manifest-snapshot/v1"
+   V2 = b"macprovider/spec042/manifest-snapshot/v2"
+
+   def allowlists(snap, tagged, event_id):
+       # Strict decode of the snapshot (phase4-coordinator/internal/
+       # poolmanifest/persist.go): every runtime_allowlist string of every
+       # accepted v2 policy core.
+       pos = len(V2 if tagged else V1)
+       def take(n):
+           nonlocal pos
+           if n < 0 or pos + n > len(snap):
+               raise ValueError(f"event {event_id}: truncated manifest snapshot")
+           pos += n
+           return snap[pos - n:pos]
+       u32 = lambda: int.from_bytes(take(4), "big")
+       u64 = lambda: take(8)
+       blob = lambda: take(u32())
+       def boolean():
+           if take(1) not in (b"\x00", b"\x01"):
+               raise ValueError(f"event {event_id}: bad boolean in manifest snapshot")
+       def signatures():
+           for _ in range(u32()):
+               blob(); blob()
+       found = set()
+       blob(); blob(); blob(); blob()                 # identity core, root issuer key
+       for _ in range(u32()):                         # authority log
+           blob(); u64(); blob()
+           for _ in range(u32()):
+               blob(); blob()
+           u64(); u64(); u64()
+           for _ in range(u32()):
+               u64()
+           u64(); signatures()
+       for _ in range(u32()):                         # accepted policies
+           encoding = take(1)[0] if tagged else 0
+           if encoding > 2:
+               raise ValueError(f"event {event_id}: unknown policy core encoding {encoding}")
+           blob(); u64(); blob(); u64()
+           for _ in range(u32()):
+               blob()
+           blob(); blob(); boolean(); blob(); u64(); blob(); blob(); u64()
+           blob(); boolean(); blob(); blob(); blob(); boolean(); u64(); u64()
+           if encoding == 2:
+               for _ in range(u32()):
+                   found.add(blob().decode("utf-8"))
+               for _ in range(u32()):
+                   blob(); blob()
+           signatures(); u64()
+       if pos != len(snap):
+           raise ValueError(f"event {event_id}: trailing bytes in manifest snapshot")
+       return found
+   try:
+       db, tier = sys.argv[1], sys.argv[2]
+       if tier not in ACCEPTS:
+           raise ValueError(f"unknown target tier {tier!r}")
+       if not os.path.isabs(db) or not os.path.isfile(db):
+           raise ValueError(f"no database file at {db!r}")
+       try:
+           con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+           tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+       except sqlite3.OperationalError:
+           # A WAL database with no -wal file (a stopped, checkpointed
+           # coordinator) cannot be opened read-only; its main file is then
+           # complete, so read it as immutable.
+           if os.path.exists(db + "-wal"):
+               raise
+           con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True)
+           tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+       if "trustpool_events" not in tables:
+           print("manifests: 0 (no trustpool history)")
+           print("VERDICT: replayable")
+           sys.exit(0)
+       rows = con.execute("SELECT id, pool_id, payload_json FROM trustpool_events "
+                          "WHERE event_type = 'manifest_accepted' ORDER BY id").fetchall()
+       v2, seen = 0, set()
+       for event_id, pool_id, payload in rows:
+           snap = base64.b64decode(json.loads(payload)["manifest_snapshot"], validate=True)
+           if snap.startswith(V2):
+               v2 += 1
+           elif not snap.startswith(V1):
+               raise ValueError(f"event {event_id}: unknown manifest snapshot format")
+           seen |= allowlists(snap, snap.startswith(V2), event_id)
+       unknown = sorted(seen - set(CLASSES))
+       accepts = ACCEPTS[tier]
+       blockers = sorted(seen) if accepts is None else sorted(seen - accepts)
+       if accepts is None and v2:
+           blockers.insert(0, "policy-core v2 snapshots")
+       print(f"manifests: {len(rows)} (v2 snapshots: {v2})")
+       print(f"runtime classes in history: {', '.join(sorted(seen)) or 'none'}")
+       if unknown:
+           print(f"unknown runtime classes (no known build replays them): {', '.join(unknown)}")
+       print(f"target tier: {tier}; cannot replay: {', '.join(blockers) or 'nothing'}")
+       print("VERDICT: " + ("replayable" if not blockers else "STOP"))
+       sys.exit(0 if not blockers else 1)
+   except SystemExit:
+       raise
+   except Exception as e:
+       print(f"manifest history check error: {e}")
+       print("VERDICT: STOP")
+       sys.exit(2)
+   PY
+   echo "exit: $?"
+   ```
+
+   `VERDICT: replayable` with `exit: 0` is the only go: roll back the
+   coordinator binary and confirm it started (`/healthz` reports the older
+   version, `/v1/catalog-artifacts` answers 200, and `/poolz` still lists
+   the pools). `VERDICT: STOP` (exit 1 or 2), or no `VERDICT` line: do not
+   roll back the coordinator; roll it forward. The check is exercised
+   against lab databases by `scripts/lab/1690-e2e/check4b.sh`.
 5. Resume buyer traffic: restore the nginx `location` bodies and reload.
 
 Prefer rolling the gateway forward: v14 only widens the
@@ -451,19 +695,32 @@ stopped and holds drained, and only as:
    `/opt/macprovider/gateway.prev` only if its sha256 matches that release's
    published gateway binary; if a later deploy replaced it, install the
    pre-v14 release binary explicitly.
-4. Export every row written after that snapshot's timestamp from `accounts`,
+4. Export every row written after that snapshot's timestamp from every
+   gateway table that takes durable writes while it serves: `accounts`,
    `account_identities`, `api_keys`, `api_key_events`, `quota_reservations`,
-   `usage_events`, `demo_usage_events`, and the `wallet_session*` tables
-   (their `created_at`, `settled_at` or equivalent timestamp is after the
-   snapshot's). These are the buyer debits and account state the restore
-   would lose.
+   `usage_events`, `demo_usage_events`, `demo_session_events`,
+   `wallet_identities`, the `wallet_session*` tables, `audit_events`,
+   `signup_events`, `feedback_events`, `public_issuance_events`,
+   `capacity_signal_events`, `relay_blind_replays` (replay protection),
+   `runtime_config` (operator changes), `settlement_fallback_candidates` and
+   `settlement_reconcile_attempts` (their `created_at`, `settled_at` or
+   equivalent timestamp is after the snapshot's). These are the buyer
+   debits, account state, audit trail, replay guards and reconcile bindings
+   the restore would lose. Not exported: `schema_migrations` (the restore's
+   own version must stay), and the short-lived `oauth_states`,
+   `oauth_handoffs` and `concurrency_reservations`, which are empty or
+   expired once traffic is stopped. Check the list against the gateway's
+   `CREATE TABLE` statements (`phase5-gateway/internal/storage/sqlite/`)
+   for both releases before the export: a table added since this runbook
+   was written belongs in it too.
 5. Run the printed recipe's restore steps with the named snapshot and binary,
    up to and including the snapshot install and its `PRAGMA
    integrity_check`, but leave out its final `systemctl start
    macprovider-gateway` and `/healthz` lines: the gateway stays stopped.
 6. Re-apply the exported rows to the restored database with `sqlite3`,
-   reconcile daily quota totals for the affected accounts, then start the
-   older gateway and check `/healthz`. Buyer traffic stays blocked at nginx
+   then start the older gateway and check `/healthz`. There is no separate
+   quota total to fix: daily quota is computed from `usage_events` and
+   `quota_reservations`, so re-applying those rows restores it. Buyer traffic stays blocked at nginx
    until step 5 of the rollback. Skipping the re-apply is only acceptable
    when step 4 exported nothing.
 
@@ -475,8 +732,16 @@ has run on the new coordinator:
 2. Run the gate with the **current** binary against the live database:
 
    ```bash
-   coordinator pool-rollback-preflight --config /etc/macprovider/coordinator.yaml
+   sudo bash -c 'set -a; . /etc/macprovider/coordinator.env; set +a
+     /opt/macprovider/coordinator pool-rollback-preflight \
+       --config /opt/macprovider/coordinator.yaml \
+       --config-overlay /etc/macprovider/coordinator.pearl-overlays.yaml'
+   echo "exit: $?"
    ```
+
+   These are the paths the `macprovider-coordinator` unit runs with (live
+   config, Pearl overlay, env file for the `env:` credentials the config
+   names); `/etc/macprovider/coordinator.yaml` does not exist on Pearl.
 
    Exit 0 means every pool route snapshot has a closed verdict or is past its
    pending deadline with no verdict. Exit 3 means a pool attempt can still

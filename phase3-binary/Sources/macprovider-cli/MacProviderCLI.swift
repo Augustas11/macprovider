@@ -831,6 +831,13 @@ struct ServeCommand: AsyncParsableCommand {
         let policyVersion: String?
         let rowIdentity: String?
         let modelSHA256: String?
+        /// #1690 M9: for a loopback serve, the signed catalog row's
+        /// snapshot-manifest digest, which the local MLX snapshot of the
+        /// row's model id must match before its tokenizer counts a cancelled
+        /// stream (SPEC-015 §N.12 item 7). Nil otherwise.
+        let siblingSnapshotSHA256: String?
+        /// The row's `model_revision`, which locates its verified artifact.
+        let siblingSnapshotRevision: String?
 
         init(
             state: String,
@@ -840,7 +847,9 @@ struct ServeCommand: AsyncParsableCommand {
             source: String,
             policyVersion: String? = nil,
             rowIdentity: String? = nil,
-            modelSHA256: String? = nil
+            modelSHA256: String? = nil,
+            siblingSnapshotSHA256: String? = nil,
+            siblingSnapshotRevision: String? = nil
         ) {
             self.state = state
             self.releaseID = releaseID
@@ -850,6 +859,8 @@ struct ServeCommand: AsyncParsableCommand {
             self.policyVersion = policyVersion
             self.rowIdentity = rowIdentity
             self.modelSHA256 = modelSHA256
+            self.siblingSnapshotSHA256 = siblingSnapshotSHA256
+            self.siblingSnapshotRevision = siblingSnapshotRevision
         }
     }
 
@@ -1125,8 +1136,27 @@ struct ServeCommand: AsyncParsableCommand {
             source: catalog.usedFallback ? "baked" : "coordinator",
             policyVersion: catalog.value.policyVersion,
             rowIdentity: rowIdentity,
-            modelSHA256: nil
+            modelSHA256: nil,
+            siblingSnapshotSHA256: row.modelSHA256,
+            siblingSnapshotRevision: row.modelRevision
         )
+    }
+
+    /// #1690 M9: where the catalog row's MLX artifact lives on this Mac, in
+    /// the order native serving verifies it: the durable-store copy, then the
+    /// Hugging Face snapshot macprovider's downloader writes (plain files).
+    static func loopbackSiblingSnapshotDirectories(_ resolved: AppConfig, trust: CatalogRuntimeTrust?) -> [URL] {
+        guard let modelID = LoopbackServeSelection.nonEmpty(resolved.modelCatalogModelID),
+              let revision = trust?.siblingSnapshotRevision,
+              let sha256 = trust?.siblingSnapshotSHA256
+        else { return [] }
+        let resolver = CachedModelArtifactResolver.forConfig(resolved)
+        var directories: [URL] = []
+        if let durable = try? resolver.durableStore.artifactURL(modelID: modelID, revision: revision, sha256: sha256) {
+            directories.append(durable)
+        }
+        directories.append(resolver.snapshotURL(modelID: modelID, revision: revision))
+        return directories
     }
 
     private static func isExistingDirectory(_ path: String) -> Bool {
@@ -2305,7 +2335,9 @@ struct ServeCommand: AsyncParsableCommand {
                     modelRuntime = try OpenAICompatibleLoopbackRuntime(
                         servedModelRef: loopbackServedRef,
                         origin: OllamaLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
-                        catalogModelIDAlias: catalogModelIDAlias
+                        catalogModelIDAlias: catalogModelIDAlias,
+                        siblingSnapshotSHA256: startupPreflight.catalogTrust?.siblingSnapshotSHA256,
+                        siblingSnapshotDirectories: Self.loopbackSiblingSnapshotDirectories(resolved, trust: startupPreflight.catalogTrust)
                     )
                 case .llamaCpp:
                     // The GGUF file llama.cpp serves is named by the operator
@@ -2315,7 +2347,9 @@ struct ServeCommand: AsyncParsableCommand {
                         servedModelRef: loopbackServedRef,
                         origin: LlamaCppLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
                         selector: try BYOMLlamaCppArtifactSelector.resolve(cliRoot: nil, cliPath: nil),
-                        catalogModelIDAlias: catalogModelIDAlias
+                        catalogModelIDAlias: catalogModelIDAlias,
+                        siblingSnapshotSHA256: startupPreflight.catalogTrust?.siblingSnapshotSHA256,
+                        siblingSnapshotDirectories: Self.loopbackSiblingSnapshotDirectories(resolved, trust: startupPreflight.catalogTrust)
                     )
                 case .mlxLM:
                     // SPEC-010-R009: the MLX snapshot mlx_lm.server serves is
@@ -2325,6 +2359,28 @@ struct ServeCommand: AsyncParsableCommand {
                         servedModelRef: loopbackServedRef,
                         origin: MLXLMLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
                         snapshotDirectory: MLXLMLoopbackServeModel.snapshotDirectory(),
+                        catalogModelIDAlias: catalogModelIDAlias
+                    )
+                case .lmStudio:
+                    // SPEC-010-R007(i) / SPEC-046-R009 (#1690 M9): the GGUF is
+                    // the one file the operator's LM Studio models root
+                    // (MACPROVIDER_LMSTUDIO_MODELS_ROOT) resolves for the key,
+                    // hashed by the CLI; LM Studio names no file.
+                    modelRuntime = try await OpenAICompatibleLoopbackRuntime.lmStudio(
+                        servedModelRef: loopbackServedRef,
+                        origin: LMStudioLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
+                        catalogModelIDAlias: catalogModelIDAlias,
+                        siblingSnapshotSHA256: startupPreflight.catalogTrust?.siblingSnapshotSHA256,
+                        siblingSnapshotDirectories: Self.loopbackSiblingSnapshotDirectories(resolved, trust: startupPreflight.catalogTrust)
+                    )
+                case .oMLX:
+                    // SPEC-010-R009 (#1690 M9): the MLX snapshot oMLX serves
+                    // is named by the operator (MACPROVIDER_OMLX_MODEL_PATH)
+                    // and hashed by the CLI, never reported by the runtime.
+                    modelRuntime = try await OpenAICompatibleLoopbackRuntime.oMLX(
+                        servedModelRef: loopbackServedRef,
+                        origin: OMLXLoopbackServeModel.resolveOrigin(configured: resolved.loopbackOrigin),
+                        snapshotDirectory: OMLXLoopbackServeModel.snapshotDirectory(),
                         catalogModelIDAlias: catalogModelIDAlias
                     )
                 }

@@ -160,6 +160,7 @@ func staticRelease(args []string) error {
 	ggufFile := fs.String("gguf-file", "", "GGUF repository-relative file_path")
 	swiftOut := fs.String("swift-out", "", "path for the lab AutotuneCatalog.generated.swift")
 	mlxSources := fs.String("mlx-runtime-sources", "mlx_cache", "csv allowed_runtime_sources of the MLX primary (#1690 M8: mlx_cache,mlxlm_loopback)")
+	ggufSources := fs.String("gguf-runtime-sources", "llamacpp_loopback", "csv allowed_runtime_sources of the GGUF artifact (#1690 M9: llamacpp_loopback,lmstudio_loopback)")
 	ollamaTag := fs.String("ollama-tag", "", "optional Ollama library tag of a GGUF ollama_loopback artifact (#1690 M8)")
 	ollamaSHA := fs.String("ollama-gguf-sha256", "", "sha256 of that Ollama model blob (macprovider.gguf-file.v1)")
 	ollamaSize := fs.Int64("ollama-gguf-size", 0, "size in bytes of that Ollama model blob")
@@ -245,7 +246,7 @@ func staticRelease(args []string) error {
 		},
 		"gguf-q4-k-m": map[string]any{
 			"runtime_format": "gguf", "hash_algorithm": "macprovider.gguf-file.v1", "hash": *ggufSHA,
-			"quantization": "q4_k_m", "size_bytes": *ggufSize, "min_ram_gb": *minRAM, "allowed_runtime_sources": []string{"llamacpp_loopback"},
+			"quantization": "q4_k_m", "size_bytes": *ggufSize, "min_ram_gb": *minRAM, "allowed_runtime_sources": splitCSV(*ggufSources),
 			"source_ref":          map[string]any{"kind": "huggingface_revision", "repo_id": *ggufRepo, "revision": *ggufRevision, "file_path": *ggufFile},
 			"verification_status": "verified", "verified_at": verifiedAt,
 		},

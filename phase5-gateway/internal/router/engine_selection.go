@@ -27,8 +27,10 @@ const (
 var engineRuntimeClasses = map[string]string{
 	"native":   engineClassNative,
 	"llamacpp": "llamacpp_loopback",
+	"lmstudio": "lmstudio_loopback",
 	"mlxlm":    "mlxlm_loopback",
 	"ollama":   "ollama_loopback",
+	"omlx":     "omlx_loopback",
 }
 
 var (

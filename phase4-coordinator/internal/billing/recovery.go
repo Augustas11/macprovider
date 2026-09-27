@@ -480,7 +480,7 @@ SELECT DISTINCT COALESCE(rl.account_id, ''), lpis.request_id, lpis.attempt_n, lp
     ON rl.request_id = lpis.request_id
    AND rl.provider_assigned_id = lpis.provider_assigned_id
  WHERE `+sqliteTimeRange("rl.ts_utc")+`
-   AND lpis.runtime_source IN ('ollama_loopback','lmstudio_loopback','llamacpp_loopback','openai_compatible_loopback','mlxlm_loopback')
+   AND lpis.runtime_source IN ('ollama_loopback','lmstudio_loopback','llamacpp_loopback','openai_compatible_loopback','mlxlm_loopback','omlx_loopback')
    AND NOT EXISTS (
        SELECT 1 FROM ledger_request_credits lrc
         WHERE lrc.request_id = lpis.request_id

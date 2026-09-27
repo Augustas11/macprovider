@@ -131,13 +131,28 @@ func settlementFinalityMACDeclared(resp *http.Response) bool {
 	return false
 }
 
-func missingSettlementFinality(b settlementFinalityBinding, why string) coordinatorSettlementFinality {
+// missingSettlementFinality holds the settlement. The stored hold reason is
+// always missing_settlement_finality_trailer; reason_detail is log-only and
+// tells an operator which fault it was (#1750): finality_mac_missing,
+// finality_mac_mismatch, finality_trailers_missing,
+// finality_declaration_missing, no_response, or body_read_failed.
+func missingSettlementFinality(b settlementFinalityBinding, why, detail string) coordinatorSettlementFinality {
 	slog.Warn("gateway held settlement: coordinator finality missing or not authenticated",
 		"request_id", b.requestID,
 		"account_id", b.accountID,
 		"why", why,
+		"reason", missingSettlementFinalityTrailer,
+		"reason_detail", detail,
 	)
 	return coordinatorSettlementFinality{Action: settlementFinalityHold, Reason: missingSettlementFinalityTrailer}
+}
+
+// finalityMACFaultDetail names why finalityMACValid failed, for the log only.
+func finalityMACFaultDetail(src http.Header) string {
+	if strings.TrimSpace(src.Get(settlementFinalityMACHeader)) == "" {
+		return "finality_mac_missing"
+	}
+	return "finality_mac_mismatch"
 }
 
 // undeclaredSettlementFinality reads finality from a response that declared
@@ -149,7 +164,11 @@ func undeclaredSettlementFinality(resp *http.Response, b settlementFinalityBindi
 		return coordinatorSettlementFinalityFromHeaders(resp.Header)
 	}
 	if !hasAnySettlementFinalityHeader(resp.Header) || !finalityMACValid(resp, resp.Header, b) {
-		return missingSettlementFinality(b, "no signed finality declaration")
+		detail := "finality_declaration_missing"
+		if hasAnySettlementFinalityHeader(resp.Header) {
+			detail = finalityMACFaultDetail(resp.Header)
+		}
+		return missingSettlementFinality(b, "no signed finality declaration", detail)
 	}
 	return coordinatorSettlementFinalityFromHeaders(resp.Header)
 }
@@ -162,7 +181,7 @@ func undeclaredSettlementFinality(resp *http.Response, b settlementFinalityBindi
 func coordinatorNonStreamingSettlementFinality(resp *http.Response, b settlementFinalityBinding) coordinatorSettlementFinality {
 	if resp == nil {
 		if b.requireSigned {
-			return missingSettlementFinality(b, "no response")
+			return missingSettlementFinality(b, "no response", "no_response")
 		}
 		return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
 	}
@@ -170,10 +189,10 @@ func coordinatorNonStreamingSettlementFinality(resp *http.Response, b settlement
 		return undeclaredSettlementFinality(resp, b)
 	}
 	if !hasAnySettlementFinalityHeader(resp.Trailer) {
-		return missingSettlementFinality(b, "declared trailers missing")
+		return missingSettlementFinality(b, "declared trailers missing", "finality_trailers_missing")
 	}
 	if !finalityMACValid(resp, resp.Trailer, b) {
-		return missingSettlementFinality(b, "trailer MAC missing or invalid")
+		return missingSettlementFinality(b, "trailer MAC missing or invalid", finalityMACFaultDetail(resp.Trailer))
 	}
 	return coordinatorSettlementFinalityFromHeaders(resp.Trailer)
 }
@@ -185,13 +204,13 @@ func coordinatorNonStreamingSettlementFinality(resp *http.Response, b settlement
 func coordinatorStreamingSettlementFinality(resp *http.Response, b settlementFinalityBinding) coordinatorSettlementFinality {
 	if resp == nil {
 		if b.requireSigned {
-			return missingSettlementFinality(b, "no response")
+			return missingSettlementFinality(b, "no response", "no_response")
 		}
 		return coordinatorSettlementFinality{Action: settlementFinalityLegacy}
 	}
 	if hasAnySettlementFinalityHeader(resp.Trailer) {
 		if (b.requireSigned || settlementFinalityMACDeclared(resp)) && !finalityMACValid(resp, resp.Trailer, b) {
-			return missingSettlementFinality(b, "trailer MAC missing or invalid")
+			return missingSettlementFinality(b, "trailer MAC missing or invalid", finalityMACFaultDetail(resp.Trailer))
 		}
 		return coordinatorSettlementFinalityFromHeaders(resp.Trailer)
 	}

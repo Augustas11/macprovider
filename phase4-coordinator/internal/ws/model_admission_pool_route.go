@@ -18,11 +18,11 @@ import (
 
 // poolRuntimeMemberAlgorithm is the SPEC-042-R004 derived-class format rule:
 // the only hash algorithm a member served by this loopback class may carry.
-// mlxlm_loopback serves MLX snapshots (SPEC-010-R009); every other loopback
-// class serves a GGUF file (SPEC-010-R007).
+// mlxlm_loopback and omlx_loopback serve MLX snapshots (SPEC-010-R009);
+// every other loopback class serves a GGUF file (SPEC-010-R007).
 func poolRuntimeMemberAlgorithm(runtimeSource string) (string, bool) {
 	switch {
-	case runtimeSource == modelAdmissionRuntimeSourceMLXLMLoopback:
+	case isMLXSnapshotLoopbackRuntimeSource(runtimeSource):
 		return modelidentity.SnapshotManifestV1, true
 	case IsBYOMLoopbackRuntimeSource(runtimeSource):
 		return modelidentity.GGUFFileV1, true
@@ -35,7 +35,8 @@ func poolRuntimeMemberAlgorithm(runtimeSource string) (string, bool) {
 // the recorded member the session's pinned verified identity names, whose
 // hash algorithm must match the candidate's recorded runtime class. A feed
 // member must be the session's release-bound artifact and allow that class.
-// A row pair (the candidate_row member) binds only for mlxlm_loopback, on a
+// A row pair (the candidate_row member) binds only for an MLX-snapshot
+// loopback class (mlxlm_loopback, omlx_loopback), on a
 // primary-pinned session with no feed binding (SPEC-010-R009, SPEC-047
 // v0.2.1); its admissibility was checked when the member was recorded and
 // on every reload sweep.
@@ -49,7 +50,7 @@ func PoolRouteSessionBoundMember(provider pool.Provider, candidate ModelAdmissio
 		return ModelAdmissionCatalogMember{}, false
 	}
 	if member.Source == modelAdmissionMemberSourceCandidateRow {
-		if candidate.RuntimeSource != modelAdmissionRuntimeSourceMLXLMLoopback || provider.ArtifactIdentity != nil {
+		if !isMLXSnapshotLoopbackRuntimeSource(candidate.RuntimeSource) || provider.ArtifactIdentity != nil {
 			return ModelAdmissionCatalogMember{}, false
 		}
 		return member, true
@@ -97,7 +98,7 @@ func ModelAdmissionPoolSettlementBindingForRouteSnapshot(event ModelAdmissionEve
 	}
 	// The derived member's format matches the recorded runtime class. A feed
 	// member carries all six values with the expected identity equal to it;
-	// only an mlxlm_loopback row pair carries none, and then the expected
+	// only an MLX-snapshot loopback row pair carries none, and then the expected
 	// identity is the event's recorded row pair (SPEC-010-R007(d) exemption).
 	algorithm, ok := poolRuntimeMemberAlgorithm(event.RuntimeSource)
 	if !ok || predicate.ExpectedCatalogModelHashAlgorithm != algorithm {
@@ -107,7 +108,7 @@ func ModelAdmissionPoolSettlementBindingForRouteSnapshot(event ModelAdmissionEve
 		if !predicate.artifactEvidenceComplete() {
 			return ModelAdmissionSettlementBinding{}, false
 		}
-	} else if event.RuntimeSource != modelAdmissionRuntimeSourceMLXLMLoopback ||
+	} else if !isMLXSnapshotLoopbackRuntimeSource(event.RuntimeSource) ||
 		predicate.ExpectedCatalogModelHash != event.CatalogRowModelSHA256 {
 		return ModelAdmissionSettlementBinding{}, false
 	}

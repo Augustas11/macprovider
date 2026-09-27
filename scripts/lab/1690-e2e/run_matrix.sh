@@ -7,7 +7,7 @@
 #   run_matrix.sh RUN ENGINE [PINS]      e.g. run_matrix.sh r1 llamacpp "0 1"
 #
 # ENGINE: native (pool A + global), llamacpp (pool A), mlxlm (pool M),
-# ollama (pool O). External engines are also sent to the global route (with
+# ollama (pool O), lmstudio (pool L), omlx (pool X; #1690 M9). External engines are also sent to the global route (with
 # and without selecting them), which must refuse them before dispatch and
 # never credit them. Output: LAB/e2e/results/<label>.json and
 # LAB/e2e/logs/<RUN>-<ENGINE>.log. Lab only (rig.sh/pidguard safety).
@@ -20,7 +20,7 @@ RIG="$HERE/../1690-m6/rig.sh"
 export E2E_PENDING_DEADLINE_S="${E2E_PENDING_DEADLINE_S:-90}"
 export E2E_REOFFER=1 E2E_NATIVE_CLEAR_ADMISSION=1
 RUN=$1 ENGINE=$2 PINS=${3:-"0 1"}
-case "$ENGINE" in native|llamacpp) POOL=A ;; mlxlm) POOL=M ;; ollama) POOL=O ;; *) echo "bad engine" >&2; exit 2 ;; esac
+case "$ENGINE" in native|llamacpp) POOL=A ;; mlxlm) POOL=M ;; ollama) POOL=O ;; lmstudio) POOL=L ;; omlx) POOL=X ;; *) echo "bad engine" >&2; exit 2 ;; esac
 POOL="${E2E_POOL:-$POOL}"
 M() { python3 "$HERE/matrix.py" "$@"; }
 mkdir -p "$LAB/e2e/logs"

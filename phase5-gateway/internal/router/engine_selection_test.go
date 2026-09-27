@@ -78,6 +78,8 @@ func TestEngineSelection_EmitsMappedRuntimeClass(t *testing.T) {
 		{"llamacpp", testPoolID, "llamacpp_loopback"},
 		{"mlxlm", testPoolID, "mlxlm_loopback"},
 		{"ollama", testPoolID, "ollama_loopback"},
+		{"lmstudio", testPoolID, "lmstudio_loopback"},
+		{"omlx", testPoolID, "omlx_loopback"},
 	} {
 		h, cap, key := newEngineHarness(t, "")
 		headers := map[string]string{engineSelectHeader: tc.selector}
@@ -100,7 +102,7 @@ func TestEngineSelection_EmitsMappedRuntimeClass(t *testing.T) {
 // SPEC-006-R016 rule 3 / SPEC-042-R014 (a): a non-native engine on a global
 // route fails closed before dispatch; it is never served natively.
 func TestEngineSelection_NonNativeOnGlobalRouteFailsClosed(t *testing.T) {
-	for _, selector := range []string{"llamacpp", "mlxlm", "ollama"} {
+	for _, selector := range []string{"llamacpp", "lmstudio", "mlxlm", "ollama", "omlx"} {
 		h, cap, key := newEngineHarness(t, "")
 		resp := postChat(t, h, key, poolChatBody, map[string]string{engineSelectHeader: selector})
 		if resp.Code != http.StatusServiceUnavailable {
@@ -117,7 +119,7 @@ func TestEngineSelection_NonNativeOnGlobalRouteFailsClosed(t *testing.T) {
 }
 
 func TestEngineSelection_InvalidSelectorRejected(t *testing.T) {
-	for _, values := range [][]string{{"LLAMACPP"}, {"vllm"}, {"mlx_cache"}, {"native, llamacpp"}, {"native", "llamacpp"}} {
+	for _, values := range [][]string{{"LLAMACPP"}, {"vllm"}, {"mlx_cache"}, {"lmstudio_loopback"}, {"LMStudio"}, {"oMLX"}, {"native, llamacpp"}, {"native", "llamacpp"}} {
 		h, cap, key := newEngineHarness(t, "")
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(poolChatBody))
 		req.Header.Set("Authorization", "Bearer "+key)
@@ -177,7 +179,9 @@ func TestEngineSelection_ResponseHeaderDisclosedWithClosedVocabulary(t *testing.
 		{"mlx_cache", "mlx_cache"},
 		{"ollama_loopback", "ollama_loopback"},
 		{"mlxlm_loopback", "mlxlm_loopback"},
-		{"lmstudio_loopback", ""},
+		{"lmstudio_loopback", "lmstudio_loopback"},
+		{"omlx_loopback", "omlx_loopback"},
+		{"openai_compatible_loopback", ""},
 		{"llamacpp_loopback\r\nX-Evil: 1", ""},
 		{" mlx_cache", ""},
 	} {

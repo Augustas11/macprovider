@@ -1780,7 +1780,10 @@ func (h *adminHandler) refreshRegistryIfAhead(w http.ResponseWriter, state *Reco
 		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
 		return false
 	}
-	if err := h.deps.Registry.LoadRouteableSnapshotsAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
+	// The periodic refresher may publish this revision (or a newer one)
+	// after the unlocked check above; the locked publish treats that as
+	// already published, so only a real load failure disables routing.
+	if err := h.deps.Registry.PublishRouteableSnapshotsIfAhead(state.Revision, state.RouteableSnapshots()); err != nil {
 		h.deps.Registry.Disable()
 		writeAdminJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "registry_refresh_failed"}})
 		return false
@@ -1801,7 +1804,11 @@ func (h *adminHandler) republishRouteGates(ctx context.Context) error {
 		h.deps.Registry.Disable()
 		return err
 	}
-	if _, err := h.deps.Registry.RefreshRouteableSnapshotsAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
+	// A refresher or admin publish of a newer revision between the
+	// Reconstruct and this call already carries the current gates; the
+	// locked republish treats that as published, so only a real failure
+	// disables routing.
+	if err := h.deps.Registry.RepublishRouteGatesAtRevision(state.Revision, state.RouteableSnapshots()); err != nil {
 		h.deps.Registry.Disable()
 		return err
 	}
@@ -2148,6 +2155,9 @@ type adminPoolState struct {
 	LaunchEnvironment              string   `json:"launch_environment,omitempty"`
 	RootCustodyClass               string   `json:"root_custody_class,omitempty"`
 	MinBinaryVersion               string   `json:"min_binary_version,omitempty"`
+	RuntimeAllowlist               []string `json:"runtime_allowlist"`
+	RuntimeScope                   string   `json:"runtime_scope,omitempty"`
+	SettlementMode                 string   `json:"settlement_mode,omitempty"`
 	Members                        []string `json:"members"`
 	Revoked                        []string `json:"revoked"`
 	BuyerAccounts                  []string `json:"buyer_accounts"`
@@ -2183,6 +2193,21 @@ func adminPoolResponse(p *ReconstructedPoolState, routeGateCheckedAt time.Time) 
 	if !routeGateCheckedAt.IsZero() {
 		routeGateCheckedAtRaw = routeGateCheckedAt.UTC().Format(time.RFC3339Nano)
 	}
+	// #1750 F-1: read back the accepted core named by ManifestVersion, as
+	// the buyer policy/status documents disclose it: the signed
+	// runtime_allowlist ([] for a v1 core or an empty list, null before any
+	// accepted core), its SPEC-043-R013 scope, and the settlement mode
+	// routing applies.
+	var runtimeAllowlist []string
+	runtimeScope, settlementMode := "", ""
+	if p.ManifestVersion > 0 {
+		runtimeAllowlist = policyRuntimeAllowlist(p)
+		if runtimeAllowlist == nil {
+			runtimeAllowlist = []string{}
+		}
+		runtimeScope, _ = policyRuntimeDisclosure(p)
+		settlementMode = routeablePoolSettlementMode(p.ManifestSettlementMode)
+	}
 	return adminPoolState{
 		PoolID:                         p.PoolID,
 		CreatorAccountID:               p.CreatorAccountID,
@@ -2196,6 +2221,9 @@ func adminPoolResponse(p *ReconstructedPoolState, routeGateCheckedAt time.Time) 
 		LaunchEnvironment:              rootIssuerLaunchEnvironment(p),
 		RootCustodyClass:               rootIssuerCustodyClass(p),
 		MinBinaryVersion:               policyMinBinaryVersion(p),
+		RuntimeAllowlist:               runtimeAllowlist,
+		RuntimeScope:                   runtimeScope,
+		SettlementMode:                 settlementMode,
 		Members:                        members,
 		Revoked:                        revoked,
 		BuyerAccounts:                  buyers,

@@ -28,9 +28,9 @@ final class MLXLMLoopbackTests: XCTestCase {
     func testSelectorAndVocabulary() {
         XCTAssertEqual(LoopbackServeSelection.select("mlxlm:Qwen2.5-0.5B-Instruct-4bit"), .mlxLM)
         XCTAssertEqual(LoopbackServeSelection.mlxLM.runtimeSource, "mlxlm_loopback")
-        XCTAssertNil(LoopbackServeSelection.select("omlx:foo"), "oMLX has no identity leg")
+        XCTAssertEqual(LoopbackServeSelection.select("omlx:foo"), .oMLX, "oMLX has its identity leg (#1690 M9)")
         XCTAssertTrue(CoordinatorClient.isBYOMLoopbackRuntimeSource("mlxlm_loopback"))
-        XCTAssertEqual(ArtifactFeed.identityMatrix["mlx_safetensors"]?.runtimeSources, ["mlx_cache", "mlxlm_loopback"])
+        XCTAssertEqual(ArtifactFeed.identityMatrix["mlx_safetensors"]?.runtimeSources, ["mlx_cache", "mlxlm_loopback", "omlx_loopback"])
         XCTAssertFalse(ArtifactFeed.identityMatrix["gguf"]?.runtimeSources.contains("mlxlm_loopback") ?? true)
         XCTAssertTrue(LoopbackServeHTTPClient.isAllowed(URL(string: "http://127.0.0.1:9191/v1/models")!, method: "GET"))
         XCTAssertEqual(MLXLMLoopbackServeModel.resolveOrigin(configured: nil, environment: [:]), "http://127.0.0.1:8080")

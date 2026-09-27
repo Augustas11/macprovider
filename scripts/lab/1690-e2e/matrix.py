@@ -3,7 +3,7 @@
 invariants across the gateway and coordinator databases.
 
   matrix.py send --label L --engine E [--route pool:NAME|global] [--select SEL]
-                 [--shapes plain,tool,long,cap] [--behaviours normal,disconnect,slow,early_close,abort]
+                 [--shapes plain,tool,long,cap] [--behaviours normal,disconnect,disconnect_tool,slow,early_close,abort]
   matrix.py selection --label L --engine E [--pools A,M,O]
   matrix.py settle --label L [--timeout S] [--expect-refund] [--allow-hold]
 
@@ -26,6 +26,15 @@ request:
   credit_implies_debit a payable provider credit means the buyer was debited
   no_undelivered_bill billed completion never exceeds what the engine
                       generated, and an aborted request bills nothing
+  disconnect_billed_or_free (#1690 M9 review M1) a disconnect during a
+                      multi-thousand-token prompt on a busy engine is either
+                      disconnect_prefix_billed or entirely free (no debit, no
+                      payable credit); never billed otherwise
+  disconnect_prefix_billed (#1690 M9) an external engine's partial stream
+                      after a buyer disconnect ends buyer_cancel with a valid
+                      receipt, pool_operator_attested usage, a payable credit,
+                      and a buyer debit above zero and within the verified
+                      delivered prefix (below max_tokens)
   delivered_not_free  a fully read 200 with output is debited
   buyer_usage_eq_debit the usage the buyer saw equals its debit
 and writes LAB/e2e/results/<label>.json plus PASS/FAIL lines. Prompts and
@@ -50,8 +59,15 @@ STATE = LAB / "e2e"
 REQS = STATE / "requests.jsonl"
 MODEL = os.environ.get("E2E_MODEL", "mlx-community/Qwen2.5-0.5B-Instruct-4bit")
 ACCOUNT = "acct-lab-1690-buyer"
-ENGINE_CLASS = {"native": "mlx_cache", "llamacpp": "llamacpp_loopback", "mlxlm": "mlxlm_loopback", "ollama": "ollama_loopback"}
-POOL_ALLOW = {"A": "llamacpp_loopback", "M": "mlxlm_loopback", "O": "ollama_loopback", "NO": "mlx_cache"}
+ENGINE_CLASS = {"native": "mlx_cache", "llamacpp": "llamacpp_loopback", "mlxlm": "mlxlm_loopback", "ollama": "ollama_loopback",
+                "lmstudio": "lmstudio_loopback", "omlx": "omlx_loopback"}
+POOL_ALLOW = {"A": "llamacpp_loopback", "M": "mlxlm_loopback", "O": "ollama_loopback", "L": "lmstudio_loopback",
+              "X": "omlx_loopback", "NO": "mlx_cache"}
+# The lab snapshot's tokenizer (the same Qwen2.5 vocabulary as the GGUF), for
+# the token count of what a disconnected buyer received. Counted in the lab
+# mlx_lm venv from stdin; the text itself is never written anywhere.
+TOKENIZER_DIR = LAB / "models" / "mlx" / "Qwen2.5-0.5B-Instruct-4bit"
+VENV_PY = LAB / "venv" / "bin" / "python3"
 TOOLS = [{"type": "function", "function": {"name": "get_weather", "description": "Get the current weather for a city.",
                                            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}}]
 SHAPES = {
@@ -59,11 +75,26 @@ SHAPES = {
     "tool": {"prompt": "What is the weather in Paris right now? Use the get_weather tool.", "max_tokens": 96, "tools": True},
     "long": {"prompt": "Write a detailed story of about 600 words about a lighthouse keeper and a storm.", "max_tokens": 700},
     "cap": {"prompt": "Write a detailed story of about 600 words about a lighthouse keeper and a storm.", "max_tokens": 8},
+    # #1690 M9 review M1: a prompt of about 2400 tokens.
+    "longprompt": {"prompt": ("Here is a log of lighthouse observations. " + " ".join(
+        f"Day {i}: wind {i % 7} knots from the {('north', 'east', 'south', 'west')[i % 4]}, visibility {i % 10} miles, one ship passed."
+        for i in range(120)) + " Summarize the log as a long story."), "max_tokens": 500},
+    # #1690 M9 verification: tools offered but tool_choice "none", so the
+    # engine writes content; LM Studio streams no per-chunk logprobs with
+    # tools, so a cancel is counted with the catalog sibling tokenizer.
+    "toolnone": {"prompt": "Write a detailed story of about 600 words about a lighthouse keeper and a storm.", "max_tokens": 700,
+                 "tools": True, "tool_choice": "none"},
 }
+DISCONNECTS = ("disconnect", "disconnect_busy", "disconnect_tool")
 # Shapes a behaviour runs on, and whether it streams.
 BEHAVIOURS = {
     "normal": [("plain", False), ("plain", True), ("tool", False), ("tool", True), ("long", False), ("long", True), ("cap", False), ("cap", True)],
     "disconnect": [("long", True)],
+    # #1690 M9 review M1: the same disconnect with a long prompt while three
+    # other long-prompt streams keep the engine busy (busy_load, recorded).
+    "disconnect_busy": [("longprompt", True)],
+    "disconnect_tool": [("toolnone", True)],
+    "busy_load": [("longprompt", True)],
     "slow": [("plain", True), ("long", True)],
     "early_close": [("long", False)],
     "abort": [("long", False)],
@@ -91,6 +122,8 @@ def one(label, engine, route, select, shape, stream, behaviour, extra_headers=No
     body = {"model": MODEL, "messages": [{"role": "user", "content": f"{spec['prompt']} (ref {rid[:8]})"}], "max_tokens": spec["max_tokens"]}
     if spec.get("tools"):
         body["tools"] = TOOLS
+    if spec.get("tool_choice"):
+        body["tool_choice"] = spec["tool_choice"]
     if stream:
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}
@@ -152,7 +185,7 @@ def one(label, engine, route, select, shape, stream, behaviour, extra_headers=No
                     finish = ch.get("finish_reason") or finish
                 if c.get("usage"):
                     usage = c["usage"]
-                if behaviour == "disconnect" and content_events >= 4:
+                if behaviour in DISCONNECTS and content_events >= 4:
                     conn.sock.close()
                     out["disconnected_after_events"] = content_events
                     break
@@ -176,10 +209,26 @@ def one(label, engine, route, select, shape, stream, behaviour, extra_headers=No
     conn.close()
     out.update({"elapsed_s": round(time.time() - t0, 2), "finish_reason": finish, "done": done, "events": events,
                 "content_events": content_events, "content_len": len(text),
+                "received_tokens": token_count(text) if behaviour in DISCONNECTS else None,
                 "content_sha256": hashlib.sha256(text.encode()).hexdigest()[:16] if text else None,
                 "tool_calls": [{"name": v["name"], "args_valid_json": valid_json(v["args"])} for v in tool_calls.values()],
                 "usage": {k: usage.get(k) for k in ("prompt_tokens", "completion_tokens")} if usage else None})
     return out
+
+
+def token_count(text):
+    """Tokens in `text` by the lab tokenizer (no special tokens), or None."""
+    if not text or not VENV_PY.exists():
+        return None
+    import subprocess
+    code = ("import sys; from tokenizers import Tokenizer; "
+            "t = Tokenizer.from_file(sys.argv[1]); print(len(t.encode(sys.stdin.read(), add_special_tokens=False).ids))")
+    try:
+        done = subprocess.run([str(VENV_PY), "-c", code, str(TOKENIZER_DIR / "tokenizer.json")], input=text,
+                              capture_output=True, text=True, timeout=60)
+        return int(done.stdout.strip()) if done.returncode == 0 else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
 
 
 def valid_json(s):
@@ -200,19 +249,29 @@ def append(rec):
 
 def cmd_send(a):
     shapes = set(a.shapes.split(",")) if a.shapes else None
-    for behaviour in a.behaviours.split(","):
+    for behaviour in a.behaviours.split(",") * a.repeat:
         for shape, stream in BEHAVIOURS[behaviour]:
             if shapes and shape not in shapes:
                 continue
             if a.stream_only and not stream:
                 continue
             flag = LAB / "run" / "slow-stream"
-            slow_tap = behaviour == "disconnect" and a.engine != "native"
+            slow_tap = behaviour in DISCONNECTS and a.engine != "native"
             if slow_tap:
                 flag.touch()
+            load = []
+            if behaviour == "disconnect_busy":
+                import threading
+                for _ in range(3):
+                    t = threading.Thread(target=lambda: append(one(a.label, a.engine, a.route, a.select, shape, stream, "busy_load")))
+                    t.start()
+                    load.append(t)
+                time.sleep(1.0)
             try:
                 append(one(a.label, a.engine, a.route, a.select, shape, stream, behaviour))
             finally:
+                for t in load:
+                    t.join()
                 if slow_tap and flag.exists():
                     flag.unlink()
 
@@ -245,7 +304,7 @@ def expected_selection(engine, route, select):
 
 
 def cmd_selection(a):
-    selectors = [None, "native", "llamacpp", "mlxlm", "ollama", "LLAMACPP", "vllm", ["native", "llamacpp"], ""]
+    selectors = [None, "native", "llamacpp", "mlxlm", "ollama", "lmstudio", "omlx", "LLAMACPP", "vllm", ["native", "llamacpp"], ""]
     routes = ["global"] + [f"pool:{p}" for p in a.pools.split(",") if (LAB / "pools" / p / "pool_id").exists()]
     results = []
     for route in routes:
@@ -357,7 +416,13 @@ def evaluate(rec, ev, expect_refund=False):
     else:
         want = (0, 0)
         basis = f"no 200 attempt (finality {fin})"
-    out.append(("debit_eq_settled", tuple(debit) == tuple(want), {"debit": debit, "settled": want, "basis": basis,
+    name, ok = "debit_eq_settled", tuple(debit) == tuple(want)
+    # SPEC-022 v0.2.2 R-5.6 (E2E-F4): a buyer that disconnected is debited the
+    # smaller of the verified completion and what the gateway delivered to it,
+    # with the verified prompt. Named so it is counted apart.
+    if not ok and rec["behaviour"] in DISCONNECTS and debit[0] == want[0] and 0 < debit[1] < want[1]:
+        name, ok = "debit_eq_settled[buyer-delivered-bound]", True
+    out.append((name, ok, {"debit": debit, "settled": want, "basis": basis,
                                                                   "gateway": {"status": (res or {}).get("status"), "token_source": (use or {}).get("token_source"), "outcome": (use or {}).get("outcome")}}))
     loop = {(s["request_id"], s["attempt_n"]): s.get("runtime_source") for s in ev["snapshots"]}
     bad = []
@@ -380,7 +445,7 @@ def evaluate(rec, ev, expect_refund=False):
     if rec["behaviour"] == "abort" and sum(debit) > 0:
         ok = False
         why["note"] = "aborted before response headers but debited"
-    if rec["behaviour"] == "disconnect":
+    if rec["behaviour"] in DISCONNECTS:
         why["received_events"] = rec.get("content_events")
         if billed_c >= rec["max_tokens"]:
             ok = False
@@ -393,8 +458,16 @@ def evaluate(rec, ev, expect_refund=False):
                                                   "content_events": rec.get("content_events"), "max_tokens": rec["max_tokens"]}))
     if delivered:
         out.append(("delivered_not_free", sum(debit) > 0 or expect_refund, {"debit": debit, "finish": rec.get("finish_reason"), "expect_refund": expect_refund}))
-    if rec["behaviour"] == "disconnect" and (rec.get("content_events") or 0) > 0:
+    if rec["behaviour"] in ("disconnect", "disconnect_tool") and (rec.get("content_events") or 0) > 0:
         out.append(("delivered_not_free", sum(debit) > 0 or expect_refund, {"debit": debit, "received_events": rec.get("content_events"), "note": "partial stream"}))
+    if rec["behaviour"] in ("disconnect", "disconnect_tool") and rec["engine"] != "native" and rec["route"].startswith("pool:") and rec.get("status") == 200 \
+            and (rec.get("content_events") or 0) > 0:
+        out.append(("disconnect_prefix_billed", *disconnect_prefix(rec, ev, debit, payable)))
+    if rec["behaviour"] == "disconnect_busy" and rec.get("status") == 200 and (rec.get("content_events") or 0) > 0:
+        billed, obs = disconnect_prefix(rec, ev, debit, payable)
+        free = sum(debit) == 0 and not payable
+        obs["outcome"] = "billed" if billed else ("free" if free else "WRONG")
+        out.append(("disconnect_billed_or_free", billed or free, obs))
     if delivered and rec.get("usage"):
         seen = (rec["usage"]["prompt_tokens"], rec["usage"]["completion_tokens"])
         name = "buyer_usage_eq_debit"
@@ -406,6 +479,24 @@ def evaluate(rec, ev, expect_refund=False):
             name = "buyer_usage_eq_debit[F1-prompt-bound]"
         out.append((name, seen == tuple(debit) or expect_refund, {"buyer_saw": seen, "debit": debit}))
     return out
+
+
+def disconnect_prefix(rec, ev, debit, payable):
+    """#1690 M9 (E2E-F3 on every external engine): (ok, observed)."""
+    cancel = [a for a in ev["attempt_outputs"] if a["terminal_state"] == "buyer_cancel"]
+    att = cancel[-1] if cancel else None
+    key = (att["request_id"], att["attempt_n"]) if att else None
+    verdicts = [v for v in ev["verdicts"] if key and (v["request_id"], v["attempt_n"]) == key]
+    receipt_ok = any(v["closed"] == 1 and v["settlement_outcome"] == "verified" and v["receipt_result"] == "valid" for v in verdicts)
+    credit = [r for r in payable if key and (r["request_id"], r["attempt_n"]) == key]
+    prefix = att["billable"][1] if att else None
+    ok = bool(att) and att["usage_source"] == "pool_operator_attested" and receipt_ok and bool(credit) \
+        and prefix is not None and 0 < debit[1] <= prefix < rec["max_tokens"]
+    return ok, {"terminal_state": att and att["terminal_state"], "usage_source": att and att["usage_source"],
+                "receipt_verified": receipt_ok, "provider_credits": [r["provider_credits"] for r in credit],
+                "verified_prefix_billable": att and att["billable"], "delivered_output_bytes": att and att["delivered_output_bytes"],
+                "buyer_debit": debit, "buyer_received_events": rec.get("content_events"),
+                "buyer_received_tokens": rec.get("received_tokens"), "max_tokens": rec["max_tokens"]}
 
 
 def cmd_settle(a):
@@ -451,11 +542,12 @@ def main():
     s.add_argument("--select")
     s.add_argument("--shapes")
     s.add_argument("--behaviours", default="normal,disconnect,slow,early_close,abort")
+    s.add_argument("--repeat", type=int, default=1)
     s.add_argument("--stream-only", action="store_true")
     e = sub.add_parser("selection")
     e.add_argument("--label", required=True)
     e.add_argument("--engine", required=True, choices=sorted(ENGINE_CLASS))
-    e.add_argument("--pools", default="A,M,O")
+    e.add_argument("--pools", default="A,M,O,L,X")
     t = sub.add_parser("settle")
     t.add_argument("--label", required=True)
     t.add_argument("--timeout", type=int, default=420)
