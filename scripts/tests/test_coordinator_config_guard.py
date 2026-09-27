@@ -133,6 +133,7 @@ NOT_WRITERS = {
     "scripts/catalog-release.py": "repo coordinator.yaml; the splice writes --output, never the live path",
     "scripts/lab/1690-m6/write_configs.py": "#1690 M6 lab rig; writes $LAB/run/coordinator.yaml on the lab Mac",
     "scripts/lab/1690-m6/cases.py": "#1690 M6 lab rig; reads $LAB/run/coordinator.yaml for pool-rollback-preflight",
+    "scripts/lab/build1-private-staging/capture.py": "Build 1 isolated lab evidence collector; reads $LAB/run/coordinator.yaml only",
 }
 
 
