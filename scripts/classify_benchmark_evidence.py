@@ -94,7 +94,8 @@ def classify(coordinator, gateway, account_id, external_request_id, journal=None
     attempts = []
     for request in requests:
         internal_id, attempt_n = request["request_id"], request["attempt_n"]
-        credit = one(coordinator, """SELECT provider_id, provider_assigned_id, quarantine_reason, quarantined
+        credit = one(coordinator, """SELECT provider_id, provider_assigned_id, quarantine_reason, quarantined,
+                                             charged_prompt_tokens, completion_tokens
                                       FROM ledger_request_credits
                                      WHERE settlement_account_scope_hash = ? AND request_id = ? AND attempt_n = ?
                                      ORDER BY id DESC LIMIT 1""", (receipt_scope, internal_id, attempt_n))
@@ -172,8 +173,22 @@ def classify(coordinator, gateway, account_id, external_request_id, journal=None
             reasons.append("settlement_output_not_successful")
         elif usage:
             settled_usage = json.loads(output["usage_canonical_json"])
-            if (settled_usage["billable_input_tokens"] != usage["prompt_tokens"] or
-                    settled_usage["billable_output_tokens"] != usage["completion_tokens"]):
+            # SPEC-022 keeps billable_input == observed_input in the settlement
+            # output for a normal_done attempt, but the gateway bills — and the
+            # ledger charges — the SPEC-022 bounded prompt, which is lower when the
+            # coordinator's independent prompt-token upper bound clamps a provider
+            # over-report (charged_prompt_tokens < observed). Compare the gateway's
+            # billed tokens against the ledger's CHARGED amounts (what the buyer
+            # paid and the provider was credited); when the ledger predates those
+            # columns, fall back to the observed settlement usage. Separately, the
+            # charge must never exceed the provider-observed settlement usage.
+            charged_prompt = credit["charged_prompt_tokens"] if credit and credit["charged_prompt_tokens"] is not None else settled_usage["billable_input_tokens"]
+            charged_completion = credit["completion_tokens"] if credit and credit["completion_tokens"] is not None else settled_usage["billable_output_tokens"]
+            if (charged_prompt != usage["prompt_tokens"] or
+                    charged_completion != usage["completion_tokens"]):
+                reasons.append("gateway_coordinator_usage_mismatch")
+            elif (charged_prompt > settled_usage["billable_input_tokens"] or
+                  charged_completion > settled_usage["billable_output_tokens"]):
                 reasons.append("gateway_coordinator_usage_mismatch")
         if verdict:
             if route and verdict["route_snapshot_digest"] != route["route_snapshot_digest"]:

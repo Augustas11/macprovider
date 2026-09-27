@@ -26,7 +26,8 @@ class BenchmarkEvidenceTests(unittest.TestCase):
             CREATE TABLE ledger_request_credits (id INTEGER PRIMARY KEY, request_id TEXT,
                 attempt_n INTEGER, provider_id TEXT, provider_assigned_id TEXT, provider_credits INTEGER,
                 quarantine_reason TEXT, quarantined INTEGER,
-                settlement_policy_mode TEXT, settlement_account_scope_hash TEXT);
+                settlement_policy_mode TEXT, settlement_account_scope_hash TEXT,
+                charged_prompt_tokens INTEGER, completion_tokens INTEGER);
             CREATE TABLE settlement_route_snapshots (account_scope TEXT, request_id TEXT, attempt_n INTEGER,
                 provider_id TEXT, pending_deadline_seconds INTEGER, request_start_ts_unix_ms INTEGER,
                 route_snapshot_digest TEXT, provider_reported_model_hash TEXT, expected_catalog_model_hash TEXT,
@@ -61,7 +62,7 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         account_scope, receipt_scope = classifier.evidence_scopes("acct")
         self.coord.execute("INSERT INTO request_log(request_id, attempt_n, ts_utc, status, provider_assigned_id, provider_header, account_id, external_request_id, model) VALUES (?, 0, ?, 200, 'assigned', 'provider', 'acct', 'external', 'model')",
                            ("internal", when.isoformat()))
-        self.coord.execute("INSERT INTO ledger_request_credits VALUES (1, 'internal', 0, 'provider', 'assigned', 5, NULL, 0, 'enforce', ?)", (receipt_scope,))
+        self.coord.execute("INSERT INTO ledger_request_credits VALUES (1, 'internal', 0, 'provider', 'assigned', 5, NULL, 0, 'enforce', ?, 10, 5)", (receipt_scope,))
         self.coord.execute("INSERT INTO settlement_route_snapshots VALUES (?, ?, 0, 'provider', 300, ?, ?, ?, ?, 'model', 'hash_verified')",
                            (account_scope, "internal", int(when.timestamp() * 1000), "a" * 64, "b" * 64, "b" * 64))
         self.coord.execute("INSERT INTO settlement_attempt_outputs VALUES (?, ?, 0, 'provider', 'normal_done', ?)",
@@ -87,7 +88,7 @@ class BenchmarkEvidenceTests(unittest.TestCase):
 
     def test_second_provider_credit_cannot_be_ignored(self):
         _, receipt_scope = classifier.evidence_scopes("acct")
-        self.coord.execute("INSERT INTO ledger_request_credits VALUES (2, 'internal', 0, 'other-provider', 'assigned', 5, NULL, 0, 'enforce', ?)", (receipt_scope,))
+        self.coord.execute("INSERT INTO ledger_request_credits VALUES (2, 'internal', 0, 'other-provider', 'assigned', 5, NULL, 0, 'enforce', ?, 10, 5)", (receipt_scope,))
         result = self.result()
         self.assertEqual(result["classification"], "incomplete")
         self.assertIn("multiple_provider_credits", result["missing"])
@@ -178,6 +179,35 @@ class BenchmarkEvidenceTests(unittest.TestCase):
         result = self.result()
         self.assertEqual(result["classification"], "incomplete")
         self.assertIn("route_snapshot_model_unverified", result["missing"])
+
+    def test_bounded_prompt_charge_is_complete(self):
+        # SPEC-022 prompt-token upper bound: the provider observed 10 prompt tokens
+        # but the coordinator's independent estimate clamped the charge to 8, so the
+        # gateway billed 8 and the ledger charged 8, while the settlement output keeps
+        # billable_input == observed_input (10) as SPEC-022 requires for normal_done.
+        # This is the designed bounded charge, not a mismatch — evidence is complete.
+        self.coord.execute("UPDATE ledger_request_credits SET charged_prompt_tokens=8")
+        self.gateway.execute("UPDATE usage_events SET prompt_tokens=8")
+        self.gateway.execute("UPDATE quota_reservations SET settled_tokens=13")
+        self.assertEqual(self.result()["classification"], "complete")
+
+    def test_gateway_billed_prompt_must_equal_charged(self):
+        # The ledger charged the bounded 8 but the gateway billed the full 10:
+        # the gateway did not bill the coordinator's charged amount, a real mismatch.
+        self.coord.execute("UPDATE ledger_request_credits SET charged_prompt_tokens=8")
+        result = self.result()
+        self.assertEqual(result["classification"], "incomplete")
+        self.assertIn("gateway_coordinator_usage_mismatch", result["missing"])
+
+    def test_charge_exceeding_observed_is_flagged(self):
+        # A charge (12) above the provider-observed settlement usage (10) can never
+        # be legitimate even when the gateway billed the same inflated amount.
+        self.coord.execute("UPDATE ledger_request_credits SET charged_prompt_tokens=12")
+        self.gateway.execute("UPDATE usage_events SET prompt_tokens=12")
+        self.gateway.execute("UPDATE quota_reservations SET settled_tokens=17")
+        result = self.result()
+        self.assertEqual(result["classification"], "incomplete")
+        self.assertIn("gateway_coordinator_usage_mismatch", result["missing"])
 
 
 if __name__ == "__main__":
