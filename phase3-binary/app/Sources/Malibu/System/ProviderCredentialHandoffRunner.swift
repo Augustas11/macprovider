@@ -1062,6 +1062,8 @@ enum ProviderCredentialHandoffRunner {
         arguments: [String],
         timeout: TimeInterval = 15,
         outputLimit: Int = 64 * 1024,
+        outputDrainGrace: TimeInterval = 2,
+        onOutputDrainFinished: (@Sendable () -> Void)? = nil,
         validateProcess: (@Sendable (pid_t) throws -> Void)? = nil
     ) async throws -> CapturedCommandResult {
         try Task.checkCancellation()
@@ -1071,6 +1073,7 @@ enum ProviderCredentialHandoffRunner {
                 let process = Process()
                 let completion = CapturedProcessCompletion(continuation)
                 let stdout = Pipe()
+                let reader = stdout.fileHandleForReading
                 let output = BoundedOutputBuffer(limit: outputLimit)
 
                 process.executableURL = executableURL
@@ -1081,31 +1084,63 @@ enum ProviderCredentialHandoffRunner {
                     "HOME": NSHomeDirectory(),
                     "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
                 ]
-                stdout.fileHandleForReading.readabilityHandler = { handle in
-                    let chunk = handle.availableData
-                    if !chunk.isEmpty { output.append(chunk) }
-                }
+                // A single reader drains stdout to EOF; the termination handler
+                // snapshots only after it finishes. Reading from the termination
+                // handler raced an in-flight readabilityHandler chunk and could
+                // return empty output for fast children.
+                let readerDone = DispatchGroup()
+                let drainCompletionQueue = DispatchQueue(
+                    label: "tech.malibu.provider-credential-handoff.stdout-drain",
+                    qos: .utility
+                )
                 process.terminationHandler = { terminated in
-                    stdout.fileHandleForReading.readabilityHandler = nil
-                    output.append(stdout.fileHandleForReading.readDataToEndOfFile())
-                    let snapshot = output.snapshot()
-                    guard !snapshot.overflowed else {
-                        completion.finish(.failure(Error.invalidOutput("output exceeds configured limit")))
-                        return
-                    }
-                    completion.finishProcessExit(
-                        CapturedCommandResult(
-                            exitCode: terminated.terminationStatus,
-                            standardOutput: snapshot.data
+                    let status = terminated.terminationStatus
+                    readerDone.notify(queue: drainCompletionQueue) {
+                        let snapshot = output.snapshot()
+                        guard !snapshot.overflowed else {
+                            completion.finish(.failure(Error.invalidOutput("output exceeds configured limit")))
+                            return
+                        }
+                        completion.finishProcessExit(
+                            CapturedCommandResult(
+                                exitCode: status,
+                                standardOutput: snapshot.data
+                            )
                         )
-                    )
+                    }
+                    // A descendant that inherited stdout can hold the pipe open
+                    // past the child's exit; bound the drain so the call still
+                    // resolves. Closing the read end also releases the blocked
+                    // utility worker instead of leaving it alive with the pipe.
+                    // Serializing this with the EOF notification prevents a
+                    // completed read from being rejected at the grace boundary.
+                    drainCompletionQueue.asyncAfter(deadline: .now() + outputDrainGrace) {
+                        _ = completion.beginFailure(
+                            Error.invalidOutput("output stream stayed open after exit")
+                        )
+                        try? reader.close()
+                    }
                 }
+                // Entered before launch so the termination handler can never
+                // observe an empty group; left on the launch-failure path.
+                readerDone.enter()
                 do {
                     try process.run()
                 } catch {
-                    stdout.fileHandleForReading.readabilityHandler = nil
+                    try? reader.close()
+                    readerDone.leave()
                     completion.finish(.failure(Error.launchFailed(error.localizedDescription)))
                     return
+                }
+                DispatchQueue.global(qos: .utility).async {
+                    // Keep draining past the limit so the child never blocks on
+                    // a full pipe; the buffer records the overflow.
+                    while let chunk = try? reader.read(upToCount: 16 * 1024), !chunk.isEmpty {
+                        output.append(chunk)
+                    }
+                    try? reader.close()
+                    onOutputDrainFinished?()
+                    readerDone.leave()
                 }
                 if let validateProcess {
                     do {
