@@ -24,6 +24,7 @@ CREATE TABLE request_log (id INTEGER PRIMARY KEY, request_id TEXT, attempt_n INT
     account_id TEXT, external_request_id TEXT, model TEXT);
 CREATE TABLE ledger_request_credits (id INTEGER PRIMARY KEY, request_id TEXT, attempt_n INTEGER,
     provider_id TEXT, provider_assigned_id TEXT, model TEXT, prompt_tokens INTEGER,
+    charged_prompt_tokens INTEGER,
     cached_prompt_tokens INTEGER, completion_tokens INTEGER, usage_source TEXT, fault_flag TEXT,
     prompt_rate_per_mtok INTEGER, completion_rate_per_mtok INTEGER, global_multiplier_ppm INTEGER,
     gross_credits INTEGER, provider_share_bps INTEGER, provider_credits INTEGER,
@@ -82,12 +83,12 @@ def seed(coordinator, gateway, account_id, rows, now):
         quarantined = row["state"] == "quarantined"
         coordinator.execute(
             "INSERT INTO ledger_request_credits(request_id, attempt_n, provider_id, provider_assigned_id, model,"
-            " prompt_tokens, cached_prompt_tokens, completion_tokens, usage_source, fault_flag,"
+            " prompt_tokens, charged_prompt_tokens, cached_prompt_tokens, completion_tokens, usage_source, fault_flag,"
             " prompt_rate_per_mtok, completion_rate_per_mtok, global_multiplier_ppm, gross_credits,"
             " provider_share_bps, provider_credits, quarantine_reason, quarantined, settlement_policy_mode,"
-            " settlement_account_scope_hash) VALUES (?, 0, ?, ?, ?, ?, ?, ?, 'provider_reported', 'none',"
+            " settlement_account_scope_hash) VALUES (?, 0, ?, ?, ?, ?, ?, ?, ?, 'provider_reported', 'none',"
             " ?, ?, ?, ?, ?, ?, ?, ?, 'enforce', ?)",
-            (internal, provider, assigned, row["model"], row["prompt_tokens"], row["cached_prompt_tokens"],
+            (internal, provider, assigned, row["model"], row["prompt_tokens"], row["prompt_tokens"], row["cached_prompt_tokens"],
              row["completion_tokens"], row["prompt_rate_per_mtok"], row["completion_rate_per_mtok"],
              row["global_multiplier_ppm"], row["gross_credits"], row["provider_share_bps"],
              row["provider_credits"], "ambiguous_cache" if quarantined else None, int(quarantined), receipt_scope))
@@ -259,7 +260,7 @@ class RevenueCalculatorFixtureTests(unittest.TestCase):
         self.assertEqual(self.candidate(report, "incumbent-qwen-coder")["provider_credits"], 2509 - 92)
 
     def test_ledger_tokens_must_match_gateway_usage(self):
-        self.coord.execute("UPDATE ledger_request_credits SET completion_tokens=completion_tokens+1 WHERE request_id='int-0-00'")
+        self.coord.execute("UPDATE ledger_request_credits SET prompt_tokens=prompt_tokens+1 WHERE request_id='int-0-00'")
         incumbent = self.candidate(self.report(), "incumbent-qwen-coder")
         self.assertEqual(incumbent["excluded_rows_by_reason"]["ledger_gateway_usage_mismatch"], 1)
         self.assertEqual(incumbent["provider_credits"], 2509 - 92)
