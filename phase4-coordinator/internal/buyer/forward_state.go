@@ -192,8 +192,7 @@ type forwardState struct {
 	// conversationCacheOnly is true when the request carried
 	// X-MacProvider-Internal-Conv-Cache and no sticky
 	// X-MacProvider-Internal-Conv key. ConversationCache hits on that
-	// path are observed (OpenAI nested cached_tokens) but not
-	// sticky-creditable and MUST NOT quarantine ambiguous_cache.
+	// authenticated path are creditable without activating sticky affinity.
 	conversationCacheOnly bool
 
 	// declaredFunctionNames is the buyer-declared tools[] function.name set.

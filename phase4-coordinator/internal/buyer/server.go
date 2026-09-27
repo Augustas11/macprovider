@@ -9476,7 +9476,7 @@ func effectiveCachedPromptTokensForBuyer(cachedPromptTokens, promptTokens *int64
 		return 0
 	}
 	cached := *cachedPromptTokens
-	if cached < 0 || cached > *promptTokens || attemptN > 0 || state == nil || state.stickyResult != "hit" {
+	if cached < 0 || cached > *promptTokens || attemptN > 0 || state == nil || (state.stickyResult != "hit" && !state.conversationCacheOnly) {
 		return 0
 	}
 	return cached
@@ -9512,11 +9512,8 @@ func requestLogCacheRecoveryFields(cachedPromptTokens, promptTokens *int64, stat
 	if attemptN > 0 {
 		return nil, ""
 	}
-	if state == nil || state.stickyResult != "hit" {
+	if state == nil || (state.stickyResult != "hit" && !state.conversationCacheOnly) {
 		if cached == 0 {
-			return nil, ""
-		}
-		if state != nil && state.conversationCacheOnly {
 			return nil, ""
 		}
 		return nil, "ambiguous_cache"

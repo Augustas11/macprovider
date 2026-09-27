@@ -13,8 +13,8 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-002 | Phase 4 Coordinator: Mac Provider Request Router | 1.6.3 | normative | pending | pending: 2 | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
 | SPEC-003 | Open Onboarding: Distribution, Lifecycle & Onboarding UX | 0.12.0 | normative | pending | pending: 5 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
 | SPEC-004 | Smart Router | 0.3.5 | normative | pending | pending corpus migration | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
-| SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.9 | normative | complete | conformant: 2, pending: 11 | [SPEC-005-billing.md](SPEC-005-billing.md) |
-| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.38 | normative | complete | conformant: 2, pending: 14 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
+| SPEC-005 | Billing, Settlement, and Provider Rewards | 0.6.10 | normative | complete | conformant: 2, pending: 12 | [SPEC-005-billing.md](SPEC-005-billing.md) |
+| SPEC-006 | Buyer API Gateway: Mac Provider's first public buyer surface | 0.9.39 | normative | complete | conformant: 2, pending: 15 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
 | SPEC-007 | Internal Operator Protocol Explorer | 0.5.1 | normative | pending | pending corpus migration | [SPEC-007-explorer.md](SPEC-007-explorer.md) |
 | SPEC-008 | Tier-2 Trust Layer | 0.7.0 | normative | pending | pending: 4 | [SPEC-008-tier2.md](SPEC-008-tier2.md) |
 | SPEC-009 | MacProvider Console v2 | 0.1 | normative | pending | pending corpus migration | [SPEC-009-console-v2.md](SPEC-009-console-v2.md) |
@@ -32,7 +32,7 @@ it can no longer drift. Do not hand-edit the table; edit each spec's
 | SPEC-021 | MALIBU rewards emission ledger | 0.4.0 | draft | complete | pending: 10 | [SPEC-021-malibu-emission-ledger.md](SPEC-021-malibu-emission-ledger.md) |
 | SPEC-022 | Verified model settlement | v0.2.4 | draft | complete | conformant: 2, pending: 10 | [SPEC-022-verified-model-settlement.md](SPEC-022-verified-model-settlement.md) |
 | SPEC-023 | Installer-Integrated Autotune Recommend | v0.20.1 | normative | pending | conformant: 2, pending: 19 | [SPEC-023-installer-autotune-recommend.md](SPEC-023-installer-autotune-recommend.md) |
-| SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.6 | normative | pending | pending: 2 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
+| SPEC-024 | Prefix-cache billing and provider-local cache isolation | 0.2.7 | normative | pending | pending: 3 | [SPEC-024-prefix-cache-billing.md](SPEC-024-prefix-cache-billing.md) |
 | SPEC-025 | Native Mac App (signed `.dmg` + menu bar wrapper) | v0.29 | draft | pending | pending corpus migration | [SPEC-025-native-mac-app.md](SPEC-025-native-mac-app.md) |
 | SPEC-026 | Browserless Provider Onboarding (one-click Launch Provider) | v0.29 | draft | pending | pending corpus migration | [SPEC-026-browserless-provider-onboarding.md](SPEC-026-browserless-provider-onboarding.md) |
 | SPEC-027 | Provider Proof of Ownership for App-Track Wallet Changes | v0.1 | draft | pending | pending corpus migration | [SPEC-027-provider-proof-of-ownership.md](SPEC-027-provider-proof-of-ownership.md) |

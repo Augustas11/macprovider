@@ -3698,7 +3698,7 @@ func TestNonStreamingBillingQuarantinesPositiveCachedPromptTokensWithoutStickyHi
 	}
 }
 
-func TestNonStreamingBillingSurfacesObservedCachedTokensOnAutoPrefixWithoutQuarantine(t *testing.T) {
+func TestNonStreamingBillingCreditsAutoPrefixCachedTokens(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":"auto-prefix","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":10,"cached_prompt_tokens":4,"completion_tokens":2,"total_tokens":12}}`))
@@ -3739,17 +3739,17 @@ func TestNonStreamingBillingSurfacesObservedCachedTokensOnAutoPrefixWithoutQuara
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	assertResponseCachedPromptTokens(t, rr.Body.Bytes(), 0)
+	assertResponseCachedPromptTokens(t, rr.Body.Bytes(), 4)
 	assertResponseObservedCachedTokens(t, rr.Body.Bytes(), 4)
 	row := queryLatestBillingRow(t, dbPath)
-	if row.CachedPromptTokens.Valid {
-		t.Fatalf("ledger cached_prompt_tokens=%#v want NULL", row.CachedPromptTokens)
+	if !row.CachedPromptTokens.Valid || row.CachedPromptTokens.Int64 != 4 {
+		t.Fatalf("ledger cached_prompt_tokens=%#v want 4", row.CachedPromptTokens)
 	}
 	if row.Quarantined != 0 || row.QuarantineReason.Valid {
 		t.Fatalf("quarantine=%d reason=%#v want clean auto-prefix re-price", row.Quarantined, row.QuarantineReason)
 	}
-	if row.GrossCredits != 14 {
-		t.Fatalf("gross_credits=%d want 14 (full prompt rate, not cache discount, not zero)", row.GrossCredits)
+	if row.GrossCredits != 11 {
+		t.Fatalf("gross_credits=%d want 11 (6 uncached + 4 cached at 25%% + 2 completion at 2x)", row.GrossCredits)
 	}
 }
 

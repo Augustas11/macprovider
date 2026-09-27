@@ -1,7 +1,11 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.6.9 (2026-09-24, MoneyTable-A price changes as one reversible signed transaction; per-generation wholesale pricing)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.36, SPEC-024 v0.2.3 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+**Version:** 0.6.10 (2026-09-27, auto-prefix cache-hit billing)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.5.6, SPEC-003 v0.7, SPEC-004 v0.3.2, SPEC-006 v0.9.39, SPEC-024 v0.2.7 (prefix-cache cache-isolation; its billing sections are superseded by this spec). Lockstep with SPEC-023 v0.18.0 / SPEC-005-R011 / SPEC-005-R013 (SPEC-023-R019) is recorded in prose, not as a CONFORMANCE `depends_on` edge (avoids a cycle through SPEC-017/SPEC-047).
+
+**Change log v0.6.10 (2026-09-27, issue #1768 — auto-prefix cache-hit billing):**
+- §5.3.1 accepts a valid first-attempt provider `cached_prompt_tokens` report on an authenticated conversation-cache-only auto-prefix request as creditable reuse. The row keeps the cached count, applies the configured cache-hit rate, and exposes the same count in the flat buyer field. This supersedes v0.6.8's full-prompt-rate carve-out for that request class without enabling sticky routing.
+- A positive non-hit report without the authenticated cache-only marker still quarantines `ambiguous_cache`; invalid values and retries retain their existing gates. Registers `SPEC-005-R014`.
 
 **Change log v0.6.9 (2026-09-24, issue #1693 — MoneyTable-A pricing corrections without a runtime release):**
 - §5.6 registers `SPEC-005-R013`: the money invariants I1–I5 for a MoneyTable-A price change. At runtime the request money table changes only through one SIGHUP that applies a verified signed `rate-card.json` together with base-yaml `rewards.rate_card` rows that match it byte-for-byte under SPEC-023 §3.3.1; the request table and the coordinator-served signed card switch in one critical section (I2); `usd_per_million_credits`, `rewards.provider_share`, and `rewards.global_multiplier` stay runtime-lane; rollback is the same transaction reversed; history is never re-priced. The operator lane that performs the change is SPEC-023-R019.
@@ -45,7 +49,7 @@
 
 ## Preliminary conformance unit IDs
 
-SPEC-005 v0.6.9 registers `SPEC-005-R001`..`SPEC-005-R013` in
+SPEC-005 v0.6.10 registers `SPEC-005-R001`..`SPEC-005-R014` in
 `specs/CONFORMANCE.json`. R001–R003 remain the paid-path formula, hot-path,
 and crash-recovery units. R004–R009 group additional existing obligation
 areas without changing them. R010 is the D1a wholesale statement unit.
@@ -72,14 +76,18 @@ invariant unit:
 - `SPEC-005-R011` — MoneyTable-A then MoneyTable-B: signed feed authors
   per-model rates; yaml is a parity copy until `RateFor` reads signed
   bytes (§5.6, D3 storage/authoring).
-- `SPEC-005-R012` — auto-prefix conversation-cache positive cache reports are
-  re-priced at the full prompt rate, not quarantined (§5.3.1 gate 4).
+- `SPEC-005-R012` — historical v0.6.8 auto-prefix carve-out: conversation-cache
+  positive reports were re-priced at the full prompt rate instead of quarantined
+  (§5.3.1 gate 4); superseded for valid first-attempt reports by R014.
 - `SPEC-005-R013` — MoneyTable-A price-change invariants I1–I5: runtime table
   change only via one SIGHUP applying a signed card plus byte-matching yaml
   rows, one-step publication of table and served card, runtime-lane globals,
   reversible transaction, per-generation history (§5.6, §11.7, §13.2).
+- `SPEC-005-R014` — authenticated conversation-cache-only auto-prefix hits keep
+  valid first-attempt cached tokens and earn the configured cache-hit rate without
+  enabling sticky routing (§5.3.1 gate 4).
 
-`requirement_id_migration` is `complete`. R004–R013 are not promoted from
+`requirement_id_migration` is `complete`. R004–R014 are not promoted from
 this close. Signed journey-result evidence is still required before any of
 those rows can become conformant.
 
@@ -1327,21 +1335,22 @@ applied in order:
    and credits are **zeroed** (`quarantined = 1`, no payable credit).
 3. **Retry** (`attempt_n > 0`) — `cached` is cleared (set NULL); the row is priced **fully at the
    prompt rate** (cache reuse is trusted only on the first attempt). Not quarantined.
-4. **Non-sticky-hit route** (`sticky_result != "hit"`): a **positive** `cached` is **quarantined**
-   with `quarantine_reason = 'ambiguous_cache'` and credits **zeroed**, **except** on a
-   conversation-cache-only auto-prefix request (coordinator saw
-   `X-MacProvider-Internal-Conv-Cache` and no sticky `X-MacProvider-Internal-Conv`): that
-   positive `cached` is **cleared** like a retry (full prompt rate, not quarantined). A zero
-   `cached` is simply cleared (no discount, not quarantined). Cache **discount** is trusted only
-   on a sticky **hit**.
-5. **Sticky hit, first attempt, valid** — `cached` is kept and the §5.3 cache split applies (the
-   discount is earned).
+4. **Authenticated conversation-cache-only auto-prefix route** (coordinator saw
+   `X-MacProvider-Internal-Conv-Cache` and no sticky `X-MacProvider-Internal-Conv`) — valid
+   `cached` is kept and the §5.3 cache split applies. The trusted gateway derived this key from
+   the authenticated account and request prefix; sticky affinity is not required for the provider's
+   first-attempt report of reuse under that key.
+5. **Other non-sticky-hit route** (`sticky_result != "hit"`): a **positive** `cached` is
+   **quarantined** with `quarantine_reason = 'ambiguous_cache'` and credits **zeroed**. A zero
+   `cached` is simply cleared (no discount, not quarantined).
+6. **Sticky hit, first attempt, valid** — `cached` is kept and the §5.3 cache split applies.
 
-So the cache discount is earned **only** on a `sticky_result = "hit"`, `attempt_n = 0`, valid-`cached`
-row; every other case is either priced at the full prompt rate or **quarantined to zero payable
-credit** — never a partial/ambiguous discount. This is the SPEC-024 §14 (FR-CI11/CI11a/CI12/CI13)
-coordinator cross-check, now normative here. (A `cached_prompt_tokens > prompt_tokens` value is
-additionally rejected by the DB CHECK, §4.3.)
+So the cache discount is earned on an `attempt_n = 0`, valid-`cached` row with either
+`sticky_result = "hit"` or the authenticated conversation-cache-only marker. Every other case is
+priced at the full prompt rate or **quarantined to zero payable credit** — never a
+partial/ambiguous discount. This is the SPEC-024 §14 (FR-CI11/CI11a/CI12/CI13) coordinator
+cross-check, now normative here. (A `cached_prompt_tokens > prompt_tokens` value is additionally
+rejected by the DB CHECK, §4.3.)
 
 **Cache-hit-rate ceiling (config-validated).** `prompt_cache_hit_credits_per_mtok` MUST satisfy
 `0 <= prompt_cache_hit_credits_per_mtok <= prompt_credits_per_mtok` for every rate-card row,
@@ -3398,7 +3407,7 @@ PARTIAL — credit-arm pending v0.5.
 
 - Type: INTEGER.
 - Constraint: NULL CHECK(cached_prompt_tokens IS NULL OR (cached_prompt_tokens >= 0 AND cached_prompt_tokens <= prompt_tokens)).
-- Meaning: prefix-cache-reused prompt tokens (SPEC-024); priced at the cache-hit rate (§5.3) only on an eligible sticky-hit first-attempt row (§5.3.1).
+- Meaning: prefix-cache-reused prompt tokens (SPEC-024); priced at the cache-hit rate (§5.3) only on an eligible first-attempt sticky-hit or authenticated auto-prefix cache row (§5.3.1).
 - Update rule: insert only.
 - Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
 

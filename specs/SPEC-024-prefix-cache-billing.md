@@ -1,8 +1,17 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.6 (2026-09-24, batched cached-turn parity)
+**Version:** 0.2.7 (2026-09-27, auto-prefix cache-hit billing)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
-**Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.8 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.30 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+**Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.10 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.39 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+
+**Change log v0.2.7 (2026-09-27, issue #1768 — auto-prefix cache-hit billing):**
+- **SPEC-024-R003 / §3 / §8 / §14.** A valid first-attempt provider cache report is creditable
+  when the coordinator received either a sticky key with `sticky_result == "hit"` or the trusted
+  gateway's authenticated `X-MacProvider-Internal-Conv-Cache` auto-prefix marker. The latter stays
+  non-sticky; it no longer needs to be discarded merely because routing recorded `no_key`.
+- Flat and nested buyer fields both expose the accepted auto-prefix cached count, and the ledger
+  prices it at the cache-hit rate. Invalid values, retries, and positive unmarked non-hit reports
+  retain their existing range/retry/quarantine gates.
 
 **Change log v0.2.6 (2026-09-24, batched cached-turn parity):**
 - **§8 / FR-CI2.** A cached turn batched under SPEC-038 v0.2.8
@@ -116,7 +125,7 @@ SPEC-024 (v0.1) specified the billing treatment for provider-reported prefix-cac
 
 - KV-cache implementation **internals** on the provider are out of scope. SPEC-024 defines the reported `cached_prompt_tokens` semantics and (v0.2, §11) the **observable cache-key/reuse invariant**; the mlx-swift cache pinning, materialization, and eviction *mechanism* between `generate()` calls remain IMPL concerns and SPEC-024 MUST NOT prescribe internal mlx APIs. (v0.2 pins the *behavior* — what may be reused for which key — not the mechanism.)
 - ~~Cache-hit fraud detection algorithms are out of scope. Section 7 defines the v0.1 fraud model and defers cross-checked coordinator verification to v0.2.~~ **(v0.2: resolved.)** Coordinator cross-checking of `cached_prompt_tokens` is now in scope — §14. Specific ML-based anomaly-scoring *algorithms* remain out of scope; §14 pins only the deterministic route/attribution gates the coordinator already applies.
-- Cross-provider KV-cache handoff is out of scope. A request that does not route through a sticky hit earns **no** cache discount — but this is the **coordinator's** billing-eligibility decision, **not** a provider wire obligation: the provider reports its *actual* reuse (FR-CI3) without seeing `sticky_result`, so a positive non-hit report is legitimate-but-non-creditable and is **quarantined** `ambiguous_cache` (shipped credit effect — whole-row-zero or recovery flag-only — is canonical in SPEC-005 §2.7 / §5.3.1), not a wire violation (§3 layering / FR-CI11).
+- Cross-provider KV-cache handoff is out of scope. A request earns the cache discount only through a sticky hit or an authenticated conversation-cache-only auto-prefix marker. Any other positive non-hit report is legitimate-but-non-creditable and is **quarantined** `ambiguous_cache` (shipped credit effect — whole-row-zero or recovery flag-only — is canonical in SPEC-005 §2.7 / §5.3.1), not a provider wire violation (§3 layering / FR-CI11).
 - **Tool-call replies (reconciled to shipped billing, v0.2).** The v0.1 draft said prefix-cache reuse for tool-call replies was "out of scope" and that accounting was "restricted to system, user, and assistant message-content prefixes." **That is NOT what shipped, and v0.2 supersedes it.** The provider renders tool messages and assistant tool-call content into the prompt (`ToolPromptRenderer`, `ModelRuntime.swift`), that full rendered prompt (`prompt_token_ids ‖ generated_token_ids`) is tokenized and cached (§11 FR-CI3), and the coordinator prices the **entire undifferentiated `cached_prompt_tokens` aggregate at the cache-hit rate with no message-type/role segmentation** (`phase4-coordinator/internal/billing/formula.go`). So tool-history tokens **do** participate in the cache LCP **and do** receive the discount. There is no shipped role filter; v0.1's "tool-call replies out of scope" is retired. (Out-of-scope items below are the ones that remain genuinely excluded.)
 - Buyer-side cache-hint headers are out of scope. Buyers MUST NOT send `X-MacProvider-Expect-Cached-Prefix` or an equivalent v0.1 hint. Providers are the source of truth for actual cache reuse; buyers observe `usage.cached_prompt_tokens`.
 - Rate-card hot reload for the new field is out of scope. SPEC-005 Wave 0/1 work continues to govern hot-reload semantics. v0.1 IMPL MAY require coordinator restart to activate `prompt_cache_hit_rate_per_mtok`.
@@ -145,10 +154,10 @@ Providers MAY report `cached_prompt_tokens` inside the standard completion-side 
 
 - `0 <= cached_prompt_tokens <= prompt_tokens`.
 - Field absence is legal and has an effective cache value of `0` for arithmetic and buyer response shaping. Ledger storage still preserves absence as `NULL` per Section 4.
-- **Layering (v0.2, explicit).** `cached_prompt_tokens` is a **provider-reported** count of the KV reuse the provider actually performed (FR-CI3); the provider reports it **without** knowledge of the coordinator-internal `sticky_result` (SPEC-004 exposes only `conversation_key` to the provider, not the sticky outcome). `sticky_result` is **coordinator** routing state. The two rules below are therefore **coordinator-side billing-eligibility normalization**, not provider wire obligations — a positive provider report on a non-hit route is **legitimate** (see FR-CI10a: post-deletion normal selection can return to the same provider under the deterministic key and genuinely reuse KV), just **non-creditable**.
+- **Layering (v0.2, explicit; v0.2.7 auto-prefix extension).** `cached_prompt_tokens` is a **provider-reported** count of the KV reuse the provider actually performed (FR-CI3); the provider reports it **without** knowledge of the coordinator-internal `sticky_result` (SPEC-004 exposes only `conversation_key` to the provider, not the sticky outcome). `sticky_result` and the authenticated cache-only marker are **coordinator** routing state. The rules below are therefore **coordinator-side billing-eligibility normalization**, not provider wire obligations — a positive provider report on an unmarked non-hit route is **legitimate** (see FR-CI10a: post-deletion normal selection can return to the same provider under the deterministic key and genuinely reuse KV), just **non-creditable**.
 - When `sticky_result = "hit"`, a positive provider-reported `cached_prompt_tokens` is **creditable** (discounted).
-- When `sticky_result != "hit"` (`miss`, `disabled`, `no_key`, `evicted`, or other non-hit values), the coordinator MUST treat `cached_prompt_tokens` as `0` for **credit/billing and the flat buyer field**, **regardless of any positive raw value the provider reported** — the reuse is non-creditable because its provenance is not sticky-attributable. **(v0.2.3:)** OpenAI nested `usage.prompt_tokens_details.cached_tokens` MAY still report the provider's observed reuse on a conversation-cache-only auto-prefix request (see §8).
-- A positive provider-reported `cached_prompt_tokens` on a non-hit route MUST quarantine the ledger write with `quarantined=1`, `quarantine_reason='ambiguous_cache'`, `cached_prompt_tokens=NULL`, and the `usage_source` value that would have applied absent the ambiguous-provenance normalization (`provider_reported` or `byte_estimated`), **except** on a conversation-cache-only auto-prefix request (`X-MacProvider-Internal-Conv-Cache` present and no sticky `X-MacProvider-Internal-Conv` key): that row MUST clear `cached_prompt_tokens` (full prompt-rate pricing) and MUST NOT quarantine. The exception exists so expected ConversationCache hits do not whole-row-zero payable credits. A sticky-miss or keyless positive report keeps `ambiguous_cache`. **This quarantine is a billing-eligibility decision (ambiguous provenance), not an assertion that the provider misreported** — the provider correctly reported actual reuse it could not attribute to a sticky outcome.
+- When the request carried the trusted gateway's authenticated `X-MacProvider-Internal-Conv-Cache` marker and no sticky key, a valid first-attempt provider-reported `cached_prompt_tokens` is also **creditable**. The marker proves the provider key was account-scoped and gateway-derived; the provider report remains the source of truth for actual reuse. This path does not activate sticky affinity.
+- On every other `sticky_result != "hit"` route (`miss`, `disabled`, `no_key`, `evicted`, or another non-hit value), the coordinator MUST treat `cached_prompt_tokens` as `0` for **credit/billing and the flat buyer field**. A positive report MUST quarantine the ledger write with `quarantined=1`, `quarantine_reason='ambiguous_cache'`, `cached_prompt_tokens=NULL`, and the `usage_source` value that would have applied absent the ambiguous-provenance normalization (`provider_reported` or `byte_estimated`). **This quarantine is a billing-eligibility decision (ambiguous provenance), not an assertion that the provider misreported** — the provider correctly reported actual reuse it could not attribute to an authenticated cache key or sticky outcome.
 - `cached_prompt_tokens > prompt_tokens`, negative `cached_prompt_tokens`, or non-integer `cached_prompt_tokens` is a genuinely **malformed** value (unlike the non-hit case above, which is legitimate-but-non-creditable) and MUST quarantine the ledger write with `quarantined=1`, `quarantine_reason='invalid_cached_prompt_tokens'`, `cached_prompt_tokens=NULL`, and the `usage_source` value that would have applied absent the invalid-value quarantine (`provider_reported` or `byte_estimated`). The row MUST set payable credit fields to 0 and MUST NOT produce provider-creditable credits.
 
 **(Shipped-behavior caveat, v0.2.1 — applies to BOTH quarantine bullets above.)** The "MUST set
@@ -273,7 +282,7 @@ when `prompt_cache_hit_rate_per_mtok <= prompt_rate_per_mtok`. Provider over-rep
 
 Provider under-reporting `cached_prompt_tokens` makes the buyer pay more than the actual cached-prefill economics justify. The gateway records buyer-visible prompt tokens, and buyers can estimate expected cache hits offline from prior-turn prompt and completion growth on sticky-hit conversations. v0.1 MUST log `cached_prompt_tokens = 0` explicitly on sticky-hit billing writes so buyer-side and operator analytics can flag providers with suspiciously low cache-hit rates. **Coordinator-side cross-checking is specified in §14 (v0.2, resolving the v0.1 deferral).**
 
-Provider-reported cached tokens on a non-sticky-hit route are **non-creditable** and MUST be quarantined (`ambiguous_cache`) per Section 3. This is **not** a provider wire-contract violation: the provider reports the actual reuse it performed (FR-CI3) and cannot see the coordinator-internal `sticky_result`, so a positive non-hit report (e.g. the FR-CI10a post-deletion same-provider return under the deterministic key) is legitimate but non-creditable. The shipped coordinator **quarantines** such a row (`ambiguous_cache`; whole-row-zero on the hot-path/receipt paths, flag-only on recovery — canonical: SPEC-005 §2.7 / §5.3.1), rather than merely re-pricing it with `cached = 0`. Either way it is not a revenue-increasing fraud vector, because the cache discount only ever **reduces** payable credits (§5 ceiling `0 <= cache_hit_rate <= prompt_rate`).
+Provider-reported cached tokens on an unmarked non-sticky-hit route are **non-creditable** and MUST be quarantined (`ambiguous_cache`) per Section 3. An authenticated conversation-cache-only auto-prefix request is the explicit exception. This is **not** a provider wire-contract violation: the provider reports the actual reuse it performed (FR-CI3) and cannot see the coordinator-internal route classification, so an unmarked positive non-hit report (e.g. the FR-CI10a post-deletion same-provider return under the deterministic key) is legitimate but non-creditable. The shipped coordinator **quarantines** such a row (`ambiguous_cache`; whole-row-zero on the hot-path/receipt paths, flag-only on recovery — canonical: SPEC-005 §2.7 / §5.3.1), rather than merely re-pricing it with `cached = 0`. Either way it is not a revenue-increasing fraud vector, because the cache discount only ever **reduces** payable credits (§5 ceiling `0 <= cache_hit_rate <= prompt_rate`).
 
 **Cross-account cache collision (v0.2, §11–§13).** The provider-local cache is keyed only on `conversation_key` (§11); it has no account dimension. If two distinct buyers could ever present the **same** `conversation_key` to the same provider process, buyer B would obtain KV reuse — and a positive, buyer-visible `cached_prompt_tokens` — against buyer A's cached prefix. That is simultaneously (a) a **confidentiality** leak (a prefix-content + TTFT oracle, §13) and (b) a **billing-attribution** fault (a cache-hit discount priced against another account's work). This vector is closed **not at the provider** but by the §12 invariant that `conversation_key` is unforgeable and account-scoped before it reaches the provider or the coordinator sticky map; §7's provider-report analysis assumes that invariant holds.
 
@@ -293,12 +302,12 @@ The buyer-visible chat-completions usage object carries two cache counts:
 }
 ```
 
-- **Flat `cached_prompt_tokens`** is the billing-aligned SPEC-024 v0.1 field. It MUST equal `effective_cached_prompt_tokens` used for ledger arithmetic (sticky-hit first-attempt only; otherwise `0`).
-- **Nested `prompt_tokens_details.cached_tokens`** is the OpenAI Chat Completions field. It MUST report **observed** provider reuse on a valid first-attempt report: sticky-hit creditable reuse, **or** conversation-cache-only auto-prefix reuse (SPEC-006-R012). Invalid values, retries (`attempt_n > 0`), and `ambiguous_cache` quarantined reports MUST surface `0`.
+- **Flat `cached_prompt_tokens`** is the billing-aligned SPEC-024 v0.1 field. It MUST equal `effective_cached_prompt_tokens` used for ledger arithmetic: a valid first-attempt sticky hit or authenticated conversation-cache-only auto-prefix hit; otherwise `0`.
+- **Nested `prompt_tokens_details.cached_tokens`** is the OpenAI Chat Completions field. It MUST report **observed** provider reuse on the same accepted first-attempt reports: sticky-hit reuse or authenticated conversation-cache-only auto-prefix reuse (SPEC-006-R012). Invalid values, retries (`attempt_n > 0`), and `ambiguous_cache` quarantined reports MUST surface `0`.
 
 **(v0.2.6)** A cached turn served by the SPEC-038 continuous-batching scheduler (v0.2.8 `continuous_batching_cached_turns`) MUST report the same provider `cached_prompt_tokens` as the serial path would for the same hit, including the checkpoint length `C` for a hybrid FR-CI2 checkpoint hit.
 
-SPEC-024 v0.1 locked a flat-only shape. v0.2.3 adds the nested OpenAI field so clients that read `prompt_tokens_details.cached_tokens` (Pi `cacheRead`) can see ConversationCache hits without enabling sticky routing or changing the cache-hit **discount** gate.
+SPEC-024 v0.1 locked a flat-only shape. v0.2.3 added the nested OpenAI field so clients that read `prompt_tokens_details.cached_tokens` (Pi `cacheRead`) could see ConversationCache hits without enabling sticky routing. v0.2.7 aligns the flat field and cache-hit discount with that authenticated auto-prefix observation.
 
 The nested field MUST be present on every completion response emitted by a SPEC-024-aware gateway (streaming terminal usage chunk included). Responses API `input_tokens_details.cached_tokens` already mirrors the billed count and MUST use the same observed value as chat-completions `prompt_tokens_details.cached_tokens`.
 
@@ -542,10 +551,11 @@ This section resolves the v0.1 §7 deferral with the **deterministic** gates the
 already applies (`phase4-coordinator/internal/billing/hotpath.go`, `normalizeCachedPromptTokens`);
 ML-based anomaly scoring remains out of scope (§2).
 
-**FR-CI11 (route gate — a billing-eligibility gate, not a wire rule).** A positive
-`cached_prompt_tokens` MUST be accepted for the discounted price only when the request was
-served on a **sticky hit** (`sticky_result == "hit"`). A positive value on any non-hit route
-MUST be quarantined (`ambiguous_cache`). This gate operates on the **coordinator** side: the
+**FR-CI11 (route gate — a billing-eligibility gate, not a wire rule).** A valid first-attempt
+`cached_prompt_tokens` MUST be accepted for the discounted price when the request was served on
+a **sticky hit** (`sticky_result == "hit"`) or carried the trusted gateway's authenticated
+conversation-cache-only auto-prefix marker. A positive value on any other non-hit route MUST be
+quarantined (`ambiguous_cache`). This gate operates on the **coordinator** side: the
 provider reports the actual reuse it performed (FR-CI3) without seeing `sticky_result`, so a
 positive report on a non-hit route (e.g. the FR-CI10a post-deletion same-provider return under
 the deterministic key) is a **legitimate, non-creditable** reuse — not a provider violation.
@@ -574,7 +584,7 @@ against the **final** admitted provider on the slot-queue path before honoring t
 
 **FR-CI12 (range + retry gates).** The coordinator MUST null and flag (`invalid_cached_prompt_tokens`)
 any value `< 0` or `> prompt_tokens`, and MUST null `cached_prompt_tokens` on any retry
-attempt (`attempt_n > 0`) — cache reuse is only trusted on the first, sticky-routed attempt.
+attempt (`attempt_n > 0`) — cache reuse is trusted only on the first eligible sticky-hit or authenticated auto-prefix attempt.
 
 **FR-CI13 (attribution — known shipped gap, MUST close).** The sticky affinity that gates
 FR-CI11 is keyed on the same `conversation_key` as the provider cache, but the shipped sticky
@@ -631,12 +641,13 @@ Prefix-cache reuse MUST NOT be enabled on a path where the conversation key is b
   therefore never share a cache entry or a sticky route.
 - **AC-CI-4 (ingress non-injection).** A buyer-supplied `X-MacProvider-Internal-Conv` header is
   stripped at ingress and never reaches the coordinator sticky map or the provider.
-- **AC-CI-5 (route/retry/range gates).** Three distinct outcomes per §14 / SPEC-005 §5.3.1:
-  (1) a positive `cached_prompt_tokens` on a **non-hit route** is **quarantined** `ambiguous_cache`;
-  (2) a value **out of `[0, prompt_tokens]`** is **quarantined** `invalid_cached_prompt_tokens`;
-  (3) a positive value on a **retry** (`attempt_n > 0`) is **NOT quarantined** — it is **nulled and the
-  row is priced at the full prompt rate** (`hotpath.go`). In all three the cache discount is never
-  applied; for the two quarantine cases the shipped credit effect is path-dependent (canonical:
+- **AC-CI-5 (route/retry/range gates).** Four distinct outcomes per §14 / SPEC-005 §5.3.1:
+  (1) a positive `cached_prompt_tokens` on an authenticated conversation-cache-only first attempt is retained and discounted;
+  (2) a positive `cached_prompt_tokens` on any other **non-hit route** is **quarantined** `ambiguous_cache`;
+  (3) a value **out of `[0, prompt_tokens]`** is **quarantined** `invalid_cached_prompt_tokens`;
+  (4) a positive value on a **retry** (`attempt_n > 0`) is **NOT quarantined** — it is **nulled and the
+  row is priced at the full prompt rate** (`hotpath.go`). Only outcome (1) applies the cache discount;
+  for the two quarantine cases the shipped credit effect is path-dependent (canonical:
   SPEC-005 §2.7).
 - **AC-CI-6 (reuse-equivalence, deterministic).** With **deterministic decoding** (fixed
   sampler + pinned RNG state, e.g. `temperature = 0` or a wired seed), a conversation produces
