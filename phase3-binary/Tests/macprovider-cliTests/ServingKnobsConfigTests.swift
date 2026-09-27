@@ -380,6 +380,53 @@ final class ServingKnobsConfigTests: XCTestCase {
         }
     }
 
+    func testContinuousBatchPrefillTokensPerIterationCLIOverridesEnvironmentOverridesYAML() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(continuousBatchPrefillTokensPerIteration: 4_096),
+            environment: ["MACPROVIDER_CONTINUOUS_BATCH_PREFILL_TOKENS_PER_ITERATION": "3072"],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batch_prefill_tokens_per_iteration: 1024\n" }
+        )
+        XCTAssertEqual(config.continuousBatchPrefillTokensPerIteration, 4_096)
+    }
+
+    func testContinuousBatchPrefillTokensPerIterationEnvironmentOverridesYAML() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_CONTINUOUS_BATCH_PREFILL_TOKENS_PER_ITERATION": "3072"],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batch_prefill_tokens_per_iteration: 1024\n" }
+        )
+        XCTAssertEqual(config.continuousBatchPrefillTokensPerIteration, 3_072)
+    }
+
+    func testContinuousBatchPrefillTokensPerIterationYAMLAppliedAndDefaultsToUnset() throws {
+        let yaml = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "continuous_batch_prefill_tokens_per_iteration: 1024\n" }
+        )
+        XCTAssertEqual(yaml.continuousBatchPrefillTokensPerIteration, 1_024)
+        XCTAssertNil(AppConfig.defaults().continuousBatchPrefillTokensPerIteration)
+    }
+
+    func testContinuousBatchPrefillTokensPerIterationPreflightRejectsOutOfRangeWhateverTheBatchingMode() throws {
+        let maximum = ContinuousBatchSchedulerConfiguration.maximumPrefillTokensPerIteration
+        for mode in [ContinuousBatchingMode.off, .canary] {
+            var config = AppConfig.defaults()
+            config.continuousBatching = mode
+            for invalid in [0, -1, maximum + 1, Int.max] {
+                config.continuousBatchPrefillTokensPerIteration = invalid
+                XCTAssertThrowsError(try ServeCommand.runServingKnobsPreflight(config), "mode=\(mode) value=\(invalid)")
+            }
+            for valid in [1, 2_048, maximum] {
+                config.continuousBatchPrefillTokensPerIteration = valid
+                XCTAssertNoThrow(try ServeCommand.runServingKnobsPreflight(config), "mode=\(mode) value=\(valid)")
+            }
+        }
+    }
+
     func testContinuousBatchingPlainYAMLOnAndOffPreserveRawThreeStateMode() throws {
         for (raw, expected) in [("on", ContinuousBatchingMode.on), ("off", .off)] {
             let config = try ConfigLoader.load(

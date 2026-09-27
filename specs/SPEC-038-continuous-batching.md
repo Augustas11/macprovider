@@ -1,11 +1,12 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.2
+Version: v0.3.3
 Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.3 (2026-09-28, operator-tunable prefill token budget):** The per-iteration prefill token budget of FR-CB2 is now an operator config key, `continuous_batch_prefill_tokens_per_iteration` (env `MACPROVIDER_CONTINUOUS_BATCH_PREFILL_TOKENS_PER_ITERATION`, CLI `--continuous-batch-prefill-tokens-per-iteration`). It caps how many prompt tokens a single scheduler iteration prefills across compatible rows. Unset ⇒ the scheduler default (1024, unchanged). A Studio benchmark (1024 vs 2048 vs 8192 at 1.5k-8k prompts) found this per-iteration total budget NON-BINDING: single-stream large-prompt TTFT is compute-bound (~300 tok/s prefill) and the per-row chunk (`prefill_step_size`) governs per-row prefill, so the total budget does not move TTFT or concurrent-8k admission. The key is therefore exposed for operator tuning/observability, not as a TTFT lever, and the default is left unchanged. Serve startup rejects a value outside `1…65536` whatever the batching mode, mirroring the `continuous_batch_queue_wait_timeout_ms` bound. No wire, receipt, or acceptance-coverage change.
 **Change log v0.3.2 (2026-09-28, final-prefill sampling parity):** FR-CB2
 requires every prompt token to be committed during prefill. Non-final chunks
 remain cache-only; the final chunk evaluates its final-position vocabulary
