@@ -285,7 +285,7 @@ struct DecodeBenchCommand: AsyncParsableCommand {
             // `.tokens` → need one more model call for the remaining token chunk.
             // `.logits` → first-token logits are already available.
             let firstTokenArray: MLXArray
-            switch try context.model.prepare(lmInput, cache: cache, state: nil, windowSize: parameters.prefillStepSize) {
+            switch try context.model.prepare(lmInput, cache: cache, windowSize: parameters.prefillStepSize) {
             case .tokens(let textInput):
                 // Process the remaining prefix tokens to get first-token logits.
                 // `withPreparedCache` is a no-op when sequenceLengths is nil
