@@ -391,6 +391,9 @@ struct NativeMTPPublishedTupleOffer: Sendable, Equatable {
 }
 
 enum NativeMTPRuntimeTupleIdentity {
+    static let schemaVersion = "macprovider.native-mtp-runtime-tuple.v1"
+    static let domain = "macprovider.native-mtp-runtime-tuple.v1\n"
+
     static func sha256(
         nativeMTPAdmissionTupleSHA256: String,
         providerID: String,
@@ -405,12 +408,12 @@ enum NativeMTPRuntimeTupleIdentity {
             "assigned_id": .string(assignedID),
             "native_mtp_admission_tuple_sha256": .string(nativeMTPAdmissionTupleSHA256),
             "provider_id": .string(providerID),
-            "schema_version": .int(1),
+            "schema_version": .string(schemaVersion),
             "served_snapshot_id": .string(servedSnapshotID),
             "target_generation": .int(generation),
         ])
         let canonical = try RFC8785JCS.canonicalString(value)
-        let digest = SHA256.hash(data: Data(canonical.utf8))
+        let digest = SHA256.hash(data: Data((domain + canonical).utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 }
@@ -7711,20 +7714,26 @@ actor ModelRuntime: ModelRuntimeServing {
                 snapshotRoot: snapshotRoot,
                 trustedKeyring: trustedKeyring
             )
-            let tupleSHA256 = try NativeMTPSelfTest.runtimeTupleDigest(selectedChallenge.runtimeTuple)
+            let selfTestRuntimeTuple = try nativeMTPSelfTestRuntimeTuple(
+                admissionCapability: admissionCapability,
+                runningBuildIdentity: runningBuildIdentity,
+                selectedChallenge: selectedChallenge,
+                targetGeneration: targetGeneration
+            )
+            let tupleSHA256 = admissionCapability.tupleSHA256
             let selfTestInput = NativeMTPSelfTestInput(
                 tupleSHA256: tupleSHA256,
                 modelID: admissionCapability.modelID,
                 modelRevision: admissionCapability.modelRevision,
                 familyAdapter: admissionCapability.familyAdapter,
-                proposalDepth: admissionCapability.maxProposalDepth,
+                proposalDepth: selectedChallenge.fixedProposalDepth,
                 challengeBank: admissionCapability.selfTestChallengeBank,
                 selectedChallenge: selectedChallenge,
                 servedSnapshot: NativeMTPSelfTestServedSnapshot(
                     tupleSHA256: tupleSHA256,
-                    runtimeTuple: selectedChallenge.runtimeTuple,
-                    generation: selectedChallenge.servedSnapshotGeneration,
-                    proposalDepth: selectedChallenge.proposalDepth
+                    runtimeTuple: selfTestRuntimeTuple,
+                    generation: targetGeneration,
+                    proposalDepth: selectedChallenge.fixedProposalDepth
                 )
             )
             let selfTestReceipt = try await selfTestRunner.validate(selfTestInput)
@@ -7748,20 +7757,26 @@ actor ModelRuntime: ModelRuntimeServing {
                 throughputDeltaPPM: admissionCapability.throughputDeltaPPM
             )
             let runtimeTuple = NativeMTPPublishedRuntimeTuple(
-                modelID: selectedChallenge.runtimeTuple.modelID,
-                modelHash: selectedChallenge.runtimeTuple.modelHash,
-                modelHashAlgorithm: selectedChallenge.runtimeTuple.modelHashAlgorithm,
+                modelID: selfTestRuntimeTuple.modelID,
+                modelHash: selfTestRuntimeTuple.modelHash,
+                modelHashAlgorithm: selfTestRuntimeTuple.modelHashAlgorithm,
                 providerRevision: admissionCapability.providerRevision,
                 runtimeRevision: admissionCapability.upstreamMLXSwiftLMRevision,
-                tokenizerDigest: selectedChallenge.runtimeTuple.tokenizerDigest,
-                artifactDigest: selectedChallenge.runtimeTuple.artifactDigest,
-                manifestDigest: selectedChallenge.runtimeTuple.manifestDigest,
-                sidecarDigest: selectedChallenge.runtimeTuple.sidecarDigest,
-                providerBinarySHA256: selectedChallenge.runtimeTuple.providerBinarySHA256,
-                runtimeCDHash: selectedChallenge.runtimeTuple.runtimeCDHash,
-                cacheNamespace: selectedChallenge.runtimeTuple.cacheNamespace,
-                stateDigest: selectedChallenge.runtimeTuple.stateDigest,
-                proposalDepth: selectedChallenge.runtimeTuple.proposalDepth
+                tokenizerDigest: selfTestRuntimeTuple.tokenizerDigest,
+                artifactDigest: selfTestRuntimeTuple.artifactDigest,
+                manifestDigest: selfTestRuntimeTuple.manifestDigest,
+                sidecarDigest: selfTestRuntimeTuple.sidecarDigest,
+                providerBinarySHA256: selfTestRuntimeTuple.providerBinarySHA256,
+                runtimeCDHash: selfTestRuntimeTuple.runtimeCDHash,
+                cacheNamespace: selfTestRuntimeTuple.cacheNamespace,
+                stateDigest: selfTestRuntimeTuple.stateDigest,
+                proposalDepth: selfTestRuntimeTuple.proposalDepth
+            )
+            let servedSnapshotID = try nativeMTPServedSnapshotID(
+                admissionCapability: admissionCapability,
+                runtimeTuple: selfTestRuntimeTuple,
+                selectedChallenge: selectedChallenge,
+                targetGeneration: targetGeneration
             )
             let tupleOffer = NativeMTPPublishedTupleOffer(
                 targetGeneration: targetGeneration,
@@ -7769,7 +7784,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 runtimeRevision: admissionCapability.upstreamMLXSwiftLMRevision,
                 runtimeTuple: runtimeTuple,
                 nativeMTPAdmissionTupleSHA256: admissionCapability.tupleSHA256,
-                servedSnapshotID: selectedChallenge.runtimeTuple.modelHash,
+                servedSnapshotID: servedSnapshotID,
                 nativeMTPRuntimeTupleSHA256: runtimeTuple.sha256,
                 sidecarDigest: admissionCapability.sidecarSHA256,
                 challengeBankReleaseID: admissionCapability.selfTestChallengeBank.releaseID,
@@ -7933,7 +7948,86 @@ actor ModelRuntime: ModelRuntimeServing {
         guard digest == admissionCapability.selfTestChallengeBank.challengeBankSHA256 else {
             throw NativeMTPSelfTestError.challengeBankMismatch
         }
-        return try NativeMTPSelfTest.parseChallenge(data, trustedPublicKeyRawRepresentation: publicKey)
+        let bank = try NativeMTPSelfTest.parseChallengeBank(data)
+        guard bank.releaseID == admissionCapability.selfTestChallengeBank.releaseID,
+              bank.signerKeyID == admissionCapability.selfTestChallengeBank.signerKeyID else {
+            throw NativeMTPSelfTestError.challengeBankMismatch
+        }
+        guard let selected = bank.entries.first(where: {
+            $0.modelID == admissionCapability.modelID
+                && $0.modelHash == admissionCapability.targetArtifactSHA256
+                && $0.tokenizerSHA256 == admissionCapability.tokenizerSHA256
+                && $0.artifactSHA256 == admissionCapability.mtpArtifactSHA256
+                && $0.mtpManifestSHA256 == admissionCapability.mtpManifestSHA256
+                && $0.fixedProposalDepth <= admissionCapability.maxProposalDepth
+                && $0.promptTokenIDs.count <= admissionCapability.maxPromptTokens
+                && $0.maxCompletionTokens <= admissionCapability.maxCompletionTokens
+        }) else {
+            throw NativeMTPSelfTestError.challengeBankMismatch
+        }
+        return selected
+    }
+
+    private static func nativeMTPSelfTestRuntimeTuple(
+        admissionCapability: NativeMTPAdmissionCapability,
+        runningBuildIdentity: NativeMTPRunningBuildIdentity,
+        selectedChallenge: NativeMTPSelfTestChallenge,
+        targetGeneration: UInt64
+    ) throws -> NativeMTPSelfTestRuntimeTuple {
+        let stateDigest = try nativeMTPServedStateDigest(
+            admissionCapability: admissionCapability,
+            selectedChallenge: selectedChallenge,
+            targetGeneration: targetGeneration
+        )
+        return NativeMTPSelfTestRuntimeTuple(
+            modelID: selectedChallenge.modelID,
+            modelHash: selectedChallenge.modelHash,
+            modelHashAlgorithm: ModelArtifactIdentity.snapshotManifestV1,
+            tokenizerDigest: selectedChallenge.tokenizerSHA256,
+            artifactDigest: selectedChallenge.artifactSHA256,
+            manifestDigest: selectedChallenge.mtpManifestSHA256,
+            sidecarDigest: admissionCapability.sidecarSHA256,
+            providerBinarySHA256: runningBuildIdentity.reproducibleBuildSHA256,
+            runtimeCDHash: runningBuildIdentity.liveExecutableCDHash,
+            cacheNamespace: "native_mtp:\(admissionCapability.tupleSHA256):\(selectedChallenge.challengeID)",
+            stateDigest: stateDigest,
+            proposalDepth: selectedChallenge.fixedProposalDepth
+        )
+    }
+
+    private static func nativeMTPServedStateDigest(
+        admissionCapability: NativeMTPAdmissionCapability,
+        selectedChallenge: NativeMTPSelfTestChallenge,
+        targetGeneration: UInt64
+    ) throws -> String {
+        guard let generation = Int(exactly: targetGeneration) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("native_mtp_selftest.target_generation")
+        }
+        return try RFC8785JCS.sha256Hex(of: .object([
+            "challenge_id": .string(selectedChallenge.challengeID),
+            "fixed_proposal_depth": .int(selectedChallenge.fixedProposalDepth),
+            "native_mtp_admission_tuple_sha256": .string(admissionCapability.tupleSHA256),
+            "schema_version": .int(1),
+            "target_generation": .int(generation),
+        ]))
+    }
+
+    private static func nativeMTPServedSnapshotID(
+        admissionCapability: NativeMTPAdmissionCapability,
+        runtimeTuple: NativeMTPSelfTestRuntimeTuple,
+        selectedChallenge: NativeMTPSelfTestChallenge,
+        targetGeneration: UInt64
+    ) throws -> String {
+        guard let generation = Int(exactly: targetGeneration) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("native_mtp_served_snapshot.target_generation")
+        }
+        return try RFC8785JCS.sha256Hex(of: .object([
+            "challenge_id": .string(selectedChallenge.challengeID),
+            "native_mtp_admission_tuple_sha256": .string(admissionCapability.tupleSHA256),
+            "runtime_tuple_sha256": .string(try NativeMTPSelfTest.runtimeTupleDigest(runtimeTuple)),
+            "schema_version": .int(1),
+            "target_generation": .int(generation),
+        ]))
     }
 
     private static func nativeMTPCapturedTokenizerDirectory(targetURL: URL, tokenizerURL: URL) -> URL? {

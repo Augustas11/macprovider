@@ -105,11 +105,11 @@ func TestParseNativeMTPTupleOfferRejectsUnknownFields(t *testing.T) {
 func TestNativeMTPRuntimeTupleIdentityUsesSpec023JCS(t *testing.T) {
 	admission := strings.Repeat("8", 64)
 	canonical := nativeMTPRuntimeTupleIdentityJCS("provider-a", "assigned-a", 7, admission, "snapshot-a")
-	wantCanonical := `{"assigned_id":"assigned-a","native_mtp_admission_tuple_sha256":"` + admission + `","provider_id":"provider-a","schema_version":1,"served_snapshot_id":"snapshot-a","target_generation":7}`
+	wantCanonical := `{"assigned_id":"assigned-a","native_mtp_admission_tuple_sha256":"` + admission + `","provider_id":"provider-a","schema_version":"macprovider.native-mtp-runtime-tuple.v1","served_snapshot_id":"snapshot-a","target_generation":7}`
 	if canonical != wantCanonical {
 		t.Fatalf("canonical JCS mismatch\n got: %s\nwant: %s", canonical, wantCanonical)
 	}
-	if got, want := nativeMTPRuntimeTupleIdentitySHA256("provider-a", "assigned-a", 7, admission, "snapshot-a"), "85010849cec8311824eb9928f3e742a693eb520b9edca3177992e0778437d664"; got != want {
+	if got, want := nativeMTPRuntimeTupleIdentitySHA256("provider-a", "assigned-a", 7, admission, "snapshot-a"), "919d2f171e70f1cca3bc93b88cb4234f13fe4cda883ad69b976a4169a3a3bc24"; got != want {
 		t.Fatalf("runtime tuple identity digest = %s, want %s", got, want)
 	}
 }

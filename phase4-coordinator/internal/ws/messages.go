@@ -2438,18 +2438,19 @@ func validateNativeMTPRuntimeTuple(tuple NativeMTPRuntimeTuple, expectedDepth in
 
 func nativeMTPRuntimeTupleIdentitySHA256(providerID, assignedID string, targetGeneration uint64, admissionTupleSHA256, servedSnapshotID string) string {
 	canonical := nativeMTPRuntimeTupleIdentityJCS(providerID, assignedID, targetGeneration, admissionTupleSHA256, servedSnapshotID)
-	sum := sha256.Sum256([]byte(canonical))
+	sum := sha256.Sum256([]byte("macprovider.native-mtp-runtime-tuple.v1\n" + canonical))
 	return fmt.Sprintf("%x", sum[:])
 }
 
 func nativeMTPRuntimeTupleIdentityJCS(providerID, assignedID string, targetGeneration uint64, admissionTupleSHA256, servedSnapshotID string) string {
-	// SPEC-023 fixes native_mtp_runtime_tuple_sha256 to this closed scalar JCS object.
+	// SPEC-023 fixes native_mtp_runtime_tuple_sha256 to a domain-separated hash
+	// of this closed scalar JCS object.
 	// The keys below are in RFC8785 lexicographic order; inputs are bounded ASCII IDs
 	// or lowercase SHA-256 digests before this identity is accepted.
 	return `{"assigned_id":` + strconv.Quote(assignedID) +
 		`,"native_mtp_admission_tuple_sha256":` + strconv.Quote(admissionTupleSHA256) +
 		`,"provider_id":` + strconv.Quote(providerID) +
-		`,"schema_version":1` +
+		`,"schema_version":"macprovider.native-mtp-runtime-tuple.v1"` +
 		`,"served_snapshot_id":` + strconv.Quote(servedSnapshotID) +
 		`,"target_generation":` + strconv.FormatUint(targetGeneration, 10) + `}`
 }

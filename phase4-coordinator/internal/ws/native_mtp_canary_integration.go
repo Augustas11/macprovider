@@ -198,7 +198,9 @@ func (s *Server) maybeDispatchNativeMTPCanary(provider pool.Provider, now time.T
 	if !key.valid() {
 		return false
 	}
-	expired, _ := s.nativeMTPCanaryStore.ExpireNativeMTPCanary(key, now)
+	if _, err := s.nativeMTPCanaryStore.ExpireNativeMTPCanary(key, now); err != nil {
+		return false
+	}
 	if state, ok := s.nativeMTPCanaryStore.NativeMTPCanaryState(key, now); ok {
 		if updated, ok := s.recordNativeMTPCanaryState(provider.ProviderID, provider.AssignedID, key.RuntimeTupleSHA256, state); ok {
 			if state.Status == NativeMTPCanaryTupleDisabled {
@@ -212,7 +214,7 @@ func (s *Server) maybeDispatchNativeMTPCanary(provider pool.Provider, now time.T
 			return false
 		}
 		if state.Status == NativeMTPCanaryTupleDisabled {
-			return expired
+			return false
 		}
 		if !state.NextDueAt.IsZero() && now.Before(state.NextDueAt) {
 			return false
@@ -492,12 +494,13 @@ func nativeMTPTupleDisableFromDiagnostics(provider pool.Provider, reason string,
 		AssignedID:                    provider.AssignedID,
 		TargetGeneration:              diag.TargetGeneration,
 		NativeMTPAdmissionTupleSHA256: diag.NativeMTPAdmissionTupleSHA256,
+		ServedSnapshotID:              diag.ServedSnapshotID,
 		NativeMTPRuntimeTupleSHA256:   diag.NativeMTPRuntimeTupleSHA256,
 		Reason:                        reason,
 		Nonce:                         nativeMTPTupleDisableNonce(provider.ProviderID, provider.AssignedID, diag.NativeMTPRuntimeTupleSHA256, reason, issuedAt),
 		IssuedAt:                      issuedAt.UTC().Format(time.RFC3339),
 	}
-	disable.RequestDigest = nativeMTPTupleDisableDigest(disable)
+	disable.RequestDigest = nativeMTPTupleDisableRequestDigest(disable)
 	return disable
 }
 
@@ -509,12 +512,13 @@ func nativeMTPTupleDisableFromOffer(offer NativeMTPTupleOffer, reason string, is
 		AssignedID:                    offer.AssignedID,
 		TargetGeneration:              offer.TargetGeneration,
 		NativeMTPAdmissionTupleSHA256: offer.NativeMTPAdmissionTupleSHA256,
+		ServedSnapshotID:              offer.ServedSnapshotID,
 		NativeMTPRuntimeTupleSHA256:   offer.NativeMTPRuntimeTupleSHA256,
 		Reason:                        reason,
 		Nonce:                         nativeMTPTupleDisableNonce(offer.ProviderID, offer.AssignedID, offer.NativeMTPRuntimeTupleSHA256, reason, issuedAt),
 		IssuedAt:                      issuedAt.UTC().Format(time.RFC3339),
 	}
-	disable.RequestDigest = nativeMTPTupleDisableDigest(disable)
+	disable.RequestDigest = nativeMTPTupleDisableRequestDigest(disable)
 	return disable
 }
 
@@ -540,32 +544,6 @@ func nativeMTPTupleDisableReason(reason string) string {
 func nativeMTPTupleDisableNonce(providerID, assignedID, tupleSHA, reason string, issuedAt time.Time) string {
 	sum := sha256.Sum256([]byte(providerID + "\x00" + assignedID + "\x00" + tupleSHA + "\x00" + reason + "\x00" + issuedAt.UTC().Format(time.RFC3339Nano)))
 	return hex.EncodeToString(sum[:16])
-}
-
-func nativeMTPTupleDisableDigest(disable NativeMTPTupleDisable) string {
-	return digestCanonicalJSON(struct {
-		Type                          string `json:"type"`
-		Version                       int    `json:"version"`
-		ProviderID                    string `json:"provider_id"`
-		AssignedID                    string `json:"assigned_id"`
-		TargetGeneration              uint64 `json:"target_generation"`
-		NativeMTPAdmissionTupleSHA256 string `json:"native_mtp_admission_tuple_sha256"`
-		NativeMTPRuntimeTupleSHA256   string `json:"native_mtp_runtime_tuple_sha256"`
-		Reason                        string `json:"reason"`
-		Nonce                         string `json:"nonce"`
-		IssuedAt                      string `json:"issued_at"`
-	}{
-		Type:                          disable.Type,
-		Version:                       disable.Version,
-		ProviderID:                    disable.ProviderID,
-		AssignedID:                    disable.AssignedID,
-		TargetGeneration:              disable.TargetGeneration,
-		NativeMTPAdmissionTupleSHA256: disable.NativeMTPAdmissionTupleSHA256,
-		NativeMTPRuntimeTupleSHA256:   disable.NativeMTPRuntimeTupleSHA256,
-		Reason:                        disable.Reason,
-		Nonce:                         disable.Nonce,
-		IssuedAt:                      disable.IssuedAt,
-	})
 }
 
 func nativeMTPCountersFromCore(c NativeMTPCanaryExpectedCounters) NativeMTPCanaryCounters {
