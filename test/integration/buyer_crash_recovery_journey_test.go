@@ -137,7 +137,7 @@ type startupScanRow struct {
 
 func (s *scenario) openCoordDB() *sql.DB {
 	s.t.Helper()
-	db, err := sql.Open("sqlite", s.coordinatorDB)
+	db, err := sql.Open("sqlite", "file:"+s.coordinatorDB+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		s.t.Fatalf("open coord db: %v", err)
 	}
