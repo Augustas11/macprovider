@@ -1,11 +1,15 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3
+Version: v0.3.1
 Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.1 (2026-09-27, native-MTP verification windows):**
+FR-CB12 is narrowed to SPEC-028 classic external-draft decoding. FR-CB18 adds
+the ragged row/position mapping, complete-window capacity reservation, sticky
+depth degradation, and shared-forward evidence contract consumed by SPEC-048.
 **Change log v0.3 (2026-09-27, batched prefill):** FR-CB2 now admits
 separate-phase, decode-first batched prefill for compatible prompt rows. The
 scheduler may prefill multiple compatible rows in one backend shared forward
@@ -211,8 +215,9 @@ In scope for v0.3:
 - Exact Entry 110 capacity mapping: the active-row cap equals the persisted
   `max_concurrency_override`; queued work never inflates advertised capacity
   (FR-CB11).
-- SPEC-028 speculative decoding remains single-slot and mutually exclusive
-  with batching in this release (FR-CB12).
+- SPEC-028 classic external-draft decoding remains single-slot and mutually
+  exclusive with batching in this release (FR-CB12). SPEC-048 native MTP is a
+  separate path admitted only through FR-CB18.
 - Warm-swap drain semantics and served-model-snapshot binding for accepted
   and queued work (FR-CB13).
 - The MSB-01..05 throughput-replication gate: no throughput number ships
@@ -234,8 +239,8 @@ Out of scope for v0.3:
   re-own them.
 - Implementing the `SPEC-039` paged KV / paged-attention engine in this SPEC
   PR. This SPEC states scheduler obligations over that engine.
-- Combined speculative decoding and continuous batching. This is deferred to a
-  future research memo and SPEC (FR-CB12).
+- Combined SPEC-028 classic external-draft decoding and continuous batching.
+  Native MTP is the separately gated FR-CB18 extension.
 - Batch-aware quantized KV. `kv_bits` batching is a separate future promotion
   gate; unsupported quantized-KV configurations are rejected at preflight, or
   reason-coded serial-routed only when the operator explicitly selects
@@ -263,7 +268,7 @@ Out of scope for v0.3:
   consumes that capacity policy; it MUST NOT synthesize new hardware tiers or
   advertise capacity above it. Authority domain `installer-autotune-policy` is
   preserved, not re-owned.
-- **SPEC-028** - speculative decoding. Preserved single-slot; the
+- **SPEC-028** - classic external-draft speculative decoding. Preserved single-slot; the
   `effective_max_batch = 1` and `draft_model_capacity_shortfall` preflight are
   unchanged (FR-CB12). Authority domain `speculative-decoding` untouched.
 - **SPEC-015** - LOCKED receipts. Untouched; the scheduler preserves the
@@ -338,7 +343,7 @@ SPEC-001 remains the provider wire/streaming envelope authority.
 
 ## 4. Normative requirements
 
-Requirement IDs `SPEC-038-R001`..`R017` are the conformance units; the
+Requirement IDs `SPEC-038-R001`..`R018` are the conformance units; the
 `FR-CB*` labels below are the human-readable anchors. MUST / MUST NOT / SHOULD
 are RFC-2119 normative.
 
@@ -709,16 +714,17 @@ capacity minus active accepted/runnable work. Internal prompt-batch,
 decode-batch, microbatch, paged-engine, and queue limits MAY differ but MUST
 NOT change `slots_total`.
 
-### FR-CB12 - SPEC-028 mutual exclusion (SPEC-038-R012)
+### FR-CB12 - SPEC-028 classic-draft mutual exclusion (SPEC-038-R012)
 
-Speculative decoding (SPEC-028) MUST remain single-slot and mutually exclusive
-with continuous batching in this release. A draft-enabled provider MUST keep
+Classic target-plus-external-draft speculative decoding (SPEC-028) MUST remain
+single-slot and mutually exclusive with continuous batching in this release. A draft-enabled provider MUST keep
 `effective_max_batch = 1` and the existing `draft_model_capacity_shortfall`
 preflight failure for an explicit `max_concurrency_override > 1`; continuous
 batching MUST NOT be engaged for draft-enabled requests. Combined speculative
 continuous batching is deferred to a future research memo and SPEC; it MUST
 NOT be silently enabled and MUST NOT be included in any advertised throughput
-multiplier (FR-CB14).
+multiplier (FR-CB14). These constraints do not govern SPEC-048 `native_mtp`,
+which carries no external draft model and is admitted only through FR-CB18.
 
 ### FR-CB13 - warm-swap drain and model-snapshot binding (SPEC-038-R013)
 
@@ -978,6 +984,64 @@ Both the admission-time and the mid-decode paths MUST be observable and
 reason-coded, and MUST NOT emit a settlement receipt for output stitched across
 a failed and a retried path (mirroring FR-CB9).
 
+### FR-CB18 - native-MTP ragged verification extension (SPEC-038-R018)
+
+SPEC-048 `native_mtp` MAY share a target verification forward across admitted
+rows only through this extension. The scheduler MUST provide an explicit,
+immutable mapping from every packed verification position to
+`(request_id, row_generation, proposal_position)` and MUST scatter logits,
+accepted tokens, cache writes, stop/cancel state, usage, and terminal state by
+that mapping. It MUST NOT infer ownership from rectangular `[B, 1]` row order.
+Rows may propose unequal lengths and may accept unequal prefixes; a row with
+depth zero contributes no verification position and remains independently
+runnable on its ordinary one-token target step under the same served snapshot.
+
+The mapping MUST be produced by the scheduler as an engine-issued opaque
+sequence handle plus `row_generation` and `proposal_position`; caller-supplied
+request ids are diagnostic only and cannot authorize a scatter destination.
+Before launching the backend forward, the engine MUST validate exact
+cardinality among packed input positions, mapping records, and expected logit
+rows; a bijection with complete coverage of every packed position; uniqueness
+of every `(sequence_handle,row_generation,proposal_position)`; live-generation
+ownership; proposal-position and tensor-shape bounds; and absence of missing,
+duplicate, stale, or out-of-range records. After the forward, returned logit
+row count and shape MUST match the validated mapping exactly. Any pre- or
+post-forward validation failure atomically aborts the whole shared forward
+before scatter, commit, buyer output, usage finalization, or counter mutation;
+the scheduler restores every participating row's target KV, MTP/recurrent
+state, block table, and reservation from the pre-forward checkpoint, then all
+rows follow their bounded request-local failure path without using any returned
+logits. Acceptance MUST inject missing, duplicate, stale,
+cross-row, out-of-range, cardinality, and logit-shape faults and prove that none
+can write another row's state or emit output.
+
+Before each proposal round, the scheduler MUST atomically reserve the complete
+worst-case verification window for every participating row: target KV/block
+growth, MTP recurrent or auxiliary state, packed input/logit staging, and the
+rollback checkpoint required by SPEC-039-R015. A partial reservation MUST NOT
+launch a forward. When the complete window does not fit, the row first reduces
+proposal depth, possibly to zero. If even its depth-zero target step cannot fit,
+the row follows FR-CB17 request-local failure; another row's reservation MUST
+NOT be consumed or corrupted. Once buyer-visible output begins, the selected
+`native_mtp` path and served snapshot remain sticky even when its depth becomes
+zero.
+
+Admission remains the FR-CB1 bounded FCFS queue. Native-MTP work MUST NOT create
+a second queue, skip an older compatible ready row, or reserve capacity while
+waiting behind an older row. The active-row cap remains the validated Entry-110
+value; this extension does not advertise eight slots unless Entry 110 has
+separately validated eight for the exact hardware/runtime tuple.
+
+Production evidence MUST exercise at least two simultaneous rows, at least half
+of active rows at proposal depth `>= 1`, unequal proposal and accepted lengths,
+rejection at every proposal position, dynamic row join/leave, depth reduction
+to zero, cancel, and request-local capacity failure. Trace evidence MUST prove
+one target backend forward contains verification positions from at least two
+requests and that every output scatters to the mapped owner. A loop that invokes
+one iterator or one target forward per request is serial multiplexing and does
+not satisfy this requirement. The same tuple MUST pass FR-CB15 Gate A5; native
+MTP does not create a weaker production gate.
+
 ### API-visible lifecycle outcomes (overlay for SPEC-038-R001/R006/R009/R013/R015)
 
 The scheduler and its HTTP/relay integration MUST map every batched request to
@@ -1022,6 +1086,7 @@ path; rollout authority remains separate from A5 (FR-CB15, §8).
 | Enabled | any | 1 | any | Existing SPEC-028 single-slot path (FR-CB12) |
 | Enabled | any | > 1 | any | Preflight failure `draft_model_capacity_shortfall` - unchanged (FR-CB12) |
 | Any | canary or on | any | unsupported cache/`kv_bits`/MoE dispatch | Serial path or reason-coded preflight rejection - never silent downgrade (FR-CB8) |
+| No external draft; SPEC-048 native MTP selected | canary or on | 2-4 (validated) | FR-CB18 + SPEC-039-R015 accepted for tuple | Ragged native-MTP verification may share a target forward; all SPEC-048 gates still apply |
 
 ## 6. Capacity, telemetry, and OPoI boundary
 
