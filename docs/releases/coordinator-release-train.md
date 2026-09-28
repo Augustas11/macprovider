@@ -73,13 +73,13 @@ A coordinator deploy compares the tag's catalog with live (`compare-live`):
 
 ## Live on Pearl
 
-Probed 2026-09-25 about 10:20Z (`/healthz`, catalog routes and read-only host checks).
+Probed 2026-09-28 about 12:00Z (`/healthz`, the host checks from the #1732 enabling rollout, and one end-to-end buyer request).
 
 | Field | Value |
 |---|---|
-| Coordinator | **v1.8.200** @ `ca809589`. Applied 2026-09-25 about 10:03Z by the signed updater, then the full `deploy-pearl-vps.sh` (DEPLOY_EXIT 0, exact-byte canary OK) |
-| Gateway | **v1.8.200** (`gateway.db` schema 14 from #1719; `coordinator.require_settlement_trailers: true` since 2026-09-25 about 10:21Z, runbook §9 step 2a) |
-| Release | [Pearl runtime v1.8.200](https://github.com/Augustas11/macprovider/releases/tag/v1.8.200), run [36120742231](https://github.com/Augustas11/macprovider/actions/runs/36120742231); updater transaction `1790330246291811116-v1.8.200` |
+| Coordinator | **v1.8.206** @ `40ed8752`. Applied 2026-09-28 about 11:40Z by the signed updater (installed from the v1.8.206 tag), then the full `deploy-pearl-vps.sh` (`CONFIG_MODE=preserve-live`, `FORCE_RESTART=1` recorded in `last-deploy-bypass.json`, DEPLOY_EXIT 0, catalog `equivalent`, canary mp-26592d… ready). The #1732 enabling rollout is complete: recovery and pricing-close units are wired, and the applied-config record carries `rate_table_sha256`, `signed_rate_card_sha256`, `autotune_release_id` and `billing_snapshot_id` |
+| Gateway | **v1.8.206** (`gateway.db` schema 15 from #1763, migrated by the #1782 fix; `coordinator.require_settlement_trailers: true`). The live `api.malibu.tech` nginx gained the `X-MacProvider-Internal-Conv-Cache` strip on 2026-09-28 (additive; backup `api.malibu.tech.bak-convcache-20260928`). **Never run the gateway `deploy-pearl-vps.sh`**: it would overwrite the live site, which carries certbot TLS and `/ws/provider` routes the repo template lacks. |
+| Release | [Pearl runtime v1.8.206](https://github.com/Augustas11/macprovider/releases/tag/v1.8.206). v1.8.204 and v1.8.205 were signed but rolled back (updater snapshot timeout #1781; gateway schema-15 migration order #1782). |
 | `recommended_binary_version` | 1.8.123 (CLI train owns this) |
 | Includes | Everything on `main` through `ca809589`: #1738 (90-day stats overview), #1741 (#1721: CLI and stats sidecars from the release), #1744 (#1735 catalog), #1719 (#1690 engine-agnostic Trusted Pools), and the 2026-09-25 deploy-tooling fixes: #1746, `c6c32692`, `ee061fc3`, `4936a062`, `ca809589` (see the note below) |
 | nginx | `/v1/stats/routability` route added on Pearl 2026-09-24 10:24Z, additively and verbatim from `phase4-coordinator/dist` (backups `*.bak-routability-20260924T102404Z`). Pearl's nginx still lags the repo on `/v1/catalog-artifacts`, `/v1/portal/session` and `/v1/provider/malibu-reward-audit`, and carries a hand-deployed `/v1/provider/model-admission/` (BYOM) route the repo lacks, so **do not copy the repo site file over it**. |
@@ -107,7 +107,10 @@ The canary Mac mp-26592d… now runs signed CLI candidate v1.8.195, whose payloa
 
 | Tag | Commit | Head PR |
 |---|---|---|
-| v1.8.200 | `ca809589` | #1719 (#1690) with the quick_check fix; #1738, #1741, #1744 catalog, #1746 and the deploy fixes — **live** |
+| v1.8.206 | `40ed8752` | #1779 (#1775 money-writer starvation), #1781 (updater snapshot timeout), #1782 (gateway schema-15 upgrade); also carries #1754, #1763, #1769, #1732, #1658 — **live** |
+| v1.8.205 | `3ca8e792` | rolled back: gateway schema-15 migration (`no such column: operator_review`) |
+| v1.8.204 | `dfd1586f` | rolled back: updater snapshot integrity_check exceeded 300 s |
+| v1.8.200 | `ca809589` | #1719 (#1690) with the quick_check fix; #1738, #1741, #1744 catalog, #1746 and the deploy fixes |
 | v1.8.199 | `4936a062` | #1719; binary rolled back by the updater (startup quick_check), never live |
 | v1.8.196–v1.8.198 | `1148185e`, `c6c32692`, `ee061fc3` | binaries applied by the updater; each full catalog deploy rolled back (see note above) |
 | v1.8.194 | `98ff77ca` | #1744 (#1735) binaries only; full deploy rolled back on the canary |
