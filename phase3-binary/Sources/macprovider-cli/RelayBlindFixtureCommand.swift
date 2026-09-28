@@ -340,11 +340,16 @@ private actor RelayReplayFixtureBackend: ContinuousBatchSchedulerBackend {
     private var generationStarts = 0
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
-        return rows.map { ContinuousBatchPrefillOutput(requestID: $0.requestID) }
+        generationStarts += rows.filter(\.sampleFirstToken).count
+        return rows.map {
+            ContinuousBatchPrefillOutput(
+                requestID: $0.requestID,
+                sampledToken: $0.sampleFirstToken ? 7 : nil
+            )
+        }
     }
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
-        generationStarts += rows.filter { $0.generatedTokens.isEmpty }.count
         return rows.map {
             .output(ContinuousBatchDecodeOutput(requestID: $0.requestID, token: 7))
         }

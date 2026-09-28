@@ -463,10 +463,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
     /// Drive `PagedKVSharedForwardBackend.prefill` + a decode loop over
     /// `prompts.count` rows, mirroring `ContinuousBatchScheduler.runDecodeStep`
-    /// bookkeeping exactly. Prefill (untimed) commits each prompt minus its last
-    /// token. One untimed warm decode step then writes the final prompt token and
-    /// produces the first (TTFT-boundary) token. The timed window spans exactly
-    /// `decodeSteps` further steps, so the reported rate is decode-only.
+    /// bookkeeping exactly. Prefill (untimed) commits each whole prompt and samples
+    /// the first token from the final prompt-position logits. The timed window spans
+    /// exactly `decodeSteps` further steps, so the reported rate is decode-only.
     private func runBatchedDecode(
         container: ModelContainer,
         prompts: [[Int]],
@@ -494,39 +493,49 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         for (index, prompt) in prompts.enumerated() {
             let id = "msb-row-\(index)"
             let promptLength = prompt.count
-            let prefixLength = promptLength - 1
             let handle = try await allocator.allocate(
                 conversationKey: id,
                 maxTokens: promptLength + decodeSteps + 1,
                 initialTokens: 0
             )
-            if prefixLength > 0 {
-                _ = try await allocator.extend(handle, by: prefixLength)
-            }
+            _ = try await allocator.extend(handle, by: promptLength)
             let prefillBinding = try await allocator.binding(for: handle)
             prefillInputs.append(ContinuousBatchPrefillInput(
                 requestID: id,
-                promptTokens: Array(prompt.prefix(prefixLength)),
+                promptTokens: prompt,
                 binding: prefillBinding,
                 promptTokenOffset: 0,
                 committedKVTokenCount: 0,
-                targetKVTokenCount: prefixLength,
-                isFinalChunk: true
+                targetKVTokenCount: promptLength,
+                isFinalChunk: true,
+                samplerSeed: 0,
+                temperature: 0,
+                topP: 1,
+                samplerStep: 0
             ))
-            rowsState.append(DecodeRow(
-                id: id, prompt: prompt, handle: handle, currentToken: prompt[promptLength - 1]
-            ))
+            rowsState.append(DecodeRow(id: id, prompt: prompt, handle: handle, currentToken: 0))
         }
 
-        _ = try await backend.prefill(rows: prefillInputs)
-
-        // One untimed warm decode step: writes the final prompt token and produces
-        // the first generated token (the TTFT boundary decode-bench excludes).
-        try await decodeOneStep(backend: backend, allocator: allocator, rows: &rowsState)
+        let prefillOutputs = try await backend.prefill(rows: prefillInputs)
+        let firstTokenByID = Dictionary(uniqueKeysWithValues: prefillOutputs.compactMap {
+            output -> (String, Int)? in
+            guard let token = output.sampledToken else { return nil }
+            return (output.requestID, token)
+        })
+        for index in rowsState.indices {
+            guard let token = firstTokenByID[rowsState[index].id] else {
+                FileHandle.standardError.write(Data(
+                    "msb-throughput: row \(rowsState[index].id) missing final-prefill token\n".utf8
+                ))
+                throw ExitCode(1)
+            }
+            rowsState[index].generated.append(token)
+            rowsState[index].currentToken = token
+        }
 
         let decodeStart: Date
         let decodeEnd: Date
-        if compiled {
+        if compiled && !cacheKinds.contains(.recurrentMamba) {
             // Compiled lockstep window: one container.perform for the timed
             // tokens, matching the contiguous engine that scaled on Studio.
             try await extendRows(allocator: allocator, rows: rowsState, by: decodeSteps)
@@ -539,6 +548,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             )
             decodeEnd = Date()
         } else {
+            // Hybrid recurrent rows are intentionally driven one token at a time:
+            // that matches the production scheduler cap and forces recurrent row
+            // state to split/repack at every boundary.
             decodeStart = Date()
             for _ in 0..<decodeSteps {
                 try await decodeOneStep(backend: backend, allocator: allocator, rows: &rowsState)
@@ -568,8 +580,13 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         compiled: Bool,
         cacheKinds: [PagedKVSharedForwardBackend.CacheKind],
         maxPromptChunkTokens: Int? = nil,
-        maxDecodeLockstepWindow: Int? = nil
+        maxDecodeLockstepWindow: Int? = nil,
+        requestedOutputTokens: Int? = nil
     ) async throws -> SchedulerRunDetail {
+        // The final prefill samples one untimed token. Throughput callers ask
+        // for `decodeSteps` timed tokens beyond it; parity callers override
+        // this with their exact total comparison window.
+        let totalOutputTokens = requestedOutputTokens ?? (decodeSteps + 1)
         let (scheduler, backend) = try makeHarnessScheduler(
             container: container,
             cacheKinds: cacheKinds,
@@ -590,7 +607,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                                 id: "msb-sched-\(index)-\(UUID().uuidString)",
                                 conversationKey: "",
                                 promptTokens: prompt,
-                                maxOutputTokens: decodeSteps,
+                                maxOutputTokens: totalOutputTokens,
                                 temperature: 0.0,
                                 topP: 1.0
                             ),
@@ -615,7 +632,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let results = indexed.map(\.1)
         guard results.count == prompts.count,
               results.allSatisfy({
-                  $0.terminalStatus == .length && $0.generatedTokens.count == decodeSteps
+                  $0.terminalStatus == .length && $0.generatedTokens.count == totalOutputTokens
               }) else {
             FileHandle.standardError.write(Data(
                 "msb-throughput: scheduler run produced incomplete or non-length terminals\n".utf8
@@ -632,7 +649,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let decodeStart = decodeEnd.addingTimeInterval(-elapsed)
         let samples = results.map { result in
             MSBAggregateThroughputInput(
-                decodedTokens: result.generatedTokens.count,
+                decodedTokens: max(result.generatedTokens.count - 1, 0),
                 decodeStartedAt: decodeStart,
                 decodeEndedAt: decodeEnd
             )
@@ -714,7 +731,9 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                     modelSHA256: descriptor.modelSHA256,
                     weightsGeneration: 1
                 ),
-                maxDecodeLockstepWindow: max(1, maxDecodeLockstepWindow)
+                maxDecodeLockstepWindow: cacheKinds.contains(.recurrentMamba)
+                    ? 1
+                    : max(1, maxDecodeLockstepWindow)
             ),
             allocator: allocator,
             backend: backend,
@@ -1154,6 +1173,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) async throws {
         let compared = parityTokens
+        let parityPrefillStepSize = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
         let prompts = try await buildDistinctPrompts(container: container, count: 2, tokens: promptTokens)
         var peakRSSMB = memoryRSSMB()
         let serialA = try await runProductionSerialOnce(
@@ -1162,30 +1182,42 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let serialB = try await runProductionSerialOnce(
             container: container, promptTokens: prompts[1], timedDecodeTokens: compared
         )
-        let oneRow = try await runSchedulerDecode(
-            container: container,
-            prompts: [prompts[0]],
-            decodeSteps: compared,
-            compiled: compile,
-            cacheKinds: cacheKinds
-        )
+        var standaloneRows: [SchedulerRunDetail] = []
+        standaloneRows.reserveCapacity(prompts.count)
+        for prompt in prompts {
+            standaloneRows.append(try await runSchedulerDecode(
+                container: container,
+                prompts: [prompt],
+                decodeSteps: compared,
+                compiled: compile,
+                cacheKinds: cacheKinds,
+                maxPromptChunkTokens: parityPrefillStepSize,
+                requestedOutputTokens: compared
+            ))
+        }
         let twoRow = try await runSchedulerDecode(
             container: container,
             prompts: prompts,
             decodeSteps: compared,
             compiled: compile,
-            cacheKinds: cacheKinds
+            cacheKinds: cacheKinds,
+            maxPromptChunkTokens: parityPrefillStepSize,
+            requestedOutputTokens: compared
         )
         peakRSSMB = max(peakRSSMB, memoryRSSMB())
-        let oneMatch = msbTemp0ParityMatch(
-            serial: serialA.generatedTokens,
-            batched: oneRow.tokensByRow[0],
-            comparedTokens: compared
-        )
+        let serialRows = [serialA.generatedTokens, serialB.generatedTokens]
+        let standaloneMatches = zip(standaloneRows, serialRows).map { standalone, serial in
+            msbTemp0ParityMatch(
+                serial: serial,
+                batched: standalone.tokensByRow[0],
+                comparedTokens: compared
+            )
+        }
+        let oneMatch = standaloneMatches[0]
         let batchedMatches = zip(twoRow.tokensByRow, [serialA.generatedTokens, serialB.generatedTokens]).map { batched, serial in
             msbTemp0ParityMatch(serial: serial, batched: batched, comparedTokens: compared).match
         }
-        let firstDivergence = oneMatch.firstDivergence
+        let firstDivergence = standaloneMatches.compactMap(\.firstDivergence).first
             ?? zip(twoRow.tokensByRow, [serialA.generatedTokens, serialB.generatedTokens])
             .compactMap { batched, serial in
                 msbTemp0ParityMatch(serial: serial, batched: batched, comparedTokens: compared).firstDivergence
@@ -1194,11 +1226,12 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         let parity = MSBParityEvidence(
             comparedTokens: compared,
             oneRowMatch: oneMatch.match,
+            standaloneRowMatches: standaloneMatches.map(\.match),
             batchedRowMatches: batchedMatches,
             firstDivergenceIndex: firstDivergence,
             serialTokenSHA256: msbTokenSequenceSHA256(Array(serialA.generatedTokens.prefix(compared))),
-            batchedTokenSHA256: msbTokenSequenceSHA256(Array(oneRow.tokensByRow[0].prefix(compared))),
-            pass: oneMatch.match && batchedMatches.allSatisfy { $0 }
+            batchedTokenSHA256: msbTokenSequenceSHA256(Array(standaloneRows[0].tokensByRow[0].prefix(compared))),
+            pass: standaloneMatches.allSatisfy(\.match) && batchedMatches.allSatisfy { $0 }
         )
         try emitLeftoverReport(
             modelID: modelID,
@@ -1207,7 +1240,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             rows: 2,
             promptTokenLengths: Array(repeating: promptTokens, count: 2),
             serialRunTPS: [serialA.timedTokensPerSecond],
-            engineSingleRowTPS: [oneRow.batched.perRowTokensPerSecond],
+            engineSingleRowTPS: [standaloneRows[0].batched.perRowTokensPerSecond],
             aggregateRunTPS: [try msbAggregateThroughput(twoRow.batched.rowSamples).aggregateTokensPerSecond],
             perRowP50: twoRow.batched.perRowTokensPerSecond,
             peakRSSMB: peakRSSMB,
@@ -1225,7 +1258,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
                 replay: nil,
                 drain: nil
             ),
-            summary: "parity compared=\(compared) one_row=\(oneMatch.match) batched=\(batchedMatches) pass=\(parity.pass)",
+            summary: "parity compared=\(compared) standalone=\(standaloneMatches.map(\.match)) batched=\(batchedMatches) pass=\(parity.pass)",
             fileLabel: "parity"
         )
     }

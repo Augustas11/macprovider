@@ -34,14 +34,25 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let moe = Data(#"{"model_type":"qwen3_5_moe","architectures":["Qwen3_5MoeForConditionalGeneration"]}"#.utf8)
         let unrelated = Data(#"{"model_type":"qwen3_5","architectures":["AnotherDecoder"]}"#.utf8)
 
-        // The allowlist is the measured qwen3.6 pair: dense qwen3.6-27b requires
-        // the dense architecture, MoE qwen3.6-35b-a3b the MoE architecture.
-        XCTAssertTrue(ModelRuntime.pagedKVModelCapabilities(
-            modelID: "qwen/qwen3.6-27b", configJSONData: dense
-        ).hybridDecoderArchitectureVerified)
-        XCTAssertTrue(ModelRuntime.pagedKVModelCapabilities(
-            modelID: "qwen/qwen3.6-35b-a3b", configJSONData: moe
-        ).hybridDecoderArchitectureVerified)
+        // Every entry is an exact measured identity/architecture pair. Dense
+        // identities require the dense architecture and the MoE identities
+        // require the MoE architecture.
+        for modelID in ["qwen/qwen3.5-27b", "qwen/qwen3.6-27b", "qwen/qwen3.8-27b"] {
+            XCTAssertTrue(ModelRuntime.pagedKVModelCapabilities(
+                modelID: modelID, configJSONData: dense
+            ).hybridDecoderArchitectureVerified)
+            XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+                modelID: modelID, configJSONData: moe
+            ).hybridDecoderArchitectureVerified)
+        }
+        for modelID in ["qwen/qwen3.5-35b-a3b", "qwen/qwen3.6-35b-a3b"] {
+            XCTAssertTrue(ModelRuntime.pagedKVModelCapabilities(
+                modelID: modelID, configJSONData: moe
+            ).hybridDecoderArchitectureVerified)
+            XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+                modelID: modelID, configJSONData: dense
+            ).hybridDecoderArchitectureVerified)
+        }
 
         // Config metadata is still required: missing or mismatched architecture never verifies.
         XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
@@ -51,18 +62,16 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             modelID: "qwen/qwen3.6-27b", configJSONData: unrelated
         ).hybridDecoderArchitectureVerified)
 
-        // Same-architecture hybrids that FAILED measured batched parity
-        // (qwen3.5 dense + MoE, qwen3.8-27b) MUST NOT verify — the allowlist is
-        // per-identity, not per-architecture, precisely so an unproven layout
-        // cannot be paged into wrong-but-billed tokens.
+        // Same-architecture identities remain excluded unless individually
+        // measured and named; architecture matching alone cannot expand support.
         XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
-            modelID: "qwen/qwen3.5-27b", configJSONData: dense
+            modelID: "qwen/qwen3.5-14b", configJSONData: dense
         ).hybridDecoderArchitectureVerified)
         XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
-            modelID: "qwen/qwen3.5-35b-a3b", configJSONData: moe
+            modelID: "qwen/qwen3.7-35b-a3b", configJSONData: moe
         ).hybridDecoderArchitectureVerified)
         XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
-            modelID: "qwen/qwen3.8-27b", configJSONData: dense
+            modelID: "qwen/qwen3.8-32b", configJSONData: dense
         ).hybridDecoderArchitectureVerified)
     }
     func testProductionRuntimeMeasurementMissingMetallibStaysNil() {
@@ -478,12 +487,32 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             crossRowDivergences: 0,
             challengeDistinguishing: false
         )), "a non-distinguishing challenge must not prove MoE isolation")
+        XCTAssertNil(measure(moeProbe: PagedKVRuntimeMoEProbeResult(
+            proven: true,
+            rowsDecodedInSharedForward: 2,
+            rowFailures: 0,
+            crossRowDivergences: 0,
+            sharedForwardParityProven: false,
+            parityTokensCompared: PagedKVRuntimeParityProbe.sharedForwardParityTokens,
+            challengeDistinguishing: true
+        )), "shared-forward isolation without exact serial parity must fail closed")
+        XCTAssertNil(measure(moeProbe: PagedKVRuntimeMoEProbeResult(
+            proven: true,
+            rowsDecodedInSharedForward: 2,
+            rowFailures: 0,
+            crossRowDivergences: 0,
+            sharedForwardParityProven: true,
+            parityTokensCompared: PagedKVRuntimeParityProbe.sharedForwardParityTokens - 1,
+            challengeDistinguishing: true
+        )), "a parity proof shorter than the required window must fail closed")
 
         let proven = try? XCTUnwrap(measure(moeProbe: PagedKVRuntimeMoEProbeResult(
             proven: true,
             rowsDecodedInSharedForward: 2,
             rowFailures: 0,
             crossRowDivergences: 0,
+            sharedForwardParityProven: true,
+            parityTokensCompared: PagedKVRuntimeParityProbe.sharedForwardParityTokens,
             challengeDistinguishing: true
         )))
         XCTAssertEqual(proven?.observedRuntimeIdentity.moeDispatchProven, true)
@@ -1542,7 +1571,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(result.conversationKey, "conversation-1")
         XCTAssertEqual(result.cachedPromptTokens, 0)
         XCTAssertEqual(result.outputTokens, [7])
-        XCTAssertEqual(decodeCallCount, 1)
+        XCTAssertEqual(decodeCallCount, 0)
     }
 
     private static func makeScheduler(
@@ -1754,6 +1783,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             rowsDecodedInSharedForward: 2,
             rowFailures: 0,
             crossRowDivergences: 0,
+            sharedForwardParityProven: true,
+            parityTokensCompared: PagedKVRuntimeParityProbe.sharedForwardParityTokens,
             challengeDistinguishing: true
         )
     }
@@ -2002,7 +2033,13 @@ private actor RuntimeBridgeScriptedBackend: ContinuousBatchSchedulerBackend {
         if let prefillError {
             throw prefillError
         }
-        return rows.map { ContinuousBatchPrefillOutput(requestID: $0.requestID) }
+        return rows.map { row in
+            let script = scripts[row.requestID] ?? []
+            return ContinuousBatchPrefillOutput(
+                requestID: row.requestID,
+                sampledToken: row.sampleFirstToken && !script.isEmpty ? script[0] : nil
+            )
+        }
     }
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {

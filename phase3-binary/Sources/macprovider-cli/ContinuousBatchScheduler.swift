@@ -515,16 +515,53 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
     let committedKVTokenCount: Int
     let targetKVTokenCount: Int
     let isFinalChunk: Bool
+    let sampleFirstToken: Bool
+    let samplerSeed: Int
+    let temperature: Double
+    let topP: Double
+    let samplerStep: Int
+
+    init(
+        requestID: String,
+        promptTokens: [Int],
+        binding: PagedKVStorageBinding,
+        promptTokenOffset: Int,
+        committedKVTokenCount: Int,
+        targetKVTokenCount: Int,
+        isFinalChunk: Bool,
+        sampleFirstToken: Bool? = nil,
+        samplerSeed: Int = 0,
+        temperature: Double = 0,
+        topP: Double = 1,
+        samplerStep: Int = 0
+    ) {
+        self.requestID = requestID
+        self.promptTokens = promptTokens
+        self.binding = binding
+        self.promptTokenOffset = promptTokenOffset
+        self.committedKVTokenCount = committedKVTokenCount
+        self.targetKVTokenCount = targetKVTokenCount
+        self.isFinalChunk = isFinalChunk
+        self.sampleFirstToken = sampleFirstToken ?? isFinalChunk
+        self.samplerSeed = samplerSeed
+        self.temperature = temperature
+        self.topP = topP
+        self.samplerStep = samplerStep
+    }
 }
 
 struct ContinuousBatchPrefillOutput: Sendable, Equatable {
     let requestID: String
+    /// The first generated token, sampled from the final prompt position.
+    /// Required for a successful final chunk and absent for earlier chunks.
+    let sampledToken: Int?
     /// Serial fallback can fail one row without coupling healthy rows to that
     /// failure. Shared-forward failures still throw and fail the whole group.
     let failureCode: String?
 
-    init(requestID: String, failureCode: String? = nil) {
+    init(requestID: String, sampledToken: Int? = nil, failureCode: String? = nil) {
         self.requestID = requestID
+        self.sampledToken = sampledToken
         self.failureCode = failureCode
     }
 }
@@ -597,8 +634,9 @@ enum ContinuousBatchDecodeOutcome: Sendable, Equatable {
 }
 
 protocol ContinuousBatchSchedulerBackend: Sendable {
-    /// Prefill commits only the prompt prefix. The final prompt token remains
-    /// scheduler-owned as the first shared-decode input.
+    /// Prefill commits the whole prompt. The final chunk samples the first
+    /// generated token from its last-position logits so the prompt partition
+    /// matches the serial `TokenIterator` path exactly.
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput]
     /// Each row's table describes the post-step target length; the backend
     /// writes `currentToken` at `committedKVTokenCount` and returns one sampled
@@ -2635,8 +2673,8 @@ actor ContinuousBatchScheduler {
         // suffix. Transition them before selecting a compatible prefill group.
         for id in Array(promptOrder) {
             guard let row = activePrompt[id] else { continue }
-            let prefixTokenCount = row.request.promptTokens.count - 1
-            if row.prefillCursor >= prefixTokenCount {
+            let promptTokenCount = row.request.promptTokens.count
+            if row.prefillCursor >= promptTokenCount {
                 await transitionPrefilledRow(row)
                 madeProgress = true
                 if cleanupFailedClosed { return true }
@@ -2679,7 +2717,7 @@ actor ContinuousBatchScheduler {
             let row = item.row
             let id = row.request.id
             let end = item.end
-            let prefixTokenCount = row.request.promptTokens.count - 1
+            let promptTokenCount = row.request.promptTokens.count
             let chunk = Array(row.request.promptTokens[row.prefillCursor..<end])
             do {
                 _ = try await allocator.extend(row.handle, by: chunk.count)
@@ -2702,7 +2740,12 @@ actor ContinuousBatchScheduler {
                         promptTokenOffset: row.prefillCursor,
                         committedKVTokenCount: row.prefillCursor,
                         targetKVTokenCount: end,
-                        isFinalChunk: end == prefixTokenCount
+                        isFinalChunk: end == promptTokenCount,
+                        sampleFirstToken: end == promptTokenCount && row.request.maxOutputTokens > 0,
+                        samplerSeed: row.request.samplerSeed,
+                        temperature: row.request.temperature,
+                        topP: row.request.topP,
+                        samplerStep: row.generatedTokens.count
                     ),
                     chunk.count
                 ))
@@ -2771,9 +2814,23 @@ actor ContinuousBatchScheduler {
                     continue
                 }
             }
-            if row.prefillCursor == row.request.promptTokens.count - 1 {
+            if row.prefillCursor == row.request.promptTokens.count {
                 activePrompt[id] = row
-                await transitionPrefilledRow(row)
+                guard row.request.maxOutputTokens > 0 else {
+                    await transitionPrefilledRow(row)
+                    if cleanupFailedClosed { return true }
+                    continue
+                }
+                guard let sampledToken = output.sampledToken,
+                      (0..<configuration.vocabularySize).contains(sampledToken) else {
+                    record(.localPreparationFailed)
+                    if await finishPrefillFailure(
+                        row,
+                        failureCode: "continuous_batching_invalid_prefill_token"
+                    ) == false { return true }
+                    continue
+                }
+                await transitionPrefilledRow(row, sampledToken: sampledToken)
                 if cleanupFailedClosed { return true }
             } else {
                 activePrompt[id] = row
@@ -2808,8 +2865,8 @@ actor ContinuousBatchScheduler {
     }
 
     private func prefillEnd(for row: Row, maxChunkTokens: Int) -> Int {
-        let prefixTokenCount = row.request.promptTokens.count - 1
-        var end = min(prefixTokenCount, row.prefillCursor + max(1, maxChunkTokens))
+        let promptTokenCount = row.request.promptTokens.count
+        var end = min(promptTokenCount, row.prefillCursor + max(1, maxChunkTokens))
         // Hybrid recurrent state may only be snapshotted on its declared
         // boundary, so compatible groups split before crossing one.
         if let checkpoint = pendingRecurrentCheckpointPositions(for: row).first(where: {
@@ -2820,14 +2877,27 @@ actor ContinuousBatchScheduler {
         return end
     }
 
-    private func transitionPrefilledRow(_ row: Row) async {
+    private func transitionPrefilledRow(_ row: Row, sampledToken: Int? = nil) async {
         _ = removePromptRow(row.request.id)
         if row.request.maxOutputTokens == 0 {
             await finishTerminal(row, status: .length)
-        } else {
+        } else if let sampledToken {
             activeDecode[row.request.id] = row
             CBTrace.log(row.request.id, "sch_active")
             record(.joinedDecode)
+            await applyToken(sampledToken, to: row)
+        } else {
+            // A fully retained prompt has no final-position logits to sample.
+            // Fail closed instead of silently reverting to the old P-1 + 1
+            // partition that diverges on recurrent hybrid decoders.
+            let released = await release(row.handle)
+            finish(
+                row,
+                status: .requestFailed,
+                errorCode: released
+                    ? "continuous_batching_final_prefill_token_missing"
+                    : "continuous_batching_cleanup_failed"
+            )
         }
     }
 
@@ -3234,12 +3304,12 @@ actor ContinuousBatchScheduler {
     }
 
     /// Checkpoint positions this row still captures: keyed rows only, inside the
-    /// prefilled prefix, at most two.
+    /// prefilled prompt, at most two.
     private func pendingRecurrentCheckpointPositions(for row: Row) -> [Int] {
         guard row.recurrentCheckpoints.count < 2,
               !row.request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return [] }
-        let prefixTokenCount = row.request.promptTokens.count - 1
+        let prefixTokenCount = row.request.promptTokens.count
         return row.request.recurrentCheckpointPositions.filter { position in
             position > 0 && position <= prefixTokenCount
                 && !row.recurrentCheckpoints.contains { $0.tokenCount == position }
@@ -3255,7 +3325,12 @@ actor ContinuousBatchScheduler {
         guard !row.recurrentCheckpoints.isEmpty,
               !row.request.conversationKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         else { return nil }
-        let tokenCount = row.request.promptTokens.count - 1 + row.generatedTokens.count
+        // A zero-output request commits the whole prompt during prefill. Once
+        // generation starts, the final sampled token has not been fed back yet,
+        // so the materializable prefix remains prompt + generated - 1.
+        let tokenCount = row.generatedTokens.isEmpty
+            ? row.request.promptTokens.count
+            : row.request.promptTokens.count - 1 + row.generatedTokens.count
         do {
             let binding = try await allocator.binding(for: row.handle)
             guard tokenCount <= binding.currentTable.logicalTokenCount else { return nil }

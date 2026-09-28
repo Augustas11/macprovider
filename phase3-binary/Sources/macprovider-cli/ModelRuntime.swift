@@ -449,6 +449,8 @@ struct PagedKVRuntimeProber: Sendable {
         _ layerCount: Int,
         _ promptA: [Int],
         _ promptB: [Int],
+        _ parityPromptA: [Int],
+        _ parityPromptB: [Int],
         _ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]
     ) async -> PagedKVRuntimeMoEProbeResult
 
@@ -463,7 +465,7 @@ struct PagedKVRuntimeProber: Sendable {
                 nNew: nNew
             )
         },
-        moe: { container, blockSizeTokens, maxPhysicalBlocks, poolEpoch, layerCount, promptA, promptB, cacheKinds in
+        moe: { container, blockSizeTokens, maxPhysicalBlocks, poolEpoch, layerCount, promptA, promptB, parityPromptA, parityPromptB, cacheKinds in
             await PagedKVRuntimeParityProbe.runMoEInputIsolationProbe(
                 container: container,
                 blockSizeTokens: blockSizeTokens,
@@ -472,6 +474,8 @@ struct PagedKVRuntimeProber: Sendable {
                 layerCount: layerCount,
                 promptA: promptA,
                 promptB: promptB,
+                parityPromptA: parityPromptA,
+                parityPromptB: parityPromptB,
                 cacheKinds: cacheKinds
             )
         }
@@ -1556,6 +1560,8 @@ actor ModelRuntime: ModelRuntimeServing {
         // forward that swapped/leaked row logits is detectable.
         guard let batched = moeProbe,
               batched.proven,
+              batched.sharedForwardParityProven,
+              batched.parityTokensCompared >= PagedKVRuntimeParityProbe.sharedForwardParityTokens,
               batched.challengeDistinguishing,
               batched.rowsDecodedInSharedForward == 2,
               batched.rowFailures == 0,
@@ -1563,7 +1569,7 @@ actor ModelRuntime: ModelRuntimeServing {
         else {
             if let m = moeProbe {
                 PagedKVRuntimeDiagnostics.log(
-                    "measure nil: batched-isolation gate (proven=\(m.proven) challengeDistinguishing=\(m.challengeDistinguishing) rowsDecoded=\(m.rowsDecodedInSharedForward) rowFailures=\(m.rowFailures) crossRowDivergences=\(m.crossRowDivergences))")
+                    "measure nil: batched-isolation gate (proven=\(m.proven) sharedForwardParity=\(m.sharedForwardParityProven) parityTokens=\(m.parityTokensCompared) challengeDistinguishing=\(m.challengeDistinguishing) rowsDecoded=\(m.rowsDecodedInSharedForward) rowFailures=\(m.rowFailures) crossRowDivergences=\(m.crossRowDivergences))")
             } else {
                 PagedKVRuntimeDiagnostics.log("measure nil: batched-isolation probe result nil")
             }
@@ -1746,6 +1752,14 @@ actor ModelRuntime: ModelRuntimeServing {
             let promptB = await container.perform { context in
                 context.tokenizer.encode(text: pair.1, addSpecialTokens: true)
             }
+            let parityPromptA = Self.repeatedProbeTokens(
+                promptA,
+                targetCount: PagedKVRuntimeParityProbe.sharedForwardParityPromptTokens
+            )
+            let parityPromptB = Self.repeatedProbeTokens(
+                promptB,
+                targetCount: PagedKVRuntimeParityProbe.sharedForwardParityPromptTokens
+            )
             return await prober.moe(
                 container,
                 blockSizeTokens,
@@ -1754,6 +1768,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 layerCount,
                 promptA,
                 promptB,
+                parityPromptA,
+                parityPromptB,
                 cacheKinds
             )
         } onIndistinguishable: { pairIndex in
@@ -1799,9 +1815,21 @@ actor ModelRuntime: ModelRuntimeServing {
     private static func isCleanIndistinguishableIsolationRun(_ result: PagedKVRuntimeMoEProbeResult) -> Bool {
         !result.challengeDistinguishing
             && !result.proven
+            && result.sharedForwardParityProven
+            && result.parityTokensCompared >= PagedKVRuntimeParityProbe.sharedForwardParityTokens
             && result.rowsDecodedInSharedForward == 2
             && result.rowFailures == 0
             && result.crossRowDivergences == 0
+    }
+
+    private static func repeatedProbeTokens(_ seed: [Int], targetCount: Int) -> [Int] {
+        guard targetCount > 0, !seed.isEmpty else { return seed }
+        var tokens: [Int] = []
+        tokens.reserveCapacity(targetCount)
+        while tokens.count < targetCount {
+            tokens.append(contentsOf: seed.prefix(targetCount - tokens.count))
+        }
+        return tokens
     }
 
     /// Upper bound for `mlx_cache_limit_mb` (1 TiB). Far above any Mac's
@@ -1942,18 +1970,20 @@ actor ModelRuntime: ModelRuntimeServing {
         // gates on the packaged runtime. This stays an explicit per-identity
         // allowlist by design: the SPEC forbids expanding hybrid support by
         // family/architecture guesswork. That is not hypothetical here — the
-        // qwen3.5 (dense + MoE) and qwen3.8-27b hybrids share these exact
-        // architecture strings yet FAIL batched token parity (serial vs batched
-        // token hashes diverge), so paging them would bill wrong tokens as
-        // correct; only the qwen3.6 pair is bit-exact. Non-hybrid Qwen models do
+        // listed Qwen3.x hybrids passed exact serial-vs-shared-forward parity
+        // across the production 512-token prefill boundary, plus batched row
+        // isolation and the campaign leftovers gates. Non-hybrid Qwen models do
         // not appear here; they are admitted by the base `KVCacheSimple`
         // allowlist. Adding a future measured hybrid is one entry here plus the
         // matching SPEC-039 line. The runtime parity/MoE probes still gate every
         // attach; this only lets a measured hybrid be evaluated instead of
         // rejected outright as an unproven `mixed` class.
         let hybridArchitectureAllowlist: [String: String] = [
+            "qwen/qwen3.5-27b": "Qwen3_5ForConditionalGeneration",
+            "qwen/qwen3.5-35b-a3b": "Qwen3_5MoeForConditionalGeneration",
             "qwen/qwen3.6-27b": "Qwen3_5ForConditionalGeneration",
             "qwen/qwen3.6-35b-a3b": "Qwen3_5MoeForConditionalGeneration",
+            "qwen/qwen3.8-27b": "Qwen3_5ForConditionalGeneration",
         ]
         let architectureVerified: Bool = {
             guard let id = modelID?.lowercased(),
@@ -3234,6 +3264,7 @@ actor ModelRuntime: ModelRuntimeServing {
         modelSHA256: String?,
         weightsGeneration: Int,
         prefillStepSize: Int,
+        maxDecodeLockstepWindow: Int = ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
         contiguousCacheBridge: PagedKVRuntimeContiguousCacheBridge? = nil
     ) -> ContinuousBatchScheduler? {
@@ -3278,7 +3309,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelSHA256: modelSHA256,
                     weightsGeneration: weightsGeneration
                 ),
-                maxDecodeLockstepWindow: ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
+                maxDecodeLockstepWindow: maxDecodeLockstepWindow,
                 maxDecodeStepsWhilePrefilling: ContinuousBatchSchedulerConfiguration.defaultDecodeStepsWhilePrefilling
             ),
             allocator: allocator,
@@ -3333,6 +3364,12 @@ actor ModelRuntime: ModelRuntimeServing {
         // serial-format materialize at terminal instead.
         let isHybrid = cacheKinds.contains(.recurrentMamba)
         let contiguousCacheBridge = isHybrid && !cachedTurns ? nil : PagedKVRuntimeContiguousCacheBridge()
+        // Hybrid recurrent state is split/repacked only at decode window
+        // boundaries. Keep production windows to one token until the Qwen35/38
+        // shared-state path proves exact beyond the 512-token prompt boundary.
+        let maxDecodeLockstepWindow = isHybrid
+            ? 1
+            : ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow
         return makeContinuousBatchScheduler(
             decision: decision,
             tuple: tuple,
@@ -3361,6 +3398,7 @@ actor ModelRuntime: ModelRuntimeServing {
             modelSHA256: modelSHA256,
             weightsGeneration: weightsGeneration,
             prefillStepSize: prefillStepSize,
+            maxDecodeLockstepWindow: maxDecodeLockstepWindow,
             replayAuthority: replayAuthority,
             contiguousCacheBridge: contiguousCacheBridge
         )

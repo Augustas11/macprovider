@@ -1,11 +1,18 @@
 # SPEC-038 — Continuous batching for concurrent provider inference
 
-Version: v0.3.1
+Version: v0.3.2
 Status: draft (normative contract; runtime enablement remains tuple- and campaign-gated)
 Owner: provider runtime / inference scheduler
 Decision source: `docs/research/RESEARCH_232_MULTISTREAM_BATCHING_MEMO.md` (original memo, commit `8d80f6c4`), `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md`, `docs/research/SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (commit `e5ded571`), `docs/research/SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (commit `acc30b1e`), and `docs/research/SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (commit `da21af53`).
 Audit history: v0.2 is subject to three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-038-v0_2-rN-audit.md`.
 Depends on: SPEC-005, SPEC-010, SPEC-015, SPEC-023, SPEC-024, SPEC-028, SPEC-032, SPEC-037, SPEC-039.
+**Change log v0.3.2 (2026-09-28, final-prefill sampling parity):** FR-CB2
+requires every prompt token to be committed during prefill. Non-final chunks
+remain cache-only; the final chunk evaluates its final-position vocabulary
+logits and samples the first generated token, which then enters the normal
+per-row stop, emission, usage, and settlement pipeline. Production partitions
+fresh prompts into at most 512-token chunks, and hybrid promotion requires
+exact 48-token serial parity across the 511/512/513 boundary campaign.
 **Change log v0.3.1 (2026-09-27, native-MTP verification windows):**
 FR-CB12 is narrowed to SPEC-028 classic external-draft decoding. FR-CB18 adds
 the ragged row/position mapping, complete-window capacity reservation, sticky
@@ -75,8 +82,11 @@ production) and is capped by each row's remaining output budget.
   prompt on the M3 Ultra, because a 512-token chunk costs about as much as
   30–50 decode steps.
 
-Prefill evaluates only the caches, never the vocabulary projection, because
-prefill never samples.
+Non-final prefill chunks evaluate only cache state. The final prefill chunk
+evaluates the vocabulary projection at the prompt's final position and samples
+the row's first generated token; that token is outside the timed decode window
+but is included in completion usage and passes through the normal stop and
+streaming pipeline.
 
 **Change log v0.2.9 (2026-09-24, per-tuple cached-turn acceptance):** AC-26
 is satisfied per tuple and per runtime revision. The FR-CB10 accepted-tuple
@@ -416,6 +426,18 @@ preserve FCFS accounting, cancellation boundaries, receipt boundaries,
 request-local block-table isolation, and every FR-CB6 per-request isolation
 rule.
 
+For a fresh prompt, prefill MUST commit the complete prompt sequence; it MUST
+NOT hold back the final prompt token for a decode call. Every non-final chunk is
+cache-only. The final chunk MUST sample the first generated token from the
+logits at the final prompt position when `max_output_tokens > 0`; that sampled
+token MUST enter the same row-local sampling, stop, streaming, usage, replay,
+and settlement accounting used by later decode tokens. A zero-output request
+MUST still commit the complete prompt but MUST NOT sample or emit a token. The
+production per-row partition is at most 512 prompt tokens per chunk, bounded
+further by the configured prefill step size. Serial and shared-forward parity
+proofs MUST use the same partition so the proof cannot compare different model
+execution shapes.
+
 Paged-pool pressure during concurrent long prompts MUST degrade gracefully. The
 scheduler MUST apply the FR-CB1/FR-CB17 admission and pool-availability gates
 before admitting prefill work, MUST keep unfunded rows in the bounded queue or
@@ -425,8 +447,8 @@ events, or stitched receipts. Cancellation observed before or during a prefill
 turn MUST take effect at a bounded scheduler boundary and release only that
 row's reservations.
 
-Prefill never samples, so it evaluates only the prompt's cache state, not the
-vocabulary projection.
+Only the final prefill chunk samples, and only when the request has a positive
+output budget. Earlier chunks remain cache-only.
 
 This decode-first split is a v0.3 safety choice. It preserves simple
 per-request accounting, cancellation, and receipt boundaries while adding
