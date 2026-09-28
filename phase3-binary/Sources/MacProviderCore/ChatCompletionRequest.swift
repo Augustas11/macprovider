@@ -78,7 +78,7 @@ public struct ChatCompletionRequest: Sendable {
             throw APIError(status: 400, message: "Missing or invalid messages", code: "invalid_request")
         }
 
-        let maxTokens = try optionalInt(dict["max_tokens"], key: "max_tokens")
+        let maxTokens = try effectiveMaxTokens(in: dict)
         if let maxTokens, maxTokens <= 0 {
             throw APIError(status: 400, message: "max_tokens must be > 0", code: "invalid_request")
         }
@@ -142,7 +142,11 @@ public struct ChatCompletionRequest: Sendable {
         _ = try optionalInt(dict["top_logprobs"], key: "top_logprobs")
         _ = try optionalJSONValue(dict["logit_bias"])
 
-        let promptSource = try ChatCompletionPromptSource(dict: dict, rawMessages: rawMessages)
+        let promptSource = try ChatCompletionPromptSource(
+            dict: dict,
+            rawMessages: rawMessages,
+            effectiveMaxTokens: maxTokens
+        )
 
         return ChatCompletionRequest(
             model: model,
@@ -453,13 +457,13 @@ public struct ChatCompletionPromptSource: Equatable, Sendable {
     public let minP: JSONValue?
     public let repetitionPenalty: JSONValue?
 
-    init(dict: [String: Any], rawMessages: [Any]) throws {
+    init(dict: [String: Any], rawMessages: [Any], effectiveMaxTokens: Int?) throws {
         self.model = try JSONValue.parse(dict["model"] as Any)
         self.messages = try rawMessages.map { try JSONValue.parse($0) }
         self.tools = try optionalJSONValue(dict["tools"])
         self.temperature = try optionalJSONValue(dict["temperature"])
         self.topP = try optionalJSONValue(dict["top_p"])
-        self.maxTokens = try optionalJSONValue(dict["max_tokens"])
+        self.maxTokens = effectiveMaxTokens.map(JSONValue.int)
         self.stop = try optionalJSONValue(dict["stop"])
         self.seed = try optionalJSONValue(dict["seed"])
         self.responseFormat = try optionalJSONValue(dict["response_format"])
@@ -682,6 +686,19 @@ private func optionalInt(_ raw: Any?, key: String) throws -> Int? {
         throw APIError(status: 400, message: "\(key) must be an integer", code: "invalid_request")
     }
     return int
+}
+
+private func effectiveMaxTokens(in dict: [String: Any]) throws -> Int? {
+    let maxTokens = try optionalInt(dict["max_tokens"], key: "max_tokens")
+    let maxCompletionTokens = try optionalInt(dict["max_completion_tokens"], key: "max_completion_tokens")
+    if let maxTokens, let maxCompletionTokens, maxTokens != maxCompletionTokens {
+        throw APIError(
+            status: 400,
+            message: "max_tokens and max_completion_tokens must match when both are supplied",
+            code: "invalid_request"
+        )
+    }
+    return maxTokens ?? maxCompletionTokens
 }
 
 private func optionalDouble(_ raw: Any?, key: String) throws -> Double? {
