@@ -427,13 +427,13 @@ enum PagedKVRuntimeParityProbe {
                     model: context.model,
                     promptTokens: promptA,
                     nNew: nNew,
-                    makeCache: { context.model.newCache(parameters: nil) }
+                    makeCache: { try context.model.newCache(parameters: nil) }
                 ),
                 try Self.greedyGenerate(
                     model: context.model,
                     promptTokens: promptB,
                     nNew: nNew,
-                    makeCache: { context.model.newCache(parameters: nil) }
+                    makeCache: { try context.model.newCache(parameters: nil) }
                 )
             )
         }
