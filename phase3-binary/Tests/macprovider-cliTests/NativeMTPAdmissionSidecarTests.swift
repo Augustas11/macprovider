@@ -1522,7 +1522,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             ],
             "request_profile": [
                 "text_only": true,
-                "streaming": false,
+                "streaming": true,
                 "tools": false,
                 "structured_outputs": false,
                 "logprobs": false,

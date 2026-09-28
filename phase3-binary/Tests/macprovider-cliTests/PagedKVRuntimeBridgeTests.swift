@@ -890,6 +890,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testNativeMTPPromptPrefillUsesBoundedFinalPrefillHiddenWithoutReplay() async throws {
+        try requireMetal()
+
         let descriptor = Self.bridgeDescriptor()
         let model = RuntimeBridgeFakeModel(
             nextTokenByInput: [12: 13],
@@ -1131,6 +1133,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testMTPPackedCacheStagesProposalColumnsPrivatelyAndIgnoresPadding() async throws {
+        try requireMetal()
+
         let descriptor = Self.bridgeDescriptor()
         let allocator = try PagedKVBlockAllocator(
             blockSizeTokens: descriptor.blockSizeTokens,
@@ -1171,6 +1175,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testMTPPackedCacheKeepsUnequalOffsetsAndReorderedRowsIndependent() async throws {
+        try requireMetal()
+
         let descriptor = Self.bridgeDescriptor()
         let allocator = try PagedKVBlockAllocator(
             blockSizeTokens: descriptor.blockSizeTokens,
@@ -1205,6 +1211,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testMTPPackedCacheResolutionCommitsBaseColumnAndAcceptedPrefixOnly() async throws {
+        try requireMetal()
+
         let descriptor = Self.bridgeDescriptor()
         let allocator = try PagedKVBlockAllocator(
             blockSizeTokens: descriptor.blockSizeTokens,
@@ -1240,6 +1248,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testMTPPackedCacheAbortRestoresExactRowsAfterFacadeFinalize() async throws {
+        try requireMetal()
+
         let descriptor = Self.bridgeDescriptor()
         let allocator = try PagedKVBlockAllocator(
             blockSizeTokens: descriptor.blockSizeTokens,
@@ -1279,6 +1289,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testMTPPackedCacheRejectsOutOfRangeResolutionWithoutRowMutation() async throws {
+        try requireMetal()
+
         let descriptor = Self.bridgeDescriptor()
         let allocator = try PagedKVBlockAllocator(
             blockSizeTokens: descriptor.blockSizeTokens,
@@ -1304,6 +1316,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
     }
 
     func testMTPPackedCacheRejectsMalformedMapsBeforeMutation() async throws {
+        try requireMetal()
+
         let descriptor = Self.bridgeDescriptor()
         let allocator = try PagedKVBlockAllocator(
             blockSizeTokens: descriptor.blockSizeTokens,
@@ -2433,6 +2447,12 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTFail("condition did not become true before timeout")
+    }
+
+    private func requireMetal() throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
     }
 }
 

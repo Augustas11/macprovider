@@ -4,9 +4,17 @@
 import MLX
 import MLXLMCommon
 import MLXNN
+@testable import MacProviderCore
 import XCTest
 
 final class NativeMTPUpstreamQualificationTests: XCTestCase {
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+    }
+
     func testDrafterContainerTransfersRowOwnedState() async {
         let configuration = ModelConfiguration(
             id: "qualification/native-mtp-drafter",
