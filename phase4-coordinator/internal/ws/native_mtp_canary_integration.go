@@ -191,7 +191,7 @@ func (s *Server) runNativeMTPCanarySweep() {
 
 func (s *Server) maybeDispatchNativeMTPCanary(provider pool.Provider, now time.Time) bool {
 	diag := provider.NativeMTPCanary
-	if diag == nil || !diag.Offered || diag.Status == string(NativeMTPCanaryTupleDisabled) {
+	if diag == nil || !diag.Offered {
 		return false
 	}
 	key := nativeMTPTupleKeyFromProvider(provider)
@@ -302,18 +302,28 @@ func (s *Server) nativeMTPChallengeForProvider(provider pool.Provider) (NativeMT
 	if s.nativeMTPCanaryBank == nil {
 		return NativeMTPChallengeRecord{}, false
 	}
+	diag := provider.NativeMTPCanary
+	if diag == nil ||
+		diag.ChallengeBankSHA256 != s.nativeMTPCanaryBank.RawSHA256 ||
+		diag.ChallengeBankReleaseID != s.nativeMTPCanaryBank.ReleaseID {
+		return NativeMTPChallengeRecord{}, false
+	}
 	for _, record := range s.nativeMTPCanaryBank.Entries {
-		modelID := provider.ModelID
-		modelHash := provider.ModelHash
-		if provider.NativeMTPCanary != nil {
-			modelID = provider.NativeMTPCanary.ModelID
-			modelHash = provider.NativeMTPCanary.ModelHash
-		}
-		if record.ModelID == modelID && strings.EqualFold(record.ModelHash, modelHash) {
+		if nativeMTPChallengeRecordMatchesTuple(record, diag) {
 			return record, true
 		}
 	}
 	return NativeMTPChallengeRecord{}, false
+}
+
+func nativeMTPChallengeRecordMatchesTuple(record NativeMTPChallengeRecord, diag *pool.NativeMTPCanaryDiagnostics) bool {
+	return diag != nil &&
+		record.ModelID == diag.ModelID &&
+		strings.EqualFold(record.ModelHash, diag.ModelHash) &&
+		record.TokenizerSHA256 == diag.TokenizerDigest &&
+		record.ArtifactSHA256 == diag.ArtifactDigest &&
+		record.MTPManifestSHA256 == diag.ManifestDigest &&
+		int(record.FixedProposalDepth) == diag.ProposalDepth
 }
 
 func nativeMTPTupleKeyFromProvider(provider pool.Provider) NativeMTPCanaryTupleKey {
@@ -326,7 +336,30 @@ func nativeMTPTupleKeyFromProvider(provider pool.Provider) NativeMTPCanaryTupleK
 		AssignedID:          provider.AssignedID,
 		TargetGeneration:    diag.TargetGeneration,
 		RuntimeTupleSHA256:  diag.NativeMTPRuntimeTupleSHA256,
+		RuntimeTuple:        nativeMTPRuntimeTupleFromDiagnostics(diag),
 		ChallengeBankSHA256: diag.ChallengeBankSHA256,
+	}
+}
+
+func nativeMTPRuntimeTupleFromDiagnostics(diag *pool.NativeMTPCanaryDiagnostics) NativeMTPRuntimeTuple {
+	if diag == nil {
+		return NativeMTPRuntimeTuple{}
+	}
+	return NativeMTPRuntimeTuple{
+		ModelID:              diag.ModelID,
+		ModelHash:            diag.ModelHash,
+		ModelHashAlgorithm:   diag.ModelHashAlgorithm,
+		ProviderRevision:     diag.ProviderRevision,
+		RuntimeRevision:      diag.RuntimeRevision,
+		TokenizerDigest:      diag.TokenizerDigest,
+		ArtifactDigest:       diag.ArtifactDigest,
+		ManifestDigest:       diag.ManifestDigest,
+		SidecarDigest:        diag.SidecarDigest,
+		ProviderBinarySHA256: diag.ProviderBinarySHA256,
+		RuntimeCDHash:        diag.RuntimeCDHash,
+		CacheNamespace:       diag.CacheNamespace,
+		StateDigest:          diag.StateDigest,
+		ProposalDepth:        diag.ProposalDepth,
 	}
 }
 
@@ -371,22 +404,7 @@ func (s *Server) nativeMTPCanaryInterval() time.Duration {
 
 func nativeMTPCanaryWireRequest(provider pool.Provider, record NativeMTPChallengeRecord, req NativeMTPCanaryCoreRequest) NativeMTPCanaryRequest {
 	diag := provider.NativeMTPCanary
-	runtimeTuple := NativeMTPRuntimeTuple{
-		ModelID:              diag.ModelID,
-		ModelHash:            diag.ModelHash,
-		ModelHashAlgorithm:   diag.ModelHashAlgorithm,
-		ProviderRevision:     diag.ProviderRevision,
-		RuntimeRevision:      diag.RuntimeRevision,
-		TokenizerDigest:      diag.TokenizerDigest,
-		ArtifactDigest:       diag.ArtifactDigest,
-		ManifestDigest:       diag.ManifestDigest,
-		SidecarDigest:        diag.SidecarDigest,
-		ProviderBinarySHA256: diag.ProviderBinarySHA256,
-		RuntimeCDHash:        diag.RuntimeCDHash,
-		CacheNamespace:       diag.CacheNamespace,
-		StateDigest:          diag.StateDigest,
-		ProposalDepth:        diag.ProposalDepth,
-	}
+	runtimeTuple := req.RuntimeTuple
 	tokens := make([]int, 0, len(req.PromptTokenIDs))
 	for _, token := range req.PromptTokenIDs {
 		tokens = append(tokens, int(token))
@@ -470,10 +488,13 @@ func (s *Server) sendNativeMTPTupleDisableOnce(provider pool.Provider, reason st
 	if issuedAt.IsZero() {
 		issuedAt = s.now()
 	}
+	if !s.sendNativeMTPTupleDisable(nativeMTPTupleDisableFromDiagnostics(provider, nativeMTPTupleDisableReason(reason), issuedAt)) {
+		return false
+	}
 	if !s.pool.MarkNativeMTPTupleDisableSent(provider.ProviderID, provider.AssignedID, diag.NativeMTPRuntimeTupleSHA256, issuedAt) {
 		return false
 	}
-	return s.sendNativeMTPTupleDisable(nativeMTPTupleDisableFromDiagnostics(provider, nativeMTPTupleDisableReason(reason), issuedAt))
+	return true
 }
 
 func (s *Server) sendNativeMTPTupleDisableForOffer(offer NativeMTPTupleOffer, reason string) bool {

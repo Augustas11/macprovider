@@ -53,6 +53,7 @@ func (s *MemoryNativeMTPCanaryStateStore) BeginNativeMTPCanary(key NativeMTPCana
 		req.AssignedID != key.AssignedID ||
 		req.TargetGeneration != key.TargetGeneration ||
 		req.RuntimeTupleSHA256 != key.RuntimeTupleSHA256 ||
+		req.RuntimeTuple != key.RuntimeTuple ||
 		req.ChallengeBankSHA256 != key.ChallengeBankSHA256 {
 		return errNativeMTPCanaryInvalidTuple
 	}
@@ -174,6 +175,7 @@ func nativeMTPReplayKey(req NativeMTPCanaryCoreRequest) string {
 		req.AssignedID + "\x00" +
 		strconvFormatUint(req.TargetGeneration) + "\x00" +
 		req.RuntimeTupleSHA256 + "\x00" +
+		req.ChallengeBankSHA256 + "\x00" +
 		req.ChallengeID + "\x00" +
 		req.Nonce
 }

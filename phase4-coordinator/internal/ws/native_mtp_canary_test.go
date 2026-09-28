@@ -110,10 +110,19 @@ func TestNativeMTPCanaryCoreRequestAndResultEvaluation(t *testing.T) {
 	}
 	record := bank.Entries[0]
 	now := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
-	tuple := nativeMTPTuple(bank.RawSHA256)
+	tuple := nativeMTPTuple(bank.RawSHA256, record)
 	req, err := NewNativeMTPCanaryCoreRequestWithNonce(tuple, record, strings.Repeat("a", 32), now)
 	if err != nil {
 		t.Fatalf("request: %v", err)
+	}
+	mutatedTuple := tuple
+	mutatedTuple.RuntimeTuple.SidecarDigest = strings.Repeat("9", 64)
+	mutatedReq, err := NewNativeMTPCanaryCoreRequestWithNonce(mutatedTuple, record, strings.Repeat("a", 32), now)
+	if err != nil {
+		t.Fatalf("mutated request: %v", err)
+	}
+	if mutatedReq.RequestDigestSHA256 == req.RequestDigestSHA256 {
+		t.Fatal("request digest did not bind full runtime tuple")
 	}
 	pass := NativeMTPCanaryCoreResult{
 		Profile:                    nativeMTPCanaryProfile,
@@ -209,7 +218,7 @@ func TestNativeMTPCanaryStoreIsTupleScopedAndReplaySafe(t *testing.T) {
 	}
 	record := bank.Entries[0]
 	now := time.Date(2026, 9, 28, 11, 0, 0, 0, time.UTC)
-	tuple := nativeMTPTuple(bank.RawSHA256)
+	tuple := nativeMTPTuple(bank.RawSHA256, record)
 	req, err := NewNativeMTPCanaryCoreRequestWithNonce(tuple, record, strings.Repeat("b", 32), now)
 	if err != nil {
 		t.Fatal(err)
@@ -229,6 +238,15 @@ func TestNativeMTPCanaryStoreIsTupleScopedAndReplaySafe(t *testing.T) {
 	}
 	if err := store.BeginNativeMTPCanary(otherTuple, otherReq, now.Add(time.Second)); err != nil {
 		t.Fatalf("different tuple should have independent in-flight slot: %v", err)
+	}
+	rotatedBankTuple := tuple
+	rotatedBankTuple.ChallengeBankSHA256 = strings.Repeat("8", 64)
+	rotatedBankReq, err := NewNativeMTPCanaryCoreRequestWithNonce(rotatedBankTuple, record, strings.Repeat("1", 32), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BeginNativeMTPCanary(rotatedBankTuple, rotatedBankReq, now.Add(time.Second)); err != nil {
+		t.Fatalf("rotated challenge bank should have independent in-flight slot: %v", err)
 	}
 
 	result := NativeMTPCanaryCoreResult{
@@ -301,7 +319,7 @@ func TestNativeMTPCanaryStoreTimeoutAndCapacityReschedule(t *testing.T) {
 	}
 	record := bank.Entries[0]
 	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
-	tuple := nativeMTPTuple(bank.RawSHA256)
+	tuple := nativeMTPTuple(bank.RawSHA256, record)
 	req, err := NewNativeMTPCanaryCoreRequestWithNonce(tuple, record, strings.Repeat("e", 32), now)
 	if err != nil {
 		t.Fatal(err)
@@ -409,12 +427,13 @@ func nativeMTPChallengeEntry(challengeID string, modelHash string) map[string]an
 	}
 }
 
-func nativeMTPTuple(bankSHA string) NativeMTPCanaryTupleKey {
+func nativeMTPTuple(bankSHA string, record NativeMTPChallengeRecord) NativeMTPCanaryTupleKey {
 	return NativeMTPCanaryTupleKey{
 		ProviderID:          "provider-a",
 		AssignedID:          "assigned-a",
 		TargetGeneration:    7,
 		RuntimeTupleSHA256:  strings.Repeat("7", 64),
+		RuntimeTuple:        nativeMTPCoreRuntimeTuple(record),
 		ChallengeBankSHA256: bankSHA,
 	}
 }

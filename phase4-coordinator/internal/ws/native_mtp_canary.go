@@ -39,10 +39,14 @@ type NativeMTPCanaryTupleKey struct {
 	AssignedID          string
 	TargetGeneration    uint64
 	RuntimeTupleSHA256  string
+	RuntimeTuple        NativeMTPRuntimeTuple
 	ChallengeBankSHA256 string
 }
 
 func (k NativeMTPCanaryTupleKey) valid() bool {
+	if _, err := validateNativeMTPRuntimeTuple(k.RuntimeTuple, k.RuntimeTuple.ProposalDepth); err != nil {
+		return false
+	}
 	return boundedPrintable(k.ProviderID, 1, 256) &&
 		boundedPrintable(k.AssignedID, 1, 256) &&
 		k.TargetGeneration > 0 &&
@@ -51,7 +55,7 @@ func (k NativeMTPCanaryTupleKey) valid() bool {
 }
 
 func (k NativeMTPCanaryTupleKey) storeKey() string {
-	return k.ProviderID + "\x00" + k.AssignedID + "\x00" + strconv.FormatUint(k.TargetGeneration, 10) + "\x00" + k.RuntimeTupleSHA256
+	return k.ProviderID + "\x00" + k.AssignedID + "\x00" + strconv.FormatUint(k.TargetGeneration, 10) + "\x00" + k.RuntimeTupleSHA256 + "\x00" + k.ChallengeBankSHA256
 }
 
 type NativeMTPChallengeBankBinding struct {
@@ -105,6 +109,7 @@ type NativeMTPCanaryCoreRequest struct {
 	AssignedID             string
 	TargetGeneration       uint64
 	RuntimeTupleSHA256     string
+	RuntimeTuple           NativeMTPRuntimeTuple
 	ChallengeBankSHA256    string
 	ChallengeID            string
 	Nonce                  string
@@ -151,6 +156,7 @@ type nativeMTPCanaryRequestDigestObject struct {
 	AssignedID             string                          `json:"assigned_id"`
 	TargetGeneration       uint64                          `json:"target_generation"`
 	RuntimeTupleSHA256     string                          `json:"runtime_tuple_sha256"`
+	RuntimeTuple           NativeMTPRuntimeTuple           `json:"runtime_tuple"`
 	ChallengeBankSHA256    string                          `json:"challenge_bank_sha256"`
 	ChallengeID            string                          `json:"challenge_id"`
 	Nonce                  string                          `json:"nonce"`
@@ -284,6 +290,7 @@ func NewNativeMTPCanaryCoreRequestWithNonce(tuple NativeMTPCanaryTupleKey, recor
 		AssignedID:             tuple.AssignedID,
 		TargetGeneration:       tuple.TargetGeneration,
 		RuntimeTupleSHA256:     tuple.RuntimeTupleSHA256,
+		RuntimeTuple:           tuple.RuntimeTuple,
 		ChallengeBankSHA256:    tuple.ChallengeBankSHA256,
 		ChallengeID:            record.ChallengeID,
 		Nonce:                  nonce,
@@ -309,6 +316,7 @@ func EvaluateNativeMTPCanaryCoreResult(req NativeMTPCanaryCoreRequest, record Na
 		result.AssignedID != req.AssignedID ||
 		result.TargetGeneration != req.TargetGeneration ||
 		result.RuntimeTupleSHA256 != req.RuntimeTupleSHA256 ||
+		result.RuntimeTuple != req.RuntimeTuple ||
 		result.ChallengeBankSHA256 != req.ChallengeBankSHA256 ||
 		result.ChallengeID != req.ChallengeID ||
 		result.Nonce != req.Nonce ||
@@ -600,6 +608,7 @@ func (r NativeMTPCanaryCoreRequest) digestObject() nativeMTPCanaryRequestDigestO
 		AssignedID:             r.AssignedID,
 		TargetGeneration:       r.TargetGeneration,
 		RuntimeTupleSHA256:     r.RuntimeTupleSHA256,
+		RuntimeTuple:           r.RuntimeTuple,
 		ChallengeBankSHA256:    r.ChallengeBankSHA256,
 		ChallengeID:            r.ChallengeID,
 		Nonce:                  r.Nonce,

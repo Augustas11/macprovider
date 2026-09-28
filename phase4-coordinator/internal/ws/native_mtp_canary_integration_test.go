@@ -265,6 +265,88 @@ func TestNativeMTPCanaryBankMismatchSendsTupleDisable(t *testing.T) {
 	}
 }
 
+func TestNativeMTPCanaryChallengeSelectionRequiresOfferedTupleAndBank(t *testing.T) {
+	h := newNativeMTPCanaryIntegrationHarness(t)
+	provider := mustResolveProvider(t, h.registry, h.provider.ProviderID, h.provider.AssignedID)
+	if record, ok := h.server.nativeMTPChallengeForProvider(provider); !ok || record.ChallengeID != h.record.ChallengeID {
+		t.Fatalf("expected matching challenge, got record=%+v ok=%v", record, ok)
+	}
+
+	depthMismatch := provider
+	depthMismatch.NativeMTPCanary = cloneNativeMTPCanaryDiagnosticsForTest(provider.NativeMTPCanary)
+	depthMismatch.NativeMTPCanary.ProposalDepth++
+	if _, ok := h.server.nativeMTPChallengeForProvider(depthMismatch); ok {
+		t.Fatal("challenge selected for mismatched offered proposal depth")
+	}
+
+	artifactMismatch := provider
+	artifactMismatch.NativeMTPCanary = cloneNativeMTPCanaryDiagnosticsForTest(provider.NativeMTPCanary)
+	artifactMismatch.NativeMTPCanary.ArtifactDigest = strings.Repeat("f", 64)
+	if _, ok := h.server.nativeMTPChallengeForProvider(artifactMismatch); ok {
+		t.Fatal("challenge selected for mismatched offered artifact digest")
+	}
+
+	bankMismatch := provider
+	bankMismatch.NativeMTPCanary = cloneNativeMTPCanaryDiagnosticsForTest(provider.NativeMTPCanary)
+	bankMismatch.NativeMTPCanary.ChallengeBankReleaseID = "old-bank"
+	if _, ok := h.server.nativeMTPChallengeForProvider(bankMismatch); ok {
+		t.Fatal("challenge selected for mismatched challenge bank release")
+	}
+}
+
+func TestNativeMTPTupleDisableSendFailureRemainsRetryable(t *testing.T) {
+	h := newNativeMTPCanaryIntegrationHarness(t)
+	req := h.dispatchRequest(t)
+	session, ok := h.server.storedSessionFor(h.provider.ProviderID, h.provider.AssignedID)
+	if !ok {
+		t.Fatal("missing provider session")
+	}
+	session.close()
+
+	wireResult := h.wireResult(req, "ordinary")
+	h.server.handleNativeMTPCanaryResult(h.provider.ProviderID, h.provider.AssignedID, mustMarshalNativeMTP(t, wireResult))
+	updated := mustResolveProvider(t, h.registry, h.provider.ProviderID, h.provider.AssignedID)
+	if updated.NativeMTPCanary == nil || updated.NativeMTPCanary.Status != string(NativeMTPCanaryTupleDisabled) {
+		t.Fatalf("expected disabled tuple after failing result: %+v", updated.NativeMTPCanary)
+	}
+	if !updated.NativeMTPCanary.TupleDisableSentAt.IsZero() {
+		t.Fatalf("send failure must not mark tuple disable sent: %+v", updated.NativeMTPCanary.TupleDisableSentAt)
+	}
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+	retrySession := newProviderSession(h.provider.ProviderID, h.provider.AssignedID, serverConn, 16, time.Second)
+	h.server.sessions.Store(sessionKey(h.provider.ProviderID, h.provider.AssignedID), retrySession)
+	go retrySession.runWriter()
+
+	if h.server.maybeDispatchNativeMTPCanary(mustResolveProvider(t, h.registry, h.provider.ProviderID, h.provider.AssignedID), *h.now) {
+		t.Fatal("disabled tuple should not dispatch a new canary")
+	}
+	_ = clientConn.SetReadDeadline(time.Now().Add(time.Second))
+	disableRaw, err := wsutil.ReadServerText(clientConn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ParseNativeMTPTupleDisable(disableRaw); err != nil {
+		t.Fatalf("retry disable parse: %v raw=%s", err, string(disableRaw))
+	}
+	retried := mustResolveProvider(t, h.registry, h.provider.ProviderID, h.provider.AssignedID)
+	if retried.NativeMTPCanary.TupleDisableSentAt.IsZero() {
+		t.Fatal("successful retry did not mark tuple disable sent")
+	}
+}
+
+func cloneNativeMTPCanaryDiagnosticsForTest(in *pool.NativeMTPCanaryDiagnostics) *pool.NativeMTPCanaryDiagnostics {
+	if in == nil {
+		return nil
+	}
+	cp := *in
+	return &cp
+}
+
 type nativeMTPCanaryIntegrationHarness struct {
 	server     *Server
 	registry   *pool.Registry
