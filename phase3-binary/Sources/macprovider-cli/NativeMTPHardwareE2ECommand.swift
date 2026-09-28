@@ -1,6 +1,7 @@
 import ArgumentParser
 import CryptoKit
 import Foundation
+import MacProviderCore
 import MLXHuggingFace
 import MLXLMCommon
 import MLXLLM
@@ -255,12 +256,17 @@ private final class NativeMTPHardwareE2ERunner {
         let handle = try await nativeRuntime.acquireRequestHandle(streamingStopRequest)
         defer { Task { await nativeRuntime.unregisterInFlight(handle.registrationID) } }
         let streamRecorder = NativeMTPHardwareStreamRecorder()
+        let admissionsBeforeStreaming = admissionRecorder.snapshot().count
         _ = try await nativeRuntime.stream(streamingStopRequest, with: handle) { chunk in
             streamRecorder.append(chunk)
         }
         try require(!streamRecorder.snapshot().isEmpty, "stream produced no chunks")
-        let streamingAdmissions = admissionRecorder.snapshot().filter { $0.requestID == "native-mtp-real-stream-stop" }
-        try require(streamingAdmissions.last?.effectivePath == .nativeMTP, "stream did not use native MTP")
+        let admissionsAfterStreaming = admissionRecorder.snapshot()
+        try require(
+            admissionsAfterStreaming.count == admissionsBeforeStreaming + 1,
+            "stream admission was not recorded"
+        )
+        try require(admissionsAfterStreaming.last?.effectivePath == .nativeMTP, "stream did not use native MTP")
 
         let snapshot = await nativeRuntime.currentSnapshot()
         try require(snapshot.continuousBatching?.pagedKVDecision == "attached", "paged KV not attached")
