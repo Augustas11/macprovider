@@ -6914,13 +6914,16 @@ actor CoordinatorClient {
               !providerID.isEmpty else {
             return nil
         }
-        guard let runtimeTupleSHA256 = try? NativeMTPRuntimeTupleIdentity.sha256(
-            nativeMTPAdmissionTupleSHA256: offer.nativeMTPAdmissionTupleSHA256,
+        guard let runtimeTupleSHA256 = try? Self.nativeMTPRuntimeTupleSHA256(
             providerID: providerID,
             assignedID: assignedID,
             targetGeneration: offer.targetGeneration,
+            nativeMTPAdmissionTupleSHA256: offer.nativeMTPAdmissionTupleSHA256,
             servedSnapshotID: offer.servedSnapshotID
         ) else {
+            return nil
+        }
+        guard runtimeTupleSHA256 == offer.nativeMTPRuntimeTupleSHA256 else {
             return nil
         }
         return NativeMTPTupleOfferWireIdentity(

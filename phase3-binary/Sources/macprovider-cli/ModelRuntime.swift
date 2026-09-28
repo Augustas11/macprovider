@@ -7930,10 +7930,7 @@ actor ModelRuntime: ModelRuntimeServing {
         snapshotRoot: URL,
         trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring
     ) throws -> NativeMTPSelfTestChallenge {
-        guard let encodedPublicKey = trustedKeyring.publicKeysByKeyID[admissionCapability.selfTestChallengeBank.signerKeyID],
-              let publicKey = Data(base64Encoded: encodedPublicKey),
-              publicKey.count == 32,
-              publicKey.base64EncodedString() == encodedPublicKey else {
+        guard trustedKeyring.publicKeysByKeyID[admissionCapability.selfTestChallengeBank.signerKeyID] != nil else {
             throw NativeMTPSelfTestError.invalidSignature
         }
         let root = snapshotRoot.standardizedFileURL
@@ -7943,7 +7940,7 @@ actor ModelRuntime: ModelRuntimeServing {
         guard BYOMArtifactPathPolicy.isContained(bankURL, in: root) else {
             throw NativeMTPSelfTestError.challengeBankMismatch
         }
-        let data = try Data(contentsOf: bankURL)
+        let data = try readNativeMTPSelfTestBank(bankURL)
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         guard digest == admissionCapability.selfTestChallengeBank.challengeBankSHA256 else {
             throw NativeMTPSelfTestError.challengeBankMismatch
@@ -7953,7 +7950,7 @@ actor ModelRuntime: ModelRuntimeServing {
               bank.signerKeyID == admissionCapability.selfTestChallengeBank.signerKeyID else {
             throw NativeMTPSelfTestError.challengeBankMismatch
         }
-        guard let selected = bank.entries.first(where: {
+        let matches = bank.entries.filter {
             $0.modelID == admissionCapability.modelID
                 && $0.modelHash == admissionCapability.targetArtifactSHA256
                 && $0.tokenizerSHA256 == admissionCapability.tokenizerSHA256
@@ -7962,10 +7959,26 @@ actor ModelRuntime: ModelRuntimeServing {
                 && $0.fixedProposalDepth <= admissionCapability.maxProposalDepth
                 && $0.promptTokenIDs.count <= admissionCapability.maxPromptTokens
                 && $0.maxCompletionTokens <= admissionCapability.maxCompletionTokens
-        }) else {
+        }
+        guard matches.count == 1,
+              let selected = matches.first,
+              try NativeMTPSelfTest.selectChallenge(bank, challengeID: selected.challengeID) == selected
+        else {
             throw NativeMTPSelfTestError.challengeBankMismatch
         }
         return selected
+    }
+
+    private static func readNativeMTPSelfTestBank(_ url: URL) throws -> Data {
+        var info = stat()
+        guard lstat(url.path, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_size >= 0,
+              info.st_size <= 4 * 1024 * 1024
+        else {
+            throw NativeMTPSelfTestError.challengeBankMismatch
+        }
+        return try Data(contentsOf: url, options: [.mappedIfSafe])
     }
 
     private static func nativeMTPSelfTestRuntimeTuple(
