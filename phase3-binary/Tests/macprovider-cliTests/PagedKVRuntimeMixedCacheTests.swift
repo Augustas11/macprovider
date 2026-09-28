@@ -759,7 +759,7 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
         super.init()
     }
 
-    func prepare(_ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters) throws -> PrepareResult {
+    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
         .tokens(input.text)
     }
 
