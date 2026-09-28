@@ -4564,8 +4564,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     func testNativeMTPPackedRoundPartitionsOrdinaryRowsFromRaggedNativeRows() async throws {
         let backend = ScriptedBackend(
             scripts: ["ordinary-b": [31]],
+            prefillTokens: ["native-a": 21],
             nativeTargetTopTokens: [
-                "native-a": [21, 22, 23],
+                "native-a": [22, 23],
             ]
         )
         let scheduler = try await makeScheduler(
@@ -4579,7 +4580,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 id: "native-a",
                 promptTokens: [10],
                 maxOutputTokens: 3,
-                proposals: [21, 22],
+                proposals: [22],
                 maximumDepth: 2
             ))
         }
@@ -4604,32 +4605,33 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let nativeVerifyProposals = await backend.nativeVerifyProposals()
         let nativeVerifyInputTokenCounts = await backend.nativeVerifyInputTokenCounts()
         let decodeBatches = await backend.decodeBatches()
-        XCTAssertEqual(decodeCallCount, 1)
-        XCTAssertEqual(decodeBatches, [["ordinary-b"]])
+        XCTAssertEqual(decodeCallCount, 0)
+        XCTAssertEqual(decodeBatches, [])
         XCTAssertEqual(nativeVerifyBatches.count, 1)
         XCTAssertEqual(nativeVerifyBatches[0], ["native-a"])
-        XCTAssertEqual(nativeVerifyProposals, [["native-a": [21, 22]]])
-        XCTAssertEqual(nativeVerifyInputTokenCounts, [["native-a": 3]])
+        XCTAssertEqual(nativeVerifyProposals, [["native-a": [22]]])
+        XCTAssertEqual(nativeVerifyInputTokenCounts, [["native-a": 2]])
         let finalizations = await backend.nativeFinalizations()
         XCTAssertEqual(finalizations.count, 1)
         XCTAssertEqual(
             Dictionary(uniqueKeysWithValues: finalizations[0].map {
                 ($0.requestID, $0.committedProposalTokenCount)
             }),
-            ["native-a": 2]
+            ["native-a": 1]
         )
         XCTAssertEqual(
             Dictionary(uniqueKeysWithValues: finalizations[0].map {
                 ($0.requestID, $0.committedInputTokenCount)
             }),
-            ["native-a": 3]
+            ["native-a": 2]
         )
     }
 
     func testNativeMTPAppliesTerminalFilterBeforeBonusCandidate() async throws {
         let backend = ScriptedBackend(
             scripts: [:],
-            nativeTargetTopTokens: ["terminal": [7, 8, 99]]
+            prefillTokens: ["terminal": 7],
+            nativeTargetTopTokens: ["terminal": [8, 99]]
         )
         let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
 
@@ -4638,7 +4640,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             promptTokens: [1],
             maxOutputTokens: 3,
             stopTokenSequences: [[8]],
-            proposals: [7, 8],
+            proposals: [8],
             maximumDepth: 2
         ))
 
@@ -4646,7 +4648,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(result.outputTokens, [7])
         XCTAssertEqual(result.terminalStatus, .stop)
         let committedProposalTokenCount = await backend.nativeFinalizations().first?.first?.committedProposalTokenCount
-        XCTAssertEqual(committedProposalTokenCount, 2)
+        XCTAssertEqual(committedProposalTokenCount, 1)
     }
 
     func testNativeMTPRejectionAtEachPositionCommitsOnlyAcceptedPrefix() async throws {
@@ -4672,6 +4674,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         ] {
             let backend = ScriptedBackend(
                 scripts: [:],
+                prefillTokens: [testCase.id: 1],
                 nativeTargetTopTokensByStep: [testCase.id: testCase.targetTopByStep]
             )
             let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
@@ -4679,12 +4682,12 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             let result = try await scheduler.submit(Self.nativeRequest(
                 id: testCase.id,
                 promptTokens: [1],
-                maxOutputTokens: 3,
+                maxOutputTokens: 4,
                 proposals: [7, 8],
                 maximumDepth: 2
             ))
 
-            XCTAssertEqual(result.outputTokens, testCase.expectedTokens, testCase.id)
+            XCTAssertEqual(result.outputTokens, [1] + testCase.expectedTokens, testCase.id)
             let committedProposalTokenCounts = await backend.nativeFinalizations()
                 .compactMap { $0.first?.committedProposalTokenCount }
             XCTAssertEqual(
@@ -4703,6 +4706,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
         let backend = ScriptedBackend(
             scripts: [:],
+            prefillTokens: ["forced-zero": 43],
             nativeTargetTopTokens: ["forced-zero": [44]]
         )
         let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
@@ -4710,13 +4714,13 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let result = try await scheduler.submit(Self.nativeRequest(
             id: "forced-zero",
             promptTokens: [4],
-            maxOutputTokens: 1,
+            maxOutputTokens: 2,
             proposals: [41, 42],
             maximumDepth: 2,
             directive: directive
         ))
 
-        XCTAssertEqual(result.outputTokens, [44])
+        XCTAssertEqual(result.outputTokens, [43, 44])
         let decodeCallCount = await backend.decodeCallCount()
         let nativeVerifyProposals = await backend.nativeVerifyProposals()
         let committedProposalTokenCount = await backend.nativeFinalizations()
@@ -4726,11 +4730,12 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(committedProposalTokenCount, 0)
     }
 
-    func testNativeMTPDoesNotExposeTokensBeforeFinalizeAndAbortsOnVerifyThrow() async throws {
+    func testNativeMTPDoesNotExposeTransactionalCandidatesBeforeFinalizeAndAbortsOnVerifyThrow() async throws {
         let finalizeGate = AsyncGate()
         let recorder = TokenEventRecorder()
         let backend = ScriptedBackend(
             scripts: [:],
+            prefillTokens: ["held": 6],
             nativeTargetTopTokens: ["held": [7, 8]],
             nativeFinalizeGate: finalizeGate
         )
@@ -4740,7 +4745,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             try await scheduler.submit(Self.nativeRequest(
                 id: "held",
                 promptTokens: [1],
-                maxOutputTokens: 2,
+                maxOutputTokens: 3,
                 proposals: [7],
                 maximumDepth: 1
             ), tokenSink: { event in
@@ -4748,14 +4753,15 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             })
         }
         try await eventually { await backend.nativeFinalizations().count == 1 }
-        XCTAssertEqual(recorder.events(), [])
+        XCTAssertEqual(recorder.events().map(\.token), [6])
         await finalizeGate.open()
         let heldResult = try await held.value
-        XCTAssertEqual(heldResult.outputTokens, [7, 8])
-        XCTAssertEqual(recorder.events().map(\.token), [7, 8])
+        XCTAssertEqual(heldResult.outputTokens, [6, 7, 8])
+        XCTAssertEqual(recorder.events().map(\.token), [6, 7, 8])
 
         let throwingBackend = ScriptedBackend(
             scripts: [:],
+            prefillTokens: ["throwing": 6],
             nativeTargetTopTokens: ["throwing": [7]],
             nativeVerifyError: BackendFailure()
         )
@@ -4763,12 +4769,12 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let failed = try await throwingScheduler.submit(Self.nativeRequest(
             id: "throwing",
             promptTokens: [1],
-            maxOutputTokens: 1,
+            maxOutputTokens: 2,
             proposals: [7],
             maximumDepth: 1
         ))
         XCTAssertEqual(failed.terminalStatus, .batchFailed)
-        XCTAssertEqual(failed.outputTokens, [])
+        XCTAssertEqual(failed.outputTokens, [6])
         let shouldCommit = await throwingBackend.nativeFinalizations().first?.first?.shouldCommit
         XCTAssertEqual(shouldCommit, false)
     }
@@ -4776,6 +4782,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     func testNativeMTPAbortFinalizationErrorFailsClosedAndIsVisible() async throws {
         let backend = ScriptedBackend(
             scripts: [:],
+            prefillTokens: ["abort-throws": 6],
             nativeTargetTopTokens: ["abort-throws": [7]],
             nativeVerifyError: BackendFailure(),
             nativeFinalizeError: BackendFailure()
@@ -4785,34 +4792,37 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let failed = try await scheduler.submit(Self.nativeRequest(
             id: "abort-throws",
             promptTokens: [1],
-            maxOutputTokens: 1,
+            maxOutputTokens: 2,
             proposals: [7],
             maximumDepth: 1
         ))
 
         XCTAssertEqual(failed.terminalStatus, .batchFailed)
         XCTAssertEqual(failed.errorCode, "continuous_batching_native_mtp_abort_failed")
-        XCTAssertEqual(failed.outputTokens, [])
+        XCTAssertEqual(failed.outputTokens, [6])
         let finalization = await backend.nativeFinalizations().first?.first
         XCTAssertEqual(finalization?.shouldCommit, false)
         XCTAssertEqual(finalization?.committedInputTokenCount, 0)
     }
 
     func testNativeMTPBackendWithoutFinalizerFailsClosedForNonemptyRows() async throws {
-        let backend = NativeVerifyOnlyBackend(targetTopTokens: ["no-finalizer": [7]])
+        let backend = NativeVerifyOnlyBackend(
+            targetTopTokens: ["no-finalizer": [7]],
+            prefillTokens: ["no-finalizer": 6]
+        )
         let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
 
         let failed = try await scheduler.submit(Self.nativeRequest(
             id: "no-finalizer",
             promptTokens: [1],
-            maxOutputTokens: 1,
+            maxOutputTokens: 2,
             proposals: [7],
             maximumDepth: 1
         ))
 
         XCTAssertEqual(failed.terminalStatus, .requestFailed)
         XCTAssertEqual(failed.errorCode, "continuous_batching_native_mtp_finalize_failed")
-        XCTAssertEqual(failed.outputTokens, [])
+        XCTAssertEqual(failed.outputTokens, [6])
         let verified = await backend.verifiedRows()
         XCTAssertEqual(verified, [["no-finalizer"]])
     }
@@ -4822,6 +4832,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let recorder = TokenEventRecorder()
         let backend = ScriptedBackend(
             scripts: [:],
+            prefillTokens: ["cancelled": 6],
             nativeTargetTopTokens: ["cancelled": [7, 8]],
             nativeVerifyGate: verifyGate
         )
@@ -4844,8 +4855,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
         let result = try await task.value
         XCTAssertEqual(result.terminalStatus, .cancelled)
-        XCTAssertEqual(result.outputTokens, [])
-        XCTAssertEqual(recorder.events(), [])
+        XCTAssertEqual(result.outputTokens, [6])
+        XCTAssertEqual(recorder.events().map(\.token), [6])
         let finalization = await backend.nativeFinalizations().first?.first
         XCTAssertEqual(finalization?.committedProposalTokenCount, 0)
         XCTAssertEqual(finalization?.committedInputTokenCount, 0)
@@ -5246,14 +5257,21 @@ private struct HeadlessRetainedCacheBridge: ContinuousBatchRetainedCacheBridge {
 
 private actor NativeVerifyOnlyBackend: ContinuousBatchSchedulerBackend {
     private let targetTopTokens: [String: [Int]]
+    private let prefillTokens: [String: Int]
     private var verifiedLog: [[String]] = []
 
-    init(targetTopTokens: [String: [Int]]) {
+    init(targetTopTokens: [String: [Int]], prefillTokens: [String: Int] = [:]) {
         self.targetTopTokens = targetTopTokens
+        self.prefillTokens = prefillTokens
     }
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
-        rows.map { ContinuousBatchPrefillOutput(requestID: $0.requestID) }
+        rows.map {
+            ContinuousBatchPrefillOutput(
+                requestID: $0.requestID,
+                sampledToken: $0.sampleFirstToken ? prefillTokens[$0.requestID] : nil
+            )
+        }
     }
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
@@ -5292,6 +5310,7 @@ private actor NativeVerifyOnlyBackend: ContinuousBatchSchedulerBackend {
 private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private nonisolated let finishRecorder = RequestFinishRecorder()
     private let scripts: [String: [Int]]
+    private let prefillTokens: [String: Int]
     private let prefillGate: AsyncGate?
     private let prefillGateExcludedRequestIDs: Set<String>
     private let decodeGate: AsyncGate?
@@ -5346,6 +5365,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
 
     init(
         scripts: [String: [Int]],
+        prefillTokens: [String: Int] = [:],
         prefillGate: AsyncGate? = nil,
         prefillGateExcludedRequestIDs: Set<String> = [],
         decodeGate: AsyncGate? = nil,
@@ -5371,6 +5391,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         self.recurrentCheckpointBackend = recurrentCheckpointBackend
         self.snapshotGate = snapshotGate
         self.scripts = scripts
+        self.prefillTokens = prefillTokens
         self.prefillGate = prefillGate
         self.prefillGateExcludedRequestIDs = prefillGateExcludedRequestIDs
         self.decodeGate = decodeGate
@@ -5412,7 +5433,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
             ContinuousBatchPrefillOutput(
                 requestID: $0.requestID,
                 sampledToken: $0.sampleFirstToken && !prefillRowFailures.contains($0.requestID)
-                    ? (scripts[$0.requestID]?.first ?? 0)
+                    ? (prefillTokens[$0.requestID] ?? scripts[$0.requestID]?.first ?? 0)
                     : nil,
                 failureCode: prefillRowFailures.contains($0.requestID)
                     ? "continuous_batching_prefill_failed"

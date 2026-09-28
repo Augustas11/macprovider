@@ -514,6 +514,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
     private struct NativeMTPPendingTransaction {
         let proposalTokenCount: Int
+        /// Target token already sampled from the fully committed prompt and
+        /// evaluated as the first column of this verification round.
+        let currentToken: Int
         let promptTokens: [Int]
         let targetState: MTPPackedVerificationRowState
         let draftTokens: MLXArray?
@@ -1522,13 +1525,12 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     target: targetModel,
                     promptTokens: prompt,
                     targetHidden: promptHidden,
-                    firstBonus: MLXArray([Int32(finalTokenID)]),
+                    firstBonus: MLXArray([Int32(transaction.currentToken)]),
                     positionDeltas: transaction.targetState.positionDeltas,
                     state: &state,
                     sampler: sampler
                 )
                 eval(state.cache)
-                return state
             }
 
             let draftTokens = transaction.draftTokens
@@ -1576,6 +1578,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 input.requestID,
                 NativeMTPPendingTransaction(
                     proposalTokenCount: input.proposalTokens.count,
+                    currentToken: input.currentToken,
                     promptTokens: input.promptTokens,
                     targetState: continuationState,
                     draftTokens: self.consumeNativeMTPDraftTokens(for: input.requestID),
