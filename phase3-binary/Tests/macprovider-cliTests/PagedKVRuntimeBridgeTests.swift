@@ -29,21 +29,40 @@ private final class RuntimeBridgeChunkRecorder: @unchecked Sendable {
 }
 
 final class PagedKVRuntimeBridgeTests: XCTestCase {
-    func testQwen36HybridArchitectureRequiresExactTupleAndConfigMetadata() {
-        let supported = Data(#"{"model_type":"qwen3_5","architectures":["Qwen3_5ForConditionalGeneration"]}"#.utf8)
+    func testQwen3xHybridArchitectureRequiresExactAllowlistedIdentityAndConfigMetadata() {
+        let dense = Data(#"{"model_type":"qwen3_5","architectures":["Qwen3_5ForConditionalGeneration"]}"#.utf8)
+        let moe = Data(#"{"model_type":"qwen3_5_moe","architectures":["Qwen3_5MoeForConditionalGeneration"]}"#.utf8)
         let unrelated = Data(#"{"model_type":"qwen3_5","architectures":["AnotherDecoder"]}"#.utf8)
 
+        // The allowlist is the measured qwen3.6 pair: dense qwen3.6-27b requires
+        // the dense architecture, MoE qwen3.6-35b-a3b the MoE architecture.
         XCTAssertTrue(ModelRuntime.pagedKVModelCapabilities(
-            modelID: "qwen/qwen3.6-27b", configJSONData: supported
+            modelID: "qwen/qwen3.6-27b", configJSONData: dense
         ).hybridDecoderArchitectureVerified)
+        XCTAssertTrue(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "qwen/qwen3.6-35b-a3b", configJSONData: moe
+        ).hybridDecoderArchitectureVerified)
+
+        // Config metadata is still required: missing or mismatched architecture never verifies.
         XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
             modelID: "qwen/qwen3.6-27b", configJSONData: nil
         ).hybridDecoderArchitectureVerified)
         XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
             modelID: "qwen/qwen3.6-27b", configJSONData: unrelated
         ).hybridDecoderArchitectureVerified)
+
+        // Same-architecture hybrids that FAILED measured batched parity
+        // (qwen3.5 dense + MoE, qwen3.8-27b) MUST NOT verify — the allowlist is
+        // per-identity, not per-architecture, precisely so an unproven layout
+        // cannot be paged into wrong-but-billed tokens.
         XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
-            modelID: "qwen/qwen3.8-27b", configJSONData: supported
+            modelID: "qwen/qwen3.5-27b", configJSONData: dense
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "qwen/qwen3.5-35b-a3b", configJSONData: moe
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "qwen/qwen3.8-27b", configJSONData: dense
         ).hybridDecoderArchitectureVerified)
     }
     func testProductionRuntimeMeasurementMissingMetallibStaysNil() {
