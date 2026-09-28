@@ -1,8 +1,15 @@
 # SPEC-024 - Prefix-cache billing and provider-local cache isolation
 
-**Version:** 0.2.7 (2026-09-27, auto-prefix cache-hit billing)
+**Version:** 0.2.8 (2026-09-27, native-MTP cache exclusion)
 **Status:** **Billing arithmetic (§4 ledger / §5 rate card / §6 formula) MOVED to SPEC-005 v0.6** (canonical). SPEC-024 **retains** the `cached_prompt_tokens` **wire field** (§3, a SPEC-002 addendum), the **buyer-visible** mirror field (§8, a SPEC-006 addendum), the fraud model (§7), and the provider-local cache-**isolation** baseline (§11–§16) — none of which SPEC-005 **re-owns** (SPEC-005 §5.3.1 does fold in the §14 coordinator cross-check *gates* as billing-eligibility rules, but SPEC-024 remains their canonical home).
 **Depends on:** SPEC-002 v1.5.2 (coordinator-provider wire), SPEC-004 v0.3.2 (sticky affinity; FR-SR-2 provider-visibility carve-out), SPEC-005 v0.6.10 (billing — the canonical owner of prefix-cache billing arithmetic, formula, ledger columns, and rate-card keys), SPEC-006 v0.9.39 (buyer API; §1.3 conversation-key derivation + survivability (b) carve-out + OpenAI nested usage), SPEC-008 v0.4.1 (Tier-2 trust; §2.2 invariant (b) carve-out permitting the provider-visible derived conversation_key), SPEC-018 v0.2.4 (tool calling)
+
+**Change log v0.2.8 (2026-09-27, SPEC-048 native-MTP cache exclusion):**
+The unified decode selector runs before cache admission. Any request carrying a
+non-empty validated `conversation_key` stays on `ordinary`; a `native_mtp`
+request has no key, acquires no cache lease, performs no promotion or commit,
+and reports `cached_prompt_tokens = 0`. This preserves every existing cache-hit
+and discount path by routing cache-eligible traffic to its ordinary oracle.
 
 **Change log v0.2.7 (2026-09-27, issue #1768 — auto-prefix cache-hit billing):**
 - **SPEC-024-R003 / §3 / §8 / §14.** A valid first-attempt provider cache report is creditable
@@ -326,6 +333,21 @@ Implementation deliverable: `BUILD_SPEC_024_PREFIX_CACHE_BILLING_IMPL_PROMPT.md`
 ---
 
 ## 11. Provider-local cache-key and reuse invariant (v0.2)
+
+**Decode-path selection precedes cache admission (v0.2.8).** The provider MUST
+resolve the SPEC-048 decode path before `ConversationCache.begin()`. A request
+with a non-empty validated `conversation_key` MUST select `ordinary` and remains
+eligible for the existing reuse and billing rules. A request selected as
+`native_mtp` MUST have no conversation key, MUST NOT acquire a cache lease,
+promote or commit cache state, or leave a key busy, and MUST report
+`cached_prompt_tokens = 0`. This exclusion does not suppress a discount:
+traffic capable of earning one is routed to `ordinary` before cache admission.
+The authenticated gateway currently derives an auto-prefix key for ordinary
+paid user-message traffic; that key is nonempty at the provider and therefore
+also routes ordinary. SPEC-048 must measure eligibility after this derivation
+and cannot treat pre-gateway keyless requests as representative production
+coverage. Allowing native MTP to discard or bypass an auto-prefix key would
+require a later wire/billing amendment and is not authorized here.
 
 The provider-local conversation/KV cache (`phase3-binary/.../ConversationCache.swift`) is an
 in-process, per-provider-process store. Its **isolation boundary is the `conversation_key`

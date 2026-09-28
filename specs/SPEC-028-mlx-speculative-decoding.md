@@ -1,14 +1,27 @@
-# SPEC-028 — MLX Speculative Decoding for Provider Serve
+# SPEC-028 — Classic External-Draft MLX Speculative Decoding for Provider Serve
 
-**Version:** 0.2-draft
+**Version:** 0.3-draft
 **Status:** Draft doc — but IMPLEMENTED IN CODE. Speculative decoding shipped via PR-C (#399) and benchmark-evidence work (#402) on 2026-07-05+ (`--draft-model`/`--num-draft-tokens`, `CompiledDecode`, `spec028-canary`/`spec028-benchmark` subcommands, spec-decode heartbeat telemetry). The v0.2 "implementation MUST NOT begin before human review" gate was overtaken by events; this document needs a post-implementation revision to become the normative record of what actually shipped.
 **Date drafted:** 2026-07-05
 **Revision history:**
+- v0.3 (2026-09-27): narrows every requirement and field in this document to
+  classic target-plus-external-draft decoding (`classic_draft_spec`). Native
+  multi-token-prediction heads are a distinct decode path owned by SPEC-048 and
+  do not consume this spec's draft model, counters, capacity clamp, or fields.
 - v0.1 (2026-07-05): initial research-round draft.
 - v0.2 (2026-07-05): greedy-only gate confirmed for v0.1; draft-model hash explicitly out of scope (no SPEC-011 amendment); gpt-oss waived from v0.1 compatibility; AC-10 reframed as ratio over measured baseline plus a sustained-thermal window; FR-4 gains a concrete `ProviderCapacity` headroom refresh and fixed plain-vs-spec equivalence fixture; FR-5 gains a v0.1 request-feature allowlist; FR-8 gates heartbeat telemetry behind an operator opt-in until a coordinator SPEC consumes it; FR-9 gains a counter-reset on warm-swap boundary; FR-12 defines fail-closed runtime speculative error handling.
 **Depends on:** SPEC-001 v1.6 (`malibu-cli serve`, OpenAI-compatible HTTP, heartbeat/status), SPEC-010 v1.5 (`supported_models[]` semantics), SPEC-011 v0.5 (warm-swap state machine and target `model_hash` heartbeat), SPEC-013 v0.3 (`autotune` serving knobs and static candidate catalog), SPEC-015 v0.4.2 (locked settlement receipt usage schema), `mlx-swift-lm` 3.31.4.
 
-SPEC-028 is provider-side only. With no draft model configured, provider behavior MUST be byte-identical to the existing non-speculative serve path. SPEC-028 MUST NOT change the buyer API, the SPEC-015 v0.4 receipt tuple, settlement verifier behavior, or coordinator routing policy.
+SPEC-028 is provider-side only and owns only the `classic_draft_spec` path: a
+target model plus a separate external draft model. In this document,
+"speculative decoding", "spec decode", "draft-enabled", and every
+`spec_decode_*` field refer exclusively to that path. Native MTP is separately
+owned by SPEC-048. It MUST NOT be inferred from `draft_model`, consume or alter
+this spec's counters, or inherit this spec's single-slot rule. With no draft
+model configured, the classic path is disabled; SPEC-048 may independently
+select `native_mtp` only under its own gates. SPEC-028 MUST NOT change the buyer
+API, the SPEC-015 v0.4 receipt tuple, settlement verifier behavior, or
+coordinator routing policy.
 
 In this document, "v0.1" means the first implementation profile of SPEC-028, not the draft-document version number.
 

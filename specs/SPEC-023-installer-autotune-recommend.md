@@ -1,12 +1,21 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.20.2
+version: v0.21.0
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-09-27
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.21.0 (2026-09-27)** — Native-MTP signed admission (#1770).
+  Registers `SPEC-023-R024` and the closed
+  `macprovider.native-mtp-admission.v1` sidecar. Admission binds one release,
+  one verified SPEC-010 artifact member, one runtime/build tuple, native MTP
+  manifest/adapter/state, optional MLX-native MXFP8 representation, hardware
+  and request profile, benchmark policy, and immutable evidence digests.
+  Accelerated native-MTP measurements cannot seed or raise ordinary throughput
+  gates.
 
 - **v0.20.1 (2026-09-27)** — Safe recommendation probing (#1723).
   Registers `SPEC-023-R022`: a benchmarking `autotune --recommend` run stops
@@ -2945,6 +2954,240 @@ whose `target_cell` targets a different model than the row that carries it is a
 catalog-integrity failure (AC-OMLX-14).
 
 Therefore `N = 3` is adopted as a conservative verification policy rather than a value derived from the oMLX dataset. One run cannot distinguish a repeatable result from a transient outlier, while two runs provide no tie-break when they disagree. Three independent verified provider autotune measurements provide a majority-consistency check before promotion while keeping verification operationally practical.
+
+### 12.5 Native-MTP admission sidecar (SPEC-023-R024)
+
+Native-MTP catalog eligibility is carried only by a detached, signed sidecar
+whose decoded top-level object is the exact closed set below. It is not a
+provider assertion and does not modify the existing candidate/artifact feed
+schema.
+
+```text
+schema_version = "macprovider.native-mtp-admission.v1"
+release_id: 1..128 ASCII bytes, equal to release.json version
+issued_at: RFC3339 UTC seconds
+expires_at: RFC3339 UTC seconds; issued_at < expires_at <= issued_at + 90 days
+signer_key_id: 1..128 ASCII bytes
+challenge_bank_signer_key_id: 1..128 ASCII bytes
+revocation_signer_key_id: 1..128 ASCII bytes
+entries: array[1..256]
+```
+
+Every entry is the exact closed object below. `sha256` means lowercase 64-hex;
+`short_string` means 1..128 UTF-8 bytes with no control character; integers are
+unsigned JSON integers and never floats.
+
+| Field | Type / closed rule |
+|---|---|
+| `model_key`, `artifact_id` | existing SPEC-023 grammars |
+| `hash_algorithm` | `"sha256"` |
+| `artifact_hash`, `artifact_manifest_sha256`, `tokenizer_sha256` | `sha256` |
+| `decode_path` | exactly `"native_mtp"` |
+| `mtp_manifest_sha256` | `sha256` |
+| `mtp_family_adapter`, `mtp_state_class` | `short_string` |
+| `mtp_head_count`, `proposal_depth` | integers `1..16` |
+| `runtime_revision`, `provider_revision` | `short_string` |
+| `source_commit` | full lowercase Git object id for the source repository's object format, exactly 40 or 64 hex characters |
+| `reproducible_build_sha256` | `sha256` |
+| `cache_state_classes` | sorted unique array `1..16` of `short_string` |
+| `hardware_class` | lowercase ASCII matching `^[a-z0-9][a-z0-9._-]{0,63}$` |
+| `ram_bytes` | exact physical RAM integer `> 0`, not a minimum |
+| `qualified_slots` | integer `2..8`, exact admitted slot count |
+| `request_feature_profile` | exactly `"native_mtp_greedy_text_v1"` |
+| `decrease_threshold_ppm`, `increase_threshold_ppm` | integers `0..1000000`, strictly increasing |
+| `max_verification_positions_per_committed_milli` | integer `1000..4000` |
+| `throughput_delta_ppm` | signed integer result from the frozen R015 cell for this exact tuple |
+| `benchmark_policy_sha256` | `sha256` |
+| `challenge_bank_sha256` | `sha256` of the release-bound SPEC-031-R033 challenge bank |
+| `fit_evidence_sha256`, `quality_evidence_sha256`, `correctness_evidence_sha256`, `state_rollback_evidence_sha256`, `batch_evidence_sha256`, `performance_evidence_sha256`, `security_negative_evidence_sha256` | `sha256` of immutable canonical evidence bytes |
+| `quantization` | closed object below |
+| `ordinary_baseline` | closed object below |
+
+`quantization` is exactly `{kind, packed_data_dtype, packed_layout,
+scale_dtype, scale_layout, block_size_elements, alignment_bytes, padding_rule,
+unquantized_exceptions, per_layer_exceptions,
+representation_manifest_sha256}`. `kind` is `base` or `mlx_mxfp8`.
+`packed_data_dtype` is `none|uint8`; `packed_layout` is
+`none|mlx_array_native_v1`; `scale_dtype` is `none|float16|float32`;
+`scale_layout` is `none|per_block`; `block_size_elements` is null or integer
+`1..1024`; `alignment_bytes` is null or a power of two `1..4096`;
+`padding_rule` is `none|zero_pad_to_alignment`; each exceptions field is a
+sorted unique array of at most 256 tensor-name patterns, each 1..128 printable
+ASCII bytes; and the manifest is a `sha256`. `base` requires the three layout/
+dtype values `none`, numeric fields null, `padding_rule=none`, empty exception
+arrays, and a manifest describing the loaded base representation. `mlx_mxfp8`
+requires `uint8`, `mlx_array_native_v1`, non-`none` scale fields, non-null
+numeric fields, and passes the SPEC-048-R012 `1.01x` perplexity, one-point task,
+5% fit-error, and 10% system-headroom bounds. Compressed-tensors FP8, TorchAO
+FP8, GGUF, a name containing `FP8`, or another microscaling format is invalid.
+
+`ordinary_baseline` is exactly `{decode_path, runtime_revision,
+provider_revision, artifact_hash, qualified_slots, measurement_sha256,
+aggregate_tps_milli}`: `decode_path` is `ordinary`, revisions are
+`short_string`, hashes are `sha256`, slots equal the entry's slots, and
+`aggregate_tps_milli` is a positive integer. This ordinary measurement is the
+only one eligible to seed or raise ordinary throughput gates.
+
+Entries are unique and sorted bytewise by `(model_key, artifact_id,
+hardware_class, ram_bytes, qualified_slots, proposal_depth, quantization.kind)`.
+Two entries with the same key are a global schema failure. The artifact fields
+MUST equal one `verified` artifact-feed member and its candidate-catalog
+release binding in this exact release; `declared` or `blocked` is ineligible.
+
+**Canonical tuple identities.** Implementations MUST use the following two
+domain-separated identities; the generic names `tuple_id`,
+`native_mtp_tuple_digest`, and `runtime_tuple_digest` are forbidden in this
+profile because they do not say which identity layer they bind.
+
+1. `native_mtp_admission_tuple_sha256` is SHA-256 over the UTF-8 bytes
+   `macprovider.native-mtp-admission-tuple.v1\n` followed by RFC 8785 JCS of
+   the exact closed object `{schema_version,release_id,sidecar_sha256,entry}`.
+   `schema_version` is exactly
+   `macprovider.native-mtp-admission-tuple.v1`, `release_id` is the enclosing
+   sidecar value, `sidecar_sha256` is SHA-256 of the exact authenticated
+   sidecar JSON bytes before parsing normalization, and `entry` is the complete
+   selected closed entry above with no field removed, renamed, or defaulted.
+   This is the stable identity used by admission, evidence, revocation, and
+   release records.
+2. `native_mtp_runtime_tuple_sha256` is SHA-256 over the UTF-8 bytes
+   `macprovider.native-mtp-runtime-tuple.v1\n` followed by RFC 8785 JCS of the
+   exact closed object `{schema_version,native_mtp_admission_tuple_sha256,
+   provider_id,assigned_id,target_generation,served_snapshot_id}`.
+   `schema_version` is exactly `macprovider.native-mtp-runtime-tuple.v1`;
+   provider and assignment identifiers use their existing authenticated wire
+   grammars; `target_generation` is an unsigned 64-bit integer; and
+   `served_snapshot_id` is the lowercase 64-hex digest of the immutable served
+   snapshot. This request-lifetime identity is used by coordinator canaries and
+   diagnostic probes. No consumer may substitute one identity for the other or
+   reconstruct either from a partial field list.
+
+The detached signature envelope and canonicalization rules MUST be identical
+to the current signed static-feed envelope, including strict unknown-field,
+duplicate-key, type, length, ordering, trusted-key, and signature validation.
+The signature covers the complete canonical sidecar bytes. The decoded body's
+`signer_key_id` MUST equal the detached envelope's authenticated `key_id`, and
+that same id MUST equal both the candidate-feed signer and
+`release.json.feeds["native-mtp-admission.json"].signer_key_id`; a valid
+concurrently trusted rotation key is insufficient. The asset names are
+`native-mtp-admission.json` and `.sig`.
+
+`challenge_bank_signer_key_id` and `revocation_signer_key_id` each pin one
+specific currently trusted key, not merely membership in the release keyring.
+The corresponding body and detached envelope MUST both authenticate as that
+exact key. A valid signature by the admission signer, a rotation-bridge key, an
+old key, or any other concurrently trusted key is an integrity failure unless
+its id is the one pinned for that artifact. Rotation requires a newly signed
+admission sidecar/release that names the successor key; there is no multi-key
+overlap for one admission identity. Old and new admission identities resolve
+key-id-qualified challenge/revocation assets independently during the bridge.
+
+This amendment introduces `macprovider.autotune-release-ledger.v4`; it does
+not alter v3. A native-MTP v4 row is exactly `{generated_at, policy_version,
+feeds, artifact_bindings, intake_decision_sha256,
+native_mtp_admission_sha256}`. Its `feeds` exact set is the existing five-feed
+artifact-bound set plus `native-mtp-admission.json`, and the new digest is
+lowercase 64-hex equal to that feed record's SHA-256. Historical v1/v2/v3
+documents and rows validate byte-unchanged and reject every v4 field; v4
+rejects a five-feed row or any missing/extra field. After the first six-feed v4
+release, a later release cannot downgrade to v3 or five feeds.
+
+`release.json` carries the new ordinary feed record
+`{bytes,sha256,version,signer_key_id}`, with `version == release_id`. Stage A
+generates, signs, serves as an external release asset, and ledger-binds the
+sidecar, but MUST NOT add the sidecar pair to `components.catalog.files` or a
+provider payload; a compatible CLI remains ordinary when the external asset is
+missing or invalid. Stage B may add the pair only after a bridge CLI accepts the
+final enlarged exact catalog-file set and the previous-stable floor is at that
+bridge. The exact target set depends on whether the artifact-feed pair has also
+completed its own Stage B; no implementation may hardcode an assumed 11- or
+13-file count outside the versioned exact-set manifest.
+
+The loader rejects cross-release replay, missing/expired sidecar, tuple-field
+mismatch, unresolved/non-verified artifact, or evidence digest absent from the
+release evidence bundle. One entry whose tuple/evidence fails is tuple-scoped
+disabled; top-level schema, ordering/uniqueness, signature, signer equality, or
+release/ledger binding failure rejects the entire sidecar. Journey and final
+three-lane review digests are deliberately not inside this pre-journey sidecar;
+SPEC-048-R014 binds them later, avoiding a self-hash cycle.
+
+**Emergency tuple revocation.** Native MTP additionally requires a current
+detached-signed `native-mtp-revocations.json` operator feed. Its decoded body is
+the exact closed object `{schema_version,generation,issued_at,expires_at,
+signer_key_id,revoked_admission_tuple_sha256}`:
+
+- `schema_version` is exactly `macprovider.native-mtp-revocations.v1`;
+- `generation` is an unsigned 64-bit integer that strictly increases whenever
+  the body changes;
+- timestamps are RFC3339 UTC seconds with
+  `issued_at < expires_at <= issued_at + 1 hour`;
+- `signer_key_id` is 1..128 ASCII bytes; and
+- `revoked_admission_tuple_sha256` is a bytewise-sorted unique array of at most
+  4096 lowercase 64-hex admission-tuple identities.
+
+The feed uses the same canonicalization, detached envelope, trusted static-feed
+keyring, and strict parser as the admission sidecar. Its body
+`signer_key_id` and authenticated envelope `key_id` MUST both equal the exact
+`revocation_signer_key_id` pinned by the selected admission sidecar. The asset
+is fetched from the canonical operator origin under the key-id-qualified name
+`native-mtp-revocations.<revocation_signer_key_id>.json` plus `.sig`; a valid
+signature by every other key, including a concurrently trusted bridge key, is
+an integrity failure. The provider MUST fetch it at startup and at least every
+15 minutes and reject a smaller generation, a revoked-set regression,
+duplicate-key or unknown-field body, invalid signature, signer mismatch,
+future-issued body, or expired body. A later accepted feed's revoked array MUST
+be a superset of the last accepted array for that signer: revocation of one
+admission identity is permanent. Restoration requires a new release/sidecar
+and therefore a new `native_mtp_admission_tuple_sha256`; omission from a later
+feed never unrevokes the old identity.
+
+The monotonic anchor is the macOS Keychain generic-password item with service
+`macprovider.native-mtp-revocation-generation` and account equal to the pinned
+signer key id. Its value is the exact closed record `{generation,body_sha256,
+revoked_set_sha256}`. The authenticated feed cache is a provider-owned `0600`
+file below the non-repository Application Support directory. Update order is:
+write and `fsync` a same-directory temporary cache, atomic-rename and `fsync`
+the directory, then atomically replace the Keychain anchor; the new feed is not
+eligible for selection until both stores agree. On restart, a higher valid
+cache may finish an interrupted Keychain update; an anchor ahead of, missing
+from, or inconsistent with the cache fails native MTP closed until a feed at
+least as new is freshly fetched. If the anchor is missing while an admission
+sidecar is installed, cached bytes are forbidden: recovery requires an online
+fetch from the canonical TLS origin whose `issued_at` is within the last 15
+minutes. Key rotation uses a separate account and cannot copy or lower the old
+account. Acceptance MUST cover crashes at every update boundary, restored
+filesystem snapshots, missing/corrupt Keychain or cache state, and old-key
+replay. A current cached body remains usable through its `expires_at`; if no
+current authenticated body is available, native MTP fails closed while
+ordinary and classic decode remain available.
+Decode-path selection MUST check the current revocation set immediately before
+admitting a native row. A listed identity disables only that exact admission
+tuple and prevents new native rows immediately. Already-admitted rows stop at
+the next committed-token scheduler boundary, no later than one target forward:
+a pre-output row may take the exact-state ordinary fallback, while a row that
+has emitted output terminates through the existing non-settling post-output
+failure path without retry or stitching. A revocation cannot be cleared by
+replaying an older generation. This mutable emergency feed is intentionally outside the immutable
+release ledger: the ledger authenticates what was released, while this feed can
+withdraw a released tuple without minting a new binary or catalog release.
+
+Native-MTP and native-MTP-plus-MXFP8 measurements are accelerated results.
+They MUST NOT seed, raise, or replace an ordinary catalog throughput gate. If
+accelerated observations enter a mixed external dataset, the generator MUST
+exclude them or apply the predeclared discount required by §12; relabeling them
+as ordinary is an integrity failure. A valid sidecar grants only SPEC-048
+eligibility: activation still requires that spec's current conformance,
+journey, release-candidate, and local runtime gates.
+
+Acceptance MUST cover byte-stable generation; historical v1/v2/v3 preservation;
+v4 exact-row/feed/digest and downgrade rules; signature/signer equality;
+release.json/ledger/candidate/artifact binding; every field mismatch; expiry;
+duplicate/order/length/bound failure; missing evidence; unknown field; wrong
+type; cross-release replay; an MXFP8 lookalike; accelerated gate seeding; Stage
+A previous-stable update with unchanged payload map; premature Stage B failure;
+bridge-qualified Stage B success for the exact final map; both canonical tuple
+digests and domain separation; source Git-object-id length; challenge-bank and
+work-amplification bounds; and emergency-revocation signing, signer equality,
+polling, expiry, rollback, replay, tuple scoping, and fail-closed unavailability.
 
 ## 13. Open questions / v0.2 candidates
 

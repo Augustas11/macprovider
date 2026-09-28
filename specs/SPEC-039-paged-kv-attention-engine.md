@@ -30,6 +30,9 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.7 (2026-09-27): FR-PKV15 defines the per-row transactional
+checkpoint/stage/commit/rewind primitive required by SPEC-048 native-MTP
+verification. It does not admit sliding-window caches or broaden persistence.
 Decision source: `docs/research/RESEARCH_232_ADDENDUM_PAGED_REDECISION_2026-07-29.md` plus the verified spike sequence `SPIKE_PAGED_ATTN_PHASE0_RESULT_2026-07-29.md` (`e5ded571`), `SPIKE_PAGED_ATTN_PHASE2_RESULT_2026-07-29.md` (`acc30b1e`), and `SPIKE_PAGED_ATTN_PHASE3_MOE_RESULT_2026-07-29.md` (`da21af53`).
 Audit history: three-lane codex SPEC audit (code / security / architect). Convergence and any carried LOW/INFO findings are recorded in the SPEC PR body and `audits/2026-07-29/SPEC-039-rN-audit.md`.
 
@@ -189,7 +192,7 @@ invariant.
 
 ## 4. Normative requirements
 
-Requirement IDs `SPEC-039-R001`..`R014` are the conformance units; FR labels
+Requirement IDs `SPEC-039-R001`..`R015` are the conformance units; FR labels
 below are the prose anchors. MUST / MUST NOT / SHOULD are RFC-2119 normative.
 
 ### FR-PKV1 — public KVCache injection seam (SPEC-039-R001)
@@ -677,6 +680,42 @@ Default-off invariants are FR-PKV6; the fallback-policy values select the
 FR-PKV7 branch. Invalid configuration MUST disable paged mode with a logged
 error, never a silent partial enable.
 
+### FR-PKV15 — native-MTP transactional sequence state (SPEC-039-R015)
+
+For a tuple admitted by SPEC-048 and SPEC-038-R018, the engine MUST expose a
+sequence-scoped transactional primitive over every mutable state component used
+by target verification: paged attention block tables and valid-token lengths,
+plus each allowlisted hybrid/recurrent layer's convolution, delta, or other
+position state. The closed operation sequence is `checkpoint`, `stage(N)`,
+`commit(prefix_length)`, or `abort`. A checkpoint binds sequence handle,
+row-generation, logical length, allocator epoch, served-snapshot identity, and
+the complete allowlisted state topology. `stage(N)` owns a tail invisible to
+other requests and to cache extraction. `commit(k)` with `0 <= k <= N` makes
+exactly the accepted prefix durable and discards/rewinds the suffix; `abort`
+restores the checkpoint exactly. Every operation rejects stale row generation,
+wrong sequence, wrong allocator epoch, double commit/abort, or topology drift.
+Here `N` counts proposed token positions only. A target-selected bonus token is
+not part of that staged tail and gains target KV/state only through the next
+target step or an explicitly qualified bonus-state operation; implementations
+MUST NOT advance logical length for an unmaterialized bonus.
+
+The engine MUST reserve all blocks and auxiliary-state staging required for the
+complete proposed window before `stage(N)` mutates live state. Allocation or
+kernel failure before first buyer-visible output may abort to the checkpoint;
+after output begins, failure remains request-local and MUST NOT expose staged
+suffix state or affect another row. Cancellation and warm-swap drain use the
+same abort/commit ownership rules. The primitive MUST be safe under ragged
+multi-row shared forwards: one row's shorter commit or abort MUST NOT change
+another row's staged tail.
+
+Admission remains restricted to the FR-PKV12 descriptor plus an explicit
+native-MTP transactional capability for the exact topology. Genuine
+`RotatingKVCache`/sliding-window, unallowlisted `CacheList`, unproven recurrent
+state, and quantized KV remain outside the descriptor and route ordinary or
+fail preflight as their owning specs require. This requirement does not
+authorize SPEC-037 persistence or SPEC-024 conversation retention for native
+MTP state.
+
 ## 5. Outcome tables
 
 | Configuration | Required result |
@@ -793,6 +832,15 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   `block_size_tokens`, pool capacity, and `fallback_policy`
   (`permissive`/`strict`); invalid values disable paged mode with a logged
   error and never a silent partial enable.
+- **AC-19 native-MTP transaction (FR-PKV15):** for both a dense paged tuple and
+  every allowlisted hybrid tuple, reject at each proposal position and prove
+  `commit(k)` matches an ordinary one-token-at-a-time cache/state oracle; prove
+  `abort` byte/logical-state equality with the checkpoint; inject allocator,
+  kernel, cancellation, stale-generation, wrong-sequence, and warm-swap faults;
+  and run two ragged rows whose unequal commits leave each row equal to its own
+  oracle with no cross-row block or recurrent-state mutation. A sliding-window,
+  unallowlisted hybrid, or quantized-KV tuple MUST lack the transactional
+  capability and fail native-MTP admission.
 
 ## 7. No-go list
 
