@@ -567,7 +567,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             .liveTupleMismatch("$.revisions.provider")
         )
         XCTAssertEqual(
-            try rejectedError(fixture.mutatingRoot { $0["admission_enabled"] = false }, fixture: fixture),
+            try rejectedError(fixture.mutatingRoot({ $0["admission_enabled"] = false }, recomputeTuple: true), fixture: fixture),
             .unsupported("admission flags")
         )
     }
@@ -676,7 +676,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 var mtp = root["mtp"] as! [String: Any]
                 mtp["complete_window_bytes_by_depth"] = [1, 2, 3, 4, Int.max]
                 root["mtp"] = mtp
-            }), fixture: fixture),
+            }, recomputeTuple: true), fixture: fixture),
             .invalidValue("$.mtp.complete_window_bytes_by_depth")
         )
     }
