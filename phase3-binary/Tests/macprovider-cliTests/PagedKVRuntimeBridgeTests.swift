@@ -939,6 +939,197 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(drafter.preparedHiddenWidths(), [3])
     }
 
+    func testNativeMTPIntegrityProbeBlocksBuyerAdmissionAndReleasesAfterCompletion() async throws {
+        let prefillGate = RuntimeBridgeTestGate()
+        let backend = RuntimeBridgeScriptedBackend(
+            scripts: ["probe": [11], "buyer": [21, 22], "buyer-after": [31, 32]],
+            nativeProposalScripts: ["probe": [[12]]],
+            prefillGate: prefillGate
+        )
+        let scheduler = try Self.makeScheduler(maxActiveRows: 1, backend: backend)
+        let fence = Self.nativeMTPFence()
+
+        let probeTask = Task {
+            try await scheduler.submitNativeMTPIntegrityProbe(Self.schedulerRequest(
+                id: "probe",
+                promptTokens: [10],
+                maxOutputTokens: 3,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPTupleFence: fence,
+                nativeMTPIntegrityProbe: true
+            ))
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        do {
+            _ = try await scheduler.submit(Self.schedulerRequest(
+                id: "buyer",
+                promptTokens: [20],
+                maxOutputTokens: 2
+            ))
+            XCTFail("buyer admission should be rejected while integrity probe is actor-held")
+        } catch {
+            XCTAssertEqual(error as? ContinuousBatchSchedulerError, .backpressure)
+        }
+
+        await prefillGate.open()
+        let probe = try await probeTask.value
+        XCTAssertEqual(probe.terminalStatus, .length)
+        XCTAssertEqual(probe.nativeMTPCounters?.acceptedTokens, 1)
+
+        let buyerAfter = try await scheduler.submit(Self.schedulerRequest(
+            id: "buyer-after",
+            promptTokens: [30],
+            maxOutputTokens: 2
+        ))
+        XCTAssertEqual(buyerAfter.terminalStatus, .length)
+        XCTAssertEqual(buyerAfter.generatedTokens, [31, 32])
+    }
+
+    func testNativeMTPCountersAggregateAcrossRounds() async throws {
+        let backend = RuntimeBridgeScriptedBackend(
+            scripts: ["multi": [11]],
+            nativeProposalScripts: ["multi": [[12], [14]]]
+        )
+        let scheduler = try Self.makeScheduler(maxActiveRows: 1, backend: backend)
+        let result = try await scheduler.submitNativeMTPIntegrityProbe(Self.schedulerRequest(
+            id: "multi",
+            promptTokens: [10],
+            maxOutputTokens: 5,
+            decodePath: .nativeMTP,
+            nativeMTPMaximumProposalDepth: 1,
+            nativeMTPTupleFence: Self.nativeMTPFence(),
+            nativeMTPIntegrityProbe: true
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertEqual(result.nativeMTPCounters?.acceptedTokens, 2)
+        XCTAssertEqual(result.nativeMTPCounters?.rejectedTokens, 0)
+        XCTAssertEqual(result.nativeMTPCounters?.bonusTokens, 2)
+        XCTAssertEqual(result.nativeMTPCounters?.committedTokens, 4)
+        let finalized = await backend.nativeFinalizeInputs()
+        XCTAssertEqual(finalized.filter(\.shouldCommit).count, 2)
+    }
+
+    func testNativeMTPTupleDisableRejectsNewAndQueuedRowsAndContinuesPreoutputOrdinary() async throws {
+        let prefillGate = RuntimeBridgeTestGate()
+        let backend = RuntimeBridgeScriptedBackend(
+            scripts: [
+                "holder": [41, 42],
+                "queued-native": [51],
+                "preoutput": [61, 62, 63],
+            ],
+            nativeProposalScripts: [
+                "queued-native": [[52]],
+                "preoutput": [[64]],
+            ],
+            prefillGate: prefillGate
+        )
+        let scheduler = try Self.makeScheduler(maxActiveRows: 1, backend: backend)
+        let fence = Self.nativeMTPFence()
+
+        await scheduler.disableNativeMTPTuple(fence)
+        do {
+            _ = try await scheduler.submit(Self.schedulerRequest(
+                id: "new-disabled",
+                promptTokens: [50],
+                maxOutputTokens: 2,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPTupleFence: fence
+            ))
+            XCTFail("new disabled tuple row should fail before admission")
+        } catch {
+            XCTAssertEqual(
+                error as? ContinuousBatchSchedulerError,
+                .requestFailed("continuous_batching_native_mtp_tuple_disabled")
+            )
+        }
+
+        let activeFence = Self.nativeMTPFence(admission: String(repeating: "b", count: 64))
+        let holder = Task {
+            try await scheduler.submit(Self.schedulerRequest(
+                id: "holder",
+                promptTokens: [40],
+                maxOutputTokens: 2
+            ))
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let queued = Task {
+            try await scheduler.submit(Self.schedulerRequest(
+                id: "queued-native",
+                promptTokens: [50],
+                maxOutputTokens: 2,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPTupleFence: activeFence
+            ))
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        await scheduler.disableNativeMTPTuple(activeFence)
+        await prefillGate.open()
+        _ = try await holder.value
+        let queuedResult = try await queued.value
+        XCTAssertEqual(queuedResult.terminalStatus, .requestFailed)
+        XCTAssertEqual(queuedResult.errorCode, "continuous_batching_native_mtp_tuple_disabled")
+
+        let preoutputFence = Self.nativeMTPFence(admission: String(repeating: "c", count: 64))
+        let preoutputGate = RuntimeBridgeTestGate()
+        let preoutputBackend = RuntimeBridgeScriptedBackend(
+            scripts: ["preoutput": [61, 62, 63]],
+            nativeProposalScripts: ["preoutput": [[64]]],
+            prefillGate: preoutputGate
+        )
+        let preoutputScheduler = try Self.makeScheduler(maxActiveRows: 1, backend: preoutputBackend)
+        let preoutput = Task {
+            try await preoutputScheduler.submit(Self.schedulerRequest(
+                id: "preoutput",
+                promptTokens: [60],
+                maxOutputTokens: 3,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPTupleFence: preoutputFence
+            ))
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        await preoutputScheduler.disableNativeMTPTuple(preoutputFence)
+        await preoutputGate.open()
+        let preoutputResult = try await preoutput.value
+        XCTAssertEqual(preoutputResult.terminalStatus, .length)
+        XCTAssertNil(preoutputResult.nativeMTPCounters)
+        XCTAssertEqual(preoutputResult.generatedTokens, [61, 62, 63])
+
+        let postoutputFence = Self.nativeMTPFence(admission: String(repeating: "d", count: 64))
+        let postoutputGate = RuntimeBridgeTestGate()
+        let postoutputBackend = RuntimeBridgeScriptedBackend(
+            scripts: ["postoutput": [71]],
+            nativeProposalScripts: ["postoutput": [[72], [74]]],
+            nativeVerifyGate: postoutputGate,
+            nativeVerifyGateCall: 2
+        )
+        let postoutputScheduler = try Self.makeScheduler(maxActiveRows: 1, backend: postoutputBackend)
+        let postoutput = Task {
+            try await postoutputScheduler.submit(Self.schedulerRequest(
+                id: "postoutput",
+                promptTokens: [70],
+                maxOutputTokens: 5,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPTupleFence: postoutputFence
+            ))
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await postoutputScheduler.disableNativeMTPTuple(postoutputFence)
+        await postoutputGate.open()
+        let postoutputResult = try await postoutput.value
+        XCTAssertEqual(postoutputResult.terminalStatus, .requestFailed)
+        XCTAssertEqual(
+            postoutputResult.errorCode,
+            "continuous_batching_native_mtp_tuple_disabled_postoutput"
+        )
+        XCTAssertEqual(postoutputResult.generatedTokens, [])
+    }
+
     func testMTPPackedCacheStagesProposalColumnsPrivatelyAndIgnoresPadding() async throws {
         let descriptor = Self.bridgeDescriptor()
         let allocator = try PagedKVBlockAllocator(
@@ -1942,6 +2133,43 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         )
     }
 
+    private static func schedulerRequest(
+        id: String,
+        promptTokens: [Int],
+        maxOutputTokens: Int,
+        decodePath: DecodePath = .ordinary,
+        nativeMTPMaximumProposalDepth: Int = 0,
+        nativeMTPTupleFence: NativeMTPTupleFence? = nil,
+        nativeMTPIntegrityProbe: Bool = false
+    ) -> ContinuousBatchSchedulerRequest {
+        ContinuousBatchSchedulerRequest(
+            id: id,
+            conversationKey: "",
+            promptTokens: promptTokens,
+            maxOutputTokens: maxOutputTokens,
+            samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
+            temperature: 0,
+            topP: 1,
+            decodePath: decodePath,
+            nativeMTPMaximumProposalDepth: nativeMTPMaximumProposalDepth,
+            nativeMTPCompleteWindowBytesByDepth: [0, 0, 0, 0],
+            nativeMTPTupleFence: nativeMTPTupleFence,
+            nativeMTPIntegrityProbe: nativeMTPIntegrityProbe
+        )
+    }
+
+    private static func nativeMTPFence(
+        admission: String = String(repeating: "a", count: 64),
+        snapshot: String = "snapshot",
+        generation: UInt64 = 1
+    ) -> NativeMTPTupleFence {
+        NativeMTPTupleFence(
+            admissionTupleSHA256: admission,
+            servedSnapshotID: snapshot,
+            targetGeneration: generation
+        )
+    }
+
     private static func qwen35HybridConfig(
         layerTypes: [String]? = nil,
         includeMTPMetadata: Bool = true
@@ -2467,26 +2695,44 @@ private struct RuntimeBridgePromptProcessor: UserInputProcessor {
 
 private actor RuntimeBridgeScriptedBackend: ContinuousBatchSchedulerBackend {
     private let scripts: [String: [Int]]
+    private let nativeProposalScripts: [String: [[Int]]]
+    private let prefillGate: RuntimeBridgeTestGate?
     private let decodeGate: RuntimeBridgeTestGate?
+    private let nativeVerifyGate: RuntimeBridgeTestGate?
+    private let nativeVerifyGateCall: Int
     private let prefillError: (any Error)?
     private var decodeCalls = 0
     private var prefillCalls = 0
+    private var nativeProposalCallsByID: [String: Int] = [:]
+    private var nativeVerifyCalls = 0
+    private var nativeFinalizeRows: [ContinuousBatchNativeMTPFinalizeInput] = []
     private var prefillLengths: [Int] = []
     private var batches: [[String]] = []
 
     init(
         scripts: [String: [Int]],
+        nativeProposalScripts: [String: [[Int]]] = [:],
+        prefillGate: RuntimeBridgeTestGate? = nil,
         decodeGate: RuntimeBridgeTestGate? = nil,
+        nativeVerifyGate: RuntimeBridgeTestGate? = nil,
+        nativeVerifyGateCall: Int = 1,
         prefillError: (any Error)? = nil
     ) {
         self.scripts = scripts
+        self.nativeProposalScripts = nativeProposalScripts
+        self.prefillGate = prefillGate
         self.decodeGate = decodeGate
+        self.nativeVerifyGate = nativeVerifyGate
+        self.nativeVerifyGateCall = nativeVerifyGateCall
         self.prefillError = prefillError
     }
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
         prefillCalls += 1
         prefillLengths.append(contentsOf: rows.map(\.promptTokens.count))
+        if prefillCalls == 1, let prefillGate {
+            await prefillGate.wait()
+        }
         if let prefillError {
             throw prefillError
         }
@@ -2497,6 +2743,42 @@ private actor RuntimeBridgeScriptedBackend: ContinuousBatchSchedulerBackend {
                 sampledToken: row.sampleFirstToken ? (script.first ?? row.promptTokens.last) : nil
             )
         }
+    }
+
+    func proposeNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPProposalInput]
+    ) async throws -> [String: [Int]]? {
+        var proposals: [String: [Int]] = [:]
+        for row in rows {
+            let call = nativeProposalCallsByID[row.requestID] ?? 0
+            nativeProposalCallsByID[row.requestID] = call + 1
+            let scripts = nativeProposalScripts[row.requestID] ?? []
+            proposals[row.requestID] = call < scripts.count ? scripts[call] : []
+        }
+        return proposals
+    }
+
+    func verifyNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPVerifyInput]
+    ) async throws -> [NativeMTPVerifiedRow] {
+        nativeVerifyCalls += 1
+        if nativeVerifyCalls == nativeVerifyGateCall, let nativeVerifyGate {
+            await nativeVerifyGate.wait()
+        }
+        return rows.map { row in
+            NativeMTPVerifiedRow(
+                schedulerRowID: row.requestID,
+                packedRowIndex: row.packedRowIndex,
+                proposedTokenIDs: row.proposalTokens,
+                targetTopTokenIDs: row.proposalTokens + [10_000 + nativeVerifyCalls]
+            )
+        }
+    }
+
+    func finalizeNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPFinalizeInput]
+    ) async throws {
+        nativeFinalizeRows.append(contentsOf: rows)
     }
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
@@ -2531,6 +2813,10 @@ private actor RuntimeBridgeScriptedBackend: ContinuousBatchSchedulerBackend {
 
     func decodeBatches() -> [[String]] {
         batches
+    }
+
+    func nativeFinalizeInputs() -> [ContinuousBatchNativeMTPFinalizeInput] {
+        nativeFinalizeRows
     }
 }
 

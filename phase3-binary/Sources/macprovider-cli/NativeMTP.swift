@@ -344,6 +344,7 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
     let maximumPromptTokens: Int
     let maximumCompletionTokens: Int
     let completeWindowBytesByDepth: [Int]
+    let tupleFence: NativeMTPTupleFence?
 
     var usesNativeMTP: Bool {
         effectivePath == .nativeMTP
@@ -368,7 +369,8 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
                 initialProposalDepth: 0,
                 maximumPromptTokens: 0,
                 maximumCompletionTokens: 0,
-                completeWindowBytesByDepth: []
+                completeWindowBytesByDepth: [],
+                tupleFence: nil
             )
         }
         return NativeMTPRuntimeAdmission(
@@ -377,7 +379,8 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
             initialProposalDepth: capability.maximumProposalDepth,
             maximumPromptTokens: capability.maximumPromptTokens,
             maximumCompletionTokens: capability.maximumCompletionTokens,
-            completeWindowBytesByDepth: capability.completeWindowBytesByDepth
+            completeWindowBytesByDepth: capability.completeWindowBytesByDepth,
+            tupleFence: nil
         )
     }
 
@@ -410,9 +413,28 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
             initialProposalDepth: 0,
             maximumPromptTokens: 0,
             maximumCompletionTokens: 0,
-            completeWindowBytesByDepth: []
+            completeWindowBytesByDepth: [],
+            tupleFence: nil
         )
     }
+
+    func binding(to fence: NativeMTPTupleFence?) -> NativeMTPRuntimeAdmission {
+        NativeMTPRuntimeAdmission(
+            selection: selection,
+            effectivePath: effectivePath,
+            initialProposalDepth: initialProposalDepth,
+            maximumPromptTokens: maximumPromptTokens,
+            maximumCompletionTokens: maximumCompletionTokens,
+            completeWindowBytesByDepth: completeWindowBytesByDepth,
+            tupleFence: usesNativeMTP ? fence : nil
+        )
+    }
+}
+
+struct NativeMTPTupleFence: Sendable, Hashable, Codable {
+    let admissionTupleSHA256: String
+    let servedSnapshotID: String
+    let targetGeneration: UInt64
 }
 
 private extension ChatCompletionPromptSource {

@@ -333,6 +333,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// from the idempotency fingerprint like other runtime-only native-MTP
     /// selection metadata.
     let nativeMTPCompleteWindowBytesByDepth: [Int]
+    let nativeMTPTupleFence: NativeMTPTupleFence?
+    let nativeMTPIntegrityProbe: Bool
     /// Test-only/request-fixture proposal source. Production native MTP rows
     /// ask the backend drafter for proposals; empty native rows still use
     /// packed target verification at depth zero.
@@ -359,6 +361,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         decodePath: DecodePath = .ordinary,
         nativeMTPMaximumProposalDepth: Int = 0,
         nativeMTPCompleteWindowBytesByDepth: [Int] = [],
+        nativeMTPTupleFence: NativeMTPTupleFence? = nil,
+        nativeMTPIntegrityProbe: Bool = false,
         nativeMTPProposalTokens: [Int] = [],
         nativeMTPAdaptationDirective: NativeMTPAdaptationDirective? = nil
     ) {
@@ -381,6 +385,8 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.decodePath = decodePath
         self.nativeMTPMaximumProposalDepth = max(0, nativeMTPMaximumProposalDepth)
         self.nativeMTPCompleteWindowBytesByDepth = nativeMTPCompleteWindowBytesByDepth
+        self.nativeMTPTupleFence = decodePath == .nativeMTP ? nativeMTPTupleFence : nil
+        self.nativeMTPIntegrityProbe = decodePath == .nativeMTP && nativeMTPIntegrityProbe
         self.nativeMTPProposalTokens = nativeMTPProposalTokens
         self.nativeMTPAdaptationDirective = nativeMTPAdaptationDirective
     }
@@ -482,6 +488,7 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
     /// Keyed hybrid rows only: the row's cache in the serial conversation-cache
     /// format, delivered to the settlement owner like `retainedCache`.
     var serialConversationCache: ContinuousBatchSerialConversationCache? = nil
+    var nativeMTPCounters: NativeMTPSelfTestCounters? = nil
 
     func withSettlementDisposition(
         _ disposition: ContinuousBatchSettlementDisposition
@@ -502,7 +509,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             retainedCache: disposition == .eligibleOwner ? retainedCache : nil,
             stopCause: stopCause,
             serialToolStopTokenCount: serialToolStopTokenCount,
-            serialConversationCache: disposition == .eligibleOwner ? serialConversationCache : nil
+            serialConversationCache: disposition == .eligibleOwner ? serialConversationCache : nil,
+            nativeMTPCounters: nativeMTPCounters
         )
     }
 
@@ -523,7 +531,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             retainedCache: cache,
             stopCause: stopCause,
             serialToolStopTokenCount: serialToolStopTokenCount,
-            serialConversationCache: serialConversationCache
+            serialConversationCache: serialConversationCache,
+            nativeMTPCounters: nativeMTPCounters
         )
     }
 
@@ -542,6 +551,7 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             && lhs.settlementDisposition == rhs.settlementDisposition
             && lhs.stopCause == rhs.stopCause
             && lhs.serialToolStopTokenCount == rhs.serialToolStopTokenCount
+            && lhs.nativeMTPCounters == rhs.nativeMTPCounters
             && lhs.retainedCache?.retainedSequence == rhs.retainedCache?.retainedSequence
     }
 }
@@ -1483,6 +1493,8 @@ actor ContinuousBatchScheduler {
         var decodePath: DecodePath = .ordinary
         var nativeMTPAdaptation: NativeMTPDepthAdaptationState?
         var nativeMTPDirective: NativeMTPAdaptationDirective?
+        var nativeMTPTupleFence: NativeMTPTupleFence?
+        var nativeMTPCounters: NativeMTPSelfTestCounters?
         var nativeMTPFixtureProposalsConsumed = false
 
         var retainedLogicalTokenCount: Int {
@@ -1546,6 +1558,8 @@ actor ContinuousBatchScheduler {
     private var requestWaiters: [String: [Waiter]] = [:]
     private var knownRequests: [String: RequestFingerprint] = [:]
     private var terminalResults: [String: ContinuousBatchSchedulerResult] = [:]
+    private var disabledNativeMTPTupleFences: Set<NativeMTPTupleFence> = []
+    private var nativeMTPIntegrityProbeInFlight = false
     private var pendingTerminalDeliveries: [String: PendingTerminalDelivery] = [:]
     private var stoppingWaiterIDs: Set<UUID> = []
     private var stoppingActiveWaiters: [UUID: StoppingActiveWaiter] = [:]
@@ -1613,6 +1627,10 @@ actor ContinuousBatchScheduler {
             await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_scheduler_failed_closed")
         }
+        if nativeMTPIntegrityProbeInFlight && !request.nativeMTPIntegrityProbe {
+            await discardUnacceptedRetainedCache(for: request)
+            throw ContinuousBatchSchedulerError.backpressure
+        }
         if let reason = Self.localCapabilityReason(
             descriptor: configuration.descriptor,
             tuple: configuration.tuple,
@@ -1657,6 +1675,13 @@ actor ContinuousBatchScheduler {
             await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.requestFailed(
                 "continuous_batching_native_mtp_prompt_prefill_exceeds_limit"
+            )
+        }
+        if let fence = request.nativeMTPTupleFence,
+           disabledNativeMTPTupleFences.contains(fence) {
+            await discardUnacceptedRetainedCache(for: request)
+            throw ContinuousBatchSchedulerError.requestFailed(
+                "continuous_batching_native_mtp_tuple_disabled"
             )
         }
         guard queueHasCapacity(addingTokenCost: retainedTokenCost) else {
@@ -1740,6 +1765,35 @@ actor ContinuousBatchScheduler {
         earlyStopIDs.insert(requestID)
     }
 
+    func disableNativeMTPTuple(_ fence: NativeMTPTupleFence) async {
+        disabledNativeMTPTupleFences.insert(fence)
+        var keptWaiting: [ContinuousBatchSchedulerRequest] = []
+        for request in waiting {
+            guard request.nativeMTPTupleFence == fence else {
+                keptWaiting.append(request)
+                continue
+            }
+            await finishQueued(
+                request,
+                status: .requestFailed,
+                errorCode: "continuous_batching_native_mtp_tuple_disabled"
+            )
+        }
+        waiting = keptWaiting
+        let disabledPromptIDs = activePrompt.compactMap { requestID, row in
+            row.request.nativeMTPTupleFence == fence ? requestID : nil
+        }
+        for requestID in disabledPromptIDs {
+            guard var row = activePrompt[requestID] else { continue }
+            row.decodePath = .ordinary
+            row.nativeMTPAdaptation = nil
+            row.nativeMTPDirective = nil
+            activePrompt[requestID] = row
+        }
+        await fenceDisabledActiveNativeMTPRows()
+        ensurePump()
+    }
+
     func drain() async throws -> ContinuousBatchDrainPermit {
         guard !cleanupFailedClosed else {
             throw ContinuousBatchSchedulerError.unsupported(
@@ -1821,6 +1875,34 @@ actor ContinuousBatchScheduler {
             && deferredTerminalCompletions.isEmpty
             && !pumpRunning
             && !backendCancellationPending
+    }
+
+    func isQuiescentForNativeMTPProbe() -> Bool {
+        !cleanupFailedClosed
+            && !nativeMTPIntegrityProbeInFlight
+            && pendingBindingChecks == 0
+            && waiting.isEmpty
+            && admittingRequests.isEmpty
+            && activePrompt.isEmpty
+            && activeDecode.isEmpty
+            && pendingTerminalDeliveries.isEmpty
+            && stoppingActiveWaiters.isEmpty
+            && deferredTerminalCompletions.isEmpty
+            && !pumpRunning
+            && !backendCancellationPending
+    }
+
+    func submitNativeMTPIntegrityProbe(
+        _ request: ContinuousBatchSchedulerRequest
+    ) async throws -> ContinuousBatchSchedulerResult {
+        guard request.nativeMTPIntegrityProbe,
+              request.decodePath == .nativeMTP,
+              isQuiescentForNativeMTPProbe() else {
+            throw ContinuousBatchSchedulerError.backpressure
+        }
+        nativeMTPIntegrityProbeInFlight = true
+        defer { nativeMTPIntegrityProbeInFlight = false }
+        return try await submit(request)
     }
 
     private func stopPendingTerminalDeliveriesForDrain() {
@@ -2989,6 +3071,8 @@ actor ContinuousBatchScheduler {
             acceptedByID[accepted.schedulerRowID] = accepted
         }
         var candidatesByID: [String: [NativeMTPTokenCandidate]] = [:]
+        var proposalCountByID: [String: Int] = [:]
+        var committedProposalCountByID: [String: Int] = [:]
         var invalidCandidateIDs: Set<String> = []
         var finalizeRows: [ContinuousBatchNativeMTPFinalizeInput] = []
         finalizeRows.reserveCapacity(prepared.count)
@@ -3002,6 +3086,8 @@ actor ContinuousBatchScheduler {
             let shouldCommit = !cancelledIDs.contains(item.row.request.id)
                 && !invalidCandidateIDs.contains(item.row.request.id)
             let committedProposalCount = selected.last?.cumulativeProposalCommitCount ?? 0
+            proposalCountByID[item.row.request.id] = item.input.proposalTokens.count
+            committedProposalCountByID[item.row.request.id] = shouldCommit ? committedProposalCount : 0
             finalizeRows.append(ContinuousBatchNativeMTPFinalizeInput(
                 requestID: item.row.request.id,
                 proposalTokenCount: item.input.proposalTokens.count,
@@ -3169,6 +3255,23 @@ actor ContinuousBatchScheduler {
         let stillActive = Set(activeDecode.keys)
         for item in prepared where healthyOutputIDs.contains(item.row.request.id)
             && stillActive.contains(item.row.request.id) {
+            if var active = activeDecode[item.row.request.id] {
+                let requestID = item.row.request.id
+                let candidates = candidatesByID[requestID] ?? []
+                let committedProposalCount = committedProposalCountByID[requestID] ?? 0
+                let proposalCount = proposalCountByID[requestID] ?? item.input.proposalTokens.count
+                let roundCounters = NativeMTPSelfTestCounters(
+                    acceptedTokens: UInt64(clamping: max(0, committedProposalCount)),
+                    rejectedTokens: UInt64(clamping: max(0, proposalCount - committedProposalCount)),
+                    bonusTokens: UInt64(clamping: candidates.filter { $0.source == .bonus }.count),
+                    committedTokens: UInt64(clamping: candidates.count)
+                )
+                active.nativeMTPCounters = Self.addNativeMTPCounters(
+                    active.nativeMTPCounters,
+                    roundCounters
+                )
+                activeDecode[requestID] = active
+            }
             if let consumed = reserved.first(where: { $0.row.request.id == item.row.request.id })?.consumedFixtureProposals,
                consumed,
                var active = activeDecode[item.row.request.id] {
@@ -3197,7 +3300,62 @@ actor ContinuousBatchScheduler {
         !row.outputTokens.isEmpty
     }
 
+    private static func addNativeMTPCounters(
+        _ lhs: NativeMTPSelfTestCounters?,
+        _ rhs: NativeMTPSelfTestCounters
+    ) -> NativeMTPSelfTestCounters {
+        let base = lhs ?? NativeMTPSelfTestCounters(
+            acceptedTokens: 0,
+            rejectedTokens: 0,
+            bonusTokens: 0,
+            committedTokens: 0
+        )
+        let accepted = base.acceptedTokens.addingReportingOverflow(rhs.acceptedTokens)
+        let rejected = base.rejectedTokens.addingReportingOverflow(rhs.rejectedTokens)
+        let bonus = base.bonusTokens.addingReportingOverflow(rhs.bonusTokens)
+        let committed = base.committedTokens.addingReportingOverflow(rhs.committedTokens)
+        return NativeMTPSelfTestCounters(
+            acceptedTokens: accepted.overflow ? UInt64.max : accepted.partialValue,
+            rejectedTokens: rejected.overflow ? UInt64.max : rejected.partialValue,
+            bonusTokens: bonus.overflow ? UInt64.max : bonus.partialValue,
+            committedTokens: committed.overflow ? UInt64.max : committed.partialValue
+        )
+    }
+
+    private func fenceDisabledActiveNativeMTPRows() async {
+        let nativeIDs = activeDecode.compactMap { requestID, row in
+            guard row.usesNativeMTP,
+                  let fence = row.nativeMTPTupleFence,
+                  disabledNativeMTPTupleFences.contains(fence) else {
+                return nil
+            }
+            return requestID
+        }
+        for requestID in nativeIDs {
+            guard var row = activeDecode.removeValue(forKey: requestID) else { continue }
+            if nativeMTPRowHasBuyerVisibleOutput(row) {
+                let released = await release(row.handle)
+                configuration.nativeMTPStatusSink?.recordPostoutputFailure()
+                finish(
+                    row,
+                    status: .requestFailed,
+                    errorCode: released
+                        ? "continuous_batching_native_mtp_tuple_disabled_postoutput"
+                        : "continuous_batching_cleanup_failed"
+                )
+                if !released { return }
+            } else {
+                row.decodePath = .ordinary
+                row.nativeMTPAdaptation = nil
+                row.nativeMTPDirective = nil
+                activeDecode[requestID] = row
+            }
+        }
+    }
+
     private func runDecodeStep() async {
+        await fenceDisabledActiveNativeMTPRows()
+        guard !cleanupFailedClosed else { return }
         let rows = activeDecode.values.sorted {
             admissionPrecedes($0.request.id, $1.request.id)
         }
@@ -3623,6 +3781,15 @@ actor ContinuousBatchScheduler {
             let request = waiting.removeFirst()
             suspendQueueWaitTimeout(requestID: request.id)
             madeProgress = true
+            if let fence = request.nativeMTPTupleFence,
+               disabledNativeMTPTupleFences.contains(fence) {
+                await finishQueued(
+                    request,
+                    status: .requestFailed,
+                    errorCode: "continuous_batching_native_mtp_tuple_disabled"
+                )
+                continue
+            }
             if cancelledIDs.remove(request.id) != nil {
                 await finishQueued(request, status: .cancelled, errorCode: "request_cancelled")
                 continue
@@ -3722,6 +3889,7 @@ actor ContinuousBatchScheduler {
                     decodePath: request.decodePath,
                     nativeMTPAdaptation: nil,
                     nativeMTPDirective: request.nativeMTPAdaptationDirective,
+                    nativeMTPTupleFence: request.nativeMTPTupleFence,
                     nativeMTPFixtureProposalsConsumed: false
                 )
                 promptOrder.append(request.id)
@@ -4108,7 +4276,8 @@ actor ContinuousBatchScheduler {
             serialToolStopTokenCount: isSuccessful
                 ? row.request.serialToolStopObserver?.stopTokenCount
                 : nil,
-            serialConversationCache: isSuccessful ? serialConversationCache : nil
+            serialConversationCache: isSuccessful ? serialConversationCache : nil,
+            nativeMTPCounters: row.nativeMTPCounters
         )
         complete(requestID: row.request.id, result: result)
     }
@@ -4140,7 +4309,8 @@ actor ContinuousBatchScheduler {
             stopCause: isSuccessful ? row.stopCause : nil,
             serialToolStopTokenCount: isSuccessful
                 ? row.request.serialToolStopObserver?.stopTokenCount
-                : nil
+                : nil,
+            nativeMTPCounters: row.nativeMTPCounters
         )
         complete(requestID: row.request.id, result: result)
     }

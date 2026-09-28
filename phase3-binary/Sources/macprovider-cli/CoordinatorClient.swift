@@ -941,7 +941,10 @@ actor CoordinatorClient {
             return try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
         }
         self.nativeMTPCanaryExecutor = nativeMTPCanaryExecutor ?? { request in
-            Self.inconclusiveNativeMTPCanaryResult(
+            if let runtime = modelRuntime as? ModelRuntime {
+                return await runtime.runNativeMTPCanary(request)
+            }
+            return Self.inconclusiveNativeMTPCanaryResult(
                 request: request,
                 diagnostic: "native MTP canary executor unavailable"
             )
@@ -2910,7 +2913,7 @@ actor CoordinatorClient {
         )
     }
 
-    private static func nativeMTPCanaryResultDigest(
+    static func nativeMTPCanaryResultDigest(
         requestID: String,
         providerID: String,
         assignedID: String,
@@ -2991,7 +2994,7 @@ actor CoordinatorClient {
         ])
     }
 
-    private static func nativeMTPRuntimeTupleSHA256(
+    static func nativeMTPRuntimeTupleSHA256(
         providerID: String,
         assignedID: String,
         targetGeneration: UInt64,

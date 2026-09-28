@@ -882,6 +882,7 @@ struct ServeCommand: AsyncParsableCommand {
         let authoritySHA256: String
         let loadPath: String
         let loadSHA256: String
+        let nativeMTPResolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority?
     }
 
     struct ModelArtifactPreflightOutcome {
@@ -1038,13 +1039,21 @@ struct ServeCommand: AsyncParsableCommand {
                 config: resolved,
                 artifactResolver: artifactResolver
             )
+            let nativeMTPResolvedArtifactAuthority = await resolveNativeMTPArtifactAuthority(
+                config: resolved,
+                catalogTrust: catalogTrust,
+                authorityPath: canonicalAuthorityPath,
+                authoritySHA256: actual,
+                staticInputs: staticInputs
+            )
             return ModelArtifactPreflightOutcome(
                 catalogTrust: catalogTrust,
                 runtimeBinding: VerifiedModelRuntimeBinding(
                     authorityPath: canonicalAuthorityPath,
                     authoritySHA256: actual,
                     loadPath: canonicalLoadPath,
-                    loadSHA256: runtimeLoadSHA256
+                    loadSHA256: runtimeLoadSHA256,
+                    nativeMTPResolvedArtifactAuthority: nativeMTPResolvedArtifactAuthority
                 )
             )
         }
@@ -1054,8 +1063,63 @@ struct ServeCommand: AsyncParsableCommand {
                 authorityPath: authorityPath,
                 authoritySHA256: actual,
                 loadPath: loadPath,
-                loadSHA256: runtimeLoadSHA256
+                loadSHA256: runtimeLoadSHA256,
+                nativeMTPResolvedArtifactAuthority: nil
             )
+        )
+    }
+
+    private static func resolveNativeMTPArtifactAuthority(
+        config: AppConfig,
+        catalogTrust: CatalogRuntimeTrust,
+        authorityPath: String,
+        authoritySHA256: String,
+        staticInputs: AutotuneStaticInputs
+    ) async -> NativeMTPResolvedArtifactAuthority? {
+        guard config.nativeMTPMode == .auto,
+              let modelKey = config.modelCatalogKey,
+              !modelKey.isEmpty,
+              !authoritySHA256.isEmpty
+        else {
+            return nil
+        }
+        let inputs = await staticInputs.loadRecommendationInputs(includeArtifactFeed: true)
+        guard inputs.candidate.value.version == catalogTrust.releaseID,
+              AutotuneStaticInputs.candidateCatalogSHA256(bytes: inputs.candidate.selectedBytes) == catalogTrust.digest,
+              inputs.artifactFeed.warnings.isEmpty,
+              let qualified = inputs.artifactFeed.value,
+              qualified.releaseID == catalogTrust.releaseID,
+              qualified.feedSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              !qualified.signerKeyID.isEmpty
+        else {
+            return nil
+        }
+        let matches = qualified.artifactIdentities().filter {
+            $0.catalogKey == modelKey
+                && $0.isPrimary
+                && $0.hashAlgorithm == NativeMTPResolvedArtifactAuthority.nativeMTPHashAlgorithm
+                && $0.hash == authoritySHA256
+                && $0.verificationStatus == "verified"
+        }
+        guard matches.count == 1, let identity = matches.first else {
+            return nil
+        }
+        let targetURL = URL(fileURLWithPath: authorityPath, isDirectory: true).standardizedFileURL
+        let bundleRoot = targetURL.deletingLastPathComponent()
+        let bundledSidecar = bundleRoot.appendingPathComponent("native-mtp-admission.json")
+        let sidecarURL = FileManager.default.fileExists(atPath: bundledSidecar.path)
+            ? bundledSidecar
+            : targetURL.appendingPathComponent("native-mtp-admission.json")
+        guard FileManager.default.fileExists(atPath: sidecarURL.path) else {
+            return nil
+        }
+        return try? qualified.nativeMTPResolvedArtifactAuthority(
+            releaseID: catalogTrust.releaseID,
+            modelKey: modelKey,
+            artifactID: identity.artifactID,
+            hash: identity.hash,
+            preflightTargetURL: targetURL,
+            snapshotRoot: sidecarURL.deletingLastPathComponent()
         )
     }
 
@@ -2425,6 +2489,7 @@ struct ServeCommand: AsyncParsableCommand {
                         acceptedTuples: resolved.continuousBatchingAcceptedTuples
                     ),
                     nativeMTPMode: resolved.nativeMTPMode,
+                    nativeMTPResolvedArtifactAuthority: startupPreflight.runtimeBinding?.nativeMTPResolvedArtifactAuthority,
                     warmSwapEnabled: resolved.enableWarmSwap,
                     swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
                     catalogModelIDAlias: catalogModelIDAlias,
