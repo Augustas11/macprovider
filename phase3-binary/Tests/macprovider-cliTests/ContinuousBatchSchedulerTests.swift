@@ -5339,9 +5339,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             decodePath: .nativeMTP,
             nativeMTPMaximumProposalDepth: maximumDepth,
             nativeMTPCompleteWindowBytesByDepth: bytesByDepth,
+            nativeMTPTupleFence: nativeMTPTupleFence,
             nativeMTPProposalTokens: proposals,
-            nativeMTPAdaptationDirective: directive,
-            nativeMTPTupleFence: nativeMTPTupleFence
+            nativeMTPAdaptationDirective: directive
         )
     }
 

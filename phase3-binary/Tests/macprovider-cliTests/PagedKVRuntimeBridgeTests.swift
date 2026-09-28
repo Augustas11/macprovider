@@ -2152,7 +2152,9 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             topP: 1,
             decodePath: decodePath,
             nativeMTPMaximumProposalDepth: nativeMTPMaximumProposalDepth,
-            nativeMTPCompleteWindowBytesByDepth: [0, 0, 0, 0],
+            nativeMTPCompleteWindowBytesByDepth: decodePath == .nativeMTP
+                ? Array(repeating: 16, count: max(1, nativeMTPMaximumProposalDepth + 1))
+                : [],
             nativeMTPTupleFence: nativeMTPTupleFence,
             nativeMTPIntegrityProbe: nativeMTPIntegrityProbe
         )

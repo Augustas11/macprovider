@@ -37,7 +37,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
 
     func testRejectsDuplicateUnknownMissingAndMalformedFields() throws {
         XCTAssertThrowsError(try NativeMTPRevocationFeed.parse(Data(#"{"schema_version":"macprovider.native-mtp-revocations.v1","schema_version":"macprovider.native-mtp-revocations.v1"}"#.utf8))) {
-            XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .duplicateKey("feed"))
+            XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .duplicateKey("schema_version"))
         }
         XCTAssertThrowsError(try NativeMTPRevocationFeed.parse(Self.json([
             "schema_version": NativeMTPRevocationFeed.schemaVersion,
@@ -196,7 +196,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
             store: store,
             now: now
         )) {
-            XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .missingFeed)
+            XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .cacheCorrupt)
         }
 
         store.cachedFeed = Data("not-json".utf8)
@@ -211,6 +211,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         }
 
         store.cachedFeed = feed
+        store.cachedSignature = Self.signature(for: feed, signer: signer, keyID: "revoker-a")
         store.anchor = NativeMTPRevocationAnchor(
             generation: 3,
             bodySHA256: "bad",

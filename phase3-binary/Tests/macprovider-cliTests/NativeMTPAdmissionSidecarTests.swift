@@ -36,7 +36,10 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(capability.maxCompletionTokens, 1_048_576)
         XCTAssertEqual(capability.spec023ReleaseID, "native-mtp-release-2026-09-28")
         XCTAssertEqual(capability.spec023LiveExecutableCDHash, Self.liveExecutableCDHash)
-        XCTAssertEqual(capability.evidenceArtifactSHA256, [Self.evidenceSHA])
+        XCTAssertEqual(
+            capability.evidenceArtifactSHA256,
+            Array(repeating: Self.evidenceSHA, count: 7)
+        )
         XCTAssertNil(capability.capturedArtifacts)
     }
 
@@ -116,7 +119,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         try fixture.sidecarData.write(to: sidecarURL)
         try fixture.signatureData.write(to: signatureURL)
 
-        let capability = try NativeMTPAdmissionSidecar.load(
+        let capability = try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
             sidecarURL: sidecarURL,
             signatureURL: signatureURL,
             snapshotRoot: fixture.snapshot,
@@ -157,7 +160,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         try sidecar.write(to: sidecarURL)
         try fixture.signature(for: sidecar).write(to: signatureURL)
 
-        let capability = try NativeMTPAdmissionSidecar.load(
+        let capability = try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
             sidecarURL: sidecarURL,
             signatureURL: signatureURL,
             snapshotRoot: fixture.snapshot,
@@ -213,7 +216,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         try sidecar.write(to: sidecarURL)
         try fixture.signature(for: sidecar).write(to: signatureURL)
 
-        let capability = try NativeMTPAdmissionSidecar.load(
+        let capability = try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
             sidecarURL: sidecarURL,
             signatureURL: signatureURL,
             snapshotRoot: fixture.snapshot,
@@ -419,7 +422,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             root["artifacts"] = artifacts
         }, recomputeTuple: true)
 
-        let capability = try NativeMTPAdmissionSidecar.load(
+        let capability = try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
             sidecarData: sidecar,
             signatureData: fixture.signature(for: sidecar),
             snapshotRoot: fixture.snapshot,
@@ -442,7 +445,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         {"schema_version":"\(NativeMTPAdmissionSidecar.schemaVersion)","schema_version":"\(NativeMTPAdmissionSidecar.schemaVersion)"}
         """.utf8)
 
-        XCTAssertThrowsError(try NativeMTPAdmissionSidecar.load(
+        XCTAssertThrowsError(try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
             sidecarData: duplicate,
             signatureData: fixture.signature(for: duplicate),
             snapshotRoot: fixture.snapshot,
@@ -453,6 +456,24 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 return XCTFail("unexpected error \(error)")
             }
             XCTAssertTrue(reason.contains("duplicateKey"))
+        }
+    }
+
+    func testProductionLoaderRejectsLegacyObjectSchema() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertThrowsError(try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.trustedKeyring
+        )) {
+            XCTAssertEqual(
+                $0 as? NativeMTPAdmissionSidecarError,
+                .missingField("$.entries")
+            )
         }
     }
 
@@ -514,7 +535,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             ]
         }, recomputeTuple: true)
 
-        let capability = try NativeMTPAdmissionSidecar.load(
+        let capability = try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
             sidecarData: sidecar,
             signatureData: fixture.signature(for: sidecar),
             snapshotRoot: fixture.snapshot,
@@ -988,9 +1009,9 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
     }
 
     func testReleaseEnvelopeRejectsProjectionManifestReplacingTargetAuthority() throws {
-        let fixture = try makeReleaseEnvelopeFixture { artifacts in
+        let fixture = try makeReleaseEnvelopeFixture(mutateProjectionArtifacts: { artifacts in
             artifacts["target"] = ["path": "invented-target.safetensors", "sha256": String(repeating: "7", count: 64)]
-        }
+        })
         defer { try? FileManager.default.removeItem(at: fixture.base.root) }
 
         XCTAssertEqual(
@@ -1062,7 +1083,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring? = nil
     ) throws -> NativeMTPAdmissionSidecarError {
         do {
-            _ = try NativeMTPAdmissionSidecar.load(
+            _ = try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
                 sidecarData: data,
                 signatureData: signatureData ?? fixture.signature(for: data),
                 snapshotRoot: fixture.snapshot,
@@ -1103,7 +1124,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         fixture: Fixture
     ) throws -> NativeMTPAdmissionSidecarError {
         do {
-            _ = try NativeMTPAdmissionSidecar.load(
+            _ = try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
                 sidecarData: data,
                 signatureData: fixture.signature(for: data),
                 snapshotRoot: fixture.snapshot,
@@ -1119,7 +1140,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
     }
 
     private func loadCapturedArtifacts(_ fixture: Fixture) throws -> NativeMTPAdmissionCapturedArtifacts {
-        let capability = try NativeMTPAdmissionSidecar.load(
+        let capability = try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
             sidecarData: fixture.sidecarData,
             signatureData: fixture.signatureData,
             snapshotRoot: fixture.snapshot,

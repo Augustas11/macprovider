@@ -579,6 +579,43 @@ enum NativeMTPAdmissionSidecar {
         let revocationSignerKeyID: String
         let selfTest: NativeMTPSelfTestChallengeBank
         let admissionAllowed: Bool
+
+        func withSidecarSHA256(_ sidecarSHA256: String) -> Parsed {
+            Parsed(
+                tupleSHA256: tupleSHA256,
+                sidecarSHA256: sidecarSHA256,
+                decodePath: decodePath,
+                admissionEnabled: admissionEnabled,
+                modelID: modelID,
+                modelRevision: modelRevision,
+                familyAdapter: familyAdapter,
+                artifacts: artifacts,
+                mtpManifestSHA256: mtpManifestSHA256,
+                sourceLayout: sourceLayout,
+                predictionLayerCount: predictionLayerCount,
+                maxProposalDepth: maxProposalDepth,
+                completeWindowBytesByDepth: completeWindowBytesByDepth,
+                throughputDeltaPPM: throughputDeltaPPM,
+                adaptationEnabled: adaptationEnabled,
+                adaptationMaxDepth: adaptationMaxDepth,
+                quantization: quantization,
+                cacheClass: cacheClass,
+                stateClass: stateClass,
+                providerRevision: providerRevision,
+                upstreamMLXSwiftLMRevision: upstreamMLXSwiftLMRevision,
+                hardwareChip: hardwareChip,
+                ramGB: ramGB,
+                osVersion: osVersion,
+                qualifiedSlots: qualifiedSlots,
+                maxSlots: maxSlots,
+                requestProfile: requestProfile,
+                spec023: spec023,
+                challengeBankSignerKeyID: challengeBankSignerKeyID,
+                revocationSignerKeyID: revocationSignerKeyID,
+                selfTest: selfTest,
+                admissionAllowed: admissionAllowed
+            )
+        }
     }
 
     private struct NativeMTPAdmissionReleaseEntry: Equatable {
@@ -731,6 +768,97 @@ enum NativeMTPAdmissionSidecar {
             trustedKeyring: trustedKeyring,
             resolvedArtifactAuthority: resolvedArtifactAuthority
         )
+        return try validateParsedCapability(
+            parsed,
+            snapshotRoot: snapshotRoot,
+            context: context,
+            trustedKeyring: trustedKeyring,
+            captureArtifacts: captureArtifacts,
+            fileManager: fileManager
+        )
+    }
+
+#if DEBUG
+    static func loadLegacyObjectForTesting(
+        sidecarURL: URL,
+        signatureURL: URL,
+        snapshotRoot: URL,
+        context: RuntimeContext,
+        trustedKeyring: TrustedKeyring,
+        captureArtifacts: Bool = false,
+        fileManager: FileManager = .default
+    ) throws -> NativeMTPAdmissionCapability {
+        try loadLegacyObjectForTesting(
+            sidecarData: readBoundedRegularFile(
+                sidecarURL,
+                maxBytes: maxSidecarBytes,
+                tooLargeName: admissionSidecarFileName
+            ),
+            signatureData: readBoundedRegularFile(
+                signatureURL,
+                maxBytes: maxSignatureBytes,
+                tooLargeName: admissionSignatureFileName
+            ),
+            snapshotRoot: snapshotRoot,
+            context: context,
+            trustedKeyring: trustedKeyring,
+            captureArtifacts: captureArtifacts,
+            fileManager: fileManager
+        )
+    }
+
+    static func loadLegacyObjectForTesting(
+        sidecarData: Data,
+        signatureData: Data,
+        snapshotRoot: URL,
+        context: RuntimeContext,
+        trustedKeyring: TrustedKeyring,
+        captureArtifacts: Bool = false,
+        fileManager: FileManager = .default
+    ) throws -> NativeMTPAdmissionCapability {
+        guard sidecarData.count <= maxSidecarBytes else {
+            throw NativeMTPAdmissionSidecarError.artifactTooLarge(admissionSidecarFileName)
+        }
+        guard signatureData.count <= maxSignatureBytes else {
+            throw NativeMTPAdmissionSidecarError.artifactTooLarge(admissionSignatureFileName)
+        }
+        _ = try verifyDetachedSignature(
+            payload: sidecarData,
+            signatureData: signatureData,
+            trustedKeyring: trustedKeyring
+        )
+        guard let text = String(data: sidecarData, encoding: .utf8) else {
+            throw NativeMTPAdmissionSidecarError.invalidJSON("sidecar must be UTF-8")
+        }
+        let value: NativeMTPSidecarJSON
+        do {
+            value = try NativeMTPSidecarJSONParser.parse(text)
+        } catch {
+            throw NativeMTPAdmissionSidecarError.invalidJSON(String(describing: error))
+        }
+        guard case .object(let root) = value else {
+            throw NativeMTPAdmissionSidecarError.wrongType("$")
+        }
+        let parsed = try parseRoot(root).withSidecarSHA256(sha256Hex(sidecarData))
+        return try validateParsedCapability(
+            parsed,
+            snapshotRoot: snapshotRoot,
+            context: context,
+            trustedKeyring: trustedKeyring,
+            captureArtifacts: captureArtifacts,
+            fileManager: fileManager
+        )
+    }
+#endif
+
+    private static func validateParsedCapability(
+        _ parsed: Parsed,
+        snapshotRoot: URL,
+        context: RuntimeContext,
+        trustedKeyring: TrustedKeyring,
+        captureArtifacts: Bool,
+        fileManager: FileManager
+    ) throws -> NativeMTPAdmissionCapability {
         try validateSelfTestChallengeBank(parsed, snapshotRoot: snapshotRoot, trustedKeyring: trustedKeyring)
         try validateStaticSupport(parsed)
         try validateLiveTuple(parsed, context: context)
