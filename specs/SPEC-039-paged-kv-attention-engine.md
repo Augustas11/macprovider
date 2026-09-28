@@ -1,13 +1,15 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.7
-Status: draft (normative design). v0.1.7 makes the FR-PKV12 mixed-layout
+Version: v0.1.8
+Status: draft (normative design). v0.1.8 makes the FR-PKV12 mixed-layout
 exception an explicit per-identity allowlist and adds the measured MoE hybrid
 `qwen/qwen3.6-35b-a3b` (`Qwen3_5MoeForConditionalGeneration`) alongside the
 dense `qwen/qwen3.6-27b` entry. Support is never generalized by family or
 architecture prefix: the same-architecture `qwen3.5` (dense + MoE) and
 `qwen3.8-27b` hybrids were measured and FAILED batched token parity, so they
 stay excluded.
+v0.1.7 adds FR-PKV15, the per-row transactional checkpoint/stage/commit/rewind
+primitive SPEC-048 native-MTP verification requires.
 v0.1.6 lets a retained or positive-cache-credit
 hybrid request batch only where the SPEC-038 FR-CB10 accepted tuple covering it
 records `cached_turns_accepted` (the SPEC-038 AC-26 recurrent-handoff proof).
@@ -30,6 +32,7 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.8 (2026-09-28): FR-PKV12 mixed-layout exception becomes an explicit per-identity allowlist; admits the measured `qwen/qwen3.6-35b-a3b` MoE hybrid alongside `qwen/qwen3.6-27b`. The same-architecture `qwen3.5` (dense + MoE) and `qwen3.8-27b` hybrids failed measured batched token parity and stay excluded. No new requirement; refines SPEC-039-R012.
 Change log v0.1.7 (2026-09-27): FR-PKV15 defines the per-row transactional
 checkpoint/stage/commit/rewind primitive required by SPEC-048 native-MTP
 verification. It does not admit sliding-window caches or broaden persistence.
