@@ -61,11 +61,12 @@ func TestRecoverLedgerMidRunFailureRecordsCommittedWorkAndRerunConverges(t *test
 		t.Fatalf("reference RecoverLedger: %v", err)
 	}
 
-	firstChunk := in
-	firstChunk.ScanTo = in.ScanFrom.Add(recoverLedgerChunkWindow)
-	injected := errors.New("injected second-chunk failure")
+	// Fail at the chunk that starts on the fixture boundary, after earlier
+	// chunks committed the attempt stamped one second before it.
+	failAt := in.ScanFrom.Add(time.Hour)
+	injected := errors.New("injected mid-run chunk failure")
 	recoverLedgerBeforeChunkForTest = func(chunk RecoverInput) error {
-		if chunk.ScanFrom.Equal(firstChunk.ScanTo) {
+		if chunk.ScanFrom.Equal(failAt) {
 			return injected
 		}
 		return nil

@@ -18,7 +18,12 @@ type RecoverInput struct {
 	Source   string
 }
 
-const recoverLedgerChunkWindow = time.Hour
+// recoverLedgerChunkWindow bounds how long one recovery transaction holds the
+// single money writer. Pearl measured ~2.4 ms per scanned row (48,774 rows in
+// ~2 min), so five minutes stays under the 6 s buyer write budget up to ~2k
+// requests per window (~1B tokens/day at the 2026-09 token/request ratio).
+// Beyond that, recovery moves with the ledger (docs/design/money-datastore-1b-tokens-per-day.md).
+const recoverLedgerChunkWindow = 5 * time.Minute
 
 // recoverLedgerBeforeChunkForTest lets tests fail a run between chunks.
 var recoverLedgerBeforeChunkForTest func(RecoverInput) error
