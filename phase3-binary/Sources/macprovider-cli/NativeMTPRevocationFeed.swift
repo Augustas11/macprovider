@@ -38,6 +38,59 @@ struct NativeMTPRevocationAnchor: Equatable, Codable, Sendable {
     }
 }
 
+private struct NativeMTPRevocationCacheRecord: Equatable, Codable, Sendable {
+    let anchor: NativeMTPRevocationAnchor
+    let bodyBase64: String
+    let signatureBase64: String
+    let priorAnchor: NativeMTPRevocationAnchor?
+    let priorBodyBase64: String?
+    let priorSignatureBase64: String?
+
+    enum CodingKeys: String, CodingKey {
+        case anchor
+        case bodyBase64 = "body_base64"
+        case signatureBase64 = "signature_base64"
+        case priorAnchor = "prior_anchor"
+        case priorBodyBase64 = "prior_body_base64"
+        case priorSignatureBase64 = "prior_signature_base64"
+    }
+
+    init(
+        feedData: Data,
+        signatureData: Data,
+        anchor: NativeMTPRevocationAnchor,
+        prior: NativeMTPRevocationCacheSnapshot?
+    ) {
+        self.anchor = anchor
+        self.bodyBase64 = feedData.base64EncodedString()
+        self.signatureBase64 = signatureData.base64EncodedString()
+        self.priorAnchor = prior?.anchor
+        self.priorBodyBase64 = prior?.feedData.base64EncodedString()
+        self.priorSignatureBase64 = prior?.signatureData.base64EncodedString()
+    }
+
+    var feedData: Data? { Data(base64Encoded: bodyBase64) }
+    var signatureData: Data? { Data(base64Encoded: signatureBase64) }
+    var priorFeedData: Data? {
+        guard let priorBodyBase64 else { return nil }
+        return Data(base64Encoded: priorBodyBase64)
+    }
+    var priorSignatureData: Data? {
+        guard let priorSignatureBase64 else { return nil }
+        return Data(base64Encoded: priorSignatureBase64)
+    }
+}
+
+struct NativeMTPRevocationCacheSnapshot: Equatable, Sendable {
+    let feedData: Data
+    let signatureData: Data
+    let anchor: NativeMTPRevocationAnchor
+    let priorFeedData: Data?
+    let priorSignatureData: Data?
+    let priorAnchor: NativeMTPRevocationAnchor?
+}
+
+
 enum NativeMTPRevocationFeedError: Error, Equatable, CustomStringConvertible {
     case missingFeed
     case invalidJSON(String)
@@ -118,8 +171,13 @@ struct NativeMTPRevocationEd25519Verifier: NativeMTPRevocationSignatureVerifying
 
 protocol NativeMTPRevocationStore: Sendable {
     func loadAnchor(signerKeyID: String) throws -> NativeMTPRevocationAnchor?
-    func loadCachedFeed(signerKeyID: String) throws -> Data?
-    func commitAcceptedFeed(_ feedData: Data, anchor: NativeMTPRevocationAnchor, signerKeyID: String) throws
+    func loadCachedRecord(signerKeyID: String) throws -> NativeMTPRevocationCacheSnapshot?
+    func commitAcceptedFeed(
+        _ feedData: Data,
+        signatureData: Data,
+        anchor: NativeMTPRevocationAnchor,
+        signerKeyID: String
+    ) throws
 }
 
 struct NativeMTPRevocationState: Equatable, Sendable {
@@ -166,27 +224,77 @@ enum NativeMTPRevocationFeedManager {
             bodySHA256: bodySHA256,
             revokedSetSHA256: feed.revokedSetSHA256
         )
-        try store.commitAcceptedFeed(feedData, anchor: anchor, signerKeyID: pinnedSignerKeyID)
+        try store.commitAcceptedFeed(
+            feedData,
+            signatureData: signatureData,
+            anchor: anchor,
+            signerKeyID: pinnedSignerKeyID
+        )
         return NativeMTPRevocationState(feed: feed, source: .network)
     }
 
     static func loadCached(
         pinnedSignerKeyID: String,
+        verifier: NativeMTPRevocationSignatureVerifying,
         store: NativeMTPRevocationStore,
         now: Date = Date()
     ) throws -> NativeMTPRevocationState {
-        guard let anchor = try store.loadAnchor(signerKeyID: pinnedSignerKeyID),
-              let data = try store.loadCachedFeed(signerKeyID: pinnedSignerKeyID) else {
+        guard let anchor = try store.loadAnchor(signerKeyID: pinnedSignerKeyID) else {
             throw NativeMTPRevocationFeedError.missingFeed
         }
+        guard let snapshot = try store.loadCachedRecord(signerKeyID: pinnedSignerKeyID) else {
+            throw NativeMTPRevocationFeedError.cacheCorrupt
+        }
+        let data = snapshot.feedData
+        let signatureData = snapshot.signatureData
+        let cacheAnchor = snapshot.anchor
+        try verifier.verify(payload: data, signatureData: signatureData, expectedSignerKeyID: pinnedSignerKeyID)
         let feed = try NativeMTPRevocationFeed.parse(data)
+        let bodySHA256 = NativeMTPRevocationFeed.sha256Hex(data)
         guard feed.signerKeyID == pinnedSignerKeyID,
-              feed.generation == anchor.generation,
-              NativeMTPRevocationFeed.sha256Hex(data) == anchor.bodySHA256,
-              feed.revokedSetSHA256 == anchor.revokedSetSHA256 else {
+              feed.generation == cacheAnchor.generation,
+              bodySHA256 == cacheAnchor.bodySHA256,
+              feed.revokedSetSHA256 == cacheAnchor.revokedSetSHA256 else {
             throw NativeMTPRevocationFeedError.anchorMismatch
         }
         try validateFreshness(feed: feed, now: now)
+        if cacheAnchor.generation < anchor.generation {
+            throw NativeMTPRevocationFeedError.anchorMismatch
+        }
+        if cacheAnchor.generation == anchor.generation {
+            guard cacheAnchor.bodySHA256 == anchor.bodySHA256,
+                  cacheAnchor.revokedSetSHA256 == anchor.revokedSetSHA256 else {
+                throw NativeMTPRevocationFeedError.anchorMismatch
+            }
+        } else {
+            guard let priorFeedData = snapshot.priorFeedData,
+                  let priorSignatureData = snapshot.priorSignatureData,
+                  let priorAnchor = snapshot.priorAnchor,
+                  priorAnchor == anchor else {
+                throw NativeMTPRevocationFeedError.cacheCorrupt
+            }
+            try verifier.verify(
+                payload: priorFeedData,
+                signatureData: priorSignatureData,
+                expectedSignerKeyID: pinnedSignerKeyID
+            )
+            let priorFeed = try NativeMTPRevocationFeed.parse(priorFeedData)
+            guard priorFeed.signerKeyID == pinnedSignerKeyID,
+                  priorFeed.generation == anchor.generation,
+                  NativeMTPRevocationFeed.sha256Hex(priorFeedData) == anchor.bodySHA256,
+                  priorFeed.revokedSetSHA256 == anchor.revokedSetSHA256 else {
+                throw NativeMTPRevocationFeedError.anchorMismatch
+            }
+            guard feed.revokedSet.isSuperset(of: priorFeed.revokedSet) else {
+                throw NativeMTPRevocationFeedError.revokedSetRegression
+            }
+            try store.commitAcceptedFeed(
+                data,
+                signatureData: signatureData,
+                anchor: cacheAnchor,
+                signerKeyID: pinnedSignerKeyID
+            )
+        }
         return NativeMTPRevocationState(feed: feed, source: .cache)
     }
 
@@ -210,8 +318,18 @@ enum NativeMTPRevocationFeedManager {
         guard feed.generation >= previous.generation else {
             throw NativeMTPRevocationFeedError.rollback
         }
-        guard let cached = try store.loadCachedFeed(signerKeyID: pinnedSignerKeyID) else {
+        guard let snapshot = try store.loadCachedRecord(signerKeyID: pinnedSignerKeyID) else {
             throw NativeMTPRevocationFeedError.cacheCorrupt
+        }
+        let cached: Data
+        if snapshot.anchor == previous {
+            cached = snapshot.feedData
+        } else if snapshot.anchor.generation > previous.generation,
+                  snapshot.priorAnchor == previous,
+                  let priorFeedData = snapshot.priorFeedData {
+            cached = priorFeedData
+        } else {
+            throw NativeMTPRevocationFeedError.anchorMismatch
         }
         let previousFeed = try NativeMTPRevocationFeed.parse(cached)
         guard previousFeed.signerKeyID == pinnedSignerKeyID,
@@ -331,6 +449,9 @@ extension NativeMTPRevocationFeed {
 
     private static func requireDate(_ object: [String: Any], _ key: String) throws -> Date {
         let value = try requireString(object, key, maxBytes: 64)
+        guard isExactRFC3339UTCSeconds(value) else {
+            throw NativeMTPRevocationFeedError.invalidField(key)
+        }
         guard let date = iso8601.date(from: value) else {
             throw NativeMTPRevocationFeedError.invalidField(key)
         }
@@ -379,6 +500,26 @@ extension NativeMTPRevocationFeed {
         }
     }
 
+    private static func isExactRFC3339UTCSeconds(_ value: String) -> Bool {
+        let bytes = Array(value.utf8)
+        guard bytes.count == 20,
+              bytes[4] == UInt8(ascii: "-"),
+              bytes[7] == UInt8(ascii: "-"),
+              bytes[10] == UInt8(ascii: "T"),
+              bytes[13] == UInt8(ascii: ":"),
+              bytes[16] == UInt8(ascii: ":"),
+              bytes[19] == UInt8(ascii: "Z") else {
+            return false
+        }
+        for index in [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18] {
+            guard bytes[index] >= UInt8(ascii: "0"),
+                  bytes[index] <= UInt8(ascii: "9") else {
+                return false
+            }
+        }
+        return true
+    }
+
     private static let iso8601: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
@@ -406,17 +547,43 @@ final class FileNativeMTPRevocationStore: NativeMTPRevocationStore, @unchecked S
         }
     }
 
-    func loadCachedFeed(signerKeyID: String) throws -> Data? {
-        let url = cacheURL(signerKeyID: signerKeyID)
-        guard fileManager.fileExists(atPath: url.path) else { return nil }
-        return try readSecureFile(url, maxBytes: NativeMTPRevocationFeed.maxFeedBytes)
-    }
-
-    func commitAcceptedFeed(_ feedData: Data, anchor: NativeMTPRevocationAnchor, signerKeyID: String) throws {
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        try writeAtomic(feedData, to: cacheURL(signerKeyID: signerKeyID))
+    func commitAcceptedFeed(
+        _ feedData: Data,
+        signatureData: Data,
+        anchor: NativeMTPRevocationAnchor,
+        signerKeyID: String
+    ) throws {
+        try ensureDirectory()
+        try commitCachedFeedOnly(feedData, signatureData: signatureData, anchor: anchor, signerKeyID: signerKeyID)
         let anchorData = try JSONEncoder.sorted.encode(anchor)
         try writeAtomic(anchorData, to: anchorURL(signerKeyID: signerKeyID))
+    }
+
+    func commitCachedFeedOnly(
+        _ feedData: Data,
+        signatureData: Data,
+        anchor: NativeMTPRevocationAnchor,
+        signerKeyID: String
+    ) throws {
+        try ensureDirectory()
+        let existing = try loadCachedRecord(signerKeyID: signerKeyID)
+        let prior = (existing?.anchor.generation ?? 0) < anchor.generation ? existing : nil
+        let record = NativeMTPRevocationCacheRecord(
+            feedData: feedData,
+            signatureData: signatureData,
+            anchor: anchor,
+            prior: prior
+        )
+        try writeAtomic(try JSONEncoder.sorted.encode(record), to: cacheURL(signerKeyID: signerKeyID))
+    }
+
+    private func ensureDirectory() throws {
+        try fileManager.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
     }
 
     private func cacheURL(signerKeyID: String) -> URL {
@@ -425,6 +592,46 @@ final class FileNativeMTPRevocationStore: NativeMTPRevocationStore, @unchecked S
 
     private func anchorURL(signerKeyID: String) -> URL {
         directory.appendingPathComponent("native-mtp-revocations.\(sanitize(signerKeyID)).anchor.json", isDirectory: false)
+    }
+
+    func loadCachedRecord(signerKeyID: String) throws -> NativeMTPRevocationCacheSnapshot? {
+        let url = cacheURL(signerKeyID: signerKeyID)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        let data = try readSecureFile(url, maxBytes: (NativeMTPRevocationFeed.maxFeedBytes + NativeMTPRevocationFeed.maxSignatureBytes) * 4)
+        do {
+            let record = try JSONDecoder().decode(NativeMTPRevocationCacheRecord.self, from: data)
+            guard let feedData = record.feedData,
+                  feedData.count <= NativeMTPRevocationFeed.maxFeedBytes,
+                  let signatureData = record.signatureData,
+                  signatureData.count <= NativeMTPRevocationFeed.maxSignatureBytes else {
+                throw NativeMTPRevocationFeedError.cacheCorrupt
+            }
+            let priorFeedData = record.priorFeedData
+            let priorSignatureData = record.priorSignatureData
+            switch (record.priorAnchor, priorFeedData, priorSignatureData) {
+            case (nil, nil, nil):
+                break
+            case (.some, .some(let body), .some(let signature)):
+                guard body.count <= NativeMTPRevocationFeed.maxFeedBytes,
+                      signature.count <= NativeMTPRevocationFeed.maxSignatureBytes else {
+                    throw NativeMTPRevocationFeedError.cacheCorrupt
+                }
+            default:
+                throw NativeMTPRevocationFeedError.cacheCorrupt
+            }
+            return NativeMTPRevocationCacheSnapshot(
+                feedData: feedData,
+                signatureData: signatureData,
+                anchor: record.anchor,
+                priorFeedData: priorFeedData,
+                priorSignatureData: priorSignatureData,
+                priorAnchor: record.priorAnchor
+            )
+        } catch let error as NativeMTPRevocationFeedError {
+            throw error
+        } catch {
+            throw NativeMTPRevocationFeedError.cacheCorrupt
+        }
     }
 
     private func sanitize(_ value: String) -> String {
@@ -566,12 +773,22 @@ final class KeychainNativeMTPRevocationStore: NativeMTPRevocationStore, @uncheck
         }
     }
 
-    func loadCachedFeed(signerKeyID: String) throws -> Data? {
-        try cacheStore.loadCachedFeed(signerKeyID: signerKeyID)
+    func loadCachedRecord(signerKeyID: String) throws -> NativeMTPRevocationCacheSnapshot? {
+        try cacheStore.loadCachedRecord(signerKeyID: signerKeyID)
     }
 
-    func commitAcceptedFeed(_ feedData: Data, anchor: NativeMTPRevocationAnchor, signerKeyID: String) throws {
-        try cacheStore.commitAcceptedFeed(feedData, anchor: anchor, signerKeyID: signerKeyID)
+    func commitAcceptedFeed(
+        _ feedData: Data,
+        signatureData: Data,
+        anchor: NativeMTPRevocationAnchor,
+        signerKeyID: String
+    ) throws {
+        try cacheStore.commitCachedFeedOnly(
+            feedData,
+            signatureData: signatureData,
+            anchor: anchor,
+            signerKeyID: signerKeyID
+        )
         let data = try JSONEncoder.sorted.encode(anchor)
         try replaceAnchor(data, signerKeyID: signerKeyID)
     }

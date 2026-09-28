@@ -7844,6 +7844,7 @@ actor ModelRuntime: ModelRuntimeServing {
             } else {
                 state = try NativeMTPRevocationFeedManager.loadCached(
                     pinnedSignerKeyID: revocationSignerKeyID,
+                    verifier: verifier,
                     store: store
                 )
             }

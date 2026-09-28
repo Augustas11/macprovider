@@ -27,6 +27,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
 
         let recovered = try NativeMTPRevocationFeedManager.loadCached(
             pinnedSignerKeyID: "native-mtp-revoker-v1",
+            verifier: verifier(signer: signer),
             store: store,
             now: now
         )
@@ -86,6 +87,16 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
             "revoked_admission_tuple_sha256": [Self.digest("02"), Self.digest("01")],
         ]))) {
             XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .invalidField("revoked_admission_tuple_sha256"))
+        }
+        XCTAssertThrowsError(try NativeMTPRevocationFeed.parse(Data("""
+        {"schema_version":"macprovider.native-mtp-revocations.v1","generation":1,"issued_at":"2026-09-28T12:00:00.000Z","expires_at":"2026-09-28T13:00:00Z","signer_key_id":"k","revoked_admission_tuple_sha256":[]}
+        """.utf8))) {
+            XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .invalidField("issued_at"))
+        }
+        XCTAssertThrowsError(try NativeMTPRevocationFeed.parse(Data("""
+        {"schema_version":"macprovider.native-mtp-revocations.v1","generation":1,"issued_at":"2026-09-28T12:00:00+00:00","expires_at":"2026-09-28T13:00:00Z","signer_key_id":"k","revoked_admission_tuple_sha256":[]}
+        """.utf8))) {
+            XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .invalidField("issued_at"))
         }
     }
 
@@ -179,12 +190,23 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         _ = try accept(feed, signer: signer, store: store, now: now)
 
         store.cachedFeed = nil
-        XCTAssertThrowsError(try NativeMTPRevocationFeedManager.loadCached(pinnedSignerKeyID: "revoker-a", store: store, now: now)) {
+        XCTAssertThrowsError(try NativeMTPRevocationFeedManager.loadCached(
+            pinnedSignerKeyID: "revoker-a",
+            verifier: verifier(signer: signer),
+            store: store,
+            now: now
+        )) {
             XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .missingFeed)
         }
 
         store.cachedFeed = Data("not-json".utf8)
-        XCTAssertThrowsError(try NativeMTPRevocationFeedManager.loadCached(pinnedSignerKeyID: "revoker-a", store: store, now: now)) {
+        store.cachedSignature = signature(for: store.cachedFeed!, signer: signer, keyID: "revoker-a")
+        XCTAssertThrowsError(try NativeMTPRevocationFeedManager.loadCached(
+            pinnedSignerKeyID: "revoker-a",
+            verifier: verifier(signer: signer),
+            store: store,
+            now: now
+        )) {
             XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .invalidJSON("feed"))
         }
 
@@ -194,7 +216,98 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
             bodySHA256: "bad",
             revokedSetSHA256: "bad"
         )
-        XCTAssertThrowsError(try NativeMTPRevocationFeedManager.loadCached(pinnedSignerKeyID: "revoker-a", store: store, now: now)) {
+        XCTAssertThrowsError(try NativeMTPRevocationFeedManager.loadCached(
+            pinnedSignerKeyID: "revoker-a",
+            verifier: verifier(signer: signer),
+            store: store,
+            now: now
+        )) {
+            XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .anchorMismatch)
+        }
+
+        let regressionStore = MemoryRevocationStore()
+        let priorWithTwo = try feedData(
+            generation: 7,
+            signerKeyID: "revoker-a",
+            tuples: [Self.digest("01"), Self.digest("02")],
+            now: now
+        )
+        _ = try accept(priorWithTwo, signer: signer, store: regressionStore, now: now)
+        let priorRegressionFeed = regressionStore.cachedFeed
+        let priorRegressionSignature = regressionStore.cachedSignature
+        let priorRegressionAnchor = regressionStore.cacheAnchor
+        let regressingAhead = try feedData(
+            generation: 8,
+            signerKeyID: "revoker-a",
+            tuples: [Self.digest("02")],
+            now: now
+        )
+        regressionStore.cachedFeed = regressingAhead
+        regressionStore.cachedSignature = signature(for: regressingAhead, signer: signer, keyID: "revoker-a")
+        regressionStore.cacheAnchor = NativeMTPRevocationAnchor(
+            generation: 8,
+            bodySHA256: NativeMTPRevocationFeed.sha256Hex(regressingAhead),
+            revokedSetSHA256: try NativeMTPRevocationFeed.parse(regressingAhead).revokedSetSHA256
+        )
+        regressionStore.priorCachedFeed = priorRegressionFeed
+        regressionStore.priorCachedSignature = priorRegressionSignature
+        regressionStore.priorCacheAnchor = priorRegressionAnchor
+        XCTAssertThrowsError(try NativeMTPRevocationFeedManager.loadCached(
+            pinnedSignerKeyID: "revoker-a",
+            verifier: verifier(signer: signer),
+            store: regressionStore,
+            now: now
+        )) {
+            XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .revokedSetRegression)
+        }
+    }
+
+    func testSignedCacheAheadCompletesInterruptedAnchorUpdateAndAnchorAheadFails() throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let now = Self.date("2026-09-28T12:00:00Z")
+        let store = MemoryRevocationStore()
+        let oldFeed = try feedData(generation: 1, signerKeyID: "revoker-a", tuples: [Self.digest("01")], now: now)
+        _ = try accept(oldFeed, signer: signer, store: store, now: now)
+        let priorFeed = store.cachedFeed
+        let priorSignature = store.cachedSignature
+        let priorAnchor = store.cacheAnchor
+
+        let aheadFeed = try feedData(generation: 2, signerKeyID: "revoker-a", tuples: [Self.digest("01"), Self.digest("02")], now: now)
+        let aheadAnchor = NativeMTPRevocationAnchor(
+            generation: 2,
+            bodySHA256: NativeMTPRevocationFeed.sha256Hex(aheadFeed),
+            revokedSetSHA256: try NativeMTPRevocationFeed.parse(aheadFeed).revokedSetSHA256
+        )
+        store.cachedFeed = aheadFeed
+        store.cachedSignature = signature(for: aheadFeed, signer: signer, keyID: "revoker-a")
+        store.cacheAnchor = aheadAnchor
+        store.priorCachedFeed = priorFeed
+        store.priorCachedSignature = priorSignature
+        store.priorCacheAnchor = priorAnchor
+
+        let recovered = try NativeMTPRevocationFeedManager.loadCached(
+            pinnedSignerKeyID: "revoker-a",
+            verifier: verifier(signer: signer),
+            store: store,
+            now: now
+        )
+        XCTAssertEqual(recovered.feed.generation, 2)
+        XCTAssertEqual(store.anchor?.generation, 2)
+
+        let behindFeed = oldFeed
+        store.cachedFeed = behindFeed
+        store.cachedSignature = signature(for: behindFeed, signer: signer, keyID: "revoker-a")
+        store.cacheAnchor = NativeMTPRevocationAnchor(
+            generation: 1,
+            bodySHA256: NativeMTPRevocationFeed.sha256Hex(behindFeed),
+            revokedSetSHA256: try NativeMTPRevocationFeed.parse(behindFeed).revokedSetSHA256
+        )
+        XCTAssertThrowsError(try NativeMTPRevocationFeedManager.loadCached(
+            pinnedSignerKeyID: "revoker-a",
+            verifier: verifier(signer: signer),
+            store: store,
+            now: now
+        )) {
             XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .anchorMismatch)
         }
     }
@@ -219,6 +332,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         )
         let recovered = try NativeMTPRevocationFeedManager.loadCached(
             pinnedSignerKeyID: "revoker.file",
+            verifier: verifier(signer: signer),
             store: store,
             now: now
         )
@@ -298,18 +412,51 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
 
 private final class MemoryRevocationStore: NativeMTPRevocationStore, @unchecked Sendable {
     var anchor: NativeMTPRevocationAnchor?
+    var cacheAnchor: NativeMTPRevocationAnchor?
     var cachedFeed: Data?
+    var cachedSignature: Data?
+    var priorCacheAnchor: NativeMTPRevocationAnchor?
+    var priorCachedFeed: Data?
+    var priorCachedSignature: Data?
 
     func loadAnchor(signerKeyID: String) throws -> NativeMTPRevocationAnchor? {
         anchor
     }
 
-    func loadCachedFeed(signerKeyID: String) throws -> Data? {
-        cachedFeed
+    func loadCachedRecord(signerKeyID: String) throws -> NativeMTPRevocationCacheSnapshot? {
+        guard let cachedFeed,
+              let cachedSignature,
+              let cacheAnchor else {
+            return nil
+        }
+        return NativeMTPRevocationCacheSnapshot(
+            feedData: cachedFeed,
+            signatureData: cachedSignature,
+            anchor: cacheAnchor,
+            priorFeedData: priorCachedFeed,
+            priorSignatureData: priorCachedSignature,
+            priorAnchor: priorCacheAnchor
+        )
     }
 
-    func commitAcceptedFeed(_ feedData: Data, anchor: NativeMTPRevocationAnchor, signerKeyID: String) throws {
+    func commitAcceptedFeed(
+        _ feedData: Data,
+        signatureData: Data,
+        anchor: NativeMTPRevocationAnchor,
+        signerKeyID: String
+    ) throws {
+        if let cacheAnchor, cacheAnchor.generation < anchor.generation {
+            priorCachedFeed = cachedFeed
+            priorCachedSignature = cachedSignature
+            priorCacheAnchor = cacheAnchor
+        } else {
+            priorCachedFeed = nil
+            priorCachedSignature = nil
+            priorCacheAnchor = nil
+        }
         cachedFeed = feedData
+        cachedSignature = signatureData
+        cacheAnchor = anchor
         self.anchor = anchor
     }
 }
