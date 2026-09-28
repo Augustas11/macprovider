@@ -7383,7 +7383,7 @@ actor ModelRuntime: ModelRuntimeServing {
     static func malformedHarmonyResponseError() -> APIError {
         APIError(
             status: 502,
-            message: "Malformed Harmony tool-call response",
+            message: "Harmony response did not produce a valid final channel. This most often means the reasoning budget was exhausted before the model reached its final answer; retry with a higher max_tokens or a lower reasoning effort. It can also indicate malformed Harmony tool-call framing.",
             type: "upstream_provider_error",
             code: "malformed_tool_call_final_json",
             inferenceRan: true,
