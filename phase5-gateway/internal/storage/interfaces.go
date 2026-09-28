@@ -67,14 +67,20 @@ type DemoSessionStore interface {
 type UsageStore interface {
 	ReserveQuota(ctx context.Context, req ReservationRequest) (QuotaDecision, error)
 	SettleReservation(ctx context.Context, settlement ReservationSettlement) error
+	SettleReservationForDrain(ctx context.Context, settlement ReservationSettlement, reconcileResult string) error
 	SettleDemoReservation(ctx context.Context, settlement ReservationSettlement, demo DemoUsageEvent) error
+	SettleDemoReservationForDrain(ctx context.Context, settlement ReservationSettlement, demo DemoUsageEvent, reconcileResult string) error
 	RefundReservation(ctx context.Context, accountID, requestID string, refundedAt int64) error
+	RefundReservationForDrain(ctx context.Context, reservation ActiveReservation, refundedAt time.Time, reconcileResult string) error
+	RefundDemoReservation(ctx context.Context, accountID, requestID string, refundedAt time.Time) error
+	RefundDemoReservationForDrain(ctx context.Context, reservation ActiveReservation, refundedAt time.Time, reconcileResult string) error
 	ExpireReservation(ctx context.Context, accountID, requestID string, expiredAt time.Time) error
 	MarkReservationStaleHeld(ctx context.Context, accountID, requestID string, staleAt time.Time) error
 	MarkReservationSettlementHold(ctx context.Context, accountID, requestID string) error
 	ClampReservationExpiry(ctx context.Context, accountID, requestID string, expiresAt time.Time) error
 	ListSettlementHeldReservations(ctx context.Context, limit int) ([]ActiveReservation, error)
 	ListDueSettlementHeldReservations(ctx context.Context, limit int, now time.Time) ([]ActiveReservation, error)
+	ListSettlementHeldReservationsForDrain(ctx context.Context, accountID string, createdBefore time.Time, limit int) ([]ActiveReservation, error)
 	LookupSettlementHeldReservation(ctx context.Context, accountID, requestID string) (ActiveReservation, error)
 	MarkSettlementReconcileAttempt(ctx context.Context, reservation ActiveReservation) error
 	RecordSettlementReconcileResult(ctx context.Context, reservation ActiveReservation, result string, now time.Time) error
@@ -146,8 +152,10 @@ type WalletSessionStore interface {
 	HoldStaleWalletSessionDispatchArms(ctx context.Context, before, heldAt time.Time) (int64, error)
 	RefundStaleWalletSessionClaims(ctx context.Context, before, refundedAt time.Time) (int64, error)
 	FinalizeWalletSessionReservation(ctx context.Context, settlement WalletSessionReservationSettlement) error
+	FinalizeWalletSessionReservationForDrain(ctx context.Context, settlement WalletSessionReservationSettlement, reconcileResult string) error
 	SealWalletSessionUsageEvent(ctx context.Context, accountID, sessionID, requestID string, settledTokens int64, sealedAt time.Time) error
 	RefundWalletSessionReservation(ctx context.Context, accountID, sessionID, requestID string, refundedAt time.Time) error
+	RefundWalletSessionReservationForDrain(ctx context.Context, reservation ActiveReservation, refundedAt time.Time, reconcileResult string) error
 	HoldWalletSessionReservation(ctx context.Context, accountID, sessionID, requestID string, heldAt time.Time) error
 	QuarantineWalletSessionReservation(ctx context.Context, accountID, sessionID, requestID string, quarantinedAt time.Time) error
 	MarkWalletSessionReservationStaleHeld(ctx context.Context, accountID, sessionID, requestID string, staleAt time.Time) error

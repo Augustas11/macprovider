@@ -568,49 +568,7 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 	case settlementFinalityLegacy:
 		return "legacy", nil
 	case settlementFinalityDebit:
-		prompt, completion, total, err := finalityTokenTotals(finality)
-		if err != nil {
-			return "", err
-		}
-		completion, total = buyerDeliveredCompletionBound(reservation, candidate, prompt, completion, total)
-		settlement := storage.ReservationSettlement{
-			ExpectedReservationCreatedAt: reservation.CreatedAt,
-			AccountID:                    reservation.AccountID,
-			RequestID:                    reservation.RequestID,
-			PromptTokens:                 prompt,
-			CompletionTokens:             completion,
-			TotalTokens:                  total,
-			MaxTotalTokens:               reservation.ReservedTokens,
-			TokenSource:                  finality.TokenSource,
-			Outcome:                      "spec022_verified",
-			SettledAt:                    s.now(),
-		}
-		var settleErr error
-		if reservation.WalletSessionID != "" {
-			settleErr = s.store.FinalizeWalletSessionReservation(ctx, storage.WalletSessionReservationSettlement{
-				ExpectedReservationCreatedAt: reservation.CreatedAt,
-				AccountID:                    settlement.AccountID,
-				SessionID:                    reservation.WalletSessionID,
-				RequestID:                    settlement.RequestID,
-				PromptTokens:                 settlement.PromptTokens,
-				CompletionTokens:             settlement.CompletionTokens,
-				TotalTokens:                  settlement.TotalTokens,
-				MaxTotalTokens:               settlement.MaxTotalTokens,
-				TokenSource:                  settlement.TokenSource,
-				Outcome:                      settlement.Outcome,
-				SettledAt:                    settlement.SettledAt,
-			})
-		} else if candidate.DemoIdentity != "" {
-			settleErr = s.store.SettleDemoReservation(ctx, settlement, storage.DemoUsageEvent{
-				RequestID:     candidate.RequestID,
-				ClientIP:      candidate.DemoIdentity,
-				DemoTokenHash: candidate.DemoTokenHash,
-				WindowDate:    candidate.WindowDate,
-				CreatedAt:     settlement.SettledAt,
-			})
-		} else {
-			settleErr = s.store.SettleReservation(ctx, settlement)
-		}
+		settleErr := s.settleVerifiedReservation(ctx, reservation, candidate, finality)
 		if settleErr != nil {
 			if errors.Is(settleErr, storage.ErrReservationNotFound) || errors.Is(settleErr, storage.ErrReservationTerminal) {
 				return "already_terminal", nil
@@ -619,12 +577,7 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 		}
 		return "verified", nil
 	case settlementFinalityRefund:
-		var err error
-		if reservation.WalletSessionID != "" {
-			err = s.store.RefundWalletSessionReservation(ctx, reservation.AccountID, reservation.WalletSessionID, reservation.RequestID, s.now())
-		} else {
-			err = s.store.RefundReservation(ctx, reservation.AccountID, reservation.RequestID, s.now().Unix())
-		}
+		err = s.refundHeldReservation(ctx, reservation, candidate)
 		if err != nil {
 			if errors.Is(err, storage.ErrReservationNotFound) {
 				return "already_terminal", nil
@@ -644,6 +597,95 @@ func (s *Server) reconcileSettlementReservation(ctx context.Context, reservation
 	default:
 		return "legacy", nil
 	}
+}
+
+func (s *Server) settleVerifiedReservation(ctx context.Context, reservation storage.ActiveReservation, candidate storage.SettlementFallbackCandidate, finality coordinatorRequestSettlementFinality) error {
+	return s.settleVerifiedReservationWithResult(ctx, reservation, candidate, finality, "")
+}
+
+func (s *Server) settleVerifiedReservationWithResult(ctx context.Context, reservation storage.ActiveReservation, candidate storage.SettlementFallbackCandidate, finality coordinatorRequestSettlementFinality, reconcileResult string) error {
+	prompt, completion, total, err := finalityTokenTotals(finality)
+	if err != nil {
+		return err
+	}
+	completion, total = buyerDeliveredCompletionBound(reservation, candidate, prompt, completion, total)
+	settlement := storage.ReservationSettlement{
+		ExpectedReservationCreatedAt: reservation.CreatedAt,
+		AccountID:                    reservation.AccountID,
+		RequestID:                    reservation.RequestID,
+		PromptTokens:                 prompt,
+		CompletionTokens:             completion,
+		TotalTokens:                  total,
+		MaxTotalTokens:               reservation.ReservedTokens,
+		TokenSource:                  finality.TokenSource,
+		Outcome:                      "spec022_verified",
+		SettledAt:                    s.now(),
+	}
+	if reservation.WalletSessionID != "" {
+		walletSettlement := storage.WalletSessionReservationSettlement{
+			ExpectedReservationCreatedAt: reservation.CreatedAt,
+			AccountID:                    settlement.AccountID,
+			SessionID:                    reservation.WalletSessionID,
+			RequestID:                    settlement.RequestID,
+			PromptTokens:                 settlement.PromptTokens,
+			CompletionTokens:             settlement.CompletionTokens,
+			TotalTokens:                  settlement.TotalTokens,
+			MaxTotalTokens:               settlement.MaxTotalTokens,
+			TokenSource:                  settlement.TokenSource,
+			Outcome:                      settlement.Outcome,
+			SettledAt:                    settlement.SettledAt,
+		}
+		if reconcileResult != "" {
+			return s.store.FinalizeWalletSessionReservationForDrain(ctx, walletSettlement, reconcileResult)
+		}
+		return s.store.FinalizeWalletSessionReservation(ctx, walletSettlement)
+	}
+	if strings.HasPrefix(reservation.AccountID, "demo:") {
+		if candidate.DemoIdentity == "" || candidate.DemoTokenHash == "" {
+			return fmt.Errorf("demo settlement metadata is unavailable")
+		}
+		demo := storage.DemoUsageEvent{
+			RequestID:     candidate.RequestID,
+			ClientIP:      candidate.DemoIdentity,
+			DemoTokenHash: candidate.DemoTokenHash,
+			WindowDate:    candidate.WindowDate,
+			CreatedAt:     settlement.SettledAt,
+		}
+		if reconcileResult != "" {
+			return s.store.SettleDemoReservationForDrain(ctx, settlement, demo, reconcileResult)
+		}
+		return s.store.SettleDemoReservation(ctx, settlement, demo)
+	}
+	if candidate.DemoIdentity != "" || candidate.DemoTokenHash != "" {
+		return fmt.Errorf("non-demo reservation has demo settlement metadata")
+	}
+	if reconcileResult != "" {
+		return s.store.SettleReservationForDrain(ctx, settlement, reconcileResult)
+	}
+	return s.store.SettleReservation(ctx, settlement)
+}
+
+func (s *Server) refundHeldReservation(ctx context.Context, reservation storage.ActiveReservation, candidate storage.SettlementFallbackCandidate) error {
+	return s.refundHeldReservationWithResult(ctx, reservation, candidate, "")
+}
+
+func (s *Server) refundHeldReservationWithResult(ctx context.Context, reservation storage.ActiveReservation, candidate storage.SettlementFallbackCandidate, reconcileResult string) error {
+	if reservation.WalletSessionID != "" {
+		if reconcileResult != "" {
+			return s.store.RefundWalletSessionReservationForDrain(ctx, reservation, s.now(), reconcileResult)
+		}
+		return s.store.RefundWalletSessionReservation(ctx, reservation.AccountID, reservation.WalletSessionID, reservation.RequestID, s.now())
+	}
+	if candidate.DemoIdentity != "" || strings.HasPrefix(reservation.AccountID, "demo:") {
+		if reconcileResult != "" {
+			return s.store.RefundDemoReservationForDrain(ctx, reservation, s.now(), reconcileResult)
+		}
+		return s.store.RefundDemoReservation(ctx, reservation.AccountID, reservation.RequestID, s.now())
+	}
+	if reconcileResult != "" {
+		return s.store.RefundReservationForDrain(ctx, reservation, s.now(), reconcileResult)
+	}
+	return s.store.RefundReservation(ctx, reservation.AccountID, reservation.RequestID, s.now().Unix())
 }
 
 func (s *Server) recordSettlementHeldResult(ctx context.Context, reservation storage.ActiveReservation, result string) (string, error) {
@@ -686,6 +728,10 @@ func coordinatorObserveFallbackAllowed(finality coordinatorRequestSettlementFina
 // The caller must first establish observe authority. Only the persisted local
 // tuple is used here; coordinator receipt totals cannot replace legacy usage.
 func (s *Server) settleObserveFallbackCandidate(ctx context.Context, candidate storage.SettlementFallbackCandidate) error {
+	return s.settleObserveFallbackCandidateWithResult(ctx, candidate, "")
+}
+
+func (s *Server) settleObserveFallbackCandidateWithResult(ctx context.Context, candidate storage.SettlementFallbackCandidate, reconcileResult string) error {
 	if candidate.ReservationCreatedAt.IsZero() || strings.TrimSpace(candidate.RequiredInternalRequestID) == "" {
 		return fmt.Errorf("observe fallback reservation creation time and current internal request ID are required")
 	}
@@ -698,20 +744,31 @@ func (s *Server) settleObserveFallbackCandidate(ctx context.Context, candidate s
 		TokenSource:    candidate.TokenSource, Outcome: candidate.Outcome, SettledAt: s.now(),
 	}
 	if candidate.WalletSessionID != "" {
-		return s.store.FinalizeWalletSessionReservation(ctx, storage.WalletSessionReservationSettlement{
+		walletSettlement := storage.WalletSessionReservationSettlement{
 			RelayBlind:                   candidate.RelayBlind,
 			ExpectedReservationCreatedAt: candidate.ReservationCreatedAt,
 			AccountID:                    candidate.AccountID, SessionID: candidate.WalletSessionID, RequestID: candidate.RequestID,
 			PromptTokens: settlement.PromptTokens, CompletionTokens: settlement.CompletionTokens,
 			TotalTokens: settlement.TotalTokens, MaxTotalTokens: settlement.MaxTotalTokens,
 			TokenSource: settlement.TokenSource, Outcome: settlement.Outcome, SettledAt: settlement.SettledAt,
-		})
+		}
+		if reconcileResult != "" {
+			return s.store.FinalizeWalletSessionReservationForDrain(ctx, walletSettlement, reconcileResult)
+		}
+		return s.store.FinalizeWalletSessionReservation(ctx, walletSettlement)
 	}
 	if candidate.DemoIdentity != "" {
-		return s.store.SettleDemoReservation(ctx, settlement, storage.DemoUsageEvent{
+		demo := storage.DemoUsageEvent{
 			RequestID: candidate.RequestID, ClientIP: candidate.DemoIdentity, DemoTokenHash: candidate.DemoTokenHash,
 			WindowDate: candidate.WindowDate, CreatedAt: settlement.SettledAt,
-		})
+		}
+		if reconcileResult != "" {
+			return s.store.SettleDemoReservationForDrain(ctx, settlement, demo, reconcileResult)
+		}
+		return s.store.SettleDemoReservation(ctx, settlement, demo)
+	}
+	if reconcileResult != "" {
+		return s.store.SettleReservationForDrain(ctx, settlement, reconcileResult)
 	}
 	return s.store.SettleReservation(ctx, settlement)
 }
