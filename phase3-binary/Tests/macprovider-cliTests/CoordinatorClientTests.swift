@@ -211,20 +211,39 @@ final class CoordinatorClientTests: XCTestCase {
     private static let nativeMTPAdmissionTupleSHA256 = String(repeating: "7", count: 64)
     private static let nativeMTPRuntimeTupleSHA256 = "0cd868d60c929446163aa38cd66ebb34812912995998e46812aac55c1327c777"
 
-    private static func nativeMTPTupleDisable() -> [String: Any] {
-        [
+    private static func nativeMTPTupleDisable() throws -> [String: Any] {
+        let issuedAt = iso8601.string(from: Date())
+        let digest = try nativeMTPTupleDisableRequestDigest(issuedAt: issuedAt)
+        return [
             "type": "native_mtp_tuple_disable_v1",
             "version": 1,
             "provider_id": "provider-test",
             "assigned_id": "assigned-native-mtp",
             "target_generation": 7,
             "native_mtp_admission_tuple_sha256": Self.nativeMTPAdmissionTupleSHA256,
+            "served_snapshot_id": "snapshot-a",
             "native_mtp_runtime_tuple_sha256": Self.nativeMTPRuntimeTupleSHA256,
             "reason": "mismatch",
             "nonce": "abcdef0123456789abcdef0123456789",
-            "issued_at": "2026-09-28T00:00:00Z",
-            "request_digest": String(repeating: "6", count: 64),
+            "issued_at": issuedAt,
+            "request_digest": digest,
         ]
+    }
+
+    private static func nativeMTPTupleDisableRequestDigest(issuedAt: String) throws -> String {
+        let canonical = try RFC8785JCS.canonicalStringRawStrings(.object([
+            "schema_version": .int(1),
+            "provider_id": .string("provider-test"),
+            "assigned_id": .string("assigned-native-mtp"),
+            "target_generation": .int(7),
+            "native_mtp_admission_tuple_sha256": .string(Self.nativeMTPAdmissionTupleSHA256),
+            "served_snapshot_id": .string("snapshot-a"),
+            "native_mtp_runtime_tuple_sha256": .string(Self.nativeMTPRuntimeTupleSHA256),
+            "reason": .string("mismatch"),
+            "nonce": .string("abcdef0123456789abcdef0123456789"),
+            "issued_at": .string(issuedAt),
+        ]))
+        return SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     func testDiagnosticStatusPayloadIsRedactedAndMatchesProviderSnapshot() async throws {
@@ -667,6 +686,65 @@ final class CoordinatorClientTests: XCTestCase {
         let frames = await recorder.frames.dropFirst(initialCount)
         XCTAssertEqual(frames.first?["type"] as? String, "nak")
         XCTAssertEqual(frames.first?["in_reply_to"] as? String, "native_mtp_canary_request_v1")
+    }
+
+    func testNativeMTPTupleDisableUsesDedicatedHandlerAndRejectsReplay() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let disableRecorder = NativeMTPTupleDisableRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            nativeMTPTupleDisableHandler: { payload in await disableRecorder.append(payload) }
+        )
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-native-mtp",
+            "heartbeat_interval_s": 30,
+        ])
+        let initialCount = await recorder.frames.count
+        let disable = try Self.nativeMTPTupleDisable()
+
+        try await client.handleCoordinatorPayloadForTest(disable)
+        try await client.handleCoordinatorPayloadForTest(disable)
+
+        let payloads = await disableRecorder.payloads
+        XCTAssertEqual(payloads.count, 1)
+        XCTAssertEqual(payloads[0].providerID, "provider-test")
+        XCTAssertEqual(payloads[0].assignedID, "assigned-native-mtp")
+        XCTAssertEqual(payloads[0].servedSnapshotID, "snapshot-a")
+        XCTAssertEqual(payloads[0].nativeMTPRuntimeTupleSHA256, Self.nativeMTPRuntimeTupleSHA256)
+        let frames = await recorder.frames.dropFirst(initialCount)
+        XCTAssertEqual(frames.first?["type"] as? String, "nak")
+        XCTAssertEqual(frames.first?["in_reply_to"] as? String, "native_mtp_tuple_disable_v1")
+    }
+
+    func testNativeMTPTupleDisableRejectsUnknownFields() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-native-mtp",
+            "heartbeat_interval_s": 30,
+        ])
+        let initialCount = await recorder.frames.count
+        var disable = try Self.nativeMTPTupleDisable()
+        disable["usage"] = ["total_tokens": 1]
+
+        try await client.handleCoordinatorPayloadForTest(disable)
+
+        let frames = await recorder.frames.dropFirst(initialCount)
+        XCTAssertEqual(frames.first?["type"] as? String, "nak")
+        XCTAssertEqual(frames.first?["in_reply_to"] as? String, "native_mtp_tuple_disable_v1")
     }
 
     func testRequestCapacityTransitionsSendCoordinatorStateUpdates() async throws {

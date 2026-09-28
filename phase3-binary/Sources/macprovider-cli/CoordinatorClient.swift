@@ -2972,17 +2972,47 @@ actor CoordinatorClient {
         nativeMTPAdmissionTupleSHA256: String,
         servedSnapshotID: String
     ) throws -> String {
-        do {
-            return try NativeMTPRuntimeTupleIdentity.sha256(
-                nativeMTPAdmissionTupleSHA256: nativeMTPAdmissionTupleSHA256,
-                providerID: providerID,
-                assignedID: assignedID,
-                targetGeneration: targetGeneration,
-                servedSnapshotID: servedSnapshotID
-            )
-        } catch {
-            throw CoordinatorAuthError.invalidMessage("invalid native MTP runtime tuple identity")
+        guard targetGeneration <= UInt64(Int.max) else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP target generation")
         }
+        let canonical = try RFC8785JCS.canonicalStringRawStrings(.object([
+            "schema_version": .string("macprovider.native-mtp-runtime-tuple.v1"),
+            "native_mtp_admission_tuple_sha256": .string(nativeMTPAdmissionTupleSHA256),
+            "provider_id": .string(providerID),
+            "assigned_id": .string(assignedID),
+            "target_generation": .int(Int(targetGeneration)),
+            "served_snapshot_id": .string(servedSnapshotID),
+        ]))
+        return SHA256.hash(data: Data("macprovider.native-mtp-runtime-tuple.v1\n\(canonical)".utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func nativeMTPTupleDisableRequestDigest(
+        providerID: String,
+        assignedID: String,
+        targetGeneration: UInt64,
+        nativeMTPAdmissionTupleSHA256: String,
+        servedSnapshotID: String,
+        nativeMTPRuntimeTupleSHA256: String,
+        reason: String,
+        nonce: String,
+        issuedAt: String
+    ) throws -> String {
+        guard targetGeneration <= UInt64(Int.max) else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP target generation")
+        }
+        let canonical = try RFC8785JCS.canonicalStringRawStrings(.object([
+            "schema_version": .int(1),
+            "provider_id": .string(providerID),
+            "assigned_id": .string(assignedID),
+            "target_generation": .int(Int(targetGeneration)),
+            "native_mtp_admission_tuple_sha256": .string(nativeMTPAdmissionTupleSHA256),
+            "served_snapshot_id": .string(servedSnapshotID),
+            "native_mtp_runtime_tuple_sha256": .string(nativeMTPRuntimeTupleSHA256),
+            "reason": .string(reason),
+            "nonce": .string(nonce),
+            "issued_at": .string(issuedAt),
+        ]))
+        return SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     private static let nativeMTPCanaryRequestKeys: Set<String> = [
