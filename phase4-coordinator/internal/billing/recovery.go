@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
+	"runtime"
 	"strings"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 )
 
 type RecoverInput struct {
@@ -16,19 +18,28 @@ type RecoverInput struct {
 	Source   string
 }
 
+const recoverLedgerChunkWindow = time.Hour
+
+type recoveryStats struct {
+	scanned         int64
+	created         int64
+	quarantined     int64
+	buyerEquivalent int64
+	providerGross   int64
+}
+
+func (s recoveryStats) add(other recoveryStats) recoveryStats {
+	s.scanned += other.scanned
+	s.created += other.created
+	s.quarantined += other.quarantined
+	s.buyerEquivalent += other.buyerEquivalent
+	s.providerGross += other.providerGross
+	return s
+}
+
 func (s *Store) RecoverLedger(ctx context.Context, in RecoverInput) (retErr error) {
 	if in.Source == "" {
 		in.Source = "startup_scan"
-	}
-	// SPEC-022-R012.3 and the R006 label are decided before the transaction
-	// opens: the durable pool authority reads this same database.
-	poolAttested, err := s.recoveryPoolAttestedRoutes(ctx, in)
-	if err != nil {
-		return err
-	}
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
-	if err != nil {
-		return err
 	}
 	started := time.Now().UTC()
 	defer func() {
@@ -53,6 +64,63 @@ INSERT INTO ledger_reconciliation_runs (
 			started.Format(time.RFC3339Nano),
 		)
 	}()
+	var total recoveryStats
+	for chunkFrom := in.ScanFrom.UTC(); chunkFrom.Before(in.ScanTo.UTC()); {
+		chunkTo := chunkFrom.Add(recoverLedgerChunkWindow)
+		if chunkTo.After(in.ScanTo.UTC()) {
+			chunkTo = in.ScanTo.UTC()
+		}
+		chunk := in
+		chunk.ScanFrom = chunkFrom
+		chunk.ScanTo = chunkTo
+		// SPEC-022-R012.3/R006 pool decisions are pre-read per chunk, then
+		// fenced again inside that chunk's writer transaction.
+		poolAttested, err := s.recoveryPoolAttestedRoutes(ctx, chunk)
+		if err != nil {
+			return err
+		}
+		stats, err := s.recoverLedgerChunk(ctx, chunk, poolAttested)
+		if err != nil {
+			return err
+		}
+		total = total.add(stats)
+		chunkFrom = chunkTo
+		if chunkFrom.Before(in.ScanTo.UTC()) {
+			runtime.Gosched()
+		}
+	}
+	finished := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO ledger_reconciliation_runs (
+    run_type, from_utc, to_utc, request_log_rows_scanned,
+    missing_credit_rows_created, orphan_credit_rows_quarantined,
+    buyer_equivalent_credits, provider_gross_credits,
+    reconciliation_delta_credits, started_at_utc, finished_at_utc, status,
+    error, created_at_utc
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', NULL, ?)`,
+		in.Source,
+		in.ScanFrom.UTC().Format(time.RFC3339Nano),
+		in.ScanTo.UTC().Format(time.RFC3339Nano),
+		total.scanned,
+		total.created,
+		total.quarantined,
+		total.buyerEquivalent,
+		total.providerGross,
+		total.providerGross-total.buyerEquivalent,
+		started.Format(time.RFC3339Nano),
+		finished.Format(time.RFC3339Nano),
+		started.Format(time.RFC3339Nano),
+	)
+	return err
+}
+
+func (s *Store) recoverLedgerChunk(ctx context.Context, in RecoverInput, poolAttested map[SettlementReceiptIdentity]recoveryPoolAttestation) (recoveryStats, error) {
+	// SPEC-022-R012.3 and the R006 label are decided before the transaction
+	// opens: the durable pool authority reads this same database.
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
+	if err != nil {
+		return recoveryStats{}, err
+	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	// SPEC-002 v1.5.0 / issue #211 money-path defense-in-depth: the
@@ -95,9 +163,9 @@ UPDATE ledger_request_credits
           -- legacy NULL rows during the rollout window. Both paths
           -- compute identical ordinals.
           AND `+requestLogAttemptOrdinalSQL("rl")+` = ledger_request_credits.attempt_n
-   )`, now, sqliteTimeText(in.ScanFrom), sqliteTimeText(in.ScanTo))
+	)`, now, sqliteTimeText(in.ScanFrom), sqliteTimeText(in.ScanTo))
 	if err != nil {
-		return err
+		return recoveryStats{}, err
 	}
 	orphanRows, _ := orphanRes.RowsAffected()
 	rows, err := tx.QueryContext(ctx, `
@@ -120,7 +188,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		sqliteTimeText(in.ScanTo),
 	)
 	if err != nil {
-		return err
+		return recoveryStats{}, err
 	}
 	defer rows.Close()
 	scanned, created, quarantined := int64(0), int64(0), orphanRows
@@ -133,7 +201,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		var privacyMode, privacyOutcome string
 		var status, stream, retried, positiveVerificationExcluded, rewardsExcluded, attemptN int
 		if err := rows.Scan(&rlID, &tsText, &requestID, &accountID, &model, &assignedID, &prompt, &cached, &completion, &estimated, &status, &stream, &errorCode, &cacheQuarantineReason, &retried, &privacyMode, &privacyOutcome, &positiveVerificationExcluded, &rewardsExcluded, &attemptN); err != nil {
-			return err
+			return recoveryStats{}, err
 		}
 		scanned++
 		ts, err := time.Parse(time.RFC3339Nano, tsText)
@@ -142,16 +210,16 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 			// wall-clock now — that is nondeterministic across recovery runs.
 			affected, qErr := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, "unparseable_ts_utc", now)
 			if qErr != nil {
-				return qErr
+				return recoveryStats{}, qErr
 			}
 			if affected == 0 {
 				exists, existsErr := ledgerRowExistsForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID)
 				if existsErr != nil {
-					return existsErr
+					return recoveryStats{}, existsErr
 				}
 				if !exists {
 					if insErr := insertQuarantineTx(ctx, tx, requestID, attemptN, unresolvedProviderID(assignedID), assignedID, time.Unix(0, 0).UTC(), model, status, stream == 1, nil, nil, nil, errorCode.String, in.Source, "unparseable_ts_utc", now); insErr != nil {
-						return insErr
+						return recoveryStats{}, insErr
 					}
 					quarantined++
 				}
@@ -168,16 +236,16 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		if invalidReason != "" {
 			affected, err := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, invalidReason, now)
 			if err != nil {
-				return err
+				return recoveryStats{}, err
 			}
 			if affected == 0 {
 				exists, err := ledgerRowExistsForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID)
 				if err != nil {
-					return err
+					return recoveryStats{}, err
 				}
 				if !exists {
 					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, unresolvedProviderID(assignedID), assignedID, ts, model, status, stream == 1, nil, nil, nil, errorCode.String, in.Source, invalidReason, now); err != nil {
-						return err
+						return recoveryStats{}, err
 					}
 					quarantined++
 				}
@@ -208,7 +276,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 				reason = "ambiguous_attempt_n"
 			}
 			if err := insertQuarantineTx(ctx, tx, requestID, attemptN, unresolvedProviderID(assignedID), assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), intPtrFromNull(estimated), errorCode.String, in.Source, reason, now); err != nil {
-				return err
+				return recoveryStats{}, err
 			}
 			quarantined++
 			continue
@@ -216,16 +284,16 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		if cacheQuarantineReason.Valid && cacheQuarantineReason.String != "" {
 			affected, err := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, cacheQuarantineReason.String, now)
 			if err != nil {
-				return err
+				return recoveryStats{}, err
 			}
 			if affected == 0 {
 				exists, err := ledgerRowExistsForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID)
 				if err != nil {
-					return err
+					return recoveryStats{}, err
 				}
 				if !exists {
 					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), intPtrFromNull(estimated), errorCode.String, in.Source, cacheQuarantineReason.String, now); err != nil {
-						return err
+						return recoveryStats{}, err
 					}
 					quarantined++
 				}
@@ -256,16 +324,16 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 			}
 			affected, quarantineErr := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, reason, now)
 			if quarantineErr != nil {
-				return quarantineErr
+				return recoveryStats{}, quarantineErr
 			}
 			if affected == 0 {
 				exists, existsErr := ledgerRowExistsForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID)
 				if existsErr != nil {
-					return existsErr
+					return recoveryStats{}, existsErr
 				}
 				if !exists {
 					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), intPtrFromNull(estimated), errorCode.String, in.Source, reason, now); err != nil {
-						return err
+						return recoveryStats{}, err
 					}
 					quarantined++
 				}
@@ -298,7 +366,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		}
 		settlementHash, settlementMode, settlementVersion, err := recoveredSettlementPolicyTx(ctx, tx, requestID, attemptN, providerID, accountID.String)
 		if err != nil {
-			return err
+			return recoveryStats{}, err
 		}
 		input := HotPathInput{
 			RequestID:                    requestID,
@@ -340,7 +408,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		// branch that resolved provider identity.
 		actualGross, expectedGross, exists, mismatch, err := reconcileExistingCreditTx(ctx, tx, input, result, now)
 		if err != nil {
-			return err
+			return recoveryStats{}, err
 		}
 		if exists {
 			buyerEquivalent += expectedGross
@@ -352,7 +420,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		}
 		if ambiguousAttempt {
 			if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, pp, cp, ep, errorCode.String, in.Source, "ambiguous_attempt_n", now); err != nil {
-				return err
+				return recoveryStats{}, err
 			}
 			quarantined++
 			continue
@@ -366,21 +434,21 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 			ProviderID:   providerID,
 		}, pp, cp, poolAttested) {
 			if _, err := insertRequestCreditTx(ctx, tx, input, zeroCredits(result), in.Source, now, true, LoopbackRuntimeNotSettlementEligible); err != nil {
-				return err
+				return recoveryStats{}, err
 			}
 			quarantined++
 			continue
 		}
 		id, err := insertRequestCreditTx(ctx, tx, input, result, in.Source, now, false, "")
 		if err != nil {
-			return err
+			return recoveryStats{}, err
 		}
 		if err := insertOperatorCreditTx(ctx, tx, id, input, result, now); err != nil {
-			return err
+			return recoveryStats{}, err
 		}
 		reason, err := syncVerifiedReceiptLedgerCreditForAttemptTx(ctx, tx, requestID, int64(attemptN), providerID)
 		if err != nil {
-			return err
+			return recoveryStats{}, err
 		}
 		created++
 		if reason == "" {
@@ -391,34 +459,18 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return recoveryStats{}, err
 	}
-	finished := time.Now().UTC()
-	_, err = tx.ExecContext(ctx, `
-INSERT INTO ledger_reconciliation_runs (
-    run_type, from_utc, to_utc, request_log_rows_scanned,
-    missing_credit_rows_created, orphan_credit_rows_quarantined,
-    buyer_equivalent_credits, provider_gross_credits,
-    reconciliation_delta_credits, started_at_utc, finished_at_utc, status,
-    error, created_at_utc
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', NULL, ?)`,
-		in.Source,
-		in.ScanFrom.UTC().Format(time.RFC3339Nano),
-		in.ScanTo.UTC().Format(time.RFC3339Nano),
-		scanned,
-		created,
-		quarantined,
-		buyerEquivalent,
-		providerGross,
-		providerGross-buyerEquivalent,
-		started.Format(time.RFC3339Nano),
-		finished.Format(time.RFC3339Nano),
-		started.Format(time.RFC3339Nano),
-	)
-	if err != nil {
-		return err
+	if err := tx.Commit(); err != nil {
+		return recoveryStats{}, err
 	}
-	return tx.Commit()
+	return recoveryStats{
+		scanned:         scanned,
+		created:         created,
+		quarantined:     quarantined,
+		buyerEquivalent: buyerEquivalent,
+		providerGross:   providerGross,
+	}, nil
 }
 
 // recoveredLoopbackAttemptBillable applies the hot path's loopback rule to a

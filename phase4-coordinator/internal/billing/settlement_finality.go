@@ -91,6 +91,7 @@ func enforceCreditWithoutEvidence(row requestSettlementVerdictRow, creditTS stri
 
 const externalRequestFinalityLookupSkew = 5 * time.Minute
 const SettlementOutcomeOverlapBlockedTerminal = "overlap_blocked_terminal"
+const settlementFinalityReadTimeout = 5 * time.Second
 
 func (s *Store) RequestSettlementFinalityForAccount(ctx context.Context, accountID, requestID string, nowUnixMS int64, notBeforeUnixMS ...int64) (RequestSettlementFinality, bool, error) {
 	notBefore := int64(0)
@@ -390,8 +391,10 @@ func (s *Store) directRequestIDWithinReservationWindow(ctx context.Context, acco
 	if notBeforeUnixMS < 0 {
 		notBeforeUnixMS = 0
 	}
+	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
+	defer cancel()
 	var n int
-	err := s.db.QueryRowContext(ctx, `
+	err := s.reader().QueryRowContext(ctx, `
 SELECT COUNT(*)
   FROM request_log
  WHERE account_id = ?
@@ -408,7 +411,9 @@ SELECT COUNT(*)
 }
 
 func (s *Store) requestSettlementVerdicts(ctx context.Context, accountScope, requestID string) ([]requestSettlementVerdictRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
+	defer cancel()
+	rows, err := s.reader().QueryContext(ctx, `
 SELECT attempt_n, provider_id, receipt_result, settlement_outcome, reason, closed,
        pending_deadline_unix_ms, route_snapshot_policy_version, route_snapshot_mode
   FROM settlement_receipt_verdicts
@@ -437,6 +442,8 @@ SELECT attempt_n, provider_id, receipt_result, settlement_outcome, reason, close
 // the deadline RecordMissingSettlementReceipt produces an explicit terminal
 // classification instead of leaving the reservation unresolved forever.
 func (s *Store) requestSettlementAttemptsWithoutVerdict(ctx context.Context, accountScope, requestID string, verdicts []requestSettlementVerdictRow, nowUnixMS int64) ([]requestSettlementVerdictRow, error) {
+	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
+	defer cancel()
 	type attemptKey struct {
 		attemptN   int64
 		providerID string
@@ -453,7 +460,7 @@ func (s *Store) requestSettlementAttemptsWithoutVerdict(ctx context.Context, acc
 	// Either way a gateway that never received the refund trailer refunds
 	// instead of holding forever (SPEC-022 v0.2.2). With no credit there is
 	// nothing to settle and the attempt is skipped.
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.reader().QueryContext(ctx, `
 SELECT rs.attempt_n, rs.provider_id,
        COALESCE(sao.terminal_state_ts_unix_ms + (rs.pending_deadline_seconds * 1000), 0),
        rs.pending_deadline_seconds,
@@ -535,8 +542,10 @@ SELECT rs.attempt_n, rs.provider_id,
 // after the credit, then closed quarantined; one the coordinator already
 // quarantined after a delivery closes at once with that reason.
 func (s *Store) requestEnforceCreditsWithoutSnapshot(ctx context.Context, accountScope, requestID string, nowUnixMS int64) ([]requestSettlementVerdictRow, error) {
+	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
+	defer cancel()
 	scopeHash := SettlementAccountScopeHash(accountScope)
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.reader().QueryContext(ctx, `
 SELECT lrc.attempt_n, lrc.provider_id, lrc.ts_utc,
        COALESCE(lrc.settlement_policy_version, ''),
        CASE WHEN lrc.quarantined = 1 AND lrc.quarantine_reason IN (?, ?, ?) THEN lrc.quarantine_reason ELSE '' END
@@ -596,7 +605,9 @@ func (s *Store) requestSettlementScopeReason(ctx context.Context, accountScope, 
 		}
 		remaining[attemptKey{verdict.attemptN, verdict.providerID}] = verdict
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
+	defer cancel()
+	rows, err := s.reader().QueryContext(ctx, `
 SELECT attempt_n, provider_id, route_snapshot_policy_version, route_snapshot_mode
   FROM settlement_route_snapshots
  WHERE account_scope = ? AND request_id = ?`, accountScope, requestID)
@@ -653,10 +664,12 @@ func anyPoolOperatorAttested(finalities []RequestSettlementFinality) bool {
 }
 
 func (s *Store) requestSettlementUsage(ctx context.Context, accountScope, requestID string, attemptN int64, providerID string) (SettlementUsage, bool, string, error) {
+	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
+	defer cancel()
 	var raw, source string
 	var overlap int
 	var ledgerPrompt, ledgerChargedPrompt, ledgerCompletion sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `
+	err := s.reader().QueryRowContext(ctx, `
 	SELECT sao.usage_canonical_json, sao.overlapping_or_duplicate, sao.usage_source,
 	       lrc.prompt_tokens, lrc.charged_prompt_tokens, lrc.completion_tokens
 	  FROM settlement_attempt_outputs sao
@@ -715,8 +728,10 @@ var errVerifiedCreditQuarantined = errors.New("verified attempt credit is quaran
 // attemptCreditOnlyQuarantined reports whether the attempt has a ledger credit
 // and every one of its credits is quarantined.
 func (s *Store) attemptCreditOnlyQuarantined(ctx context.Context, accountScope, requestID string, attemptN int64, providerID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
+	defer cancel()
 	var quarantined, unquarantined int64
-	err := s.db.QueryRowContext(ctx, `
+	err := s.reader().QueryRowContext(ctx, `
 SELECT COALESCE(SUM(CASE WHEN quarantined = 1 THEN 1 ELSE 0 END), 0),
        COALESCE(SUM(CASE WHEN quarantined = 0 THEN 1 ELSE 0 END), 0)
   FROM ledger_request_credits
@@ -763,7 +778,9 @@ func (s *Store) requestIDsForExternalRequest(ctx context.Context, accountID, ext
 		notBeforeClause = " AND " + sqliteTimeSince("ts_utc")
 		args = append(args, sqliteTimeText(time.UnixMilli(notBeforeUnixMS)))
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	ctx, cancel := context.WithTimeout(ctx, settlementFinalityReadTimeout)
+	defer cancel()
+	rows, err := s.reader().QueryContext(ctx, `
 SELECT request_id
   FROM (
         SELECT request_id, MIN(id) AS first_id

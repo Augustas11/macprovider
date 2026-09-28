@@ -16,6 +16,7 @@ import (
 const RecentVerifiedWorkWindow = 30 * time.Minute
 
 const rewardProjectionFreshnessWindow = time.Minute
+const providerRewardProjectionReadTimeout = 5 * time.Second
 
 // ProviderRewardProjection is the coherent reward-owner read used by both the
 // accrual and wallet endpoints. Wallet and payout fields are retained here so
@@ -56,6 +57,11 @@ func BuildProviderRewardProjection(ctx context.Context, providerID string, deps 
 	if deps.RewardsDB == nil {
 		return ProviderRewardProjection{}, errors.New("rewards db is required")
 	}
+	// Both authenticated provider surfaces include payout facts from the
+	// billing read pool. Bound the complete projection so a disconnected
+	// client cannot pin the primary WAL through that shared reader.
+	ctx, cancel := context.WithTimeout(ctx, providerRewardProjectionReadTimeout)
+	defer cancel()
 	now := time.Now().UTC()
 	if deps.Now != nil {
 		now = deps.Now().UTC()
