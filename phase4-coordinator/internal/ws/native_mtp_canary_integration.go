@@ -433,11 +433,14 @@ func nativeMTPCanaryWireRequest(provider pool.Provider, record NativeMTPChalleng
 }
 
 func nativeMTPCanaryCoreResultFromWire(result NativeMTPCanaryResult) NativeMTPCanaryCoreResult {
-	return NativeMTPCanaryCoreResult{
+	core := NativeMTPCanaryCoreResult{
 		Profile:                    nativeMTPCanaryProfile,
+		RequestID:                  result.RequestID,
 		ProviderID:                 result.ProviderID,
 		AssignedID:                 result.AssignedID,
 		TargetGeneration:           result.TargetGeneration,
+		ProviderRevision:           result.ProviderRevision,
+		RuntimeRevision:            result.RuntimeRevision,
 		RuntimeTupleSHA256:         result.NativeMTPRuntimeTupleSHA256,
 		ChallengeBankSHA256:        result.ChallengeBankSHA256,
 		ChallengeID:                result.ChallengeID,
@@ -446,12 +449,16 @@ func nativeMTPCanaryCoreResultFromWire(result NativeMTPCanaryResult) NativeMTPCa
 		ActualDecodePath:           result.ActualDecodePath,
 		FallbackUsed:               result.FallbackUsed,
 		CapacityUnavailable:        result.ActualDecodePath == "unavailable",
+		ExpectedTokenIDSHA256:      result.ExpectedTokenIDSHA256,
 		ActualTokenIDSHA256:        result.ActualTokenIDSHA256,
 		ActualTerminalReason:       result.TerminalReason,
 		ActualCounters:             nativeMTPCountersToCore(result.Counters),
 		ActualCommittedStateSHA256: result.CommittedStateSHA256,
+		RuntimeTuple:               result.RuntimeTuple,
+		Diagnostic:                 result.Diagnostic,
 		ResultDigestSHA256:         result.ResultDigest,
 	}
+	return core
 }
 
 func (s *Server) sendNativeMTPTupleDisableOnce(provider pool.Provider, reason string, disabledAt time.Time) bool {

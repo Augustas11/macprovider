@@ -121,9 +121,12 @@ type NativeMTPCanaryCoreRequest struct {
 
 type NativeMTPCanaryCoreResult struct {
 	Profile                    string
+	RequestID                  string
 	ProviderID                 string
 	AssignedID                 string
 	TargetGeneration           uint64
+	ProviderRevision           string
+	RuntimeRevision            string
 	RuntimeTupleSHA256         string
 	ChallengeBankSHA256        string
 	ChallengeID                string
@@ -132,10 +135,13 @@ type NativeMTPCanaryCoreResult struct {
 	ActualDecodePath           string
 	FallbackUsed               bool
 	CapacityUnavailable        bool
+	ExpectedTokenIDSHA256      string
 	ActualTokenIDSHA256        string
 	ActualTerminalReason       string
 	ActualCounters             NativeMTPCanaryExpectedCounters
 	ActualCommittedStateSHA256 string
+	RuntimeTuple               NativeMTPRuntimeTuple
+	Diagnostic                 string
 	ResultDigestSHA256         string
 }
 
@@ -156,25 +162,6 @@ type nativeMTPCanaryRequestDigestObject struct {
 	ExpectedTokenIDSHA256  string                          `json:"expected_token_id_sha256"`
 	ExpectedTerminalReason string                          `json:"expected_terminal_reason"`
 	ExpectedCounters       NativeMTPCanaryExpectedCounters `json:"expected_counters"`
-}
-
-type nativeMTPCanaryResultDigestObject struct {
-	Profile                    string                          `json:"profile"`
-	ProviderID                 string                          `json:"provider_id"`
-	AssignedID                 string                          `json:"assigned_id"`
-	TargetGeneration           uint64                          `json:"target_generation"`
-	RuntimeTupleSHA256         string                          `json:"runtime_tuple_sha256"`
-	ChallengeBankSHA256        string                          `json:"challenge_bank_sha256"`
-	ChallengeID                string                          `json:"challenge_id"`
-	Nonce                      string                          `json:"nonce"`
-	RequestDigestSHA256        string                          `json:"request_digest_sha256"`
-	CapacityUnavailable        bool                            `json:"capacity_unavailable"`
-	ActualDecodePath           string                          `json:"actual_decode_path"`
-	FallbackUsed               bool                            `json:"fallback_used"`
-	ActualTokenIDSHA256        string                          `json:"actual_token_id_sha256"`
-	ActualTerminalReason       string                          `json:"actual_terminal_reason"`
-	ActualCounters             NativeMTPCanaryExpectedCounters `json:"actual_counters"`
-	ActualCommittedStateSHA256 string                          `json:"actual_committed_state_sha256"`
 }
 
 type NativeMTPCanaryOutcome string
@@ -328,7 +315,21 @@ func EvaluateNativeMTPCanaryCoreResult(req NativeMTPCanaryCoreRequest, record Na
 		result.RequestDigestSHA256 != req.RequestDigestSHA256 {
 		return NativeMTPCanaryEvaluation{Outcome: NativeMTPCanaryFail, Reason: "binding_mismatch", DisableTupleOnly: true, TrustSemantics: "observe_only"}
 	}
-	if result.ResultDigestSHA256 == "" || result.ResultDigestSHA256 != digestCanonicalJSON(result.digestObject()) {
+	if result.RequestID == "" ||
+		result.ProviderRevision == "" ||
+		result.RuntimeRevision == "" ||
+		result.ExpectedTokenIDSHA256 != req.ExpectedTokenIDSHA256 ||
+		result.RuntimeTuple.ProviderRevision != result.ProviderRevision ||
+		result.RuntimeTuple.RuntimeRevision != result.RuntimeRevision ||
+		result.RuntimeTuple.ProposalDepth != int(req.FixedProposalDepth) ||
+		result.RuntimeTuple.ModelID != record.ModelID ||
+		result.RuntimeTuple.ModelHash != record.ModelHash ||
+		result.RuntimeTuple.TokenizerDigest != record.TokenizerSHA256 ||
+		result.RuntimeTuple.ArtifactDigest != record.ArtifactSHA256 ||
+		result.RuntimeTuple.ManifestDigest != record.MTPManifestSHA256 {
+		return NativeMTPCanaryEvaluation{Outcome: NativeMTPCanaryFail, Reason: "binding_mismatch", DisableTupleOnly: true, TrustSemantics: "observe_only"}
+	}
+	if result.ResultDigestSHA256 == "" || result.ResultDigestSHA256 != result.resultDigest() {
 		return NativeMTPCanaryEvaluation{Outcome: NativeMTPCanaryFail, Reason: "result_digest_mismatch", DisableTupleOnly: true, TrustSemantics: "observe_only"}
 	}
 	if result.CapacityUnavailable {
@@ -613,23 +614,29 @@ func (r NativeMTPCanaryCoreRequest) digestObject() nativeMTPCanaryRequestDigestO
 	}
 }
 
-func (r NativeMTPCanaryCoreResult) digestObject() nativeMTPCanaryResultDigestObject {
-	return nativeMTPCanaryResultDigestObject{
-		Profile:                    r.Profile,
-		ProviderID:                 r.ProviderID,
-		AssignedID:                 r.AssignedID,
-		TargetGeneration:           r.TargetGeneration,
-		RuntimeTupleSHA256:         r.RuntimeTupleSHA256,
-		ChallengeBankSHA256:        r.ChallengeBankSHA256,
-		ChallengeID:                r.ChallengeID,
-		Nonce:                      r.Nonce,
-		RequestDigestSHA256:        r.RequestDigestSHA256,
-		CapacityUnavailable:        r.CapacityUnavailable,
-		ActualDecodePath:           r.ActualDecodePath,
-		FallbackUsed:               r.FallbackUsed,
-		ActualTokenIDSHA256:        r.ActualTokenIDSHA256,
-		ActualTerminalReason:       r.ActualTerminalReason,
-		ActualCounters:             r.ActualCounters,
-		ActualCommittedStateSHA256: r.ActualCommittedStateSHA256,
-	}
+func (r NativeMTPCanaryCoreResult) resultDigest() string {
+	return nativeMTPCanaryResultDigest(NativeMTPCanaryResult{
+		Type:                        "native_mtp_canary_result_v1",
+		Version:                     1,
+		RequestID:                   r.RequestID,
+		ProviderID:                  r.ProviderID,
+		AssignedID:                  r.AssignedID,
+		RequestDigest:               r.RequestDigestSHA256,
+		TargetGeneration:            r.TargetGeneration,
+		ProviderRevision:            r.ProviderRevision,
+		RuntimeRevision:             r.RuntimeRevision,
+		ChallengeID:                 r.ChallengeID,
+		ChallengeBankSHA256:         r.ChallengeBankSHA256,
+		Nonce:                       r.Nonce,
+		NativeMTPRuntimeTupleSHA256: r.RuntimeTupleSHA256,
+		ExpectedTokenIDSHA256:       r.ExpectedTokenIDSHA256,
+		ActualTokenIDSHA256:         r.ActualTokenIDSHA256,
+		TerminalReason:              r.ActualTerminalReason,
+		Counters:                    nativeMTPCountersFromCore(r.ActualCounters),
+		CommittedStateSHA256:        r.ActualCommittedStateSHA256,
+		ActualDecodePath:            r.ActualDecodePath,
+		FallbackUsed:                r.FallbackUsed,
+		RuntimeTuple:                r.RuntimeTuple,
+		Diagnostic:                  r.Diagnostic,
+	})
 }

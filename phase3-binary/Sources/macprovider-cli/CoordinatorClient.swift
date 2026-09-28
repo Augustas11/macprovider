@@ -2932,37 +2932,63 @@ actor CoordinatorClient {
         runtimeTuple: NativeMTPRuntimeTuplePayload,
         diagnostic: String?
     ) -> String {
-        _ = requestID
-        _ = providerRevision
-        _ = runtimeRevision
-        _ = runtimeTuple
-        _ = diagnostic
-        let countersJSON = [
-            "\"accepted\":\(counters.acceptedTokens)",
-            "\"rejected\":\(counters.rejectedTokens)",
-            "\"bonus\":\(counters.bonusTokens)",
-            "\"committed\":\(counters.committedTokens)",
-        ].joined(separator: ",")
-        let canonical = [
-            "\"profile\":\"native_mtp_canary_v1\"",
-            "\"provider_id\":\"\(providerID)\"",
-            "\"assigned_id\":\"\(assignedID)\"",
-            "\"target_generation\":\(targetGeneration)",
-            "\"runtime_tuple_sha256\":\"\(nativeMTPRuntimeTupleSHA256)\"",
-            "\"challenge_bank_sha256\":\"\(challengeBankSHA256)\"",
-            "\"challenge_id\":\"\(challengeID)\"",
-            "\"nonce\":\"\(nonce)\"",
-            "\"request_digest_sha256\":\"\(requestDigest)\"",
-            "\"expected_token_id_sha256\":\"\(expectedTokenIDSHA256)\"",
-            "\"capacity_unavailable\":\(actualDecodePath == "unavailable" ? "true" : "false")",
-            "\"actual_decode_path\":\"\(actualDecodePath)\"",
-            "\"fallback_used\":\(fallbackUsed ? "true" : "false")",
-            "\"actual_token_id_sha256\":\"\(actualTokenIDSHA256)\"",
-            "\"actual_terminal_reason\":\"\(terminalReason)\"",
-            "\"actual_counters\":{\(countersJSON)}",
-            "\"actual_committed_state_sha256\":\"\(committedStateSHA256)\"",
-        ].joined(separator: ",")
-        return SHA256.hash(data: Data("{\(canonical)}".utf8)).map { String(format: "%02x", $0) }.joined()
+        guard let generation = Int(exactly: targetGeneration),
+              let accepted = Int(exactly: counters.acceptedTokens),
+              let rejected = Int(exactly: counters.rejectedTokens),
+              let bonus = Int(exactly: counters.bonusTokens),
+              let committed = Int(exactly: counters.committedTokens)
+        else {
+            return ""
+        }
+        let value = RFC8785JCS.Value.object([
+            "schema_version": .string("macprovider.native-mtp-canary-result.v1"),
+            "request_id": .string(requestID),
+            "provider_id": .string(providerID),
+            "assigned_id": .string(assignedID),
+            "request_digest": .string(requestDigest),
+            "target_generation": .int(generation),
+            "provider_revision": .string(providerRevision),
+            "runtime_revision": .string(runtimeRevision),
+            "challenge_id": .string(challengeID),
+            "challenge_bank_sha256": .string(challengeBankSHA256),
+            "nonce": .string(nonce),
+            "native_mtp_runtime_tuple_sha256": .string(nativeMTPRuntimeTupleSHA256),
+            "expected_token_id_sha256": .string(expectedTokenIDSHA256),
+            "actual_token_id_sha256": .string(actualTokenIDSHA256),
+            "terminal_reason": .string(terminalReason),
+            "counters": .object([
+                "accepted": .int(accepted),
+                "rejected": .int(rejected),
+                "bonus": .int(bonus),
+                "committed": .int(committed),
+            ]),
+            "committed_state_sha256": .string(committedStateSHA256),
+            "actual_decode_path": .string(actualDecodePath),
+            "fallback_used": .bool(fallbackUsed),
+            "runtime_tuple": nativeMTPRuntimeTupleJCSValue(runtimeTuple),
+            "diagnostic": .string(diagnostic ?? ""),
+        ])
+        guard let canonical = try? RFC8785JCS.canonicalStringRawStrings(value) else { return "" }
+        return SHA256.hash(data: Data("macprovider.native-mtp-canary-result.v1\n\(canonical)".utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func nativeMTPRuntimeTupleJCSValue(_ tuple: NativeMTPRuntimeTuplePayload) -> RFC8785JCS.Value {
+        .object([
+            "model_id": .string(tuple.modelID),
+            "model_hash": .string(tuple.modelHash),
+            "model_hash_algorithm": .string(tuple.modelHashAlgorithm),
+            "provider_revision": .string(tuple.providerRevision),
+            "runtime_revision": .string(tuple.runtimeRevision),
+            "tokenizer_digest": .string(tuple.tokenizerDigest),
+            "artifact_digest": .string(tuple.artifactDigest),
+            "manifest_digest": .string(tuple.manifestDigest),
+            "sidecar_digest": .string(tuple.sidecarDigest),
+            "provider_binary_sha256": .string(tuple.providerBinarySHA256),
+            "runtime_cdhash": .string(tuple.runtimeCDHash),
+            "cache_namespace": .string(tuple.cacheNamespace),
+            "state_digest": .string(tuple.stateDigest),
+            "proposal_depth": .int(tuple.proposalDepth),
+        ])
     }
 
     private static func nativeMTPRuntimeTupleSHA256(

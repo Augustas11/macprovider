@@ -117,9 +117,12 @@ func TestNativeMTPCanaryCoreRequestAndResultEvaluation(t *testing.T) {
 	}
 	pass := NativeMTPCanaryCoreResult{
 		Profile:                    nativeMTPCanaryProfile,
+		RequestID:                  req.RequestDigestSHA256,
 		ProviderID:                 req.ProviderID,
 		AssignedID:                 req.AssignedID,
 		TargetGeneration:           req.TargetGeneration,
+		ProviderRevision:           "1.8.123",
+		RuntimeRevision:            "mlx-swift-lm-e874140",
 		RuntimeTupleSHA256:         req.RuntimeTupleSHA256,
 		ChallengeBankSHA256:        req.ChallengeBankSHA256,
 		ChallengeID:                req.ChallengeID,
@@ -127,19 +130,21 @@ func TestNativeMTPCanaryCoreRequestAndResultEvaluation(t *testing.T) {
 		RequestDigestSHA256:        req.RequestDigestSHA256,
 		ActualDecodePath:           "native_mtp",
 		FallbackUsed:               false,
+		ExpectedTokenIDSHA256:      req.ExpectedTokenIDSHA256,
 		ActualTokenIDSHA256:        record.ExpectedTokenIDSHA256,
 		ActualTerminalReason:       record.ExpectedTerminalReason,
 		ActualCounters:             record.ExpectedCounters,
 		ActualCommittedStateSHA256: record.ExpectedCommittedStateSHA256,
+		RuntimeTuple:               nativeMTPCoreRuntimeTuple(record),
 	}
-	pass.ResultDigestSHA256 = digestCanonicalJSON(pass.digestObject())
+	pass.ResultDigestSHA256 = pass.resultDigest()
 	if got := EvaluateNativeMTPCanaryCoreResult(req, record, pass, now.Add(time.Second)); got.Outcome != NativeMTPCanaryPass || got.DisableTupleOnly {
 		t.Fatalf("pass evaluation = %+v", got)
 	}
 
 	fallback := pass
 	fallback.ActualDecodePath = "ordinary"
-	fallback.ResultDigestSHA256 = digestCanonicalJSON(fallback.digestObject())
+	fallback.ResultDigestSHA256 = fallback.resultDigest()
 	got := EvaluateNativeMTPCanaryCoreResult(req, record, fallback, now.Add(time.Second))
 	if got.Outcome != NativeMTPCanaryFail || got.Reason != "unsupported_path_fallback" || !got.DisableTupleOnly {
 		t.Fatalf("fallback evaluation = %+v", got)
@@ -147,14 +152,14 @@ func TestNativeMTPCanaryCoreRequestAndResultEvaluation(t *testing.T) {
 
 	capacity := pass
 	capacity.CapacityUnavailable = true
-	capacity.ResultDigestSHA256 = digestCanonicalJSON(capacity.digestObject())
+	capacity.ResultDigestSHA256 = capacity.resultDigest()
 	got = EvaluateNativeMTPCanaryCoreResult(req, record, capacity, now.Add(time.Second))
 	if got.Outcome != NativeMTPCanaryReschedule || got.DisableTupleOnly {
 		t.Fatalf("capacity evaluation = %+v", got)
 	}
 	staleCapacity := capacity
 	staleCapacity.Nonce = strings.Repeat("0", 32)
-	staleCapacity.ResultDigestSHA256 = digestCanonicalJSON(staleCapacity.digestObject())
+	staleCapacity.ResultDigestSHA256 = staleCapacity.resultDigest()
 	got = EvaluateNativeMTPCanaryCoreResult(req, record, staleCapacity, now.Add(time.Second))
 	if got.Outcome != NativeMTPCanaryFail || got.Reason != "binding_mismatch" || !got.DisableTupleOnly {
 		t.Fatalf("stale capacity evaluation = %+v", got)
@@ -163,6 +168,35 @@ func TestNativeMTPCanaryCoreRequestAndResultEvaluation(t *testing.T) {
 	late := EvaluateNativeMTPCanaryCoreResult(req, record, pass, req.ExpiresAt.Add(time.Nanosecond))
 	if late.Outcome != NativeMTPCanaryFail || late.Reason != "expired_result" || !late.DisableTupleOnly {
 		t.Fatalf("late evaluation = %+v", late)
+	}
+}
+
+func TestNativeMTPCanaryCoreResultDigestMatchesWireVector(t *testing.T) {
+	t.Parallel()
+	result := NativeMTPCanaryCoreResult{
+		Profile:                    nativeMTPCanaryProfile,
+		RequestID:                  "canary-1",
+		ProviderID:                 "provider-a",
+		AssignedID:                 "assigned-a",
+		TargetGeneration:           7,
+		ProviderRevision:           "1.8.123",
+		RuntimeRevision:            "mlx-swift-lm-e874140",
+		RuntimeTupleSHA256:         "919d2f171e70f1cca3bc93b88cb4234f13fe4cda883ad69b976a4169a3a3bc24",
+		ChallengeBankSHA256:        strings.Repeat("4", 64),
+		ChallengeID:                "challenge-a",
+		Nonce:                      "0123456789abcdef0123456789abcdef",
+		RequestDigestSHA256:        strings.Repeat("6", 64),
+		ActualDecodePath:           "native_mtp",
+		FallbackUsed:               true,
+		ExpectedTokenIDSHA256:      strings.Repeat("5", 64),
+		ActualTokenIDSHA256:        strings.Repeat("5", 64),
+		ActualTerminalReason:       "passed",
+		ActualCounters:             NativeMTPCanaryExpectedCounters{Accepted: 2, Rejected: 1, Bonus: 0, Committed: 3},
+		ActualCommittedStateSHA256: strings.Repeat("2", 64),
+		RuntimeTuple:               nativeMTPTestRuntimeTuple(),
+	}
+	if got, want := result.resultDigest(), "0e19abd8896de79b7fc46ad56630647d27551aafe57c95f579527eb02eab5e2f"; got != want {
+		t.Fatalf("core result digest = %s, want %s", got, want)
 	}
 }
 
@@ -199,21 +233,26 @@ func TestNativeMTPCanaryStoreIsTupleScopedAndReplaySafe(t *testing.T) {
 
 	result := NativeMTPCanaryCoreResult{
 		Profile:                    nativeMTPCanaryProfile,
+		RequestID:                  req.RequestDigestSHA256,
 		ProviderID:                 req.ProviderID,
 		AssignedID:                 req.AssignedID,
 		TargetGeneration:           req.TargetGeneration,
+		ProviderRevision:           "1.8.123",
+		RuntimeRevision:            "mlx-swift-lm-e874140",
 		RuntimeTupleSHA256:         req.RuntimeTupleSHA256,
 		ChallengeBankSHA256:        req.ChallengeBankSHA256,
 		ChallengeID:                req.ChallengeID,
 		Nonce:                      req.Nonce,
 		RequestDigestSHA256:        req.RequestDigestSHA256,
 		ActualDecodePath:           "native_mtp",
+		ExpectedTokenIDSHA256:      req.ExpectedTokenIDSHA256,
 		ActualTokenIDSHA256:        record.ExpectedTokenIDSHA256,
 		ActualTerminalReason:       record.ExpectedTerminalReason,
 		ActualCounters:             record.ExpectedCounters,
 		ActualCommittedStateSHA256: record.ExpectedCommittedStateSHA256,
+		RuntimeTuple:               nativeMTPCoreRuntimeTuple(record),
 	}
-	result.ResultDigestSHA256 = digestCanonicalJSON(result.digestObject())
+	result.ResultDigestSHA256 = result.resultDigest()
 	eval := EvaluateNativeMTPCanaryCoreResult(req, record, result, now.Add(time.Second))
 	if err := store.CompleteNativeMTPCanary(tuple, req, result, eval, 0, now.Add(time.Second)); err != nil {
 		t.Fatalf("complete: %v", err)
@@ -234,10 +273,11 @@ func TestNativeMTPCanaryStoreIsTupleScopedAndReplaySafe(t *testing.T) {
 		t.Fatalf("begin failing request: %v", err)
 	}
 	failingResult := result
+	failingResult.RequestID = failingReq.RequestDigestSHA256
 	failingResult.Nonce = failingReq.Nonce
 	failingResult.RequestDigestSHA256 = failingReq.RequestDigestSHA256
 	failingResult.ActualDecodePath = "classic_draft_spec"
-	failingResult.ResultDigestSHA256 = digestCanonicalJSON(failingResult.digestObject())
+	failingResult.ResultDigestSHA256 = failingResult.resultDigest()
 	eval = EvaluateNativeMTPCanaryCoreResult(failingReq, record, failingResult, req.ExpiresAt.Add(2*time.Second))
 	if err := store.CompleteNativeMTPCanary(tuple, failingReq, failingResult, eval, time.Minute, req.ExpiresAt.Add(2*time.Second)); err != nil {
 		t.Fatalf("complete failure: %v", err)
@@ -288,9 +328,12 @@ func TestNativeMTPCanaryStoreTimeoutAndCapacityReschedule(t *testing.T) {
 	}
 	result := NativeMTPCanaryCoreResult{
 		Profile:                    nativeMTPCanaryProfile,
+		RequestID:                  req2.RequestDigestSHA256,
 		ProviderID:                 req2.ProviderID,
 		AssignedID:                 req2.AssignedID,
 		TargetGeneration:           req2.TargetGeneration,
+		ProviderRevision:           "1.8.123",
+		RuntimeRevision:            "mlx-swift-lm-e874140",
 		RuntimeTupleSHA256:         req2.RuntimeTupleSHA256,
 		ChallengeBankSHA256:        req2.ChallengeBankSHA256,
 		ChallengeID:                req2.ChallengeID,
@@ -298,12 +341,14 @@ func TestNativeMTPCanaryStoreTimeoutAndCapacityReschedule(t *testing.T) {
 		RequestDigestSHA256:        req2.RequestDigestSHA256,
 		CapacityUnavailable:        true,
 		ActualDecodePath:           "unavailable",
+		ExpectedTokenIDSHA256:      req2.ExpectedTokenIDSHA256,
 		ActualTokenIDSHA256:        record.ExpectedTokenIDSHA256,
 		ActualTerminalReason:       record.ExpectedTerminalReason,
 		ActualCounters:             record.ExpectedCounters,
 		ActualCommittedStateSHA256: record.ExpectedCommittedStateSHA256,
+		RuntimeTuple:               nativeMTPCoreRuntimeTuple(record),
 	}
-	result.ResultDigestSHA256 = digestCanonicalJSON(result.digestObject())
+	result.ResultDigestSHA256 = result.resultDigest()
 	eval := EvaluateNativeMTPCanaryCoreResult(req2, record, result, now.Add(2*time.Minute+time.Second))
 	if err := store.CompleteNativeMTPCanary(tuple, req2, result, eval, time.Minute, now.Add(2*time.Minute+time.Second)); err != nil {
 		t.Fatal(err)
@@ -371,6 +416,25 @@ func nativeMTPTuple(bankSHA string) NativeMTPCanaryTupleKey {
 		TargetGeneration:    7,
 		RuntimeTupleSHA256:  strings.Repeat("7", 64),
 		ChallengeBankSHA256: bankSHA,
+	}
+}
+
+func nativeMTPCoreRuntimeTuple(record NativeMTPChallengeRecord) NativeMTPRuntimeTuple {
+	return NativeMTPRuntimeTuple{
+		ModelID:              record.ModelID,
+		ModelHash:            record.ModelHash,
+		ModelHashAlgorithm:   "sha256",
+		ProviderRevision:     "1.8.123",
+		RuntimeRevision:      "mlx-swift-lm-e874140",
+		TokenizerDigest:      record.TokenizerSHA256,
+		ArtifactDigest:       record.ArtifactSHA256,
+		ManifestDigest:       record.MTPManifestSHA256,
+		SidecarDigest:        strings.Repeat("8", 64),
+		ProviderBinarySHA256: strings.Repeat("9", 64),
+		RuntimeCDHash:        strings.Repeat("a", 64),
+		CacheNamespace:       "native-mtp-test",
+		StateDigest:          record.ExpectedCommittedStateSHA256,
+		ProposalDepth:        int(record.FixedProposalDepth),
 	}
 }
 

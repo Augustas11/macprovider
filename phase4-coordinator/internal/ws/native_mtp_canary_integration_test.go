@@ -170,23 +170,6 @@ func TestNativeMTPCanaryTupleOfferDispatchAndResultAreTupleScoped(t *testing.T) 
 	if err != nil {
 		t.Fatalf("parse request: %v", err)
 	}
-	result := NativeMTPCanaryCoreResult{
-		Profile:                    nativeMTPCanaryProfile,
-		ProviderID:                 req.ProviderID,
-		AssignedID:                 req.AssignedID,
-		TargetGeneration:           req.TargetGeneration,
-		RuntimeTupleSHA256:         req.NativeMTPRuntimeTupleSHA256,
-		ChallengeBankSHA256:        req.ChallengeBankSHA256,
-		ChallengeID:                req.ChallengeID,
-		Nonce:                      req.Nonce,
-		RequestDigestSHA256:        req.RequestDigest,
-		ActualDecodePath:           "native_mtp",
-		ActualTokenIDSHA256:        record.ExpectedTokenIDSHA256,
-		ActualTerminalReason:       record.ExpectedTerminalReason,
-		ActualCounters:             record.ExpectedCounters,
-		ActualCommittedStateSHA256: record.ExpectedCommittedStateSHA256,
-	}
-	result.ResultDigestSHA256 = digestCanonicalJSON(result.digestObject())
 	wireResult := NativeMTPCanaryResult{
 		Type:                        "native_mtp_canary_result_v1",
 		Version:                     1,
@@ -194,7 +177,6 @@ func TestNativeMTPCanaryTupleOfferDispatchAndResultAreTupleScoped(t *testing.T) 
 		ProviderID:                  req.ProviderID,
 		AssignedID:                  req.AssignedID,
 		RequestDigest:               req.RequestDigest,
-		ResultDigest:                result.ResultDigestSHA256,
 		TargetGeneration:            req.TargetGeneration,
 		ProviderRevision:            runtimeTuple.ProviderRevision,
 		RuntimeRevision:             runtimeTuple.RuntimeRevision,
@@ -210,6 +192,7 @@ func TestNativeMTPCanaryTupleOfferDispatchAndResultAreTupleScoped(t *testing.T) 
 		ActualDecodePath:            "native_mtp",
 		RuntimeTuple:                runtimeTuple,
 	}
+	wireResult.ResultDigest = nativeMTPCanaryResultDigest(wireResult)
 	server.handleNativeMTPCanaryResult(provider.ProviderID, provider.AssignedID, mustMarshalNativeMTP(t, wireResult))
 	updated := mustResolveProvider(t, registry, provider.ProviderID, provider.AssignedID)
 	if updated.NativeMTPCanary == nil || updated.NativeMTPCanary.Status != string(NativeMTPCanaryTupleFresh) || updated.CanaryFailCount != 0 || updated.State != pool.StateReady {
@@ -408,31 +391,13 @@ func (h *nativeMTPCanaryIntegrationHarness) dispatchRequest(t *testing.T) Native
 }
 
 func (h *nativeMTPCanaryIntegrationHarness) wireResult(req NativeMTPCanaryRequest, decodePath string) NativeMTPCanaryResult {
-	result := NativeMTPCanaryCoreResult{
-		Profile:                    nativeMTPCanaryProfile,
-		ProviderID:                 req.ProviderID,
-		AssignedID:                 req.AssignedID,
-		TargetGeneration:           req.TargetGeneration,
-		RuntimeTupleSHA256:         req.NativeMTPRuntimeTupleSHA256,
-		ChallengeBankSHA256:        req.ChallengeBankSHA256,
-		ChallengeID:                req.ChallengeID,
-		Nonce:                      req.Nonce,
-		RequestDigestSHA256:        req.RequestDigest,
-		ActualDecodePath:           decodePath,
-		ActualTokenIDSHA256:        h.record.ExpectedTokenIDSHA256,
-		ActualTerminalReason:       h.record.ExpectedTerminalReason,
-		ActualCounters:             h.record.ExpectedCounters,
-		ActualCommittedStateSHA256: h.record.ExpectedCommittedStateSHA256,
-	}
-	result.ResultDigestSHA256 = digestCanonicalJSON(result.digestObject())
-	return NativeMTPCanaryResult{
+	wireResult := NativeMTPCanaryResult{
 		Type:                        "native_mtp_canary_result_v1",
 		Version:                     1,
 		RequestID:                   req.RequestID,
 		ProviderID:                  req.ProviderID,
 		AssignedID:                  req.AssignedID,
 		RequestDigest:               req.RequestDigest,
-		ResultDigest:                result.ResultDigestSHA256,
 		TargetGeneration:            req.TargetGeneration,
 		ProviderRevision:            h.runtime.ProviderRevision,
 		RuntimeRevision:             h.runtime.RuntimeRevision,
@@ -448,6 +413,8 @@ func (h *nativeMTPCanaryIntegrationHarness) wireResult(req NativeMTPCanaryReques
 		ActualDecodePath:            decodePath,
 		RuntimeTuple:                h.runtime,
 	}
+	wireResult.ResultDigest = nativeMTPCanaryResultDigest(wireResult)
+	return wireResult
 }
 
 func (h *nativeMTPCanaryIntegrationHarness) readDisable(t *testing.T) NativeMTPTupleDisable {

@@ -246,6 +246,57 @@ final class CoordinatorClientTests: XCTestCase {
         return SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
+    private static func nativeMTPGoVectorCanaryResultDigest() throws -> String {
+        let runtimeTuple = RFC8785JCS.Value.object([
+            "model_id": .string("model-a"),
+            "model_hash": .string(String(repeating: "a", count: 64)),
+            "model_hash_algorithm": .string("macprovider.snapshot-manifest.v1"),
+            "provider_revision": .string("1.8.123"),
+            "runtime_revision": .string("mlx-swift-lm-e874140"),
+            "tokenizer_digest": .string(String(repeating: "b", count: 64)),
+            "artifact_digest": .string(String(repeating: "c", count: 64)),
+            "manifest_digest": .string(String(repeating: "d", count: 64)),
+            "sidecar_digest": .string(String(repeating: "e", count: 64)),
+            "provider_binary_sha256": .string(String(repeating: "f", count: 64)),
+            "runtime_cdhash": .string(String(repeating: "1", count: 64)),
+            "cache_namespace": .string("cache-a"),
+            "state_digest": .string(String(repeating: "2", count: 64)),
+            "proposal_depth": .int(2),
+        ])
+        let value = RFC8785JCS.Value.object([
+            "schema_version": .string("macprovider.native-mtp-canary-result.v1"),
+            "request_id": .string("canary-1"),
+            "provider_id": .string("provider-a"),
+            "assigned_id": .string("assigned-a"),
+            "request_digest": .string(String(repeating: "6", count: 64)),
+            "target_generation": .int(7),
+            "provider_revision": .string("1.8.123"),
+            "runtime_revision": .string("mlx-swift-lm-e874140"),
+            "challenge_id": .string("challenge-a"),
+            "challenge_bank_sha256": .string(String(repeating: "4", count: 64)),
+            "nonce": .string("0123456789abcdef0123456789abcdef"),
+            "native_mtp_runtime_tuple_sha256": .string("919d2f171e70f1cca3bc93b88cb4234f13fe4cda883ad69b976a4169a3a3bc24"),
+            "expected_token_id_sha256": .string(String(repeating: "5", count: 64)),
+            "actual_token_id_sha256": .string(String(repeating: "5", count: 64)),
+            "terminal_reason": .string("passed"),
+            "counters": .object([
+                "accepted": .int(2),
+                "rejected": .int(1),
+                "bonus": .int(0),
+                "committed": .int(3),
+            ]),
+            "committed_state_sha256": .string(String(repeating: "2", count: 64)),
+            "actual_decode_path": .string("native_mtp"),
+            "fallback_used": .bool(true),
+            "runtime_tuple": runtimeTuple,
+            "diagnostic": .string(""),
+        ])
+        let canonical = try RFC8785JCS.canonicalStringRawStrings(value)
+        return SHA256.hash(data: Data("macprovider.native-mtp-canary-result.v1\n\(canonical)".utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
     func testDiagnosticStatusPayloadIsRedactedAndMatchesProviderSnapshot() async throws {
         let recorder = CoordinatorFrameRecorder()
         let modelHash = String(repeating: "a", count: 64)
@@ -686,6 +737,27 @@ final class CoordinatorClientTests: XCTestCase {
         let frames = await recorder.frames.dropFirst(initialCount)
         XCTAssertEqual(frames.first?["type"] as? String, "nak")
         XCTAssertEqual(frames.first?["in_reply_to"] as? String, "native_mtp_canary_request_v1")
+    }
+
+    func testNativeMTPRuntimeTupleIdentityMatchesGoVector() throws {
+        let admission = String(repeating: "8", count: 64)
+        let canonical = try RFC8785JCS.canonicalStringRawStrings(.object([
+            "schema_version": .string("macprovider.native-mtp-runtime-tuple.v1"),
+            "native_mtp_admission_tuple_sha256": .string(admission),
+            "provider_id": .string("provider-a"),
+            "assigned_id": .string("assigned-a"),
+            "target_generation": .int(7),
+            "served_snapshot_id": .string("snapshot-a"),
+        ]))
+        let digest = SHA256.hash(data: Data("macprovider.native-mtp-runtime-tuple.v1\n\(canonical)".utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        XCTAssertEqual(digest, "919d2f171e70f1cca3bc93b88cb4234f13fe4cda883ad69b976a4169a3a3bc24")
+    }
+
+    func testNativeMTPCanaryResultDigestMatchesGoVector() throws {
+        let digest = try Self.nativeMTPGoVectorCanaryResultDigest()
+        XCTAssertEqual(digest, "0e19abd8896de79b7fc46ad56630647d27551aafe57c95f579527eb02eab5e2f")
     }
 
     func testNativeMTPTupleDisableUsesDedicatedHandlerAndRejectsReplay() async throws {

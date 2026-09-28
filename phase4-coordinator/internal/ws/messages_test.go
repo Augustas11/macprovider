@@ -114,6 +114,23 @@ func TestNativeMTPRuntimeTupleIdentityUsesSpec023JCS(t *testing.T) {
 	}
 }
 
+func TestNativeMTPCanaryResultDigestUsesClosedCanonicalVector(t *testing.T) {
+	result := nativeMTPTestCanaryResult()
+	if got, want := result.ResultDigest, "0e19abd8896de79b7fc46ad56630647d27551aafe57c95f579527eb02eab5e2f"; got != want {
+		t.Fatalf("result digest = %s, want %s", got, want)
+	}
+	mutated := result
+	mutated.ProviderRevision = "1.8.124"
+	if nativeMTPCanaryResultDigest(mutated) == result.ResultDigest {
+		t.Fatalf("result digest did not bind provider_revision")
+	}
+	mutated = result
+	mutated.RuntimeTuple.StateDigest = strings.Repeat("3", 64)
+	if nativeMTPCanaryResultDigest(mutated) == result.ResultDigest {
+		t.Fatalf("result digest did not bind runtime_tuple fields")
+	}
+}
+
 func TestParseNativeMTPTupleDisableRejectsUnknownAndInvalidReason(t *testing.T) {
 	payload := nativeMTPTupleDisableJSON(nil)
 	disable, field, err := ParseNativeMTPTupleDisable([]byte(payload))
@@ -245,31 +262,83 @@ func nativeMTPCanaryRequestJSON(extra map[string]string) string {
 }
 
 func nativeMTPCanaryResultJSON(extra map[string]string) string {
-	runtimeTupleSHA256 := nativeMTPTestRuntimeTupleSHA256()
+	result := nativeMTPTestCanaryResult()
 	return nativeMTPJSONObject(`{
 		"type":"native_mtp_canary_result_v1",
 		"version":1,
-		"request_id":"canary-1",
-		"provider_id":"provider-a",
-		"assigned_id":"assigned-a",
-		"request_digest":"`+strings.Repeat("6", 64)+`",
-		"result_digest":"`+strings.Repeat("7", 64)+`",
+		"request_id":"`+result.RequestID+`",
+		"provider_id":"`+result.ProviderID+`",
+		"assigned_id":"`+result.AssignedID+`",
+		"request_digest":"`+result.RequestDigest+`",
+		"result_digest":"`+result.ResultDigest+`",
 		"target_generation":7,
-		"provider_revision":"1.8.123",
-		"runtime_revision":"mlx-swift-lm-e874140",
-		"challenge_id":"challenge-a",
-		"challenge_bank_sha256":"`+strings.Repeat("4", 64)+`",
-		"nonce":"0123456789abcdef0123456789abcdef",
-		"native_mtp_runtime_tuple_sha256":"`+runtimeTupleSHA256+`",
-		"expected_token_id_sha256":"`+strings.Repeat("5", 64)+`",
-		"actual_token_id_sha256":"`+strings.Repeat("5", 64)+`",
-		"terminal_reason":"passed",
+		"provider_revision":"`+result.ProviderRevision+`",
+		"runtime_revision":"`+result.RuntimeRevision+`",
+		"challenge_id":"`+result.ChallengeID+`",
+		"challenge_bank_sha256":"`+result.ChallengeBankSHA256+`",
+		"nonce":"`+result.Nonce+`",
+		"native_mtp_runtime_tuple_sha256":"`+result.NativeMTPRuntimeTupleSHA256+`",
+		"expected_token_id_sha256":"`+result.ExpectedTokenIDSHA256+`",
+		"actual_token_id_sha256":"`+result.ActualTokenIDSHA256+`",
+		"terminal_reason":"`+result.TerminalReason+`",
 		"counters":{"accepted":2,"rejected":1,"bonus":0,"committed":3},
-		"committed_state_sha256":"`+strings.Repeat("2", 64)+`",
-		"actual_decode_path":"native_mtp",
+		"committed_state_sha256":"`+result.CommittedStateSHA256+`",
+		"actual_decode_path":"`+result.ActualDecodePath+`",
 		"fallback_used":true,
 		"runtime_tuple":`+nativeMTPRuntimeTupleJSON()+`
 	}`, extra)
+}
+
+func nativeMTPTestCanaryResult() NativeMTPCanaryResult {
+	result := NativeMTPCanaryResult{
+		Type:                        "native_mtp_canary_result_v1",
+		Version:                     1,
+		RequestID:                   "canary-1",
+		ProviderID:                  "provider-a",
+		AssignedID:                  "assigned-a",
+		RequestDigest:               strings.Repeat("6", 64),
+		TargetGeneration:            7,
+		ProviderRevision:            "1.8.123",
+		RuntimeRevision:             "mlx-swift-lm-e874140",
+		ChallengeID:                 "challenge-a",
+		ChallengeBankSHA256:         strings.Repeat("4", 64),
+		Nonce:                       "0123456789abcdef0123456789abcdef",
+		NativeMTPRuntimeTupleSHA256: nativeMTPTestRuntimeTupleSHA256(),
+		ExpectedTokenIDSHA256:       strings.Repeat("5", 64),
+		ActualTokenIDSHA256:         strings.Repeat("5", 64),
+		TerminalReason:              "passed",
+		Counters: NativeMTPCanaryCounters{
+			Accepted:  2,
+			Rejected:  1,
+			Bonus:     0,
+			Committed: 3,
+		},
+		CommittedStateSHA256: strings.Repeat("2", 64),
+		ActualDecodePath:     "native_mtp",
+		FallbackUsed:         true,
+		RuntimeTuple:         nativeMTPTestRuntimeTuple(),
+	}
+	result.ResultDigest = nativeMTPCanaryResultDigest(result)
+	return result
+}
+
+func nativeMTPTestRuntimeTuple() NativeMTPRuntimeTuple {
+	return NativeMTPRuntimeTuple{
+		ModelID:              "model-a",
+		ModelHash:            strings.Repeat("a", 64),
+		ModelHashAlgorithm:   "macprovider.snapshot-manifest.v1",
+		ProviderRevision:     "1.8.123",
+		RuntimeRevision:      "mlx-swift-lm-e874140",
+		TokenizerDigest:      strings.Repeat("b", 64),
+		ArtifactDigest:       strings.Repeat("c", 64),
+		ManifestDigest:       strings.Repeat("d", 64),
+		SidecarDigest:        strings.Repeat("e", 64),
+		ProviderBinarySHA256: strings.Repeat("f", 64),
+		RuntimeCDHash:        strings.Repeat("1", 64),
+		CacheNamespace:       "cache-a",
+		StateDigest:          strings.Repeat("2", 64),
+		ProposalDepth:        2,
+	}
 }
 
 func nativeMTPTupleOfferJSON(extra map[string]string) string {

@@ -2243,7 +2243,60 @@ func validateNativeMTPCanaryResult(result NativeMTPCanaryResult) (string, error)
 	if field, err := validateNativeMTPRuntimeTuple(result.RuntimeTuple, result.RuntimeTuple.ProposalDepth); err != nil {
 		return "runtime_tuple." + field, err
 	}
+	if expected := nativeMTPCanaryResultDigest(result); result.ResultDigest != expected {
+		return "result_digest", fmt.Errorf("result_digest does not match native_mtp_canary_result_v1 payload")
+	}
 	return "", nil
+}
+
+func nativeMTPCanaryResultDigest(result NativeMTPCanaryResult) string {
+	canonical := `{"actual_decode_path":` + strconv.Quote(result.ActualDecodePath) +
+		`,"actual_token_id_sha256":` + strconv.Quote(result.ActualTokenIDSHA256) +
+		`,"assigned_id":` + strconv.Quote(result.AssignedID) +
+		`,"challenge_bank_sha256":` + strconv.Quote(result.ChallengeBankSHA256) +
+		`,"challenge_id":` + strconv.Quote(result.ChallengeID) +
+		`,"committed_state_sha256":` + strconv.Quote(result.CommittedStateSHA256) +
+		`,"counters":` + nativeMTPCanaryCountersJCS(result.Counters) +
+		`,"diagnostic":` + strconv.Quote(result.Diagnostic) +
+		`,"expected_token_id_sha256":` + strconv.Quote(result.ExpectedTokenIDSHA256) +
+		`,"fallback_used":` + strconv.FormatBool(result.FallbackUsed) +
+		`,"native_mtp_runtime_tuple_sha256":` + strconv.Quote(result.NativeMTPRuntimeTupleSHA256) +
+		`,"nonce":` + strconv.Quote(result.Nonce) +
+		`,"provider_id":` + strconv.Quote(result.ProviderID) +
+		`,"provider_revision":` + strconv.Quote(result.ProviderRevision) +
+		`,"request_digest":` + strconv.Quote(result.RequestDigest) +
+		`,"request_id":` + strconv.Quote(result.RequestID) +
+		`,"runtime_revision":` + strconv.Quote(result.RuntimeRevision) +
+		`,"runtime_tuple":` + nativeMTPRuntimeTupleJCS(result.RuntimeTuple) +
+		`,"schema_version":"macprovider.native-mtp-canary-result.v1"` +
+		`,"target_generation":` + strconv.FormatUint(result.TargetGeneration, 10) +
+		`,"terminal_reason":` + strconv.Quote(result.TerminalReason) + `}`
+	sum := sha256.Sum256([]byte("macprovider.native-mtp-canary-result.v1\n" + canonical))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func nativeMTPCanaryCountersJCS(counters NativeMTPCanaryCounters) string {
+	return `{"accepted":` + strconv.FormatUint(counters.Accepted, 10) +
+		`,"bonus":` + strconv.FormatUint(counters.Bonus, 10) +
+		`,"committed":` + strconv.FormatUint(counters.Committed, 10) +
+		`,"rejected":` + strconv.FormatUint(counters.Rejected, 10) + `}`
+}
+
+func nativeMTPRuntimeTupleJCS(tuple NativeMTPRuntimeTuple) string {
+	return `{"artifact_digest":` + strconv.Quote(tuple.ArtifactDigest) +
+		`,"cache_namespace":` + strconv.Quote(tuple.CacheNamespace) +
+		`,"manifest_digest":` + strconv.Quote(tuple.ManifestDigest) +
+		`,"model_hash":` + strconv.Quote(tuple.ModelHash) +
+		`,"model_hash_algorithm":` + strconv.Quote(tuple.ModelHashAlgorithm) +
+		`,"model_id":` + strconv.Quote(tuple.ModelID) +
+		`,"proposal_depth":` + strconv.Itoa(tuple.ProposalDepth) +
+		`,"provider_binary_sha256":` + strconv.Quote(tuple.ProviderBinarySHA256) +
+		`,"provider_revision":` + strconv.Quote(tuple.ProviderRevision) +
+		`,"runtime_cdhash":` + strconv.Quote(tuple.RuntimeCDHash) +
+		`,"runtime_revision":` + strconv.Quote(tuple.RuntimeRevision) +
+		`,"sidecar_digest":` + strconv.Quote(tuple.SidecarDigest) +
+		`,"state_digest":` + strconv.Quote(tuple.StateDigest) +
+		`,"tokenizer_digest":` + strconv.Quote(tuple.TokenizerDigest) + `}`
 }
 
 func validateNativeMTPTupleOffer(offer NativeMTPTupleOffer) (string, error) {
