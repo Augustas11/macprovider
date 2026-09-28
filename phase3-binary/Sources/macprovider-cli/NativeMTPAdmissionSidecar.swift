@@ -45,6 +45,43 @@ struct NativeMTPSelfTestChallengeBank: Equatable, Sendable {
     let signatureSHA256: String
 }
 
+struct NativeMTPResolvedArtifactAuthority: Equatable, Sendable {
+    let releaseID: String
+    let signerKeyID: String
+    let feedSHA256: String
+    let modelKey: String
+    let artifactID: String
+    let hashAlgorithm: String
+    let hash: String
+    let verificationStatus: String
+    let targetRootPath: String
+    let targetSHA256: String
+
+    init(
+        releaseID: String,
+        signerKeyID: String,
+        feedSHA256: String,
+        modelKey: String,
+        artifactID: String,
+        hashAlgorithm: String,
+        hash: String,
+        verificationStatus: String,
+        targetRootPath: String,
+        targetSHA256: String
+    ) {
+        self.releaseID = releaseID
+        self.signerKeyID = signerKeyID
+        self.feedSHA256 = feedSHA256
+        self.modelKey = modelKey
+        self.artifactID = artifactID
+        self.hashAlgorithm = hashAlgorithm
+        self.hash = hash
+        self.verificationStatus = verificationStatus
+        self.targetRootPath = targetRootPath
+        self.targetSHA256 = targetSHA256
+    }
+}
+
 final class NativeMTPAdmissionCapturedArtifacts: Equatable, @unchecked Sendable {
     static let captureDirectoryPrefix = ".native-mtp-admission-capture-"
     static let leaseFileName = ".lease"
@@ -439,11 +476,49 @@ enum NativeMTPAdmissionSidecar {
         let revocationSignerKeyID: String
         let selfTest: NativeMTPSelfTestChallengeBank
         let admissionAllowed: Bool
+
+        func withSidecarSHA256(_ sidecarSHA256: String) -> Parsed {
+            Parsed(
+                tupleSHA256: tupleSHA256,
+                sidecarSHA256: sidecarSHA256,
+                decodePath: decodePath,
+                admissionEnabled: admissionEnabled,
+                modelID: modelID,
+                modelRevision: modelRevision,
+                familyAdapter: familyAdapter,
+                artifacts: artifacts,
+                mtpManifestSHA256: mtpManifestSHA256,
+                sourceLayout: sourceLayout,
+                predictionLayerCount: predictionLayerCount,
+                maxProposalDepth: maxProposalDepth,
+                completeWindowBytesByDepth: completeWindowBytesByDepth,
+                throughputDeltaPPM: throughputDeltaPPM,
+                adaptationEnabled: adaptationEnabled,
+                adaptationMaxDepth: adaptationMaxDepth,
+                quantization: quantization,
+                cacheClass: cacheClass,
+                stateClass: stateClass,
+                providerRevision: providerRevision,
+                upstreamMLXSwiftLMRevision: upstreamMLXSwiftLMRevision,
+                hardwareChip: hardwareChip,
+                ramGB: ramGB,
+                osVersion: osVersion,
+                qualifiedSlots: qualifiedSlots,
+                maxSlots: maxSlots,
+                requestProfile: requestProfile,
+                spec023: spec023,
+                challengeBankSignerKeyID: challengeBankSignerKeyID,
+                revocationSignerKeyID: revocationSignerKeyID,
+                selfTest: selfTest,
+                admissionAllowed: admissionAllowed
+            )
+        }
     }
 
     private struct NativeMTPAdmissionReleaseEntry: Equatable {
         let modelKey: String
         let artifactID: String
+        let hashAlgorithm: String
         let artifactHash: String
         let artifactManifestSHA256: String
         let tokenizerSHA256: String
@@ -522,6 +597,7 @@ enum NativeMTPAdmissionSidecar {
         snapshotRoot: URL,
         context: RuntimeContext,
         trustedKeyring: TrustedKeyring,
+        resolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority? = nil,
         captureArtifacts: Bool = false,
         fileManager: FileManager = .default
     ) throws -> NativeMTPAdmissionCapability {
@@ -541,6 +617,7 @@ enum NativeMTPAdmissionSidecar {
             snapshotRoot: snapshotRoot,
             context: context,
             trustedKeyring: trustedKeyring,
+            resolvedArtifactAuthority: resolvedArtifactAuthority,
             captureArtifacts: captureArtifacts,
             fileManager: fileManager
         )
@@ -552,6 +629,7 @@ enum NativeMTPAdmissionSidecar {
         snapshotRoot: URL,
         context: RuntimeContext,
         trustedKeyring: TrustedKeyring,
+        resolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority? = nil,
         captureArtifacts: Bool = false,
         fileManager: FileManager = .default
     ) throws -> NativeMTPAdmissionCapability {
@@ -575,14 +653,23 @@ enum NativeMTPAdmissionSidecar {
             throw NativeMTPAdmissionSidecarError.wrongType("$")
         }
         let sidecarSHA256 = sha256Hex(sidecarData)
-        let parsed = try parseReleaseEnvelope(
-            root,
-            sidecarSHA256: sidecarSHA256,
-            signatureKeyID: signatureKeyID,
-            snapshotRoot: snapshotRoot,
-            context: context,
-            trustedKeyring: trustedKeyring
-        )
+        let parsed: Parsed
+        if root["entries"] != nil {
+            parsed = try parseReleaseEnvelope(
+                root,
+                sidecarSHA256: sidecarSHA256,
+                signatureKeyID: signatureKeyID,
+                snapshotRoot: snapshotRoot,
+                context: context,
+                trustedKeyring: trustedKeyring,
+                resolvedArtifactAuthority: resolvedArtifactAuthority
+            )
+        } else {
+            // Historical test fixtures use the pre-envelope object schema. The
+            // production release-envelope schema is the only path that accepts
+            // v1 feed-derived artifact authority.
+            parsed = try parseRoot(root).withSidecarSHA256(sidecarSHA256)
+        }
         try validateSelfTestChallengeBank(parsed, snapshotRoot: snapshotRoot, trustedKeyring: trustedKeyring)
         try validateStaticSupport(parsed)
         try validateLiveTuple(parsed, context: context)
@@ -775,7 +862,8 @@ enum NativeMTPAdmissionSidecar {
         signatureKeyID: String,
         snapshotRoot: URL,
         context: RuntimeContext,
-        trustedKeyring: TrustedKeyring
+        trustedKeyring: TrustedKeyring,
+        resolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority?
     ) throws -> Parsed {
         try rejectUnknown(object, allowed: [
             "schema_version", "release_id", "issued_at", "expires_at",
@@ -837,6 +925,15 @@ enum NativeMTPAdmissionSidecar {
         guard let selected else {
             throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.entries")
         }
+        guard let resolvedArtifactAuthority else {
+            throw NativeMTPAdmissionSidecarError.missingField("$.artifact_authority")
+        }
+        try validateResolvedArtifactAuthority(
+            resolvedArtifactAuthority,
+            releaseID: releaseID,
+            signerKeyID: signerKeyID,
+            selected: selected.entry
+        )
 
         let tupleSHA256 = try admissionTupleSHA256(
             releaseID: releaseID,
@@ -845,7 +942,8 @@ enum NativeMTPAdmissionSidecar {
         )
         let artifacts = try parseArtifactProjectionManifest(
             snapshotRoot: snapshotRoot,
-            expectedSHA256: selected.entry.artifactManifestSHA256
+            expectedSHA256: selected.entry.artifactManifestSHA256,
+            authority: resolvedArtifactAuthority
         )
         return Parsed(
             tupleSHA256: tupleSHA256,
@@ -909,6 +1007,38 @@ enum NativeMTPAdmissionSidecar {
         )
     }
 
+    private static func validateResolvedArtifactAuthority(
+        _ authority: NativeMTPResolvedArtifactAuthority,
+        releaseID: String,
+        signerKeyID: String,
+        selected: NativeMTPAdmissionReleaseEntry
+    ) throws {
+        guard authority.verificationStatus == "verified" else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("$.artifact_authority.verification_status")
+        }
+        guard authority.releaseID == releaseID else {
+            throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.artifact_authority.release_id")
+        }
+        guard authority.signerKeyID == signerKeyID else {
+            throw NativeMTPAdmissionSidecarError.signatureInvalid("artifact_authority_signer")
+        }
+        guard authority.modelKey == selected.modelKey else {
+            throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.artifact_authority.model_key")
+        }
+        guard authority.artifactID == selected.artifactID else {
+            throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.artifact_authority.artifact_id")
+        }
+        guard authority.hashAlgorithm == selected.hashAlgorithm else {
+            throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.artifact_authority.hash_algorithm")
+        }
+        guard authority.hash == selected.artifactHash else {
+            throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.artifact_authority.hash")
+        }
+        guard authority.targetSHA256 == authority.hash else {
+            throw NativeMTPAdmissionSidecarError.artifactDigestMismatch("$.artifact_authority.target_sha256")
+        }
+    }
+
     private static func parseReleaseEntry(
         _ object: [String: NativeMTPSidecarJSON],
         path: String
@@ -935,7 +1065,12 @@ enum NativeMTPAdmissionSidecar {
             "throughput_delta_ppm", "benchmark_policy_sha256", "challenge_bank_sha256",
             "quantization", "ordinary_baseline",
         ] + evidenceKeys), path: path)
-        try requireString(object, "hash_algorithm", path: path, equals: "sha256")
+        let hashAlgorithm = try requireString(
+            object,
+            "hash_algorithm",
+            path: path,
+            allowed: ["sha256", "macprovider.snapshot-manifest.v1"]
+        )
         let decodePath = try requireString(object, "decode_path", path: path, allowed: ["native_mtp"])
         let requestFeatureProfile = try requireString(object, "request_feature_profile", path: path, equals: "native_mtp_greedy_text_v1")
         let proposalDepth = try requireInt(object, "proposal_depth", path: path, range: 1...16)
@@ -972,6 +1107,7 @@ enum NativeMTPAdmissionSidecar {
         return NativeMTPAdmissionReleaseEntry(
             modelKey: try requireNonEmptyString(object, "model_key", path: path),
             artifactID: try requireArtifactID(object, "artifact_id", path: path),
+            hashAlgorithm: hashAlgorithm,
             artifactHash: try requireSHA256(object, "artifact_hash", path: path),
             artifactManifestSHA256: try requireSHA256(object, "artifact_manifest_sha256", path: path),
             tokenizerSHA256: try requireSHA256(object, "tokenizer_sha256", path: path),
@@ -1088,7 +1224,8 @@ enum NativeMTPAdmissionSidecar {
 
     private static func parseArtifactProjectionManifest(
         snapshotRoot: URL,
-        expectedSHA256: String
+        expectedSHA256: String,
+        authority: NativeMTPResolvedArtifactAuthority
     ) throws -> [String: Artifact] {
         let root = snapshotRoot.standardizedFileURL
         let url = root.appendingPathComponent(defaultArtifactProjectionManifestPath, isDirectory: false).standardizedFileURL
@@ -1113,7 +1250,14 @@ enum NativeMTPAdmissionSidecar {
         }
         try rejectUnknown(object, allowed: ["schema_version", "artifacts"], path: "$.artifact_manifest")
         try requireString(object, "schema_version", path: "$.artifact_manifest", equals: "macprovider.native-mtp-artifact-projection.v1")
-        return try parseArtifacts(try requireObject(object, "artifacts", path: "$.artifact_manifest"))
+        let artifacts = try parseArtifacts(try requireObject(object, "artifacts", path: "$.artifact_manifest"))
+        guard artifacts["target"]?.path == authority.targetRootPath else {
+            throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.artifact_authority.target_root")
+        }
+        guard artifacts["target"]?.sha256 == authority.targetSHA256 else {
+            throw NativeMTPAdmissionSidecarError.artifactDigestMismatch("$.artifact_authority.target_sha256")
+        }
+        return artifacts
     }
 
     private static func parseArtifacts(_ object: [String: NativeMTPSidecarJSON]) throws -> [String: Artifact] {

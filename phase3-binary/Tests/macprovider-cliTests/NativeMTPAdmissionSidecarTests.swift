@@ -865,6 +865,143 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
+    func testReleaseEnvelopeRequiresResolvedArtifactAuthority() throws {
+        let fixture = try makeReleaseEnvelopeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture, includeAuthority: false),
+            .missingField("$.artifact_authority")
+        )
+    }
+
+    func testReleaseEnvelopeRejectsUnverifiedArtifactFeedMember() throws {
+        let fixture = try makeReleaseEnvelopeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        for status in ["declared", "blocked"] {
+            XCTAssertEqual(
+                try rejectedReleaseEnvelopeError(
+                    fixture,
+                    authority: fixture.authority(verificationStatus: status)
+                ),
+                .invalidValue("$.artifact_authority.verification_status"),
+                status
+            )
+        }
+    }
+
+    func testReleaseEnvelopeRejectsAuthorityIdentityDrift() throws {
+        let fixture = try makeReleaseEnvelopeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture, authority: fixture.authority(releaseID: "other-release")),
+            .liveTupleMismatch("$.artifact_authority.release_id")
+        )
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture, authority: fixture.authority(signerKeyID: "other-signer")),
+            .signatureInvalid("artifact_authority_signer")
+        )
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture, authority: fixture.authority(modelKey: "other/model")),
+            .liveTupleMismatch("$.artifact_authority.model_key")
+        )
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture, authority: fixture.authority(artifactID: "other-artifact")),
+            .liveTupleMismatch("$.artifact_authority.artifact_id")
+        )
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture, authority: fixture.authority(hashAlgorithm: "sha256")),
+            .liveTupleMismatch("$.artifact_authority.hash_algorithm")
+        )
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture, authority: fixture.authority(hash: String(repeating: "9", count: 64))),
+            .liveTupleMismatch("$.artifact_authority.hash")
+        )
+    }
+
+    func testReleaseEnvelopeRejectsTargetRootAndHashMismatch() throws {
+        let fixture = try makeReleaseEnvelopeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture, authority: fixture.authority(targetRootPath: "other-target")),
+            .liveTupleMismatch("$.artifact_authority.target_root")
+        )
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture, authority: fixture.authority(targetSHA256: String(repeating: "8", count: 64))),
+            .artifactDigestMismatch("$.artifact_authority.target_sha256")
+        )
+    }
+
+    func testReleaseEnvelopeRejectsProjectionManifestReplacingTargetAuthority() throws {
+        let fixture = try makeReleaseEnvelopeFixture { artifacts in
+            artifacts["target"] = ["path": "invented-target.safetensors", "sha256": String(repeating: "7", count: 64)]
+        }
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture),
+            .liveTupleMismatch("$.artifact_authority.target_root")
+        )
+    }
+
+    func testReleaseEnvelopeAcceptsVerifiedMemberWithContainedAuxiliaryLayout() throws {
+        let fixture = try makeReleaseEnvelopeFixture(prepareSnapshot: { base in
+            let targetDirectory = base.snapshot.appendingPathComponent("target", isDirectory: true)
+            let mtpDirectory = base.snapshot.appendingPathComponent("mtp", isDirectory: true)
+            try FileManager.default.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: mtpDirectory, withIntermediateDirectories: true)
+            try FileManager.default.moveItem(
+                at: base.snapshot.appendingPathComponent("target.safetensors"),
+                to: targetDirectory.appendingPathComponent("model.safetensors")
+            )
+            try FileManager.default.moveItem(
+                at: base.snapshot.appendingPathComponent("tokenizer.json"),
+                to: targetDirectory.appendingPathComponent("tokenizer.json")
+            )
+            try FileManager.default.moveItem(
+                at: base.snapshot.appendingPathComponent("mtp.safetensors"),
+                to: mtpDirectory.appendingPathComponent("model.safetensors")
+            )
+            try FileManager.default.moveItem(
+                at: base.snapshot.appendingPathComponent("mtp-manifest.json"),
+                to: mtpDirectory.appendingPathComponent("config.json")
+            )
+            let targetDigest = try MLXSnapshotIdentity.compute(directory: targetDirectory).digest
+            let mtpDigest = try MLXSnapshotIdentity.compute(directory: mtpDirectory).digest
+            return ReleaseLayout(
+                targetPath: "target",
+                targetSHA256: targetDigest,
+                mtpPath: "mtp",
+                mtpSHA256: mtpDigest,
+                tokenizerPath: "target/tokenizer.json",
+                tokenizerSHA256: base.digests["tokenizer.json"]!,
+                manifestPath: "mtp/config.json",
+                manifestSHA256: base.digests["mtp-manifest.json"]!
+            )
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        let capability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.base.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.base.trustedKeyring,
+            resolvedArtifactAuthority: fixture.authority,
+            captureArtifacts: true
+        )
+
+        XCTAssertEqual(capability.modelID, fixture.authority.modelKey)
+        XCTAssertEqual(capability.targetArtifactSHA256, fixture.authority.hash)
+        let captured = try XCTUnwrap(capability.capturedArtifacts)
+        XCTAssertTrue(captured.tokenizerURL.path.hasPrefix(captured.targetURL.path + "/"))
+        XCTAssertTrue(captured.manifestURL.path.hasPrefix(captured.mtpURL.path + "/"))
+        XCTAssertEqual(try MLXSnapshotIdentity.compute(directory: captured.targetURL).digest, fixture.authority.hash)
+    }
+
     private func rejectedError(
         _ data: Data,
         signatureData: Data? = nil,
@@ -881,6 +1018,27 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 trustedKeyring: trustedKeyring ?? fixture.trustedKeyring
             )
             XCTFail("sidecar should reject")
+            return .invalidValue("test did not reject")
+        } catch let error as NativeMTPAdmissionSidecarError {
+            return error
+        }
+    }
+
+    private func rejectedReleaseEnvelopeError(
+        _ fixture: ReleaseEnvelopeFixture,
+        authority: NativeMTPResolvedArtifactAuthority? = nil,
+        includeAuthority: Bool = true
+    ) throws -> NativeMTPAdmissionSidecarError {
+        do {
+            _ = try NativeMTPAdmissionSidecar.load(
+                sidecarData: fixture.sidecarData,
+                signatureData: fixture.signatureData,
+                snapshotRoot: fixture.base.snapshot,
+                context: fixture.context,
+                trustedKeyring: fixture.base.trustedKeyring,
+                resolvedArtifactAuthority: includeAuthority ? (authority ?? fixture.authority) : nil
+            )
+            XCTFail("release envelope should reject")
             return .invalidValue("test did not reject")
         } catch let error as NativeMTPAdmissionSidecarError {
             return error
@@ -1001,6 +1159,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             digests: digests,
             tupleSHA: tupleSHA,
             signer: signer,
+            selfTestBankSHA256: Self.sha256Hex(selfTestBankData),
+            selfTestSignerKeyID: selfTestSignerKeyID,
             trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring(
                 publicKeysByKeyID: [
                     keyID: signer.publicKey.rawRepresentation.base64EncodedString(),
@@ -1022,6 +1182,85 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
+    private func makeReleaseEnvelopeFixture(
+        prepareSnapshot: ((Fixture) throws -> ReleaseLayout)? = nil,
+        mutateProjectionArtifacts: ((inout [String: Any]) -> Void)? = nil
+    ) throws -> ReleaseEnvelopeFixture {
+        let base = try makeFixture()
+        let layout = try prepareSnapshot?(base) ?? ReleaseLayout(
+            targetPath: "target.safetensors",
+            targetSHA256: base.digests["target.safetensors"]!,
+            mtpPath: "mtp.safetensors",
+            mtpSHA256: base.digests["mtp.safetensors"]!,
+            tokenizerPath: "tokenizer.json",
+            tokenizerSHA256: base.digests["tokenizer.json"]!,
+            manifestPath: "mtp-manifest.json",
+            manifestSHA256: base.digests["mtp-manifest.json"]!
+        )
+        var projectionArtifacts: [String: Any] = [
+            "target": ["path": layout.targetPath, "sha256": layout.targetSHA256],
+            "mtp": ["path": layout.mtpPath, "sha256": layout.mtpSHA256],
+            "tokenizer": ["path": layout.tokenizerPath, "sha256": layout.tokenizerSHA256],
+            "manifest": ["path": layout.manifestPath, "sha256": layout.manifestSHA256],
+        ]
+        mutateProjectionArtifacts?(&projectionArtifacts)
+        let projectionData = try Self.jsonData([
+            "schema_version": "macprovider.native-mtp-artifact-projection.v1",
+            "artifacts": projectionArtifacts,
+        ])
+        try projectionData.write(to: base.snapshot.appendingPathComponent("native-mtp-artifact-manifest.json"))
+        let releaseID = "native-mtp-release-2026-09-28"
+        let keyID = base.trustedKeyring.requiredKeyID
+        let issuedAt = Self.iso8601Seconds(Date().addingTimeInterval(-3600))
+        let expiresAt = Self.iso8601Seconds(Date().addingTimeInterval(3600))
+        let entry = Self.releaseEntry(
+            layout: layout,
+            artifactManifestSHA256: Self.sha256Hex(projectionData),
+            challengeBankSHA256: base.selfTestBankSHA256
+        )
+        let envelope: [String: Any] = [
+            "schema_version": NativeMTPAdmissionSidecar.schemaVersion,
+            "release_id": releaseID,
+            "issued_at": issuedAt,
+            "expires_at": expiresAt,
+            "signer_key_id": keyID,
+            "challenge_bank_signer_key_id": base.selfTestSignerKeyID,
+            "revocation_signer_key_id": keyID,
+            "entries": [entry],
+        ]
+        let sidecarData = try Self.jsonData(envelope)
+        let context = NativeMTPAdmissionSidecar.RuntimeContext(
+            modelID: "mlx-community/Qwen3-MTP",
+            modelRevision: layout.targetSHA256,
+            providerRevision: Self.providerRevision,
+            upstreamMLXSwiftLMRevision: Self.upstreamRevision,
+            hardwareChip: "M2 Ultra",
+            ramGB: 256,
+            osVersion: "macOS 15.6",
+            slotCount: 8,
+            revokedTupleSHA256: []
+        )
+        let authority = NativeMTPResolvedArtifactAuthority(
+            releaseID: releaseID,
+            signerKeyID: keyID,
+            feedSHA256: String(repeating: "5", count: 64),
+            modelKey: "mlx-community/Qwen3-MTP",
+            artifactID: "primary",
+            hashAlgorithm: "macprovider.snapshot-manifest.v1",
+            hash: layout.targetSHA256,
+            verificationStatus: "verified",
+            targetRootPath: layout.targetPath,
+            targetSHA256: layout.targetSHA256
+        )
+        return ReleaseEnvelopeFixture(
+            base: base,
+            sidecarData: sidecarData,
+            signatureData: base.signature(for: sidecarData),
+            context: context,
+            authority: authority
+        )
+    }
+
     private struct Fixture {
         let root: URL
         let snapshot: URL
@@ -1031,6 +1270,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         let digests: [String: String]
         let tupleSHA: String
         let signer: Curve25519.Signing.PrivateKey
+        let selfTestBankSHA256: String
+        let selfTestSignerKeyID: String
         let trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring
         let context: NativeMTPAdmissionSidecar.RuntimeContext
 
@@ -1062,6 +1303,51 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 payload: payload,
                 signer: signer,
                 keyID: trustedKeyring.requiredKeyID
+            )
+        }
+    }
+
+    private struct ReleaseLayout {
+        let targetPath: String
+        let targetSHA256: String
+        let mtpPath: String
+        let mtpSHA256: String
+        let tokenizerPath: String
+        let tokenizerSHA256: String
+        let manifestPath: String
+        let manifestSHA256: String
+    }
+
+    private struct ReleaseEnvelopeFixture {
+        let base: Fixture
+        let sidecarData: Data
+        let signatureData: Data
+        let context: NativeMTPAdmissionSidecar.RuntimeContext
+        let authority: NativeMTPResolvedArtifactAuthority
+
+        func authority(
+            releaseID: String? = nil,
+            signerKeyID: String? = nil,
+            feedSHA256: String? = nil,
+            modelKey: String? = nil,
+            artifactID: String? = nil,
+            hashAlgorithm: String? = nil,
+            hash: String? = nil,
+            verificationStatus: String? = nil,
+            targetRootPath: String? = nil,
+            targetSHA256: String? = nil
+        ) -> NativeMTPResolvedArtifactAuthority {
+            NativeMTPResolvedArtifactAuthority(
+                releaseID: releaseID ?? authority.releaseID,
+                signerKeyID: signerKeyID ?? authority.signerKeyID,
+                feedSHA256: feedSHA256 ?? authority.feedSHA256,
+                modelKey: modelKey ?? authority.modelKey,
+                artifactID: artifactID ?? authority.artifactID,
+                hashAlgorithm: hashAlgorithm ?? authority.hashAlgorithm,
+                hash: hash ?? authority.hash,
+                verificationStatus: verificationStatus ?? authority.verificationStatus,
+                targetRootPath: targetRootPath ?? authority.targetRootPath,
+                targetSHA256: targetSHA256 ?? authority.targetSHA256
             )
         }
     }
@@ -1159,6 +1445,73 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         ]
     }
 
+    private static func releaseEntry(
+        layout: ReleaseLayout,
+        artifactManifestSHA256: String,
+        challengeBankSHA256: String
+    ) -> [String: Any] {
+        [
+            "model_key": "mlx-community/Qwen3-MTP",
+            "artifact_id": "primary",
+            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "artifact_hash": layout.targetSHA256,
+            "artifact_manifest_sha256": artifactManifestSHA256,
+            "tokenizer_sha256": layout.tokenizerSHA256,
+            "decode_path": "native_mtp",
+            "mtp_manifest_sha256": layout.manifestSHA256,
+            "mtp_family_adapter": "qwen3_mtp_v1",
+            "mtp_state_class": "stageable_rewindable",
+            "mtp_head_count": 4,
+            "proposal_depth": 4,
+            "complete_window_bytes_by_depth": [1024, 2048, 4096, 8192, 16384],
+            "runtime_revision": upstreamRevision,
+            "provider_revision": providerRevision,
+            "source_commit": providerRevision,
+            "reproducible_build_sha256": String(repeating: "2", count: 64),
+            "live_executable_cdhash": liveExecutableCDHash,
+            "cache_state_classes": ["stageable_rewindable"],
+            "hardware_class": "M2 Ultra",
+            "ram_bytes": 256 * 1_073_741_824,
+            "qualified_slots": 8,
+            "request_feature_profile": "native_mtp_greedy_text_v1",
+            "decrease_threshold_ppm": 1,
+            "increase_threshold_ppm": 2,
+            "max_verification_positions_per_committed_milli": 1000,
+            "throughput_delta_ppm": 42_000,
+            "benchmark_policy_sha256": String(repeating: "3", count: 64),
+            "challenge_bank_sha256": challengeBankSHA256,
+            "fit_evidence_sha256": evidenceSHA,
+            "quality_evidence_sha256": evidenceSHA,
+            "correctness_evidence_sha256": evidenceSHA,
+            "state_rollback_evidence_sha256": evidenceSHA,
+            "batch_evidence_sha256": evidenceSHA,
+            "performance_evidence_sha256": evidenceSHA,
+            "security_negative_evidence_sha256": evidenceSHA,
+            "quantization": [
+                "kind": "base",
+                "packed_data_dtype": "none",
+                "packed_layout": "none",
+                "scale_dtype": "none",
+                "scale_layout": "none",
+                "block_size_elements": NSNull(),
+                "alignment_bytes": NSNull(),
+                "padding_rule": "none",
+                "unquantized_exceptions": [],
+                "per_layer_exceptions": [],
+                "representation_manifest_sha256": String(repeating: "7", count: 64),
+            ],
+            "ordinary_baseline": [
+                "decode_path": "ordinary",
+                "runtime_revision": upstreamRevision,
+                "provider_revision": providerRevision,
+                "artifact_hash": layout.targetSHA256,
+                "qualified_slots": 8,
+                "measurement_sha256": String(repeating: "8", count: 64),
+                "aggregate_tps_milli": 1,
+            ],
+        ]
+    }
+
     private static func jsonData(_ object: [String: Any]) throws -> Data {
         var data = try JSONSerialization.data(
             withJSONObject: object,
@@ -1170,6 +1523,13 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
 
     private static func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func iso8601Seconds(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.string(from: date)
     }
 
     private static func signatureData(
