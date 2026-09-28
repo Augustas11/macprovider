@@ -1,8 +1,8 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.2.5 (2026-07-14, item 20 — streaming SSE retryable-override symmetry made explicit in §8)
+**Version:** 0.2.6 (2026-09-28, streaming cleanup-rewrite byte domain clarified)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.4 LOCKED
-**Status:** LOCKED (v0.2.4 r4 defensive audit: 0 CRITICAL + 0 HIGH + 0 MEDIUM across all 6 lanes). v0.2.5 is a normative clarification of the existing §8 "preserve retryability" requirement — the coordinator streaming SSE writer MUST honor the provider `end.Retryable` override, matching the non-streaming path (runbook item 20; codex 3-lane 0 C/H/M).
+**Status:** LOCKED. v0.2.6 clarifies the streaming cleanup-rewrite byte domain; v0.2.5 clarified the existing §8 "preserve retryability" requirement.
 
 ## Quick orientation
 
@@ -414,15 +414,22 @@ Pydantic object. The current non-streaming anchor pins `openai==2.44.0` and
 and captures `response_format.json_schema`
 (`test/integration/spec_019/openai_python_strict_json_schema/fixture_request_body.json:9-31`).
 
-AC-V2-7. Streaming token-incremental `content` deltas concatenate to the same
-assistant content bytes as the non-streaming response for the same deterministic
-fixture, modulo transport chunk boundaries. The provider already computes
+AC-V2-7. Streaming token-incremental `content` deltas concatenate to the
+authoritative buyer-delivered streaming content bytes used for returned output,
+terminal structured-output validation, and settlement, consistent with
+SPEC-015 §N.5. Those bytes equal the non-streaming response for the same
+deterministic fixture, modulo transport chunk boundaries, for Harmony and for
+tokenizers with `clean_up_tokenization_spaces` disabled. With cleanup enabled,
+the streaming concatenation MAY retain a space that a later cumulative
+non-streaming decode removes, only via the tokenizer's deterministic cleanup
+rule set; it MUST NOT otherwise drop or duplicate content. The provider computes
 content deltas from `emittedText` to the candidate/final text
 (`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:562-592`,
 `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:603-619`); v0.2
-requires the validated final buffer to be that same concatenation. Fail
-condition: streaming validation uses bytes that differ from the buyer-visible
-delta concatenation.
+requires the validated final buffer to be the buyer-visible concatenation. Fail
+condition: streaming validation or settlement uses bytes that differ from the
+buyer-visible delta concatenation, or a stream/non-stream difference is not
+solely the cleanup-rewrite exception above.
 
 AC-V2-8. Empty-content streaming fixture: when the model emits zero tokens, or
 only ASCII structured-output whitespace, under `json_schema` or `json_object`,
@@ -1004,8 +1011,10 @@ No internal retry is allowed in v0.1.0. Buyer retries happen at the buyer layer.
 ### v0.2 streaming validation
 
 For `stream:true` with `json_schema` or `json_object`, the validator runs at
-end-of-stream over the exact byte-equivalent concatenation of buyer-visible SSE
-`content` deltas. This is the same post-hoc validation posture as v0.1
+end-of-stream over the exact concatenation of buyer-visible SSE `content`
+deltas. That immutable concatenation is the streaming output and settlement
+content domain per SPEC-015 §N.5, including when tokenizer cleanup later removes
+a previously delivered space from the non-streaming decode. This is the same post-hoc validation posture as v0.1
 non-streaming, using the same structured validator semantics; v0.2 relaxes the
 pre-inference `stream:true` reject gate rather than introducing constrained
 decoding. Current non-streaming validation is anchored at
@@ -1611,9 +1620,9 @@ v0.2 audit lanes should additionally probe:
 
 ## 12. Document metadata
 
-**Version:** 0.2.5 (2026-07-14, item 20 amendment)
+**Version:** 0.2.6 (2026-09-28, streaming cleanup-rewrite byte domain clarified)
 
-**Status:** LOCKED (v0.2.4 r4 defensive audit: 0 CRITICAL + 0 HIGH + 0 MEDIUM across all 6 lanes). v0.2.5 adds one normative clause to §8 (streaming SSE writer MUST honor the provider `end.Retryable` override) — a clarification of the pre-existing "preserve retryability" requirement, landed with the item-20 code fix under a codex 3-lane 0 C/H/M audit.
+**Status:** LOCKED. v0.2.6 clarifies the streaming cleanup-rewrite byte domain; v0.2.5 added the §8 retryable-override clarification.
 
 Audit trajectory:
 - r1: 1C + 9H + 9M → absorbed in v0.2.1.
@@ -1635,6 +1644,14 @@ Drafting scope: no implementation code, no SPEC-018 edits, no SPEC-015 schema
 change, no new HTTP endpoint.
 
 ### Change log
+
+- **v0.2.6 (2026-09-28, cleanup-rewrite byte-domain clarification):** AC-V2-7
+  and the v0.2 streaming-validation contract now name the immutable
+  buyer-delivered `delta.content` concatenation as the output, validation, and
+  settlement content domain per SPEC-015 §N.5. Exact stream/non-stream parity
+  remains required for Harmony and cleanup-disabled tokenizers; cleanup-enabled
+  tokenizers may retain only a space removed by the deterministic cleanup rule
+  set, with no other dropped or duplicated content.
 
 - **v0.2.5 (2026-07-14, runbook item 20 — streaming retryable-override
   symmetry):** §8's "Provider-to-coordinator WS terminal validation failure

@@ -3,6 +3,49 @@ import MacProviderCore
 @testable import macprovider_cli
 
 final class StreamingEmitterCleanupRewriteTests: XCTestCase {
+    func testEveryCleanupRuleAndSplitMatchesWholeStringOracleWithoutContentLoss() throws {
+        let patterns = [" .", " ?", " !", " ,", " ' ", " n't", " 'm", " 's", " 've", " 're"]
+        let inputs = patterns.map { "A\($0)B" } + ["A 's .B", "A n't ?B"]
+
+        for input in inputs {
+            let expected = Self.cleanupReference(input)
+            for pieces in Self.twoAndThreeWaySplits(input) {
+                let detokenizer = ModelRuntime.StreamingDetokenizer(
+                    decode: { ids in ids.map { pieces[$0] }.joined() },
+                    tokenPiece: { pieces[$0] },
+                    cleanUpTokenizationSpaces: true
+                )
+                let decoder = detokenizer.makeIncremental()
+                let request = try makeRequest(stops: [])
+                let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+                let idle = StructuredStreamingIdleState(enabled: false)
+                var emitter = SerialStreamingTextEmitter(request: request)
+                var chunks: [String] = []
+
+                for token in pieces.indices {
+                    let cumulative = decoder.append(token)
+                    _ = emitter.step(
+                        candidate: (text: cumulative, hitStop: false),
+                        structuredAccumulator: accumulator,
+                        idleState: idle,
+                        onChunk: { if case .content(let text) = $0 { chunks.append(text) } }
+                    )
+                }
+
+                XCTAssertEqual(decoder.appendedText, expected, "input=\(input) pieces=\(pieces)")
+                let delivered = chunks.joined()
+                XCTAssertTrue(
+                    Self.differsOnlyByRetainingCleanupDeletedSpaces(
+                        delivered,
+                        original: input,
+                        cleaned: expected
+                    ),
+                    "stream duplicated, reordered, or dropped non-cleanup content; input=\(input) pieces=\(pieces) delivered=\(delivered)"
+                )
+            }
+        }
+    }
+
     func testPrefixExtendingDecodesKeepExistingChunkBoundaries() throws {
         let chunks = try stream(decodes: ["a", "ab", "abc"])
 
@@ -143,5 +186,73 @@ final class StreamingEmitterCleanupRewriteTests: XCTestCase {
             body["stop"] = stops
         }
         return try ChatCompletionRequest.parse(data: JSONSerialization.data(withJSONObject: body))
+    }
+
+    private static func cleanupReference(_ input: String) -> String {
+        input
+            .replacingOccurrences(of: " .", with: ".")
+            .replacingOccurrences(of: " ?", with: "?")
+            .replacingOccurrences(of: " !", with: "!")
+            .replacingOccurrences(of: " ,", with: ",")
+            .replacingOccurrences(of: " ' ", with: "'")
+            .replacingOccurrences(of: " n't", with: "n't")
+            .replacingOccurrences(of: " 'm", with: "'m")
+            .replacingOccurrences(of: " 's", with: "'s")
+            .replacingOccurrences(of: " 've", with: "'ve")
+            .replacingOccurrences(of: " 're", with: "'re")
+    }
+
+    private static func twoAndThreeWaySplits(_ input: String) -> [[String]] {
+        let characters = Array(input)
+        var result: [[String]] = []
+        for first in 1..<characters.count {
+            result.append([
+                String(characters[..<first]),
+                String(characters[first...]),
+            ])
+            for second in (first + 1)..<characters.count {
+                result.append([
+                    String(characters[..<first]),
+                    String(characters[first..<second]),
+                    String(characters[second...]),
+                ])
+            }
+        }
+        return result
+    }
+
+    private static func differsOnlyByRetainingCleanupDeletedSpaces(
+        _ delivered: String,
+        original: String,
+        cleaned: String
+    ) -> Bool {
+        let originalCharacters = Array(original)
+        let cleanedCharacters = Array(cleaned)
+        let deliveredCharacters = Array(delivered)
+        var cleanupDeletedIndices = Set<Int>()
+        var cleanedIndex = 0
+
+        for (originalIndex, character) in originalCharacters.enumerated() {
+            if cleanedIndex < cleanedCharacters.count,
+               character == cleanedCharacters[cleanedIndex] {
+                cleanedIndex += 1
+            } else if character == " " {
+                cleanupDeletedIndices.insert(originalIndex)
+            } else {
+                return false
+            }
+        }
+        guard cleanedIndex == cleanedCharacters.count else { return false }
+
+        var deliveredIndex = 0
+        for (originalIndex, character) in originalCharacters.enumerated() {
+            if deliveredIndex < deliveredCharacters.count,
+               character == deliveredCharacters[deliveredIndex] {
+                deliveredIndex += 1
+            } else if !cleanupDeletedIndices.contains(originalIndex) {
+                return false
+            }
+        }
+        return deliveredIndex == deliveredCharacters.count
     }
 }

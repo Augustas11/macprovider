@@ -1,11 +1,84 @@
 package buyer
 
 import (
+	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 )
+
+func TestSettlementStreamCleanupRewriteGoldenBindsDeliveredBytes(t *testing.T) {
+	var fixture struct {
+		DeliveredDeltas    []string       `json:"delivered_deltas"`
+		DeliveredContent   string         `json:"delivered_content"`
+		NonStreamContent   string         `json:"non_stream_content"`
+		SettlementOutputV1 map[string]any `json:"settlement_output_v1"`
+		ExpectedCanonical  string         `json:"expected_canonical"`
+		ExpectedOutputHash string         `json:"expected_output_hash"`
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "spec015", "stream_cleanup_settlement.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := newSettlementStreamOutputTracker()
+	for _, delta := range fixture.DeliveredDeltas {
+		chunk, err := json.Marshal(map[string]any{
+			"choices": []any{map[string]any{"delta": map[string]any{"content": delta}}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := tracker.observeLine(append(append([]byte("data: "), chunk...), '\n', '\n')); err != nil {
+			t.Fatalf("observe delivered delta %q: %v", delta, err)
+		}
+	}
+	finish := []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+	if err := tracker.observeLine(finish); err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.observeLine([]byte("data: [DONE]\n\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	output := tracker.outputAt(billing.TerminalStateNormalDone, 1_800_000_000_000)
+	if !output.Available {
+		t.Fatalf("tracked output unavailable: %#v", output)
+	}
+	if output.Content != fixture.DeliveredContent {
+		t.Fatalf("content=%q want delivered concatenation %q", output.Content, fixture.DeliveredContent)
+	}
+	if output.Content == fixture.NonStreamContent {
+		t.Fatalf("tracker used non-stream cleanup decode %q", fixture.NonStreamContent)
+	}
+	digest, canonical, err := output.Digest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(canonical) != fixture.ExpectedCanonical {
+		t.Fatalf("canonical=%s want %s", canonical, fixture.ExpectedCanonical)
+	}
+	if digest != fixture.ExpectedOutputHash {
+		t.Fatalf("output_hash=%s want %s", digest, fixture.ExpectedOutputHash)
+	}
+	if got, want := output.Value(), fixture.SettlementOutputV1; !mapsEqualJSON(got, want) {
+		gotJSON, _ := json.Marshal(got)
+		wantJSON, _ := json.Marshal(want)
+		t.Fatalf("settlement output=%s want %s", gotJSON, wantJSON)
+	}
+}
+
+func mapsEqualJSON(left, right map[string]any) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && string(leftJSON) == string(rightJSON)
+}
 
 func TestTerminalStateFromAttemptCoversReceiptTerminalStates(t *testing.T) {
 	tests := []struct {
