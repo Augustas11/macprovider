@@ -26,6 +26,9 @@ PEARL_UPDATER_GATEWAY_DRAIN_TIMEOUT_S=90
 PEARL_UPDATER_GATEWAY_DRAIN_STEADY_S=5
 PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S=900
 PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S=60
+# Bounds each SQLite snapshot step (.backup and PRAGMA integrity_check) while
+# traffic is stopped. Scale with the largest money DB; 60-3600 s.
+PEARL_UPDATER_SQLITE_SNAPSHOT_TIMEOUT_S=900
 PEARL_UPDATER_CANARY_TIMEOUT_S=720
 # Defaults to required. Use disabled only during an explicitly sealed production
 # window where both canary enable gates are absent, the root-owned empty 0644

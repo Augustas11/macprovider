@@ -326,6 +326,7 @@ class Config:
     gateway_drain_steady_s: int = 5
     provider_recovery_timeout_s: int = 900
     service_health_timeout_s: int = 60
+    sqlite_snapshot_timeout_s: int = 900
     canary_timeout_s: int = 720
     buyer_canary_mode: str = BUYER_CANARY_MODE_REQUIRED
     revoked_versions_file: Path = Path("/etc/macprovider/pearl-updater.revoked")
@@ -718,6 +719,7 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
         "PEARL_UPDATER_GATEWAY_DRAIN_STEADY_S",
         "PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S",
         "PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S",
+        "PEARL_UPDATER_SQLITE_SNAPSHOT_TIMEOUT_S",
         "PEARL_UPDATER_CANARY_TIMEOUT_S",
         "PEARL_UPDATER_BUYER_CANARY_MODE",
         "PEARL_UPDATER_REVOKED_VERSIONS_FILE",
@@ -758,6 +760,7 @@ def load_config(path: Path, *, trusted_uid: int | None = None) -> Config:
         gateway_drain_steady_s=bounded_int(values.get("PEARL_UPDATER_GATEWAY_DRAIN_STEADY_S", "5"), "gateway drain steady", 1, 30),
         provider_recovery_timeout_s=bounded_int(values.get("PEARL_UPDATER_PROVIDER_RECOVERY_TIMEOUT_S", "900"), "provider recovery timeout", 10, 900),
         service_health_timeout_s=bounded_int(values.get("PEARL_UPDATER_SERVICE_HEALTH_TIMEOUT_S", "60"), "service health timeout", 5, 300),
+        sqlite_snapshot_timeout_s=bounded_int(values.get("PEARL_UPDATER_SQLITE_SNAPSHOT_TIMEOUT_S", "900"), "SQLite snapshot timeout", 60, 3600),
         canary_timeout_s=bounded_int(values.get("PEARL_UPDATER_CANARY_TIMEOUT_S", "720"), "canary timeout", 700, 1800),
         buyer_canary_mode=enum_value(
             values.get("PEARL_UPDATER_BUYER_CANARY_MODE", BUYER_CANARY_MODE_REQUIRED),
@@ -4127,10 +4130,14 @@ class Updater:
         self._journal_transition("traffic_quiesced")
 
     def sqlite_backup(self, source: Path, destination: Path) -> None:
-        result = self.run_command(["sqlite3", "-bail", str(source), f".backup '{destination}'"], check=False, timeout=300)
+        # Traffic is stopped for the whole snapshot. The integrity check scales
+        # with the money DB (a 5.2 GB coordinator.db exceeded 300 s on Pearl,
+        # #1775), so the bound is operator-configured rather than fixed.
+        timeout = self.config.sqlite_snapshot_timeout_s
+        result = self.run_command(["sqlite3", "-bail", str(source), f".backup '{destination}'"], check=False, timeout=timeout)
         if result.returncode != 0 or not destination.is_file():
             raise UpdateError(f"SQLite snapshot failed for {source}: {result.stderr.strip()}")
-        check = self.run_command(["sqlite3", "-bail", str(destination), "PRAGMA integrity_check;"], check=False, timeout=300)
+        check = self.run_command(["sqlite3", "-bail", str(destination), "PRAGMA integrity_check;"], check=False, timeout=timeout)
         if check.returncode != 0 or check.stdout.strip() != "ok":
             raise UpdateError(f"SQLite snapshot integrity check failed for {source}")
         destination.chmod(0o600)
