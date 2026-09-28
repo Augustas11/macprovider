@@ -13,6 +13,7 @@ final class NativeMTPStatusTests: XCTestCase {
             resetGeneration: 7,
             lastReason: .active
         )
+        sink.recordNativeMTPAdmission(rowCount: 2)
         sink.beginRound(requestedDepths: [4, 2])
         XCTAssertEqual(sink.snapshot().mode, .active)
         sink.recordRound(NativeMTPStatusSink.Round(
@@ -50,6 +51,100 @@ final class NativeMTPStatusTests: XCTestCase {
             (object["accepted_by_position"] as? [NSNumber])?.map(\.uint64Value),
             [2, 1, 0, 0]
         )
+    }
+
+    func testRequestsSinceResetCountsNativeAdmissionOnceAcrossMultipleRounds() {
+        let sink = NativeMTPStatusSink(
+            supported: true,
+            enabled: true,
+            family: "qwen3_mtp_v1",
+            proposalDepth: 2,
+            throughputDeltaPPM: 0,
+            resetGeneration: 1,
+            lastReason: .active
+        )
+
+        sink.recordNativeMTPAdmission()
+        for _ in 0..<3 {
+            sink.beginRound(requestedDepths: [2])
+            sink.recordRound(NativeMTPStatusSink.Round(
+                requestedDepths: [2],
+                proposedTokens: 2,
+                acceptedTokens: 1,
+                bonusTokens: 0,
+                committedTokens: 1,
+                acceptedProposalTokensByRow: [1],
+                verificationOverheadMS: 1
+            ))
+            sink.endRound()
+        }
+
+        XCTAssertEqual(sink.snapshot().requestsSinceReset, 1)
+        XCTAssertEqual(sink.snapshot().mtpForwards, 3)
+    }
+
+    func testRequestsSinceResetCountsMultiRowNativeAdmissionOnce() {
+        let sink = NativeMTPStatusSink(
+            supported: true,
+            enabled: true,
+            family: "qwen3_mtp_v1",
+            proposalDepth: 2,
+            throughputDeltaPPM: 0,
+            resetGeneration: 1,
+            lastReason: .active
+        )
+
+        sink.recordNativeMTPAdmission(rowCount: 3)
+        sink.beginRound(requestedDepths: [2, 1, 0])
+        sink.recordRound(NativeMTPStatusSink.Round(
+            requestedDepths: [2, 1, 0],
+            proposedTokens: 3,
+            acceptedTokens: 1,
+            bonusTokens: 0,
+            committedTokens: 1,
+            acceptedProposalTokensByRow: [1, 0, 0],
+            verificationOverheadMS: 1
+        ))
+        sink.endRound()
+        sink.beginRound(requestedDepths: [2, 1, 0])
+        sink.recordRound(NativeMTPStatusSink.Round(
+            requestedDepths: [2, 1, 0],
+            proposedTokens: 3,
+            acceptedTokens: 1,
+            bonusTokens: 0,
+            committedTokens: 1,
+            acceptedProposalTokensByRow: [0, 1, 0],
+            verificationOverheadMS: 1
+        ))
+        sink.endRound()
+
+        XCTAssertEqual(sink.snapshot().requestsSinceReset, 3)
+        XCTAssertEqual(sink.snapshot().mtpForwards, 2)
+    }
+
+    func testRoundAccountingDoesNotCountFallbackOnlyRowsAsRequests() {
+        let sink = NativeMTPStatusSink(
+            supported: true,
+            enabled: true,
+            family: "qwen3_mtp_v1",
+            proposalDepth: 2,
+            throughputDeltaPPM: 0,
+            resetGeneration: 1,
+            lastReason: .active
+        )
+
+        sink.recordRound(NativeMTPStatusSink.Round(
+            requestedDepths: [2],
+            proposedTokens: 2,
+            acceptedTokens: 1,
+            bonusTokens: 0,
+            committedTokens: 1,
+            acceptedProposalTokensByRow: [1],
+            verificationOverheadMS: 1
+        ))
+
+        XCTAssertEqual(sink.snapshot().requestsSinceReset, 0)
+        XCTAssertEqual(sink.snapshot().mtpForwards, 1)
     }
 
     func testDepthZeroRoundReportsDegradedModeWhileActive() {

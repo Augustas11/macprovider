@@ -3702,6 +3702,9 @@ actor ContinuousBatchScheduler {
                 record(.promptHeadroomReserved)
                 record(.accepted)
                 try? FileHandle.standardError.write(contentsOf: Data("event=batching_admitted action=scheduler_admitted\n".utf8))
+                if request.decodePath == .nativeMTP {
+                    configuration.nativeMTPStatusSink?.recordNativeMTPAdmission()
+                }
                 activePrompt[request.id] = Row(
                     request: request,
                     handle: handle,

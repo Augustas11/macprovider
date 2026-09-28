@@ -235,11 +235,18 @@ final class NativeMTPStatusSink: @unchecked Sendable, Equatable {
         }
     }
 
+    func recordNativeMTPAdmission(rowCount: Int = 1) {
+        guard rowCount > 0 else { return }
+        lock.withLock {
+            guard !disabledBySaturation else { return }
+            add(UInt64(rowCount), to: \.requestsSinceReset)
+        }
+    }
+
     func recordRound(_ round: Round) {
         lock.withLock {
             guard !disabledBySaturation else { return }
             let rejected = max(0, round.proposedTokens - round.acceptedTokens)
-            add(UInt64(round.requestedDepths.count), to: \.requestsSinceReset)
             add(UInt64(max(0, round.proposedTokens)), to: \.proposedTokens)
             add(UInt64(max(0, round.acceptedTokens)), to: \.acceptedTokens)
             add(UInt64(rejected), to: \.rejectedTokens)
