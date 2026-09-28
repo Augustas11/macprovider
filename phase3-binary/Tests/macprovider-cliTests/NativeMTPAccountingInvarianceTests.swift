@@ -214,8 +214,8 @@ final class NativeMTPAccountingInvarianceTests: XCTestCase {
             content: content,
             toolCalls: nil,
             finishReason: "stop",
-            promptTokens: promptTokens,
-            completionTokens: completionTokens,
+            promptTokens: Int64(promptTokens),
+            completionTokens: Int64(completionTokens),
             terminalState: terminalState,
             terminalStateUnixMS: 1_800_000_000_123,
             issuedAtUnixMS: 1_800_000_000_124

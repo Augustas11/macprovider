@@ -346,8 +346,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         var captured: NativeMTPAdmissionCapturedArtifacts? = try loadCapturedArtifacts(fixture)
         let stagedRoot = try XCTUnwrap(captured?.rootURL)
         let stagedFile = try XCTUnwrap(captured?.targetURL)
-        XCTAssertEqual(permissions(stagedRoot) & 0o777, 0o500)
-        XCTAssertEqual(permissions(stagedFile) & 0o777, 0o400)
+        XCTAssertEqual(try permissions(stagedRoot) & 0o777, 0o500)
+        XCTAssertEqual(try permissions(stagedFile) & 0o777, 0o400)
 
         captured = nil
 

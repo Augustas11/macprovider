@@ -193,6 +193,7 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
             stream: true,
             stop: ["STOP"]
         )
+        let admissionCountBeforeStream = admissionRecorder.snapshot().count
         let handle = try await nativeRuntime.acquireRequestHandle(streamingStopRequest)
         defer { Task { await nativeRuntime.unregisterInFlight(handle.registrationID) } }
         let streamRecorder = NativeMTPHardwareStreamRecorder()
@@ -200,7 +201,7 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
             streamRecorder.append(chunk)
         }
         XCTAssertFalse(streamRecorder.snapshot().isEmpty)
-        let streamingAdmissions = admissionRecorder.snapshot().filter { $0.requestID == "native-mtp-real-stream-stop" }
+        let streamingAdmissions = admissionRecorder.snapshot().dropFirst(admissionCountBeforeStream)
         XCTAssertEqual(streamingAdmissions.last?.effectivePath, .nativeMTP)
 
         let snapshot = await nativeRuntime.currentSnapshot()

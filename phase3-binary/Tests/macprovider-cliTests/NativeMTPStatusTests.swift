@@ -213,7 +213,7 @@ final class NativeMTPStatusTests: XCTestCase {
         XCTAssertEqual(snapshot.proposedTokens, UInt64.max)
     }
 
-    func testMetricsSamplesUseOnlyBoundedLabels() {
+    func testMetricsSamplesUseOnlyBoundedLabels() throws {
         let sink = NativeMTPStatusSink(
             supported: true,
             enabled: true,
