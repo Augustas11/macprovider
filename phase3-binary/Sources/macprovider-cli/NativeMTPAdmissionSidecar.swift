@@ -839,7 +839,14 @@ enum NativeMTPAdmissionSidecar {
         guard case .object(let root) = value else {
             throw NativeMTPAdmissionSidecarError.wrongType("$")
         }
-        let parsed = try parseRoot(root).withSidecarSHA256(sha256Hex(sidecarData))
+        let legacyParsed = try parseRoot(root)
+        guard legacyParsed.tupleSHA256 == legacyParsed.spec023.nativeMTPAdmissionTupleSHA256 else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("$.spec023.native_mtp_admission_tuple_sha256")
+        }
+        guard legacyParsed.tupleSHA256 == admissionTupleSHA256(legacyParsed) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("$.tuple_sha256")
+        }
+        let parsed = legacyParsed.withSidecarSHA256(sha256Hex(sidecarData))
         return try validateParsedCapability(
             parsed,
             snapshotRoot: snapshotRoot,

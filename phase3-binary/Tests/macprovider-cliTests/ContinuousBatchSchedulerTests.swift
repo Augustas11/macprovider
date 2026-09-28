@@ -4811,19 +4811,31 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     }
 
     func testNativeMTPConcurrentRowsCannotOvercommitRoundByteBudgetBeforeProposal() async throws {
+        let decodeGate = AsyncGate()
         let proposalGate = AsyncGate()
         let backend = ScriptedBackend(
-            scripts: [:],
+            scripts: ["blocker": [4, 5]],
             prefillTokens: ["a": 6, "b": 8],
+            decodeGate: decodeGate,
             nativeTargetTopTokens: ["a": [7], "b": [9]],
             nativeProposalGate: proposalGate
         )
         let scheduler = try await makeScheduler(
-            maxActiveRows: 2,
+            maxActiveRows: 3,
             maxPrefillRowsPerIteration: 2,
             nativeMTPRoundByteCapacity: 24,
             backend: backend
         )
+
+        let blocker = Task {
+            try await scheduler.submit(.init(
+                id: "blocker",
+                conversationKey: "",
+                promptTokens: [0],
+                maxOutputTokens: 2
+            ))
+        }
+        try await eventually { await scheduler.metrics().activeDecodeRows == 1 }
 
         let a = Task {
             try await scheduler.submit(Self.nativeRequest(
@@ -4846,6 +4858,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             ))
         }
 
+        try await eventually { await scheduler.metrics().waitingCount == 2 }
+        await decodeGate.open()
+        _ = try await blocker.value
         try await eventually { await scheduler.nativeMTPReservedRoundBytesSnapshot() == 16 }
         await proposalGate.open()
         let results = try await [a.value, b.value]
@@ -4964,15 +4979,17 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     }
 
     func testNativeMTPConcurrentRowsHonorSystemHeadroomAndRelease() async throws {
+        let decodeGate = AsyncGate()
         let proposalGate = AsyncGate()
         let backend = ScriptedBackend(
-            scripts: [:],
+            scripts: ["blocker": [4, 5]],
             prefillTokens: ["a": 6, "b": 8],
+            decodeGate: decodeGate,
             nativeTargetTopTokens: ["a": [7], "b": [9]],
             nativeProposalGate: proposalGate
         )
         let scheduler = try await makeScheduler(
-            maxActiveRows: 2,
+            maxActiveRows: 3,
             maxPrefillRowsPerIteration: 2,
             nativeMTPRoundByteCapacity: 64,
             nativeMTPRoundSystemMemoryProbe: Self.nativeMTPMemoryProbe(
@@ -4981,6 +4998,16 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             ),
             backend: backend
         )
+
+        let blocker = Task {
+            try await scheduler.submit(.init(
+                id: "blocker",
+                conversationKey: "",
+                promptTokens: [0],
+                maxOutputTokens: 2
+            ))
+        }
+        try await eventually { await scheduler.metrics().activeDecodeRows == 1 }
 
         let a = Task {
             try await scheduler.submit(Self.nativeRequest(
@@ -5003,6 +5030,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             ))
         }
 
+        try await eventually { await scheduler.metrics().waitingCount == 2 }
+        await decodeGate.open()
+        _ = try await blocker.value
         try await eventually { await scheduler.nativeMTPReservedRoundBytesSnapshot() == 16 }
         await proposalGate.open()
         let results = try await [a.value, b.value]
