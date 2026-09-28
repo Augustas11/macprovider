@@ -15,7 +15,7 @@ final class StreamingSettlementBindingTests: XCTestCase {
         )
         XCTAssertEqual(serial.deltas, fixture.deliveredDeltas)
         XCTAssertEqual(serial.completion.content, fixture.deliveredContent)
-        XCTAssertNotEqual(serial.completion.content, fixture.nonStreamContent)
+        XCTAssertEqual(serial.completion.content, fixture.nonStreamContent)
         try assertSettlementBinding(serial.completion, fixture: fixture)
 
         let batched = try continuousBatchStream(
@@ -109,6 +109,163 @@ final class StreamingSettlementBindingTests: XCTestCase {
         XCTAssertGreaterThan(toolDeltaCount, 0)
         XCTAssertEqual(completion.content, "")
         try assertSettlementBinding(completion)
+    }
+
+    func testCleanupSensitiveToolArgumentsMatchFinalBytesForSerialAndContinuousBatch() throws {
+        let request = try makeRequest(withTools: true)
+        let finalArguments = #"{"query":"It's fine"}"#
+        let finalText = #"<tool_call>{"name":"lookup","arguments":{"query":"It's fine"}}</tool_call>"#
+        let call = macprovider_cli.ToolCall(
+            id: "call_0123456789abcdef0123456789abcdef",
+            functionName: "lookup",
+            arguments: finalArguments
+        )
+
+        let serial = try toolArgumentStream(
+            request: request,
+            snapshots: [
+                #"<tool_call>{"name":"lookup","arguments":{"query":"It "#,
+                #"<tool_call>{"name":"lookup","arguments":{"query":"It's"#,
+                finalText,
+            ],
+            finalText: finalText,
+            call: call
+        )
+        XCTAssertEqual(Data(serial.arguments.utf8), Data(finalArguments.utf8))
+        XCTAssertEqual(serial.deliveredID, serial.finalCall.id)
+        XCTAssertEqual(serial.deliveredName, serial.finalCall.functionName)
+        try assertSettlementBinding(CompletionResult(
+            content: "",
+            finishReason: "tool_calls",
+            promptTokens: 1,
+            completionTokens: 1,
+            toolCalls: [serial.finalCall],
+            settlementDisposition: .eligibleOwner
+        ))
+
+        let pieces = [
+            #"<tool_call>{"name":"lookup","arguments":{"query":"It"#,
+            "Ġ", "'", "s", "Ġfine", #""}}</tool_call>"#,
+        ]
+        let batched = try continuousBatchToolArgumentStream(
+            request: request,
+            pieces: pieces,
+            finalText: finalText,
+            call: call
+        )
+        XCTAssertEqual(Data(batched.arguments.utf8), Data(finalArguments.utf8))
+        XCTAssertEqual(batched.completion.toolCalls?.first?.arguments, finalArguments)
+        XCTAssertEqual(batched.deliveredID, batched.completion.toolCalls?.first?.id)
+        XCTAssertEqual(batched.deliveredName, batched.completion.toolCalls?.first?.functionName)
+        try assertSettlementBinding(batched.completion)
+    }
+
+    func testCleanupHoldbackBypassFailsClosedBeforeFinalToolArgumentsCanBeSigned() throws {
+        let request = try makeRequest(withTools: true)
+        let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+        let idle = StructuredStreamingIdleState(enabled: false)
+        var emitter = SerialStreamingTextEmitter(
+            request: request,
+            holdsCleanupPatternPrefixes: false
+        )
+        let provisional = #"<tool_call>{"name":"lookup","arguments":{"query":"It 's fine"}}</tool_call>"#
+        _ = emitter.step(
+            candidate: (text: provisional, hitStop: false),
+            structuredAccumulator: accumulator,
+            idleState: idle,
+            onChunk: { _ in }
+        )
+        let call = macprovider_cli.ToolCall(
+            id: "call_0123456789abcdef0123456789abcdef",
+            functionName: "lookup",
+            arguments: #"{"query":"It's fine"}"#
+        )
+
+        XCTAssertThrowsError(try emitter.finish(
+            finalText: #"<tool_call>{"name":"lookup","arguments":{"query":"It's fine"}}</tool_call>"#,
+            parsed: ModelRuntime.ParsedGeneratedOutput(
+                content: "",
+                toolCalls: [call],
+                completionTokens: 1,
+                generatedCompletionTokens: 1,
+                hitStop: false,
+                isTerminal: true
+            ),
+            structuredAccumulator: accumulator,
+            idleState: idle,
+            onChunk: { _ in }
+        )) { error in
+            XCTAssertEqual((error as? APIError)?.code, "malformed_tool_call_final_json")
+        }
+    }
+
+    func testFinalCloseRejectsNonPrefixToolArgumentFallback() {
+        let streamed = StreamedToolCallArgs()
+        streamed.note(StreamToolCallDelta(
+            index: 0,
+            id: "call_0123456789abcdef0123456789abcdef",
+            type: "function",
+            functionName: "lookup",
+            arguments: #"{"query":"It 's"#
+        ))
+        let call = macprovider_cli.ToolCall(
+            id: "call_0123456789abcdef0123456789abcdef",
+            functionName: "lookup",
+            arguments: #"{"query":"It's fine"}"#
+        )
+
+        XCTAssertThrowsError(try streamed.finalDeltas(for: [call])) { error in
+            XCTAssertEqual((error as? APIError)?.code, "malformed_tool_call_final_json")
+        }
+    }
+
+    func testFinalCloseRejectsToolCallIdentityMismatch() {
+        let streamed = StreamedToolCallArgs()
+        streamed.note(StreamToolCallDelta(
+            index: 0,
+            id: "call_delivered",
+            type: "function",
+            functionName: "lookup",
+            arguments: #"{"query":"It's fine"}"#
+        ))
+        let finalized = macprovider_cli.ToolCall(
+            id: "call_finalized",
+            functionName: "lookup",
+            arguments: #"{"query":"It's fine"}"#
+        )
+
+        XCTAssertThrowsError(try streamed.finalDeltas(for: [finalized])) { error in
+            XCTAssertEqual((error as? APIError)?.code, "malformed_tool_call_final_json")
+        }
+
+        let invalidType = StreamedToolCallArgs()
+        invalidType.note(StreamToolCallDelta(
+            index: 0,
+            id: finalized.id,
+            type: "evil",
+            functionName: finalized.functionName,
+            arguments: finalized.arguments
+        ))
+        XCTAssertThrowsError(try invalidType.finalDeltas(for: [finalized])) { error in
+            XCTAssertEqual((error as? APIError)?.code, "malformed_tool_call_final_json")
+        }
+
+        let fragmentedName = StreamedToolCallArgs()
+        fragmentedName.note(StreamToolCallDelta(
+            index: 0,
+            id: finalized.id,
+            type: "function",
+            functionName: "look",
+            arguments: ""
+        ))
+        fragmentedName.note(StreamToolCallDelta(
+            index: 0,
+            id: nil,
+            type: nil,
+            functionName: "up",
+            arguments: finalized.arguments
+        ))
+        XCTAssertNoThrow(try fragmentedName.finalDeltas(for: [finalized]))
     }
 
     func testNoRewriteContentEqualsParsedContentAndSettlement() throws {
@@ -229,6 +386,133 @@ final class StreamingSettlementBindingTests: XCTestCase {
             onChunk: { if case .content(let text) = $0 { deltas.append(text) } }
         )
         return (deltas, completion)
+    }
+
+    private func toolArgumentStream(
+        request: ChatCompletionRequest,
+        snapshots: [String],
+        finalText: String,
+        call: macprovider_cli.ToolCall
+    ) throws -> (arguments: String, deliveredID: String?, deliveredName: String?, finalCall: macprovider_cli.ToolCall) {
+        let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+        let idle = StructuredStreamingIdleState(enabled: false)
+        var emitter = SerialStreamingTextEmitter(request: request)
+        var arguments = ""
+        var deliveredID: String?
+        var deliveredName: String?
+        let sink: (StreamChunk) -> Void = { chunk in
+            if case .toolCallDelta(let delta) = chunk {
+                if let id = delta.id { deliveredID = id }
+                if let functionName = delta.functionName { deliveredName = functionName }
+                arguments += delta.arguments ?? ""
+                XCTAssertTrue(
+                    call.arguments.hasPrefix(arguments),
+                    "every delivered argument concatenation must prefix the finalized arguments"
+                )
+            }
+        }
+        for snapshot in snapshots {
+            _ = emitter.step(
+                candidate: (text: snapshot, hitStop: false),
+                structuredAccumulator: accumulator,
+                idleState: idle,
+                onChunk: sink
+            )
+        }
+        try emitter.finish(
+            finalText: finalText,
+            parsed: ModelRuntime.ParsedGeneratedOutput(
+                content: "",
+                toolCalls: [call],
+                completionTokens: snapshots.count,
+                generatedCompletionTokens: snapshots.count,
+                hitStop: false,
+                isTerminal: true
+            ),
+            structuredAccumulator: accumulator,
+            idleState: idle,
+            onChunk: sink
+        )
+        XCTAssertEqual(emitter.cleanupRewriteFallbackCount, 0)
+        return (
+            arguments,
+            deliveredID,
+            deliveredName,
+            try XCTUnwrap(emitter.reconciledToolCalls.first)
+        )
+    }
+
+    private func continuousBatchToolArgumentStream(
+        request: ChatCompletionRequest,
+        pieces: [String],
+        finalText: String,
+        call: macprovider_cli.ToolCall
+    ) throws -> (arguments: String, deliveredID: String?, deliveredName: String?, completion: CompletionResult) {
+        let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+        let idle = StructuredStreamingIdleState(enabled: false)
+        let state = ModelRuntime.AttachedPagedKVStreamState(
+            request: request,
+            detokenizer: ModelRuntime.StreamingDetokenizer(
+                decode: { _ in finalText },
+                tokenPiece: { pieces[$0] },
+                cleanUpTokenizationSpaces: true
+            )
+        )
+        var arguments = ""
+        var deliveredID: String?
+        var deliveredName: String?
+        let sink: (StreamChunk) -> Void = { chunk in
+            if case .toolCallDelta(let delta) = chunk {
+                if let id = delta.id { deliveredID = id }
+                if let functionName = delta.functionName { deliveredName = functionName }
+                arguments += delta.arguments ?? ""
+                XCTAssertTrue(
+                    call.arguments.hasPrefix(arguments),
+                    "every batched argument concatenation must prefix the finalized arguments"
+                )
+            }
+        }
+        for token in pieces.indices {
+            _ = state.step(
+                eventTokens: [token],
+                stopTokenFilter: StopTokenFilter(tokens: []),
+                requestStops: [],
+                structuredAccumulator: accumulator,
+                idleState: idle,
+                onChunk: sink
+            )
+        }
+        let parsed = ModelRuntime.ParsedGeneratedOutput(
+            content: "",
+            toolCalls: [call],
+            completionTokens: pieces.count,
+            generatedCompletionTokens: pieces.count,
+            hitStop: false,
+            isTerminal: true
+        )
+        let finalized = ModelRuntime.ContinuousBatchFinalizedRow(
+            completion: CompletionResult(
+                content: "",
+                finishReason: "tool_calls",
+                promptTokens: 1,
+                completionTokens: pieces.count,
+                toolCalls: [call],
+                settlementDisposition: .eligibleOwner
+            ),
+            filteredText: finalText,
+            parsed: parsed,
+            generatedTokens: Array(pieces.indices),
+            truncatedAtSerialStop: false
+        )
+        let completion = try ModelRuntime.finishContinuousBatchStream(
+            finalized,
+            state: state,
+            request: request,
+            structuredAccumulator: accumulator,
+            idleState: idle,
+            onChunk: sink
+        )
+        return (arguments, deliveredID, deliveredName, completion)
     }
 
     private func assertSettlementBinding(

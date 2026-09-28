@@ -663,6 +663,70 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(sigBytes.count, 64)
     }
 
+    func testRelayStreamingToolArgumentMismatchFailsClosedWithoutReceipt() async throws {
+        let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let runtime = ModelRuntime(
+            modelID: "mlx-community/Test-Model",
+            modelHash: hash,
+            warmSwapEnabled: true,
+            loader: { _ in throw URLError(.unsupportedURL) },
+            testCompletion: { _, _ in
+                CompletionResult(
+                    content: "",
+                    finishReason: "tool_calls",
+                    promptTokens: 1,
+                    completionTokens: 1,
+                    toolCalls: [ToolCall(
+                        id: "call_0123456789abcdef",
+                        functionName: "lookup",
+                        arguments: #"{"query":"It's fine"}"#
+                    )],
+                    settlementDisposition: .eligibleOwner
+                )
+            },
+            testStreamChunks: [
+                .toolCallDelta(StreamToolCallDelta(
+                    index: 0,
+                    id: "call_0123456789abcdef",
+                    type: "function",
+                    functionName: "lookup",
+                    arguments: #"{"query":"It 's"#
+                )),
+            ]
+        )
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: ProviderStatus(
+                modelID: "mlx-community/Test-Model",
+                modelLoaded: true,
+                capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+            ),
+            loadedModelID: "mlx-community/Test-Model",
+            warmSwapEnabled: true,
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            sendFrame: { frame in await recorder.append(frame) }
+        )
+
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-tool-argument-mismatch",
+            "stream": true,
+            "body": #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"Use lookup."}],"stream":true}"#,
+        ])
+        let frames = try await waitForFrames { frames in
+            frames.contains { $0["type"] as? String == "inference_response_end" }
+        } from: { await recorder.frames }
+        let end = try XCTUnwrap(frames.last { $0["type"] as? String == "inference_response_end" })
+
+        XCTAssertEqual(end["status"] as? String, "error_internal")
+        XCTAssertNil(end["receipt"])
+        XCTAssertFalse(frames.contains { frame in
+            (frame["data"] as? String)?.contains(#""finish_reason":"tool_calls""#) == true
+        })
+    }
+
     func testRelayNonStreamingEndFrameCarriesV04SettlementReceiptWithWarmSwapDisabled() async throws {
         let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
         let runtime = FakeReceiptCompletionRuntime(servedSnapshot: RuntimeSnapshot(

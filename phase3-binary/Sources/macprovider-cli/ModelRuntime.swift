@@ -1514,6 +1514,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private let loader: @Sendable (String) async throws -> (ModelContainer, String, String?)
     private let testLoader: (@Sendable (String) async throws -> (String, String?))?
     private let testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
+    private let testStreamChunks: [StreamChunk]
     private let testSpeculativeCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
     private let testSpeculativeStream: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
 
@@ -2522,6 +2523,7 @@ actor ModelRuntime: ModelRuntimeServing {
         }
         self.testLoader = nil
         self.testCompletion = nil
+        self.testStreamChunks = []
         self.testSpeculativeCompletion = nil
         self.testSpeculativeStream = nil
 
@@ -2610,7 +2612,8 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentChatTemplateSHA256 = tokenizerHashes.template
         self.configuredTemplateSupportsThinkingToggle = Self.chatTemplateSupportsThinkingToggle(in: directory)
         self.currentTemplateSupportsThinkingToggle = self.configuredTemplateSupportsThinkingToggle
-        self.configuredTemplateSupportsPreserveThinking = Self.chatTemplateSupportsPreserveThinking(in: directory)
+        self.configuredTemplateSupportsPreserveThinking = self.configuredTemplateSupportsThinkingToggle
+            && Self.chatTemplateSupportsPreserveThinking(in: directory)
         self.currentTemplateSupportsPreserveThinking = self.configuredTemplateSupportsPreserveThinking
         self.pagedKVRuntimeCacheClass = runtimeCacheClass
         self.currentPagedKVModelCapabilities = modelCapabilities
@@ -2837,6 +2840,7 @@ actor ModelRuntime: ModelRuntimeServing {
         loader: @escaping @Sendable (String) async throws -> (ModelContainer, String, String?),
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
         testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
+        testStreamChunks: [StreamChunk] = [],
         testSpeculativeCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil,
         testSpeculativeStream: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
     ) {
@@ -2888,8 +2892,9 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentChatTemplateSHA256 = nil
         self.configuredTemplateSupportsThinkingToggle = templateSupportsThinkingToggle
         self.currentTemplateSupportsThinkingToggle = templateSupportsThinkingToggle
-        self.configuredTemplateSupportsPreserveThinking = templateSupportsPreserveThinking
-        self.currentTemplateSupportsPreserveThinking = templateSupportsPreserveThinking
+        self.configuredTemplateSupportsPreserveThinking = templateSupportsThinkingToggle
+            && templateSupportsPreserveThinking
+        self.currentTemplateSupportsPreserveThinking = self.configuredTemplateSupportsPreserveThinking
         self.verifiedCatalogArtifactSHA256 = nil
         self.verifiedModelCatalogRevision = nil
         self.targetAuthorities = targetAuthorities
@@ -2986,6 +2991,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.loader = loader
         self.testLoader = testLoader
         self.testCompletion = testCompletion
+        self.testStreamChunks = testStreamChunks
         self.testSpeculativeCompletion = testSpeculativeCompletion
         self.testSpeculativeStream = testSpeculativeStream
         let continuousBatchScheduler = Self.makeContinuousBatchScheduler(
@@ -4958,13 +4964,16 @@ actor ModelRuntime: ModelRuntimeServing {
     struct StreamingDetokenizer: @unchecked Sendable {
         let decode: ([Int]) -> String
         let makeIncremental: () -> IncrementalTextDecoder
+        let cleanUpTokenizationSpaces: Bool
 
         init(
             decode: @escaping ([Int]) -> String,
-            makeIncremental: @escaping () -> IncrementalTextDecoder
+            makeIncremental: @escaping () -> IncrementalTextDecoder,
+            cleanUpTokenizationSpaces: Bool = false
         ) {
             self.decode = decode
             self.makeIncremental = makeIncremental
+            self.cleanUpTokenizationSpaces = cleanUpTokenizationSpaces
         }
 
         init(
@@ -4980,7 +4989,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         cleanUpTokenizationSpaces: cleanUpTokenizationSpaces
                     )
                     return IncrementalTextDecoder(appendToken: box.append)
-                }
+                },
+                cleanUpTokenizationSpaces: cleanUpTokenizationSpaces
             )
         }
 
@@ -5206,7 +5216,10 @@ actor ModelRuntime: ModelRuntimeServing {
         private let needsPerTokenPrecision: Bool
 
         init(request: ChatCompletionRequest, detokenizer: StreamingDetokenizer) {
-            emitter = SerialStreamingTextEmitter(request: request)
+            emitter = SerialStreamingTextEmitter(
+                request: request,
+                holdsCleanupDecoderPendingPrefixes: detokenizer.cleanUpTokenizationSpaces
+            )
             decode = detokenizer.decode
             needsPerTokenPrecision = ModelRuntime.serialNativeToolStopApplies(request)
             incrementalDecoder = needsPerTokenPrecision ? detokenizer.makeIncremental() : nil
@@ -5308,6 +5321,12 @@ actor ModelRuntime: ModelRuntimeServing {
             lock.lock()
             defer { lock.unlock() }
             return emitter.emittedContent
+        }
+
+        var reconciledToolCalls: [ToolCall] {
+            lock.lock()
+            defer { lock.unlock() }
+            return emitter.reconciledToolCalls
         }
 
         /// Token count at which the serial path would have stopped a serial
@@ -5600,7 +5619,9 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         let completion = HarmonyResponseParser.isHarmonyModelID(request.model)
             ? finalized.completion
-            : finalized.completion.withContent(state.emittedContent)
+            : finalized.completion
+                .withContent(state.emittedContent)
+                .withToolCalls(state.reconciledToolCalls)
         return try validateStructuredStreamingCompletion(
             completion,
             request: request,
@@ -6967,6 +6988,9 @@ actor ModelRuntime: ModelRuntimeServing {
             let completion = try await Self.withDrainCancellation(drainCancelled) {
                 try await testSpeculativeStream(snapshot, request)
             }.withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash))
+            for chunk in testStreamChunks {
+                onChunk(chunk)
+            }
             if !completion.content.isEmpty {
                 if let error = structuredAccumulator.append(completion.content) {
                     throw error
@@ -6984,6 +7008,9 @@ actor ModelRuntime: ModelRuntimeServing {
             let completion = try await Self.withDrainCancellation(drainCancelled) {
                 try await testCompletion(snapshot, request)
             }.withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash))
+            for chunk in testStreamChunks {
+                onChunk(chunk)
+            }
             if !completion.content.isEmpty {
                 if let error = structuredAccumulator.append(completion.content) {
                     throw error
@@ -7386,7 +7413,9 @@ actor ModelRuntime: ModelRuntimeServing {
                             completionTokens: parsed.completionTokens,
                             generatedCompletionTokens: parsed.generatedCompletionTokens,
                             generationMilliseconds: generationMS,
-                            toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
+                            toolCalls: textEmitter.reconciledToolCalls.isEmpty
+                                ? nil
+                                : textEmitter.reconciledToolCalls,
                             modelHashObserved: Self.validObservedModelHash(snapshot.modelHash),
                             settlementDisposition: .eligibleOwner
                         )
@@ -8803,9 +8832,9 @@ actor ModelRuntime: ModelRuntimeServing {
 
         for authority in authorities.values {
             let supported = byModelArgument[authority.modelArgument] ?? {
-                let value = chatTemplateSupportsPreserveThinking(
-                    in: URL(fileURLWithPath: authority.modelArgument, isDirectory: true)
-                )
+                let directory = URL(fileURLWithPath: authority.modelArgument, isDirectory: true)
+                let value = chatTemplateSupportsThinkingToggle(in: directory)
+                    && chatTemplateSupportsPreserveThinking(in: directory)
                 byModelArgument[authority.modelArgument] = value
                 return value
             }()
@@ -9321,6 +9350,17 @@ actor ModelRuntime: ModelRuntimeServing {
         APIError(
             status: 502,
             message: "Harmony response did not produce a valid final channel. This most often means the reasoning budget was exhausted before the model reached its final answer; retry with a higher max_tokens or a lower reasoning effort. It can also indicate malformed Harmony tool-call framing.",
+            type: "upstream_provider_error",
+            code: "malformed_tool_call_final_json",
+            inferenceRan: true,
+            settlementRan: true
+        )
+    }
+
+    static func streamedToolCallArgumentsMismatchError() -> APIError {
+        APIError(
+            status: 502,
+            message: "Streamed tool-call arguments did not match the finalized tool call",
             type: "upstream_provider_error",
             code: "malformed_tool_call_final_json",
             inferenceRan: true,
@@ -9859,9 +9899,16 @@ struct SerialStreamingTextEmitter {
     private var lastEmittedDecodedText = ""
     private var emittedTextSuffix = ""
     private(set) var emittedContent = ""
-    private var observedCleanupRewrite = false
+    private(set) var cleanupRewriteFallbackCount = 0
+    private(set) var reconciledToolCalls: [ToolCall] = []
+    private let holdsCleanupPatternPrefixes: Bool
+    private let holdsCleanupDecoderPendingPrefixes: Bool
 
-    init(request: ChatCompletionRequest) {
+    init(
+        request: ChatCompletionRequest,
+        holdsCleanupPatternPrefixes: Bool = true,
+        holdsCleanupDecoderPendingPrefixes: Bool = false
+    ) {
         streamToolsIncrementally = ModelRuntime.hasEnabledTools(request.promptSource.tools)
             && !HarmonyResponseParser.isHarmonyModelID(request.model)
         stopsAfterFirstCompleteToolCall = request.stopsAfterFirstCompleteToolCall
@@ -9869,6 +9916,8 @@ struct SerialStreamingTextEmitter {
             modelID: request.model,
             allowedFunctionNames: ModelRuntime.toolFunctionNames(from: request.promptSource.tools)
         )
+        self.holdsCleanupPatternPrefixes = holdsCleanupPatternPrefixes
+        self.holdsCleanupDecoderPendingPrefixes = holdsCleanupDecoderPendingPrefixes
     }
 
     /// One decoded prefix of the generation (`streamingSafePrefix` of every
@@ -9879,13 +9928,22 @@ struct SerialStreamingTextEmitter {
         idleState: StructuredStreamingIdleState,
         onChunk: (StreamChunk) -> Void
     ) -> Step {
+        let stableText = holdsCleanupPatternPrefixes
+            ? Self.cleanupStablePrefix(
+                of: candidate.text,
+                includesDecoderPendingPrefixes: holdsCleanupDecoderPendingPrefixes
+            )
+            : candidate.text
         if streamToolsIncrementally {
-            for event in toolStreamer.observe(candidate.text) {
+            // Capture prose before observing the tool delimiter: observe() flips
+            // suppression as soon as a call opens, but cleanup holdback may have
+            // deferred the separator immediately before that delimiter.
+            let visibleContent = toolStreamer.visibleContentPrefix(of: stableText)
+            for event in toolStreamer.observe(stableText) {
                 onChunk(event)
             }
-            if !toolStreamer.suppressesAssistantContent {
-                let safe = toolStreamer.visibleContentPrefix(of: candidate.text)
-                let delta = delta(to: safe)
+            if !visibleContent.isEmpty || !toolStreamer.suppressesAssistantContent {
+                let delta = delta(to: visibleContent)
                 if !delta.isEmpty {
                     if structuredAccumulator.append(delta) != nil {
                         return .structuredError
@@ -9894,7 +9952,7 @@ struct SerialStreamingTextEmitter {
                     noteEmitted(delta)
                     onChunk(.content(delta))
                 }
-                lastEmittedDecodedText = safe
+                lastEmittedDecodedText = visibleContent
             }
             if stopsAfterFirstCompleteToolCall, toolStreamer.hasCompletedValidToolCall {
                 return .toolCallComplete
@@ -9902,7 +9960,7 @@ struct SerialStreamingTextEmitter {
             return candidate.hitStop ? .requestStop : .more
         }
 
-        let delta = delta(to: candidate.text)
+        let delta = delta(to: stableText)
         if !delta.isEmpty {
             if structuredAccumulator.append(delta) != nil {
                 return .structuredError
@@ -9911,7 +9969,7 @@ struct SerialStreamingTextEmitter {
             noteEmitted(delta)
             onChunk(.content(delta))
         }
-        lastEmittedDecodedText = candidate.text
+        lastEmittedDecodedText = stableText
         return candidate.hitStop ? .requestStop : .more
     }
 
@@ -9924,10 +9982,27 @@ struct SerialStreamingTextEmitter {
         idleState: StructuredStreamingIdleState,
         onChunk: (StreamChunk) -> Void
     ) throws {
+        reconciledToolCalls = parsed.toolCalls
         let finalDelta = delta(to: parsed.content)
         if streamToolsIncrementally {
             for event in toolStreamer.observe(finalText) {
                 onChunk(event)
+            }
+            if let deliveredArguments = toolStreamer.deliveredArguments {
+                guard let finalizedArguments = parsed.toolCalls.first?.arguments,
+                      Data(deliveredArguments.utf8) == Data(finalizedArguments.utf8)
+                else {
+                    throw ModelRuntime.streamedToolCallArgumentsMismatchError()
+                }
+                if let deliveredCallID = toolStreamer.deliveredCallID,
+                   let first = parsed.toolCalls.first
+                {
+                    reconciledToolCalls[0] = ToolCall(
+                        id: deliveredCallID,
+                        functionName: first.functionName,
+                        arguments: first.arguments
+                    )
+                }
             }
             if parsed.toolCalls.isEmpty,
                !parsed.content.isEmpty,
@@ -9953,7 +10028,7 @@ struct SerialStreamingTextEmitter {
         }
         lastEmittedDecodedText = parsed.content
         assert(
-            observedCleanupRewrite
+            cleanupRewriteFallbackCount > 0
                 || !parsed.toolCalls.isEmpty
                 || toolStreamer.suppressesAssistantContent
                 || emittedContent == parsed.content,
@@ -9972,7 +10047,7 @@ struct SerialStreamingTextEmitter {
         guard !current.unicodeScalars.starts(with: lastEmittedDecodedText.unicodeScalars) else {
             return delta
         }
-        observedCleanupRewrite = true
+        cleanupRewriteFallbackCount += 1
         return ModelRuntime.removingAlreadyEmittedRewritePrefix(
             from: delta,
             emittedSuffix: emittedTextSuffix
@@ -9983,6 +10058,37 @@ struct SerialStreamingTextEmitter {
         emittedContent += delta
         let scalars = (emittedTextSuffix + delta).unicodeScalars
         emittedTextSuffix = String(scalars.suffix(4))
+    }
+
+    static func cleanupStablePrefix(
+        of text: String,
+        includesDecoderPendingPrefixes: Bool = false
+    ) -> String {
+        let patterns = [" .", " ?", " !", " ,", " ' ", " n't", " 'm", " 's", " 've", " 're"]
+        var heldCharacterCount = 0
+        for pattern in patterns {
+            let characters = Array(pattern)
+            guard characters.count > 1 else { continue }
+            for prefixLength in 1..<characters.count {
+                let prefix = String(characters.prefix(prefixLength))
+                if text.hasSuffix(prefix) {
+                    heldCharacterCount = max(heldCharacterCount, prefix.count)
+                }
+                // ByteLevelIncrementalTextDecoderBox may provisionally expose
+                // the characters after the cleanup rule's leading space while
+                // that space is still pending (for example "'" for " ' ").
+                // They are just as rewritable as the full pattern prefix.
+                let pendingPrefix = String(prefix.dropFirst())
+                if includesDecoderPendingPrefixes,
+                   !pendingPrefix.isEmpty,
+                   text.hasSuffix(pendingPrefix)
+                {
+                    heldCharacterCount = max(heldCharacterCount, pendingPrefix.count)
+                }
+            }
+        }
+        guard heldCharacterCount > 0 else { return text }
+        return String(text.dropLast(heldCharacterCount))
     }
 }
 
@@ -10042,6 +10148,8 @@ struct NativeToolCallStreamEmitter {
     /// JSON object or closed function-XML). Wrapper-close, prefixes, and cap
     /// failures must not satisfy this; they must not stop a serial turn.
     var hasCompletedValidToolCall: Bool { completedValidToolCall }
+    var deliveredArguments: String? { opened ? emittedArguments : nil }
+    var deliveredCallID: String? { opened ? callID : nil }
 
     func visibleContentPrefix(of text: String) -> String {
         guard enabled else { return text }
@@ -10086,7 +10194,7 @@ struct NativeToolCallStreamEmitter {
 
     private mutating func observeJSONToolCall(body: String, isClosed: Bool) -> [StreamChunk] {
         let name: String
-        let arguments: String
+        let arguments: String?
         let parsedComplete: Bool
         if let object = ToolCallParser.firstCompleteJSONObject(in: body),
            let parsed = ToolCallParser.jsonToolCallNameAndArguments(in: object, argumentKey: argumentKey)
@@ -10101,7 +10209,12 @@ struct NativeToolCallStreamEmitter {
                 return []
             }
             name = parsedName
-            arguments = prefix
+            // Partial raw JSON cannot be guaranteed to prefix the finalized
+            // canonical JSON (whitespace is removed and keys are sorted).
+            // Open the call once its name is known, but hold all argument
+            // bytes until the object is complete and canonical.
+            _ = prefix
+            arguments = nil
             parsedComplete = false
         }
         // Fail closed: never stream a tool-call delta for an undeclared function name.
@@ -10110,7 +10223,7 @@ struct NativeToolCallStreamEmitter {
         }
         // Byte-cap parity with the final parser (SPEC-018 §3.4 / §10a #7): never stream oversized
         // arguments; stop the emitter once the cumulative arguments exceed the per-call cap.
-        guard arguments.utf8.count <= ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
+        guard arguments?.utf8.count ?? 0 <= ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
             closed = true
             return []
         }
@@ -10120,10 +10233,12 @@ struct NativeToolCallStreamEmitter {
             opened = true
             events.append(.toolCallDelta(StreamToolCallDelta(index: 0, id: callID, type: "function", functionName: name, arguments: "")))
         }
-        let fragment = Self.delta(from: emittedArguments, to: arguments)
-        if !fragment.isEmpty {
-            emittedArguments = arguments
-            events.append(.toolCallDelta(StreamToolCallDelta(index: 0, id: nil, type: nil, functionName: nil, arguments: fragment)))
+        if let arguments {
+            let fragment = Self.delta(from: emittedArguments, to: arguments)
+            if !fragment.isEmpty {
+                emittedArguments = arguments
+                events.append(.toolCallDelta(StreamToolCallDelta(index: 0, id: nil, type: nil, functionName: nil, arguments: fragment)))
+            }
         }
         if isClosed {
             closed = true
@@ -10414,6 +10529,27 @@ struct CompletionResult: Sendable {
         )
     }
 
+    func withToolCalls(_ toolCalls: [ToolCall]) -> CompletionResult {
+        CompletionResult(
+            content: content,
+            finishReason: finishReason,
+            promptTokens: promptTokens,
+            cachedPromptTokens: cachedPromptTokens,
+            kvCacheBytesReused: kvCacheBytesReused,
+            completionTokens: completionTokens,
+            generatedCompletionTokens: generatedCompletionTokens,
+            ttftMilliseconds: ttftMilliseconds,
+            generationMilliseconds: generationMilliseconds,
+            toolCalls: toolCalls.isEmpty ? nil : toolCalls,
+            modelHashObserved: modelHashObserved,
+            settlementDisposition: settlementDisposition,
+            specDecodeDraftedTokens: specDecodeDraftedTokens,
+            specDecodeAcceptedTokens: specDecodeAcceptedTokens,
+            specDecodeGeneration: specDecodeGeneration,
+            loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens
+        )
+    }
+
     /// #1690 E2E-F3: the usage a buyer_cancel end frame and receipt carry for
     /// a cancelled loopback stream: the upstream's prompt tokens and the
     /// completion tokens generated through exactly the delivered content.
@@ -10491,24 +10627,73 @@ private final class WarmupCancellationRecorder: @unchecked Sendable {
 }
 
 final class StreamedToolCallArgs: @unchecked Sendable {
-    private let lock = NSLock()
-    private var byIndex: [Int: String] = [:]
+    private struct StreamedCall {
+        var id: String?
+        var type: String?
+        var functionName: String?
+        var arguments = ""
+    }
 
-    func note(index: Int, fragment: String?) {
+    private let lock = NSLock()
+    private var byIndex: [Int: StreamedCall] = [:]
+
+    func note(_ delta: StreamToolCallDelta) {
         lock.lock()
-        if byIndex[index] == nil {
-            byIndex[index] = ""
+        var call = byIndex[delta.index] ?? StreamedCall()
+        if let id = delta.id { call.id = id }
+        if let type = delta.type { call.type = type }
+        if let functionName = delta.functionName {
+            call.functionName = (call.functionName ?? "") + functionName
         }
-        if let fragment, !fragment.isEmpty {
-            byIndex[index, default: ""] += fragment
+        if let fragment = delta.arguments, !fragment.isEmpty {
+            call.arguments += fragment
         }
+        byIndex[delta.index] = call
         lock.unlock()
     }
 
     func snapshot() -> [Int: String] {
         lock.lock()
         defer { lock.unlock() }
-        return byIndex
+        return byIndex.mapValues(\.arguments)
+    }
+
+    func finalDeltas(for toolCalls: [ToolCall]?) throws -> [[[String: Any]]] {
+        lock.lock()
+        let streamedCalls = byIndex
+        lock.unlock()
+        let streamed = streamedCalls.mapValues(\.arguments)
+        let finalized = toolCalls ?? []
+        guard streamed.keys.allSatisfy({ $0 >= 0 && $0 < finalized.count }) else {
+            throw ModelRuntime.streamedToolCallArgumentsMismatchError()
+        }
+        for (index, streamedCall) in streamedCalls {
+            let finalCall = finalized[index]
+            guard finalCall.arguments.hasPrefix(streamedCall.arguments),
+                  streamedCall.id.map({ $0 == finalCall.id }) ?? true,
+                  streamedCall.type.map({ $0 == "function" }) ?? true,
+                  streamedCall.functionName.map({ $0 == finalCall.functionName }) ?? true
+            else {
+                throw ModelRuntime.streamedToolCallArgumentsMismatchError()
+            }
+        }
+        let deltas = ToolCall.openAIFallbackDeltas(
+            toolCalls: finalized,
+            streamedArgumentsByIndex: streamed
+        )
+        for (index, call) in finalized.enumerated() {
+            let delivered = streamed[index] ?? ""
+            let appended = deltas.flatMap { $0 }.compactMap { delta -> String? in
+                guard delta["index"] as? Int == index,
+                      let function = delta["function"] as? [String: Any]
+                else { return nil }
+                return function["arguments"] as? String
+            }.joined()
+            guard Data((delivered + appended).utf8) == Data(call.arguments.utf8) else {
+                throw ModelRuntime.streamedToolCallArgumentsMismatchError()
+            }
+        }
+        return deltas
     }
 }
 

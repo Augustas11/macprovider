@@ -32,16 +32,25 @@ final class StreamingEmitterCleanupRewriteTests: XCTestCase {
                     )
                 }
 
+                try emitter.finish(
+                    finalText: expected,
+                    parsed: ModelRuntime.ParsedGeneratedOutput(
+                        content: expected,
+                        toolCalls: [],
+                        completionTokens: pieces.count,
+                        generatedCompletionTokens: pieces.count,
+                        hitStop: false,
+                        isTerminal: true
+                    ),
+                    structuredAccumulator: accumulator,
+                    idleState: idle,
+                    onChunk: { if case .content(let text) = $0 { chunks.append(text) } }
+                )
+
                 XCTAssertEqual(decoder.appendedText, expected, "input=\(input) pieces=\(pieces)")
                 let delivered = chunks.joined()
-                XCTAssertTrue(
-                    Self.differsOnlyByRetainingCleanupDeletedSpaces(
-                        delivered,
-                        original: input,
-                        cleaned: expected
-                    ),
-                    "stream duplicated, reordered, or dropped non-cleanup content; input=\(input) pieces=\(pieces) delivered=\(delivered)"
-                )
+                XCTAssertEqual(Data(delivered.utf8), Data(expected.utf8), "input=\(input) pieces=\(pieces)")
+                XCTAssertEqual(emitter.cleanupRewriteFallbackCount, 0, "input=\(input) pieces=\(pieces)")
             }
         }
     }
@@ -56,15 +65,14 @@ final class StreamingEmitterCleanupRewriteTests: XCTestCase {
     func testIndentationCleanupRewriteDoesNotStallLaterContent() throws {
         let chunks = try stream(decodes: ["    ", "   .", "   .later"])
 
-        XCTAssertEqual(chunks, ["    ", ".", "later"])
-        XCTAssertEqual(chunks.joined(), "    .later")
+        XCTAssertEqual(chunks.joined(), "   .later")
     }
 
     func testApostropheCleanupRewriteDoesNotStallLaterContent() throws {
         let chunks = try stream(decodes: ["it ", "it's", "it's fine"])
 
-        XCTAssertEqual(chunks, ["it ", "'s", " fine"])
-        XCTAssertEqual(chunks.joined(), "it 's fine")
+        XCTAssertEqual(chunks, ["it", "'s", " fine"])
+        XCTAssertEqual(chunks.joined(), "it's fine")
     }
 
     func testCleanupRewriteWhileStopCandidateIsHeldBack() throws {
@@ -73,28 +81,26 @@ final class StreamingEmitterCleanupRewriteTests: XCTestCase {
             stops: ["</stop>"]
         )
 
-        XCTAssertEqual(chunks, ["    ", ".", "later"])
-        XCTAssertEqual(chunks.joined(), "    .later")
+        XCTAssertEqual(chunks.joined(), "   .later")
     }
 
     func testFinishFlushesTailAfterCleanupRewrite() throws {
         let chunks = try stream(decodes: ["    ", "   ."], final: "   .tail")
 
-        XCTAssertEqual(chunks, ["    ", ".", "tail"])
-        XCTAssertEqual(chunks.joined(), "    .tail")
+        XCTAssertEqual(chunks.joined(), "   .tail")
     }
 
     func testCleanupRewriteCompletionContentIsExactDeliveredConcatenation() throws {
         let result = try streamResult(
-            decodes: ["It ", "It 's", "It's fine"],
+            decodes: ["It ", "It's", "It's fine"],
             final: "It's fine"
         )
 
-        XCTAssertEqual(result.chunks, ["It ", "'s", " fine"])
-        XCTAssertEqual(result.chunks.joined(), "It 's fine")
+        XCTAssertEqual(result.chunks, ["It", "'s", " fine"])
+        XCTAssertEqual(result.chunks.joined(), "It's fine")
         XCTAssertEqual(result.emittedContent, result.chunks.joined())
         XCTAssertEqual(result.completion.content, result.chunks.joined())
-        XCTAssertNotEqual(result.completion.content, "It's fine")
+        XCTAssertEqual(result.completion.content, "It's fine")
     }
 
     func testNoRewriteCompletionContentIsByteIdenticalToParsedContent() throws {
@@ -221,38 +227,4 @@ final class StreamingEmitterCleanupRewriteTests: XCTestCase {
         return result
     }
 
-    private static func differsOnlyByRetainingCleanupDeletedSpaces(
-        _ delivered: String,
-        original: String,
-        cleaned: String
-    ) -> Bool {
-        let originalCharacters = Array(original)
-        let cleanedCharacters = Array(cleaned)
-        let deliveredCharacters = Array(delivered)
-        var cleanupDeletedIndices = Set<Int>()
-        var cleanedIndex = 0
-
-        for (originalIndex, character) in originalCharacters.enumerated() {
-            if cleanedIndex < cleanedCharacters.count,
-               character == cleanedCharacters[cleanedIndex] {
-                cleanedIndex += 1
-            } else if character == " " {
-                cleanupDeletedIndices.insert(originalIndex)
-            } else {
-                return false
-            }
-        }
-        guard cleanedIndex == cleanedCharacters.count else { return false }
-
-        var deliveredIndex = 0
-        for (originalIndex, character) in originalCharacters.enumerated() {
-            if deliveredIndex < deliveredCharacters.count,
-               character == deliveredCharacters[deliveredIndex] {
-                deliveredIndex += 1
-            } else if !cleanupDeletedIndices.contains(originalIndex) {
-                return false
-            }
-        }
-        return deliveredIndex == deliveredCharacters.count
-    }
 }

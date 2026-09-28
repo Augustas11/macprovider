@@ -199,6 +199,33 @@ final class ModelRuntimePromptContextTests: XCTestCase {
         ))
     }
 
+    func testPreserveThinkingCapabilityRequiresEnableThinkingMarker() async throws {
+        let preserveOnlyArtifact = try artifactDirectory(
+            chatTemplate: #"{% if preserve_thinking %}preserve{% endif %}"#
+        )
+        let preserveOnlyHash = String(repeating: "c", count: 64)
+        let capabilities = ModelRuntime.preserveThinkingCapabilities(for: [
+            "preserve-only": ModelRuntimeTargetAuthority(
+                modelArgument: preserveOnlyArtifact.path,
+                artifactSHA256: preserveOnlyHash,
+                catalogRevision: "preserve-only-revision"
+            ),
+        ])
+        XCTAssertEqual(capabilities[preserveOnlyHash], false)
+
+        let runtime = ModelRuntime(
+            modelID: "mlx-community/preserve-only",
+            modelHash: preserveOnlyHash,
+            templateSupportsThinkingToggle: false,
+            templateSupportsPreserveThinking: true,
+            warmSwapEnabled: true,
+            loader: { _ in throw URLError(.unsupportedURL) }
+        )
+        let snapshot = await runtime.currentSnapshot()
+        XCTAssertFalse(snapshot.templateSupportsThinkingToggle)
+        XCTAssertFalse(snapshot.templateSupportsPreserveThinking)
+    }
+
     private func artifactDirectory(
         chatTemplate: String? = nil,
         tokenizerConfig: String? = nil

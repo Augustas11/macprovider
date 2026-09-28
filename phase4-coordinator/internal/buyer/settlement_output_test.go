@@ -54,8 +54,8 @@ func TestSettlementStreamCleanupRewriteGoldenBindsDeliveredBytes(t *testing.T) {
 	if output.Content != fixture.DeliveredContent {
 		t.Fatalf("content=%q want delivered concatenation %q", output.Content, fixture.DeliveredContent)
 	}
-	if output.Content == fixture.NonStreamContent {
-		t.Fatalf("tracker used non-stream cleanup decode %q", fixture.NonStreamContent)
+	if output.Content != fixture.NonStreamContent {
+		t.Fatalf("stream content=%q want non-stream bytes %q", output.Content, fixture.NonStreamContent)
 	}
 	digest, canonical, err := output.Digest()
 	if err != nil {

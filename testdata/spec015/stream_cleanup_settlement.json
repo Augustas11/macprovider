@@ -1,18 +1,18 @@
 {
   "id": "cleanup_rewrite_stream",
-  "decoded_snapshots": ["It ", "It 's", "It's fine"],
+  "decoded_snapshots": ["It ", "It's", "It's fine"],
   "token_pieces": ["It", "Ġ", "'s", "Ġfine"],
-  "delivered_deltas": ["It ", "'s", " fine"],
-  "delivered_content": "It 's fine",
+  "delivered_deltas": ["It", "'s", " fine"],
+  "delivered_content": "It's fine",
   "non_stream_content": "It's fine",
   "settlement_output_v1": {
-    "content": "It 's fine",
+    "content": "It's fine",
     "finish_reason": "stop",
-    "output_prefix_end_byte": 10,
+    "output_prefix_end_byte": 9,
     "output_prefix_start_byte": 0,
     "terminal_state": "normal_done",
     "tool_calls": null
   },
-  "expected_canonical": "{\"content\":\"It 's fine\",\"finish_reason\":\"stop\",\"output_prefix_end_byte\":10,\"output_prefix_start_byte\":0,\"terminal_state\":\"normal_done\",\"tool_calls\":null}",
-  "expected_output_hash": "aa88f117ed3c9cbceae2547e93f5390a68fa72917e8be5174b5a7e5b9ce00613"
+  "expected_canonical": "{\"content\":\"It's fine\",\"finish_reason\":\"stop\",\"output_prefix_end_byte\":9,\"output_prefix_start_byte\":0,\"terminal_state\":\"normal_done\",\"tool_calls\":null}",
+  "expected_output_hash": "55d1d78cb26d83d6c11fd5ecfe26a5f2499be385790fac9b80d4508476a7578c"
 }

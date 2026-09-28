@@ -1,8 +1,8 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.2.6 (2026-09-28, streaming cleanup-rewrite byte domain clarified)
-**Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.4 LOCKED
-**Status:** LOCKED. v0.2.6 clarifies the streaming cleanup-rewrite byte domain; v0.2.5 clarified the existing §8 "preserve retryability" requirement.
+**Version:** 0.2.6 (2026-09-28, streaming cleanup-prefix holdback clarified)
+**Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.10 LOCKED
+**Status:** LOCKED. v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 clarified the existing §8 "preserve retryability" requirement.
 
 ## Quick orientation
 
@@ -48,8 +48,8 @@ encoder setup and prompt hash input). SPEC-006 already lists `response_format`
 in the buyer API allow-list (`specs/SPEC-006-buyer-api.md:1036-1047`, allowed
 chat-completions request fields).
 
-SPEC-018 v0.2.4 is the precondition. The SPEC body is locked at `7e50832` via
-PR #202, and the implementation landed at `c77313a` via PR #209
+SPEC-018 v0.2.10 is the precondition. Its current locked specification anchor is
+`8201d1c66`; the historical v0.2.4 implementation baseline landed at `c77313a` via PR #209
 (`specs/design/spec-018/SPEC-018-v0_2-IMPL-NOTES.md:7-10`, release note and implementation
 commit anchors). SPEC-018 §10b names structured-output response synthesis as the
 follow-on surface promoted after streaming-incremental wire contract stability
@@ -161,7 +161,7 @@ content buffer, not incremental partial-JSON-prefix validation. On success, the
 buyer sees the normal terminal `data: [DONE]`. On validation failure,
 malformed JSON, empty / whitespace-only structured content, validator panic, or
 validation timeout, the stream terminates with the same OpenAI-style terminal
-SSE error-frame shape as SPEC-018 v0.2.4 §10d.4. The failure format is `data:
+SSE error-frame shape as SPEC-018 v0.2.10 §10d.4. The failure format is `data:
 {"error":{...}}\n\n` followed by `data: [DONE]\n\n` when the buyer connection
 can still be written (`specs/SPEC-018-agentic-tool-calling.md:736-753`,
 `specs/SPEC-018-agentic-tool-calling.md:834-864`).
@@ -351,7 +351,7 @@ Fail condition: v0.1 `streaming_json_object_unsupported` remains active, or the
 stream silently permits unconstrained text.
 
 AC-V2-3. A streaming output that fails post-stream validation emits a terminal
-SSE error frame matching SPEC-018 v0.2.4 §10d.4 minimum envelope fields
+SSE error frame matching SPEC-018 v0.2.10 §10d.4 minimum envelope fields
 (`error.type`, `error.code`, `error.message`, optional `error.param`,
 `error.retryable`, `error.request_id`, `error.inference_ran`,
 `error.settlement_ran`) and the stream is settled
@@ -417,19 +417,19 @@ and captures `response_format.json_schema`
 AC-V2-7. Streaming token-incremental `content` deltas concatenate to the
 authoritative buyer-delivered streaming content bytes used for returned output,
 terminal structured-output validation, and settlement, consistent with
-SPEC-015 §N.5. Those bytes equal the non-streaming response for the same
-deterministic fixture, modulo transport chunk boundaries, for Harmony and for
-tokenizers with `clean_up_tokenization_spaces` disabled. With cleanup enabled,
-the streaming concatenation MAY retain a space that a later cumulative
-non-streaming decode removes, only via the tokenizer's deterministic cleanup
-rule set; it MUST NOT otherwise drop or duplicate content. The provider computes
-content deltas from `emittedText` to the candidate/final text
+SPEC-015 §N.5. Those bytes MUST equal the non-streaming response for the same
+deterministic fixture, modulo transport chunk boundaries, for every tokenizer.
+Before emitting content or tool arguments, the provider holds back the longest
+trailing proper prefix of each SPEC-018 v0.2.10 §3.10 cleanup pattern, then
+flushes finalized bytes at end-of-stream. The provider computes content deltas
+from `emittedText` to the candidate/final text
 (`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:562-592`,
 `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:603-619`); v0.2
 requires the validated final buffer to be the buyer-visible concatenation. Fail
 condition: streaming validation or settlement uses bytes that differ from the
-buyer-visible delta concatenation, or a stream/non-stream difference is not
-solely the cleanup-rewrite exception above.
+buyer-visible delta concatenation, stream/non-stream bytes differ, a known
+cleanup pattern reaches defensive re-anchoring, or finalized tool arguments
+differ from delivered argument fragments without a terminal fail-closed error.
 
 AC-V2-8. Empty-content streaming fixture: when the model emits zero tokens, or
 only ASCII structured-output whitespace, under `json_schema` or `json_object`,
@@ -1013,8 +1013,8 @@ No internal retry is allowed in v0.1.0. Buyer retries happen at the buyer layer.
 For `stream:true` with `json_schema` or `json_object`, the validator runs at
 end-of-stream over the exact concatenation of buyer-visible SSE `content`
 deltas. That immutable concatenation is the streaming output and settlement
-content domain per SPEC-015 §N.5, including when tokenizer cleanup later removes
-a previously delivered space from the non-streaming decode. This is the same post-hoc validation posture as v0.1
+content domain per SPEC-015 §N.5. Cleanup-pattern prefix holdback makes that
+concatenation byte-identical to the finalized non-streaming content. This is the same post-hoc validation posture as v0.1
 non-streaming, using the same structured validator semantics; v0.2 relaxes the
 pre-inference `stream:true` reject gate rather than introducing constrained
 decoding. Current non-streaming validation is anchored at
@@ -1029,7 +1029,7 @@ Validation trigger: when the streaming generator is ready to emit its success
 terminal `[DONE]`, the provider first validates the concatenated content buffer.
 If validation succeeds, the provider emits the normal finish chunk, optional
 usage chunk, and `data: [DONE]` success terminal. If validation fails, the
-provider emits a terminal SSE error frame in the SPEC-018 v0.2.4 §10d.4 shape
+provider emits a terminal SSE error frame in the SPEC-018 v0.2.10 §10d.4 shape
 and does not emit a success terminal. The current provider success terminal is
 `writeSSEDone()`
 (`phase3-binary/Sources/macprovider-cli/HTTPServer.swift:568-587`,
@@ -1177,7 +1177,7 @@ level. Provider and coordinator MUST compute the same value.
 
 SPEC-019 inherits the SPEC-018 §9 / §10d.7 response-size posture
 (`specs/SPEC-018-agentic-tool-calling.md:963-975`, cap values and fail-closed
-requirements). **Response cap order**: the SPEC-018 v0.2.4 §9
+requirements). **Response cap order**: the SPEC-018 v0.2.10 §9
 `2_097_152`-byte response cap is enforced on the raw UTF-8 bytes emitted by
 inference, before JSON parsing or schema validation runs. Exceeding the cap
 returns HTTP 502 `response_byte_cap_exceeded` (existing SPEC-018 code),
@@ -1193,7 +1193,7 @@ v0.2 does not change SPEC-019 schema-size or schema-depth caps. For streaming
 structured output, SPEC-019 v0.2 defines a concatenated-`content` cap of
 `2_097_152` bytes. The byte domain is the post-stop-token-filter,
 buyer-visible SSE `content` delta concatenation, counted as UTF-8 bytes with an
-inclusive boundary. The value intentionally matches the SPEC-018 v0.2.4
+inclusive boundary. The value intentionally matches the SPEC-018 v0.2.10
 response cap value, but this is a SPEC-019-defined cap for assistant `content`,
 not a reuse of SPEC-018's `tool_calls[].function.arguments` cap. If the cap is
 exceeded, the provider MUST close upstream generation and emit a terminal SSE
@@ -1295,7 +1295,7 @@ The gateway MUST NOT remap these terminal SSE
 error frames to `api_error`, `stream_malformed`, generic
 `upstream_provider_error`, or any other code, and MUST NOT drop the structured
 `retryable`, `request_id`, `inference_ran`, or `settlement_ran` fields required
-by SPEC-018 v0.2.4 §10d.0. The gateway MUST recognize these terminal SSE error
+by SPEC-018 v0.2.10 §10d.0. The gateway MUST recognize these terminal SSE error
 frames as final structured-output failures, forward them verbatim through
 `[DONE]`, and skip gateway-side positive / ok settlement. The affected gateway
 normalization site is the full `forwardLine` closure at
@@ -1341,7 +1341,7 @@ OpenAI-style SSE error writer with the required minimum fields for terminal
 streaming errors
 (`phase4-coordinator/internal/buyer/server.go:5150-5170`).
 
-Streaming auto-downgrade reuses SPEC-018 v0.2.4 §10d.4 per-(buyer, provider)
+Streaming auto-downgrade reuses SPEC-018 v0.2.10 §10d.4 per-(buyer, provider)
 attribution and recovery: malformed streams from one buyer to one provider MUST
 NOT downgrade that provider for all buyers
 (`specs/SPEC-018-agentic-tool-calling.md:834-840`). SPEC-019 v0.2 does not add
@@ -1596,7 +1596,7 @@ v0.2 audit lanes should additionally probe:
     non-streaming post-hoc validation: inference ran, buyer receives an error,
     and settlement is `FaultBreakerQualifying`.
 12. Whether the terminal SSE error-frame shape should exactly reuse SPEC-018
-    v0.2.4 §10d.4 or whether SPEC-019 needs a dedicated structured-output
+    v0.2.10 §10d.4 or whether SPEC-019 needs a dedicated structured-output
     streaming shape before lock.
 13. Whether `Content-Type: text/event-stream; charset=utf-8` and chunked
     transfer encoding are preserved through the gateway/coordinator path on
@@ -1620,9 +1620,9 @@ v0.2 audit lanes should additionally probe:
 
 ## 12. Document metadata
 
-**Version:** 0.2.6 (2026-09-28, streaming cleanup-rewrite byte domain clarified)
+**Version:** 0.2.6 (2026-09-28, streaming cleanup-prefix holdback clarified)
 
-**Status:** LOCKED. v0.2.6 clarifies the streaming cleanup-rewrite byte domain; v0.2.5 added the §8 retryable-override clarification.
+**Status:** LOCKED. v0.2.6 clarifies cleanup-prefix holdback and exact streaming byte parity; v0.2.5 added the §8 retryable-override clarification.
 
 Audit trajectory:
 - r1: 1C + 9H + 9M → absorbed in v0.2.1.
@@ -1630,8 +1630,8 @@ Audit trajectory:
 - r3: 0C + 3H + 3M → absorbed in v0.2.3 (wall-clock authority rewrite + NaN/Infinity envelope split).
 - r4 defensive: 0C + 0H + 0M across all 6 lanes. LOCK satisfied.
 
-Precondition: SPEC-018 v0.2.4 LOCKED at `7e50832` via PR #202, with
-implementation shipped at `c77313a` via PR #209
+Precondition: SPEC-018 v0.2.10 LOCKED at specification anchor `8201d1c66`, with
+the historical v0.2.4 implementation baseline shipped at `c77313a` via PR #209
 (`specs/design/spec-018/SPEC-018-v0_2-IMPL-NOTES.md:7-10`, release note and implementation
 commit anchors).
 
@@ -1640,18 +1640,19 @@ Streaming structured output, gateway-owned wall-clock authority, numeric
 bounds + $schema, Cline + Vercel AI SDK + openai-python streaming
 fixtures.
 
-Drafting scope: no implementation code, no SPEC-018 edits, no SPEC-015 schema
-change, no new HTTP endpoint.
+Original v0.2 drafting scope excluded implementation code and SPEC-018 edits.
+The v0.2.6 lock amendment includes the provider holdback implementation and the
+matching SPEC-018 v0.2.10 clarification; it makes no SPEC-015 schema change and
+adds no HTTP endpoint.
 
 ### Change log
 
-- **v0.2.6 (2026-09-28, cleanup-rewrite byte-domain clarification):** AC-V2-7
-  and the v0.2 streaming-validation contract now name the immutable
-  buyer-delivered `delta.content` concatenation as the output, validation, and
-  settlement content domain per SPEC-015 §N.5. Exact stream/non-stream parity
-  remains required for Harmony and cleanup-disabled tokenizers; cleanup-enabled
-  tokenizers may retain only a space removed by the deterministic cleanup rule
-  set, with no other dropped or duplicated content.
+- **v0.2.6 (2026-09-28, cleanup-prefix holdback clarification):** AC-V2-7
+  and the v0.2 streaming-validation contract require cleanup-pattern proper
+  prefixes to be withheld before content or tool-argument emission. Streamed
+  bytes therefore equal finalized non-streaming bytes for every tokenizer;
+  buyer-delivered concatenation remains authoritative under SPEC-015 §N.5,
+  and any tool-argument mismatch fails closed with no positive receipt.
 
 - **v0.2.5 (2026-07-14, runbook item 20 — streaming retryable-override
   symmetry):** §8's "Provider-to-coordinator WS terminal validation failure
