@@ -1,19 +1,19 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.9
+**Version:** 0.1.10
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
   "authority_domains": ["native-mtp-serving"],
   "supersedes": [],
   "depends_on": ["SPEC-001", "SPEC-005", "SPEC-010", "SPEC-011", "SPEC-015", "SPEC-018", "SPEC-019", "SPEC-022", "SPEC-023", "SPEC-024", "SPEC-028", "SPEC-030", "SPEC-031", "SPEC-032", "SPEC-033", "SPEC-036", "SPEC-037", "SPEC-038", "SPEC-039", "SPEC-041"],
-  "implementation_status": "pending-reconciliation",
+  "implementation_status": "partial",
   "production_status": "pending-verification",
   "last_reconciled_commit": null,
   "last_reconciled_at": null,
@@ -23,7 +23,7 @@
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-    "rationale": "Issue #1770 requires a native target-local MTP path, independent MXFP8 qualification, multi-row serving semantics, signed admission evidence, and real Apple-Silicon validation. No production implementation or signed journey evidence exists yet."
+    "rationale": "Issue #1770 has a branch-local native target-local MTP implementation with signed admission parsing, default-off selection, row-local transactions, status diagnostics, tuple revocation, provider self-test, and coordinator canary plumbing. Conformance and production remain pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed journey evidence. MXFP8 remains independently unqualified."
   }
 }
 ```
@@ -855,19 +855,31 @@ self-test depth and corpus.
 
 ## 5. Implementation, tests, and journeys
 
-Implementation is intentionally absent. The expected sequence is:
+Implementation is branch-local and default-off. The current campaign branch
+contains:
 
-1. dependency/API and exact-artifact qualification;
-2. serial greedy oracle and transaction proof, default-off;
-3. multi-row scheduler/paged-hybrid integration;
-4. independent MXFP8 format/fit/quality qualification;
-5. combined validation, signed catalog/autotune admission, and hardware
-   campaign; and
-6. reviewed release enablement.
+1. an immutable fork pin and reviewed upstream row-transaction, packed
+   verification, serialized drafter-state, and hybrid recurrent-cache
+   qualification surface;
+2. provider signed-admission sidecar parsing and artifact observation for the
+   Qwen 3.5 separate-artifact tuple;
+3. default-off native-MTP selection, revocation gating, and ordinary fallback
+   before sticky native state;
+4. serial and mixed continuous-batching native-MTP runtime plumbing with
+   row-local commit/discard/cancel behavior and status counters;
+5. local `/v1/status` `native_mtp_status_v1` diagnostics and bounded metric
+   labels;
+6. provider-local `native_mtp_selftest_v1` challenge parsing/evaluation and
+   coordinator `native_mtp_tuple_offer_v1` / `native_mtp_canary_v1` plumbing;
+   and
+7. local negative fixtures and parser/contract checks for admission,
+   revocation, status, accounting invariance, and canary wire schemas.
 
-The serial slice cannot close issue #1770. Phase 2 cannot begin until the
-row-mapped upstream transaction API is proven. Catalog work cannot admit a row
-until the runtime, combined-format, and hardware gates pass.
+This is not production conformance. The campaign still requires a clean frozen
+diff, CI, Mac Studio hardware build/e2e/benchmark evidence, three-lane code /
+security / architecture audit with zero Critical/High/Medium findings, and the
+signed journey evidence listed below. MXFP8 remains excluded until SPEC-023 and
+SPEC-048-R012 qualify a concrete artifact and the combined tuple.
 
 Minimum automated coverage:
 
@@ -907,17 +919,21 @@ the journey must include its independent and combined evidence.
 
 | Requirement/domain | Verdict | Owner | Issue | Evidence needed |
 |---|---|---|---|---|
-| `SPEC-048-R001..R016` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Normative approval, implementation, automated fixtures, immutable dependency/artifact selection, and signed journey evidence. R014 additionally needs post-release-candidate evidence. |
-| `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance and signed real-hardware journey evidence for the first production tuple. |
+| `SPEC-048-R001..R013/R016` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Branch-local implementation and focused parser/contract tests exist; pending CI, frozen-diff audits, Mac Studio hardware evidence, and signed journey evidence before promotion. |
+| `SPEC-048-R014/R015` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Production enablement and preregistered Studio/advertised-tier benchmarking remain pending. |
+| `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance, release-candidate review, and signed real-hardware journey evidence for the first production tuple. |
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
-| Upstream MLX Swift release | `UNKNOWN` | `@Augustas11` | `#1770` | Tagged release with Qwen-family adapter, row-mapped transaction API, cache rewind behavior, and MacProvider toolchain qualification. |
+| Upstream MLX Swift release | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | A reviewed fork exception is pinned for this campaign; replacement by an upstream tag remains required by the re-review/removal trigger. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 
 ## 7. Evidence
 
-No implementation, production, or signed journey evidence exists for
-SPEC-048. The issue #1770 planning and review artifacts are design inputs, not
-conformance or production evidence.
+Branch-local implementation and focused verification evidence exists for this
+campaign, including Swift parser checks for the changed provider files and
+focused coordinator native-MTP canary/config Go tests. No production release,
+signed journey, or settlement/integrity evidence exists yet. The issue #1770
+planning/review artifacts and this branch's local checks are design and
+implementation evidence only, not production conformance.
 
 The first implementation PR must record the selected upstream release and
 artifact hashes rather than replacing the unknowns in this draft with mutable

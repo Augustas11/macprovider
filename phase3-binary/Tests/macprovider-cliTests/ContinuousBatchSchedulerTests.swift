@@ -5026,6 +5026,81 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
+    func testNativeMTPFirstRoundFailureBeforeVisibleOutputDoesNotIncrementPostoutputFailures() async throws {
+        let sink = NativeMTPStatusSink(
+            supported: true,
+            enabled: true,
+            family: "test_mtp",
+            proposalDepth: 1,
+            throughputDeltaPPM: 0,
+            resetGeneration: 1,
+            lastReason: .active
+        )
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillTokens: ["first-round": 6],
+            nativeTargetTopTokens: ["first-round": [7]],
+            nativeProposalError: BackendFailure()
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            nativeMTPStatusSink: sink,
+            backend: backend
+        )
+
+        let result = try await scheduler.submit(Self.nativeRequest(
+            id: "first-round",
+            promptTokens: [1],
+            maxOutputTokens: 2,
+            stopTokenSequences: [[6, 99]],
+            proposals: [7],
+            maximumDepth: 1
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_native_mtp_proposal_failed")
+        XCTAssertEqual(sink.snapshot().postoutputFailures, 0)
+    }
+
+    func testNativeMTPLaterRoundFailureAfterVisibleOutputIncrementsPostoutputFailures() async throws {
+        let sink = NativeMTPStatusSink(
+            supported: true,
+            enabled: true,
+            family: "test_mtp",
+            proposalDepth: 1,
+            throughputDeltaPPM: 0,
+            resetGeneration: 1,
+            lastReason: .active
+        )
+        let recorder = TokenEventRecorder()
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillTokens: ["later-round": 6],
+            nativeTargetTopTokensByStep: ["later-round": [[7]]],
+            nativeProposalErrorAfterCall: 2
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            nativeMTPStatusSink: sink,
+            backend: backend
+        )
+
+        let result = try await scheduler.submit(Self.nativeRequest(
+            id: "later-round",
+            promptTokens: [1],
+            maxOutputTokens: 3,
+            proposals: [7],
+            maximumDepth: 1
+        ), tokenSink: { event in
+            recorder.append(event)
+        })
+
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_native_mtp_proposal_failed")
+        XCTAssertEqual(recorder.events().map(\.token), [6, 7])
+        XCTAssertEqual(sink.snapshot().postoutputFailures, 1)
+    }
+
     func testNativeMTPDoesNotExposeTransactionalCandidatesBeforeFinalizeAndAbortsOnVerifyThrow() async throws {
         let finalizeGate = AsyncGate()
         let recorder = TokenEventRecorder()
@@ -5246,6 +5321,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         maxPrefillRowsPerIteration: Int = 1,
         maxPrefillTokensPerIteration: Int? = nil,
         nativeMTPRoundByteCapacity: Int? = nil,
+        nativeMTPStatusSink: NativeMTPStatusSink? = nil,
         nativeMTPRoundSystemMemoryProbe: NativeMTPRoundSystemMemoryProbe = .init(
             identity: "test-default",
             sampleProvider: {
@@ -5282,7 +5358,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             maxDecodeLockstepWindow: maxDecodeLockstepWindow,
             maxDecodeStepsWhilePrefilling: maxDecodeStepsWhilePrefilling,
             nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
-            nativeMTPRoundSystemMemoryProbe: nativeMTPRoundSystemMemoryProbe
+            nativeMTPRoundSystemMemoryProbe: nativeMTPRoundSystemMemoryProbe,
+            nativeMTPStatusSink: nativeMTPStatusSink
         )
         return ContinuousBatchScheduler(
             configuration: config,
@@ -5653,6 +5730,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private let nativeTargetTopTokensByStep: [String: [[Int]]]
     private let nativeProposalGate: AsyncGate?
     private let nativeProposalError: (any Error)?
+    private let nativeProposalErrorAfterCall: Int?
     private let nativeVerifyGate: AsyncGate?
     private let nativeFinalizeGate: AsyncGate?
     private let nativeVerifyError: (any Error)?
@@ -5687,6 +5765,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private var nativeVerifyInputTokenCountLog: [[String: Int]] = []
     private var nativeVerifyStepByRequest: [String: Int] = [:]
     private var nativeFinalizeLog: [[ContinuousBatchNativeMTPFinalizeInput]] = []
+    private var nativeProposalCallCount = 0
     private var samplerSeedLog: [String: [Int]] = [:]
     private var samplerStepLog: [String: [Int]] = [:]
     private var retainedInstallLog: [String: Int] = [:]
@@ -5711,6 +5790,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         nativeTargetTopTokensByStep: [String: [[Int]]] = [:],
         nativeProposalGate: AsyncGate? = nil,
         nativeProposalError: (any Error)? = nil,
+        nativeProposalErrorAfterCall: Int? = nil,
         nativeVerifyGate: AsyncGate? = nil,
         nativeFinalizeGate: AsyncGate? = nil,
         nativeVerifyError: (any Error)? = nil,
@@ -5739,6 +5819,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         self.nativeTargetTopTokensByStep = nativeTargetTopTokensByStep
         self.nativeProposalGate = nativeProposalGate
         self.nativeProposalError = nativeProposalError
+        self.nativeProposalErrorAfterCall = nativeProposalErrorAfterCall
         self.nativeVerifyGate = nativeVerifyGate
         self.nativeFinalizeGate = nativeFinalizeGate
         self.nativeVerifyError = nativeVerifyError
@@ -5850,10 +5931,14 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     func proposeNativeMTPPackedRound(
         rows: [ContinuousBatchNativeMTPProposalInput]
     ) async throws -> [String: [Int]]? {
+        nativeProposalCallCount += 1
         nativeProposalRowsLog.append(rows)
         eventLog.append("native_propose:\(rows.map(\.requestID).joined(separator: ","))")
         if let nativeProposalGate {
             await nativeProposalGate.wait()
+        }
+        if nativeProposalErrorAfterCall == nativeProposalCallCount {
+            throw BackendFailure()
         }
         if let nativeProposalError {
             throw nativeProposalError

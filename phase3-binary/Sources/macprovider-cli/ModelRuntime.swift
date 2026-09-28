@@ -280,6 +280,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     public let templateSupportsThinkingToggle: Bool
     public let specDecodeGeneration: Int
     public let continuousBatching: RuntimeContinuousBatchingSnapshot?
+    public let nativeMTPStatus: NativeMTPStatusSnapshot
+    let nativeMTPTupleOffer: NativeMTPPublishedTupleOffer?
 
     init(
         state: SwapState,
@@ -295,7 +297,9 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         numDraftTokens: Int? = nil,
         templateSupportsThinkingToggle: Bool = false,
         specDecodeGeneration: Int = 0,
-        continuousBatching: RuntimeContinuousBatchingSnapshot? = nil
+        continuousBatching: RuntimeContinuousBatchingSnapshot? = nil,
+        nativeMTPStatus: NativeMTPStatusSnapshot = NativeMTPStatusSink.disabled().snapshot(),
+        nativeMTPTupleOffer: NativeMTPPublishedTupleOffer? = nil
     ) {
         self.state = state
         self.container = container
@@ -313,6 +317,8 @@ public struct RuntimeSnapshot: @unchecked Sendable {
         self.templateSupportsThinkingToggle = templateSupportsThinkingToggle
         self.specDecodeGeneration = specDecodeGeneration
         self.continuousBatching = continuousBatching
+        self.nativeMTPStatus = nativeMTPStatus
+        self.nativeMTPTupleOffer = nativeMTPTupleOffer
     }
 
     var hasTargetCompatibleDraft: Bool {
@@ -320,6 +326,92 @@ public struct RuntimeSnapshot: @unchecked Sendable {
             return false
         }
         return draftTargetModelID == modelID
+    }
+}
+
+struct NativeMTPPublishedRuntimeTuple: Sendable, Equatable {
+    let modelID: String
+    let modelHash: String
+    let modelHashAlgorithm: String
+    let providerRevision: String
+    let runtimeRevision: String
+    let tokenizerDigest: String
+    let artifactDigest: String
+    let manifestDigest: String
+    let sidecarDigest: String
+    let providerBinarySHA256: String
+    let runtimeCDHash: String
+    let cacheNamespace: String
+    let stateDigest: String
+    let proposalDepth: Int
+
+    var goCanonicalJSONString: String {
+        let fields: [(String, String)] = [
+            ("model_id", modelID),
+            ("model_hash", modelHash),
+            ("model_hash_algorithm", modelHashAlgorithm),
+            ("provider_revision", providerRevision),
+            ("runtime_revision", runtimeRevision),
+            ("tokenizer_digest", tokenizerDigest),
+            ("artifact_digest", artifactDigest),
+            ("manifest_digest", manifestDigest),
+            ("sidecar_digest", sidecarDigest),
+            ("provider_binary_sha256", providerBinarySHA256),
+            ("runtime_cdhash", runtimeCDHash),
+            ("cache_namespace", cacheNamespace),
+            ("state_digest", stateDigest),
+        ]
+        let body = fields
+            .map { "\"\($0.0)\":\"\($0.1)\"" }
+            .joined(separator: ",")
+        return "{\(body),\"proposal_depth\":\(proposalDepth)}"
+    }
+
+    var sha256: String {
+        let digest = SHA256.hash(data: Data(goCanonicalJSONString.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+struct NativeMTPPublishedTupleOffer: Sendable, Equatable {
+    let targetGeneration: UInt64
+    let providerRevision: String
+    let runtimeRevision: String
+    let runtimeTuple: NativeMTPPublishedRuntimeTuple
+    let nativeMTPAdmissionTupleSHA256: String
+    let servedSnapshotID: String
+    let nativeMTPRuntimeTupleSHA256: String
+    let sidecarDigest: String
+    let challengeBankReleaseID: String
+    let challengeBankSHA256: String
+    let challengeCorpusSHA256: String
+    let selftestProfile: String
+    let selftestPassDigest: String
+    let selftestObservedAt: Date
+}
+
+enum NativeMTPRuntimeTupleIdentity {
+    static func sha256(
+        nativeMTPAdmissionTupleSHA256: String,
+        providerID: String,
+        assignedID: String,
+        targetGeneration: UInt64,
+        servedSnapshotID: String
+    ) throws -> String {
+        guard let generation = Int(exactly: targetGeneration) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("native_mtp_runtime_tuple.target_generation")
+        }
+        let value = RFC8785JCS.Value.object([
+            "assigned_id": .string(assignedID),
+            "native_mtp_admission_tuple_sha256": .string(nativeMTPAdmissionTupleSHA256),
+            "provider_id": .string(providerID),
+            "schema_version": .int(1),
+            "served_snapshot_id": .string(servedSnapshotID),
+            "target_generation": .int(generation),
+        ])
+        let canonical = try RFC8785JCS.canonicalString(value)
+        let digest = SHA256.hash(data: Data(canonical.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 }
 
@@ -1150,8 +1242,42 @@ actor ModelRuntime: ModelRuntimeServing {
             nativeMTPCapability: capability,
             schedulerSupportsNativeMTP: schedulerSupportsNativeMTP
         )
+        recordNativeMTPAdmissionStatus(admission)
         testNativeMTPAdmissionObserver?(admission)
         return admission
+    }
+
+    private func recordNativeMTPAdmissionStatus(_ admission: NativeMTPRuntimeAdmission) {
+        guard nativeMTPMode == .auto else { return }
+        if admission.selection.path == .nativeMTP, admission.effectivePath != .nativeMTP {
+            currentNativeMTPStatusSink.recordPreoutputFallback(.unsupportedCacheState)
+            return
+        }
+        guard admission.effectivePath != .nativeMTP,
+              let reason = admission.selection.nativeMTPReason,
+              !reason.isEligible else {
+            return
+        }
+        currentNativeMTPStatusSink.recordReason(Self.nativeMTPStatusReason(for: reason))
+    }
+
+    private static func nativeMTPStatusReason(for selectorReason: NativeMTPSelectorReason) -> NativeMTPStatusReason {
+        switch selectorReason {
+        case .modeOff, .classicDraftConfigured:
+            return .disabledByDefault
+        case .tupleNotAdmitted, .capabilityMismatch:
+            return .tupleNotAdmitted
+        case .tupleRevoked:
+            return .tupleRevoked
+        case .revocationStateUnavailable:
+            return .revocationStateUnavailable
+        case .unsupportedStateCache:
+            return .unsupportedCacheState
+        case .insufficientVerificationCapacity:
+            return .capacityUnavailable
+        default:
+            return .requestIneligible
+        }
     }
 
     /// mlx-swift-lm #424: classic speculative rollback silently fails after a
@@ -1251,6 +1377,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentNativeMTPDrafterContainer: MTPDrafterContainer?
     private var currentNativeMTPCapability: NativeMTPCapability?
     private var currentNativeMTPAdmissionCapability: NativeMTPAdmissionCapability?
+    private var currentNativeMTPStatusSink = NativeMTPStatusSink.disabled()
+    private var currentNativeMTPTupleOffer: NativeMTPPublishedTupleOffer?
+    private var nativeMTPStatusResetGeneration: UInt64 = 0
     private let configuredDraftModelID: String?
     private let configuredDraftModelLoadPath: String?
     private let configuredNativeMTPAdmissionSidecarPath: String?
@@ -1258,6 +1387,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private let configuredNativeMTPTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring?
     private let configuredNativeMTPRunningBuildIdentity: NativeMTPRunningBuildIdentity?
     private let configuredNativeMTPRevokedTupleSHA256: Set<String>?
+    private let nativeMTPSelfTestRunner: NativeMTPSelfTestRunner
     private var currentSpecDecodeGeneration = 0
     private let numDraftTokens: Int
     private let stopTokenFilter: StopTokenFilter
@@ -2261,6 +2391,7 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring? = nil,
         nativeMTPRunningBuildIdentity: NativeMTPRunningBuildIdentity? = nil,
         nativeMTPRevokedTupleSHA256: Set<String>? = nil,
+        nativeMTPSelfTestRunner: NativeMTPSelfTestRunner = .unavailable,
         testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30,
@@ -2300,6 +2431,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.configuredNativeMTPRunningBuildIdentity = nil
         #endif
         self.configuredNativeMTPRevokedTupleSHA256 = nativeMTPRevokedTupleSHA256
+        self.nativeMTPSelfTestRunner = nativeMTPSelfTestRunner
         self.numDraftTokens = numDraftTokens
         self.speculativeCacheWrapValidated = speculativeCacheWrapValidated
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
@@ -2395,7 +2527,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 signaturePath: self.configuredNativeMTPAdmissionSignaturePath,
                 trustedKeyring: self.configuredNativeMTPTrustedKeyring,
                 runningBuildIdentity: self.configuredNativeMTPRunningBuildIdentity,
-                revokedTupleSHA256: self.configuredNativeMTPRevokedTupleSHA256
+                revokedTupleSHA256: self.configuredNativeMTPRevokedTupleSHA256,
+                targetGeneration: UInt64(max(1, self.currentSpecDecodeGeneration + 1)),
+                selfTestRunner: self.nativeMTPSelfTestRunner
             )
         } else {
             candidateNativeMTPLoad = nil
@@ -2488,6 +2622,19 @@ actor ModelRuntime: ModelRuntimeServing {
             self.currentNativeMTPDrafterContainer = nativeMTPLoad.drafterContainer
             self.currentNativeMTPCapability = nativeMTPLoad.capability
             self.currentNativeMTPAdmissionCapability = nativeMTPLoad.admissionCapability
+            self.currentNativeMTPTupleOffer = nativeMTPLoad.tupleOffer
+            publishNativeMTPStatusSink(
+                capability: nativeMTPLoad.capability,
+                admissionCapability: nativeMTPLoad.admissionCapability,
+                reasonIfDisabled: .tupleNotAdmitted
+            )
+        } else {
+            self.currentNativeMTPTupleOffer = nil
+            publishNativeMTPStatusSink(
+                capability: nil,
+                admissionCapability: nil,
+                reasonIfDisabled: .tupleNotAdmitted
+            )
         }
         self.continuousBatchScheduler = await Self.makeContinuousBatchScheduler(
             decision: self.pagedKVAttachDecision,
@@ -2506,6 +2653,7 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsGeneration: self.currentSpecDecodeGeneration,
             kvBitsOverride: self.kvBitsOverride,
             prefillStepSize: self.prefillStepSize,
+            nativeMTPStatusSink: self.currentNativeMTPStatusSink,
             replayAuthority: self.continuousBatchReplayAuthority,
             cachedTurns: self.continuousBatchingCachedTurns
         )
@@ -2595,6 +2743,7 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPRunningBuildIdentity: NativeMTPRunningBuildIdentity? = nil,
         nativeMTPRevokedTupleSHA256: Set<String>? = nil,
         nativeMTPDrafterContainer: MTPDrafterContainer? = nil,
+        nativeMTPSelfTestRunner: NativeMTPSelfTestRunner = .unavailable,
         testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
@@ -2639,6 +2788,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentNativeMTPCapability = nil
         #endif
         self.currentNativeMTPAdmissionCapability = nil
+        self.currentNativeMTPTupleOffer = nil
         self.configuredDraftModelID = normalizedDraftModelID
         self.configuredDraftModelLoadPath = nil
         self.configuredNativeMTPAdmissionSidecarPath = Self.nonEmpty(nativeMTPAdmissionSidecarPath)
@@ -2650,6 +2800,11 @@ actor ModelRuntime: ModelRuntimeServing {
         self.configuredNativeMTPRunningBuildIdentity = nil
         #endif
         self.configuredNativeMTPRevokedTupleSHA256 = nativeMTPRevokedTupleSHA256
+        #if DEBUG
+        self.nativeMTPSelfTestRunner = nativeMTPSelfTestRunner
+        #else
+        self.nativeMTPSelfTestRunner = .unavailable
+        #endif
         self.numDraftTokens = numDraftTokens
         self.speculativeCacheWrapValidated = speculativeCacheWrapValidated
         self.currentModelHash = modelHash
@@ -2822,7 +2977,9 @@ actor ModelRuntime: ModelRuntimeServing {
                         slotsFree: $0.slotsFree
                     )
                 }
-            )
+            ),
+            nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
+            nativeMTPTupleOffer: currentNativeMTPTupleOffer
         )
     }
 
@@ -2840,7 +2997,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 draftContainer: nil,
                 numDraftTokens: nil,
                 templateSupportsThinkingToggle: currentTemplateSupportsThinkingToggle,
-                specDecodeGeneration: currentSpecDecodeGeneration
+                specDecodeGeneration: currentSpecDecodeGeneration,
+                nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
+                nativeMTPTupleOffer: currentNativeMTPTupleOffer
             )
         }
         return RuntimeSnapshot(
@@ -2855,7 +3014,9 @@ actor ModelRuntime: ModelRuntimeServing {
             draftContainer: currentDraftContainer,
             numDraftTokens: currentDraftModelID == nil ? nil : numDraftTokens,
             templateSupportsThinkingToggle: currentTemplateSupportsThinkingToggle,
-            specDecodeGeneration: currentSpecDecodeGeneration
+            specDecodeGeneration: currentSpecDecodeGeneration,
+            nativeMTPStatus: currentNativeMTPStatusSink.snapshot(),
+            nativeMTPTupleOffer: currentNativeMTPTupleOffer
         )
     }
 
@@ -2867,6 +3028,27 @@ actor ModelRuntime: ModelRuntimeServing {
             Task { await self?.removeSignalContinuation(id) }
         }
         return pair.stream
+    }
+
+    func disableNativeMTPTuple(
+        admissionTupleSHA256: String,
+        servedSnapshotID: String,
+        targetGeneration: UInt64
+    ) {
+        guard let offer = currentNativeMTPTupleOffer,
+              offer.nativeMTPAdmissionTupleSHA256 == admissionTupleSHA256,
+              offer.servedSnapshotID == servedSnapshotID,
+              offer.targetGeneration == targetGeneration else {
+            return
+        }
+        currentNativeMTPCapability = nil
+        currentNativeMTPAdmissionCapability = nil
+        currentNativeMTPTupleOffer = nil
+        currentNativeMTPDrafterContainer = nil
+        currentNativeMTPStatusSink = NativeMTPStatusSink.disabled(
+            resetGeneration: currentSpecDecodeGeneration,
+            reason: .tupleRevoked
+        )
     }
 
     /// #1689 FR-20b: the knobs a plain warm switch carries so a
@@ -3521,6 +3703,77 @@ actor ModelRuntime: ModelRuntimeServing {
         return capacity
     }
 
+    private static func nativeMTPStatusSink(
+        capability: NativeMTPCapability?,
+        admissionCapability: NativeMTPAdmissionCapability?,
+        mode: NativeMTPMode,
+        resetGeneration: UInt64
+    ) -> NativeMTPStatusSink {
+        guard let capability, let admissionCapability else {
+            return NativeMTPStatusSink.disabled(resetGeneration: resetGeneration, reason: .tupleNotAdmitted)
+        }
+        guard mode == .auto else {
+            return NativeMTPStatusSink(
+                supported: capability.admitted,
+                enabled: false,
+                family: capability.family ?? admissionCapability.familyAdapter,
+                proposalDepth: capability.maximumProposalDepth,
+                throughputDeltaPPM: capability.throughputDeltaPPM,
+                resetGeneration: resetGeneration,
+                lastReason: .disabledByDefault
+            )
+        }
+        let reason: NativeMTPStatusReason
+        if !capability.revocationStateAvailable {
+            reason = .revocationStateUnavailable
+        } else if capability.revoked {
+            reason = .tupleRevoked
+        } else if !capability.admitted {
+            reason = .tupleNotAdmitted
+        } else if !capability.supportsCurrentStateCache {
+            reason = .unsupportedCacheState
+        } else {
+            reason = .active
+        }
+        return NativeMTPStatusSink(
+            supported: capability.admitted,
+            enabled: reason == .active,
+            family: capability.family ?? admissionCapability.familyAdapter,
+            proposalDepth: capability.maximumProposalDepth,
+            throughputDeltaPPM: capability.throughputDeltaPPM,
+            resetGeneration: resetGeneration,
+            lastReason: reason
+        )
+    }
+
+    private func publishNativeMTPStatusSink(
+        capability: NativeMTPCapability?,
+        admissionCapability: NativeMTPAdmissionCapability?,
+        reasonIfDisabled: NativeMTPStatusReason = .warmSwap
+    ) {
+        guard nativeMTPStatusResetGeneration < UInt64.max else {
+            currentNativeMTPStatusSink = NativeMTPStatusSink.disabled(
+                resetGeneration: UInt64.max,
+                reason: .runtimeFailure
+            )
+            return
+        }
+        nativeMTPStatusResetGeneration += 1
+        if capability == nil || admissionCapability == nil {
+            currentNativeMTPStatusSink = NativeMTPStatusSink.disabled(
+                resetGeneration: nativeMTPStatusResetGeneration,
+                reason: nativeMTPMode == .auto ? reasonIfDisabled : .disabledByDefault
+            )
+            return
+        }
+        currentNativeMTPStatusSink = Self.nativeMTPStatusSink(
+            capability: capability,
+            admissionCapability: admissionCapability,
+            mode: nativeMTPMode,
+            resetGeneration: nativeMTPStatusResetGeneration
+        )
+    }
+
     private nonisolated static func makeContinuousBatchScheduler(
         decision: PagedKVAttachDecision,
         tuple: ContinuousBatchingRequestedTuple?,
@@ -3536,6 +3789,7 @@ actor ModelRuntime: ModelRuntimeServing {
         prefillStepSize: Int,
         maxDecodeLockstepWindow: Int = ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
         nativeMTPRoundByteCapacity: Int? = nil,
+        nativeMTPStatusSink: NativeMTPStatusSink? = nil,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
         contiguousCacheBridge: PagedKVRuntimeContiguousCacheBridge? = nil
     ) -> ContinuousBatchScheduler? {
@@ -3582,7 +3836,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 ),
                 maxDecodeLockstepWindow: maxDecodeLockstepWindow,
                 maxDecodeStepsWhilePrefilling: ContinuousBatchSchedulerConfiguration.defaultDecodeStepsWhilePrefilling,
-                nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity
+                nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
+                nativeMTPStatusSink: nativeMTPStatusSink
             ),
             allocator: allocator,
             backend: backend,
@@ -3608,12 +3863,13 @@ actor ModelRuntime: ModelRuntimeServing {
         weightsGeneration: Int,
         kvBitsOverride: Int?,
         prefillStepSize: Int,
+        nativeMTPStatusSink: NativeMTPStatusSink? = nil,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
         cachedTurns: Bool
     ) async -> ContinuousBatchScheduler? {
         let nativeMTPRoundByteCapacity: Int?
         if nativeMTPDrafterContainer != nil {
-            guard let capacity = nativeMTPRoundByteCapacity(from: nativeMTPAdmissionCapability) else {
+            guard let capacity = Self.nativeMTPRoundByteCapacity(from: nativeMTPAdmissionCapability) else {
                 return nil
             }
             nativeMTPRoundByteCapacity = capacity
@@ -3635,6 +3891,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 weightsGeneration: weightsGeneration,
                 prefillStepSize: prefillStepSize,
                 nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
+                nativeMTPStatusSink: nativeMTPStatusSink,
                 replayAuthority: replayAuthority
             )
         }
@@ -3688,6 +3945,7 @@ actor ModelRuntime: ModelRuntimeServing {
             prefillStepSize: prefillStepSize,
             maxDecodeLockstepWindow: maxDecodeLockstepWindow,
             nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
+            nativeMTPStatusSink: nativeMTPStatusSink,
             replayAuthority: replayAuthority,
             contiguousCacheBridge: contiguousCacheBridge
         )
@@ -3702,6 +3960,10 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     private func rebuildContinuousBatchScheduler(container: ModelContainer?) async {
+        publishNativeMTPStatusSink(
+            capability: currentNativeMTPCapability,
+            admissionCapability: currentNativeMTPAdmissionCapability
+        )
         continuousBatchScheduler = await Self.makeContinuousBatchScheduler(
             decision: pagedKVAttachDecision,
             tuple: continuousBatchingRequestedTuple(),
@@ -3719,6 +3981,7 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsGeneration: currentSpecDecodeGeneration,
             kvBitsOverride: kvBitsOverride,
             prefillStepSize: prefillStepSize,
+            nativeMTPStatusSink: currentNativeMTPStatusSink,
             replayAuthority: continuousBatchReplayAuthority,
             cachedTurns: continuousBatchingCachedTurns
         )
@@ -3988,6 +4251,7 @@ actor ModelRuntime: ModelRuntimeServing {
         currentNativeMTPDrafterContainer = nil
         currentNativeMTPCapability = nil
         currentNativeMTPAdmissionCapability = nil
+        currentNativeMTPTupleOffer = nil
         currentSpecDecodeGeneration += 1
         await rebuildContinuousBatchScheduler(container: container)
         if continuousBatchScheduler == nil {
@@ -7144,6 +7408,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let drafterContainer: MTPDrafterContainer
         let capability: NativeMTPCapability
         let admissionCapability: NativeMTPAdmissionCapability
+        let tupleOffer: NativeMTPPublishedTupleOffer
         let runtimeCacheClass: String
         let modelCapabilities: PagedKVRuntimeModelCapabilities
     }
@@ -7301,7 +7566,9 @@ actor ModelRuntime: ModelRuntimeServing {
         signaturePath: String?,
         trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring?,
         runningBuildIdentity injectedRunningBuildIdentity: NativeMTPRunningBuildIdentity?,
-        revokedTupleSHA256: Set<String>?
+        revokedTupleSHA256: Set<String>?,
+        targetGeneration: UInt64,
+        selfTestRunner: NativeMTPSelfTestRunner
     ) async -> NativeMTPRuntimeLoadResult? {
         guard mode == .auto,
               let targetModelRevision,
@@ -7327,6 +7594,11 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         do {
+            let effectiveRevokedTupleSHA256 = revokedTupleSHA256 ?? Self.nativeMTPRevokedTupleSHA256(
+                sidecarURL: sidecarURL,
+                signatureURL: signatureURL,
+                trustedKeyring: trustedKeyring
+            )
             let snapshotRoot = sidecarURL.deletingLastPathComponent()
             let machine = MachineFingerprinter().sample()
             let admissionCapability = try NativeMTPAdmissionSidecar.load(
@@ -7342,7 +7614,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     ramGB: machine.ramGB,
                     osVersion: machine.osVersion,
                     slotCount: slotCount,
-                    revokedTupleSHA256: revokedTupleSHA256
+                    revokedTupleSHA256: effectiveRevokedTupleSHA256
                 ),
                 trustedKeyring: trustedKeyring,
                 captureArtifacts: true
@@ -7434,6 +7706,28 @@ actor ModelRuntime: ModelRuntimeServing {
             ) else {
                 return nil
             }
+            let selectedChallenge = try loadNativeMTPSelfTestChallenge(
+                admissionCapability: admissionCapability,
+                snapshotRoot: snapshotRoot,
+                trustedKeyring: trustedKeyring
+            )
+            let tupleSHA256 = try NativeMTPSelfTest.runtimeTupleDigest(selectedChallenge.runtimeTuple)
+            let selfTestInput = NativeMTPSelfTestInput(
+                tupleSHA256: tupleSHA256,
+                modelID: admissionCapability.modelID,
+                modelRevision: admissionCapability.modelRevision,
+                familyAdapter: admissionCapability.familyAdapter,
+                proposalDepth: admissionCapability.maxProposalDepth,
+                challengeBank: admissionCapability.selfTestChallengeBank,
+                selectedChallenge: selectedChallenge,
+                servedSnapshot: NativeMTPSelfTestServedSnapshot(
+                    tupleSHA256: tupleSHA256,
+                    runtimeTuple: selectedChallenge.runtimeTuple,
+                    generation: selectedChallenge.servedSnapshotGeneration,
+                    proposalDepth: selectedChallenge.proposalDepth
+                )
+            )
+            let selfTestReceipt = try await selfTestRunner.validate(selfTestInput)
             let capability = NativeMTPCapability(
                 admitted: true,
                 revoked: false,
@@ -7449,7 +7743,41 @@ actor ModelRuntime: ModelRuntimeServing {
                 maximumProposalDepth: admissionCapability.maxProposalDepth,
                 maximumPromptTokens: admissionCapability.maxPromptTokens,
                 maximumCompletionTokens: admissionCapability.maxCompletionTokens,
-                completeWindowBytesByDepth: admissionCapability.completeWindowBytesByDepth
+                completeWindowBytesByDepth: admissionCapability.completeWindowBytesByDepth,
+                family: admissionCapability.familyAdapter,
+                throughputDeltaPPM: admissionCapability.throughputDeltaPPM
+            )
+            let runtimeTuple = NativeMTPPublishedRuntimeTuple(
+                modelID: selectedChallenge.runtimeTuple.modelID,
+                modelHash: selectedChallenge.runtimeTuple.modelHash,
+                modelHashAlgorithm: selectedChallenge.runtimeTuple.modelHashAlgorithm,
+                providerRevision: admissionCapability.providerRevision,
+                runtimeRevision: admissionCapability.upstreamMLXSwiftLMRevision,
+                tokenizerDigest: selectedChallenge.runtimeTuple.tokenizerDigest,
+                artifactDigest: selectedChallenge.runtimeTuple.artifactDigest,
+                manifestDigest: selectedChallenge.runtimeTuple.manifestDigest,
+                sidecarDigest: selectedChallenge.runtimeTuple.sidecarDigest,
+                providerBinarySHA256: selectedChallenge.runtimeTuple.providerBinarySHA256,
+                runtimeCDHash: selectedChallenge.runtimeTuple.runtimeCDHash,
+                cacheNamespace: selectedChallenge.runtimeTuple.cacheNamespace,
+                stateDigest: selectedChallenge.runtimeTuple.stateDigest,
+                proposalDepth: selectedChallenge.runtimeTuple.proposalDepth
+            )
+            let tupleOffer = NativeMTPPublishedTupleOffer(
+                targetGeneration: targetGeneration,
+                providerRevision: admissionCapability.providerRevision,
+                runtimeRevision: admissionCapability.upstreamMLXSwiftLMRevision,
+                runtimeTuple: runtimeTuple,
+                nativeMTPAdmissionTupleSHA256: admissionCapability.tupleSHA256,
+                servedSnapshotID: selectedChallenge.runtimeTuple.modelHash,
+                nativeMTPRuntimeTupleSHA256: runtimeTuple.sha256,
+                sidecarDigest: admissionCapability.sidecarSHA256,
+                challengeBankReleaseID: admissionCapability.selfTestChallengeBank.releaseID,
+                challengeBankSHA256: admissionCapability.selfTestChallengeBank.challengeBankSHA256,
+                challengeCorpusSHA256: admissionCapability.selfTestChallengeBank.challengeBankSHA256,
+                selftestProfile: NativeMTPSelfTestRunner.capability,
+                selftestPassDigest: selfTestReceipt.passDigestSHA256,
+                selftestObservedAt: Date()
             )
             return NativeMTPRuntimeLoadResult(
                 targetContainer: capturedTargetContainer,
@@ -7457,9 +7785,56 @@ actor ModelRuntime: ModelRuntimeServing {
                 drafterContainer: drafterContainer,
                 capability: capability,
                 admissionCapability: admissionCapability,
+                tupleOffer: tupleOffer,
                 runtimeCacheClass: runtimeCacheClass,
                 modelCapabilities: modelCapabilities
             )
+        } catch {
+            return nil
+        }
+    }
+
+    private static func nativeMTPRevokedTupleSHA256(
+        sidecarURL: URL,
+        signatureURL: URL,
+        trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring
+    ) -> Set<String>? {
+        do {
+            let sidecarData = try Data(contentsOf: sidecarURL)
+            let signatureData = try Data(contentsOf: signatureURL)
+            let revocationSignerKeyID = try NativeMTPAdmissionSidecar.pinnedRevocationSignerKeyID(
+                sidecarData: sidecarData,
+                signatureData: signatureData,
+                trustedKeyring: trustedKeyring
+            )
+            let store = KeychainNativeMTPRevocationStore()
+            let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID)
+            let directory = sidecarURL.deletingLastPathComponent()
+            let feedURL = directory.appendingPathComponent(
+                "native-mtp-revocations.\(revocationSignerKeyID).json",
+                isDirectory: false
+            )
+            let feedSignatureURL = directory.appendingPathComponent(
+                "native-mtp-revocations.\(revocationSignerKeyID).json.sig",
+                isDirectory: false
+            )
+            let state: NativeMTPRevocationState
+            if FileManager.default.fileExists(atPath: feedURL.path),
+               FileManager.default.fileExists(atPath: feedSignatureURL.path) {
+                state = try NativeMTPRevocationFeedManager.accept(
+                    feedData: Data(contentsOf: feedURL),
+                    signatureData: Data(contentsOf: feedSignatureURL),
+                    pinnedSignerKeyID: revocationSignerKeyID,
+                    verifier: verifier,
+                    store: store
+                )
+            } else {
+                state = try NativeMTPRevocationFeedManager.loadCached(
+                    pinnedSignerKeyID: revocationSignerKeyID,
+                    store: store
+                )
+            }
+            return state.feed.revokedSet
         } catch {
             return nil
         }
@@ -7516,11 +7891,12 @@ actor ModelRuntime: ModelRuntimeServing {
         capturedArtifacts: NativeMTPAdmissionCapturedArtifacts,
         admissionCapability: NativeMTPAdmissionCapability
     ) throws -> Bool {
-        nativeMTPCapturedManifestPathMatchesMTP(
+        let pathMatches = nativeMTPCapturedManifestPathMatchesMTP(
             mtpURL: capturedArtifacts.mtpURL,
             manifestURL: capturedArtifacts.manifestURL
         )
-            && (try sha256RegularFileNoFollow(capturedArtifacts.manifestURL)) == admissionCapability.mtpManifestSHA256
+        guard pathMatches else { return false }
+        return try sha256RegularFileNoFollow(capturedArtifacts.manifestURL) == admissionCapability.mtpManifestSHA256
     }
 
     private static func nativeMTPCapturedManifestPathMatchesMTP(mtpURL: URL, manifestURL: URL) -> Bool {
@@ -7532,6 +7908,32 @@ actor ModelRuntime: ModelRuntimeServing {
 
     static func nativeMTPCapturedManifestPathMatchesMTPForTest(mtpURL: URL, manifestURL: URL) -> Bool {
         nativeMTPCapturedManifestPathMatchesMTP(mtpURL: mtpURL, manifestURL: manifestURL)
+    }
+
+    private static func loadNativeMTPSelfTestChallenge(
+        admissionCapability: NativeMTPAdmissionCapability,
+        snapshotRoot: URL,
+        trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring
+    ) throws -> NativeMTPSelfTestChallenge {
+        guard let encodedPublicKey = trustedKeyring.publicKeysByKeyID[admissionCapability.selfTestChallengeBank.signerKeyID],
+              let publicKey = Data(base64Encoded: encodedPublicKey),
+              publicKey.count == 32,
+              publicKey.base64EncodedString() == encodedPublicKey else {
+            throw NativeMTPSelfTestError.invalidSignature
+        }
+        let root = snapshotRoot.standardizedFileURL
+        let bankURL = root
+            .appendingPathComponent(admissionCapability.selfTestChallengeBank.challengeBankPath, isDirectory: false)
+            .standardizedFileURL
+        guard BYOMArtifactPathPolicy.isContained(bankURL, in: root) else {
+            throw NativeMTPSelfTestError.challengeBankMismatch
+        }
+        let data = try Data(contentsOf: bankURL)
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        guard digest == admissionCapability.selfTestChallengeBank.challengeBankSHA256 else {
+            throw NativeMTPSelfTestError.challengeBankMismatch
+        }
+        return try NativeMTPSelfTest.parseChallenge(data, trustedPublicKeyRawRepresentation: publicKey)
     }
 
     private static func nativeMTPCapturedTokenizerDirectory(targetURL: URL, tokenizerURL: URL) -> URL? {

@@ -451,12 +451,31 @@ private final class QualificationDrafter: Module, MTPDrafterModel {
         lastToken: MLXArray,
         lastHidden _: MLXArray,
         sharedKV _: [String: (MLXArray, MLXArray)],
-        positionDeltas _: MLXArray?,
         queryOffset _: Int,
         blockSize: Int,
         sampler _: any LogitSampler
     ) -> MLXArray {
         MLXArray.zeros([lastToken.dim(0), max(0, blockSize - 1)], dtype: .int32)
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas _: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        draftBlock(
+            target: target,
+            lastToken: lastToken,
+            lastHidden: lastHidden,
+            sharedKV: sharedKV,
+            queryOffset: queryOffset,
+            blockSize: blockSize,
+            sampler: sampler)
     }
 }
 
@@ -557,8 +576,7 @@ private final class PackedVerificationModel: Module, LanguageModel, KVCacheDimen
     func prepare(
         _ input: LMInput,
         cache: [KVCache],
-        state: LMOutput.State?,
-        prefill: PrefillParameters
+        windowSize _: Int?
     ) throws -> PrepareResult {
         .tokens(input.text)
     }

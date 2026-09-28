@@ -37,6 +37,8 @@ struct NativeMTPCapability: Sendable, Equatable {
     let maximumPromptTokens: Int
     let maximumCompletionTokens: Int
     let completeWindowBytesByDepth: [Int]
+    let family: String?
+    let throughputDeltaPPM: Int
 
     init(
         admitted: Bool,
@@ -51,7 +53,9 @@ struct NativeMTPCapability: Sendable, Equatable {
         maximumProposalDepth: Int,
         maximumPromptTokens: Int,
         maximumCompletionTokens: Int,
-        completeWindowBytesByDepth: [Int] = []
+        completeWindowBytesByDepth: [Int] = [],
+        family: String? = nil,
+        throughputDeltaPPM: Int = 0
     ) {
         self.admitted = admitted
         self.revoked = revoked
@@ -66,6 +70,8 @@ struct NativeMTPCapability: Sendable, Equatable {
         self.maximumPromptTokens = maximumPromptTokens
         self.maximumCompletionTokens = maximumCompletionTokens
         self.completeWindowBytesByDepth = completeWindowBytesByDepth
+        self.family = family
+        self.throughputDeltaPPM = throughputDeltaPPM
     }
 
     static let unavailable = NativeMTPCapability(

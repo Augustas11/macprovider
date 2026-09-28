@@ -263,6 +263,16 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
     ) throws -> NativeMTPAdmissionCapability {
         let tokenizerSHA = try sha256(of: root.appendingPathComponent("target/tokenizer.json"))
         let manifestSHA = try sha256(of: root.appendingPathComponent("mtp/config.json"))
+        let signer = Curve25519.Signing.PrivateKey()
+        let keyID = "native-mtp-hardware-e2e"
+        let selfTestBankData = Data(#"{"schema":"native_mtp_selftest_bank.v1","release_id":"native-mtp-hardware-e2e-selftest","prompts":[[1,2,3]]}"#.utf8)
+        try selfTestBankData.write(to: root.appendingPathComponent("native-mtp-selftest-bank.json"))
+        let selfTestSignature = try signer.signature(for: selfTestBankData).base64EncodedString()
+        let selfTestSignatureData = Data("""
+        {"alg":"ed25519","key_id":"\(keyID)","signature":"\(selfTestSignature)"}
+
+        """.utf8)
+        try selfTestSignatureData.write(to: root.appendingPathComponent("native-mtp-selftest-bank.json.sig"))
         let placeholder = String(repeating: "0", count: 64)
         var object = sidecarObject(
             tupleSHA: placeholder,
@@ -270,6 +280,9 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
             mtpSHA: mtpIdentity.digest,
             tokenizerSHA: tokenizerSHA,
             manifestSHA: manifestSHA,
+            selfTestBankSHA: sha256Hex(selfTestBankData),
+            selfTestSignatureSHA: sha256Hex(selfTestSignatureData),
+            selfTestSignerKeyID: keyID,
             machine: machine
         )
         let tupleSHA = try NativeMTPAdmissionSidecar.admissionTupleSHA256ForTesting(object)
@@ -282,8 +295,6 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
             options: [.sortedKeys, .withoutEscapingSlashes]
         )
         sidecarData.append(0x0a)
-        let signer = Curve25519.Signing.PrivateKey()
-        let keyID = "native-mtp-hardware-e2e"
         let signature = try signer.signature(for: sidecarData).base64EncodedString()
         let signatureData = Data("""
         {"alg":"ed25519","key_id":"\(keyID)","signature":"\(signature)"}
@@ -317,6 +328,9 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
         mtpSHA: String,
         tokenizerSHA: String,
         manifestSHA: String,
+        selfTestBankSHA: String,
+        selfTestSignatureSHA: String,
+        selfTestSignerKeyID: String,
         machine: MachineFingerprint
     ) -> [String: Any] {
         [
@@ -341,6 +355,7 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
                 "prediction_layer_count": 1,
                 "max_proposal_depth": 1,
                 "complete_window_bytes_by_depth": [1_048_576, 2_097_152],
+                "throughput_delta_ppm": 0,
                 "adaptation_enabled": true,
                 "adaptation_max_depth": 1,
             ],
@@ -380,6 +395,14 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
                 "benchmark_policy_sha256": String(repeating: "2", count: 64),
                 "native_mtp_admission_tuple_sha256": tupleSHA,
                 "evidence_artifact_sha256": [String(repeating: "3", count: 64)],
+            ],
+            "selftest": [
+                "release_id": "native-mtp-hardware-e2e-selftest",
+                "challenge_bank_path": "native-mtp-selftest-bank.json",
+                "challenge_bank_sha256": selfTestBankSHA,
+                "signature_path": "native-mtp-selftest-bank.json.sig",
+                "signer_key_id": selfTestSignerKeyID,
+                "signature_sha256": selfTestSignatureSHA,
             ],
             "flags": ["admission_allowed": true],
         ]
@@ -424,6 +447,10 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
 
     private func sha256(of url: URL) throws -> String {
         SHA256.hash(data: try Data(contentsOf: url)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }
 

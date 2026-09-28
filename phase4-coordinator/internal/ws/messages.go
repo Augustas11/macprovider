@@ -1,7 +1,9 @@
 package ws
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -533,6 +535,132 @@ type SELivenessResponse struct {
 	Timestamp string `json:"timestamp"`
 	PublicKey string `json:"public_key"`
 	Signature string `json:"signature"`
+}
+
+type NativeMTPRuntimeTuple struct {
+	ModelID              string `json:"model_id"`
+	ModelHash            string `json:"model_hash"`
+	ModelHashAlgorithm   string `json:"model_hash_algorithm"`
+	ProviderRevision     string `json:"provider_revision"`
+	RuntimeRevision      string `json:"runtime_revision"`
+	TokenizerDigest      string `json:"tokenizer_digest"`
+	ArtifactDigest       string `json:"artifact_digest"`
+	ManifestDigest       string `json:"manifest_digest"`
+	SidecarDigest        string `json:"sidecar_digest"`
+	ProviderBinarySHA256 string `json:"provider_binary_sha256"`
+	RuntimeCDHash        string `json:"runtime_cdhash"`
+	CacheNamespace       string `json:"cache_namespace"`
+	StateDigest          string `json:"state_digest"`
+	ProposalDepth        int    `json:"proposal_depth"`
+}
+
+type NativeMTPCanaryRequest struct {
+	Type                          string                  `json:"type"`
+	Version                       int                     `json:"version"`
+	RequestID                     string                  `json:"request_id"`
+	ProviderID                    string                  `json:"provider_id"`
+	AssignedID                    string                  `json:"assigned_id"`
+	ModelID                       string                  `json:"model_id"`
+	ModelHash                     string                  `json:"model_hash"`
+	ModelHashAlgorithm            string                  `json:"model_hash_algorithm"`
+	ProviderRevision              string                  `json:"provider_revision"`
+	RuntimeRevision               string                  `json:"runtime_revision"`
+	TargetGeneration              uint64                  `json:"target_generation"`
+	TokenizerDigest               string                  `json:"tokenizer_digest"`
+	ArtifactDigest                string                  `json:"artifact_digest"`
+	ManifestDigest                string                  `json:"manifest_digest"`
+	SidecarDigest                 string                  `json:"sidecar_digest"`
+	ProviderBinarySHA256          string                  `json:"provider_binary_sha256"`
+	RuntimeCDHash                 string                  `json:"runtime_cdhash"`
+	CacheNamespace                string                  `json:"cache_namespace"`
+	StateDigest                   string                  `json:"state_digest"`
+	RuntimeTuple                  NativeMTPRuntimeTuple   `json:"runtime_tuple"`
+	ChallengeID                   string                  `json:"challenge_id"`
+	ChallengeCorpusSHA256         string                  `json:"challenge_corpus_sha256"`
+	ChallengeBankSHA256           string                  `json:"challenge_bank_sha256"`
+	NativeMTPAdmissionTupleSHA256 string                  `json:"native_mtp_admission_tuple_sha256"`
+	ServedSnapshotID              string                  `json:"served_snapshot_id"`
+	NativeMTPRuntimeTupleSHA256   string                  `json:"native_mtp_runtime_tuple_sha256"`
+	ExpectedTokenIDSHA256         string                  `json:"expected_token_id_sha256"`
+	ExpectedTerminalReason        string                  `json:"expected_terminal_reason"`
+	ExpectedCounters              NativeMTPCanaryCounters `json:"expected_counters"`
+	ExpectedCommittedStateSHA256  string                  `json:"expected_committed_state_sha256"`
+	Nonce                         string                  `json:"nonce"`
+	RequestDigest                 string                  `json:"request_digest"`
+	IssuedAt                      string                  `json:"issued_at"`
+	ExpiresAt                     string                  `json:"expires_at"`
+	PromptTokenIDs                []int                   `json:"prompt_token_ids"`
+	MaxCompletionTokens           int                     `json:"max_completion_tokens"`
+	ProposalDepth                 int                     `json:"proposal_depth"`
+}
+
+type NativeMTPCanaryCounters struct {
+	Accepted  uint64 `json:"accepted"`
+	Rejected  uint64 `json:"rejected"`
+	Bonus     uint64 `json:"bonus"`
+	Committed uint64 `json:"committed"`
+}
+
+type NativeMTPCanaryResult struct {
+	Type                        string                  `json:"type"`
+	Version                     int                     `json:"version"`
+	RequestID                   string                  `json:"request_id"`
+	ProviderID                  string                  `json:"provider_id"`
+	AssignedID                  string                  `json:"assigned_id"`
+	RequestDigest               string                  `json:"request_digest"`
+	ResultDigest                string                  `json:"result_digest"`
+	TargetGeneration            uint64                  `json:"target_generation"`
+	ProviderRevision            string                  `json:"provider_revision"`
+	RuntimeRevision             string                  `json:"runtime_revision"`
+	ChallengeID                 string                  `json:"challenge_id"`
+	ChallengeBankSHA256         string                  `json:"challenge_bank_sha256"`
+	Nonce                       string                  `json:"nonce"`
+	NativeMTPRuntimeTupleSHA256 string                  `json:"native_mtp_runtime_tuple_sha256"`
+	ExpectedTokenIDSHA256       string                  `json:"expected_token_id_sha256"`
+	ActualTokenIDSHA256         string                  `json:"actual_token_id_sha256"`
+	TerminalReason              string                  `json:"terminal_reason"`
+	Counters                    NativeMTPCanaryCounters `json:"counters"`
+	CommittedStateSHA256        string                  `json:"committed_state_sha256"`
+	ActualDecodePath            string                  `json:"actual_decode_path"`
+	FallbackUsed                bool                    `json:"fallback_used"`
+	RuntimeTuple                NativeMTPRuntimeTuple   `json:"runtime_tuple"`
+	Diagnostic                  string                  `json:"diagnostic,omitempty"`
+}
+
+type NativeMTPTupleOffer struct {
+	Type                          string                `json:"type"`
+	Version                       int                   `json:"version"`
+	ProviderID                    string                `json:"provider_id"`
+	AssignedID                    string                `json:"assigned_id"`
+	TargetGeneration              uint64                `json:"target_generation"`
+	ProviderRevision              string                `json:"provider_revision"`
+	RuntimeRevision               string                `json:"runtime_revision"`
+	RuntimeTuple                  NativeMTPRuntimeTuple `json:"runtime_tuple"`
+	NativeMTPAdmissionTupleSHA256 string                `json:"native_mtp_admission_tuple_sha256"`
+	ServedSnapshotID              string                `json:"served_snapshot_id"`
+	NativeMTPRuntimeTupleSHA256   string                `json:"native_mtp_runtime_tuple_sha256"`
+	SidecarDigest                 string                `json:"sidecar_digest"`
+	ChallengeBankReleaseID        string                `json:"challenge_bank_release_id"`
+	ChallengeBankSHA256           string                `json:"challenge_bank_sha256"`
+	ChallengeCorpusSHA256         string                `json:"challenge_corpus_sha256"`
+	SelftestProfile               string                `json:"selftest_profile"`
+	SelftestPassDigest            string                `json:"selftest_pass_digest"`
+	SelftestObservedAt            string                `json:"selftest_observed_at"`
+}
+
+type NativeMTPTupleDisable struct {
+	Type                          string `json:"type"`
+	Version                       int    `json:"version"`
+	ProviderID                    string `json:"provider_id"`
+	AssignedID                    string `json:"assigned_id"`
+	TargetGeneration              uint64 `json:"target_generation"`
+	NativeMTPAdmissionTupleSHA256 string `json:"native_mtp_admission_tuple_sha256"`
+	ServedSnapshotID              string `json:"served_snapshot_id"`
+	NativeMTPRuntimeTupleSHA256   string `json:"native_mtp_runtime_tuple_sha256"`
+	Reason                        string `json:"reason"`
+	Nonce                         string `json:"nonce"`
+	IssuedAt                      string `json:"issued_at"`
+	RequestDigest                 string `json:"request_digest"`
 }
 
 type CancelRequest struct {
@@ -1795,6 +1923,665 @@ func ParseDrainStatus(payload []byte) (DrainStatus, string, error) {
 		return DrainStatus{}, "estimated_drain_seconds", fieldError{Field: "invalid estimated_drain_seconds"}
 	}
 	return status, "", nil
+}
+
+const maxNativeMTPCanaryPayloadBytes = 16384
+
+var nativeMTPCanaryRequestFields = map[string]struct{}{
+	"type": {}, "version": {}, "request_id": {}, "provider_id": {}, "assigned_id": {},
+	"model_id": {}, "model_hash": {}, "model_hash_algorithm": {}, "target_generation": {},
+	"provider_revision": {}, "runtime_revision": {},
+	"tokenizer_digest": {}, "artifact_digest": {}, "manifest_digest": {}, "sidecar_digest": {},
+	"provider_binary_sha256": {}, "runtime_cdhash": {}, "cache_namespace": {}, "state_digest": {},
+	"runtime_tuple": {}, "challenge_id": {}, "challenge_corpus_sha256": {}, "challenge_bank_sha256": {},
+	"native_mtp_admission_tuple_sha256": {}, "served_snapshot_id": {},
+	"native_mtp_runtime_tuple_sha256": {}, "expected_token_id_sha256": {}, "expected_terminal_reason": {},
+	"expected_counters": {}, "expected_committed_state_sha256": {}, "nonce": {}, "request_digest": {},
+	"issued_at": {}, "expires_at": {}, "prompt_token_ids": {},
+	"max_completion_tokens": {}, "proposal_depth": {},
+}
+
+var nativeMTPCanaryResultFields = map[string]struct{}{
+	"type": {}, "version": {}, "request_id": {}, "provider_id": {}, "assigned_id": {},
+	"request_digest": {}, "result_digest": {}, "target_generation": {}, "provider_revision": {}, "runtime_revision": {}, "challenge_id": {}, "challenge_bank_sha256": {},
+	"nonce": {}, "native_mtp_runtime_tuple_sha256": {}, "expected_token_id_sha256": {}, "actual_token_id_sha256": {},
+	"terminal_reason": {}, "counters": {}, "committed_state_sha256": {}, "actual_decode_path": {},
+	"fallback_used": {}, "runtime_tuple": {}, "diagnostic": {},
+}
+
+var nativeMTPRuntimeTupleFields = map[string]struct{}{
+	"model_id": {}, "model_hash": {}, "model_hash_algorithm": {}, "tokenizer_digest": {},
+	"provider_revision": {}, "runtime_revision": {},
+	"artifact_digest": {}, "manifest_digest": {}, "sidecar_digest": {}, "provider_binary_sha256": {},
+	"runtime_cdhash": {}, "cache_namespace": {}, "state_digest": {}, "proposal_depth": {},
+}
+
+var nativeMTPCanaryCountersFields = map[string]struct{}{
+	"accepted": {}, "rejected": {}, "bonus": {}, "committed": {},
+}
+
+var nativeMTPTupleOfferFields = map[string]struct{}{
+	"type": {}, "version": {}, "provider_id": {}, "assigned_id": {}, "target_generation": {},
+	"provider_revision": {}, "runtime_revision": {}, "runtime_tuple": {},
+	"native_mtp_admission_tuple_sha256": {}, "served_snapshot_id": {}, "native_mtp_runtime_tuple_sha256": {}, "sidecar_digest": {},
+	"challenge_bank_release_id": {}, "challenge_bank_sha256": {}, "challenge_corpus_sha256": {},
+	"selftest_profile": {}, "selftest_pass_digest": {}, "selftest_observed_at": {},
+}
+
+var nativeMTPTupleDisableFields = map[string]struct{}{
+	"type": {}, "version": {}, "provider_id": {}, "assigned_id": {}, "target_generation": {},
+	"native_mtp_admission_tuple_sha256": {}, "served_snapshot_id": {}, "native_mtp_runtime_tuple_sha256": {},
+	"reason": {}, "nonce": {}, "issued_at": {}, "request_digest": {},
+}
+
+func ParseNativeMTPCanaryRequest(payload []byte) (NativeMTPCanaryRequest, string, error) {
+	if len(payload) > maxNativeMTPCanaryPayloadBytes {
+		return NativeMTPCanaryRequest{}, "payload", fmt.Errorf("native_mtp_canary_request_v1 exceeds %d bytes", maxNativeMTPCanaryPayloadBytes)
+	}
+	if field, err := rejectDuplicateJSONFields(payload); err != nil {
+		return NativeMTPCanaryRequest{}, field, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return NativeMTPCanaryRequest{}, "json", err
+	}
+	if field := rejectUnknownFields(raw, nativeMTPCanaryRequestFields); field != "" {
+		return NativeMTPCanaryRequest{}, field, fmt.Errorf("unknown field %s", field)
+	}
+	var req NativeMTPCanaryRequest
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		return NativeMTPCanaryRequest{}, "json", err
+	}
+	if req.Type != "native_mtp_canary_request_v1" {
+		return NativeMTPCanaryRequest{}, "type", fmt.Errorf("expected native_mtp_canary_request_v1, got %q", req.Type)
+	}
+	if req.Version != 1 {
+		return NativeMTPCanaryRequest{}, "version", fmt.Errorf("unsupported native_mtp_canary_request_v1 version %d", req.Version)
+	}
+	if field, err := validateNativeMTPCanaryRequest(req); err != nil {
+		return NativeMTPCanaryRequest{}, field, err
+	}
+	return req, "", nil
+}
+
+func ParseNativeMTPCanaryResult(payload []byte) (NativeMTPCanaryResult, string, error) {
+	if len(payload) > maxNativeMTPCanaryPayloadBytes {
+		return NativeMTPCanaryResult{}, "payload", fmt.Errorf("native_mtp_canary_result_v1 exceeds %d bytes", maxNativeMTPCanaryPayloadBytes)
+	}
+	if field, err := rejectDuplicateJSONFields(payload); err != nil {
+		return NativeMTPCanaryResult{}, field, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return NativeMTPCanaryResult{}, "json", err
+	}
+	if field := rejectUnknownFields(raw, nativeMTPCanaryResultFields); field != "" {
+		return NativeMTPCanaryResult{}, field, fmt.Errorf("unknown field %s", field)
+	}
+	var result NativeMTPCanaryResult
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&result); err != nil {
+		return NativeMTPCanaryResult{}, "json", err
+	}
+	if result.Type != "native_mtp_canary_result_v1" {
+		return NativeMTPCanaryResult{}, "type", fmt.Errorf("expected native_mtp_canary_result_v1, got %q", result.Type)
+	}
+	if result.Version != 1 {
+		return NativeMTPCanaryResult{}, "version", fmt.Errorf("unsupported native_mtp_canary_result_v1 version %d", result.Version)
+	}
+	if field, err := validateNativeMTPCanaryResult(result); err != nil {
+		return NativeMTPCanaryResult{}, field, err
+	}
+	return result, "", nil
+}
+
+func ParseNativeMTPTupleOffer(payload []byte) (NativeMTPTupleOffer, string, error) {
+	if len(payload) > maxNativeMTPCanaryPayloadBytes {
+		return NativeMTPTupleOffer{}, "payload", fmt.Errorf("native_mtp_tuple_offer_v1 exceeds %d bytes", maxNativeMTPCanaryPayloadBytes)
+	}
+	if field, err := rejectDuplicateJSONFields(payload); err != nil {
+		return NativeMTPTupleOffer{}, field, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return NativeMTPTupleOffer{}, "json", err
+	}
+	if field := rejectUnknownFields(raw, nativeMTPTupleOfferFields); field != "" {
+		return NativeMTPTupleOffer{}, field, fmt.Errorf("unknown field %s", field)
+	}
+	var offer NativeMTPTupleOffer
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&offer); err != nil {
+		return NativeMTPTupleOffer{}, "json", err
+	}
+	if offer.Type != "native_mtp_tuple_offer_v1" {
+		return NativeMTPTupleOffer{}, "type", fmt.Errorf("expected native_mtp_tuple_offer_v1, got %q", offer.Type)
+	}
+	if offer.Version != 1 {
+		return NativeMTPTupleOffer{}, "version", fmt.Errorf("unsupported native_mtp_tuple_offer_v1 version %d", offer.Version)
+	}
+	if field, err := validateNativeMTPTupleOffer(offer); err != nil {
+		return NativeMTPTupleOffer{}, field, err
+	}
+	return offer, "", nil
+}
+
+func ParseNativeMTPTupleDisable(payload []byte) (NativeMTPTupleDisable, string, error) {
+	if len(payload) > maxNativeMTPCanaryPayloadBytes {
+		return NativeMTPTupleDisable{}, "payload", fmt.Errorf("native_mtp_tuple_disable_v1 exceeds %d bytes", maxNativeMTPCanaryPayloadBytes)
+	}
+	if field, err := rejectDuplicateJSONFields(payload); err != nil {
+		return NativeMTPTupleDisable{}, field, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return NativeMTPTupleDisable{}, "json", err
+	}
+	if field := rejectUnknownFields(raw, nativeMTPTupleDisableFields); field != "" {
+		return NativeMTPTupleDisable{}, field, fmt.Errorf("unknown field %s", field)
+	}
+	var disable NativeMTPTupleDisable
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&disable); err != nil {
+		return NativeMTPTupleDisable{}, "json", err
+	}
+	if disable.Type != "native_mtp_tuple_disable_v1" {
+		return NativeMTPTupleDisable{}, "type", fmt.Errorf("expected native_mtp_tuple_disable_v1, got %q", disable.Type)
+	}
+	if disable.Version != 1 {
+		return NativeMTPTupleDisable{}, "version", fmt.Errorf("unsupported native_mtp_tuple_disable_v1 version %d", disable.Version)
+	}
+	if field, err := validateNativeMTPTupleDisable(disable); err != nil {
+		return NativeMTPTupleDisable{}, field, err
+	}
+	return disable, "", nil
+}
+
+func validateNativeMTPCanaryRequest(req NativeMTPCanaryRequest) (string, error) {
+	for field, value := range map[string]string{
+		"request_id":                        req.RequestID,
+		"provider_id":                       req.ProviderID,
+		"assigned_id":                       req.AssignedID,
+		"model_id":                          req.ModelID,
+		"model_hash":                        req.ModelHash,
+		"model_hash_algorithm":              req.ModelHashAlgorithm,
+		"provider_revision":                 req.ProviderRevision,
+		"runtime_revision":                  req.RuntimeRevision,
+		"tokenizer_digest":                  req.TokenizerDigest,
+		"artifact_digest":                   req.ArtifactDigest,
+		"manifest_digest":                   req.ManifestDigest,
+		"sidecar_digest":                    req.SidecarDigest,
+		"provider_binary_sha256":            req.ProviderBinarySHA256,
+		"runtime_cdhash":                    req.RuntimeCDHash,
+		"cache_namespace":                   req.CacheNamespace,
+		"state_digest":                      req.StateDigest,
+		"challenge_id":                      req.ChallengeID,
+		"challenge_corpus_sha256":           req.ChallengeCorpusSHA256,
+		"challenge_bank_sha256":             req.ChallengeBankSHA256,
+		"native_mtp_admission_tuple_sha256": req.NativeMTPAdmissionTupleSHA256,
+		"served_snapshot_id":                req.ServedSnapshotID,
+		"native_mtp_runtime_tuple_sha256":   req.NativeMTPRuntimeTupleSHA256,
+		"expected_token_id_sha256":          req.ExpectedTokenIDSHA256,
+		"expected_terminal_reason":          req.ExpectedTerminalReason,
+		"expected_committed_state_sha256":   req.ExpectedCommittedStateSHA256,
+		"nonce":                             req.Nonce,
+		"request_digest":                    req.RequestDigest,
+		"issued_at":                         req.IssuedAt,
+		"expires_at":                        req.ExpiresAt,
+	} {
+		if value == "" || containsControlChar(value) {
+			return field, fieldError{Field: field}
+		}
+	}
+	if err := config.ValidateProviderID(req.ProviderID); err != nil {
+		return "provider_id", err
+	}
+	if len([]byte(req.ModelID)) > maxHandshakeModelIDBytes {
+		return "model_id", fmt.Errorf("model_id exceeds %d bytes", maxHandshakeModelIDBytes)
+	}
+	if !modelidentity.ValidSHA256(req.ModelHash) {
+		return "model_hash", fmt.Errorf("model_hash must be a lowercase SHA-256 digest")
+	}
+	for field, digest := range nativeMTPCanaryDigestFields(req) {
+		if !modelidentity.ValidSHA256(digest) {
+			return field, fmt.Errorf("%s must be a lowercase SHA-256 digest", field)
+		}
+	}
+	if !isLowerHexLenAny(req.RuntimeCDHash, 40, 64) {
+		return "runtime_cdhash", fmt.Errorf("runtime_cdhash must be 40 or 64 lowercase hex characters")
+	}
+	if expected := nativeMTPRuntimeTupleIdentitySHA256(req.ProviderID, req.AssignedID, req.TargetGeneration, req.NativeMTPAdmissionTupleSHA256, req.ServedSnapshotID); req.NativeMTPRuntimeTupleSHA256 != expected {
+		return "native_mtp_runtime_tuple_sha256", fmt.Errorf("native_mtp_runtime_tuple_sha256 does not match SPEC-023 runtime tuple identity")
+	}
+	if !validNativeMTPTerminalReason(req.ExpectedTerminalReason) {
+		return "expected_terminal_reason", fmt.Errorf("unsupported expected_terminal_reason")
+	}
+	if !isLowerHexLen(req.Nonce, 32) {
+		return "nonce", fmt.Errorf("nonce must be 32 lowercase hex characters")
+	}
+	if _, err := time.Parse(time.RFC3339, req.IssuedAt); err != nil {
+		return "issued_at", err
+	}
+	if _, err := time.Parse(time.RFC3339, req.ExpiresAt); err != nil {
+		return "expires_at", err
+	}
+	if len(req.PromptTokenIDs) == 0 || len(req.PromptTokenIDs) > 2048 {
+		return "prompt_token_ids", fmt.Errorf("prompt_token_ids must contain 1..2048 tokens")
+	}
+	for _, tokenID := range req.PromptTokenIDs {
+		if tokenID < 0 {
+			return "prompt_token_ids", fmt.Errorf("prompt_token_ids must be non-negative")
+		}
+	}
+	if req.MaxCompletionTokens < 1 || req.MaxCompletionTokens > 64 {
+		return "max_completion_tokens", fmt.Errorf("max_completion_tokens must be 1..64")
+	}
+	if req.ProposalDepth < 1 || req.ProposalDepth > 16 {
+		return "proposal_depth", fmt.Errorf("proposal_depth must be 1..16")
+	}
+	if field, err := validateNativeMTPRuntimeTuple(req.RuntimeTuple, req.ProposalDepth); err != nil {
+		return "runtime_tuple." + field, err
+	}
+	return "", nil
+}
+
+func validateNativeMTPCanaryResult(result NativeMTPCanaryResult) (string, error) {
+	for field, value := range map[string]string{
+		"request_id":                      result.RequestID,
+		"provider_id":                     result.ProviderID,
+		"assigned_id":                     result.AssignedID,
+		"request_digest":                  result.RequestDigest,
+		"result_digest":                   result.ResultDigest,
+		"provider_revision":               result.ProviderRevision,
+		"runtime_revision":                result.RuntimeRevision,
+		"challenge_id":                    result.ChallengeID,
+		"challenge_bank_sha256":           result.ChallengeBankSHA256,
+		"nonce":                           result.Nonce,
+		"native_mtp_runtime_tuple_sha256": result.NativeMTPRuntimeTupleSHA256,
+		"expected_token_id_sha256":        result.ExpectedTokenIDSHA256,
+		"actual_token_id_sha256":          result.ActualTokenIDSHA256,
+		"terminal_reason":                 result.TerminalReason,
+		"committed_state_sha256":          result.CommittedStateSHA256,
+		"actual_decode_path":              result.ActualDecodePath,
+	} {
+		if value == "" || containsControlChar(value) {
+			return field, fieldError{Field: field}
+		}
+	}
+	if err := config.ValidateProviderID(result.ProviderID); err != nil {
+		return "provider_id", err
+	}
+	for field, digest := range map[string]string{
+		"request_digest":                  result.RequestDigest,
+		"result_digest":                   result.ResultDigest,
+		"challenge_bank_sha256":           result.ChallengeBankSHA256,
+		"native_mtp_runtime_tuple_sha256": result.NativeMTPRuntimeTupleSHA256,
+		"expected_token_id_sha256":        result.ExpectedTokenIDSHA256,
+		"actual_token_id_sha256":          result.ActualTokenIDSHA256,
+		"committed_state_sha256":          result.CommittedStateSHA256,
+	} {
+		if !modelidentity.ValidSHA256(digest) {
+			return field, fmt.Errorf("%s must be a lowercase SHA-256 digest", field)
+		}
+	}
+	if !validNativeMTPTerminalReason(result.TerminalReason) {
+		return "terminal_reason", fmt.Errorf("unsupported terminal_reason")
+	}
+	switch result.ActualDecodePath {
+	case "native_mtp", "ordinary", "classic_spec_decode", "unavailable":
+	default:
+		return "actual_decode_path", fmt.Errorf("unsupported actual_decode_path")
+	}
+	if containsControlChar(result.Diagnostic) || len([]byte(result.Diagnostic)) > 512 {
+		return "diagnostic", fieldError{Field: "diagnostic"}
+	}
+	if field, err := validateNativeMTPRuntimeTuple(result.RuntimeTuple, result.RuntimeTuple.ProposalDepth); err != nil {
+		return "runtime_tuple." + field, err
+	}
+	return "", nil
+}
+
+func validateNativeMTPTupleOffer(offer NativeMTPTupleOffer) (string, error) {
+	for field, value := range map[string]string{
+		"provider_id":                       offer.ProviderID,
+		"assigned_id":                       offer.AssignedID,
+		"provider_revision":                 offer.ProviderRevision,
+		"runtime_revision":                  offer.RuntimeRevision,
+		"native_mtp_admission_tuple_sha256": offer.NativeMTPAdmissionTupleSHA256,
+		"served_snapshot_id":                offer.ServedSnapshotID,
+		"native_mtp_runtime_tuple_sha256":   offer.NativeMTPRuntimeTupleSHA256,
+		"sidecar_digest":                    offer.SidecarDigest,
+		"challenge_bank_release_id":         offer.ChallengeBankReleaseID,
+		"challenge_bank_sha256":             offer.ChallengeBankSHA256,
+		"challenge_corpus_sha256":           offer.ChallengeCorpusSHA256,
+		"selftest_profile":                  offer.SelftestProfile,
+		"selftest_pass_digest":              offer.SelftestPassDigest,
+		"selftest_observed_at":              offer.SelftestObservedAt,
+	} {
+		if value == "" || containsControlChar(value) {
+			return field, fieldError{Field: field}
+		}
+	}
+	if err := config.ValidateProviderID(offer.ProviderID); err != nil {
+		return "provider_id", err
+	}
+	for field, digest := range map[string]string{
+		"native_mtp_admission_tuple_sha256": offer.NativeMTPAdmissionTupleSHA256,
+		"native_mtp_runtime_tuple_sha256":   offer.NativeMTPRuntimeTupleSHA256,
+		"sidecar_digest":                    offer.SidecarDigest,
+		"challenge_bank_sha256":             offer.ChallengeBankSHA256,
+		"challenge_corpus_sha256":           offer.ChallengeCorpusSHA256,
+		"selftest_pass_digest":              offer.SelftestPassDigest,
+	} {
+		if !modelidentity.ValidSHA256(digest) {
+			return field, fmt.Errorf("%s must be a lowercase SHA-256 digest", field)
+		}
+	}
+	if _, err := time.Parse(time.RFC3339, offer.SelftestObservedAt); err != nil {
+		return "selftest_observed_at", err
+	}
+	if expected := nativeMTPRuntimeTupleIdentitySHA256(offer.ProviderID, offer.AssignedID, offer.TargetGeneration, offer.NativeMTPAdmissionTupleSHA256, offer.ServedSnapshotID); offer.NativeMTPRuntimeTupleSHA256 != expected {
+		return "native_mtp_runtime_tuple_sha256", fmt.Errorf("native_mtp_runtime_tuple_sha256 does not match SPEC-023 runtime tuple identity")
+	}
+	if field, err := validateNativeMTPRuntimeTuple(offer.RuntimeTuple, offer.RuntimeTuple.ProposalDepth); err != nil {
+		return "runtime_tuple." + field, err
+	}
+	return "", nil
+}
+
+func validateNativeMTPTupleDisable(disable NativeMTPTupleDisable) (string, error) {
+	for field, value := range map[string]string{
+		"provider_id":                       disable.ProviderID,
+		"assigned_id":                       disable.AssignedID,
+		"native_mtp_admission_tuple_sha256": disable.NativeMTPAdmissionTupleSHA256,
+		"served_snapshot_id":                disable.ServedSnapshotID,
+		"native_mtp_runtime_tuple_sha256":   disable.NativeMTPRuntimeTupleSHA256,
+		"reason":                            disable.Reason,
+		"nonce":                             disable.Nonce,
+		"issued_at":                         disable.IssuedAt,
+		"request_digest":                    disable.RequestDigest,
+	} {
+		if value == "" || containsControlChar(value) {
+			return field, fieldError{Field: field}
+		}
+	}
+	if err := config.ValidateProviderID(disable.ProviderID); err != nil {
+		return "provider_id", err
+	}
+	for field, digest := range map[string]string{
+		"native_mtp_admission_tuple_sha256": disable.NativeMTPAdmissionTupleSHA256,
+		"native_mtp_runtime_tuple_sha256":   disable.NativeMTPRuntimeTupleSHA256,
+		"request_digest":                    disable.RequestDigest,
+	} {
+		if !modelidentity.ValidSHA256(digest) {
+			return field, fmt.Errorf("%s must be a lowercase SHA-256 digest", field)
+		}
+	}
+	if !validNativeMTPTupleDisableReason(disable.Reason) {
+		return "reason", fmt.Errorf("unsupported native MTP tuple disable reason")
+	}
+	if !isLowerHexLen(disable.Nonce, 32) {
+		return "nonce", fmt.Errorf("nonce must be 32 lowercase hex characters")
+	}
+	if _, err := time.Parse(time.RFC3339, disable.IssuedAt); err != nil {
+		return "issued_at", err
+	}
+	if expected := nativeMTPRuntimeTupleIdentitySHA256(disable.ProviderID, disable.AssignedID, disable.TargetGeneration, disable.NativeMTPAdmissionTupleSHA256, disable.ServedSnapshotID); disable.NativeMTPRuntimeTupleSHA256 != expected {
+		return "native_mtp_runtime_tuple_sha256", fmt.Errorf("native_mtp_runtime_tuple_sha256 does not match SPEC-023 runtime tuple identity")
+	}
+	if expected := nativeMTPTupleDisableRequestDigest(disable); disable.RequestDigest != expected {
+		return "request_digest", fmt.Errorf("request_digest does not match native_mtp_tuple_disable_v1 payload")
+	}
+	return "", nil
+}
+
+func nativeMTPTupleDisableRequestDigest(disable NativeMTPTupleDisable) string {
+	canonical := `{"assigned_id":` + strconv.Quote(disable.AssignedID) +
+		`,"issued_at":` + strconv.Quote(disable.IssuedAt) +
+		`,"native_mtp_admission_tuple_sha256":` + strconv.Quote(disable.NativeMTPAdmissionTupleSHA256) +
+		`,"native_mtp_runtime_tuple_sha256":` + strconv.Quote(disable.NativeMTPRuntimeTupleSHA256) +
+		`,"nonce":` + strconv.Quote(disable.Nonce) +
+		`,"provider_id":` + strconv.Quote(disable.ProviderID) +
+		`,"reason":` + strconv.Quote(disable.Reason) +
+		`,"schema_version":1` +
+		`,"served_snapshot_id":` + strconv.Quote(disable.ServedSnapshotID) +
+		`,"target_generation":` + strconv.FormatUint(disable.TargetGeneration, 10) + `}`
+	sum := sha256.Sum256([]byte(canonical))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func validNativeMTPTupleDisableReason(value string) bool {
+	switch value {
+	case "mismatch", "timeout", "expired", "fallback", "ordinary_or_classic", "bank_mismatch", "operator":
+		return true
+	default:
+		return false
+	}
+}
+
+func validNativeMTPTerminalReason(value string) bool {
+	switch value {
+	case "passed", "failed", "inconclusive", "expired", "runtime_unavailable",
+		"stop", "length", "cancelled", "request_failed", "batch_failed", "rejected":
+		return true
+	default:
+		return false
+	}
+}
+
+func nativeMTPCanaryDigestFields(req NativeMTPCanaryRequest) map[string]string {
+	return map[string]string{
+		"tokenizer_digest":                  req.TokenizerDigest,
+		"artifact_digest":                   req.ArtifactDigest,
+		"manifest_digest":                   req.ManifestDigest,
+		"sidecar_digest":                    req.SidecarDigest,
+		"provider_binary_sha256":            req.ProviderBinarySHA256,
+		"state_digest":                      req.StateDigest,
+		"challenge_corpus_sha256":           req.ChallengeCorpusSHA256,
+		"challenge_bank_sha256":             req.ChallengeBankSHA256,
+		"native_mtp_admission_tuple_sha256": req.NativeMTPAdmissionTupleSHA256,
+		"native_mtp_runtime_tuple_sha256":   req.NativeMTPRuntimeTupleSHA256,
+		"expected_token_id_sha256":          req.ExpectedTokenIDSHA256,
+		"expected_committed_state_sha256":   req.ExpectedCommittedStateSHA256,
+		"request_digest":                    req.RequestDigest,
+	}
+}
+
+func validateNativeMTPRuntimeTuple(tuple NativeMTPRuntimeTuple, expectedDepth int) (string, error) {
+	if tuple.ProposalDepth != expectedDepth || tuple.ProposalDepth < 1 || tuple.ProposalDepth > 16 {
+		return "proposal_depth", fmt.Errorf("runtime tuple proposal_depth mismatch")
+	}
+	for field, value := range map[string]string{
+		"model_id":               tuple.ModelID,
+		"model_hash":             tuple.ModelHash,
+		"model_hash_algorithm":   tuple.ModelHashAlgorithm,
+		"provider_revision":      tuple.ProviderRevision,
+		"runtime_revision":       tuple.RuntimeRevision,
+		"tokenizer_digest":       tuple.TokenizerDigest,
+		"artifact_digest":        tuple.ArtifactDigest,
+		"manifest_digest":        tuple.ManifestDigest,
+		"sidecar_digest":         tuple.SidecarDigest,
+		"provider_binary_sha256": tuple.ProviderBinarySHA256,
+		"runtime_cdhash":         tuple.RuntimeCDHash,
+		"cache_namespace":        tuple.CacheNamespace,
+		"state_digest":           tuple.StateDigest,
+	} {
+		if value == "" || containsControlChar(value) {
+			return field, fieldError{Field: field}
+		}
+	}
+	if !modelidentity.ValidSHA256(tuple.ModelHash) {
+		return "model_hash", fmt.Errorf("model_hash must be a lowercase SHA-256 digest")
+	}
+	for field, digest := range map[string]string{
+		"tokenizer_digest":       tuple.TokenizerDigest,
+		"artifact_digest":        tuple.ArtifactDigest,
+		"manifest_digest":        tuple.ManifestDigest,
+		"sidecar_digest":         tuple.SidecarDigest,
+		"provider_binary_sha256": tuple.ProviderBinarySHA256,
+		"state_digest":           tuple.StateDigest,
+	} {
+		if !modelidentity.ValidSHA256(digest) {
+			return field, fmt.Errorf("%s must be a lowercase SHA-256 digest", field)
+		}
+	}
+	if !isLowerHexLenAny(tuple.RuntimeCDHash, 40, 64) {
+		return "runtime_cdhash", fmt.Errorf("runtime_cdhash must be 40 or 64 lowercase hex characters")
+	}
+	return "", nil
+}
+
+func nativeMTPRuntimeTupleIdentitySHA256(providerID, assignedID string, targetGeneration uint64, admissionTupleSHA256, servedSnapshotID string) string {
+	canonical := nativeMTPRuntimeTupleIdentityJCS(providerID, assignedID, targetGeneration, admissionTupleSHA256, servedSnapshotID)
+	sum := sha256.Sum256([]byte(canonical))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func nativeMTPRuntimeTupleIdentityJCS(providerID, assignedID string, targetGeneration uint64, admissionTupleSHA256, servedSnapshotID string) string {
+	// SPEC-023 fixes native_mtp_runtime_tuple_sha256 to this closed scalar JCS object.
+	// The keys below are in RFC8785 lexicographic order; inputs are bounded ASCII IDs
+	// or lowercase SHA-256 digests before this identity is accepted.
+	return `{"assigned_id":` + strconv.Quote(assignedID) +
+		`,"native_mtp_admission_tuple_sha256":` + strconv.Quote(admissionTupleSHA256) +
+		`,"provider_id":` + strconv.Quote(providerID) +
+		`,"schema_version":1` +
+		`,"served_snapshot_id":` + strconv.Quote(servedSnapshotID) +
+		`,"target_generation":` + strconv.FormatUint(targetGeneration, 10) + `}`
+}
+
+func rejectUnknownFields(raw map[string]json.RawMessage, allowed map[string]struct{}) string {
+	for field := range raw {
+		if _, ok := allowed[field]; !ok {
+			return field
+		}
+	}
+	return ""
+}
+
+func rejectDuplicateJSONFields(payload []byte) (string, error) {
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	return rejectDuplicateJSONObjectFields(dec, "")
+}
+
+func rejectDuplicateJSONObjectFields(dec *json.Decoder, path string) (string, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return "json", err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return "json", fmt.Errorf("expected object")
+	}
+	switch delim {
+	case '{':
+		seen := map[string]struct{}{}
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return "json", err
+			}
+			key, ok := keyTok.(string)
+			if !ok {
+				return "json", fmt.Errorf("expected object key")
+			}
+			field := key
+			if path != "" {
+				field = path + "." + key
+			}
+			if _, exists := seen[key]; exists {
+				return field, fmt.Errorf("duplicate field %s", field)
+			}
+			seen[key] = struct{}{}
+			if field, err := rejectDuplicateJSONValue(dec, field); err != nil {
+				return field, err
+			}
+		}
+		_, err := dec.Token()
+		return "", err
+	case '[':
+		for dec.More() {
+			if field, err := rejectDuplicateJSONValue(dec, path); err != nil {
+				return field, err
+			}
+		}
+		_, err := dec.Token()
+		return "", err
+	default:
+		return "json", fmt.Errorf("expected object")
+	}
+}
+
+func rejectDuplicateJSONValue(dec *json.Decoder, path string) (string, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return "json", err
+	}
+	if delim, ok := tok.(json.Delim); ok {
+		switch delim {
+		case '{':
+			seen := map[string]struct{}{}
+			for dec.More() {
+				keyTok, err := dec.Token()
+				if err != nil {
+					return "json", err
+				}
+				key, ok := keyTok.(string)
+				if !ok {
+					return "json", fmt.Errorf("expected object key")
+				}
+				field := key
+				if path != "" {
+					field = path + "." + key
+				}
+				if _, exists := seen[key]; exists {
+					return field, fmt.Errorf("duplicate field %s", field)
+				}
+				seen[key] = struct{}{}
+				if field, err := rejectDuplicateJSONValue(dec, field); err != nil {
+					return field, err
+				}
+			}
+			_, err := dec.Token()
+			return "", err
+		case '[':
+			for dec.More() {
+				if field, err := rejectDuplicateJSONValue(dec, path); err != nil {
+					return field, err
+				}
+			}
+			_, err := dec.Token()
+			return "", err
+		default:
+			return "json", fmt.Errorf("unexpected delimiter")
+		}
+	}
+	return "", nil
+}
+
+func isLowerHexLen(value string, n int) bool {
+	if len(value) != n {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func isLowerHexLenAny(value string, lengths ...int) bool {
+	for _, n := range lengths {
+		if isLowerHexLen(value, n) {
+			return true
+		}
+	}
+	return false
 }
 
 func ParseNak(payload []byte) (Nak, string, error) {

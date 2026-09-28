@@ -372,9 +372,82 @@ type Provider struct {
 	// swap-completion emission.
 	LoadingStartedAt time.Time `json:"-"`
 
+	NativeMTPCanary *NativeMTPCanaryDiagnostics `json:"native_mtp_canary,omitempty"`
+
 	Tier2Session *Tier2Session `json:"-"`
 
 	conn net.Conn
+}
+
+type NativeMTPCanaryDiagnostics struct {
+	Offered                       bool      `json:"offered"`
+	Status                        string    `json:"status,omitempty"`
+	LastOutcome                   string    `json:"last_outcome,omitempty"`
+	LastReason                    string    `json:"last_reason,omitempty"`
+	TargetGeneration              uint64    `json:"target_generation,omitempty"`
+	ProviderRevision              string    `json:"provider_revision,omitempty"`
+	RuntimeRevision               string    `json:"runtime_revision,omitempty"`
+	NativeMTPAdmissionTupleSHA256 string    `json:"native_mtp_admission_tuple_sha256,omitempty"`
+	ServedSnapshotID              string    `json:"served_snapshot_id,omitempty"`
+	NativeMTPRuntimeTupleSHA256   string    `json:"native_mtp_runtime_tuple_sha256,omitempty"`
+	ChallengeBankSHA256           string    `json:"challenge_bank_sha256,omitempty"`
+	ChallengeBankReleaseID        string    `json:"challenge_bank_release_id,omitempty"`
+	ChallengeCorpusSHA256         string    `json:"challenge_corpus_sha256,omitempty"`
+	ModelID                       string    `json:"model_id,omitempty"`
+	ModelHash                     string    `json:"model_hash,omitempty"`
+	ModelHashAlgorithm            string    `json:"model_hash_algorithm,omitempty"`
+	TokenizerDigest               string    `json:"tokenizer_digest,omitempty"`
+	ArtifactDigest                string    `json:"artifact_digest,omitempty"`
+	ManifestDigest                string    `json:"manifest_digest,omitempty"`
+	SidecarDigest                 string    `json:"sidecar_digest,omitempty"`
+	ProviderBinarySHA256          string    `json:"provider_binary_sha256,omitempty"`
+	RuntimeCDHash                 string    `json:"runtime_cdhash,omitempty"`
+	CacheNamespace                string    `json:"cache_namespace,omitempty"`
+	StateDigest                   string    `json:"state_digest,omitempty"`
+	ProposalDepth                 int       `json:"proposal_depth,omitempty"`
+	OfferedAt                     time.Time `json:"offered_at,omitempty"`
+	LastCheckedAt                 time.Time `json:"last_checked_at,omitempty"`
+	FreshUntil                    time.Time `json:"fresh_until,omitempty"`
+	NextDueAt                     time.Time `json:"next_due_at,omitempty"`
+	DisabledAt                    time.Time `json:"disabled_at,omitempty"`
+	DisabledReason                string    `json:"disabled_reason,omitempty"`
+	TupleDisableSentAt            time.Time `json:"tuple_disable_sent_at,omitempty"`
+}
+
+type NativeMTPTupleOfferUpdate struct {
+	TargetGeneration              uint64
+	ProviderRevision              string
+	RuntimeRevision               string
+	NativeMTPAdmissionTupleSHA256 string
+	ServedSnapshotID              string
+	NativeMTPRuntimeTupleSHA256   string
+	ChallengeBankSHA256           string
+	ChallengeBankReleaseID        string
+	ChallengeCorpusSHA256         string
+	ModelID                       string
+	ModelHash                     string
+	ModelHashAlgorithm            string
+	TokenizerDigest               string
+	ArtifactDigest                string
+	ManifestDigest                string
+	SidecarDigest                 string
+	ProviderBinarySHA256          string
+	RuntimeCDHash                 string
+	CacheNamespace                string
+	StateDigest                   string
+	ProposalDepth                 int
+	OfferedAt                     time.Time
+}
+
+type NativeMTPCanaryStatusUpdate struct {
+	Status         string
+	LastOutcome    string
+	LastReason     string
+	LastCheckedAt  time.Time
+	FreshUntil     time.Time
+	NextDueAt      time.Time
+	DisabledAt     time.Time
+	DisabledReason string
 }
 
 type AdmissionGateFlags struct {
@@ -481,6 +554,14 @@ func sanitizeProviderHardwareCapacity(in *ProviderHardwareCapacity) *ProviderHar
 		out.GPUCoresTotal == 0 && out.CPUCoresTotal == 0 {
 		return nil
 	}
+	return &out
+}
+
+func cloneNativeMTPCanaryDiagnostics(in *NativeMTPCanaryDiagnostics) *NativeMTPCanaryDiagnostics {
+	if in == nil {
+		return nil
+	}
+	out := *in
 	return &out
 }
 
@@ -3028,6 +3109,84 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 	return &cp, true
 }
 
+func (r *Registry) SetNativeMTPTupleOffer(providerID, assignedID string, update NativeMTPTupleOfferUpdate) (Provider, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return Provider{}, false
+	}
+	at := update.OfferedAt
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	p.NativeMTPCanary = &NativeMTPCanaryDiagnostics{
+		Offered:                       true,
+		Status:                        "unknown",
+		TargetGeneration:              update.TargetGeneration,
+		ProviderRevision:              update.ProviderRevision,
+		RuntimeRevision:               update.RuntimeRevision,
+		NativeMTPAdmissionTupleSHA256: update.NativeMTPAdmissionTupleSHA256,
+		ServedSnapshotID:              update.ServedSnapshotID,
+		NativeMTPRuntimeTupleSHA256:   update.NativeMTPRuntimeTupleSHA256,
+		ChallengeBankSHA256:           update.ChallengeBankSHA256,
+		ChallengeBankReleaseID:        update.ChallengeBankReleaseID,
+		ChallengeCorpusSHA256:         update.ChallengeCorpusSHA256,
+		ModelID:                       update.ModelID,
+		ModelHash:                     update.ModelHash,
+		ModelHashAlgorithm:            update.ModelHashAlgorithm,
+		TokenizerDigest:               update.TokenizerDigest,
+		ArtifactDigest:                update.ArtifactDigest,
+		ManifestDigest:                update.ManifestDigest,
+		SidecarDigest:                 update.SidecarDigest,
+		ProviderBinarySHA256:          update.ProviderBinarySHA256,
+		RuntimeCDHash:                 update.RuntimeCDHash,
+		CacheNamespace:                update.CacheNamespace,
+		StateDigest:                   update.StateDigest,
+		ProposalDepth:                 update.ProposalDepth,
+		OfferedAt:                     at.UTC(),
+	}
+	cp := *p
+	cp.conn = nil
+	cp.NativeMTPCanary = cloneNativeMTPCanaryDiagnostics(p.NativeMTPCanary)
+	return cp, true
+}
+
+func (r *Registry) UpdateNativeMTPCanaryStatus(providerID, assignedID, runtimeTupleSHA256 string, update NativeMTPCanaryStatusUpdate) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID || p.NativeMTPCanary == nil ||
+		p.NativeMTPCanary.NativeMTPRuntimeTupleSHA256 != runtimeTupleSHA256 {
+		return false
+	}
+	p.NativeMTPCanary.Status = update.Status
+	p.NativeMTPCanary.LastOutcome = update.LastOutcome
+	p.NativeMTPCanary.LastReason = update.LastReason
+	p.NativeMTPCanary.LastCheckedAt = update.LastCheckedAt.UTC()
+	p.NativeMTPCanary.FreshUntil = update.FreshUntil.UTC()
+	p.NativeMTPCanary.NextDueAt = update.NextDueAt.UTC()
+	p.NativeMTPCanary.DisabledAt = update.DisabledAt.UTC()
+	p.NativeMTPCanary.DisabledReason = update.DisabledReason
+	return true
+}
+
+func (r *Registry) MarkNativeMTPTupleDisableSent(providerID, assignedID, runtimeTupleSHA256 string, at time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID || p.NativeMTPCanary == nil ||
+		p.NativeMTPCanary.NativeMTPRuntimeTupleSHA256 != runtimeTupleSHA256 ||
+		!p.NativeMTPCanary.TupleDisableSentAt.IsZero() {
+		return false
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	p.NativeMTPCanary.TupleDisableSentAt = at.UTC()
+	return true
+}
+
 func (r *Registry) RemoveIfSession(providerID, assignedID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -3070,6 +3229,7 @@ func (r *Registry) Resolve(providerID, assignedID string) (Provider, bool) {
 	}
 	cp := *p
 	cp.conn = nil
+	cp.NativeMTPCanary = cloneNativeMTPCanaryDiagnostics(p.NativeMTPCanary)
 	return cp, true
 }
 
@@ -3106,6 +3266,7 @@ func (r *Registry) Snapshot() []Provider {
 		cp.conn = nil
 		cp.HardwareCapacity = cloneProviderHardwareCapacity(p.HardwareCapacity)
 		cp.SafetyTelemetry = cloneProviderSafetyTelemetry(p.SafetyTelemetry)
+		cp.NativeMTPCanary = cloneNativeMTPCanaryDiagnostics(p.NativeMTPCanary)
 		out = append(out, cp)
 	}
 	return out

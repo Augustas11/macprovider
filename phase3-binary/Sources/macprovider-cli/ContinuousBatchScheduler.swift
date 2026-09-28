@@ -154,6 +154,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// supplies that independent live gate before every proposal.
     let nativeMTPRoundByteCapacity: Int
     let nativeMTPRoundSystemMemoryProbe: NativeMTPRoundSystemMemoryProbe
+    let nativeMTPStatusSink: NativeMTPStatusSink?
 
     init(
         descriptor: PagedKVDescriptor,
@@ -186,7 +187,8 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         maxDecodeLockstepWindow: Int = 1,
         maxDecodeStepsWhilePrefilling: Int = 1,
         nativeMTPRoundByteCapacity: Int? = nil,
-        nativeMTPRoundSystemMemoryProbe: NativeMTPRoundSystemMemoryProbe = .system
+        nativeMTPRoundSystemMemoryProbe: NativeMTPRoundSystemMemoryProbe = .system,
+        nativeMTPStatusSink: NativeMTPStatusSink? = nil
     ) {
         self.descriptor = descriptor
         self.tuple = tuple
@@ -245,6 +247,7 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
             nativeMTPRoundByteCapacity ?? Int.max
         )
         self.nativeMTPRoundSystemMemoryProbe = nativeMTPRoundSystemMemoryProbe
+        self.nativeMTPStatusSink = nativeMTPStatusSink
     }
 
     /// Production serve-path lockstep burst. Join/leave still happens between
@@ -2620,6 +2623,14 @@ actor ContinuousBatchScheduler {
     }
 
     private func runNativeMTPDecodeStep(rows: [Row]) async {
+        let nativeMTPStatusSink = configuration.nativeMTPStatusSink
+        var nativeMTPStatusRoundStarted = false
+        let nativeMTPStatusStartedAt = Date()
+        defer {
+            if nativeMTPStatusRoundStarted {
+                nativeMTPStatusSink?.endRound()
+            }
+        }
         let topology: PagedKVStateTopology
         do {
             topology = try nativeMTPLocalTopology()
@@ -2720,6 +2731,9 @@ actor ContinuousBatchScheduler {
                 } else {
                     carriedCode = "continuous_batching_block_extension_failed"
                 }
+                if carriedCode == "continuous_batching_native_mtp_round_memory_exhausted" {
+                    nativeMTPStatusSink?.recordCapacityRejection()
+                }
                 record(.localExtensionFailed)
                 if let removed = activeDecode.removeValue(forKey: row.request.id) {
                     let released = await release(removed.handle)
@@ -2747,10 +2761,16 @@ actor ContinuousBatchScheduler {
                 samplerStep: row.generatedTokens.count
             )
         }
+        nativeMTPStatusSink?.beginRound(requestedDepths: proposalInputs.map(\.maximumProposalDepth))
+        nativeMTPStatusRoundStarted = true
         let backendProposals: [String: [Int]]?
         do {
             backendProposals = try await backend.proposeNativeMTPPackedRound(rows: proposalInputs)
         } catch {
+            recordNativeMTPPostoutputFailureIfVisible(
+                sink: nativeMTPStatusSink,
+                rows: preReserved.map(\.row)
+            )
             record(.batchForwardFailed)
             ContinuousBatchingPolicy.logForwardFailed(error)
             await abortPreReservedNativeMTPRows(preReserved)
@@ -2888,6 +2908,10 @@ actor ContinuousBatchScheduler {
         do {
             verifiedRows = try await backend.verifyNativeMTPPackedRound(rows: prepared.map(\.input))
         } catch {
+            recordNativeMTPPostoutputFailureIfVisible(
+                sink: nativeMTPStatusSink,
+                rows: prepared.map(\.row)
+            )
             let abortError: (any Error)?
             do {
                 try await abortNativeMTPRound(prepared)
@@ -2926,6 +2950,10 @@ actor ContinuousBatchScheduler {
                 packedRowCount: prepared.count
             )
         } catch {
+            recordNativeMTPPostoutputFailureIfVisible(
+                sink: nativeMTPStatusSink,
+                rows: prepared.map(\.row)
+            )
             let abortError: (any Error)?
             do {
                 try await abortNativeMTPRound(prepared)
@@ -2987,6 +3015,10 @@ actor ContinuousBatchScheduler {
         do {
             try await backend.finalizeNativeMTPPackedRound(rows: finalizeRows)
         } catch {
+            recordNativeMTPPostoutputFailureIfVisible(
+                sink: nativeMTPStatusSink,
+                rows: prepared.map(\.row)
+            )
             var localAbortError: (any Error)?
             for item in prepared {
                 do {
@@ -3081,6 +3113,10 @@ actor ContinuousBatchScheduler {
             if localFinalizeError == nil {
                 healthyOutputIDs.insert(item.row.request.id)
             } else if let error = localFinalizeError {
+                recordNativeMTPPostoutputFailureIfVisible(
+                    sink: nativeMTPStatusSink,
+                    rows: [item.row]
+                )
                 record(.cleanupFailed)
                 ContinuousBatchingPolicy.logForwardFailed(error)
                 if let removed = activeDecode.removeValue(forKey: item.row.request.id) {
@@ -3099,6 +3135,23 @@ actor ContinuousBatchScheduler {
         if backendCancellationPending { return }
         await processCancellations()
         guard !cleanupFailedClosed else { return }
+
+        let acceptedProposalTokens = finalizeRows.reduce(0) { $0 + $1.committedProposalTokenCount }
+        let proposedTokens = prepared.reduce(0) { $0 + $1.input.proposalTokens.count }
+        let committedTokens = candidatesByID.values.reduce(0) { $0 + $1.count }
+        let bonusTokens = candidatesByID.values.reduce(0) { partial, candidates in
+            partial + candidates.filter { $0.source == .bonus }.count
+        }
+        let overheadMS = UInt64(max(0, Date().timeIntervalSince(nativeMTPStatusStartedAt) * 1000.0))
+        nativeMTPStatusSink?.recordRound(NativeMTPStatusSink.Round(
+            requestedDepths: proposalInputs.map(\.maximumProposalDepth),
+            proposedTokens: proposedTokens,
+            acceptedTokens: acceptedProposalTokens,
+            bonusTokens: bonusTokens,
+            committedTokens: committedTokens,
+            acceptedProposalTokensByRow: finalizeRows.map(\.committedProposalTokenCount),
+            verificationOverheadMS: overheadMS
+        ))
 
         for requestID in invalidCandidateIDs {
             guard let removed = activeDecode.removeValue(forKey: requestID) else { continue }
@@ -3128,6 +3181,20 @@ actor ContinuousBatchScheduler {
                 if cleanupFailedClosed { return }
             }
         }
+    }
+
+    private func recordNativeMTPPostoutputFailureIfVisible(
+        sink: NativeMTPStatusSink?,
+        rows: [Row]
+    ) {
+        guard let sink else { return }
+        if rows.contains(where: nativeMTPRowHasBuyerVisibleOutput) {
+            sink.recordPostoutputFailure()
+        }
+    }
+
+    private func nativeMTPRowHasBuyerVisibleOutput(_ row: Row) -> Bool {
+        !row.outputTokens.isEmpty
     }
 
     private func runDecodeStep() async {

@@ -31,6 +31,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(capability.sourceLayout, "separate_artifact")
         XCTAssertEqual(capability.predictionLayerCount, 4)
         XCTAssertEqual(capability.completeWindowBytesByDepth, [1024, 2048, 4096, 8192, 16384])
+        XCTAssertEqual(capability.throughputDeltaPPM, 42_000)
         XCTAssertEqual(capability.maxPromptTokens, 32768)
         XCTAssertEqual(capability.maxCompletionTokens, 4096)
         XCTAssertEqual(capability.spec023ReleaseID, "native-mtp-release-2026-09-28")
@@ -659,6 +660,64 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
+    func testThroughputDeltaPPMIsRequiredSignedSidecarData() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot({ root in
+                var mtp = root["mtp"] as! [String: Any]
+                mtp.removeValue(forKey: "throughput_delta_ppm")
+                root["mtp"] = mtp
+            }, recomputeTuple: true), fixture: fixture),
+            .missingField("$.mtp.throughput_delta_ppm")
+        )
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot({ root in
+                var mtp = root["mtp"] as! [String: Any]
+                mtp["throughput_delta_ppm"] = 1_000_001
+                root["mtp"] = mtp
+            }, recomputeTuple: true), fixture: fixture),
+            .invalidValue("$.mtp.throughput_delta_ppm")
+        )
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot { root in
+                var mtp = root["mtp"] as! [String: Any]
+                mtp["throughput_delta_ppm"] = -10
+                root["mtp"] = mtp
+            }, fixture: fixture),
+            .invalidValue("$.tuple_sha256")
+        )
+    }
+
+    func testSelfTestChallengeBankIsRequiredAndSignedIntoTuple() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot({ root in
+                root.removeValue(forKey: "selftest")
+            }, recomputeTuple: false), fixture: fixture),
+            .missingField("$.selftest")
+        )
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot({ root in
+                var selftest = root["selftest"] as! [String: Any]
+                selftest["challenge_bank_sha256"] = String(repeating: "e", count: 63)
+                root["selftest"] = selftest
+            }, recomputeTuple: true), fixture: fixture),
+            .invalidValue("$.selftest.challenge_bank_sha256")
+        )
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot { root in
+                var selftest = root["selftest"] as! [String: Any]
+                selftest["signer_key_id"] = "different-signer"
+                root["selftest"] = selftest
+            }, fixture: fixture),
+            .invalidValue("$.tuple_sha256")
+        )
+    }
+
     func testSpec023LiveExecutableCDHashIsRequiredLowercaseAndSignedIntoTuple() throws {
         let fixture = try makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -904,10 +963,32 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             try data.write(to: snapshot.appendingPathComponent(name))
             digests[name] = Self.sha256Hex(data)
         }
+        let selfTestBankData = Data(#"{"schema":"native_mtp_selftest_bank.v1","release_id":"native-mtp-selftest-2026-09-28","prompts":[[1,2,3]]}"#.utf8)
+        try selfTestBankData.write(to: snapshot.appendingPathComponent("native-mtp-selftest-bank.json"))
+        let selfTestSigner = Curve25519.Signing.PrivateKey()
+        let selfTestSignerKeyID = "native-mtp-selftest-release"
+        let selfTestSignatureData = Self.signatureData(
+            payload: selfTestBankData,
+            signer: selfTestSigner,
+            keyID: selfTestSignerKeyID
+        )
+        try selfTestSignatureData.write(to: snapshot.appendingPathComponent("native-mtp-selftest-bank.json.sig"))
         let placeholderSHA = String(repeating: "1", count: 64)
-        let placeholderObject = try Self.sidecarObject(digests: digests, tupleSHA: placeholderSHA)
+        let placeholderObject = try Self.sidecarObject(
+            digests: digests,
+            tupleSHA: placeholderSHA,
+            selfTestBankSHA256: Self.sha256Hex(selfTestBankData),
+            selfTestSignerKeyID: selfTestSignerKeyID,
+            selfTestSignatureSHA256: Self.sha256Hex(selfTestSignatureData)
+        )
         let tupleSHA = try NativeMTPAdmissionSidecar.admissionTupleSHA256ForTesting(placeholderObject)
-        let rootObject = try Self.sidecarObject(digests: digests, tupleSHA: tupleSHA)
+        let rootObject = try Self.sidecarObject(
+            digests: digests,
+            tupleSHA: tupleSHA,
+            selfTestBankSHA256: Self.sha256Hex(selfTestBankData),
+            selfTestSignerKeyID: selfTestSignerKeyID,
+            selfTestSignatureSHA256: Self.sha256Hex(selfTestSignatureData)
+        )
         let sidecarData = try Self.jsonData(rootObject)
         let signer = Curve25519.Signing.PrivateKey()
         let keyID = "native-mtp-release"
@@ -921,7 +1002,10 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             tupleSHA: tupleSHA,
             signer: signer,
             trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring(
-                publicKeysByKeyID: [keyID: signer.publicKey.rawRepresentation.base64EncodedString()],
+                publicKeysByKeyID: [
+                    keyID: signer.publicKey.rawRepresentation.base64EncodedString(),
+                    selfTestSignerKeyID: selfTestSigner.publicKey.rawRepresentation.base64EncodedString(),
+                ],
                 requiredKeyID: keyID
             ),
             context: NativeMTPAdmissionSidecar.RuntimeContext(
@@ -988,7 +1072,13 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
     private static let evidenceSHA = String(repeating: "d", count: 64)
     private static let liveExecutableCDHash = String(repeating: "4", count: 40)
 
-    private static func sidecarObject(digests: [String: String], tupleSHA: String) throws -> [String: Any] {
+    private static func sidecarObject(
+        digests: [String: String],
+        tupleSHA: String,
+        selfTestBankSHA256: String,
+        selfTestSignerKeyID: String,
+        selfTestSignatureSHA256: String
+    ) throws -> [String: Any] {
         [
             "schema_version": NativeMTPAdmissionSidecar.schemaVersion,
             "tuple_sha256": tupleSHA,
@@ -1011,6 +1101,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 "prediction_layer_count": 4,
                 "max_proposal_depth": 4,
                 "complete_window_bytes_by_depth": [1024, 2048, 4096, 8192, 16384],
+                "throughput_delta_ppm": 42_000,
                 "adaptation_enabled": true,
                 "adaptation_max_depth": 4,
             ],
@@ -1053,6 +1144,14 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 "benchmark_policy_sha256": String(repeating: "3", count: 64),
                 "native_mtp_admission_tuple_sha256": tupleSHA,
                 "evidence_artifact_sha256": [evidenceSHA],
+            ],
+            "selftest": [
+                "release_id": "native-mtp-selftest-2026-09-28",
+                "challenge_bank_path": "native-mtp-selftest-bank.json",
+                "challenge_bank_sha256": selfTestBankSHA256,
+                "signature_path": "native-mtp-selftest-bank.json.sig",
+                "signer_key_id": selfTestSignerKeyID,
+                "signature_sha256": selfTestSignatureSHA256,
             ],
             "flags": [
                 "admission_allowed": true,

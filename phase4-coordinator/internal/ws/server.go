@@ -135,6 +135,9 @@ type Server struct {
 	losslessnessProfileCursor     map[string]int
 	losslessnessTelemetry         []LosslessnessTelemetryEvent
 	canarySanctions               CanarySanctionStore
+	nativeMTPCanaryStore          NativeMTPCanaryStateStore
+	nativeMTPCanaryBank           *NativeMTPChallengeBank
+	nativeMTPCanaryJitter         func(time.Duration) time.Duration
 	tokens                        TokenValidator
 	relayBlindKeys                RelayBlindKeySink
 	// SPEC-003 v0.8 FR-C9.1 — separate issuer field so validator and
@@ -1115,6 +1118,22 @@ func WithCanarySanctionStore(store CanarySanctionStore) Option {
 	}
 }
 
+func WithNativeMTPCanaryStateStore(store NativeMTPCanaryStateStore) Option {
+	return func(s *Server) {
+		if store != nil {
+			s.nativeMTPCanaryStore = store
+		}
+	}
+}
+
+func WithNativeMTPCanaryJitter(fn func(time.Duration) time.Duration) Option {
+	return func(s *Server) {
+		if fn != nil {
+			s.nativeMTPCanaryJitter = fn
+		}
+	}
+}
+
 // WithAuthAttemptRetentionBound overrides the default 1024-bound
 // on the SPEC-002 v1.3.5 §7.9 auth-attempt retention store.
 // INTENDED USE: tests that exercise the AC-K.16 retention-bound
@@ -1201,6 +1220,8 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		autotuneCatalogEnforced:       cfg.AutotuneFeeds.EnforceProviderAdmission,
 		autotuneCatalogBridgeDeadline: providerAdmissionBridgeDeadline,
 		modelAdmissions:               NewMemoryModelAdmissionStore(),
+		nativeMTPCanaryStore:          NewMemoryNativeMTPCanaryStateStore(),
+		nativeMTPCanaryJitter:         jitteredCanaryInterval,
 		// The published release generation is never the zero value: a
 		// binding stamped 0 was never validated under any release.
 		artifactIdentitySets:   releaseSnapshotState{gen: 1},
@@ -1214,6 +1235,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.loadNativeMTPCanaryBank()
 	s.modelAdmissions = splitModelAdmissionRouteReads(s.modelAdmissions, s.modelAdmissionRouteReads)
 	if tier2.ModelHashActive(s.tier2) || strings.TrimSpace(s.tier2.ModelHashLegacyUntil) != "" {
 		s.scheduleModelHashLegacyDeadline(s.tier2.ModelHashLegacyUntil)
@@ -1241,6 +1263,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	}
 	if cfg.Pool.CanaryEnabled && registry != nil {
 		go s.runCanaryLoop()
+	}
+	if cfg.Pool.NativeMTPCanary.Enabled && s.nativeMTPCanaryBank != nil && registry != nil {
+		go s.runNativeMTPCanaryLoop()
 	}
 	if registry != nil {
 		go s.runSELivenessLoop()
@@ -4528,6 +4553,10 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleDrainStatus(conn, providerID, assignedID, payload)
 	case "se_liveness_response":
 		s.handleSELivenessResponse(providerID, assignedID, payload)
+	case "native_mtp_tuple_offer_v1":
+		s.handleNativeMTPTupleOffer(providerID, assignedID, payload)
+	case "native_mtp_canary_result_v1":
+		s.handleNativeMTPCanaryResult(providerID, assignedID, payload)
 	case losslessnessResultType, losslessnessEncryptedResultType:
 		s.handleLosslessnessProbeResult(providerID, assignedID, payload)
 	default:

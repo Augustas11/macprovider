@@ -1559,6 +1559,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
     ) -> NativeMTPAdmissionCapability {
         NativeMTPAdmissionCapability(
             tupleSHA256: String(repeating: "1", count: 64),
+            sidecarSHA256: String(repeating: "0", count: 64),
             modelID: "mlx-community/Qwen3.5-9B-4bit",
             modelRevision: targetArtifactSHA256,
             targetArtifactSHA256: targetArtifactSHA256,
@@ -1582,6 +1583,16 @@ final class ModelRuntimeSwapTests: XCTestCase {
             spec023BuildDigestSHA256: spec023BuildDigestSHA256,
             spec023LiveExecutableCDHash: spec023LiveExecutableCDHash,
             evidenceArtifactSHA256: [String(repeating: "5", count: 64)],
+            challengeBankSignerKeyID: "native-mtp-selftest-test",
+            revocationSignerKeyID: "native-mtp-revocation-test",
+            selfTestChallengeBank: NativeMTPSelfTestChallengeBank(
+                releaseID: "native-mtp-test",
+                challengeBankPath: "native-mtp-selftest-bank.json",
+                challengeBankSHA256: String(repeating: "6", count: 64),
+                signaturePath: "native-mtp-selftest-bank.json.sig",
+                signerKeyID: "native-mtp-selftest-test",
+                signatureSHA256: String(repeating: "7", count: 64)
+            ),
             capturedArtifacts: nil
         )
     }

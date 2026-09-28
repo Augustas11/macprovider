@@ -4,6 +4,7 @@ import Foundation
 
 struct NativeMTPAdmissionCapability: Equatable, Sendable {
     let tupleSHA256: String
+    let sidecarSHA256: String
     let modelID: String
     let modelRevision: String
     let targetArtifactSHA256: String
@@ -15,6 +16,7 @@ struct NativeMTPAdmissionCapability: Equatable, Sendable {
     let predictionLayerCount: Int
     let maxProposalDepth: Int
     let completeWindowBytesByDepth: [Int]
+    let throughputDeltaPPM: Int
     let maxPromptTokens: Int
     let maxCompletionTokens: Int
     let cacheClass: String
@@ -28,7 +30,19 @@ struct NativeMTPAdmissionCapability: Equatable, Sendable {
     let spec023BuildDigestSHA256: String
     let spec023LiveExecutableCDHash: String
     let evidenceArtifactSHA256: [String]
+    let challengeBankSignerKeyID: String
+    let revocationSignerKeyID: String
+    let selfTestChallengeBank: NativeMTPSelfTestChallengeBank
     let capturedArtifacts: NativeMTPAdmissionCapturedArtifacts?
+}
+
+struct NativeMTPSelfTestChallengeBank: Equatable, Sendable {
+    let releaseID: String
+    let challengeBankPath: String
+    let challengeBankSHA256: String
+    let signaturePath: String
+    let signerKeyID: String
+    let signatureSHA256: String
 }
 
 final class NativeMTPAdmissionCapturedArtifacts: Equatable, @unchecked Sendable {
@@ -318,12 +332,18 @@ enum NativeMTPAdmissionSidecar {
     static let schemaVersion = "macprovider.native-mtp-admission.v1"
     static let maxSidecarBytes = 1 * 1024 * 1024
     static let maxSignatureBytes = 16 * 1024
+    static let maxSelfTestChallengeBankBytes = 256 * 1024
     static let hashChunkBytes = 1 * 1024 * 1024
     static let maxSingleArtifactBytes: Int64 = 512 * 1024 * 1024 * 1024
     static let maxSnapshotTreeFiles = 100_000
     static let maxSnapshotTreeBytes: Int64 = 2 * 1024 * 1024 * 1024 * 1024
     private static let admissionSidecarFileName = "native-mtp-admission.json"
     private static let admissionSignatureFileName = "native-mtp-admission.json.sig"
+    private static let tupleIdentitySchemaVersion = "macprovider.native-mtp-admission-tuple.v1"
+    private static let tupleIdentityDomain = "macprovider.native-mtp-admission-tuple.v1\n"
+    private static let defaultChallengeBankPath = "native-mtp-selftest-bank.json"
+    private static let defaultChallengeBankSignaturePath = "native-mtp-selftest-bank.json.sig"
+    private static let defaultArtifactProjectionManifestPath = "native-mtp-artifact-manifest.json"
     nonisolated(unsafe) static var testingDescriptorCaptureMutationHook: ((String) throws -> Void)?
     nonisolated(unsafe) static var testingExpectedStagingDeviceOverride: dev_t?
 
@@ -388,6 +408,7 @@ enum NativeMTPAdmissionSidecar {
 
     private struct Parsed: Equatable {
         let tupleSHA256: String
+        let sidecarSHA256: String
         let decodePath: String
         let admissionEnabled: Bool
         let modelID: String
@@ -399,6 +420,7 @@ enum NativeMTPAdmissionSidecar {
         let predictionLayerCount: Int
         let maxProposalDepth: Int
         let completeWindowBytesByDepth: [Int]
+        let throughputDeltaPPM: Int
         let adaptationEnabled: Bool
         let adaptationMaxDepth: Int
         let quantization: Quantization
@@ -413,7 +435,62 @@ enum NativeMTPAdmissionSidecar {
         let maxSlots: Int
         let requestProfile: RequestProfile
         let spec023: Spec023
+        let challengeBankSignerKeyID: String
+        let revocationSignerKeyID: String
+        let selfTest: NativeMTPSelfTestChallengeBank
         let admissionAllowed: Bool
+    }
+
+    private struct NativeMTPAdmissionReleaseEntry: Equatable {
+        let modelKey: String
+        let artifactID: String
+        let artifactHash: String
+        let artifactManifestSHA256: String
+        let tokenizerSHA256: String
+        let decodePath: String
+        let mtpManifestSHA256: String
+        let familyAdapter: String
+        let mtpStateClass: String
+        let mtpHeadCount: Int
+        let proposalDepth: Int
+        let completeWindowBytesByDepth: [Int]
+        let runtimeRevision: String
+        let providerRevision: String
+        let sourceCommit: String
+        let reproducibleBuildSHA256: String
+        let liveExecutableCDHash: String
+        let cacheStateClasses: [String]
+        let hardwareClass: String
+        let ramBytes: Int
+        let qualifiedSlots: Int
+        let requestFeatureProfile: String
+        let decreaseThresholdPPM: Int
+        let increaseThresholdPPM: Int
+        let maxVerificationPositionsPerCommittedMilli: Int
+        let throughputDeltaPPM: Int
+        let benchmarkPolicySHA256: String
+        let challengeBankSHA256: String
+        let evidenceArtifactSHA256: [String]
+        let quantization: Quantization
+
+        var sortKey: [String] {
+            [
+                modelKey, artifactID, hardwareClass, String(ramBytes),
+                String(qualifiedSlots), String(proposalDepth), quantization.target,
+            ]
+        }
+
+        var sourceLayout: String { "separate_artifact" }
+
+        func matches(context: RuntimeContext) -> Bool {
+            modelKey == context.modelID
+                && artifactHash == context.modelRevision
+                && providerRevision == context.providerRevision
+                && runtimeRevision == context.upstreamMLXSwiftLMRevision
+                && hardwareClass == context.hardwareChip
+                && ramBytes == context.ramGB * 1_073_741_824
+                && qualifiedSlots == context.slotCount
+        }
     }
 
     private struct RequestProfile: Equatable {
@@ -484,7 +561,7 @@ enum NativeMTPAdmissionSidecar {
         guard signatureData.count <= maxSignatureBytes else {
             throw NativeMTPAdmissionSidecarError.artifactTooLarge(admissionSignatureFileName)
         }
-        try verifyDetachedSignature(payload: sidecarData, signatureData: signatureData, trustedKeyring: trustedKeyring)
+        let signatureKeyID = try verifyDetachedSignature(payload: sidecarData, signatureData: signatureData, trustedKeyring: trustedKeyring)
         guard let text = String(data: sidecarData, encoding: .utf8) else {
             throw NativeMTPAdmissionSidecarError.invalidJSON("sidecar must be UTF-8")
         }
@@ -497,7 +574,16 @@ enum NativeMTPAdmissionSidecar {
         guard case .object(let root) = value else {
             throw NativeMTPAdmissionSidecarError.wrongType("$")
         }
-        let parsed = try parseRoot(root)
+        let sidecarSHA256 = sha256Hex(sidecarData)
+        let parsed = try parseReleaseEnvelope(
+            root,
+            sidecarSHA256: sidecarSHA256,
+            signatureKeyID: signatureKeyID,
+            snapshotRoot: snapshotRoot,
+            context: context,
+            trustedKeyring: trustedKeyring
+        )
+        try validateSelfTestChallengeBank(parsed, snapshotRoot: snapshotRoot, trustedKeyring: trustedKeyring)
         try validateStaticSupport(parsed)
         try validateLiveTuple(parsed, context: context)
         try validateRevocation(parsed, context: context)
@@ -505,10 +591,16 @@ enum NativeMTPAdmissionSidecar {
             parsed.artifacts,
             snapshotRoot: snapshotRoot,
             captureArtifacts: captureArtifacts,
+            allowedAuxiliaryPaths: [
+                parsed.selfTest.challengeBankPath,
+                parsed.selfTest.signaturePath,
+                defaultArtifactProjectionManifestPath,
+            ],
             fileManager: fileManager
         )
         return NativeMTPAdmissionCapability(
             tupleSHA256: parsed.tupleSHA256,
+            sidecarSHA256: parsed.sidecarSHA256,
             modelID: parsed.modelID,
             modelRevision: parsed.modelRevision,
             targetArtifactSHA256: parsed.artifacts["target"]!.sha256,
@@ -520,6 +612,7 @@ enum NativeMTPAdmissionSidecar {
             predictionLayerCount: parsed.predictionLayerCount,
             maxProposalDepth: parsed.maxProposalDepth,
             completeWindowBytesByDepth: parsed.completeWindowBytesByDepth,
+            throughputDeltaPPM: parsed.throughputDeltaPPM,
             maxPromptTokens: parsed.requestProfile.maxPromptTokens,
             maxCompletionTokens: parsed.requestProfile.maxCompletionTokens,
             cacheClass: parsed.cacheClass,
@@ -533,15 +626,58 @@ enum NativeMTPAdmissionSidecar {
             spec023BuildDigestSHA256: parsed.spec023.reproducibleBuildSHA256,
             spec023LiveExecutableCDHash: parsed.spec023.liveExecutableCDHash,
             evidenceArtifactSHA256: parsed.spec023.evidenceArtifactSHA256,
+            challengeBankSignerKeyID: parsed.challengeBankSignerKeyID,
+            revocationSignerKeyID: parsed.revocationSignerKeyID,
+            selfTestChallengeBank: parsed.selfTest,
             capturedArtifacts: capturedArtifacts
         )
+    }
+
+    static func pinnedRevocationSignerKeyID(
+        sidecarData: Data,
+        signatureData: Data,
+        trustedKeyring: TrustedKeyring
+    ) throws -> String {
+        guard sidecarData.count <= maxSidecarBytes else {
+            throw NativeMTPAdmissionSidecarError.artifactTooLarge(admissionSidecarFileName)
+        }
+        guard signatureData.count <= maxSignatureBytes else {
+            throw NativeMTPAdmissionSidecarError.artifactTooLarge(admissionSignatureFileName)
+        }
+        let signatureKeyID = try verifyDetachedSignature(
+            payload: sidecarData,
+            signatureData: signatureData,
+            trustedKeyring: trustedKeyring
+        )
+        guard let text = String(data: sidecarData, encoding: .utf8) else {
+            throw NativeMTPAdmissionSidecarError.invalidJSON("sidecar must be UTF-8")
+        }
+        let value: NativeMTPSidecarJSON
+        do {
+            value = try NativeMTPSidecarJSONParser.parse(text)
+        } catch {
+            throw NativeMTPAdmissionSidecarError.invalidJSON(String(describing: error))
+        }
+        guard case .object(let root) = value else {
+            throw NativeMTPAdmissionSidecarError.wrongType("$")
+        }
+        try requireString(root, "schema_version", path: "$", equals: schemaVersion)
+        let signerKeyID = try requireASCIIString(root, "signer_key_id", path: "$", range: 1...128)
+        guard signerKeyID == signatureKeyID, signerKeyID == trustedKeyring.requiredKeyID else {
+            throw NativeMTPAdmissionSidecarError.signatureInvalid("unexpected_key_id")
+        }
+        let revocationSignerKeyID = try requireASCIIString(root, "revocation_signer_key_id", path: "$", range: 1...128)
+        guard trustedKeyring.publicKeysByKeyID[revocationSignerKeyID] != nil else {
+            throw NativeMTPAdmissionSidecarError.signatureInvalid("missing_revocation_key")
+        }
+        return revocationSignerKeyID
     }
 
     private static func parseRoot(_ object: [String: NativeMTPSidecarJSON]) throws -> Parsed {
         try rejectUnknown(object, allowed: [
             "schema_version", "tuple_sha256", "decode_path", "admission_enabled",
             "model", "artifacts", "mtp", "quantization", "cache_state",
-            "revisions", "hardware", "request_profile", "spec023", "flags",
+            "revisions", "hardware", "request_profile", "spec023", "selftest", "flags",
         ], path: "$")
         try requireString(object, "schema_version", path: "$", equals: schemaVersion)
         let model = try requireObject(object, "model", path: "$")
@@ -552,7 +688,7 @@ enum NativeMTPAdmissionSidecar {
         try rejectUnknown(mtp, allowed: [
             "manifest_sha256", "source_layout", "prediction_layer_count",
             "max_proposal_depth", "complete_window_bytes_by_depth",
-            "adaptation_enabled", "adaptation_max_depth",
+            "throughput_delta_ppm", "adaptation_enabled", "adaptation_max_depth",
         ], path: "$.mtp")
         let sourceLayout = try requireString(mtp, "source_layout", path: "$.mtp", allowed: ["checkpoint_mtp", "config_next_n", "separate_artifact"])
         let predictionLayerCount = try requireInt(mtp, "prediction_layer_count", path: "$.mtp", range: 1...64)
@@ -562,6 +698,12 @@ enum NativeMTPAdmissionSidecar {
             key: "complete_window_bytes_by_depth",
             path: "$.mtp",
             maxProposalDepth: maxProposalDepth
+        )
+        let throughputDeltaPPM = try requireInt(
+            mtp,
+            "throughput_delta_ppm",
+            path: "$.mtp",
+            range: -1_000_000...1_000_000
         )
 
         let quantization = try requireObject(object, "quantization", path: "$")
@@ -574,11 +716,13 @@ enum NativeMTPAdmissionSidecar {
         try rejectUnknown(hardware, allowed: ["chip", "ram_gb", "os_version", "qualified_slots", "max_slots"], path: "$.hardware")
         let requestProfile = try parseRequestProfile(try requireObject(object, "request_profile", path: "$"))
         let spec023 = try parseSpec023(try requireObject(object, "spec023", path: "$"))
+        let selfTest = try parseSelfTest(try requireObject(object, "selftest", path: "$"))
         let flags = try requireObject(object, "flags", path: "$")
         try rejectUnknown(flags, allowed: ["admission_allowed"], path: "$.flags")
 
         return Parsed(
             tupleSHA256: try requireSHA256(object, "tuple_sha256", path: "$"),
+            sidecarSHA256: String(repeating: "0", count: 64),
             decodePath: try requireString(object, "decode_path", path: "$", allowed: ["native_mtp"]),
             admissionEnabled: try requireBool(object, "admission_enabled", path: "$"),
             modelID: try requireNonEmptyString(model, "id", path: "$.model"),
@@ -590,6 +734,7 @@ enum NativeMTPAdmissionSidecar {
             predictionLayerCount: predictionLayerCount,
             maxProposalDepth: maxProposalDepth,
             completeWindowBytesByDepth: completeWindowBytesByDepth,
+            throughputDeltaPPM: throughputDeltaPPM,
             adaptationEnabled: try requireBool(mtp, "adaptation_enabled", path: "$.mtp"),
             adaptationMaxDepth: try requireInt(mtp, "adaptation_max_depth", path: "$.mtp", range: 1...16),
             quantization: Quantization(
@@ -617,8 +762,358 @@ enum NativeMTPAdmissionSidecar {
             maxSlots: try requireInt(hardware, "max_slots", path: "$.hardware", range: 1...1024),
             requestProfile: requestProfile,
             spec023: spec023,
+            challengeBankSignerKeyID: selfTest.signerKeyID,
+            revocationSignerKeyID: "",
+            selfTest: selfTest,
             admissionAllowed: try requireBool(flags, "admission_allowed", path: "$.flags")
         )
+    }
+
+    private static func parseReleaseEnvelope(
+        _ object: [String: NativeMTPSidecarJSON],
+        sidecarSHA256: String,
+        signatureKeyID: String,
+        snapshotRoot: URL,
+        context: RuntimeContext,
+        trustedKeyring: TrustedKeyring
+    ) throws -> Parsed {
+        try rejectUnknown(object, allowed: [
+            "schema_version", "release_id", "issued_at", "expires_at",
+            "signer_key_id", "challenge_bank_signer_key_id",
+            "revocation_signer_key_id", "entries",
+        ], path: "$")
+        try requireString(object, "schema_version", path: "$", equals: schemaVersion)
+        let releaseID = try requireASCIIString(object, "release_id", path: "$", range: 1...128)
+        let issuedAt = try requireRFC3339UTCSeconds(object, "issued_at", path: "$")
+        let expiresAt = try requireRFC3339UTCSeconds(object, "expires_at", path: "$")
+        let now = Date()
+        guard issuedAt <= now else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("$.issued_at")
+        }
+        guard issuedAt < expiresAt, expiresAt.timeIntervalSince(issuedAt) <= 90 * 24 * 60 * 60 else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("$.expires_at")
+        }
+        guard expiresAt > now else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("$.expires_at")
+        }
+        let signerKeyID = try requireASCIIString(object, "signer_key_id", path: "$", range: 1...128)
+        let challengeBankSignerKeyID = try requireASCIIString(object, "challenge_bank_signer_key_id", path: "$", range: 1...128)
+        let revocationSignerKeyID = try requireASCIIString(object, "revocation_signer_key_id", path: "$", range: 1...128)
+        guard signerKeyID == signatureKeyID, signerKeyID == trustedKeyring.requiredKeyID else {
+            throw NativeMTPAdmissionSidecarError.signatureInvalid("unexpected_key_id")
+        }
+        guard trustedKeyring.publicKeysByKeyID[challengeBankSignerKeyID] != nil else {
+            throw NativeMTPAdmissionSidecarError.signatureInvalid("missing_challenge_bank_key")
+        }
+        guard trustedKeyring.publicKeysByKeyID[revocationSignerKeyID] != nil else {
+            throw NativeMTPAdmissionSidecarError.signatureInvalid("missing_revocation_key")
+        }
+        guard case .array(let rawEntries) = object["entries"] else {
+            throw NativeMTPAdmissionSidecarError.wrongType("$.entries")
+        }
+        guard (1...256).contains(rawEntries.count) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("$.entries")
+        }
+
+        var lastSortKey: [String]?
+        var selected: (entry: NativeMTPAdmissionReleaseEntry, raw: NativeMTPSidecarJSON)?
+        for (index, rawEntry) in rawEntries.enumerated() {
+            guard case .object(let entryObject) = rawEntry else {
+                throw NativeMTPAdmissionSidecarError.wrongType("$.entries[\(index)]")
+            }
+            let entry = try parseReleaseEntry(entryObject, path: "$.entries[\(index)]")
+            let sortKey = entry.sortKey
+            if let lastSortKey, !(lastSortKey.lexicographicallyPrecedes(sortKey)) {
+                throw NativeMTPAdmissionSidecarError.invalidValue("$.entries")
+            }
+            lastSortKey = sortKey
+            if entry.matches(context: context) {
+                guard selected == nil else {
+                    throw NativeMTPAdmissionSidecarError.invalidValue("$.entries")
+                }
+                selected = (entry, rawEntry)
+            }
+        }
+        guard let selected else {
+            throw NativeMTPAdmissionSidecarError.liveTupleMismatch("$.entries")
+        }
+
+        let tupleSHA256 = try admissionTupleSHA256(
+            releaseID: releaseID,
+            sidecarSHA256: sidecarSHA256,
+            entry: selected.raw
+        )
+        let artifacts = try parseArtifactProjectionManifest(
+            snapshotRoot: snapshotRoot,
+            expectedSHA256: selected.entry.artifactManifestSHA256
+        )
+        return Parsed(
+            tupleSHA256: tupleSHA256,
+            sidecarSHA256: sidecarSHA256,
+            decodePath: selected.entry.decodePath,
+            admissionEnabled: true,
+            modelID: selected.entry.modelKey,
+            modelRevision: selected.entry.artifactHash,
+            familyAdapter: selected.entry.familyAdapter,
+            artifacts: artifacts,
+            mtpManifestSHA256: selected.entry.mtpManifestSHA256,
+            sourceLayout: selected.entry.sourceLayout,
+            predictionLayerCount: selected.entry.mtpHeadCount,
+            maxProposalDepth: selected.entry.proposalDepth,
+            completeWindowBytesByDepth: selected.entry.completeWindowBytesByDepth,
+            throughputDeltaPPM: selected.entry.throughputDeltaPPM,
+            adaptationEnabled: true,
+            adaptationMaxDepth: selected.entry.proposalDepth,
+            quantization: selected.entry.quantization,
+            cacheClass: "paged_kv",
+            stateClass: selected.entry.mtpStateClass,
+            providerRevision: selected.entry.providerRevision,
+            upstreamMLXSwiftLMRevision: selected.entry.runtimeRevision,
+            hardwareChip: selected.entry.hardwareClass,
+            ramGB: selected.entry.ramBytes / 1_073_741_824,
+            osVersion: context.osVersion,
+            qualifiedSlots: selected.entry.qualifiedSlots,
+            maxSlots: selected.entry.qualifiedSlots,
+            requestProfile: RequestProfile(
+                textOnly: true,
+                streaming: false,
+                tools: false,
+                structuredOutputs: false,
+                logprobs: false,
+                penalties: false,
+                conversationCache: false,
+                diskCache: false,
+                maxPromptTokens: 1_048_576,
+                maxCompletionTokens: 1_048_576
+            ),
+            spec023: Spec023(
+                releaseID: releaseID,
+                sourceCommit: selected.entry.sourceCommit,
+                reproducibleBuildSHA256: selected.entry.reproducibleBuildSHA256,
+                liveExecutableCDHash: selected.entry.liveExecutableCDHash,
+                benchmarkPolicySHA256: selected.entry.benchmarkPolicySHA256,
+                nativeMTPAdmissionTupleSHA256: tupleSHA256,
+                evidenceArtifactSHA256: selected.entry.evidenceArtifactSHA256
+            ),
+            challengeBankSignerKeyID: challengeBankSignerKeyID,
+            revocationSignerKeyID: revocationSignerKeyID,
+            selfTest: NativeMTPSelfTestChallengeBank(
+                releaseID: releaseID,
+                challengeBankPath: defaultChallengeBankPath,
+                challengeBankSHA256: selected.entry.challengeBankSHA256,
+                signaturePath: defaultChallengeBankSignaturePath,
+                signerKeyID: challengeBankSignerKeyID,
+                signatureSHA256: ""
+            ),
+            admissionAllowed: true
+        )
+    }
+
+    private static func parseReleaseEntry(
+        _ object: [String: NativeMTPSidecarJSON],
+        path: String
+    ) throws -> NativeMTPAdmissionReleaseEntry {
+        let evidenceKeys: [String] = [
+            "fit_evidence_sha256",
+            "quality_evidence_sha256",
+            "correctness_evidence_sha256",
+            "state_rollback_evidence_sha256",
+            "batch_evidence_sha256",
+            "performance_evidence_sha256",
+            "security_negative_evidence_sha256",
+        ]
+        try rejectUnknown(object, allowed: Set([
+            "model_key", "artifact_id", "hash_algorithm", "artifact_hash",
+            "artifact_manifest_sha256", "tokenizer_sha256", "decode_path",
+            "mtp_manifest_sha256", "mtp_family_adapter", "mtp_state_class",
+            "mtp_head_count", "proposal_depth", "complete_window_bytes_by_depth",
+            "runtime_revision", "provider_revision", "source_commit",
+            "reproducible_build_sha256", "live_executable_cdhash",
+            "cache_state_classes", "hardware_class", "ram_bytes",
+            "qualified_slots", "request_feature_profile", "decrease_threshold_ppm",
+            "increase_threshold_ppm", "max_verification_positions_per_committed_milli",
+            "throughput_delta_ppm", "benchmark_policy_sha256", "challenge_bank_sha256",
+            "quantization", "ordinary_baseline",
+        ] + evidenceKeys), path: path)
+        try requireString(object, "hash_algorithm", path: path, equals: "sha256")
+        let decodePath = try requireString(object, "decode_path", path: path, allowed: ["native_mtp"])
+        let requestFeatureProfile = try requireString(object, "request_feature_profile", path: path, equals: "native_mtp_greedy_text_v1")
+        let proposalDepth = try requireInt(object, "proposal_depth", path: path, range: 1...16)
+        let completeWindowBytesByDepth = try requireCompleteWindowBytesByDepth(
+            object,
+            key: "complete_window_bytes_by_depth",
+            path: path,
+            maxProposalDepth: proposalDepth
+        )
+        let cacheStateClasses = try requireStringArray(object, "cache_state_classes", path: path, range: 1...16)
+        guard cacheStateClasses == cacheStateClasses.sorted(), Set(cacheStateClasses).count == cacheStateClasses.count else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).cache_state_classes")
+        }
+        let decreaseThreshold = try requireInt(object, "decrease_threshold_ppm", path: path, range: 0...1_000_000)
+        let increaseThreshold = try requireInt(object, "increase_threshold_ppm", path: path, range: 0...1_000_000)
+        guard decreaseThreshold < increaseThreshold else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).increase_threshold_ppm")
+        }
+        let quantization = try parseReleaseQuantization(
+            try requireObject(object, "quantization", path: path),
+            path: "\(path).quantization"
+        )
+        try parseOrdinaryBaseline(
+            try requireObject(object, "ordinary_baseline", path: path),
+            path: "\(path).ordinary_baseline",
+            entrySlots: try requireInt(object, "qualified_slots", path: path, range: 2...8),
+            artifactHash: try requireSHA256(object, "artifact_hash", path: path),
+            runtimeRevision: try requireShortString(object, "runtime_revision", path: path),
+            providerRevision: try requireShortString(object, "provider_revision", path: path)
+        )
+        let evidence = try evidenceKeys.map { key in
+            try requireSHA256(object, key, path: path)
+        }
+        return NativeMTPAdmissionReleaseEntry(
+            modelKey: try requireNonEmptyString(object, "model_key", path: path),
+            artifactID: try requireArtifactID(object, "artifact_id", path: path),
+            artifactHash: try requireSHA256(object, "artifact_hash", path: path),
+            artifactManifestSHA256: try requireSHA256(object, "artifact_manifest_sha256", path: path),
+            tokenizerSHA256: try requireSHA256(object, "tokenizer_sha256", path: path),
+            decodePath: decodePath,
+            mtpManifestSHA256: try requireSHA256(object, "mtp_manifest_sha256", path: path),
+            familyAdapter: try requireNonEmptyString(object, "mtp_family_adapter", path: path),
+            mtpStateClass: try requireString(object, "mtp_state_class", path: path, allowed: ["stageable_rewindable", "hybrid_stageable_rewindable"]),
+            mtpHeadCount: try requireInt(object, "mtp_head_count", path: path, range: 1...16),
+            proposalDepth: proposalDepth,
+            completeWindowBytesByDepth: completeWindowBytesByDepth,
+            runtimeRevision: try requireShortString(object, "runtime_revision", path: path),
+            providerRevision: try requireShortString(object, "provider_revision", path: path),
+            sourceCommit: try requireCommitSHA(object, "source_commit", path: path),
+            reproducibleBuildSHA256: try requireSHA256(object, "reproducible_build_sha256", path: path),
+            liveExecutableCDHash: try requireCDHash(object, "live_executable_cdhash", path: path),
+            cacheStateClasses: cacheStateClasses,
+            hardwareClass: try requireHardwareClass(object, "hardware_class", path: path),
+            ramBytes: try requireInt(object, "ram_bytes", path: path, range: 1...Int.max),
+            qualifiedSlots: try requireInt(object, "qualified_slots", path: path, range: 2...8),
+            requestFeatureProfile: requestFeatureProfile,
+            decreaseThresholdPPM: decreaseThreshold,
+            increaseThresholdPPM: increaseThreshold,
+            maxVerificationPositionsPerCommittedMilli: try requireInt(object, "max_verification_positions_per_committed_milli", path: path, range: 1000...4000),
+            throughputDeltaPPM: try requireInt(object, "throughput_delta_ppm", path: path, range: -1_000_000...1_000_000),
+            benchmarkPolicySHA256: try requireSHA256(object, "benchmark_policy_sha256", path: path),
+            challengeBankSHA256: try requireSHA256(object, "challenge_bank_sha256", path: path),
+            evidenceArtifactSHA256: evidence,
+            quantization: quantization
+        )
+    }
+
+    private static func parseReleaseQuantization(
+        _ object: [String: NativeMTPSidecarJSON],
+        path: String
+    ) throws -> Quantization {
+        try rejectUnknown(object, allowed: [
+            "kind", "packed_data_dtype", "packed_layout", "scale_dtype",
+            "scale_layout", "block_size_elements", "alignment_bytes",
+            "padding_rule", "unquantized_exceptions", "per_layer_exceptions",
+            "representation_manifest_sha256",
+        ], path: path)
+        let kind = try requireString(object, "kind", path: path, allowed: ["base", "mlx_mxfp8"])
+        let packedDataDType = try requireString(object, "packed_data_dtype", path: path, allowed: ["none", "uint8"])
+        let packedLayout = try requireString(object, "packed_layout", path: path, allowed: ["none", "mlx_array_native_v1"])
+        let scaleDType = try requireString(object, "scale_dtype", path: path, allowed: ["none", "float16", "float32"])
+        let scaleLayout = try requireString(object, "scale_layout", path: path, allowed: ["none", "per_block"])
+        let blockSize = try requireNullableInt(object, "block_size_elements", path: path, range: 1...1024)
+        let alignmentBytes = try requireNullableInt(object, "alignment_bytes", path: path, range: 1...4096)
+        if let alignmentBytes {
+            guard alignmentBytes > 0, alignmentBytes & (alignmentBytes - 1) == 0 else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("\(path).alignment_bytes")
+            }
+        }
+        let paddingRule = try requireString(object, "padding_rule", path: path, allowed: ["none", "zero_pad_to_alignment"])
+        _ = try requirePatternArray(object, "unquantized_exceptions", path: path)
+        _ = try requirePatternArray(object, "per_layer_exceptions", path: path)
+        _ = try requireSHA256(object, "representation_manifest_sha256", path: path)
+        switch kind {
+        case "base":
+            guard packedDataDType == "none",
+                  packedLayout == "none",
+                  scaleDType == "none",
+                  scaleLayout == "none",
+                  blockSize == nil,
+                  alignmentBytes == nil,
+                  paddingRule == "none" else {
+                throw NativeMTPAdmissionSidecarError.invalidValue(path)
+            }
+            return Quantization(target: "bf16", mtp: "bf16")
+        case "mlx_mxfp8":
+            guard packedDataDType == "uint8",
+                  packedLayout == "mlx_array_native_v1",
+                  scaleDType != "none",
+                  scaleLayout != "none",
+                  blockSize != nil,
+                  alignmentBytes != nil,
+                  paddingRule == "zero_pad_to_alignment" else {
+                throw NativeMTPAdmissionSidecarError.invalidValue(path)
+            }
+            return Quantization(target: "mlx_mxfp8", mtp: "mlx_mxfp8")
+        default:
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).kind")
+        }
+    }
+
+    private static func parseOrdinaryBaseline(
+        _ object: [String: NativeMTPSidecarJSON],
+        path: String,
+        entrySlots: Int,
+        artifactHash: String,
+        runtimeRevision: String,
+        providerRevision: String
+    ) throws {
+        try rejectUnknown(object, allowed: [
+            "decode_path", "runtime_revision", "provider_revision", "artifact_hash",
+            "qualified_slots", "measurement_sha256", "aggregate_tps_milli",
+        ], path: path)
+        try requireString(object, "decode_path", path: path, equals: "ordinary")
+        guard try requireShortString(object, "runtime_revision", path: path) == runtimeRevision else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).runtime_revision")
+        }
+        guard try requireShortString(object, "provider_revision", path: path) == providerRevision else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).provider_revision")
+        }
+        guard try requireSHA256(object, "artifact_hash", path: path) == artifactHash else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).artifact_hash")
+        }
+        guard try requireInt(object, "qualified_slots", path: path, range: 2...8) == entrySlots else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).qualified_slots")
+        }
+        _ = try requireSHA256(object, "measurement_sha256", path: path)
+        _ = try requireInt(object, "aggregate_tps_milli", path: path, range: 1...Int.max)
+    }
+
+    private static func parseArtifactProjectionManifest(
+        snapshotRoot: URL,
+        expectedSHA256: String
+    ) throws -> [String: Artifact] {
+        let root = snapshotRoot.standardizedFileURL
+        let url = root.appendingPathComponent(defaultArtifactProjectionManifestPath, isDirectory: false).standardizedFileURL
+        guard BYOMArtifactPathPolicy.isContained(url, in: root) else {
+            throw NativeMTPAdmissionSidecarError.pathRejected(defaultArtifactProjectionManifestPath)
+        }
+        let data = try readBoundedRegularFile(url, maxBytes: maxSignatureBytes, tooLargeName: defaultArtifactProjectionManifestPath)
+        guard sha256Hex(data) == expectedSHA256 else {
+            throw NativeMTPAdmissionSidecarError.artifactDigestMismatch("$.entries.artifact_manifest_sha256")
+        }
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw NativeMTPAdmissionSidecarError.invalidJSON("artifact projection manifest must be UTF-8")
+        }
+        let value: NativeMTPSidecarJSON
+        do {
+            value = try NativeMTPSidecarJSONParser.parse(text)
+        } catch {
+            throw NativeMTPAdmissionSidecarError.invalidJSON(String(describing: error))
+        }
+        guard case .object(let object) = value else {
+            throw NativeMTPAdmissionSidecarError.wrongType("$.artifact_manifest")
+        }
+        try rejectUnknown(object, allowed: ["schema_version", "artifacts"], path: "$.artifact_manifest")
+        try requireString(object, "schema_version", path: "$.artifact_manifest", equals: "macprovider.native-mtp-artifact-projection.v1")
+        return try parseArtifacts(try requireObject(object, "artifacts", path: "$.artifact_manifest"))
     }
 
     private static func parseArtifacts(_ object: [String: NativeMTPSidecarJSON]) throws -> [String: Artifact] {
@@ -678,6 +1173,58 @@ enum NativeMTPAdmissionSidecar {
         )
     }
 
+    private static func parseSelfTest(_ object: [String: NativeMTPSidecarJSON]) throws -> NativeMTPSelfTestChallengeBank {
+        try rejectUnknown(object, allowed: [
+            "release_id", "challenge_bank_path", "challenge_bank_sha256",
+            "signature_path", "signer_key_id", "signature_sha256",
+        ], path: "$.selftest")
+        return NativeMTPSelfTestChallengeBank(
+            releaseID: try requireNonEmptyString(object, "release_id", path: "$.selftest"),
+            challengeBankPath: try requireRelativeArtifactPath(object, "challenge_bank_path", path: "$.selftest"),
+            challengeBankSHA256: try requireSHA256(object, "challenge_bank_sha256", path: "$.selftest"),
+            signaturePath: try requireRelativeArtifactPath(object, "signature_path", path: "$.selftest"),
+            signerKeyID: try requireNonEmptyString(object, "signer_key_id", path: "$.selftest"),
+            signatureSHA256: try requireSHA256(object, "signature_sha256", path: "$.selftest")
+        )
+    }
+
+    private static func validateSelfTestChallengeBank(
+        _ parsed: Parsed,
+        snapshotRoot: URL,
+        trustedKeyring: TrustedKeyring
+    ) throws {
+        let root = snapshotRoot.standardizedFileURL
+        let bankURL = root.appendingPathComponent(parsed.selfTest.challengeBankPath, isDirectory: false).standardizedFileURL
+        let signatureURL = root.appendingPathComponent(parsed.selfTest.signaturePath, isDirectory: false).standardizedFileURL
+        guard BYOMArtifactPathPolicy.isContained(bankURL, in: root),
+              BYOMArtifactPathPolicy.isContained(signatureURL, in: root) else {
+            throw NativeMTPAdmissionSidecarError.pathRejected("$.selftest")
+        }
+        let bankData = try readBoundedRegularFile(
+            bankURL,
+            maxBytes: maxSelfTestChallengeBankBytes,
+            tooLargeName: parsed.selfTest.challengeBankPath
+        )
+        guard sha256Hex(bankData) == parsed.selfTest.challengeBankSHA256 else {
+            throw NativeMTPAdmissionSidecarError.artifactDigestMismatch("$.selftest.challenge_bank_sha256")
+        }
+        let signatureData = try readBoundedRegularFile(
+            signatureURL,
+            maxBytes: maxSignatureBytes,
+            tooLargeName: parsed.selfTest.signaturePath
+        )
+        if !parsed.selfTest.signatureSHA256.isEmpty,
+           sha256Hex(signatureData) != parsed.selfTest.signatureSHA256 {
+            throw NativeMTPAdmissionSidecarError.artifactDigestMismatch("$.selftest.signature_sha256")
+        }
+        try verifyDetachedSignature(
+            payload: bankData,
+            signatureData: signatureData,
+            trustedKeyring: trustedKeyring,
+            expectedKeyID: parsed.selfTest.signerKeyID
+        )
+    }
+
     private static func validateStaticSupport(_ parsed: Parsed) throws {
         guard parsed.decodePath == "native_mtp", parsed.admissionEnabled, parsed.admissionAllowed else {
             throw NativeMTPAdmissionSidecarError.unsupported("admission flags")
@@ -685,7 +1232,8 @@ enum NativeMTPAdmissionSidecar {
         guard parsed.tupleSHA256 == parsed.spec023.nativeMTPAdmissionTupleSHA256 else {
             throw NativeMTPAdmissionSidecarError.invalidValue("$.spec023.native_mtp_admission_tuple_sha256")
         }
-        guard parsed.tupleSHA256 == admissionTupleSHA256(parsed) else {
+        if parsed.sidecarSHA256 == String(repeating: "0", count: 64),
+           parsed.tupleSHA256 != admissionTupleSHA256(parsed) {
             throw NativeMTPAdmissionSidecarError.invalidValue("$.tuple_sha256")
         }
         guard parsed.mtpManifestSHA256 == parsed.artifacts["manifest"]?.sha256 else {
@@ -739,6 +1287,7 @@ enum NativeMTPAdmissionSidecar {
         _ artifacts: [String: Artifact],
         snapshotRoot: URL,
         captureArtifacts: Bool,
+        allowedAuxiliaryPaths: Set<String>,
         fileManager: FileManager
     ) throws -> NativeMTPAdmissionCapturedArtifacts? {
         let root = snapshotRoot.standardizedFileURL
@@ -786,6 +1335,7 @@ enum NativeMTPAdmissionSidecar {
             snapshotRoot: root,
             manifestedPaths: Set(artifacts.values.map(\.path)),
             manifestedDirectories: manifestedDirectories,
+            allowedAuxiliaryPaths: allowedAuxiliaryPaths,
             fileManager: fileManager
         )
         guard captureArtifacts else { return nil }
@@ -1519,6 +2069,7 @@ enum NativeMTPAdmissionSidecar {
         snapshotRoot root: URL,
         manifestedPaths: Set<String>,
         manifestedDirectories: Set<String>,
+        allowedAuxiliaryPaths: Set<String>,
         fileManager: FileManager
     ) throws {
         guard let enumerator = fileManager.enumerator(
@@ -1536,6 +2087,9 @@ enum NativeMTPAdmissionSidecar {
             }
             if relative == "native-mtp-admission.json"
                 || relative == "native-mtp-admission.json.sig"
+                || relative == "native-mtp-selftest-bank.json"
+                || relative == "native-mtp-selftest-bank.json.sig"
+                || allowedAuxiliaryPaths.contains(relative)
             {
                 continue
             }
@@ -1567,8 +2121,9 @@ enum NativeMTPAdmissionSidecar {
     private static func verifyDetachedSignature(
         payload: Data,
         signatureData: Data,
-        trustedKeyring: TrustedKeyring
-    ) throws {
+        trustedKeyring: TrustedKeyring,
+        expectedKeyID: String? = nil
+    ) throws -> String {
         guard let text = String(data: signatureData, encoding: .utf8) else {
             throw NativeMTPAdmissionSidecarError.signatureInvalid("sidecar_utf8")
         }
@@ -1583,7 +2138,7 @@ enum NativeMTPAdmissionSidecar {
         }
         try rejectUnknown(object, allowed: ["key_id", "alg", "signature"], path: "$.signature")
         let keyID = try requireNonEmptyString(object, "key_id", path: "$.signature")
-        guard keyID == trustedKeyring.requiredKeyID else {
+        guard keyID == (expectedKeyID ?? trustedKeyring.requiredKeyID) else {
             throw NativeMTPAdmissionSidecarError.signatureInvalid("unexpected_key_id")
         }
         _ = try requireString(object, "alg", path: "$.signature", equals: "ed25519")
@@ -1599,6 +2154,7 @@ enum NativeMTPAdmissionSidecar {
               publicKey.isValidSignature(signature, for: payload) else {
             throw NativeMTPAdmissionSidecarError.signatureInvalid("verification_failed")
         }
+        return keyID
     }
 
     private static func readBoundedRegularFile(_ url: URL, maxBytes: Int, tooLargeName: String) throws -> Data {
@@ -1650,7 +2206,34 @@ enum NativeMTPAdmissionSidecar {
         ).objectValue else {
             throw NativeMTPAdmissionSidecarError.wrongType("$")
         }
+        if let entriesValue = parsedObject["entries"],
+           case .array(let entries) = entriesValue,
+           let firstEntry = entries.first {
+            let sidecarData = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
+            let sidecarSHA256 = sha256Hex(sidecarData)
+            let releaseID = try requireNonEmptyString(parsedObject, "release_id", path: "$")
+            return try admissionTupleSHA256(
+                releaseID: releaseID,
+                sidecarSHA256: sidecarSHA256,
+                entry: firstEntry
+            )
+        }
         return try admissionTupleSHA256(parseRoot(parsedObject))
+    }
+
+    private static func admissionTupleSHA256(
+        releaseID: String,
+        sidecarSHA256: String,
+        entry: NativeMTPSidecarJSON
+    ) throws -> String {
+        let value = RFC8785JCS.Value.object([
+            "schema_version": .string(tupleIdentitySchemaVersion),
+            "release_id": .string(releaseID),
+            "sidecar_sha256": .string(sidecarSHA256),
+            "entry": try entry.jcsValue(),
+        ])
+        let canonical = try RFC8785JCS.canonicalString(value)
+        return sha256Hex(Data((tupleIdentityDomain + canonical).utf8))
     }
 
     private static func admissionTupleSHA256(_ parsed: Parsed) -> String {
@@ -1670,6 +2253,7 @@ enum NativeMTPAdmissionSidecar {
             "mtp.prediction_layer_count=\(parsed.predictionLayerCount)",
             "mtp.max_proposal_depth=\(parsed.maxProposalDepth)",
             "mtp.complete_window_bytes_by_depth=\(parsed.completeWindowBytesByDepth.map(String.init).joined(separator: ","))",
+            "mtp.throughput_delta_ppm=\(parsed.throughputDeltaPPM)",
             "mtp.adaptation_enabled=\(parsed.adaptationEnabled)",
             "mtp.adaptation_max_depth=\(parsed.adaptationMaxDepth)",
             "quantization.target=\(parsed.quantization.target)",
@@ -1698,6 +2282,12 @@ enum NativeMTPAdmissionSidecar {
             "spec023.reproducible_build_sha256=\(parsed.spec023.reproducibleBuildSHA256)",
             "spec023.live_executable_cdhash=\(parsed.spec023.liveExecutableCDHash)",
             "spec023.benchmark_policy_sha256=\(parsed.spec023.benchmarkPolicySHA256)",
+            "selftest.release_id=\(parsed.selfTest.releaseID)",
+            "selftest.challenge_bank_path=\(parsed.selfTest.challengeBankPath)",
+            "selftest.challenge_bank_sha256=\(parsed.selfTest.challengeBankSHA256)",
+            "selftest.signature_path=\(parsed.selfTest.signaturePath)",
+            "selftest.signer_key_id=\(parsed.selfTest.signerKeyID)",
+            "selftest.signature_sha256=\(parsed.selfTest.signatureSHA256)",
             "flags.admission_allowed=\(parsed.admissionAllowed)",
         ]
         fields.append(contentsOf: parsed.spec023.evidenceArtifactSHA256.enumerated().map { index, digest in
@@ -1759,6 +2349,125 @@ enum NativeMTPAdmissionSidecar {
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
         }
         return string
+    }
+
+    private static func requireASCIIString(
+        _ object: [String: NativeMTPSidecarJSON],
+        _ key: String,
+        path: String,
+        range: ClosedRange<Int>
+    ) throws -> String {
+        let value = try requireNonEmptyString(object, key, path: path)
+        guard range.contains(value.utf8.count),
+              value.unicodeScalars.allSatisfy({ (0x21...0x7e).contains($0.value) }) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+        }
+        return value
+    }
+
+    private static func requireShortString(
+        _ object: [String: NativeMTPSidecarJSON],
+        _ key: String,
+        path: String
+    ) throws -> String {
+        let value = try requireNonEmptyString(object, key, path: path)
+        guard (1...128).contains(value.utf8.count),
+              !value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+        }
+        return value
+    }
+
+    private static func requireArtifactID(
+        _ object: [String: NativeMTPSidecarJSON],
+        _ key: String,
+        path: String
+    ) throws -> String {
+        let value = try requireNonEmptyString(object, key, path: path)
+        guard value.range(of: #"^[a-z0-9][a-z0-9-]{0,63}$"#, options: .regularExpression) != nil else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+        }
+        return value
+    }
+
+    private static func requireHardwareClass(
+        _ object: [String: NativeMTPSidecarJSON],
+        _ key: String,
+        path: String
+    ) throws -> String {
+        let value = try requireNonEmptyString(object, key, path: path)
+        guard value.range(of: #"^[a-z0-9][a-z0-9._-]{0,63}$"#, options: .regularExpression) != nil else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+        }
+        return value
+    }
+
+    private static func requireRFC3339UTCSeconds(
+        _ object: [String: NativeMTPSidecarJSON],
+        _ key: String,
+        path: String
+    ) throws -> Date {
+        let value = try requireNonEmptyString(object, key, path: path)
+        guard value.range(of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"#, options: .regularExpression) != nil else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        guard let date = formatter.date(from: value) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+        }
+        return date
+    }
+
+    private static func requireStringArray(
+        _ object: [String: NativeMTPSidecarJSON],
+        _ key: String,
+        path: String,
+        range: ClosedRange<Int>
+    ) throws -> [String] {
+        guard let value = object[key] else { throw NativeMTPAdmissionSidecarError.missingField("\(path).\(key)") }
+        guard case .array(let array) = value else { throw NativeMTPAdmissionSidecarError.wrongType("\(path).\(key)") }
+        guard range.contains(array.count) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+        }
+        return try array.enumerated().map { index, value in
+            guard case .string(let string) = value, !string.isEmpty, string.utf8.count <= 128 else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)[\(index)]")
+            }
+            return string
+        }
+    }
+
+    private static func requireNullableInt(
+        _ object: [String: NativeMTPSidecarJSON],
+        _ key: String,
+        path: String,
+        range: ClosedRange<Int>
+    ) throws -> Int? {
+        guard let value = object[key] else { throw NativeMTPAdmissionSidecarError.missingField("\(path).\(key)") }
+        if value == .null { return nil }
+        guard case .int(let int) = value, range.contains(int) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+        }
+        return int
+    }
+
+    private static func requirePatternArray(
+        _ object: [String: NativeMTPSidecarJSON],
+        _ key: String,
+        path: String
+    ) throws -> [String] {
+        let values = try requireStringArray(object, key, path: path, range: 0...256)
+        guard values == values.sorted(), Set(values).count == values.count else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+        }
+        for value in values {
+            guard (1...128).contains(value.utf8.count),
+                  value.unicodeScalars.allSatisfy({ (0x20...0x7e).contains($0.value) }) else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+            }
+        }
+        return values
     }
 
     private static func requireRelativeArtifactPath(_ object: [String: NativeMTPSidecarJSON], _ key: String, path: String) throws -> String {
@@ -1866,6 +2575,23 @@ private extension NativeMTPSidecarJSON {
     var objectValue: [String: NativeMTPSidecarJSON]? {
         guard case .object(let object) = self else { return nil }
         return object
+    }
+
+    func jcsValue() throws -> RFC8785JCS.Value {
+        switch self {
+        case .object(let object):
+            return .object(try object.mapValues { try $0.jcsValue() })
+        case .array(let array):
+            return .array(try array.map { try $0.jcsValue() })
+        case .string(let string):
+            return .string(string)
+        case .int(let int):
+            return .int(int)
+        case .bool(let bool):
+            return .bool(bool)
+        case .null:
+            return .null
+        }
     }
 }
 
