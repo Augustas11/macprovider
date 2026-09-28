@@ -4797,13 +4797,16 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         }
 
         try await eventually { await backend.nativeProposalBatches().count == 1 }
-        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 24)
-        XCTAssertLessThan(await allocator.freeBlockCount(), 16)
+        let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        let freeBlocksWhileReserved = await allocator.freeBlockCount()
+        XCTAssertEqual(reservedRoundBytes, 24)
+        XCTAssertLessThan(freeBlocksWhileReserved, 16)
 
         await proposalGate.open()
         let result = try await task.value
         XCTAssertEqual(result.outputTokens, [6, 7])
-        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+        let reservedRoundBytesAfterCompletion = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        XCTAssertEqual(reservedRoundBytesAfterCompletion, 0)
         try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
@@ -4849,7 +4852,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
         let proposalBatches = await backend.nativeProposalBatches()
         XCTAssertFalse(proposalBatches.contains { $0.count > 1 })
-        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+        let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        XCTAssertEqual(reservedRoundBytes, 0)
     }
 
     func testNativeMTPByteCapacityFailureReducesDepthBeforeProposal() async throws {
@@ -4880,7 +4884,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(proposalDepths, [0])
         let verifyInputs = await backend.nativeVerifyInputTokenCounts()
         XCTAssertEqual(verifyInputs, [["fallback-depth": 1]])
-        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+        let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        XCTAssertEqual(reservedRoundBytes, 0)
     }
 
     func testNativeMTPSystemHeadroomFailureReducesDepthBeforeProposal() async throws {
@@ -4913,7 +4918,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             $0.map(\.maximumProposalDepth)
         }
         XCTAssertEqual(proposalDepths, [0])
-        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+        let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        XCTAssertEqual(reservedRoundBytes, 0)
     }
 
     func testNativeMTPSystemHeadroomFailureAtDepthZeroFailsBeforeProposal() async throws {
@@ -4943,8 +4949,10 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
         XCTAssertEqual(result.terminalStatus, .requestFailed)
         XCTAssertEqual(result.errorCode, "continuous_batching_native_mtp_round_memory_exhausted")
-        XCTAssertEqual(await backend.nativeProposalBatches(), [])
-        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+        let proposalBatches = await backend.nativeProposalBatches()
+        let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        XCTAssertEqual(proposalBatches, [])
+        XCTAssertEqual(reservedRoundBytes, 0)
     }
 
     func testNativeMTPConcurrentRowsHonorSystemHeadroomAndRelease() async throws {
@@ -4993,7 +5001,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
         let proposalBatches = await backend.nativeProposalBatches()
         XCTAssertFalse(proposalBatches.contains { $0.count > 1 })
-        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+        let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        XCTAssertEqual(reservedRoundBytes, 0)
     }
 
     func testNativeMTPProposalFailureReleasesCompleteRoundReservation() async throws {
@@ -5022,7 +5031,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
         XCTAssertEqual(result.terminalStatus, .requestFailed)
         XCTAssertEqual(result.errorCode, "continuous_batching_native_mtp_proposal_failed")
-        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+        let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        XCTAssertEqual(reservedRoundBytes, 0)
         try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
@@ -5233,7 +5243,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(finalization?.committedProposalTokenCount, 0)
         XCTAssertEqual(finalization?.committedInputTokenCount, 0)
         XCTAssertEqual(finalization?.shouldCommit, false)
-        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+        let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        XCTAssertEqual(reservedRoundBytes, 0)
         try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
@@ -5943,7 +5954,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         if let nativeProposalError {
             throw nativeProposalError
         }
-        nil
+        return nil
     }
 
     func verifyNativeMTPPackedRound(
