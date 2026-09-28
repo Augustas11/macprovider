@@ -311,7 +311,7 @@ func (s *Store) applySettlementReceiptVerdict(ctx context.Context, id Settlement
 		return SettlementReceiptState{}, err
 	}
 	var outcome SettlementReceiptState
-	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+	err := sqliteutil.TransactObserved(ctx, s.db, "settlement_receipt", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
 		existing, found, err := loadSettlementReceiptStateConn(ctx, conn, id)
 		if err != nil {
 			return err
@@ -1275,7 +1275,7 @@ func (s *Store) DrainSettlementReceiptAuditOutbox(ctx context.Context, sink Sett
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.reader().QueryContext(ctx, `
 SELECT id
 FROM settlement_receipt_audit_outbox
 WHERE drained_at_utc IS NULL
@@ -1307,7 +1307,8 @@ ORDER BY id
 func (s *Store) SettlementReceiptAuditOutboxStats(ctx context.Context) (SettlementReceiptAuditOutboxStats, error) {
 	var stats SettlementReceiptAuditOutboxStats
 	var oldest sql.NullString
-	err := s.db.QueryRowContext(ctx, `
+	reader := s.reader()
+	err := reader.QueryRowContext(ctx, `
 SELECT COUNT(*), MIN(created_at_utc)
 FROM settlement_receipt_audit_outbox
 WHERE drained_at_utc IS NULL
@@ -1315,14 +1316,14 @@ WHERE drained_at_utc IS NULL
 	if err != nil {
 		return stats, err
 	}
-	if err := s.db.QueryRowContext(ctx, `
+	if err := reader.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM settlement_receipt_audit_outbox
 WHERE poisoned_at_utc IS NOT NULL
   AND poison_acknowledged_at_utc IS NULL`).Scan(&stats.PoisonedRows); err != nil {
 		return stats, err
 	}
-	if err := s.db.QueryRowContext(ctx, `
+	if err := reader.QueryRowContext(ctx, `
 SELECT COUNT(*)
 FROM settlement_receipt_audit_outbox
 WHERE poisoned_at_utc IS NOT NULL`).Scan(&stats.RetainedPoisonedRows); err != nil {

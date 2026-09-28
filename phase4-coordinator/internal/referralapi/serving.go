@@ -14,6 +14,29 @@ import (
 
 const defaultServingReconcileBatch = 128
 
+const listVerifiedServingSQL = `
+SELECT v.id, v.provider_id, v.received_at_unix_ms
+  FROM (
+       SELECT p.provider_id,
+              (SELECT first.id
+                 FROM settlement_receipt_verdicts first
+                WHERE first.provider_id = p.provider_id
+                  AND first.closed = 1
+                  -- Unary + prevents idx_srv_outcome from hiding the provider-local index walk.
+                  AND +first.settlement_outcome = 'verified'
+                  AND first.receipt_result = 'valid'
+                ORDER BY first.received_at_unix_ms, first.id
+                LIMIT 1) AS first_id
+         FROM (SELECT DISTINCT provider_id
+                 FROM settlement_receipt_verdicts
+                WHERE provider_id > ?
+                  AND provider_id <> ''
+                ORDER BY provider_id) p
+       ) f
+  JOIN settlement_receipt_verdicts v ON v.id = f.first_id
+ ORDER BY v.provider_id
+ LIMIT ?`
+
 // VerifiedServing is coordinator/buyer evidence that one provider completed a
 // closed, verified settlement. EvidenceID is the durable settlement verdict
 // identity used to make qualification replay-safe.
@@ -54,26 +77,7 @@ func (s SQLiteServingEvidence) ListVerifiedServing(ctx context.Context, afterPro
 	defer db.Close()
 	db.SetMaxOpenConns(1)
 
-	rows, err := db.QueryContext(ctx, `
-SELECT v.id, v.provider_id, v.received_at_unix_ms
-  FROM settlement_receipt_verdicts v
- WHERE v.provider_id > ?
-   AND v.provider_id <> ''
-   AND v.closed = 1
-   AND v.settlement_outcome = 'verified'
-   AND v.receipt_result = 'valid'
-   AND v.id = (
-       SELECT first.id
-         FROM settlement_receipt_verdicts first
-        WHERE first.provider_id = v.provider_id
-          AND first.closed = 1
-          AND first.settlement_outcome = 'verified'
-          AND first.receipt_result = 'valid'
-        ORDER BY first.received_at_unix_ms, first.id
-        LIMIT 1
-   )
- ORDER BY v.provider_id
- LIMIT ?`, strings.TrimSpace(afterProviderID), limit)
+	rows, err := db.QueryContext(ctx, listVerifiedServingSQL, strings.TrimSpace(afterProviderID), limit)
 	if err != nil {
 		return nil, err
 	}

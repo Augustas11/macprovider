@@ -285,12 +285,6 @@ func main() {
 	routeSnapshotJournalDB.SetMaxOpenConns(routeSnapshotJournalSQLiteMaxOpenConns)
 	routeSnapshotJournalDB.SetMaxIdleConns(routeSnapshotJournalSQLiteMaxOpenConns)
 	defer routeSnapshotJournalDB.Close()
-	payoutReadDB, closePayoutReadDB, err := configuredPayoutReadDB(cfg, reqLogStore)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "payout read db: %v\n", err)
-		os.Exit(1)
-	}
-	defer closePayoutReadDB()
 	// SPEC-002 v1.4.2 R-2 / ISS-188: request_log.external_request_id
 	// is added by OpenStore as an additive column. The matching partial-
 	// NULL reconciliation index is NOT auto-built here — the request-log
@@ -357,6 +351,26 @@ func main() {
 		fmt.Fprintf(os.Stderr, "billing: %v\n", err)
 		os.Exit(1)
 	}
+	billingReadDB := reqLogStore.DB()
+	var billingReadStore *requestlog.Store
+	if dbPath := strings.TrimSpace(cfg.Storage.DBPath); dbPath != "" && dbPath != ":memory:" {
+		billingReadStore, err = requestlog.OpenStoreReadOnly(dbPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "billing read db: %v\n", err)
+			os.Exit(1)
+		}
+		billingReadDB = billingReadStore.DB()
+		billingReadDB.SetMaxOpenConns(4)
+		billingReadDB.SetMaxIdleConns(4)
+		defer billingReadStore.Close()
+		billingStore.SetReadDB(billingReadDB)
+	}
+	payoutReadDB, closePayoutReadDB, err := configuredPayoutReadDB(cfg, billingReadDB)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "payout read db: %v\n", err)
+		os.Exit(1)
+	}
+	defer closePayoutReadDB()
 	billingStore.SetSQLiteMetrics(metricsHandle)
 	billingStore.SetRouteSnapshotDB(routeSnapshotDB)
 	billingStore.SetRouteSnapshotJournalDB(routeSnapshotJournalDB)
@@ -839,7 +853,7 @@ func main() {
 		logger.Info().Msg("provider WS token validation NOT required (auth.require_provider_tokens=false); tokenless provisional admissions will self-mint per SPEC-003 FR-C9")
 	}
 	if cfg.Explorer.Enabled {
-		wsOpts = append(wsOpts, providerws.WithExplorerHandler(explorer.NewHandler(cfg, reqLogStore.DB(), registry, startedAt)))
+		wsOpts = append(wsOpts, providerws.WithExplorerHandler(explorer.NewHandler(cfg, billingReadDB, registry, startedAt)))
 		logger.Info().Str("path", cfg.Explorer.BindPath).Msg("operator explorer enabled")
 	}
 	if rewardsDB != nil {
@@ -3659,14 +3673,14 @@ func coordinatorRewardsConfig(cfg config.Config) rewards.Config {
 	return rewardsCfg
 }
 
-func configuredPayoutReadDB(cfg config.Config, defaultStore *requestlog.Store) (*sql.DB, func(), error) {
-	if defaultStore == nil {
-		return nil, nil, errors.New("default request log store is required")
+func configuredPayoutReadDB(cfg config.Config, billingReadDB *sql.DB) (*sql.DB, func(), error) {
+	if billingReadDB == nil {
+		return nil, nil, errors.New("billing read DB is required")
 	}
 	rewardsCfg := coordinatorRewardsConfig(cfg)
 	payoutPath := strings.TrimSpace(rewardsCfg.SQLitePayoutDBPath)
 	if payoutPath == "" || sameFilePath(payoutPath, cfg.Storage.DBPath) {
-		return defaultStore.DB(), func() {}, nil
+		return billingReadDB, func() {}, nil
 	}
 	payoutStore, err := requestlog.OpenStoreReadOnly(payoutPath)
 	if err != nil {

@@ -1318,17 +1318,22 @@ func TestConfiguredPayoutReadDBUsesAlternateSQLitePath(t *testing.T) {
 
 	cfg := config.Default()
 	cfg.Storage.DBPath = defaultPath
-	db, closeDB, err := configuredPayoutReadDB(cfg, defaultStore)
+	defaultReadStore, err := requestlog.OpenStoreReadOnly(defaultPath)
+	if err != nil {
+		t.Fatalf("open default read store: %v", err)
+	}
+	t.Cleanup(func() { _ = defaultReadStore.Close() })
+	db, closeDB, err := configuredPayoutReadDB(cfg, defaultReadStore.DB())
 	if err != nil {
 		t.Fatalf("default payout read db: %v", err)
 	}
 	t.Cleanup(closeDB)
-	if db != defaultStore.DB() {
-		t.Fatal("default payout read DB should reuse the request-log DB handle")
+	if db != defaultReadStore.DB() {
+		t.Fatal("default payout read DB should reuse the billing read DB handle")
 	}
 
 	cfg.MalibuEmission.SQLitePayoutDBPath = alternatePath
-	db, closeDB, err = configuredPayoutReadDB(cfg, defaultStore)
+	db, closeDB, err = configuredPayoutReadDB(cfg, defaultReadStore.DB())
 	if err != nil {
 		t.Fatalf("alternate payout read db: %v", err)
 	}

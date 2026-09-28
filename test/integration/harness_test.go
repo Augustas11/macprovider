@@ -2571,7 +2571,7 @@ func (s *scenario) readQuotaReservation(requestID string) (quotaReservationRow, 
 // pins the model + status from the row.
 func (s *scenario) readLatestRequestLog() (requestLogRow, bool) {
 	s.t.Helper()
-	db, err := sql.Open("sqlite", s.coordinatorDB)
+	db, err := sql.Open("sqlite", "file:"+s.coordinatorDB+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		s.t.Fatalf("open coord db: %v", err)
 	}
@@ -2591,7 +2591,7 @@ func (s *scenario) readLatestRequestLog() (requestLogRow, bool) {
 
 func (s *scenario) readSettlementReceiptVerdicts() []settlementReceiptVerdictRow {
 	s.t.Helper()
-	db, err := sql.Open("sqlite", s.coordinatorDB)
+	db, err := sql.Open("sqlite", "file:"+s.coordinatorDB+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		s.t.Fatalf("open coord db: %v", err)
 	}
@@ -2659,7 +2659,7 @@ type ledgerCreditRow struct {
 
 func (s *scenario) readLedgerCredits() []ledgerCreditRow {
 	s.t.Helper()
-	db, err := sql.Open("sqlite", s.coordinatorDB)
+	db, err := sql.Open("sqlite", "file:"+s.coordinatorDB+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		s.t.Fatalf("open coord db: %v", err)
 	}
@@ -2711,7 +2711,7 @@ SELECT id, request_id, attempt_n, provider_id, status, stream,
 
 func (s *scenario) payoutReadyCount() int {
 	s.t.Helper()
-	db, err := sql.Open("sqlite", s.coordinatorDB)
+	db, err := sql.Open("sqlite", "file:"+s.coordinatorDB+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		s.t.Fatalf("open coord db: %v", err)
 	}

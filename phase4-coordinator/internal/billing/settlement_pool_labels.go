@@ -87,7 +87,7 @@ func (s *Store) RecordSettlementPoolLabels(ctx context.Context, id SettlementRec
 		return SettlementPoolLabelRecord{}, err
 	}
 	var out SettlementPoolLabelRecord
-	err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+	err := sqliteutil.TransactObserved(ctx, s.db, "settlement_pool_labels", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
 		route, routeHash, err := loadSettlementRouteSnapshotConn(ctx, conn, id)
 		if err != nil {
 			return err

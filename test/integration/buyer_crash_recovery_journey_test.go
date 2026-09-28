@@ -71,6 +71,7 @@ func TestJourneyBuyerCrashRecoveryIsolatedCandidate(t *testing.T) {
 	})
 
 	s.restartCoordinator()
+	s.waitForStartupScanFinished(scansBefore, 30*time.Second)
 	if got := s.creditCount(crashRecoveryRequestID, false); got != 1 {
 		t.Fatalf("recovered credits=%d want 1", got)
 	}
@@ -102,6 +103,7 @@ func TestJourneyBuyerCrashRecoveryIsolatedCandidate(t *testing.T) {
 	})
 
 	s.restartCoordinator()
+	s.waitForStartupScanFinished(scansBefore, 30*time.Second)
 	if got := s.creditCount(crashRecoveryRequestID, false); got != 1 {
 		t.Fatalf("credits after rescan=%d want 1 (no double credit)", got)
 	}
@@ -135,7 +137,7 @@ type startupScanRow struct {
 
 func (s *scenario) openCoordDB() *sql.DB {
 	s.t.Helper()
-	db, err := sql.Open("sqlite", s.coordinatorDB)
+	db, err := sql.Open("sqlite", "file:"+s.coordinatorDB+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		s.t.Fatalf("open coord db: %v", err)
 	}
@@ -243,6 +245,24 @@ func (s *scenario) startupScanCount() int {
 		s.t.Fatalf("startup_scan count: %v", err)
 	}
 	return count
+}
+
+// waitForStartupScanFinished blocks until a startup_scan run newer than
+// `before` has left 'running'. The scan starts in the background after the
+// listeners, and recovery commits in short chunks, so /healthz alone does not
+// mean the scan is done.
+func (s *scenario) waitForStartupScanFinished(before int, timeout time.Duration) {
+	s.t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if s.startupScanCount() > before && s.latestStartupScan().Status != "running" {
+			return
+		}
+		if time.Now().After(deadline) {
+			s.t.Fatalf("startup_scan did not finish within %s", timeout)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func (s *scenario) latestStartupScan() startupScanRow {

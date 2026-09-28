@@ -54,7 +54,9 @@ var (
 	allowMoneySQLiteComponentLabel = map[string]bool{
 		"billing_hot_path": true, "request_log_identity": true,
 		"billing_reload_config": true, "route_snapshot": true,
-		"wal_checkpoint": true,
+		"wal_checkpoint": true, "ledger_recovery": true,
+		"settlement_attempt_output": true, "settlement_pool_labels": true,
+		"settlement_receipt": true,
 	}
 	allowMoneySQLiteOutcomeLabel   = map[string]bool{"success": true, "error": true}
 	allowMoneySQLiteOperationLabel = map[string]bool{
@@ -119,6 +121,9 @@ func TestLabelHygiene(t *testing.T) {
 	m.IncReferralEvent("validate", "raw-attacker-value")
 	m.IncReferralEvent("raw-attacker-value", "valid")
 	m.ObserveSQLiteConnectionWait("billing_hot_path", "success", time.Millisecond)
+	for _, component := range []string{"ledger_recovery", "settlement_attempt_output", "settlement_pool_labels", "settlement_receipt"} {
+		m.ObserveSQLiteConnectionWait(component, "success", time.Millisecond)
+	}
 	m.ObserveSQLiteConnectionWait("raw-attacker-value", "success", time.Millisecond)
 	m.ObserveSQLiteConnectionWait("billing_hot_path", "raw-attacker-value", time.Millisecond)
 	m.ObserveSQLiteTransactionDuration("request_log_identity", "error", time.Millisecond)
@@ -145,6 +150,11 @@ func TestLabelHygiene(t *testing.T) {
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("gather: %v", err)
+	}
+	for _, component := range []string{"ledger_recovery", "settlement_attempt_output", "settlement_pool_labels", "settlement_receipt"} {
+		if !metricExists(families, "money_sqlite_connection_wait_seconds", map[string]string{"component": component, "outcome": "success"}) {
+			t.Errorf("money SQLite series missing for component=%q", component)
+		}
 	}
 
 	for _, mf := range families {

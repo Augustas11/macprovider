@@ -22,6 +22,7 @@ type SettlementConfig = config.SettlementConfig
 
 type Store struct {
 	db           *sql.DB
+	readDB       atomic.Pointer[sql.DB]
 	now          func() time.Time
 	sqliteMetric SQLiteMetrics
 	// routeSnapshotDB is an optional same-file SQLite handle reserved for
@@ -85,6 +86,23 @@ func (s *Store) SetSQLiteMetrics(metrics SQLiteMetrics) {
 		return
 	}
 	s.sqliteMetric = metrics
+}
+
+func (s *Store) SetReadDB(db *sql.DB) {
+	if s == nil {
+		return
+	}
+	s.readDB.Store(db)
+}
+
+func (s *Store) reader() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	if db := s.readDB.Load(); db != nil {
+		return db
+	}
+	return s.db
 }
 
 func (s *Store) SetRouteSnapshotDB(db *sql.DB) {

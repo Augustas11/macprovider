@@ -393,7 +393,7 @@ func readOwnershipEvent(t *testing.T, conn net.Conn, providerID string) map[stri
 
 func openDB(t *testing.T, path string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(10000)")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
