@@ -9,16 +9,16 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.root) }
 
         let capability = try NativeMTPAdmissionSidecar.load(
-            sidecarData: fixture.sidecarData,
-            signatureData: fixture.signatureData,
+            sidecarData: fixture.releaseSidecarData,
+            signatureData: fixture.signature(for: fixture.releaseSidecarData),
             snapshotRoot: fixture.snapshot,
-            context: fixture.context,
-            trustedKeyring: fixture.trustedKeyring
+            context: fixture.releaseContext,
+            trustedKeyring: fixture.trustedKeyring,
+            resolvedArtifactAuthority: fixture.releaseAuthority
         )
 
-        XCTAssertEqual(capability.tupleSHA256, fixture.tupleSHA)
         XCTAssertEqual(capability.modelID, "mlx-community/Qwen3-MTP")
-        XCTAssertEqual(capability.modelRevision, Self.modelRevision)
+        XCTAssertEqual(capability.modelRevision, fixture.digests["target.safetensors"])
         XCTAssertEqual(capability.familyAdapter, "qwen3_mtp_v1")
         XCTAssertEqual(capability.maxProposalDepth, 4)
         XCTAssertEqual(capability.targetArtifactSHA256, fixture.digests["target.safetensors"])
@@ -32,8 +32,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(capability.predictionLayerCount, 4)
         XCTAssertEqual(capability.completeWindowBytesByDepth, [1024, 2048, 4096, 8192, 16384])
         XCTAssertEqual(capability.throughputDeltaPPM, 42_000)
-        XCTAssertEqual(capability.maxPromptTokens, 32768)
-        XCTAssertEqual(capability.maxCompletionTokens, 4096)
+        XCTAssertEqual(capability.maxPromptTokens, 1_048_576)
+        XCTAssertEqual(capability.maxCompletionTokens, 1_048_576)
         XCTAssertEqual(capability.spec023ReleaseID, "native-mtp-release-2026-09-28")
         XCTAssertEqual(capability.spec023LiveExecutableCDHash, Self.liveExecutableCDHash)
         XCTAssertEqual(capability.evidenceArtifactSHA256, [Self.evidenceSHA])
@@ -896,6 +896,10 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: fixture.base.root) }
 
         XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture, authority: fixture.authority(feedSHA256: "not-hex")),
+            .invalidValue("$.artifact_authority.feed_sha256")
+        )
+        XCTAssertEqual(
             try rejectedReleaseEnvelopeError(fixture, authority: fixture.authority(releaseID: "other-release")),
             .liveTupleMismatch("$.artifact_authority.release_id")
         )
@@ -921,13 +925,61 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         )
     }
 
+    func testReleaseEnvelopeRejectsNonCanonicalHardwareClass() throws {
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
+            entry["hardware_class"] = "M2 Ultra"
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture),
+            .invalidValue("$.entries[0].hardware_class")
+        )
+    }
+
+    func testReleaseEnvelopeRejectsCanonicalHardwareMismatch() throws {
+        let fixture = try makeReleaseEnvelopeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+        let wrongHardware = NativeMTPAdmissionSidecar.RuntimeContext(
+            modelID: fixture.context.modelID,
+            modelRevision: fixture.context.modelRevision,
+            providerRevision: fixture.context.providerRevision,
+            upstreamMLXSwiftLMRevision: fixture.context.upstreamMLXSwiftLMRevision,
+            hardwareChip: "M1 Max",
+            ramGB: fixture.context.ramGB,
+            osVersion: fixture.context.osVersion,
+            slotCount: fixture.context.slotCount,
+            revokedTupleSHA256: []
+        )
+
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture, context: wrongHardware),
+            .liveTupleMismatch("$.entries")
+        )
+    }
+
+    func testReleaseEnvelopeRejectsLegacySHA256HashAlgorithm() throws {
+        let fixture = try makeReleaseEnvelopeFixture(entryEdit: { entry in
+            entry["hash_algorithm"] = "sha256"
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.base.root) }
+
+        XCTAssertEqual(
+            try rejectedReleaseEnvelopeError(fixture),
+            .invalidValue("$.entries[0].hash_algorithm")
+        )
+    }
+
     func testReleaseEnvelopeRejectsTargetRootAndHashMismatch() throws {
         let fixture = try makeReleaseEnvelopeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.base.root) }
 
         XCTAssertEqual(
-            try rejectedReleaseEnvelopeError(fixture, authority: fixture.authority(targetRootPath: "other-target")),
-            .liveTupleMismatch("$.artifact_authority.target_root")
+            try rejectedReleaseEnvelopeError(
+                fixture,
+                authority: fixture.authority(targetURLPath: fixture.base.root.appendingPathComponent("other-target").path)
+            ),
+            .liveTupleMismatch("$.artifact_authority.target_url")
         )
         XCTAssertEqual(
             try rejectedReleaseEnvelopeError(fixture, authority: fixture.authority(targetSHA256: String(repeating: "8", count: 64))),
@@ -943,7 +995,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
 
         XCTAssertEqual(
             try rejectedReleaseEnvelopeError(fixture),
-            .liveTupleMismatch("$.artifact_authority.target_root")
+            .liveTupleMismatch("$.artifact_authority.target_url")
         )
     }
 
@@ -1027,14 +1079,15 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
     private func rejectedReleaseEnvelopeError(
         _ fixture: ReleaseEnvelopeFixture,
         authority: NativeMTPResolvedArtifactAuthority? = nil,
-        includeAuthority: Bool = true
+        includeAuthority: Bool = true,
+        context: NativeMTPAdmissionSidecar.RuntimeContext? = nil
     ) throws -> NativeMTPAdmissionSidecarError {
         do {
             _ = try NativeMTPAdmissionSidecar.load(
                 sidecarData: fixture.sidecarData,
                 signatureData: fixture.signatureData,
                 snapshotRoot: fixture.base.snapshot,
-                context: fixture.context,
+                context: context ?? fixture.context,
                 trustedKeyring: fixture.base.trustedKeyring,
                 resolvedArtifactAuthority: includeAuthority ? (authority ?? fixture.authority) : nil
             )
@@ -1150,12 +1203,57 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         let sidecarData = try Self.jsonData(rootObject)
         let signer = Curve25519.Signing.PrivateKey()
         let keyID = "native-mtp-release"
+        let releaseLayout = ReleaseLayout(
+            targetPath: "target.safetensors",
+            targetSHA256: digests["target.safetensors"]!,
+            mtpPath: "mtp.safetensors",
+            mtpSHA256: digests["mtp.safetensors"]!,
+            tokenizerPath: "tokenizer.json",
+            tokenizerSHA256: digests["tokenizer.json"]!,
+            manifestPath: "mtp-manifest.json",
+            manifestSHA256: digests["mtp-manifest.json"]!
+        )
+        let releaseProjectionData = try Self.projectionData(layout: releaseLayout)
+        try releaseProjectionData.write(to: snapshot.appendingPathComponent("native-mtp-artifact-manifest.json"))
+        let releaseSidecarData = try Self.releaseEnvelopeData(
+            layout: releaseLayout,
+            artifactManifestSHA256: Self.sha256Hex(releaseProjectionData),
+            challengeBankSHA256: Self.sha256Hex(selfTestBankData),
+            signerKeyID: keyID,
+            challengeBankSignerKeyID: selfTestSignerKeyID
+        )
+        let releaseContext = NativeMTPAdmissionSidecar.RuntimeContext(
+            modelID: "mlx-community/Qwen3-MTP",
+            modelRevision: releaseLayout.targetSHA256,
+            providerRevision: Self.providerRevision,
+            upstreamMLXSwiftLMRevision: Self.upstreamRevision,
+            hardwareChip: "M2 Ultra",
+            ramGB: 256,
+            osVersion: "macOS 15.6",
+            slotCount: 8,
+            revokedTupleSHA256: []
+        )
+        let releaseAuthority = NativeMTPResolvedArtifactAuthority.uncheckedForTesting(
+            releaseID: Self.releaseID,
+            signerKeyID: keyID,
+            feedSHA256: String(repeating: "5", count: 64),
+            modelKey: "mlx-community/Qwen3-MTP",
+            artifactID: "primary",
+            hashAlgorithm: NativeMTPResolvedArtifactAuthority.nativeMTPHashAlgorithm,
+            hash: releaseLayout.targetSHA256,
+            verificationStatus: "verified",
+            targetURLPath: snapshot.appendingPathComponent(releaseLayout.targetPath).standardizedFileURL.path,
+            targetSHA256: releaseLayout.targetSHA256
+        )
         return Fixture(
             root: root,
             snapshot: snapshot,
             rootObject: rootObject,
             sidecarData: sidecarData,
             signatureData: Self.signatureData(payload: sidecarData, signer: signer, keyID: keyID),
+            releaseSidecarData: releaseSidecarData,
+            releaseContext: releaseContext,
+            releaseAuthority: releaseAuthority,
             digests: digests,
             tupleSHA: tupleSHA,
             signer: signer,
@@ -1184,7 +1282,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
 
     private func makeReleaseEnvelopeFixture(
         prepareSnapshot: ((Fixture) throws -> ReleaseLayout)? = nil,
-        mutateProjectionArtifacts: ((inout [String: Any]) -> Void)? = nil
+        mutateProjectionArtifacts: ((inout [String: Any]) -> Void)? = nil,
+        entryEdit: ((inout [String: Any]) -> Void)? = nil
     ) throws -> ReleaseEnvelopeFixture {
         let base = try makeFixture()
         let layout = try prepareSnapshot?(base) ?? ReleaseLayout(
@@ -1204,31 +1303,17 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             "manifest": ["path": layout.manifestPath, "sha256": layout.manifestSHA256],
         ]
         mutateProjectionArtifacts?(&projectionArtifacts)
-        let projectionData = try Self.jsonData([
-            "schema_version": "macprovider.native-mtp-artifact-projection.v1",
-            "artifacts": projectionArtifacts,
-        ])
+        let projectionData = try Self.projectionData(artifacts: projectionArtifacts)
         try projectionData.write(to: base.snapshot.appendingPathComponent("native-mtp-artifact-manifest.json"))
-        let releaseID = "native-mtp-release-2026-09-28"
         let keyID = base.trustedKeyring.requiredKeyID
-        let issuedAt = Self.iso8601Seconds(Date().addingTimeInterval(-3600))
-        let expiresAt = Self.iso8601Seconds(Date().addingTimeInterval(3600))
-        let entry = Self.releaseEntry(
+        let sidecarData = try Self.releaseEnvelopeData(
             layout: layout,
             artifactManifestSHA256: Self.sha256Hex(projectionData),
-            challengeBankSHA256: base.selfTestBankSHA256
+            challengeBankSHA256: base.selfTestBankSHA256,
+            signerKeyID: keyID,
+            challengeBankSignerKeyID: base.selfTestSignerKeyID,
+            entryEdit: entryEdit
         )
-        let envelope: [String: Any] = [
-            "schema_version": NativeMTPAdmissionSidecar.schemaVersion,
-            "release_id": releaseID,
-            "issued_at": issuedAt,
-            "expires_at": expiresAt,
-            "signer_key_id": keyID,
-            "challenge_bank_signer_key_id": base.selfTestSignerKeyID,
-            "revocation_signer_key_id": keyID,
-            "entries": [entry],
-        ]
-        let sidecarData = try Self.jsonData(envelope)
         let context = NativeMTPAdmissionSidecar.RuntimeContext(
             modelID: "mlx-community/Qwen3-MTP",
             modelRevision: layout.targetSHA256,
@@ -1240,16 +1325,16 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             slotCount: 8,
             revokedTupleSHA256: []
         )
-        let authority = NativeMTPResolvedArtifactAuthority(
-            releaseID: releaseID,
+        let authority = NativeMTPResolvedArtifactAuthority.uncheckedForTesting(
+            releaseID: Self.releaseID,
             signerKeyID: keyID,
             feedSHA256: String(repeating: "5", count: 64),
             modelKey: "mlx-community/Qwen3-MTP",
             artifactID: "primary",
-            hashAlgorithm: "macprovider.snapshot-manifest.v1",
+            hashAlgorithm: NativeMTPResolvedArtifactAuthority.nativeMTPHashAlgorithm,
             hash: layout.targetSHA256,
             verificationStatus: "verified",
-            targetRootPath: layout.targetPath,
+            targetURLPath: base.snapshot.appendingPathComponent(layout.targetPath).standardizedFileURL.path,
             targetSHA256: layout.targetSHA256
         )
         return ReleaseEnvelopeFixture(
@@ -1267,6 +1352,9 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         let rootObject: [String: Any]
         let sidecarData: Data
         let signatureData: Data
+        let releaseSidecarData: Data
+        let releaseContext: NativeMTPAdmissionSidecar.RuntimeContext
+        let releaseAuthority: NativeMTPResolvedArtifactAuthority
         let digests: [String: String]
         let tupleSHA: String
         let signer: Curve25519.Signing.PrivateKey
@@ -1334,10 +1422,10 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             hashAlgorithm: String? = nil,
             hash: String? = nil,
             verificationStatus: String? = nil,
-            targetRootPath: String? = nil,
+            targetURLPath: String? = nil,
             targetSHA256: String? = nil
         ) -> NativeMTPResolvedArtifactAuthority {
-            NativeMTPResolvedArtifactAuthority(
+            NativeMTPResolvedArtifactAuthority.uncheckedForTesting(
                 releaseID: releaseID ?? authority.releaseID,
                 signerKeyID: signerKeyID ?? authority.signerKeyID,
                 feedSHA256: feedSHA256 ?? authority.feedSHA256,
@@ -1346,7 +1434,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 hashAlgorithm: hashAlgorithm ?? authority.hashAlgorithm,
                 hash: hash ?? authority.hash,
                 verificationStatus: verificationStatus ?? authority.verificationStatus,
-                targetRootPath: targetRootPath ?? authority.targetRootPath,
+                targetURLPath: targetURLPath ?? authority.targetURLPath,
                 targetSHA256: targetSHA256 ?? authority.targetSHA256
             )
         }
@@ -1357,6 +1445,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
     private static let upstreamRevision = String(repeating: "c", count: 40)
     private static let evidenceSHA = String(repeating: "d", count: 64)
     private static let liveExecutableCDHash = String(repeating: "4", count: 40)
+    private static let releaseID = "native-mtp-release-2026-09-28"
 
     private static func sidecarObject(
         digests: [String: String],
@@ -1453,7 +1542,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         [
             "model_key": "mlx-community/Qwen3-MTP",
             "artifact_id": "primary",
-            "hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "hash_algorithm": NativeMTPResolvedArtifactAuthority.nativeMTPHashAlgorithm,
             "artifact_hash": layout.targetSHA256,
             "artifact_manifest_sha256": artifactManifestSHA256,
             "tokenizer_sha256": layout.tokenizerSHA256,
@@ -1470,7 +1559,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
             "reproducible_build_sha256": String(repeating: "2", count: 64),
             "live_executable_cdhash": liveExecutableCDHash,
             "cache_state_classes": ["stageable_rewindable"],
-            "hardware_class": "M2 Ultra",
+            "hardware_class": "m2-ultra",
             "ram_bytes": 256 * 1_073_741_824,
             "qualified_slots": 8,
             "request_feature_profile": "native_mtp_greedy_text_v1",
@@ -1510,6 +1599,48 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 "aggregate_tps_milli": 1,
             ],
         ]
+    }
+
+    private static func projectionData(layout: ReleaseLayout) throws -> Data {
+        try projectionData(artifacts: [
+            "target": ["path": layout.targetPath, "sha256": layout.targetSHA256],
+            "mtp": ["path": layout.mtpPath, "sha256": layout.mtpSHA256],
+            "tokenizer": ["path": layout.tokenizerPath, "sha256": layout.tokenizerSHA256],
+            "manifest": ["path": layout.manifestPath, "sha256": layout.manifestSHA256],
+        ])
+    }
+
+    private static func projectionData(artifacts: [String: Any]) throws -> Data {
+        try jsonData([
+            "schema_version": "macprovider.native-mtp-artifact-projection.v1",
+            "artifacts": artifacts,
+        ])
+    }
+
+    private static func releaseEnvelopeData(
+        layout: ReleaseLayout,
+        artifactManifestSHA256: String,
+        challengeBankSHA256: String,
+        signerKeyID: String,
+        challengeBankSignerKeyID: String,
+        entryEdit: ((inout [String: Any]) -> Void)? = nil
+    ) throws -> Data {
+        var entry = releaseEntry(
+            layout: layout,
+            artifactManifestSHA256: artifactManifestSHA256,
+            challengeBankSHA256: challengeBankSHA256
+        )
+        entryEdit?(&entry)
+        return try jsonData([
+            "schema_version": NativeMTPAdmissionSidecar.schemaVersion,
+            "release_id": releaseID,
+            "issued_at": iso8601Seconds(Date().addingTimeInterval(-3600)),
+            "expires_at": iso8601Seconds(Date().addingTimeInterval(3600)),
+            "signer_key_id": signerKeyID,
+            "challenge_bank_signer_key_id": challengeBankSignerKeyID,
+            "revocation_signer_key_id": signerKeyID,
+            "entries": [entry],
+        ])
     }
 
     private static func jsonData(_ object: [String: Any]) throws -> Data {
