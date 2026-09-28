@@ -32,6 +32,9 @@ public struct ChatCompletionRequest: Sendable {
     public let promptSource: ChatCompletionPromptSource
     public let conversationKey: String?
     public let requestID: String?
+    public let topLevelKeys: Set<String>
+    public let streamOptionKeys: Set<String>
+    public let containsNonTextMessageContentPart: Bool
     // SPEC-037 FR-KVP11: the ingest boundary this request arrived on. Defaults
     // to `.unknown` (non-persisting) at parse; each boundary stamps its own.
     public let ingestProvenance: KVIngestProvenance
@@ -104,6 +107,7 @@ public struct ChatCompletionRequest: Sendable {
         if let streamOptions = dict["stream_options"], !(streamOptions is NSNull), !(streamOptions is [String: Any]) {
             throw APIError(status: 400, message: "stream_options must be an object", code: "invalid_request")
         }
+        let streamOptionKeys = Set((dict["stream_options"] as? [String: Any]).map { Array($0.keys) } ?? [])
 
         let stop = try parseStop(dict["stop"])
         let presencePenalty = try optionalDouble(dict["presence_penalty"], key: "presence_penalty") ?? 0.0
@@ -129,6 +133,7 @@ public struct ChatCompletionRequest: Sendable {
         let messages = try rawMessages.enumerated().map { index, raw in
             try ChatMessage.parse(raw, index: index)
         }
+        let containsNonTextMessageContentPart = Self.containsNonTextMessageContentPart(rawMessages)
         try RequestValidation.validate(messages)
 
         try validateTools(dict["tools"])
@@ -155,6 +160,9 @@ public struct ChatCompletionRequest: Sendable {
             promptSource: promptSource,
             conversationKey: nil,
             requestID: nil,
+            topLevelKeys: Set(dict.keys),
+            streamOptionKeys: streamOptionKeys,
+            containsNonTextMessageContentPart: containsNonTextMessageContentPart,
             ingestProvenance: .unknown
         )
     }
@@ -176,6 +184,9 @@ public struct ChatCompletionRequest: Sendable {
             promptSource: promptSource,
             conversationKey: Self.validConversationKey(key),
             requestID: requestID,
+            topLevelKeys: topLevelKeys,
+            streamOptionKeys: streamOptionKeys,
+            containsNonTextMessageContentPart: containsNonTextMessageContentPart,
             ingestProvenance: ingestProvenance
         )
     }
@@ -197,6 +208,9 @@ public struct ChatCompletionRequest: Sendable {
             promptSource: promptSource,
             conversationKey: conversationKey,
             requestID: Self.validRequestID(id),
+            topLevelKeys: topLevelKeys,
+            streamOptionKeys: streamOptionKeys,
+            containsNonTextMessageContentPart: containsNonTextMessageContentPart,
             ingestProvenance: ingestProvenance
         )
     }
@@ -220,8 +234,30 @@ public struct ChatCompletionRequest: Sendable {
             promptSource: promptSource,
             conversationKey: conversationKey,
             requestID: requestID,
+            topLevelKeys: topLevelKeys,
+            streamOptionKeys: streamOptionKeys,
+            containsNonTextMessageContentPart: containsNonTextMessageContentPart,
             ingestProvenance: provenance
         )
+    }
+
+    private static func containsNonTextMessageContentPart(_ rawMessages: [Any]) -> Bool {
+        for raw in rawMessages {
+            guard let message = raw as? [String: Any],
+                  let parts = message["content"] as? [Any] else {
+                continue
+            }
+            for rawPart in parts {
+                guard let part = rawPart as? [String: Any],
+                      let type = part["type"] as? String else {
+                    continue
+                }
+                if type != "text" {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     private static func validConversationKey(_ key: String?) -> String? {
@@ -276,6 +312,9 @@ public struct ChatCompletionRequest: Sendable {
         promptSource: ChatCompletionPromptSource,
         conversationKey: String?,
         requestID: String?,
+        topLevelKeys: Set<String>,
+        streamOptionKeys: Set<String>,
+        containsNonTextMessageContentPart: Bool,
         ingestProvenance: KVIngestProvenance = .unknown
     ) {
         self.model = model
@@ -293,6 +332,9 @@ public struct ChatCompletionRequest: Sendable {
         self.promptSource = promptSource
         self.conversationKey = conversationKey
         self.requestID = requestID
+        self.topLevelKeys = topLevelKeys
+        self.streamOptionKeys = streamOptionKeys
+        self.containsNonTextMessageContentPart = containsNonTextMessageContentPart
         self.ingestProvenance = ingestProvenance
     }
 
@@ -407,6 +449,9 @@ public struct ChatCompletionPromptSource: Equatable, Sendable {
     public let logprobs: JSONValue?
     public let topLogprobs: JSONValue?
     public let n: JSONValue?
+    public let topK: JSONValue?
+    public let minP: JSONValue?
+    public let repetitionPenalty: JSONValue?
 
     init(dict: [String: Any], rawMessages: [Any]) throws {
         self.model = try JSONValue.parse(dict["model"] as Any)
@@ -425,6 +470,9 @@ public struct ChatCompletionPromptSource: Equatable, Sendable {
         self.logprobs = try optionalJSONValue(dict["logprobs"])
         self.topLogprobs = try optionalJSONValue(dict["top_logprobs"])
         self.n = try optionalJSONValue(dict["n"])
+        self.topK = try optionalJSONValue(dict["top_k"])
+        self.minP = try optionalJSONValue(dict["min_p"])
+        self.repetitionPenalty = try optionalJSONValue(dict["repetition_penalty"])
     }
 }
 

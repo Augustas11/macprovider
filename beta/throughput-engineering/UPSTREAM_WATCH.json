@@ -43,8 +43,8 @@
       ],
       "state": "OPEN",
       "status": "blocked",
-      "title": "KVCacheSimple.offset (Swift Int) breaks MLX.compile() decode \u2014 cache write position frozen across steps",
-      "updated_at": "2026-07-07T16:53:26Z",
+      "title": "KVCacheSimple.offset (Swift Int) breaks MLX.compile() decode — cache write position frozen across steps",
+      "updated_at": "2026-08-18T10:33:45Z",
       "url": "https://github.com/ml-explore/mlx-swift-lm/issues/406"
     },
     "mlx_swift_lm_424_speculative_cache_wrap": {
@@ -92,14 +92,169 @@
       "title": "[BUG] Can't add mlx-swift-lm as a dependency because of Unsafe Flags",
       "updated_at": "2026-08-11T15:55:11Z",
       "url": "https://github.com/ml-explore/mlx-swift-lm/issues/518"
+    },
+    "mlx_swift_lm_351_qwen_mtp": {
+      "repo": "ml-explore/mlx-swift-lm",
+      "kind": "pull_request",
+      "number": 351,
+      "url": "https://github.com/ml-explore/mlx-swift-lm/pull/351",
+      "state": "MERGED",
+      "title": "Add Qwen3.5 MTP speculative decoding",
+      "runbook_tasks": [
+        "SPEC-048-R003",
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
+      "updated_at": "2026-08-13T00:46:39Z",
+      "merged_at": "2026-08-13T00:46:39Z",
+      "merge_commit": "01472a78fca830689ff78246a82c6d31ab111a78",
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1770",
+      "status": "awaiting_release_tag"
+    },
+    "mlx_swift_lm_516_mtp_sliding_window": {
+      "repo": "ml-explore/mlx-swift-lm",
+      "kind": "pull_request",
+      "number": 516,
+      "url": "https://github.com/ml-explore/mlx-swift-lm/pull/516",
+      "state": "MERGED",
+      "title": "Speculate past the sliding window in MTP",
+      "runbook_tasks": [
+        "SPEC-048-R003",
+        "SPEC-048-R006"
+      ],
+      "updated_at": "2026-08-11T18:15:18Z",
+      "merged_at": "2026-08-11T17:13:15Z",
+      "merge_commit": "2af378b3557384f6c6ce936fab8e9748a1e8d61a",
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1770",
+      "status": "awaiting_release_tag"
+    },
+    "mlx_swift_lm_505_mtp_sliding_window_rewind": {
+      "repo": "ml-explore/mlx-swift-lm",
+      "kind": "issue",
+      "number": 505,
+      "url": "https://github.com/ml-explore/mlx-swift-lm/issues/505",
+      "state": "CLOSED",
+      "title": "[BUG] MTP speculative decoding crashes once generation crosses the sliding window",
+      "runbook_tasks": [
+        "SPEC-048-R003",
+        "SPEC-048-R006"
+      ],
+      "updated_at": "2026-08-05T23:34:37Z",
+      "closed_at": "2026-08-05T23:34:37Z",
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1770",
+      "status": "closed_upstream_awaiting_qualified_release"
+    },
+    "mlx_swift_lm_510_mamba_hybrid_rewind": {
+      "repo": "ml-explore/mlx-swift-lm",
+      "kind": "pull_request",
+      "number": 510,
+      "url": "https://github.com/ml-explore/mlx-swift-lm/pull/510",
+      "state": "OPEN",
+      "title": "Make MambaCache rewindable so speculative decoding can run on hybrid SSM/attention models",
+      "runbook_tasks": [
+        "SPEC-048-R003",
+        "SPEC-048-R006"
+      ],
+      "updated_at": "2026-08-29T23:35:35Z",
+      "merged_at": null,
+      "merge_commit": null,
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1770",
+      "status": "blocked_upstream_open"
+    },
+    "mlx_swift_lm_545_qwen38_mtp": {
+      "repo": "ml-explore/mlx-swift-lm",
+      "kind": "pull_request",
+      "number": 545,
+      "url": "https://github.com/ml-explore/mlx-swift-lm/pull/545",
+      "state": "OPEN",
+      "title": "Add Qwen 3.8 support for text, VLM, and MTP speculative decoding",
+      "runbook_tasks": [
+        "SPEC-048-R003",
+        "JOURNEY-NATIVE-MTP-SERVING"
+      ],
+      "updated_at": "2026-09-17T15:09:57Z",
+      "merged_at": null,
+      "merge_commit": null,
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1770",
+      "status": "blocked_upstream_open"
+    },
+    "mlx_swift_lm_581_resumable_qwen_mtp": {
+      "repo": "ml-explore/mlx-swift-lm",
+      "kind": "pull_request",
+      "number": 581,
+      "url": "https://github.com/ml-explore/mlx-swift-lm/pull/581",
+      "state": "OPEN",
+      "title": "Add resumable Qwen MTP speculative decoding to ChatSession",
+      "runbook_tasks": [
+        "SPEC-048-R003",
+        "SPEC-048-R005"
+      ],
+      "updated_at": "2026-09-26T07:07:15Z",
+      "merged_at": null,
+      "merge_commit": null,
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1770",
+      "status": "blocked_upstream_open"
+    },
+    "mlx_swift_lm_584_rotating_cache_trim": {
+      "repo": "ml-explore/mlx-swift-lm",
+      "kind": "pull_request",
+      "number": 584,
+      "url": "https://github.com/ml-explore/mlx-swift-lm/pull/584",
+      "state": "MERGED",
+      "title": "RotatingKVCache: make trim wrap-aware instead of corrupting the ring",
+      "runbook_tasks": [
+        "SPEC-048-R003",
+        "SPEC-048-R006"
+      ],
+      "updated_at": "2026-09-11T03:52:24Z",
+      "merged_at": "2026-09-11T03:52:23Z",
+      "merge_commit": "604fae710a4e3324346fc59e3845952350acd4b7",
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1770",
+      "status": "awaiting_release_tag"
+    },
+    "mlx_swift_lm_622_exact_rotating_cache_rewinds": {
+      "repo": "ml-explore/mlx-swift-lm",
+      "kind": "pull_request",
+      "number": 622,
+      "url": "https://github.com/ml-explore/mlx-swift-lm/pull/622",
+      "state": "OPEN",
+      "title": "Fix exact prefix rewinds in rotating KV caches",
+      "runbook_tasks": [
+        "SPEC-048-R003",
+        "SPEC-048-R006"
+      ],
+      "updated_at": "2026-09-14T19:12:24Z",
+      "merged_at": null,
+      "merge_commit": null,
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1770",
+      "status": "blocked_upstream_open"
     }
   },
   "implementation_signals": {
     "kvcache_offset_graph_traceable": false,
+    "native_mtp_required_merges": {
+      "mlx_swift_lm_351_qwen_mtp": {
+        "merged_at": "2026-08-13T00:46:39Z",
+        "merge_commit": "01472a78fca830689ff78246a82c6d31ab111a78",
+        "in_latest_release": false
+      },
+      "mlx_swift_lm_516_mtp_sliding_window": {
+        "merged_at": "2026-08-11T17:13:15Z",
+        "merge_commit": "2af378b3557384f6c6ce936fab8e9748a1e8d61a",
+        "in_latest_release": false
+      },
+      "mlx_swift_lm_584_rotating_cache_trim": {
+        "merged_at": "2026-09-11T03:52:23Z",
+        "merge_commit": "604fae710a4e3324346fc59e3845952350acd4b7",
+        "in_latest_release": false
+      }
+    },
+    "native_mtp_required_merges_in_latest_release": false,
+    "native_mtp_public_row_mapped_transactions_reviewed": false,
+    "native_mtp_status": "blocked_missing_public_row_mapped_transactions",
     "note": "KVCache.swift heuristic on upstream main"
   },
-  "last_changed_at": "2026-08-16T13:43:53Z",
-  "last_checked_at": "2026-08-16T13:43:53Z",
+  "last_changed_at": "2026-09-28T00:44:53Z",
+  "last_checked_at": "2026-09-28T00:44:51Z",
   "macprovider_pins": {
     "mlx_swift": "0.31.4",
     "mlx_swift_lm": "3.31.4",
@@ -107,8 +262,8 @@
     "mlx_swift_revision": "dc43e62d7055353c7f99fa071a4e71d29dfddc44",
     "swift_jinja": "2.4.2",
     "swift_jinja_revision": "7d0b8880ef8e567dd4e0089f8b99fb354129017c",
-    "swift_transformers": "1.0.0",
-    "swift_transformers_revision": "a2e184dddb4757bc943e77fbe99ac6786c53f0b2"
+    "swift_transformers": "1.3.4",
+    "swift_transformers_revision": "c21fdcde390313a6d98d8e33a346f2c3486c3ab0"
   },
   "protected_release_toolchain": {
     "note": "mlx-swift 0.31.5/0.31.6 require Swift 6.3 and are not production-compatible",
@@ -131,21 +286,21 @@
       "tag": "3.31.4"
     },
     "swift_jinja_latest": {
-      "published_at": "2026-07-21T09:32:08Z",
+      "published_at": "2026-09-14T10:04:59Z",
       "repo": "huggingface/swift-jinja",
-      "tag": "2.4.2"
+      "tag": "2.5.1"
     },
     "swift_transformers_latest": {
-      "published_at": "2026-05-16T11:43:01Z",
+      "published_at": "2026-09-02T17:04:48Z",
       "repo": "huggingface/swift-transformers",
-      "tag": "1.3.3"
+      "tag": "1.3.4"
     }
   },
   "reviewed_adjacent_pins": {
     "swift_jinja": "2.4.2",
     "swift_jinja_revision": "7d0b8880ef8e567dd4e0089f8b99fb354129017c",
-    "swift_transformers": "1.0.0",
-    "swift_transformers_revision": "a2e184dddb4757bc943e77fbe99ac6786c53f0b2"
+    "swift_transformers": "1.3.4",
+    "swift_transformers_revision": "c21fdcde390313a6d98d8e33a346f2c3486c3ab0"
   },
   "schema_version": 2,
   "source_of_truth": "phase3-binary/Package.resolved",
@@ -154,7 +309,8 @@
     "engine_upgrade": "https://github.com/Augustas11/macprovider/issues/700",
     "quantized_reusable_kv": "https://github.com/Augustas11/macprovider/issues/965",
     "speculative_cache_wrap": "https://github.com/Augustas11/macprovider/issues/377",
-    "swift_transformers_migration": "https://github.com/Augustas11/macprovider/issues/966"
+    "swift_transformers_migration": "https://github.com/Augustas11/macprovider/issues/966",
+    "native_mtp": "https://github.com/Augustas11/macprovider/issues/1770"
   },
   "watchlist": {
     "omlx": {
@@ -166,13 +322,13 @@
       "homepage": "https://omlx.ai",
       "latest_release_published_at": "2026-08-08",
       "latest_release_tag": "v0.5.7",
-      "notes": "Community board uses mlx-lm Python; Macprovider uses mlx-swift-lm. Calibration source only \u2014 not a runtime dependency. See docs/research/RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md.",
+      "notes": "Community board uses mlx-lm Python; Macprovider uses mlx-swift-lm. Calibration source only — not a runtime dependency. See docs/research/RESEARCH_231_OMLX_BENCHMARK_CATALOG_MEMO.md.",
       "previous_tracked_release_tag": "v0.5.3",
       "refresh_2026-07-22": {
         "board_growth": "rows 321280 -> ~339980 (+~18.7k / +5.8% in ~2wk); board live and current (today-dated rows).",
-        "checked_via": "in-app browser UA (server-side fetch 403s on Cloudflare, per RESEARCH_231 \u00a7methodology)",
-        "new_signal_for_blocked_p1_row": "qwen3.6-35b-a3b now HAS direct oMLX rows (was extrapolated ~35 TG in the memo): 'Qwen3.6-35B-A3B-4bit-MTP...' on M3 Max 40c 64GB -> TG 90.6 @8k, 95.7 @4k. CAVEAT: MTP build includes built-in speculative acceleration macprovider's plain decode path would NOT get, so do not apply 0.85 naively; treat as upper bound. Residency/VLM-pin/rate-card blockers (E1/E3 + RESEARCH_227) are UNCHANGED \u2014 throughput was never the 35b blocker.",
-        "release_drift": "tracked tag was the v0.5.0.dev3 PRERELEASE; upstream is now v0.5.3 stable (v0.5.0/0.5.1/0.5.2/0.5.3 shipped 2026-07-21..22). v0.5.3 notes GLM MTP quantization changes \u2014 MTP = multi-token prediction, spec-decode-adjacent; may shift board TG numbers, so engine_delta=0.85 should be re-derived against a v0.5.x-stable snapshot before any gate change.",
+        "checked_via": "in-app browser UA (server-side fetch 403s on Cloudflare, per RESEARCH_231 §methodology)",
+        "new_signal_for_blocked_p1_row": "qwen3.6-35b-a3b now HAS direct oMLX rows (was extrapolated ~35 TG in the memo): 'Qwen3.6-35B-A3B-4bit-MTP...' on M3 Max 40c 64GB -> TG 90.6 @8k, 95.7 @4k. CAVEAT: MTP build includes built-in speculative acceleration macprovider's plain decode path would NOT get, so do not apply 0.85 naively; treat as upper bound. Residency/VLM-pin/rate-card blockers (E1/E3 + RESEARCH_227) are UNCHANGED — throughput was never the 35b blocker.",
+        "release_drift": "tracked tag was the v0.5.0.dev3 PRERELEASE; upstream is now v0.5.3 stable (v0.5.0/0.5.1/0.5.2/0.5.3 shipped 2026-07-21..22). v0.5.3 notes GLM MTP quantization changes — MTP = multi-token prediction, spec-decode-adjacent; may shift board TG numbers, so engine_delta=0.85 should be re-derived against a v0.5.x-stable snapshot before any gate change.",
         "schema_version_unconfirmed": "no explicit schema stamp on the page; column layout unchanged vs 2026-07-09."
       },
       "repo": "jundot/omlx",

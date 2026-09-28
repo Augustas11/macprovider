@@ -10,7 +10,7 @@
 #   2 — material change detected (automation should alert / open issue)
 #
 # Material changes: issue/PR closed or merged, new release tag above macprovider pin,
-# or KVCache compile-fix heuristic flips true.
+# KVCache compile-fix heuristic flips true, or native-MTP readiness flips true.
 
 set -euo pipefail
 
@@ -48,29 +48,66 @@ def gh_json(args):
     out = subprocess.check_output(["gh"] + args, text=True)
     return json.loads(out)
 
+def issue(number):
+    return gh_json(["issue", "view", str(number), "--repo", "ml-explore/mlx-swift-lm",
+                    "--json", "number,state,title,updatedAt,closedAt"])
+
+def pr(number):
+    return gh_json(["pr", "view", str(number), "--repo", "ml-explore/mlx-swift-lm",
+                    "--json", "number,state,title,updatedAt,mergedAt,mergeCommit"])
+
 def latest_release(repo):
     r = gh_json(["release", "view", "--repo", repo, "--json", "tagName,publishedAt,name"])
     if not r.get("tagName") or not r.get("publishedAt"):
         raise RuntimeError(f"latest release missing required fields for {repo}")
     return {"tag": r["tagName"], "published_at": r["publishedAt"]}
 
-issue = gh_json(["issue", "view", "406", "--repo", "ml-explore/mlx-swift-lm",
-                 "--json", "number,state,title,updatedAt,closedAt"])
-pr = gh_json(["pr", "view", "364", "--repo", "ml-explore/mlx-swift-lm",
-              "--json", "number,state,title,updatedAt,mergedAt"])
-issue312 = gh_json(["issue", "view", "312", "--repo", "ml-explore/mlx-swift-lm",
-                    "--json", "number,state,title,updatedAt,closedAt"])
-pr453 = gh_json(["pr", "view", "453", "--repo", "ml-explore/mlx-swift-lm",
-                 "--json", "number,state,title,updatedAt,mergedAt"])
-issue424 = gh_json(["issue", "view", "424", "--repo", "ml-explore/mlx-swift-lm",
-                    "--json", "number,state,title,updatedAt,closedAt"])
-issue518 = gh_json(["issue", "view", "518", "--repo", "ml-explore/mlx-swift-lm",
-                    "--json", "number,state,title,updatedAt,closedAt"])
+def release_contains_commit(repo, tag, commit):
+    if not tag or not commit:
+        return False
+    comparison = gh_json(["api", f"repos/{repo}/compare/{commit}...{tag}"])
+    return comparison.get("behind_by") == 0
+
+issue406 = issue(406)
+pr364 = pr(364)
+issue312 = issue(312)
+pr453 = pr(453)
+issue424 = issue(424)
+issue518 = issue(518)
+pr351 = pr(351)
+pr516 = pr(516)
+issue505 = issue(505)
+pr510 = pr(510)
+pr545 = pr(545)
+pr581 = pr(581)
+pr584 = pr(584)
+pr622 = pr(622)
 
 lm_rel = latest_release("ml-explore/mlx-swift-lm")
 swift_rel = latest_release("ml-explore/mlx-swift")
 transformers_rel = latest_release("huggingface/swift-transformers")
 jinja_rel = latest_release("huggingface/swift-jinja")
+
+native_mtp_required_prs = {
+    "mlx_swift_lm_351_qwen_mtp": pr351,
+    "mlx_swift_lm_516_mtp_sliding_window": pr516,
+    "mlx_swift_lm_584_rotating_cache_trim": pr584,
+}
+native_mtp_required_merges = {}
+for key, row in native_mtp_required_prs.items():
+    native_mtp_required_merges[key] = {
+        "merged_at": row.get("mergedAt"),
+        "merge_commit": (row.get("mergeCommit") or {}).get("oid"),
+        "in_latest_release": release_contains_commit(
+            "ml-explore/mlx-swift-lm",
+            lm_rel["tag"],
+            (row.get("mergeCommit") or {}).get("oid"),
+        ),
+    }
+native_mtp_required_merges_in_latest_release = all(
+    row["merged_at"] and row["merge_commit"] and row["in_latest_release"]
+    for row in native_mtp_required_merges.values()
+)
 
 # Heuristic: fetch KVCache.swift and look for graph-traceable offset patterns.
 kvcache_url = "https://raw.githubusercontent.com/ml-explore/mlx-swift-lm/main/Libraries/MLXLMCommon/KVCache.swift"
@@ -94,24 +131,24 @@ out = {
         "mlx_swift_lm_406_compile_kv_offset": {
             "repo": "ml-explore/mlx-swift-lm",
             "kind": "issue",
-            "number": issue["number"],
+            "number": issue406["number"],
             "url": "https://github.com/ml-explore/mlx-swift-lm/issues/406",
-            "state": issue["state"],
-            "title": issue["title"],
+            "state": issue406["state"],
+            "title": issue406["title"],
             "runbook_tasks": ["T2-01", "TG2"],
-            "updated_at": issue["updatedAt"],
-            "closed_at": issue.get("closedAt"),
+            "updated_at": issue406["updatedAt"],
+            "closed_at": issue406.get("closedAt"),
         },
         "mlx_swift_lm_364_gemma_moe": {
             "repo": "ml-explore/mlx-swift-lm",
             "kind": "pull_request",
-            "number": pr["number"],
+            "number": pr364["number"],
             "url": "https://github.com/ml-explore/mlx-swift-lm/pull/364",
-            "state": pr["state"],
-            "title": pr["title"],
+            "state": pr364["state"],
+            "title": pr364["title"],
             "runbook_tasks": ["T1-02", "TG1"],
-            "updated_at": pr["updatedAt"],
-            "merged_at": pr.get("mergedAt"),
+            "updated_at": pr364["updatedAt"],
+            "merged_at": pr364.get("mergedAt"),
         },
         "mlx_swift_lm_312_quantized_cache_ownership": {
             "repo": "ml-explore/mlx-swift-lm", "kind": "issue", "number": 312,
@@ -141,6 +178,69 @@ out = {
             "runbook_tasks": ["T1-01", "TG1"],
             "updated_at": issue518["updatedAt"], "closed_at": issue518.get("closedAt"),
         },
+        "mlx_swift_lm_351_qwen_mtp": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 351,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/351",
+            "state": pr351["state"], "title": pr351["title"],
+            "runbook_tasks": ["SPEC-048-R003", "JOURNEY-NATIVE-MTP-SERVING"],
+            "updated_at": pr351["updatedAt"], "merged_at": pr351.get("mergedAt"),
+            "merge_commit": (pr351.get("mergeCommit") or {}).get("oid"),
+        },
+        "mlx_swift_lm_516_mtp_sliding_window": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 516,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/516",
+            "state": pr516["state"], "title": pr516["title"],
+            "runbook_tasks": ["SPEC-048-R003", "SPEC-048-R006"],
+            "updated_at": pr516["updatedAt"], "merged_at": pr516.get("mergedAt"),
+            "merge_commit": (pr516.get("mergeCommit") or {}).get("oid"),
+        },
+        "mlx_swift_lm_505_mtp_sliding_window_rewind": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "issue", "number": 505,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/issues/505",
+            "state": issue505["state"], "title": issue505["title"],
+            "runbook_tasks": ["SPEC-048-R003", "SPEC-048-R006"],
+            "updated_at": issue505["updatedAt"], "closed_at": issue505.get("closedAt"),
+        },
+        "mlx_swift_lm_510_mamba_hybrid_rewind": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 510,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/510",
+            "state": pr510["state"], "title": pr510["title"],
+            "runbook_tasks": ["SPEC-048-R003", "SPEC-048-R006"],
+            "updated_at": pr510["updatedAt"], "merged_at": pr510.get("mergedAt"),
+            "merge_commit": (pr510.get("mergeCommit") or {}).get("oid"),
+        },
+        "mlx_swift_lm_545_qwen38_mtp": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 545,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/545",
+            "state": pr545["state"], "title": pr545["title"],
+            "runbook_tasks": ["SPEC-048-R003", "JOURNEY-NATIVE-MTP-SERVING"],
+            "updated_at": pr545["updatedAt"], "merged_at": pr545.get("mergedAt"),
+            "merge_commit": (pr545.get("mergeCommit") or {}).get("oid"),
+        },
+        "mlx_swift_lm_581_resumable_qwen_mtp": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 581,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/581",
+            "state": pr581["state"], "title": pr581["title"],
+            "runbook_tasks": ["SPEC-048-R003", "SPEC-048-R005"],
+            "updated_at": pr581["updatedAt"], "merged_at": pr581.get("mergedAt"),
+            "merge_commit": (pr581.get("mergeCommit") or {}).get("oid"),
+        },
+        "mlx_swift_lm_584_rotating_cache_trim": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 584,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/584",
+            "state": pr584["state"], "title": pr584["title"],
+            "runbook_tasks": ["SPEC-048-R003", "SPEC-048-R006"],
+            "updated_at": pr584["updatedAt"], "merged_at": pr584.get("mergedAt"),
+            "merge_commit": (pr584.get("mergeCommit") or {}).get("oid"),
+        },
+        "mlx_swift_lm_622_exact_rotating_cache_rewinds": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "pull_request", "number": 622,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/pull/622",
+            "state": pr622["state"], "title": pr622["title"],
+            "runbook_tasks": ["SPEC-048-R003", "SPEC-048-R006"],
+            "updated_at": pr622["updatedAt"], "merged_at": pr622.get("mergedAt"),
+            "merge_commit": (pr622.get("mergeCommit") or {}).get("oid"),
+        },
     },
     "releases": {
         "mlx_swift_lm_latest": {
@@ -162,6 +262,8 @@ out = {
     },
     "implementation_signals": {
         "kvcache_offset_graph_traceable": graph_traceable,
+        "native_mtp_required_merges": native_mtp_required_merges,
+        "native_mtp_required_merges_in_latest_release": native_mtp_required_merges_in_latest_release,
         "note": note,
     },
 }

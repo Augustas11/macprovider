@@ -1083,6 +1083,24 @@ actor ModelRuntime: ModelRuntimeServing {
         return .speculative
     }
 
+    static func decodePath(
+        for request: ChatCompletionRequest,
+        draftConfigured: Bool,
+        draftLoaded: Bool,
+        numDraftTokens: Int?,
+        nativeMTPMode: NativeMTPMode = .off,
+        nativeMTPCapability: NativeMTPCapability?
+    ) -> DecodePathSelection {
+        NativeMTPSelector.select(
+            request: request,
+            draftConfigured: draftConfigured,
+            draftLoaded: draftLoaded,
+            numDraftTokens: numDraftTokens,
+            nativeMTPMode: nativeMTPMode,
+            nativeCapability: nativeMTPCapability
+        )
+    }
+
     /// mlx-swift-lm #424: classic speculative rollback silently fails after a
     /// RotatingKVCache wraps. Stay strictly below the wrap boundary, including
     /// transient draft tokens that may need to be rejected and trimmed.
