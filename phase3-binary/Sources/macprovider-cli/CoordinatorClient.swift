@@ -6923,9 +6923,6 @@ actor CoordinatorClient {
         ) else {
             return nil
         }
-        guard runtimeTupleSHA256 == offer.nativeMTPRuntimeTupleSHA256 else {
-            return nil
-        }
         return NativeMTPTupleOfferWireIdentity(
             providerRevision: offer.providerRevision,
             runtimeRevision: offer.runtimeRevision,

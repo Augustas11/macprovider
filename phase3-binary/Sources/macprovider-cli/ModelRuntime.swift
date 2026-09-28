@@ -380,7 +380,6 @@ struct NativeMTPPublishedTupleOffer: Sendable, Equatable {
     let runtimeTuple: NativeMTPPublishedRuntimeTuple
     let nativeMTPAdmissionTupleSHA256: String
     let servedSnapshotID: String
-    let nativeMTPRuntimeTupleSHA256: String
     let sidecarDigest: String
     let challengeBankReleaseID: String
     let challengeBankSHA256: String
@@ -7785,7 +7784,6 @@ actor ModelRuntime: ModelRuntimeServing {
                 runtimeTuple: runtimeTuple,
                 nativeMTPAdmissionTupleSHA256: admissionCapability.tupleSHA256,
                 servedSnapshotID: servedSnapshotID,
-                nativeMTPRuntimeTupleSHA256: runtimeTuple.sha256,
                 sidecarDigest: admissionCapability.sidecarSHA256,
                 challengeBankReleaseID: admissionCapability.selfTestChallengeBank.releaseID,
                 challengeBankSHA256: admissionCapability.selfTestChallengeBank.challengeBankSHA256,
