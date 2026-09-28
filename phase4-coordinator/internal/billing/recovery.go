@@ -20,6 +20,9 @@ type RecoverInput struct {
 
 const recoverLedgerChunkWindow = time.Hour
 
+// recoverLedgerBeforeChunkForTest lets tests fail a run between chunks.
+var recoverLedgerBeforeChunkForTest func(RecoverInput) error
+
 type recoveryStats struct {
 	scanned         int64
 	created         int64
@@ -42,29 +45,28 @@ func (s *Store) RecoverLedger(ctx context.Context, in RecoverInput) (retErr erro
 		in.Source = "startup_scan"
 	}
 	started := time.Now().UTC()
+	// Chunks commit independently, so the run row is created first and each
+	// chunk's transaction advances its cumulative counters atomically with the
+	// ledger rows it wrote. A failed or interrupted run therefore still
+	// reports exactly the work that became durable.
+	runID, err := s.insertRecoveryRun(ctx, in, started)
+	if err != nil {
+		return err
+	}
+	var total recoveryStats
 	defer func() {
 		if retErr == nil {
 			return
 		}
-		finished := time.Now().UTC()
 		_, _ = s.db.ExecContext(context.Background(), `
-INSERT INTO ledger_reconciliation_runs (
-    run_type, from_utc, to_utc, request_log_rows_scanned,
-    missing_credit_rows_created, orphan_credit_rows_quarantined,
-    buyer_equivalent_credits, provider_gross_credits,
-    reconciliation_delta_credits, started_at_utc, finished_at_utc, status,
-    error, created_at_utc
-) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, ?, ?, 'failed', ?, ?)`,
-			in.Source,
-			in.ScanFrom.UTC().Format(time.RFC3339Nano),
-			in.ScanTo.UTC().Format(time.RFC3339Nano),
-			started.Format(time.RFC3339Nano),
-			finished.Format(time.RFC3339Nano),
+UPDATE ledger_reconciliation_runs
+   SET status = 'failed', error = ?, finished_at_utc = ?
+ WHERE id = ?`,
 			retErr.Error(),
-			started.Format(time.RFC3339Nano),
+			time.Now().UTC().Format(time.RFC3339Nano),
+			runID,
 		)
 	}()
-	var total recoveryStats
 	for chunkFrom := in.ScanFrom.UTC(); chunkFrom.Before(in.ScanTo.UTC()); {
 		chunkTo := chunkFrom.Add(recoverLedgerChunkWindow)
 		if chunkTo.After(in.ScanTo.UTC()) {
@@ -73,13 +75,18 @@ INSERT INTO ledger_reconciliation_runs (
 		chunk := in
 		chunk.ScanFrom = chunkFrom
 		chunk.ScanTo = chunkTo
+		if recoverLedgerBeforeChunkForTest != nil {
+			if err := recoverLedgerBeforeChunkForTest(chunk); err != nil {
+				return err
+			}
+		}
 		// SPEC-022-R012.3/R006 pool decisions are pre-read per chunk, then
 		// fenced again inside that chunk's writer transaction.
 		poolAttested, err := s.recoveryPoolAttestedRoutes(ctx, chunk)
 		if err != nil {
 			return err
 		}
-		stats, err := s.recoverLedgerChunk(ctx, chunk, poolAttested)
+		stats, err := s.recoverLedgerChunk(ctx, chunk, poolAttested, runID, total)
 		if err != nil {
 			return err
 		}
@@ -89,32 +96,38 @@ INSERT INTO ledger_reconciliation_runs (
 			runtime.Gosched()
 		}
 	}
-	finished := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
+UPDATE ledger_reconciliation_runs
+   SET status = 'complete', finished_at_utc = ?
+ WHERE id = ?`,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		runID,
+	)
+	return err
+}
+
+func (s *Store) insertRecoveryRun(ctx context.Context, in RecoverInput, started time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `
 INSERT INTO ledger_reconciliation_runs (
     run_type, from_utc, to_utc, request_log_rows_scanned,
     missing_credit_rows_created, orphan_credit_rows_quarantined,
     buyer_equivalent_credits, provider_gross_credits,
     reconciliation_delta_credits, started_at_utc, finished_at_utc, status,
     error, created_at_utc
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', NULL, ?)`,
+) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, ?, NULL, 'running', NULL, ?)`,
 		in.Source,
 		in.ScanFrom.UTC().Format(time.RFC3339Nano),
 		in.ScanTo.UTC().Format(time.RFC3339Nano),
-		total.scanned,
-		total.created,
-		total.quarantined,
-		total.buyerEquivalent,
-		total.providerGross,
-		total.providerGross-total.buyerEquivalent,
 		started.Format(time.RFC3339Nano),
-		finished.Format(time.RFC3339Nano),
 		started.Format(time.RFC3339Nano),
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
 }
 
-func (s *Store) recoverLedgerChunk(ctx context.Context, in RecoverInput, poolAttested map[SettlementReceiptIdentity]recoveryPoolAttestation) (recoveryStats, error) {
+func (s *Store) recoverLedgerChunk(ctx context.Context, in RecoverInput, poolAttested map[SettlementReceiptIdentity]recoveryPoolAttestation, runID int64, prior recoveryStats) (recoveryStats, error) {
 	// SPEC-022-R012.3 and the R006 label are decided before the transaction
 	// opens: the durable pool authority reads this same database.
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
@@ -461,16 +474,37 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.account_id, rl.model, rl.provider_ass
 	if err := rows.Err(); err != nil {
 		return recoveryStats{}, err
 	}
-	if err := tx.Commit(); err != nil {
-		return recoveryStats{}, err
-	}
-	return recoveryStats{
+	stats := recoveryStats{
 		scanned:         scanned,
 		created:         created,
 		quarantined:     quarantined,
 		buyerEquivalent: buyerEquivalent,
 		providerGross:   providerGross,
-	}, nil
+	}
+	cumulative := prior.add(stats)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE ledger_reconciliation_runs
+   SET request_log_rows_scanned = ?,
+       missing_credit_rows_created = ?,
+       orphan_credit_rows_quarantined = ?,
+       buyer_equivalent_credits = ?,
+       provider_gross_credits = ?,
+       reconciliation_delta_credits = ?
+ WHERE id = ?`,
+		cumulative.scanned,
+		cumulative.created,
+		cumulative.quarantined,
+		cumulative.buyerEquivalent,
+		cumulative.providerGross,
+		cumulative.providerGross-cumulative.buyerEquivalent,
+		runID,
+	); err != nil {
+		return recoveryStats{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return recoveryStats{}, err
+	}
+	return stats, nil
 }
 
 // recoveredLoopbackAttemptBillable applies the hot path's loopback rule to a

@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -26,7 +27,11 @@ func TestRecoverLedgerChunkedMatchesSingleWindowAcrossBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("single-window pool attestation pre-read: %v", err)
 	}
-	singleStats, err := single.recoverLedgerChunk(ctx, in, poolAttested)
+	singleRunID, err := single.insertRecoveryRun(ctx, in, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("single-window run row: %v", err)
+	}
+	singleStats, err := single.recoverLedgerChunk(ctx, in, poolAttested, singleRunID, recoveryStats{})
 	if err != nil {
 		t.Fatalf("single-window recover chunk: %v", err)
 	}
@@ -43,6 +48,59 @@ func TestRecoverLedgerChunkedMatchesSingleWindowAcrossBoundary(t *testing.T) {
 	}
 	if got := scalar(t, chunked.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE status='failed' AND run_type='nightly_reconcile'`); got != 0 {
 		t.Fatalf("failed recovery rows=%d want 0", got)
+	}
+}
+
+func TestRecoverLedgerMidRunFailureRecordsCommittedWorkAndRerunConverges(t *testing.T) {
+	ctx := context.Background()
+	reqStore, store := newRequestAndBillingStores(t)
+	in := seedRecoveryChunkEquivalenceFixture(t, reqStore, store)
+	reqWant, want := newRequestAndBillingStores(t)
+	seedRecoveryChunkEquivalenceFixture(t, reqWant, want)
+	if err := want.RecoverLedger(ctx, in); err != nil {
+		t.Fatalf("reference RecoverLedger: %v", err)
+	}
+
+	firstChunk := in
+	firstChunk.ScanTo = in.ScanFrom.Add(recoverLedgerChunkWindow)
+	injected := errors.New("injected second-chunk failure")
+	recoverLedgerBeforeChunkForTest = func(chunk RecoverInput) error {
+		if chunk.ScanFrom.Equal(firstChunk.ScanTo) {
+			return injected
+		}
+		return nil
+	}
+	err := store.RecoverLedger(ctx, in)
+	recoverLedgerBeforeChunkForTest = nil
+	if !errors.Is(err, injected) {
+		t.Fatalf("RecoverLedger err=%v want injected failure", err)
+	}
+
+	var status, runErr string
+	var failed recoveryStats
+	if err := store.db.QueryRow(`
+SELECT status, COALESCE(error, ''), request_log_rows_scanned, missing_credit_rows_created,
+       orphan_credit_rows_quarantined, buyer_equivalent_credits, provider_gross_credits
+  FROM ledger_reconciliation_runs
+ WHERE run_type='nightly_reconcile'
+ ORDER BY id DESC LIMIT 1`).Scan(&status, &runErr, &failed.scanned, &failed.created, &failed.quarantined, &failed.buyerEquivalent, &failed.providerGross); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || !strings.Contains(runErr, injected.Error()) {
+		t.Fatalf("run status=%q error=%q want failed with injected error", status, runErr)
+	}
+	if failed.scanned == 0 {
+		t.Fatalf("failed run reports no committed work: %+v", failed)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_reconciliation_runs WHERE status='running'`); got != 0 {
+		t.Fatalf("running rows=%d want 0 after failure", got)
+	}
+
+	if err := store.RecoverLedger(ctx, in); err != nil {
+		t.Fatalf("rerun RecoverLedger: %v", err)
+	}
+	if got, wantSnap := recoveryLedgerSnapshot(t, store.db), recoveryLedgerSnapshot(t, want.db); got != wantSnap {
+		t.Fatalf("rerun ledger differs from uninterrupted run\ngot:\n%s\nwant:\n%s", got, wantSnap)
 	}
 }
 
