@@ -5304,6 +5304,12 @@ actor ModelRuntime: ModelRuntimeServing {
             )
         }
 
+        var emittedContent: String {
+            lock.lock()
+            defer { lock.unlock() }
+            return emitter.emittedContent
+        }
+
         /// Token count at which the serial path would have stopped a serial
         /// tool turn; nil when it would not have stopped early.
         var serialStopTokenCount: Int? {
@@ -5592,8 +5598,11 @@ actor ModelRuntime: ModelRuntimeServing {
             idleState: idleState,
             onChunk: onChunk
         )
+        let completion = HarmonyResponseParser.isHarmonyModelID(request.model)
+            ? finalized.completion
+            : finalized.completion.withContent(state.emittedContent)
         return try validateStructuredStreamingCompletion(
-            finalized.completion,
+            completion,
             request: request,
             buyerVisibleContent: structuredAccumulator.content
         )
@@ -7144,7 +7153,7 @@ actor ModelRuntime: ModelRuntimeServing {
                         }
 
                         let completion = CompletionResult(
-                            content: parsed.content,
+                            content: emittedText,
                             finishReason: finishReason,
                             promptTokens: promptTokenIds.count,
                             cachedPromptTokens: 0,
@@ -7369,7 +7378,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             decode: { context.tokenizer.decode(tokenIds: $0) }
                         )
                         let completion = CompletionResult(
-                            content: parsed.content,
+                            content: isHarmonyResponse ? parsed.content : textEmitter.emittedContent,
                             finishReason: finishReason,
                             promptTokens: promptTokenIds.count,
                             cachedPromptTokens: cachedPromptTokens,
@@ -9849,6 +9858,8 @@ struct SerialStreamingTextEmitter {
     private var toolStreamer: NativeToolCallStreamEmitter
     private var lastEmittedDecodedText = ""
     private var emittedTextSuffix = ""
+    private(set) var emittedContent = ""
+    private var observedCleanupRewrite = false
 
     init(request: ChatCompletionRequest) {
         streamToolsIncrementally = ModelRuntime.hasEnabledTools(request.promptSource.tools)
@@ -9941,12 +9952,19 @@ struct SerialStreamingTextEmitter {
             onChunk(.content(finalDelta))
         }
         lastEmittedDecodedText = parsed.content
+        assert(
+            observedCleanupRewrite
+                || !parsed.toolCalls.isEmpty
+                || toolStreamer.suppressesAssistantContent
+                || emittedContent == parsed.content,
+            "prefix-only streaming must emit content byte-identical to parsed.content"
+        )
         if let error = structuredAccumulator.error {
             throw error
         }
     }
 
-    private func delta(to current: String) -> String {
+    private mutating func delta(to current: String) -> String {
         let delta = ModelRuntime.streamDeltaAfterCleanupRewrite(
             from: lastEmittedDecodedText,
             to: current
@@ -9954,6 +9972,7 @@ struct SerialStreamingTextEmitter {
         guard !current.unicodeScalars.starts(with: lastEmittedDecodedText.unicodeScalars) else {
             return delta
         }
+        observedCleanupRewrite = true
         return ModelRuntime.removingAlreadyEmittedRewritePrefix(
             from: delta,
             emittedSuffix: emittedTextSuffix
@@ -9961,6 +9980,7 @@ struct SerialStreamingTextEmitter {
     }
 
     private mutating func noteEmitted(_ delta: String) {
+        emittedContent += delta
         let scalars = (emittedTextSuffix + delta).unicodeScalars
         emittedTextSuffix = String(scalars.suffix(4))
     }
@@ -10370,6 +10390,27 @@ struct CompletionResult: Sendable {
             specDecodeAcceptedTokens: specDecodeAcceptedTokens,
             specDecodeGeneration: specDecodeGeneration,
             loopbackPrefixCompletionTokens: loopbackPrefixCompletionTokens
+        )
+    }
+
+    func withContent(_ content: String) -> CompletionResult {
+        CompletionResult(
+            content: content,
+            finishReason: finishReason,
+            promptTokens: promptTokens,
+            cachedPromptTokens: cachedPromptTokens,
+            kvCacheBytesReused: kvCacheBytesReused,
+            completionTokens: completionTokens,
+            generatedCompletionTokens: generatedCompletionTokens,
+            ttftMilliseconds: ttftMilliseconds,
+            generationMilliseconds: generationMilliseconds,
+            toolCalls: toolCalls,
+            modelHashObserved: modelHashObserved,
+            settlementDisposition: settlementDisposition,
+            specDecodeDraftedTokens: specDecodeDraftedTokens,
+            specDecodeAcceptedTokens: specDecodeAcceptedTokens,
+            specDecodeGeneration: specDecodeGeneration,
+            loopbackPrefixCompletionTokens: content == self.content ? loopbackPrefixCompletionTokens : nil
         )
     }
 

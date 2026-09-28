@@ -41,11 +41,45 @@ final class StreamingEmitterCleanupRewriteTests: XCTestCase {
         XCTAssertEqual(chunks.joined(), "    .tail")
     }
 
+    func testCleanupRewriteCompletionContentIsExactDeliveredConcatenation() throws {
+        let result = try streamResult(
+            decodes: ["It ", "It 's", "It's fine"],
+            final: "It's fine"
+        )
+
+        XCTAssertEqual(result.chunks, ["It ", "'s", " fine"])
+        XCTAssertEqual(result.chunks.joined(), "It 's fine")
+        XCTAssertEqual(result.emittedContent, result.chunks.joined())
+        XCTAssertEqual(result.completion.content, result.chunks.joined())
+        XCTAssertNotEqual(result.completion.content, "It's fine")
+    }
+
+    func testNoRewriteCompletionContentIsByteIdenticalToParsedContent() throws {
+        let parsedContent = "café \u{1F642}"
+        let result = try streamResult(
+            decodes: ["caf", "café "],
+            final: parsedContent
+        )
+
+        XCTAssertEqual(Data(result.emittedContent.utf8), Data(parsedContent.utf8))
+        XCTAssertEqual(Data(result.completion.content.utf8), Data(parsedContent.utf8))
+        XCTAssertEqual(result.emittedContent, result.chunks.joined())
+        XCTAssertEqual(result.completion.content, parsedContent)
+    }
+
     private func stream(
         decodes: [String],
         stops: [String] = [],
         final: String? = nil
     ) throws -> [String] {
+        try streamResult(decodes: decodes, stops: stops, final: final).chunks
+    }
+
+    private func streamResult(
+        decodes: [String],
+        stops: [String] = [],
+        final: String? = nil
+    ) throws -> (chunks: [String], emittedContent: String, completion: CompletionResult) {
         let request = try makeRequest(stops: stops)
         let accumulator = StructuredStreamingContentAccumulator(enabled: false)
         let idleState = StructuredStreamingIdleState(enabled: false)
@@ -90,7 +124,14 @@ final class StreamingEmitterCleanupRewriteTests: XCTestCase {
                 }
             )
         }
-        return chunks
+        let completion = CompletionResult(
+            content: emitter.emittedContent,
+            finishReason: "stop",
+            promptTokens: 1,
+            completionTokens: chunks.count,
+            settlementDisposition: .eligibleOwner
+        )
+        return (chunks, emitter.emittedContent, completion)
     }
 
     private func makeRequest(stops: [String]) throws -> ChatCompletionRequest {

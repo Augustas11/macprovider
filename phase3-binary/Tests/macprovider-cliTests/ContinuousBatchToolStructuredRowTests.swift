@@ -226,7 +226,7 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
             )
             let completion = try ModelRuntime.validateStructuredStreamingCompletion(
                 CompletionResult(
-                    content: parsed.content,
+                    content: emitter.emittedContent,
                     finishReason: parsed.toolCalls.isEmpty ? "stop" : "tool_calls",
                     promptTokens: 3,
                     completionTokens: parsed.completionTokens,
@@ -675,6 +675,38 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         }
 
         XCTAssertEqual(sink.normalized(), ["content:    ", "content:.", "content:later"])
+        let parsed = ModelRuntime.ParsedGeneratedOutput(
+            content: "   .later",
+            toolCalls: [],
+            completionTokens: pieces.count,
+            generatedCompletionTokens: pieces.count,
+            hitStop: false,
+            isTerminal: true
+        )
+        let completion = try ModelRuntime.finishContinuousBatchStream(
+            ModelRuntime.ContinuousBatchFinalizedRow(
+                completion: CompletionResult(
+                    content: parsed.content,
+                    finishReason: "stop",
+                    promptTokens: 3,
+                    completionTokens: pieces.count,
+                    settlementDisposition: .eligibleOwner
+                ),
+                filteredText: parsed.content,
+                parsed: parsed,
+                generatedTokens: Array(pieces.indices),
+                truncatedAtSerialStop: false
+            ),
+            state: state,
+            request: request,
+            structuredAccumulator: accumulator,
+            idleState: idle,
+            onChunk: sink.append
+        )
+        XCTAssertEqual(completion.content, "    .later")
+        XCTAssertEqual(completion.content, sink.normalized().compactMap { chunk in
+            chunk.hasPrefix("content:") ? String(chunk.dropFirst("content:".count)) : nil
+        }.joined())
     }
 
     func testIncrementalCleanupContractionDoesNotDuplicateBatchedStream() throws {
