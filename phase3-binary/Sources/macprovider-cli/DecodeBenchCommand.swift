@@ -279,13 +279,13 @@ struct DecodeBenchCommand: AsyncParsableCommand {
             // KVCache instances the model will mutate during prefill. After
             // prepare() returns, innerState() will be non-empty and we can
             // safely construct CompiledDecodeStep.
-            let cache = context.model.newCache(parameters: parameters)
+            let cache = try context.model.newCache(parameters: parameters)
 
             // Prefill: model.prepare() handles chunked prefill internally.
             // `.tokens` → need one more model call for the remaining token chunk.
             // `.logits` → first-token logits are already available.
             let firstTokenArray: MLXArray
-            switch try context.model.prepare(lmInput, cache: cache, windowSize: parameters.prefillStepSize) {
+            switch try context.model.prepare(lmInput, cache: cache, state: nil, windowSize: parameters.prefillStepSize) {
             case .tokens(let textInput):
                 // Process the remaining prefix tokens to get first-token logits.
                 // `withPreparedCache` is a no-op when sequenceLengths is nil

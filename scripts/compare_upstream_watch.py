@@ -41,6 +41,10 @@ def material_changes(
     reasons: list[str] = []
     if old.get("macprovider_pins") != new.get("macprovider_pins"):
         reasons.append("resolved production pin graph changed")
+    if old.get("native_mtp_immutable_dependency_exception") != new.get(
+        "native_mtp_immutable_dependency_exception"
+    ):
+        reasons.append("native MTP immutable-dependency exception changed")
     for key in BLOCKER_KEYS:
         if key not in old.get("blockers", {}):
             reasons.append(f"{key} added to upstream watch")
@@ -106,6 +110,7 @@ def merge_snapshot(old: dict[str, Any] | None, new: dict[str, Any]) -> dict[str,
             "releases",
             "trackers",
             "implementation_signals",
+            "native_mtp_immutable_dependency_exception",
         ) and isinstance(value, dict):
             reviewed = old.get(key, {})
             merged_rows = dict(reviewed)

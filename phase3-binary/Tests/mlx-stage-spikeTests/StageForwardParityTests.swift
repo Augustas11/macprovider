@@ -149,7 +149,7 @@ final class StageForwardParityTests: XCTestCase {
             let input = MLXArray([Int32(1)]).reshaped(1, 1)
 
             // ── Full path ──────────────────────────────────────────────────────────
-            let fullCache = llamaModel.newCache(parameters: nil)
+            let fullCache = try llamaModel.newCache(parameters: nil)
             let fullLogits = llamaModel(input, cache: fullCache)
             eval(fullLogits)
             let fullArgmax = argMax(fullLogits[0, -1], axis: -1).item(Int.self)
@@ -158,7 +158,7 @@ final class StageForwardParityTests: XCTestCase {
             let numLayers = llamaModel.model.layers.count
             let lo = numLayers / 2
 
-            let stagedCache = llamaModel.newCache(parameters: nil)
+            let stagedCache = try llamaModel.newCache(parameters: nil)
             var h = llamaModel.model.embedTokens(input)
 
             // single token: seq len == 1 → .none mask throughout

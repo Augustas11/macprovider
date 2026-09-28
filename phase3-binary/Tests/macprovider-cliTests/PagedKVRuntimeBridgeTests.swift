@@ -1850,7 +1850,7 @@ private final class RuntimeBridgeFakeModel: Module, LanguageModel, KVCacheDimens
         super.init()
     }
 
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    func prepare(_ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters) throws -> PrepareResult {
         .tokens(input.text)
     }
 
@@ -1888,7 +1888,7 @@ private final class RuntimeBridgeBlockingModel: Module, LanguageModel, KVCacheDi
         super.init()
     }
 
-    func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {
+    func prepare(_ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters) throws -> PrepareResult {
         .tokens(input.text)
     }
 

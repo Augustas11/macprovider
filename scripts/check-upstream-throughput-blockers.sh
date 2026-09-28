@@ -68,6 +68,10 @@ def release_contains_commit(repo, tag, commit):
     comparison = gh_json(["api", f"repos/{repo}/compare/{commit}...{tag}"])
     return comparison.get("behind_by") == 0
 
+def commit_is_descendant(repo, base, commit):
+    comparison = gh_json(["api", f"repos/{repo}/compare/{base}...{commit}"])
+    return comparison.get("behind_by") == 0 and comparison.get("ahead_by", 0) >= 1
+
 issue406 = issue(406)
 pr364 = pr(364)
 issue312 = issue(312)
@@ -110,6 +114,21 @@ native_mtp_required_merges_in_latest_release = all(
     for row in native_mtp_required_merges.values()
 )
 
+native_mtp_exception_revision = "3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db"
+native_mtp_exception_base = "ee673d6a71d76e67b532dc7eaf91d92edc3bb8bb"
+native_mtp_exception_repo = "Augustas11/mlx-swift-lm"
+native_mtp_exception_remote_verified = commit_is_descendant(
+    native_mtp_exception_repo,
+    native_mtp_exception_base,
+    native_mtp_exception_revision,
+)
+native_mtp_exception_pin_matches = (
+    pins.get("mlx_swift_lm_revision") == native_mtp_exception_revision
+)
+native_mtp_exception_approved = (
+    native_mtp_exception_remote_verified and native_mtp_exception_pin_matches
+)
+
 # Heuristic: fetch KVCache.swift and look for graph-traceable offset patterns.
 kvcache_url = "https://raw.githubusercontent.com/ml-explore/mlx-swift-lm/main/Libraries/MLXLMCommon/KVCache.swift"
 body = urllib.request.urlopen(kvcache_url, timeout=30).read().decode("utf-8", "replace")
@@ -127,7 +146,7 @@ note = (
 now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 out = {
-    "schema_version": 2,
+    "schema_version": 3,
     "last_checked_at": now,
     "last_changed_at": now,
     "macprovider_pins": pins,
@@ -275,7 +294,34 @@ out = {
         "kvcache_offset_graph_traceable": graph_traceable,
         "native_mtp_required_merges": native_mtp_required_merges,
         "native_mtp_required_merges_in_latest_release": native_mtp_required_merges_in_latest_release,
-        "note": note,
+        "native_mtp_public_row_mapped_transactions_reviewed": native_mtp_exception_approved,
+        "native_mtp_status": (
+            "qualified_transaction_exception_default_off"
+            if native_mtp_exception_approved
+            else "blocked_transaction_exception_unverified"
+        ),
+        "note": (
+            "Exact reviewed fork transaction facade qualifies the SPEC-048-R003 "
+            "cache boundary; upstream #645 remains the tagged-release replacement tracker"
+        ),
+    },
+    "native_mtp_immutable_dependency_exception": {
+        "approved": native_mtp_exception_approved,
+        "approved_at": "2026-09-28",
+        "approved_by": "@Augustas11",
+        "review_due_at": "2026-12-27",
+        "fork_location": "https://github.com/Augustas11/mlx-swift-lm.git",
+        "fork_revision": native_mtp_exception_revision,
+        "upstream_base_revision": native_mtp_exception_base,
+        "remote_revision_verified": native_mtp_exception_remote_verified,
+        "local_pin_matches": native_mtp_exception_pin_matches,
+        "review_status": "approved_0_critical_0_high_0_medium",
+        "scope": "public_mtp_cache_transaction_facade_only",
+        "removal_trigger": (
+            "first reviewed upstream tag with an equivalent public facade that "
+            "passes the MacProvider qualification artifact"
+        ),
+        "replacement_tracker": "https://github.com/ml-explore/mlx-swift-lm/issues/645",
     },
 }
 

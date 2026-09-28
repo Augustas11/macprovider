@@ -62,6 +62,53 @@ class SwiftPMPinParsingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unexpected SwiftPM source location"):
                 read_pins(resolved)
 
+    def test_accepts_spec048_mlx_swift_lm_fork_at_exact_revision_only(self):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
+        payload["pins"][1]["state"] = {
+            "revision": "3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db"
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            resolved = Path(temporary) / "Package.resolved"
+            resolved.write_text(json.dumps(payload))
+
+            pins = read_pins(resolved)
+
+        self.assertEqual(
+            pins["mlx_swift_lm"],
+            "3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db",
+        )
+        self.assertEqual(
+            pins["mlx_swift_lm_revision"],
+            "3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db",
+        )
+
+    def test_fails_closed_when_spec048_fork_uses_unreviewed_revision(self):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
+        payload["pins"][1]["state"] = {
+            "revision": "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57"
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            resolved = Path(temporary) / "Package.resolved"
+            resolved.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "unexpected SwiftPM source location"):
+                read_pins(resolved)
+
+    def test_fails_closed_when_upstream_mlx_swift_lm_is_revision_only(self):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        payload["pins"][1]["state"] = {
+            "revision": "3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db"
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            resolved = Path(temporary) / "Package.resolved"
+            resolved.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "missing required SwiftPM pins"):
+                read_pins(resolved)
+
 
 class UpstreamWatchComparisonTests(unittest.TestCase):
     @staticmethod
@@ -192,6 +239,24 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
             (True, "resolved production pin graph changed"),
         )
 
+    def test_native_mtp_immutable_dependency_exception_change_is_material(self):
+        old = self._baseline()
+        old["native_mtp_immutable_dependency_exception"] = {
+            "mlx_swift_lm": {
+                "location": "https://github.com/Augustas11/mlx-swift-lm.git",
+                "revision": "old",
+            }
+        }
+        new = json.loads(json.dumps(old))
+        new["native_mtp_immutable_dependency_exception"]["mlx_swift_lm"][
+            "revision"
+        ] = "3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db"
+
+        changed, reason = material_changes(old, new)
+
+        self.assertTrue(changed)
+        self.assertIn("native MTP immutable-dependency exception changed", reason)
+
     def test_snapshot_merge_preserves_reviewed_metadata_and_watchlist(self):
         old = self._baseline()
         old["blockers"]["mlx_swift_lm_364_gemma_moe"]["status"] = "awaiting_release_tag"
@@ -219,6 +284,43 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
         self.assertEqual(merged["blockers"]["reviewed_only"]["status"], "blocked")
         self.assertEqual(
             merged["blockers"]["mlx_swift_lm_364_gemma_moe"]["updated_at"], "new"
+        )
+
+    def test_snapshot_merge_preserves_reviewed_native_mtp_exception_metadata(self):
+        old = self._baseline()
+        old["native_mtp_immutable_dependency_exception"] = {
+            "mlx_swift_lm": {
+                "status": "reviewed_exception",
+                "directive": "SPEC-048 fork only",
+            }
+        }
+        live = self._baseline()
+        live["native_mtp_immutable_dependency_exception"] = {
+            "mlx_swift_lm": {
+                "location": "https://github.com/Augustas11/mlx-swift-lm.git",
+                "revision": "3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db",
+            }
+        }
+
+        merged = merge_snapshot(old, live)
+
+        self.assertEqual(
+            merged["native_mtp_immutable_dependency_exception"]["mlx_swift_lm"][
+                "status"
+            ],
+            "reviewed_exception",
+        )
+        self.assertEqual(
+            merged["native_mtp_immutable_dependency_exception"]["mlx_swift_lm"][
+                "directive"
+            ],
+            "SPEC-048 fork only",
+        )
+        self.assertEqual(
+            merged["native_mtp_immutable_dependency_exception"]["mlx_swift_lm"][
+                "revision"
+            ],
+            "3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db",
         )
 
     def test_native_mtp_required_merges_release_flip_is_material(self):

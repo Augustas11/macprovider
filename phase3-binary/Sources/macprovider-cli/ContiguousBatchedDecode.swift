@@ -59,8 +59,8 @@ enum ContiguousBatchedDecode {
         nonisolated(unsafe) var decodeStart = Date()
         nonisolated(unsafe) var decodeEnd = decodeStart
 
-        await container.perform { context in
-            let cache = context.model.newCache(parameters: nil)
+        try await container.perform { context in
+            let cache = try context.model.newCache(parameters: nil)
             let flat = prompts.flatMap { $0.map(Int32.init) }
             let promptArray = MLXArray(flat).reshaped([rows, sequenceLength])
             let prefillLogits = context.model(promptArray, cache: cache)

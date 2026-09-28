@@ -1069,7 +1069,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 compiledCaches = existing
                 step = existingStep
             } else {
-                compiledCaches = model.newCache(parameters: nil)
+                compiledCaches = try model.newCache(parameters: nil)
                 guard compiledCaches.count == batchedCaches.count else {
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
                 }

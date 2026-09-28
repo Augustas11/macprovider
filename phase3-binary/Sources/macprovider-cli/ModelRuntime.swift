@@ -1387,8 +1387,8 @@ actor ModelRuntime: ModelRuntimeServing {
     /// `testConversationKeyedServeCacheProducesTrimmableKVCacheSimple`.
     nonisolated static func serveCache(
         model: any LanguageModel, baseParameters: GenerateParameters, forceSimpleKV: Bool
-    ) -> [KVCache] {
-        model.newCache(parameters: cacheParameters(baseParameters, forceSimpleKV: forceSimpleKV))
+    ) throws -> [KVCache] {
+        try model.newCache(parameters: cacheParameters(baseParameters, forceSimpleKV: forceSimpleKV))
     }
 
     nonisolated static func pagedKVAttachDecision(
@@ -1732,8 +1732,8 @@ actor ModelRuntime: ModelRuntimeServing {
         else {
             return (nil, nil)
         }
-        let cacheKinds = await container.perform { context in
-            Self.pagedKVCacheKinds(model: context.model)
+        let cacheKinds = try? await container.perform { context in
+            try Self.pagedKVCacheKinds(model: context.model)
         }
         guard let cacheKinds,
               runtimeCacheClass != "mixed"
@@ -1758,9 +1758,9 @@ actor ModelRuntime: ModelRuntimeServing {
         // cannot attach on the single-row parity probe alone and then serve a batched path
         // that was never proven. For MoE it additionally proves expert dispatch stays
         // per-row.
-        let layerCount = await container.perform { context in
-            context.model.newCache(parameters: nil).count
-        }
+        let layerCount = (try? await container.perform { context in
+            try context.model.newCache(parameters: nil).count
+        }) ?? 0
         let pairs = Self.pagedKVRuntimeIsolationProbePromptPairs
         let prober = pagedKVRuntimeProber
         let blockSizeTokens = pagedKVConfig.blockSizeTokens
@@ -1903,15 +1903,15 @@ actor ModelRuntime: ModelRuntimeServing {
             // (`maxKVSize = nil` → `KVCacheSimple`); a model that still returns a
             // rotating/other class uncapped (e.g. genuine sliding-window attention)
             // remains correctly rejected.
-            return Self.pagedKVRuntimeCacheClass(
+            return (try? Self.pagedKVRuntimeCacheClass(
                 model: context.model,
                 baseParameters: Self.cacheParameters(parameters, forceSimpleKV: true)
-            )
+            )) ?? Self.pagedKVUnavailableCacheClass
         }
     }
 
-    nonisolated static func pagedKVRuntimeCacheClass(model: any LanguageModel, baseParameters: GenerateParameters) -> String {
-        let caches = model.newCache(parameters: baseParameters)
+    nonisolated static func pagedKVRuntimeCacheClass(model: any LanguageModel, baseParameters: GenerateParameters) throws -> String {
+        let caches = try model.newCache(parameters: baseParameters)
         guard let first = caches.first else { return "empty" }
         let firstClass = String(describing: type(of: first))
         guard caches.allSatisfy({ String(describing: type(of: $0)) == firstClass }) else {
@@ -1922,8 +1922,8 @@ actor ModelRuntime: ModelRuntimeServing {
 
     private nonisolated static func pagedKVCacheKinds(
         model: any LanguageModel
-    ) -> [PagedKVSharedForwardBackend.CacheKind]? {
-        let caches = model.newCache(parameters: nil)
+    ) throws -> [PagedKVSharedForwardBackend.CacheKind]? {
+        let caches = try model.newCache(parameters: nil)
         guard !caches.isEmpty else { return nil }
         var kinds: [PagedKVSharedForwardBackend.CacheKind] = []
         for cache in caches {
@@ -3439,7 +3439,7 @@ actor ModelRuntime: ModelRuntimeServing {
         container: ModelContainer
     ) async -> [PagedKVSharedForwardBackend.CacheKind]? {
         await container.perform { context in
-            return Self.pagedKVCacheKinds(model: context.model)
+            return try? Self.pagedKVCacheKinds(model: context.model)
         }
     }
 
@@ -4754,7 +4754,7 @@ actor ModelRuntime: ModelRuntimeServing {
             )
             let tokenizer = context.tokenizer
             // Only keyed requests can hold or reuse conversation state.
-            let hybrid = Self.nonEmpty(request.conversationKey) != nil
+            let hybrid = try Self.nonEmpty(request.conversationKey) != nil
                 && ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
             return (
                 ContinuousBatchPreparedRequest(
@@ -4972,7 +4972,7 @@ actor ModelRuntime: ModelRuntimeServing {
             )
             let tokenizer = context.tokenizer
             // Only keyed requests can hold or reuse conversation state.
-            let hybrid = Self.nonEmpty(request.conversationKey) != nil
+            let hybrid = try Self.nonEmpty(request.conversationKey) != nil
                 && ConversationCacheLayers.hasRecurrentLayers(context.model.newCache(parameters: nil))
             return (
                 ContinuousBatchPreparedRequest(
@@ -5296,7 +5296,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     temperature: 0.0,
                     topP: 1.0
                 )
-                let kvCache = context.model.newCache(parameters: parameters)
+                let kvCache = try context.model.newCache(parameters: parameters)
                 let iterator = try TokenIterator(input: lmInput, model: context.model, cache: kvCache, parameters: parameters)
                 return try await blockingInferenceExecutor.run { inferenceCancellation in
                     BlockingGenerateResult(generate(input: lmInput, context: context, iterator: iterator) { tokens in
@@ -5505,7 +5505,7 @@ actor ModelRuntime: ModelRuntimeServing {
                                 // keeps the rotating cap. TokenIterator still gets the
                                 // original `parameters` (its maxKVSize is ignored once the
                                 // cache is passed explicitly).
-                                kvCache = Self.serveCache(
+                                kvCache = try Self.serveCache(
                                     model: generationContext.model, baseParameters: parameters,
                                     forceSimpleKV: Self.forceSimpleKVCache(
                                         eligible: coldContext?.eligible == true,
@@ -5514,7 +5514,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             }
                             let recurrent = Self.prefillRecurrentCheckpoints(
                                 lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
-                                context: generationContext, prefillStepSize: parameters.prefillStepSize)
+                                context: generationContext, prefillStepSize: parameters.prefill.resolvedStepSize())
                             if let resumeAt = recurrent.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                             }
@@ -5741,7 +5741,7 @@ actor ModelRuntime: ModelRuntimeServing {
             return try await draft.perform(nonSendable: (input, targetContext, cache)) { draftContext, values in
                 let (input, targetContext, cache) = values
                 return try await blockingInferenceExecutor.run { inferenceCancellation in
-                    let draftCache = draftContext.model.newCache(parameters: parameters)
+                    let draftCache = try draftContext.model.newCache(parameters: parameters)
                     var iterator = try SpeculativeTokenIterator(
                         input: input,
                         mainModel: targetContext.model,
@@ -6132,7 +6132,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     } else {
                         // SPEC-037 FR-KVP1 / SPEC-024-R001: same KVCacheSimple selector as
                         // the non-streaming path (eligible persist or keyed serial reuse).
-                        kvCache = Self.serveCache(
+                        kvCache = try Self.serveCache(
                             model: generationContext.model, baseParameters: parameters,
                             forceSimpleKV: Self.forceSimpleKVCache(
                                 eligible: coldContext?.eligible == true,
@@ -6141,7 +6141,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     }
                     let recurrent = Self.prefillRecurrentCheckpoints(
                         lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
-                        context: generationContext, prefillStepSize: parameters.prefillStepSize)
+                        context: generationContext, prefillStepSize: parameters.prefill.resolvedStepSize())
                     if let resumeAt = recurrent.resumeAt {
                         iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                     }
@@ -6415,7 +6415,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 // SPEC-037 FR-KVP1: the seed always models the tier-ELIGIBLE path, so it
                 // must build a KVCacheSimple (maxKVSize=nil) — otherwise the
                 // `as? [KVCacheSimple]` guard below never succeeds and no geometry is seeded.
-                let kvCache = context.model.newCache(parameters: Self.cacheParameters(parameters, forceSimpleKV: true))
+                let kvCache = try context.model.newCache(parameters: Self.cacheParameters(parameters, forceSimpleKV: true))
                 let iterator = try TokenIterator(input: lmInput, model: context.model, cache: kvCache, parameters: parameters)
                 // A single-token warmup populates the per-layer cache tensors; that is
                 // all the seed needs (only the geometry is read, never the values).
@@ -6713,7 +6713,7 @@ actor ModelRuntime: ModelRuntimeServing {
         context: ModelContext,
         blockingInferenceExecutor: BlockingInferenceExecutor
     ) async throws -> [Int] {
-        let cache = context.model.newCache(parameters: parameters)
+        let cache = try context.model.newCache(parameters: parameters)
         let iterator = try TokenIterator(input: input, model: context.model, cache: cache, parameters: parameters)
         let result: BlockingGenerateResult = try await blockingInferenceExecutor.run { inferenceCancellation in
             BlockingGenerateResult(generate(input: input, context: context, iterator: iterator) { _ in
@@ -6737,7 +6737,7 @@ actor ModelRuntime: ModelRuntimeServing {
         try await draft.perform(nonSendable: (input, targetContext)) { draftContext, values in
             let (input, targetContext) = values
             return try await blockingInferenceExecutor.run { inferenceCancellation in
-                let draftCache = draftContext.model.newCache(parameters: parameters)
+                let draftCache = try draftContext.model.newCache(parameters: parameters)
                 var iterator = try SpeculativeTokenIterator(
                     input: input,
                     mainModel: targetContext.model,

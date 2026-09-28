@@ -20,9 +20,20 @@ EXPECTED_LOCATIONS = {
     "swift-jinja": "https://github.com/huggingface/swift-jinja",
 }
 
+SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
+SPEC048_MLX_SWIFT_LM_REVISION = "3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db"
+
 
 def normalized_location(value: str) -> str:
     return value.strip().lower().removesuffix(".git").rstrip("/")
+
+
+def is_spec048_mlx_swift_lm_fork(identity: str, location: str, revision: object) -> bool:
+    return (
+        identity == "mlx-swift-lm"
+        and location == normalized_location(SPEC048_MLX_SWIFT_LM_FORK)
+        and revision == SPEC048_MLX_SWIFT_LM_REVISION
+    )
 
 
 def read_pins(path: Path) -> dict[str, str]:
@@ -35,11 +46,16 @@ def read_pins(path: Path) -> dict[str, str]:
             continue
         if pin.get("kind") != "remoteSourceControl":
             raise ValueError(f"unexpected SwiftPM source kind for {identity}")
-        if normalized_location(str(pin.get("location", ""))) != EXPECTED_LOCATIONS[identity]:
-            raise ValueError(f"unexpected SwiftPM source location for {identity}")
+        location = normalized_location(str(pin.get("location", "")))
         state = pin.get("state", {})
         version = state.get("version")
         revision = state.get("revision")
+        if location != normalized_location(EXPECTED_LOCATIONS[identity]):
+            if is_spec048_mlx_swift_lm_fork(identity, location, revision) and version is None:
+                pins[output_name] = revision
+                pins[f"{output_name}_revision"] = revision
+                continue
+            raise ValueError(f"unexpected SwiftPM source location for {identity}")
         if isinstance(version, str) and version and isinstance(revision, str) and revision:
             pins[output_name] = version
             pins[f"{output_name}_revision"] = revision
