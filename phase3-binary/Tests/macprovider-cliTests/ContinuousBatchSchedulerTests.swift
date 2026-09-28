@@ -4811,10 +4811,12 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     }
 
     func testNativeMTPConcurrentRowsCannotOvercommitRoundByteBudgetBeforeProposal() async throws {
+        let proposalGate = AsyncGate()
         let backend = ScriptedBackend(
             scripts: [:],
             prefillTokens: ["a": 6, "b": 8],
-            nativeTargetTopTokens: ["a": [7], "b": [9]]
+            nativeTargetTopTokens: ["a": [7], "b": [9]],
+            nativeProposalGate: proposalGate
         )
         let scheduler = try await makeScheduler(
             maxActiveRows: 2,
@@ -4844,6 +4846,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             ))
         }
 
+        try await eventually { await scheduler.nativeMTPReservedRoundBytesSnapshot() == 16 }
+        await proposalGate.open()
         let results = try await [a.value, b.value]
         XCTAssertEqual(results.filter { $0.terminalStatus == .length }.count, 1)
         XCTAssertEqual(
@@ -4956,10 +4960,12 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     }
 
     func testNativeMTPConcurrentRowsHonorSystemHeadroomAndRelease() async throws {
+        let proposalGate = AsyncGate()
         let backend = ScriptedBackend(
             scripts: [:],
             prefillTokens: ["a": 6, "b": 8],
-            nativeTargetTopTokens: ["a": [7], "b": [9]]
+            nativeTargetTopTokens: ["a": [7], "b": [9]],
+            nativeProposalGate: proposalGate
         )
         let scheduler = try await makeScheduler(
             maxActiveRows: 2,
@@ -4993,6 +4999,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             ))
         }
 
+        try await eventually { await scheduler.nativeMTPReservedRoundBytesSnapshot() == 16 }
+        await proposalGate.open()
         let results = try await [a.value, b.value]
         XCTAssertEqual(results.filter { $0.terminalStatus == .length }.count, 1)
         XCTAssertEqual(

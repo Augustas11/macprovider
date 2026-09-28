@@ -1034,7 +1034,7 @@ final class KVConversationColdTierTests: XCTestCase {
             self.kvHeads = Array(repeating: 1, count: layers)
             super.init()
         }
-        func newCache(parameters: GenerateParameters?) throws -> [KVCache] {
+        func newCache(parameters: GenerateParameters?) -> [KVCache] {
             kvHeads.map { _ in RotatingKVCache(maxSize: 4096) }
         }
         func prepare(_ input: LMInput, cache: [KVCache], windowSize: Int?) throws -> PrepareResult {

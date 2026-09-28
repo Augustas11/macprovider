@@ -4,13 +4,12 @@
 import MLX
 import MLXLMCommon
 import MLXNN
-@testable import MacProviderCore
 import XCTest
 
 final class NativeMTPUpstreamQualificationTests: XCTestCase {
     override func setUpWithError() throws {
         try super.setUpWithError()
-        guard PagedKVMetallibGate.defaultMetallibExists() else {
+        guard Self.defaultMetallibExists() else {
             throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
     }
@@ -429,6 +428,19 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
         let keys = MLXArray(values, [1, 1, positions.count, 2])
         let vals = MLXArray(values.map { -$0 }, [1, 1, positions.count, 2])
         return (keys, vals)
+    }
+
+    private static func defaultMetallibExists() -> Bool {
+        let relativeNames = [
+            "mlx.metallib",
+            "mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib",
+            "default.metallib",
+            "mlx-swift_Cmlx.bundle/default.metallib",
+        ]
+        let roots = [Bundle.main.resourceURL, Bundle.main.executableURL?.deletingLastPathComponent()]
+        return roots.compactMap { $0 }.contains { root in
+            relativeNames.contains { FileManager.default.fileExists(atPath: root.appendingPathComponent($0).path) }
+        }
     }
 
     private static func transactionSharedKVState(

@@ -1529,8 +1529,8 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 "penalties": false,
                 "conversation_cache": false,
                 "disk_cache": false,
-                "max_prompt_tokens": 32768,
-                "max_completion_tokens": 4096,
+                "max_prompt_tokens": 1_048_576,
+                "max_completion_tokens": 1_048_576,
             ],
             "spec023": [
                 "release_id": "native-mtp-release-2026-09-28",
@@ -1539,7 +1539,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 "live_executable_cdhash": liveExecutableCDHash,
                 "benchmark_policy_sha256": String(repeating: "3", count: 64),
                 "native_mtp_admission_tuple_sha256": tupleSHA,
-                "evidence_artifact_sha256": [evidenceSHA],
+                "evidence_artifact_sha256": Array(repeating: evidenceSHA, count: 7),
             ],
             "selftest": [
                 "release_id": "native-mtp-selftest-2026-09-28",
