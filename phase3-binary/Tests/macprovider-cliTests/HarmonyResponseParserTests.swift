@@ -19,6 +19,35 @@ final class HarmonyResponseParserTests: XCTestCase {
         XCTAssertFalse(HarmonyResponseParser.isHarmonyModelID("mlx-community/Qwen3-32B-4bit"))
     }
 
+    /// #1682: the Harmony fail-closed path (generation ends without a completed
+    /// `final` channel — most commonly reasoning-budget exhaustion) MUST keep the
+    /// SPEC-018 §3.10-locked buyer-visible contract: retryable
+    /// `malformed_tool_call_final_json`, HTTP 502, `upstream_provider_error`. The
+    /// human-readable message is diagnostic (not part of the locked contract) and
+    /// MUST name the actionable remedy so a usable reasoning model is not
+    /// misread as unusable when a probe under-budgets it.
+    func testMalformedHarmonyErrorKeepsLockedContractAndCarriesActionableMessage() {
+        let error = ModelRuntime.malformedHarmonyResponseError()
+
+        // SPEC-018 §3.10 rule 3: the buyer-visible code/type/status are locked.
+        XCTAssertEqual(error.code, "malformed_tool_call_final_json")
+        XCTAssertEqual(error.type, "upstream_provider_error")
+        XCTAssertEqual(error.status, 502)
+        XCTAssertTrue(error.inferenceRan)
+        XCTAssertTrue(error.settlementRan)
+
+        // retryable is derived from the locked code and must stay true.
+        let envelope = error.envelope["error"] as? [String: Any]
+        XCTAssertEqual(envelope?["retryable"] as? Bool, true)
+
+        // Diagnostic message names the actionable remedy (not contract, but the
+        // point of #1682: the opaque message made a working model look broken).
+        let message = error.message.lowercased()
+        XCTAssertTrue(message.contains("max_tokens"), "message should suggest raising max_tokens")
+        XCTAssertTrue(message.contains("reasoning effort"), "message should suggest lowering reasoning effort")
+        XCTAssertTrue(message.contains("final channel"), "message should name the missing final channel")
+    }
+
     func testHarmonyTerminalPreservingTokenizerHidesReturnEOSFromGenerationStopSet() {
         let tokenizer = HarmonyFixtureTokenizer(eosToken: "<|return|>", unknownToken: "<unk>")
         XCTAssertEqual(tokenizer.eosTokenId, HarmonyResponseParser.returnTokenID)
