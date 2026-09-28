@@ -46,7 +46,7 @@ Two apparently distinct failure classes:
 
 **MoE class — `qwen3.5-35b-a3b` (FAIL) vs `qwen3.6-35b-a3b` (PASS).** Real
 `config.json` differences that plausibly change decode numerics:
-- `text_config.partial_rotary_factor`: **0.25 on 3.6 (partial RoPE), absent/full on 3.5** — the paged gather/attention path may only be correct for the partial-rotary layout it was validated on.
+- ~~`text_config.partial_rotary_factor`: 0.25 on 3.6, absent/full on 3.5~~ — **refuted 2026-09-28.** The 3.5 configs carry the factor under `text_config.rope_parameters.partial_rotary_factor = 0.25`, and the pinned mlx-swift-lm 3.31.4 `Qwen35.swift` reads it from `rope_parameters` (default 0.25). All five hybrids (3.5-35B-A3B, 3.5-27B, 3.6-35B-A3B, 3.6-27B, 3.8-27B) resolve to partial RoPE 0.25 with `full_attention_interval` 4 (verified from the Studio HF cache). RoPE layout does not separate passing from failing models.
 - MoE `mlp.gate` / `mlp.shared_expert_gate` are **quantized 8-bit on 3.6, unquantized on 3.5** — different router numerics.
 - Minor: `bos_token_id`, `mlp_only_layers`, `output_router_logits`, `tie_word_embeddings`, `transformers_version`.
 
@@ -77,13 +77,20 @@ for one failing model on a short greedy prompt: find the first layer/op whose
 output differs, then whether it is the RoPE application (partial vs full rotary),
 the gather-fed SDPA, the Mamba recurrent-state handling, or the MoE gate.
 
+**Leads ruled out or reprioritized (2026-09-28 sweep of open ml-explore/mlx-swift-lm issues and PRs):**
+
+- Partial vs full RoPE: ruled out (see above).
+- Upstream mlx-swift-lm #633 (gated-delta q/k-norm epsilon headKDim× too large at our pin): a real numerics bug, but row-local and identical on the serial and batched paths, and all five models share `linear_key_head_dim` 128 and `rms_norm_eps` 1e-6. It cannot make serial ≠ batched. It will change every Qwen hybrid token on the next pin bump.
+- Upstream #450 (per-layer mixed-quant garbage): not the cause. The failing models are uniform 4-bit/g64; the passing 3.6-35B-A3B is the one with 8-bit gate overrides.
+- Remaining leads: batch-shape-dependent reduction order in the GDN recurrence or MoE path (upstream #488 merged Kahan-compensated recurrence; #643 saw greedy divergence at near-tied logits from batched verification alone). Bit-exact serial == batched may be unreachable for these identities; if so, the gate needs a tolerance-based content-parity rule rather than a numerics fix.
+
 ## Code anchors
 
 - `phase3-binary/Sources/macprovider-cli/ContinuousBatchScheduler.swift` —
   `PagedKVSharedForwardBackend`, `runDecodeStep()` / `decodeLockstepWindow` (the
   batched decode path that diverges).
 - Gather kernel identity `macprovider_paged_kv_gather_v1`; RoPE application in the
-  paged attention path (check partial-rotary handling).
+  paged attention path (partial-rotary layout is common to passing and failing models).
 - `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift` — the runtime parity
   probe (`computePagedKVRuntimeProbes`, `pagedKVRuntimeProber.parity`) that
   reports `[paged-kv] parity … established=…`; note it currently reports
@@ -98,7 +105,7 @@ the gather-fed SDPA, the Mamba recurrent-state handling, or the MoE gate.
 
 ## Deliverable
 
-Root-cause each failure class (MoE partial-rotary/gate-quant vs dense
+Root-cause each failure class (MoE gate-quant/reduction order vs dense
 weight-numerics), fix the paged shared-forward decode so batched == serial
 bit-exact, re-run `--scenario leftovers` to PASS, then add each newly-proven
 identity to the FR-PKV12 allowlist (code + SPEC) with its measured evidence — the
