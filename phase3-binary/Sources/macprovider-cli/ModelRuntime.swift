@@ -1388,6 +1388,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentNativeMTPStatusSink = NativeMTPStatusSink.disabled()
     private var currentNativeMTPTupleOffer: NativeMTPPublishedTupleOffer?
     private var currentNativeMTPSelfTestInput: NativeMTPSelfTestInput?
+    private var nativeMTPRevocationRefreshTask: Task<Void, Never>?
     private var nativeMTPStatusResetGeneration: UInt64 = 0
     private let configuredDraftModelID: String?
     private let configuredDraftModelLoadPath: String?
@@ -2707,12 +2708,14 @@ actor ModelRuntime: ModelRuntimeServing {
                     load: nativeMTPLoad,
                     receipt: receipt
                 )
+                startNativeMTPRevocationRefresh(load: nativeMTPLoad)
                 publishNativeMTPStatusSink(
                     capability: nativeMTPLoad.capability,
                     admissionCapability: nativeMTPLoad.admissionCapability,
                     reasonIfDisabled: .tupleNotAdmitted
                 )
             } else {
+                stopNativeMTPRevocationRefresh()
                 self.currentNativeMTPDrafterContainer = nil
                 self.currentNativeMTPAdmissionCapability = nil
                 self.currentNativeMTPCapability = nil
@@ -3086,7 +3089,8 @@ actor ModelRuntime: ModelRuntimeServing {
     func disableNativeMTPTuple(
         admissionTupleSHA256: String,
         servedSnapshotID: String,
-        targetGeneration: UInt64
+        targetGeneration: UInt64,
+        reason: NativeMTPStatusReason = .tupleRevoked
     ) async {
         guard let offer = currentNativeMTPTupleOffer,
               offer.nativeMTPAdmissionTupleSHA256 == admissionTupleSHA256,
@@ -3094,6 +3098,7 @@ actor ModelRuntime: ModelRuntimeServing {
               offer.targetGeneration == targetGeneration else {
             return
         }
+        stopNativeMTPRevocationRefresh()
         let fence = NativeMTPTupleFence(
             admissionTupleSHA256: admissionTupleSHA256,
             servedSnapshotID: servedSnapshotID,
@@ -3107,8 +3112,48 @@ actor ModelRuntime: ModelRuntimeServing {
         currentNativeMTPDrafterContainer = nil
         currentNativeMTPStatusSink = NativeMTPStatusSink.disabled(
             resetGeneration: UInt64(max(0, currentSpecDecodeGeneration)),
-            reason: .tupleRevoked
+            reason: reason
         )
+    }
+
+    private func startNativeMTPRevocationRefresh(load: NativeMTPRuntimeLoadResult) {
+        stopNativeMTPRevocationRefresh()
+        guard let signerKeyID = load.revocationSignerKeyID,
+              let trustedKeyring = load.revocationTrustedKeyring else {
+            return
+        }
+        let tupleSHA256 = load.admissionCapability.tupleSHA256
+        let servedSnapshotID = load.servedSnapshotID
+        let targetGeneration = load.selfTestInput.servedSnapshot?.generation ?? 0
+        let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID)
+        let store = KeychainNativeMTPRevocationStore()
+        nativeMTPRevocationRefreshTask = Task { [weak self] in
+            await NativeMTPRevocationFeedManager.pollWhileActive(
+                pinnedSignerKeyID: signerKeyID,
+                tupleSHA256: tupleSHA256,
+                verifier: verifier,
+                store: store,
+                initialExpiresAt: load.revocationExpiresAt
+            ) { _ in
+                await self?.disableNativeMTPTuple(
+                    admissionTupleSHA256: tupleSHA256,
+                    servedSnapshotID: servedSnapshotID,
+                    targetGeneration: targetGeneration
+                )
+            } onUnavailable: {
+                await self?.disableNativeMTPTuple(
+                    admissionTupleSHA256: tupleSHA256,
+                    servedSnapshotID: servedSnapshotID,
+                    targetGeneration: targetGeneration,
+                    reason: .revocationStateUnavailable
+                )
+            }
+        }
+    }
+
+    private func stopNativeMTPRevocationRefresh() {
+        nativeMTPRevocationRefreshTask?.cancel()
+        nativeMTPRevocationRefreshTask = nil
     }
 
     private func executeNativeMTPSelfTest(
@@ -4576,6 +4621,7 @@ actor ModelRuntime: ModelRuntimeServing {
         if case .attached = pagedKVAttachDecision {
             pagedKVSchedulerBackendInstalled = true
         }
+        stopNativeMTPRevocationRefresh()
         currentNativeMTPDrafterContainer = nil
         currentNativeMTPCapability = nil
         currentNativeMTPAdmissionCapability = nil
@@ -7743,6 +7789,9 @@ actor ModelRuntime: ModelRuntimeServing {
         let servedSnapshotID: String
         let runtimeCacheClass: String
         let modelCapabilities: PagedKVRuntimeModelCapabilities
+        let revocationSignerKeyID: String?
+        let revocationTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring?
+        let revocationExpiresAt: Date?
     }
 
     private struct NativeMTPCapturedTokenizerLoader: TokenizerLoader {
@@ -7948,11 +7997,25 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         do {
-            let effectiveRevokedTupleSHA256 = revokedTupleSHA256 ?? Self.nativeMTPRevokedTupleSHA256(
-                sidecarURL: sidecarURL,
-                signatureURL: signatureURL,
-                trustedKeyring: trustedKeyring
-            )
+            let revocationAdmissionState: NativeMTPRevocationAdmissionState
+            if let revokedTupleSHA256 {
+                revocationAdmissionState = NativeMTPRevocationAdmissionState(
+                    revokedTupleSHA256: revokedTupleSHA256,
+                    signerKeyID: nil,
+                    trustedKeyring: nil,
+                    expiresAt: nil
+                )
+            } else {
+                guard let loadedRevocationState = await Self.nativeMTPRevocationAdmissionState(
+                    sidecarURL: sidecarURL,
+                    signatureURL: signatureURL,
+                    trustedKeyring: trustedKeyring
+                ) else {
+                    return nil
+                }
+                revocationAdmissionState = loadedRevocationState
+            }
+            let effectiveRevokedTupleSHA256 = revocationAdmissionState.revokedTupleSHA256
             let snapshotRoot = sidecarURL.deletingLastPathComponent()
             let machine = MachineFingerprinter().sample()
             let admissionCapability = try NativeMTPAdmissionSidecar.load(
@@ -8138,18 +8201,28 @@ actor ModelRuntime: ModelRuntimeServing {
                 runtimeTuple: runtimeTuple,
                 servedSnapshotID: servedSnapshotID,
                 runtimeCacheClass: runtimeCacheClass,
-                modelCapabilities: modelCapabilities
+                modelCapabilities: modelCapabilities,
+                revocationSignerKeyID: revocationAdmissionState.signerKeyID,
+                revocationTrustedKeyring: revocationAdmissionState.trustedKeyring,
+                revocationExpiresAt: revocationAdmissionState.expiresAt
             )
         } catch {
             return nil
         }
     }
 
-    private static func nativeMTPRevokedTupleSHA256(
+    private struct NativeMTPRevocationAdmissionState {
+        let revokedTupleSHA256: Set<String>
+        let signerKeyID: String?
+        let trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring?
+        let expiresAt: Date?
+    }
+
+    private static func nativeMTPRevocationAdmissionState(
         sidecarURL: URL,
         signatureURL: URL,
         trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring
-    ) -> Set<String>? {
+    ) async -> NativeMTPRevocationAdmissionState? {
         do {
             let sidecarData = try Data(contentsOf: sidecarURL)
             let signatureData = try Data(contentsOf: signatureURL)
@@ -8160,33 +8233,17 @@ actor ModelRuntime: ModelRuntimeServing {
             )
             let store = KeychainNativeMTPRevocationStore()
             let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID)
-            let directory = sidecarURL.deletingLastPathComponent()
-            let feedURL = directory.appendingPathComponent(
-                "native-mtp-revocations.\(revocationSignerKeyID).json",
-                isDirectory: false
+            let state = try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+                pinnedSignerKeyID: revocationSignerKeyID,
+                verifier: verifier,
+                store: store
             )
-            let feedSignatureURL = directory.appendingPathComponent(
-                "native-mtp-revocations.\(revocationSignerKeyID).json.sig",
-                isDirectory: false
+            return NativeMTPRevocationAdmissionState(
+                revokedTupleSHA256: state.feed.revokedSet,
+                signerKeyID: revocationSignerKeyID,
+                trustedKeyring: trustedKeyring,
+                expiresAt: state.feed.expiresAt
             )
-            let state: NativeMTPRevocationState
-            if FileManager.default.fileExists(atPath: feedURL.path),
-               FileManager.default.fileExists(atPath: feedSignatureURL.path) {
-                state = try NativeMTPRevocationFeedManager.accept(
-                    feedData: Data(contentsOf: feedURL),
-                    signatureData: Data(contentsOf: feedSignatureURL),
-                    pinnedSignerKeyID: revocationSignerKeyID,
-                    verifier: verifier,
-                    store: store
-                )
-            } else {
-                state = try NativeMTPRevocationFeedManager.loadCached(
-                    pinnedSignerKeyID: revocationSignerKeyID,
-                    verifier: verifier,
-                    store: store
-                )
-            }
-            return state.feed.revokedSet
         } catch {
             return nil
         }

@@ -93,6 +93,10 @@ struct NativeMTPRevocationCacheSnapshot: Equatable, Sendable {
 
 enum NativeMTPRevocationFeedError: Error, Equatable, CustomStringConvertible {
     case missingFeed
+    case invalidOrigin
+    case invalidHTTPStatus(Int)
+    case redirectRejected
+    case transportFailed(String)
     case invalidJSON(String)
     case duplicateKey(String)
     case unknownField(String)
@@ -112,6 +116,10 @@ enum NativeMTPRevocationFeedError: Error, Equatable, CustomStringConvertible {
     var description: String {
         switch self {
         case .missingFeed: return "native-MTP revocation feed unavailable"
+        case .invalidOrigin: return "invalid native-MTP revocation feed origin"
+        case .invalidHTTPStatus(let status): return "invalid native-MTP revocation HTTP status: \(status)"
+        case .redirectRejected: return "native-MTP revocation feed redirect rejected"
+        case .transportFailed(let reason): return "native-MTP revocation feed transport failed: \(reason)"
         case .invalidJSON(let field): return "invalid native-MTP revocation JSON: \(field)"
         case .duplicateKey(let field): return "duplicate native-MTP revocation key: \(field)"
         case .unknownField(let field): return "unknown native-MTP revocation field: \(field)"
@@ -128,6 +136,18 @@ enum NativeMTPRevocationFeedError: Error, Equatable, CustomStringConvertible {
         case .cacheCorrupt: return "native-MTP revocation cache corrupt"
         case .storeFailed(let reason): return "native-MTP revocation store failed: \(reason)"
         }
+    }
+}
+
+struct NativeMTPRevocationFetchResponse: Equatable, Sendable {
+    let statusCode: Int
+    let body: Data
+    let redirected: Bool
+
+    init(statusCode: Int, body: Data, redirected: Bool = false) {
+        self.statusCode = statusCode
+        self.body = body
+        self.redirected = redirected
     }
 }
 
@@ -195,6 +215,11 @@ struct NativeMTPRevocationState: Equatable, Sendable {
 }
 
 enum NativeMTPRevocationFeedManager {
+    static let productionOrigin = URL(string: "https://coordinator.malibu.tech/v1/")!
+    static let refreshIntervalSeconds: TimeInterval = 15 * 60
+    typealias Fetcher = @Sendable (URL, Int) async throws -> NativeMTPRevocationFetchResponse
+    typealias Sleeper = @Sendable (UInt64) async throws -> Void
+
     static func accept(
         feedData: Data,
         signatureData: Data,
@@ -298,6 +323,240 @@ enum NativeMTPRevocationFeedManager {
         return NativeMTPRevocationState(feed: feed, source: .cache)
     }
 
+    static func feedURLs(
+        pinnedSignerKeyID: String,
+        origin: URL = productionOrigin
+    ) throws -> (feed: URL, signature: URL) {
+        guard pinnedSignerKeyID.utf8.allSatisfy({ $0 >= 0x21 && $0 <= 0x7e }),
+              pinnedSignerKeyID.utf8.count <= 128,
+              let encodedSignerKeyID = encodedPathSegment(pinnedSignerKeyID),
+              origin.scheme == "https",
+              origin.host?.isEmpty == false,
+              origin.user == nil,
+              origin.password == nil,
+              origin.fragment == nil else {
+            throw NativeMTPRevocationFeedError.invalidOrigin
+        }
+        let base = origin.absoluteString.hasSuffix("/") ? origin : origin.appendingPathComponent("")
+        guard let feed = URL(
+                string: "native-mtp-revocations.\(encodedSignerKeyID).json",
+                relativeTo: base
+              )?.absoluteURL,
+              let signature = URL(
+                string: "native-mtp-revocations.\(encodedSignerKeyID).json.sig",
+                relativeTo: base
+              )?.absoluteURL else {
+            throw NativeMTPRevocationFeedError.invalidOrigin
+        }
+        guard feed.scheme == "https",
+              signature.scheme == "https",
+              feed.host == origin.host,
+              signature.host == origin.host else {
+            throw NativeMTPRevocationFeedError.invalidOrigin
+        }
+        return (feed, signature)
+    }
+
+    static func loadNetworkFirst(
+        pinnedSignerKeyID: String,
+        verifier: NativeMTPRevocationSignatureVerifying,
+        store: NativeMTPRevocationStore,
+        origin: URL = productionOrigin,
+        fetcher: Fetcher = defaultFetch,
+        now: Date = Date()
+    ) async throws -> NativeMTPRevocationState {
+        do {
+            let urls = try feedURLs(pinnedSignerKeyID: pinnedSignerKeyID, origin: origin)
+            let feedData = try await fetch(urls.feed, maxBytes: NativeMTPRevocationFeed.maxFeedBytes, fetcher: fetcher)
+            let signatureData = try await fetch(
+                urls.signature,
+                maxBytes: NativeMTPRevocationFeed.maxSignatureBytes,
+                fetcher: fetcher
+            )
+            return try accept(
+                feedData: feedData,
+                signatureData: signatureData,
+                pinnedSignerKeyID: pinnedSignerKeyID,
+                verifier: verifier,
+                store: store,
+                now: now
+            )
+        } catch let error as NativeMTPRevocationFeedError where error.isTransportOrHTTPFailure {
+            return try loadCached(
+                pinnedSignerKeyID: pinnedSignerKeyID,
+                verifier: verifier,
+                store: store,
+                now: now
+            )
+        }
+    }
+
+    @discardableResult
+    static func refreshOnce(
+        pinnedSignerKeyID: String,
+        tupleSHA256: String,
+        verifier: NativeMTPRevocationSignatureVerifying,
+        store: NativeMTPRevocationStore,
+        origin: URL = productionOrigin,
+        fetcher: Fetcher = defaultFetch,
+        now: Date = Date(),
+        onRevoked: @Sendable (NativeMTPRevocationState) async -> Void
+    ) async throws -> NativeMTPRevocationState {
+        let state = try await loadNetworkFirst(
+            pinnedSignerKeyID: pinnedSignerKeyID,
+            verifier: verifier,
+            store: store,
+            origin: origin,
+            fetcher: fetcher,
+            now: now
+        )
+        if state.isRevoked(tupleSHA256: tupleSHA256) {
+            await onRevoked(state)
+        }
+        return state
+    }
+
+    static func pollWhileActive(
+        pinnedSignerKeyID: String,
+        tupleSHA256: String,
+        verifier: NativeMTPRevocationSignatureVerifying,
+        store: NativeMTPRevocationStore,
+        origin: URL = productionOrigin,
+        fetcher: @escaping Fetcher = defaultFetch,
+        intervalSeconds: TimeInterval = refreshIntervalSeconds,
+        sleeper: @escaping Sleeper = defaultSleep,
+        now: @escaping @Sendable () -> Date = Date.init,
+        initialExpiresAt: Date? = nil,
+        onRevoked: @escaping @Sendable (NativeMTPRevocationState) async -> Void
+    ) async {
+        await pollWhileActive(
+            pinnedSignerKeyID: pinnedSignerKeyID,
+            tupleSHA256: tupleSHA256,
+            verifier: verifier,
+            store: store,
+            origin: origin,
+            fetcher: fetcher,
+            intervalSeconds: intervalSeconds,
+            sleeper: sleeper,
+            now: now,
+            initialExpiresAt: initialExpiresAt,
+            onRevoked: onRevoked,
+            onUnavailable: {}
+        )
+    }
+
+    static func pollWhileActive(
+        pinnedSignerKeyID: String,
+        tupleSHA256: String,
+        verifier: NativeMTPRevocationSignatureVerifying,
+        store: NativeMTPRevocationStore,
+        origin: URL = productionOrigin,
+        fetcher: @escaping Fetcher = defaultFetch,
+        intervalSeconds: TimeInterval = refreshIntervalSeconds,
+        sleeper: @escaping Sleeper = defaultSleep,
+        now: @escaping @Sendable () -> Date = Date.init,
+        initialExpiresAt: Date? = nil,
+        onRevoked: @escaping @Sendable (NativeMTPRevocationState) async -> Void,
+        onUnavailable: @escaping @Sendable () async -> Void
+    ) async {
+        let boundedInterval = min(max(1, intervalSeconds), refreshIntervalSeconds)
+        var currentExpiresAt = initialExpiresAt
+        while !Task.isCancelled {
+            let nowDate = now()
+            let sleepSeconds: TimeInterval
+            if let expiresAt = currentExpiresAt {
+                let remaining = expiresAt.timeIntervalSince(nowDate)
+                guard remaining > 0 else {
+                    await onUnavailable()
+                    return
+                }
+                sleepSeconds = min(boundedInterval, remaining)
+            } else {
+                sleepSeconds = boundedInterval
+            }
+            let sleepNanoseconds = UInt64((sleepSeconds * 1_000_000_000).rounded())
+            do {
+                try await sleeper(sleepNanoseconds)
+                if Task.isCancelled { return }
+                let state = try await refreshOnce(
+                    pinnedSignerKeyID: pinnedSignerKeyID,
+                    tupleSHA256: tupleSHA256,
+                    verifier: verifier,
+                    store: store,
+                    origin: origin,
+                    fetcher: fetcher,
+                    now: now(),
+                    onRevoked: onRevoked
+                )
+                currentExpiresAt = state.feed.expiresAt
+                if state.isRevoked(tupleSHA256: tupleSHA256) {
+                    return
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                await onUnavailable()
+                return
+            }
+        }
+    }
+
+    static func defaultFetch(url: URL, maxBytes: Int) async throws -> NativeMTPRevocationFetchResponse {
+        guard url.scheme == "https",
+              url.user == nil,
+              url.password == nil,
+              url.fragment == nil else {
+            throw NativeMTPRevocationFeedError.invalidOrigin
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        let delegate = NativeMTPRevocationNoRedirectDelegate()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 20
+        delegate.maxBytes = maxBytes
+        let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+        defer {
+            session.finishTasksAndInvalidate()
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            delegate.continuation = continuation
+            session.dataTask(with: request).resume()
+        }
+    }
+
+    private static func fetch(
+        _ url: URL,
+        maxBytes: Int,
+        fetcher: Fetcher
+    ) async throws -> Data {
+        let response = try await fetcher(url, maxBytes)
+        if response.redirected || (response.statusCode >= 300 && response.statusCode < 400) {
+            throw NativeMTPRevocationFeedError.redirectRejected
+        }
+        guard response.statusCode == 200 else {
+            throw NativeMTPRevocationFeedError.invalidHTTPStatus(response.statusCode)
+        }
+        guard response.body.count <= maxBytes else {
+            throw NativeMTPRevocationFeedError.payloadTooLarge("network")
+        }
+        return response.body
+    }
+
+    private static func defaultSleep(_ nanoseconds: UInt64) async throws {
+        try await Task.sleep(nanoseconds: nanoseconds)
+    }
+
+    private static func encodedPathSegment(_ value: String) -> String? {
+        var allowed = CharacterSet()
+        allowed.insert(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed)
+    }
+
     private static func validate(
         feed: NativeMTPRevocationFeed,
         bodySHA256: String,
@@ -363,6 +622,127 @@ enum NativeMTPRevocationFeedManager {
         }
     }
 
+}
+
+private extension NativeMTPRevocationFeedError {
+    var isTransportOrHTTPFailure: Bool {
+        switch self {
+        case .transportFailed, .invalidHTTPStatus, .redirectRejected:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+private final class NativeMTPRevocationNoRedirectDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    fileprivate var maxBytes = 0
+    fileprivate var continuation: CheckedContinuation<NativeMTPRevocationFetchResponse, Error>?
+    private var statusCode: Int?
+    private var body = Data()
+    private var completed = false
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let http = response as? HTTPURLResponse else {
+            resume(throwing: NativeMTPRevocationFeedError.transportFailed("non_http_response"))
+            completionHandler(.cancel)
+            return
+        }
+        if http.statusCode >= 300 && http.statusCode < 400 {
+            resume(throwing: NativeMTPRevocationFeedError.redirectRejected)
+            completionHandler(.cancel)
+            return
+        }
+        guard http.statusCode == 200 else {
+            resume(throwing: NativeMTPRevocationFeedError.invalidHTTPStatus(http.statusCode))
+            completionHandler(.cancel)
+            return
+        }
+        if let contentLength = http.value(forHTTPHeaderField: "Content-Length"),
+           let byteCount = Int(contentLength),
+           byteCount > maxBytes {
+            resume(throwing: NativeMTPRevocationFeedError.payloadTooLarge("network"))
+            completionHandler(.cancel)
+            return
+        }
+        statusCode = http.statusCode
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        if !completed {
+            body.append(data)
+            if body.count > maxBytes {
+                lock.unlock()
+                resume(throwing: NativeMTPRevocationFeedError.payloadTooLarge("network"))
+                dataTask.cancel()
+                return
+            }
+        }
+        lock.unlock()
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            if (error as NSError).code == NSURLErrorCancelled {
+                return
+            }
+            resume(throwing: NativeMTPRevocationFeedError.transportFailed(String(describing: error)))
+            return
+        }
+        lock.lock()
+        let statusCode = self.statusCode
+        let body = self.body
+        lock.unlock()
+        guard let statusCode else {
+            resume(throwing: NativeMTPRevocationFeedError.transportFailed("missing_http_status"))
+            return
+        }
+        resume(returning: NativeMTPRevocationFetchResponse(statusCode: statusCode, body: body))
+    }
+
+    private func resume(returning value: NativeMTPRevocationFetchResponse) {
+        lock.lock()
+        guard !completed else {
+            lock.unlock()
+            return
+        }
+        completed = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: value)
+    }
+
+    private func resume(throwing error: Error) {
+        lock.lock()
+        guard !completed else {
+            lock.unlock()
+            return
+        }
+        completed = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(throwing: error)
+    }
 }
 
 extension NativeMTPRevocationFeed {

@@ -5284,7 +5284,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
     ) -> ContinuousBatchSchedulerRequest {
         let bytesByDepth = completeWindowBytesByDepth
             ?? Array(repeating: completeWindowBytes, count: maximumDepth + 1)
-        ContinuousBatchSchedulerRequest(
+        return ContinuousBatchSchedulerRequest(
             id: id,
             conversationKey: "",
             promptTokens: promptTokens,

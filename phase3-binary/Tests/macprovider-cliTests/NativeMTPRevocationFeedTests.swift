@@ -341,6 +341,234 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         XCTAssertFalse(recovered.isRevoked(tupleSHA256: otherTuple))
     }
 
+    func testNetworkURLConstructionUsesCanonicalOperatorOriginAndKeyQualifiedNames() throws {
+        let urls = try NativeMTPRevocationFeedManager.feedURLs(pinnedSignerKeyID: "revoker-a")
+
+        XCTAssertEqual(
+            urls.feed.absoluteString,
+            "https://coordinator.malibu.tech/v1/native-mtp-revocations.revoker-a.json"
+        )
+        XCTAssertEqual(
+            urls.signature.absoluteString,
+            "https://coordinator.malibu.tech/v1/native-mtp-revocations.revoker-a.json.sig"
+        )
+        let encoded = try NativeMTPRevocationFeedManager.feedURLs(
+            pinnedSignerKeyID: "revoker/a",
+            origin: URL(string: "https://example.test/v1/")!
+        )
+        XCTAssertEqual(encoded.feed.absoluteString, "https://example.test/v1/native-mtp-revocations.revoker%2Fa.json")
+        XCTAssertThrowsError(try NativeMTPRevocationFeedManager.feedURLs(
+            pinnedSignerKeyID: "revoker-a",
+            origin: URL(string: "http://coordinator.malibu.tech/v1/")!
+        )) {
+            XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .invalidOrigin)
+        }
+    }
+
+    func testNetworkFirstRejectsRedirectStatusAndOversizedResponses() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let now = Self.date("2026-09-28T12:00:00Z")
+
+        await XCTAssertThrowsNativeMTPRevocationError(.missingFeed) {
+            try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+                pinnedSignerKeyID: "revoker-a",
+                verifier: Self.verifier(signer: signer),
+                store: MemoryRevocationStore(),
+                origin: URL(string: "https://example.test/v1/")!,
+                fetcher: { _, _ in NativeMTPRevocationFetchResponse(statusCode: 302, body: Data(), redirected: true) },
+                now: now
+            )
+        }
+        await XCTAssertThrowsNativeMTPRevocationError(.missingFeed) {
+            try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+                pinnedSignerKeyID: "revoker-a",
+                verifier: Self.verifier(signer: signer),
+                store: MemoryRevocationStore(),
+                origin: URL(string: "https://example.test/v1/")!,
+                fetcher: { _, _ in NativeMTPRevocationFetchResponse(statusCode: 503, body: Data()) },
+                now: now
+            )
+        }
+        await XCTAssertThrowsNativeMTPRevocationError(.payloadTooLarge("network")) {
+            try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+                pinnedSignerKeyID: "revoker-a",
+                verifier: Self.verifier(signer: signer),
+                store: MemoryRevocationStore(),
+                origin: URL(string: "https://example.test/v1/")!,
+                fetcher: { _, _ in
+                    NativeMTPRevocationFetchResponse(
+                        statusCode: 200,
+                        body: Data(repeating: 0x7b, count: NativeMTPRevocationFeed.maxFeedBytes + 1)
+                    )
+                },
+                now: now
+            )
+        }
+    }
+
+    func testNetworkFirstAcceptsFreshNetworkAndFallsBackToCurrentCacheOnTransportFailure() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let store = MemoryRevocationStore()
+        let now = Self.date("2026-09-28T12:00:00Z")
+        let tuple = Self.digest("01")
+        let feed = try Self.feedData(generation: 1, signerKeyID: "revoker-a", tuples: [tuple], now: now)
+        let signature = Self.signature(for: feed, signer: signer, keyID: "revoker-a")
+        let networkState = try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+            pinnedSignerKeyID: "revoker-a",
+            verifier: Self.verifier(signer: signer),
+            store: store,
+            origin: URL(string: "https://example.test/v1/")!,
+            fetcher: { url, _ in
+                if url.lastPathComponent.hasSuffix(".json.sig") {
+                    return NativeMTPRevocationFetchResponse(statusCode: 200, body: signature)
+                }
+                return NativeMTPRevocationFetchResponse(statusCode: 200, body: feed)
+            },
+            now: now
+        )
+
+        XCTAssertEqual(networkState.source, .network)
+        XCTAssertTrue(networkState.isRevoked(tupleSHA256: tuple))
+
+        let cachedState = try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+            pinnedSignerKeyID: "revoker-a",
+            verifier: Self.verifier(signer: signer),
+            store: store,
+            origin: URL(string: "https://example.test/v1/")!,
+            fetcher: { _, _ in throw NativeMTPRevocationFeedError.transportFailed("offline") },
+            now: now.addingTimeInterval(60)
+        )
+        XCTAssertEqual(cachedState.source, .cache)
+        XCTAssertTrue(cachedState.isRevoked(tupleSHA256: tuple))
+    }
+
+    func testNetworkFirstFailsClosedWhenNoCurrentAuthenticatedStateExists() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let now = Self.date("2026-09-28T12:00:00Z")
+
+        await XCTAssertThrowsNativeMTPRevocationError(.missingFeed) {
+            try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+                pinnedSignerKeyID: "revoker-a",
+                verifier: Self.verifier(signer: signer),
+                store: MemoryRevocationStore(),
+                origin: URL(string: "https://example.test/v1/")!,
+                fetcher: { _, _ in throw NativeMTPRevocationFeedError.transportFailed("offline") },
+                now: now
+            )
+        }
+    }
+
+    func testRefreshNotifiesWhenCurrentTupleBecomesRevoked() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let store = MemoryRevocationStore()
+        let now = Self.date("2026-09-28T12:00:00Z")
+        let tuple = Self.digest("01")
+        let initial = try Self.feedData(generation: 1, signerKeyID: "revoker-a", tuples: [], now: now)
+        _ = try Self.accept(initial, signer: signer, store: store, now: now)
+        let revoked = try Self.feedData(generation: 2, signerKeyID: "revoker-a", tuples: [tuple], now: now.addingTimeInterval(60))
+        let revokedSignature = Self.signature(for: revoked, signer: signer, keyID: "revoker-a")
+        let flag = AsyncFlag()
+
+        let state = try await NativeMTPRevocationFeedManager.refreshOnce(
+            pinnedSignerKeyID: "revoker-a",
+            tupleSHA256: tuple,
+            verifier: Self.verifier(signer: signer),
+            store: store,
+            origin: URL(string: "https://example.test/v1/")!,
+            fetcher: { url, _ in
+                if url.lastPathComponent.hasSuffix(".json.sig") {
+                    return NativeMTPRevocationFetchResponse(statusCode: 200, body: revokedSignature)
+                }
+                return NativeMTPRevocationFetchResponse(statusCode: 200, body: revoked)
+            },
+            now: now.addingTimeInterval(60)
+        ) { _ in
+            await flag.mark()
+        }
+
+        XCTAssertEqual(state.feed.generation, 2)
+        XCTAssertTrue(state.isRevoked(tupleSHA256: tuple))
+        let wasNotified = await flag.value
+        XCTAssertTrue(wasNotified)
+    }
+
+    func testPollingIntervalIsCappedAtFifteenMinutes() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let probe = SleepProbe()
+
+        await NativeMTPRevocationFeedManager.pollWhileActive(
+            pinnedSignerKeyID: "revoker-a",
+            tupleSHA256: Self.digest("01"),
+            verifier: Self.verifier(signer: signer),
+            store: MemoryRevocationStore(),
+            origin: URL(string: "https://example.test/v1/")!,
+            fetcher: { _, _ in throw NativeMTPRevocationFeedError.transportFailed("offline") },
+            intervalSeconds: 3_600,
+            sleeper: { nanoseconds in
+                await probe.record(nanoseconds)
+                throw CancellationError()
+            },
+            now: { Self.date("2026-09-28T12:00:00Z") },
+            onRevoked: { _ in }
+        )
+
+        let sleepValues = await probe.values
+        XCTAssertEqual(sleepValues, [UInt64(15 * 60 * 1_000_000_000)])
+    }
+
+    func testPollingIntervalIsCappedByCurrentFeedExpiryBeforeFifteenMinutes() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let probe = SleepProbe()
+        let now = Self.date("2026-09-28T12:00:00Z")
+
+        await NativeMTPRevocationFeedManager.pollWhileActive(
+            pinnedSignerKeyID: "revoker-a",
+            tupleSHA256: Self.digest("01"),
+            verifier: Self.verifier(signer: signer),
+            store: MemoryRevocationStore(),
+            origin: URL(string: "https://example.test/v1/")!,
+            fetcher: { _, _ in throw NativeMTPRevocationFeedError.transportFailed("offline") },
+            intervalSeconds: 15 * 60,
+            sleeper: { nanoseconds in
+                await probe.record(nanoseconds)
+                throw CancellationError()
+            },
+            now: { now },
+            initialExpiresAt: now.addingTimeInterval(5 * 60),
+            onRevoked: { _ in },
+            onUnavailable: {}
+        )
+
+        let sleepValues = await probe.values
+        XCTAssertEqual(sleepValues, [UInt64(5 * 60 * 1_000_000_000)])
+    }
+
+    func testPollingFailsClosedImmediatelyWhenCurrentFeedIsExpired() async throws {
+        let signer = Curve25519.Signing.PrivateKey()
+        let probe = SleepProbe()
+        let unavailable = AsyncFlag()
+        let now = Self.date("2026-09-28T12:00:00Z")
+
+        await NativeMTPRevocationFeedManager.pollWhileActive(
+            pinnedSignerKeyID: "revoker-a",
+            tupleSHA256: Self.digest("01"),
+            verifier: Self.verifier(signer: signer),
+            store: MemoryRevocationStore(),
+            origin: URL(string: "https://example.test/v1/")!,
+            fetcher: { _, _ in throw NativeMTPRevocationFeedError.transportFailed("offline") },
+            sleeper: { nanoseconds in await probe.record(nanoseconds) },
+            now: { now },
+            initialExpiresAt: now,
+            onRevoked: { _ in },
+            onUnavailable: { await unavailable.mark() }
+        )
+
+        let wasUnavailable = await unavailable.value
+        let sleepValues = await probe.values
+        XCTAssertTrue(wasUnavailable)
+        XCTAssertEqual(sleepValues, [])
+    }
+
     private static func accept(
         _ feed: Data,
         signer: Curve25519.Signing.PrivateKey,
@@ -458,5 +686,41 @@ private final class MemoryRevocationStore: NativeMTPRevocationStore, @unchecked 
         cachedSignature = signatureData
         cacheAnchor = anchor
         self.anchor = anchor
+    }
+}
+
+private func XCTAssertThrowsNativeMTPRevocationError<T>(
+    _ expected: NativeMTPRevocationFeedError,
+    file: StaticString = #filePath,
+    line: UInt = #line,
+    _ operation: () async throws -> T
+) async {
+    do {
+        _ = try await operation()
+        XCTFail("expected \(expected)", file: file, line: line)
+    } catch let error as NativeMTPRevocationFeedError {
+        XCTAssertEqual(error, expected, file: file, line: line)
+    } catch {
+        XCTFail("unexpected error: \(error)", file: file, line: line)
+    }
+}
+
+private actor AsyncFlag {
+    private var stored = false
+
+    var value: Bool { stored }
+
+    func mark() {
+        stored = true
+    }
+}
+
+private actor SleepProbe {
+    private var stored: [UInt64] = []
+
+    var values: [UInt64] { stored }
+
+    func record(_ value: UInt64) {
+        stored.append(value)
     }
 }
