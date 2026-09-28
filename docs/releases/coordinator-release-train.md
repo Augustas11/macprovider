@@ -170,7 +170,7 @@ around 2026-10-23. The fix takes effect at the next renewal (Wed 2026-09-30
 
 | Net change in coordinator / gateway / Pearl assets | Status | PR |
 |---|---|---|
-| _none yet_ | | |
+| #1752 operator drain: gateway `POST /admin/settlement/release-holds` (operator-only, one account per call, required `created_before`, dry-run by default; verified finality settles, refund finality refunds, anything else is released via the reservation-type-correct path, recording a terminal `operator_drain_*` reconcile result). Rollout: in the same gateway restart, set Pearl `settlement.reconcile_interval_s`/`reconcile_batch_limit` back to the repo defaults 30 s / 100 (they are 3600 s / 1 since 2026-09-15). Then dry-run each held account, apply, and report the held count on #1752. | merged 2026-09-28, not deployed | #1783 (#1752) |
 
 ## Open Pearl actions (not new code)
 
