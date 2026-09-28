@@ -6955,6 +6955,34 @@ class PearlUpdaterTests(unittest.TestCase):
         self.assertEqual(loaded.release_mirror_gate, "disabled")
         self.assertEqual(loaded.release_mirror_root, Path("/srv/mirror/releases"))
 
+    def test_sqlite_snapshot_timeout_is_configured_bounded_and_applied(self):
+        config = self.root / "updater.conf"
+        config.write_text("PEARL_UPDATER_ENABLED=0\n")
+        config.chmod(0o600)
+        self.assertEqual(updater_module.load_config(config, trusted_uid=os.geteuid()).sqlite_snapshot_timeout_s, 900)
+        config.write_text("PEARL_UPDATER_SQLITE_SNAPSHOT_TIMEOUT_S=1500\n")
+        self.assertEqual(updater_module.load_config(config, trusted_uid=os.geteuid()).sqlite_snapshot_timeout_s, 1500)
+        for bad in ("59", "3601"):
+            config.write_text(f"PEARL_UPDATER_SQLITE_SNAPSHOT_TIMEOUT_S={bad}\n")
+            with self.assertRaises(updater_module.UpdateError):
+                updater_module.load_config(config, trusted_uid=os.geteuid())
+
+        source = self.root / "money.db"
+        destination = self.root / "snapshot.db"
+        timeouts = []
+
+        def fake_run(argv, check=False, timeout=None, **_kwargs):
+            timeouts.append(timeout)
+            if ".backup" in argv[-1]:
+                destination.write_bytes(b"sqlite")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            return subprocess.CompletedProcess(argv, 0, "ok\n", "")
+
+        self.updater.config = dataclasses.replace(self.updater.config, sqlite_snapshot_timeout_s=1234)
+        with mock.patch.object(self.updater, "run_command", side_effect=fake_run):
+            self.updater.sqlite_backup(source, destination)
+        self.assertEqual(timeouts, [1234, 1234])
+
     def test_release_mirror_gate_ignores_non_string_asset_names(self):
         self.with_release_mirror_gate()
         directory = self.seed_release_mirror()
