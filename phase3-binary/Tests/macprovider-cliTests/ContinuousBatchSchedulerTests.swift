@@ -4774,7 +4774,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             maximumDepth: 1
         ))
         XCTAssertEqual(failed.terminalStatus, .batchFailed)
-        XCTAssertEqual(failed.outputTokens, [6])
+        XCTAssertEqual(failed.outputTokens, [])
         let shouldCommit = await throwingBackend.nativeFinalizations().first?.first?.shouldCommit
         XCTAssertEqual(shouldCommit, false)
     }
@@ -4799,7 +4799,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
         XCTAssertEqual(failed.terminalStatus, .batchFailed)
         XCTAssertEqual(failed.errorCode, "continuous_batching_native_mtp_abort_failed")
-        XCTAssertEqual(failed.outputTokens, [6])
+        XCTAssertEqual(failed.outputTokens, [])
         let finalization = await backend.nativeFinalizations().first?.first
         XCTAssertEqual(finalization?.shouldCommit, false)
         XCTAssertEqual(finalization?.committedInputTokenCount, 0)
@@ -4822,18 +4822,18 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
         XCTAssertEqual(failed.terminalStatus, .requestFailed)
         XCTAssertEqual(failed.errorCode, "continuous_batching_native_mtp_finalize_failed")
-        XCTAssertEqual(failed.outputTokens, [6])
+        XCTAssertEqual(failed.outputTokens, [])
         let verified = await backend.verifiedRows()
         XCTAssertEqual(verified, [["no-finalizer"]])
     }
 
-    func testNativeMTPCancellationBeforeFinalizeRollsBackAndHidesTokens() async throws {
+    func testNativeMTPCancellationBeforeFinalizeRollsBackTransactionalCandidates() async throws {
         let verifyGate = AsyncGate()
         let recorder = TokenEventRecorder()
         let backend = ScriptedBackend(
             scripts: [:],
             prefillTokens: ["cancelled": 6],
-            nativeTargetTopTokens: ["cancelled": [7, 8]],
+            nativeTargetTopTokens: ["cancelled": [7]],
             nativeVerifyGate: verifyGate
         )
         let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
@@ -4855,7 +4855,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
         let result = try await task.value
         XCTAssertEqual(result.terminalStatus, .cancelled)
-        XCTAssertEqual(result.outputTokens, [6])
+        XCTAssertEqual(result.outputTokens, [])
         XCTAssertEqual(recorder.events().map(\.token), [6])
         let finalization = await backend.nativeFinalizations().first?.first
         XCTAssertEqual(finalization?.committedProposalTokenCount, 0)
