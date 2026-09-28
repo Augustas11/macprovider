@@ -568,7 +568,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(retainedInstalls, ["sticky-hit": 34])
         XCTAssertEqual(prefillCommitted.first, ["sticky-hit": 34])
         XCTAssertEqual(prefillTargets.first, ["sticky-hit": 36])
-        XCTAssertEqual(decodeCommitted.last, ["sticky-hit": 39])
+        XCTAssertTrue(decodeCommitted.isEmpty)
         XCTAssertEqual(result.retainedCache?.retainedSequence.logicalTokenCount, 41)
         let terminalCommitTargets = await fixture.backend.terminalCommitTargets()
         XCTAssertEqual(terminalCommitTargets, ["sticky-hit": 41])

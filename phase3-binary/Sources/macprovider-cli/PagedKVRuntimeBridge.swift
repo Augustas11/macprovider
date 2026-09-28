@@ -913,7 +913,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     initialOffset: $0.committedKVTokenCount
                 )
             }
-            let batchedCaches = try self.makeBatchedCaches(from: rowStates.map(\.caches))
+            let batchedCaches = try self.makeBatchedCaches(
+                from: rowStates.map(\.caches),
+                nativeMTP: true
+            )
             let width = inputs.map(\.verifiedInputTokenCount).max() ?? 1
             let tokenRows = inputs.flatMap { input -> [Int32] in
                 let valid = [input.currentToken] + input.proposalTokens
@@ -1859,7 +1862,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
-    private func makeBatchedCaches(from rowCaches: [[KVCache]]) throws -> [PagedKVSharedLayerBatch] {
+    private func makeBatchedCaches(
+        from rowCaches: [[KVCache]],
+        nativeMTP: Bool = false
+    ) throws -> [PagedKVSharedLayerBatch] {
         guard let layerCount = rowCaches.first?.count,
               rowCaches.allSatisfy({ $0.count == layerCount }),
               layerCount == cacheKinds.count
@@ -1891,6 +1897,38 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 let rows = rowCaches.compactMap { $0[layerIndex] as? MambaCache }
                 guard rows.count == rowCaches.count else {
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
+                }
+                guard nativeMTP else {
+                    let cache = MambaCache()
+                    try Self.packMambaRows(rows, into: cache)
+                    return PagedKVSharedLayerBatch(
+                        cache: cache,
+                        validateBatchStateClosure: {
+                            guard cache.state.count == 2,
+                                  cache.state.allSatisfy({ $0.ndim >= 1 && $0.dim(0) == rows.count })
+                            else {
+                                throw ContinuousBatchSchedulerError.unsupported(
+                                    "continuous_batching_invalid_mamba_state"
+                                )
+                            }
+                        },
+                        syncRowsFromBatchClosure: { Self.syncMambaRows(from: cache, into: rows) },
+                        writebackCompiledInnerStateClosure: { compiledState, targets in
+                            guard targets.count == rows.count else {
+                                throw ContinuousBatchSchedulerError.unsupported(
+                                    "continuous_batching_invalid_cache_layout"
+                                )
+                            }
+                            cache.state = compiledState
+                            Self.syncMambaRows(from: cache, into: rows)
+                            try Self.packMambaRows(rows, into: cache)
+                        },
+                        pendingMTPResolutionsClosure: {
+                            throw ContinuousBatchSchedulerError.unsupported(
+                                "native_mtp_missing_recurrent_transaction"
+                            )
+                        }
+                    )
                 }
                 let cache = try MTPPackedMambaBatchCache(rowCaches: rows)
                 return PagedKVSharedLayerBatch(

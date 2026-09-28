@@ -766,7 +766,7 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
     func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?) -> LMOutput {
         let batch = input.tokens.dim(0)
         let sequenceLength = input.tokens.dim(1)
-        let flatTokens = input.tokens.asArray(Int.self)
+        let flatTokens = input.tokens.asArray(Int32.self).map(Int.init)
         recorder.recordForwardBatch(batch)
 
         if let cache {

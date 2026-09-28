@@ -696,53 +696,58 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertNotNil(noBackendCapability.unsupportedReason)
     }
 
-    func testQwen35MixedRuntimeAttachesOnlyWithVerifiedArchitecture() async {
-        let modelID = "mlx-community/Qwen3.5-9B-4bit"
-        let modelSHA = String(repeating: "a", count: 64)
-        let proof = Self.sizingProof(modelID: modelID, modelSHA: modelSHA)
-        let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
+    func testQwen35AndQwen36MixedRuntimesAttachOnlyWithVerifiedArchitecture() async {
+        for modelID in ["mlx-community/Qwen3.5-9B-4bit", "qwen/qwen3.6-27b"] {
+            let modelSHA = String(repeating: "a", count: 64)
+            let proof = Self.sizingProof(modelID: modelID, modelSHA: modelSHA)
+            let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
 
-        func runtime(verified: Bool) -> ModelRuntime {
-            ModelRuntime(
-                modelID: modelID,
-                modelHash: modelSHA,
-                pagedKVConfig: config,
-                maxBatch: 8,
-                continuousBatchingMode: .on,
-                continuousBatchingDurableReplayAuthorityAvailable: true,
-                warmSwapEnabled: false,
-                pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
-                pagedKVHardwareSizingProof: proof,
-                pagedKVRuntimeCacheClass: "mixed",
-                pagedKVSchedulerBackendInstalled: true,
-                pagedKVModelCapabilities: PagedKVRuntimeModelCapabilities(
-                    modelFamily: "qwen",
-                    requiresMoEDispatch: false,
-                    hybridDecoderArchitectureVerified: verified
-                ),
-                continuousBatchingBackend: RuntimeBridgeScriptedBackend(scripts: [:]),
-                loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
+            func runtime(verified: Bool) -> ModelRuntime {
+                ModelRuntime(
+                    modelID: modelID,
+                    modelHash: modelSHA,
+                    pagedKVConfig: config,
+                    maxBatch: 8,
+                    continuousBatchingMode: .on,
+                    continuousBatchingDurableReplayAuthorityAvailable: true,
+                    warmSwapEnabled: false,
+                    pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
+                    pagedKVHardwareSizingProof: proof,
+                    pagedKVRuntimeCacheClass: "mixed",
+                    pagedKVSchedulerBackendInstalled: true,
+                    pagedKVModelCapabilities: PagedKVRuntimeModelCapabilities(
+                        modelFamily: "qwen",
+                        requiresMoEDispatch: false,
+                        hybridDecoderArchitectureVerified: verified
+                    ),
+                    continuousBatchingBackend: RuntimeBridgeScriptedBackend(scripts: [:]),
+                    loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
+                )
+            }
+
+            let admitted = runtime(verified: true)
+            let admittedDecision = await admitted.pagedKVDecisionForTest()
+            let admittedCapability = await admitted.continuousBatchingCapabilityForTest()
+            let admittedStatus = await admitted.currentSnapshot().continuousBatching
+            XCTAssertNotNil(admittedDecision.descriptor, modelID)
+            XCTAssertNil(admittedCapability.unsupportedReason, modelID)
+            XCTAssertEqual(admittedStatus?.active, true, modelID)
+            XCTAssertEqual(admittedStatus?.cacheClass, "mixed", modelID)
+            XCTAssertEqual(admittedStatus?.scheduler?.slotsTotal, 8, modelID)
+
+            let rejected = runtime(verified: false)
+            let rejectedDecision = await rejected.pagedKVDecisionForTest()
+            let rejectedCapability = await rejected.continuousBatchingCapabilityForTest()
+            let rejectedStatus = await rejected.currentSnapshot().continuousBatching
+            XCTAssertNil(rejectedDecision.descriptor, modelID)
+            XCTAssertNotNil(rejectedCapability.unsupportedReason, modelID)
+            XCTAssertEqual(rejectedStatus?.active, false, modelID)
+            XCTAssertEqual(
+                rejectedStatus?.unsupportedReason,
+                rejectedCapability.unsupportedReason?.rawValue,
+                modelID
             )
         }
-
-        let admitted = runtime(verified: true)
-        let admittedDecision = await admitted.pagedKVDecisionForTest()
-        let admittedCapability = await admitted.continuousBatchingCapabilityForTest()
-        let admittedStatus = await admitted.currentSnapshot().continuousBatching
-        XCTAssertNotNil(admittedDecision.descriptor)
-        XCTAssertNil(admittedCapability.unsupportedReason)
-        XCTAssertEqual(admittedStatus?.active, true)
-        XCTAssertEqual(admittedStatus?.cacheClass, "mixed")
-        XCTAssertEqual(admittedStatus?.scheduler?.slotsTotal, 8)
-
-        let rejected = runtime(verified: false)
-        let rejectedDecision = await rejected.pagedKVDecisionForTest()
-        let rejectedCapability = await rejected.continuousBatchingCapabilityForTest()
-        let rejectedStatus = await rejected.currentSnapshot().continuousBatching
-        XCTAssertNil(rejectedDecision.descriptor)
-        XCTAssertNotNil(rejectedCapability.unsupportedReason)
-        XCTAssertEqual(rejectedStatus?.active, false)
-        XCTAssertEqual(rejectedStatus?.unsupportedReason, rejectedCapability.unsupportedReason?.rawValue)
     }
 
     func testSharedForwardGreedyMatchesSerialLoneAndFullBatchWithUsageAndStops() async throws {
@@ -1310,9 +1315,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         await cancel.value
         XCTAssertTrue(cancellation.returned())
         XCTAssertEqual(backend.retainedRowCountForTest(), 0)
-        await XCTAssertThrowsErrorAsync {
-            _ = try await allocator.materializeContiguousByteCache(handle)
-        }
+        await XCTAssertThrowsErrorAsync(try await allocator.materializeContiguousByteCache(handle))
     }
 
     func testSharedForwardBackendFinishPreservesRetainedPagedHandoffRecord() async throws {
@@ -1388,12 +1391,9 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(completion.promptTokens, 1)
         XCTAssertEqual(completion.completionTokens, 2)
         let completionDecodeCalls = await backend.decodeCallCount()
-        XCTAssertEqual(completionDecodeCalls, 2)
+        XCTAssertEqual(completionDecodeCalls, 1)
         let completionDecodeBatches = await backend.decodeBatches()
-        XCTAssertEqual(completionDecodeBatches, [
-            ["relay-request-1500"],
-            ["relay-request-1500"],
-        ])
+        XCTAssertEqual(completionDecodeBatches, [["relay-request-1500"]])
 
         let chunkRecorder = RuntimeBridgeChunkRecorder()
         let handle = try await runtime.acquireRequestHandle(request)
@@ -1412,12 +1412,9 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
         XCTAssertEqual(chunkText, ["3", " 3"])
         let streamedDecodeCalls = await backend.decodeCallCount()
-        XCTAssertEqual(streamedDecodeCalls, 4)
+        XCTAssertEqual(streamedDecodeCalls, 2)
         let allDecodeBatches = await backend.decodeBatches()
-        XCTAssertEqual(Array(allDecodeBatches.suffix(2)), [
-            ["relay-request-1500"],
-            ["relay-request-1500"],
-        ])
+        XCTAssertEqual(Array(allDecodeBatches.suffix(1)), [["relay-request-1500"]])
     }
 
     func testAttachedServePathPrefillsChatPreparedMultiTokenPrompt() async throws {
@@ -1443,8 +1440,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let prefillLengths = await backend.prefillPromptLengths()
         let decodeCalls = await backend.decodeCallCount()
         XCTAssertEqual(prefillCalls, 1)
-        XCTAssertEqual(prefillLengths, [15])
-        XCTAssertEqual(decodeCalls, 2)
+        XCTAssertEqual(prefillLengths, [16])
+        XCTAssertEqual(decodeCalls, 1)
     }
 
     func testAttachedServePathPrefillFailureReturnsReasonCoded503() async throws {
@@ -1579,21 +1576,23 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         )
         XCTAssertThrowsError(try bridge.materializeContiguousByteCache(handle: handle, table: permutedTable))
 
+        let replacementKeyBytes = Self.fp16Bytes([201, 202, 203, 204, 205, 206, 207, 208, 209, 210])
+        let replacementValueBytes = Self.fp16Bytes([301, 302, 303, 304, 305, 306, 307, 308, 309, 310])
         paged.state = [
-            MLXArray(Self.fp16Bytes([201, 202, 203, 204, 205, 206, 207, 208, 209, 210]), [1, 2, 5, 1], dtype: .float16),
-            MLXArray(Self.fp16Bytes([301, 302, 303, 304, 305, 306, 307, 308, 309, 310]), [1, 2, 5, 1], dtype: .float16),
+            MLXArray(replacementKeyBytes, [1, 2, 5, 1], dtype: .float16),
+            MLXArray(replacementValueBytes, [1, 2, 5, 1], dtype: .float16),
         ]
         XCTAssertNotEqual(paged.state[0].asData(access: .copy).data, keyBytes)
 
         let materialized = try await allocator.materializeContiguousByteCache(handle)
-        XCTAssertEqual(materialized.layers[0].keyBytes, keyBytes)
-        XCTAssertEqual(materialized.layers[0].valueBytes, valueBytes)
+        XCTAssertEqual(materialized.layers[0].keyBytes, replacementKeyBytes)
+        XCTAssertEqual(materialized.layers[0].valueBytes, replacementValueBytes)
 
         let handoff = try bridge.materializeContiguousKVCache(handle: handle, table: binding.currentTable)
         XCTAssertEqual(handoff.caches.count, 1)
         XCTAssertEqual(handoff.caches[0].offset, 5)
-        XCTAssertEqual(handoff.caches[0].state[0].asData(access: .copy).data, keyBytes)
-        XCTAssertEqual(handoff.caches[0].state[1].asData(access: .copy).data, valueBytes)
+        XCTAssertEqual(handoff.caches[0].state[0].asData(access: .copy).data, replacementKeyBytes)
+        XCTAssertEqual(handoff.caches[0].state[1].asData(access: .copy).data, replacementValueBytes)
 
         let nextKeyBytes = Self.fp16Bytes([11, 12])
         let nextValueBytes = Self.fp16Bytes([111, 112])
@@ -1605,11 +1604,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(handoff.caches[0].offset, 6)
         XCTAssertEqual(
             handoff.caches[0].state[0].asData(access: .copy).data,
-            Self.fp16Bytes([1, 2, 3, 4, 5, 11, 6, 7, 8, 9, 10, 12])
+            Self.fp16Bytes([201, 202, 203, 204, 205, 11, 206, 207, 208, 209, 210, 12])
         )
         XCTAssertEqual(
             handoff.caches[0].state[1].asData(access: .copy).data,
-            Self.fp16Bytes([101, 102, 103, 104, 105, 111, 106, 107, 108, 109, 110, 112])
+            Self.fp16Bytes([301, 302, 303, 304, 305, 111, 306, 307, 308, 309, 310, 112])
         )
     }
 
@@ -1740,9 +1739,9 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(extracted.caches[0].state[0].asData(access: .copy).data, Self.fp16Bytes([1, 2, 3, 4, 5]))
 
         let retained = try await allocator.retain(handle)
-        await XCTAssertThrowsErrorAsync {
-            _ = try await allocator.reattach(retained, conversationKey: "conv:b", trimToLogicalTokens: 5)
-        }
+        await XCTAssertThrowsErrorAsync(
+            try await allocator.reattach(retained, conversationKey: "conv:b", trimToLogicalTokens: 5)
+        )
         let reattached = try await allocator.reattach(
             retained,
             conversationKey: "conv:a",
@@ -1788,9 +1787,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let zeroTable = try await allocator.table(for: zeroReattached)
         XCTAssertEqual(zeroTable.logicalTokenCount, 0)
         XCTAssertEqual(zeroTable.tailValidTokenCount, 0)
-        await XCTAssertThrowsErrorAsync {
-            _ = try await allocator.materializeContiguousByteCache(zeroReattached)
-        }
+        await XCTAssertThrowsErrorAsync(try await allocator.materializeContiguousByteCache(zeroReattached))
     }
 
     func testContiguousCacheBridgeRejectsCrossHandleCacheRecord() async throws {
@@ -1816,9 +1813,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ]
 
         XCTAssertThrowsError(try bridge.record(caches: [paged], binding: secondBinding))
-        await XCTAssertThrowsErrorAsync {
-            _ = try await allocator.materializeContiguousByteCache(second)
-        }
+        await XCTAssertThrowsErrorAsync(try await allocator.materializeContiguousByteCache(second))
     }
 
     func testConversationKeyWithoutRetainedHandoffRunsAsFreshSchedulerRow() async throws {
@@ -1937,7 +1932,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         var data = Data()
         data.reserveCapacity(values.count * 2)
         for value in values {
-            var littleEndian = value.littleEndian
+            var littleEndian = Float16(value).bitPattern.littleEndian
             withUnsafeBytes(of: &littleEndian) { bytes in
                 data.append(contentsOf: bytes)
             }
@@ -2173,7 +2168,7 @@ private final class RuntimeBridgeFakeModel: Module, LanguageModel, KVCacheDimens
     func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?) -> LMOutput {
         let batch = input.tokens.dim(0)
         let sequenceLength = input.tokens.dim(1)
-        let flatTokens = input.tokens.asArray(Int.self)
+        let flatTokens = input.tokens.asArray(Int32.self).map(Int.init)
         if let cache {
             let keys = MLXArray(flatTokens.map(Float.init), [batch, 1, sequenceLength, 1])
             let values = MLXArray(flatTokens.map { Float($0 + 100) }, [batch, 1, sequenceLength, 1])
@@ -2213,7 +2208,7 @@ private final class RuntimeBridgeBlockingModel: Module, LanguageModel, KVCacheDi
         let batch = input.tokens.dim(0)
         let sequenceLength = input.tokens.dim(1)
         if let cache {
-            let flatTokens = input.tokens.asArray(Int.self)
+            let flatTokens = input.tokens.asArray(Int32.self).map(Int.init)
             let keys = MLXArray(flatTokens.map(Float.init), [batch, 1, sequenceLength, 1])
             let values = MLXArray(flatTokens.map { Float($0 + 100) }, [batch, 1, sequenceLength, 1])
             for layer in cache {
@@ -2353,7 +2348,7 @@ private actor RuntimeBridgeScriptedBackend: ContinuousBatchSchedulerBackend {
             let script = scripts[row.requestID] ?? []
             return ContinuousBatchPrefillOutput(
                 requestID: row.requestID,
-                sampledToken: row.sampleFirstToken && !script.isEmpty ? script[0] : nil
+                sampledToken: row.sampleFirstToken ? (script.first ?? row.promptTokens.last) : nil
             )
         }
     }
