@@ -2473,7 +2473,12 @@ private enum TestRuntimeError: Error {
 
 private actor ServingKnobsContinuousBatchingBackend: ContinuousBatchSchedulerBackend {
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
-        rows.map { ContinuousBatchPrefillOutput(requestID: $0.requestID) }
+        rows.map {
+            ContinuousBatchPrefillOutput(
+                requestID: $0.requestID,
+                sampledToken: $0.sampleFirstToken ? ($0.promptTokens.last ?? 0) : nil
+            )
+        }
     }
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {

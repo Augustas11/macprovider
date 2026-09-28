@@ -1100,7 +1100,7 @@
     {
       "spec_id": "SPEC-038",
       "title": "Continuous batching for concurrent provider inference",
-      "version": "v0.3.1",
+      "version": "v0.3.2",
       "path": "specs/SPEC-038-continuous-batching.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -1129,13 +1129,13 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "SPEC v0.3 adds the spec-first batched-prefill contract for issue #1758: decode-first separate phases, backend shared prefill for compatible rows, bounded per-iteration prefill token budget, FCFS/no-starvation fairness, isolated serial fallback for incompatible/ragged groups, and graceful paged-pool backpressure. Implementation and unit-test paths are linked from SPEC-038-R002; Studio TTFT validation, packaged-runtime Metal evidence, MSB-01-05, and the FR-CB15 real-hardware enable gate remain pending."
+        "rationale": "SPEC v0.3.2 aligns final-prefill sampling with the serial MLX execution contract: every prompt token is committed, the final chunk samples the first generated token, and production uses at-most-512-token chunks. Issue #1773 supplies exact 48-token boundary parity, lifecycle, usage, and rows=8 hardware evidence for the three promoted Qwen hybrids; broader production rollout remains campaign- and release-gated."
       }
     },
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.8",
+      "version": "v0.1.9",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -4390,6 +4390,9 @@
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testCancellationDuringFailingPrefillWinsTerminalRace",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testCancellationDuringThrownGroupPrefillFailureWinsOnlyForCancelledRow",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testSerialPrefillFallbackFailureIsRequestLocal",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testFinalPrefillCommitsWholePromptAndSamplesWithoutDecode",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testFinalPrefillCoversWholePromptAndSeedsDecodeWithFirstGeneratedToken",
+        "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testZeroOutputHybridRowMaterializesTheFullPrefilledPrompt",
         "phase3-binary/Tests/macprovider-cliTests/ContinuousBatchSchedulerTests.swift:testPoolPressureWithPromptAndDecodeHeadroomQueuesLongPromptWorkWithoutExtensionFailure",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testEqualOffsetEqualLengthPrefillUsesSharedForwardForMixedCacheAndIsolatesRows",
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeMixedCacheTests.swift:testIncompatibleOrRaggedPrefillUsesSerialForwardsForMixedCache",
@@ -4402,7 +4405,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1758",
-        "rationale": "FR-CB2 v0.3 batched-prefill scheduling is implemented for compatible rows with bounded group/per-row token budgets, isolated serial fallback for incompatible or backend-state rows, and long-prompt pool backpressure. Studio TTFT and packaged-runtime Metal evidence remain pending in issue #1758 before release review."
+        "rationale": "FR-CB2 v0.3.2 batched-prefill scheduling commits the whole prompt, samples the first generated token from the final prefill position, preserves bounded group/per-row token budgets and isolated fallback, and uses the production 512-token partition. Issue #1773 records packaged-runtime boundary parity at L511/L512/L513; broader rollout remains release-gated."
       }
     },
     {
@@ -4802,15 +4805,21 @@
       "requirement_id": "SPEC-039-R012",
       "spec_id": "SPEC-039",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:nonisolated static func pagedKVModelCapabilities",
+        "phase3-binary/Sources/macprovider-cli/PagedKVRuntimeParityProbe.swift:runSharedForwardExactParityProbe"
+      ],
+      "tests": [
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwen3xHybridArchitectureRequiresExactAllowlistedIdentityAndConfigMetadata",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testMoEDispatchGateRequiresGenuinelyProvenSharedForwardIsolation"
+      ],
       "journeys": [],
       "evidence": [],
       "gap": {
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
-        "issue": "https://github.com/Augustas11/macprovider/issues/614",
-        "rationale": "FR-PKV12 (cache-class allowlist + attach-time admission gate; non-allowlisted classes fail safe to stock contiguous, mirroring SPEC-037 AC-10): normative in SPEC-039 v0.1; implementation and tests land in the follow-up IMPL PR."
+        "issue": "https://github.com/Augustas11/macprovider/issues/1773",
+        "rationale": "FR-PKV12 v0.1.9 adds three exact Qwen hybrid identities after packaged-runtime parity, isolation, lifecycle, usage, and throughput evidence. Runtime attach still fails closed unless the identity/config pair and fresh 48-token shared-forward proof pass; release and production deployment remain pending."
       }
     },
     {

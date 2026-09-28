@@ -27,6 +27,7 @@ struct MSBUsageRow: Codable, Sendable, Equatable {
 struct MSBParityEvidence: Codable, Sendable, Equatable {
     let comparedTokens: Int
     let oneRowMatch: Bool
+    let standaloneRowMatches: [Bool]?
     let batchedRowMatches: [Bool]
     let firstDivergenceIndex: Int?
     let serialTokenSHA256: String

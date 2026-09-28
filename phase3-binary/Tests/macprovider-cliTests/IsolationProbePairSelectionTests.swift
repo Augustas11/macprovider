@@ -8,6 +8,8 @@ final class IsolationProbePairSelectionTests: XCTestCase {
             rowsDecodedInSharedForward: 2,
             rowFailures: 0,
             crossRowDivergences: divergences,
+            sharedForwardParityProven: true,
+            parityTokensCompared: PagedKVRuntimeParityProbe.sharedForwardParityTokens,
             challengeDistinguishing: distinguishing
         )
     }

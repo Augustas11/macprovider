@@ -1,13 +1,12 @@
 # SPEC-039 — Paged KV / paged-attention engine
 
-Version: v0.1.8
-Status: draft (normative design). v0.1.8 makes the FR-PKV12 mixed-layout
-exception an explicit per-identity allowlist and adds the measured MoE hybrid
-`qwen/qwen3.6-35b-a3b` (`Qwen3_5MoeForConditionalGeneration`) alongside the
-dense `qwen/qwen3.6-27b` entry. Support is never generalized by family or
-architecture prefix: the same-architecture `qwen3.5` (dense + MoE) and
-`qwen3.8-27b` hybrids were measured and FAILED batched token parity, so they
-stay excluded.
+Version: v0.1.9
+Status: draft (normative design). v0.1.9 adds the individually measured
+`qwen/qwen3.5-27b`, `qwen/qwen3.5-35b-a3b`, and `qwen/qwen3.8-27b` hybrids to
+the FR-PKV12 per-identity allowlist after exact serial/shared-forward parity,
+row-isolation, lifecycle-leftovers, and rows=8 throughput evidence on the
+packaged runtime. Support is never generalized by family or architecture
+prefix.
 v0.1.7 adds FR-PKV15, the per-row transactional checkpoint/stage/commit/rewind
 primitive SPEC-048 native-MTP verification requires.
 v0.1.6 lets a retained or positive-cache-credit
@@ -32,6 +31,12 @@ is `RotatingKVCache` only because the serve path caps KV for memory attaches to
 paged mode (the block pool bounds memory), while a genuine sliding-window model
 stays fail-safe. IMPL lands with this revision.
 Owner: provider runtime / inference engine
+Change log v0.1.9 (2026-09-28): FR-PKV12 admits the measured
+`qwen/qwen3.5-27b`, `qwen/qwen3.5-35b-a3b`, and `qwen/qwen3.8-27b` identities.
+Each passed exact 48-token serial/shared-forward parity at prompt lengths 511,
+512, and 513 using the production 512-token partition, plus isolation, replay,
+drain, usage, and rows=8 throughput gates. No family-wide admission is added;
+refines SPEC-039-R012.
 Change log v0.1.8 (2026-09-28): FR-PKV12 mixed-layout exception becomes an explicit per-identity allowlist; admits the measured `qwen/qwen3.6-35b-a3b` MoE hybrid alongside `qwen/qwen3.6-27b`. The same-architecture `qwen3.5` (dense + MoE) and `qwen3.8-27b` hybrids failed measured batched token parity and stay excluded. No new requirement; refines SPEC-039-R012.
 Change log v0.1.7 (2026-09-27): FR-PKV15 defines the per-row transactional
 checkpoint/stage/commit/rewind primitive required by SPEC-048 native-MTP
@@ -567,13 +572,21 @@ be individually measured before it is added. The v1 allowlist is:
 - `qwen/qwen3.6-35b-a3b` with `Qwen3_5MoeForConditionalGeneration` in the
   artifact's `config.json` architectures (MoE hybrid decoder; the paged path
   MUST additionally pass cross-row MoE expert-dispatch isolation).
+- `qwen/qwen3.5-27b` with `Qwen3_5ForConditionalGeneration` in the artifact's
+  `config.json` architectures (dense hybrid decoder);
+- `qwen/qwen3.5-35b-a3b` with `Qwen3_5MoeForConditionalGeneration` in the
+  artifact's `config.json` architectures (MoE hybrid decoder; the paged path
+  MUST additionally pass cross-row MoE expert-dispatch isolation);
+- `qwen/qwen3.8-27b` with `Qwen3_5ForConditionalGeneration` in the artifact's
+  `config.json` architectures (dense hybrid decoder).
 
-Membership is per identity and evidence-gated, never per architecture: the
-`qwen/qwen3.5-27b`, `qwen/qwen3.5-35b-a3b`, and `qwen/qwen3.8-27b` hybrids carry
-these same architecture strings but FAILED measured batched token parity (their
-serial and batched greedy token hashes diverge) and are therefore excluded. A
+Membership is per identity and evidence-gated, never per architecture. A
 same-architecture identity is admitted only after it individually passes the
-parity and isolation gates on the packaged runtime.
+parity and isolation gates on the packaged runtime. For an allowlisted hybrid,
+the attach-time proof MUST compare at least 48 exact greedy tokens after a
+513-token prompt partitioned in the same at-most-512-token chunks used by
+production serving; a shorter, differently partitioned, or non-exact proof
+fails closed.
 
 Each allowlisted identity requires a runtime cache topology measured as
 `MambaCache` on recurrent layers and `KVCacheSimple` on full-attention layers.
@@ -880,9 +893,9 @@ The implementation PR for this SPEC MUST include fixtures that prove:
   `mlx-swift-lm` fork.
 - Paged quantized KV remains a future numerical surface if the provider later
   enables `kvBits` in production.
-- Sliding-window and general hybrid cache support remain future work; v0.1.4
+- Sliding-window and general hybrid cache support remain future work; FR-PKV12
   admits only full-context, non-rotating `KVCacheSimple`-equivalent fp16 caches
-  plus the narrow measured Qwen3.6 first-turn exception in FR-PKV12. The
+  plus the narrow measured per-identity Qwen3.x first-turn exceptions. The
   existing uncapped attach probe prevents false rejection of full-context
   models capped for memory, but it does not authorize genuine sliding-window
   paged attention.

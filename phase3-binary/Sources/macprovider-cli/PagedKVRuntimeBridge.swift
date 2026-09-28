@@ -583,13 +583,32 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     }
                     if output.state == nil,
                        Self.hasValidBatchState(batchedCaches) {
+                        let sampledTokens: [Int]?
+                        if inputs.contains(where: \.sampleFirstToken) {
+                            sampledTokens = ContinuousBatchRowSampler.sample(
+                                logits: output.logits[0..., -1, 0...],
+                                rows: inputs.map(Self.samplerRow)
+                            ).asArray(Int.self)
+                            guard sampledTokens?.count == inputs.count else {
+                                throw ContinuousBatchSchedulerError.unsupported(
+                                    "continuous_batching_invalid_logits_shape"
+                                )
+                            }
+                        } else {
+                            sampledTokens = nil
+                        }
                         eval(cachesAsKV)
                         batchedCaches.forEach { $0.syncRowsFromBatch() }
                         for (index, input) in inputs.enumerated() {
                             try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
                         }
                         self.clearDecodeSession()
-                        return inputs.map { ContinuousBatchPrefillOutput(requestID: $0.requestID) }
+                        return inputs.enumerated().map { index, input in
+                            ContinuousBatchPrefillOutput(
+                                requestID: input.requestID,
+                                sampledToken: input.sampleFirstToken ? sampledTokens?[index] : nil
+                            )
+                        }
                     }
                     // Backend-level LMOutput.State cannot be split safely by
                     // row. The speculative batched caches have not been synced
@@ -606,6 +625,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         binding: input.binding,
                         initialOffset: input.committedKVTokenCount
                     )
+                    var sampledToken: Int?
                     if !input.promptTokens.isEmpty {
                         let prompt = MLXArray(input.promptTokens.map(Int32.init))
                             .reshaped([1, input.promptTokens.count])
@@ -613,15 +633,25 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
                             context.model(text, cache: state.caches, state: state.state)
                         }
-                        // Prefill never samples: the last prompt token is fed by the
-                        // first decode step. Evaluate only the caches, as
-                        // `LLMModel.prepare` does, so the vocabulary projection over
-                        // every chunk position is never computed.
+                        if input.sampleFirstToken {
+                            sampledToken = ContinuousBatchRowSampler.sample(
+                                logits: output.logits[0..., -1, 0...],
+                                rows: [Self.samplerRow(input)]
+                            ).asArray(Int.self).first
+                        } else {
+                            sampledToken = nil
+                        }
+                        // Earlier chunks evaluate only cache state. The final
+                        // chunk also evaluates its sampled token, matching
+                        // `TokenIterator.prepare` on the serial path.
                         eval(state.caches)
                         state.state = output.state
                     }
                     try self.setRowState(state, for: input.requestID, binding: input.binding)
-                    outputs.append(ContinuousBatchPrefillOutput(requestID: input.requestID))
+                    outputs.append(ContinuousBatchPrefillOutput(
+                        requestID: input.requestID,
+                        sampledToken: input.sampleFirstToken ? sampledToken : nil
+                    ))
                 } catch {
                     self.removeRowState(for: input.requestID)
                     outputs.append(ContinuousBatchPrefillOutput(
@@ -1117,7 +1147,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
               sampledByRow.allSatisfy({ $0.count == decodeSteps }) else {
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_logits_shape")
         }
-        storeDecodeSession(session)
+        // Hybrid recurrent decoders (Qwen3.5/Qwen3.8) are exact only when the
+        // batched recurrent state is split back to rows at a token boundary.
+        // Reusing a packed Mamba batch across windows can carry row-state at the
+        // wrong boundary after long prefills, so force the next hybrid window to
+        // rebuild from the just-synced row caches. KV-only layouts still keep the
+        // reusable session that amortizes contiguous compiled decode.
+        storeDecodeSession(cacheKinds.contains(.recurrentMamba) ? nil : session)
         for (index, input) in supportedInputs.enumerated() {
             try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
         }
@@ -1185,6 +1221,15 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
     private static func supportsRowSampling(_ input: ContinuousBatchDecodeInput) -> Bool {
         ContinuousBatchRowSampler.supports(temperature: input.temperature, topP: input.topP)
+    }
+
+    private static func samplerRow(_ input: ContinuousBatchPrefillInput) -> ContinuousBatchRowSampler.Row {
+        ContinuousBatchRowSampler.Row(
+            temperature: input.temperature,
+            topP: input.topP,
+            samplerSeed: input.samplerSeed,
+            samplerStep: input.samplerStep
+        )
     }
 
     private static func samplerRows(

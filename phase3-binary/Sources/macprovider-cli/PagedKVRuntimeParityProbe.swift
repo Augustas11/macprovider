@@ -45,17 +45,42 @@ struct PagedKVRuntimeMoEProbeResult: Sendable, Equatable {
     let rowsDecodedInSharedForward: Int
     let rowFailures: Int
     let crossRowDivergences: Int
+    /// Exact serial-vs-production shared-forward token parity over the full
+    /// final-prefill + decode lifecycle. This catches one-row divergences where
+    /// row isolation is intact but the prompt/decode partition changed logits.
+    let sharedForwardParityProven: Bool
+    let parityTokensCompared: Int
     /// True only when the two challenge rows have DIFFERENT serial reference tokens, so
     /// that a shared forward which swapped or leaked one row's logits into the other would
     /// register as a divergence. A non-distinguishing challenge (identical references) can
     /// never prove isolation, so `proven` requires this to hold.
     let challengeDistinguishing: Bool
 
+    init(
+        proven: Bool,
+        rowsDecodedInSharedForward: Int,
+        rowFailures: Int,
+        crossRowDivergences: Int,
+        sharedForwardParityProven: Bool = false,
+        parityTokensCompared: Int = 0,
+        challengeDistinguishing: Bool
+    ) {
+        self.proven = proven
+        self.rowsDecodedInSharedForward = rowsDecodedInSharedForward
+        self.rowFailures = rowFailures
+        self.crossRowDivergences = crossRowDivergences
+        self.sharedForwardParityProven = sharedForwardParityProven
+        self.parityTokensCompared = parityTokensCompared
+        self.challengeDistinguishing = challengeDistinguishing
+    }
+
     static let failClosed = PagedKVRuntimeMoEProbeResult(
         proven: false,
         rowsDecodedInSharedForward: 0,
         rowFailures: 0,
         crossRowDivergences: 0,
+        sharedForwardParityProven: false,
+        parityTokensCompared: 0,
         challengeDistinguishing: false
     )
 }
@@ -71,6 +96,8 @@ enum PagedKVRuntimeParityProbe {
     /// paired with a hard "must be this row's own runner-up" rank gate and an explicit
     /// other-row-token guard, so relaxing exact argmax does not relax cross-row isolation.
     static let batchedArgmaxLogitTolerance: Float = 1.0
+    static let sharedForwardParityPromptTokens = 513
+    static let sharedForwardParityTokens = 48
 
     /// A row's stock serial next-token distribution: greedy argmax, runner-up, and the full
     /// last-position logits (so a candidate token's gap below the argmax can be measured).
@@ -203,12 +230,25 @@ enum PagedKVRuntimeParityProbe {
         layerCount: Int,
         promptA: [Int],
         promptB: [Int],
+        parityPromptA: [Int]? = nil,
+        parityPromptB: [Int]? = nil,
         cacheKinds: [PagedKVSharedForwardBackend.CacheKind]? = nil
     ) async -> PagedKVRuntimeMoEProbeResult {
         guard layerCount > 0, promptA.count >= 1, promptB.count >= 1 else {
             return .failClosed
         }
         do {
+            let sharedForwardParityProven = try await Self.runSharedForwardExactParityProbe(
+                container: container,
+                blockSizeTokens: blockSizeTokens,
+                maxPhysicalBlocks: maxPhysicalBlocks,
+                poolEpoch: poolEpoch,
+                layerCount: layerCount,
+                promptA: parityPromptA ?? promptA,
+                promptB: parityPromptB ?? promptB,
+                cacheKinds: cacheKinds,
+                nNew: sharedForwardParityTokens
+            )
             let backend = PagedKVSharedForwardBackend(
                 container: container,
                 blockSizeTokens: blockSizeTokens,
@@ -258,6 +298,8 @@ enum PagedKVRuntimeParityProbe {
                     rowsDecodedInSharedForward: first.rowsDecoded,
                     rowFailures: first.rowFailures,
                     crossRowDivergences: 0,
+                    sharedForwardParityProven: sharedForwardParityProven,
+                    parityTokensCompared: Self.sharedForwardParityTokens,
                     challengeDistinguishing: false
                 )
             }
@@ -283,6 +325,8 @@ enum PagedKVRuntimeParityProbe {
                     rowsDecodedInSharedForward: first.rowsDecoded,
                     rowFailures: first.rowFailures,
                     crossRowDivergences: firstCrossRowDivergences,
+                    sharedForwardParityProven: sharedForwardParityProven,
+                    parityTokensCompared: Self.sharedForwardParityTokens,
                     challengeDistinguishing: firstChallengeDistinguishing
                 )
             }
@@ -353,6 +397,8 @@ enum PagedKVRuntimeParityProbe {
                 rowsDecodedInSharedForward: rowsDecoded,
                 rowFailures: rowFailures,
                 crossRowDivergences: crossRowDivergences,
+                sharedForwardParityProven: sharedForwardParityProven,
+                parityTokensCompared: Self.sharedForwardParityTokens,
                 challengeDistinguishing: challengeDistinguishing
             )
         } catch {
@@ -363,16 +409,214 @@ enum PagedKVRuntimeParityProbe {
 
     // MARK: - Harness (ported from PagedKVParityTests)
 
+    private static func runSharedForwardExactParityProbe(
+        container: ModelContainer,
+        blockSizeTokens: Int,
+        maxPhysicalBlocks: Int,
+        poolEpoch: Int,
+        layerCount: Int,
+        promptA: [Int],
+        promptB: [Int],
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?,
+        nNew: Int
+    ) async throws -> Bool {
+        guard nNew > 0 else { return false }
+        let serial = await container.perform { context in
+            (
+                Self.greedyGenerate(
+                    model: context.model,
+                    promptTokens: promptA,
+                    nNew: nNew,
+                    makeCache: { context.model.newCache(parameters: nil) }
+                ),
+                Self.greedyGenerate(
+                    model: context.model,
+                    promptTokens: promptB,
+                    nNew: nNew,
+                    makeCache: { context.model.newCache(parameters: nil) }
+                )
+            )
+        }
+        let (serialA, serialB) = serial
+        let oneRow = try await sharedForwardGeneratedTokens(
+            container: container,
+            blockSizeTokens: blockSizeTokens,
+            maxPhysicalBlocks: maxPhysicalBlocks,
+            poolEpoch: poolEpoch,
+            layerCount: layerCount,
+            cacheKinds: cacheKinds,
+            rows: [("shared-parity-a", promptA)],
+            nNew: nNew
+        )
+        guard oneRow["shared-parity-a"] == serialA else { return false }
+        let twoRow = try await sharedForwardGeneratedTokens(
+            container: container,
+            blockSizeTokens: blockSizeTokens,
+            maxPhysicalBlocks: maxPhysicalBlocks,
+            poolEpoch: poolEpoch,
+            layerCount: layerCount,
+            cacheKinds: cacheKinds,
+            rows: [
+                ("shared-parity-a", promptA),
+                ("shared-parity-b", promptB),
+            ],
+            nNew: nNew
+        )
+        return twoRow["shared-parity-a"] == serialA && twoRow["shared-parity-b"] == serialB
+    }
+
+    private static func sharedForwardGeneratedTokens(
+        container: ModelContainer,
+        blockSizeTokens: Int,
+        maxPhysicalBlocks: Int,
+        poolEpoch: Int,
+        layerCount: Int,
+        cacheKinds: [PagedKVSharedForwardBackend.CacheKind]?,
+        rows: [(id: String, prompt: [Int])],
+        nNew: Int
+    ) async throws -> [String: [Int]] {
+        guard let promptCount = rows.first?.prompt.count,
+              promptCount > 0,
+              rows.allSatisfy({ $0.prompt.count == promptCount })
+        else { return [:] }
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            blockSizeTokens: blockSizeTokens,
+            maxPhysicalBlocks: maxPhysicalBlocks,
+            poolEpoch: poolEpoch,
+            layerCount: layerCount,
+            cacheKinds: cacheKinds
+        )
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: blockSizeTokens,
+            maxPhysicalBlocks: maxPhysicalBlocks
+        )
+        var handles: [String: PagedKVBlockTableHandle] = [:]
+        for row in rows {
+            let maxTokens = row.prompt.count + nNew
+            let handle = try await allocator.allocate(
+                conversationKey: row.id,
+                maxTokens: max(maxTokens, 1),
+                initialTokens: 0
+            )
+            handles[row.id] = handle
+        }
+        var generated: [String: [Int]] = [:]
+        let prefillStepSize = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
+        var promptOffset = 0
+        while promptOffset < promptCount {
+            var prefillInputs: [ContinuousBatchPrefillInput] = []
+            prefillInputs.reserveCapacity(rows.count)
+            for row in rows {
+                guard let handle = handles[row.id] else { return [:] }
+                let end = min(row.prompt.count, promptOffset + prefillStepSize)
+                let chunk = Array(row.prompt[promptOffset..<end])
+                _ = try await allocator.extend(handle, by: chunk.count)
+                let binding = try await allocator.binding(for: handle)
+                let isFinalChunk = end == row.prompt.count
+                prefillInputs.append(ContinuousBatchPrefillInput(
+                    requestID: row.id,
+                    promptTokens: chunk,
+                    binding: binding,
+                    promptTokenOffset: promptOffset,
+                    committedKVTokenCount: promptOffset,
+                    targetKVTokenCount: end,
+                    isFinalChunk: isFinalChunk,
+                    sampleFirstToken: isFinalChunk,
+                    samplerSeed: 0,
+                    temperature: 0,
+                    topP: 1,
+                    samplerStep: 0
+                ))
+            }
+            let prefillOutputs = try await backend.prefill(rows: prefillInputs)
+            let finalRequestIDs = Set(prefillInputs.filter(\.isFinalChunk).map(\.requestID))
+            for output in prefillOutputs where finalRequestIDs.contains(output.requestID) {
+                guard let token = output.sampledToken else { return [:] }
+                generated[output.requestID] = [token]
+            }
+            promptOffset += prefillInputs.first?.promptTokens.count ?? 0
+        }
+        guard nNew > 1 else {
+            for row in rows {
+                backend.finish(requestID: row.id)
+            }
+            return generated
+        }
+
+        let hybrid = cacheKinds?.contains(.recurrentMamba) == true
+        var remaining = nNew - 1
+        while remaining > 0 {
+            let window = hybrid ? 1 : remaining
+            var decodeInputs: [ContinuousBatchDecodeInput] = []
+            for row in rows {
+                guard let handle = handles[row.id],
+                      let rowGenerated = generated[row.id],
+                      let currentToken = rowGenerated.last
+                else { return [:] }
+                let committed = row.prompt.count - 1 + rowGenerated.count
+                _ = try await allocator.extend(handle, by: window)
+                try await allocator.beginDecodeStep(handle)
+                let binding = try await allocator.binding(for: handle)
+                decodeInputs.append(ContinuousBatchDecodeInput(
+                    requestID: row.id,
+                    currentToken: currentToken,
+                    generatedTokens: rowGenerated,
+                    promptTokens: row.prompt,
+                    samplerSeed: 0,
+                    temperature: 0,
+                    topP: 1,
+                    presencePenalty: 0,
+                    frequencyPenalty: 0,
+                    binding: binding,
+                    blockTable: binding.currentTable,
+                    committedKVTokenCount: committed,
+                    targetKVTokenCount: committed + window,
+                    samplerStep: rowGenerated.count
+                ))
+            }
+            let outcomes = try await backend.decodeLockstepWindow(rows: decodeInputs, steps: window)
+            for row in rows {
+                if let handle = handles[row.id] {
+                    try await allocator.endDecodeStep(handle)
+                }
+            }
+            for outcome in outcomes {
+                guard case .output(let output) = outcome,
+                      output.tokens.count == window
+                else { return [:] }
+                generated[output.requestID, default: []].append(contentsOf: output.tokens)
+            }
+            remaining -= window
+        }
+        for row in rows {
+            backend.finish(requestID: row.id)
+        }
+        return generated
+    }
+
     private static func greedyGenerate(
         model: any LanguageModel,
         promptTokens: [Int],
         nNew: Int,
+        prefillStepSize: Int = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens,
         makeCache: () -> [KVCache]
     ) -> [Int] {
         let cache = makeCache()
         var out: [Int] = []
         out.reserveCapacity(nNew)
-        var y = MLXArray(promptTokens.map { Int32($0) }).reshaped([1, promptTokens.count])
+        let chunkSize = max(1, prefillStepSize)
+        var promptOffset = 0
+        while promptTokens.count - promptOffset > chunkSize {
+            let end = promptOffset + chunkSize
+            let chunk = MLXArray(promptTokens[promptOffset..<end].map { Int32($0) })
+                .reshaped([1, chunkSize])
+            _ = model(chunk, cache: cache)
+            eval(cache.flatMap { $0.state })
+            promptOffset = end
+        }
+        let remainder = Array(promptTokens[promptOffset...])
+        var y = MLXArray(remainder.map { Int32($0) }).reshaped([1, remainder.count])
         for _ in 0 ..< nNew {
             let logits = model(y, cache: cache)
             let next = lastTokenArgmax(logits)
@@ -407,9 +651,9 @@ enum PagedKVRuntimeParityProbe {
         let tokens: [String: [Int]]
     }
 
-    /// Prefill commits `prompt` minus its last token; the batched decode then writes the
-    /// final prompt token and samples `decodeSteps` tokens. Mirrors the scheduler's own
-    /// prefill/decode split so the probe exercises the real serving contract.
+    /// Builds the independent P-1/decode challenge used to detect row leakage and
+    /// near-tie routing changes. Exact scheduler-lifecycle parity is proved separately
+    /// by `runSharedForwardExactParityProbe` before this isolation challenge runs.
     private static func makeMoEProbeRow(
         requestID: String,
         prompt: [Int],
@@ -435,7 +679,8 @@ enum PagedKVRuntimeParityProbe {
             promptTokenOffset: 0,
             committedKVTokenCount: 0,
             targetKVTokenCount: prefixLength,
-            isFinalChunk: true
+            isFinalChunk: true,
+            sampleFirstToken: false
         )
 
         _ = try await allocator.extend(handle, by: max(1, decodeSteps))
@@ -497,7 +742,8 @@ enum PagedKVRuntimeParityProbe {
                 promptTokenOffset: committedKVTokenCount,
                 committedKVTokenCount: committedKVTokenCount,
                 targetKVTokenCount: committedKVTokenCount,
-                isFinalChunk: true
+                isFinalChunk: true,
+                sampleFirstToken: false
             ),
             decode: decode
         )
