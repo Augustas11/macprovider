@@ -3323,13 +3323,14 @@ actor ContinuousBatchScheduler {
     }
 
     private func fenceDisabledActiveNativeMTPRows() async {
-        let nativeIDs = activeDecode.compactMap { requestID, row in
-            guard row.usesNativeMTP,
-                  let fence = row.nativeMTPTupleFence,
-                  disabledNativeMTPTupleFences.contains(fence) else {
-                return nil
+        var nativeIDs: [String] = []
+        nativeIDs.reserveCapacity(activeDecode.count)
+        for (requestID, row) in activeDecode {
+            if row.usesNativeMTP,
+               let fence = row.nativeMTPTupleFence,
+               disabledNativeMTPTupleFences.contains(fence) {
+                nativeIDs.append(requestID)
             }
-            return requestID
         }
         for requestID in nativeIDs {
             guard var row = activeDecode.removeValue(forKey: requestID) else { continue }
@@ -3345,7 +3346,7 @@ actor ContinuousBatchScheduler {
                 )
                 if !released { return }
             } else {
-                row.decodePath = .ordinary
+                row.decodePath = DecodePath.ordinary
                 row.nativeMTPAdaptation = nil
                 row.nativeMTPDirective = nil
                 activeDecode[requestID] = row

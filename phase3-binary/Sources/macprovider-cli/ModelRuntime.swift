@@ -6408,7 +6408,7 @@ actor ModelRuntime: ModelRuntimeServing {
                             }
                             let recurrent = Self.prefillRecurrentCheckpoints(
                                 lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
-                                context: generationContext, prefillStepSize: parameters.prefill.resolvedStepSize())
+                                context: generationContext, prefillStepSize: prefillStepSize)
                             if let resumeAt = recurrent.resumeAt {
                                 iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                             }
@@ -6872,15 +6872,15 @@ actor ModelRuntime: ModelRuntimeServing {
         return try await Self.withDrainCancellation(drainCancelled) {
             try await Self.withStructuredStreamingIdleTimeout(
                 idleState: idleState,
-                onIdleTimeout: {
+                onIdleTimeout: { () throws -> CompletionResult in
                     try Self.synthesizeIdleTimeoutResultOrThrow(
                         accumulator: structuredAccumulator,
                         request: request,
                         modelHash: snapshot.modelHash
                     )
                 }
-            ) { idleCancellation in
-                try await inferenceGate.withPermit {
+            ) { idleCancellation -> CompletionResult in
+                try await inferenceGate.withPermit { () async throws -> CompletionResult in
                 try drainCancelled.check()
                 try Task.checkCancellation()
                 return try await container.perform { context in
@@ -7039,7 +7039,7 @@ actor ModelRuntime: ModelRuntimeServing {
                     }
                     let recurrent = Self.prefillRecurrentCheckpoints(
                         lease: lease, cache: kvCache, promptTokenIds: promptTokenIds,
-                        context: generationContext, prefillStepSize: parameters.prefill.resolvedStepSize())
+                        context: generationContext, prefillStepSize: prefillStepSize)
                     if let resumeAt = recurrent.resumeAt {
                         iteratorInput = LMInput(tokens: MLXArray(Array(promptTokenIds[resumeAt...])))
                     }
