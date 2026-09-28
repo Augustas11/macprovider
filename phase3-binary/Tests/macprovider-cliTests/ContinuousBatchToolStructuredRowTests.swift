@@ -636,6 +636,74 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         XCTAssertEqual(decoder.append(1), "é")
         XCTAssertEqual(decoder.append(2), "é word")
         XCTAssertEqual(decoder.append(3), "é word.")
+
+        let orderedPieces = ["Ġ'", "Ġ", "."]
+        let orderedDecoder = ModelRuntime.StreamingDetokenizer(
+            decode: { _ in "" },
+            tokenPiece: { orderedPieces[$0] },
+            cleanUpTokenizationSpaces: true
+        ).makeIncremental()
+        XCTAssertEqual(orderedDecoder.append(0), " '")
+        XCTAssertEqual(orderedDecoder.append(1), "'")
+        XCTAssertEqual(orderedDecoder.append(2), " '.")
+    }
+
+    func testIncrementalCleanupRewriteDoesNotStallBatchedStream() throws {
+        let pieces = ["ĠĠĠĠ", ".", "later"]
+        let request = try request(["tools": Self.weatherTool])
+        let state = ModelRuntime.AttachedPagedKVStreamState(
+            request: request,
+            detokenizer: ModelRuntime.StreamingDetokenizer(
+                decode: { ids in ids.map { pieces[$0] }.joined() },
+                tokenPiece: { pieces[$0] },
+                cleanUpTokenizationSpaces: true
+            )
+        )
+        let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+        let idle = StructuredStreamingIdleState(enabled: false)
+        let sink = ChunkSink()
+
+        for token in pieces.indices {
+            XCTAssertFalse(state.step(
+                eventTokens: [token],
+                stopTokenFilter: Self.stopTokenFilter,
+                requestStops: [],
+                structuredAccumulator: accumulator,
+                idleState: idle,
+                onChunk: sink.append
+            ))
+        }
+
+        XCTAssertEqual(sink.normalized(), ["content:    ", "content:.", "content:later"])
+    }
+
+    func testIncrementalCleanupContractionDoesNotDuplicateBatchedStream() throws {
+        let pieces = ["Ġ'", "Ġ", ".", "later"]
+        let request = try request(["tools": Self.weatherTool])
+        let state = ModelRuntime.AttachedPagedKVStreamState(
+            request: request,
+            detokenizer: ModelRuntime.StreamingDetokenizer(
+                decode: { ids in ids.map { pieces[$0] }.joined() },
+                tokenPiece: { pieces[$0] },
+                cleanUpTokenizationSpaces: true
+            )
+        )
+        let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+        let idle = StructuredStreamingIdleState(enabled: false)
+        let sink = ChunkSink()
+
+        for token in pieces.indices {
+            XCTAssertFalse(state.step(
+                eventTokens: [token],
+                stopTokenFilter: Self.stopTokenFilter,
+                requestStops: [],
+                structuredAccumulator: accumulator,
+                idleState: idle,
+                onChunk: sink.append
+            ))
+        }
+
+        XCTAssertEqual(sink.normalized(), ["content: '", "content:.", "content:later"])
     }
 
     func testStreamingToolTurnEmitsSerialToolDeltasAndStopsAtSerialToken() throws {
