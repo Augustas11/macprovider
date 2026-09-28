@@ -279,8 +279,10 @@ CREATE TABLE IF NOT EXISTS settlement_reconcile_attempts (
 	UNIQUE (account_id, request_id),
 	FOREIGN KEY (account_id, request_id) REFERENCES quota_reservations(account_id, request_id) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS idx_settlement_reconcile_next_attempt
-	ON settlement_reconcile_attempts(operator_review, next_attempt_after);
+-- idx_settlement_reconcile_next_attempt is created by
+-- ensureSettlementReconcileBacklogColumns after it adds operator_review:
+-- on a pre-v15 database the CREATE TABLE above is a no-op, so an index on
+-- the new columns here fails with "no such column" and blocks Open.
 CREATE TABLE IF NOT EXISTS settlement_fallback_candidates (
 	account_id TEXT NOT NULL,
 	request_id TEXT NOT NULL,
