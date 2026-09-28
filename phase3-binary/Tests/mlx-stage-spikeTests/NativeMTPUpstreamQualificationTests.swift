@@ -7,13 +7,6 @@ import MLXNN
 import XCTest
 
 final class NativeMTPUpstreamQualificationTests: XCTestCase {
-    override func setUpWithError() throws {
-        try super.setUpWithError()
-        guard Self.defaultMetallibExists() else {
-            throw XCTSkip("MLX default metallib is unavailable in this test host")
-        }
-    }
-
     func testDrafterContainerTransfersRowOwnedState() async {
         let configuration = ModelConfiguration(
             id: "qualification/native-mtp-drafter",
@@ -37,6 +30,7 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
     }
 
     func testPublicTransactionFacadeExposesRowOwnedPositionMetadata() throws {
+        try Self.requireDefaultMetallib()
         let leaf = KVCacheSimple()
         let storage = try MTPKVCacheStorage(cache: [leaf])
         let position = MTPKVCacheTransactionPosition(rowIndex: 7, queryOffset: 42)
@@ -63,6 +57,7 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
     }
 
     func testStagedProposalAndTargetVerificationRepresentation() throws {
+        try Self.requireDefaultMetallib()
         let leaf = KVCacheSimple()
         let storage = try MTPKVCacheStorage(cache: [leaf])
         let transaction = try XCTUnwrap(storage.beginTransaction(maximumPositions: 3))
@@ -86,6 +81,7 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
     }
 
     func testContiguousPrefixCommitDiscardsRejectedTail() throws {
+        try Self.requireDefaultMetallib()
         let first = KVCacheSimple()
         let second = KVCacheSimple()
         let storage = try MTPKVCacheStorage(cache: [first, second])
@@ -115,6 +111,7 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
     }
 
     func testRollbackAndRewindRestoreExactCachePosition() throws {
+        try Self.requireDefaultMetallib()
         let leaf = KVCacheSimple()
         let storage = try MTPKVCacheStorage(cache: [leaf])
 
@@ -145,6 +142,7 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
     }
 
     func testInvalidSourceAndPositionFailuresLeaveTransactionRecoverable() throws {
+        try Self.requireDefaultMetallib()
         let leaf = KVCacheSimple()
         let storage = try MTPKVCacheStorage(cache: [leaf])
 
@@ -185,6 +183,7 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
     }
 
     func testCacheBoundaryRefusalsDoNotMutateStorage() throws {
+        try Self.requireDefaultMetallib()
         let unsupported = try MTPKVCacheStorage(cache: [MambaCache()])
         XCTAssertNil(unsupported.beginTransaction(maximumPositions: 1))
         XCTAssertNil(
@@ -212,6 +211,7 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
     }
 
     func testPublicPackedVerificationAPIUsesExplicitMixedRaggedRows() throws {
+        try Self.requireDefaultMetallib()
         let model = PackedVerificationModel()
         let cache = PackedVerificationCache(offsets: [12, 1, 8])
         let rowMaps = [
@@ -302,6 +302,7 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
     }
 
     func testPublicPackedVerificationRequiresContinuationStateFailClosed() throws {
+        try Self.requireDefaultMetallib()
         let tokens = MLXArray([1, 2]).reshaped(1, 2)
         let rowMaps = [
             MTPPackedVerificationRowMap(
@@ -351,6 +352,7 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
     }
 
     func testPublicPackedVerificationRejectsIncapableOrEmptyCache() throws {
+        try Self.requireDefaultMetallib()
         let model = PackedVerificationModel()
         let rowMaps = [
             MTPPackedVerificationRowMap(
@@ -440,6 +442,12 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
         let roots = [Bundle.main.resourceURL, Bundle.main.executableURL?.deletingLastPathComponent()]
         return roots.compactMap { $0 }.contains { root in
             relativeNames.contains { FileManager.default.fileExists(atPath: root.appendingPathComponent($0).path) }
+        }
+    }
+
+    private static func requireDefaultMetallib() throws {
+        guard defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
         }
     }
 
