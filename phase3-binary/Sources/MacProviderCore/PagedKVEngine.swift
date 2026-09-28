@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum PagedKVDType: String, Sendable, Equatable, Codable {
     /// IEEE float16. The original SPEC-039 unquantized KV tag.
@@ -485,6 +486,134 @@ public enum PagedKVAllocatorError: Error, Equatable {
     case retainedHandleStillLive
 }
 
+public struct PagedKVStateTopologyComponent: Equatable, Sendable, Codable {
+    public let name: String
+    public let kind: String
+    public let dtype: PagedKVDType
+    public let shape: [Int]
+    public let logicalExtent: Int
+
+    public init(
+        name: String,
+        kind: String,
+        dtype: PagedKVDType,
+        shape: [Int],
+        logicalExtent: Int
+    ) throws {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedKind = kind.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isCanonicalAtom(trimmedName), Self.isCanonicalAtom(trimmedKind) else {
+            throw PagedKVAllocatorError.invalidBlockTable("invalid state topology component")
+        }
+        guard !shape.isEmpty, shape.allSatisfy({ $0 >= 0 }), logicalExtent >= 0 else {
+            throw PagedKVAllocatorError.invalidBlockTable("invalid state topology shape")
+        }
+        self.name = trimmedName
+        self.kind = trimmedKind
+        self.dtype = dtype
+        self.shape = shape
+        self.logicalExtent = logicalExtent
+    }
+
+    fileprivate var canonicalRecord: String {
+        [
+            name,
+            kind,
+            dtype.rawValue,
+            shape.map(String.init).joined(separator: ","),
+            String(logicalExtent),
+        ].joined(separator: "|")
+    }
+
+    private static func isCanonicalAtom(_ value: String) -> Bool {
+        !value.isEmpty && value.allSatisfy { character in
+            character.isLetter || character.isNumber || character == "_" || character == "." || character == "-"
+        }
+    }
+}
+
+public struct PagedKVStateTopology: Equatable, Sendable, Codable {
+    public let version: Int
+    public let components: [PagedKVStateTopologyComponent]
+    public let canonicalEncoding: Data
+    public let digestSHA256: String
+
+    public init(version: Int = 1, components: [PagedKVStateTopologyComponent]) throws {
+        guard version > 0 else {
+            throw PagedKVAllocatorError.invalidBlockTable("invalid state topology version")
+        }
+        guard !components.isEmpty else {
+            throw PagedKVAllocatorError.invalidBlockTable("empty state topology")
+        }
+        guard Set(components.map(\.name)).count == components.count else {
+            throw PagedKVAllocatorError.invalidBlockTable("duplicate state topology component")
+        }
+        self.version = version
+        self.components = components
+        var lines = ["paged_kv_state_topology.v\(version)"]
+        lines.append(contentsOf: components.enumerated().map { index, component in
+            "\(index)|\(component.canonicalRecord)"
+        })
+        lines.append("")
+        let encoding = Data(lines.joined(separator: "\n").utf8)
+        self.canonicalEncoding = encoding
+        self.digestSHA256 = SHA256.hash(data: encoding).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+public struct PagedKVNativeMTPTransaction: Equatable, Sendable {
+    public let transactionID: UUID
+    public let handle: PagedKVBlockTableHandle
+    public let rowGeneration: Int
+    public let logicalTokenCount: Int
+    public let allocatorEpoch: Int
+    public let servedSnapshotID: String
+    public let topology: PagedKVStateTopology
+
+    public init(
+        transactionID: UUID,
+        handle: PagedKVBlockTableHandle,
+        rowGeneration: Int,
+        logicalTokenCount: Int,
+        allocatorEpoch: Int,
+        servedSnapshotID: String,
+        topology: PagedKVStateTopology
+    ) {
+        self.transactionID = transactionID
+        self.handle = handle
+        self.rowGeneration = rowGeneration
+        self.logicalTokenCount = logicalTokenCount
+        self.allocatorEpoch = allocatorEpoch
+        self.servedSnapshotID = servedSnapshotID
+        self.topology = topology
+    }
+}
+
+public struct PagedKVNativeMTPStagedMapping: Equatable, Sendable {
+    public let transactionID: UUID
+    public let committedTable: PagedKVBlockTable
+    public let privateStagedTable: PagedKVBlockTable
+    public let proposalRange: Range<Int>
+    public let stagedTailPhysicalBlocks: [Int]
+    public let proposalTokenCount: Int
+
+    public init(
+        transactionID: UUID,
+        committedTable: PagedKVBlockTable,
+        privateStagedTable: PagedKVBlockTable,
+        proposalRange: Range<Int>,
+        stagedTailPhysicalBlocks: [Int],
+        proposalTokenCount: Int
+    ) {
+        self.transactionID = transactionID
+        self.committedTable = committedTable
+        self.privateStagedTable = privateStagedTable
+        self.proposalRange = proposalRange
+        self.stagedTailPhysicalBlocks = stagedTailPhysicalBlocks
+        self.proposalTokenCount = proposalTokenCount
+    }
+}
+
 public struct PagedKVRetainedSequence: Equatable, Sendable {
     public let handle: PagedKVBlockTableHandle
     let conversationKey: String
@@ -495,8 +624,25 @@ public struct PagedKVStorageBinding: Equatable, Sendable {
     public let handle: PagedKVBlockTableHandle
     public let blockSizeTokens: Int
     public let maxLogicalTokens: Int
+    public let rowGeneration: Int
     public let currentTable: PagedKVBlockTable
     public let poolEpoch: Int
+
+    public init(
+        handle: PagedKVBlockTableHandle,
+        blockSizeTokens: Int,
+        maxLogicalTokens: Int,
+        rowGeneration: Int = 0,
+        currentTable: PagedKVBlockTable,
+        poolEpoch: Int
+    ) {
+        self.handle = handle
+        self.blockSizeTokens = blockSizeTokens
+        self.maxLogicalTokens = maxLogicalTokens
+        self.rowGeneration = rowGeneration
+        self.currentTable = currentTable
+        self.poolEpoch = poolEpoch
+    }
 }
 
 struct PagedKVPhysicalLayerBlocks: Equatable, Sendable {
@@ -623,13 +769,25 @@ public extension PagedKVContiguousCacheBridge {
 }
 
 public actor PagedKVBlockAllocator {
+    private struct NativeMTPTransactionState: Sendable {
+        let transactionID: UUID
+        let rowGeneration: Int
+        let checkpointLogicalTokenCount: Int
+        let checkpointReservedBlockCount: Int
+        let servedSnapshotID: String
+        let topology: PagedKVStateTopology
+        var stagedProposalTokenCount: Int?
+    }
+
     private struct SequenceState: Sendable {
         var conversationKey: String
         var reservedBlocks: [Int]
         var maxLogicalTokens: Int
         var logicalTokenCount: Int
+        var rowGeneration: Int
         var inFlightDecodeSteps: Int
         var retained: Bool
+        var nativeMTPTransaction: NativeMTPTransactionState?
     }
 
     public let blockSizeTokens: Int
@@ -770,11 +928,192 @@ public actor PagedKVBlockAllocator {
             reservedBlocks: reserved,
             maxLogicalTokens: maxLogicalTokens,
             logicalTokenCount: initialTokens,
+            rowGeneration: 0,
             inFlightDecodeSteps: 0,
-            retained: false
+            retained: false,
+            nativeMTPTransaction: nil
         )
         try validate(handle)
         return handle
+    }
+
+    private func ensureNoNativeMTPTransaction(_ state: SequenceState) throws {
+        guard state.nativeMTPTransaction == nil else {
+            throw PagedKVAllocatorError.invalidBlockTable("native MTP transaction in progress")
+        }
+    }
+
+    private func validateNativeMTPTransaction(
+        _ transaction: PagedKVNativeMTPTransaction,
+        state: SequenceState
+    ) throws -> NativeMTPTransactionState {
+        guard transaction.handle.poolEpoch == poolEpoch,
+              transaction.allocatorEpoch == poolEpoch
+        else {
+            throw PagedKVAllocatorError.unknownHandle
+        }
+        guard transaction.handle.conversationKey == state.conversationKey else {
+            throw PagedKVAllocatorError.conversationMismatch
+        }
+        guard transaction.rowGeneration == state.rowGeneration else {
+            throw PagedKVAllocatorError.invalidBlockTable("stale native MTP row generation")
+        }
+        guard transaction.logicalTokenCount == state.logicalTokenCount else {
+            throw PagedKVAllocatorError.invalidBlockTable("stale native MTP logical length")
+        }
+        guard let staged = state.nativeMTPTransaction,
+              staged.transactionID == transaction.transactionID,
+              staged.rowGeneration == transaction.rowGeneration,
+              staged.checkpointLogicalTokenCount == transaction.logicalTokenCount,
+              staged.servedSnapshotID == transaction.servedSnapshotID,
+              staged.topology == transaction.topology
+        else {
+            throw PagedKVAllocatorError.invalidBlockTable("native MTP transaction mismatch")
+        }
+        return staged
+    }
+
+    public func checkpointNativeMTPTransaction(
+        handle: PagedKVBlockTableHandle,
+        servedSnapshotID: String,
+        topology: PagedKVStateTopology
+    ) throws -> PagedKVNativeMTPTransaction {
+        let trimmedSnapshotID = servedSnapshotID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSnapshotID.isEmpty else {
+            throw PagedKVAllocatorError.invalidBlockTable("empty served snapshot")
+        }
+        var state = try lookupState(for: handle)
+        guard !state.retained else {
+            throw PagedKVAllocatorError.retainedHandleStillLive
+        }
+        guard state.inFlightDecodeSteps == 0 else {
+            throw PagedKVAllocatorError.retainedHandleStillLive
+        }
+        try ensureNoNativeMTPTransaction(state)
+        let transaction = PagedKVNativeMTPTransaction(
+            transactionID: UUID(),
+            handle: handle,
+            rowGeneration: state.rowGeneration,
+            logicalTokenCount: state.logicalTokenCount,
+            allocatorEpoch: poolEpoch,
+            servedSnapshotID: trimmedSnapshotID,
+            topology: topology
+        )
+        state.nativeMTPTransaction = NativeMTPTransactionState(
+            transactionID: transaction.transactionID,
+            rowGeneration: transaction.rowGeneration,
+            checkpointLogicalTokenCount: state.logicalTokenCount,
+            checkpointReservedBlockCount: state.reservedBlocks.count,
+            servedSnapshotID: trimmedSnapshotID,
+            topology: topology,
+            stagedProposalTokenCount: nil
+        )
+        sequences[handle.id] = state
+        return transaction
+    }
+
+    public func stageNativeMTPTransaction(
+        _ transaction: PagedKVNativeMTPTransaction,
+        proposalTokenCount: Int
+    ) throws -> PagedKVNativeMTPStagedMapping {
+        guard proposalTokenCount >= 0 else {
+            throw PagedKVAllocatorError.invalidBlockTable("negative native MTP proposal length")
+        }
+        var state = try lookupState(for: transaction.handle)
+        var staged = try validateNativeMTPTransaction(transaction, state: state)
+        guard staged.stagedProposalTokenCount == nil else {
+            throw PagedKVAllocatorError.invalidBlockTable("native MTP transaction already staged")
+        }
+        let (stagedLength, overflow) = staged.checkpointLogicalTokenCount.addingReportingOverflow(proposalTokenCount)
+        guard !overflow else {
+            throw PagedKVAllocatorError.invalidBlockTable("logical length overflow")
+        }
+        guard stagedLength <= state.maxLogicalTokens else {
+            throw PagedKVAllocatorError.capacityExceeded(
+                requiredBlocks: try requiredBlocks(maxTokens: stagedLength),
+                availableBlocks: state.reservedBlocks.count
+            )
+        }
+        let needed = try requiredBlocks(maxTokens: stagedLength)
+        if needed > state.reservedBlocks.count {
+            let additional = needed - state.reservedBlocks.count
+            guard additional <= freeBlocks.count else {
+                throw PagedKVAllocatorError.capacityExceeded(
+                    requiredBlocks: needed,
+                    availableBlocks: state.reservedBlocks.count + freeBlocks.count
+                )
+            }
+            for _ in 0..<additional {
+                state.reservedBlocks.append(freeBlocks.removeLast())
+            }
+        }
+        staged.stagedProposalTokenCount = proposalTokenCount
+        state.nativeMTPTransaction = staged
+        sequences[transaction.handle.id] = state
+        let committedTable = try validateTable(handle: transaction.handle, state: state)
+        var stagedState = state
+        stagedState.logicalTokenCount = stagedLength
+        let privateStagedTable = try validateTable(handle: transaction.handle, state: stagedState)
+        let checkpointBlocks = try requiredBlocks(maxTokens: staged.checkpointLogicalTokenCount)
+        let proposalStartBlock = proposalTokenCount == 0 ? checkpointBlocks : staged.checkpointLogicalTokenCount / blockSizeTokens
+        let stagedTailBlocks = proposalStartBlock < privateStagedTable.physicalBlocks.count
+            ? Array(privateStagedTable.physicalBlocks[proposalStartBlock...])
+            : []
+        return PagedKVNativeMTPStagedMapping(
+            transactionID: transaction.transactionID,
+            committedTable: committedTable,
+            privateStagedTable: privateStagedTable,
+            proposalRange: staged.checkpointLogicalTokenCount..<stagedLength,
+            stagedTailPhysicalBlocks: stagedTailBlocks,
+            proposalTokenCount: proposalTokenCount
+        )
+    }
+
+    public func commitNativeMTPTransaction(
+        _ transaction: PagedKVNativeMTPTransaction,
+        acceptedPrefixTokenCount: Int
+    ) throws -> PagedKVBlockTable {
+        guard acceptedPrefixTokenCount >= 0 else {
+            throw PagedKVAllocatorError.invalidBlockTable("negative native MTP commit length")
+        }
+        var state = try lookupState(for: transaction.handle)
+        let staged = try validateNativeMTPTransaction(transaction, state: state)
+        guard let proposalTokenCount = staged.stagedProposalTokenCount else {
+            throw PagedKVAllocatorError.invalidBlockTable("native MTP transaction not staged")
+        }
+        guard acceptedPrefixTokenCount <= proposalTokenCount else {
+            throw PagedKVAllocatorError.invalidBlockTable("native MTP commit exceeds staged length")
+        }
+        let nextLength = staged.checkpointLogicalTokenCount + acceptedPrefixTokenCount
+        let needed = try requiredBlocks(maxTokens: nextLength)
+        var released: ArraySlice<Int> = []
+        if needed < state.reservedBlocks.count {
+            released = state.reservedBlocks[needed...]
+            state.reservedBlocks.removeSubrange(needed...)
+        }
+        state.logicalTokenCount = nextLength
+        state.rowGeneration += 1
+        state.nativeMTPTransaction = nil
+        let table = try validateTable(handle: transaction.handle, state: state)
+        sequences[transaction.handle.id] = state
+        freeBlocks.append(contentsOf: released.reversed())
+        return table
+    }
+
+    public func abortNativeMTPTransaction(_ transaction: PagedKVNativeMTPTransaction) throws -> PagedKVBlockTable {
+        var state = try lookupState(for: transaction.handle)
+        let staged = try validateNativeMTPTransaction(transaction, state: state)
+        var released: ArraySlice<Int> = []
+        if staged.checkpointReservedBlockCount < state.reservedBlocks.count {
+            released = state.reservedBlocks[staged.checkpointReservedBlockCount...]
+            state.reservedBlocks.removeSubrange(staged.checkpointReservedBlockCount...)
+        }
+        state.logicalTokenCount = staged.checkpointLogicalTokenCount
+        state.nativeMTPTransaction = nil
+        let table = try validateTable(handle: transaction.handle, state: state)
+        sequences[transaction.handle.id] = state
+        freeBlocks.append(contentsOf: released.reversed())
+        return table
     }
 
     public func extend(_ handle: PagedKVBlockTableHandle, by tokens: Int) throws -> PagedKVBlockTable {
@@ -786,6 +1125,7 @@ public actor PagedKVBlockAllocator {
         guard state.inFlightDecodeSteps == 0 else {
             throw PagedKVAllocatorError.retainedHandleStillLive
         }
+        try ensureNoNativeMTPTransaction(state)
         let (nextLength, overflow) = state.logicalTokenCount.addingReportingOverflow(tokens)
         guard !overflow else {
             throw PagedKVAllocatorError.invalidBlockTable("logical length overflow")
@@ -804,6 +1144,7 @@ public actor PagedKVBlockAllocator {
             }
         }
         state.logicalTokenCount = nextLength
+        state.rowGeneration += 1
         sequences[handle.id] = state
         return try validate(handle)
     }
@@ -813,6 +1154,7 @@ public actor PagedKVBlockAllocator {
         guard !state.retained else {
             throw PagedKVAllocatorError.retainedHandleStillLive
         }
+        try ensureNoNativeMTPTransaction(state)
         state.inFlightDecodeSteps += 1
         sequences[handle.id] = state
     }
@@ -835,11 +1177,13 @@ public actor PagedKVBlockAllocator {
         guard state.inFlightDecodeSteps == 0 else {
             throw PagedKVAllocatorError.retainedHandleStillLive
         }
+        try ensureNoNativeMTPTransaction(state)
         guard tokens <= state.logicalTokenCount else {
             throw PagedKVAllocatorError.invalidBlockTable("trim length exceeds logical length")
         }
         var nextState = state
         nextState.logicalTokenCount = tokens
+        nextState.rowGeneration += 1
         let needed = try requiredBlocks(maxTokens: tokens)
         var released: ArraySlice<Int> = []
         if needed < nextState.reservedBlocks.count {
@@ -863,6 +1207,7 @@ public actor PagedKVBlockAllocator {
             handle: handle,
             blockSizeTokens: blockSizeTokens,
             maxLogicalTokens: state.maxLogicalTokens,
+            rowGeneration: state.rowGeneration,
             currentTable: try validate(handle),
             poolEpoch: poolEpoch
         )
@@ -927,6 +1272,7 @@ public actor PagedKVBlockAllocator {
         guard !state.retained else {
             throw PagedKVAllocatorError.retainedHandleStillLive
         }
+        try ensureNoNativeMTPTransaction(state)
         state.retained = true
         sequences[handle.id] = state
         return PagedKVRetainedSequence(
@@ -965,6 +1311,7 @@ public actor PagedKVBlockAllocator {
             }
             var nextState = state
             nextState.logicalTokenCount = tokens
+            nextState.rowGeneration += 1
             if let requestedMaxLogicalTokens {
                 guard requestedMaxLogicalTokens >= tokens else {
                     throw PagedKVAllocatorError.invalidBlockTable("max logical length below trim length")
@@ -1020,6 +1367,7 @@ public actor PagedKVBlockAllocator {
         guard state.inFlightDecodeSteps == 0 else {
             throw PagedKVAllocatorError.retainedHandleStillLive
         }
+        try ensureNoNativeMTPTransaction(state)
         sequences.removeValue(forKey: handle.id)
         freeBlocks.append(contentsOf: state.reservedBlocks.reversed())
         contiguousCacheBridge?.discardContiguousCache(handle: handle)
