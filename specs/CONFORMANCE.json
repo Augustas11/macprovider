@@ -1474,7 +1474,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.2",
+      "version": "0.1.5",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -9841,12 +9841,13 @@
       ],
       "tests": [
         "phase3-binary/Tests/mlx-stage-spikeTests/NativeMTPUpstreamQualificationTests.swift:func testPublicPackedVerificationAPIUsesExplicitMixedRaggedRows() throws",
+        "phase3-binary/Tests/mlx-stage-spikeTests/NativeMTPUpstreamQualificationTests.swift:func testPublicPackedVerificationRequiresContinuationStateFailClosed() throws",
         "scripts/tests/test_upstream_watch.py:class SwiftPMPinParsingTests"
       ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [
         {
-          "artifact": "sha256:6c6fef7b3dd46d654e2e9569a27b9a56d096daa4c9fd1e9f7a74a61051c7adc3",
+          "artifact": "sha256:a5615401ffaace7371f69baad7887f757a4142dd8c3185a8d17330e5a0db6864",
           "source": "docs/research/SPEC_048_PHASE0_UPSTREAM_GATE_2026-09-28.md",
           "captured_at": "2026-09-28",
           "expires_at": "2026-12-27"
@@ -9856,7 +9857,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "The exact reviewed fork revision and public row-mapped cache-transaction plus packed target-verification facades are selected under the SPEC-048 v0.1.2 immutable-dependency exception. R003 remains pending until the external-package qualification, full upstream/cache test evidence, strict-concurrency and deployment/license checks, and the production adapter all pass on the frozen MacProvider diff."
+        "rationale": "The exact reviewed fork revision adds standalone Qwen 3.5 MTP checkpoint loading plus public row-mapped cache transactions, packed target verification, strict row-local continuation state, serialized non-Sendable drafter-state access, and packed recurrent Mamba row transactions under the SPEC-048 v0.1.5 immutable-dependency exception. The expanded upstream test bundle compiled and the real Qwen 3.5 target/MTP tuple passed Mac Studio ordinary-versus-native-MTP parity, but R003 remains pending until the frozen MacProvider diff completes every audit, release, and signed-campaign gate. This does not make any production tuple eligible."
       }
     },
     {

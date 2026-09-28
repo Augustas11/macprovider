@@ -441,6 +441,32 @@ struct RecurrentStateSlotLayout: Equatable, Sendable {
     let dtype: DType
 }
 
+struct PagedKVMTPPackedCacheExerciseResult: Equatable {
+    let batchOffsetsBeforeUpdate: [Int]
+    let returnedKeyShape: [Int]
+    let rowOffsetsAfterUpdate: [Int]
+    let rowStoredTokensAfterUpdate: [Int]
+    let rowStateTokenCountsAfterUpdate: [Int]
+    let batchTokenCountBeforeFinalize: Int
+    let batchTokenCountAfterFinalize: Int
+    let rowStateTokenCountsAfterFinalize: [Int]
+    let maskShape: [Int]
+    let maskValues: [Bool]
+}
+
+struct PagedKVMTPPackedCacheResolutionResult: Equatable {
+    let rowOffsetsAfterStaging: [Int]
+    let rowStoredTokensAfterStaging: [Int]
+    let rowStateTokenCountsAfterStaging: [Int]
+    let pendingInputCountsBeforeFinalize: [Int]
+    let pendingProposalCountsBeforeFinalize: [Int]
+    let pendingInputCountsAfterFacadeFinalize: [Int]
+    let pendingProposalCountsAfterFacadeFinalize: [Int]
+    let rowOffsetsAfterResolution: [Int]
+    let rowStoredTokensAfterResolution: [Int]
+    let rowStateTokenCountsAfterResolution: [Int]
+}
+
 final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unchecked Sendable {
     /// `MambaCache` holds exactly two slots (conv state, SSM state).
     static let mambaCacheSlotCount = 2
@@ -486,7 +512,16 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         var compiledStep: CompiledDecodeStep?
     }
 
+    private struct NativeMTPPendingTransaction {
+        let proposalTokenCount: Int
+        let promptTokens: [Int]
+        let targetState: MTPPackedVerificationRowState
+        let draftTokens: MLXArray?
+        let layers: [NativeMTPPendingLayerResolution]
+    }
+
     private let container: ModelContainer
+    private let drafterContainer: MTPDrafterContainer?
     private let blockSizeTokens: Int
     private let maxPhysicalBlocks: Int
     private let poolEpoch: Int
@@ -498,6 +533,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
     private let lock = NSLock()
     private var rows: [String: RowState] = [:]
     private var decodeSession: DecodeSession?
+    private var nativeMTPPendingTransactions: [String: NativeMTPPendingTransaction] = [:]
+    private var nativeMTPTargetStates: [String: MTPPackedVerificationRowState] = [:]
+    private var nativeMTPDrafterStates: [String: MTPDrafterState] = [:]
+    private var nativeMTPDraftTokens: [String: MLXArray] = [:]
     private var activeOperations = 0
     private var cancelRequested = false
     private var cancellationWaiters: [CheckedContinuation<Void, Never>] = []
@@ -510,9 +549,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         layerCount: Int,
         cacheKinds: [CacheKind]? = nil,
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
-        compiledDecode: Bool = false
+        compiledDecode: Bool = false,
+        drafterContainer: MTPDrafterContainer? = nil
     ) {
         self.container = container
+        self.drafterContainer = drafterContainer
         self.blockSizeTokens = blockSizeTokens
         self.maxPhysicalBlocks = maxPhysicalBlocks
         self.poolEpoch = poolEpoch
@@ -536,7 +577,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         layerCount: Int,
         cacheKinds: [CacheKind]? = nil,
         contiguousCacheBridge: (any PagedKVRuntimeCacheBridge)? = nil,
-        compiledDecode: Bool = false
+        compiledDecode: Bool = false,
+        drafterContainer: MTPDrafterContainer? = nil
     ) {
         self.init(
             container: container,
@@ -546,7 +588,8 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             layerCount: layerCount,
             cacheKinds: cacheKinds,
             contiguousCacheBridge: contiguousCacheBridge,
-            compiledDecode: compiledDecode
+            compiledDecode: compiledDecode,
+            drafterContainer: drafterContainer
         )
     }
 
@@ -771,8 +814,207 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         }
     }
 
+    func proposeNativeMTPPackedRound(
+        rows inputs: [ContinuousBatchNativeMTPProposalInput]
+    ) async throws -> [String: [Int]]? {
+        guard !inputs.isEmpty else { return [:] }
+        guard let drafterContainer else { return nil }
+        guard beginOperation() else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
+        }
+        defer { endOperation() }
+
+        return try await container.perform(nonSendable: inputs) { (targetContext: ModelContext, inputs: [ContinuousBatchNativeMTPProposalInput]) in
+            var proposals: [String: [Int]] = [:]
+            for input in inputs {
+                guard input.maximumProposalDepth > 0 else {
+                    proposals[input.requestID] = []
+                    continue
+                }
+                guard let targetState = self.nativeMTPTargetState(for: input.requestID),
+                      let drafterState = self.nativeMTPDrafterState(for: input.requestID)
+                else {
+                    proposals[input.requestID] = []
+                    continue
+                }
+                let proposalResult = try await drafterContainer.perform(
+                    nonSendable: (input, targetState, drafterState, targetContext.model)
+                ) { drafterContext, values in
+                    let (input, targetState, drafterState, targetModel) = values
+                    let blockSize = input.maximumProposalDepth + 1
+                    let sampler = GenerateParameters(temperature: 0).sampler()
+                    guard let statefulDrafter = drafterContext.model as? any StatefulMTPDrafterModel else {
+                        throw ContinuousBatchSchedulerError.unsupported("native_mtp_stateful_drafter_required")
+                    }
+                    guard NativeMTPProposalBounds.fits(
+                        maximumProposalDepth: input.maximumProposalDepth,
+                        maximumBlockSize: statefulDrafter.maximumBlockSize
+                    ) else {
+                        throw ContinuousBatchSchedulerError.unsupported("native_mtp_proposal_depth_exceeds_drafter")
+                    }
+                    var state = drafterState
+                    let lastToken = MLXArray([Int32(input.currentToken)])
+                    let hiddenIndex = max(0, targetState.lastHidden.dim(1) - 1)
+                    let lastHidden = targetState.lastHidden[0..., hiddenIndex ..< (hiddenIndex + 1), 0...]
+                    let draftTokens = statefulDrafter.draftBlock(
+                        target: targetModel,
+                        lastToken: lastToken,
+                        lastHidden: lastHidden,
+                        sharedKV: targetState.sharedKV,
+                        positionDeltas: targetState.positionDeltas,
+                        queryOffset: targetState.queryOffset,
+                        blockSize: blockSize,
+                        state: &state,
+                        sampler: sampler
+                    )
+                    eval(draftTokens)
+                    self.rollbackTentativeNativeMTPDrafterWrites(&state)
+                    return (
+                        proposals: Array(draftTokens.asArray(Int.self).prefix(input.maximumProposalDepth)),
+                        state: state,
+                        draftTokens: draftTokens
+                    )
+                }
+                self.storeNativeMTPDrafterState(proposalResult.state, for: input.requestID)
+                self.storeNativeMTPDraftTokens(proposalResult.draftTokens, for: input.requestID)
+                proposals[input.requestID] = proposalResult.proposals
+            }
+            return proposals
+        }
+    }
+
+    func verifyNativeMTPPackedRound(
+        rows inputs: [ContinuousBatchNativeMTPVerifyInput]
+    ) async throws -> [NativeMTPVerifiedRow] {
+        guard !inputs.isEmpty else { return [] }
+        guard beginOperation() else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
+        }
+        defer { endOperation() }
+        guard inputs.allSatisfy({ $0.verifiedInputTokenCount == $0.proposalTokens.count + 1 }) else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_invalid_verification_width")
+        }
+        guard Set(inputs.map(\.requestID)).count == inputs.count,
+              Set(inputs.map(\.packedRowIndex)).count == inputs.count,
+              inputs.allSatisfy({ $0.packedRowIndex >= 0 && $0.packedRowIndex < inputs.count })
+        else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_duplicate_packed_row")
+        }
+
+        clearDecodeSession()
+        let verified: [NativeMTPVerifiedRow] = try await container.perform(nonSendable: inputs) { context, inputs in
+            let rowStates = inputs.map {
+                self.rowState(
+                    for: $0.requestID,
+                    binding: $0.binding,
+                    initialOffset: $0.committedKVTokenCount
+                )
+            }
+            let batchedCaches = try self.makeBatchedCaches(from: rowStates.map(\.caches))
+            let width = inputs.map(\.verifiedInputTokenCount).max() ?? 1
+            let tokenRows = inputs.flatMap { input -> [Int32] in
+                let valid = [input.currentToken] + input.proposalTokens
+                return valid.map(Int32.init) + Array(repeating: Int32(0), count: width - valid.count)
+            }
+            let tokens = MLXArray(tokenRows, [inputs.count, width])
+            let rowMaps = inputs.map {
+                MTPPackedVerificationRowMap(
+                    rowIndex: $0.packedRowIndex,
+                    queryOffset: $0.committedKVTokenCount,
+                    inputCount: $0.verifiedInputTokenCount,
+                    proposalCount: $0.proposalTokens.count
+                )
+            }
+            let output = try verifyMTPPackedTargets(
+                model: context.model,
+                tokens: tokens,
+                rowMaps: rowMaps,
+                cache: batchedCaches.map(\.cache),
+                requireContinuationState: true
+            )
+            let pendingByRequestID = try Dictionary(
+                uniqueKeysWithValues: self.pendingNativeMTPTransactions(
+                    from: batchedCaches,
+                    inputs: inputs,
+                    rows: output.rows
+                ).map { ($0.0, $0.1) }
+            )
+            self.replaceNativeMTPTargetStates(
+                requestIDs: inputs.map(\.requestID),
+                states: Dictionary(uniqueKeysWithValues: output.rows.map { row in
+                    let input = inputs[row.map.rowIndex]
+                    return (input.requestID, row.continuationState)
+                })
+            )
+            self.replaceNativeMTPPendingTransactions(
+                requestIDs: inputs.map(\.requestID),
+                transactions: pendingByRequestID.mapValues { $0 }
+            )
+            for (index, input) in inputs.enumerated() {
+                try self.setRowState(rowStates[index], for: input.requestID, binding: input.binding)
+            }
+            return output.rows.map { row in
+                let input = inputs[row.map.rowIndex]
+                return NativeMTPVerifiedRow(
+                    schedulerRowID: input.requestID,
+                    packedRowIndex: input.packedRowIndex,
+                    proposedTokenIDs: input.proposalTokens,
+                    targetTopTokenIDs: Self.topTokenIDs(
+                        proposalLogits: row.proposalLogits,
+                        bonusLogits: row.bonusLogits
+                    )
+                )
+            }
+        }
+        return verified.sorted { $0.packedRowIndex < $1.packedRowIndex }
+    }
+
+    func finalizeNativeMTPPackedRound(rows inputs: [ContinuousBatchNativeMTPFinalizeInput]) async throws {
+        guard !inputs.isEmpty else { return }
+        guard beginOperation() else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_backend_cancelled")
+        }
+        defer { endOperation() }
+        try await container.perform(nonSendable: inputs) { context, inputs in
+            if inputs.allSatisfy({ !$0.shouldCommit }) {
+                let transactions = self.consumeAvailableNativeMTPPendingTransactions(for: inputs)
+                if !transactions.isEmpty {
+                    let presentInputs = inputs.filter { transactions[$0.requestID] != nil }
+                    try self.validateNativeMTPFinalizeInputs(
+                        presentInputs,
+                        transactions: transactions)
+                }
+                for input in inputs {
+                    self.rollbackNativeMTPDrafterState(for: input.requestID)
+                }
+                return
+            }
+            let transactions = try self.consumeNativeMTPPendingTransactions(for: inputs)
+            let byRequestID = Dictionary(uniqueKeysWithValues: inputs.map { ($0.requestID, $0) })
+            try self.validateNativeMTPFinalizeInputs(inputs, transactions: transactions)
+            for (requestID, transaction) in transactions {
+                guard let input = byRequestID[requestID] else { continue }
+                guard input.shouldCommit else {
+                    self.rollbackNativeMTPDrafterState(for: requestID)
+                    continue
+                }
+                for layer in transaction.layers {
+                    try layer.commit(inputCount: input.committedInputTokenCount)
+                }
+                try await self.commitNativeMTPDrafterState(
+                    targetModel: context.model,
+                    input: input,
+                    transaction: transaction
+                )
+                self.invalidateDecodeSession(containing: requestID)
+            }
+        }
+    }
+
     func finish(requestID: String) {
         invalidateDecodeSession(containing: requestID)
+        removeNativeMTPPendingTransaction(for: requestID)
+        removeNativeMTPRowState(for: requestID)
         removeRowState(for: requestID, discardRecordedCache: false)
     }
 
@@ -915,6 +1157,10 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             decodeSession = nil
             let handlesToDiscard = rows.compactMap { Self.pagedAttentionCaches(in: $0.value.caches).first?.binding.handle }
             rows.removeAll()
+            nativeMTPPendingTransactions.removeAll()
+            nativeMTPTargetStates.removeAll()
+            nativeMTPDrafterStates.removeAll()
+            nativeMTPDraftTokens.removeAll()
             if activeOperations == 0 {
                 lock.unlock()
                 handlesToDiscard.forEach { contiguousCacheBridge?.discardContiguousCache(handle: $0) }
@@ -1171,6 +1417,268 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         return decodeSession
     }
 
+    private static func topTokenIDs(proposalLogits: MLXArray, bonusLogits: MLXArray) -> [Int] {
+        var ids: [Int] = []
+        if proposalLogits.ndim == 2, proposalLogits.dim(0) > 0 {
+            ids.append(contentsOf: argMax(proposalLogits, axis: -1).asArray(Int.self))
+        }
+        ids.append(contentsOf: argMax(bonusLogits, axis: -1).asArray(Int.self))
+        return ids
+    }
+
+    private func nativeMTPTargetState(for requestID: String) -> MTPPackedVerificationRowState? {
+        lock.lock()
+        defer { lock.unlock() }
+        return nativeMTPTargetStates[requestID]
+    }
+
+    private func nativeMTPDrafterState(for requestID: String) -> MTPDrafterState? {
+        lock.lock()
+        defer { lock.unlock() }
+        return nativeMTPDrafterStates[requestID]
+    }
+
+    private func storeNativeMTPDrafterState(_ state: MTPDrafterState, for requestID: String) {
+        lock.lock()
+        nativeMTPDrafterStates[requestID] = state
+        lock.unlock()
+    }
+
+    private func storeNativeMTPDraftTokens(_ tokens: MLXArray, for requestID: String) {
+        lock.lock()
+        nativeMTPDraftTokens[requestID] = tokens
+        lock.unlock()
+    }
+
+    private func consumeNativeMTPDraftTokens(for requestID: String) -> MLXArray? {
+        lock.lock()
+        defer { lock.unlock() }
+        return nativeMTPDraftTokens.removeValue(forKey: requestID)
+    }
+
+    private func replaceNativeMTPTargetStates(
+        requestIDs: [String],
+        states: [String: MTPPackedVerificationRowState?]
+    ) {
+        lock.lock()
+        for requestID in requestIDs {
+            nativeMTPTargetStates[requestID] = states[requestID] ?? nil
+        }
+        lock.unlock()
+    }
+
+    private func rollbackTentativeNativeMTPDrafterWrites(_ state: inout MTPDrafterState) {
+        guard state.proposalAppended > 0 else { return }
+        let trimmed = trimPromptCache(state.cache, numTokens: state.proposalAppended)
+        state.nextPosition = max(0, state.nextPosition - trimmed)
+        state.proposalAppended = 0
+    }
+
+    private func rollbackNativeMTPDrafterState(for requestID: String) {
+        lock.lock()
+        var state = nativeMTPDrafterStates[requestID]
+        nativeMTPDraftTokens.removeValue(forKey: requestID)
+        lock.unlock()
+        guard var state else { return }
+        rollbackTentativeNativeMTPDrafterWrites(&state)
+        storeNativeMTPDrafterState(state, for: requestID)
+    }
+
+    private func commitNativeMTPDrafterState(
+        targetModel: any LanguageModel,
+        input: ContinuousBatchNativeMTPFinalizeInput,
+        transaction: NativeMTPPendingTransaction
+    ) async throws {
+        guard let drafterContainer else { return }
+        guard let finalTokenID = input.acceptedTokenIDs.last else { return }
+        let state = try await drafterContainer.perform(
+            nonSendable: (input, transaction, targetModel, finalTokenID)
+        ) { drafterContext, values in
+            let (input, transaction, targetModel, finalTokenID) = values
+            guard let statefulDrafter = drafterContext.model as? any StatefulMTPDrafterModel else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_stateful_drafter_required")
+            }
+            let sampler = GenerateParameters(temperature: 0).sampler()
+            var state: MTPDrafterState
+            if let existing = self.nativeMTPDrafterState(for: input.requestID) {
+                state = existing
+            } else {
+                state = statefulDrafter.makeState(parameters: nil)
+                guard input.proposalTokenCount == 0,
+                      input.committedProposalTokenCount == 0,
+                      !transaction.promptTokens.isEmpty
+                else {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_drafter_state")
+                }
+                let prompt = MLXArray(transaction.promptTokens.map(Int32.init))
+                    .reshaped([1, transaction.promptTokens.count])
+                var targetState = LMOutput.State()
+                targetState[mtpEmitFlagKey] = true
+                let promptOutput = targetModel(LMInput.Text(tokens: prompt), cache: nil, state: targetState)
+                guard let promptHidden = promptOutput.state?[mtpLastHiddenStatesKey] else {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_prompt_hidden_state")
+                }
+                statefulDrafter.prepareDrafterState(
+                    target: targetModel,
+                    promptTokens: prompt,
+                    targetHidden: promptHidden,
+                    firstBonus: MLXArray([Int32(finalTokenID)]),
+                    positionDeltas: transaction.targetState.positionDeltas,
+                    state: &state,
+                    sampler: sampler
+                )
+                eval(state.cache)
+                return state
+            }
+
+            let draftTokens = transaction.draftTokens
+                ?? MLXArray([Int32](), [1, 0])
+            statefulDrafter.commitDrafterState(
+                target: targetModel,
+                targetHidden: transaction.targetState.lastHidden,
+                draftTokens: draftTokens,
+                acceptedCount: input.committedProposalTokenCount,
+                finalToken: MLXArray([Int32(finalTokenID)]),
+                positionDeltas: transaction.targetState.positionDeltas,
+                state: &state,
+                sampler: sampler
+            )
+            eval(state.cache)
+            return state
+        }
+        storeNativeMTPDrafterState(state, for: input.requestID)
+    }
+
+    private func pendingNativeMTPTransactions(
+        from batchedCaches: [PagedKVSharedLayerBatch],
+        inputs: [ContinuousBatchNativeMTPVerifyInput],
+        rows: [MTPPackedVerificationRowOutput]
+    ) throws -> [(String, NativeMTPPendingTransaction)] {
+        let layerResolutions = try batchedCaches.map { try $0.pendingMTPResolutions() }
+        guard layerResolutions.allSatisfy({ $0.count == inputs.count }) else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_missing_staged_state")
+        }
+        let continuationByPackedRow = Dictionary(uniqueKeysWithValues: rows.map { ($0.map.rowIndex, $0.continuationState) })
+        return try inputs.enumerated().map { packedIndex, input in
+            guard let continuationState = continuationByPackedRow[packedIndex] ?? nil else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_continuation_state")
+            }
+            let layers = try layerResolutions.map { resolutions in
+                let resolution = resolutions[packedIndex]
+                guard resolution.proposalTokenCount == input.proposalTokens.count,
+                      resolution.inputTokenCount == input.verifiedInputTokenCount
+                else {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_staged_state_mismatch")
+                }
+                return resolution
+            }
+            return (
+                input.requestID,
+                NativeMTPPendingTransaction(
+                    proposalTokenCount: input.proposalTokens.count,
+                    promptTokens: input.promptTokens,
+                    targetState: continuationState,
+                    draftTokens: self.consumeNativeMTPDraftTokens(for: input.requestID),
+                    layers: layers
+                )
+            )
+        }
+    }
+
+    private func replaceNativeMTPPendingTransactions(
+        requestIDs: [String],
+        transactions: [String: NativeMTPPendingTransaction]
+    ) {
+        lock.lock()
+        for requestID in requestIDs {
+            nativeMTPPendingTransactions[requestID] = transactions[requestID]
+        }
+        lock.unlock()
+    }
+
+    private func consumeNativeMTPPendingTransactions(
+        for inputs: [ContinuousBatchNativeMTPFinalizeInput]
+    ) throws -> [String: NativeMTPPendingTransaction] {
+        lock.lock()
+        defer { lock.unlock() }
+        var consumed: [String: NativeMTPPendingTransaction] = [:]
+        for input in inputs {
+            guard let transaction = nativeMTPPendingTransactions.removeValue(forKey: input.requestID) else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_pending_transaction")
+            }
+            consumed[input.requestID] = transaction
+        }
+        return consumed
+    }
+
+    /// Verification can fail before pending target transactions are installed.
+    /// A subsequent all-abort cleanup must still be idempotent: row caches were
+    /// never mutated, while tentative drafter state still needs rollback.
+    private func consumeAvailableNativeMTPPendingTransactions(
+        for inputs: [ContinuousBatchNativeMTPFinalizeInput]
+    ) -> [String: NativeMTPPendingTransaction] {
+        lock.lock()
+        defer { lock.unlock() }
+        var consumed: [String: NativeMTPPendingTransaction] = [:]
+        for input in inputs {
+            if let transaction = nativeMTPPendingTransactions.removeValue(forKey: input.requestID) {
+                consumed[input.requestID] = transaction
+            }
+        }
+        return consumed
+    }
+
+    private func removeNativeMTPPendingTransaction(for requestID: String) {
+        lock.lock()
+        nativeMTPPendingTransactions.removeValue(forKey: requestID)
+        lock.unlock()
+    }
+
+    private func removeNativeMTPRowState(for requestID: String) {
+        lock.lock()
+        nativeMTPTargetStates.removeValue(forKey: requestID)
+        nativeMTPDrafterStates.removeValue(forKey: requestID)
+        nativeMTPDraftTokens.removeValue(forKey: requestID)
+        lock.unlock()
+    }
+
+    private func validateNativeMTPFinalizeInputs(
+        _ inputs: [ContinuousBatchNativeMTPFinalizeInput],
+        transactions: [String: NativeMTPPendingTransaction]
+    ) throws {
+        guard Set(inputs.map(\.requestID)).count == inputs.count else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_duplicate_finalize_row")
+        }
+        for input in inputs {
+            guard let transaction = transactions[input.requestID] else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_pending_transaction")
+            }
+            guard input.proposalTokenCount == transaction.proposalTokenCount,
+                  input.committedProposalTokenCount >= 0,
+                  input.committedProposalTokenCount <= input.proposalTokenCount
+            else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_finalize_proposal_count_mismatch")
+            }
+            if input.shouldCommit {
+                guard input.committedInputTokenCount == input.committedProposalTokenCount + 1 else {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_finalize_input_count_mismatch")
+                }
+                guard !input.acceptedTokenIDs.isEmpty,
+                      input.acceptedTokenIDs.count >= input.committedProposalTokenCount
+                else {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_finalize_accepted_tokens_mismatch")
+                }
+            } else {
+                guard input.committedProposalTokenCount == 0,
+                      input.committedInputTokenCount == 0,
+                      input.acceptedTokenIDs.isEmpty
+                else {
+                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_abort_commits_tokens")
+                }
+            }
+        }
+    }
+
     private func storeDecodeSession(_ session: DecodeSession?) {
         lock.lock()
         decodeSession = session
@@ -1217,6 +1725,108 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         defer { lock.unlock() }
         guard let session = decodeSession else { return false }
         return session.batchedCaches.allSatisfy { !$0.innerState().isEmpty }
+    }
+
+    static func validateMTPPackedCacheForTest(
+        rowCaches: [PagedKVCache],
+        rowMaps: [MTPPackedVerificationRowMap]
+    ) throws {
+        let cache = PagedKVBatchLayerCache(rowCaches: rowCaches)
+        try cache.prepareMTPPackedVerification(rowMaps: rowMaps)
+    }
+
+    static func exerciseMTPPackedCacheForTest(
+        rowCaches: [PagedKVCache],
+        rowMaps: [MTPPackedVerificationRowMap],
+        width: Int
+    ) throws -> PagedKVMTPPackedCacheExerciseResult {
+        try Device.withDefaultDevice(.cpu) {
+            let cache = PagedKVBatchLayerCache(rowCaches: rowCaches)
+            try cache.prepareMTPPackedVerification(rowMaps: rowMaps)
+            let batchOffsets = cache.batchOffset.asArray(Int.self)
+            let inputCounts = rowMaps.map(\.inputCount)
+            cache.prepare(lengths: inputCounts)
+            let mask: MLXArray
+            switch cache.makeMask(n: width, windowSize: nil, returnArray: true) {
+            case .array(let array):
+                mask = array
+            default:
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_missing_mask")
+            }
+            let keys = MLXArray.zeros([rowCaches.count, 1, width, 1], dtype: .float32, stream: .cpu)
+            let values = MLXArray.zeros([rowCaches.count, 1, width, 1], dtype: .float32, stream: .cpu)
+            let updated = cache.update(keys: keys, values: values)
+            let beforeFinalize = cache.innerState().first?.dim(2) ?? 0
+            let rowStateCounts = rowCaches.map { row -> Int in
+                let state = row.state
+                return state.count == 2 ? state[0].dim(2) : 0
+            }
+            cache.finalize()
+            let afterFinalize = cache.innerState().first?.dim(2) ?? 0
+            let rowStateCountsAfterFinalize = rowCaches.map { row -> Int in
+                let state = row.state
+                return state.count == 2 ? state[0].dim(2) : 0
+            }
+            return PagedKVMTPPackedCacheExerciseResult(
+                batchOffsetsBeforeUpdate: batchOffsets,
+                returnedKeyShape: updated.0.shape,
+                rowOffsetsAfterUpdate: rowCaches.map(\.offset),
+                rowStoredTokensAfterUpdate: rowCaches.map(\.storedTokens),
+                rowStateTokenCountsAfterUpdate: rowStateCounts,
+                batchTokenCountBeforeFinalize: beforeFinalize,
+                batchTokenCountAfterFinalize: afterFinalize,
+                rowStateTokenCountsAfterFinalize: rowStateCountsAfterFinalize,
+                maskShape: mask.shape,
+                maskValues: mask.asArray(Bool.self)
+            )
+        }
+    }
+
+    static func exerciseMTPPackedCacheResolutionForTest(
+        rowCaches: [PagedKVCache],
+        rowMaps: [MTPPackedVerificationRowMap],
+        width: Int,
+        committedInputCounts: [Int?]
+    ) throws -> PagedKVMTPPackedCacheResolutionResult {
+        guard committedInputCounts.count == rowMaps.count else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_resolution_count_mismatch")
+        }
+        return try Device.withDefaultDevice(.cpu) {
+            let cache = PagedKVBatchLayerCache(rowCaches: rowCaches)
+            try cache.prepareMTPPackedVerification(rowMaps: rowMaps)
+            cache.prepare(lengths: rowMaps.map(\.inputCount))
+            let keys = MLXArray.zeros([rowCaches.count, 1, width, 1], dtype: .float32, stream: .cpu)
+            let values = MLXArray.zeros([rowCaches.count, 1, width, 1], dtype: .float32, stream: .cpu)
+            _ = cache.update(keys: keys, values: values)
+            let pendingBeforeFinalize = try cache.pendingMTPResolutions()
+            let rowStateCountsAfterStaging = rowCaches.map { row -> Int in
+                let state = row.state
+                return state.count == 2 ? state[0].dim(2) : 0
+            }
+            let rowOffsetsAfterStaging = rowCaches.map(\.offset)
+            let rowStoredTokensAfterStaging = rowCaches.map(\.storedTokens)
+            cache.finalize()
+            let pendingAfterFinalize = try cache.pendingMTPResolutions()
+            for (index, inputCount) in committedInputCounts.enumerated() {
+                guard let inputCount else { continue }
+                try pendingAfterFinalize[index].commit(inputCount: inputCount)
+            }
+            return PagedKVMTPPackedCacheResolutionResult(
+                rowOffsetsAfterStaging: rowOffsetsAfterStaging,
+                rowStoredTokensAfterStaging: rowStoredTokensAfterStaging,
+                rowStateTokenCountsAfterStaging: rowStateCountsAfterStaging,
+                pendingInputCountsBeforeFinalize: pendingBeforeFinalize.map(\.inputTokenCount),
+                pendingProposalCountsBeforeFinalize: pendingBeforeFinalize.map(\.proposalTokenCount),
+                pendingInputCountsAfterFacadeFinalize: pendingAfterFinalize.map(\.inputTokenCount),
+                pendingProposalCountsAfterFacadeFinalize: pendingAfterFinalize.map(\.proposalTokenCount),
+                rowOffsetsAfterResolution: rowCaches.map(\.offset),
+                rowStoredTokensAfterResolution: rowCaches.map(\.storedTokens),
+                rowStateTokenCountsAfterResolution: rowCaches.map { row -> Int in
+                    let state = row.state
+                    return state.count == 2 ? state[0].dim(2) : 0
+                }
+            )
+        }
     }
 
     private static func supportsRowSampling(_ input: ContinuousBatchDecodeInput) -> Bool {
@@ -1267,6 +1877,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                     syncRowsFromBatchClosure: { cache.syncRowsFromBatch() },
                     writebackCompiledInnerStateClosure: { compiledState, targets in
                         try cache.writebackCompiledInnerState(compiledState, targets: targets)
+                    },
+                    pendingMTPResolutionsClosure: {
+                        try cache.pendingMTPResolutions().map {
+                            NativeMTPPendingLayerResolution.pagedAttention($0)
+                        }
                     }
                 )
             case .recurrentMamba:
@@ -1274,8 +1889,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 guard rows.count == rowCaches.count else {
                     throw ContinuousBatchSchedulerError.unsupported("continuous_batching_invalid_cache_layout")
                 }
-                let cache = MambaCache()
-                try Self.packMambaRows(rows, into: cache)
+                let cache = try MTPPackedMambaBatchCache(rowCaches: rows)
                 return PagedKVSharedLayerBatch(
                     cache: cache,
                     validateBatchStateClosure: {
@@ -1293,6 +1907,11 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         cache.state = compiledState
                         Self.syncMambaRows(from: cache, into: rows)
                         try Self.packMambaRows(rows, into: cache)
+                    },
+                    pendingMTPResolutionsClosure: {
+                        try cache.rowTransactions().map {
+                            NativeMTPPendingLayerResolution.recurrent($0)
+                        }
                     }
                 )
             }
@@ -1385,6 +2004,7 @@ private struct PagedKVSharedLayerBatch {
     let validateBatchStateClosure: () throws -> Void
     let syncRowsFromBatchClosure: () -> Void
     let writebackCompiledInnerStateClosure: ([MLXArray], [Int]) throws -> Void
+    let pendingMTPResolutionsClosure: () throws -> [NativeMTPPendingLayerResolution]
 
     func innerState() -> [MLXArray] {
         cache.innerState()
@@ -1401,11 +2021,65 @@ private struct PagedKVSharedLayerBatch {
     func writebackCompiledInnerState(_ compiledState: [MLXArray], targets: [Int]) throws {
         try writebackCompiledInnerStateClosure(compiledState, targets)
     }
+
+    func pendingMTPResolutions() throws -> [NativeMTPPendingLayerResolution] {
+        try pendingMTPResolutionsClosure()
+    }
 }
 
-private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
+private enum NativeMTPPendingLayerResolution {
+    case pagedAttention(PagedKVBatchLayerCache.PendingMTPResolution)
+    case recurrent(MTPPackedMambaRowTransaction)
+
+    var inputTokenCount: Int {
+        switch self {
+        case .pagedAttention(let resolution): resolution.inputTokenCount
+        case .recurrent(let resolution): resolution.inputCount
+        }
+    }
+
+    var proposalTokenCount: Int {
+        switch self {
+        case .pagedAttention(let resolution): resolution.proposalTokenCount
+        case .recurrent(let resolution): resolution.proposalCount
+        }
+    }
+
+    func commit(inputCount: Int) throws {
+        switch self {
+        case .pagedAttention(let resolution):
+            try resolution.commit(inputCount: inputCount)
+        case .recurrent(let resolution):
+            try resolution.commit(retaining: inputCount)
+        }
+    }
+}
+
+private final class PagedKVBatchLayerCache: MTPPackedVerificationCache, @unchecked Sendable {
+    fileprivate struct PendingMTPResolution {
+        let rowCache: PagedKVCache
+        let inputTokenCount: Int
+        let proposalTokenCount: Int
+        let inputKeys: MLXArray
+        let inputValues: MLXArray
+
+        func commit(inputCount: Int) throws {
+            guard inputCount >= 0, inputCount <= inputTokenCount else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_finalize_input_count_mismatch")
+            }
+            guard inputCount > 0 else { return }
+            let keySlice = inputKeys[0..., 0..., 0 ..< inputCount, 0...]
+            let valueSlice = inputValues[0..., 0..., 0 ..< inputCount, 0...]
+            let updated = rowCache.update(keys: keySlice, values: valueSlice)
+            eval(updated.0, updated.1)
+        }
+    }
+
     private let rowCaches: [PagedKVCache]
     private var preparedLengths: [Int]?
+    private var preparedMTPPackedRowMaps: [MTPPackedVerificationRowMap]?
+    private var mtpPackedForwardDidUpdate = false
+    private var pendingMTPResolutionsByRow: [PendingMTPResolution]?
     /// `[B, H, capacity, D]` batch buffers; only `[..<length]` is logical. Rows
     /// shorter than `length` are zero past their own stored tokens, exactly
     /// the padding `concatenatePadded` produced.
@@ -1431,6 +2105,16 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
 
     var ropeOffset: RoPEOffset {
         .batch(MLXArray(preUpdateOffsets.map(Int32.init)))
+    }
+
+    var batchOffset: MLXArray {
+        let offsets: [Int]
+        if mtpPackedForwardDidUpdate, let rowMaps = preparedMTPPackedRowMaps {
+            offsets = rowMaps.map { $0.queryOffset + $0.inputCount }
+        } else {
+            offsets = preUpdateOffsets
+        }
+        return MLXArray(offsets.map(Int32.init))
     }
 
     var maxSize: Int? {
@@ -1495,6 +2179,9 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         else {
             return (incomingKeys, incomingValues)
         }
+        if let rowMaps = preparedMTPPackedRowMaps {
+            return updatePackedMTPVerification(keys: incomingKeys, values: incomingValues, rowMaps: rowMaps)
+        }
         if allowsLockstepConcat,
            let existingKeys = keys,
            let existingValues = values,
@@ -1546,6 +2233,71 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         let countsAfter = rowCaches.map(\.mutationCount)
         rowMutationCounts = zip(countsBefore, countsAfter).allSatisfy { $0 != $1 } ? countsAfter : nil
         batchedOffset = nil
+        return (mergedKeys, mergedValues)
+    }
+
+    private func updatePackedMTPVerification(
+        keys incomingKeys: MLXArray,
+        values incomingValues: MLXArray,
+        rowMaps: [MTPPackedVerificationRowMap]
+    ) -> (MLXArray, MLXArray) {
+        guard rowMaps.count == rowCaches.count,
+              incomingKeys.ndim == 4,
+              incomingValues.ndim == 4,
+              incomingKeys.dim(0) == rowCaches.count,
+              incomingValues.dim(0) == rowCaches.count,
+              incomingKeys.dim(2) == incomingValues.dim(2),
+              incomingKeys.dim(2) >= (rowMaps.map(\.inputCount).max() ?? 0),
+              zip(rowCaches, rowMaps).allSatisfy({ cache, map in
+                  cache.offset == map.queryOffset && map.inputCount == map.proposalCount + 1
+              })
+        else {
+            return (incomingKeys, incomingValues)
+        }
+
+        var stagedKeys: [MLXArray] = []
+        var stagedValues: [MLXArray] = []
+        var pendingResolutions: [PendingMTPResolution] = []
+        stagedKeys.reserveCapacity(rowCaches.count)
+        stagedValues.reserveCapacity(rowCaches.count)
+        pendingResolutions.reserveCapacity(rowCaches.count)
+        for (rowIndex, cache) in rowCaches.enumerated() {
+            let state = cache.state
+            let map = rowMaps[rowIndex]
+            let inputRange = 0 ..< map.inputCount
+            let inputKeys = incomingKeys[rowIndex ..< rowIndex + 1, 0..., inputRange, 0...]
+            let inputValues = incomingValues[rowIndex ..< rowIndex + 1, 0..., inputRange, 0...]
+            let resolvedKeys: MLXArray
+            let resolvedValues: MLXArray
+            if state.count == 2 {
+                resolvedKeys = concatenated([state[0], inputKeys], axis: 2)
+                resolvedValues = concatenated([state[1], inputValues], axis: 2)
+            } else if cache.storedTokens == 0 {
+                resolvedKeys = inputKeys
+                resolvedValues = inputValues
+            } else {
+                return (incomingKeys, incomingValues)
+            }
+            stagedKeys.append(resolvedKeys)
+            stagedValues.append(resolvedValues)
+            pendingResolutions.append(PendingMTPResolution(
+                rowCache: cache,
+                inputTokenCount: map.inputCount,
+                proposalTokenCount: map.proposalCount,
+                inputKeys: inputKeys,
+                inputValues: inputValues
+            ))
+        }
+
+        let mergedKeys = Self.concatenatePadded(stagedKeys, fallback: incomingKeys)
+        let mergedValues = Self.concatenatePadded(stagedValues, fallback: incomingValues)
+        keys = Self.prefix(mergedKeys, mergedKeys.dim(2))
+        values = Self.prefix(mergedValues, mergedValues.dim(2))
+        length = mergedKeys.dim(2)
+        rowMutationCounts = nil
+        batchedOffset = nil
+        pendingMTPResolutionsByRow = pendingResolutions
+        mtpPackedForwardDidUpdate = true
         return (mergedKeys, mergedValues)
     }
 
@@ -1674,6 +2426,9 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         windowSize: Int?,
         returnArray: Bool
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
+        if let rowMaps = preparedMTPPackedRowMaps {
+            return .array(Self.makePackedMTPMask(n: n, rowMaps: rowMaps, windowSize: windowSize))
+        }
         // `makeMask` runs at the start of the forward, before any layer calls
         // `update`, so these are PRE-update per-row token counts.
         let preUpdateOffsets = self.preUpdateOffsets
@@ -1717,8 +2472,48 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
         preparedLengths = lengths?.asArray(Int.self)
     }
 
+    func prepareMTPPackedVerification(rowMaps: [MTPPackedVerificationRowMap]) throws {
+        guard rowMaps.count == rowCaches.count else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_row_count_mismatch")
+        }
+        var seen = Set<Int>()
+        for map in rowMaps {
+            guard map.rowIndex >= 0,
+                  seen.insert(map.rowIndex).inserted,
+                  map.queryOffset >= 0,
+                  map.inputCount > 0,
+                  map.proposalCount >= 0,
+                  map.inputCount == map.proposalCount + 1
+            else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_invalid_row_map")
+            }
+        }
+        guard zip(rowCaches, rowMaps).allSatisfy({ cache, map in
+            cache.offset == map.queryOffset
+        }) else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_offset_mismatch")
+        }
+        preparedMTPPackedRowMaps = rowMaps
+        pendingMTPResolutionsByRow = nil
+        mtpPackedForwardDidUpdate = false
+    }
+
     func finalize() {
         preparedLengths = nil
+        if preparedMTPPackedRowMaps != nil {
+            preparedMTPPackedRowMaps = nil
+            mtpPackedForwardDidUpdate = false
+            packFromRows()
+        }
+    }
+
+    fileprivate func pendingMTPResolutions() throws -> [PendingMTPResolution] {
+        guard let pendingMTPResolutionsByRow,
+              pendingMTPResolutionsByRow.count == rowCaches.count
+        else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_packed_cache_missing_staged_state")
+        }
+        return pendingMTPResolutionsByRow
     }
 
     func copy() -> any KVCache {
@@ -1726,10 +2521,36 @@ private final class PagedKVBatchLayerCache: KVCache, @unchecked Sendable {
     }
 
     private var preUpdateOffsets: [Int] {
+        if let preparedMTPPackedRowMaps {
+            return preparedMTPPackedRowMaps.map(\.queryOffset)
+        }
         if let batchedOffset {
             return Array(repeating: batchedOffset, count: rowCaches.count)
         }
         return rowCaches.map(\.offset)
+    }
+
+    private static func makePackedMTPMask(
+        n: Int,
+        rowMaps: [MTPPackedVerificationRowMap],
+        windowSize: Int?
+    ) -> MLXArray {
+        let totalKeys = rowMaps.map { $0.queryOffset + $0.inputCount }.max() ?? n
+        var maskValues: [Int32] = []
+        maskValues.reserveCapacity(rowMaps.count * n * totalKeys)
+        for map in rowMaps {
+            for queryColumn in 0 ..< n {
+                let validQuery = queryColumn < map.inputCount
+                let queryPosition = map.queryOffset + queryColumn
+                for keyPosition in 0 ..< totalKeys {
+                    let validKey = keyPosition < map.queryOffset + map.inputCount
+                    let causal = keyPosition <= queryPosition
+                    let inWindow = windowSize.map { queryPosition < keyPosition + $0 } ?? true
+                    maskValues.append(validQuery && validKey && causal && inWindow ? 1 : 0)
+                }
+            }
+        }
+        return MLXArray(maskValues, [rowMaps.count, 1, n, totalKeys]) .!= MLXArray(Int32(0))
     }
 
     private var allowsLockstepConcat: Bool {

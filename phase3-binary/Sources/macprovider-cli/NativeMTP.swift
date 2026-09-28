@@ -7,9 +7,15 @@ enum DecodePath: String, Sendable, Equatable {
     case nativeMTP = "native_mtp"
 }
 
-enum NativeMTPMode: String, Sendable, Equatable {
-    case off
-    case auto
+enum NativeMTPProposalBounds {
+    /// `maximumBlockSize` is the total target-verification width: the current
+    /// bonus token plus the proposed tokens. A signed proposal depth therefore
+    /// needs one extra slot and must never be silently clamped.
+    static func fits(maximumProposalDepth: Int, maximumBlockSize: Int?) -> Bool {
+        guard maximumProposalDepth >= 1 else { return false }
+        guard let maximumBlockSize else { return true }
+        return maximumBlockSize > 0 && maximumProposalDepth <= maximumBlockSize - 1
+    }
 }
 
 struct DecodePathSelection: Sendable, Equatable {
@@ -73,6 +79,7 @@ struct NativeMTPSelector: Sendable {
         "model",
         "messages",
         "max_tokens",
+        "max_completion_tokens",
         "stream",
         "stream_options",
         "temperature",
@@ -275,6 +282,42 @@ struct NativeMTPSelector: Sendable {
         default:
             return false
         }
+    }
+}
+
+struct NativeMTPRuntimeAdmission: Sendable, Equatable {
+    let selection: DecodePathSelection
+    let effectivePath: DecodePath
+    let initialProposalDepth: Int
+
+    var usesNativeMTP: Bool {
+        effectivePath == .nativeMTP
+    }
+
+    var allowsConversationCacheLease: Bool {
+        !usesNativeMTP
+    }
+
+    static func resolve(
+        selection: DecodePathSelection,
+        capability: NativeMTPCapability?,
+        schedulerSupportsNativeMTP: Bool
+    ) -> NativeMTPRuntimeAdmission {
+        guard selection.path == .nativeMTP,
+              schedulerSupportsNativeMTP,
+              let capability,
+              capability.maximumProposalDepth > 0 else {
+            return NativeMTPRuntimeAdmission(
+                selection: selection,
+                effectivePath: selection.path == .classicDraftSpec ? .classicDraftSpec : .ordinary,
+                initialProposalDepth: 0
+            )
+        }
+        return NativeMTPRuntimeAdmission(
+            selection: selection,
+            effectivePath: .nativeMTP,
+            initialProposalDepth: capability.maximumProposalDepth
+        )
     }
 }
 

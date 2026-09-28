@@ -1101,6 +1101,51 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    static func nativeMTPRuntimeAdmission(
+        for request: ChatCompletionRequest,
+        draftConfigured: Bool,
+        draftLoaded: Bool,
+        numDraftTokens: Int?,
+        nativeMTPMode: NativeMTPMode = .off,
+        nativeMTPCapability: NativeMTPCapability?,
+        schedulerSupportsNativeMTP: Bool = false
+    ) -> NativeMTPRuntimeAdmission {
+        let selection = decodePath(
+            for: request,
+            draftConfigured: draftConfigured,
+            draftLoaded: draftLoaded,
+            numDraftTokens: numDraftTokens,
+            nativeMTPMode: nativeMTPMode,
+            nativeMTPCapability: nativeMTPCapability
+        )
+        return NativeMTPRuntimeAdmission.resolve(
+            selection: selection,
+            capability: nativeMTPCapability,
+            schedulerSupportsNativeMTP: schedulerSupportsNativeMTP
+        )
+    }
+
+    private func nativeMTPRuntimeAdmission(
+        for request: ChatCompletionRequest,
+        snapshot: RuntimeSnapshot
+    ) -> NativeMTPRuntimeAdmission {
+        let capability = currentNativeMTPCapability ?? nativeMTPCapability
+        let schedulerSupportsNativeMTP = currentNativeMTPDrafterContainer != nil
+            && continuousBatchScheduler != nil
+            || nativeMTPSchedulerSupported
+        let admission = Self.nativeMTPRuntimeAdmission(
+            for: request,
+            draftConfigured: snapshot.hasTargetCompatibleDraft || currentDraftModelID != nil,
+            draftLoaded: snapshot.hasTargetCompatibleDraft,
+            numDraftTokens: snapshot.numDraftTokens,
+            nativeMTPMode: nativeMTPMode,
+            nativeMTPCapability: capability,
+            schedulerSupportsNativeMTP: schedulerSupportsNativeMTP
+        )
+        testNativeMTPAdmissionObserver?(admission)
+        return admission
+    }
+
     /// mlx-swift-lm #424: classic speculative rollback silently fails after a
     /// RotatingKVCache wraps. Stay strictly below the wrap boundary, including
     /// transient draft tokens that may need to be rejected and trimmed.
@@ -1195,8 +1240,17 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentDraftModelID: String?
     private var currentDraftTargetModelID: String?
     private var currentDraftContainer: ModelContainer?
+    private var currentNativeMTPDrafterContainer: MTPDrafterContainer?
+    private var currentNativeMTPCapability: NativeMTPCapability?
+    private var currentNativeMTPAdmissionCapability: NativeMTPAdmissionCapability?
     private let configuredDraftModelID: String?
     private let configuredDraftModelLoadPath: String?
+    private let configuredNativeMTPAdmissionSidecarPath: String?
+    private let configuredNativeMTPAdmissionSignaturePath: String?
+    private let configuredNativeMTPTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring?
+    private let configuredNativeMTPProviderRevision: String?
+    private let configuredNativeMTPUpstreamRevision: String?
+    private let configuredNativeMTPRevokedTupleSHA256: Set<String>?
     private var currentSpecDecodeGeneration = 0
     private let numDraftTokens: Int
     private let stopTokenFilter: StopTokenFilter
@@ -1265,6 +1319,10 @@ actor ModelRuntime: ModelRuntimeServing {
     private var currentPagedKVModelCapabilities: PagedKVRuntimeModelCapabilities
     private var continuousBatchScheduler: ContinuousBatchScheduler?
     private let testContinuousBatchingBackend: (any ContinuousBatchSchedulerBackend)?
+    private let nativeMTPMode: NativeMTPMode
+    private let nativeMTPCapability: NativeMTPCapability?
+    private let nativeMTPSchedulerSupported: Bool
+    private let testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)?
     /// Injectable seam over the on-device SPEC-039 parity/MoE self-measurement probes.
     /// Production uses `.live`; tests inject a stub so unit coverage of the
     /// measurement→attach pipeline needs no MLX/metallib. Mirrors
@@ -2006,7 +2064,7 @@ actor ModelRuntime: ModelRuntimeServing {
             "qwen/qwen3.6-35b-a3b": "Qwen3_5MoeForConditionalGeneration",
             "qwen/qwen3.8-27b": "Qwen3_5ForConditionalGeneration",
         ]
-        let architectureVerified: Bool = {
+        let allowlistedArchitectureVerified: Bool = {
             guard let id = modelID?.lowercased(),
                   let expectedArchitecture = hybridArchitectureAllowlist[id],
                   let configJSONData,
@@ -2015,12 +2073,68 @@ actor ModelRuntime: ModelRuntimeServing {
             else { return false }
             return architectures.contains(expectedArchitecture)
         }()
+        let architectureVerified = allowlistedArchitectureVerified
+            || qwen35HybridDecoderArchitectureVerified(
+            modelID: modelID,
+            configJSONData: configJSONData
+        )
         return PagedKVRuntimeModelCapabilities(
             modelFamily: Self.pagedKVModelFamily(modelID: modelID, configJSONData: configJSONData),
             requiresMoEDispatch: (configJSONData.flatMap(Self.pagedKVConfigRequiresMoE) ?? false)
                 || Self.pagedKVModelIDLooksLikeExpertModel(modelID),
             hybridDecoderArchitectureVerified: architectureVerified
         )
+    }
+
+    private nonisolated static func qwen35HybridDecoderArchitectureVerified(
+        modelID: String?,
+        configJSONData: Data?
+    ) -> Bool {
+        guard let normalizedModelID = modelID?.lowercased(),
+              normalizedModelID == "mlx-community/qwen3.5-9b-4bit",
+              let configJSONData,
+              let object = try? JSONSerialization.jsonObject(with: configJSONData) as? [String: Any],
+              let architectures = object["architectures"] as? [String],
+              architectures == ["Qwen3_5ForConditionalGeneration"],
+              let modelType = object["model_type"] as? String,
+              modelType == "qwen3_5",
+              let textConfig = object["text_config"] as? [String: Any],
+              let textModelType = textConfig["model_type"] as? String,
+              textModelType == "qwen3_5_text",
+              let numHiddenLayers = textConfig["num_hidden_layers"] as? Int,
+              numHiddenLayers > 0,
+              let layerTypes = textConfig["layer_types"] as? [String],
+              layerTypes.count == numHiddenLayers,
+              layerTypes.contains("linear_attention"),
+              layerTypes.contains("full_attention"),
+              let fullAttentionInterval = textConfig["full_attention_interval"] as? Int,
+              fullAttentionInterval > 0,
+              let mtpHiddenLayers = textConfig["mtp_num_hidden_layers"] as? Int,
+              mtpHiddenLayers > 0,
+              textConfig["mtp_use_dedicated_embeddings"] is Bool
+        else {
+            return false
+        }
+        return layerTypes.enumerated().allSatisfy { index, layerType in
+            if (index + 1).isMultiple(of: fullAttentionInterval) {
+                return layerType == "full_attention"
+            }
+            return layerType == "linear_attention"
+        }
+    }
+
+    nonisolated static func nativeMTPAdmissionCacheClass(
+        runtimeCacheClass: String,
+        modelCapabilities: PagedKVRuntimeModelCapabilities
+    ) -> String? {
+        if runtimeCacheClass == "KVCacheSimple" {
+            return "paged_kv"
+        }
+        if runtimeCacheClass == "mixed",
+           modelCapabilities.hybridDecoderArchitectureVerified {
+            return "paged_kv"
+        }
+        return nil
     }
 
     private static func pagedKVModelCapabilities(
@@ -2132,6 +2246,16 @@ actor ModelRuntime: ModelRuntimeServing {
         continuousBatchingCachedTurns: Bool = false,
         continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage = .empty,
         continuousBatchingDurableReplayAuthorityAvailable: Bool = false,
+        nativeMTPMode: NativeMTPMode = .off,
+        nativeMTPCapability: NativeMTPCapability? = nil,
+        nativeMTPSchedulerSupported: Bool = false,
+        nativeMTPAdmissionSidecarPath: String? = nil,
+        nativeMTPAdmissionSignaturePath: String? = nil,
+        nativeMTPTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring? = nil,
+        nativeMTPProviderRevision: String? = nil,
+        nativeMTPUpstreamRevision: String? = nil,
+        nativeMTPRevokedTupleSHA256: Set<String>? = nil,
+        testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30,
         catalogModelIDAlias: String? = nil,
@@ -2153,8 +2277,21 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentDraftModelID = nil
         self.currentDraftTargetModelID = nil
         self.currentDraftContainer = nil
+        self.currentNativeMTPDrafterContainer = nil
+        self.currentNativeMTPCapability = nil
+        self.currentNativeMTPAdmissionCapability = nil
         self.configuredDraftModelID = normalizedDraftModelID
         self.configuredDraftModelLoadPath = normalizedDraftModelLoadPath
+        self.configuredNativeMTPAdmissionSidecarPath = Self.nonEmpty(nativeMTPAdmissionSidecarPath)
+        self.configuredNativeMTPAdmissionSignaturePath = Self.nonEmpty(nativeMTPAdmissionSignaturePath)
+        self.configuredNativeMTPTrustedKeyring = nativeMTPTrustedKeyring ?? NativeMTPAdmissionSidecar.TrustedKeyring(
+            publicKeysByKeyID: AutotuneStaticInputs.defaultTrustedPublicKeys,
+            requiredKeyID: AutotuneStaticInputs.keyID
+        )
+        self.configuredNativeMTPProviderRevision = Self.nonEmpty(nativeMTPProviderRevision)
+        self.configuredNativeMTPUpstreamRevision = Self.nonEmpty(nativeMTPUpstreamRevision)
+            ?? KVBuildIdentity.mlxSwiftLMRevision
+        self.configuredNativeMTPRevokedTupleSHA256 = nativeMTPRevokedTupleSHA256
         self.numDraftTokens = numDraftTokens
         self.speculativeCacheWrapValidated = speculativeCacheWrapValidated
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
@@ -2168,6 +2305,10 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentPagedKVModelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, configJSONData: nil)
         self.continuousBatchScheduler = nil
         self.testContinuousBatchingBackend = nil
+        self.nativeMTPMode = nativeMTPMode
+        self.nativeMTPCapability = nativeMTPCapability
+        self.nativeMTPSchedulerSupported = nativeMTPSchedulerSupported
+        self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
         self.pagedKVRuntimeProber = .live
         self.continuousBatchReplayAuthority = ContinuousBatchRuntimeReplayAuthority()
         self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
@@ -2298,10 +2439,31 @@ actor ModelRuntime: ModelRuntimeServing {
         if case .attached = self.pagedKVAttachDecision {
             self.pagedKVSchedulerBackendInstalled = true
         }
+        if normalizedDraftModelID == nil,
+           let nativeMTPLoad = await Self.loadNativeMTPDrafterIfAdmitted(
+            mode: self.nativeMTPMode,
+            targetModelID: modelID,
+            targetModelRevision: self.currentModelHash,
+            targetDirectory: directory,
+            runtimeCacheClass: runtimeCacheClass,
+            modelCapabilities: modelCapabilities,
+            slotCount: self.maxBatch,
+            sidecarPath: self.configuredNativeMTPAdmissionSidecarPath,
+            signaturePath: self.configuredNativeMTPAdmissionSignaturePath,
+            trustedKeyring: self.configuredNativeMTPTrustedKeyring,
+            providerRevision: self.configuredNativeMTPProviderRevision,
+            upstreamRevision: self.configuredNativeMTPUpstreamRevision,
+            revokedTupleSHA256: self.configuredNativeMTPRevokedTupleSHA256
+           ) {
+            self.currentNativeMTPDrafterContainer = nativeMTPLoad.drafterContainer
+            self.currentNativeMTPCapability = nativeMTPLoad.capability
+            self.currentNativeMTPAdmissionCapability = nativeMTPLoad.admissionCapability
+        }
         self.continuousBatchScheduler = await Self.makeContinuousBatchScheduler(
             decision: self.pagedKVAttachDecision,
             tuple: self.continuousBatchingRequestedTuple(),
             container: container,
+            nativeMTPDrafterContainer: self.currentNativeMTPDrafterContainer,
             backendOverride: self.testContinuousBatchingBackend,
             maxBatch: self.maxBatch,
             queueLimit: self.continuousBatchQueueLimit,
@@ -2393,6 +2555,17 @@ actor ModelRuntime: ModelRuntimeServing {
         // on the FR-CB10 gate itself.
         continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage = .unrestrictedForTests,
         continuousBatchingDurableReplayAuthorityAvailable: Bool = false,
+        nativeMTPMode: NativeMTPMode = .off,
+        nativeMTPCapability: NativeMTPCapability? = nil,
+        nativeMTPSchedulerSupported: Bool = false,
+        nativeMTPAdmissionSidecarPath: String? = nil,
+        nativeMTPAdmissionSignaturePath: String? = nil,
+        nativeMTPTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring? = nil,
+        nativeMTPProviderRevision: String? = nil,
+        nativeMTPUpstreamRevision: String? = nil,
+        nativeMTPRevokedTupleSHA256: Set<String>? = nil,
+        nativeMTPDrafterContainer: MTPDrafterContainer? = nil,
+        testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
         providerStatus: ProviderStatus? = nil,
@@ -2428,8 +2601,22 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentDraftModelID = normalizedDraftModelID
         self.currentDraftTargetModelID = normalizedDraftModelID == nil ? nil : modelID
         self.currentDraftContainer = nil
+        #if DEBUG
+        self.currentNativeMTPDrafterContainer = nativeMTPDrafterContainer
+        self.currentNativeMTPCapability = nativeMTPDrafterContainer == nil ? nil : nativeMTPCapability
+        #else
+        self.currentNativeMTPDrafterContainer = nil
+        self.currentNativeMTPCapability = nil
+        #endif
+        self.currentNativeMTPAdmissionCapability = nil
         self.configuredDraftModelID = normalizedDraftModelID
         self.configuredDraftModelLoadPath = nil
+        self.configuredNativeMTPAdmissionSidecarPath = Self.nonEmpty(nativeMTPAdmissionSidecarPath)
+        self.configuredNativeMTPAdmissionSignaturePath = Self.nonEmpty(nativeMTPAdmissionSignaturePath)
+        self.configuredNativeMTPTrustedKeyring = nativeMTPTrustedKeyring
+        self.configuredNativeMTPProviderRevision = Self.nonEmpty(nativeMTPProviderRevision)
+        self.configuredNativeMTPUpstreamRevision = Self.nonEmpty(nativeMTPUpstreamRevision)
+        self.configuredNativeMTPRevokedTupleSHA256 = nativeMTPRevokedTupleSHA256
         self.numDraftTokens = numDraftTokens
         self.speculativeCacheWrapValidated = speculativeCacheWrapValidated
         self.currentModelHash = modelHash
@@ -2473,6 +2660,10 @@ actor ModelRuntime: ModelRuntimeServing {
         self.pagedKVHardwareSizingProof = effectiveSizingProof
         self.pagedKVSchedulerBackendInstalled = effectiveBackendInstalled
         self.testContinuousBatchingBackend = continuousBatchingBackend
+        self.nativeMTPMode = nativeMTPMode
+        self.nativeMTPCapability = nativeMTPCapability
+        self.nativeMTPSchedulerSupported = nativeMTPSchedulerSupported
+        self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
         // Defense-in-depth: only DEBUG/test builds may inject a non-`.live` prober. A
         // release provider always re-derives evidence via the real on-device `.live`
         // probes, so an injected prober can never revive the "self-authored" attach path.
@@ -3351,6 +3542,7 @@ actor ModelRuntime: ModelRuntimeServing {
         decision: PagedKVAttachDecision,
         tuple: ContinuousBatchingRequestedTuple?,
         container: ModelContainer?,
+        nativeMTPDrafterContainer: MTPDrafterContainer? = nil,
         backendOverride: (any ContinuousBatchSchedulerBackend)?,
         maxBatch: Int,
         queueLimit: Int?,
@@ -3418,7 +3610,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 // Studio 2026-09-24: signed 176, 181 and main all degenerate
                 // with this on and are coherent with it off. Applies to
                 // hybrid (Qwen3.6) and KV-only layouts alike.
-                compiledDecode: false
+                compiledDecode: false,
+                drafterContainer: nativeMTPDrafterContainer
             ),
             maxBatch: maxBatch,
             queueLimit: queueLimit,
@@ -3448,6 +3641,7 @@ actor ModelRuntime: ModelRuntimeServing {
             decision: pagedKVAttachDecision,
             tuple: continuousBatchingRequestedTuple(),
             container: container,
+            nativeMTPDrafterContainer: currentNativeMTPDrafterContainer,
             backendOverride: testContinuousBatchingBackend,
             maxBatch: maxBatch,
             queueLimit: continuousBatchQueueLimit,
@@ -3725,6 +3919,9 @@ actor ModelRuntime: ModelRuntimeServing {
         if case .attached = pagedKVAttachDecision {
             pagedKVSchedulerBackendInstalled = true
         }
+        currentNativeMTPDrafterContainer = nil
+        currentNativeMTPCapability = nil
+        currentNativeMTPAdmissionCapability = nil
         currentSpecDecodeGeneration += 1
         await rebuildContinuousBatchScheduler(container: container)
         if continuousBatchScheduler == nil {
@@ -4412,7 +4609,8 @@ actor ModelRuntime: ModelRuntimeServing {
         retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
         recurrentCheckpointPositions: [Int] = [],
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
-        serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil
+        serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
+        nativeMTPAdmission: NativeMTPRuntimeAdmission? = nil
     ) throws -> ContinuousBatchSubmission {
         guard let requestID = schedulerRequestID(for: request) else {
             throw attachedPagedKVUnavailableError(
@@ -4437,7 +4635,9 @@ actor ModelRuntime: ModelRuntimeServing {
                 retainedPagedKVSequence: retainedPagedKVSequence,
                 recurrentCheckpointPositions: recurrentCheckpointPositions,
                 retainedRecurrentCheckpoints: retainedRecurrentCheckpoints,
-                serialToolStopObserver: serialToolStopObserver
+                serialToolStopObserver: serialToolStopObserver,
+                decodePath: nativeMTPAdmission?.effectivePath ?? .ordinary,
+                nativeMTPMaximumProposalDepth: nativeMTPAdmission?.initialProposalDepth ?? 0
             )
         )
     }
@@ -4711,6 +4911,7 @@ actor ModelRuntime: ModelRuntimeServing {
         request: ChatCompletionRequest,
         snapshot: RuntimeSnapshot,
         capability: ContinuousBatchingCapability,
+        nativeMTPAdmission: NativeMTPRuntimeAdmission,
         completionStartedAt: Date,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken
@@ -4784,15 +4985,18 @@ actor ModelRuntime: ModelRuntimeServing {
             configured: kvBitsOverride,
             conversationKey: request.conversationKey
         )
-        let lease = await conversationCache.begin(
-            conversationKey: request.conversationKey,
-            incomingTokens: preparedPromptTokenIDs,
-            modelID: request.model,
-            kvBits: batchKVBits,
-            allowRetainedPagedKVHandoff: true
-        )
+        let lease = nativeMTPAdmission.allowsConversationCacheLease
+            ? await conversationCache.begin(
+                conversationKey: request.conversationKey,
+                incomingTokens: preparedPromptTokenIDs,
+                modelID: request.model,
+                kvBits: batchKVBits,
+                allowRetainedPagedKVHandoff: true
+            )
+            : nil
         CBTrace.log(schedulerRequestID, "rt_cb_lease cached=\(lease?.cachedPromptTokens ?? -1)")
-        if try await serialRouteCanaryCachedHitMissingRetainedHandoff(
+        if nativeMTPAdmission.allowsConversationCacheLease,
+           try await serialRouteCanaryCachedHitMissingRetainedHandoff(
             lease,
             capability: capability,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
@@ -4816,7 +5020,8 @@ actor ModelRuntime: ModelRuntimeServing {
             retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
             recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
-            serialToolStopObserver: serialToolStop
+            serialToolStopObserver: serialToolStop,
+            nativeMTPAdmission: nativeMTPAdmission
         )
         let result: ContinuousBatchSchedulerResult
         do {
@@ -4925,6 +5130,7 @@ actor ModelRuntime: ModelRuntimeServing {
         request: ChatCompletionRequest,
         snapshot: RuntimeSnapshot,
         capability: ContinuousBatchingCapability,
+        nativeMTPAdmission: NativeMTPRuntimeAdmission,
         completionStartedAt: Date,
         shouldCancel: @escaping @Sendable () -> Bool,
         drainCancelled: DrainCancelToken,
@@ -5011,14 +5217,17 @@ actor ModelRuntime: ModelRuntimeServing {
             configured: kvBitsOverride,
             conversationKey: request.conversationKey
         )
-        let lease = await conversationCache.begin(
-            conversationKey: request.conversationKey,
-            incomingTokens: preparedPromptTokenIDs,
-            modelID: request.model,
-            kvBits: batchKVBits,
-            allowRetainedPagedKVHandoff: true
-        )
-        if try await serialRouteCanaryCachedHitMissingRetainedHandoff(
+        let lease = nativeMTPAdmission.allowsConversationCacheLease
+            ? await conversationCache.begin(
+                conversationKey: request.conversationKey,
+                incomingTokens: preparedPromptTokenIDs,
+                modelID: request.model,
+                kvBits: batchKVBits,
+                allowRetainedPagedKVHandoff: true
+            )
+            : nil
+        if nativeMTPAdmission.allowsConversationCacheLease,
+           try await serialRouteCanaryCachedHitMissingRetainedHandoff(
             lease,
             capability: capability,
             modelHasRecurrentLayers: prepared.modelHasRecurrentLayers
@@ -5035,7 +5244,8 @@ actor ModelRuntime: ModelRuntimeServing {
             retainedPagedKVSequence: lease?.reusableCache?.retainedPagedKVSequence,
             recurrentCheckpointPositions: prepared.recurrentCheckpointPositions,
             retainedRecurrentCheckpoints: Self.retainedRecurrentCheckpoints(for: lease),
-            serialToolStopObserver: serialToolStop
+            serialToolStopObserver: serialToolStop,
+            nativeMTPAdmission: nativeMTPAdmission
         )
         let result: ContinuousBatchSchedulerResult
         do {
@@ -5360,6 +5570,7 @@ actor ModelRuntime: ModelRuntimeServing {
             snapshot: snapshot,
             emitTelemetry: true
         )
+        let nativeMTPAdmission = nativeMTPRuntimeAdmission(for: request, snapshot: snapshot)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         try drainCancelled.check()
         CBTrace.log(request.requestID, "rt_complete_enter")
@@ -5367,6 +5578,7 @@ actor ModelRuntime: ModelRuntimeServing {
             request: request,
             snapshot: snapshot,
             capability: continuousBatchingCapability,
+            nativeMTPAdmission: nativeMTPAdmission,
             completionStartedAt: completionStartedAt,
             shouldCancel: shouldCancel,
             drainCancelled: drainCancelled
@@ -5485,13 +5697,15 @@ actor ModelRuntime: ModelRuntimeServing {
                             Self.logSpeculativeFallback(error)
                         }
                     }
-                    let lease = await conversationCache.begin(
-                        conversationKey: request.conversationKey,
-                        incomingTokens: promptTokenIds,
-                        modelID: request.model,
-                        kvBits: kvBitsOverride,
-                        cold: coldContext
-                    )
+                    let lease = nativeMTPAdmission.allowsConversationCacheLease
+                        ? await conversationCache.begin(
+                            conversationKey: request.conversationKey,
+                            incomingTokens: promptTokenIds,
+                            modelID: request.model,
+                            kvBits: kvBitsOverride,
+                            cold: coldContext
+                        )
+                        : nil
                         do {
                             let generationContext = Self.harmonyTerminalPreservingContext(from: context, modelID: request.model)
                             let kvCache: [KVCache]
@@ -5867,6 +6081,7 @@ actor ModelRuntime: ModelRuntimeServing {
             snapshot: snapshot,
             emitTelemetry: false
         )
+        let nativeMTPAdmission = nativeMTPRuntimeAdmission(for: request, snapshot: snapshot)
         try Self.enforcePagedKVPreflight(pagedKVAttachDecision)
         let structuredAccumulator = StructuredStreamingContentAccumulator(enabled: Self.requiresStructuredValidation(request.responseFormat))
         let idleState = StructuredStreamingIdleState(enabled: Self.requiresStructuredValidation(request.responseFormat))
@@ -5891,6 +6106,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 request: request,
                 snapshot: snapshot,
                 capability: continuousBatchingCapability,
+                nativeMTPAdmission: nativeMTPAdmission,
                 completionStartedAt: batchedCompletionStartedAt,
                 shouldCancel: shouldCancel,
                 drainCancelled: drainCancelled,
@@ -6117,13 +6333,15 @@ actor ModelRuntime: ModelRuntimeServing {
                         )
                     }
 
-                    let lease = await conversationCache.begin(
-                        conversationKey: request.conversationKey,
-                        incomingTokens: promptTokenIds,
-                        modelID: request.model,
-                        kvBits: kvBitsOverride,
-                        cold: coldContext
-                    )
+                    let lease = nativeMTPAdmission.allowsConversationCacheLease
+                        ? await conversationCache.begin(
+                            conversationKey: request.conversationKey,
+                            incomingTokens: promptTokenIds,
+                            modelID: request.model,
+                            kvBits: kvBitsOverride,
+                            cold: coldContext
+                        )
+                        : nil
                     let kvCache: [KVCache]
                     var iteratorInput: LMInput
                     if let reusableCache = lease?.reusableCache, let lcp = lease?.lcp {
@@ -6801,6 +7019,168 @@ actor ModelRuntime: ModelRuntimeServing {
             using: #huggingFaceTokenizerLoader()
         )
         return (container, directory)
+    }
+
+    private struct NativeMTPRuntimeLoadResult {
+        let drafterContainer: MTPDrafterContainer
+        let capability: NativeMTPCapability
+        let admissionCapability: NativeMTPAdmissionCapability
+    }
+
+    private static func loadNativeMTPDrafterIfAdmitted(
+        mode: NativeMTPMode,
+        targetModelID: String,
+        targetModelRevision: String?,
+        targetDirectory: URL,
+        runtimeCacheClass: String,
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        slotCount: Int,
+        sidecarPath: String?,
+        signaturePath: String?,
+        trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring?,
+        providerRevision: String?,
+        upstreamRevision: String?,
+        revokedTupleSHA256: Set<String>?
+    ) async -> NativeMTPRuntimeLoadResult? {
+        let environment = ProcessInfo.processInfo.environment
+        let resolvedProviderRevision = providerRevision
+            ?? Self.nonEmpty(environment["MACPROVIDER_PROVIDER_REVISION"])
+            ?? Self.nonEmpty(environment["MACPROVIDER_SOURCE_COMMIT"])
+        let resolvedUpstreamRevision = upstreamRevision
+            ?? Self.nonEmpty(environment["MACPROVIDER_UPSTREAM_MLX_SWIFT_LM_REVISION"])
+        guard mode == .auto,
+              let targetModelRevision,
+              let canonicalCacheClass = nativeMTPAdmissionCacheClass(
+                runtimeCacheClass: runtimeCacheClass,
+                modelCapabilities: modelCapabilities
+              ),
+              let trustedKeyring,
+              let resolvedProviderRevision,
+              let resolvedUpstreamRevision
+        else {
+            return nil
+        }
+        let bundleRoot = targetDirectory.deletingLastPathComponent()
+        let bundledSidecar = bundleRoot.appendingPathComponent("native-mtp-admission.json")
+        let defaultSidecar = FileManager.default.fileExists(atPath: bundledSidecar.path)
+            ? bundledSidecar
+            : targetDirectory.appendingPathComponent("native-mtp-admission.json")
+        let sidecarURL = sidecarPath
+            .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+            ?? defaultSidecar
+        let signatureURL = signaturePath
+            .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
+            ?? sidecarURL.deletingLastPathComponent().appendingPathComponent("native-mtp-admission.json.sig")
+        guard FileManager.default.fileExists(atPath: sidecarURL.path),
+              FileManager.default.fileExists(atPath: signatureURL.path)
+        else {
+            return nil
+        }
+        do {
+            let sidecarData = try Data(contentsOf: sidecarURL)
+            let signatureData = try Data(contentsOf: signatureURL)
+            let snapshotRoot = sidecarURL.deletingLastPathComponent()
+            let machine = MachineFingerprinter().sample()
+            let admissionCapability = try NativeMTPAdmissionSidecar.load(
+                sidecarData: sidecarData,
+                signatureData: signatureData,
+                snapshotRoot: snapshotRoot,
+                context: NativeMTPAdmissionSidecar.RuntimeContext(
+                    modelID: targetModelID,
+                    modelRevision: targetModelRevision,
+                    providerRevision: resolvedProviderRevision,
+                    upstreamMLXSwiftLMRevision: resolvedUpstreamRevision,
+                    hardwareChip: machine.chip,
+                    ramGB: machine.ramGB,
+                    osVersion: machine.osVersion,
+                    slotCount: slotCount,
+                    revokedTupleSHA256: revokedTupleSHA256
+                ),
+                trustedKeyring: trustedKeyring
+            )
+            guard admissionCapability.familyAdapter.lowercased().contains("qwen"),
+                  admissionCapability.cacheClass == canonicalCacheClass,
+                  admissionCapability.qualifiedSlots <= slotCount,
+                  let targetArtifactPath = nativeMTPArtifactPath(
+                    named: "target",
+                    fromSignedSidecarData: sidecarData
+                  ),
+                  let mtpArtifactPath = nativeMTPArtifactPath(
+                    named: "mtp",
+                    fromSignedSidecarData: sidecarData
+                  )
+            else {
+                return nil
+            }
+            let admittedTargetDirectory = snapshotRoot
+                .appendingPathComponent(targetArtifactPath, isDirectory: true)
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+            guard admittedTargetDirectory == targetDirectory
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+            else {
+                return nil
+            }
+            let artifactURL = snapshotRoot.appendingPathComponent(mtpArtifactPath)
+            let isDirectory = (try? artifactURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            let drafterDirectory = isDirectory ? artifactURL : artifactURL.deletingLastPathComponent()
+            await Qwen35TextMTPRegistration.register()
+            let drafterContainer = try await MTPDrafterModelFactory.shared.loadContainer(
+                from: drafterDirectory,
+                using: #huggingFaceTokenizerLoader()
+            )
+            let drafterMaximumBlockSize = await drafterContainer.perform { context in
+                context.model.maximumBlockSize
+            }
+            guard NativeMTPProposalBounds.fits(
+                maximumProposalDepth: admissionCapability.maxProposalDepth,
+                maximumBlockSize: drafterMaximumBlockSize
+            ) else {
+                return nil
+            }
+            let capability = NativeMTPCapability(
+                admitted: true,
+                revoked: false,
+                revocationStateAvailable: true,
+                supportsCurrentProcessor: true,
+                supportsCurrentStateCache: true,
+                // v1 sidecars qualify only the signed non-streaming, no-stop
+                // request profile. Backend ability must not widen admission.
+                supportsStreaming: false,
+                supportsNonStreaming: true,
+                supportsStopSequences: false,
+                hasQualifiedRowMappedTransactions: true,
+                maximumProposalDepth: admissionCapability.maxProposalDepth
+            )
+            return NativeMTPRuntimeLoadResult(
+                drafterContainer: drafterContainer,
+                capability: capability,
+                admissionCapability: admissionCapability
+            )
+        } catch {
+            return nil
+        }
+    }
+
+    private static func nativeMTPArtifactPath(
+        named artifactName: String,
+        fromSignedSidecarData sidecarData: Data
+    ) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: sidecarData) as? [String: Any],
+              let artifacts = object["artifacts"] as? [String: Any],
+              let artifact = artifacts[artifactName] as? [String: Any],
+              let path = artifact["path"] as? String,
+              !path.isEmpty,
+              !path.hasPrefix("/")
+        else {
+            return nil
+        }
+        let components = path.split(separator: "/", omittingEmptySubsequences: false)
+        guard components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+            return nil
+        }
+        return path
     }
 
     static func localModelDirectory(for target: String) throws -> URL {

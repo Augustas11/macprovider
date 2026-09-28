@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.2
+**Version:** 0.1.5
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.2",
+  "version": "0.1.5",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -272,26 +272,40 @@ tagged release is the default production requirement.
 The first such exception is closed and exact:
 
 - repository: `https://github.com/Augustas11/mlx-swift-lm.git`;
-- revision: `31223c97262bd5123e76055c5662a42677936eea`;
+- revision: `b250ac2e87a1a780eb82ce73522c4bf3e70a8d8e`;
 - upstream base: `ml-explore/mlx-swift-lm@ee673d6a71d76e67b532dc7eaf91d92edc3bb8bb`;
 - reviewed surface: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
   `MTPKVCacheTransactionPosition`, `MTPKVCacheTransactionCommit`, and
   `reconcileMTPSharedKVState`; plus `MTPPackedVerificationCache`,
-  `MTPPackedVerificationRowMap`, `MTPPackedVerificationOutput`,
-  `MTPPackedVerificationError`, and `verifyMTPPackedTargets`;
+  `MTPPackedVerificationRowMap`, `MTPPackedVerificationRowState`,
+  `MTPPackedVerificationOutput`, `MTPPackedVerificationError`, and
+  `verifyMTPPackedTargets`, including the strict
+  `requireContinuationState` overload for row-local multi-round continuation;
+  plus `MTPDrafterContainer.perform(nonSendable:_:)` for serialized movement
+  of caller-owned drafter state without model-global mutation or unsafe
+  `Sendable` capture; plus standalone Qwen 3.5 MTP checkpoint normalization,
+  `MTPPackedMambaBatchCache`, `MTPPackedMambaRowTransaction`, and the
+  `mtpPackedCheckpointIndex` contract needed for row-isolated commit across
+  hybrid attention/Mamba verification;
 - review date and owner: `2026-09-28`, `@Augustas11`;
 - mandatory exception re-review date: `2026-12-27`;
-- review gate: upstream-focused tests plus an independent adversarial review
-  with zero Critical, High, or Medium findings; and
+- review gate: upstream-focused build-tests, MacProvider qualification and
+  real-hardware tests, plus an independent adversarial review with zero
+  Critical, High, or Medium findings; the prior transaction surface passed
+  15/15 focused upstream tests, the expanded surface compiled in the complete
+  upstream test bundle, and the real Qwen 3.5 target/MTP tuple passed the
+  Mac Studio ordinary-versus-native-MTP parity test; and
 - removal trigger: replace the fork pin with the first reviewed upstream tag
-  that contains equivalent public transaction and packed target-verification
-  surfaces and passes the same MacProvider qualification artifact.
+  that contains equivalent standalone-checkpoint loading, public transaction,
+  packed target-verification, and hybrid recurrent-cache surfaces and passes
+  the same MacProvider qualification artifact.
 
 No other fork URL, revision, API, or transitive source substitution is covered
-by this exception. The exception qualifies the public cache-transaction and
-packed target-verification API boundaries only. It does not make a model/artifact
-tuple eligible, satisfy the serial or multi-row parity gates, admit MXFP8, or
-enable production serving.
+by this exception. The exception qualifies standalone-checkpoint loading and
+the public cache-transaction, packed target-verification, row-local
+continuation-state, and hybrid recurrent-cache boundaries only. It
+does not make a model/artifact tuple eligible, satisfy the serial or multi-row
+parity gates, admit MXFP8, or enable production serving.
 
 ### MTP-4 — v0.1 request eligibility and fallback boundary (SPEC-048-R004)
 
@@ -894,6 +908,28 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.5 (2026-09-28)** — Repins the immutable-dependency exception to fork
+  revision `b250ac2e87a1a780eb82ce73522c4bf3e70a8d8e` after qualifying standalone
+  Qwen 3.5 MTP checkpoint normalization and packed row-isolated recurrent
+  Mamba transactions. The upstream test bundle compiled on Mac Studio, the
+  complete delta received independent adversarial approval with 0 Critical,
+  0 High, 0 Medium, and 0 Low findings, and the real Qwen 3.5 target/MTP tuple
+  passed concurrent ordinary-versus-native-MTP greedy parity on Mac Studio.
+  The feature remains default-off pending the remaining release gates.
+- **0.1.4 (2026-09-28)** — Repins the exact immutable-dependency exception
+  to fork revision `9f8234109403d1aef7e497672f373776e2b1b3f4` after review of
+  serialized non-`Sendable` caller-state access on `MTPDrafterContainer`.
+  Mac Studio build-tests and focused Swift Testing coverage passed 2/2 for
+  the existing and new container access paths. The exception remains
+  default-off and makes no production-enablement claim.
+- **0.1.3 (2026-09-28)** — Repinned the exact immutable-dependency exception
+  to fork revision `3c8a50228cc6e8edea6a8716fa7954770e9b28a8` after review of
+  the strict row-local multi-round continuation API
+  (`MTPPackedVerificationRowState` and the `requireContinuationState`
+  overload). The evidence records 15/15 upstream Xcode qualification tests and
+  independent adversarial review with 0 Critical, 0 High, and 0 Medium findings.
+  The exception remains default-off and makes no scheduler, artifact, signed
+  journey, hardware, release, or production enablement claim.
 - **0.1.2 (2026-09-28)** — Extends the exact immutable-dependency exception
   to the reviewed public packed target-verification facade at fork revision
   `31223c97262bd5123e76055c5662a42677936eea`. The exception remains

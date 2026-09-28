@@ -1,5 +1,6 @@
 import Foundation
 import MacProviderCore
+import MLXLMCommon
 
 /// Stable, reason-coded explanations for why a request did not enter the
 /// continuous-batching scheduler. These describe locally-owned capability;
@@ -466,6 +467,10 @@ enum ContinuousBatchingPolicy {
             return "paged_kv_block_table_mismatch"
         case PagedKVContiguousCacheBridgeError.trimShortfall:
             return "paged_kv_trim_shortfall"
+        case let error as MTPPackedVerificationError:
+            return "mtp_packed_\(String(describing: error))"
+        case let error as MTPPackedMambaCacheError:
+            return "mtp_recurrent_\(String(describing: error))"
         default:
             return String(describing: type(of: error))
         }

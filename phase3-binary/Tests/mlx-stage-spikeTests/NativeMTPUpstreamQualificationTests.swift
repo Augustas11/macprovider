@@ -7,6 +7,28 @@ import MLXNN
 import XCTest
 
 final class NativeMTPUpstreamQualificationTests: XCTestCase {
+    func testDrafterContainerTransfersRowOwnedState() async {
+        let configuration = ModelConfiguration(
+            id: "qualification/native-mtp-drafter",
+            defaultPrompt: "")
+        let container = MTPDrafterContainer(
+            context: MTPDrafterContext(
+                configuration: configuration,
+                model: QualificationDrafter()))
+        let state = MTPDrafterState(cache: [], nextPosition: 7)
+
+        let updated = await container.perform(nonSendable: state) { context, state in
+            XCTAssertTrue(context.model is QualificationDrafter)
+            var state = state
+            state.nextPosition += 2
+            state.proposalAppended = 1
+            return state
+        }
+
+        XCTAssertEqual(updated.nextPosition, 9)
+        XCTAssertEqual(updated.proposalAppended, 1)
+    }
+
     func testPublicTransactionFacadeExposesRowOwnedPositionMetadata() throws {
         let leaf = KVCacheSimple()
         let storage = try MTPKVCacheStorage(cache: [leaf])
@@ -203,7 +225,8 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
             model: model,
             tokens: tokens,
             rowMaps: rowMaps,
-            cache: [cache])
+            cache: [cache],
+            requireContinuationState: true)
 
         XCTAssertEqual(model.callCount, 1)
         XCTAssertEqual(model.receivedTokens, [30, 999, 999, 40, 41, 42, 50, 51, 999])
@@ -223,12 +246,21 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
         XCTAssertEqual(cache.finalizeCallCount, 1)
         XCTAssertNil(cache.activeLengths)
         XCTAssertNil(cache.activeRowMaps)
+        XCTAssertEqual(cache.batchOffset.asArray(Int.self), [13, 4, 10])
 
         XCTAssertEqual(output.rows.map(\.map.rowIndex), [91, 4, 7])
         XCTAssertEqual(output.rows[0].proposalLogits.shape, [0, 3])
         XCTAssertEqual(output.rows[0].proposalLogits.size, 0)
         XCTAssertEqual(output.rows[0].bonusLogits.asArray(Float.self), [0, 1, 2])
         XCTAssertEqual(output.rows[0].lastHidden?.asArray(Float.self), [0, 1])
+        let firstState = try XCTUnwrap(output.rows[0].continuationState)
+        XCTAssertEqual(firstState.lastHidden.shape, [1, 1, 2])
+        XCTAssertEqual(firstState.queryOffset, 13)
+        XCTAssertEqual(firstState.sharedKVOffsets, ["full_attention": 13])
+        XCTAssertEqual(firstState.sharedKVSourceIndices, ["full_attention": 0])
+        XCTAssertEqual(
+            try XCTUnwrap(firstState.sharedKV["full_attention"]?.0).shape,
+            [1, 1, 13, 1])
 
         XCTAssertEqual(output.rows[1].proposalLogits.shape, [2, 3])
         XCTAssertEqual(
@@ -238,6 +270,15 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
         XCTAssertEqual(
             output.rows[1].lastHidden?.asArray(Float.self),
             [100, 101, 110, 111, 120, 121])
+        let secondState = try XCTUnwrap(output.rows[1].continuationState)
+        XCTAssertEqual(secondState.lastHidden.shape, [1, 3, 2])
+        XCTAssertEqual(secondState.lastHidden.asArray(Float.self), [100, 101, 110, 111, 120, 121])
+        XCTAssertEqual(secondState.queryOffset, 4)
+        let secondKeys = try XCTUnwrap(secondState.sharedKV["full_attention"]?.0)
+        XCTAssertEqual(secondKeys.shape, [1, 1, 4, 1])
+        XCTAssertEqual(secondKeys.asArray(Float.self), [1_000, 1_001, 1_002, 1_003])
+        XCTAssertEqual(secondState.positionDeltas?.shape, [1, 1])
+        XCTAssertEqual(secondState.positionDeltas?.asArray(Int.self), [1])
 
         XCTAssertEqual(output.rows[2].proposalLogits.shape, [1, 3])
         XCTAssertEqual(output.rows[2].proposalLogits.asArray(Float.self), [200, 201, 202])
@@ -245,6 +286,61 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
         XCTAssertEqual(
             output.rows[2].lastHidden?.asArray(Float.self),
             [200, 201, 210, 211])
+        let thirdState = try XCTUnwrap(output.rows[2].continuationState)
+        XCTAssertEqual(thirdState.lastHidden.shape, [1, 2, 2])
+        XCTAssertEqual(thirdState.queryOffset, 10)
+        XCTAssertEqual(
+            try XCTUnwrap(thirdState.sharedKV["full_attention"]?.0).shape,
+            [1, 1, 10, 1])
+    }
+
+    func testPublicPackedVerificationRequiresContinuationStateFailClosed() throws {
+        let tokens = MLXArray([1, 2]).reshaped(1, 2)
+        let rowMaps = [
+            MTPPackedVerificationRowMap(
+                rowIndex: 7, queryOffset: 3, inputCount: 2, proposalCount: 1)
+        ]
+
+        let missingSharedKV = PackedVerificationModel()
+        missingSharedKV.omitsSharedKV = true
+        let missingCache = PackedVerificationCache(offsets: [3])
+        XCTAssertThrowsError(
+            try verifyMTPPackedTargets(
+                model: missingSharedKV,
+                tokens: tokens,
+                rowMaps: rowMaps,
+                cache: [missingCache],
+                requireContinuationState: true)
+        ) { error in
+            XCTAssertEqual(error as? MTPPackedVerificationError, .missingSharedKV)
+        }
+        XCTAssertEqual(missingCache.finalizeCallCount, 1)
+
+        let mismatchedOffset = PackedVerificationModel()
+        mismatchedOffset.wrongPostForwardOffsetRow = 0
+        let offsetCache = PackedVerificationCache(offsets: [3])
+        XCTAssertThrowsError(
+            try verifyMTPPackedTargets(
+                model: mismatchedOffset,
+                tokens: tokens,
+                rowMaps: rowMaps,
+                cache: [offsetCache],
+                requireContinuationState: true)
+        ) { error in
+            XCTAssertEqual(
+                error as? MTPPackedVerificationError,
+                .postForwardCacheOffsetMismatch(
+                    cacheIndex: 0,
+                    rowIndex: 7,
+                    expected: 5,
+                    actual: 6))
+        }
+        XCTAssertEqual(offsetCache.finalizeCallCount, 1)
+    }
+
+    func testPinnedForkExposesStrictPackedContinuationSymbols() {
+        let rowStateType: Any.Type = MTPPackedVerificationRowState.self
+        XCTAssertNotNil(rowStateType)
     }
 
     func testPublicPackedVerificationRejectsIncapableOrEmptyCache() throws {
@@ -289,6 +385,7 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
         let errorType: Any.Type = MTPKVCacheTransactionError.self
         let packedCacheType: Any.Type = (any MTPPackedVerificationCache).self
         let packedRowMapType: Any.Type = MTPPackedVerificationRowMap.self
+        let packedRowStateType: Any.Type = MTPPackedVerificationRowState.self
         let packedOutputType: Any.Type = MTPPackedVerificationOutput.self
         let packedErrorType: Any.Type = MTPPackedVerificationError.self
 
@@ -300,6 +397,7 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
         XCTAssertNotNil(errorType)
         XCTAssertNotNil(packedCacheType)
         XCTAssertNotNil(packedRowMapType)
+        XCTAssertNotNil(packedRowStateType)
         XCTAssertNotNil(packedOutputType)
         XCTAssertNotNil(packedErrorType)
     }
@@ -347,6 +445,21 @@ final class NativeMTPUpstreamQualificationTests: XCTestCase {
     }
 }
 
+private final class QualificationDrafter: Module, MTPDrafterModel {
+    func draftBlock(
+        target _: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden _: MLXArray,
+        sharedKV _: [String: (MLXArray, MLXArray)],
+        positionDeltas _: MLXArray?,
+        queryOffset _: Int,
+        blockSize: Int,
+        sampler _: any LogitSampler
+    ) -> MLXArray {
+        MLXArray.zeros([lastToken.dim(0), max(0, blockSize - 1)], dtype: .int32)
+    }
+}
+
 private let packedOutputStateKey = LMOutput.Key<Int>("tests.mtp.packed.output")
 
 private final class PackedVerificationCache: MTPPackedVerificationCache {
@@ -361,14 +474,16 @@ private final class PackedVerificationCache: MTPPackedVerificationCache {
     private(set) var prepareCallCount = 0
     private(set) var finalizeCallCount = 0
     var batchOffset: MLXArray
+    let maxSize: Int?
     var offset: Int { batchOffset.asArray(Int.self).max() ?? 0 }
-    var maxSize: Int? { nil }
+    var ropeOffset: RoPEOffset { .batch(batchOffset) }
     var state: [MLXArray] = []
     var metaState: [String] = [""]
     var isTrimmable: Bool { false }
 
-    init(offsets: [Int]) {
+    init(offsets: [Int], maxSize: Int? = nil) {
         self.batchOffset = MLXArray(offsets)
+        self.maxSize = maxSize
     }
 
     func innerState() -> [MLXArray] { [] }
@@ -414,7 +529,16 @@ private final class PackedVerificationCache: MTPPackedVerificationCache {
     }
 
     func copy() -> any KVCache {
-        PackedVerificationCache(offsets: batchOffset.asArray(Int.self))
+        PackedVerificationCache(offsets: batchOffset.asArray(Int.self), maxSize: maxSize)
+    }
+
+    func finishPackedForward(wrongOffsetRow: Int? = nil) {
+        guard let activeRowMaps else { return }
+        var offsets = activeRowMaps.map { $0.queryOffset + $0.inputCount }
+        if let wrongOffsetRow {
+            offsets[wrongOffsetRow] += 1
+        }
+        batchOffset = MLXArray(offsets)
     }
 }
 
@@ -427,6 +551,8 @@ private final class PackedVerificationModel: Module, LanguageModel, KVCacheDimen
     private(set) var receivedOpaqueState: Int?
     private(set) var observedActiveLengths: [Int]?
     private(set) var observedActiveRowMaps: [MTPPackedVerificationRowMap]?
+    var omitsSharedKV = false
+    var wrongPostForwardOffsetRow: Int?
 
     func prepare(
         _ input: LMInput,
@@ -451,8 +577,9 @@ private final class PackedVerificationModel: Module, LanguageModel, KVCacheDimen
         receivedMask = input.mask?.asArray(Int.self) ?? []
         receivedEmitFlag = state?[mtpEmitFlagKey]
         receivedOpaqueState = state?[packedOutputStateKey]
-        observedActiveLengths = (cache?.first as? PackedVerificationCache)?.activeLengths
-        observedActiveRowMaps = (cache?.first as? PackedVerificationCache)?.activeRowMaps
+        let packedCache = cache?.first as? PackedVerificationCache
+        observedActiveLengths = packedCache?.activeLengths
+        observedActiveRowMaps = packedCache?.activeRowMaps
 
         let batchSize = input.tokens.dim(0)
         let width = input.tokens.dim(1)
@@ -477,6 +604,23 @@ private final class PackedVerificationModel: Module, LanguageModel, KVCacheDimen
         var outputState = LMOutput.State()
         outputState[packedOutputStateKey] = 42
         outputState[mtpLastHiddenStatesKey] = MLXArray(hidden, [batchSize, width, 2])
+        packedCache?.finishPackedForward(wrongOffsetRow: wrongPostForwardOffsetRow)
+        if !omitsSharedKV {
+            let offsets = packedCache?.batchOffset.asArray(Int.self) ?? []
+            let sharedWidth = offsets.max() ?? 0
+            let sharedValues = (0 ..< (batchSize * sharedWidth)).map { flatIndex in
+                let row = flatIndex / sharedWidth
+                let position = flatIndex % sharedWidth
+                return Float(row * 1_000 + position)
+            }
+            outputState[mtpSharedKVStatesKey] = [
+                "full_attention": (
+                    MLXArray(sharedValues, [batchSize, 1, sharedWidth, 1]),
+                    MLXArray(sharedValues.map { $0 + 10_000 }, [batchSize, 1, sharedWidth, 1]))
+            ]
+            outputState[mtpSharedKVSourceIndicesKey] = ["full_attention": 0]
+        }
+        outputState[mtpPositionDeltasKey] = MLXArray(0 ..< batchSize).reshaped(batchSize, 1)
 
         return LMOutput(
             logits: MLXArray(logits, [batchSize, width, vocabularySize]),

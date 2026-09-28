@@ -1,17 +1,20 @@
 # SPEC-048 Phase-0 Upstream Gate - 2026-09-28
 
-Status: PUBLIC TRANSACTION AND PACKED VERIFICATION BOUNDARIES QUALIFIED by a
-narrow immutable-dependency exception; production native MTP serving remains
-default-off and unqualified.
+Status: STANDALONE LOADING, PUBLIC TRANSACTION, PACKED VERIFICATION, AND HYBRID
+RECURRENT-CACHE BOUNDARIES QUALIFIED by a narrow immutable-dependency exception;
+production native MTP serving remains default-off and unqualified.
 
 ## Verdict
 
 MacProvider may now implement and test the default-off scheduler path against
 one reviewed, immutable fork revision. That revision exposes the row-owned
-cache transaction boundary and the packed target-verification facade that the
-released dependency lacked. This clears the API-access portion of SPEC-048-R003
-only; it does not clear artifact, parity, multi-row, signed-evidence, hardware,
-audit, release, or production enablement gates.
+cache transaction boundary, packed target verification, strict row-local
+continuation state, standalone Qwen 3.5 MTP checkpoint normalization, and
+packed row-isolated recurrent Mamba transactions that the released dependency
+lacked. This clears the dependency/API portion of SPEC-048-R003. The real
+Qwen 3.5 target/MTP tuple also passes the preregistered Mac Studio parity test,
+but production enablement remains gated on the complete MacProvider audit,
+release, and signed-campaign evidence.
 
 ## Current Pins
 
@@ -19,7 +22,8 @@ Source of truth: `phase3-binary/Package.swift` and
 `phase3-binary/Package.resolved`.
 
 - `mlx-swift-lm`: fork `Augustas11/mlx-swift-lm`, exact revision
-  `31223c97262bd5123e76055c5662a42677936eea`, based on upstream
+  `b250ac2e87a1a780eb82ce73522c4bf3e70a8d8e`, branch
+  `feat/public-mtp-transactions`, based on upstream
   `ee673d6a71d76e67b532dc7eaf91d92edc3bb8bb`.
 - `mlx-swift`: resolved `0.31.6`, revision
   `0bb916c67f4b9e5c682cbe02a42c701c93ab5021`.
@@ -40,9 +44,10 @@ The pinned fork provides the existing public serial MTP symbols in
 - `MTPDrafterModel`
 - `MTPSpeculativeTokenIterator`
 - `MTPDrafterModelFactory`
+- `MTPDrafterContainer.perform(nonSendable:_:)`
 
-It additionally exposes the reviewed transaction and packed verification
-facades:
+It additionally exposes the reviewed transaction, packed verification, and
+hybrid recurrent-cache surfaces:
 
 - `MTPKVCacheStorage`
 - `MTPKVCacheTransaction`
@@ -51,34 +56,63 @@ facades:
 - `reconcileMTPSharedKVState`
 - `MTPPackedVerificationCache`
 - `MTPPackedVerificationRowMap`
+- `MTPPackedVerificationRowState`
 - `MTPPackedVerificationOutput`
 - `MTPPackedVerificationError`
+- `MTPPackedMambaBatchCache`
+- `MTPPackedMambaRowTransaction`
+- `MTPPackedVerificationCache.mtpPackedCheckpointIndex`
 - `verifyMTPPackedTargets`
+- the strict `verifyMTPPackedTargets(..., requireContinuationState:)` overload
+
+The standalone Qwen 3.5 MTP registrations also normalize root checkpoint keys
+into the model's `mtp.*` namespace without changing combined-checkpoint
+behavior.
 
 The facades provide row/position metadata, isolated staging for stageable
 attention caches, bounded native rewind for admitted attention/Mamba hybrids,
 contiguous-prefix commit, rejected-tail discard, exact rollback, shared-KV
 reconciliation, explicit ragged row maps, ordinary-row participation, and one
-packed target verification call for the admitted rows. The pinned `mlx-swift`
-also exposes
+packed target verification call for the admitted rows. The strict continuation
+overload returns `MTPPackedVerificationRowState` with per-row hidden state,
+shared-KV snapshots trimmed to each row's live sequence span, source indices,
+post-forward offsets, query offset, and optional position deltas. It is designed
+for row-local multi-round MTP and fails closed on missing, malformed, ambiguous,
+or cross-row continuation state. The pinned `mlx-swift` also exposes
 `QuantizationMode.mxfp8`.
 
-The MacProvider qualification test exercises the facades as an external package
+The serialized `MTPDrafterContainer` overload moves caller-owned,
+non-`Sendable` `MTPDrafterState` through the same protected container boundary
+without storing row state on the drafter model or using unsafe captures. The
+Mac Studio Xcode toolchain built the upstream test targets, and focused Swift
+Testing coverage passed 2/2 for the existing and non-`Sendable` container
+access paths.
+
+The MacProvider qualification test exercises the surfaces as an external package
 consumer, including one mixed ragged packed target call with explicit row maps,
-ordinary and native rows, and fail-closed incapable/empty cache cases. Upstream
-focused coverage passed for the fork qualification surface; seven existing
-shared-KV reconciliation tests also passed. The complete facade diff received an
-independent adversarial review with 0 Critical, 0 High, and 0 Medium findings.
+ordinary and native rows, row-local continuation-state extraction, padding
+exclusion, post-forward row identity validation, and fail-closed incapable,
+empty, missing-state, and malformed-state cases. Upstream focused Xcode
+coverage previously passed 15/15 tests for the transaction qualification
+surface. The expanded upstream test bundle compiled on Mac Studio; direct
+Swift Testing execution was not available under the installed command-line
+toolchain, so no new upstream execution count is claimed. The complete expanded
+diff received an independent adversarial review with 0 Critical, 0 High,
+0 Medium, and 0 Low findings. MacProvider's real-hardware test loaded the
+standalone `mlx-community/Qwen3.5-9B-MTP-4bit` artifact and passed concurrent
+ordinary-versus-native-MTP greedy content and usage parity with native
+admission and packed batch depth of at least two.
 Two broader Qwen checkpoint-equivalence failures reproduced unchanged on
 pristine upstream base and are recorded as baseline, not attributed to the
 facades.
 
 ## Immutable-Dependency Exception
 
-SPEC-048 v0.1.2 permits exactly the fork and revision above. The facades keep
+SPEC-048 v0.1.5 permits exactly the fork and revision above. The public surfaces keep
 the underlying `KVCacheRound` strategies package-scoped and expose only the
-narrow ownership/transaction and packed target-verification operations required
-by an external scheduler.
+narrow ownership/transaction, packed target-verification, and hybrid recurrent
+commit operations required by an external scheduler, plus the strict row-local
+continuation state needed for another MTP round.
 All other fork URLs, revisions, and source substitutions remain rejected.
 The exception must be re-reviewed no later than `2026-12-27` if it has not
 already been removed.
@@ -137,9 +171,10 @@ Allowed now:
 - Keep `native_mtp` fail-closed and default-off.
 - Implement the row-owned cache transaction, allocator transaction, and serial
   oracle needed by the production adapter.
-- Use the qualified packed verification facade only behind the default-off gate;
-  it does not satisfy the Phase-2 exit gate without the remaining scheduler,
-  parity, signed-evidence, hardware, audit, release, and production gates.
+- Use the qualified packed verification and strict continuation-state facades
+  only behind the default-off gate; they do not satisfy the Phase-2 exit gate
+  without the remaining scheduler, parity, signed-evidence, hardware, audit,
+  release, and production gates.
 - Keep upstream watch automation and compile probes current.
 - Re-run the upstream replacement gate when `mlx-swift-lm` publishes a newer
   release.

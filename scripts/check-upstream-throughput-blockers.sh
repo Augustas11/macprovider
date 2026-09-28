@@ -114,7 +114,7 @@ native_mtp_required_merges_in_latest_release = all(
     for row in native_mtp_required_merges.values()
 )
 
-native_mtp_exception_revision = "31223c97262bd5123e76055c5662a42677936eea"
+native_mtp_exception_revision = "b250ac2e87a1a780eb82ce73522c4bf3e70a8d8e"
 native_mtp_exception_base = "ee673d6a71d76e67b532dc7eaf91d92edc3bb8bb"
 native_mtp_exception_repo = "Augustas11/mlx-swift-lm"
 native_mtp_exception_remote_verified = commit_is_descendant(
@@ -301,9 +301,10 @@ out = {
             else "blocked_transaction_exception_unverified"
         ),
         "note": (
-            "Exact reviewed fork transaction and packed verification facades qualify "
-            "the SPEC-048-R003 API boundary; upstream #645 remains the tagged-release "
-            "replacement tracker"
+            "Exact reviewed fork standalone Qwen MTP loading, transaction, packed "
+            "verification, strict continuation-state, and packed recurrent-cache "
+            "surfaces qualify the SPEC-048-R003 boundary "
+            "only; upstream #645 remains the tagged-release replacement tracker"
         ),
     },
     "native_mtp_immutable_dependency_exception": {
@@ -317,10 +318,16 @@ out = {
         "remote_revision_verified": native_mtp_exception_remote_verified,
         "local_pin_matches": native_mtp_exception_pin_matches,
         "review_status": "approved_0_critical_0_high_0_medium",
-        "scope": "public_mtp_cache_transaction_and_packed_verification_facades_only",
+        "scope": (
+            "standalone_qwen_mtp_loading_public_cache_transaction_packed_"
+            "verification_strict_continuation_and_packed_recurrent_cache_"
+            "surfaces_only"
+        ),
         "removal_trigger": (
-            "first reviewed upstream tag with an equivalent public facade that "
-            "passes the MacProvider qualification artifact"
+            "first reviewed upstream tag with equivalent standalone-checkpoint "
+            "loading and public transaction, packed verification, continuation, "
+            "and recurrent-cache surfaces that passes the MacProvider qualification "
+            "artifact"
         ),
         "replacement_tracker": "https://github.com/ml-explore/mlx-swift-lm/issues/645",
     },

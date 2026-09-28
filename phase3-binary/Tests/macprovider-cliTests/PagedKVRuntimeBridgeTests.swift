@@ -74,6 +74,66 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             modelID: "qwen/qwen3.8-32b", configJSONData: dense
         ).hybridDecoderArchitectureVerified)
     }
+
+    func testQwen35HybridArchitectureRequiresExactTupleAndConfigMetadata() {
+        let supported = Self.qwen35HybridConfig()
+        let wrongLayers = Self.qwen35HybridConfig(
+            layerTypes: Array(repeating: "full_attention", count: 32)
+        )
+        let missingMTP = Self.qwen35HybridConfig(includeMTPMetadata: false)
+        let unrelated = Data(#"{"model_type":"qwen3_5","architectures":["AnotherDecoder"]}"#.utf8)
+
+        XCTAssertTrue(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3.5-9B-4bit", configJSONData: supported
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3.5-9B-4bit", configJSONData: nil
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3.5-9B-4bit", configJSONData: unrelated
+        ).hybridDecoderArchitectureVerified)
+
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3.5-9B-4bit", configJSONData: wrongLayers
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3.5-9B-4bit", configJSONData: missingMTP
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3.5-10B-4bit", configJSONData: supported
+        ).hybridDecoderArchitectureVerified)
+    }
+
+    func testNativeMTPAdmissionCacheClassCanonicalizesOnlyVerifiedPagedRuntime() {
+        let verified = PagedKVRuntimeModelCapabilities(
+            modelFamily: "qwen",
+            requiresMoEDispatch: false,
+            hybridDecoderArchitectureVerified: true
+        )
+        let unverified = PagedKVRuntimeModelCapabilities(
+            modelFamily: "qwen",
+            requiresMoEDispatch: false,
+            hybridDecoderArchitectureVerified: false
+        )
+
+        XCTAssertEqual(ModelRuntime.nativeMTPAdmissionCacheClass(
+            runtimeCacheClass: "KVCacheSimple",
+            modelCapabilities: unverified
+        ), "paged_kv")
+        XCTAssertEqual(ModelRuntime.nativeMTPAdmissionCacheClass(
+            runtimeCacheClass: "mixed",
+            modelCapabilities: verified
+        ), "paged_kv")
+        XCTAssertNil(ModelRuntime.nativeMTPAdmissionCacheClass(
+            runtimeCacheClass: "mixed",
+            modelCapabilities: unverified
+        ))
+        XCTAssertNil(ModelRuntime.nativeMTPAdmissionCacheClass(
+            runtimeCacheClass: "RotatingKVCache",
+            modelCapabilities: verified
+        ))
+    }
+
     func testProductionRuntimeMeasurementMissingMetallibStaysNil() {
         let measurement = ModelRuntime.measurePagedKVRuntime(
             config: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
@@ -636,8 +696,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertNotNil(noBackendCapability.unsupportedReason)
     }
 
-    func testQwen36MixedRuntimeAttachesOnlyWithVerifiedArchitecture() async {
-        let modelID = "qwen/qwen3.6-27b"
+    func testQwen35MixedRuntimeAttachesOnlyWithVerifiedArchitecture() async {
+        let modelID = "mlx-community/Qwen3.5-9B-4bit"
         let modelSHA = String(repeating: "a", count: 64)
         let proof = Self.sizingProof(modelID: modelID, modelSHA: modelSHA)
         let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
@@ -822,6 +882,213 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let lone = try await loneBackend.decode(rows: [loneInput])
         try await loneAllocator.endDecodeStep(loneHandle)
         XCTAssertEqual(Self.tokens(from: lone), ["lone": 4])
+    }
+
+    func testMTPPackedCacheStagesProposalColumnsPrivatelyAndIgnoresPadding() async throws {
+        let descriptor = Self.bridgeDescriptor()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let rows = try await Self.pagedRows(
+            descriptor: descriptor,
+            allocator: allocator,
+            ids: ["mtp-a", "ordinary-b"],
+            initialOffsets: [0, 0]
+        )
+        let result = try PagedKVSharedForwardBackend.exerciseMTPPackedCacheForTest(
+            rowCaches: rows,
+            rowMaps: [
+                MTPPackedVerificationRowMap(rowIndex: 11, queryOffset: 0, inputCount: 3, proposalCount: 2),
+                MTPPackedVerificationRowMap(rowIndex: 22, queryOffset: 0, inputCount: 1, proposalCount: 0),
+            ],
+            width: 3
+        )
+
+        XCTAssertEqual(result.batchOffsetsBeforeUpdate, [0, 0])
+        XCTAssertEqual(result.returnedKeyShape, [2, 1, 3, 1])
+        XCTAssertEqual(result.rowOffsetsAfterUpdate, [0, 0])
+        XCTAssertEqual(result.rowStoredTokensAfterUpdate, [0, 0])
+        XCTAssertEqual(result.rowStateTokenCountsAfterUpdate, [0, 0])
+        XCTAssertEqual(result.batchTokenCountBeforeFinalize, 3)
+        XCTAssertEqual(result.batchTokenCountAfterFinalize, 0)
+        XCTAssertEqual(result.rowStateTokenCountsAfterFinalize, [0, 0])
+        XCTAssertEqual(result.maskShape, [2, 1, 3, 3])
+        XCTAssertEqual(result.maskValues, [
+            true, false, false,
+            true, true, false,
+            true, true, true,
+            true, false, false,
+            false, false, false,
+            false, false, false,
+        ])
+    }
+
+    func testMTPPackedCacheKeepsUnequalOffsetsAndReorderedRowsIndependent() async throws {
+        let descriptor = Self.bridgeDescriptor()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let rows = try await Self.pagedRows(
+            descriptor: descriptor,
+            allocator: allocator,
+            ids: ["late-row", "early-row"],
+            initialOffsets: [2, 0]
+        )
+        let result = try PagedKVSharedForwardBackend.exerciseMTPPackedCacheForTest(
+            rowCaches: rows,
+            rowMaps: [
+                MTPPackedVerificationRowMap(rowIndex: 100, queryOffset: 2, inputCount: 2, proposalCount: 1),
+                MTPPackedVerificationRowMap(rowIndex: 7, queryOffset: 0, inputCount: 1, proposalCount: 0),
+            ],
+            width: 2
+        )
+
+        XCTAssertEqual(result.batchOffsetsBeforeUpdate, [2, 0])
+        XCTAssertEqual(result.rowOffsetsAfterUpdate, [2, 0])
+        XCTAssertEqual(result.rowStoredTokensAfterUpdate, [0, 0])
+        XCTAssertEqual(result.rowStateTokenCountsAfterFinalize, [0, 0])
+        XCTAssertEqual(result.maskShape, [2, 1, 2, 4])
+        XCTAssertEqual(result.maskValues, [
+            true, true, true, false,
+            true, true, true, true,
+            true, false, false, false,
+            false, false, false, false,
+        ])
+    }
+
+    func testMTPPackedCacheResolutionCommitsBaseColumnAndAcceptedPrefixOnly() async throws {
+        let descriptor = Self.bridgeDescriptor()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let rows = try await Self.pagedRows(
+            descriptor: descriptor,
+            allocator: allocator,
+            ids: ["accept-one", "accept-zero"],
+            initialOffsets: [0, 0]
+        )
+
+        let result = try PagedKVSharedForwardBackend.exerciseMTPPackedCacheResolutionForTest(
+            rowCaches: rows,
+            rowMaps: [
+                MTPPackedVerificationRowMap(rowIndex: 0, queryOffset: 0, inputCount: 3, proposalCount: 2),
+                MTPPackedVerificationRowMap(rowIndex: 1, queryOffset: 0, inputCount: 2, proposalCount: 1),
+            ],
+            width: 3,
+            committedInputCounts: [2, 1]
+        )
+
+        XCTAssertEqual(result.rowOffsetsAfterStaging, [0, 0])
+        XCTAssertEqual(result.rowStoredTokensAfterStaging, [0, 0])
+        XCTAssertEqual(result.rowStateTokenCountsAfterStaging, [0, 0])
+        XCTAssertEqual(result.pendingInputCountsBeforeFinalize, [3, 2])
+        XCTAssertEqual(result.pendingProposalCountsBeforeFinalize, [2, 1])
+        XCTAssertEqual(result.pendingInputCountsAfterFacadeFinalize, [3, 2])
+        XCTAssertEqual(result.pendingProposalCountsAfterFacadeFinalize, [2, 1])
+        XCTAssertEqual(result.rowOffsetsAfterResolution, [2, 1])
+        XCTAssertEqual(result.rowStoredTokensAfterResolution, [2, 1])
+        XCTAssertEqual(result.rowStateTokenCountsAfterResolution, [2, 1])
+    }
+
+    func testMTPPackedCacheAbortRestoresExactRowsAfterFacadeFinalize() async throws {
+        let descriptor = Self.bridgeDescriptor()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let rows = try await Self.pagedRows(
+            descriptor: descriptor,
+            allocator: allocator,
+            ids: ["abort-a", "abort-b"],
+            initialOffsets: [1, 3]
+        )
+        let beforeOffsets = rows.map(\.offset)
+        let beforeStoredTokens = rows.map(\.storedTokens)
+        let beforeStateCounts = rows.map { row -> Int in
+            let state = row.state
+            return state.count == 2 ? state[0].dim(2) : 0
+        }
+
+        let result = try PagedKVSharedForwardBackend.exerciseMTPPackedCacheResolutionForTest(
+            rowCaches: rows,
+            rowMaps: [
+                MTPPackedVerificationRowMap(rowIndex: 0, queryOffset: 1, inputCount: 2, proposalCount: 1),
+                MTPPackedVerificationRowMap(rowIndex: 1, queryOffset: 3, inputCount: 3, proposalCount: 2),
+            ],
+            width: 3,
+            committedInputCounts: [nil, nil]
+        )
+
+        XCTAssertEqual(result.rowOffsetsAfterStaging, beforeOffsets)
+        XCTAssertEqual(result.rowStoredTokensAfterStaging, beforeStoredTokens)
+        XCTAssertEqual(result.rowStateTokenCountsAfterStaging, beforeStateCounts)
+        XCTAssertEqual(result.pendingInputCountsAfterFacadeFinalize, [2, 3])
+        XCTAssertEqual(result.pendingProposalCountsAfterFacadeFinalize, [1, 2])
+        XCTAssertEqual(result.rowOffsetsAfterResolution, beforeOffsets)
+        XCTAssertEqual(result.rowStoredTokensAfterResolution, beforeStoredTokens)
+        XCTAssertEqual(result.rowStateTokenCountsAfterResolution, beforeStateCounts)
+    }
+
+    func testMTPPackedCacheRejectsOutOfRangeResolutionWithoutRowMutation() async throws {
+        let descriptor = Self.bridgeDescriptor()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let rows = try await Self.pagedRows(
+            descriptor: descriptor,
+            allocator: allocator,
+            ids: ["bad-resolution"],
+            initialOffsets: [0]
+        )
+
+        XCTAssertThrowsError(try PagedKVSharedForwardBackend.exerciseMTPPackedCacheResolutionForTest(
+            rowCaches: rows,
+            rowMaps: [
+                MTPPackedVerificationRowMap(rowIndex: 0, queryOffset: 0, inputCount: 2, proposalCount: 1),
+            ],
+            width: 2,
+            committedInputCounts: [3]
+        ))
+        XCTAssertEqual(rows.map(\.offset), [0])
+        XCTAssertEqual(rows.map(\.storedTokens), [0])
+    }
+
+    func testMTPPackedCacheRejectsMalformedMapsBeforeMutation() async throws {
+        let descriptor = Self.bridgeDescriptor()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let rows = try await Self.pagedRows(
+            descriptor: descriptor,
+            allocator: allocator,
+            ids: ["bad-a", "bad-b"],
+            initialOffsets: [1, 0]
+        )
+
+        XCTAssertThrowsError(try PagedKVSharedForwardBackend.validateMTPPackedCacheForTest(
+            rowCaches: rows,
+            rowMaps: [
+                MTPPackedVerificationRowMap(rowIndex: 1, queryOffset: 0, inputCount: 1, proposalCount: 0),
+                MTPPackedVerificationRowMap(rowIndex: 2, queryOffset: 0, inputCount: 1, proposalCount: 0),
+            ]
+        ))
+        XCTAssertEqual(rows.map(\.offset), [1, 0])
+        XCTAssertEqual(rows.map(\.storedTokens), [0, 0])
+
+        XCTAssertThrowsError(try PagedKVSharedForwardBackend.validateMTPPackedCacheForTest(
+            rowCaches: rows,
+            rowMaps: [
+                MTPPackedVerificationRowMap(rowIndex: 1, queryOffset: 1, inputCount: 2, proposalCount: 0),
+                MTPPackedVerificationRowMap(rowIndex: 1, queryOffset: 0, inputCount: 1, proposalCount: 0),
+            ]
+        ))
+        XCTAssertEqual(rows.map(\.offset), [1, 0])
+        XCTAssertEqual(rows.map(\.storedTokens), [0, 0])
     }
 
     func testLockstepSharedForwardDecodePopulatesBatchInnerState() async throws {
@@ -1624,6 +1891,31 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         )
     }
 
+    private static func qwen35HybridConfig(
+        layerTypes: [String]? = nil,
+        includeMTPMetadata: Bool = true
+    ) -> Data {
+        let defaultLayers = (0..<32).map { index in
+            (index + 1).isMultiple(of: 4) ? "full_attention" : "linear_attention"
+        }
+        var textConfig: [String: Any] = [
+            "model_type": "qwen3_5_text",
+            "num_hidden_layers": 32,
+            "full_attention_interval": 4,
+            "layer_types": layerTypes ?? defaultLayers,
+        ]
+        if includeMTPMetadata {
+            textConfig["mtp_num_hidden_layers"] = 1
+            textConfig["mtp_use_dedicated_embeddings"] = false
+        }
+        let object: [String: Any] = [
+            "model_type": "qwen3_5",
+            "architectures": ["Qwen3_5ForConditionalGeneration"],
+            "text_config": textConfig,
+        ]
+        return try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
     private static func bridgeDescriptor(blockSizeTokens: Int = 4, maxPhysicalBlocks: Int = 16) -> PagedKVDescriptor {
         PagedKVDescriptor(
             blockSizeTokens: blockSizeTokens,
@@ -1687,6 +1979,30 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             targetKVTokenCount: targetKVTokenCount,
             samplerStep: 0
         )
+    }
+
+    private static func pagedRows(
+        descriptor: PagedKVDescriptor,
+        allocator: PagedKVBlockAllocator,
+        ids: [String],
+        initialOffsets: [Int]
+    ) async throws -> [PagedKVCache] {
+        precondition(ids.count == initialOffsets.count)
+        var rows: [PagedKVCache] = []
+        rows.reserveCapacity(ids.count)
+        for (id, offset) in zip(ids, initialOffsets) {
+            let handle = try await allocator.allocate(conversationKey: id, maxTokens: 8)
+            let binding = try await allocator.binding(for: handle)
+            rows.append(PagedKVCache(
+                blockSizeTokens: descriptor.blockSizeTokens,
+                maxPhysicalBlocks: descriptor.maxPhysicalBlocks,
+                poolEpoch: descriptor.poolEpoch,
+                binding: binding,
+                initialOffset: offset,
+                reconstructViaGather: false
+            ))
+        }
+        return rows
     }
 
     private static func tokens(from outcomes: [ContinuousBatchDecodeOutcome]) -> [String: Int] {

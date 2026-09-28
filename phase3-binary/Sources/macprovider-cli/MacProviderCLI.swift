@@ -299,6 +299,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("publish-spec-decode-telemetry"), inversion: .prefixedNo, help: "Opt into publishing speculative-decoding performance telemetry after provider software is verified. Default off.")
     var publishSpecDecodeTelemetry: Bool?
 
+    @Option(name: .customLong("native-mtp"), help: "Native multi-token prediction mode: off or auto. Default off. Overrides MACPROVIDER_NATIVE_MTP_MODE and config key native_mtp_mode.")
+    var nativeMTP: String?
+
     @Option(help: "Coordinator WebSocket URL. Overrides MACPROVIDER_COORDINATOR_URL and config file coordinator_url.")
     var coordinator: String?
 
@@ -1852,6 +1855,7 @@ struct ServeCommand: AsyncParsableCommand {
                 draftModelArtifactSHA256: draftModelArtifactSha256,
                 numDraftTokens: numDraftTokens,
                 publishesSpecDecodeTelemetry: publishSpecDecodeTelemetry,
+                nativeMTPMode: nativeMTP,
                 coordinatorURL: coordinator,
                 providerID: providerID,
                 endpointURL: endpointURL,
@@ -2420,6 +2424,7 @@ struct ServeCommand: AsyncParsableCommand {
                     continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage(
                         acceptedTuples: resolved.continuousBatchingAcceptedTuples
                     ),
+                    nativeMTPMode: resolved.nativeMTPMode,
                     warmSwapEnabled: resolved.enableWarmSwap,
                     swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds,
                     catalogModelIDAlias: catalogModelIDAlias,
