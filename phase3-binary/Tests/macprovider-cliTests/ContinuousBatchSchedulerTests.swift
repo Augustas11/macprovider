@@ -5248,6 +5248,49 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
+    func testNativeMTPDisableWhileVerifyInFlightAbortsWithoutApplyingNativeOutput() async throws {
+        let verifyGate = AsyncGate()
+        let recorder = TokenEventRecorder()
+        let fence = Self.nativeMTPFence()
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillTokens: ["disabled-inflight": 6],
+            nativeTargetTopTokens: ["disabled-inflight": [7, 8]],
+            nativeVerifyGate: verifyGate
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend, allocator: allocator)
+
+        let task = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "disabled-inflight",
+                promptTokens: [1],
+                maxOutputTokens: 3,
+                proposals: [7],
+                maximumDepth: 1,
+                nativeMTPTupleFence: fence
+            ), tokenSink: { event in
+                recorder.append(event)
+            })
+        }
+        try await eventually { await backend.nativeVerifyBatches().count == 1 }
+        await scheduler.disableNativeMTPTuple(fence)
+        await verifyGate.open()
+
+        let result = try await task.value
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_native_mtp_tuple_disabled_postoutput")
+        XCTAssertEqual(recorder.events().map(\.token), [6])
+        try await eventually { await backend.nativeFinalizations().count == 1 }
+        let finalization = await backend.nativeFinalizations().first?.first
+        XCTAssertEqual(finalization?.shouldCommit, false)
+        XCTAssertEqual(finalization?.committedProposalTokenCount, 0)
+        XCTAssertEqual(finalization?.committedInputTokenCount, 0)
+        let reservedRoundBytes = await scheduler.nativeMTPReservedRoundBytesSnapshot()
+        XCTAssertEqual(reservedRoundBytes, 0)
+        try await eventually { await allocator.freeBlockCount() == 16 }
+    }
+
     private static func configuration(
         descriptor: PagedKVDescriptor = descriptor(),
         tuple: ContinuousBatchingRequestedTuple = tuple(),
@@ -5280,7 +5323,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         maximumDepth: Int,
         completeWindowBytes: Int = 16,
         completeWindowBytesByDepth: [Int]? = nil,
-        directive: NativeMTPAdaptationDirective? = nil
+        directive: NativeMTPAdaptationDirective? = nil,
+        nativeMTPTupleFence: NativeMTPTupleFence? = nil
     ) -> ContinuousBatchSchedulerRequest {
         let bytesByDepth = completeWindowBytesByDepth
             ?? Array(repeating: completeWindowBytes, count: maximumDepth + 1)
@@ -5296,7 +5340,20 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             nativeMTPMaximumProposalDepth: maximumDepth,
             nativeMTPCompleteWindowBytesByDepth: bytesByDepth,
             nativeMTPProposalTokens: proposals,
-            nativeMTPAdaptationDirective: directive
+            nativeMTPAdaptationDirective: directive,
+            nativeMTPTupleFence: nativeMTPTupleFence
+        )
+    }
+
+    private static func nativeMTPFence(
+        admission: String = String(repeating: "a", count: 64),
+        snapshot: String = "snapshot",
+        generation: UInt64 = 1
+    ) -> NativeMTPTupleFence {
+        NativeMTPTupleFence(
+            admissionTupleSHA256: admission,
+            servedSnapshotID: snapshot,
+            targetGeneration: generation
         )
     }
 

@@ -1559,6 +1559,7 @@ actor ContinuousBatchScheduler {
     private var knownRequests: [String: RequestFingerprint] = [:]
     private var terminalResults: [String: ContinuousBatchSchedulerResult] = [:]
     private var disabledNativeMTPTupleFences: Set<NativeMTPTupleFence> = []
+    private var nativeMTPRowsWithStagedMutation: Set<String> = []
     private var nativeMTPIntegrityProbeInFlight = false
     private var pendingTerminalDeliveries: [String: PendingTerminalDelivery] = [:]
     private var stoppingWaiterIDs: Set<UUID> = []
@@ -2609,6 +2610,7 @@ actor ContinuousBatchScheduler {
                 failure = failure ?? error
             }
             releaseNativeMTPRoundBytes(item.byteReservation)
+            nativeMTPRowsWithStagedMutation.remove(item.row.request.id)
         }
         if let failure {
             throw failure
@@ -2636,6 +2638,7 @@ actor ContinuousBatchScheduler {
             }
             await releaseNativeMTPScratch(item.scratchReservation)
             releaseNativeMTPRoundBytes(item.byteReservation)
+            nativeMTPRowsWithStagedMutation.remove(item.row.request.id)
         }
     }
 
@@ -2650,6 +2653,7 @@ actor ContinuousBatchScheduler {
             }
             await releaseNativeMTPScratch(item.scratchReservation)
             releaseNativeMTPRoundBytes(item.byteReservation)
+            nativeMTPRowsWithStagedMutation.remove(item.row.request.id)
         }
     }
 
@@ -2676,6 +2680,60 @@ actor ContinuousBatchScheduler {
             row.snapshot.modelSHA256,
             String(row.snapshot.weightsGeneration),
         ].joined(separator: ":")
+    }
+
+    private func nativeMTPStagedRowIsCurrent(_ row: Row) -> Bool {
+        guard let active = activeDecode[row.request.id] else { return false }
+        if let fence = active.nativeMTPTupleFence,
+           disabledNativeMTPTupleFences.contains(fence) {
+            return false
+        }
+        return active.usesNativeMTP
+            && active.nativeMTPTupleFence == row.nativeMTPTupleFence
+            && active.handle == row.handle
+            && active.currentToken == row.currentToken
+            && active.generatedTokens == row.generatedTokens
+            && active.outputTokens == row.outputTokens
+    }
+
+    private func staleNativeMTPRows(_ rows: [Row]) -> [Row] {
+        rows.filter { !nativeMTPStagedRowIsCurrent($0) }
+    }
+
+    private func failStaleNativeMTPRows(
+        _ rows: [Row],
+        cleanupError: (any Error)?,
+        fallbackErrorCode: String
+    ) async {
+        if let cleanupError {
+            record(.cleanupFailed)
+            ContinuousBatchingPolicy.logForwardFailed(cleanupError)
+        } else {
+            record(.localPreparationFailed)
+        }
+        for row in rows {
+            nativeMTPRowsWithStagedMutation.remove(row.request.id)
+            guard let removed = activeDecode.removeValue(forKey: row.request.id) else { continue }
+            let released = await release(removed.handle)
+            let disabled = removed.nativeMTPTupleFence.map {
+                disabledNativeMTPTupleFences.contains($0)
+            } ?? false
+            if disabled && nativeMTPRowHasBuyerVisibleOutput(removed) {
+                configuration.nativeMTPStatusSink?.recordPostoutputFailure()
+            }
+            finish(
+                removed,
+                status: .requestFailed,
+                errorCode: released
+                    ? (disabled
+                        ? (nativeMTPRowHasBuyerVisibleOutput(removed)
+                            ? "continuous_batching_native_mtp_tuple_disabled_postoutput"
+                            : "continuous_batching_native_mtp_tuple_disabled")
+                        : fallbackErrorCode)
+                    : "continuous_batching_cleanup_failed"
+            )
+            if !released { return }
+        }
     }
 
     private func checkpointAndStageNativeMTP(
@@ -2768,10 +2826,12 @@ actor ContinuousBatchScheduler {
                 }
                 let scratchTokens = nativeMTPScratchReservationTokens()
                 let scratchReservation: PagedKVNativeMTPScratchReservation
+                nativeMTPRowsWithStagedMutation.insert(row.request.id)
                 do {
                     scratchReservation = try await allocator.reserveNativeMTPScratchTokens(scratchTokens)
                 } catch {
                     releaseNativeMTPRoundBytes(byteReservation)
+                    nativeMTPRowsWithStagedMutation.remove(row.request.id)
                     reservationFailure = error
                     if depth == 0 { break }
                     depth -= 1
@@ -2796,6 +2856,7 @@ actor ContinuousBatchScheduler {
                 } catch {
                     await releaseNativeMTPScratch(scratchReservation)
                     releaseNativeMTPRoundBytes(byteReservation)
+                    nativeMTPRowsWithStagedMutation.remove(row.request.id)
                     reservationFailure = error
                     if depth == 0 { break }
                     depth -= 1
@@ -2870,6 +2931,16 @@ actor ContinuousBatchScheduler {
                     if !released { return }
                 }
             }
+            return
+        }
+        let stalePreReservedRows = staleNativeMTPRows(preReserved.map(\.row))
+        guard stalePreReservedRows.isEmpty else {
+            await abortPreReservedNativeMTPRows(preReserved)
+            await failStaleNativeMTPRows(
+                stalePreReservedRows,
+                cleanupError: nil,
+                fallbackErrorCode: "continuous_batching_native_mtp_stale_row"
+            )
             return
         }
 
@@ -3023,6 +3094,24 @@ actor ContinuousBatchScheduler {
             }
             return
         }
+        let stalePreparedRows = staleNativeMTPRows(prepared.map(\.row))
+        guard stalePreparedRows.isEmpty else {
+            let abortError: (any Error)?
+            do {
+                try await abortNativeMTPRound(prepared)
+                abortError = nil
+            } catch {
+                abortError = error
+            }
+            await failStaleNativeMTPRows(
+                abortError == nil ? stalePreparedRows : prepared.map(\.row),
+                cleanupError: abortError,
+                fallbackErrorCode: abortError == nil
+                    ? "continuous_batching_native_mtp_stale_row"
+                    : "continuous_batching_native_mtp_abort_failed"
+            )
+            return
+        }
 
         let acceptedRows: [NativeMTPAcceptedRow]
         do {
@@ -3118,6 +3207,7 @@ actor ContinuousBatchScheduler {
                     localAbortError = localAbortError ?? error
                 }
                 releaseNativeMTPRoundBytes(item.byteReservation)
+                nativeMTPRowsWithStagedMutation.remove(item.row.request.id)
             }
             record(.batchForwardFailed)
             ContinuousBatchingPolicy.logForwardFailed(error)
@@ -3141,6 +3231,24 @@ actor ContinuousBatchScheduler {
             }
             return
         }
+        let staleFinalizedRows = staleNativeMTPRows(prepared.map(\.row))
+        guard staleFinalizedRows.isEmpty else {
+            let abortError: (any Error)?
+            do {
+                try await abortNativeMTPRound(prepared)
+                abortError = nil
+            } catch {
+                abortError = error
+            }
+            await failStaleNativeMTPRows(
+                abortError == nil ? staleFinalizedRows : prepared.map(\.row),
+                cleanupError: abortError,
+                fallbackErrorCode: abortError == nil
+                    ? "continuous_batching_native_mtp_stale_row"
+                    : "continuous_batching_native_mtp_abort_failed"
+            )
+            return
+        }
 
         let finalizedByID = Dictionary(uniqueKeysWithValues: finalizeRows.map { ($0.requestID, $0) })
         var healthyOutputIDs: Set<String> = []
@@ -3158,6 +3266,7 @@ actor ContinuousBatchScheduler {
                     cleanupError = cleanupError ?? error
                 }
                 releaseNativeMTPRoundBytes(item.byteReservation)
+                nativeMTPRowsWithStagedMutation.remove(item.row.request.id)
                 if let cleanupError {
                     record(.cleanupFailed)
                     ContinuousBatchingPolicy.logForwardFailed(cleanupError)
@@ -3175,6 +3284,28 @@ actor ContinuousBatchScheduler {
                     )
                     if !released { return }
                 }
+                continue
+            }
+            guard nativeMTPStagedRowIsCurrent(item.row) else {
+                var cleanupError: (any Error)?
+                do {
+                    _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+                } catch {
+                    cleanupError = cleanupError ?? error
+                }
+                do {
+                    try await allocator.releaseNativeMTPScratchReservation(item.scratchReservation)
+                } catch {
+                    cleanupError = cleanupError ?? error
+                }
+                releaseNativeMTPRoundBytes(item.byteReservation)
+                await failStaleNativeMTPRows(
+                    [item.row],
+                    cleanupError: cleanupError,
+                    fallbackErrorCode: cleanupError == nil
+                        ? "continuous_batching_native_mtp_stale_row"
+                        : "continuous_batching_native_mtp_abort_failed"
+                )
                 continue
             }
             var localFinalizeError: (any Error)?
@@ -3196,8 +3327,17 @@ actor ContinuousBatchScheduler {
                 localFinalizeError = localFinalizeError ?? error
             }
             releaseNativeMTPRoundBytes(item.byteReservation)
+            nativeMTPRowsWithStagedMutation.remove(item.row.request.id)
             if localFinalizeError == nil {
-                healthyOutputIDs.insert(item.row.request.id)
+                if nativeMTPStagedRowIsCurrent(item.row) {
+                    healthyOutputIDs.insert(item.row.request.id)
+                } else {
+                    await failStaleNativeMTPRows(
+                        [item.row],
+                        cleanupError: nil,
+                        fallbackErrorCode: "continuous_batching_native_mtp_stale_row"
+                    )
+                }
             } else if let error = localFinalizeError {
                 recordNativeMTPPostoutputFailureIfVisible(
                     sink: nativeMTPStatusSink,
@@ -3333,7 +3473,11 @@ actor ContinuousBatchScheduler {
             }
         }
         for requestID in nativeIDs {
-            guard var row = activeDecode.removeValue(forKey: requestID) else { continue }
+            guard var row = activeDecode[requestID] else { continue }
+            if nativeMTPRowsWithStagedMutation.contains(requestID) {
+                continue
+            }
+            activeDecode.removeValue(forKey: requestID)
             if nativeMTPRowHasBuyerVisibleOutput(row) {
                 let released = await release(row.handle)
                 configuration.nativeMTPStatusSink?.recordPostoutputFailure()
