@@ -2589,7 +2589,7 @@ actor CoordinatorClient {
                 throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable identity")
             }
             let reason = try boundedString(message, "reason", maxBytes: 64)
-            guard nativeMTPTupleDisableReasons.contains(reason) else {
+            guard Self.nativeMTPTupleDisableReasons.contains(reason) else {
                 throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable reason")
             }
             let nonce = try boundedString(message, "nonce", maxBytes: 32)
@@ -2601,7 +2601,7 @@ actor CoordinatorClient {
                 throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable nonce")
             }
             let issuedAt = try boundedString(message, "issued_at", maxBytes: 64)
-            guard let issuedDate = parseISO8601Date(issuedAt), abs(issuedDate.timeIntervalSinceNow) <= 300 else {
+            guard let issuedDate = Self.parseISO8601Date(issuedAt), abs(issuedDate.timeIntervalSinceNow) <= 300 else {
                 throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable issued_at")
             }
             let requestDigest = try sha256String(message, "request_digest")
