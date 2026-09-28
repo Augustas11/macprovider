@@ -399,6 +399,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Bounded continuous-batching admission wait in milliseconds. Default 30000. A request still queued when it expires is rejected pre-admission and never settles. Overrides MACPROVIDER_CONTINUOUS_BATCH_QUEUE_WAIT_TIMEOUT_MS and config key continuous_batch_queue_wait_timeout_ms.")
     var continuousBatchQueueWaitTimeoutMS: Int?
 
+    @Option(help: "Continuous-batching prefill per-iteration token budget (across compatible rows). Default 1024. Operator tuning/observability knob: a Studio sweep found this total budget non-binding for TTFT (single-stream prefill is compute-bound; the per-row prefill_step_size is the lever), so raising it does not by itself cut large-prompt TTFT. Overrides MACPROVIDER_CONTINUOUS_BATCH_PREFILL_TOKENS_PER_ITERATION and config key continuous_batch_prefill_tokens_per_iteration.")
+    var continuousBatchPrefillTokensPerIteration: Int?
+
     @Flag(name: .customLong("continuous-batching-cached-turns"), inversion: .prefixedNo, help: "Let a positive-cached follow-up turn with a usable retained paged-KV handoff (plus a recurrent checkpoint on hybrid models) batch instead of serial-routing. Default off. Inert while continuous batching is off. Overrides MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS and config key continuous_batching_cached_turns.")
     var continuousBatchingCachedTurns: Bool?
 
@@ -690,6 +693,13 @@ struct ServeCommand: AsyncParsableCommand {
            !(1 ... ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS).contains(queueWaitTimeoutMS) {
             FileHandle.standardError.write(Data((
                 "--continuous-batch-queue-wait-timeout-ms \(queueWaitTimeoutMS) must be in 1...\(ContinuousBatchSchedulerConfiguration.maximumQueueWaitTimeoutMS)\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
+        if let prefillBudget = resolved.continuousBatchPrefillTokensPerIteration,
+           !(1 ... ContinuousBatchSchedulerConfiguration.maximumPrefillTokensPerIteration).contains(prefillBudget) {
+            FileHandle.standardError.write(Data((
+                "--continuous-batch-prefill-tokens-per-iteration \(prefillBudget) must be in 1...\(ContinuousBatchSchedulerConfiguration.maximumPrefillTokensPerIteration)\n"
             ).utf8))
             throw ExitCode(2)
         }
@@ -1877,6 +1887,7 @@ struct ServeCommand: AsyncParsableCommand {
                 continuousBatching: continuousBatching,
                 continuousBatchQueueLimit: continuousBatchQueueLimit,
                 continuousBatchQueueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
+                continuousBatchPrefillTokensPerIteration: continuousBatchPrefillTokensPerIteration,
                 continuousBatchingCachedTurns: continuousBatchingCachedTurns,
                 pagedKV: pagedKVCLIOverrides
             )
@@ -2404,6 +2415,7 @@ struct ServeCommand: AsyncParsableCommand {
                     continuousBatchingMode: resolved.continuousBatching,
                     continuousBatchQueueLimit: resolved.continuousBatchQueueLimit,
                     continuousBatchQueueWaitTimeoutMS: resolved.continuousBatchQueueWaitTimeoutMS,
+                    continuousBatchPrefillTokensPerIteration: resolved.continuousBatchPrefillTokensPerIteration,
                     continuousBatchingCachedTurns: resolved.continuousBatchingCachedTurns,
                     continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage(
                         acceptedTuples: resolved.continuousBatchingAcceptedTuples
@@ -4011,6 +4023,7 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  continuous_batching: \(config.continuousBatching.rawValue)")
     print("  continuous_batch_queue_limit: \(config.continuousBatchQueueLimit.map(String.init) ?? "<unset, 2 * max_batch>")")
     print("  continuous_batch_queue_wait_timeout_ms: \(config.continuousBatchQueueWaitTimeoutMS.map(String.init) ?? "<unset, 30000>")")
+    print("  continuous_batch_prefill_tokens_per_iteration: \(config.continuousBatchPrefillTokensPerIteration.map(String.init) ?? "<unset, 2048>")")
     print("  continuous_batching_cached_turns: \(config.continuousBatchingCachedTurns)")
     print("  enable_receipts: \(config.enableReceipts)")
     print("  relay_blind_enabled: \(config.relayBlindEnabled)")

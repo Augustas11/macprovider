@@ -272,6 +272,15 @@ public struct AppConfig: Equatable, Sendable {
     // milliseconds. Unset ⇒ the scheduler's 30s default. A request still
     // queued when it expires is rejected pre-admission, non-settling.
     public var continuousBatchQueueWaitTimeoutMS: Int?
+    // SPEC-038: operator-tunable continuous-batch prefill per-iteration token
+    // budget. Caps how many prompt tokens are prefilled per scheduler iteration
+    // across concurrent admissions; larger values improve large-prompt TTFT and
+    // de-serialize concurrent large prefills. Unset ⇒ the scheduler's
+    // `defaultPrefillTokensPerIteration`. Triple-exposed: yaml key
+    // `continuous_batch_prefill_tokens_per_iteration`, env
+    // `MACPROVIDER_CONTINUOUS_BATCH_PREFILL_TOKENS_PER_ITERATION`, CLI
+    // `--continuous-batch-prefill-tokens-per-iteration`.
+    public var continuousBatchPrefillTokensPerIteration: Int?
     // SPEC-038 AC-26: let positive-cached follow-up turns that carry a usable
     // retained paged-KV handoff (plus a recurrent checkpoint on hybrid models)
     // batch instead of serial-routing. Default off; inert while
@@ -371,6 +380,7 @@ public struct AppConfig: Equatable, Sendable {
             continuousBatching: .off,
             continuousBatchQueueLimit: nil,
             continuousBatchQueueWaitTimeoutMS: nil,
+            continuousBatchPrefillTokensPerIteration: nil,
             continuousBatchingCachedTurns: false,
             mlxCacheLimitMB: nil,
             continuousBatchingAcceptedTuples: [],
@@ -424,6 +434,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var continuousBatching: String?
     public var continuousBatchQueueLimit: Int?
     public var continuousBatchQueueWaitTimeoutMS: Int?
+    public var continuousBatchPrefillTokensPerIteration: Int?
     public var continuousBatchingCachedTurns: Bool?
     // SPEC-037 FR-KVP11: KV disk-tier CLI flags (`--kv-disk-cache-*`).
     public var kvDiskCache: KVDiskCacheCLIOverrides
@@ -472,6 +483,7 @@ public struct CLIOverrides: Equatable, Sendable {
         continuousBatching: String? = nil,
         continuousBatchQueueLimit: Int? = nil,
         continuousBatchQueueWaitTimeoutMS: Int? = nil,
+        continuousBatchPrefillTokensPerIteration: Int? = nil,
         continuousBatchingCachedTurns: Bool? = nil,
         pagedKV: PagedKVCLIOverrides = PagedKVCLIOverrides()
     ) {
@@ -515,6 +527,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.continuousBatching = continuousBatching
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
+        self.continuousBatchPrefillTokensPerIteration = continuousBatchPrefillTokensPerIteration
         self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.kvDiskCache = kvDiskCache
         self.pagedKV = pagedKV
@@ -731,6 +744,12 @@ public enum ConfigLoader {
             expected: "integer >= 1"
         )
         try assign(
+            &config.continuousBatchPrefillTokensPerIteration,
+            from: dict,
+            key: "continuous_batch_prefill_tokens_per_iteration",
+            expected: "integer >= 1"
+        )
+        try assign(
             &config.continuousBatchingCachedTurns,
             from: dict,
             key: "continuous_batching_cached_turns",
@@ -923,6 +942,12 @@ public enum ConfigLoader {
             expected: "integer >= 1"
         )
         try assign(
+            &config.continuousBatchPrefillTokensPerIteration,
+            from: environment,
+            env: "MACPROVIDER_CONTINUOUS_BATCH_PREFILL_TOKENS_PER_ITERATION",
+            expected: "integer >= 1"
+        )
+        try assign(
             &config.continuousBatchingCachedTurns,
             from: environment,
             env: "MACPROVIDER_CONTINUOUS_BATCHING_CACHED_TURNS",
@@ -1108,6 +1133,9 @@ public enum ConfigLoader {
         }
         if let continuousBatchQueueWaitTimeoutMS = cli.continuousBatchQueueWaitTimeoutMS {
             config.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
+        }
+        if let continuousBatchPrefillTokensPerIteration = cli.continuousBatchPrefillTokensPerIteration {
+            config.continuousBatchPrefillTokensPerIteration = continuousBatchPrefillTokensPerIteration
         }
         if let continuousBatchingCachedTurns = cli.continuousBatchingCachedTurns {
             config.continuousBatchingCachedTurns = continuousBatchingCachedTurns

@@ -1267,6 +1267,9 @@ actor ModelRuntime: ModelRuntimeServing {
     /// SPEC-038 AC-25 bounded admission wait, in milliseconds. Nil ⇒ the
     /// scheduler configuration default.
     private let continuousBatchQueueWaitTimeoutMS: Int?
+    /// SPEC-038 operator-tunable prefill per-iteration token budget. Nil ⇒ the
+    /// scheduler's `defaultPrefillTokensPerIteration`.
+    private let continuousBatchPrefillTokensPerIteration: Int?
     /// SPEC-038 AC-26 opt-in: positive-cached turns with a usable retained
     /// handoff batch instead of serial-routing. Off keeps the fence.
     private let continuousBatchingCachedTurns: Bool
@@ -2107,6 +2110,7 @@ actor ModelRuntime: ModelRuntimeServing {
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
         continuousBatchQueueWaitTimeoutMS: Int? = nil,
+        continuousBatchPrefillTokensPerIteration: Int? = nil,
         continuousBatchingCachedTurns: Bool = false,
         continuousBatchingAcceptanceCoverage: ContinuousBatchingAcceptanceCoverage = .empty,
         continuousBatchingDurableReplayAuthorityAvailable: Bool = false,
@@ -2165,6 +2169,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
+        self.continuousBatchPrefillTokensPerIteration = continuousBatchPrefillTokensPerIteration
         self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingDurableReplayAuthorityAvailable = false
@@ -2283,6 +2288,7 @@ actor ModelRuntime: ModelRuntimeServing {
             maxBatch: self.maxBatch,
             queueLimit: self.continuousBatchQueueLimit,
             queueWaitTimeoutMS: self.continuousBatchQueueWaitTimeoutMS,
+            prefillTokensPerIteration: self.continuousBatchPrefillTokensPerIteration,
             maxContextTokens: self.maxContextTokens,
             modelID: modelID,
             modelSHA256: self.currentModelHash,
@@ -2362,6 +2368,7 @@ actor ModelRuntime: ModelRuntimeServing {
         continuousBatchingMode: ContinuousBatchingMode = .off,
         continuousBatchQueueLimit: Int? = nil,
         continuousBatchQueueWaitTimeoutMS: Int? = nil,
+        continuousBatchPrefillTokensPerIteration: Int? = nil,
         continuousBatchingCachedTurns: Bool = false,
         // Test-only init: mirrors `ContinuousBatchRuntimeReplayAuthority
         // .inMemoryForTests` — coverage is unrestricted unless a test asserts
@@ -2493,6 +2500,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.continuousBatchingMode = continuousBatchingMode
         self.continuousBatchQueueLimit = continuousBatchQueueLimit
         self.continuousBatchQueueWaitTimeoutMS = continuousBatchQueueWaitTimeoutMS
+        self.continuousBatchPrefillTokensPerIteration = continuousBatchPrefillTokensPerIteration
         self.continuousBatchingCachedTurns = continuousBatchingCachedTurns
         self.continuousBatchingAcceptanceCoverage = continuousBatchingAcceptanceCoverage
         self.continuousBatchingDurableReplayAuthorityAvailable = false
@@ -2511,6 +2519,7 @@ actor ModelRuntime: ModelRuntimeServing {
             maxBatch: boundedMaxBatch,
             queueLimit: continuousBatchQueueLimit,
             queueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
+            prefillTokensPerIteration: continuousBatchPrefillTokensPerIteration,
             maxContextTokens: self.maxContextTokens,
             modelID: modelID,
             modelSHA256: modelHash,
@@ -3259,6 +3268,7 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch: Int,
         queueLimit: Int?,
         queueWaitTimeoutMS: Int?,
+        prefillTokensPerIteration: Int?,
         maxContextTokens: Int,
         modelID: String?,
         modelSHA256: String?,
@@ -3296,8 +3306,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     maxBatch,
                     ContinuousBatchSchedulerConfiguration.defaultPrefillRowsPerIteration
                 ),
-                maxPrefillTokensPerIteration: ContinuousBatchSchedulerConfiguration
-                    .defaultPrefillTokensPerIteration,
+                maxPrefillTokensPerIteration: prefillTokensPerIteration
+                    ?? ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration,
                 maxPromptChunkTokens: min(
                     max(1, prefillStepSize),
                     ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
@@ -3327,6 +3337,7 @@ actor ModelRuntime: ModelRuntimeServing {
         maxBatch: Int,
         queueLimit: Int?,
         queueWaitTimeoutMS: Int?,
+        prefillTokensPerIteration: Int?,
         maxContextTokens: Int,
         modelID: String?,
         modelSHA256: String?,
@@ -3344,6 +3355,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 maxBatch: maxBatch,
                 queueLimit: queueLimit,
                 queueWaitTimeoutMS: queueWaitTimeoutMS,
+                prefillTokensPerIteration: prefillTokensPerIteration,
                 maxContextTokens: maxContextTokens,
                 modelID: modelID,
                 modelSHA256: modelSHA256,
@@ -3393,6 +3405,7 @@ actor ModelRuntime: ModelRuntimeServing {
             maxBatch: maxBatch,
             queueLimit: queueLimit,
             queueWaitTimeoutMS: queueWaitTimeoutMS,
+            prefillTokensPerIteration: prefillTokensPerIteration,
             maxContextTokens: maxContextTokens,
             modelID: modelID,
             modelSHA256: modelSHA256,
@@ -3421,6 +3434,7 @@ actor ModelRuntime: ModelRuntimeServing {
             maxBatch: maxBatch,
             queueLimit: continuousBatchQueueLimit,
             queueWaitTimeoutMS: continuousBatchQueueWaitTimeoutMS,
+            prefillTokensPerIteration: continuousBatchPrefillTokensPerIteration,
             maxContextTokens: maxContextTokens,
             modelID: currentModelID,
             modelSHA256: currentModelHash,

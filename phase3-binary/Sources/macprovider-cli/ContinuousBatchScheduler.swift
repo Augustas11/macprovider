@@ -178,7 +178,20 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     static let defaultDecodeStepsWhilePrefilling = 8
     static let defaultDecodeHeadroomTokens = 128
     static let defaultPrefillRowsPerIteration = 4
+    // Prefill per-iteration token budget when the operator sets no
+    // `continuous_batch_prefill_tokens_per_iteration` (SPEC-038). Kept at 1024:
+    // a Studio benchmark (1024 vs 2048 vs 8192) found this budget NON-BINDING at
+    // 1.5k-8k prompts — single-stream large-prompt TTFT is compute-bound (~300
+    // tok/s prefill) and the per-row chunk (`prefill_step_size`) governs per-row
+    // prefill, so the total budget does not move TTFT or concurrent-8k
+    // admission. The key is exposed for operator tuning/observability (it may
+    // bind under many concurrent small prefills), not as a TTFT lever.
+    // Operator-tunable up to `maximumPrefillTokensPerIteration`.
     static let defaultPrefillTokensPerIteration = 1_024
+    // Upper bound for `continuous_batch_prefill_tokens_per_iteration`. Serve
+    // startup rejects a larger value rather than letting one prefill iteration
+    // monopolize the backend hop.
+    static let maximumPrefillTokensPerIteration = 65_536
     static let defaultPromptChunkTokens = 512
 
     /// Stream token delivery is non-blocking on the scheduler actor. Compiled

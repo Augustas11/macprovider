@@ -6,6 +6,38 @@ import MLXLMCommon
 import XCTest
 
 final class ContinuousBatchSchedulerTests: XCTestCase {
+    func testConfigurationHonorsExplicitPrefillTokensPerIterationAndDefault() {
+        let snapshot = ContinuousBatchSchedulerSnapshot(
+            modelID: Self.modelID,
+            modelSHA256: Self.modelSHA,
+            weightsGeneration: 3
+        )
+        let explicit = ContinuousBatchSchedulerConfiguration(
+            descriptor: Self.descriptor(),
+            tuple: Self.tuple(),
+            maxActiveRows: 2,
+            decodeHeadroomTokens: 2,
+            maxPrefillTokensPerIteration: 4_096,
+            maxPromptChunkTokens: 256,
+            snapshot: snapshot
+        )
+        XCTAssertEqual(explicit.maxPrefillTokensPerIteration, 4_096, "an explicit budget must be honored verbatim")
+
+        // Unset falls back to maxPromptChunkTokens at the configuration layer;
+        // the serve path (ModelRuntime) passes defaultPrefillTokensPerIteration
+        // explicitly so the raised default applies when the operator sets no key.
+        let unset = ContinuousBatchSchedulerConfiguration(
+            descriptor: Self.descriptor(),
+            tuple: Self.tuple(),
+            maxActiveRows: 2,
+            decodeHeadroomTokens: 2,
+            maxPromptChunkTokens: 256,
+            snapshot: snapshot
+        )
+        XCTAssertEqual(unset.maxPrefillTokensPerIteration, 256)
+        XCTAssertEqual(ContinuousBatchSchedulerConfiguration.defaultPrefillTokensPerIteration, 1_024)
+    }
+
     func testDescriptorDrivenLocalCapabilityRejectsUnsupportedTuple() {
         let descriptor = Self.descriptor(supportsMoE: false)
         var tuple = Self.tuple()
