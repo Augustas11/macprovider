@@ -2561,23 +2561,23 @@ actor CoordinatorClient {
 
     private func handleNativeMTPTupleDisable(_ message: [String: Any]) async throws {
         do {
-            try rejectUnknownFields(message, allowed: [
+            try Self.rejectUnknownFields(message, allowed: [
                 "type", "version", "provider_id", "assigned_id", "target_generation",
                 "native_mtp_admission_tuple_sha256", "served_snapshot_id",
                 "native_mtp_runtime_tuple_sha256",
                 "reason", "nonce", "issued_at", "request_digest",
             ])
-            guard try requiredString(message, "type") == "native_mtp_tuple_disable_v1",
-                  intValue(message["version"]) == 1,
+            guard try Self.requiredString(message, "type") == "native_mtp_tuple_disable_v1",
+                  Self.intValue(message["version"]) == 1,
                   coordinatorSessionAccepted,
-                  try boundedString(message, "provider_id", maxBytes: 128) == providerID,
-                  try boundedString(message, "assigned_id", maxBytes: 128) == acceptedAssignedProviderID else {
+                  try Self.boundedString(message, "provider_id", maxBytes: 128) == providerID,
+                  try Self.boundedString(message, "assigned_id", maxBytes: 128) == acceptedAssignedProviderID else {
                 throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable binding")
             }
-            let targetGeneration = try uint64Value(message["target_generation"], field: "target_generation")
-            let admissionTupleSHA256 = try sha256String(message, "native_mtp_admission_tuple_sha256")
-            let servedSnapshotID = try boundedString(message, "served_snapshot_id", maxBytes: 128)
-            let runtimeTupleSHA256 = try sha256String(message, "native_mtp_runtime_tuple_sha256")
+            let targetGeneration = try Self.uint64Value(message["target_generation"], field: "target_generation")
+            let admissionTupleSHA256 = try Self.sha256String(message, "native_mtp_admission_tuple_sha256")
+            let servedSnapshotID = try Self.boundedString(message, "served_snapshot_id", maxBytes: 128)
+            let runtimeTupleSHA256 = try Self.sha256String(message, "native_mtp_runtime_tuple_sha256")
             let expectedRuntimeTupleSHA256 = try Self.nativeMTPRuntimeTupleSHA256(
                 providerID: providerID,
                 assignedID: acceptedAssignedProviderID ?? "",
@@ -2588,11 +2588,11 @@ actor CoordinatorClient {
             guard runtimeTupleSHA256 == expectedRuntimeTupleSHA256 else {
                 throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable identity")
             }
-            let reason = try boundedString(message, "reason", maxBytes: 64)
+            let reason = try Self.boundedString(message, "reason", maxBytes: 64)
             guard Self.nativeMTPTupleDisableReasons.contains(reason) else {
                 throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable reason")
             }
-            let nonce = try boundedString(message, "nonce", maxBytes: 32)
+            let nonce = try Self.boundedString(message, "nonce", maxBytes: 32)
             guard nonce.count == 32,
                   nonce.unicodeScalars.allSatisfy({ scalar in
                       (UnicodeScalar("0").value...UnicodeScalar("9").value).contains(scalar.value) ||
@@ -2600,11 +2600,11 @@ actor CoordinatorClient {
                   }) else {
                 throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable nonce")
             }
-            let issuedAt = try boundedString(message, "issued_at", maxBytes: 64)
+            let issuedAt = try Self.boundedString(message, "issued_at", maxBytes: 64)
             guard let issuedDate = Self.parseISO8601Date(issuedAt), abs(issuedDate.timeIntervalSinceNow) <= 300 else {
                 throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable issued_at")
             }
-            let requestDigest = try sha256String(message, "request_digest")
+            let requestDigest = try Self.sha256String(message, "request_digest")
             let expectedRequestDigest = try Self.nativeMTPTupleDisableRequestDigest(
                 providerID: providerID,
                 assignedID: acceptedAssignedProviderID ?? "",
