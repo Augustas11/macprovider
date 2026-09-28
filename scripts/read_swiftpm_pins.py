@@ -21,7 +21,7 @@ EXPECTED_LOCATIONS = {
 }
 
 SPEC048_MLX_SWIFT_LM_FORK = "https://github.com/Augustas11/mlx-swift-lm"
-SPEC048_MLX_SWIFT_LM_REVISION = "b250ac2e87a1a780eb82ce73522c4bf3e70a8d8e"
+SPEC048_MLX_SWIFT_LM_REVISION = "e874140ecb5b04aeb445eb3837d48f7b187b867e"
 
 
 def normalized_location(value: str) -> str:

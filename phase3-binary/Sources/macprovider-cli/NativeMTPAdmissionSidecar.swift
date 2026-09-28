@@ -11,7 +11,12 @@ struct NativeMTPAdmissionCapability: Equatable, Sendable {
     let tokenizerSHA256: String
     let mtpManifestSHA256: String
     let familyAdapter: String
+    let sourceLayout: String
+    let predictionLayerCount: Int
     let maxProposalDepth: Int
+    let completeWindowBytesByDepth: [Int]
+    let maxPromptTokens: Int
+    let maxCompletionTokens: Int
     let cacheClass: String
     let stateClass: String
     let quantization: NativeMTPAdmissionSidecar.Quantization
@@ -21,7 +26,252 @@ struct NativeMTPAdmissionCapability: Equatable, Sendable {
     let spec023ReleaseID: String
     let spec023SourceCommit: String
     let spec023BuildDigestSHA256: String
+    let spec023LiveExecutableCDHash: String
     let evidenceArtifactSHA256: [String]
+    let capturedArtifacts: NativeMTPAdmissionCapturedArtifacts?
+}
+
+final class NativeMTPAdmissionCapturedArtifacts: Equatable, @unchecked Sendable {
+    static let captureDirectoryPrefix = ".native-mtp-admission-capture-"
+    static let leaseFileName = ".lease"
+    private static let maxStaleCaptureReclaims = 8
+
+    let rootURL: URL
+    let targetURL: URL
+    let mtpURL: URL
+    let tokenizerURL: URL
+    let manifestURL: URL
+    private let rootStamp: NativeMTPAdmissionCapturedNodeStamp
+    private let fileStamps: [NativeMTPAdmissionCapturedNodeStamp]
+    private let cleanupOnDeinit: Bool
+    private let leaseFD: Int32?
+
+    init(
+        rootURL: URL,
+        targetURL: URL,
+        mtpURL: URL,
+        tokenizerURL: URL,
+        manifestURL: URL,
+        rootStamp: NativeMTPAdmissionCapturedNodeStamp,
+        fileStamps: [NativeMTPAdmissionCapturedNodeStamp],
+        leaseFD: Int32? = nil,
+        cleanupOnDeinit: Bool = true
+    ) {
+        self.rootURL = rootURL
+        self.targetURL = targetURL
+        self.mtpURL = mtpURL
+        self.tokenizerURL = tokenizerURL
+        self.manifestURL = manifestURL
+        self.rootStamp = rootStamp
+        self.fileStamps = fileStamps
+        self.leaseFD = leaseFD
+        self.cleanupOnDeinit = cleanupOnDeinit
+    }
+
+    deinit {
+        if cleanupOnDeinit {
+            try? Self.removePrivateCaptureTree(rootURL)
+        }
+        if let leaseFD {
+            close(leaseFD)
+        }
+    }
+
+    static func == (lhs: NativeMTPAdmissionCapturedArtifacts, rhs: NativeMTPAdmissionCapturedArtifacts) -> Bool {
+        lhs.rootURL == rhs.rootURL
+            && lhs.targetURL == rhs.targetURL
+            && lhs.mtpURL == rhs.mtpURL
+            && lhs.tokenizerURL == rhs.tokenizerURL
+            && lhs.manifestURL == rhs.manifestURL
+    }
+
+    func revalidateAfterLoad() throws {
+        let current = try Self.captureTreeStamp(rootURL)
+        guard current.root == rootStamp, current.files == fileStamps else {
+            throw NativeMTPAdmissionSidecarError.artifactDigestMismatch("captured_artifacts")
+        }
+    }
+
+    static func reclaimStaleCaptureSiblings(of snapshotRoot: URL, fileManager: FileManager = .default) {
+        let parent = snapshotRoot.deletingLastPathComponent()
+        guard let siblings = try? fileManager.contentsOfDirectory(
+            at: parent,
+            includingPropertiesForKeys: nil,
+            options: [.skipsSubdirectoryDescendants]
+        ) else {
+            return
+        }
+        var reclaimed = 0
+        for sibling in siblings where sibling.lastPathComponent.hasPrefix(captureDirectoryPrefix) {
+            guard reclaimed < maxStaleCaptureReclaims else { return }
+            guard let leaseFD = try? openLockedLease(
+                for: sibling,
+                create: false,
+                nonblocking: true
+            ) else {
+                continue
+            }
+            defer { close(leaseFD) }
+            if (try? removePrivateCaptureTree(sibling, fileManager: fileManager)) != nil {
+                reclaimed += 1
+            }
+        }
+    }
+
+    static func openLockedLease(for root: URL, create: Bool, nonblocking: Bool) throws -> Int32 {
+        let lease = root.appendingPathComponent(leaseFileName, isDirectory: false)
+        let flags = create ? (O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC) : (O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let fd = open(lease.path, flags, 0o600)
+        guard fd >= 0 else {
+            throw NativeMTPAdmissionSidecarError.pathRejected("captured_artifacts")
+        }
+        var info = stat()
+        guard fstat(fd, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_uid == geteuid(),
+              info.st_nlink == 1,
+              (info.st_mode & 0o077) == 0 else {
+            close(fd)
+            throw NativeMTPAdmissionSidecarError.pathRejected("captured_artifacts")
+        }
+        let operation = LOCK_EX | (nonblocking ? LOCK_NB : 0)
+        guard flock(fd, operation) == 0 else {
+            close(fd)
+            throw NativeMTPAdmissionSidecarError.pathRejected("captured_artifacts")
+        }
+        return fd
+    }
+
+    static func removePrivateCaptureTree(_ root: URL, fileManager: FileManager = .default) throws {
+        try thawPrivateCaptureTree(root, fileManager: fileManager)
+        try fileManager.removeItem(at: root)
+        var info = stat()
+        guard lstat(root.path, &info) != 0, errno == ENOENT else {
+            throw NativeMTPAdmissionSidecarError.pathRejected("captured_artifacts")
+        }
+    }
+
+    private static func thawPrivateCaptureTree(_ root: URL, fileManager: FileManager) throws {
+        guard root.lastPathComponent.hasPrefix(captureDirectoryPrefix) else {
+            throw NativeMTPAdmissionSidecarError.pathRejected("captured_artifacts")
+        }
+        var rootInfo = stat()
+        guard lstat(root.path, &rootInfo) == 0,
+              (rootInfo.st_mode & S_IFMT) == S_IFDIR else {
+            throw NativeMTPAdmissionSidecarError.pathRejected("captured_artifacts")
+        }
+        try validatePrivateCaptureNode(rootInfo, relativePath: "captured_artifacts", allowDirectory: true)
+        guard chmod(root.path, 0o700) == 0 else {
+            throw NativeMTPAdmissionSidecarError.pathRejected("captured_artifacts")
+        }
+        guard let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: nil, options: []) else {
+            return
+        }
+        let base = root.standardizedFileURL.path
+        for case let url as URL in enumerator {
+            let path = url.standardizedFileURL.path
+            guard path.hasPrefix(base + "/") else {
+                throw NativeMTPAdmissionSidecarError.pathRejected("captured_artifacts")
+            }
+            let relative = String(path.dropFirst(base.count + 1))
+            var info = stat()
+            guard lstat(path, &info) == 0 else {
+                throw NativeMTPAdmissionSidecarError.pathRejected(relative)
+            }
+            switch info.st_mode & S_IFMT {
+            case S_IFDIR:
+                try validatePrivateCaptureNode(info, relativePath: relative, allowDirectory: true)
+                guard chmod(path, 0o700) == 0 else {
+                    throw NativeMTPAdmissionSidecarError.pathRejected(relative)
+                }
+            case S_IFREG:
+                try validatePrivateCaptureNode(info, relativePath: relative, allowDirectory: false)
+                guard chmod(path, 0o600) == 0 else {
+                    throw NativeMTPAdmissionSidecarError.pathRejected(relative)
+                }
+            default:
+                throw NativeMTPAdmissionSidecarError.pathRejected(relative)
+            }
+        }
+    }
+
+    private static func validatePrivateCaptureNode(_ info: stat, relativePath: String, allowDirectory: Bool) throws {
+        let type = info.st_mode & S_IFMT
+        guard info.st_uid == geteuid(), (info.st_mode & 0o022) == 0 else {
+            throw NativeMTPAdmissionSidecarError.pathRejected(relativePath)
+        }
+        if type == S_IFREG {
+            guard info.st_nlink == 1 else {
+                throw NativeMTPAdmissionSidecarError.pathRejected(relativePath)
+            }
+        } else if !(allowDirectory && type == S_IFDIR) {
+            throw NativeMTPAdmissionSidecarError.pathRejected(relativePath)
+        }
+    }
+
+    static func captureTreeStamp(_ root: URL) throws -> (root: NativeMTPAdmissionCapturedNodeStamp, files: [NativeMTPAdmissionCapturedNodeStamp]) {
+        var rootInfo = stat()
+        guard lstat(root.path, &rootInfo) == 0,
+              (rootInfo.st_mode & S_IFMT) == S_IFDIR,
+              (rootInfo.st_mode & 0o222) == 0 else {
+            throw NativeMTPAdmissionSidecarError.pathRejected("captured_artifacts")
+        }
+        let rootStamp = NativeMTPAdmissionCapturedNodeStamp(relativePath: ".", info: rootInfo)
+        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil, options: []) else {
+            throw NativeMTPAdmissionSidecarError.artifactNotFound("captured_artifacts")
+        }
+        let base = root.standardizedFileURL.path
+        var files: [NativeMTPAdmissionCapturedNodeStamp] = []
+        for case let url as URL in enumerator {
+            let path = url.standardizedFileURL.path
+            guard path.hasPrefix(base + "/") else {
+                throw NativeMTPAdmissionSidecarError.pathRejected("captured_artifacts")
+            }
+            let relative = String(path.dropFirst(base.count + 1))
+            var info = stat()
+            guard lstat(path, &info) == 0 else {
+                throw NativeMTPAdmissionSidecarError.artifactNotFound(relative)
+            }
+            switch info.st_mode & S_IFMT {
+            case S_IFDIR:
+                guard (info.st_mode & 0o222) == 0 else {
+                    throw NativeMTPAdmissionSidecarError.pathRejected(relative)
+                }
+            case S_IFREG:
+                guard info.st_nlink == 1, (info.st_mode & 0o222) == 0 else {
+                    throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relative)
+                }
+                files.append(NativeMTPAdmissionCapturedNodeStamp(relativePath: relative, info: info))
+            default:
+                throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relative)
+            }
+        }
+        return (rootStamp, files.sorted { $0.relativePath < $1.relativePath })
+    }
+}
+
+struct NativeMTPAdmissionCapturedNodeStamp: Equatable, Sendable {
+    let relativePath: String
+    let size: Int64
+    let device: Int64
+    let inode: UInt64
+    let modifiedSeconds: Int
+    let modifiedNanoseconds: Int
+    let changedSeconds: Int
+    let changedNanoseconds: Int
+    let mode: UInt16
+
+    init(relativePath: String, info: stat) {
+        self.relativePath = relativePath
+        self.size = Int64(info.st_size)
+        self.device = Int64(info.st_dev)
+        self.inode = UInt64(info.st_ino)
+        self.modifiedSeconds = info.st_mtimespec.tv_sec
+        self.modifiedNanoseconds = info.st_mtimespec.tv_nsec
+        self.changedSeconds = info.st_ctimespec.tv_sec
+        self.changedNanoseconds = info.st_ctimespec.tv_nsec
+        self.mode = UInt16(info.st_mode & 0o777)
+    }
 }
 
 enum NativeMTPAdmissionSidecarError: Error, Equatable, CustomStringConvertible {
@@ -37,6 +287,7 @@ enum NativeMTPAdmissionSidecarError: Error, Equatable, CustomStringConvertible {
     case artifactNotFound(String)
     case artifactNotRegularFile(String)
     case artifactNotManifested(String)
+    case artifactTooLarge(String)
     case artifactDigestMismatch(String)
     case liveTupleMismatch(String)
     case signatureInvalid(String)
@@ -55,6 +306,7 @@ enum NativeMTPAdmissionSidecarError: Error, Equatable, CustomStringConvertible {
         case .artifactNotFound(let path): return "artifact not found: \(path)"
         case .artifactNotRegularFile(let path): return "artifact is not a regular file: \(path)"
         case .artifactNotManifested(let path): return "artifact is not manifested: \(path)"
+        case .artifactTooLarge(let path): return "artifact exceeds admission ceiling: \(path)"
         case .artifactDigestMismatch(let name): return "artifact digest mismatch: \(name)"
         case .liveTupleMismatch(let field): return "live tuple mismatch: \(field)"
         case .signatureInvalid(let reason): return "signature invalid: \(reason)"
@@ -64,6 +316,16 @@ enum NativeMTPAdmissionSidecarError: Error, Equatable, CustomStringConvertible {
 
 enum NativeMTPAdmissionSidecar {
     static let schemaVersion = "macprovider.native-mtp-admission.v1"
+    static let maxSidecarBytes = 1 * 1024 * 1024
+    static let maxSignatureBytes = 16 * 1024
+    static let hashChunkBytes = 1 * 1024 * 1024
+    static let maxSingleArtifactBytes: Int64 = 512 * 1024 * 1024 * 1024
+    static let maxSnapshotTreeFiles = 100_000
+    static let maxSnapshotTreeBytes: Int64 = 2 * 1024 * 1024 * 1024 * 1024
+    private static let admissionSidecarFileName = "native-mtp-admission.json"
+    private static let admissionSignatureFileName = "native-mtp-admission.json.sig"
+    nonisolated(unsafe) static var testingDescriptorCaptureMutationHook: ((String) throws -> Void)?
+    nonisolated(unsafe) static var testingExpectedStagingDeviceOverride: dev_t?
 
     struct RuntimeContext: Equatable, Sendable {
         let modelID: String
@@ -133,7 +395,10 @@ enum NativeMTPAdmissionSidecar {
         let familyAdapter: String
         let artifacts: [String: Artifact]
         let mtpManifestSHA256: String
+        let sourceLayout: String
+        let predictionLayerCount: Int
         let maxProposalDepth: Int
+        let completeWindowBytesByDepth: [Int]
         let adaptationEnabled: Bool
         let adaptationMaxDepth: Int
         let quantization: Quantization
@@ -168,6 +433,7 @@ enum NativeMTPAdmissionSidecar {
         let releaseID: String
         let sourceCommit: String
         let reproducibleBuildSHA256: String
+        let liveExecutableCDHash: String
         let benchmarkPolicySHA256: String
         let nativeMTPAdmissionTupleSHA256: String
         let evidenceArtifactSHA256: [String]
@@ -179,16 +445,26 @@ enum NativeMTPAdmissionSidecar {
         snapshotRoot: URL,
         context: RuntimeContext,
         trustedKeyring: TrustedKeyring,
+        captureArtifacts: Bool = false,
         fileManager: FileManager = .default
     ) throws -> NativeMTPAdmissionCapability {
-        let bytes = try Data(contentsOf: sidecarURL)
-        let signatureBytes = try Data(contentsOf: signatureURL)
+        let bytes = try readBoundedRegularFile(
+            sidecarURL,
+            maxBytes: maxSidecarBytes,
+            tooLargeName: admissionSidecarFileName
+        )
+        let signatureBytes = try readBoundedRegularFile(
+            signatureURL,
+            maxBytes: maxSignatureBytes,
+            tooLargeName: admissionSignatureFileName
+        )
         return try load(
             sidecarData: bytes,
             signatureData: signatureBytes,
             snapshotRoot: snapshotRoot,
             context: context,
             trustedKeyring: trustedKeyring,
+            captureArtifacts: captureArtifacts,
             fileManager: fileManager
         )
     }
@@ -199,8 +475,15 @@ enum NativeMTPAdmissionSidecar {
         snapshotRoot: URL,
         context: RuntimeContext,
         trustedKeyring: TrustedKeyring,
+        captureArtifacts: Bool = false,
         fileManager: FileManager = .default
     ) throws -> NativeMTPAdmissionCapability {
+        guard sidecarData.count <= maxSidecarBytes else {
+            throw NativeMTPAdmissionSidecarError.artifactTooLarge(admissionSidecarFileName)
+        }
+        guard signatureData.count <= maxSignatureBytes else {
+            throw NativeMTPAdmissionSidecarError.artifactTooLarge(admissionSignatureFileName)
+        }
         try verifyDetachedSignature(payload: sidecarData, signatureData: signatureData, trustedKeyring: trustedKeyring)
         guard let text = String(data: sidecarData, encoding: .utf8) else {
             throw NativeMTPAdmissionSidecarError.invalidJSON("sidecar must be UTF-8")
@@ -218,7 +501,12 @@ enum NativeMTPAdmissionSidecar {
         try validateStaticSupport(parsed)
         try validateLiveTuple(parsed, context: context)
         try validateRevocation(parsed, context: context)
-        try validateArtifacts(parsed.artifacts, snapshotRoot: snapshotRoot, fileManager: fileManager)
+        let capturedArtifacts = try validateArtifacts(
+            parsed.artifacts,
+            snapshotRoot: snapshotRoot,
+            captureArtifacts: captureArtifacts,
+            fileManager: fileManager
+        )
         return NativeMTPAdmissionCapability(
             tupleSHA256: parsed.tupleSHA256,
             modelID: parsed.modelID,
@@ -228,7 +516,12 @@ enum NativeMTPAdmissionSidecar {
             tokenizerSHA256: parsed.artifacts["tokenizer"]!.sha256,
             mtpManifestSHA256: parsed.mtpManifestSHA256,
             familyAdapter: parsed.familyAdapter,
+            sourceLayout: parsed.sourceLayout,
+            predictionLayerCount: parsed.predictionLayerCount,
             maxProposalDepth: parsed.maxProposalDepth,
+            completeWindowBytesByDepth: parsed.completeWindowBytesByDepth,
+            maxPromptTokens: parsed.requestProfile.maxPromptTokens,
+            maxCompletionTokens: parsed.requestProfile.maxCompletionTokens,
             cacheClass: parsed.cacheClass,
             stateClass: parsed.stateClass,
             quantization: parsed.quantization,
@@ -238,7 +531,9 @@ enum NativeMTPAdmissionSidecar {
             spec023ReleaseID: parsed.spec023.releaseID,
             spec023SourceCommit: parsed.spec023.sourceCommit,
             spec023BuildDigestSHA256: parsed.spec023.reproducibleBuildSHA256,
-            evidenceArtifactSHA256: parsed.spec023.evidenceArtifactSHA256
+            spec023LiveExecutableCDHash: parsed.spec023.liveExecutableCDHash,
+            evidenceArtifactSHA256: parsed.spec023.evidenceArtifactSHA256,
+            capturedArtifacts: capturedArtifacts
         )
     }
 
@@ -256,10 +551,18 @@ enum NativeMTPAdmissionSidecar {
         let mtp = try requireObject(object, "mtp", path: "$")
         try rejectUnknown(mtp, allowed: [
             "manifest_sha256", "source_layout", "prediction_layer_count",
-            "max_proposal_depth", "adaptation_enabled", "adaptation_max_depth",
+            "max_proposal_depth", "complete_window_bytes_by_depth",
+            "adaptation_enabled", "adaptation_max_depth",
         ], path: "$.mtp")
-        _ = try requireString(mtp, "source_layout", path: "$.mtp", allowed: ["checkpoint_mtp", "config_next_n", "separate_artifact"])
-        _ = try requireInt(mtp, "prediction_layer_count", path: "$.mtp", range: 1...64)
+        let sourceLayout = try requireString(mtp, "source_layout", path: "$.mtp", allowed: ["checkpoint_mtp", "config_next_n", "separate_artifact"])
+        let predictionLayerCount = try requireInt(mtp, "prediction_layer_count", path: "$.mtp", range: 1...64)
+        let maxProposalDepth = try requireInt(mtp, "max_proposal_depth", path: "$.mtp", range: 1...16)
+        let completeWindowBytesByDepth = try requireCompleteWindowBytesByDepth(
+            mtp,
+            key: "complete_window_bytes_by_depth",
+            path: "$.mtp",
+            maxProposalDepth: maxProposalDepth
+        )
 
         let quantization = try requireObject(object, "quantization", path: "$")
         try rejectUnknown(quantization, allowed: ["target", "mtp"], path: "$.quantization")
@@ -283,7 +586,10 @@ enum NativeMTPAdmissionSidecar {
             familyAdapter: try requireNonEmptyString(model, "family_adapter", path: "$.model"),
             artifacts: artifacts,
             mtpManifestSHA256: try requireSHA256(mtp, "manifest_sha256", path: "$.mtp"),
-            maxProposalDepth: try requireInt(mtp, "max_proposal_depth", path: "$.mtp", range: 1...16),
+            sourceLayout: sourceLayout,
+            predictionLayerCount: predictionLayerCount,
+            maxProposalDepth: maxProposalDepth,
+            completeWindowBytesByDepth: completeWindowBytesByDepth,
             adaptationEnabled: try requireBool(mtp, "adaptation_enabled", path: "$.mtp"),
             adaptationMaxDepth: try requireInt(mtp, "adaptation_max_depth", path: "$.mtp", range: 1...16),
             quantization: Quantization(
@@ -353,6 +659,7 @@ enum NativeMTPAdmissionSidecar {
     private static func parseSpec023(_ object: [String: NativeMTPSidecarJSON]) throws -> Spec023 {
         try rejectUnknown(object, allowed: [
             "release_id", "source_commit", "reproducible_build_sha256",
+            "live_executable_cdhash",
             "benchmark_policy_sha256", "native_mtp_admission_tuple_sha256",
             "evidence_artifact_sha256",
         ], path: "$.spec023")
@@ -364,6 +671,7 @@ enum NativeMTPAdmissionSidecar {
             releaseID: try requireNonEmptyString(object, "release_id", path: "$.spec023"),
             sourceCommit: try requireCommitSHA(object, "source_commit", path: "$.spec023"),
             reproducibleBuildSHA256: try requireSHA256(object, "reproducible_build_sha256", path: "$.spec023"),
+            liveExecutableCDHash: try requireCDHash(object, "live_executable_cdhash", path: "$.spec023"),
             benchmarkPolicySHA256: try requireSHA256(object, "benchmark_policy_sha256", path: "$.spec023"),
             nativeMTPAdmissionTupleSHA256: try requireSHA256(object, "native_mtp_admission_tuple_sha256", path: "$.spec023"),
             evidenceArtifactSHA256: evidence
@@ -385,6 +693,10 @@ enum NativeMTPAdmissionSidecar {
         }
         guard parsed.adaptationEnabled, parsed.adaptationMaxDepth <= parsed.maxProposalDepth else {
             throw NativeMTPAdmissionSidecarError.invalidValue("$.mtp.adaptation_max_depth")
+        }
+        let maxDepthCompleteWindowBytes = parsed.completeWindowBytesByDepth[parsed.maxProposalDepth]
+        guard parsed.qualifiedSlots <= Int.max / maxDepthCompleteWindowBytes else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("$.mtp.complete_window_bytes_by_depth")
         }
         guard parsed.qualifiedSlots <= parsed.maxSlots else {
             throw NativeMTPAdmissionSidecarError.invalidValue("$.hardware.qualified_slots")
@@ -426,8 +738,9 @@ enum NativeMTPAdmissionSidecar {
     private static func validateArtifacts(
         _ artifacts: [String: Artifact],
         snapshotRoot: URL,
+        captureArtifacts: Bool,
         fileManager: FileManager
-    ) throws {
+    ) throws -> NativeMTPAdmissionCapturedArtifacts? {
         let root = snapshotRoot.standardizedFileURL
         var rootStat = stat()
         guard lstat(root.path, &rootStat) == 0 else {
@@ -436,21 +749,28 @@ enum NativeMTPAdmissionSidecar {
         guard (rootStat.st_mode & S_IFMT) == S_IFDIR else {
             throw NativeMTPAdmissionSidecarError.pathRejected(root.path)
         }
+        try validateTrustedSourceMetadata(rootStat, relativePath: ".")
         let rootFD = open(root.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard rootFD >= 0 else {
             throw NativeMTPAdmissionSidecarError.artifactNotFound(".")
         }
         defer { close(rootFD) }
+        var openedRootStat = stat()
+        guard fstat(rootFD, &openedRootStat) == 0,
+              openedRootStat.st_dev == rootStat.st_dev,
+              openedRootStat.st_ino == rootStat.st_ino else {
+            throw NativeMTPAdmissionSidecarError.pathRejected(".")
+        }
         var manifestedDirectories: Set<String> = []
+        var validatedByName: [String: ValidatedArtifactHandle] = [:]
         for (name, artifact) in artifacts {
             let url = root.appendingPathComponent(artifact.path, isDirectory: false)
             let standardized = url.standardizedFileURL
             guard BYOMArtifactPathPolicy.isContained(standardized, in: root) else {
                 throw NativeMTPAdmissionSidecarError.pathRejected(artifact.path)
             }
-            let validated = try digestOpeningArtifactNoFollow(
+            let validated = try openAndDigestArtifactNoFollow(
                 relativePath: artifact.path,
-                root: root,
                 rootFD: rootFD
             )
             if validated.isDirectory {
@@ -460,6 +780,7 @@ enum NativeMTPAdmissionSidecar {
             guard digest == artifact.sha256 else {
                 throw NativeMTPAdmissionSidecarError.artifactDigestMismatch(name)
             }
+            validatedByName[name] = validated
         }
         try rejectUnmanifestedSnapshotArtifacts(
             snapshotRoot: root,
@@ -467,13 +788,75 @@ enum NativeMTPAdmissionSidecar {
             manifestedDirectories: manifestedDirectories,
             fileManager: fileManager
         )
+        guard captureArtifacts else { return nil }
+        return try captureValidatedArtifacts(
+            artifacts: artifacts,
+            validatedByName: validatedByName,
+            snapshotRoot: root,
+            sourceDevice: rootStat.st_dev,
+            fileManager: fileManager
+        )
     }
 
-    private static func digestOpeningArtifactNoFollow(
+    private final class ValidatedArtifactHandle {
+        let relativePath: String
+        let leafName: String
+        let parentFD: Int32
+        let artifactFD: Int32
+        let initialStat: stat
+        let isDirectory: Bool
+        let sha256: String
+
+        init(
+            relativePath: String,
+            leafName: String,
+            parentFD: Int32,
+            artifactFD: Int32,
+            initialStat: stat,
+            isDirectory: Bool,
+            sha256: String
+        ) {
+            self.relativePath = relativePath
+            self.leafName = leafName
+            self.parentFD = parentFD
+            self.artifactFD = artifactFD
+            self.initialStat = initialStat
+            self.isDirectory = isDirectory
+            self.sha256 = sha256
+        }
+
+        deinit {
+            close(artifactFD)
+            close(parentFD)
+        }
+    }
+
+    private struct DescriptorFileStamp: Equatable {
+        let relativePath: String
+        let size: Int64
+        let device: Int64
+        let inode: UInt64
+        let modifiedSeconds: Int
+        let modifiedNanoseconds: Int
+        let changedSeconds: Int
+        let changedNanoseconds: Int
+
+        init(relativePath: String, info: stat) {
+            self.relativePath = relativePath
+            self.size = Int64(info.st_size)
+            self.device = Int64(info.st_dev)
+            self.inode = UInt64(info.st_ino)
+            self.modifiedSeconds = info.st_mtimespec.tv_sec
+            self.modifiedNanoseconds = info.st_mtimespec.tv_nsec
+            self.changedSeconds = info.st_ctimespec.tv_sec
+            self.changedNanoseconds = info.st_ctimespec.tv_nsec
+        }
+    }
+
+    private static func openAndDigestArtifactNoFollow(
         relativePath: String,
-        root: URL,
         rootFD: Int32
-    ) throws -> (sha256: String, isDirectory: Bool) {
+    ) throws -> ValidatedArtifactHandle {
         let components = relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard let leaf = components.last, !leaf.isEmpty else {
             throw NativeMTPAdmissionSidecarError.pathRejected(relativePath)
@@ -493,11 +876,22 @@ enum NativeMTPAdmissionSidecar {
             guard nextFD >= 0 else {
                 throw NativeMTPAdmissionSidecarError.pathRejected(relativePath)
             }
+            var componentStat = stat()
+            guard fstat(nextFD, &componentStat) == 0 else {
+                close(nextFD)
+                throw NativeMTPAdmissionSidecarError.pathRejected(relativePath)
+            }
+            try validateTrustedSourceMetadata(componentStat, relativePath: relativePath)
             currentFD = nextFD
             fdsToClose.append(nextFD)
         }
+        let parentFD = dup(currentFD)
+        guard parentFD >= 0 else {
+            throw NativeMTPAdmissionSidecarError.artifactNotFound(relativePath)
+        }
         let artifactFD = openat(currentFD, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard artifactFD >= 0 else {
+            close(parentFD)
             if errno == ENOENT {
                 throw NativeMTPAdmissionSidecarError.artifactNotFound(relativePath)
             }
@@ -506,22 +900,619 @@ enum NativeMTPAdmissionSidecar {
         var st = stat()
         guard fstat(artifactFD, &st) == 0 else {
             close(artifactFD)
+            close(parentFD)
             throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
         }
+        try validateTrustedSourceMetadata(st, relativePath: relativePath)
         if (st.st_mode & S_IFMT) == S_IFDIR {
-            close(artifactFD)
-            let directory = root.appendingPathComponent(relativePath, isDirectory: true)
-            let identity = try MLXSnapshotIdentity.compute(directory: directory)
-            return (identity.digest, true)
+            let identity = try computeDirectoryIdentityDescriptorRelative(directoryFD: artifactFD, relativePath: relativePath)
+            return ValidatedArtifactHandle(
+                relativePath: relativePath,
+                leafName: leaf,
+                parentFD: parentFD,
+                artifactFD: artifactFD,
+                initialStat: st,
+                isDirectory: true,
+                sha256: identity.digest
+            )
         }
         guard (st.st_mode & S_IFMT) == S_IFREG, st.st_nlink == 1 else {
             close(artifactFD)
+            close(parentFD)
             throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
         }
-        let handle = FileHandle(fileDescriptor: artifactFD, closeOnDealloc: true)
-        let data = try handle.readToEnd() ?? Data()
-        try handle.close()
-        return (sha256Hex(data), false)
+        guard st.st_size <= maxSingleArtifactBytes else {
+            close(artifactFD)
+            close(parentFD)
+            throw NativeMTPAdmissionSidecarError.artifactTooLarge(relativePath)
+        }
+        let digest = try hashRegularFileDescriptorNoClose(artifactFD, expected: st, relativePath: relativePath)
+        return ValidatedArtifactHandle(
+            relativePath: relativePath,
+            leafName: leaf,
+            parentFD: parentFD,
+            artifactFD: artifactFD,
+            initialStat: st,
+            isDirectory: false,
+            sha256: digest
+        )
+    }
+
+    private static func hashRegularFileDescriptor(
+        _ fd: Int32,
+        expected: stat,
+        relativePath: String
+    ) throws -> String {
+        defer { close(fd) }
+        var hasher = SHA256()
+        var buffer = [UInt8](repeating: 0, count: hashChunkBytes)
+        var total: Int64 = 0
+        while true {
+            let count = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+            guard count >= 0 else {
+                throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+            }
+            if count == 0 { break }
+            buffer.withUnsafeBytes { raw in
+                hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: raw[0..<count]))
+            }
+            total += Int64(count)
+            guard total <= maxSingleArtifactBytes else {
+                throw NativeMTPAdmissionSidecarError.artifactTooLarge(relativePath)
+            }
+        }
+        var after = stat()
+        guard fstat(fd, &after) == 0,
+              sameRegularIdentity(expected, after),
+              total == expected.st_size else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+        }
+        return Data(hasher.finalize()).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func hashRegularFileDescriptorNoClose(
+        _ fd: Int32,
+        expected: stat,
+        relativePath: String
+    ) throws -> String {
+        guard lseek(fd, 0, SEEK_SET) >= 0 else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+        }
+        var hasher = SHA256()
+        var buffer = [UInt8](repeating: 0, count: hashChunkBytes)
+        var total: Int64 = 0
+        while true {
+            let count = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+            guard count >= 0 else {
+                throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+            }
+            if count == 0 { break }
+            buffer.withUnsafeBytes { raw in
+                hasher.update(bufferPointer: UnsafeRawBufferPointer(rebasing: raw[0..<count]))
+            }
+            total += Int64(count)
+            guard total <= maxSingleArtifactBytes else {
+                throw NativeMTPAdmissionSidecarError.artifactTooLarge(relativePath)
+            }
+        }
+        var after = stat()
+        guard fstat(fd, &after) == 0,
+              sameRegularIdentity(expected, after),
+              total == expected.st_size else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+        }
+        guard lseek(fd, 0, SEEK_SET) >= 0 else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+        }
+        return Data(hasher.finalize()).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func sameRegularIdentity(_ lhs: stat, _ rhs: stat) -> Bool {
+        lhs.st_dev == rhs.st_dev
+            && lhs.st_ino == rhs.st_ino
+            && lhs.st_size == rhs.st_size
+            && lhs.st_mtimespec.tv_sec == rhs.st_mtimespec.tv_sec
+            && lhs.st_mtimespec.tv_nsec == rhs.st_mtimespec.tv_nsec
+            && lhs.st_ctimespec.tv_sec == rhs.st_ctimespec.tv_sec
+            && lhs.st_ctimespec.tv_nsec == rhs.st_ctimespec.tv_nsec
+            && (rhs.st_mode & S_IFMT) == S_IFREG
+            && rhs.st_nlink == 1
+    }
+
+    private static func computeDirectoryIdentityDescriptorRelative(
+        directoryFD: Int32,
+        relativePath: String
+    ) throws -> (digest: String, stamps: [DescriptorFileStamp]) {
+        let before = try descriptorStamps(directoryFD: directoryFD, prefix: "", relativePath: relativePath)
+        guard before.count <= maxSnapshotTreeFiles else {
+            throw NativeMTPAdmissionSidecarError.artifactTooLarge(relativePath)
+        }
+        var total: Int64 = 0
+        var manifest = ""
+        for stamp in before {
+            total += stamp.size
+            guard total <= maxSnapshotTreeBytes else {
+                throw NativeMTPAdmissionSidecarError.artifactTooLarge(relativePath)
+            }
+            let sha = try hashDescriptorRelativeFile(directoryFD: directoryFD, relativePath: relativePath, stamp: stamp)
+            manifest += "\(stamp.relativePath)\n\(stamp.size)\n\(sha)\n"
+        }
+        guard try descriptorStamps(directoryFD: directoryFD, prefix: "", relativePath: relativePath) == before else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+        }
+        let digest = Data(SHA256.hash(data: Data(manifest.utf8))).map { String(format: "%02x", $0) }.joined()
+        return (digest, before)
+    }
+
+    private static func descriptorStamps(
+        directoryFD: Int32,
+        prefix: String,
+        relativePath: String
+    ) throws -> [DescriptorFileStamp] {
+        let scanFD = dup(directoryFD)
+        guard scanFD >= 0 else {
+            throw NativeMTPAdmissionSidecarError.artifactNotFound(relativePath)
+        }
+        guard let dir = fdopendir(scanFD) else {
+            close(scanFD)
+            throw NativeMTPAdmissionSidecarError.artifactNotFound(relativePath)
+        }
+        defer { closedir(dir) }
+        var entries: [(name: String, stat: stat)] = []
+        while let entry = readdir(dir) {
+            let name = direntName(entry)
+            if name == "." || name == ".." { continue }
+            var info = stat()
+            guard fstatat(directoryFD, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else {
+                throw NativeMTPAdmissionSidecarError.artifactNotRegularFile("\(relativePath)/\(prefix)\(name)")
+            }
+            try validateTrustedSourceMetadata(info, relativePath: "\(relativePath)/\(prefix)\(name)")
+            entries.append((name, info))
+        }
+        entries.sort { $0.name < $1.name }
+
+        var stamps: [DescriptorFileStamp] = []
+        for entry in entries {
+            let childRelative = prefix + entry.name
+            switch entry.stat.st_mode & S_IFMT {
+            case S_IFDIR:
+                let childFD = openat(directoryFD, entry.name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                guard childFD >= 0 else {
+                    throw NativeMTPAdmissionSidecarError.artifactNotRegularFile("\(relativePath)/\(childRelative)")
+                }
+                let childStamps = try descriptorStamps(
+                    directoryFD: childFD,
+                    prefix: childRelative + "/",
+                    relativePath: relativePath
+                )
+                close(childFD)
+                stamps.append(contentsOf: childStamps)
+            case S_IFREG where entry.stat.st_nlink == 1:
+                try ModelArtifactRelativePathPolicy.validate(childRelative)
+                guard stamps.count < maxSnapshotTreeFiles else {
+                    throw NativeMTPAdmissionSidecarError.artifactTooLarge(relativePath)
+                }
+                stamps.append(DescriptorFileStamp(relativePath: childRelative, info: entry.stat))
+            default:
+                throw NativeMTPAdmissionSidecarError.artifactNotRegularFile("\(relativePath)/\(childRelative)")
+            }
+        }
+        return stamps.sorted { $0.relativePath < $1.relativePath }
+    }
+
+    private static func hashDescriptorRelativeFile(
+        directoryFD: Int32,
+        relativePath: String,
+        stamp: DescriptorFileStamp
+    ) throws -> String {
+        let components = stamp.relativePath.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+        guard let leaf = components.last, !leaf.isEmpty else {
+            throw NativeMTPAdmissionSidecarError.pathRejected(stamp.relativePath)
+        }
+        var currentFD = dup(directoryFD)
+        guard currentFD >= 0 else {
+            throw NativeMTPAdmissionSidecarError.artifactNotFound(relativePath)
+        }
+        var fdsToClose: [Int32] = [currentFD]
+        defer {
+            for fd in fdsToClose.reversed() {
+                close(fd)
+            }
+        }
+        for component in components.dropLast() {
+            let nextFD = openat(currentFD, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard nextFD >= 0 else {
+                throw NativeMTPAdmissionSidecarError.artifactNotRegularFile("\(relativePath)/\(stamp.relativePath)")
+            }
+            currentFD = nextFD
+            fdsToClose.append(nextFD)
+        }
+        let fd = openat(currentFD, leaf, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile("\(relativePath)/\(stamp.relativePath)")
+        }
+        defer { close(fd) }
+        var expected = stat()
+        expected.st_size = off_t(stamp.size)
+        expected.st_dev = dev_t(stamp.device)
+        expected.st_ino = ino_t(stamp.inode)
+        expected.st_mtimespec.tv_sec = stamp.modifiedSeconds
+        expected.st_mtimespec.tv_nsec = stamp.modifiedNanoseconds
+        expected.st_ctimespec.tv_sec = stamp.changedSeconds
+        expected.st_ctimespec.tv_nsec = stamp.changedNanoseconds
+        guard currentDescriptorStamp(fd: fd, relativePath: stamp.relativePath) == stamp else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile("\(relativePath)/\(stamp.relativePath)")
+        }
+        return try hashRegularFileDescriptorNoClose(fd, expected: expected, relativePath: "\(relativePath)/\(stamp.relativePath)")
+    }
+
+    private static func currentDescriptorStamp(fd: Int32, relativePath: String) -> DescriptorFileStamp? {
+        var info = stat()
+        guard fstat(fd, &info) == 0,
+              (info.st_mode & S_IFMT) == S_IFREG,
+              info.st_nlink == 1 else {
+            return nil
+        }
+        return DescriptorFileStamp(relativePath: relativePath, info: info)
+    }
+
+    private static func direntName(_ entry: UnsafeMutablePointer<dirent>) -> String {
+        withUnsafePointer(to: entry.pointee.d_name) { ptr in
+            ptr.withMemoryRebound(to: CChar.self, capacity: Int(entry.pointee.d_namlen) + 1) {
+                String(cString: $0)
+            }
+        }
+    }
+
+    private static func validateTrustedSourceMetadata(_ st: stat, relativePath: String) throws {
+        guard st.st_uid == geteuid(), (st.st_mode & 0o022) == 0 else {
+            throw NativeMTPAdmissionSidecarError.pathRejected(relativePath)
+        }
+    }
+
+    private static func validateArtifactEntryUnchanged(_ handle: ValidatedArtifactHandle) throws {
+        var entryStat = stat()
+        guard fstatat(handle.parentFD, handle.leafName, &entryStat, AT_SYMLINK_NOFOLLOW) == 0,
+              sameArtifactEntryIdentity(handle.initialStat, entryStat, isDirectory: handle.isDirectory) else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(handle.relativePath)
+        }
+    }
+
+    private static func sameArtifactEntryIdentity(_ lhs: stat, _ rhs: stat, isDirectory: Bool) -> Bool {
+        lhs.st_dev == rhs.st_dev
+            && lhs.st_ino == rhs.st_ino
+            && lhs.st_size == rhs.st_size
+            && lhs.st_mtimespec.tv_sec == rhs.st_mtimespec.tv_sec
+            && lhs.st_mtimespec.tv_nsec == rhs.st_mtimespec.tv_nsec
+            && lhs.st_ctimespec.tv_sec == rhs.st_ctimespec.tv_sec
+            && lhs.st_ctimespec.tv_nsec == rhs.st_ctimespec.tv_nsec
+            && (rhs.st_mode & S_IFMT) == (isDirectory ? S_IFDIR : S_IFREG)
+            && (isDirectory || rhs.st_nlink == 1)
+    }
+
+    private struct CaptureBudget {
+        var fileCount = 0
+        var byteCount: Int64 = 0
+
+        mutating func chargeRegularFile(bytes: Int64, relativePath: String) throws {
+            fileCount += 1
+            byteCount += bytes
+            guard fileCount <= maxSnapshotTreeFiles, byteCount <= maxSnapshotTreeBytes else {
+                throw NativeMTPAdmissionSidecarError.artifactTooLarge(relativePath)
+            }
+        }
+    }
+
+    private static func captureValidatedArtifacts(
+        artifacts: [String: Artifact],
+        validatedByName: [String: ValidatedArtifactHandle],
+        snapshotRoot: URL,
+        sourceDevice: dev_t,
+        fileManager: FileManager
+    ) throws -> NativeMTPAdmissionCapturedArtifacts {
+        NativeMTPAdmissionCapturedArtifacts.reclaimStaleCaptureSiblings(of: snapshotRoot, fileManager: fileManager)
+        let stagingRoot = snapshotRoot.deletingLastPathComponent()
+            .appendingPathComponent(
+                "\(NativeMTPAdmissionCapturedArtifacts.captureDirectoryPrefix)\(UUID().uuidString)",
+                isDirectory: true
+            )
+        try fileManager.createDirectory(at: stagingRoot, withIntermediateDirectories: false)
+        chmod(stagingRoot.path, 0o700)
+        let leaseFD = try NativeMTPAdmissionCapturedArtifacts.openLockedLease(
+            for: stagingRoot,
+            create: true,
+            nonblocking: false
+        )
+        var shouldCloseLease = true
+        defer {
+            if shouldCloseLease {
+                close(leaseFD)
+            }
+        }
+        var stagingStat = stat()
+        guard lstat(stagingRoot.path, &stagingStat) == 0,
+              (stagingStat.st_mode & S_IFMT) == S_IFDIR,
+              stagingStat.st_dev == (testingExpectedStagingDeviceOverride ?? sourceDevice) else {
+            try? NativeMTPAdmissionCapturedArtifacts.removePrivateCaptureTree(stagingRoot, fileManager: fileManager)
+            throw NativeMTPAdmissionSidecarError.pathRejected("captured_artifacts")
+        }
+        do {
+            if let hook = testingDescriptorCaptureMutationHook {
+                try hook("before_capture")
+            }
+            var stagedURLs: [String: URL] = [:]
+            var budget = CaptureBudget()
+            for name in ["target", "mtp", "tokenizer", "manifest"] {
+                guard let artifact = artifacts[name],
+                      let validated = validatedByName[name] else {
+                    throw NativeMTPAdmissionSidecarError.artifactNotManifested(name)
+                }
+                let destination = stagingRoot.appendingPathComponent(artifact.path, isDirectory: validated.isDirectory)
+                try fileManager.createDirectory(
+                    at: destination.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try validateArtifactEntryUnchanged(validated)
+                if validated.isDirectory {
+                    try copyDirectoryDescriptorRelative(
+                        from: validated,
+                        to: destination,
+                        fileManager: fileManager,
+                        budget: &budget
+                    )
+                    try validateArtifactEntryUnchanged(validated)
+                    let sourceDigest = try computeDirectoryIdentityDescriptorRelative(
+                        directoryFD: validated.artifactFD,
+                        relativePath: artifact.path
+                    ).digest
+                    guard sourceDigest == artifact.sha256 else {
+                        throw NativeMTPAdmissionSidecarError.artifactDigestMismatch(name)
+                    }
+                    let stagedDigest = try MLXSnapshotIdentity.compute(directory: destination).digest
+                    guard stagedDigest == artifact.sha256 else {
+                        throw NativeMTPAdmissionSidecarError.artifactDigestMismatch(name)
+                    }
+                } else {
+                    let stagedDigest: String
+                    if fileManager.fileExists(atPath: destination.path) {
+                        stagedDigest = try hashStagedRegularFileNoFollow(destination, relativePath: artifact.path)
+                    } else {
+                        let copiedBytes = try copyRegularFileDescriptorNoClose(
+                            from: validated.artifactFD,
+                            expected: validated.initialStat,
+                            to: destination,
+                            relativePath: artifact.path
+                        )
+                        try budget.chargeRegularFile(bytes: copiedBytes, relativePath: artifact.path)
+                        stagedDigest = try hashStagedRegularFileNoFollow(destination, relativePath: artifact.path)
+                    }
+                    try validateArtifactEntryUnchanged(validated)
+                    guard stagedDigest == artifact.sha256 else {
+                        throw NativeMTPAdmissionSidecarError.artifactDigestMismatch(name)
+                    }
+                }
+                stagedURLs[name] = destination
+            }
+            try chmodCapturedRoot(stagingRoot, fileManager: fileManager)
+            guard let targetURL = stagedURLs["target"],
+                  let mtpURL = stagedURLs["mtp"],
+                  let tokenizerURL = stagedURLs["tokenizer"],
+                  let manifestURL = stagedURLs["manifest"] else {
+                throw NativeMTPAdmissionSidecarError.artifactNotManifested("captured_artifacts")
+            }
+            let capturedStamp = try NativeMTPAdmissionCapturedArtifacts.captureTreeStamp(stagingRoot)
+            let captured = NativeMTPAdmissionCapturedArtifacts(
+                rootURL: stagingRoot,
+                targetURL: targetURL,
+                mtpURL: mtpURL,
+                tokenizerURL: tokenizerURL,
+                manifestURL: manifestURL,
+                rootStamp: capturedStamp.root,
+                fileStamps: capturedStamp.files,
+                leaseFD: leaseFD
+            )
+            shouldCloseLease = false
+            return captured
+        } catch {
+            try? NativeMTPAdmissionCapturedArtifacts.removePrivateCaptureTree(stagingRoot, fileManager: fileManager)
+            throw error
+        }
+    }
+
+    private static func copyDirectoryDescriptorRelative(
+        from source: ValidatedArtifactHandle,
+        to destination: URL,
+        fileManager: FileManager,
+        budget: inout CaptureBudget
+    ) throws {
+        try fileManager.createDirectory(at: destination, withIntermediateDirectories: false)
+        chmod(destination.path, 0o700)
+        try copyDirectoryEntriesDescriptorRelative(
+            directoryFD: source.artifactFD,
+            destination: destination,
+            relativePath: source.relativePath,
+            prefix: "",
+            fileManager: fileManager,
+            budget: &budget
+        )
+        try chmodTree(destination, fileManager: fileManager)
+    }
+
+    private static func copyDirectoryEntriesDescriptorRelative(
+        directoryFD: Int32,
+        destination: URL,
+        relativePath: String,
+        prefix: String,
+        fileManager: FileManager,
+        budget: inout CaptureBudget
+    ) throws {
+        let entries = try descriptorDirectoryEntries(directoryFD: directoryFD, relativePath: relativePath, prefix: prefix)
+        for entry in entries {
+            let childRelative = prefix + entry.name
+            let destURL = destination.appendingPathComponent(childRelative)
+            switch entry.info.st_mode & S_IFMT {
+            case S_IFDIR:
+                let childFD = openat(directoryFD, entry.name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                guard childFD >= 0 else {
+                    throw NativeMTPAdmissionSidecarError.artifactNotRegularFile("\(relativePath)/\(childRelative)")
+                }
+                defer { close(childFD) }
+                try fileManager.createDirectory(at: destURL, withIntermediateDirectories: false)
+                chmod(destURL.path, 0o700)
+                try copyDirectoryEntriesDescriptorRelative(
+                    directoryFD: childFD,
+                    destination: destination,
+                    relativePath: relativePath,
+                    prefix: childRelative + "/",
+                    fileManager: fileManager,
+                    budget: &budget
+                )
+            case S_IFREG where entry.info.st_nlink == 1:
+                try fileManager.createDirectory(at: destURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let fd = openat(directoryFD, entry.name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+                guard fd >= 0 else {
+                    throw NativeMTPAdmissionSidecarError.artifactNotRegularFile("\(relativePath)/\(childRelative)")
+                }
+                defer { close(fd) }
+                let copiedBytes = try copyRegularFileDescriptorNoClose(
+                    from: fd,
+                    expected: entry.info,
+                    to: destURL,
+                    relativePath: "\(relativePath)/\(childRelative)"
+                )
+                try budget.chargeRegularFile(bytes: copiedBytes, relativePath: "\(relativePath)/\(childRelative)")
+            default:
+                throw NativeMTPAdmissionSidecarError.artifactNotRegularFile("\(relativePath)/\(childRelative)")
+            }
+        }
+    }
+
+    private static func descriptorDirectoryEntries(
+        directoryFD: Int32,
+        relativePath: String,
+        prefix: String
+    ) throws -> [(name: String, info: stat)] {
+        let scanFD = dup(directoryFD)
+        guard scanFD >= 0 else {
+            throw NativeMTPAdmissionSidecarError.artifactNotFound(relativePath)
+        }
+        guard let dir = fdopendir(scanFD) else {
+            close(scanFD)
+            throw NativeMTPAdmissionSidecarError.artifactNotFound(relativePath)
+        }
+        defer { closedir(dir) }
+        var entries: [(name: String, info: stat)] = []
+        while let entry = readdir(dir) {
+            let name = direntName(entry)
+            if name == "." || name == ".." { continue }
+            var info = stat()
+            guard fstatat(directoryFD, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else {
+                throw NativeMTPAdmissionSidecarError.artifactNotRegularFile("\(relativePath)/\(prefix)\(name)")
+            }
+            try validateTrustedSourceMetadata(info, relativePath: "\(relativePath)/\(prefix)\(name)")
+            entries.append((name, info))
+        }
+        return entries.sorted { $0.name < $1.name }
+    }
+
+    private static func copyRegularFileDescriptorNoClose(
+        from inputFD: Int32,
+        expected before: stat,
+        to destination: URL,
+        relativePath: String
+    ) throws -> Int64 {
+        guard (before.st_mode & S_IFMT) == S_IFREG, before.st_nlink == 1 else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+        }
+        guard before.st_size <= maxSingleArtifactBytes else {
+            throw NativeMTPAdmissionSidecarError.artifactTooLarge(relativePath)
+        }
+        guard lseek(inputFD, 0, SEEK_SET) >= 0 else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+        }
+        let outputFD = open(destination.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0o400)
+        guard outputFD >= 0 else {
+            throw NativeMTPAdmissionSidecarError.pathRejected(destination.path)
+        }
+        defer { close(outputFD) }
+        var buffer = [UInt8](repeating: 0, count: hashChunkBytes)
+        var total: Int64 = 0
+        while true {
+            let count = buffer.withUnsafeMutableBytes { read(inputFD, $0.baseAddress, $0.count) }
+            guard count >= 0 else {
+                throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+            }
+            if count == 0 { break }
+            var written = 0
+            while written < count {
+                let result = buffer.withUnsafeBytes {
+                    write(outputFD, $0.baseAddress!.advanced(by: written), count - written)
+                }
+                guard result > 0 else {
+                    throw NativeMTPAdmissionSidecarError.pathRejected(destination.path)
+                }
+                written += result
+            }
+            total += Int64(count)
+            guard total <= maxSingleArtifactBytes else {
+                throw NativeMTPAdmissionSidecarError.artifactTooLarge(relativePath)
+            }
+        }
+        var after = stat()
+        guard fstat(inputFD, &after) == 0,
+              sameRegularIdentity(before, after),
+              total == before.st_size else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+        }
+        guard lseek(inputFD, 0, SEEK_SET) >= 0 else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+        }
+        guard fsync(outputFD) == 0 else {
+            throw NativeMTPAdmissionSidecarError.pathRejected(destination.path)
+        }
+        chmod(destination.path, 0o400)
+        return total
+    }
+
+    private static func hashStagedRegularFileNoFollow(_ url: URL, relativePath: String) throws -> String {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+        }
+        var st = stat()
+        guard fstat(fd, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFREG,
+              st.st_nlink == 1 else {
+            close(fd)
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(relativePath)
+        }
+        guard st.st_size <= maxSingleArtifactBytes else {
+            close(fd)
+            throw NativeMTPAdmissionSidecarError.artifactTooLarge(relativePath)
+        }
+        return try hashRegularFileDescriptor(fd, expected: st, relativePath: relativePath)
+    }
+
+    private static func chmodTree(_ root: URL, fileManager: FileManager) throws {
+        guard let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: []) else {
+            return
+        }
+        for case let url as URL in enumerator {
+            let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            chmod(url.path, isDirectory ? 0o500 : 0o400)
+        }
+        chmod(root.path, 0o500)
+    }
+
+    private static func chmodCapturedRoot(_ root: URL, fileManager: FileManager) throws {
+        guard let enumerator = fileManager.enumerator(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: []) else {
+            return
+        }
+        for case let url as URL in enumerator {
+            let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
+            chmod(url.path, isDirectory ? 0o500 : 0o400)
+        }
+        chmod(root.path, 0o500)
     }
 
     private static func rejectUnmanifestedSnapshotArtifacts(
@@ -610,6 +1601,49 @@ enum NativeMTPAdmissionSidecar {
         }
     }
 
+    private static func readBoundedRegularFile(_ url: URL, maxBytes: Int, tooLargeName: String) throws -> Data {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else {
+            if errno == ENOENT {
+                throw NativeMTPAdmissionSidecarError.artifactNotFound(url.lastPathComponent)
+            }
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(url.lastPathComponent)
+        }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFREG,
+              st.st_nlink == 1 else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(url.lastPathComponent)
+        }
+        guard st.st_size <= Int64(maxBytes) else {
+            throw NativeMTPAdmissionSidecarError.artifactTooLarge(tooLargeName)
+        }
+        var data = Data()
+        data.reserveCapacity(Int(st.st_size))
+        var buffer = [UInt8](repeating: 0, count: min(hashChunkBytes, maxBytes))
+        var total = 0
+        while true {
+            let count = buffer.withUnsafeMutableBytes { read(fd, $0.baseAddress, $0.count) }
+            guard count >= 0 else {
+                throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(url.lastPathComponent)
+            }
+            if count == 0 { break }
+            total += count
+            guard total <= maxBytes else {
+                throw NativeMTPAdmissionSidecarError.artifactTooLarge(tooLargeName)
+            }
+            data.append(contentsOf: buffer.prefix(count))
+        }
+        var after = stat()
+        guard fstat(fd, &after) == 0,
+              sameRegularIdentity(st, after),
+              total == st.st_size else {
+            throw NativeMTPAdmissionSidecarError.artifactNotRegularFile(url.lastPathComponent)
+        }
+        return data
+    }
+
     static func admissionTupleSHA256ForTesting(_ object: [String: Any]) throws -> String {
         guard let parsedObject = try NativeMTPSidecarJSONParser.parse(
             String(data: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]), encoding: .utf8)!
@@ -632,7 +1666,10 @@ enum NativeMTPAdmissionSidecar {
             "artifacts.tokenizer.sha256=\(parsed.artifacts["tokenizer"]?.sha256 ?? "")",
             "artifacts.manifest.sha256=\(parsed.artifacts["manifest"]?.sha256 ?? "")",
             "mtp.manifest_sha256=\(parsed.mtpManifestSHA256)",
+            "mtp.source_layout=\(parsed.sourceLayout)",
+            "mtp.prediction_layer_count=\(parsed.predictionLayerCount)",
             "mtp.max_proposal_depth=\(parsed.maxProposalDepth)",
+            "mtp.complete_window_bytes_by_depth=\(parsed.completeWindowBytesByDepth.map(String.init).joined(separator: ","))",
             "mtp.adaptation_enabled=\(parsed.adaptationEnabled)",
             "mtp.adaptation_max_depth=\(parsed.adaptationMaxDepth)",
             "quantization.target=\(parsed.quantization.target)",
@@ -659,6 +1696,7 @@ enum NativeMTPAdmissionSidecar {
             "spec023.release_id=\(parsed.spec023.releaseID)",
             "spec023.source_commit=\(parsed.spec023.sourceCommit)",
             "spec023.reproducible_build_sha256=\(parsed.spec023.reproducibleBuildSHA256)",
+            "spec023.live_executable_cdhash=\(parsed.spec023.liveExecutableCDHash)",
             "spec023.benchmark_policy_sha256=\(parsed.spec023.benchmarkPolicySHA256)",
             "flags.admission_allowed=\(parsed.admissionAllowed)",
         ]
@@ -763,6 +1801,15 @@ enum NativeMTPAdmissionSidecar {
         return value
     }
 
+    private static func requireCDHash(_ object: [String: NativeMTPSidecarJSON], _ key: String, path: String) throws -> String {
+        let value = try requireNonEmptyString(object, key, path: path)
+        guard value.utf8.count == 40,
+              value.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+        }
+        return value
+    }
+
     private static func requireBool(_ object: [String: NativeMTPSidecarJSON], _ key: String, path: String) throws -> Bool {
         guard let value = object[key] else { throw NativeMTPAdmissionSidecarError.missingField("\(path).\(key)") }
         guard case .bool(let bool) = value else { throw NativeMTPAdmissionSidecarError.wrongType("\(path).\(key)") }
@@ -774,6 +1821,31 @@ enum NativeMTPAdmissionSidecar {
         guard case .int(let int) = value else { throw NativeMTPAdmissionSidecarError.wrongType("\(path).\(key)") }
         guard range.contains(int) else { throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)") }
         return int
+    }
+
+    private static func requireCompleteWindowBytesByDepth(
+        _ object: [String: NativeMTPSidecarJSON],
+        key: String,
+        path: String,
+        maxProposalDepth: Int
+    ) throws -> [Int] {
+        guard let value = object[key] else { throw NativeMTPAdmissionSidecarError.missingField("\(path).\(key)") }
+        guard case .array(let entries) = value else { throw NativeMTPAdmissionSidecarError.wrongType("\(path).\(key)") }
+        guard entries.count == maxProposalDepth + 1 else {
+            throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+        }
+        var values: [Int] = []
+        values.reserveCapacity(entries.count)
+        for (index, entry) in entries.enumerated() {
+            guard case .int(let bytes) = entry, bytes > 0 else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)[\(index)]")
+            }
+            if let previous = values.last, bytes < previous {
+                throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)[\(index)]")
+            }
+            values.append(bytes)
+        }
+        return values
     }
 
     private static func isLowercaseSHA256(_ value: String) -> Bool {

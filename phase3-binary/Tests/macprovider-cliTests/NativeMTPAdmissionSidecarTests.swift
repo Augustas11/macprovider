@@ -28,8 +28,377 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(capability.providerRevision, Self.providerRevision)
         XCTAssertEqual(capability.upstreamMLXSwiftLMRevision, Self.upstreamRevision)
         XCTAssertEqual(capability.qualifiedSlots, 8)
+        XCTAssertEqual(capability.sourceLayout, "separate_artifact")
+        XCTAssertEqual(capability.predictionLayerCount, 4)
+        XCTAssertEqual(capability.completeWindowBytesByDepth, [1024, 2048, 4096, 8192, 16384])
+        XCTAssertEqual(capability.maxPromptTokens, 32768)
+        XCTAssertEqual(capability.maxCompletionTokens, 4096)
         XCTAssertEqual(capability.spec023ReleaseID, "native-mtp-release-2026-09-28")
+        XCTAssertEqual(capability.spec023LiveExecutableCDHash, Self.liveExecutableCDHash)
         XCTAssertEqual(capability.evidenceArtifactSHA256, [Self.evidenceSHA])
+        XCTAssertNil(capability.capturedArtifacts)
+    }
+
+    func testURLLoaderCapsSidecarAndSignatureBeforeWholeRead() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let sidecarURL = fixture.root.appendingPathComponent("native-mtp-admission.json")
+        let signatureURL = fixture.root.appendingPathComponent("native-mtp-admission.json.sig")
+        try fixture.sidecarData.write(to: sidecarURL)
+        try fixture.signatureData.write(to: signatureURL)
+
+        try Data(repeating: UInt8(ascii: "{"), count: NativeMTPAdmissionSidecar.maxSidecarBytes + 1)
+            .write(to: sidecarURL)
+        XCTAssertEqual(
+            try rejectedURLError(sidecarURL: sidecarURL, signatureURL: signatureURL, fixture: fixture),
+            .artifactTooLarge("native-mtp-admission.json")
+        )
+
+        try fixture.sidecarData.write(to: sidecarURL)
+        try Data(repeating: UInt8(ascii: "s"), count: NativeMTPAdmissionSidecar.maxSignatureBytes + 1)
+            .write(to: signatureURL)
+        XCTAssertEqual(
+            try rejectedURLError(sidecarURL: sidecarURL, signatureURL: signatureURL, fixture: fixture),
+            .artifactTooLarge("native-mtp-admission.json.sig")
+        )
+    }
+
+    func testDataLoaderCapsAlreadyMaterializedSidecarAndSignature() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertEqual(
+            try rejectedError(
+                Data(repeating: UInt8(ascii: "{"), count: NativeMTPAdmissionSidecar.maxSidecarBytes + 1),
+                signatureData: fixture.signatureData,
+                fixture: fixture
+            ),
+            .artifactTooLarge("native-mtp-admission.json")
+        )
+        XCTAssertEqual(
+            try rejectedError(
+                fixture.sidecarData,
+                signatureData: Data(repeating: UInt8(ascii: "s"), count: NativeMTPAdmissionSidecar.maxSignatureBytes + 1),
+                fixture: fixture
+            ),
+            .artifactTooLarge("native-mtp-admission.json.sig")
+        )
+    }
+
+    func testAdmissionTupleBindsMTPLayoutAndPredictionLayerCount() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot { root in
+                var mtp = root["mtp"] as! [String: Any]
+                mtp["source_layout"] = "checkpoint_mtp"
+                root["mtp"] = mtp
+            }, fixture: fixture),
+            .invalidValue("$.tuple_sha256")
+        )
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot { root in
+                var mtp = root["mtp"] as! [String: Any]
+                mtp["prediction_layer_count"] = 8
+                root["mtp"] = mtp
+            }, fixture: fixture),
+            .invalidValue("$.tuple_sha256")
+        )
+    }
+
+    func testCaptureArtifactsReturnsPrivateStagedBytesAndSurvivesSourceMutation() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let sidecarURL = fixture.root.appendingPathComponent("native-mtp-admission.json")
+        let signatureURL = fixture.root.appendingPathComponent("native-mtp-admission.json.sig")
+        try fixture.sidecarData.write(to: sidecarURL)
+        try fixture.signatureData.write(to: signatureURL)
+
+        let capability = try NativeMTPAdmissionSidecar.load(
+            sidecarURL: sidecarURL,
+            signatureURL: signatureURL,
+            snapshotRoot: fixture.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.trustedKeyring,
+            captureArtifacts: true
+        )
+        let captured = try XCTUnwrap(capability.capturedArtifacts)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: captured.rootURL.path))
+        XCTAssertEqual(try Data(contentsOf: captured.mtpURL), Data("mtp weights".utf8))
+        XCTAssertEqual(try permissions(captured.rootURL) & 0o777, 0o500)
+        XCTAssertEqual(try permissions(captured.mtpURL) & 0o777, 0o400)
+        XCTAssertNoThrow(try captured.revalidateAfterLoad())
+
+        try Data("mutated source".utf8).write(to: fixture.snapshot.appendingPathComponent("mtp.safetensors"))
+        XCTAssertEqual(try Data(contentsOf: captured.mtpURL), Data("mtp weights".utf8))
+        XCTAssertNoThrow(try captured.revalidateAfterLoad())
+    }
+
+    func testDirectoryCaptureHashesStagedTree() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let targetDirectory = fixture.snapshot.appendingPathComponent("target", isDirectory: true)
+        try FileManager.default.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
+        try FileManager.default.moveItem(
+            at: fixture.snapshot.appendingPathComponent("target.safetensors"),
+            to: targetDirectory.appendingPathComponent("model.safetensors")
+        )
+        try Data("config".utf8).write(to: targetDirectory.appendingPathComponent("config.json"))
+        let digest = try MLXSnapshotIdentity.compute(directory: targetDirectory).digest
+        let sidecar = try fixture.mutatingRoot({ root in
+            var artifacts = root["artifacts"] as! [String: Any]
+            artifacts["target"] = ["path": "target", "sha256": digest]
+            root["artifacts"] = artifacts
+        }, recomputeTuple: true)
+        let sidecarURL = fixture.root.appendingPathComponent("native-mtp-admission.json")
+        let signatureURL = fixture.root.appendingPathComponent("native-mtp-admission.json.sig")
+        try sidecar.write(to: sidecarURL)
+        try fixture.signature(for: sidecar).write(to: signatureURL)
+
+        let capability = try NativeMTPAdmissionSidecar.load(
+            sidecarURL: sidecarURL,
+            signatureURL: signatureURL,
+            snapshotRoot: fixture.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.trustedKeyring,
+            captureArtifacts: true
+        )
+        let captured = try XCTUnwrap(capability.capturedArtifacts)
+        XCTAssertEqual(try MLXSnapshotIdentity.compute(directory: captured.targetURL).digest, digest)
+    }
+
+    func testCaptureArtifactsReusesNestedTokenizerAndManifestAlreadyCopiedByParentDirectories() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let targetDirectory = fixture.snapshot.appendingPathComponent("target", isDirectory: true)
+        let mtpDirectory = fixture.snapshot.appendingPathComponent("mtp", isDirectory: true)
+        try FileManager.default.createDirectory(at: targetDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: mtpDirectory, withIntermediateDirectories: true)
+        try FileManager.default.moveItem(
+            at: fixture.snapshot.appendingPathComponent("target.safetensors"),
+            to: targetDirectory.appendingPathComponent("model.safetensors")
+        )
+        try FileManager.default.moveItem(
+            at: fixture.snapshot.appendingPathComponent("tokenizer.json"),
+            to: targetDirectory.appendingPathComponent("tokenizer.json")
+        )
+        try FileManager.default.moveItem(
+            at: fixture.snapshot.appendingPathComponent("mtp.safetensors"),
+            to: mtpDirectory.appendingPathComponent("model.safetensors")
+        )
+        try FileManager.default.moveItem(
+            at: fixture.snapshot.appendingPathComponent("mtp-manifest.json"),
+            to: mtpDirectory.appendingPathComponent("config.json")
+        )
+        let targetDigest = try MLXSnapshotIdentity.compute(directory: targetDirectory).digest
+        let mtpDigest = try MLXSnapshotIdentity.compute(directory: mtpDirectory).digest
+        let tokenizerDigest = fixture.digests["tokenizer.json"]!
+        let manifestDigest = fixture.digests["mtp-manifest.json"]!
+        let sidecar = try fixture.mutatingRoot({ root in
+            var artifacts = root["artifacts"] as! [String: Any]
+            artifacts["target"] = ["path": "target", "sha256": targetDigest]
+            artifacts["mtp"] = ["path": "mtp", "sha256": mtpDigest]
+            artifacts["tokenizer"] = ["path": "target/tokenizer.json", "sha256": tokenizerDigest]
+            artifacts["manifest"] = ["path": "mtp/config.json", "sha256": manifestDigest]
+            root["artifacts"] = artifacts
+            var mtp = root["mtp"] as! [String: Any]
+            mtp["manifest_sha256"] = manifestDigest
+            root["mtp"] = mtp
+        }, recomputeTuple: true)
+        let sidecarURL = fixture.root.appendingPathComponent("native-mtp-admission.json")
+        let signatureURL = fixture.root.appendingPathComponent("native-mtp-admission.json.sig")
+        try sidecar.write(to: sidecarURL)
+        try fixture.signature(for: sidecar).write(to: signatureURL)
+
+        let capability = try NativeMTPAdmissionSidecar.load(
+            sidecarURL: sidecarURL,
+            signatureURL: signatureURL,
+            snapshotRoot: fixture.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.trustedKeyring,
+            captureArtifacts: true
+        )
+        let captured = try XCTUnwrap(capability.capturedArtifacts)
+        XCTAssertTrue(captured.tokenizerURL.path.hasPrefix(captured.targetURL.path + "/"))
+        XCTAssertTrue(captured.manifestURL.path.hasPrefix(captured.mtpURL.path + "/"))
+        XCTAssertEqual(try Data(contentsOf: captured.tokenizerURL), Data(#"{"kind":"tokenizer"}"#.utf8))
+        XCTAssertEqual(try Data(contentsOf: captured.manifestURL), Data(#"{"layout":"mtp"}"#.utf8))
+        XCTAssertEqual(try MLXSnapshotIdentity.compute(directory: captured.targetURL).digest, targetDigest)
+        XCTAssertEqual(try MLXSnapshotIdentity.compute(directory: captured.mtpURL).digest, mtpDigest)
+    }
+
+    func testCaptureRejectsPathSwapAfterValidation() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        defer { NativeMTPAdmissionSidecar.testingDescriptorCaptureMutationHook = nil }
+        NativeMTPAdmissionSidecar.testingDescriptorCaptureMutationHook = { _ in
+            try FileManager.default.removeItem(at: fixture.snapshot.appendingPathComponent("target.safetensors"))
+            try FileManager.default.createSymbolicLink(
+                at: fixture.snapshot.appendingPathComponent("target.safetensors"),
+                withDestinationURL: fixture.snapshot.appendingPathComponent("mtp.safetensors")
+            )
+        }
+
+        XCTAssertEqual(
+            try rejectedCaptureError(fixture.sidecarData, fixture: fixture),
+            .artifactNotRegularFile("target.safetensors")
+        )
+    }
+
+    func testCaptureRejectsRenameReplacementAfterValidation() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        defer { NativeMTPAdmissionSidecar.testingDescriptorCaptureMutationHook = nil }
+        NativeMTPAdmissionSidecar.testingDescriptorCaptureMutationHook = { _ in
+            let target = fixture.snapshot.appendingPathComponent("target.safetensors")
+            try FileManager.default.moveItem(
+                at: target,
+                to: fixture.snapshot.appendingPathComponent("target.old")
+            )
+            try Data("target weights".utf8).write(to: target)
+        }
+
+        XCTAssertEqual(
+            try rejectedCaptureError(fixture.sidecarData, fixture: fixture),
+            .artifactNotRegularFile("target.safetensors")
+        )
+    }
+
+    func testCaptureRejectsTruncationAfterValidation() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        defer { NativeMTPAdmissionSidecar.testingDescriptorCaptureMutationHook = nil }
+        NativeMTPAdmissionSidecar.testingDescriptorCaptureMutationHook = { _ in
+            try Data().write(to: fixture.snapshot.appendingPathComponent("target.safetensors"))
+        }
+
+        XCTAssertEqual(
+            try rejectedCaptureError(fixture.sidecarData, fixture: fixture),
+            .artifactNotRegularFile("target.safetensors")
+        )
+    }
+
+    func testCaptureRejectsSameSizeRewriteWithRestoredMTimeAfterValidation() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let target = fixture.snapshot.appendingPathComponent("target.safetensors")
+        var before = stat()
+        XCTAssertEqual(lstat(target.path, &before), 0)
+        defer { NativeMTPAdmissionSidecar.testingDescriptorCaptureMutationHook = nil }
+        NativeMTPAdmissionSidecar.testingDescriptorCaptureMutationHook = { _ in
+            try Data("TARGET weights".utf8).write(to: target)
+            var times = [
+                timeval(tv_sec: before.st_atimespec.tv_sec, tv_usec: Int32(before.st_atimespec.tv_nsec / 1000)),
+                timeval(tv_sec: before.st_mtimespec.tv_sec, tv_usec: Int32(before.st_mtimespec.tv_nsec / 1000)),
+            ]
+            XCTAssertEqual(times.withUnsafeMutableBufferPointer { utimes(target.path, $0.baseAddress) }, 0)
+        }
+
+        XCTAssertEqual(
+            try rejectedCaptureError(fixture.sidecarData, fixture: fixture),
+            .artifactNotRegularFile("target.safetensors")
+        )
+    }
+
+    func testCaptureRejectsGroupWritableSourceMode() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let target = fixture.snapshot.appendingPathComponent("target.safetensors")
+        XCTAssertEqual(chmod(target.path, 0o664), 0)
+
+        XCTAssertEqual(
+            try rejectedCaptureError(fixture.sidecarData, fixture: fixture),
+            .pathRejected("target.safetensors")
+        )
+    }
+
+    func testCaptureRejectsStagingDeviceMismatch() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var st = stat()
+        XCTAssertEqual(lstat(fixture.snapshot.path, &st), 0)
+        defer { NativeMTPAdmissionSidecar.testingExpectedStagingDeviceOverride = nil }
+        NativeMTPAdmissionSidecar.testingExpectedStagingDeviceOverride = st.st_dev == 0 ? 1 : 0
+
+        XCTAssertEqual(
+            try rejectedCaptureError(fixture.sidecarData, fixture: fixture),
+            .pathRejected("captured_artifacts")
+        )
+    }
+
+    func testRevalidateAfterLoadRejectsStagedMutation() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let captured = try loadCapturedArtifacts(fixture)
+        XCTAssertNoThrow(try captured.revalidateAfterLoad())
+
+        XCTAssertEqual(chmod(captured.mtpURL.path, 0o600), 0)
+        try Data("mutated staged".utf8).write(to: captured.mtpURL)
+        XCTAssertThrowsError(try captured.revalidateAfterLoad())
+    }
+
+    func testCapturedLeaseDeinitRemovesFrozenPrivateTree() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        var captured: NativeMTPAdmissionCapturedArtifacts? = try loadCapturedArtifacts(fixture)
+        let stagedRoot = try XCTUnwrap(captured?.rootURL)
+        let stagedFile = try XCTUnwrap(captured?.targetURL)
+        XCTAssertEqual(permissions(stagedRoot) & 0o777, 0o500)
+        XCTAssertEqual(permissions(stagedFile) & 0o777, 0o400)
+
+        captured = nil
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stagedRoot.path))
+    }
+
+    func testCaptureReclaimsUnlockedStalePrivateSiblingsAndPreservesLockedLiveSiblings() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let staleRoot = fixture.root
+            .appendingPathComponent(
+                "\(NativeMTPAdmissionCapturedArtifacts.captureDirectoryPrefix)stale",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(
+            at: staleRoot.appendingPathComponent("nested", isDirectory: true),
+            withIntermediateDirectories: true
+        )
+        let staleFile = staleRoot.appendingPathComponent("nested/file.bin")
+        try Data("stale capture".utf8).write(to: staleFile)
+        let staleLease = staleRoot.appendingPathComponent(NativeMTPAdmissionCapturedArtifacts.leaseFileName)
+        try Data("stale lease".utf8).write(to: staleLease)
+        XCTAssertEqual(chmod(staleLease.path, 0o400), 0)
+        XCTAssertEqual(chmod(staleFile.path, 0o400), 0)
+        XCTAssertEqual(chmod(staleRoot.appendingPathComponent("nested", isDirectory: true).path, 0o500), 0)
+        XCTAssertEqual(chmod(staleRoot.path, 0o500), 0)
+
+        let liveRoot = fixture.root
+            .appendingPathComponent(
+                "\(NativeMTPAdmissionCapturedArtifacts.captureDirectoryPrefix)live",
+                isDirectory: true
+            )
+        try FileManager.default.createDirectory(at: liveRoot, withIntermediateDirectories: false)
+        let liveLeaseFD = try NativeMTPAdmissionCapturedArtifacts.openLockedLease(
+            for: liveRoot,
+            create: true,
+            nonblocking: false
+        )
+        defer { close(liveLeaseFD) }
+        let liveFile = liveRoot.appendingPathComponent("live.bin")
+        try Data("live capture".utf8).write(to: liveFile)
+        XCTAssertEqual(chmod(liveRoot.appendingPathComponent(NativeMTPAdmissionCapturedArtifacts.leaseFileName).path, 0o400), 0)
+        XCTAssertEqual(chmod(liveFile.path, 0o400), 0)
+        XCTAssertEqual(chmod(liveRoot.path, 0o500), 0)
+        defer { try? NativeMTPAdmissionCapturedArtifacts.removePrivateCaptureTree(liveRoot) }
+
+        let captured = try loadCapturedArtifacts(fixture)
+        defer { _ = captured }
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: staleRoot.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: liveRoot.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: captured.rootURL.path))
     }
 
     func testDirectoryArtifactBindsCompleteSnapshotTree() throws {
@@ -221,6 +590,22 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         XCTAssertEqual(
             try rejectedError(fixture.mutatingRoot { root in
                 var spec023 = root["spec023"] as! [String: Any]
+                spec023["live_executable_cdhash"] = String(repeating: "e", count: 40)
+                root["spec023"] = spec023
+            }, fixture: fixture),
+            .invalidValue("$.tuple_sha256")
+        )
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot { root in
+                var mtp = root["mtp"] as! [String: Any]
+                mtp["complete_window_bytes_by_depth"] = [2048, 4096, 8192, 16384, 32768]
+                root["mtp"] = mtp
+            }, fixture: fixture),
+            .invalidValue("$.tuple_sha256")
+        )
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot { root in
+                var spec023 = root["spec023"] as! [String: Any]
                 spec023["native_mtp_admission_tuple_sha256"] = String(repeating: "4", count: 64)
                 root["spec023"] = spec023
             }, fixture: fixture),
@@ -233,6 +618,74 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 root["mtp"] = mtp
             }, recomputeTuple: true), fixture: fixture),
             .invalidValue("$.mtp.manifest_sha256")
+        )
+    }
+
+    func testCompleteWindowBytesByDepthIsRequiredMonotonicAndCapacityBounded() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot({ root in
+                var mtp = root["mtp"] as! [String: Any]
+                mtp.removeValue(forKey: "complete_window_bytes_by_depth")
+                root["mtp"] = mtp
+            }, recomputeTuple: true), fixture: fixture),
+            .missingField("$.mtp.complete_window_bytes_by_depth")
+        )
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot({ root in
+                var mtp = root["mtp"] as! [String: Any]
+                mtp["complete_window_bytes_by_depth"] = [1024, 2048, 4096, 8192]
+                root["mtp"] = mtp
+            }, recomputeTuple: true), fixture: fixture),
+            .invalidValue("$.mtp.complete_window_bytes_by_depth")
+        )
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot({ root in
+                var mtp = root["mtp"] as! [String: Any]
+                mtp["complete_window_bytes_by_depth"] = [1024, 4096, 2048, 8192, 16384]
+                root["mtp"] = mtp
+            }, recomputeTuple: true), fixture: fixture),
+            .invalidValue("$.mtp.complete_window_bytes_by_depth[2]")
+        )
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot({ root in
+                var mtp = root["mtp"] as! [String: Any]
+                mtp["complete_window_bytes_by_depth"] = [1, 2, 3, 4, Int.max]
+                root["mtp"] = mtp
+            }, recomputeTuple: true), fixture: fixture),
+            .invalidValue("$.mtp.complete_window_bytes_by_depth")
+        )
+    }
+
+    func testSpec023LiveExecutableCDHashIsRequiredLowercaseAndSignedIntoTuple() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot({ root in
+                var spec023 = root["spec023"] as! [String: Any]
+                spec023.removeValue(forKey: "live_executable_cdhash")
+                root["spec023"] = spec023
+            }, recomputeTuple: true), fixture: fixture),
+            .missingField("$.spec023.live_executable_cdhash")
+        )
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot({ root in
+                var spec023 = root["spec023"] as! [String: Any]
+                spec023["live_executable_cdhash"] = String(repeating: "E", count: 40)
+                root["spec023"] = spec023
+            }, recomputeTuple: true), fixture: fixture),
+            .invalidValue("$.spec023.live_executable_cdhash")
+        )
+        XCTAssertEqual(
+            try rejectedError(fixture.mutatingRoot({ root in
+                var spec023 = root["spec023"] as! [String: Any]
+                spec023["live_executable_cdhash"] = String(repeating: "e", count: 39)
+                root["spec023"] = spec023
+            }, recomputeTuple: true), fixture: fixture),
+            .invalidValue("$.spec023.live_executable_cdhash")
         )
     }
 
@@ -375,6 +828,66 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
         }
     }
 
+    private func rejectedCaptureError(
+        _ data: Data,
+        fixture: Fixture
+    ) throws -> NativeMTPAdmissionSidecarError {
+        do {
+            _ = try NativeMTPAdmissionSidecar.load(
+                sidecarData: data,
+                signatureData: fixture.signature(for: data),
+                snapshotRoot: fixture.snapshot,
+                context: fixture.context,
+                trustedKeyring: fixture.trustedKeyring,
+                captureArtifacts: true
+            )
+            XCTFail("sidecar should reject")
+            return .invalidValue("test did not reject")
+        } catch let error as NativeMTPAdmissionSidecarError {
+            return error
+        }
+    }
+
+    private func loadCapturedArtifacts(_ fixture: Fixture) throws -> NativeMTPAdmissionCapturedArtifacts {
+        let capability = try NativeMTPAdmissionSidecar.load(
+            sidecarData: fixture.sidecarData,
+            signatureData: fixture.signatureData,
+            snapshotRoot: fixture.snapshot,
+            context: fixture.context,
+            trustedKeyring: fixture.trustedKeyring,
+            captureArtifacts: true
+        )
+        return try XCTUnwrap(capability.capturedArtifacts)
+    }
+
+    private func rejectedURLError(
+        sidecarURL: URL,
+        signatureURL: URL,
+        fixture: Fixture
+    ) throws -> NativeMTPAdmissionSidecarError {
+        do {
+            _ = try NativeMTPAdmissionSidecar.load(
+                sidecarURL: sidecarURL,
+                signatureURL: signatureURL,
+                snapshotRoot: fixture.snapshot,
+                context: fixture.context,
+                trustedKeyring: fixture.trustedKeyring
+            )
+            XCTFail("sidecar should reject")
+            return .invalidValue("test did not reject")
+        } catch let error as NativeMTPAdmissionSidecarError {
+            return error
+        }
+    }
+
+    private func permissions(_ url: URL) throws -> Int {
+        var st = stat()
+        guard lstat(url.path, &st) == 0 else {
+            throw NativeMTPAdmissionSidecarError.artifactNotFound(url.lastPathComponent)
+        }
+        return Int(st.st_mode)
+    }
+
     private func makeFixture() throws -> Fixture {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("native-mtp-sidecar-\(UUID().uuidString)", isDirectory: true)
@@ -473,6 +986,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
     private static let providerRevision = String(repeating: "b", count: 40)
     private static let upstreamRevision = String(repeating: "c", count: 40)
     private static let evidenceSHA = String(repeating: "d", count: 64)
+    private static let liveExecutableCDHash = String(repeating: "4", count: 40)
 
     private static func sidecarObject(digests: [String: String], tupleSHA: String) throws -> [String: Any] {
         [
@@ -496,6 +1010,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 "source_layout": "separate_artifact",
                 "prediction_layer_count": 4,
                 "max_proposal_depth": 4,
+                "complete_window_bytes_by_depth": [1024, 2048, 4096, 8192, 16384],
                 "adaptation_enabled": true,
                 "adaptation_max_depth": 4,
             ],
@@ -534,6 +1049,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 "release_id": "native-mtp-release-2026-09-28",
                 "source_commit": providerRevision,
                 "reproducible_build_sha256": String(repeating: "2", count: 64),
+                "live_executable_cdhash": liveExecutableCDHash,
                 "benchmark_policy_sha256": String(repeating: "3", count: 64),
                 "native_mtp_admission_tuple_sha256": tupleSHA,
                 "evidence_artifact_sha256": [evidenceSHA],

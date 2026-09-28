@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.5
+**Version:** 0.1.9
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.5",
+  "version": "0.1.9",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -216,14 +216,32 @@ result, and the signed SPEC-023/SPEC-010 identity. The capability MUST bind:
 - hidden-state, embedding/head sharing, cache, and recurrent-state interfaces;
 - target and MTP tensor quantization modes;
 - cache/state classes proven stageable and rewindable;
-- supported request-feature matrix; and
-- exact provider and upstream MLX runtime revision used for qualification.
+- supported request-feature matrix;
+- exact provider and upstream MLX runtime revision used for qualification; and
+- the SPEC-023 `live_executable_cdhash` expected CodeDirectory identity for
+  the signed provider executable admitted to consume the tuple.
 
 Capability construction MUST fail closed for a missing, extra, duplicate,
 silently filtered, wrong-shape, wrong-dtype, unexpectedly quantized,
 unmanifested, or digest-mismatched required tensor; an unsupported cache/state
 class; a family-adapter mismatch; or a runtime revision outside the signed
 evidence tuple. Model-name matching alone MUST NOT establish capability.
+
+For the v0.1 `separate_artifact` Qwen 3.5 adapter, the signed `manifest`
+artifact MUST be the exact regular file `config.json` directly inside the
+captured MTP artifact directory. The digest MUST match the bytes parsed by the
+capability observer and then consumed by the upstream loader. The signed
+tokenizer artifact MUST likewise be the exact `tokenizer.json` directly inside
+the captured target directory used by the target tokenizer loader. An
+independent or merely descriptive manifest, tokenizer from another directory,
+or path alias MUST fail closed.
+
+The observer MUST inspect the same recursive set of `.safetensors` files that
+the pinned 3.31.4 loader can consume. It MUST reject symlinked or hidden weight
+files, scan every parsed tensor name before representation filters, and reject
+every target tensor the family sanitizer would silently discard, including any
+target name containing the `mtp.` namespace when `source_layout` is
+`separate_artifact`.
 
 Artifact resolution and parsing MUST reject path traversal, symlink escape,
 unexpected local or network references, malformed safetensors metadata,
@@ -272,8 +290,9 @@ tagged release is the default production requirement.
 The first such exception is closed and exact:
 
 - repository: `https://github.com/Augustas11/mlx-swift-lm.git`;
-- revision: `b250ac2e87a1a780eb82ce73522c4bf3e70a8d8e`;
-- upstream base: `ml-explore/mlx-swift-lm@ee673d6a71d76e67b532dc7eaf91d92edc3bb8bb`;
+- revision: `e874140ecb5b04aeb445eb3837d48f7b187b867e`;
+- upstream base: `ml-explore/mlx-swift-lm@bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57`
+  (`3.31.4`);
 - reviewed surface: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
   `MTPKVCacheTransactionPosition`, `MTPKVCacheTransactionCommit`, and
   `reconcileMTPSharedKVState`; plus `MTPPackedVerificationCache`,
@@ -447,6 +466,18 @@ remain on `native_mtp` but deterministically reduce its proposal depth, down to
 depth zero, until the next round fits; if even depth zero cannot fit, it takes
 the existing SPEC-038 request-local capacity failure. It MUST NOT switch paths,
 overcommit memory, or partially stage a round.
+
+The signed SPEC-023 admission sidecar MUST carry
+`mtp.complete_window_bytes_by_depth`, an exact array indexed by proposal depth
+`0...max_proposal_depth`. Each value is the qualification-derived conservative
+complete native-MTP round ceiling for that depth, covering target/MTP state,
+checkpoints, workspace, proposal span, and bonus-token position. Values MUST be
+positive JSON integers, bounded by the consumer's `Int.max`, and monotonically
+nondecreasing. Admission and capability construction MUST fail closed on a
+missing array, wrong length, non-integer, nonpositive, decreasing value,
+integer overflow, or tuple-digest mismatch. Total scheduler capacity for the
+qualified tuple is the checked product of the max-depth value and
+`qualified_slots`; overflow is an admission failure.
 
 Native MTP MUST use SPEC-038 FCFS admission and shared-iteration fairness; it
 MUST NOT create a second priority queue or skip an older ready ordinary row for
@@ -636,17 +667,23 @@ state, capacity, quality, and performance gate.
 
 ### MTP-13 — signed admission and immutable evidence (SPEC-048-R013)
 
-Catalog/autotune admission MUST be based on the SPEC-023 v0.21.0
+Catalog/autotune admission MUST be based on the SPEC-023 v0.21.2
 `macprovider.native-mtp-admission.v1` signed sidecar bound to one immutable SPEC-023
 `release_id` and SPEC-010 model/artifact member, never provider self-report.
 The sidecar MUST bind the exact decode path, model/artifact/tokenizer digests,
 MTP manifest and family adapter, proposal depth, quantization representation,
 runtime/provider revisions, cache/state classes, exact hardware/RAM,
 qualified slot count, request-feature profile, benchmark policy digest, source
-commit, reproducible-build digest, and evidence artifact digests.
+commit, reproducible-build digest, the exact lowercase 40-hex
+`spec023.live_executable_cdhash` CodeDirectory identity for the live signed
+executable, `mtp.complete_window_bytes_by_depth`, and evidence artifact
+digests. The live executable CDHash is
+distinct from the installed binary SHA-256 artifact digest; consumers MUST bind
+both and MUST NOT substitute one for the other.
 
 Capability advertisement MUST fail closed if the live tuple differs from any
-bound field. Loader success or a serial correctness pass is not sufficient for
+bound field, including a missing or mismatched `live_executable_cdhash`. Loader
+success or a serial correctness pass is not sufficient for
 catalog eligibility. Classic SPEC-028 evidence MUST NOT be relabeled as native
 MTP evidence, and upstream/non-MLX benchmark numbers MUST NOT satisfy local
 admission.
@@ -908,6 +945,22 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.9 (2026-09-28)** — Makes the signed MTP manifest the exact captured
+  `mtp/config.json`, binds the target loader to captured
+  `target/tokenizer.json`, and requires loader-equivalent recursive tensor
+  observation before any sanitizer/filter can hide an extra target MTP tensor.
+- **0.1.8 (2026-09-28)** — Requires signed
+  `mtp.complete_window_bytes_by_depth` admission closure for native-MTP
+  scheduler-capacity accounting, including deterministic tuple binding and
+  checked max-depth-by-slot multiplication.
+- **0.1.7 (2026-09-28)** — Requires the SPEC-023 v0.21.1
+  `live_executable_cdhash` binding in the signed native-MTP admission sidecar,
+  exposes it as capability input, and keeps it distinct from the installed
+  binary SHA-256 artifact digest.
+- **0.1.6 (2026-09-28)** — Repins the immutable-dependency exception to fork
+  revision `e874140ecb5b04aeb445eb3837d48f7b187b867e`. This preserves the audited
+  native-MTP API delta from 0.1.5 while restoring the package manifest's Swift
+  6.1 consumer floor required by MacProvider's release CI toolchain.
 - **0.1.5 (2026-09-28)** — Repins the immutable-dependency exception to fork
   revision `b250ac2e87a1a780eb82ce73522c4bf3e70a8d8e` after qualifying standalone
   Qwen 3.5 MTP checkpoint normalization and packed row-isolated recurrent

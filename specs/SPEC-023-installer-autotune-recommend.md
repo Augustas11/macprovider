@@ -1,12 +1,31 @@
 # SPEC-023 — Installer-Integrated Autotune Recommend
 
-version: v0.21.0
+version: v0.21.2
 status: LOCKED
 owner: operator (a11)
 last-locked: 2026-09-27
 lockstep: SPEC-005 v0.6.9 (SPEC-005-R011 money-table owner; SPEC-005-R013 price-change invariants). CONFORMANCE `depends_on` does not list SPEC-005; the lockstep is recorded in prose only, avoiding a dependency cycle (SPEC-005 likewise does not list SPEC-023 in its `depends_on`).
 
 ## Change log
+
+- **v0.21.2 (2026-09-28)** — Native-MTP complete-window byte closure (#1770).
+  The signed `macprovider.native-mtp-admission.v1` sidecar now requires
+  `mtp.complete_window_bytes_by_depth`, an exact positive, nondecreasing
+  integer array indexed by proposal depth `0...max_proposal_depth`. It is
+  included in `native_mtp_admission_tuple_sha256` and records qualification's
+  conservative complete native-MTP round byte ceiling, covering target/MTP
+  state, checkpoints, workspace, proposal span, and bonus-token position.
+  Consumers fail closed unless the max-depth value multiplied by
+  `qualified_slots` fits without integer overflow.
+
+- **v0.21.1 (2026-09-28)** — Native-MTP live executable binding (#1770).
+  The `macprovider.native-mtp-admission.v1` sidecar's `spec023` object now
+  requires `live_executable_cdhash`, an exact lowercase 40-hex Mach-O
+  CodeDirectory CDHash for the live executable that is permitted to consume the
+  admission tuple. The value is authenticated by the detached sidecar
+  signature, included in `native_mtp_admission_tuple_sha256`, and remains
+  separate from `reproducible_build_sha256`, which continues to identify the
+  installed build artifact bytes.
 
 - **v0.21.0 (2026-09-27)** — Native-MTP signed admission (#1770).
   Registers `SPEC-023-R024` and the closed
@@ -2986,9 +3005,11 @@ unsigned JSON integers and never floats.
 | `mtp_manifest_sha256` | `sha256` |
 | `mtp_family_adapter`, `mtp_state_class` | `short_string` |
 | `mtp_head_count`, `proposal_depth` | integers `1..16` |
+| `complete_window_bytes_by_depth` | exact array length `proposal_depth + 1`, indexed by proposal depth `0...proposal_depth`; every value is a positive JSON integer no larger than the consumer `Int.max`, values are monotonically nondecreasing, and the last value multiplied by `qualified_slots` MUST fit without integer overflow |
 | `runtime_revision`, `provider_revision` | `short_string` |
 | `source_commit` | full lowercase Git object id for the source repository's object format, exactly 40 or 64 hex characters |
 | `reproducible_build_sha256` | `sha256` |
+| `live_executable_cdhash` | exact lowercase 40-hex Mach-O CodeDirectory CDHash of the live signed executable admitted to consume this tuple |
 | `cache_state_classes` | sorted unique array `1..16` of `short_string` |
 | `hardware_class` | lowercase ASCII matching `^[a-z0-9][a-z0-9._-]{0,63}$` |
 | `ram_bytes` | exact physical RAM integer `> 0`, not a minimum |
@@ -3047,6 +3068,14 @@ profile because they do not say which identity layer they bind.
    sidecar value, `sidecar_sha256` is SHA-256 of the exact authenticated
    sidecar JSON bytes before parsing normalization, and `entry` is the complete
    selected closed entry above with no field removed, renamed, or defaulted.
+   The `entry.live_executable_cdhash` field is part of this canonical object:
+   a sidecar omitting it, using uppercase/non-hex/wrong-length text, or
+   presenting a value that differs from the live signed executable's CDHash
+   MUST fail closed. `reproducible_build_sha256` remains the installed artifact
+   byte digest and MUST NOT be substituted for the live CodeDirectory CDHash.
+   The `entry.complete_window_bytes_by_depth` array is likewise part of the
+   canonical object; every indexed value MUST be encoded deterministically, with
+   no defaulting from `proposal_depth` or runtime heuristics.
    This is the stable identity used by admission, evidence, revocation, and
    release records.
 2. `native_mtp_runtime_tuple_sha256` is SHA-256 over the UTF-8 bytes

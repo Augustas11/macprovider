@@ -22,11 +22,11 @@ Source of truth: `phase3-binary/Package.swift` and
 `phase3-binary/Package.resolved`.
 
 - `mlx-swift-lm`: fork `Augustas11/mlx-swift-lm`, exact revision
-  `b250ac2e87a1a780eb82ce73522c4bf3e70a8d8e`, branch
-  `feat/public-mtp-transactions`, based on upstream
-  `ee673d6a71d76e67b532dc7eaf91d92edc3bb8bb`.
-- `mlx-swift`: resolved `0.31.6`, revision
-  `0bb916c67f4b9e5c682cbe02a42c701c93ab5021`.
+  `e874140ecb5b04aeb445eb3837d48f7b187b867e`, branch
+  `feat/3314-native-mtp-backport`, based on upstream
+  `bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57` (`3.31.4`).
+- `mlx-swift`: resolved `0.31.4`, revision
+  `dc43e62d7055353c7f99fa071a4e71d29dfddc44`.
 - `swift-transformers`: exact/resolved `1.3.4`, revision
   `c21fdcde390313a6d98d8e33a346f2c3486c3ab0`.
 - `swift-jinja`: resolved `2.4.2`, revision
@@ -108,7 +108,7 @@ facades.
 
 ## Immutable-Dependency Exception
 
-SPEC-048 v0.1.5 permits exactly the fork and revision above. The public surfaces keep
+SPEC-048 v0.1.6 permits exactly the fork and revision above. The public surfaces keep
 the underlying `KVCacheRound` strategies package-scoped and expose only the
 narrow ownership/transaction, packed target-verification, and hybrid recurrent
 commit operations required by an external scheduler, plus the strict row-local

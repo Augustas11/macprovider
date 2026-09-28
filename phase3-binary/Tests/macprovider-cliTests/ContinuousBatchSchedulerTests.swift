@@ -4627,6 +4627,45 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         )
     }
 
+    func testNativeMTPRejectsPromptExceedingBoundedPrefillChunkBeforeBackendWork() async throws {
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillTokens: ["too-long": 4],
+            nativeTargetTopTokens: ["too-long": [5]]
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            maxPromptChunkTokens: 2,
+            backend: backend
+        )
+
+        do {
+            _ = try await scheduler.submit(Self.nativeRequest(
+                id: "too-long",
+                promptTokens: [1, 2, 3],
+                maxOutputTokens: 2,
+                proposals: [5],
+                maximumDepth: 1
+            ))
+            XCTFail("oversized native MTP prompt should fail before admission")
+        } catch let error as ContinuousBatchSchedulerError {
+            XCTAssertEqual(
+                error,
+                .requestFailed("continuous_batching_native_mtp_prompt_prefill_exceeds_limit")
+            )
+        }
+
+        let metrics = await scheduler.metrics()
+        XCTAssertEqual(metrics.activePromptRows, 0)
+        XCTAssertEqual(metrics.activeDecodeRows, 0)
+        let prefillCallCount = await backend.prefillCallCount()
+        let nativeVerifyBatches = await backend.nativeVerifyBatches()
+        let nativeFinalizations = await backend.nativeFinalizations()
+        XCTAssertEqual(prefillCallCount, 0)
+        XCTAssertEqual(nativeVerifyBatches, [])
+        XCTAssertEqual(nativeFinalizations, [])
+    }
+
     func testNativeMTPAppliesTerminalFilterBeforeBonusCandidate() async throws {
         let backend = ScriptedBackend(
             scripts: [:],
@@ -4728,6 +4767,263 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(decodeCallCount, 0)
         XCTAssertEqual(nativeVerifyProposals, [["forced-zero": []]])
         XCTAssertEqual(committedProposalTokenCount, 0)
+    }
+
+    func testNativeMTPProposalIsNotCalledBeforeCompleteRoundReservation() async throws {
+        let proposalGate = AsyncGate()
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillTokens: ["reserved": 6],
+            nativeTargetTopTokens: ["reserved": [7]],
+            nativeProposalGate: proposalGate
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            nativeMTPRoundByteCapacity: 64,
+            backend: backend,
+            allocator: allocator
+        )
+
+        let task = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "reserved",
+                promptTokens: [1],
+                maxOutputTokens: 2,
+                proposals: [7],
+                maximumDepth: 1,
+                completeWindowBytes: 24
+            ))
+        }
+
+        try await eventually { await backend.nativeProposalBatches().count == 1 }
+        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 24)
+        XCTAssertLessThan(await allocator.freeBlockCount(), 16)
+
+        await proposalGate.open()
+        let result = try await task.value
+        XCTAssertEqual(result.outputTokens, [6, 7])
+        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+        try await eventually { await allocator.freeBlockCount() == 16 }
+    }
+
+    func testNativeMTPConcurrentRowsCannotOvercommitRoundByteBudgetBeforeProposal() async throws {
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillTokens: ["a": 6, "b": 8],
+            nativeTargetTopTokens: ["a": [7], "b": [9]]
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            maxPrefillRowsPerIteration: 2,
+            nativeMTPRoundByteCapacity: 24,
+            backend: backend
+        )
+
+        let a = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "a",
+                promptTokens: [1],
+                maxOutputTokens: 2,
+                proposals: [7],
+                maximumDepth: 1,
+                completeWindowBytes: 16
+            ))
+        }
+        let b = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "b",
+                promptTokens: [2],
+                maxOutputTokens: 2,
+                proposals: [9],
+                maximumDepth: 1,
+                completeWindowBytes: 16
+            ))
+        }
+
+        let results = try await [a.value, b.value]
+        XCTAssertEqual(results.filter { $0.terminalStatus == .length }.count, 1)
+        XCTAssertEqual(
+            results.first { $0.terminalStatus == .requestFailed }?.errorCode,
+            "continuous_batching_native_mtp_round_memory_exhausted"
+        )
+        let proposalBatches = await backend.nativeProposalBatches()
+        XCTAssertFalse(proposalBatches.contains { $0.count > 1 })
+        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+    }
+
+    func testNativeMTPByteCapacityFailureReducesDepthBeforeProposal() async throws {
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillTokens: ["fallback-depth": 6],
+            nativeTargetTopTokens: ["fallback-depth": [7]]
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            nativeMTPRoundByteCapacity: 24,
+            backend: backend
+        )
+
+        let result = try await scheduler.submit(Self.nativeRequest(
+            id: "fallback-depth",
+            promptTokens: [1],
+            maxOutputTokens: 3,
+            proposals: [7],
+            maximumDepth: 1,
+            completeWindowBytesByDepth: [8, 32]
+        ))
+
+        XCTAssertEqual(result.outputTokens, [6, 7])
+        let proposalDepths = await backend.nativeProposalBatches().flatMap {
+            $0.map(\.maximumProposalDepth)
+        }
+        XCTAssertEqual(proposalDepths, [0])
+        let verifyInputs = await backend.nativeVerifyInputTokenCounts()
+        XCTAssertEqual(verifyInputs, [["fallback-depth": 1]])
+        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+    }
+
+    func testNativeMTPSystemHeadroomFailureReducesDepthBeforeProposal() async throws {
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillTokens: ["headroom-depth": 6],
+            nativeTargetTopTokens: ["headroom-depth": [7]]
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            nativeMTPRoundByteCapacity: 64,
+            nativeMTPRoundSystemMemoryProbe: Self.nativeMTPMemoryProbe(
+                availableBytes: 124,
+                physicalBytes: 1_000
+            ),
+            backend: backend
+        )
+
+        let result = try await scheduler.submit(Self.nativeRequest(
+            id: "headroom-depth",
+            promptTokens: [1],
+            maxOutputTokens: 3,
+            proposals: [7],
+            maximumDepth: 1,
+            completeWindowBytesByDepth: [8, 32]
+        ))
+
+        XCTAssertEqual(result.outputTokens, [6, 7])
+        let proposalDepths = await backend.nativeProposalBatches().flatMap {
+            $0.map(\.maximumProposalDepth)
+        }
+        XCTAssertEqual(proposalDepths, [0])
+        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+    }
+
+    func testNativeMTPSystemHeadroomFailureAtDepthZeroFailsBeforeProposal() async throws {
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillTokens: ["no-headroom": 6],
+            nativeTargetTopTokens: ["no-headroom": [7]]
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            nativeMTPRoundByteCapacity: 64,
+            nativeMTPRoundSystemMemoryProbe: Self.nativeMTPMemoryProbe(
+                availableBytes: 107,
+                physicalBytes: 1_000
+            ),
+            backend: backend
+        )
+
+        let result = try await scheduler.submit(Self.nativeRequest(
+            id: "no-headroom",
+            promptTokens: [1],
+            maxOutputTokens: 3,
+            proposals: [7],
+            maximumDepth: 1,
+            completeWindowBytesByDepth: [8, 32]
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_native_mtp_round_memory_exhausted")
+        XCTAssertEqual(await backend.nativeProposalBatches(), [])
+        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+    }
+
+    func testNativeMTPConcurrentRowsHonorSystemHeadroomAndRelease() async throws {
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillTokens: ["a": 6, "b": 8],
+            nativeTargetTopTokens: ["a": [7], "b": [9]]
+        )
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 2,
+            maxPrefillRowsPerIteration: 2,
+            nativeMTPRoundByteCapacity: 64,
+            nativeMTPRoundSystemMemoryProbe: Self.nativeMTPMemoryProbe(
+                availableBytes: 124,
+                physicalBytes: 1_000
+            ),
+            backend: backend
+        )
+
+        let a = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "a",
+                promptTokens: [1],
+                maxOutputTokens: 2,
+                proposals: [7],
+                maximumDepth: 1,
+                completeWindowBytes: 16
+            ))
+        }
+        let b = Task {
+            try await scheduler.submit(Self.nativeRequest(
+                id: "b",
+                promptTokens: [2],
+                maxOutputTokens: 2,
+                proposals: [9],
+                maximumDepth: 1,
+                completeWindowBytes: 16
+            ))
+        }
+
+        let results = try await [a.value, b.value]
+        XCTAssertEqual(results.filter { $0.terminalStatus == .length }.count, 1)
+        XCTAssertEqual(
+            results.first { $0.terminalStatus == .requestFailed }?.errorCode,
+            "continuous_batching_native_mtp_round_memory_exhausted"
+        )
+        let proposalBatches = await backend.nativeProposalBatches()
+        XCTAssertFalse(proposalBatches.contains { $0.count > 1 })
+        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+    }
+
+    func testNativeMTPProposalFailureReleasesCompleteRoundReservation() async throws {
+        let backend = ScriptedBackend(
+            scripts: [:],
+            prefillTokens: ["throws": 6],
+            nativeTargetTopTokens: ["throws": [7]],
+            nativeProposalError: BackendFailure()
+        )
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = try await makeScheduler(
+            maxActiveRows: 1,
+            nativeMTPRoundByteCapacity: 64,
+            backend: backend,
+            allocator: allocator
+        )
+
+        let result = try await scheduler.submit(Self.nativeRequest(
+            id: "throws",
+            promptTokens: [1],
+            maxOutputTokens: 2,
+            proposals: [7],
+            maximumDepth: 1,
+            completeWindowBytes: 24
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .requestFailed)
+        XCTAssertEqual(result.errorCode, "continuous_batching_native_mtp_proposal_failed")
+        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+        try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
     func testNativeMTPDoesNotExposeTransactionalCandidatesBeforeFinalizeAndAbortsOnVerifyThrow() async throws {
@@ -4836,7 +5132,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             nativeTargetTopTokens: ["cancelled": [7]],
             nativeVerifyGate: verifyGate
         )
-        let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend)
+        let allocator = try PagedKVBlockAllocator(blockSizeTokens: 4, maxPhysicalBlocks: 16)
+        let scheduler = try await makeScheduler(maxActiveRows: 1, backend: backend, allocator: allocator)
 
         let task = Task {
             try await scheduler.submit(Self.nativeRequest(
@@ -4861,6 +5158,8 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         XCTAssertEqual(finalization?.committedProposalTokenCount, 0)
         XCTAssertEqual(finalization?.committedInputTokenCount, 0)
         XCTAssertEqual(finalization?.shouldCommit, false)
+        XCTAssertEqual(await scheduler.nativeMTPReservedRoundBytesSnapshot(), 0)
+        try await eventually { await allocator.freeBlockCount() == 16 }
     }
 
     private static func configuration(
@@ -4893,8 +5192,12 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         stopTokenSequences: [[Int]] = [],
         proposals: [Int],
         maximumDepth: Int,
+        completeWindowBytes: Int = 16,
+        completeWindowBytesByDepth: [Int]? = nil,
         directive: NativeMTPAdaptationDirective? = nil
     ) -> ContinuousBatchSchedulerRequest {
+        let bytesByDepth = completeWindowBytesByDepth
+            ?? Array(repeating: completeWindowBytes, count: maximumDepth + 1)
         ContinuousBatchSchedulerRequest(
             id: id,
             conversationKey: "",
@@ -4905,8 +5208,24 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
             topP: 1.0,
             decodePath: .nativeMTP,
             nativeMTPMaximumProposalDepth: maximumDepth,
+            nativeMTPCompleteWindowBytesByDepth: bytesByDepth,
             nativeMTPProposalTokens: proposals,
             nativeMTPAdaptationDirective: directive
+        )
+    }
+
+    private static func nativeMTPMemoryProbe(
+        availableBytes: Int,
+        physicalBytes: Int
+    ) -> NativeMTPRoundSystemMemoryProbe {
+        NativeMTPRoundSystemMemoryProbe(
+            identity: "test-\(availableBytes)-\(physicalBytes)",
+            sampleProvider: {
+                NativeMTPRoundSystemMemorySample(
+                    availableBytes: availableBytes,
+                    physicalBytes: physicalBytes
+                )
+            }
         )
     }
 
@@ -4926,6 +5245,16 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         maxDecodeStepsWhilePrefilling: Int = 1,
         maxPrefillRowsPerIteration: Int = 1,
         maxPrefillTokensPerIteration: Int? = nil,
+        nativeMTPRoundByteCapacity: Int? = nil,
+        nativeMTPRoundSystemMemoryProbe: NativeMTPRoundSystemMemoryProbe = .init(
+            identity: "test-default",
+            sampleProvider: {
+                NativeMTPRoundSystemMemorySample(
+                    availableBytes: 1_000_000_000,
+                    physicalBytes: 1_000_000_000
+                )
+            }
+        ),
         backend: any ContinuousBatchSchedulerBackend,
         allocator: PagedKVBlockAllocator? = nil,
         contiguousCacheBridge: (any ContinuousBatchRetainedCacheBridge)? = nil,
@@ -4951,7 +5280,9 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
                 weightsGeneration: 3
             ),
             maxDecodeLockstepWindow: maxDecodeLockstepWindow,
-            maxDecodeStepsWhilePrefilling: maxDecodeStepsWhilePrefilling
+            maxDecodeStepsWhilePrefilling: maxDecodeStepsWhilePrefilling,
+            nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
+            nativeMTPRoundSystemMemoryProbe: nativeMTPRoundSystemMemoryProbe
         )
         return ContinuousBatchScheduler(
             configuration: config,
@@ -5320,6 +5651,8 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private let rowFailures: Set<String>
     private let nativeTargetTopTokens: [String: [Int]]
     private let nativeTargetTopTokensByStep: [String: [[Int]]]
+    private let nativeProposalGate: AsyncGate?
+    private let nativeProposalError: (any Error)?
     private let nativeVerifyGate: AsyncGate?
     private let nativeFinalizeGate: AsyncGate?
     private let nativeVerifyError: (any Error)?
@@ -5348,6 +5681,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     private var decodeTargetLog: [[String: Int]] = []
     private var blockTableLengthLog: [[String: Int]] = []
     private var nativeVerifyRowsLog: [[String]] = []
+    private var nativeProposalRowsLog: [[ContinuousBatchNativeMTPProposalInput]] = []
     private var nativeVerifyProposalLog: [[String: [Int]]] = []
     private var nativeVerifyCurrentTokenLog: [[String: Int]] = []
     private var nativeVerifyInputTokenCountLog: [[String: Int]] = []
@@ -5375,6 +5709,8 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         rowFailures: Set<String> = [],
         nativeTargetTopTokens: [String: [Int]] = [:],
         nativeTargetTopTokensByStep: [String: [[Int]]] = [:],
+        nativeProposalGate: AsyncGate? = nil,
+        nativeProposalError: (any Error)? = nil,
         nativeVerifyGate: AsyncGate? = nil,
         nativeFinalizeGate: AsyncGate? = nil,
         nativeVerifyError: (any Error)? = nil,
@@ -5401,6 +5737,8 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
         self.rowFailures = rowFailures
         self.nativeTargetTopTokens = nativeTargetTopTokens
         self.nativeTargetTopTokensByStep = nativeTargetTopTokensByStep
+        self.nativeProposalGate = nativeProposalGate
+        self.nativeProposalError = nativeProposalError
         self.nativeVerifyGate = nativeVerifyGate
         self.nativeFinalizeGate = nativeFinalizeGate
         self.nativeVerifyError = nativeVerifyError
@@ -5512,6 +5850,14 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     func proposeNativeMTPPackedRound(
         rows: [ContinuousBatchNativeMTPProposalInput]
     ) async throws -> [String: [Int]]? {
+        nativeProposalRowsLog.append(rows)
+        eventLog.append("native_propose:\(rows.map(\.requestID).joined(separator: ","))")
+        if let nativeProposalGate {
+            await nativeProposalGate.wait()
+        }
+        if let nativeProposalError {
+            throw nativeProposalError
+        }
         nil
     }
 
@@ -5637,6 +5983,7 @@ private actor ScriptedBackend: ContinuousBatchSchedulerBackend {
     func decodeCommittedCounts() -> [[String: Int]] { decodeCommittedLog }
     func decodeTargetCounts() -> [[String: Int]] { decodeTargetLog }
     func blockTableLengthsByDecodeBatch() -> [[String: Int]] { blockTableLengthLog }
+    func nativeProposalBatches() -> [[ContinuousBatchNativeMTPProposalInput]] { nativeProposalRowsLog }
     func nativeVerifyBatches() -> [[String]] { nativeVerifyRowsLog }
     func nativeVerifyProposals() -> [[String: [Int]]] { nativeVerifyProposalLog }
     func nativeVerifyCurrentTokens() -> [[String: Int]] { nativeVerifyCurrentTokenLog }

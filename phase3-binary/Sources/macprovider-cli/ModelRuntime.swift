@@ -7,6 +7,7 @@ import MLXLLM
 import MLXHuggingFace
 import MLXLMCommon
 import MacProviderCore
+import Security
 import Tokenizers
 
 protocol ModelRuntimeServing: Actor {
@@ -1125,6 +1126,13 @@ actor ModelRuntime: ModelRuntimeServing {
         )
     }
 
+    static func nativeMTPFullPromptPrefillTokenLimit(prefillStepSize: Int) -> Int {
+        min(
+            max(1, prefillStepSize),
+            ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens
+        )
+    }
+
     private func nativeMTPRuntimeAdmission(
         for request: ChatCompletionRequest,
         snapshot: RuntimeSnapshot
@@ -1248,8 +1256,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private let configuredNativeMTPAdmissionSidecarPath: String?
     private let configuredNativeMTPAdmissionSignaturePath: String?
     private let configuredNativeMTPTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring?
-    private let configuredNativeMTPProviderRevision: String?
-    private let configuredNativeMTPUpstreamRevision: String?
+    private let configuredNativeMTPRunningBuildIdentity: NativeMTPRunningBuildIdentity?
     private let configuredNativeMTPRevokedTupleSHA256: Set<String>?
     private var currentSpecDecodeGeneration = 0
     private let numDraftTokens: Int
@@ -2252,8 +2259,7 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPAdmissionSidecarPath: String? = nil,
         nativeMTPAdmissionSignaturePath: String? = nil,
         nativeMTPTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring? = nil,
-        nativeMTPProviderRevision: String? = nil,
-        nativeMTPUpstreamRevision: String? = nil,
+        nativeMTPRunningBuildIdentity: NativeMTPRunningBuildIdentity? = nil,
         nativeMTPRevokedTupleSHA256: Set<String>? = nil,
         testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
         warmSwapEnabled: Bool = false,
@@ -2288,9 +2294,11 @@ actor ModelRuntime: ModelRuntimeServing {
             publicKeysByKeyID: AutotuneStaticInputs.defaultTrustedPublicKeys,
             requiredKeyID: AutotuneStaticInputs.keyID
         )
-        self.configuredNativeMTPProviderRevision = Self.nonEmpty(nativeMTPProviderRevision)
-        self.configuredNativeMTPUpstreamRevision = Self.nonEmpty(nativeMTPUpstreamRevision)
-            ?? KVBuildIdentity.mlxSwiftLMRevision
+        #if DEBUG
+        self.configuredNativeMTPRunningBuildIdentity = nativeMTPRunningBuildIdentity
+        #else
+        self.configuredNativeMTPRunningBuildIdentity = nil
+        #endif
         self.configuredNativeMTPRevokedTupleSHA256 = nativeMTPRevokedTupleSHA256
         self.numDraftTokens = numDraftTokens
         self.speculativeCacheWrapValidated = speculativeCacheWrapValidated
@@ -2369,7 +2377,53 @@ actor ModelRuntime: ModelRuntimeServing {
             return
         }
 
-        let (container, directory) = try await Self.loadLocalContainer(from: modelLoadPath ?? modelID)
+        let targetLoadPath = modelLoadPath ?? modelID
+        let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
+        if normalizedDraftModelID == nil,
+           let verifiedModelArtifactSHA256,
+           let targetDirectory = try? Self.localModelDirectory(for: targetLoadPath) {
+            candidateNativeMTPLoad = await Self.loadNativeMTPDrafterIfAdmitted(
+                mode: self.nativeMTPMode,
+                targetModelID: modelID,
+                targetModelRevision: verifiedModelArtifactSHA256,
+                targetDirectory: targetDirectory,
+                maxContextTokens: self.maxContextTokens,
+                kvBitsOverride: self.kvBitsOverride,
+                prefillStepSize: self.prefillStepSize,
+                slotCount: self.maxBatch,
+                sidecarPath: self.configuredNativeMTPAdmissionSidecarPath,
+                signaturePath: self.configuredNativeMTPAdmissionSignaturePath,
+                trustedKeyring: self.configuredNativeMTPTrustedKeyring,
+                runningBuildIdentity: self.configuredNativeMTPRunningBuildIdentity,
+                revokedTupleSHA256: self.configuredNativeMTPRevokedTupleSHA256
+            )
+        } else {
+            candidateNativeMTPLoad = nil
+        }
+
+        let container: ModelContainer
+        let directory: URL
+        let runtimeCacheClass: String
+        let modelCapabilities: PagedKVRuntimeModelCapabilities
+        if let candidateNativeMTPLoad {
+            container = candidateNativeMTPLoad.targetContainer
+            directory = candidateNativeMTPLoad.targetDirectory
+            runtimeCacheClass = candidateNativeMTPLoad.runtimeCacheClass
+            modelCapabilities = candidateNativeMTPLoad.modelCapabilities
+        } else {
+            let loaded = try await Self.loadLocalContainer(from: targetLoadPath)
+            container = loaded.0
+            directory = loaded.1
+            runtimeCacheClass = self.pagedKVConfig.effectiveEnabled
+                ? await Self.pagedKVRuntimeCacheClass(
+                    container: container,
+                    maxContextTokens: self.maxContextTokens,
+                    kvBitsOverride: self.kvBitsOverride,
+                    prefillStepSize: self.prefillStepSize
+                )
+                : Self.pagedKVUnavailableCacheClass
+            modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: directory)
+        }
         if let expectedArtifactHash = verifiedModelLoadSHA256 ?? verifiedModelArtifactSHA256 {
             try Self.verifyLoadedArtifact(directory: directory, expectedSHA256: expectedArtifactHash)
         }
@@ -2391,15 +2445,6 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentChatTemplateSHA256 = tokenizerHashes.template
         self.configuredTemplateSupportsThinkingToggle = Self.chatTemplateSupportsThinkingToggle(in: directory)
         self.currentTemplateSupportsThinkingToggle = self.configuredTemplateSupportsThinkingToggle
-        let runtimeCacheClass = self.pagedKVConfig.effectiveEnabled
-            ? await Self.pagedKVRuntimeCacheClass(
-                container: container,
-                maxContextTokens: self.maxContextTokens,
-                kvBitsOverride: self.kvBitsOverride,
-                prefillStepSize: self.prefillStepSize
-            )
-            : Self.pagedKVUnavailableCacheClass
-        let modelCapabilities = Self.pagedKVModelCapabilities(modelID: modelID, directory: directory)
         self.pagedKVRuntimeCacheClass = runtimeCacheClass
         self.currentPagedKVModelCapabilities = modelCapabilities
         let (parityProbe, moeProbe) = await self.computePagedKVRuntimeProbes(
@@ -2439,22 +2484,7 @@ actor ModelRuntime: ModelRuntimeServing {
         if case .attached = self.pagedKVAttachDecision {
             self.pagedKVSchedulerBackendInstalled = true
         }
-        if normalizedDraftModelID == nil,
-           let nativeMTPLoad = await Self.loadNativeMTPDrafterIfAdmitted(
-            mode: self.nativeMTPMode,
-            targetModelID: modelID,
-            targetModelRevision: self.currentModelHash,
-            targetDirectory: directory,
-            runtimeCacheClass: runtimeCacheClass,
-            modelCapabilities: modelCapabilities,
-            slotCount: self.maxBatch,
-            sidecarPath: self.configuredNativeMTPAdmissionSidecarPath,
-            signaturePath: self.configuredNativeMTPAdmissionSignaturePath,
-            trustedKeyring: self.configuredNativeMTPTrustedKeyring,
-            providerRevision: self.configuredNativeMTPProviderRevision,
-            upstreamRevision: self.configuredNativeMTPUpstreamRevision,
-            revokedTupleSHA256: self.configuredNativeMTPRevokedTupleSHA256
-           ) {
+        if let nativeMTPLoad = candidateNativeMTPLoad {
             self.currentNativeMTPDrafterContainer = nativeMTPLoad.drafterContainer
             self.currentNativeMTPCapability = nativeMTPLoad.capability
             self.currentNativeMTPAdmissionCapability = nativeMTPLoad.admissionCapability
@@ -2464,6 +2494,7 @@ actor ModelRuntime: ModelRuntimeServing {
             tuple: self.continuousBatchingRequestedTuple(),
             container: container,
             nativeMTPDrafterContainer: self.currentNativeMTPDrafterContainer,
+            nativeMTPAdmissionCapability: self.currentNativeMTPAdmissionCapability,
             backendOverride: self.testContinuousBatchingBackend,
             maxBatch: self.maxBatch,
             queueLimit: self.continuousBatchQueueLimit,
@@ -2561,8 +2592,7 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPAdmissionSidecarPath: String? = nil,
         nativeMTPAdmissionSignaturePath: String? = nil,
         nativeMTPTrustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring? = nil,
-        nativeMTPProviderRevision: String? = nil,
-        nativeMTPUpstreamRevision: String? = nil,
+        nativeMTPRunningBuildIdentity: NativeMTPRunningBuildIdentity? = nil,
         nativeMTPRevokedTupleSHA256: Set<String>? = nil,
         nativeMTPDrafterContainer: MTPDrafterContainer? = nil,
         testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
@@ -2614,8 +2644,11 @@ actor ModelRuntime: ModelRuntimeServing {
         self.configuredNativeMTPAdmissionSidecarPath = Self.nonEmpty(nativeMTPAdmissionSidecarPath)
         self.configuredNativeMTPAdmissionSignaturePath = Self.nonEmpty(nativeMTPAdmissionSignaturePath)
         self.configuredNativeMTPTrustedKeyring = nativeMTPTrustedKeyring
-        self.configuredNativeMTPProviderRevision = Self.nonEmpty(nativeMTPProviderRevision)
-        self.configuredNativeMTPUpstreamRevision = Self.nonEmpty(nativeMTPUpstreamRevision)
+        #if DEBUG
+        self.configuredNativeMTPRunningBuildIdentity = nativeMTPRunningBuildIdentity
+        #else
+        self.configuredNativeMTPRunningBuildIdentity = nil
+        #endif
         self.configuredNativeMTPRevokedTupleSHA256 = nativeMTPRevokedTupleSHA256
         self.numDraftTokens = numDraftTokens
         self.speculativeCacheWrapValidated = speculativeCacheWrapValidated
@@ -3470,6 +3503,24 @@ actor ModelRuntime: ModelRuntimeServing {
         return UInt64(bounded) * 1_000_000
     }
 
+    private nonisolated static func nativeMTPRoundByteCapacity(
+        from admissionCapability: NativeMTPAdmissionCapability?
+    ) -> Int? {
+        guard let admissionCapability,
+              admissionCapability.qualifiedSlots > 0,
+              admissionCapability.completeWindowBytesByDepth.indices.contains(admissionCapability.maxProposalDepth)
+        else {
+            return nil
+        }
+        let maxDepthBytes = admissionCapability.completeWindowBytesByDepth[admissionCapability.maxProposalDepth]
+        guard maxDepthBytes > 0 else { return nil }
+        let (capacity, overflow) = maxDepthBytes.multipliedReportingOverflow(
+            by: admissionCapability.qualifiedSlots
+        )
+        guard !overflow, capacity > 0 else { return nil }
+        return capacity
+    }
+
     private nonisolated static func makeContinuousBatchScheduler(
         decision: PagedKVAttachDecision,
         tuple: ContinuousBatchingRequestedTuple?,
@@ -3484,6 +3535,7 @@ actor ModelRuntime: ModelRuntimeServing {
         weightsGeneration: Int,
         prefillStepSize: Int,
         maxDecodeLockstepWindow: Int = ContinuousBatchSchedulerConfiguration.defaultDecodeLockstepWindow,
+        nativeMTPRoundByteCapacity: Int? = nil,
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
         contiguousCacheBridge: PagedKVRuntimeContiguousCacheBridge? = nil
     ) -> ContinuousBatchScheduler? {
@@ -3529,7 +3581,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     weightsGeneration: weightsGeneration
                 ),
                 maxDecodeLockstepWindow: maxDecodeLockstepWindow,
-                maxDecodeStepsWhilePrefilling: ContinuousBatchSchedulerConfiguration.defaultDecodeStepsWhilePrefilling
+                maxDecodeStepsWhilePrefilling: ContinuousBatchSchedulerConfiguration.defaultDecodeStepsWhilePrefilling,
+                nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity
             ),
             allocator: allocator,
             backend: backend,
@@ -3543,6 +3596,7 @@ actor ModelRuntime: ModelRuntimeServing {
         tuple: ContinuousBatchingRequestedTuple?,
         container: ModelContainer?,
         nativeMTPDrafterContainer: MTPDrafterContainer? = nil,
+        nativeMTPAdmissionCapability: NativeMTPAdmissionCapability? = nil,
         backendOverride: (any ContinuousBatchSchedulerBackend)?,
         maxBatch: Int,
         queueLimit: Int?,
@@ -3557,6 +3611,15 @@ actor ModelRuntime: ModelRuntimeServing {
         replayAuthority: any ContinuousBatchSchedulerReplayAuthority,
         cachedTurns: Bool
     ) async -> ContinuousBatchScheduler? {
+        let nativeMTPRoundByteCapacity: Int?
+        if nativeMTPDrafterContainer != nil {
+            guard let capacity = nativeMTPRoundByteCapacity(from: nativeMTPAdmissionCapability) else {
+                return nil
+            }
+            nativeMTPRoundByteCapacity = capacity
+        } else {
+            nativeMTPRoundByteCapacity = nil
+        }
         if let backendOverride {
             return makeContinuousBatchScheduler(
                 decision: decision,
@@ -3571,6 +3634,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 modelSHA256: modelSHA256,
                 weightsGeneration: weightsGeneration,
                 prefillStepSize: prefillStepSize,
+                nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
                 replayAuthority: replayAuthority
             )
         }
@@ -3623,6 +3687,7 @@ actor ModelRuntime: ModelRuntimeServing {
             weightsGeneration: weightsGeneration,
             prefillStepSize: prefillStepSize,
             maxDecodeLockstepWindow: maxDecodeLockstepWindow,
+            nativeMTPRoundByteCapacity: nativeMTPRoundByteCapacity,
             replayAuthority: replayAuthority,
             contiguousCacheBridge: contiguousCacheBridge
         )
@@ -3642,6 +3707,7 @@ actor ModelRuntime: ModelRuntimeServing {
             tuple: continuousBatchingRequestedTuple(),
             container: container,
             nativeMTPDrafterContainer: currentNativeMTPDrafterContainer,
+            nativeMTPAdmissionCapability: currentNativeMTPAdmissionCapability,
             backendOverride: testContinuousBatchingBackend,
             maxBatch: maxBatch,
             queueLimit: continuousBatchQueueLimit,
@@ -4637,7 +4703,8 @@ actor ModelRuntime: ModelRuntimeServing {
                 retainedRecurrentCheckpoints: retainedRecurrentCheckpoints,
                 serialToolStopObserver: serialToolStopObserver,
                 decodePath: nativeMTPAdmission?.effectivePath ?? .ordinary,
-                nativeMTPMaximumProposalDepth: nativeMTPAdmission?.initialProposalDepth ?? 0
+                nativeMTPMaximumProposalDepth: nativeMTPAdmission?.initialProposalDepth ?? 0,
+                nativeMTPCompleteWindowBytesByDepth: nativeMTPAdmission?.completeWindowBytesByDepth ?? []
             )
         )
     }
@@ -4980,6 +5047,13 @@ actor ModelRuntime: ModelRuntimeServing {
         try Task.checkCancellation()
         if shouldCancel() { throw CancellationError() }
         let maxOutputTokens = request.maxTokens ?? max(1, maxContextTokens - prepared.promptTokens.count)
+        let nativeMTPAdmission = nativeMTPAdmission.resolvingTokenBounds(
+            promptTokenCount: prepared.promptTokens.count,
+            maxOutputTokens: maxOutputTokens,
+            runtimeMaximumPromptTokens: Self.nativeMTPFullPromptPrefillTokenLimit(
+                prefillStepSize: prefillStepSize
+            )
+        )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
@@ -5212,6 +5286,13 @@ actor ModelRuntime: ModelRuntimeServing {
             stopTokenFilter: stopTokenFilter
         )
         let maxOutputTokens = request.maxTokens ?? max(1, maxContextTokens - prepared.promptTokens.count)
+        let nativeMTPAdmission = nativeMTPAdmission.resolvingTokenBounds(
+            promptTokenCount: prepared.promptTokens.count,
+            maxOutputTokens: maxOutputTokens,
+            runtimeMaximumPromptTokens: Self.nativeMTPFullPromptPrefillTokenLimit(
+                prefillStepSize: prefillStepSize
+            )
+        )
         let preparedPromptTokenIDs = prepared.promptTokens.map(Int32.init)
         let batchKVBits = Self.effectiveKVBits(
             configured: kvBitsOverride,
@@ -5256,7 +5337,13 @@ actor ModelRuntime: ModelRuntimeServing {
                 shouldCancel: { shouldCancel() || idleCancellation.isFired }
             ) {
                 try await scheduler.submit(submission.schedulerRequest, tokenSink: { event in
-                    guard !idleCancellation.isFired else { return }
+                    guard !drainCancelled.isFired,
+                          !shouldCancel(),
+                          !idleCancellation.isFired
+                    else {
+                        Task { await scheduler.stopEarly(requestID: schedulerRequestID) }
+                        return
+                    }
                     if streamState.step(
                         eventTokens: event.replayTokens ?? [event.token],
                         stopTokenFilter: stopTokenFilter,
@@ -7010,21 +7097,195 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     private static func loadLocalContainer(from target: String) async throws -> (ModelContainer, URL) {
+        try await loadLocalContainer(from: target, tokenizerLoader: #huggingFaceTokenizerLoader())
+    }
+
+    private static func loadLocalContainer(
+        from target: String,
+        tokenizerLoader: any TokenizerLoader
+    ) async throws -> (ModelContainer, URL) {
         let directory = try localModelDirectory(for: target)
         // mlx-swift-lm 3.x requires an explicit tokenizer loader. The provider
         // preflight has already verified model_artifact_path/model_artifact_sha256,
         // so load directly from the resolved local snapshot instead of downloading.
         let container = try await LLMModelFactory.shared.loadContainer(
             from: directory,
-            using: #huggingFaceTokenizerLoader()
+            using: tokenizerLoader
         )
         return (container, directory)
     }
 
+    struct NativeMTPRunningBuildIdentity: Equatable, Sendable {
+        let sourceCommit: String
+        let reproducibleBuildSHA256: String
+        let liveExecutableCDHash: String
+        let upstreamMLXSwiftLMRevision: String
+
+        init(
+            sourceCommit: String,
+            reproducibleBuildSHA256: String,
+            liveExecutableCDHash: String,
+            upstreamMLXSwiftLMRevision: String = KVBuildIdentity.mlxSwiftLMRevision
+        ) {
+            self.sourceCommit = sourceCommit
+            self.reproducibleBuildSHA256 = reproducibleBuildSHA256
+            self.liveExecutableCDHash = liveExecutableCDHash
+            self.upstreamMLXSwiftLMRevision = upstreamMLXSwiftLMRevision
+        }
+    }
+
+    private struct NativeMTPLiveProcessCodeIdentity: Equatable, Sendable {
+        let cdHash: String
+    }
+
     private struct NativeMTPRuntimeLoadResult {
+        let targetContainer: ModelContainer
+        let targetDirectory: URL
         let drafterContainer: MTPDrafterContainer
         let capability: NativeMTPCapability
         let admissionCapability: NativeMTPAdmissionCapability
+        let runtimeCacheClass: String
+        let modelCapabilities: PagedKVRuntimeModelCapabilities
+    }
+
+    private struct NativeMTPCapturedTokenizerLoader: TokenizerLoader {
+        let tokenizerDirectory: URL
+        let base: any TokenizerLoader
+
+        func load(from directory: URL) async throws -> any MLXLMCommon.Tokenizer {
+            try await base.load(from: tokenizerDirectory)
+        }
+    }
+
+    static func nativeMTPRunningBuildIdentity(
+        launchedExecutableURL: URL? = Bundle.main.executableURL,
+        markerStore: AutoUpdateMarkerStore = AutoUpdateMarkerStore()
+    ) -> NativeMTPRunningBuildIdentity? {
+        let canonicalBinaryURL = markerStore.resolveCanonicalInstallBinary(
+            launchedExecutableURL: launchedExecutableURL
+        )
+        guard let manifest = CompatibilitySetManifest.loadInstalledPreferringInstallAuthority(
+            launchedExecutableURL: launchedExecutableURL,
+            canonicalBinaryURL: canonicalBinaryURL,
+            expectedVersion: CoordinatorClient.binaryVersion,
+            allowProviderVersionMismatch: false
+        ),
+              let sourceCommit = compatibilitySetSourceCommit(manifest.compatibilitySetID),
+              let executableURL = CompatibilitySetManifest.resolvedExecutableURL(launchedExecutableURL),
+              let executableSHA256 = try? sha256RegularFileNoFollow(executableURL),
+              let liveCodeIdentity = nativeMTPLiveProcessCodeIdentity()
+        else {
+            return nil
+        }
+        return NativeMTPRunningBuildIdentity(
+            sourceCommit: sourceCommit,
+            reproducibleBuildSHA256: executableSHA256,
+            liveExecutableCDHash: liveCodeIdentity.cdHash,
+            upstreamMLXSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision
+        )
+    }
+
+    static func nativeMTPRunningBuildIdentityForTest(
+        launchedExecutableURL: URL?,
+        markerStore: AutoUpdateMarkerStore
+    ) -> NativeMTPRunningBuildIdentity? {
+        nativeMTPRunningBuildIdentity(
+            launchedExecutableURL: launchedExecutableURL,
+            markerStore: markerStore
+        )
+    }
+
+    static func nativeMTPRunningBuildIdentityForTest(
+        compatibilitySetID: String,
+        reproducibleBuildSHA256: String,
+        liveExecutableCDHash: String
+    ) -> NativeMTPRunningBuildIdentity? {
+        guard let sourceCommit = compatibilitySetSourceCommit(compatibilitySetID),
+              reproducibleBuildSHA256.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              liveExecutableCDHash.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil
+        else {
+            return nil
+        }
+        return NativeMTPRunningBuildIdentity(
+            sourceCommit: sourceCommit,
+            reproducibleBuildSHA256: reproducibleBuildSHA256,
+            liveExecutableCDHash: liveExecutableCDHash,
+            upstreamMLXSwiftLMRevision: KVBuildIdentity.mlxSwiftLMRevision
+        )
+    }
+
+    private static func compatibilitySetSourceCommit(_ compatibilitySetID: String) -> String? {
+        guard CompatibilitySetManifest.isCanonicalCompatibilitySetID(compatibilitySetID),
+              let marker = compatibilitySetID.lastIndex(of: "@")
+        else {
+            return nil
+        }
+        let commit = String(compatibilitySetID[compatibilitySetID.index(after: marker)...])
+        guard commit.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        return commit
+    }
+
+    private static func sha256RegularFileNoFollow(_ url: URL) throws -> String {
+        let fd = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw CocoaError(.fileReadNoSuchFile) }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFREG,
+              st.st_nlink == 1
+        else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        var hasher = SHA256()
+        var buffer = [UInt8](repeating: 0, count: 1024 * 1024)
+        while true {
+            let count = read(fd, &buffer, buffer.count)
+            if count < 0 { throw CocoaError(.fileReadUnknown) }
+            if count == 0 { break }
+            hasher.update(data: Data(buffer.prefix(count)))
+        }
+        return hexString(hasher.finalize())
+    }
+
+    private static func nativeMTPLiveProcessCodeIdentity() -> NativeMTPLiveProcessCodeIdentity? {
+        var currentCode: SecCode?
+        guard SecCodeCopySelf([], &currentCode) == errSecSuccess,
+              let currentCode,
+              SecCodeCheckValidity(
+                currentCode,
+                SecCSFlags(rawValue: kSecCSStrictValidate),
+                nil
+              ) == errSecSuccess
+        else {
+            return nil
+        }
+        var staticCode: SecStaticCode?
+        guard SecCodeCopyStaticCode(currentCode, [], &staticCode) == errSecSuccess,
+              let staticCode
+        else {
+            return nil
+        }
+        var signingInfo: CFDictionary?
+        guard SecCodeCopySigningInformation(
+            staticCode,
+            SecCSFlags(rawValue: kSecCSSigningInformation),
+            &signingInfo
+        ) == errSecSuccess,
+              let info = signingInfo as? [String: Any],
+              let cdHash = info[kSecCodeInfoUnique as NSString as String] as? Data,
+              !cdHash.isEmpty
+        else {
+            return nil
+        }
+        let cdHashHex = hexString(cdHash)
+        guard cdHashHex.range(of: #"^[0-9a-f]{40}$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        return NativeMTPLiveProcessCodeIdentity(
+            cdHash: cdHashHex
+        )
     }
 
     private static func loadNativeMTPDrafterIfAdmitted(
@@ -7032,31 +7293,20 @@ actor ModelRuntime: ModelRuntimeServing {
         targetModelID: String,
         targetModelRevision: String?,
         targetDirectory: URL,
-        runtimeCacheClass: String,
-        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        maxContextTokens: Int,
+        kvBitsOverride: Int?,
+        prefillStepSize: Int,
         slotCount: Int,
         sidecarPath: String?,
         signaturePath: String?,
         trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring?,
-        providerRevision: String?,
-        upstreamRevision: String?,
+        runningBuildIdentity injectedRunningBuildIdentity: NativeMTPRunningBuildIdentity?,
         revokedTupleSHA256: Set<String>?
     ) async -> NativeMTPRuntimeLoadResult? {
-        let environment = ProcessInfo.processInfo.environment
-        let resolvedProviderRevision = providerRevision
-            ?? Self.nonEmpty(environment["MACPROVIDER_PROVIDER_REVISION"])
-            ?? Self.nonEmpty(environment["MACPROVIDER_SOURCE_COMMIT"])
-        let resolvedUpstreamRevision = upstreamRevision
-            ?? Self.nonEmpty(environment["MACPROVIDER_UPSTREAM_MLX_SWIFT_LM_REVISION"])
         guard mode == .auto,
               let targetModelRevision,
-              let canonicalCacheClass = nativeMTPAdmissionCacheClass(
-                runtimeCacheClass: runtimeCacheClass,
-                modelCapabilities: modelCapabilities
-              ),
               let trustedKeyring,
-              let resolvedProviderRevision,
-              let resolvedUpstreamRevision
+              let runningBuildIdentity = injectedRunningBuildIdentity ?? nativeMTPRunningBuildIdentity()
         else {
             return nil
         }
@@ -7077,65 +7327,110 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
         do {
-            let sidecarData = try Data(contentsOf: sidecarURL)
-            let signatureData = try Data(contentsOf: signatureURL)
             let snapshotRoot = sidecarURL.deletingLastPathComponent()
             let machine = MachineFingerprinter().sample()
             let admissionCapability = try NativeMTPAdmissionSidecar.load(
-                sidecarData: sidecarData,
-                signatureData: signatureData,
+                sidecarURL: sidecarURL,
+                signatureURL: signatureURL,
                 snapshotRoot: snapshotRoot,
                 context: NativeMTPAdmissionSidecar.RuntimeContext(
                     modelID: targetModelID,
                     modelRevision: targetModelRevision,
-                    providerRevision: resolvedProviderRevision,
-                    upstreamMLXSwiftLMRevision: resolvedUpstreamRevision,
+                    providerRevision: runningBuildIdentity.sourceCommit,
+                    upstreamMLXSwiftLMRevision: runningBuildIdentity.upstreamMLXSwiftLMRevision,
                     hardwareChip: machine.chip,
                     ramGB: machine.ramGB,
                     osVersion: machine.osVersion,
                     slotCount: slotCount,
                     revokedTupleSHA256: revokedTupleSHA256
                 ),
-                trustedKeyring: trustedKeyring
+                trustedKeyring: trustedKeyring,
+                captureArtifacts: true
             )
-            guard admissionCapability.familyAdapter.lowercased().contains("qwen"),
-                  admissionCapability.cacheClass == canonicalCacheClass,
-                  admissionCapability.qualifiedSlots <= slotCount,
-                  let targetArtifactPath = nativeMTPArtifactPath(
-                    named: "target",
-                    fromSignedSidecarData: sidecarData
+            guard nativeMTPAdmissionMatchesRunningBuild(
+                    admissionCapability,
+                    targetModelRevision: targetModelRevision,
+                    runningBuildIdentity: runningBuildIdentity
                   ),
-                  let mtpArtifactPath = nativeMTPArtifactPath(
-                    named: "mtp",
-                    fromSignedSidecarData: sidecarData
+                  admissionCapability.qualifiedSlots <= slotCount,
+                  let capturedArtifacts = admissionCapability.capturedArtifacts
+            else {
+                return nil
+            }
+            let drafterDirectory = try nativeMTPArtifactDirectory(for: capturedArtifacts.mtpURL)
+            guard let capturedTokenizerLoader = nativeMTPCapturedTokenizerLoader(
+                capturedArtifacts: capturedArtifacts
+            ) else {
+                return nil
+            }
+            guard try nativeMTPCapturedManifestMatchesAdmission(
+                capturedArtifacts: capturedArtifacts,
+                admissionCapability: admissionCapability
+            ) else {
+                return nil
+            }
+            let artifactObservation = try NativeMTPArtifactObserver.observePair(
+                targetDirectory: capturedArtifacts.targetURL,
+                mtpDirectory: drafterDirectory
+            )
+            guard nativeMTPArtifactObservationMatchesAdmission(
+                artifactObservation,
+                admissionCapability: admissionCapability
+            ) else {
+                return nil
+            }
+            let targetLoad = try await loadLocalContainer(
+                from: capturedArtifacts.targetURL.path,
+                tokenizerLoader: capturedTokenizerLoader
+            )
+            let capturedTargetContainer = targetLoad.0
+            let capturedTargetDirectory = targetLoad.1
+            guard capturedTargetDirectory
+                .resolvingSymlinksInPath()
+                .standardizedFileURL == capturedArtifacts.targetURL
+                .resolvingSymlinksInPath()
+                .standardizedFileURL
+            else {
+                return nil
+            }
+            let modelCapabilities = pagedKVModelCapabilities(modelID: targetModelID, directory: capturedTargetDirectory)
+            let runtimeCacheClass = await pagedKVRuntimeCacheClass(
+                container: capturedTargetContainer,
+                maxContextTokens: maxContextTokens,
+                kvBitsOverride: kvBitsOverride,
+                prefillStepSize: prefillStepSize
+            )
+            guard let canonicalCacheClass = nativeMTPAdmissionCacheClass(
+                    runtimeCacheClass: runtimeCacheClass,
+                    modelCapabilities: modelCapabilities
+                  ),
+                  nativeMTPAdmissionCapabilitySupported(
+                    admissionCapability,
+                    canonicalCacheClass: canonicalCacheClass,
+                    modelCapabilities: modelCapabilities
                   )
             else {
                 return nil
             }
-            let admittedTargetDirectory = snapshotRoot
-                .appendingPathComponent(targetArtifactPath, isDirectory: true)
-                .resolvingSymlinksInPath()
-                .standardizedFileURL
-            guard admittedTargetDirectory == targetDirectory
-                .resolvingSymlinksInPath()
-                .standardizedFileURL
-            else {
-                return nil
-            }
-            let artifactURL = snapshotRoot.appendingPathComponent(mtpArtifactPath)
-            let isDirectory = (try? artifactURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
-            let drafterDirectory = isDirectory ? artifactURL : artifactURL.deletingLastPathComponent()
             await Qwen35TextMTPRegistration.register()
             let drafterContainer = try await MTPDrafterModelFactory.shared.loadContainer(
                 from: drafterDirectory,
-                using: #huggingFaceTokenizerLoader()
+                using: capturedTokenizerLoader
             )
-            let drafterMaximumBlockSize = await drafterContainer.perform { context in
-                context.model.maximumBlockSize
+            try capturedArtifacts.revalidateAfterLoad()
+            let drafterRuntimeObservation = await drafterContainer.perform { context -> (maximumBlockSize: Int?, stateLayerCount: Int?) in
+                let stateLayerCount = (context.model as? any StatefulMTPDrafterModel)?
+                    .makeState(parameters: nil)
+                    .cache
+                    .count
+                return (context.model.maximumBlockSize, stateLayerCount)
+            }
+            guard drafterRuntimeObservation.stateLayerCount == admissionCapability.predictionLayerCount else {
+                return nil
             }
             guard NativeMTPProposalBounds.fits(
                 maximumProposalDepth: admissionCapability.maxProposalDepth,
-                maximumBlockSize: drafterMaximumBlockSize
+                maximumBlockSize: drafterRuntimeObservation.maximumBlockSize
             ) else {
                 return nil
             }
@@ -7151,36 +7446,161 @@ actor ModelRuntime: ModelRuntimeServing {
                 supportsNonStreaming: true,
                 supportsStopSequences: false,
                 hasQualifiedRowMappedTransactions: true,
-                maximumProposalDepth: admissionCapability.maxProposalDepth
+                maximumProposalDepth: admissionCapability.maxProposalDepth,
+                maximumPromptTokens: admissionCapability.maxPromptTokens,
+                maximumCompletionTokens: admissionCapability.maxCompletionTokens,
+                completeWindowBytesByDepth: admissionCapability.completeWindowBytesByDepth
             )
             return NativeMTPRuntimeLoadResult(
+                targetContainer: capturedTargetContainer,
+                targetDirectory: capturedTargetDirectory,
                 drafterContainer: drafterContainer,
                 capability: capability,
-                admissionCapability: admissionCapability
+                admissionCapability: admissionCapability,
+                runtimeCacheClass: runtimeCacheClass,
+                modelCapabilities: modelCapabilities
             )
         } catch {
             return nil
         }
     }
 
-    private static func nativeMTPArtifactPath(
-        named artifactName: String,
-        fromSignedSidecarData sidecarData: Data
-    ) -> String? {
-        guard let object = try? JSONSerialization.jsonObject(with: sidecarData) as? [String: Any],
-              let artifacts = object["artifacts"] as? [String: Any],
-              let artifact = artifacts[artifactName] as? [String: Any],
-              let path = artifact["path"] as? String,
-              !path.isEmpty,
-              !path.hasPrefix("/")
+    private static func nativeMTPAdmissionMatchesRunningBuild(
+        _ admissionCapability: NativeMTPAdmissionCapability,
+        targetModelRevision: String,
+        runningBuildIdentity: NativeMTPRunningBuildIdentity
+    ) -> Bool {
+        admissionCapability.providerRevision == runningBuildIdentity.sourceCommit
+            && admissionCapability.spec023SourceCommit == runningBuildIdentity.sourceCommit
+            && admissionCapability.spec023BuildDigestSHA256 == runningBuildIdentity.reproducibleBuildSHA256
+            && admissionCapability.spec023LiveExecutableCDHash == runningBuildIdentity.liveExecutableCDHash
+            && admissionCapability.upstreamMLXSwiftLMRevision == KVBuildIdentity.mlxSwiftLMRevision
+            && runningBuildIdentity.upstreamMLXSwiftLMRevision == KVBuildIdentity.mlxSwiftLMRevision
+            && admissionCapability.targetArtifactSHA256 == targetModelRevision
+    }
+
+    static func nativeMTPAdmissionMatchesRunningBuildForTest(
+        _ admissionCapability: NativeMTPAdmissionCapability,
+        targetModelRevision: String,
+        runningBuildIdentity: NativeMTPRunningBuildIdentity
+    ) -> Bool {
+        nativeMTPAdmissionMatchesRunningBuild(
+            admissionCapability,
+            targetModelRevision: targetModelRevision,
+            runningBuildIdentity: runningBuildIdentity
+        )
+    }
+
+    private static func nativeMTPArtifactDirectory(for url: URL) throws -> URL {
+        let values = try url.resourceValues(forKeys: [.isDirectoryKey])
+        return values.isDirectory == true ? url : url.deletingLastPathComponent()
+    }
+
+    private static func nativeMTPCapturedTokenizerLoader(
+        capturedArtifacts: NativeMTPAdmissionCapturedArtifacts
+    ) -> (any TokenizerLoader)? {
+        guard let targetURL = nativeMTPCapturedTokenizerDirectory(
+            targetURL: capturedArtifacts.targetURL,
+            tokenizerURL: capturedArtifacts.tokenizerURL
+        )
         else {
             return nil
         }
-        let components = path.split(separator: "/", omittingEmptySubsequences: false)
-        guard components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
+        return NativeMTPCapturedTokenizerLoader(
+            tokenizerDirectory: targetURL,
+            base: #huggingFaceTokenizerLoader()
+        )
+    }
+
+    private static func nativeMTPCapturedManifestMatchesAdmission(
+        capturedArtifacts: NativeMTPAdmissionCapturedArtifacts,
+        admissionCapability: NativeMTPAdmissionCapability
+    ) throws -> Bool {
+        nativeMTPCapturedManifestPathMatchesMTP(
+            mtpURL: capturedArtifacts.mtpURL,
+            manifestURL: capturedArtifacts.manifestURL
+        )
+            && (try sha256RegularFileNoFollow(capturedArtifacts.manifestURL)) == admissionCapability.mtpManifestSHA256
+    }
+
+    private static func nativeMTPCapturedManifestPathMatchesMTP(mtpURL: URL, manifestURL: URL) -> Bool {
+        let mtpURL = mtpURL.standardizedFileURL
+        let manifestURL = manifestURL.standardizedFileURL
+        return manifestURL == mtpURL.appendingPathComponent("config.json").standardizedFileURL
+            && BYOMArtifactPathPolicy.isContained(manifestURL, in: mtpURL)
+    }
+
+    static func nativeMTPCapturedManifestPathMatchesMTPForTest(mtpURL: URL, manifestURL: URL) -> Bool {
+        nativeMTPCapturedManifestPathMatchesMTP(mtpURL: mtpURL, manifestURL: manifestURL)
+    }
+
+    private static func nativeMTPCapturedTokenizerDirectory(targetURL: URL, tokenizerURL: URL) -> URL? {
+        let targetURL = targetURL.standardizedFileURL
+        let tokenizerURL = tokenizerURL.standardizedFileURL
+        guard tokenizerURL.deletingLastPathComponent() == targetURL,
+              tokenizerURL.lastPathComponent == "tokenizer.json",
+              BYOMArtifactPathPolicy.isContained(tokenizerURL, in: targetURL)
+        else {
             return nil
         }
-        return path
+        return targetURL
+    }
+
+    static func nativeMTPCapturedTokenizerDirectoryForTest(targetURL: URL, tokenizerURL: URL) -> URL? {
+        nativeMTPCapturedTokenizerDirectory(targetURL: targetURL, tokenizerURL: tokenizerURL)
+    }
+
+    private static func nativeMTPArtifactObservationMatchesAdmission(
+        _ observation: NativeMTPArtifactPairObservation?,
+        admissionCapability: NativeMTPAdmissionCapability
+    ) -> Bool {
+        guard let observation else { return false }
+        return observation.target.format.sidecarQuantizationLabel == admissionCapability.quantization.target
+            && observation.mtp.format.sidecarQuantizationLabel == admissionCapability.quantization.mtp
+            && observation.target.mtpPredictionLayerCount == admissionCapability.predictionLayerCount
+            && observation.mtp.mtpPredictionLayerCount == admissionCapability.predictionLayerCount
+    }
+
+    static func nativeMTPArtifactObservationMatchesAdmissionForTest(
+        _ observation: NativeMTPArtifactPairObservation?,
+        admissionCapability: NativeMTPAdmissionCapability
+    ) -> Bool {
+        nativeMTPArtifactObservationMatchesAdmission(
+            observation,
+            admissionCapability: admissionCapability
+        )
+    }
+
+    private static func nativeMTPAdmissionCapabilitySupported(
+        _ admissionCapability: NativeMTPAdmissionCapability,
+        canonicalCacheClass: String,
+        modelCapabilities: PagedKVRuntimeModelCapabilities
+    ) -> Bool {
+        admissionCapability.familyAdapter == "qwen3_5_mtp_v1"
+            && admissionCapability.sourceLayout == "separate_artifact"
+            && admissionCapability.predictionLayerCount == admissionCapability.maxProposalDepth
+            && admissionCapability.cacheClass == canonicalCacheClass
+            && admissionCapability.stateClass == nativeMTPExpectedStateClass(modelCapabilities: modelCapabilities)
+    }
+
+    static func nativeMTPAdmissionCapabilitySupportedForTest(
+        _ admissionCapability: NativeMTPAdmissionCapability,
+        canonicalCacheClass: String,
+        modelCapabilities: PagedKVRuntimeModelCapabilities
+    ) -> Bool {
+        nativeMTPAdmissionCapabilitySupported(
+            admissionCapability,
+            canonicalCacheClass: canonicalCacheClass,
+            modelCapabilities: modelCapabilities
+        )
+    }
+
+    private static func nativeMTPExpectedStateClass(
+        modelCapabilities: PagedKVRuntimeModelCapabilities
+    ) -> String {
+        modelCapabilities.hybridDecoderArchitectureVerified
+            ? "hybrid_stageable_rewindable"
+            : "stageable_rewindable"
     }
 
     static func localModelDirectory(for target: String) throws -> URL {

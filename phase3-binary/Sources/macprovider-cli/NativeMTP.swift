@@ -34,6 +34,39 @@ struct NativeMTPCapability: Sendable, Equatable {
     let supportsStopSequences: Bool
     let hasQualifiedRowMappedTransactions: Bool
     let maximumProposalDepth: Int
+    let maximumPromptTokens: Int
+    let maximumCompletionTokens: Int
+    let completeWindowBytesByDepth: [Int]
+
+    init(
+        admitted: Bool,
+        revoked: Bool,
+        revocationStateAvailable: Bool,
+        supportsCurrentProcessor: Bool,
+        supportsCurrentStateCache: Bool,
+        supportsStreaming: Bool,
+        supportsNonStreaming: Bool,
+        supportsStopSequences: Bool,
+        hasQualifiedRowMappedTransactions: Bool,
+        maximumProposalDepth: Int,
+        maximumPromptTokens: Int,
+        maximumCompletionTokens: Int,
+        completeWindowBytesByDepth: [Int] = []
+    ) {
+        self.admitted = admitted
+        self.revoked = revoked
+        self.revocationStateAvailable = revocationStateAvailable
+        self.supportsCurrentProcessor = supportsCurrentProcessor
+        self.supportsCurrentStateCache = supportsCurrentStateCache
+        self.supportsStreaming = supportsStreaming
+        self.supportsNonStreaming = supportsNonStreaming
+        self.supportsStopSequences = supportsStopSequences
+        self.hasQualifiedRowMappedTransactions = hasQualifiedRowMappedTransactions
+        self.maximumProposalDepth = maximumProposalDepth
+        self.maximumPromptTokens = maximumPromptTokens
+        self.maximumCompletionTokens = maximumCompletionTokens
+        self.completeWindowBytesByDepth = completeWindowBytesByDepth
+    }
 
     static let unavailable = NativeMTPCapability(
         admitted: false,
@@ -45,7 +78,10 @@ struct NativeMTPCapability: Sendable, Equatable {
         supportsNonStreaming: false,
         supportsStopSequences: false,
         hasQualifiedRowMappedTransactions: false,
-        maximumProposalDepth: 0
+        maximumProposalDepth: 0,
+        maximumPromptTokens: 0,
+        maximumCompletionTokens: 0,
+        completeWindowBytesByDepth: []
     )
 }
 
@@ -70,6 +106,8 @@ enum NativeMTPSelectorReason: String, CaseIterable, Sendable {
     case tupleNotAdmitted = "tuple_not_admitted"
     case tupleRevoked = "tuple_revoked"
     case revocationStateUnavailable = "revocation_state_unavailable"
+    case promptTokenLimit = "prompt_token_limit"
+    case completionTokenLimit = "completion_token_limit"
 
     var isEligible: Bool { self == .eligible }
 }
@@ -168,6 +206,14 @@ struct NativeMTPSelector: Sendable {
         }
         guard nativeCapability.maximumProposalDepth > 0 else {
             return .insufficientVerificationCapacity
+        }
+        guard nativeCapability.maximumPromptTokens > 0,
+              nativeCapability.maximumCompletionTokens > 0 else {
+            return .capabilityMismatch
+        }
+        if let maxTokens = request.maxTokens,
+           maxTokens > nativeCapability.maximumCompletionTokens {
+            return .completionTokenLimit
         }
         guard request.stop.isEmpty || nativeCapability.supportsStopSequences else {
             return .capabilityMismatch
@@ -289,6 +335,9 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
     let selection: DecodePathSelection
     let effectivePath: DecodePath
     let initialProposalDepth: Int
+    let maximumPromptTokens: Int
+    let maximumCompletionTokens: Int
+    let completeWindowBytesByDepth: [Int]
 
     var usesNativeMTP: Bool {
         effectivePath == .nativeMTP
@@ -310,13 +359,52 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
             return NativeMTPRuntimeAdmission(
                 selection: selection,
                 effectivePath: selection.path == .classicDraftSpec ? .classicDraftSpec : .ordinary,
-                initialProposalDepth: 0
+                initialProposalDepth: 0,
+                maximumPromptTokens: 0,
+                maximumCompletionTokens: 0,
+                completeWindowBytesByDepth: []
             )
         }
         return NativeMTPRuntimeAdmission(
             selection: selection,
             effectivePath: .nativeMTP,
-            initialProposalDepth: capability.maximumProposalDepth
+            initialProposalDepth: capability.maximumProposalDepth,
+            maximumPromptTokens: capability.maximumPromptTokens,
+            maximumCompletionTokens: capability.maximumCompletionTokens,
+            completeWindowBytesByDepth: capability.completeWindowBytesByDepth
+        )
+    }
+
+    func resolvingTokenBounds(
+        promptTokenCount: Int,
+        maxOutputTokens: Int,
+        runtimeMaximumPromptTokens: Int? = nil
+    ) -> NativeMTPRuntimeAdmission {
+        guard usesNativeMTP else { return self }
+        let effectiveMaximumPromptTokens: Int
+        if let runtimeMaximumPromptTokens {
+            effectiveMaximumPromptTokens = min(maximumPromptTokens, runtimeMaximumPromptTokens)
+        } else {
+            effectiveMaximumPromptTokens = maximumPromptTokens
+        }
+        let reason: NativeMTPSelectorReason?
+        if promptTokenCount < 0
+            || effectiveMaximumPromptTokens <= 0
+            || promptTokenCount > effectiveMaximumPromptTokens {
+            reason = .promptTokenLimit
+        } else if maxOutputTokens < 0 || maximumCompletionTokens <= 0 || maxOutputTokens > maximumCompletionTokens {
+            reason = .completionTokenLimit
+        } else {
+            reason = nil
+        }
+        guard let reason else { return self }
+        return NativeMTPRuntimeAdmission(
+            selection: DecodePathSelection(path: .ordinary, nativeMTPReason: reason),
+            effectivePath: .ordinary,
+            initialProposalDepth: 0,
+            maximumPromptTokens: 0,
+            maximumCompletionTokens: 0,
+            completeWindowBytesByDepth: []
         )
     }
 }

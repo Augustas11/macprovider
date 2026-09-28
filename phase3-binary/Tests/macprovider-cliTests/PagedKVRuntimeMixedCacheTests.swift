@@ -32,7 +32,7 @@ final class PagedKVRuntimeMixedCacheTests: XCTestCase {
         let result = await PagedKVRuntimeParityProbe.runMoEInputIsolationProbe(
             container: container,
             blockSizeTokens: 4,
-            maxPhysicalBlocks: 16,
+            maxPhysicalBlocks: 32,
             poolEpoch: 1,
             layerCount: 2,
             promptA: [0, 1],
@@ -742,7 +742,7 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
     let kvHeads = [1, 1]
     private let recorder: MixedCacheRecorder
     private let nextTokenByInput: [Int: Int]
-    private let vocabularySize = 32
+    private let vocabularySize = 64
     private let attentionDType: DType
     private let returnsBackendStateForBatches: Bool
 
@@ -761,6 +761,14 @@ private final class MixedCacheFakeModel: Module, LanguageModel, KVCacheDimension
 
     func prepare(_ input: LMInput, cache: [KVCache], state: LMOutput.State?, prefill: PrefillParameters) throws -> PrepareResult {
         .tokens(input.text)
+    }
+
+    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
+        callAsFunction(
+            LMInput.Text(tokens: inputs),
+            cache: cache,
+            state: nil
+        ).logits
     }
 
     func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?) -> LMOutput {

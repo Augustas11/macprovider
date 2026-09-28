@@ -517,7 +517,6 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         /// Target token already sampled from the fully committed prompt and
         /// evaluated as the first column of this verification round.
         let currentToken: Int
-        let promptTokens: [Int]
         let targetState: MTPPackedVerificationRowState
         let draftTokens: MLXArray?
         let layers: [NativeMTPPendingLayerResolution]
@@ -676,8 +675,13 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                         let prompt = MLXArray(input.promptTokens.map(Int32.init))
                             .reshaped([1, input.promptTokens.count])
                         let text = LMInput.Text(tokens: prompt)
+                        var modelState = state.state
+                        if input.nativeMTPPromptPrefill {
+                            modelState = modelState ?? LMOutput.State()
+                            modelState?[mtpEmitFlagKey] = true
+                        }
                         let output = withPreparedCache(state.caches, lengths: text.sequenceLengths) {
-                            context.model(text, cache: state.caches, state: state.state)
+                            context.model(text, cache: state.caches, state: modelState)
                         }
                         if input.sampleFirstToken {
                             sampledToken = ContinuousBatchRowSampler.sample(
@@ -686,6 +690,20 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                             ).asArray(Int.self).first
                         } else {
                             sampledToken = nil
+                        }
+                        if input.nativeMTPPromptPrefill {
+                            guard let sampledToken else {
+                                throw ContinuousBatchSchedulerError.unsupported(
+                                    "native_mtp_missing_prompt_bonus_token"
+                                )
+                            }
+                            try await self.prepareNativeMTPDrafterState(
+                                targetModel: context.model,
+                                prompt: prompt,
+                                output: output,
+                                firstBonusToken: sampledToken,
+                                requestID: input.requestID
+                            )
                         }
                         // Earlier chunks evaluate only cache state. The final
                         // chunk also evaluates its sampled token, matching
@@ -728,6 +746,9 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
 
     private static func canSharePrefillForward(_ inputs: [ContinuousBatchPrefillInput]) -> Bool {
         guard inputs.count > 1, let first = inputs.first, !first.promptTokens.isEmpty else {
+            return false
+        }
+        guard inputs.allSatisfy({ !$0.nativeMTPPromptPrefill }) else {
             return false
         }
         let chunkLength = first.promptTokens.count
@@ -1490,6 +1511,47 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
         storeNativeMTPDrafterState(state, for: requestID)
     }
 
+    private func prepareNativeMTPDrafterState(
+        targetModel: any LanguageModel,
+        prompt: MLXArray,
+        output: LMOutput,
+        firstBonusToken: Int,
+        requestID: String
+    ) async throws {
+        guard let drafterContainer else { return }
+        guard let targetHidden = output.state?[mtpLastHiddenStatesKey] else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_prompt_hidden_state")
+        }
+        guard targetHidden.ndim == 3,
+              targetHidden.dim(0) == 1,
+              targetHidden.dim(1) >= prompt.dim(1)
+        else {
+            throw ContinuousBatchSchedulerError.unsupported("native_mtp_invalid_prompt_hidden_state")
+        }
+        let state = try await drafterContainer.perform(
+            nonSendable: (targetModel, prompt, targetHidden, firstBonusToken, output.state)
+        ) { drafterContext, values in
+            let (targetModel, prompt, targetHidden, firstBonusToken, outputState) = values
+            guard let statefulDrafter = drafterContext.model as? any StatefulMTPDrafterModel else {
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_stateful_drafter_required")
+            }
+            let sampler = GenerateParameters(temperature: 0).sampler()
+            var state = statefulDrafter.makeState(parameters: nil)
+            statefulDrafter.prepareDrafterState(
+                target: targetModel,
+                promptTokens: prompt,
+                targetHidden: targetHidden,
+                firstBonus: MLXArray([Int32(firstBonusToken)]),
+                positionDeltas: outputState?[mtpPositionDeltasKey],
+                state: &state,
+                sampler: sampler
+            )
+            eval(state.cache)
+            return state
+        }
+        storeNativeMTPDrafterState(state, for: requestID)
+    }
+
     private func commitNativeMTPDrafterState(
         targetModel: any LanguageModel,
         input: ContinuousBatchNativeMTPFinalizeInput,
@@ -1509,31 +1571,7 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
             if let existing = self.nativeMTPDrafterState(for: input.requestID) {
                 state = existing
             } else {
-                state = statefulDrafter.makeState(parameters: nil)
-                guard input.proposalTokenCount == 0,
-                      input.committedProposalTokenCount == 0,
-                      !transaction.promptTokens.isEmpty
-                else {
-                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_drafter_state")
-                }
-                let prompt = MLXArray(transaction.promptTokens.map(Int32.init))
-                    .reshaped([1, transaction.promptTokens.count])
-                var targetState = LMOutput.State()
-                targetState[mtpEmitFlagKey] = true
-                let promptOutput = targetModel(LMInput.Text(tokens: prompt), cache: nil, state: targetState)
-                guard let promptHidden = promptOutput.state?[mtpLastHiddenStatesKey] else {
-                    throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_prompt_hidden_state")
-                }
-                statefulDrafter.prepareDrafterState(
-                    target: targetModel,
-                    promptTokens: prompt,
-                    targetHidden: promptHidden,
-                    firstBonus: MLXArray([Int32(transaction.currentToken)]),
-                    positionDeltas: transaction.targetState.positionDeltas,
-                    state: &state,
-                    sampler: sampler
-                )
-                eval(state.cache)
+                throw ContinuousBatchSchedulerError.unsupported("native_mtp_missing_drafter_state")
             }
 
             let draftTokens = transaction.draftTokens
@@ -1582,7 +1620,6 @@ final class PagedKVSharedForwardBackend: ContinuousBatchSchedulerBackend, @unche
                 NativeMTPPendingTransaction(
                     proposalTokenCount: input.proposalTokens.count,
                     currentToken: input.currentToken,
-                    promptTokens: input.promptTokens,
                     targetState: continuationState,
                     draftTokens: self.consumeNativeMTPDraftTokens(for: input.requestID),
                     layers: layers

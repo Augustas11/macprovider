@@ -889,6 +889,56 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(Self.tokens(from: lone), ["lone": 4])
     }
 
+    func testNativeMTPPromptPrefillUsesBoundedFinalPrefillHiddenWithoutReplay() async throws {
+        let descriptor = Self.bridgeDescriptor()
+        let model = RuntimeBridgeFakeModel(
+            nextTokenByInput: [12: 13],
+            emitsMTPState: true
+        )
+        let drafter = RuntimeBridgeRecordingMTPDrafter()
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: descriptor.modelID),
+            model: model,
+            processor: StandInUserInputProcessor(),
+            tokenizer: RuntimeBridgeFakeTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            descriptor: descriptor,
+            layerCount: 1,
+            drafterContainer: MTPDrafterContainer(
+                context: MTPDrafterContext(
+                    configuration: ModelConfiguration(id: "mtp"),
+                    model: drafter
+                )
+            )
+        )
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: 16
+        )
+        let handle = try await allocator.allocate(conversationKey: "native", maxTokens: 8)
+        _ = try await allocator.extend(handle, by: 3)
+
+        let output = try await backend.prefill(rows: [
+            ContinuousBatchPrefillInput(
+                requestID: "native",
+                promptTokens: [10, 11, 12],
+                binding: try await allocator.binding(for: handle),
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 3,
+                isFinalChunk: true,
+                nativeMTPPromptPrefill: true
+            ),
+        ])
+
+        XCTAssertEqual(output, [ContinuousBatchPrefillOutput(requestID: "native", sampledToken: 13)])
+        XCTAssertEqual(model.forwardCallCount(), 1)
+        XCTAssertEqual(drafter.preparedPromptWidths(), [3])
+        XCTAssertEqual(drafter.preparedHiddenWidths(), [3])
+    }
+
     func testMTPPackedCacheStagesProposalColumnsPrivatelyAndIgnoresPadding() async throws {
         let descriptor = Self.bridgeDescriptor()
         let allocator = try PagedKVBlockAllocator(
@@ -1396,9 +1446,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(completionDecodeBatches, [["relay-request-1500"]])
 
         let chunkRecorder = RuntimeBridgeChunkRecorder()
-        let handle = try await runtime.acquireRequestHandle(request)
+        let streamingRequest = try Self.chatRequest(modelID: modelID, maxTokens: 2)
+            .withRequestID("relay-request-1501")
+        let handle = try await runtime.acquireRequestHandle(streamingRequest)
         let streamed = try await runtime.stream(
-            request,
+            streamingRequest,
             with: handle,
             onChunk: { chunkRecorder.append($0) }
         )
@@ -1414,7 +1466,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let streamedDecodeCalls = await backend.decodeCallCount()
         XCTAssertEqual(streamedDecodeCalls, 2)
         let allDecodeBatches = await backend.decodeBatches()
-        XCTAssertEqual(Array(allDecodeBatches.suffix(1)), [["relay-request-1500"]])
+        XCTAssertEqual(Array(allDecodeBatches.suffix(1)), [["relay-request-1501"]])
     }
 
     func testAttachedServePathPrefillsChatPreparedMultiTokenPrompt() async throws {
@@ -1537,7 +1589,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             // Expected.
         }
         await runtime.unregisterInFlight(handle.registrationID)
-        XCTAssertTrue(chunks.chunks().isEmpty)
+        let emittedContent = chunks.chunks().compactMap { chunk -> String? in
+            if case .content(let text) = chunk { return text }
+            return nil
+        }
+        XCTAssertEqual(emittedContent, ["3"])
     }
 
     func testContiguousCacheBridgeRestoresLiveKVCacheByteExactAndRoundTrips() async throws {
@@ -2154,10 +2210,14 @@ private final class RuntimeBridgeFakeModel: Module, LanguageModel, KVCacheDimens
     let kvHeads = [1]
     private let vocabularySize: Int
     private let nextTokenByInput: [Int: Int]
+    private let emitsMTPState: Bool
+    private let lock = NSLock()
+    private var forwardCalls = 0
 
-    init(vocabularySize: Int = 32, nextTokenByInput: [Int: Int]) {
+    init(vocabularySize: Int = 32, nextTokenByInput: [Int: Int], emitsMTPState: Bool = false) {
         self.vocabularySize = vocabularySize
         self.nextTokenByInput = nextTokenByInput
+        self.emitsMTPState = emitsMTPState
         super.init()
     }
 
@@ -2166,6 +2226,9 @@ private final class RuntimeBridgeFakeModel: Module, LanguageModel, KVCacheDimens
     }
 
     func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?) -> LMOutput {
+        lock.lock()
+        forwardCalls += 1
+        lock.unlock()
         let batch = input.tokens.dim(0)
         let sequenceLength = input.tokens.dim(1)
         let flatTokens = input.tokens.asArray(Int32.self).map(Int.init)
@@ -2186,7 +2249,90 @@ private final class RuntimeBridgeFakeModel: Module, LanguageModel, KVCacheDimens
                 logits[(row * sequenceLength + position) * vocabularySize + next] = 1_000
             }
         }
-        return LMOutput(logits: MLXArray(logits, [batch, sequenceLength, vocabularySize]))
+        var outputState: LMOutput.State?
+        if emitsMTPState, state?[mtpEmitFlagKey] != nil {
+            var state = LMOutput.State()
+            state[mtpLastHiddenStatesKey] = MLXArray.zeros([batch, sequenceLength, 2])
+            outputState = state
+        }
+        return LMOutput(
+            logits: MLXArray(logits, [batch, sequenceLength, vocabularySize]),
+            state: outputState
+        )
+    }
+
+    func forwardCallCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return forwardCalls
+    }
+}
+
+private final class RuntimeBridgeRecordingMTPDrafter: Module, StatefulMTPDrafterModel {
+    let maximumBlockSize: Int? = 2
+    let requiresSharedTargetKV = false
+    let requiresPromptPrefill = true
+    let requiresGreedySampling = true
+    private let lock = NSLock()
+    private var promptWidths: [Int] = []
+    private var hiddenWidths: [Int] = []
+
+    func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
+        MTPDrafterState(cache: [])
+    }
+
+    func prepareDrafterState(
+        target: any LanguageModel,
+        promptTokens: MLXArray,
+        targetHidden: MLXArray,
+        firstBonus: MLXArray,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) {
+        lock.lock()
+        promptWidths.append(promptTokens.dim(1))
+        hiddenWidths.append(targetHidden.dim(1))
+        lock.unlock()
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        MLXArray.zeros([1, max(0, blockSize - 1)], dtype: .int32)
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        MLXArray.zeros([1, max(0, blockSize - 1)], dtype: .int32)
+    }
+
+    func preparedPromptWidths() -> [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return promptWidths
+    }
+
+    func preparedHiddenWidths() -> [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return hiddenWidths
     }
 }
 

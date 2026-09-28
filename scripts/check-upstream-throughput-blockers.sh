@@ -114,8 +114,8 @@ native_mtp_required_merges_in_latest_release = all(
     for row in native_mtp_required_merges.values()
 )
 
-native_mtp_exception_revision = "b250ac2e87a1a780eb82ce73522c4bf3e70a8d8e"
-native_mtp_exception_base = "ee673d6a71d76e67b532dc7eaf91d92edc3bb8bb"
+native_mtp_exception_revision = "e874140ecb5b04aeb445eb3837d48f7b187b867e"
+native_mtp_exception_base = "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57"
 native_mtp_exception_repo = "Augustas11/mlx-swift-lm"
 native_mtp_exception_remote_verified = commit_is_descendant(
     native_mtp_exception_repo,

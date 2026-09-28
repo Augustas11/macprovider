@@ -90,6 +90,79 @@ final class NativeMTPSelectorTests: XCTestCase {
         XCTAssertEqual(selection.nativeMTPReason, .eligible)
     }
 
+    func testNativeMTPRejectsExplicitCompletionLimitAboveSignedProfile() throws {
+        let selection = ModelRuntime.decodePath(
+            for: try makeRequest(extra: ["max_completion_tokens": 65]),
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
+            nativeMTPMode: .auto,
+            nativeMTPCapability: admittedCapability(maximumCompletionTokens: 64)
+        )
+
+        XCTAssertEqual(selection.path, .ordinary)
+        XCTAssertEqual(selection.nativeMTPReason, .completionTokenLimit)
+    }
+
+    func testNativeMTPRuntimeAdmissionDowngradesAfterTokenizedPromptExceedsSignedProfile() throws {
+        let admission = ModelRuntime.nativeMTPRuntimeAdmission(
+            for: try makeRequest(extra: ["max_completion_tokens": 8]),
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
+            nativeMTPMode: .auto,
+            nativeMTPCapability: admittedCapability(maximumPromptTokens: 4, maximumCompletionTokens: 8),
+            schedulerSupportsNativeMTP: true
+        ).resolvingTokenBounds(promptTokenCount: 5, maxOutputTokens: 8)
+
+        XCTAssertEqual(admission.selection.path, .ordinary)
+        XCTAssertEqual(admission.selection.nativeMTPReason, .promptTokenLimit)
+        XCTAssertEqual(admission.effectivePath, .ordinary)
+        XCTAssertEqual(admission.initialProposalDepth, 0)
+        XCTAssertTrue(admission.allowsConversationCacheLease)
+    }
+
+    func testNativeMTPRuntimeAdmissionDowngradesAfterTokenizedPromptExceedsRuntimePrefillBound() throws {
+        let admission = ModelRuntime.nativeMTPRuntimeAdmission(
+            for: try makeRequest(extra: ["max_completion_tokens": 8]),
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
+            nativeMTPMode: .auto,
+            nativeMTPCapability: admittedCapability(maximumPromptTokens: 4096, maximumCompletionTokens: 8),
+            schedulerSupportsNativeMTP: true
+        ).resolvingTokenBounds(
+            promptTokenCount: 513,
+            maxOutputTokens: 8,
+            runtimeMaximumPromptTokens: ModelRuntime.nativeMTPFullPromptPrefillTokenLimit(prefillStepSize: 512)
+        )
+
+        XCTAssertEqual(ModelRuntime.nativeMTPFullPromptPrefillTokenLimit(prefillStepSize: 512), 512)
+        XCTAssertEqual(admission.selection.path, .ordinary)
+        XCTAssertEqual(admission.selection.nativeMTPReason, .promptTokenLimit)
+        XCTAssertEqual(admission.effectivePath, .ordinary)
+        XCTAssertEqual(admission.initialProposalDepth, 0)
+        XCTAssertTrue(admission.allowsConversationCacheLease)
+    }
+
+    func testNativeMTPRuntimeAdmissionDowngradesAfterDefaultCompletionExceedsSignedProfile() throws {
+        let admission = ModelRuntime.nativeMTPRuntimeAdmission(
+            for: try makeRequest(),
+            draftConfigured: false,
+            draftLoaded: false,
+            numDraftTokens: nil,
+            nativeMTPMode: .auto,
+            nativeMTPCapability: admittedCapability(maximumPromptTokens: 16, maximumCompletionTokens: 4),
+            schedulerSupportsNativeMTP: true
+        ).resolvingTokenBounds(promptTokenCount: 3, maxOutputTokens: 5)
+
+        XCTAssertEqual(admission.selection.path, .ordinary)
+        XCTAssertEqual(admission.selection.nativeMTPReason, .completionTokenLimit)
+        XCTAssertEqual(admission.effectivePath, .ordinary)
+        XCTAssertEqual(admission.initialProposalDepth, 0)
+        XCTAssertTrue(admission.allowsConversationCacheLease)
+    }
+
     func testAutoWithoutCapabilityFailsClosed() throws {
         let selection = ModelRuntime.decodePath(
             for: try makeRequest(),
@@ -187,7 +260,9 @@ final class NativeMTPSelectorTests: XCTestCase {
                 supportsNonStreaming: true,
                 supportsStopSequences: false,
                 hasQualifiedRowMappedTransactions: false,
-                maximumProposalDepth: 2
+                maximumProposalDepth: 2,
+                maximumPromptTokens: 32768,
+                maximumCompletionTokens: 4096
             ), .capabilityMismatch),
             ("revocation_state", NativeMTPCapability(
                 admitted: true,
@@ -199,7 +274,9 @@ final class NativeMTPSelectorTests: XCTestCase {
                 supportsNonStreaming: true,
                 supportsStopSequences: false,
                 hasQualifiedRowMappedTransactions: true,
-                maximumProposalDepth: 2
+                maximumProposalDepth: 2,
+                maximumPromptTokens: 32768,
+                maximumCompletionTokens: 4096
             ), .revocationStateUnavailable),
             ("revoked", NativeMTPCapability(
                 admitted: true,
@@ -211,7 +288,9 @@ final class NativeMTPSelectorTests: XCTestCase {
                 supportsNonStreaming: true,
                 supportsStopSequences: false,
                 hasQualifiedRowMappedTransactions: true,
-                maximumProposalDepth: 2
+                maximumProposalDepth: 2,
+                maximumPromptTokens: 32768,
+                maximumCompletionTokens: 4096
             ), .tupleRevoked),
             ("not_admitted", NativeMTPCapability(
                 admitted: false,
@@ -223,7 +302,9 @@ final class NativeMTPSelectorTests: XCTestCase {
                 supportsNonStreaming: true,
                 supportsStopSequences: false,
                 hasQualifiedRowMappedTransactions: true,
-                maximumProposalDepth: 2
+                maximumProposalDepth: 2,
+                maximumPromptTokens: 32768,
+                maximumCompletionTokens: 4096
             ), .tupleNotAdmitted),
             ("processor", NativeMTPCapability(
                 admitted: true,
@@ -235,7 +316,9 @@ final class NativeMTPSelectorTests: XCTestCase {
                 supportsNonStreaming: true,
                 supportsStopSequences: false,
                 hasQualifiedRowMappedTransactions: true,
-                maximumProposalDepth: 2
+                maximumProposalDepth: 2,
+                maximumPromptTokens: 32768,
+                maximumCompletionTokens: 4096
             ), .unsupportedProcessor),
             ("cache", NativeMTPCapability(
                 admitted: true,
@@ -247,7 +330,9 @@ final class NativeMTPSelectorTests: XCTestCase {
                 supportsNonStreaming: true,
                 supportsStopSequences: false,
                 hasQualifiedRowMappedTransactions: true,
-                maximumProposalDepth: 2
+                maximumProposalDepth: 2,
+                maximumPromptTokens: 32768,
+                maximumCompletionTokens: 4096
             ), .unsupportedStateCache),
             ("capacity", NativeMTPCapability(
                 admitted: true,
@@ -259,7 +344,9 @@ final class NativeMTPSelectorTests: XCTestCase {
                 supportsNonStreaming: true,
                 supportsStopSequences: false,
                 hasQualifiedRowMappedTransactions: true,
-                maximumProposalDepth: 0
+                maximumProposalDepth: 0,
+                maximumPromptTokens: 32768,
+                maximumCompletionTokens: 4096
             ), .insufficientVerificationCapacity),
         ]
 
@@ -407,7 +494,9 @@ final class NativeMTPSelectorTests: XCTestCase {
         supportsStreaming: Bool = true,
         supportsNonStreaming: Bool = true,
         supportsStopSequences: Bool = false,
-        maximumProposalDepth: Int = 2
+        maximumProposalDepth: Int = 2,
+        maximumPromptTokens: Int = 32768,
+        maximumCompletionTokens: Int = 4096
     ) -> NativeMTPCapability {
         NativeMTPCapability(
             admitted: true,
@@ -419,7 +508,9 @@ final class NativeMTPSelectorTests: XCTestCase {
             supportsNonStreaming: supportsNonStreaming,
             supportsStopSequences: supportsStopSequences,
             hasQualifiedRowMappedTransactions: true,
-            maximumProposalDepth: maximumProposalDepth
+            maximumProposalDepth: maximumProposalDepth,
+            maximumPromptTokens: maximumPromptTokens,
+            maximumCompletionTokens: maximumCompletionTokens
         )
     }
 

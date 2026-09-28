@@ -614,6 +614,25 @@ public struct PagedKVNativeMTPStagedMapping: Equatable, Sendable {
     }
 }
 
+public struct PagedKVNativeMTPScratchReservation: Equatable, Sendable {
+    public let reservationID: UUID
+    public let tokenCount: Int
+    public let blockCount: Int
+    public let allocatorEpoch: Int
+
+    public init(
+        reservationID: UUID,
+        tokenCount: Int,
+        blockCount: Int,
+        allocatorEpoch: Int
+    ) {
+        self.reservationID = reservationID
+        self.tokenCount = tokenCount
+        self.blockCount = blockCount
+        self.allocatorEpoch = allocatorEpoch
+    }
+}
+
 public struct PagedKVRetainedSequence: Equatable, Sendable {
     public let handle: PagedKVBlockTableHandle
     let conversationKey: String
@@ -795,6 +814,7 @@ public actor PagedKVBlockAllocator {
     public let poolEpoch: Int
     private var freeBlocks: [Int]
     private var sequences: [UUID: SequenceState] = [:]
+    private var nativeMTPScratchReservations: [UUID: [Int]] = [:]
     private let contiguousCacheBridge: (any PagedKVContiguousCacheBridge)?
 
     public init(
@@ -888,6 +908,83 @@ public actor PagedKVBlockAllocator {
 
     public func canAdmitBatch1(maxTokens: Int) -> Bool {
         (try? requiredBlocks(maxTokens: maxTokens)).map { $0 <= freeBlocks.count } ?? false
+    }
+
+    public func reserveNativeMTPScratchTokens(_ tokenCount: Int) throws -> PagedKVNativeMTPScratchReservation {
+        guard tokenCount >= 0 else {
+            throw PagedKVAllocatorError.invalidBlockTable("negative native MTP scratch reservation")
+        }
+        let needed = try requiredBlocks(maxTokens: tokenCount)
+        guard needed <= freeBlocks.count else {
+            throw PagedKVAllocatorError.capacityExceeded(
+                requiredBlocks: needed,
+                availableBlocks: freeBlocks.count
+            )
+        }
+        let reservationID = UUID()
+        var blocks: [Int] = []
+        blocks.reserveCapacity(needed)
+        for _ in 0..<needed {
+            blocks.append(freeBlocks.removeLast())
+        }
+        nativeMTPScratchReservations[reservationID] = blocks
+        return PagedKVNativeMTPScratchReservation(
+            reservationID: reservationID,
+            tokenCount: tokenCount,
+            blockCount: needed,
+            allocatorEpoch: poolEpoch
+        )
+    }
+
+    public func resizeNativeMTPScratchReservation(
+        _ reservation: PagedKVNativeMTPScratchReservation,
+        tokenCount: Int
+    ) throws -> PagedKVNativeMTPScratchReservation {
+        guard reservation.allocatorEpoch == poolEpoch else {
+            throw PagedKVAllocatorError.unknownHandle
+        }
+        guard tokenCount >= 0 else {
+            throw PagedKVAllocatorError.invalidBlockTable("negative native MTP scratch reservation")
+        }
+        guard var blocks = nativeMTPScratchReservations[reservation.reservationID] else {
+            throw PagedKVAllocatorError.unknownHandle
+        }
+        let needed = try requiredBlocks(maxTokens: tokenCount)
+        if needed > blocks.count {
+            let additional = needed - blocks.count
+            guard additional <= freeBlocks.count else {
+                throw PagedKVAllocatorError.capacityExceeded(
+                    requiredBlocks: needed,
+                    availableBlocks: blocks.count + freeBlocks.count
+                )
+            }
+            for _ in 0..<additional {
+                blocks.append(freeBlocks.removeLast())
+            }
+        } else if needed < blocks.count {
+            let released = blocks[needed...]
+            blocks.removeSubrange(needed...)
+            freeBlocks.append(contentsOf: released.reversed())
+        }
+        nativeMTPScratchReservations[reservation.reservationID] = blocks
+        return PagedKVNativeMTPScratchReservation(
+            reservationID: reservation.reservationID,
+            tokenCount: tokenCount,
+            blockCount: needed,
+            allocatorEpoch: poolEpoch
+        )
+    }
+
+    public func releaseNativeMTPScratchReservation(
+        _ reservation: PagedKVNativeMTPScratchReservation
+    ) throws {
+        guard reservation.allocatorEpoch == poolEpoch else {
+            throw PagedKVAllocatorError.unknownHandle
+        }
+        guard let blocks = nativeMTPScratchReservations.removeValue(forKey: reservation.reservationID) else {
+            throw PagedKVAllocatorError.unknownHandle
+        }
+        freeBlocks.append(contentsOf: blocks.reversed())
     }
 
     public func allocate(conversationKey: String, maxTokens: Int, initialTokens: Int = 0) throws -> PagedKVBlockTableHandle {

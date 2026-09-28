@@ -18,8 +18,9 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
     private static let enabledVariable = "MACPROVIDER_NATIVE_MTP_E2E"
     private static let rootVariable = "MACPROVIDER_NATIVE_MTP_E2E_ROOT"
     private static let modelID = "mlx-community/Qwen3.5-9B-4bit"
-    private static let upstreamRevision = "b250ac2e87a1a780eb82ce73522c4bf3e70a8d8e"
+    private static let upstreamRevision = "e874140ecb5b04aeb445eb3837d48f7b187b867e"
     private static let providerRevision = "0123456789abcdef0123456789abcdef01234567"
+    private static let liveExecutableCDHash = "456789abcdef0123456789abcdef0123456789ab"
 
     func testRealQwen35NativeMTPMatchesOrdinaryGreedyBatch() async throws {
         let environment = ProcessInfo.processInfo.environment
@@ -102,7 +103,9 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
             supportsNonStreaming: true,
             supportsStopSequences: false,
             hasQualifiedRowMappedTransactions: true,
-            maximumProposalDepth: admission.maxProposalDepth
+            maximumProposalDepth: admission.maxProposalDepth,
+            maximumPromptTokens: admission.maxPromptTokens,
+            maximumCompletionTokens: admission.maxCompletionTokens
         )
         let ordinaryBackend = PagedKVSharedForwardBackend(
             container: targetContainer,
@@ -337,6 +340,7 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
                 "source_layout": "separate_artifact",
                 "prediction_layer_count": 1,
                 "max_proposal_depth": 1,
+                "complete_window_bytes_by_depth": [1_048_576, 2_097_152],
                 "adaptation_enabled": true,
                 "adaptation_max_depth": 1,
             ],
@@ -372,6 +376,7 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
                 "release_id": "native-mtp-hardware-e2e",
                 "source_commit": Self.providerRevision,
                 "reproducible_build_sha256": String(repeating: "1", count: 64),
+                "live_executable_cdhash": Self.liveExecutableCDHash,
                 "benchmark_policy_sha256": String(repeating: "2", count: 64),
                 "native_mtp_admission_tuple_sha256": tupleSHA,
                 "evidence_artifact_sha256": [String(repeating: "3", count: 64)],
