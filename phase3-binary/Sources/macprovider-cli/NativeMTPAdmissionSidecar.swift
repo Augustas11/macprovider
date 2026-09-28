@@ -1845,7 +1845,12 @@ enum NativeMTPAdmissionSidecar {
         prefix: String,
         relativePath: String
     ) throws -> [DescriptorFileStamp] {
-        let scanFD = dup(directoryFD)
+        // `dup` shares the directory offset with `directoryFD`. Admission walks
+        // each directory more than once (before/after identity checks and later
+        // capture), so a duplicated descriptor can start at EOF and falsely
+        // report that the artifact changed. Reopen `.` to get an independent
+        // open-file description and directory cursor for every scan.
+        let scanFD = openat(directoryFD, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard scanFD >= 0 else {
             throw NativeMTPAdmissionSidecarError.artifactNotFound(relativePath)
         }
@@ -2188,7 +2193,9 @@ enum NativeMTPAdmissionSidecar {
         relativePath: String,
         prefix: String
     ) throws -> [(name: String, info: stat)] {
-        let scanFD = dup(directoryFD)
+        // Use an independent directory cursor; `dup` would share and consume
+        // the source handle's offset across validation and capture passes.
+        let scanFD = openat(directoryFD, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
         guard scanFD >= 0 else {
             throw NativeMTPAdmissionSidecarError.artifactNotFound(relativePath)
         }
