@@ -652,7 +652,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 var mtp = root["mtp"] as! [String: Any]
                 mtp.removeValue(forKey: "complete_window_bytes_by_depth")
                 root["mtp"] = mtp
-            }, recomputeTuple: true), fixture: fixture),
+            }), fixture: fixture),
             .missingField("$.mtp.complete_window_bytes_by_depth")
         )
         XCTAssertEqual(
@@ -660,7 +660,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 var mtp = root["mtp"] as! [String: Any]
                 mtp["complete_window_bytes_by_depth"] = [1024, 2048, 4096, 8192]
                 root["mtp"] = mtp
-            }, recomputeTuple: true), fixture: fixture),
+            }), fixture: fixture),
             .invalidValue("$.mtp.complete_window_bytes_by_depth")
         )
         XCTAssertEqual(
@@ -668,7 +668,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 var mtp = root["mtp"] as! [String: Any]
                 mtp["complete_window_bytes_by_depth"] = [1024, 4096, 2048, 8192, 16384]
                 root["mtp"] = mtp
-            }, recomputeTuple: true), fixture: fixture),
+            }), fixture: fixture),
             .invalidValue("$.mtp.complete_window_bytes_by_depth[2]")
         )
         XCTAssertEqual(
@@ -676,7 +676,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 var mtp = root["mtp"] as! [String: Any]
                 mtp["complete_window_bytes_by_depth"] = [1, 2, 3, 4, Int.max]
                 root["mtp"] = mtp
-            }, recomputeTuple: true), fixture: fixture),
+            }), fixture: fixture),
             .invalidValue("$.mtp.complete_window_bytes_by_depth")
         )
     }
@@ -690,7 +690,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 var mtp = root["mtp"] as! [String: Any]
                 mtp.removeValue(forKey: "throughput_delta_ppm")
                 root["mtp"] = mtp
-            }, recomputeTuple: true), fixture: fixture),
+            }), fixture: fixture),
             .missingField("$.mtp.throughput_delta_ppm")
         )
         XCTAssertEqual(
@@ -698,7 +698,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 var mtp = root["mtp"] as! [String: Any]
                 mtp["throughput_delta_ppm"] = 1_000_001
                 root["mtp"] = mtp
-            }, recomputeTuple: true), fixture: fixture),
+            }), fixture: fixture),
             .invalidValue("$.mtp.throughput_delta_ppm")
         )
         XCTAssertEqual(
@@ -726,13 +726,13 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 var selftest = root["selftest"] as! [String: Any]
                 selftest["challenge_bank_sha256"] = String(repeating: "e", count: 63)
                 root["selftest"] = selftest
-            }, recomputeTuple: true), fixture: fixture),
+            }), fixture: fixture),
             .invalidValue("$.selftest.challenge_bank_sha256")
         )
         XCTAssertEqual(
             try rejectedError(fixture.mutatingRoot { root in
                 var selftest = root["selftest"] as! [String: Any]
-                selftest["signer_key_id"] = "different-signer"
+                selftest["signer_key_id"] = fixture.trustedKeyring.requiredKeyID
                 root["selftest"] = selftest
             }, fixture: fixture),
             .invalidValue("$.tuple_sha256")
@@ -748,7 +748,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 var spec023 = root["spec023"] as! [String: Any]
                 spec023.removeValue(forKey: "live_executable_cdhash")
                 root["spec023"] = spec023
-            }, recomputeTuple: true), fixture: fixture),
+            }), fixture: fixture),
             .missingField("$.spec023.live_executable_cdhash")
         )
         XCTAssertEqual(
@@ -756,7 +756,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 var spec023 = root["spec023"] as! [String: Any]
                 spec023["live_executable_cdhash"] = String(repeating: "E", count: 40)
                 root["spec023"] = spec023
-            }, recomputeTuple: true), fixture: fixture),
+            }), fixture: fixture),
             .invalidValue("$.spec023.live_executable_cdhash")
         )
         XCTAssertEqual(
@@ -764,7 +764,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 var spec023 = root["spec023"] as! [String: Any]
                 spec023["live_executable_cdhash"] = String(repeating: "e", count: 39)
                 root["spec023"] = spec023
-            }, recomputeTuple: true), fixture: fixture),
+            }), fixture: fixture),
             .invalidValue("$.spec023.live_executable_cdhash")
         )
     }
@@ -1514,7 +1514,7 @@ final class NativeMTPAdmissionSidecarTests: XCTestCase {
                 "upstream_mlx_swift_lm": upstreamRevision,
             ],
             "hardware": [
-                "chip": "M2 Ultra",
+                "chip": "m2-ultra",
                 "ram_gb": 256,
                 "os_version": "macOS 15.6",
                 "qualified_slots": 8,

@@ -4875,7 +4875,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let result = try await scheduler.submit(Self.nativeRequest(
             id: "fallback-depth",
             promptTokens: [1],
-            maxOutputTokens: 3,
+            maxOutputTokens: 2,
             proposals: [7],
             maximumDepth: 1,
             completeWindowBytesByDepth: [8, 32]
@@ -4911,7 +4911,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let result = try await scheduler.submit(Self.nativeRequest(
             id: "headroom-depth",
             promptTokens: [1],
-            maxOutputTokens: 3,
+            maxOutputTokens: 2,
             proposals: [7],
             maximumDepth: 1,
             completeWindowBytesByDepth: [8, 32]
@@ -5094,7 +5094,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let backend = ScriptedBackend(
             scripts: [:],
             prefillTokens: ["later-round": 6],
-            nativeTargetTopTokensByStep: ["later-round": [[7]]],
+            nativeTargetTopTokensByStep: ["later-round": [[7, 8]]],
             nativeProposalErrorAfterCall: 2
         )
         let scheduler = try await makeScheduler(
@@ -5106,7 +5106,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let result = try await scheduler.submit(Self.nativeRequest(
             id: "later-round",
             promptTokens: [1],
-            maxOutputTokens: 3,
+            maxOutputTokens: 4,
             proposals: [7],
             maximumDepth: 1
         ), tokenSink: { event in
@@ -5115,7 +5115,7 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
 
         XCTAssertEqual(result.terminalStatus, .requestFailed)
         XCTAssertEqual(result.errorCode, "continuous_batching_native_mtp_proposal_failed")
-        XCTAssertEqual(recorder.events().map(\.token), [6, 7])
+        XCTAssertEqual(recorder.events().map(\.token), [6, 7, 8])
         XCTAssertEqual(sink.snapshot().postoutputFailures, 1)
     }
 
