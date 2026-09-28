@@ -101,7 +101,7 @@ final class NativeMTPSelectorTests: XCTestCase {
         )
 
         XCTAssertEqual(selection.path, .ordinary)
-        XCTAssertEqual(selection.nativeMTPReason, .completionTokenLimit)
+        XCTAssertEqual(selection.nativeMTPReason, .capabilityMismatch)
     }
 
     func testNativeMTPRuntimeAdmissionDowngradesAfterTokenizedPromptExceedsSignedProfile() throws {
@@ -116,7 +116,7 @@ final class NativeMTPSelectorTests: XCTestCase {
         ).resolvingTokenBounds(promptTokenCount: 5, maxOutputTokens: 8)
 
         XCTAssertEqual(admission.selection.path, .ordinary)
-        XCTAssertEqual(admission.selection.nativeMTPReason, .promptTokenLimit)
+        XCTAssertEqual(admission.selection.nativeMTPReason, .capabilityMismatch)
         XCTAssertEqual(admission.effectivePath, .ordinary)
         XCTAssertEqual(admission.initialProposalDepth, 0)
         XCTAssertTrue(admission.allowsConversationCacheLease)
@@ -139,7 +139,7 @@ final class NativeMTPSelectorTests: XCTestCase {
 
         XCTAssertEqual(ModelRuntime.nativeMTPFullPromptPrefillTokenLimit(prefillStepSize: 512), 512)
         XCTAssertEqual(admission.selection.path, .ordinary)
-        XCTAssertEqual(admission.selection.nativeMTPReason, .promptTokenLimit)
+        XCTAssertEqual(admission.selection.nativeMTPReason, .capabilityMismatch)
         XCTAssertEqual(admission.effectivePath, .ordinary)
         XCTAssertEqual(admission.initialProposalDepth, 0)
         XCTAssertTrue(admission.allowsConversationCacheLease)
@@ -157,7 +157,7 @@ final class NativeMTPSelectorTests: XCTestCase {
         ).resolvingTokenBounds(promptTokenCount: 3, maxOutputTokens: 5)
 
         XCTAssertEqual(admission.selection.path, .ordinary)
-        XCTAssertEqual(admission.selection.nativeMTPReason, .completionTokenLimit)
+        XCTAssertEqual(admission.selection.nativeMTPReason, .capabilityMismatch)
         XCTAssertEqual(admission.effectivePath, .ordinary)
         XCTAssertEqual(admission.initialProposalDepth, 0)
         XCTAssertTrue(admission.allowsConversationCacheLease)

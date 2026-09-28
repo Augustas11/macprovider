@@ -112,8 +112,6 @@ enum NativeMTPSelectorReason: String, CaseIterable, Sendable {
     case tupleNotAdmitted = "tuple_not_admitted"
     case tupleRevoked = "tuple_revoked"
     case revocationStateUnavailable = "revocation_state_unavailable"
-    case promptTokenLimit = "prompt_token_limit"
-    case completionTokenLimit = "completion_token_limit"
 
     var isEligible: Bool { self == .eligible }
 }
@@ -219,7 +217,7 @@ struct NativeMTPSelector: Sendable {
         }
         if let maxTokens = request.maxTokens,
            maxTokens > nativeCapability.maximumCompletionTokens {
-            return .completionTokenLimit
+            return .capabilityMismatch
         }
         guard request.stop.isEmpty || nativeCapability.supportsStopSequences else {
             return .capabilityMismatch
@@ -400,9 +398,9 @@ struct NativeMTPRuntimeAdmission: Sendable, Equatable {
         if promptTokenCount < 0
             || effectiveMaximumPromptTokens <= 0
             || promptTokenCount > effectiveMaximumPromptTokens {
-            reason = .promptTokenLimit
+            reason = .capabilityMismatch
         } else if maxOutputTokens < 0 || maximumCompletionTokens <= 0 || maxOutputTokens > maximumCompletionTokens {
-            reason = .completionTokenLimit
+            reason = .capabilityMismatch
         } else {
             reason = nil
         }
