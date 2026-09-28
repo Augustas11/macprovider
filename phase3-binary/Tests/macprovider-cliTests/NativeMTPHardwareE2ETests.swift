@@ -21,6 +21,7 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
     private static let upstreamRevision = "e874140ecb5b04aeb445eb3837d48f7b187b867e"
     private static let providerRevision = "0123456789abcdef0123456789abcdef01234567"
     private static let liveExecutableCDHash = "456789abcdef0123456789abcdef0123456789ab"
+    private static let releaseID = "native-mtp-hardware-e2e"
 
     func testRealQwen35NativeMTPMatchesOrdinaryGreedyBatch() async throws {
         let environment = ProcessInfo.processInfo.environment
@@ -50,6 +51,9 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
         XCTAssertEqual(admission.targetArtifactSHA256, targetIdentity.digest)
         XCTAssertEqual(admission.mtpArtifactSHA256, mtpIdentity.digest)
         XCTAssertEqual(admission.maxProposalDepth, 1)
+        XCTAssertEqual(admission.spec023ReleaseID, Self.releaseID)
+        XCTAssertEqual(admission.sidecarSHA256.count, 64)
+        XCTAssertEqual(admission.selfTestChallengeBank.challengeBankPath, "native-mtp-selftest-bank.json")
 
         let configData = try Data(contentsOf: targetDirectory.appendingPathComponent("config.json"))
         let modelCapabilities = ModelRuntime.pagedKVModelCapabilities(
@@ -99,13 +103,16 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
             revocationStateAvailable: true,
             supportsCurrentProcessor: true,
             supportsCurrentStateCache: true,
-            supportsStreaming: false,
+            supportsStreaming: true,
             supportsNonStreaming: true,
-            supportsStopSequences: false,
+            supportsStopSequences: true,
             hasQualifiedRowMappedTransactions: true,
             maximumProposalDepth: admission.maxProposalDepth,
             maximumPromptTokens: admission.maxPromptTokens,
-            maximumCompletionTokens: admission.maxCompletionTokens
+            maximumCompletionTokens: admission.maxCompletionTokens,
+            completeWindowBytesByDepth: admission.completeWindowBytesByDepth,
+            family: admission.familyAdapter,
+            throughputDeltaPPM: admission.throughputDeltaPPM
         )
         let ordinaryBackend = PagedKVSharedForwardBackend(
             container: targetContainer,
@@ -179,6 +186,23 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
         }
         XCTAssertEqual(admissionRecorder.snapshot().count, requests.count)
         XCTAssertTrue(admissionRecorder.snapshot().allSatisfy { $0.effectivePath == .nativeMTP })
+
+        let streamingStopRequest = try makeRequest(
+            id: "native-mtp-real-stream-stop",
+            prompt: "Answer with a terse sentence ending in STOP.",
+            stream: true,
+            stop: ["STOP"]
+        )
+        let handle = try await nativeRuntime.acquireRequestHandle(streamingStopRequest)
+        defer { Task { await nativeRuntime.unregisterInFlight(handle.registrationID) } }
+        let streamRecorder = NativeMTPHardwareStreamRecorder()
+        _ = try await nativeRuntime.stream(streamingStopRequest, with: handle) { chunk in
+            streamRecorder.append(chunk)
+        }
+        XCTAssertFalse(streamRecorder.snapshot().isEmpty)
+        let streamingAdmissions = admissionRecorder.snapshot().filter { $0.requestID == "native-mtp-real-stream-stop" }
+        XCTAssertEqual(streamingAdmissions.last?.effectivePath, .nativeMTP)
+
         let snapshot = await nativeRuntime.currentSnapshot()
         XCTAssertEqual(snapshot.continuousBatching?.pagedKVDecision, "attached")
         XCTAssertGreaterThanOrEqual(snapshot.continuousBatching?.scheduler?.maxObservedBatchDepth ?? 0, 2)
@@ -243,15 +267,24 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
         }
     }
 
-    private func makeRequest(id: String, prompt: String) throws -> ChatCompletionRequest {
-        let data = try JSONSerialization.data(withJSONObject: [
+    private func makeRequest(
+        id: String,
+        prompt: String,
+        stream: Bool = false,
+        stop: [String]? = nil
+    ) throws -> ChatCompletionRequest {
+        var object: [String: Any] = [
             "model": Self.modelID,
             "messages": [["role": "user", "content": prompt]],
             "max_tokens": 8,
             "temperature": 0,
             "top_p": 1.0,
-            "stream": false,
-        ])
+            "stream": stream,
+        ]
+        if let stop {
+            object["stop"] = stop
+        }
+        let data = try JSONSerialization.data(withJSONObject: object)
         return try ChatCompletionRequest.parse(data: data).withRequestID(id)
     }
 
@@ -273,33 +306,40 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
 
         """.utf8)
         try selfTestSignatureData.write(to: root.appendingPathComponent("native-mtp-selftest-bank.json.sig"))
-        let placeholder = String(repeating: "0", count: 64)
-        var object = sidecarObject(
-            tupleSHA: placeholder,
+
+        let projectionData = try artifactProjectionData(
             targetSHA: targetIdentity.digest,
             mtpSHA: mtpIdentity.digest,
             tokenizerSHA: tokenizerSHA,
+            manifestSHA: manifestSHA
+        )
+        try projectionData.write(to: root.appendingPathComponent("native-mtp-artifact-manifest.json"))
+        let sidecarData = try releaseEnvelopeData(
+            machine: machine,
+            targetSHA: targetIdentity.digest,
+            tokenizerSHA: tokenizerSHA,
             manifestSHA: manifestSHA,
-            selfTestBankSHA: sha256Hex(selfTestBankData),
-            selfTestSignatureSHA: sha256Hex(selfTestSignatureData),
-            selfTestSignerKeyID: keyID,
-            machine: machine
+            artifactManifestSHA: sha256Hex(projectionData),
+            challengeBankSHA: sha256Hex(selfTestBankData),
+            signerKeyID: keyID
         )
-        let tupleSHA = try NativeMTPAdmissionSidecar.admissionTupleSHA256ForTesting(object)
-        object["tuple_sha256"] = tupleSHA
-        var spec023 = object["spec023"] as! [String: Any]
-        spec023["native_mtp_admission_tuple_sha256"] = tupleSHA
-        object["spec023"] = spec023
-        var sidecarData = try JSONSerialization.data(
-            withJSONObject: object,
-            options: [.sortedKeys, .withoutEscapingSlashes]
-        )
-        sidecarData.append(0x0a)
         let signature = try signer.signature(for: sidecarData).base64EncodedString()
         let signatureData = Data("""
         {"alg":"ed25519","key_id":"\(keyID)","signature":"\(signature)"}
 
         """.utf8)
+        let authority = NativeMTPResolvedArtifactAuthority.uncheckedForTesting(
+            releaseID: Self.releaseID,
+            signerKeyID: keyID,
+            feedSHA256: String(repeating: "5", count: 64),
+            modelKey: Self.modelID,
+            artifactID: "primary",
+            hashAlgorithm: NativeMTPResolvedArtifactAuthority.nativeMTPHashAlgorithm,
+            hash: targetIdentity.digest,
+            verificationStatus: "verified",
+            targetURLPath: root.appendingPathComponent("target", isDirectory: true).standardizedFileURL.path,
+            targetSHA256: targetIdentity.digest
+        )
         return try NativeMTPAdmissionSidecar.load(
             sidecarData: sidecarData,
             signatureData: signatureData,
@@ -318,94 +358,123 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
             trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring(
                 publicKeysByKeyID: [keyID: signer.publicKey.rawRepresentation.base64EncodedString()],
                 requiredKeyID: keyID
-            )
+            ),
+            resolvedArtifactAuthority: authority
         )
     }
 
-    private func sidecarObject(
-        tupleSHA: String,
+    private func artifactProjectionData(
         targetSHA: String,
         mtpSHA: String,
         tokenizerSHA: String,
-        manifestSHA: String,
-        selfTestBankSHA: String,
-        selfTestSignatureSHA: String,
-        selfTestSignerKeyID: String,
-        machine: MachineFingerprint
-    ) -> [String: Any] {
-        [
-            "schema_version": NativeMTPAdmissionSidecar.schemaVersion,
-            "tuple_sha256": tupleSHA,
-            "decode_path": "native_mtp",
-            "admission_enabled": true,
-            "model": [
-                "id": Self.modelID,
-                "revision": targetSHA,
-                "family_adapter": "qwen3_5_mtp_v1",
-            ],
+        manifestSHA: String
+    ) throws -> Data {
+        try jsonData([
+            "schema_version": "macprovider.native-mtp-artifact-projection.v1",
             "artifacts": [
                 "target": ["path": "target", "sha256": targetSHA],
                 "mtp": ["path": "mtp", "sha256": mtpSHA],
                 "tokenizer": ["path": "target/tokenizer.json", "sha256": tokenizerSHA],
                 "manifest": ["path": "mtp/config.json", "sha256": manifestSHA],
             ],
-            "mtp": [
-                "manifest_sha256": manifestSHA,
-                "source_layout": "separate_artifact",
-                "prediction_layer_count": 1,
-                "max_proposal_depth": 1,
-                "complete_window_bytes_by_depth": [1_048_576, 2_097_152],
-                "throughput_delta_ppm": 0,
-                "adaptation_enabled": true,
-                "adaptation_max_depth": 1,
+        ])
+    }
+
+    private func releaseEnvelopeData(
+        machine: MachineFingerprint,
+        targetSHA: String,
+        tokenizerSHA: String,
+        manifestSHA: String,
+        artifactManifestSHA: String,
+        challengeBankSHA: String,
+        signerKeyID: String
+    ) throws -> Data {
+        let entry: [String: Any] = [
+            "model_key": Self.modelID,
+            "artifact_id": "primary",
+            "hash_algorithm": NativeMTPResolvedArtifactAuthority.nativeMTPHashAlgorithm,
+            "artifact_hash": targetSHA,
+            "artifact_manifest_sha256": artifactManifestSHA,
+            "tokenizer_sha256": tokenizerSHA,
+            "decode_path": "native_mtp",
+            "mtp_manifest_sha256": manifestSHA,
+            "mtp_family_adapter": "qwen3_5_mtp_v1",
+            "mtp_state_class": "hybrid_stageable_rewindable",
+            "mtp_head_count": 1,
+            "proposal_depth": 1,
+            "complete_window_bytes_by_depth": [1_048_576, 2_097_152],
+            "runtime_revision": Self.upstreamRevision,
+            "provider_revision": Self.providerRevision,
+            "source_commit": Self.providerRevision,
+            "reproducible_build_sha256": String(repeating: "1", count: 64),
+            "live_executable_cdhash": Self.liveExecutableCDHash,
+            "cache_state_classes": ["hybrid_stageable_rewindable"],
+            "hardware_class": NativeMTPAdmissionSidecar.canonicalHardwareClass(machine.chip),
+            "ram_bytes": machine.ramGB * 1_073_741_824,
+            "qualified_slots": 2,
+            "request_feature_profile": "native_mtp_greedy_text_v1",
+            "decrease_threshold_ppm": 1,
+            "increase_threshold_ppm": 2,
+            "max_verification_positions_per_committed_milli": 1000,
+            "throughput_delta_ppm": 0,
+            "benchmark_policy_sha256": String(repeating: "2", count: 64),
+            "challenge_bank_sha256": challengeBankSHA,
+            "fit_evidence_sha256": String(repeating: "3", count: 64),
+            "quality_evidence_sha256": String(repeating: "3", count: 64),
+            "correctness_evidence_sha256": String(repeating: "3", count: 64),
+            "state_rollback_evidence_sha256": String(repeating: "3", count: 64),
+            "batch_evidence_sha256": String(repeating: "3", count: 64),
+            "performance_evidence_sha256": String(repeating: "3", count: 64),
+            "security_negative_evidence_sha256": String(repeating: "3", count: 64),
+            "quantization": [
+                "kind": "base",
+                "packed_data_dtype": "none",
+                "packed_layout": "none",
+                "scale_dtype": "none",
+                "scale_layout": "none",
+                "block_size_elements": NSNull(),
+                "alignment_bytes": NSNull(),
+                "padding_rule": "none",
+                "unquantized_exceptions": [],
+                "per_layer_exceptions": [],
+                "representation_manifest_sha256": String(repeating: "7", count: 64),
             ],
-            "quantization": ["target": "mlx_affine_4bit", "mtp": "mlx_affine_4bit"],
-            "cache_state": [
-                "cache_class": "paged_kv",
-                "state_class": "hybrid_stageable_rewindable",
-            ],
-            "revisions": [
-                "provider": Self.providerRevision,
-                "upstream_mlx_swift_lm": Self.upstreamRevision,
-            ],
-            "hardware": [
-                "chip": machine.chip,
-                "ram_gb": machine.ramGB,
-                "os_version": machine.osVersion,
+            "ordinary_baseline": [
+                "decode_path": "ordinary",
+                "runtime_revision": Self.upstreamRevision,
+                "provider_revision": Self.providerRevision,
+                "artifact_hash": targetSHA,
                 "qualified_slots": 2,
-                "max_slots": 2,
+                "measurement_sha256": String(repeating: "8", count: 64),
+                "aggregate_tps_milli": 1,
             ],
-            "request_profile": [
-                "text_only": true,
-                "streaming": false,
-                "tools": false,
-                "structured_outputs": false,
-                "logprobs": false,
-                "penalties": false,
-                "conversation_cache": false,
-                "disk_cache": false,
-                "max_prompt_tokens": 4096,
-                "max_completion_tokens": 256,
-            ],
-            "spec023": [
-                "release_id": "native-mtp-hardware-e2e",
-                "source_commit": Self.providerRevision,
-                "reproducible_build_sha256": String(repeating: "1", count: 64),
-                "live_executable_cdhash": Self.liveExecutableCDHash,
-                "benchmark_policy_sha256": String(repeating: "2", count: 64),
-                "native_mtp_admission_tuple_sha256": tupleSHA,
-                "evidence_artifact_sha256": [String(repeating: "3", count: 64)],
-            ],
-            "selftest": [
-                "release_id": "native-mtp-hardware-e2e-selftest",
-                "challenge_bank_path": "native-mtp-selftest-bank.json",
-                "challenge_bank_sha256": selfTestBankSHA,
-                "signature_path": "native-mtp-selftest-bank.json.sig",
-                "signer_key_id": selfTestSignerKeyID,
-                "signature_sha256": selfTestSignatureSHA,
-            ],
-            "flags": ["admission_allowed": true],
         ]
+        return try jsonData([
+            "schema_version": NativeMTPAdmissionSidecar.schemaVersion,
+            "release_id": Self.releaseID,
+            "issued_at": iso8601Seconds(Date().addingTimeInterval(-3600)),
+            "expires_at": iso8601Seconds(Date().addingTimeInterval(3600)),
+            "signer_key_id": signerKeyID,
+            "challenge_bank_signer_key_id": signerKeyID,
+            "revocation_signer_key_id": signerKeyID,
+            "entries": [entry],
+        ])
+    }
+
+    private func jsonData(_ object: [String: Any]) throws -> Data {
+        var data = try JSONSerialization.data(
+            withJSONObject: object,
+            options: [.sortedKeys, .withoutEscapingSlashes]
+        )
+        data.append(0x0a)
+        return data
+    }
+
+    private func iso8601Seconds(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.string(from: date)
     }
 
     private func sizingProof(modelSHA: String) -> PagedKVHardwareSizingProof {
@@ -474,5 +543,22 @@ private final class NativeMTPHardwareAdmissionRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return admissions
+    }
+}
+
+private final class NativeMTPHardwareStreamRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var chunks: [StreamChunk] = []
+
+    func append(_ chunk: StreamChunk) {
+        lock.lock()
+        chunks.append(chunk)
+        lock.unlock()
+    }
+
+    func snapshot() -> [StreamChunk] {
+        lock.lock()
+        defer { lock.unlock() }
+        return chunks
     }
 }
