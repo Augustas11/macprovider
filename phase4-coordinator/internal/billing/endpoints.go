@@ -746,7 +746,7 @@ func (h *handler) providers(w http.ResponseWriter, r *http.Request) {
 	// consistent within the SQLite read transaction, errors propagate.
 	// The grouped subquery scans ledger_payout_ready once for the whole
 	// page, which is strictly cheaper than the per-provider sum loop.
-	rows, err := h.store.db.QueryContext(ctx, `
+	rows, err := h.store.reader().QueryContext(ctx, `
 SELECT lrc.provider_id,
        SUM(CASE WHEN payable.id IS NOT NULL THEN payable.provider_credits ELSE 0 END),
        SUM(CASE WHEN payable.id IS NOT NULL AND `+sqliteTimeSince("payable.ts_utc")+` THEN payable.provider_credits ELSE 0 END),
@@ -1246,7 +1246,7 @@ func (h *handler) settlementReceiptSummariesForProviders(ctx context.Context, pr
 		args = append(args, providerID)
 	}
 	args = append(args, rangeArgs...)
-	rows, err := h.store.db.QueryContext(ctx, `
+	rows, err := h.store.reader().QueryContext(ctx, `
 SELECT provider_id,
        COALESCE(SUM(CASE WHEN settlement_outcome='verified' AND receipt_result='valid' THEN 1 ELSE 0 END), 0) AS verified_count,
        COALESCE(SUM(CASE WHEN settlement_outcome='zero_settled' AND receipt_result='valid' THEN 1 ELSE 0 END), 0) AS zero_settled_count,
@@ -1287,7 +1287,7 @@ SELECT provider_id,
 		recentArgs = append(recentArgs, providerID)
 		recentArgs = append(recentArgs, rangeArgs...)
 		recentArgs = append(recentArgs, recentLimit)
-		rows, err = h.store.db.QueryContext(ctx, `
+		rows, err = h.store.reader().QueryContext(ctx, `
 SELECT request_id, attempt_n, receipt_result, settlement_outcome,
        reason, received_at_unix_ms, pending_deadline_unix_ms,
        route_snapshot_digest, route_snapshot_policy_version,
@@ -1369,7 +1369,7 @@ func (h *handler) settlementVerdictCounters(ctx context.Context) ([]settlementVe
 	// this is a defensive dedup against any digest collision — never a fan-out).
 	// LEFT JOIN so a verdict whose snapshot row was pruned still reports (as
 	// deadline 0), rather than silently dropping from the counters.
-	rows, err := h.store.db.QueryContext(ctx, `
+	rows, err := h.store.reader().QueryContext(ctx, `
 SELECT srv.route_snapshot_policy_version,
        COALESCE(srs.pending_deadline_seconds, 0) AS pending_deadline_seconds,
        srv.model_id,
@@ -1480,17 +1480,25 @@ func earningsRangeFilter(from, to time.Time, enabled bool) (string, []any) {
 	return " AND " + sqliteTimeRange("ts_utc"), []any{sqliteTimeText(from), sqliteTimeText(to)}
 }
 
+// sum reads from the read-only pool: these are display aggregates, so they
+// must not queue behind the single money writer connection.
 func (h *handler) sum(ctx context.Context, query string, args ...any) int64 {
-	n, err := h.sumErr(ctx, query, args...)
+	n, err := sumOn(ctx, h.store.reader(), query, args...)
 	if err != nil {
 		return 0
 	}
 	return n
 }
 
+// sumErr stays on the writer handle: reconcile compares these totals against
+// rows it is about to repair.
 func (h *handler) sumErr(ctx context.Context, query string, args ...any) (int64, error) {
+	return sumOn(ctx, h.store.db, query, args...)
+}
+
+func sumOn(ctx context.Context, db *sql.DB, query string, args ...any) (int64, error) {
 	var n sql.NullInt64
-	if err := h.store.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
 		return 0, err
 	}
 	if !n.Valid {
@@ -1522,7 +1530,7 @@ func (h *handler) allowEarnings(providerID string) bool {
 
 func (h *handler) modelsServed(ctx context.Context, providerID string, rangeSQL string, rangeArgs ...any) []string {
 	args := append([]any{providerID}, rangeArgs...)
-	rows, err := h.store.db.QueryContext(ctx, `SELECT DISTINCT model FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL+` ORDER BY model`, args...)
+	rows, err := h.store.reader().QueryContext(ctx, `SELECT DISTINCT model FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL+` ORDER BY model`, args...)
 	if err != nil {
 		return []string{}
 	}
@@ -1539,7 +1547,7 @@ func (h *handler) modelsServed(ctx context.Context, providerID string, rangeSQL 
 
 func (h *handler) rateCardExcerpt(ctx context.Context, models []string) map[string]RateCardEntry {
 	var raw string
-	if err := h.store.db.QueryRowContext(ctx, `SELECT rate_card_json FROM ledger_config_snapshots ORDER BY effective_at_utc DESC, id DESC LIMIT 1`).Scan(&raw); err != nil {
+	if err := h.store.reader().QueryRowContext(ctx, `SELECT rate_card_json FROM ledger_config_snapshots ORDER BY effective_at_utc DESC, id DESC LIMIT 1`).Scan(&raw); err != nil {
 		return map[string]RateCardEntry{}
 	}
 	var card map[string]RateCardEntry
@@ -1558,7 +1566,7 @@ func (h *handler) latestShareBps(ctx context.Context) int64 {
 }
 
 func (h *handler) lastPayout(ctx context.Context, providerID string) any {
-	row := h.store.db.QueryRowContext(ctx, `
+	row := h.store.reader().QueryRowContext(ctx, `
 SELECT window_start_utc, window_end_utc, provider_credits, status
   FROM ledger_payout_ready
  WHERE provider_id = ?

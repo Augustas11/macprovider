@@ -89,7 +89,7 @@ func (s *Store) SweepExpiredPoolSettlementVerdicts(ctx context.Context, nowUnixM
 		}
 	}
 	c := st.cursor
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.reader().QueryContext(ctx, `
 SELECT v.pending_deadline_unix_ms, v.id, rs.id,
        rs.account_scope, v.account_scope_hash, v.request_id, v.attempt_n, v.provider_id
   FROM settlement_receipt_verdicts v

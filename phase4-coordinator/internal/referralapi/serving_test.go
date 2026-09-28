@@ -6,11 +6,14 @@ import (
 	"errors"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/billing"
+	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	_ "modernc.org/sqlite"
 )
 
@@ -156,6 +159,78 @@ func TestServingReconcilerAcceptsOnlyEarliestClosedVerifiedValidEvidence(t *test
 	}
 	if len(store.seen) != 1 {
 		t.Fatalf("qualified=%v", store.seen)
+	}
+}
+
+func TestListVerifiedServingChoosesEarliestQualifyingVerdictAndPaginates(t *testing.T) {
+	path := openServingEvidenceDB(t)
+	base := time.Date(2026, 9, 28, 8, 0, 0, 0, time.UTC)
+	insertServingVerdict(t, path, "provider-a", base, true, "quarantined", "invalid")
+	wantA := insertServingVerdict(t, path, "provider-a", base.Add(time.Minute), true, "verified", "valid")
+	insertServingVerdict(t, path, "provider-b", base, true, "verified", "invalid")
+	insertServingVerdict(t, path, "provider-b", base.Add(time.Minute), true, "quarantined", "valid")
+	wantC := insertServingVerdict(t, path, "provider-c", base.Add(2*time.Minute), true, "verified", "valid")
+	insertServingVerdict(t, path, "provider-c", base.Add(2*time.Minute), true, "verified", "valid")
+
+	source := SQLiteServingEvidence{Path: path}
+	got, err := source.ListVerifiedServing(context.Background(), "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []VerifiedServing{
+		{ProviderID: "provider-a", EvidenceID: "settlement-verdict:" + strconv.FormatInt(wantA, 10), ServedAt: base.Add(time.Minute)},
+		{ProviderID: "provider-c", EvidenceID: "settlement-verdict:" + strconv.FormatInt(wantC, 10), ServedAt: base.Add(2 * time.Minute)},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ListVerifiedServing()=%+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i].ProviderID != want[i].ProviderID || got[i].EvidenceID != want[i].EvidenceID || !got[i].ServedAt.Equal(want[i].ServedAt) {
+			t.Fatalf("ListVerifiedServing()[%d]=%+v, want %+v", i, got[i], want[i])
+		}
+	}
+
+	page, err := source.ListVerifiedServing(context.Background(), "provider-a", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 1 || page[0].ProviderID != "provider-c" || page[0].EvidenceID != want[1].EvidenceID || !page[0].ServedAt.Equal(want[1].ServedAt) {
+		t.Fatalf("paginated ListVerifiedServing()=%+v, want %+v", page, want[1:])
+	}
+}
+
+func TestListVerifiedServingQueryPlanUsesProviderRecentIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "billing.db")
+	requestLogStore, err := requestlog.OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer requestLogStore.Close()
+	db := requestLogStore.DB()
+	if _, err := billing.NewStore(db); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := db.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+listVerifiedServingSQL, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(plan, "\n")
+	if !strings.Contains(joined, "SEARCH first USING INDEX idx_srv_provider_recent") {
+		t.Fatalf("correlated subquery does not search idx_srv_provider_recent:\n%s", joined)
 	}
 }
 

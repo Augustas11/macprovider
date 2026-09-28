@@ -517,7 +517,7 @@ SELECT DISTINCT COALESCE(rl.account_id, ''), lpis.request_id, lpis.attempt_n, lp
 	for _, c := range candidates {
 		var route RouteSnapshot
 		var routeHash string
-		if err := sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+		if err := sqliteutil.TransactObserved(ctx, s.db, "ledger_recovery", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
 			var err error
 			route, routeHash, err = loadSettlementRouteSnapshotConn(ctx, conn, c.id)
 			return err

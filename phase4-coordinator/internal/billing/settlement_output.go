@@ -411,7 +411,7 @@ func (s *Store) InsertSettlementAttemptOutput(ctx context.Context, attempt Settl
 	// insert share one write lock taken up front, so a writer on another
 	// handle to this file (routeSnapshotDB) waits in busy_timeout instead of
 	// failing the deferred read-to-write upgrade with SQLITE_BUSY_SNAPSHOT.
-	err = sqliteutil.Transact(ctx, s.db, func(ctx context.Context, conn *sql.Conn) error {
+	err = sqliteutil.TransactObserved(ctx, s.db, "settlement_attempt_output", s.sqliteMetric, func(ctx context.Context, conn *sql.Conn) error {
 		var overlapCount int
 		if attempt.OutputAvailable {
 			if err := conn.QueryRowContext(ctx, `
