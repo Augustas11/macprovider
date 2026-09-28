@@ -209,10 +209,10 @@ final class CoordinatorClientTests: XCTestCase {
     }
 
     private static let nativeMTPAdmissionTupleSHA256 = String(repeating: "7", count: 64)
-    private static let nativeMTPRuntimeTupleSHA256 = "0cd868d60c929446163aa38cd66ebb34812912995998e46812aac55c1327c777"
+    private static let nativeMTPRuntimeTupleSHA256 = "2886709db5f6b3cc0c37d70da2f665bb368dd2e4f48ac07befbfb7f8ee3d5060"
 
     private static func nativeMTPTupleDisable() throws -> [String: Any] {
-        let issuedAt = iso8601.string(from: Date())
+        let issuedAt = ISO8601DateFormatter().string(from: Date())
         let digest = try nativeMTPTupleDisableRequestDigest(issuedAt: issuedAt)
         return [
             "type": "native_mtp_tuple_disable_v1",

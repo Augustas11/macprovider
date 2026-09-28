@@ -201,6 +201,14 @@ struct NativeMTPSelfTestChallenge: Sendable, Equatable {
     let expectedCommittedStateDigest: String
 }
 
+struct NativeMTPSelfTestChallengeBankEnvelope: Sendable, Equatable {
+    let releaseID: String
+    let issuedAt: Date
+    let expiresAt: Date
+    let signerKeyID: String
+    let entries: [NativeMTPSelfTestChallenge]
+}
+
 struct NativeMTPSelfTestExecutionResult: Sendable, Equatable {
     enum DecodePath: String, Sendable, Equatable {
         case nativeMTP = "native_mtp"
@@ -239,7 +247,10 @@ struct NativeMTPSelfTestEvaluation: Sendable, Equatable {
 }
 
 enum NativeMTPSelfTest {
-    static func parseChallengeBank(_ data: Data) throws -> [NativeMTPSelfTestChallenge] {
+    static func parseChallengeBank(
+        _ data: Data,
+        now: Date = Date()
+    ) throws -> NativeMTPSelfTestChallengeBankEnvelope {
         do {
             try AutotuneStrictJSON.rejectDuplicateKeys(data)
         } catch {
@@ -254,6 +265,16 @@ enum NativeMTPSelfTest {
         guard try printableString(object, "schema_version", maxBytes: 128) == NativeMTPSelfTestChallenge.bankSchemaVersion else {
             throw NativeMTPSelfTestError.missingOrInvalidField("schema_version")
         }
+        let releaseID = try printableString(object, "release_id", maxBytes: 128)
+        let issuedAt = try utcSecondsDate(object, "issued_at")
+        let expiresAt = try utcSecondsDate(object, "expires_at")
+        guard issuedAt < expiresAt,
+              now >= issuedAt,
+              now < expiresAt
+        else {
+            throw NativeMTPSelfTestError.missingOrInvalidField("issued_at")
+        }
+        let signerKeyID = try printableString(object, "signer_key_id", maxBytes: 128)
         guard let entries = object["entries"] as? [[String: Any]],
               !entries.isEmpty,
               entries.count <= NativeMTPSelfTestChallenge.maxEntries
@@ -273,14 +294,20 @@ enum NativeMTPSelfTest {
             lastID = challenge.challengeID
             parsed.append(challenge)
         }
-        return parsed
+        return NativeMTPSelfTestChallengeBankEnvelope(
+            releaseID: releaseID,
+            issuedAt: issuedAt,
+            expiresAt: expiresAt,
+            signerKeyID: signerKeyID,
+            entries: parsed
+        )
     }
 
     static func selectChallenge(
-        _ records: [NativeMTPSelfTestChallenge],
+        _ bank: NativeMTPSelfTestChallengeBankEnvelope,
         challengeID: String
     ) throws -> NativeMTPSelfTestChallenge {
-        guard let record = records.first(where: { $0.challengeID == challengeID }) else {
+        guard let record = bank.entries.first(where: { $0.challengeID == challengeID }) else {
             throw NativeMTPSelfTestError.missingOrInvalidField("challenge_id")
         }
         return record
@@ -420,6 +447,24 @@ enum NativeMTPSelfTest {
             throw NativeMTPSelfTestError.missingOrInvalidField(field)
         }
         return value
+    }
+
+    private static func utcSecondsDate(_ object: [String: Any], _ field: String) throws -> Date {
+        let value = try string(object, field)
+        guard value.range(of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"#, options: .regularExpression) != nil else {
+            throw NativeMTPSelfTestError.missingOrInvalidField(field)
+        }
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        guard let date = formatter.date(from: value),
+              formatter.string(from: date) == value
+        else {
+            throw NativeMTPSelfTestError.missingOrInvalidField(field)
+        }
+        return date
     }
 
     private static func sha256(_ object: [String: Any], _ field: String) throws -> String {

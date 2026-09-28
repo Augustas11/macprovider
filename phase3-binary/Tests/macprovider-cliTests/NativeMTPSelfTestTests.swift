@@ -6,8 +6,8 @@ import XCTest
 final class NativeMTPSelfTestTests: XCTestCase {
     func testChallengeBankParsesExactRecordAndPassingExecutionEvaluatesTupleOnlyPass() throws {
         let fixture = makeBankFixture()
-        let records = try NativeMTPSelfTest.parseChallengeBank(try jsonData(fixture.bank))
-        let record = try NativeMTPSelfTest.selectChallenge(records, challengeID: "challenge-1")
+        let bank = try NativeMTPSelfTest.parseChallengeBank(try jsonData(fixture.bank))
+        let record = try NativeMTPSelfTest.selectChallenge(bank, challengeID: "challenge-1")
 
         XCTAssertEqual(record.challengeID, "challenge-1")
         XCTAssertEqual(record.promptTokenIDs, [101, 102, 103])
@@ -40,7 +40,7 @@ final class NativeMTPSelfTestTests: XCTestCase {
         }
 
         let duplicated = Data("""
-        {"schema_version":"macprovider.native-mtp-challenge-bank.v1","schema_version":"macprovider.native-mtp-challenge-bank.v1","release_id":"r","issued_at":"2026-09-28T00:00:00Z","expires_at":"2026-09-29T00:00:00Z","signer_key_id":"k","entries":[]}
+        {"schema_version":"macprovider.native-mtp-challenge-bank.v1","schema_version":"macprovider.native-mtp-challenge-bank.v1","release_id":"r","issued_at":"2020-01-01T00:00:00Z","expires_at":"2099-09-29T00:00:00Z","signer_key_id":"k","entries":[]}
         """.utf8)
         XCTAssertThrowsError(try NativeMTPSelfTest.parseChallengeBank(duplicated)) { error in
             XCTAssertEqual(error as? NativeMTPSelfTestError, .invalidJSON)
@@ -62,6 +62,21 @@ final class NativeMTPSelfTestTests: XCTestCase {
             try jsonData(mutatingEntry(fixture.bank) { $0["expected_token_id_sha256"] = digest("wrong") })
         )) { error in
             XCTAssertEqual(error as? NativeMTPSelfTestError, .missingOrInvalidField("expected_token_id_sha256"))
+        }
+    }
+
+    func testParserRejectsInvalidBankTimeBounds() throws {
+        let fixture = makeBankFixture()
+        var expired = fixture.bank
+        expired["expires_at"] = "2020-01-02T00:00:00Z"
+        XCTAssertThrowsError(try NativeMTPSelfTest.parseChallengeBank(try jsonData(expired))) { error in
+            XCTAssertEqual(error as? NativeMTPSelfTestError, .missingOrInvalidField("issued_at"))
+        }
+
+        var fractional = fixture.bank
+        fractional["issued_at"] = "2020-01-01T00:00:00.000Z"
+        XCTAssertThrowsError(try NativeMTPSelfTest.parseChallengeBank(try jsonData(fractional))) { error in
+            XCTAssertEqual(error as? NativeMTPSelfTestError, .missingOrInvalidField("issued_at"))
         }
     }
 
@@ -94,7 +109,7 @@ final class NativeMTPSelfTestTests: XCTestCase {
 
     func testEvaluatorRejectsEachRuntimeMismatch() throws {
         let fixture = makeBankFixture()
-        let record = try NativeMTPSelfTest.parseChallengeBank(try jsonData(fixture.bank))[0]
+        let record = try NativeMTPSelfTest.parseChallengeBank(try jsonData(fixture.bank)).entries[0]
         let base = NativeMTPSelfTestExecutionResult(
             runtimeTuple: fixture.runtimeTuple,
             servedSnapshotGeneration: fixture.servedSnapshot.generation,
@@ -125,7 +140,7 @@ final class NativeMTPSelfTestTests: XCTestCase {
 
     func testRunnerValidateGroundsReceiptInSelectedBankRecordAndServedSnapshot() async throws {
         let fixture = makeBankFixture()
-        let record = try NativeMTPSelfTest.parseChallengeBank(try jsonData(fixture.bank))[0]
+        let record = try NativeMTPSelfTest.parseChallengeBank(try jsonData(fixture.bank)).entries[0]
         let input = makeInput(fixture: fixture, record: record)
         let receipt = makeReceipt(input: input, challenge: record, servedSnapshot: fixture.servedSnapshot, outputTokens: fixture.outputTokens)
         let runner = NativeMTPSelfTestRunner { received in
@@ -139,7 +154,7 @@ final class NativeMTPSelfTestTests: XCTestCase {
 
     func testRunnerValidateFailsClosedOnUngroundedOrMismatchedReceipt() async throws {
         let fixture = makeBankFixture()
-        let record = try NativeMTPSelfTest.parseChallengeBank(try jsonData(fixture.bank))[0]
+        let record = try NativeMTPSelfTest.parseChallengeBank(try jsonData(fixture.bank)).entries[0]
         let input = makeInput(fixture: fixture, record: record)
         let receipt = makeReceipt(input: input, challenge: record, servedSnapshot: fixture.servedSnapshot, outputTokens: fixture.outputTokens)
 
@@ -245,8 +260,8 @@ final class NativeMTPSelfTestTests: XCTestCase {
         let bank: [String: Any] = [
             "schema_version": NativeMTPSelfTestChallenge.bankSchemaVersion,
             "release_id": "native-mtp-selftest-fixture",
-            "issued_at": "2026-09-28T00:00:00Z",
-            "expires_at": "2026-09-29T00:00:00Z",
+            "issued_at": "2020-01-01T00:00:00Z",
+            "expires_at": "2099-09-29T00:00:00Z",
             "signer_key_id": "native-mtp-selftest-release",
             "entries": [[
                 "challenge_id": "challenge-1",
