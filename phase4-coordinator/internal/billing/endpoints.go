@@ -147,6 +147,12 @@ const settlementReceiptDiagnosticsDefaultWindow = 31 * 24 * time.Hour
 const idlePrewarmEarningsReadTimeout = 250 * time.Millisecond
 const settlementReceiptAuditOutboxPoisonPath = "/admin/ledger/settlement-receipt-audit-outbox/poisoned"
 
+// Reader queries are isolated from the single money writer, but still need a
+// finite lifetime so an abandoned aggregate cannot pin a WAL snapshot. Admin
+// aggregates get more room than the latency-sensitive provider earnings card.
+const adminAggregateReadTimeout = 15 * time.Second
+const providerEarningsReadTimeout = 5 * time.Second
+
 type settlementReceiptSummary struct {
 	ReceiptProfile        string                        `json:"receipt_profile"`
 	WindowFromUTC         string                        `json:"window_from_utc,omitempty"`
@@ -679,7 +685,8 @@ func (h *handler) allowAdminRequest(w http.ResponseWriter) bool {
 }
 
 func (h *handler) summary(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), adminAggregateReadTimeout)
+	defer cancel()
 	settlementVerdictCounters, err := h.settlementVerdictCounters(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
@@ -709,7 +716,8 @@ SELECT COUNT(*) FROM ledger_request_credits lrc
 }
 
 func (h *handler) providers(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), adminAggregateReadTimeout)
+	defer cancel()
 	limit := 50
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
@@ -1135,7 +1143,9 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "provider earnings rate limit exceeded")
 		return
 	}
-	if h.sum(r.Context(), `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=?`, providerID) == 0 {
+	ctx, cancel := context.WithTimeout(r.Context(), providerEarningsReadTimeout)
+	defer cancel()
+	if h.sum(ctx, `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=?`, providerID) == 0 {
 		writeError(w, http.StatusNotFound, "not_found", "provider not found")
 		return
 	}
@@ -1148,7 +1158,7 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 	nowUTC := time.Now().UTC()
 	current := sqliteTimeText(currentMondayUTC(nowUTC))
 	todayUTC := sqliteTimeText(time.Date(nowUTC.Year(), nowUTC.Month(), nowUTC.Day(), 0, 0, 0, 0, time.UTC))
-	models := h.modelsServed(r.Context(), providerID, rangeSQL, rangeArgs...)
+	models := h.modelsServed(ctx, providerID, rangeSQL, rangeArgs...)
 	totalArgs := append([]any{providerID}, rangeArgs...)
 	currentArgs := append([]any{providerID, current}, rangeArgs...)
 	todayArgs := append([]any{providerID, todayUTC}, rangeArgs...)
@@ -1157,9 +1167,9 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 	// Payable provider_credits for the range-scoped total plus the two rolling
 	// windows the Malibu card shows. current_window == "this week" (since Monday
 	// UTC); today == since midnight UTC. These honour any from/to range.
-	totalCredits := h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL, totalArgs...)
-	weekCredits := h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND `+sqliteTimeSince("ts_utc")+rangeSQL, currentArgs...)
-	todayCredits := h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND `+sqliteTimeSince("ts_utc")+rangeSQL, todayArgs...)
+	totalCredits := h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`+rangeSQL, totalArgs...)
+	weekCredits := h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND `+sqliteTimeSince("ts_utc")+rangeSQL, currentArgs...)
+	todayCredits := h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=? AND `+sqliteTimeSince("ts_utc")+rangeSQL, todayArgs...)
 	// "Pending" = all USDC currently owed to the provider (earned, payout-
 	// eligible, not yet paid). It is a lifetime, range-INDEPENDENT figure — a
 	// from/to filter narrows the today/week/lifetime views but must never make
@@ -1171,17 +1181,17 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 	// ledger_payout_ready — see internal/payout/reorg.go, orphans.go); a naive
 	// `status NOT IN ('ready','voided')` subtraction would UNDERSTATE owed money
 	// after an unresolved orphan, so it is intentionally not done here.
-	pendingCredits := h.sum(r.Context(), `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`, providerID)
+	pendingCredits := h.sum(ctx, `SELECT SUM(provider_credits) FROM spec022_payable_request_credits WHERE provider_id=?`, providerID)
 
 	resp := map[string]any{
 		"provider_id":            providerID,
 		"total_credits":          totalCredits,
 		"current_window_credits": weekCredits,
-		"last_payout_ready":      h.lastPayout(r.Context(), providerID),
-		"provider_share_bps":     h.latestShareBps(r.Context()),
+		"last_payout_ready":      h.lastPayout(ctx, providerID),
+		"provider_share_bps":     h.latestShareBps(ctx),
 		"models_served":          models,
-		"rate_card_excerpt":      h.rateCardExcerpt(r.Context(), models),
-		"fault_count":            h.sum(r.Context(), `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, faultArgs...),
+		"rate_card_excerpt":      h.rateCardExcerpt(ctx, models),
+		"fault_count":            h.sum(ctx, `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, faultArgs...),
 		// usdc_* are the USD figures the Malibu client (ProviderEarningsClient)
 		// decodes for the "today / wk / pending / life" card. Before this the
 		// endpoint emitted only *_credits, so every card read $0.00 regardless
@@ -1212,7 +1222,7 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 	}
 	resp["idle_prewarm"] = idlePrewarm
 	diagnosticsFrom, diagnosticsTo := settlementReceiptDiagnosticsWindow(h.store.nowUTC(), rangeFrom, rangeTo, hasRange)
-	summaries, err := h.settlementReceiptSummariesForProviders(r.Context(), []string{providerID}, diagnosticsFrom, diagnosticsTo, true, 5)
+	summaries, err := h.settlementReceiptSummariesForProviders(ctx, []string{providerID}, diagnosticsFrom, diagnosticsTo, true, 5)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return

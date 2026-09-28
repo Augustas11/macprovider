@@ -520,7 +520,8 @@ func (m *Metrics) AddSettlementReceiptAuditOutboxRows(operation string, rows int
 
 func allowMoneySQLiteComponent(component string) bool {
 	switch component {
-	case "billing_hot_path", "request_log_identity", "billing_reload_config", "route_snapshot", "wal_checkpoint":
+	case "billing_hot_path", "request_log_identity", "billing_reload_config", "route_snapshot", "wal_checkpoint",
+		"ledger_recovery", "settlement_attempt_output", "settlement_pool_labels", "settlement_receipt":
 		return true
 	default:
 		return false
