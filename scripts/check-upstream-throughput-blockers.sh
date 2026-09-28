@@ -114,7 +114,7 @@ native_mtp_required_merges_in_latest_release = all(
     for row in native_mtp_required_merges.values()
 )
 
-native_mtp_exception_revision = "3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db"
+native_mtp_exception_revision = "31223c97262bd5123e76055c5662a42677936eea"
 native_mtp_exception_base = "ee673d6a71d76e67b532dc7eaf91d92edc3bb8bb"
 native_mtp_exception_repo = "Augustas11/mlx-swift-lm"
 native_mtp_exception_remote_verified = commit_is_descendant(
@@ -139,7 +139,7 @@ graph_traceable = (
     or "CompilableKVCache" in body
 )
 note = (
-    "KVCache.swift heuristic on upstream main; public MTP transaction API "
+    "KVCache.swift heuristic on upstream main; public MTP transaction/packed verification API "
     "tracked by mlx-swift-lm#645"
 )
 
@@ -301,8 +301,9 @@ out = {
             else "blocked_transaction_exception_unverified"
         ),
         "note": (
-            "Exact reviewed fork transaction facade qualifies the SPEC-048-R003 "
-            "cache boundary; upstream #645 remains the tagged-release replacement tracker"
+            "Exact reviewed fork transaction and packed verification facades qualify "
+            "the SPEC-048-R003 API boundary; upstream #645 remains the tagged-release "
+            "replacement tracker"
         ),
     },
     "native_mtp_immutable_dependency_exception": {
@@ -316,7 +317,7 @@ out = {
         "remote_revision_verified": native_mtp_exception_remote_verified,
         "local_pin_matches": native_mtp_exception_pin_matches,
         "review_status": "approved_0_critical_0_high_0_medium",
-        "scope": "public_mtp_cache_transaction_facade_only",
+        "scope": "public_mtp_cache_transaction_and_packed_verification_facades_only",
         "removal_trigger": (
             "first reviewed upstream tag with an equivalent public facade that "
             "passes the MacProvider qualification artifact"

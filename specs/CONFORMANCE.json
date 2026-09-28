@@ -1474,7 +1474,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -9836,22 +9836,27 @@
       "spec_id": "SPEC-048",
       "state": "pending",
       "implementation": [
-        "phase3-binary/Package.swift",
-        "scripts/read_swiftpm_pins.py"
+        "phase3-binary/Package.swift:let package",
+        "scripts/read_swiftpm_pins.py:SPEC048_MLX_SWIFT_LM_REVISION"
       ],
       "tests": [
-        "phase3-binary/Tests/mlx-stage-spikeTests/NativeMTPUpstreamQualificationTests.swift",
-        "scripts/tests/test_upstream_watch.py"
+        "phase3-binary/Tests/mlx-stage-spikeTests/NativeMTPUpstreamQualificationTests.swift:func testPublicPackedVerificationAPIUsesExplicitMixedRaggedRows() throws",
+        "scripts/tests/test_upstream_watch.py:class SwiftPMPinParsingTests"
       ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
       "evidence": [
-        "docs/research/SPEC_048_PHASE0_UPSTREAM_GATE_2026-09-28.md"
+        {
+          "artifact": "sha256:6c6fef7b3dd46d654e2e9569a27b9a56d096daa4c9fd1e9f7a74a61051c7adc3",
+          "source": "docs/research/SPEC_048_PHASE0_UPSTREAM_GATE_2026-09-28.md",
+          "captured_at": "2026-09-28",
+          "expires_at": "2026-12-27"
+        }
       ],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "The exact reviewed fork revision and public row-mapped cache-transaction facade are selected under the SPEC-048 v0.1.1 immutable-dependency exception. R003 remains pending until the external-package qualification, full upstream/cache test evidence, strict-concurrency and deployment/license checks, and the production adapter all pass on the frozen MacProvider diff."
+        "rationale": "The exact reviewed fork revision and public row-mapped cache-transaction plus packed target-verification facades are selected under the SPEC-048 v0.1.2 immutable-dependency exception. R003 remains pending until the external-package qualification, full upstream/cache test evidence, strict-concurrency and deployment/license checks, and the production adapter all pass on the frozen MacProvider diff."
       }
     },
     {

@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.1
+**Version:** 0.1.2
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -272,23 +272,26 @@ tagged release is the default production requirement.
 The first such exception is closed and exact:
 
 - repository: `https://github.com/Augustas11/mlx-swift-lm.git`;
-- revision: `3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db`;
+- revision: `31223c97262bd5123e76055c5662a42677936eea`;
 - upstream base: `ml-explore/mlx-swift-lm@ee673d6a71d76e67b532dc7eaf91d92edc3bb8bb`;
 - reviewed surface: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
   `MTPKVCacheTransactionPosition`, `MTPKVCacheTransactionCommit`, and
-  `reconcileMTPSharedKVState`;
+  `reconcileMTPSharedKVState`; plus `MTPPackedVerificationCache`,
+  `MTPPackedVerificationRowMap`, `MTPPackedVerificationOutput`,
+  `MTPPackedVerificationError`, and `verifyMTPPackedTargets`;
 - review date and owner: `2026-09-28`, `@Augustas11`;
 - mandatory exception re-review date: `2026-12-27`;
 - review gate: upstream-focused tests plus an independent adversarial review
   with zero Critical, High, or Medium findings; and
 - removal trigger: replace the fork pin with the first reviewed upstream tag
-  that contains an equivalent public transaction surface and passes the same
-  MacProvider qualification artifact.
+  that contains equivalent public transaction and packed target-verification
+  surfaces and passes the same MacProvider qualification artifact.
 
 No other fork URL, revision, API, or transitive source substitution is covered
-by this exception. The exception qualifies the public cache-transaction
-boundary only. It does not make a model/artifact tuple eligible, satisfy the
-serial or multi-row parity gates, admit MXFP8, or enable production serving.
+by this exception. The exception qualifies the public cache-transaction and
+packed target-verification API boundaries only. It does not make a model/artifact
+tuple eligible, satisfy the serial or multi-row parity gates, admit MXFP8, or
+enable production serving.
 
 ### MTP-4 — v0.1 request eligibility and fallback boundary (SPEC-048-R004)
 
@@ -891,6 +894,11 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.2 (2026-09-28)** — Extends the exact immutable-dependency exception
+  to the reviewed public packed target-verification facade at fork revision
+  `31223c97262bd5123e76055c5662a42677936eea`. The exception remains
+  default-off and does not satisfy scheduler integration, parity, hardware,
+  signed-evidence, audit, release, or production gates.
 - **0.1.1 (2026-09-28)** — Records the narrow immutable-dependency exception
   for the reviewed public MTP cache-transaction facade at fork revision
   `3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db`. The exception is exact,

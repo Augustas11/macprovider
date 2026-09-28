@@ -268,7 +268,7 @@
     "native_mtp_required_merges_in_latest_release": false,
     "native_mtp_public_row_mapped_transactions_reviewed": true,
     "native_mtp_status": "qualified_transaction_exception_default_off",
-    "note": "Exact reviewed fork transaction facade qualifies the SPEC-048-R003 cache boundary; upstream #645 remains the tagged-release replacement tracker"
+    "note": "Exact reviewed fork transaction and packed verification facades qualify the SPEC-048-R003 API boundary; upstream #645 remains the tagged-release replacement tracker"
   },
   "native_mtp_immutable_dependency_exception": {
     "approved": true,
@@ -276,12 +276,12 @@
     "approved_by": "@Augustas11",
     "review_due_at": "2026-12-27",
     "fork_location": "https://github.com/Augustas11/mlx-swift-lm.git",
-    "fork_revision": "3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db",
+    "fork_revision": "31223c97262bd5123e76055c5662a42677936eea",
     "remote_revision_verified": true,
     "local_pin_matches": true,
     "upstream_base_revision": "ee673d6a71d76e67b532dc7eaf91d92edc3bb8bb",
     "review_status": "approved_0_critical_0_high_0_medium",
-    "scope": "public_mtp_cache_transaction_facade_only",
+    "scope": "public_mtp_cache_transaction_and_packed_verification_facades_only",
     "removal_trigger": "first reviewed upstream tag with an equivalent public facade that passes the MacProvider qualification artifact",
     "replacement_tracker": "https://github.com/ml-explore/mlx-swift-lm/issues/645"
   },
@@ -289,8 +289,8 @@
   "last_checked_at": "2026-09-28T01:24:16Z",
   "macprovider_pins": {
     "mlx_swift": "0.31.6",
-    "mlx_swift_lm": "3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db",
-    "mlx_swift_lm_revision": "3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db",
+    "mlx_swift_lm": "31223c97262bd5123e76055c5662a42677936eea",
+    "mlx_swift_lm_revision": "31223c97262bd5123e76055c5662a42677936eea",
     "mlx_swift_revision": "0bb916c67f4b9e5c682cbe02a42c701c93ab5021",
     "swift_jinja": "2.4.2",
     "swift_jinja_revision": "7d0b8880ef8e567dd4e0089f8b99fb354129017c",

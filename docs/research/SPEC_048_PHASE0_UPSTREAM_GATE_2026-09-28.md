@@ -1,16 +1,17 @@
 # SPEC-048 Phase-0 Upstream Gate - 2026-09-28
 
-Status: PUBLIC TRANSACTION BOUNDARY QUALIFIED by a narrow immutable-dependency
-exception; production native MTP serving remains default-off and unqualified.
+Status: PUBLIC TRANSACTION AND PACKED VERIFICATION BOUNDARIES QUALIFIED by a
+narrow immutable-dependency exception; production native MTP serving remains
+default-off and unqualified.
 
 ## Verdict
 
 MacProvider may now implement and test the default-off scheduler path against
 one reviewed, immutable fork revision. That revision exposes the row-owned
-cache transaction boundary that the released dependency lacked. This clears
-the API-access portion of SPEC-048-R003 only; it does not clear artifact,
-parity, multi-row, signed-evidence, hardware, audit, release, or production
-enablement gates.
+cache transaction boundary and the packed target-verification facade that the
+released dependency lacked. This clears the API-access portion of SPEC-048-R003
+only; it does not clear artifact, parity, multi-row, signed-evidence, hardware,
+audit, release, or production enablement gates.
 
 ## Current Pins
 
@@ -18,7 +19,7 @@ Source of truth: `phase3-binary/Package.swift` and
 `phase3-binary/Package.resolved`.
 
 - `mlx-swift-lm`: fork `Augustas11/mlx-swift-lm`, exact revision
-  `3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db`, based on upstream
+  `31223c97262bd5123e76055c5662a42677936eea`, based on upstream
   `ee673d6a71d76e67b532dc7eaf91d92edc3bb8bb`.
 - `mlx-swift`: resolved `0.31.6`, revision
   `0bb916c67f4b9e5c682cbe02a42c701c93ab5021`.
@@ -40,33 +41,44 @@ The pinned fork provides the existing public serial MTP symbols in
 - `MTPSpeculativeTokenIterator`
 - `MTPDrafterModelFactory`
 
-It additionally exposes the reviewed transaction facade:
+It additionally exposes the reviewed transaction and packed verification
+facades:
 
 - `MTPKVCacheStorage`
 - `MTPKVCacheTransaction`
 - `MTPKVCacheTransactionPosition`
 - `MTPKVCacheTransactionCommit`
 - `reconcileMTPSharedKVState`
+- `MTPPackedVerificationCache`
+- `MTPPackedVerificationRowMap`
+- `MTPPackedVerificationOutput`
+- `MTPPackedVerificationError`
+- `verifyMTPPackedTargets`
 
-The facade provides row/position metadata, isolated staging for stageable
+The facades provide row/position metadata, isolated staging for stageable
 attention caches, bounded native rewind for admitted attention/Mamba hybrids,
-contiguous-prefix commit, rejected-tail discard, exact rollback, and shared-KV
-reconciliation. The pinned `mlx-swift` also exposes
+contiguous-prefix commit, rejected-tail discard, exact rollback, shared-KV
+reconciliation, explicit ragged row maps, ordinary-row participation, and one
+packed target verification call for the admitted rows. The pinned `mlx-swift`
+also exposes
 `QuantizationMode.mxfp8`.
 
-The MacProvider qualification test exercises the facade as an external package
-consumer. Upstream focused coverage passed 25 tests across two suites; seven
-existing shared-KV reconciliation tests also passed. The complete facade diff
-received an independent adversarial review with 0 Critical, 0 High, and 0
-Medium findings. Two broader Qwen checkpoint-equivalence failures reproduced
-unchanged on pristine upstream base and are recorded as baseline, not attributed
-to the facade.
+The MacProvider qualification test exercises the facades as an external package
+consumer, including one mixed ragged packed target call with explicit row maps,
+ordinary and native rows, and fail-closed incapable/empty cache cases. Upstream
+focused coverage passed for the fork qualification surface; seven existing
+shared-KV reconciliation tests also passed. The complete facade diff received an
+independent adversarial review with 0 Critical, 0 High, and 0 Medium findings.
+Two broader Qwen checkpoint-equivalence failures reproduced unchanged on
+pristine upstream base and are recorded as baseline, not attributed to the
+facades.
 
 ## Immutable-Dependency Exception
 
-SPEC-048 v0.1.1 permits exactly the fork and revision above. The facade keeps
-the underlying `KVCacheRound` strategies package-scoped and exposes only the
-narrow ownership/transaction operations required by an external scheduler.
+SPEC-048 v0.1.2 permits exactly the fork and revision above. The facades keep
+the underlying `KVCacheRound` strategies package-scoped and expose only the
+narrow ownership/transaction and packed target-verification operations required
+by an external scheduler.
 All other fork URLs, revisions, and source substitutions remain rejected.
 The exception must be re-reviewed no later than `2026-12-27` if it has not
 already been removed.
@@ -125,9 +137,9 @@ Allowed now:
 - Keep `native_mtp` fail-closed and default-off.
 - Implement the row-owned cache transaction, allocator transaction, and serial
   oracle needed by the production adapter.
-- Prototype packed verification only behind the default-off gate; it cannot
-  satisfy the Phase-2 exit gate until an external-consumer qualification proves
-  explicit ragged row maps and one shared target forward.
+- Use the qualified packed verification facade only behind the default-off gate;
+  it does not satisfy the Phase-2 exit gate without the remaining scheduler,
+  parity, signed-evidence, hardware, audit, release, and production gates.
 - Keep upstream watch automation and compile probes current.
 - Re-run the upstream replacement gate when `mlx-swift-lm` publishes a newer
   release.
@@ -140,8 +152,8 @@ Still blocked from production enablement:
 - No claim that MXFP8 support alone satisfies SPEC-048.
 - No tuple enablement before artifact, parity, multi-row, signed journey,
   hardware, audit, and release gates pass.
-- No Phase-2 completion claim from the cache facade alone; the packed target
-  verification boundary remains a separate required proof.
+- No Phase-2 completion claim from the qualified API facades alone; they are
+  necessary API-access evidence, not integration or production proof.
 
 Upstream issue #645 remains the replacement tracker. MacProvider issue #1770
 and the campaign PR remain open until the full multi-row and production-evidence
