@@ -449,6 +449,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         "legacy_reader_fallback_v1",
         "service_instance_v1",
         "model_liveness_token_v1",
+        NativeMTPStatusSnapshot.capability,
         ProviderBuild1LaneAStatusEvidence.schema,
         "status_observation_v1",
         "provider_safety_telemetry_v1",
@@ -2216,6 +2217,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "throughput_probe_model": jsonNullable(snapshot.capacity.throughputProbe?.modelID),
             ],
             "continuous_batching": continuousBatchingStatusFields(runtimeSnapshot?.continuousBatching),
+            "native_mtp": (runtimeSnapshot?.nativeMTPStatus ?? NativeMTPStatusSink.disabled().snapshot()).statusObject(),
             "coordinator": [
                 "connected": snapshot.coordinatorConnected,
                 "session": jsonNullable(snapshot.coordinatorAssignedID),

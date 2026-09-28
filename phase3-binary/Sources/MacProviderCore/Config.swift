@@ -22,6 +22,11 @@ public enum ContinuousBatchingMode: String, Sendable {
     case on
 }
 
+public enum NativeMTPMode: String, Sendable {
+    case off
+    case auto
+}
+
 /// SPEC-038 FR-CB10: one operator-declared tuple that real-hardware acceptance
 /// (AC-14 / AC-23) actually qualified for continuous batching. Declared in the
 /// `continuous_batching_accepted_tuples` config key; an absent key covers
@@ -175,6 +180,7 @@ public struct AppConfig: Equatable, Sendable {
     public var draftModelArtifactSHA256: String?
     public var numDraftTokens: Int
     public var publishesSpecDecodeTelemetry: Bool
+    public var nativeMTPMode: NativeMTPMode
     public var modelCatalogKey: String?
     public var modelCatalogModelID: String?
     public var modelCatalogRevision: String?
@@ -330,6 +336,7 @@ public struct AppConfig: Equatable, Sendable {
             draftModelArtifactSHA256: nil,
             numDraftTokens: 3,
             publishesSpecDecodeTelemetry: false,
+            nativeMTPMode: .off,
             modelCatalogKey: nil,
             modelCatalogModelID: nil,
             modelCatalogRevision: nil,
@@ -399,6 +406,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var draftModelArtifactSHA256: String?
     public var numDraftTokens: Int?
     public var publishesSpecDecodeTelemetry: Bool?
+    public var nativeMTPMode: String?
     public var coordinatorURL: String?
     public var providerID: String?
     public var endpointURL: String?
@@ -450,6 +458,7 @@ public struct CLIOverrides: Equatable, Sendable {
         draftModelArtifactSHA256: String? = nil,
         numDraftTokens: Int? = nil,
         publishesSpecDecodeTelemetry: Bool? = nil,
+        nativeMTPMode: String? = nil,
         coordinatorURL: String? = nil,
         providerID: String? = nil,
         endpointURL: String? = nil,
@@ -495,6 +504,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.draftModelArtifactSHA256 = draftModelArtifactSHA256
         self.numDraftTokens = numDraftTokens
         self.publishesSpecDecodeTelemetry = publishesSpecDecodeTelemetry
+        self.nativeMTPMode = nativeMTPMode
         self.coordinatorURL = coordinatorURL
         self.providerID = providerID
         self.endpointURL = endpointURL
@@ -655,6 +665,17 @@ public enum ConfigLoader {
         try assign(&config.draftModelArtifactSHA256, from: dict, key: "draft_model_artifact_sha256", expected: "string")
         try assign(&config.numDraftTokens, from: dict, key: "num_draft_tokens", expected: "integer")
         try assign(&config.publishesSpecDecodeTelemetry, from: dict, key: "publishes_spec_decode_telemetry", expected: "boolean")
+        if dict["native_mtp_mode"] != nil {
+            guard let rawMode = rawNode?["native_mtp_mode"]?.scalar?.string,
+                  let mode = NativeMTPMode(rawValue: rawMode.lowercased()) else {
+                throw ConfigError.invalidValue(
+                    key: "native_mtp_mode",
+                    value: String(describing: dict["native_mtp_mode"]),
+                    expected: "off or auto"
+                )
+            }
+            config.nativeMTPMode = mode
+        }
         try assign(&config.modelCatalogKey, from: dict, key: "model_catalog_key", expected: "string")
         try assign(&config.modelCatalogModelID, from: dict, key: "model_catalog_model_id", expected: "string")
         try assign(&config.modelCatalogRevision, from: dict, key: "model_catalog_revision", expected: "string")
@@ -879,6 +900,7 @@ public enum ConfigLoader {
         try assign(&config.draftModelArtifactSHA256, from: environment, env: "MACPROVIDER_DRAFT_MODEL_ARTIFACT_SHA256", expected: "string")
         try assign(&config.numDraftTokens, from: environment, env: "MACPROVIDER_NUM_DRAFT_TOKENS", expected: "integer")
         try assign(&config.publishesSpecDecodeTelemetry, from: environment, env: "MACPROVIDER_PUBLISHES_SPEC_DECODE_TELEMETRY", expected: "boolean")
+        try assign(&config.nativeMTPMode, from: environment, env: "MACPROVIDER_NATIVE_MTP_MODE", expected: "off or auto")
         try assign(&config.coordinatorURL, from: environment, env: "MACPROVIDER_COORDINATOR_URL", expected: "string")
         try assign(&config.providerID, from: environment, env: "MACPROVIDER_PROVIDER_ID", expected: "string")
         try assign(&config.endpointURL, from: environment, env: "MACPROVIDER_ENDPOINT_URL", expected: "string")
@@ -1017,6 +1039,16 @@ public enum ConfigLoader {
         }
         if let publishesSpecDecodeTelemetry = cli.publishesSpecDecodeTelemetry {
             config.publishesSpecDecodeTelemetry = publishesSpecDecodeTelemetry
+        }
+        if let nativeMTPMode = cli.nativeMTPMode {
+            guard let mode = NativeMTPMode(rawValue: nativeMTPMode.lowercased()) else {
+                throw ConfigError.invalidValue(
+                    key: "--native-mtp",
+                    value: nativeMTPMode,
+                    expected: "off or auto"
+                )
+            }
+            config.nativeMTPMode = mode
         }
         if let coordinatorURL = cli.coordinatorURL {
             config.coordinatorURL = coordinatorURL
@@ -1368,6 +1400,14 @@ public enum ConfigLoader {
     private static func assign(_ field: inout ContinuousBatchingMode, from env: [String: String], env key: String, expected: String) throws {
         guard let value = env[key] else { return }
         guard let mode = ContinuousBatchingMode(rawValue: value.lowercased()) else {
+            throw ConfigError.invalidValue(key: key, value: value, expected: expected)
+        }
+        field = mode
+    }
+
+    private static func assign(_ field: inout NativeMTPMode, from env: [String: String], env key: String, expected: String) throws {
+        guard let value = env[key] else { return }
+        guard let mode = NativeMTPMode(rawValue: value.lowercased()) else {
             throw ConfigError.invalidValue(key: key, value: value, expected: expected)
         }
         field = mode

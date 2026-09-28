@@ -155,6 +155,8 @@ actor CoordinatorClient {
     /// fetch and returns a hello envelope for the row this process already
     /// serves, or nil when no live verified same-row document is available.
     typealias CatalogEnvelopeRefresher = @Sendable () async -> CatalogEnvelope?
+    typealias NativeMTPCanaryExecutor = @Sendable (NativeMTPCanaryRequestPayload) async -> NativeMTPCanaryResultPayload
+    typealias NativeMTPTupleDisableHandler = @Sendable (NativeMTPTupleDisablePayload) async -> Void
 
     struct CatalogEnvelope: Sendable, Equatable {
         let releaseID: String
@@ -163,6 +165,257 @@ actor CoordinatorClient {
         let signerKeyID: String
         let rowIdentity: String
         let modelSHA256: String
+    }
+
+    struct NativeMTPRuntimeTuplePayload: Sendable, Equatable {
+        let modelID: String
+        let modelHash: String
+        let modelHashAlgorithm: String
+        let providerRevision: String
+        let runtimeRevision: String
+        let tokenizerDigest: String
+        let artifactDigest: String
+        let manifestDigest: String
+        let sidecarDigest: String
+        let providerBinarySHA256: String
+        let runtimeCDHash: String
+        let cacheNamespace: String
+        let stateDigest: String
+        let proposalDepth: Int
+
+        var wireObject: [String: Any] {
+            [
+                "model_id": modelID,
+                "model_hash": modelHash,
+                "model_hash_algorithm": modelHashAlgorithm,
+                "provider_revision": providerRevision,
+                "runtime_revision": runtimeRevision,
+                "tokenizer_digest": tokenizerDigest,
+                "artifact_digest": artifactDigest,
+                "manifest_digest": manifestDigest,
+                "sidecar_digest": sidecarDigest,
+                "provider_binary_sha256": providerBinarySHA256,
+                "runtime_cdhash": runtimeCDHash,
+                "cache_namespace": cacheNamespace,
+                "state_digest": stateDigest,
+                "proposal_depth": proposalDepth,
+            ]
+        }
+
+        init(
+            modelID: String,
+            modelHash: String,
+            modelHashAlgorithm: String,
+            providerRevision: String,
+            runtimeRevision: String,
+            tokenizerDigest: String,
+            artifactDigest: String,
+            manifestDigest: String,
+            sidecarDigest: String,
+            providerBinarySHA256: String,
+            runtimeCDHash: String,
+            cacheNamespace: String,
+            stateDigest: String,
+            proposalDepth: Int
+        ) {
+            self.modelID = modelID
+            self.modelHash = modelHash
+            self.modelHashAlgorithm = modelHashAlgorithm
+            self.providerRevision = providerRevision
+            self.runtimeRevision = runtimeRevision
+            self.tokenizerDigest = tokenizerDigest
+            self.artifactDigest = artifactDigest
+            self.manifestDigest = manifestDigest
+            self.sidecarDigest = sidecarDigest
+            self.providerBinarySHA256 = providerBinarySHA256
+            self.runtimeCDHash = runtimeCDHash
+            self.cacheNamespace = cacheNamespace
+            self.stateDigest = stateDigest
+            self.proposalDepth = proposalDepth
+        }
+
+        init(_ tuple: NativeMTPPublishedRuntimeTuple, providerRevision: String, runtimeRevision: String) {
+            self.init(
+                modelID: tuple.modelID,
+                modelHash: tuple.modelHash,
+                modelHashAlgorithm: tuple.modelHashAlgorithm,
+                providerRevision: providerRevision,
+                runtimeRevision: runtimeRevision,
+                tokenizerDigest: tuple.tokenizerDigest,
+                artifactDigest: tuple.artifactDigest,
+                manifestDigest: tuple.manifestDigest,
+                sidecarDigest: tuple.sidecarDigest,
+                providerBinarySHA256: tuple.providerBinarySHA256,
+                runtimeCDHash: tuple.runtimeCDHash,
+                cacheNamespace: tuple.cacheNamespace,
+                stateDigest: tuple.stateDigest,
+                proposalDepth: tuple.proposalDepth
+            )
+        }
+    }
+
+    struct NativeMTPCanaryRequestPayload: Sendable, Equatable {
+        let requestID: String
+        let providerID: String
+        let assignedID: String
+        let modelID: String
+        let modelHash: String
+        let modelHashAlgorithm: String
+        let providerRevision: String
+        let runtimeRevision: String
+        let targetGeneration: UInt64
+        let tokenizerDigest: String
+        let artifactDigest: String
+        let manifestDigest: String
+        let sidecarDigest: String
+        let providerBinarySHA256: String
+        let runtimeCDHash: String
+        let cacheNamespace: String
+        let stateDigest: String
+        let runtimeTuple: NativeMTPRuntimeTuplePayload
+        let challengeID: String
+        let challengeCorpusSHA256: String
+        let challengeBankSHA256: String
+        let nativeMTPAdmissionTupleSHA256: String
+        let servedSnapshotID: String
+        let nativeMTPRuntimeTupleSHA256: String
+        let expectedTokenIDSHA256: String
+        let expectedTerminalReason: String
+        let expectedCounters: NativeMTPCanaryCountersPayload
+        let expectedCommittedStateSHA256: String
+        let nonce: String
+        let requestDigest: String
+        let issuedAt: String
+        let expiresAt: String
+        let promptTokenIDs: [Int]
+        let maxCompletionTokens: Int
+        let proposalDepth: Int
+    }
+
+    struct NativeMTPCanaryCountersPayload: Sendable, Equatable {
+        let acceptedTokens: UInt64
+        let rejectedTokens: UInt64
+        let bonusTokens: UInt64
+        let committedTokens: UInt64
+
+        var wireObject: [String: Any] {
+            [
+                "accepted": NSNumber(value: acceptedTokens),
+                "rejected": NSNumber(value: rejectedTokens),
+                "bonus": NSNumber(value: bonusTokens),
+                "committed": NSNumber(value: committedTokens),
+            ]
+        }
+    }
+
+    struct NativeMTPCanaryResultPayload: Sendable, Equatable {
+        let requestID: String
+        let providerID: String
+        let assignedID: String
+        let requestDigest: String
+        let resultDigest: String
+        let targetGeneration: UInt64
+        let providerRevision: String
+        let runtimeRevision: String
+        let challengeID: String
+        let challengeBankSHA256: String
+        let nonce: String
+        let nativeMTPRuntimeTupleSHA256: String
+        let expectedTokenIDSHA256: String
+        let actualTokenIDSHA256: String
+        let terminalReason: String
+        let counters: NativeMTPCanaryCountersPayload
+        let committedStateSHA256: String
+        let actualDecodePath: String
+        let fallbackUsed: Bool
+        let runtimeTuple: NativeMTPRuntimeTuplePayload
+        let diagnostic: String?
+
+        var wireObject: [String: Any] {
+            var object: [String: Any] = [
+                "type": "native_mtp_canary_result_v1",
+                "version": 1,
+                "request_id": requestID,
+                "provider_id": providerID,
+                "assigned_id": assignedID,
+                "request_digest": requestDigest,
+                "result_digest": resultDigest,
+                "target_generation": NSNumber(value: targetGeneration),
+                "provider_revision": providerRevision,
+                "runtime_revision": runtimeRevision,
+                "challenge_id": challengeID,
+                "challenge_bank_sha256": challengeBankSHA256,
+                "nonce": nonce,
+                "native_mtp_runtime_tuple_sha256": nativeMTPRuntimeTupleSHA256,
+                "expected_token_id_sha256": expectedTokenIDSHA256,
+                "actual_token_id_sha256": actualTokenIDSHA256,
+                "terminal_reason": terminalReason,
+                "counters": counters.wireObject,
+                "committed_state_sha256": committedStateSHA256,
+                "actual_decode_path": actualDecodePath,
+                "fallback_used": fallbackUsed,
+                "runtime_tuple": runtimeTuple.wireObject,
+            ]
+            if let diagnostic {
+                object["diagnostic"] = diagnostic
+            }
+            return object
+        }
+    }
+
+    struct NativeMTPTupleOfferPayload: Sendable, Equatable {
+        let providerID: String
+        let assignedID: String
+        let targetGeneration: UInt64
+        let providerRevision: String
+        let runtimeRevision: String
+        let runtimeTuple: NativeMTPRuntimeTuplePayload
+        let nativeMTPAdmissionTupleSHA256: String
+        let servedSnapshotID: String
+        let nativeMTPRuntimeTupleSHA256: String
+        let sidecarDigest: String
+        let challengeBankReleaseID: String
+        let challengeBankSHA256: String
+        let challengeCorpusSHA256: String
+        let selftestProfile: String
+        let selftestPassDigest: String
+        let selftestObservedAt: String
+
+        var wireObject: [String: Any] {
+            [
+                "type": "native_mtp_tuple_offer_v1",
+                "version": 1,
+                "provider_id": providerID,
+                "assigned_id": assignedID,
+                "target_generation": NSNumber(value: targetGeneration),
+                "provider_revision": providerRevision,
+                "runtime_revision": runtimeRevision,
+                "runtime_tuple": runtimeTuple.wireObject,
+                "native_mtp_admission_tuple_sha256": nativeMTPAdmissionTupleSHA256,
+                "served_snapshot_id": servedSnapshotID,
+                "native_mtp_runtime_tuple_sha256": nativeMTPRuntimeTupleSHA256,
+                "sidecar_digest": sidecarDigest,
+                "challenge_bank_release_id": challengeBankReleaseID,
+                "challenge_bank_sha256": challengeBankSHA256,
+                "challenge_corpus_sha256": challengeCorpusSHA256,
+                "selftest_profile": selftestProfile,
+                "selftest_pass_digest": selftestPassDigest,
+                "selftest_observed_at": selftestObservedAt,
+            ]
+        }
+    }
+
+    struct NativeMTPTupleDisablePayload: Sendable, Equatable {
+        let providerID: String
+        let assignedID: String
+        let targetGeneration: UInt64
+        let nativeMTPAdmissionTupleSHA256: String
+        let servedSnapshotID: String
+        let nativeMTPRuntimeTupleSHA256: String
+        let reason: String
+        let nonce: String
+        let issuedAt: String
+        let requestDigest: String
     }
     typealias InstalledCompatibilityManifest = @Sendable (URL, String) -> CompatibilitySetManifest?
     typealias ReloadHelperFence = @Sendable () throws -> Void
@@ -421,6 +674,8 @@ actor CoordinatorClient {
     private let installedCompatibilityManifest: InstalledCompatibilityManifest
     private let catalogModelSHA256: String?
     private let catalogArtifactIdentity: CatalogArtifactIdentity
+    private let nativeMTPCanaryExecutor: NativeMTPCanaryExecutor
+    private let nativeMTPTupleDisableHandler: NativeMTPTupleDisableHandler
     private let coordinatorReadiness: CoordinatorReadiness
     /// Isolated lab join only (`--isolate-lifecycle` + protected-file + a
     /// literal loopback coordinator URL): that relaxation skips the catalog
@@ -451,6 +706,9 @@ actor CoordinatorClient {
     private var requestCapacityTransitionGeneration = 0
     private var stateUpdateSendInFlight = false
     private var stateUpdateSendWaiters: [CheckedContinuation<Void, Never>] = []
+    private var lastNativeMTPTupleOfferDigest: String?
+    private var nativeMTPTupleDisableReplayDigests: [String] = []
+    private var nativeMTPTupleDisableReplaySet: Set<String> = []
     private static let requestCapacityStateUpdateCoalesceNanoseconds: UInt64 = 20_000_000
     private static let defaultCapacityStateUpdateSendTimeoutNanoseconds: UInt64 = 1_000_000_000
     private var capacityStateUpdateSendTimeoutNanoseconds = CoordinatorClient.defaultCapacityStateUpdateSendTimeoutNanoseconds
@@ -493,6 +751,8 @@ actor CoordinatorClient {
         installedCompatibilityManifest: InstalledCompatibilityManifest? = nil,
         catalogModelSHA256: String? = nil,
         catalogArtifactIdentity: CatalogArtifactIdentity? = nil,
+        nativeMTPCanaryExecutor: NativeMTPCanaryExecutor? = nil,
+        nativeMTPTupleDisableHandler: NativeMTPTupleDisableHandler? = nil,
         catalogEnvelopeRefresher: CatalogEnvelopeRefresher? = nil,
         catalogEnvelopeRefreshMinimumInterval: TimeInterval = 300,
         coordinatorReadiness: CoordinatorReadiness? = nil,
@@ -680,6 +940,24 @@ actor CoordinatorClient {
             }
             return try? ModelArtifactVerifier.canonicalArtifactHash(directory: directory)
         }
+        self.nativeMTPCanaryExecutor = nativeMTPCanaryExecutor ?? { request in
+            if let runtime = modelRuntime as? ModelRuntime {
+                return await runtime.runNativeMTPCanary(request)
+            }
+            return Self.inconclusiveNativeMTPCanaryResult(
+                request: request,
+                diagnostic: "native MTP canary executor unavailable"
+            )
+        }
+        self.nativeMTPTupleDisableHandler = nativeMTPTupleDisableHandler ?? { payload in
+            if let runtime = modelRuntime as? ModelRuntime {
+                await runtime.disableNativeMTPTuple(
+                    admissionTupleSHA256: payload.nativeMTPAdmissionTupleSHA256,
+                    servedSnapshotID: payload.servedSnapshotID,
+                    targetGeneration: payload.targetGeneration
+                )
+            }
+        }
         self.labLoopbackCatalogReadinessWaived = labLoopbackCatalogReadinessWaived
         self.coordinatorReadiness = coordinatorReadiness ?? { providerID, assignedProviderID, expected in
             await CoordinatorReadinessClient.fetchReadiness(
@@ -757,6 +1035,9 @@ actor CoordinatorClient {
         inBandAEADRekeyEnabled = false
         webSocket?.cancel(with: .goingAway, reason: nil)
         coordinatorSessionAccepted = false
+        lastNativeMTPTupleOfferDigest = nil
+        nativeMTPTupleDisableReplayDigests.removeAll()
+        nativeMTPTupleDisableReplaySet.removeAll()
         autoupdateCoordinatorPayload = [:]
         autoupdateCoordinatorPayloadIsV2 = false
         autoupdateAssignedProviderTokenAdopted = false
@@ -934,6 +1215,9 @@ actor CoordinatorClient {
                         // selected catalog row.
                         catalogWarmSwapInvalidated = true
                         coordinatorSessionAccepted = false
+                        lastNativeMTPTupleOfferDigest = nil
+                        nativeMTPTupleDisableReplayDigests.removeAll()
+                        nativeMTPTupleDisableReplaySet.removeAll()
                         await clearRequestCapacityStateUpdateHandler()
                         await providerStatus.setCatalogCompatibilityConfirmed(false)
                         Self.keepaliveDebug("catalog warm swap requires model-specific re-admission")
@@ -2158,6 +2442,9 @@ actor CoordinatorClient {
         webSocket?.cancel(with: .goingAway, reason: nil)
         webSocket = nil
         coordinatorSessionAccepted = false
+        lastNativeMTPTupleOfferDigest = nil
+        nativeMTPTupleDisableReplayDigests.removeAll()
+        nativeMTPTupleDisableReplaySet.removeAll()
         await clearRequestCapacityStateUpdateHandler()
         autoupdateCoordinatorPayload = [:]
         autoupdateCoordinatorPayloadIsV2 = false
@@ -2259,11 +2546,104 @@ actor CoordinatorClient {
             try await sendStateUpdate(state: .ready, reason: "warm_up complete")
         case "se_liveness_challenge":
             try await handleSELivenessChallenge(dict)
+        case "native_mtp_canary_request_v1":
+            try await handleNativeMTPCanaryRequest(dict)
+        case "native_mtp_tuple_disable_v1":
+            try await handleNativeMTPTupleDisable(dict)
         default:
             try await sendNAK(
                 inReplyTo: type,
                 code: "unknown_message_type",
                 message: "Unrecognized message type: '\(type)'"
+            )
+        }
+    }
+
+    private func handleNativeMTPTupleDisable(_ message: [String: Any]) async throws {
+        do {
+            try Self.rejectUnknownFields(message, allowed: [
+                "type", "version", "provider_id", "assigned_id", "target_generation",
+                "native_mtp_admission_tuple_sha256", "served_snapshot_id",
+                "native_mtp_runtime_tuple_sha256",
+                "reason", "nonce", "issued_at", "request_digest",
+            ])
+            guard try Self.requiredString(message, "type") == "native_mtp_tuple_disable_v1",
+                  Self.intValue(message["version"]) == 1,
+                  coordinatorSessionAccepted,
+                  try Self.boundedString(message, "provider_id", maxBytes: 128) == providerID,
+                  try Self.boundedString(message, "assigned_id", maxBytes: 128) == acceptedAssignedProviderID else {
+                throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable binding")
+            }
+            let targetGeneration = try Self.uint64Value(message["target_generation"], field: "target_generation")
+            let admissionTupleSHA256 = try Self.sha256String(message, "native_mtp_admission_tuple_sha256")
+            let servedSnapshotID = try Self.boundedString(message, "served_snapshot_id", maxBytes: 128)
+            let runtimeTupleSHA256 = try Self.sha256String(message, "native_mtp_runtime_tuple_sha256")
+            let expectedRuntimeTupleSHA256 = try Self.nativeMTPRuntimeTupleSHA256(
+                providerID: providerID,
+                assignedID: acceptedAssignedProviderID ?? "",
+                targetGeneration: targetGeneration,
+                nativeMTPAdmissionTupleSHA256: admissionTupleSHA256,
+                servedSnapshotID: servedSnapshotID
+            )
+            guard runtimeTupleSHA256 == expectedRuntimeTupleSHA256 else {
+                throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable identity")
+            }
+            let reason = try Self.boundedString(message, "reason", maxBytes: 64)
+            guard Self.nativeMTPTupleDisableReasons.contains(reason) else {
+                throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable reason")
+            }
+            let nonce = try Self.boundedString(message, "nonce", maxBytes: 32)
+            guard nonce.count == 32,
+                  nonce.unicodeScalars.allSatisfy({ scalar in
+                      (UnicodeScalar("0").value...UnicodeScalar("9").value).contains(scalar.value) ||
+                          (UnicodeScalar("a").value...UnicodeScalar("f").value).contains(scalar.value)
+                  }) else {
+                throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable nonce")
+            }
+            let issuedAt = try Self.boundedString(message, "issued_at", maxBytes: 64)
+            guard let issuedDate = Self.parseISO8601Date(issuedAt), abs(issuedDate.timeIntervalSinceNow) <= 300 else {
+                throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable issued_at")
+            }
+            let requestDigest = try Self.sha256String(message, "request_digest")
+            let expectedRequestDigest = try Self.nativeMTPTupleDisableRequestDigest(
+                providerID: providerID,
+                assignedID: acceptedAssignedProviderID ?? "",
+                targetGeneration: targetGeneration,
+                nativeMTPAdmissionTupleSHA256: admissionTupleSHA256,
+                servedSnapshotID: servedSnapshotID,
+                nativeMTPRuntimeTupleSHA256: runtimeTupleSHA256,
+                reason: reason,
+                nonce: nonce,
+                issuedAt: issuedAt
+            )
+            guard requestDigest == expectedRequestDigest,
+                  !nativeMTPTupleDisableReplaySet.contains(requestDigest) else {
+                throw CoordinatorAuthError.invalidMessage("invalid native MTP tuple disable request digest")
+            }
+            nativeMTPTupleDisableReplaySet.insert(requestDigest)
+            nativeMTPTupleDisableReplayDigests.append(requestDigest)
+            if nativeMTPTupleDisableReplayDigests.count > 256 {
+                let evicted = nativeMTPTupleDisableReplayDigests.removeFirst()
+                nativeMTPTupleDisableReplaySet.remove(evicted)
+            }
+            await nativeMTPTupleDisableHandler(NativeMTPTupleDisablePayload(
+                providerID: providerID,
+                assignedID: acceptedAssignedProviderID ?? "",
+                targetGeneration: targetGeneration,
+                nativeMTPAdmissionTupleSHA256: admissionTupleSHA256,
+                servedSnapshotID: servedSnapshotID,
+                nativeMTPRuntimeTupleSHA256: runtimeTupleSHA256,
+                reason: reason,
+                nonce: nonce,
+                issuedAt: issuedAt,
+                requestDigest: requestDigest
+            ))
+            lastNativeMTPTupleOfferDigest = nil
+        } catch {
+            try await sendNAK(
+                inReplyTo: "native_mtp_tuple_disable_v1",
+                code: "invalid_message",
+                message: "invalid native_mtp_tuple_disable_v1"
             )
         }
     }
@@ -2442,6 +2822,569 @@ actor CoordinatorClient {
             return nil
         }
         return max(1, Int(min(ceil(remaining), Double(Int32.max))))
+    }
+
+    private func handleNativeMTPCanaryRequest(_ message: [String: Any]) async throws {
+        let request: NativeMTPCanaryRequestPayload
+        do {
+            request = try Self.decodeNativeMTPCanaryRequest(message)
+            guard coordinatorSessionAccepted,
+                  request.providerID == providerID,
+                  request.assignedID == acceptedAssignedProviderID
+            else {
+                throw CoordinatorAuthError.invalidMessage("native MTP canary session binding mismatch")
+            }
+        } catch {
+            try await sendNAK(
+                inReplyTo: "native_mtp_canary_request_v1",
+                code: "invalid_message",
+                message: "invalid native_mtp_canary_request_v1"
+            )
+            return
+        }
+
+        let result = await nativeMTPCanaryExecutor(request)
+        do {
+            try Self.validateNativeMTPCanaryResult(result, request: request)
+            try await send(result.wireObject)
+        } catch {
+            let failed = Self.inconclusiveNativeMTPCanaryResult(
+                request: request,
+                diagnostic: "native MTP canary executor returned invalid result"
+            )
+            try await send(failed.wireObject)
+        }
+    }
+
+    private static func inconclusiveNativeMTPCanaryResult(
+        request: NativeMTPCanaryRequestPayload,
+        diagnostic: String
+    ) -> NativeMTPCanaryResultPayload {
+        let counters = NativeMTPCanaryCountersPayload(
+            acceptedTokens: 0,
+            rejectedTokens: 0,
+            bonusTokens: 0,
+            committedTokens: 0
+        )
+        let resultDigest = nativeMTPCanaryResultDigest(
+            requestID: request.requestID,
+            providerID: request.providerID,
+            assignedID: request.assignedID,
+            requestDigest: request.requestDigest,
+            targetGeneration: request.targetGeneration,
+            providerRevision: request.providerRevision,
+            runtimeRevision: request.runtimeRevision,
+            challengeID: request.challengeID,
+            challengeBankSHA256: request.challengeBankSHA256,
+            nonce: request.nonce,
+            nativeMTPRuntimeTupleSHA256: request.nativeMTPRuntimeTupleSHA256,
+            expectedTokenIDSHA256: request.expectedTokenIDSHA256,
+            actualTokenIDSHA256: request.expectedTokenIDSHA256,
+            terminalReason: "inconclusive",
+            counters: counters,
+            committedStateSHA256: request.expectedCommittedStateSHA256,
+            actualDecodePath: "unavailable",
+            fallbackUsed: false,
+            runtimeTuple: request.runtimeTuple,
+            diagnostic: diagnostic
+        )
+        return NativeMTPCanaryResultPayload(
+            requestID: request.requestID,
+            providerID: request.providerID,
+            assignedID: request.assignedID,
+            requestDigest: request.requestDigest,
+            resultDigest: resultDigest,
+            targetGeneration: request.targetGeneration,
+            providerRevision: request.providerRevision,
+            runtimeRevision: request.runtimeRevision,
+            challengeID: request.challengeID,
+            challengeBankSHA256: request.challengeBankSHA256,
+            nonce: request.nonce,
+            nativeMTPRuntimeTupleSHA256: request.nativeMTPRuntimeTupleSHA256,
+            expectedTokenIDSHA256: request.expectedTokenIDSHA256,
+            actualTokenIDSHA256: request.expectedTokenIDSHA256,
+            terminalReason: "inconclusive",
+            counters: counters,
+            committedStateSHA256: request.expectedCommittedStateSHA256,
+            actualDecodePath: "unavailable",
+            fallbackUsed: false,
+            runtimeTuple: request.runtimeTuple,
+            diagnostic: diagnostic
+        )
+    }
+
+    static func nativeMTPCanaryResultDigest(
+        requestID: String,
+        providerID: String,
+        assignedID: String,
+        requestDigest: String,
+        targetGeneration: UInt64,
+        providerRevision: String,
+        runtimeRevision: String,
+        challengeID: String,
+        challengeBankSHA256: String,
+        nonce: String,
+        nativeMTPRuntimeTupleSHA256: String,
+        expectedTokenIDSHA256: String,
+        actualTokenIDSHA256: String,
+        terminalReason: String,
+        counters: NativeMTPCanaryCountersPayload,
+        committedStateSHA256: String,
+        actualDecodePath: String,
+        fallbackUsed: Bool,
+        runtimeTuple: NativeMTPRuntimeTuplePayload,
+        diagnostic: String?
+    ) -> String {
+        guard let generation = Int(exactly: targetGeneration),
+              let accepted = Int(exactly: counters.acceptedTokens),
+              let rejected = Int(exactly: counters.rejectedTokens),
+              let bonus = Int(exactly: counters.bonusTokens),
+              let committed = Int(exactly: counters.committedTokens)
+        else {
+            return ""
+        }
+        let value = RFC8785JCS.Value.object([
+            "schema_version": .string("macprovider.native-mtp-canary-result.v1"),
+            "request_id": .string(requestID),
+            "provider_id": .string(providerID),
+            "assigned_id": .string(assignedID),
+            "request_digest": .string(requestDigest),
+            "target_generation": .int(generation),
+            "provider_revision": .string(providerRevision),
+            "runtime_revision": .string(runtimeRevision),
+            "challenge_id": .string(challengeID),
+            "challenge_bank_sha256": .string(challengeBankSHA256),
+            "nonce": .string(nonce),
+            "native_mtp_runtime_tuple_sha256": .string(nativeMTPRuntimeTupleSHA256),
+            "expected_token_id_sha256": .string(expectedTokenIDSHA256),
+            "actual_token_id_sha256": .string(actualTokenIDSHA256),
+            "terminal_reason": .string(terminalReason),
+            "counters": .object([
+                "accepted": .int(accepted),
+                "rejected": .int(rejected),
+                "bonus": .int(bonus),
+                "committed": .int(committed),
+            ]),
+            "committed_state_sha256": .string(committedStateSHA256),
+            "actual_decode_path": .string(actualDecodePath),
+            "fallback_used": .bool(fallbackUsed),
+            "runtime_tuple": nativeMTPRuntimeTupleJCSValue(runtimeTuple),
+            "diagnostic": .string(diagnostic ?? ""),
+        ])
+        guard let canonical = try? RFC8785JCS.canonicalStringRawStrings(value) else { return "" }
+        return SHA256.hash(data: Data("macprovider.native-mtp-canary-result.v1\n\(canonical)".utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func nativeMTPRuntimeTupleJCSValue(_ tuple: NativeMTPRuntimeTuplePayload) -> RFC8785JCS.Value {
+        .object([
+            "model_id": .string(tuple.modelID),
+            "model_hash": .string(tuple.modelHash),
+            "model_hash_algorithm": .string(tuple.modelHashAlgorithm),
+            "provider_revision": .string(tuple.providerRevision),
+            "runtime_revision": .string(tuple.runtimeRevision),
+            "tokenizer_digest": .string(tuple.tokenizerDigest),
+            "artifact_digest": .string(tuple.artifactDigest),
+            "manifest_digest": .string(tuple.manifestDigest),
+            "sidecar_digest": .string(tuple.sidecarDigest),
+            "provider_binary_sha256": .string(tuple.providerBinarySHA256),
+            "runtime_cdhash": .string(tuple.runtimeCDHash),
+            "cache_namespace": .string(tuple.cacheNamespace),
+            "state_digest": .string(tuple.stateDigest),
+            "proposal_depth": .int(tuple.proposalDepth),
+        ])
+    }
+
+    static func nativeMTPRuntimeTupleSHA256(
+        providerID: String,
+        assignedID: String,
+        targetGeneration: UInt64,
+        nativeMTPAdmissionTupleSHA256: String,
+        servedSnapshotID: String
+    ) throws -> String {
+        guard targetGeneration <= UInt64(Int.max) else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP target generation")
+        }
+        let canonical = try RFC8785JCS.canonicalStringRawStrings(.object([
+            "schema_version": .string("macprovider.native-mtp-runtime-tuple.v1"),
+            "native_mtp_admission_tuple_sha256": .string(nativeMTPAdmissionTupleSHA256),
+            "provider_id": .string(providerID),
+            "assigned_id": .string(assignedID),
+            "target_generation": .int(Int(targetGeneration)),
+            "served_snapshot_id": .string(servedSnapshotID),
+        ]))
+        return SHA256.hash(data: Data("macprovider.native-mtp-runtime-tuple.v1\n\(canonical)".utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func nativeMTPTupleDisableRequestDigest(
+        providerID: String,
+        assignedID: String,
+        targetGeneration: UInt64,
+        nativeMTPAdmissionTupleSHA256: String,
+        servedSnapshotID: String,
+        nativeMTPRuntimeTupleSHA256: String,
+        reason: String,
+        nonce: String,
+        issuedAt: String
+    ) throws -> String {
+        guard targetGeneration <= UInt64(Int.max) else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP target generation")
+        }
+        let canonical = try RFC8785JCS.canonicalStringRawStrings(.object([
+            "schema_version": .int(1),
+            "provider_id": .string(providerID),
+            "assigned_id": .string(assignedID),
+            "target_generation": .int(Int(targetGeneration)),
+            "native_mtp_admission_tuple_sha256": .string(nativeMTPAdmissionTupleSHA256),
+            "served_snapshot_id": .string(servedSnapshotID),
+            "native_mtp_runtime_tuple_sha256": .string(nativeMTPRuntimeTupleSHA256),
+            "reason": .string(reason),
+            "nonce": .string(nonce),
+            "issued_at": .string(issuedAt),
+        ]))
+        return SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static let nativeMTPCanaryRequestKeys: Set<String> = [
+        "type", "version", "request_id", "provider_id", "assigned_id",
+        "model_id", "model_hash", "model_hash_algorithm", "target_generation",
+        "provider_revision", "runtime_revision",
+        "tokenizer_digest", "artifact_digest", "manifest_digest", "sidecar_digest",
+        "provider_binary_sha256", "runtime_cdhash", "cache_namespace", "state_digest",
+        "runtime_tuple", "challenge_id", "challenge_corpus_sha256", "challenge_bank_sha256",
+        "native_mtp_admission_tuple_sha256", "served_snapshot_id",
+        "native_mtp_runtime_tuple_sha256", "expected_token_id_sha256", "expected_terminal_reason",
+        "expected_counters", "expected_committed_state_sha256", "nonce", "request_digest", "issued_at", "expires_at",
+        "prompt_token_ids", "max_completion_tokens", "proposal_depth",
+    ]
+
+    private static let nativeMTPRuntimeTupleKeys: Set<String> = [
+        "model_id", "model_hash", "model_hash_algorithm", "tokenizer_digest",
+        "provider_revision", "runtime_revision",
+        "artifact_digest", "manifest_digest", "sidecar_digest", "provider_binary_sha256",
+        "runtime_cdhash", "cache_namespace", "state_digest", "proposal_depth",
+    ]
+
+    private static let nativeMTPCanaryCounterKeys: Set<String> = [
+        "accepted", "rejected", "bonus", "committed",
+    ]
+
+    private static let nativeMTPTerminalReasons: Set<String> = [
+        "passed", "failed", "inconclusive", "expired", "runtime_unavailable",
+        "stop", "length", "cancelled", "request_failed", "batch_failed", "rejected",
+    ]
+
+    private static let nativeMTPDecodePaths: Set<String> = [
+        "native_mtp", "ordinary", "classic_spec_decode", "unavailable",
+    ]
+
+    private static let nativeMTPTupleDisableReasons: Set<String> = [
+        "mismatch", "timeout", "expired", "fallback", "ordinary_or_classic", "bank_mismatch", "operator",
+    ]
+
+    private static func decodeNativeMTPCanaryRequest(_ object: [String: Any]) throws -> NativeMTPCanaryRequestPayload {
+        try rejectUnknownFields(object, allowed: nativeMTPCanaryRequestKeys)
+        guard try requiredString(object, "type") == "native_mtp_canary_request_v1" else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP canary type")
+        }
+        guard intValue(object["version"]) == 1 else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP canary version")
+        }
+        let requestID = try boundedString(object, "request_id", maxBytes: 128)
+        let providerID = try boundedString(object, "provider_id", maxBytes: 128)
+        let assignedID = try boundedString(object, "assigned_id", maxBytes: 128)
+        let modelID = try boundedString(object, "model_id", maxBytes: 256)
+        let modelHash = try sha256String(object, "model_hash")
+        let modelHashAlgorithm = try boundedString(object, "model_hash_algorithm", maxBytes: 128)
+        let providerRevision = try boundedString(object, "provider_revision", maxBytes: 128)
+        let runtimeRevision = try boundedString(object, "runtime_revision", maxBytes: 128)
+        let targetGeneration = try uint64Value(object["target_generation"], field: "target_generation")
+        let tokenizerDigest = try sha256String(object, "tokenizer_digest")
+        let artifactDigest = try sha256String(object, "artifact_digest")
+        let manifestDigest = try sha256String(object, "manifest_digest")
+        let sidecarDigest = try sha256String(object, "sidecar_digest")
+        let providerBinarySHA256 = try sha256String(object, "provider_binary_sha256")
+        let runtimeCDHash = try lowercaseHexString(object, "runtime_cdhash", lengths: [40, 64])
+        let cacheNamespace = try boundedString(object, "cache_namespace", maxBytes: 128)
+        let stateDigest = try sha256String(object, "state_digest")
+        let challengeID = try boundedString(object, "challenge_id", maxBytes: 128)
+        let challengeCorpusSHA256 = try sha256String(object, "challenge_corpus_sha256")
+        let challengeBankSHA256 = try sha256String(object, "challenge_bank_sha256")
+        let nativeMTPAdmissionTupleSHA256 = try sha256String(object, "native_mtp_admission_tuple_sha256")
+        let servedSnapshotID = try boundedString(object, "served_snapshot_id", maxBytes: 128)
+        let runtimeTupleSHA256 = try sha256String(object, "native_mtp_runtime_tuple_sha256")
+        let expectedRuntimeTupleSHA256 = try nativeMTPRuntimeTupleSHA256(
+            providerID: providerID,
+            assignedID: assignedID,
+            targetGeneration: targetGeneration,
+            nativeMTPAdmissionTupleSHA256: nativeMTPAdmissionTupleSHA256,
+            servedSnapshotID: servedSnapshotID
+        )
+        guard runtimeTupleSHA256 == expectedRuntimeTupleSHA256 else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP runtime tuple identity")
+        }
+        let expectedTokenIDSHA256 = try sha256String(object, "expected_token_id_sha256")
+        let expectedTerminalReason = try boundedString(object, "expected_terminal_reason", maxBytes: 64)
+        guard nativeMTPTerminalReasons.contains(expectedTerminalReason) else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP canary expected terminal reason")
+        }
+        guard let expectedCountersObject = object["expected_counters"] as? [String: Any] else {
+            throw CoordinatorAuthError.invalidMessage("missing native MTP canary expected counters")
+        }
+        let expectedCounters = try decodeNativeMTPCanaryCounters(expectedCountersObject)
+        let expectedCommittedStateSHA256 = try sha256String(object, "expected_committed_state_sha256")
+        let nonce = try boundedString(object, "nonce", maxBytes: 32)
+        guard nonce.count == 32,
+              nonce.unicodeScalars.allSatisfy({ scalar in
+                  (UnicodeScalar("0").value...UnicodeScalar("9").value).contains(scalar.value) ||
+                      (UnicodeScalar("a").value...UnicodeScalar("f").value).contains(scalar.value)
+              }) else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP canary nonce")
+        }
+        let requestDigest = try sha256String(object, "request_digest")
+        let issuedAt = try boundedString(object, "issued_at", maxBytes: 64)
+        let expiresAt = try boundedString(object, "expires_at", maxBytes: 64)
+        guard parseISO8601Date(issuedAt) != nil,
+              let expiry = parseISO8601Date(expiresAt),
+              expiry > Date()
+        else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP canary validity window")
+        }
+        guard let rawPromptTokens = object["prompt_token_ids"] as? [Any],
+              !rawPromptTokens.isEmpty,
+              rawPromptTokens.count <= 2048
+        else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP canary prompt tokens")
+        }
+        let promptTokenIDs = try rawPromptTokens.map { value in
+            guard let tokenID = intValue(value), tokenID >= 0 else {
+                throw CoordinatorAuthError.invalidMessage("invalid native MTP canary token id")
+            }
+            return tokenID
+        }
+        guard let maxCompletionTokens = intValue(object["max_completion_tokens"]),
+              (1...64).contains(maxCompletionTokens)
+        else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP canary max_completion_tokens")
+        }
+        guard let proposalDepth = intValue(object["proposal_depth"]),
+              (1...16).contains(proposalDepth)
+        else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP canary proposal_depth")
+        }
+        guard let tupleObject = object["runtime_tuple"] as? [String: Any] else {
+            throw CoordinatorAuthError.invalidMessage("missing native MTP canary runtime_tuple")
+        }
+        let runtimeTuple = try decodeNativeMTPRuntimeTuple(tupleObject, expectedDepth: proposalDepth)
+        return NativeMTPCanaryRequestPayload(
+            requestID: requestID,
+            providerID: providerID,
+            assignedID: assignedID,
+            modelID: modelID,
+            modelHash: modelHash,
+            modelHashAlgorithm: modelHashAlgorithm,
+            providerRevision: providerRevision,
+            runtimeRevision: runtimeRevision,
+            targetGeneration: targetGeneration,
+            tokenizerDigest: tokenizerDigest,
+            artifactDigest: artifactDigest,
+            manifestDigest: manifestDigest,
+            sidecarDigest: sidecarDigest,
+            providerBinarySHA256: providerBinarySHA256,
+            runtimeCDHash: runtimeCDHash,
+            cacheNamespace: cacheNamespace,
+            stateDigest: stateDigest,
+            runtimeTuple: runtimeTuple,
+            challengeID: challengeID,
+            challengeCorpusSHA256: challengeCorpusSHA256,
+            challengeBankSHA256: challengeBankSHA256,
+            nativeMTPAdmissionTupleSHA256: nativeMTPAdmissionTupleSHA256,
+            servedSnapshotID: servedSnapshotID,
+            nativeMTPRuntimeTupleSHA256: runtimeTupleSHA256,
+            expectedTokenIDSHA256: expectedTokenIDSHA256,
+            expectedTerminalReason: expectedTerminalReason,
+            expectedCounters: expectedCounters,
+            expectedCommittedStateSHA256: expectedCommittedStateSHA256,
+            nonce: nonce,
+            requestDigest: requestDigest,
+            issuedAt: issuedAt,
+            expiresAt: expiresAt,
+            promptTokenIDs: promptTokenIDs,
+            maxCompletionTokens: maxCompletionTokens,
+            proposalDepth: proposalDepth
+        )
+    }
+
+    private static func decodeNativeMTPRuntimeTuple(_ object: [String: Any], expectedDepth: Int) throws -> NativeMTPRuntimeTuplePayload {
+        try rejectUnknownFields(object, allowed: nativeMTPRuntimeTupleKeys)
+        guard let proposalDepth = intValue(object["proposal_depth"]),
+              proposalDepth == expectedDepth,
+              (1...16).contains(proposalDepth)
+        else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP runtime tuple depth")
+        }
+        return NativeMTPRuntimeTuplePayload(
+            modelID: try boundedString(object, "model_id", maxBytes: 256),
+            modelHash: try sha256String(object, "model_hash"),
+            modelHashAlgorithm: try boundedString(object, "model_hash_algorithm", maxBytes: 128),
+            providerRevision: try boundedString(object, "provider_revision", maxBytes: 128),
+            runtimeRevision: try boundedString(object, "runtime_revision", maxBytes: 128),
+            tokenizerDigest: try sha256String(object, "tokenizer_digest"),
+            artifactDigest: try sha256String(object, "artifact_digest"),
+            manifestDigest: try sha256String(object, "manifest_digest"),
+            sidecarDigest: try sha256String(object, "sidecar_digest"),
+            providerBinarySHA256: try sha256String(object, "provider_binary_sha256"),
+            runtimeCDHash: try lowercaseHexString(object, "runtime_cdhash", lengths: [40, 64]),
+            cacheNamespace: try boundedString(object, "cache_namespace", maxBytes: 128),
+            stateDigest: try sha256String(object, "state_digest"),
+            proposalDepth: proposalDepth
+        )
+    }
+
+    private static func decodeNativeMTPCanaryCounters(_ object: [String: Any]) throws -> NativeMTPCanaryCountersPayload {
+        try rejectUnknownFields(object, allowed: nativeMTPCanaryCounterKeys)
+        return NativeMTPCanaryCountersPayload(
+            acceptedTokens: try uint64Value(object["accepted"], field: "accepted"),
+            rejectedTokens: try uint64Value(object["rejected"], field: "rejected"),
+            bonusTokens: try uint64Value(object["bonus"], field: "bonus"),
+            committedTokens: try uint64Value(object["committed"], field: "committed")
+        )
+    }
+
+    private static func validateNativeMTPCanaryResult(
+        _ result: NativeMTPCanaryResultPayload,
+        request: NativeMTPCanaryRequestPayload
+    ) throws {
+        guard result.requestID == request.requestID,
+              result.providerID == request.providerID,
+              result.assignedID == request.assignedID,
+              result.requestDigest == request.requestDigest,
+              result.targetGeneration == request.targetGeneration,
+              result.providerRevision == request.providerRevision,
+              result.runtimeRevision == request.runtimeRevision,
+              result.challengeID == request.challengeID,
+              result.challengeBankSHA256 == request.challengeBankSHA256,
+              result.nonce == request.nonce,
+              result.nativeMTPRuntimeTupleSHA256 == request.nativeMTPRuntimeTupleSHA256,
+              result.expectedTokenIDSHA256 == request.expectedTokenIDSHA256,
+              result.runtimeTuple == request.runtimeTuple,
+              nativeMTPTerminalReasons.contains(result.terminalReason),
+              nativeMTPDecodePaths.contains(result.actualDecodePath),
+              isLowercaseSHA256(result.resultDigest),
+              isLowercaseSHA256(result.actualTokenIDSHA256),
+              isLowercaseSHA256(result.committedStateSHA256)
+        else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP canary result")
+        }
+        let expectedDigest = nativeMTPCanaryResultDigest(
+            requestID: result.requestID,
+            providerID: result.providerID,
+            assignedID: result.assignedID,
+            requestDigest: result.requestDigest,
+            targetGeneration: result.targetGeneration,
+            providerRevision: result.providerRevision,
+            runtimeRevision: result.runtimeRevision,
+            challengeID: result.challengeID,
+            challengeBankSHA256: result.challengeBankSHA256,
+            nonce: result.nonce,
+            nativeMTPRuntimeTupleSHA256: result.nativeMTPRuntimeTupleSHA256,
+            expectedTokenIDSHA256: result.expectedTokenIDSHA256,
+            actualTokenIDSHA256: result.actualTokenIDSHA256,
+            terminalReason: result.terminalReason,
+            counters: result.counters,
+            committedStateSHA256: result.committedStateSHA256,
+            actualDecodePath: result.actualDecodePath,
+            fallbackUsed: result.fallbackUsed,
+            runtimeTuple: result.runtimeTuple,
+            diagnostic: result.diagnostic
+        )
+        guard result.resultDigest == expectedDigest else {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP canary result digest")
+        }
+        if let diagnostic = result.diagnostic,
+           (diagnostic.utf8.count > 512 || containsControlCharacter(diagnostic)) {
+            throw CoordinatorAuthError.invalidMessage("invalid native MTP canary diagnostic")
+        }
+    }
+
+    private static func rejectUnknownFields(_ object: [String: Any], allowed: Set<String>) throws {
+        for key in object.keys where !allowed.contains(key) {
+            throw CoordinatorAuthError.invalidMessage("unknown field \(key)")
+        }
+    }
+
+    private static func requiredString(_ object: [String: Any], _ field: String) throws -> String {
+        guard let value = object[field] as? String,
+              !value.isEmpty,
+              !containsControlCharacter(value)
+        else {
+            throw CoordinatorAuthError.invalidMessage("invalid string field \(field)")
+        }
+        return value
+    }
+
+    private static func boundedString(_ object: [String: Any], _ field: String, maxBytes: Int) throws -> String {
+        let value = try requiredString(object, field)
+        guard value.utf8.count <= maxBytes else {
+            throw CoordinatorAuthError.invalidMessage("field \(field) exceeds \(maxBytes) bytes")
+        }
+        return value
+    }
+
+    private static func sha256String(_ object: [String: Any], _ field: String) throws -> String {
+        let value = try boundedString(object, field, maxBytes: 64)
+        guard isLowercaseSHA256(value) else {
+            throw CoordinatorAuthError.invalidMessage("field \(field) must be lowercase sha256")
+        }
+        return value
+    }
+
+    private static func lowercaseHexString(_ object: [String: Any], _ field: String, lengths: Set<Int>) throws -> String {
+        let value = try boundedString(object, field, maxBytes: lengths.max() ?? 64)
+        guard lengths.contains(value.count),
+              value.unicodeScalars.allSatisfy({ scalar in
+                  (UnicodeScalar("0").value...UnicodeScalar("9").value).contains(scalar.value) ||
+                      (UnicodeScalar("a").value...UnicodeScalar("f").value).contains(scalar.value)
+              })
+        else {
+            throw CoordinatorAuthError.invalidMessage("field \(field) must be lowercase hex")
+        }
+        return value
+    }
+
+    private static func uint64Value(_ value: Any?, field: String) throws -> UInt64 {
+        switch value {
+        case let value as UInt64:
+            return value
+        case let value as Int where value >= 0:
+            return UInt64(value)
+        case let value as NSNumber where value.int64Value >= 0:
+            return value.uint64Value
+        default:
+            throw CoordinatorAuthError.invalidMessage("invalid uint64 field \(field)")
+        }
+    }
+
+    private static func isLowercaseSHA256(_ value: String) -> Bool {
+        guard value.count == 64 else { return false }
+        return value.unicodeScalars.allSatisfy { scalar in
+            (UnicodeScalar("0").value...UnicodeScalar("9").value).contains(scalar.value) ||
+                (UnicodeScalar("a").value...UnicodeScalar("f").value).contains(scalar.value)
+        }
+    }
+
+    private static func containsControlCharacter(_ value: String) -> Bool {
+        value.unicodeScalars.contains { CharacterSet.controlCharacters.contains($0) || CharacterSet.newlines.contains($0) }
+    }
+
+    private static func parseISO8601Date(_ raw: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: raw) {
+            return date
+        }
+        let wholeSeconds = ISO8601DateFormatter()
+        wholeSeconds.formatOptions = [.withInternetDateTime]
+        return wholeSeconds.date(from: raw)
     }
 
     private func handleLosslessnessProbeRequest(_ message: [String: Any]) async throws {
@@ -5925,7 +6868,97 @@ actor CoordinatorClient {
             } catch {
                 Self.keepaliveDebug("diagnostic_status_send_error error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
             }
+            do {
+                try await sendNativeMTPTupleOfferIfAvailable()
+            } catch {
+                Self.keepaliveDebug("native_mtp_tuple_offer_send_error error=\(Self.sanitizedDiagnosticText(String(describing: error)))")
+            }
         }
+    }
+
+    private func sendNativeMTPTupleOfferIfAvailable() async throws {
+        guard coordinatorSessionAccepted,
+              let assignedID = acceptedAssignedProviderID,
+              !assignedID.isEmpty else {
+            return
+        }
+        let snapshot = await modelRuntime.currentSnapshot()
+        guard let offer = snapshot.nativeMTPTupleOffer else { return }
+        guard let identity = nativeMTPTupleOfferWireIdentity(for: offer) else {
+            Self.keepaliveDebug("native_mtp_tuple_offer_skipped_missing_wire_identity")
+            return
+        }
+        let offerDigestInput = [
+            identity.nativeMTPRuntimeTupleSHA256,
+            offer.challengeBankSHA256,
+            offer.selftestPassDigest,
+            String(offer.targetGeneration),
+            assignedID,
+        ].joined(separator: "\n")
+        let offerDigest = SHA256.hash(data: Data(offerDigestInput.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        guard offerDigest != lastNativeMTPTupleOfferDigest else { return }
+        let payload = NativeMTPTupleOfferPayload(
+            providerID: providerID,
+            assignedID: assignedID,
+            targetGeneration: offer.targetGeneration,
+            providerRevision: identity.providerRevision,
+            runtimeRevision: identity.runtimeRevision,
+            runtimeTuple: NativeMTPRuntimeTuplePayload(
+                offer.runtimeTuple,
+                providerRevision: identity.providerRevision,
+                runtimeRevision: identity.runtimeRevision
+            ),
+            nativeMTPAdmissionTupleSHA256: identity.nativeMTPAdmissionTupleSHA256,
+            servedSnapshotID: identity.servedSnapshotID,
+            nativeMTPRuntimeTupleSHA256: identity.nativeMTPRuntimeTupleSHA256,
+            sidecarDigest: offer.sidecarDigest,
+            challengeBankReleaseID: offer.challengeBankReleaseID,
+            challengeBankSHA256: offer.challengeBankSHA256,
+            challengeCorpusSHA256: offer.challengeCorpusSHA256,
+            selftestProfile: offer.selftestProfile,
+            selftestPassDigest: offer.selftestPassDigest,
+            selftestObservedAt: ISO8601DateFormatter().string(from: offer.selftestObservedAt)
+        )
+        try await send(payload.wireObject)
+        lastNativeMTPTupleOfferDigest = offerDigest
+    }
+
+    private struct NativeMTPTupleOfferWireIdentity {
+        let providerRevision: String
+        let runtimeRevision: String
+        let nativeMTPAdmissionTupleSHA256: String
+        let servedSnapshotID: String
+        let nativeMTPRuntimeTupleSHA256: String
+    }
+
+    private func nativeMTPTupleOfferWireIdentity(for offer: NativeMTPPublishedTupleOffer) -> NativeMTPTupleOfferWireIdentity? {
+        guard let assignedID = acceptedAssignedProviderID,
+              Self.isLowercaseSHA256(offer.nativeMTPAdmissionTupleSHA256),
+              !offer.servedSnapshotID.isEmpty,
+              offer.servedSnapshotID.utf8.count <= 128,
+              !Self.containsControlCharacter(offer.servedSnapshotID),
+              !assignedID.isEmpty,
+              !providerID.isEmpty else {
+            return nil
+        }
+        guard let runtimeTupleSHA256 = try? Self.nativeMTPRuntimeTupleSHA256(
+            providerID: providerID,
+            assignedID: assignedID,
+            targetGeneration: offer.targetGeneration,
+            nativeMTPAdmissionTupleSHA256: offer.nativeMTPAdmissionTupleSHA256,
+            servedSnapshotID: offer.servedSnapshotID
+        ) else {
+            return nil
+        }
+        return NativeMTPTupleOfferWireIdentity(
+            providerRevision: offer.providerRevision,
+            runtimeRevision: offer.runtimeRevision,
+            nativeMTPAdmissionTupleSHA256: offer.nativeMTPAdmissionTupleSHA256,
+            servedSnapshotID: offer.servedSnapshotID,
+            nativeMTPRuntimeTupleSHA256: runtimeTupleSHA256
+        )
     }
 
     private func sendStateUpdate(transition: RequestCapacityTransitionSnapshot, generation: Int) async throws {

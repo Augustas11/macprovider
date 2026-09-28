@@ -71,8 +71,8 @@ struct MSBPerplexityCommand: AsyncParsableCommand {
         var scored = 0
         for chunk in 0..<chunks {
             let window = Array(tokens[(chunk * context)..<((chunk + 1) * context)])
-            let chunkNLL = await container.perform { ctxt in
-                let cache = ctxt.model.newCache(parameters: nil)
+            let chunkNLL = try await container.perform { ctxt in
+                let cache = try ctxt.model.newCache(parameters: nil)
                 let input = MLXArray(window.map(Int32.init)).reshaped([1, context])
                 let logits = ctxt.model(input, cache: cache)[0, first..<(context - 1), 0...].asType(.float32)
                 let targets = MLXArray(window[(first + 1)..<context].map(Int32.init)).reshaped([context - 1 - first, 1])

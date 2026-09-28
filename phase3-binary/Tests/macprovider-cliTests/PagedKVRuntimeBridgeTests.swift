@@ -74,6 +74,66 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             modelID: "qwen/qwen3.8-32b", configJSONData: dense
         ).hybridDecoderArchitectureVerified)
     }
+
+    func testQwen35HybridArchitectureRequiresExactTupleAndConfigMetadata() {
+        let supported = Self.qwen35HybridConfig()
+        let wrongLayers = Self.qwen35HybridConfig(
+            layerTypes: Array(repeating: "full_attention", count: 32)
+        )
+        let missingMTP = Self.qwen35HybridConfig(includeMTPMetadata: false)
+        let unrelated = Data(#"{"model_type":"qwen3_5","architectures":["AnotherDecoder"]}"#.utf8)
+
+        XCTAssertTrue(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3.5-9B-4bit", configJSONData: supported
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3.5-9B-4bit", configJSONData: nil
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3.5-9B-4bit", configJSONData: unrelated
+        ).hybridDecoderArchitectureVerified)
+
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3.5-9B-4bit", configJSONData: wrongLayers
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3.5-9B-4bit", configJSONData: missingMTP
+        ).hybridDecoderArchitectureVerified)
+        XCTAssertFalse(ModelRuntime.pagedKVModelCapabilities(
+            modelID: "mlx-community/Qwen3.5-10B-4bit", configJSONData: supported
+        ).hybridDecoderArchitectureVerified)
+    }
+
+    func testNativeMTPAdmissionCacheClassCanonicalizesOnlyVerifiedPagedRuntime() {
+        let verified = PagedKVRuntimeModelCapabilities(
+            modelFamily: "qwen",
+            requiresMoEDispatch: false,
+            hybridDecoderArchitectureVerified: true
+        )
+        let unverified = PagedKVRuntimeModelCapabilities(
+            modelFamily: "qwen",
+            requiresMoEDispatch: false,
+            hybridDecoderArchitectureVerified: false
+        )
+
+        XCTAssertEqual(ModelRuntime.nativeMTPAdmissionCacheClass(
+            runtimeCacheClass: "KVCacheSimple",
+            modelCapabilities: unverified
+        ), "paged_kv")
+        XCTAssertEqual(ModelRuntime.nativeMTPAdmissionCacheClass(
+            runtimeCacheClass: "mixed",
+            modelCapabilities: verified
+        ), "paged_kv")
+        XCTAssertNil(ModelRuntime.nativeMTPAdmissionCacheClass(
+            runtimeCacheClass: "mixed",
+            modelCapabilities: unverified
+        ))
+        XCTAssertNil(ModelRuntime.nativeMTPAdmissionCacheClass(
+            runtimeCacheClass: "RotatingKVCache",
+            modelCapabilities: verified
+        ))
+    }
+
     func testProductionRuntimeMeasurementMissingMetallibStaysNil() {
         let measurement = ModelRuntime.measurePagedKVRuntime(
             config: PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64),
@@ -636,53 +696,58 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertNotNil(noBackendCapability.unsupportedReason)
     }
 
-    func testQwen36MixedRuntimeAttachesOnlyWithVerifiedArchitecture() async {
-        let modelID = "qwen/qwen3.6-27b"
-        let modelSHA = String(repeating: "a", count: 64)
-        let proof = Self.sizingProof(modelID: modelID, modelSHA: modelSHA)
-        let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
+    func testQwen35AndQwen36MixedRuntimesAttachOnlyWithVerifiedArchitecture() async {
+        for modelID in ["mlx-community/Qwen3.5-9B-4bit", "qwen/qwen3.6-27b"] {
+            let modelSHA = String(repeating: "a", count: 64)
+            let proof = Self.sizingProof(modelID: modelID, modelSHA: modelSHA)
+            let config = PagedKVConfig(enabled: true, blockSizeTokens: 32, maxPhysicalBlocks: 64)
 
-        func runtime(verified: Bool) -> ModelRuntime {
-            ModelRuntime(
-                modelID: modelID,
-                modelHash: modelSHA,
-                pagedKVConfig: config,
-                maxBatch: 8,
-                continuousBatchingMode: .on,
-                continuousBatchingDurableReplayAuthorityAvailable: true,
-                warmSwapEnabled: false,
-                pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
-                pagedKVHardwareSizingProof: proof,
-                pagedKVRuntimeCacheClass: "mixed",
-                pagedKVSchedulerBackendInstalled: true,
-                pagedKVModelCapabilities: PagedKVRuntimeModelCapabilities(
-                    modelFamily: "qwen",
-                    requiresMoEDispatch: false,
-                    hybridDecoderArchitectureVerified: verified
-                ),
-                continuousBatchingBackend: RuntimeBridgeScriptedBackend(scripts: [:]),
-                loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
+            func runtime(verified: Bool) -> ModelRuntime {
+                ModelRuntime(
+                    modelID: modelID,
+                    modelHash: modelSHA,
+                    pagedKVConfig: config,
+                    maxBatch: 8,
+                    continuousBatchingMode: .on,
+                    continuousBatchingDurableReplayAuthorityAvailable: true,
+                    warmSwapEnabled: false,
+                    pagedKVObservedRuntimeIdentity: Self.observedIdentity(from: proof),
+                    pagedKVHardwareSizingProof: proof,
+                    pagedKVRuntimeCacheClass: "mixed",
+                    pagedKVSchedulerBackendInstalled: true,
+                    pagedKVModelCapabilities: PagedKVRuntimeModelCapabilities(
+                        modelFamily: "qwen",
+                        requiresMoEDispatch: false,
+                        hybridDecoderArchitectureVerified: verified
+                    ),
+                    continuousBatchingBackend: RuntimeBridgeScriptedBackend(scripts: [:]),
+                    loader: { _ in throw PagedKVRuntimeBridgeTestError.notExpected }
+                )
+            }
+
+            let admitted = runtime(verified: true)
+            let admittedDecision = await admitted.pagedKVDecisionForTest()
+            let admittedCapability = await admitted.continuousBatchingCapabilityForTest()
+            let admittedStatus = await admitted.currentSnapshot().continuousBatching
+            XCTAssertNotNil(admittedDecision.descriptor, modelID)
+            XCTAssertNil(admittedCapability.unsupportedReason, modelID)
+            XCTAssertEqual(admittedStatus?.active, true, modelID)
+            XCTAssertEqual(admittedStatus?.cacheClass, "mixed", modelID)
+            XCTAssertEqual(admittedStatus?.scheduler?.slotsTotal, 8, modelID)
+
+            let rejected = runtime(verified: false)
+            let rejectedDecision = await rejected.pagedKVDecisionForTest()
+            let rejectedCapability = await rejected.continuousBatchingCapabilityForTest()
+            let rejectedStatus = await rejected.currentSnapshot().continuousBatching
+            XCTAssertNil(rejectedDecision.descriptor, modelID)
+            XCTAssertNotNil(rejectedCapability.unsupportedReason, modelID)
+            XCTAssertEqual(rejectedStatus?.active, false, modelID)
+            XCTAssertEqual(
+                rejectedStatus?.unsupportedReason,
+                rejectedCapability.unsupportedReason?.rawValue,
+                modelID
             )
         }
-
-        let admitted = runtime(verified: true)
-        let admittedDecision = await admitted.pagedKVDecisionForTest()
-        let admittedCapability = await admitted.continuousBatchingCapabilityForTest()
-        let admittedStatus = await admitted.currentSnapshot().continuousBatching
-        XCTAssertNotNil(admittedDecision.descriptor)
-        XCTAssertNil(admittedCapability.unsupportedReason)
-        XCTAssertEqual(admittedStatus?.active, true)
-        XCTAssertEqual(admittedStatus?.cacheClass, "mixed")
-        XCTAssertEqual(admittedStatus?.scheduler?.slotsTotal, 8)
-
-        let rejected = runtime(verified: false)
-        let rejectedDecision = await rejected.pagedKVDecisionForTest()
-        let rejectedCapability = await rejected.continuousBatchingCapabilityForTest()
-        let rejectedStatus = await rejected.currentSnapshot().continuousBatching
-        XCTAssertNil(rejectedDecision.descriptor)
-        XCTAssertNotNil(rejectedCapability.unsupportedReason)
-        XCTAssertEqual(rejectedStatus?.active, false)
-        XCTAssertEqual(rejectedStatus?.unsupportedReason, rejectedCapability.unsupportedReason?.rawValue)
     }
 
     func testSharedForwardGreedyMatchesSerialLoneAndFullBatchWithUsageAndStops() async throws {
@@ -822,6 +887,468 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let lone = try await loneBackend.decode(rows: [loneInput])
         try await loneAllocator.endDecodeStep(loneHandle)
         XCTAssertEqual(Self.tokens(from: lone), ["lone": 4])
+    }
+
+    func testNativeMTPPromptPrefillUsesBoundedFinalPrefillHiddenWithoutReplay() async throws {
+        try requireMetal()
+
+        let descriptor = Self.bridgeDescriptor()
+        let model = RuntimeBridgeFakeModel(
+            nextTokenByInput: [12: 13],
+            emitsMTPState: true
+        )
+        let drafter = RuntimeBridgeRecordingMTPDrafter()
+        let container = ModelContainer(context: ModelContext(
+            configuration: ModelConfiguration(id: descriptor.modelID),
+            model: model,
+            processor: StandInUserInputProcessor(),
+            tokenizer: RuntimeBridgeFakeTokenizer()
+        ))
+        let backend = PagedKVSharedForwardBackend(
+            container: container,
+            descriptor: descriptor,
+            layerCount: 1,
+            drafterContainer: MTPDrafterContainer(
+                context: MTPDrafterContext(
+                    configuration: ModelConfiguration(id: "mtp"),
+                    model: drafter
+                )
+            )
+        )
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: 16
+        )
+        let handle = try await allocator.allocate(conversationKey: "native", maxTokens: 8)
+        _ = try await allocator.extend(handle, by: 3)
+
+        let output = try await backend.prefill(rows: [
+            ContinuousBatchPrefillInput(
+                requestID: "native",
+                promptTokens: [10, 11, 12],
+                binding: try await allocator.binding(for: handle),
+                promptTokenOffset: 0,
+                committedKVTokenCount: 0,
+                targetKVTokenCount: 3,
+                isFinalChunk: true,
+                nativeMTPPromptPrefill: true
+            ),
+        ])
+
+        XCTAssertEqual(output, [ContinuousBatchPrefillOutput(requestID: "native", sampledToken: 13)])
+        XCTAssertEqual(model.forwardCallCount(), 1)
+        XCTAssertEqual(drafter.preparedPromptWidths(), [3])
+        XCTAssertEqual(drafter.preparedHiddenWidths(), [3])
+    }
+
+    func testNativeMTPIntegrityProbeBlocksBuyerAdmissionAndReleasesAfterCompletion() async throws {
+        let prefillGate = RuntimeBridgeTestGate()
+        let backend = RuntimeBridgeScriptedBackend(
+            scripts: ["probe": [11], "buyer": [21, 22], "buyer-after": [31, 32]],
+            nativeProposalScripts: ["probe": [[12]]],
+            prefillGate: prefillGate
+        )
+        let scheduler = try Self.makeScheduler(maxActiveRows: 1, backend: backend)
+        let fence = Self.nativeMTPFence()
+
+        let probeTask = Task {
+            try await scheduler.submitNativeMTPIntegrityProbe(Self.schedulerRequest(
+                id: "probe",
+                promptTokens: [10],
+                maxOutputTokens: 3,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPTupleFence: fence,
+                nativeMTPIntegrityProbe: true
+            ))
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        do {
+            _ = try await scheduler.submit(Self.schedulerRequest(
+                id: "buyer",
+                promptTokens: [20],
+                maxOutputTokens: 2
+            ))
+            XCTFail("buyer admission should be rejected while integrity probe is actor-held")
+        } catch {
+            XCTAssertEqual(error as? ContinuousBatchSchedulerError, .backpressure)
+        }
+
+        await prefillGate.open()
+        let probe = try await probeTask.value
+        XCTAssertEqual(probe.terminalStatus, .length)
+        XCTAssertEqual(probe.nativeMTPCounters?.acceptedTokens, 1)
+
+        let buyerAfter = try await scheduler.submit(Self.schedulerRequest(
+            id: "buyer-after",
+            promptTokens: [30],
+            maxOutputTokens: 2
+        ))
+        XCTAssertEqual(buyerAfter.terminalStatus, .length)
+        XCTAssertEqual(buyerAfter.generatedTokens, [31, 32])
+    }
+
+    func testNativeMTPCountersAggregateAcrossRounds() async throws {
+        let backend = RuntimeBridgeScriptedBackend(
+            scripts: ["multi": [11]],
+            nativeProposalScripts: ["multi": [[12], [14]]]
+        )
+        let scheduler = try Self.makeScheduler(maxActiveRows: 1, backend: backend)
+        let result = try await scheduler.submitNativeMTPIntegrityProbe(Self.schedulerRequest(
+            id: "multi",
+            promptTokens: [10],
+            maxOutputTokens: 5,
+            decodePath: .nativeMTP,
+            nativeMTPMaximumProposalDepth: 1,
+            nativeMTPTupleFence: Self.nativeMTPFence(),
+            nativeMTPIntegrityProbe: true
+        ))
+
+        XCTAssertEqual(result.terminalStatus, .length)
+        XCTAssertEqual(result.nativeMTPCounters?.acceptedTokens, 2)
+        XCTAssertEqual(result.nativeMTPCounters?.rejectedTokens, 0)
+        XCTAssertEqual(result.nativeMTPCounters?.bonusTokens, 2)
+        XCTAssertEqual(result.nativeMTPCounters?.committedTokens, 4)
+        let finalized = await backend.nativeFinalizeInputs()
+        XCTAssertEqual(finalized.filter(\.shouldCommit).count, 2)
+    }
+
+    func testNativeMTPTupleDisableRejectsNewAndQueuedRowsAndContinuesPreoutputOrdinary() async throws {
+        let prefillGate = RuntimeBridgeTestGate()
+        let backend = RuntimeBridgeScriptedBackend(
+            scripts: [
+                "holder": [41, 42],
+                "queued-native": [51],
+                "preoutput": [61, 62, 63],
+            ],
+            nativeProposalScripts: [
+                "queued-native": [[52]],
+                "preoutput": [[64]],
+            ],
+            prefillGate: prefillGate
+        )
+        let scheduler = try Self.makeScheduler(maxActiveRows: 1, backend: backend)
+        let fence = Self.nativeMTPFence()
+
+        await scheduler.disableNativeMTPTuple(fence)
+        do {
+            _ = try await scheduler.submit(Self.schedulerRequest(
+                id: "new-disabled",
+                promptTokens: [50],
+                maxOutputTokens: 2,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPTupleFence: fence
+            ))
+            XCTFail("new disabled tuple row should fail before admission")
+        } catch {
+            XCTAssertEqual(
+                error as? ContinuousBatchSchedulerError,
+                .requestFailed("continuous_batching_native_mtp_tuple_disabled")
+            )
+        }
+
+        let activeFence = Self.nativeMTPFence(admission: String(repeating: "b", count: 64))
+        let holder = Task {
+            try await scheduler.submit(Self.schedulerRequest(
+                id: "holder",
+                promptTokens: [40],
+                maxOutputTokens: 2
+            ))
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let queued = Task {
+            try await scheduler.submit(Self.schedulerRequest(
+                id: "queued-native",
+                promptTokens: [50],
+                maxOutputTokens: 2,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPTupleFence: activeFence
+            ))
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        await scheduler.disableNativeMTPTuple(activeFence)
+        await prefillGate.open()
+        _ = try await holder.value
+        let queuedResult = try await queued.value
+        XCTAssertEqual(queuedResult.terminalStatus, .requestFailed)
+        XCTAssertEqual(queuedResult.errorCode, "continuous_batching_native_mtp_tuple_disabled")
+
+        let preoutputFence = Self.nativeMTPFence(admission: String(repeating: "c", count: 64))
+        let preoutputGate = RuntimeBridgeTestGate()
+        let preoutputBackend = RuntimeBridgeScriptedBackend(
+            scripts: ["preoutput": [61, 62, 63]],
+            nativeProposalScripts: ["preoutput": [[64]]],
+            prefillGate: preoutputGate
+        )
+        let preoutputScheduler = try Self.makeScheduler(maxActiveRows: 1, backend: preoutputBackend)
+        let preoutput = Task {
+            try await preoutputScheduler.submit(Self.schedulerRequest(
+                id: "preoutput",
+                promptTokens: [60],
+                maxOutputTokens: 3,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPTupleFence: preoutputFence
+            ))
+        }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        await preoutputScheduler.disableNativeMTPTuple(preoutputFence)
+        await preoutputGate.open()
+        let preoutputResult = try await preoutput.value
+        XCTAssertEqual(preoutputResult.terminalStatus, .length)
+        XCTAssertNil(preoutputResult.nativeMTPCounters)
+        XCTAssertEqual(preoutputResult.generatedTokens, [61, 62, 63])
+
+        let postoutputFence = Self.nativeMTPFence(admission: String(repeating: "d", count: 64))
+        let postoutputGate = RuntimeBridgeTestGate()
+        let postoutputBackend = RuntimeBridgeScriptedBackend(
+            scripts: ["postoutput": [71]],
+            nativeProposalScripts: ["postoutput": [[72], [74]]],
+            nativeVerifyGate: postoutputGate,
+            nativeVerifyGateCall: 2
+        )
+        let postoutputScheduler = try Self.makeScheduler(maxActiveRows: 1, backend: postoutputBackend)
+        let postoutput = Task {
+            try await postoutputScheduler.submit(Self.schedulerRequest(
+                id: "postoutput",
+                promptTokens: [70],
+                maxOutputTokens: 5,
+                decodePath: .nativeMTP,
+                nativeMTPMaximumProposalDepth: 1,
+                nativeMTPTupleFence: postoutputFence
+            ))
+        }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await postoutputScheduler.disableNativeMTPTuple(postoutputFence)
+        await postoutputGate.open()
+        let postoutputResult = try await postoutput.value
+        XCTAssertEqual(postoutputResult.terminalStatus, .requestFailed)
+        XCTAssertEqual(
+            postoutputResult.errorCode,
+            "continuous_batching_native_mtp_tuple_disabled_postoutput"
+        )
+        XCTAssertEqual(postoutputResult.generatedTokens, [])
+    }
+
+    func testMTPPackedCacheStagesProposalColumnsPrivatelyAndIgnoresPadding() async throws {
+        try requireMetal()
+
+        let descriptor = Self.bridgeDescriptor()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let rows = try await Self.pagedRows(
+            descriptor: descriptor,
+            allocator: allocator,
+            ids: ["mtp-a", "ordinary-b"],
+            initialOffsets: [0, 0]
+        )
+        let result = try PagedKVSharedForwardBackend.exerciseMTPPackedCacheForTest(
+            rowCaches: rows,
+            rowMaps: [
+                MTPPackedVerificationRowMap(rowIndex: 11, queryOffset: 0, inputCount: 3, proposalCount: 2),
+                MTPPackedVerificationRowMap(rowIndex: 22, queryOffset: 0, inputCount: 1, proposalCount: 0),
+            ],
+            width: 3
+        )
+
+        XCTAssertEqual(result.batchOffsetsBeforeUpdate, [0, 0])
+        XCTAssertEqual(result.returnedKeyShape, [2, 1, 3, 1])
+        XCTAssertEqual(result.rowOffsetsAfterUpdate, [0, 0])
+        XCTAssertEqual(result.rowStoredTokensAfterUpdate, [0, 0])
+        XCTAssertEqual(result.rowStateTokenCountsAfterUpdate, [0, 0])
+        XCTAssertEqual(result.batchTokenCountBeforeFinalize, 3)
+        XCTAssertEqual(result.batchTokenCountAfterFinalize, 0)
+        XCTAssertEqual(result.rowStateTokenCountsAfterFinalize, [0, 0])
+        XCTAssertEqual(result.maskShape, [2, 1, 3, 3])
+        XCTAssertEqual(result.maskValues, [
+            true, false, false,
+            true, true, false,
+            true, true, true,
+            true, false, false,
+            false, false, false,
+            false, false, false,
+        ])
+    }
+
+    func testMTPPackedCacheKeepsUnequalOffsetsAndReorderedRowsIndependent() async throws {
+        try requireMetal()
+
+        let descriptor = Self.bridgeDescriptor()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let rows = try await Self.pagedRows(
+            descriptor: descriptor,
+            allocator: allocator,
+            ids: ["late-row", "early-row"],
+            initialOffsets: [2, 0]
+        )
+        let result = try PagedKVSharedForwardBackend.exerciseMTPPackedCacheForTest(
+            rowCaches: rows,
+            rowMaps: [
+                MTPPackedVerificationRowMap(rowIndex: 100, queryOffset: 2, inputCount: 2, proposalCount: 1),
+                MTPPackedVerificationRowMap(rowIndex: 7, queryOffset: 0, inputCount: 1, proposalCount: 0),
+            ],
+            width: 2
+        )
+
+        XCTAssertEqual(result.batchOffsetsBeforeUpdate, [2, 0])
+        XCTAssertEqual(result.rowOffsetsAfterUpdate, [2, 0])
+        XCTAssertEqual(result.rowStoredTokensAfterUpdate, [0, 0])
+        XCTAssertEqual(result.rowStateTokenCountsAfterFinalize, [0, 0])
+        XCTAssertEqual(result.maskShape, [2, 1, 2, 4])
+        XCTAssertEqual(result.maskValues, [
+            true, true, true, false,
+            true, true, true, true,
+            true, false, false, false,
+            false, false, false, false,
+        ])
+    }
+
+    func testMTPPackedCacheResolutionCommitsBaseColumnAndAcceptedPrefixOnly() async throws {
+        try requireMetal()
+
+        let descriptor = Self.bridgeDescriptor()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let rows = try await Self.pagedRows(
+            descriptor: descriptor,
+            allocator: allocator,
+            ids: ["accept-one", "accept-zero"],
+            initialOffsets: [0, 0]
+        )
+
+        let result = try PagedKVSharedForwardBackend.exerciseMTPPackedCacheResolutionForTest(
+            rowCaches: rows,
+            rowMaps: [
+                MTPPackedVerificationRowMap(rowIndex: 0, queryOffset: 0, inputCount: 3, proposalCount: 2),
+                MTPPackedVerificationRowMap(rowIndex: 1, queryOffset: 0, inputCount: 2, proposalCount: 1),
+            ],
+            width: 3,
+            committedInputCounts: [2, 1]
+        )
+
+        XCTAssertEqual(result.rowOffsetsAfterStaging, [0, 0])
+        XCTAssertEqual(result.rowStoredTokensAfterStaging, [0, 0])
+        XCTAssertEqual(result.rowStateTokenCountsAfterStaging, [0, 0])
+        XCTAssertEqual(result.pendingInputCountsBeforeFinalize, [3, 2])
+        XCTAssertEqual(result.pendingProposalCountsBeforeFinalize, [2, 1])
+        XCTAssertEqual(result.pendingInputCountsAfterFacadeFinalize, [3, 2])
+        XCTAssertEqual(result.pendingProposalCountsAfterFacadeFinalize, [2, 1])
+        XCTAssertEqual(result.rowOffsetsAfterResolution, [2, 1])
+        XCTAssertEqual(result.rowStoredTokensAfterResolution, [2, 1])
+        XCTAssertEqual(result.rowStateTokenCountsAfterResolution, [2, 1])
+    }
+
+    func testMTPPackedCacheAbortRestoresExactRowsAfterFacadeFinalize() async throws {
+        try requireMetal()
+
+        let descriptor = Self.bridgeDescriptor()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let rows = try await Self.pagedRows(
+            descriptor: descriptor,
+            allocator: allocator,
+            ids: ["abort-a", "abort-b"],
+            initialOffsets: [1, 3]
+        )
+        let beforeOffsets = rows.map(\.offset)
+        let beforeStoredTokens = rows.map(\.storedTokens)
+        let beforeStateCounts = rows.map { row -> Int in
+            let state = row.state
+            return state.count == 2 ? state[0].dim(2) : 0
+        }
+
+        let result = try PagedKVSharedForwardBackend.exerciseMTPPackedCacheResolutionForTest(
+            rowCaches: rows,
+            rowMaps: [
+                MTPPackedVerificationRowMap(rowIndex: 0, queryOffset: 1, inputCount: 2, proposalCount: 1),
+                MTPPackedVerificationRowMap(rowIndex: 1, queryOffset: 3, inputCount: 3, proposalCount: 2),
+            ],
+            width: 3,
+            committedInputCounts: [nil, nil]
+        )
+
+        XCTAssertEqual(result.rowOffsetsAfterStaging, beforeOffsets)
+        XCTAssertEqual(result.rowStoredTokensAfterStaging, beforeStoredTokens)
+        XCTAssertEqual(result.rowStateTokenCountsAfterStaging, beforeStateCounts)
+        XCTAssertEqual(result.pendingInputCountsAfterFacadeFinalize, [2, 3])
+        XCTAssertEqual(result.pendingProposalCountsAfterFacadeFinalize, [1, 2])
+        XCTAssertEqual(result.rowOffsetsAfterResolution, beforeOffsets)
+        XCTAssertEqual(result.rowStoredTokensAfterResolution, beforeStoredTokens)
+        XCTAssertEqual(result.rowStateTokenCountsAfterResolution, beforeStateCounts)
+    }
+
+    func testMTPPackedCacheRejectsOutOfRangeResolutionWithoutRowMutation() async throws {
+        try requireMetal()
+
+        let descriptor = Self.bridgeDescriptor()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let rows = try await Self.pagedRows(
+            descriptor: descriptor,
+            allocator: allocator,
+            ids: ["bad-resolution"],
+            initialOffsets: [0]
+        )
+
+        XCTAssertThrowsError(try PagedKVSharedForwardBackend.exerciseMTPPackedCacheResolutionForTest(
+            rowCaches: rows,
+            rowMaps: [
+                MTPPackedVerificationRowMap(rowIndex: 0, queryOffset: 0, inputCount: 2, proposalCount: 1),
+            ],
+            width: 2,
+            committedInputCounts: [3]
+        ))
+        XCTAssertEqual(rows.map(\.offset), [0])
+        XCTAssertEqual(rows.map(\.storedTokens), [0])
+    }
+
+    func testMTPPackedCacheRejectsMalformedMapsBeforeMutation() async throws {
+        try requireMetal()
+
+        let descriptor = Self.bridgeDescriptor()
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: descriptor.blockSizeTokens,
+            maxPhysicalBlocks: descriptor.maxPhysicalBlocks
+        )
+        let rows = try await Self.pagedRows(
+            descriptor: descriptor,
+            allocator: allocator,
+            ids: ["bad-a", "bad-b"],
+            initialOffsets: [1, 0]
+        )
+
+        XCTAssertThrowsError(try PagedKVSharedForwardBackend.validateMTPPackedCacheForTest(
+            rowCaches: rows,
+            rowMaps: [
+                MTPPackedVerificationRowMap(rowIndex: 1, queryOffset: 0, inputCount: 1, proposalCount: 0),
+                MTPPackedVerificationRowMap(rowIndex: 2, queryOffset: 0, inputCount: 1, proposalCount: 0),
+            ]
+        ))
+        XCTAssertEqual(rows.map(\.offset), [1, 0])
+        XCTAssertEqual(rows.map(\.storedTokens), [0, 0])
+
+        XCTAssertThrowsError(try PagedKVSharedForwardBackend.validateMTPPackedCacheForTest(
+            rowCaches: rows,
+            rowMaps: [
+                MTPPackedVerificationRowMap(rowIndex: 1, queryOffset: 1, inputCount: 2, proposalCount: 0),
+                MTPPackedVerificationRowMap(rowIndex: 1, queryOffset: 0, inputCount: 1, proposalCount: 0),
+            ]
+        ))
+        XCTAssertEqual(rows.map(\.offset), [1, 0])
+        XCTAssertEqual(rows.map(\.storedTokens), [0, 0])
     }
 
     func testLockstepSharedForwardDecodePopulatesBatchInnerState() async throws {
@@ -1043,9 +1570,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         await cancel.value
         XCTAssertTrue(cancellation.returned())
         XCTAssertEqual(backend.retainedRowCountForTest(), 0)
-        await XCTAssertThrowsErrorAsync {
-            _ = try await allocator.materializeContiguousByteCache(handle)
-        }
+        await XCTAssertThrowsErrorAsync(try await allocator.materializeContiguousByteCache(handle))
     }
 
     func testSharedForwardBackendFinishPreservesRetainedPagedHandoffRecord() async throws {
@@ -1121,17 +1646,16 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(completion.promptTokens, 1)
         XCTAssertEqual(completion.completionTokens, 2)
         let completionDecodeCalls = await backend.decodeCallCount()
-        XCTAssertEqual(completionDecodeCalls, 2)
+        XCTAssertEqual(completionDecodeCalls, 1)
         let completionDecodeBatches = await backend.decodeBatches()
-        XCTAssertEqual(completionDecodeBatches, [
-            ["relay-request-1500"],
-            ["relay-request-1500"],
-        ])
+        XCTAssertEqual(completionDecodeBatches, [["relay-request-1500"]])
 
         let chunkRecorder = RuntimeBridgeChunkRecorder()
-        let handle = try await runtime.acquireRequestHandle(request)
+        let streamingRequest = try Self.chatRequest(modelID: modelID, maxTokens: 2)
+            .withRequestID("relay-request-1501")
+        let handle = try await runtime.acquireRequestHandle(streamingRequest)
         let streamed = try await runtime.stream(
-            request,
+            streamingRequest,
             with: handle,
             onChunk: { chunkRecorder.append($0) }
         )
@@ -1145,12 +1669,9 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
         XCTAssertEqual(chunkText, ["3", " 3"])
         let streamedDecodeCalls = await backend.decodeCallCount()
-        XCTAssertEqual(streamedDecodeCalls, 4)
+        XCTAssertEqual(streamedDecodeCalls, 2)
         let allDecodeBatches = await backend.decodeBatches()
-        XCTAssertEqual(Array(allDecodeBatches.suffix(2)), [
-            ["relay-request-1500"],
-            ["relay-request-1500"],
-        ])
+        XCTAssertEqual(Array(allDecodeBatches.suffix(1)), [["relay-request-1501"]])
     }
 
     func testAttachedServePathPrefillsChatPreparedMultiTokenPrompt() async throws {
@@ -1176,8 +1697,8 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let prefillLengths = await backend.prefillPromptLengths()
         let decodeCalls = await backend.decodeCallCount()
         XCTAssertEqual(prefillCalls, 1)
-        XCTAssertEqual(prefillLengths, [15])
-        XCTAssertEqual(decodeCalls, 2)
+        XCTAssertEqual(prefillLengths, [16])
+        XCTAssertEqual(decodeCalls, 1)
     }
 
     func testAttachedServePathPrefillFailureReturnsReasonCoded503() async throws {
@@ -1273,7 +1794,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             // Expected.
         }
         await runtime.unregisterInFlight(handle.registrationID)
-        XCTAssertTrue(chunks.chunks().isEmpty)
+        let emittedContent = chunks.chunks().compactMap { chunk -> String? in
+            if case .content(let text) = chunk { return text }
+            return nil
+        }
+        XCTAssertEqual(emittedContent, ["3"])
     }
 
     func testContiguousCacheBridgeRestoresLiveKVCacheByteExactAndRoundTrips() async throws {
@@ -1312,21 +1837,23 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         )
         XCTAssertThrowsError(try bridge.materializeContiguousByteCache(handle: handle, table: permutedTable))
 
+        let replacementKeyBytes = Self.fp16Bytes([201, 202, 203, 204, 205, 206, 207, 208, 209, 210])
+        let replacementValueBytes = Self.fp16Bytes([301, 302, 303, 304, 305, 306, 307, 308, 309, 310])
         paged.state = [
-            MLXArray(Self.fp16Bytes([201, 202, 203, 204, 205, 206, 207, 208, 209, 210]), [1, 2, 5, 1], dtype: .float16),
-            MLXArray(Self.fp16Bytes([301, 302, 303, 304, 305, 306, 307, 308, 309, 310]), [1, 2, 5, 1], dtype: .float16),
+            MLXArray(replacementKeyBytes, [1, 2, 5, 1], dtype: .float16),
+            MLXArray(replacementValueBytes, [1, 2, 5, 1], dtype: .float16),
         ]
         XCTAssertNotEqual(paged.state[0].asData(access: .copy).data, keyBytes)
 
         let materialized = try await allocator.materializeContiguousByteCache(handle)
-        XCTAssertEqual(materialized.layers[0].keyBytes, keyBytes)
-        XCTAssertEqual(materialized.layers[0].valueBytes, valueBytes)
+        XCTAssertEqual(materialized.layers[0].keyBytes, replacementKeyBytes)
+        XCTAssertEqual(materialized.layers[0].valueBytes, replacementValueBytes)
 
         let handoff = try bridge.materializeContiguousKVCache(handle: handle, table: binding.currentTable)
         XCTAssertEqual(handoff.caches.count, 1)
         XCTAssertEqual(handoff.caches[0].offset, 5)
-        XCTAssertEqual(handoff.caches[0].state[0].asData(access: .copy).data, keyBytes)
-        XCTAssertEqual(handoff.caches[0].state[1].asData(access: .copy).data, valueBytes)
+        XCTAssertEqual(handoff.caches[0].state[0].asData(access: .copy).data, replacementKeyBytes)
+        XCTAssertEqual(handoff.caches[0].state[1].asData(access: .copy).data, replacementValueBytes)
 
         let nextKeyBytes = Self.fp16Bytes([11, 12])
         let nextValueBytes = Self.fp16Bytes([111, 112])
@@ -1338,11 +1865,11 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(handoff.caches[0].offset, 6)
         XCTAssertEqual(
             handoff.caches[0].state[0].asData(access: .copy).data,
-            Self.fp16Bytes([1, 2, 3, 4, 5, 11, 6, 7, 8, 9, 10, 12])
+            Self.fp16Bytes([201, 202, 203, 204, 205, 11, 206, 207, 208, 209, 210, 12])
         )
         XCTAssertEqual(
             handoff.caches[0].state[1].asData(access: .copy).data,
-            Self.fp16Bytes([101, 102, 103, 104, 105, 111, 106, 107, 108, 109, 110, 112])
+            Self.fp16Bytes([301, 302, 303, 304, 305, 111, 306, 307, 308, 309, 310, 112])
         )
     }
 
@@ -1473,9 +2000,9 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         XCTAssertEqual(extracted.caches[0].state[0].asData(access: .copy).data, Self.fp16Bytes([1, 2, 3, 4, 5]))
 
         let retained = try await allocator.retain(handle)
-        await XCTAssertThrowsErrorAsync {
-            _ = try await allocator.reattach(retained, conversationKey: "conv:b", trimToLogicalTokens: 5)
-        }
+        await XCTAssertThrowsErrorAsync(
+            try await allocator.reattach(retained, conversationKey: "conv:b", trimToLogicalTokens: 5)
+        )
         let reattached = try await allocator.reattach(
             retained,
             conversationKey: "conv:a",
@@ -1521,9 +2048,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         let zeroTable = try await allocator.table(for: zeroReattached)
         XCTAssertEqual(zeroTable.logicalTokenCount, 0)
         XCTAssertEqual(zeroTable.tailValidTokenCount, 0)
-        await XCTAssertThrowsErrorAsync {
-            _ = try await allocator.materializeContiguousByteCache(zeroReattached)
-        }
+        await XCTAssertThrowsErrorAsync(try await allocator.materializeContiguousByteCache(zeroReattached))
     }
 
     func testContiguousCacheBridgeRejectsCrossHandleCacheRecord() async throws {
@@ -1549,9 +2074,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         ]
 
         XCTAssertThrowsError(try bridge.record(caches: [paged], binding: secondBinding))
-        await XCTAssertThrowsErrorAsync {
-            _ = try await allocator.materializeContiguousByteCache(second)
-        }
+        await XCTAssertThrowsErrorAsync(try await allocator.materializeContiguousByteCache(second))
     }
 
     func testConversationKeyWithoutRetainedHandoffRunsAsFreshSchedulerRow() async throws {
@@ -1624,6 +2147,70 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         )
     }
 
+    private static func schedulerRequest(
+        id: String,
+        promptTokens: [Int],
+        maxOutputTokens: Int,
+        decodePath: DecodePath = .ordinary,
+        nativeMTPMaximumProposalDepth: Int = 0,
+        nativeMTPTupleFence: NativeMTPTupleFence? = nil,
+        nativeMTPIntegrityProbe: Bool = false
+    ) -> ContinuousBatchSchedulerRequest {
+        ContinuousBatchSchedulerRequest(
+            id: id,
+            conversationKey: "",
+            promptTokens: promptTokens,
+            maxOutputTokens: maxOutputTokens,
+            samplerSeed: ContinuousBatchRowSampler.requestSeed(requestID: id),
+            temperature: 0,
+            topP: 1,
+            decodePath: decodePath,
+            nativeMTPMaximumProposalDepth: nativeMTPMaximumProposalDepth,
+            nativeMTPCompleteWindowBytesByDepth: decodePath == .nativeMTP
+                ? Array(repeating: 16, count: max(1, nativeMTPMaximumProposalDepth + 1))
+                : [],
+            nativeMTPTupleFence: nativeMTPTupleFence,
+            nativeMTPIntegrityProbe: nativeMTPIntegrityProbe
+        )
+    }
+
+    private static func nativeMTPFence(
+        admission: String = String(repeating: "a", count: 64),
+        snapshot: String = "snapshot",
+        generation: UInt64 = 1
+    ) -> NativeMTPTupleFence {
+        NativeMTPTupleFence(
+            admissionTupleSHA256: admission,
+            servedSnapshotID: snapshot,
+            targetGeneration: generation
+        )
+    }
+
+    private static func qwen35HybridConfig(
+        layerTypes: [String]? = nil,
+        includeMTPMetadata: Bool = true
+    ) -> Data {
+        let defaultLayers = (0..<32).map { index in
+            (index + 1).isMultiple(of: 4) ? "full_attention" : "linear_attention"
+        }
+        var textConfig: [String: Any] = [
+            "model_type": "qwen3_5_text",
+            "num_hidden_layers": 32,
+            "full_attention_interval": 4,
+            "layer_types": layerTypes ?? defaultLayers,
+        ]
+        if includeMTPMetadata {
+            textConfig["mtp_num_hidden_layers"] = 1
+            textConfig["mtp_use_dedicated_embeddings"] = false
+        }
+        let object: [String: Any] = [
+            "model_type": "qwen3_5",
+            "architectures": ["Qwen3_5ForConditionalGeneration"],
+            "text_config": textConfig,
+        ]
+        return try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
     private static func bridgeDescriptor(blockSizeTokens: Int = 4, maxPhysicalBlocks: Int = 16) -> PagedKVDescriptor {
         PagedKVDescriptor(
             blockSizeTokens: blockSizeTokens,
@@ -1645,7 +2232,7 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         var data = Data()
         data.reserveCapacity(values.count * 2)
         for value in values {
-            var littleEndian = value.littleEndian
+            var littleEndian = Float16(value).bitPattern.littleEndian
             withUnsafeBytes(of: &littleEndian) { bytes in
                 data.append(contentsOf: bytes)
             }
@@ -1687,6 +2274,30 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
             targetKVTokenCount: targetKVTokenCount,
             samplerStep: 0
         )
+    }
+
+    private static func pagedRows(
+        descriptor: PagedKVDescriptor,
+        allocator: PagedKVBlockAllocator,
+        ids: [String],
+        initialOffsets: [Int]
+    ) async throws -> [PagedKVCache] {
+        precondition(ids.count == initialOffsets.count)
+        var rows: [PagedKVCache] = []
+        rows.reserveCapacity(ids.count)
+        for (id, offset) in zip(ids, initialOffsets) {
+            let handle = try await allocator.allocate(conversationKey: id, maxTokens: 8)
+            let binding = try await allocator.binding(for: handle)
+            rows.append(PagedKVCache(
+                blockSizeTokens: descriptor.blockSizeTokens,
+                maxPhysicalBlocks: descriptor.maxPhysicalBlocks,
+                poolEpoch: descriptor.poolEpoch,
+                binding: binding,
+                initialOffset: offset,
+                reconstructViaGather: false
+            ))
+        }
+        return rows
     }
 
     private static func tokens(from outcomes: [ContinuousBatchDecodeOutcome]) -> [String: Int] {
@@ -1837,16 +2448,26 @@ final class PagedKVRuntimeBridgeTests: XCTestCase {
         }
         XCTFail("condition did not become true before timeout")
     }
+
+    private func requireMetal() throws {
+        guard PagedKVMetallibGate.defaultMetallibExists() else {
+            throw XCTSkip("MLX default metallib is unavailable in this test host")
+        }
+    }
 }
 
 private final class RuntimeBridgeFakeModel: Module, LanguageModel, KVCacheDimensionProvider {
     let kvHeads = [1]
     private let vocabularySize: Int
     private let nextTokenByInput: [Int: Int]
+    private let emitsMTPState: Bool
+    private let lock = NSLock()
+    private var forwardCalls = 0
 
-    init(vocabularySize: Int = 32, nextTokenByInput: [Int: Int]) {
+    init(vocabularySize: Int = 32, nextTokenByInput: [Int: Int], emitsMTPState: Bool = false) {
         self.vocabularySize = vocabularySize
         self.nextTokenByInput = nextTokenByInput
+        self.emitsMTPState = emitsMTPState
         super.init()
     }
 
@@ -1855,9 +2476,12 @@ private final class RuntimeBridgeFakeModel: Module, LanguageModel, KVCacheDimens
     }
 
     func callAsFunction(_ input: LMInput.Text, cache: [KVCache]?, state: LMOutput.State?) -> LMOutput {
+        lock.lock()
+        forwardCalls += 1
+        lock.unlock()
         let batch = input.tokens.dim(0)
         let sequenceLength = input.tokens.dim(1)
-        let flatTokens = input.tokens.asArray(Int.self)
+        let flatTokens = input.tokens.asArray(Int32.self).map(Int.init)
         if let cache {
             let keys = MLXArray(flatTokens.map(Float.init), [batch, 1, sequenceLength, 1])
             let values = MLXArray(flatTokens.map { Float($0 + 100) }, [batch, 1, sequenceLength, 1])
@@ -1875,7 +2499,110 @@ private final class RuntimeBridgeFakeModel: Module, LanguageModel, KVCacheDimens
                 logits[(row * sequenceLength + position) * vocabularySize + next] = 1_000
             }
         }
-        return LMOutput(logits: MLXArray(logits, [batch, sequenceLength, vocabularySize]))
+        var outputState: LMOutput.State?
+        if emitsMTPState, state?[mtpEmitFlagKey] != nil {
+            var state = LMOutput.State()
+            state[mtpLastHiddenStatesKey] = MLXArray.zeros([batch, sequenceLength, 2])
+            outputState = state
+        }
+        return LMOutput(
+            logits: MLXArray(logits, [batch, sequenceLength, vocabularySize]),
+            state: outputState
+        )
+    }
+
+    func forwardCallCount() -> Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return forwardCalls
+    }
+}
+
+private final class RuntimeBridgeRecordingMTPDrafter: Module, StatefulMTPDrafterModel {
+    let maximumBlockSize: Int? = 2
+    let requiresSharedTargetKV = false
+    let requiresPromptPrefill = true
+    let requiresGreedySampling = true
+    private let lock = NSLock()
+    private var promptWidths: [Int] = []
+    private var hiddenWidths: [Int] = []
+
+    func makeState(parameters: GenerateParameters?) -> MTPDrafterState {
+        MTPDrafterState(cache: [])
+    }
+
+    func prepareDrafterState(
+        target: any LanguageModel,
+        promptTokens: MLXArray,
+        targetHidden: MLXArray,
+        firstBonus: MLXArray,
+        positionDeltas: MLXArray?,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) {
+        lock.lock()
+        promptWidths.append(promptTokens.dim(1))
+        hiddenWidths.append(targetHidden.dim(1))
+        lock.unlock()
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        state: inout MTPDrafterState,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        MLXArray.zeros([1, max(0, blockSize - 1)], dtype: .int32)
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        queryOffset: Int,
+        blockSize: Int,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        draftBlock(
+            target: target,
+            lastToken: lastToken,
+            lastHidden: lastHidden,
+            sharedKV: sharedKV,
+            positionDeltas: nil,
+            queryOffset: queryOffset,
+            blockSize: blockSize,
+            sampler: sampler)
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
+        positionDeltas: MLXArray?,
+        queryOffset: Int,
+        blockSize: Int,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        MLXArray.zeros([1, max(0, blockSize - 1)], dtype: .int32)
+    }
+
+    func preparedPromptWidths() -> [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return promptWidths
+    }
+
+    func preparedHiddenWidths() -> [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return hiddenWidths
     }
 }
 
@@ -1897,7 +2624,7 @@ private final class RuntimeBridgeBlockingModel: Module, LanguageModel, KVCacheDi
         let batch = input.tokens.dim(0)
         let sequenceLength = input.tokens.dim(1)
         if let cache {
-            let flatTokens = input.tokens.asArray(Int.self)
+            let flatTokens = input.tokens.asArray(Int32.self).map(Int.init)
             let keys = MLXArray(flatTokens.map(Float.init), [batch, 1, sequenceLength, 1])
             let values = MLXArray(flatTokens.map { Float($0 + 100) }, [batch, 1, sequenceLength, 1])
             for layer in cache {
@@ -2010,26 +2737,44 @@ private struct RuntimeBridgePromptProcessor: UserInputProcessor {
 
 private actor RuntimeBridgeScriptedBackend: ContinuousBatchSchedulerBackend {
     private let scripts: [String: [Int]]
+    private let nativeProposalScripts: [String: [[Int]]]
+    private let prefillGate: RuntimeBridgeTestGate?
     private let decodeGate: RuntimeBridgeTestGate?
+    private let nativeVerifyGate: RuntimeBridgeTestGate?
+    private let nativeVerifyGateCall: Int
     private let prefillError: (any Error)?
     private var decodeCalls = 0
     private var prefillCalls = 0
+    private var nativeProposalCallsByID: [String: Int] = [:]
+    private var nativeVerifyCalls = 0
+    private var nativeFinalizeRows: [ContinuousBatchNativeMTPFinalizeInput] = []
     private var prefillLengths: [Int] = []
     private var batches: [[String]] = []
 
     init(
         scripts: [String: [Int]],
+        nativeProposalScripts: [String: [[Int]]] = [:],
+        prefillGate: RuntimeBridgeTestGate? = nil,
         decodeGate: RuntimeBridgeTestGate? = nil,
+        nativeVerifyGate: RuntimeBridgeTestGate? = nil,
+        nativeVerifyGateCall: Int = 1,
         prefillError: (any Error)? = nil
     ) {
         self.scripts = scripts
+        self.nativeProposalScripts = nativeProposalScripts
+        self.prefillGate = prefillGate
         self.decodeGate = decodeGate
+        self.nativeVerifyGate = nativeVerifyGate
+        self.nativeVerifyGateCall = nativeVerifyGateCall
         self.prefillError = prefillError
     }
 
     func prefill(rows: [ContinuousBatchPrefillInput]) async throws -> [ContinuousBatchPrefillOutput] {
         prefillCalls += 1
         prefillLengths.append(contentsOf: rows.map(\.promptTokens.count))
+        if prefillCalls == 1, let prefillGate {
+            await prefillGate.wait()
+        }
         if let prefillError {
             throw prefillError
         }
@@ -2037,9 +2782,45 @@ private actor RuntimeBridgeScriptedBackend: ContinuousBatchSchedulerBackend {
             let script = scripts[row.requestID] ?? []
             return ContinuousBatchPrefillOutput(
                 requestID: row.requestID,
-                sampledToken: row.sampleFirstToken && !script.isEmpty ? script[0] : nil
+                sampledToken: row.sampleFirstToken ? (script.first ?? row.promptTokens.last) : nil
             )
         }
+    }
+
+    func proposeNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPProposalInput]
+    ) async throws -> [String: [Int]]? {
+        var proposals: [String: [Int]] = [:]
+        for row in rows {
+            let call = nativeProposalCallsByID[row.requestID] ?? 0
+            nativeProposalCallsByID[row.requestID] = call + 1
+            let scripts = nativeProposalScripts[row.requestID] ?? []
+            proposals[row.requestID] = call < scripts.count ? scripts[call] : []
+        }
+        return proposals
+    }
+
+    func verifyNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPVerifyInput]
+    ) async throws -> [NativeMTPVerifiedRow] {
+        nativeVerifyCalls += 1
+        if nativeVerifyCalls == nativeVerifyGateCall, let nativeVerifyGate {
+            await nativeVerifyGate.wait()
+        }
+        return rows.map { row in
+            NativeMTPVerifiedRow(
+                schedulerRowID: row.requestID,
+                packedRowIndex: row.packedRowIndex,
+                proposedTokenIDs: row.proposalTokens,
+                targetTopTokenIDs: row.proposalTokens + [10_000 + nativeVerifyCalls]
+            )
+        }
+    }
+
+    func finalizeNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPFinalizeInput]
+    ) async throws {
+        nativeFinalizeRows.append(contentsOf: rows)
     }
 
     func decode(rows: [ContinuousBatchDecodeInput]) async throws -> [ContinuousBatchDecodeOutcome] {
@@ -2074,6 +2855,10 @@ private actor RuntimeBridgeScriptedBackend: ContinuousBatchSchedulerBackend {
 
     func decodeBatches() -> [[String]] {
         batches
+    }
+
+    func nativeFinalizeInputs() -> [ContinuousBatchNativeMTPFinalizeInput] {
+        nativeFinalizeRows
     }
 }
 

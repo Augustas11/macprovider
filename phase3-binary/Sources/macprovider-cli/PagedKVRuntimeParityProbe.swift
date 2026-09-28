@@ -165,20 +165,20 @@ enum PagedKVRuntimeParityProbe {
             )
             let binding = try await allocator.binding(for: handle)
 
-            return await container.perform { context in
+            return try await container.perform { context in
                 let model = context.model
-                let stockLayout = model.newCache(parameters: nil)
+                let stockLayout = try model.newCache(parameters: nil)
                 let nLayers = stockLayout.filter { $0 is KVCacheSimple }.count
                 guard nLayers > 0,
                       stockLayout.allSatisfy({ $0 is KVCacheSimple || $0 is MambaCache })
                 else { return .failClosed(nNew: nNew) }
 
-                let stock = Self.greedyGenerate(model: model, promptTokens: promptTokens, nNew: nNew) {
-                    model.newCache(parameters: nil)
+                let stock = try Self.greedyGenerate(model: model, promptTokens: promptTokens, nNew: nNew) {
+                    try model.newCache(parameters: nil)
                 }
 
                 PagedKVCache.resetGatherDiagnostics()
-                let paged = Self.greedyGenerate(model: model, promptTokens: promptTokens, nNew: nNew) {
+                let paged = try Self.greedyGenerate(model: model, promptTokens: promptTokens, nNew: nNew) {
                     stockLayout.map { cache in
                         if cache is MambaCache { return MambaCache() as KVCache }
                         return PagedKVCache(
@@ -421,19 +421,19 @@ enum PagedKVRuntimeParityProbe {
         nNew: Int
     ) async throws -> Bool {
         guard nNew > 0 else { return false }
-        let serial = await container.perform { context in
+        let serial = try await container.perform { context in
             (
-                Self.greedyGenerate(
+                try Self.greedyGenerate(
                     model: context.model,
                     promptTokens: promptA,
                     nNew: nNew,
-                    makeCache: { context.model.newCache(parameters: nil) }
+                    makeCache: { try context.model.newCache(parameters: nil) }
                 ),
-                Self.greedyGenerate(
+                try Self.greedyGenerate(
                     model: context.model,
                     promptTokens: promptB,
                     nNew: nNew,
-                    makeCache: { context.model.newCache(parameters: nil) }
+                    makeCache: { try context.model.newCache(parameters: nil) }
                 )
             )
         }
@@ -600,9 +600,9 @@ enum PagedKVRuntimeParityProbe {
         promptTokens: [Int],
         nNew: Int,
         prefillStepSize: Int = ContinuousBatchSchedulerConfiguration.defaultPromptChunkTokens,
-        makeCache: () -> [KVCache]
-    ) -> [Int] {
-        let cache = makeCache()
+        makeCache: () throws -> [KVCache]
+    ) throws -> [Int] {
+        let cache = try makeCache()
         var out: [Int] = []
         out.reserveCapacity(nNew)
         let chunkSize = max(1, prefillStepSize)
@@ -763,7 +763,7 @@ enum PagedKVRuntimeParityProbe {
             var references: [SerialReference] = []
             references.reserveCapacity(nNew)
             for _ in 0 ..< nNew {
-                let reference = Self.serialReference(model: context.model, prompt: tokens)
+                let reference = try Self.serialReference(model: context.model, prompt: tokens)
                 references.append(reference)
                 tokens.append(reference.top1)
             }
@@ -778,13 +778,13 @@ enum PagedKVRuntimeParityProbe {
         container: ModelContainer,
         prompt: [Int]
     ) async throws -> SerialReference {
-        await container.perform { context in
-            Self.serialReference(model: context.model, prompt: prompt)
+        try await container.perform { context in
+            try Self.serialReference(model: context.model, prompt: prompt)
         }
     }
 
-    private static func serialReference(model: any LanguageModel, prompt: [Int]) -> SerialReference {
-        let cache = model.newCache(parameters: nil)
+    private static func serialReference(model: any LanguageModel, prompt: [Int]) throws -> SerialReference {
+        let cache = try model.newCache(parameters: nil)
         let y = MLXArray(prompt.map { Int32($0) }).reshaped([1, prompt.count])
         let logits = model(y, cache: cache)
         let vocab = logits.dim(logits.ndim - 1)

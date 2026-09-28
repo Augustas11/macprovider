@@ -104,6 +104,24 @@ final class PagedKVEngineTests: XCTestCase {
         )
     }
 
+    private func nativeMTPTopology(
+        _ components: [(String, String, PagedKVDType, [Int], Int)] = [
+            ("paged_kv", "attention", .fp16, [1, 1, 4, 1], 4),
+        ]
+    ) throws -> PagedKVStateTopology {
+        try PagedKVStateTopology(
+            components: components.map {
+                try PagedKVStateTopologyComponent(
+                    name: $0.0,
+                    kind: $0.1,
+                    dtype: $0.2,
+                    shape: $0.3,
+                    logicalExtent: $0.4
+                )
+            }
+        )
+    }
+
     func testClosedFallbackReasonEnumMatchesSpec039() {
         XCTAssertEqual(
             PagedKVFallbackReason.allCases.map(\.rawValue).sorted(),
@@ -767,6 +785,401 @@ final class PagedKVEngineTests: XCTestCase {
         )
         XCTAssertEqual(ordered.layers[0].keyBytes, materialized.layers[0].keyBytes)
         XCTAssertEqual(ordered.layers[0].valueBytes, materialized.layers[0].valueBytes)
+    }
+
+    func testNativeMTPStageReservesFullTailButKeepsPublicBindingAtCheckpoint() async throws {
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 3,
+            physicalBlockOrder: [0, 1, 2]
+        )
+        let handle = try await allocator.allocate(
+            conversationKey: "conv:native-mtp",
+            initialCapacityTokens: 4,
+            maxLogicalTokens: 12,
+            initialTokens: 4
+        )
+        let topology = try nativeMTPTopology()
+        let checkpoint = try await allocator.checkpointNativeMTPTransaction(
+            handle: handle,
+            servedSnapshotID: "snapshot-a",
+            topology: topology
+        )
+
+        let visibleBeforeStage = try await allocator.binding(for: handle)
+        XCTAssertEqual(visibleBeforeStage.rowGeneration, checkpoint.rowGeneration)
+        XCTAssertEqual(visibleBeforeStage.currentTable.logicalTokenCount, 4)
+        let freeBlocks = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocks, 2)
+
+        let staged = try await allocator.stageNativeMTPTransaction(checkpoint, proposalTokenCount: 5)
+        XCTAssertEqual(staged.transactionID, checkpoint.transactionID)
+        XCTAssertEqual(staged.committedTable.logicalTokenCount, 4)
+        XCTAssertEqual(staged.committedTable.physicalBlocks, [0])
+        XCTAssertEqual(staged.privateStagedTable.logicalTokenCount, 9)
+        XCTAssertEqual(staged.privateStagedTable.physicalBlocks, [0, 1, 2])
+        XCTAssertEqual(staged.proposalRange, 4..<9)
+        XCTAssertEqual(staged.stagedTailPhysicalBlocks, [1, 2])
+        let freeBlocksAfterStage = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocksAfterStage, 0, "stage(N) reserves the full hidden proposal tail before mutation")
+
+        let publicMaterialized = try await allocator.materialize(
+            handle,
+            physicalBlocks: [
+                0: Data("abcd".utf8),
+            ],
+            bytesPerToken: 1
+        )
+        XCTAssertEqual(String(data: publicMaterialized, encoding: .utf8), "abcd")
+
+        let privateMaterialized = try PagedKVMaterializer.materialize(
+            table: staged.privateStagedTable,
+            physicalBlocks: [
+                0: Data("abcd".utf8),
+                1: Data("efgh".utf8),
+                2: Data("i000".utf8),
+            ],
+            bytesPerToken: 1
+        )
+        XCTAssertEqual(String(data: privateMaterialized, encoding: .utf8), "abcdefghi")
+
+        let committed = try await allocator.commitNativeMTPTransaction(checkpoint, acceptedPrefixTokenCount: 3)
+        XCTAssertEqual(committed.logicalTokenCount, 7)
+        XCTAssertEqual(committed.physicalBlocks, [0, 1])
+        let committedMaterialized = try await allocator.materialize(
+            handle,
+            physicalBlocks: [
+                0: Data("abcd".utf8),
+                1: Data("efgh".utf8),
+            ],
+            bytesPerToken: 1
+        )
+        XCTAssertEqual(String(data: committedMaterialized, encoding: .utf8), "abcdefg")
+        let freeBlocksAfterCommit = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocksAfterCommit, 1)
+        let afterCommit = try await allocator.binding(for: handle)
+        XCTAssertEqual(afterCommit.rowGeneration, checkpoint.rowGeneration + 1)
+    }
+
+    func testNativeMTPAbortRestoresCheckpointAndReleasesStagedBlocks() async throws {
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 3,
+            physicalBlockOrder: [0, 1, 2]
+        )
+        let handle = try await allocator.allocate(
+            conversationKey: "conv:native-mtp",
+            initialCapacityTokens: 4,
+            maxLogicalTokens: 12,
+            initialTokens: 3
+        )
+        let topology = try nativeMTPTopology()
+        let checkpoint = try await allocator.checkpointNativeMTPTransaction(
+            handle: handle,
+            servedSnapshotID: "snapshot-a",
+            topology: topology
+        )
+
+        _ = try await allocator.stageNativeMTPTransaction(checkpoint, proposalTokenCount: 6)
+        let freeBlocksAfterStage = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocksAfterStage, 0)
+
+        let aborted = try await allocator.abortNativeMTPTransaction(checkpoint)
+        XCTAssertEqual(aborted.logicalTokenCount, 3)
+        XCTAssertEqual(aborted.physicalBlocks, [0])
+        let freeBlocks = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocks, 2)
+        let afterAbort = try await allocator.binding(for: handle)
+        XCTAssertEqual(afterAbort.rowGeneration, checkpoint.rowGeneration)
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await allocator.abortNativeMTPTransaction(checkpoint)
+        }
+    }
+
+    func testNativeMTPStageCapacityFailureIsAtomicAndCommitZeroPublishesNoTail() async throws {
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 1,
+            physicalBlockOrder: [0]
+        )
+        let handle = try await allocator.allocate(
+            conversationKey: "conv:native-mtp",
+            initialCapacityTokens: 4,
+            maxLogicalTokens: 8,
+            initialTokens: 4
+        )
+        let checkpoint = try await allocator.checkpointNativeMTPTransaction(
+            handle: handle,
+            servedSnapshotID: "snapshot-a",
+            topology: try nativeMTPTopology()
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            _ = try await allocator.stageNativeMTPTransaction(checkpoint, proposalTokenCount: 1)
+        }
+        let afterFailedStage = try await allocator.binding(for: handle)
+        XCTAssertEqual(afterFailedStage.currentTable.logicalTokenCount, 4)
+        XCTAssertEqual(afterFailedStage.currentTable.physicalBlocks, [0])
+        let freeBlocksAfterFailure = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocksAfterFailure, 0)
+
+        let stagedZero = try await allocator.stageNativeMTPTransaction(checkpoint, proposalTokenCount: 0)
+        XCTAssertEqual(stagedZero.privateStagedTable.logicalTokenCount, 4)
+        XCTAssertEqual(stagedZero.proposalRange, 4..<4)
+        XCTAssertEqual(stagedZero.stagedTailPhysicalBlocks, [])
+        let committedZero = try await allocator.commitNativeMTPTransaction(checkpoint, acceptedPrefixTokenCount: 0)
+        XCTAssertEqual(committedZero.logicalTokenCount, 4)
+        XCTAssertEqual(committedZero.physicalBlocks, [0])
+        let afterCommitZero = try await allocator.binding(for: handle)
+        XCTAssertEqual(afterCommitZero.rowGeneration, checkpoint.rowGeneration + 1)
+    }
+
+    func testNativeMTPTransactionInterlocksOrdinaryMutatorsAndAbortReleasesPrivateMap() async throws {
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 3,
+            physicalBlockOrder: [0, 1, 2]
+        )
+        let handle = try await allocator.allocate(
+            conversationKey: "conv:native-mtp",
+            initialCapacityTokens: 4,
+            maxLogicalTokens: 12,
+            initialTokens: 4
+        )
+        let checkpoint = try await allocator.checkpointNativeMTPTransaction(
+            handle: handle,
+            servedSnapshotID: "snapshot-a",
+            topology: try nativeMTPTopology()
+        )
+
+        await XCTAssertThrowsErrorAsync { _ = try await allocator.extend(handle, by: 1) }
+        await XCTAssertThrowsErrorAsync { _ = try await allocator.trim(handle, toLogicalTokens: 3) }
+        await XCTAssertThrowsErrorAsync { _ = try await allocator.retain(handle) }
+        await XCTAssertThrowsErrorAsync { try await allocator.release(handle) }
+        await XCTAssertThrowsErrorAsync { try await allocator.beginDecodeStep(handle) }
+
+        let staged = try await allocator.stageNativeMTPTransaction(checkpoint, proposalTokenCount: 5)
+        XCTAssertEqual(staged.privateStagedTable.physicalBlocks, [0, 1, 2])
+        let stagedBytes = try PagedKVMaterializer.materialize(
+            table: staged.privateStagedTable,
+            physicalBlocks: [
+                0: Data("abcd".utf8),
+                1: Data("efgh".utf8),
+                2: Data("i000".utf8),
+            ],
+            bytesPerToken: 1
+        )
+        XCTAssertEqual(String(data: stagedBytes, encoding: .utf8), "abcdefghi")
+
+        let aborted = try await allocator.abortNativeMTPTransaction(checkpoint)
+        XCTAssertEqual(aborted.logicalTokenCount, 4)
+        XCTAssertEqual(aborted.physicalBlocks, [0])
+        let freeAfterAbort = await allocator.freeBlockCount()
+        XCTAssertEqual(freeAfterAbort, 2)
+        let next = try await allocator.allocate(conversationKey: "conv:next", maxTokens: 8, initialTokens: 8)
+        let nextTable = try await allocator.table(for: next)
+        XCTAssertEqual(nextTable.physicalBlocks, [1, 2], "abort releases the private staged map back to the pool")
+    }
+
+    func testNativeMTPRejectsWrongHandleEpochGenerationTopologyAndDoubleResolve() async throws {
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 4,
+            poolEpoch: 9
+        )
+        let handle = try await allocator.allocate(
+            conversationKey: "conv:native-mtp",
+            initialCapacityTokens: 4,
+            maxLogicalTokens: 16,
+            initialTokens: 4
+        )
+        let otherHandle = try await allocator.allocate(
+            conversationKey: "conv:other",
+            initialCapacityTokens: 4,
+            maxLogicalTokens: 4,
+            initialTokens: 1
+        )
+        let topology = try nativeMTPTopology([
+            ("paged_kv", "attention", .fp16, [1, 1, 4, 1], 4),
+            ("mamba_state", "recurrent", .fp16, [1, 4], 4),
+        ])
+        let checkpoint = try await allocator.checkpointNativeMTPTransaction(
+            handle: handle,
+            servedSnapshotID: "snapshot-a",
+            topology: topology
+        )
+
+        await XCTAssertThrowsErrorAsync {
+            let wrongHandle = PagedKVNativeMTPTransaction(
+                transactionID: checkpoint.transactionID,
+                handle: otherHandle,
+                rowGeneration: checkpoint.rowGeneration,
+                logicalTokenCount: checkpoint.logicalTokenCount,
+                allocatorEpoch: checkpoint.allocatorEpoch,
+                servedSnapshotID: checkpoint.servedSnapshotID,
+                topology: checkpoint.topology
+            )
+            _ = try await allocator.stageNativeMTPTransaction(wrongHandle, proposalTokenCount: 1)
+        }
+        await XCTAssertThrowsErrorAsync {
+            let wrongEpoch = PagedKVNativeMTPTransaction(
+                transactionID: checkpoint.transactionID,
+                handle: PagedKVBlockTableHandle(
+                    id: checkpoint.handle.id,
+                    conversationKey: checkpoint.handle.conversationKey,
+                    poolEpoch: checkpoint.handle.poolEpoch + 1
+                ),
+                rowGeneration: checkpoint.rowGeneration,
+                logicalTokenCount: checkpoint.logicalTokenCount,
+                allocatorEpoch: checkpoint.allocatorEpoch + 1,
+                servedSnapshotID: checkpoint.servedSnapshotID,
+                topology: checkpoint.topology
+            )
+            _ = try await allocator.stageNativeMTPTransaction(wrongEpoch, proposalTokenCount: 1)
+        }
+        await XCTAssertThrowsErrorAsync {
+            let wrongGeneration = PagedKVNativeMTPTransaction(
+                transactionID: checkpoint.transactionID,
+                handle: checkpoint.handle,
+                rowGeneration: checkpoint.rowGeneration + 1,
+                logicalTokenCount: checkpoint.logicalTokenCount,
+                allocatorEpoch: checkpoint.allocatorEpoch,
+                servedSnapshotID: checkpoint.servedSnapshotID,
+                topology: checkpoint.topology
+            )
+            _ = try await allocator.stageNativeMTPTransaction(wrongGeneration, proposalTokenCount: 1)
+        }
+        await XCTAssertThrowsErrorAsync {
+            let wrongTopology = PagedKVNativeMTPTransaction(
+                transactionID: checkpoint.transactionID,
+                handle: checkpoint.handle,
+                rowGeneration: checkpoint.rowGeneration,
+                logicalTokenCount: checkpoint.logicalTokenCount,
+                allocatorEpoch: checkpoint.allocatorEpoch,
+                servedSnapshotID: checkpoint.servedSnapshotID,
+                topology: try nativeMTPTopology([
+                    ("paged_kv", "attention", .fp16, [1, 1, 4, 1], 4),
+                ])
+            )
+            _ = try await allocator.stageNativeMTPTransaction(wrongTopology, proposalTokenCount: 1)
+        }
+        await XCTAssertThrowsErrorAsync {
+            let shapeDrift = PagedKVNativeMTPTransaction(
+                transactionID: checkpoint.transactionID,
+                handle: checkpoint.handle,
+                rowGeneration: checkpoint.rowGeneration,
+                logicalTokenCount: checkpoint.logicalTokenCount,
+                allocatorEpoch: checkpoint.allocatorEpoch,
+                servedSnapshotID: checkpoint.servedSnapshotID,
+                topology: try nativeMTPTopology([
+                    ("paged_kv", "attention", .fp16, [1, 1, 5, 1], 5),
+                    ("mamba_state", "recurrent", .fp16, [1, 4], 4),
+                ])
+            )
+            _ = try await allocator.stageNativeMTPTransaction(shapeDrift, proposalTokenCount: 1)
+        }
+        await XCTAssertThrowsErrorAsync {
+            let dtypeDrift = PagedKVNativeMTPTransaction(
+                transactionID: checkpoint.transactionID,
+                handle: checkpoint.handle,
+                rowGeneration: checkpoint.rowGeneration,
+                logicalTokenCount: checkpoint.logicalTokenCount,
+                allocatorEpoch: checkpoint.allocatorEpoch,
+                servedSnapshotID: checkpoint.servedSnapshotID,
+                topology: try nativeMTPTopology([
+                    ("paged_kv", "attention", .bf16, [1, 1, 4, 1], 4),
+                    ("mamba_state", "recurrent", .fp16, [1, 4], 4),
+                ])
+            )
+            _ = try await allocator.stageNativeMTPTransaction(dtypeDrift, proposalTokenCount: 1)
+        }
+        await XCTAssertThrowsErrorAsync {
+            let wrongSnapshot = PagedKVNativeMTPTransaction(
+                transactionID: checkpoint.transactionID,
+                handle: checkpoint.handle,
+                rowGeneration: checkpoint.rowGeneration,
+                logicalTokenCount: checkpoint.logicalTokenCount,
+                allocatorEpoch: checkpoint.allocatorEpoch,
+                servedSnapshotID: "snapshot-b",
+                topology: checkpoint.topology
+            )
+            _ = try await allocator.stageNativeMTPTransaction(wrongSnapshot, proposalTokenCount: 1)
+        }
+
+        _ = try await allocator.stageNativeMTPTransaction(checkpoint, proposalTokenCount: 2)
+        await XCTAssertThrowsErrorAsync {
+            _ = try await allocator.commitNativeMTPTransaction(checkpoint, acceptedPrefixTokenCount: 3)
+        }
+        _ = try await allocator.commitNativeMTPTransaction(checkpoint, acceptedPrefixTokenCount: 1)
+        await XCTAssertThrowsErrorAsync {
+            _ = try await allocator.commitNativeMTPTransaction(checkpoint, acceptedPrefixTokenCount: 1)
+        }
+        await XCTAssertThrowsErrorAsync {
+            _ = try await allocator.abortNativeMTPTransaction(checkpoint)
+        }
+    }
+
+    func testNativeMTPRaggedRowsCommitIndependently() async throws {
+        let allocator = try PagedKVBlockAllocator(
+            blockSizeTokens: 4,
+            maxPhysicalBlocks: 6,
+            physicalBlockOrder: [0, 1, 2, 3, 4, 5]
+        )
+        let rowA = try await allocator.allocate(
+            conversationKey: "conv:row-a",
+            initialCapacityTokens: 4,
+            maxLogicalTokens: 12,
+            initialTokens: 4
+        )
+        let rowB = try await allocator.allocate(
+            conversationKey: "conv:row-b",
+            initialCapacityTokens: 4,
+            maxLogicalTokens: 12,
+            initialTokens: 4
+        )
+        let topology = try nativeMTPTopology()
+        let checkpointA = try await allocator.checkpointNativeMTPTransaction(
+            handle: rowA,
+            servedSnapshotID: "snapshot-a",
+            topology: topology
+        )
+        let checkpointB = try await allocator.checkpointNativeMTPTransaction(
+            handle: rowB,
+            servedSnapshotID: "snapshot-a",
+            topology: topology
+        )
+
+        _ = try await allocator.stageNativeMTPTransaction(checkpointA, proposalTokenCount: 5)
+        _ = try await allocator.stageNativeMTPTransaction(checkpointB, proposalTokenCount: 2)
+        let committedA = try await allocator.commitNativeMTPTransaction(checkpointA, acceptedPrefixTokenCount: 4)
+        let committedB = try await allocator.commitNativeMTPTransaction(checkpointB, acceptedPrefixTokenCount: 1)
+
+        XCTAssertEqual(committedA.logicalTokenCount, 8)
+        XCTAssertEqual(committedA.physicalBlocks, [0, 2])
+        XCTAssertEqual(committedB.logicalTokenCount, 5)
+        XCTAssertEqual(committedB.physicalBlocks, [1, 4])
+        let freeBlocks = await allocator.freeBlockCount()
+        XCTAssertEqual(freeBlocks, 2)
+
+        let rowAMaterialized = try await allocator.materialize(
+            rowA,
+            physicalBlocks: [
+                0: Data("abcd".utf8),
+                2: Data("efgh".utf8),
+            ],
+            bytesPerToken: 1
+        )
+        let rowBMaterialized = try await allocator.materialize(
+            rowB,
+            physicalBlocks: [
+                1: Data("wxyz".utf8),
+                4: Data("q000".utf8),
+            ],
+            bytesPerToken: 1
+        )
+        XCTAssertEqual(String(data: rowAMaterialized, encoding: .utf8), "abcdefgh")
+        XCTAssertEqual(String(data: rowBMaterialized, encoding: .utf8), "wxyzq")
     }
 
     func testContiguousBridgeMaterializesValidEmptySequence() async throws {

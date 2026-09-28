@@ -13,7 +13,7 @@ enum KVBuildIdentity {
     /// change: `KVBuildIdentityDriftTests` parses Package.resolved and fails CI if
     /// this drifts from the resolved pin. A different pin ⇒ a different ABI ⇒ all
     /// prior ciphertext hard-misses (accepted — this tier is an optimization).
-    static let mlxSwiftLMRevision = "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57"
+    static let mlxSwiftLMRevision = "e874140ecb5b04aeb445eb3837d48f7b187b867e"
     /// The REAL pinned mlx-swift package version (HIGH-8). Same bump-on-change rule.
     static let mlxVersion = "0.31.4"
     static let decodePathOrdinary = "ordinary"

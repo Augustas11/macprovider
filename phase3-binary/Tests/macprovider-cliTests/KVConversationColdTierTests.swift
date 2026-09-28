@@ -760,14 +760,14 @@ final class KVConversationColdTierTests: XCTestCase {
 
         // Eligible branch: serveCache(forceSimpleKV:true) drops maxKVSize via cacheParameters
         // → the production serve allocation builds [KVCacheSimple].
-        let eligibleCaches = ModelRuntime.serveCache(model: model, baseParameters: base, forceSimpleKV: true)
+        let eligibleCaches = try! ModelRuntime.serveCache(model: model, baseParameters: base, forceSimpleKV: true)
         XCTAssertNotNil(eligibleCaches as? [KVCacheSimple],
             "eligible serveCache must build [KVCacheSimple] so captureSnapshot's cast succeeds")
         XCTAssertEqual(eligibleCaches.count, 3, "one cache per layer")
 
         // Non-eligible keyless branch keeps maxKVSize → RotatingKVCache (non-simple): the cast
         // captureSnapshot rejects, which is exactly why the eligible branch must differ.
-        let buyerCaches = ModelRuntime.serveCache(model: model, baseParameters: base, forceSimpleKV: false)
+        let buyerCaches = try! ModelRuntime.serveCache(model: model, baseParameters: base, forceSimpleKV: false)
         XCTAssertNil(buyerCaches as? [KVCacheSimple],
             "non-eligible serveCache keeps maxKVSize → a rotating (non-simple) cache")
         XCTAssertTrue(buyerCaches.allSatisfy { $0 is RotatingKVCache },
@@ -790,7 +790,7 @@ final class KVConversationColdTierTests: XCTestCase {
         let base = GenerateParameters(
             maxTokens: 128, maxKVSize: 4096, kvBits: nil,
             temperature: 0.0, topP: 1.0, prefillStepSize: 512)
-        let keyed = ModelRuntime.serveCache(
+        let keyed = try! ModelRuntime.serveCache(
             model: model,
             baseParameters: base,
             forceSimpleKV: ModelRuntime.forceSimpleKVCache(
@@ -799,7 +799,7 @@ final class KVConversationColdTierTests: XCTestCase {
         XCTAssertNotNil(keyed as? [KVCacheSimple])
         XCTAssertTrue(keyed.allSatisfy(\.isTrimmable))
 
-        let keyless = ModelRuntime.serveCache(
+        let keyless = try! ModelRuntime.serveCache(
             model: model,
             baseParameters: base,
             forceSimpleKV: ModelRuntime.forceSimpleKVCache(eligible: false, conversationKey: nil))
@@ -813,7 +813,7 @@ final class KVConversationColdTierTests: XCTestCase {
         let base = GenerateParameters(
             maxTokens: 128, maxKVSize: 4096, kvBits: nil,
             temperature: 0.0, topP: 1.0, prefillStepSize: 512)
-        let keyed = ModelRuntime.serveCache(
+        let keyed = try! ModelRuntime.serveCache(
             model: model,
             baseParameters: base,
             forceSimpleKV: ModelRuntime.forceSimpleKVCache(
@@ -855,14 +855,14 @@ final class KVConversationColdTierTests: XCTestCase {
 
         // Non-batched serve cache (unforced, capped) is rotating — a full-attention model
         // is rotating ONLY because of the memory cap, not because it needs a window.
-        let servedClass = ModelRuntime.pagedKVRuntimeCacheClass(model: model, baseParameters: base)
+        let servedClass = try! ModelRuntime.pagedKVRuntimeCacheClass(model: model, baseParameters: base)
         XCTAssertEqual(servedClass, "RotatingKVCache",
             "the non-batched serve cache is memory-capped → RotatingKVCache")
 
         // The attach probe now classifies the paged path's cache: dropping maxKVSize
         // (as the container-level probe does via cacheParameters(forceSimpleKV:true))
         // resolves KVCacheSimple, so a memory-capped full-attention model can attach.
-        let attachClass = ModelRuntime.pagedKVRuntimeCacheClass(
+        let attachClass = try! ModelRuntime.pagedKVRuntimeCacheClass(
             model: model,
             baseParameters: ModelRuntime.cacheParameters(base, forceSimpleKV: true))
         XCTAssertEqual(attachClass, "KVCacheSimple",
@@ -885,7 +885,7 @@ final class KVConversationColdTierTests: XCTestCase {
 
         // Even with the memory cap removed (as the attach probe does), a genuine
         // sliding-window model still resolves RotatingKVCache -> off the allowlist.
-        let attachClass = ModelRuntime.pagedKVRuntimeCacheClass(
+        let attachClass = try! ModelRuntime.pagedKVRuntimeCacheClass(
             model: model,
             baseParameters: ModelRuntime.cacheParameters(base, forceSimpleKV: true))
         XCTAssertEqual(attachClass, "RotatingKVCache",

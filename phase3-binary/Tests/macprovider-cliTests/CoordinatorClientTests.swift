@@ -147,6 +147,156 @@ final class CoordinatorClientTests: XCTestCase {
         return url
     }
 
+    private static func nativeMTPCanaryRequest() -> [String: Any] {
+        [
+            "type": "native_mtp_canary_request_v1",
+            "version": 1,
+            "request_id": "canary-1",
+            "provider_id": "provider-test",
+            "assigned_id": "assigned-native-mtp",
+            "model_id": "model-a",
+            "model_hash": String(repeating: "a", count: 64),
+            "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "provider_revision": "provider-rev-a",
+            "runtime_revision": "mlx-rev-a",
+            "target_generation": 7,
+            "tokenizer_digest": String(repeating: "b", count: 64),
+            "artifact_digest": String(repeating: "c", count: 64),
+            "manifest_digest": String(repeating: "d", count: 64),
+            "sidecar_digest": String(repeating: "e", count: 64),
+            "provider_binary_sha256": String(repeating: "f", count: 64),
+            "runtime_cdhash": String(repeating: "1", count: 64),
+            "cache_namespace": "cache-a",
+            "state_digest": String(repeating: "2", count: 64),
+            "runtime_tuple": nativeMTPRuntimeTuple(),
+            "challenge_id": "challenge-a",
+            "challenge_corpus_sha256": String(repeating: "3", count: 64),
+            "challenge_bank_sha256": String(repeating: "4", count: 64),
+            "native_mtp_admission_tuple_sha256": Self.nativeMTPAdmissionTupleSHA256,
+            "served_snapshot_id": "snapshot-a",
+            "native_mtp_runtime_tuple_sha256": Self.nativeMTPRuntimeTupleSHA256,
+            "expected_token_id_sha256": String(repeating: "5", count: 64),
+            "expected_terminal_reason": "passed",
+            "expected_counters": ["accepted": 2, "rejected": 1, "bonus": 0, "committed": 3],
+            "expected_committed_state_sha256": String(repeating: "2", count: 64),
+            "nonce": "0123456789abcdef0123456789abcdef",
+            "request_digest": String(repeating: "6", count: 64),
+            "issued_at": "2026-09-28T00:00:00Z",
+            "expires_at": "2099-09-28T00:01:00Z",
+            "prompt_token_ids": [1, 2, 3],
+            "max_completion_tokens": 8,
+            "proposal_depth": 2,
+        ]
+    }
+
+    private static func nativeMTPRuntimeTuple() -> [String: Any] {
+        [
+            "model_id": "model-a",
+            "model_hash": String(repeating: "a", count: 64),
+            "model_hash_algorithm": "macprovider.snapshot-manifest.v1",
+            "provider_revision": "provider-rev-a",
+            "runtime_revision": "mlx-rev-a",
+            "tokenizer_digest": String(repeating: "b", count: 64),
+            "artifact_digest": String(repeating: "c", count: 64),
+            "manifest_digest": String(repeating: "d", count: 64),
+            "sidecar_digest": String(repeating: "e", count: 64),
+            "provider_binary_sha256": String(repeating: "f", count: 64),
+            "runtime_cdhash": String(repeating: "1", count: 64),
+            "cache_namespace": "cache-a",
+            "state_digest": String(repeating: "2", count: 64),
+            "proposal_depth": 2,
+        ]
+    }
+
+    private static let nativeMTPAdmissionTupleSHA256 = String(repeating: "7", count: 64)
+    private static let nativeMTPRuntimeTupleSHA256 = "2886709db5f6b3cc0c37d70da2f665bb368dd2e4f48ac07befbfb7f8ee3d5060"
+
+    private static func nativeMTPTupleDisable() throws -> [String: Any] {
+        let issuedAt = ISO8601DateFormatter().string(from: Date())
+        let digest = try nativeMTPTupleDisableRequestDigest(issuedAt: issuedAt)
+        return [
+            "type": "native_mtp_tuple_disable_v1",
+            "version": 1,
+            "provider_id": "provider-test",
+            "assigned_id": "assigned-native-mtp",
+            "target_generation": 7,
+            "native_mtp_admission_tuple_sha256": Self.nativeMTPAdmissionTupleSHA256,
+            "served_snapshot_id": "snapshot-a",
+            "native_mtp_runtime_tuple_sha256": Self.nativeMTPRuntimeTupleSHA256,
+            "reason": "mismatch",
+            "nonce": "abcdef0123456789abcdef0123456789",
+            "issued_at": issuedAt,
+            "request_digest": digest,
+        ]
+    }
+
+    private static func nativeMTPTupleDisableRequestDigest(issuedAt: String) throws -> String {
+        let canonical = try RFC8785JCS.canonicalStringRawStrings(.object([
+            "schema_version": .int(1),
+            "provider_id": .string("provider-test"),
+            "assigned_id": .string("assigned-native-mtp"),
+            "target_generation": .int(7),
+            "native_mtp_admission_tuple_sha256": .string(Self.nativeMTPAdmissionTupleSHA256),
+            "served_snapshot_id": .string("snapshot-a"),
+            "native_mtp_runtime_tuple_sha256": .string(Self.nativeMTPRuntimeTupleSHA256),
+            "reason": .string("mismatch"),
+            "nonce": .string("abcdef0123456789abcdef0123456789"),
+            "issued_at": .string(issuedAt),
+        ]))
+        return SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func nativeMTPGoVectorCanaryResultDigest() throws -> String {
+        let runtimeTuple = RFC8785JCS.Value.object([
+            "model_id": .string("model-a"),
+            "model_hash": .string(String(repeating: "a", count: 64)),
+            "model_hash_algorithm": .string("macprovider.snapshot-manifest.v1"),
+            "provider_revision": .string("1.8.123"),
+            "runtime_revision": .string("mlx-swift-lm-e874140"),
+            "tokenizer_digest": .string(String(repeating: "b", count: 64)),
+            "artifact_digest": .string(String(repeating: "c", count: 64)),
+            "manifest_digest": .string(String(repeating: "d", count: 64)),
+            "sidecar_digest": .string(String(repeating: "e", count: 64)),
+            "provider_binary_sha256": .string(String(repeating: "f", count: 64)),
+            "runtime_cdhash": .string(String(repeating: "1", count: 64)),
+            "cache_namespace": .string("cache-a"),
+            "state_digest": .string(String(repeating: "2", count: 64)),
+            "proposal_depth": .int(2),
+        ])
+        let value = RFC8785JCS.Value.object([
+            "schema_version": .string("macprovider.native-mtp-canary-result.v1"),
+            "request_id": .string("canary-1"),
+            "provider_id": .string("provider-a"),
+            "assigned_id": .string("assigned-a"),
+            "request_digest": .string(String(repeating: "6", count: 64)),
+            "target_generation": .int(7),
+            "provider_revision": .string("1.8.123"),
+            "runtime_revision": .string("mlx-swift-lm-e874140"),
+            "challenge_id": .string("challenge-a"),
+            "challenge_bank_sha256": .string(String(repeating: "4", count: 64)),
+            "nonce": .string("0123456789abcdef0123456789abcdef"),
+            "native_mtp_runtime_tuple_sha256": .string("919d2f171e70f1cca3bc93b88cb4234f13fe4cda883ad69b976a4169a3a3bc24"),
+            "expected_token_id_sha256": .string(String(repeating: "5", count: 64)),
+            "actual_token_id_sha256": .string(String(repeating: "5", count: 64)),
+            "terminal_reason": .string("passed"),
+            "counters": .object([
+                "accepted": .int(2),
+                "rejected": .int(1),
+                "bonus": .int(0),
+                "committed": .int(3),
+            ]),
+            "committed_state_sha256": .string(String(repeating: "2", count: 64)),
+            "actual_decode_path": .string("native_mtp"),
+            "fallback_used": .bool(true),
+            "runtime_tuple": runtimeTuple,
+            "diagnostic": .string(""),
+        ])
+        let canonical = try RFC8785JCS.canonicalStringRawStrings(value)
+        return SHA256.hash(data: Data("macprovider.native-mtp-canary-result.v1\n\(canonical)".utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+    }
+
     func testDiagnosticStatusPayloadIsRedactedAndMatchesProviderSnapshot() async throws {
         let recorder = CoordinatorFrameRecorder()
         let modelHash = String(repeating: "a", count: 64)
@@ -523,6 +673,150 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(frames[0]["request_id"] as? String, "req-preflight")
         XCTAssertEqual(frames[0]["accepted"] as? Bool, true)
         XCTAssertEqual(frames[0]["estimated_wait_ms"] as? Int, 0)
+    }
+
+    func testNativeMTPCanaryRequestUsesDedicatedResultCarrier() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-native-mtp",
+            "heartbeat_interval_s": 30,
+        ])
+        let initialCount = await recorder.frames.count
+
+        try await client.handleCoordinatorPayloadForTest(Self.nativeMTPCanaryRequest())
+
+        let frames = await recorder.frames.dropFirst(initialCount)
+        XCTAssertEqual(frames.count, 1)
+        let result = try XCTUnwrap(frames.first)
+        XCTAssertEqual(result["type"] as? String, "native_mtp_canary_result_v1")
+        XCTAssertEqual(result["provider_id"] as? String, "provider-test")
+        XCTAssertEqual(result["assigned_id"] as? String, "assigned-native-mtp")
+        XCTAssertEqual(result["request_digest"] as? String, String(repeating: "6", count: 64))
+        XCTAssertNotEqual(result["result_digest"] as? String, result["request_digest"] as? String)
+        XCTAssertEqual(result["target_generation"] as? Int, 7)
+        XCTAssertEqual(result["provider_revision"] as? String, "provider-rev-a")
+        XCTAssertEqual(result["runtime_revision"] as? String, "mlx-rev-a")
+        XCTAssertEqual(result["challenge_id"] as? String, "challenge-a")
+        XCTAssertEqual(result["challenge_bank_sha256"] as? String, String(repeating: "4", count: 64))
+        XCTAssertEqual(result["native_mtp_runtime_tuple_sha256"] as? String, Self.nativeMTPRuntimeTupleSHA256)
+        XCTAssertEqual(result["terminal_reason"] as? String, "inconclusive")
+        XCTAssertEqual(result["actual_decode_path"] as? String, "unavailable")
+        XCTAssertFalse(frames.contains { frame in
+            frame["type"] as? String == "heartbeat" || frame["type"] as? String == "state_update"
+        })
+        XCTAssertNil(result["usage"])
+        XCTAssertNil(result["receipt"])
+    }
+
+    func testNativeMTPCanaryRequestRejectsUnknownAccountingFields() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-native-mtp",
+            "heartbeat_interval_s": 30,
+        ])
+        let initialCount = await recorder.frames.count
+        var request = Self.nativeMTPCanaryRequest()
+        request["usage"] = ["total_tokens": 1]
+
+        try await client.handleCoordinatorPayloadForTest(request)
+
+        let frames = await recorder.frames.dropFirst(initialCount)
+        XCTAssertEqual(frames.first?["type"] as? String, "nak")
+        XCTAssertEqual(frames.first?["in_reply_to"] as? String, "native_mtp_canary_request_v1")
+    }
+
+    func testNativeMTPRuntimeTupleIdentityMatchesGoVector() throws {
+        let admission = String(repeating: "8", count: 64)
+        let canonical = try RFC8785JCS.canonicalStringRawStrings(.object([
+            "schema_version": .string("macprovider.native-mtp-runtime-tuple.v1"),
+            "native_mtp_admission_tuple_sha256": .string(admission),
+            "provider_id": .string("provider-a"),
+            "assigned_id": .string("assigned-a"),
+            "target_generation": .int(7),
+            "served_snapshot_id": .string("snapshot-a"),
+        ]))
+        let digest = SHA256.hash(data: Data("macprovider.native-mtp-runtime-tuple.v1\n\(canonical)".utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
+        XCTAssertEqual(digest, "919d2f171e70f1cca3bc93b88cb4234f13fe4cda883ad69b976a4169a3a3bc24")
+    }
+
+    func testNativeMTPCanaryResultDigestMatchesGoVector() throws {
+        let digest = try Self.nativeMTPGoVectorCanaryResultDigest()
+        XCTAssertEqual(digest, "0e19abd8896de79b7fc46ad56630647d27551aafe57c95f579527eb02eab5e2f")
+    }
+
+    func testNativeMTPTupleDisableUsesDedicatedHandlerAndRejectsReplay() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let disableRecorder = NativeMTPTupleDisableRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            nativeMTPTupleDisableHandler: { payload in await disableRecorder.append(payload) }
+        )
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-native-mtp",
+            "heartbeat_interval_s": 30,
+        ])
+        let initialCount = await recorder.frames.count
+        let disable = try Self.nativeMTPTupleDisable()
+
+        try await client.handleCoordinatorPayloadForTest(disable)
+        try await client.handleCoordinatorPayloadForTest(disable)
+
+        let payloads = await disableRecorder.payloads
+        XCTAssertEqual(payloads.count, 1)
+        XCTAssertEqual(payloads[0].providerID, "provider-test")
+        XCTAssertEqual(payloads[0].assignedID, "assigned-native-mtp")
+        XCTAssertEqual(payloads[0].servedSnapshotID, "snapshot-a")
+        XCTAssertEqual(payloads[0].nativeMTPRuntimeTupleSHA256, Self.nativeMTPRuntimeTupleSHA256)
+        let frames = await recorder.frames.dropFirst(initialCount)
+        XCTAssertEqual(frames.first?["type"] as? String, "nak")
+        XCTAssertEqual(frames.first?["in_reply_to"] as? String, "native_mtp_tuple_disable_v1")
+    }
+
+    func testNativeMTPTupleDisableRejectsUnknownFields() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-native-mtp",
+            "heartbeat_interval_s": 30,
+        ])
+        let initialCount = await recorder.frames.count
+        var disable = try Self.nativeMTPTupleDisable()
+        disable["usage"] = ["total_tokens": 1]
+
+        try await client.handleCoordinatorPayloadForTest(disable)
+
+        let frames = await recorder.frames.dropFirst(initialCount)
+        XCTAssertEqual(frames.first?["type"] as? String, "nak")
+        XCTAssertEqual(frames.first?["in_reply_to"] as? String, "native_mtp_tuple_disable_v1")
     }
 
     func testRequestCapacityTransitionsSendCoordinatorStateUpdates() async throws {
@@ -7767,6 +8061,7 @@ final class CoordinatorClientTests: XCTestCase {
         installedCompatibilityManifest: CoordinatorClient.InstalledCompatibilityManifest? = nil,
         catalogModelSHA256: String? = nil,
         catalogArtifactIdentity: CoordinatorClient.CatalogArtifactIdentity? = nil,
+        nativeMTPTupleDisableHandler: CoordinatorClient.NativeMTPTupleDisableHandler? = nil,
         catalogEnvelopeRefresher: CoordinatorClient.CatalogEnvelopeRefresher? = nil,
         catalogEnvelopeRefreshMinimumInterval: TimeInterval = 300,
         coordinatorReadiness: CoordinatorClient.CoordinatorReadiness? = nil,
@@ -7840,6 +8135,7 @@ final class CoordinatorClientTests: XCTestCase {
             installedCompatibilityManifest: installedCompatibilityManifest ?? { _, _ in nil },
             catalogModelSHA256: catalogModelSHA256,
             catalogArtifactIdentity: catalogArtifactIdentity,
+            nativeMTPTupleDisableHandler: nativeMTPTupleDisableHandler,
             catalogEnvelopeRefresher: catalogEnvelopeRefresher,
             catalogEnvelopeRefreshMinimumInterval: catalogEnvelopeRefreshMinimumInterval,
             coordinatorReadiness: coordinatorReadiness,
@@ -8351,6 +8647,14 @@ private actor CoordinatorFrameRecorder {
 
     func append(_ frame: [String: Any]) {
         frames.append(frame)
+    }
+}
+
+private actor NativeMTPTupleDisableRecorder {
+    private(set) var payloads: [CoordinatorClient.NativeMTPTupleDisablePayload] = []
+
+    func append(_ payload: CoordinatorClient.NativeMTPTupleDisablePayload) {
+        payloads.append(payload)
     }
 }
 

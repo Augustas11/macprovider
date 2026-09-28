@@ -137,6 +137,44 @@ final class ChatCompletionRequestTests: XCTestCase {
         XCTAssertNoThrow(try ChatCompletionRequest.parse(data: data))
     }
 
+    func testMaxCompletionTokensAliasIsEffectiveMaxTokens() throws {
+        let request = try makeRequest(model: "m", extra: ["max_completion_tokens": 64])
+
+        XCTAssertEqual(request.maxTokens, 64)
+        XCTAssertTrue(request.topLevelKeys.contains("max_completion_tokens"))
+        XCTAssertEqual(request.promptSource.maxTokens, .int(64))
+    }
+
+    func testNullMaxTokensFallsBackToMaxCompletionTokensEverywhere() throws {
+        let request = try makeRequest(model: "m", extra: [
+            "max_tokens": NSNull(),
+            "max_completion_tokens": 64,
+        ])
+
+        XCTAssertEqual(request.maxTokens, 64)
+        XCTAssertEqual(request.promptSource.maxTokens, .int(64))
+    }
+
+    func testMatchingMaxTokenAliasesAreAccepted() throws {
+        let request = try makeRequest(model: "m", extra: [
+            "max_tokens": 64,
+            "max_completion_tokens": 64,
+        ])
+
+        XCTAssertEqual(request.maxTokens, 64)
+    }
+
+    func testConflictingMaxTokenAliasesAreRejected() throws {
+        XCTAssertAPIError(
+            try makeRequest(model: "m", extra: [
+                "max_tokens": 64,
+                "max_completion_tokens": 65,
+            ]),
+            status: 400,
+            code: "invalid_request"
+        )
+    }
+
     func testBooleanIsNotAcceptedAsInteger() throws {
         let body: [String: Any] = [
             "model": "m",

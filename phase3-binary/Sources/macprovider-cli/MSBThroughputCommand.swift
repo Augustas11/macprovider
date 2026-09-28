@@ -168,8 +168,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
             throw ExitCode(1)
         }
 
-        let cacheKinds = await container.perform { context in
-            Self.msbCacheKinds(model: context.model)
+        let cacheKinds = try await container.perform { context in
+            try Self.msbCacheKinds(model: context.model)
         }
         guard let cacheKinds, !cacheKinds.isEmpty else {
             FileHandle.standardError.write(Data("msb-throughput: model reports unsupported cache topology\n".utf8))
@@ -436,8 +436,8 @@ struct MSBThroughputCommand: AsyncParsableCommand {
         var currentToken: Int
     }
 
-    private static func msbCacheKinds(model: any LanguageModel) -> [PagedKVSharedForwardBackend.CacheKind]? {
-        let caches = model.newCache(parameters: nil)
+    private static func msbCacheKinds(model: any LanguageModel) throws -> [PagedKVSharedForwardBackend.CacheKind]? {
+        let caches = try model.newCache(parameters: nil)
         guard !caches.isEmpty else { return nil }
         var kinds: [PagedKVSharedForwardBackend.CacheKind] = []
         kinds.reserveCapacity(caches.count)

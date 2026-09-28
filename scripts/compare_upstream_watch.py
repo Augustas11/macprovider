@@ -14,6 +14,15 @@ BLOCKER_KEYS = (
     "mlx_swift_lm_453_typed_cache_storage",
     "mlx_swift_lm_424_speculative_cache_wrap",
     "mlx_swift_lm_518_remote_package_unsafe_flags",
+    "mlx_swift_lm_351_qwen_mtp",
+    "mlx_swift_lm_516_mtp_sliding_window",
+    "mlx_swift_lm_505_mtp_sliding_window_rewind",
+    "mlx_swift_lm_510_mamba_hybrid_rewind",
+    "mlx_swift_lm_545_qwen38_mtp",
+    "mlx_swift_lm_581_resumable_qwen_mtp",
+    "mlx_swift_lm_584_rotating_cache_trim",
+    "mlx_swift_lm_622_exact_rotating_cache_rewinds",
+    "mlx_swift_lm_645_public_mtp_transactions",
 )
 RELEASE_PIN_KEYS = {
     "mlx_swift_lm_latest": "mlx_swift_lm",
@@ -32,7 +41,14 @@ def material_changes(
     reasons: list[str] = []
     if old.get("macprovider_pins") != new.get("macprovider_pins"):
         reasons.append("resolved production pin graph changed")
+    if old.get("native_mtp_immutable_dependency_exception") != new.get(
+        "native_mtp_immutable_dependency_exception"
+    ):
+        reasons.append("native MTP immutable-dependency exception changed")
     for key in BLOCKER_KEYS:
+        if key not in old.get("blockers", {}):
+            reasons.append(f"{key} added to upstream watch")
+            continue
         previous = old["blockers"][key]
         current = new["blockers"][key]
         if previous.get("state") != current.get("state"):
@@ -62,6 +78,24 @@ def material_changes(
     if not previous_signal and current_signal:
         reasons.append("KVCache compile-fix heuristic now true")
 
+    previous_native_mtp_release = old.get("implementation_signals", {}).get(
+        "native_mtp_required_merges_in_latest_release"
+    )
+    current_native_mtp_release = new.get("implementation_signals", {}).get(
+        "native_mtp_required_merges_in_latest_release"
+    )
+    if not previous_native_mtp_release and current_native_mtp_release:
+        reasons.append("native MTP required merge commits are in latest mlx-swift-lm release")
+
+    previous_native_mtp_api = old.get("implementation_signals", {}).get(
+        "native_mtp_public_row_mapped_transactions_reviewed"
+    )
+    current_native_mtp_api = new.get("implementation_signals", {}).get(
+        "native_mtp_public_row_mapped_transactions_reviewed"
+    )
+    if not previous_native_mtp_api and current_native_mtp_api:
+        reasons.append("native MTP public row-mapped transaction API reviewed ready")
+
     return bool(reasons), "; ".join(reasons) if reasons else "unchanged"
 
 
@@ -71,11 +105,21 @@ def merge_snapshot(old: dict[str, Any] | None, new: dict[str, Any]) -> dict[str,
         return new
     merged = dict(old)
     for key, value in new.items():
-        if key in ("blockers", "releases") and isinstance(value, dict):
+        if key in (
+            "blockers",
+            "releases",
+            "trackers",
+            "implementation_signals",
+            "native_mtp_immutable_dependency_exception",
+        ) and isinstance(value, dict):
             reviewed = old.get(key, {})
             merged_rows = dict(reviewed)
             for name, live in value.items():
-                merged_rows[name] = {**reviewed.get(name, {}), **live}
+                previous = reviewed.get(name, {})
+                if isinstance(previous, dict) and isinstance(live, dict):
+                    merged_rows[name] = {**previous, **live}
+                else:
+                    merged_rows[name] = live
             merged[key] = merged_rows
         else:
             merged[key] = value
@@ -92,8 +136,8 @@ def main() -> int:
             old = json.loads(Path(sys.argv[1]).read_text())
         except FileNotFoundError:
             old = None
-        changed, reason = material_changes(old, new)
         new = merge_snapshot(old, new)
+        changed, reason = material_changes(old, new)
         if not changed and old is not None:
             new["last_changed_at"] = old.get("last_changed_at")
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as error:

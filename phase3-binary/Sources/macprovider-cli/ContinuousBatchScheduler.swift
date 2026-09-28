@@ -2,6 +2,73 @@ import Foundation
 import CryptoKit
 import MLXLMCommon
 import MacProviderCore
+#if canImport(Darwin)
+import Darwin
+#endif
+
+struct NativeMTPRoundSystemMemorySample: Sendable, Equatable {
+    let availableBytes: Int
+    let physicalBytes: Int
+}
+
+struct NativeMTPRoundSystemMemoryProbe: Sendable, Equatable {
+    let identity: String
+    private let sampleProvider: @Sendable () -> NativeMTPRoundSystemMemorySample?
+
+    init(
+        identity: String = "system",
+        sampleProvider: @escaping @Sendable () -> NativeMTPRoundSystemMemorySample?
+    ) {
+        self.identity = identity
+        self.sampleProvider = sampleProvider
+    }
+
+    func sample() -> NativeMTPRoundSystemMemorySample? {
+        sampleProvider()
+    }
+
+    static let system = NativeMTPRoundSystemMemoryProbe {
+        Self.systemSample()
+    }
+
+    static func == (lhs: NativeMTPRoundSystemMemoryProbe, rhs: NativeMTPRoundSystemMemoryProbe) -> Bool {
+        lhs.identity == rhs.identity
+    }
+
+    private static func systemSample() -> NativeMTPRoundSystemMemorySample? {
+#if canImport(Darwin)
+        var pageSize: vm_size_t = 0
+        guard host_page_size(mach_host_self(), &pageSize) == KERN_SUCCESS, pageSize > 0 else {
+            return nil
+        }
+        var statistics = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let status = withUnsafeMutablePointer(to: &statistics) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
+                host_statistics64(mach_host_self(), HOST_VM_INFO64, rebound, &count)
+            }
+        }
+        guard status == KERN_SUCCESS else {
+            return nil
+        }
+        let pages = UInt64(statistics.free_count)
+            + UInt64(statistics.inactive_count)
+            + UInt64(statistics.purgeable_count)
+        let pageBytes = UInt64(pageSize)
+        let (available, availableOverflow) = pages.multipliedReportingOverflow(by: pageBytes)
+        guard !availableOverflow, available <= UInt64(Int.max) else {
+            return nil
+        }
+        let physical = min(ProcessInfo.processInfo.physicalMemory, UInt64(Int.max))
+        return NativeMTPRoundSystemMemorySample(
+            availableBytes: Int(available),
+            physicalBytes: Int(physical)
+        )
+#else
+        return nil
+#endif
+    }
+}
 
 enum ContinuousBatchSchedulerTerminalStatus: String, Sendable, Equatable {
     case stop
@@ -81,6 +148,13 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
     /// costs about as much as 30-50 decode steps. Production uses
     /// `defaultDecodeStepsWhilePrefilling` (SPEC-038 FR-CB2).
     let maxDecodeStepsWhilePrefilling: Int
+    /// Signed admission/static bound for all in-flight native-MTP complete
+    /// windows. This is a contract ceiling, not proof that the host currently
+    /// has the unified-memory headroom; `nativeMTPRoundSystemMemoryProbe`
+    /// supplies that independent live gate before every proposal.
+    let nativeMTPRoundByteCapacity: Int
+    let nativeMTPRoundSystemMemoryProbe: NativeMTPRoundSystemMemoryProbe
+    let nativeMTPStatusSink: NativeMTPStatusSink?
 
     init(
         descriptor: PagedKVDescriptor,
@@ -111,7 +185,10 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         maxTotalStopTokens: Int = 256,
         snapshot: ContinuousBatchSchedulerSnapshot,
         maxDecodeLockstepWindow: Int = 1,
-        maxDecodeStepsWhilePrefilling: Int = 1
+        maxDecodeStepsWhilePrefilling: Int = 1,
+        nativeMTPRoundByteCapacity: Int? = nil,
+        nativeMTPRoundSystemMemoryProbe: NativeMTPRoundSystemMemoryProbe = .system,
+        nativeMTPStatusSink: NativeMTPStatusSink? = nil
     ) {
         self.descriptor = descriptor
         self.tuple = tuple
@@ -165,6 +242,12 @@ struct ContinuousBatchSchedulerConfiguration: Sendable, Equatable {
         self.snapshot = snapshot
         self.maxDecodeLockstepWindow = max(1, maxDecodeLockstepWindow)
         self.maxDecodeStepsWhilePrefilling = max(1, maxDecodeStepsWhilePrefilling)
+        self.nativeMTPRoundByteCapacity = max(
+            0,
+            nativeMTPRoundByteCapacity ?? Int.max
+        )
+        self.nativeMTPRoundSystemMemoryProbe = nativeMTPRoundSystemMemoryProbe
+        self.nativeMTPStatusSink = nativeMTPStatusSink
     }
 
     /// Production serve-path lockstep burst. Join/leave still happens between
@@ -240,6 +323,23 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
     /// idempotency fingerprint: duplicate waiters reuse the canonical row's
     /// observer and receive its boundary in the retained result.
     let serialToolStopObserver: ContinuousBatchCanonicalStopObserver?
+    /// Runtime-only decode path selected before scheduler admission. Ordinary
+    /// remains the default; native MTP rows stay distinguishable even when a
+    /// directive forces their proposal depth to zero.
+    let decodePath: DecodePath
+    let nativeMTPMaximumProposalDepth: Int
+    /// Runtime-only signed/loaded complete-window byte ceiling for native MTP,
+    /// indexed by proposal depth `0...nativeMTPMaximumProposalDepth`. Excluded
+    /// from the idempotency fingerprint like other runtime-only native-MTP
+    /// selection metadata.
+    let nativeMTPCompleteWindowBytesByDepth: [Int]
+    let nativeMTPTupleFence: NativeMTPTupleFence?
+    let nativeMTPIntegrityProbe: Bool
+    /// Test-only/request-fixture proposal source. Production native MTP rows
+    /// ask the backend drafter for proposals; empty native rows still use
+    /// packed target verification at depth zero.
+    let nativeMTPProposalTokens: [Int]
+    let nativeMTPAdaptationDirective: NativeMTPAdaptationDirective?
 
     init(
         id: String,
@@ -257,7 +357,14 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         retainedPagedKVSequence: PagedKVRetainedSequence? = nil,
         recurrentCheckpointPositions: [Int] = [],
         retainedRecurrentCheckpoints: [RecurrentStateCheckpoint] = [],
-        serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil
+        serialToolStopObserver: ContinuousBatchCanonicalStopObserver? = nil,
+        decodePath: DecodePath = .ordinary,
+        nativeMTPMaximumProposalDepth: Int = 0,
+        nativeMTPCompleteWindowBytesByDepth: [Int] = [],
+        nativeMTPTupleFence: NativeMTPTupleFence? = nil,
+        nativeMTPIntegrityProbe: Bool = false,
+        nativeMTPProposalTokens: [Int] = [],
+        nativeMTPAdaptationDirective: NativeMTPAdaptationDirective? = nil
     ) {
         self.id = id
         self.conversationKey = conversationKey
@@ -275,6 +382,13 @@ struct ContinuousBatchSchedulerRequest: Sendable, Equatable, Encodable {
         self.recurrentCheckpointPositions = recurrentCheckpointPositions
         self.retainedRecurrentCheckpoints = retainedRecurrentCheckpoints
         self.serialToolStopObserver = serialToolStopObserver
+        self.decodePath = decodePath
+        self.nativeMTPMaximumProposalDepth = max(0, nativeMTPMaximumProposalDepth)
+        self.nativeMTPCompleteWindowBytesByDepth = nativeMTPCompleteWindowBytesByDepth
+        self.nativeMTPTupleFence = decodePath == .nativeMTP ? nativeMTPTupleFence : nil
+        self.nativeMTPIntegrityProbe = decodePath == .nativeMTP && nativeMTPIntegrityProbe
+        self.nativeMTPProposalTokens = nativeMTPProposalTokens
+        self.nativeMTPAdaptationDirective = nativeMTPAdaptationDirective
     }
 
     enum CodingKeys: String, CodingKey {
@@ -374,6 +488,7 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
     /// Keyed hybrid rows only: the row's cache in the serial conversation-cache
     /// format, delivered to the settlement owner like `retainedCache`.
     var serialConversationCache: ContinuousBatchSerialConversationCache? = nil
+    var nativeMTPCounters: NativeMTPSelfTestCounters? = nil
 
     func withSettlementDisposition(
         _ disposition: ContinuousBatchSettlementDisposition
@@ -394,7 +509,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             retainedCache: disposition == .eligibleOwner ? retainedCache : nil,
             stopCause: stopCause,
             serialToolStopTokenCount: serialToolStopTokenCount,
-            serialConversationCache: disposition == .eligibleOwner ? serialConversationCache : nil
+            serialConversationCache: disposition == .eligibleOwner ? serialConversationCache : nil,
+            nativeMTPCounters: nativeMTPCounters
         )
     }
 
@@ -415,7 +531,8 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             retainedCache: cache,
             stopCause: stopCause,
             serialToolStopTokenCount: serialToolStopTokenCount,
-            serialConversationCache: serialConversationCache
+            serialConversationCache: serialConversationCache,
+            nativeMTPCounters: nativeMTPCounters
         )
     }
 
@@ -434,6 +551,7 @@ struct ContinuousBatchSchedulerResult: Sendable, Equatable {
             && lhs.settlementDisposition == rhs.settlementDisposition
             && lhs.stopCause == rhs.stopCause
             && lhs.serialToolStopTokenCount == rhs.serialToolStopTokenCount
+            && lhs.nativeMTPCounters == rhs.nativeMTPCounters
             && lhs.retainedCache?.retainedSequence == rhs.retainedCache?.retainedSequence
     }
 }
@@ -533,6 +651,10 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
     let temperature: Double
     let topP: Double
     let samplerStep: Int
+    /// Native MTP drafters such as Qwen require target hidden states for the
+    /// complete prompt. This flag is set only for bounded full-prompt final
+    /// chunks; the backend must not replay a larger prompt to synthesize it.
+    let nativeMTPPromptPrefill: Bool
 
     init(
         requestID: String,
@@ -546,7 +668,8 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
         samplerSeed: Int = 0,
         temperature: Double = 0,
         topP: Double = 1,
-        samplerStep: Int = 0
+        samplerStep: Int = 0,
+        nativeMTPPromptPrefill: Bool = false
     ) {
         self.requestID = requestID
         self.promptTokens = promptTokens
@@ -560,6 +683,7 @@ struct ContinuousBatchPrefillInput: Sendable, Equatable {
         self.temperature = temperature
         self.topP = topP
         self.samplerStep = samplerStep
+        self.nativeMTPPromptPrefill = nativeMTPPromptPrefill
     }
 }
 
@@ -598,6 +722,49 @@ struct ContinuousBatchDecodeInput: Sendable, Equatable {
     /// parameters, and the row logits; hidden cross-row sampler state is
     /// forbidden.
     let samplerStep: Int
+}
+
+struct ContinuousBatchNativeMTPVerifyInput: Sendable, Equatable {
+    let requestID: String
+    let currentToken: Int
+    let proposalTokens: [Int]
+    let generatedTokens: [Int]
+    let samplerSeed: Int
+    let binding: PagedKVStorageBinding
+    let blockTable: PagedKVBlockTable
+    let committedKVTokenCount: Int
+    /// Number of target-cache columns staged by packed verification. Native MTP
+    /// verifies the current target column plus every proposal, while scheduler
+    /// acceptance/visibility still reports proposal counts only.
+    let verifiedInputTokenCount: Int
+    let targetKVTokenCount: Int
+    let packedRowIndex: Int
+    let samplerStep: Int
+}
+
+struct ContinuousBatchNativeMTPProposalInput: Sendable, Equatable {
+    let requestID: String
+    let currentToken: Int
+    let generatedTokens: [Int]
+    let samplerSeed: Int
+    let maximumProposalDepth: Int
+    let samplerStep: Int
+}
+
+struct ContinuousBatchNativeMTPFinalizeInput: Sendable, Equatable {
+    let requestID: String
+    let proposalTokenCount: Int
+    let committedProposalTokenCount: Int
+    /// Exact buyer-visible tokens selected from this packed round, after stop
+    /// and max-token filters. The backend uses these to resolve row-local
+    /// drafter state against the same accepted prefix as target KV.
+    let acceptedTokenIDs: [Int]
+    /// Number of staged target-cache columns the backend may make durable for
+    /// this row. This is `1 + committedProposalTokenCount` on commit because
+    /// the verified target column is part of the native transaction, and `0`
+    /// on abort/cancel/invalid rows.
+    let committedInputTokenCount: Int
+    let shouldCommit: Bool
 }
 
 struct ContinuousBatchTerminalKVCommitInput: Sendable, Equatable {
@@ -662,6 +829,19 @@ protocol ContinuousBatchSchedulerBackend: Sendable {
         rows: [ContinuousBatchDecodeInput],
         steps: Int
     ) async throws -> [ContinuousBatchDecodeOutcome]
+    /// Return backend-owned native MTP proposal tokens by request ID. A nil
+    /// return means this backend has no drafter source; the scheduler may use
+    /// request-fixture proposals in tests. A non-nil empty proposal for a row
+    /// means depth-zero target verification is required for that row.
+    func proposeNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPProposalInput]
+    ) async throws -> [String: [Int]]?
+    func verifyNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPVerifyInput]
+    ) async throws -> [NativeMTPVerifiedRow]
+    func finalizeNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPFinalizeInput]
+    ) async throws
     /// Install a same-conversation retained paged-KV handoff before the row resumes
     /// prefill at its serial LCP. Backends that cannot consume FR-PKV10 must fail
     /// closed instead of accepting positive cached-token credit. A hybrid backend
@@ -706,6 +886,26 @@ protocol ContinuousBatchRetainedCacheBridge: Sendable {
 }
 
 extension ContinuousBatchSchedulerBackend {
+    func proposeNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPProposalInput]
+    ) async throws -> [String: [Int]]? {
+        nil
+    }
+
+    func verifyNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPVerifyInput]
+    ) async throws -> [NativeMTPVerifiedRow] {
+        throw ContinuousBatchSchedulerError.unsupported("continuous_batching_native_mtp_backend_unavailable")
+    }
+
+    func finalizeNativeMTPPackedRound(
+        rows: [ContinuousBatchNativeMTPFinalizeInput]
+    ) async throws {
+        guard rows.isEmpty else {
+            throw ContinuousBatchSchedulerError.unsupported("continuous_batching_native_mtp_backend_unavailable")
+        }
+    }
+
     func decodeLockstepWindow(
         rows: [ContinuousBatchDecodeInput],
         steps: Int
@@ -1242,12 +1442,18 @@ extension ContinuousBatchSchedulerError {
         "continuous_batching_local_binding_mismatch": 503,
         "continuous_batching_terminal_kv_commit_unavailable": 503,
         "continuous_batching_retained_hybrid_cache_unavailable": 503,
+        "continuous_batching_native_mtp_backend_unavailable": 503,
+        "continuous_batching_native_mtp_round_memory_exhausted": 503,
+        "continuous_batching_native_mtp_tuple_disabled": 503,
+        "continuous_batching_native_mtp_window_bytes_unavailable": 503,
         "continuous_batching_terminal_kv_commit_missing_token": 503,
         "continuous_batching_decode_row_mismatch": 503,
+        "continuous_batching_decode_cursor_overflow": 503,
         "continuous_batching_duplicate_decode_row": 503,
         "continuous_batching_duplicate_prefill_row": 503,
         "continuous_batching_prefill_row_mismatch": 503,
         "continuous_batching_reservation_overflow": 503,
+        "continuous_batching_native_mtp_prompt_prefill_exceeds_limit": 400,
     ]
 
     private static func carriedCodeStatus(_ code: String) -> Int {
@@ -1286,9 +1492,19 @@ actor ContinuousBatchScheduler {
         var snapshot: ContinuousBatchSchedulerSnapshot
         /// Keyed hybrid rows: recurrent state at each reached checkpoint (<= 2).
         var recurrentCheckpoints: [RecurrentStateCheckpoint] = []
+        var decodePath: DecodePath = .ordinary
+        var nativeMTPAdaptation: NativeMTPDepthAdaptationState?
+        var nativeMTPDirective: NativeMTPAdaptationDirective?
+        var nativeMTPTupleFence: NativeMTPTupleFence?
+        var nativeMTPCounters: NativeMTPSelfTestCounters?
+        var nativeMTPFixtureProposalsConsumed = false
 
         var retainedLogicalTokenCount: Int {
             request.promptTokens.count + generatedTokens.count
+        }
+
+        var usesNativeMTP: Bool {
+            decodePath == .nativeMTP
         }
     }
 
@@ -1336,12 +1552,17 @@ actor ContinuousBatchScheduler {
     private var admissionTurnWaiters: [UInt64: CheckedContinuation<Void, Never>] = [:]
     private var requestAdmissionSequences: [String: UInt64] = [:]
     private var admittingRequests: [String: ContinuousBatchSchedulerRequest] = [:]
+    private var nativeMTPReservedRoundBytes = 0
+    private var nativeMTPRoundByteReservations: [UUID: Int] = [:]
     private var activePrompt: [String: Row] = [:]
     private var promptOrder: [String] = []
     private var activeDecode: [String: Row] = [:]
     private var requestWaiters: [String: [Waiter]] = [:]
     private var knownRequests: [String: RequestFingerprint] = [:]
     private var terminalResults: [String: ContinuousBatchSchedulerResult] = [:]
+    private var disabledNativeMTPTupleFences: Set<NativeMTPTupleFence> = []
+    private var nativeMTPRowsWithStagedMutation: Set<String> = []
+    private var nativeMTPIntegrityProbeInFlight = false
     private var pendingTerminalDeliveries: [String: PendingTerminalDelivery] = [:]
     private var stoppingWaiterIDs: Set<UUID> = []
     private var stoppingActiveWaiters: [UUID: StoppingActiveWaiter] = [:]
@@ -1409,6 +1630,10 @@ actor ContinuousBatchScheduler {
             await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.unsupported("continuous_batching_scheduler_failed_closed")
         }
+        if nativeMTPIntegrityProbeInFlight && !request.nativeMTPIntegrityProbe {
+            await discardUnacceptedRetainedCache(for: request)
+            throw ContinuousBatchSchedulerError.backpressure
+        }
         if let reason = Self.localCapabilityReason(
             descriptor: configuration.descriptor,
             tuple: configuration.tuple,
@@ -1447,6 +1672,20 @@ actor ContinuousBatchScheduler {
               retainedTokenCost <= configuration.maxRequestTokens else {
             await discardUnacceptedRetainedCache(for: request)
             throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_invalid_request")
+        }
+        if request.decodePath == .nativeMTP,
+           request.promptTokens.count > configuration.maxPromptChunkTokens {
+            await discardUnacceptedRetainedCache(for: request)
+            throw ContinuousBatchSchedulerError.requestFailed(
+                "continuous_batching_native_mtp_prompt_prefill_exceeds_limit"
+            )
+        }
+        if let fence = request.nativeMTPTupleFence,
+           disabledNativeMTPTupleFences.contains(fence) {
+            await discardUnacceptedRetainedCache(for: request)
+            throw ContinuousBatchSchedulerError.requestFailed(
+                "continuous_batching_native_mtp_tuple_disabled"
+            )
         }
         guard queueHasCapacity(addingTokenCost: retainedTokenCost) else {
             record(.backpressureRejected)
@@ -1527,6 +1766,35 @@ actor ContinuousBatchScheduler {
     func stopEarly(requestID: String) {
         guard activeDecode[requestID] != nil else { return }
         earlyStopIDs.insert(requestID)
+    }
+
+    func disableNativeMTPTuple(_ fence: NativeMTPTupleFence) async {
+        disabledNativeMTPTupleFences.insert(fence)
+        var keptWaiting: [ContinuousBatchSchedulerRequest] = []
+        for request in waiting {
+            guard request.nativeMTPTupleFence == fence else {
+                keptWaiting.append(request)
+                continue
+            }
+            await finishQueued(
+                request,
+                status: .requestFailed,
+                errorCode: "continuous_batching_native_mtp_tuple_disabled"
+            )
+        }
+        waiting = keptWaiting
+        let disabledPromptIDs = activePrompt.compactMap { requestID, row in
+            row.request.nativeMTPTupleFence == fence ? requestID : nil
+        }
+        for requestID in disabledPromptIDs {
+            guard var row = activePrompt[requestID] else { continue }
+            row.decodePath = .ordinary
+            row.nativeMTPAdaptation = nil
+            row.nativeMTPDirective = nil
+            activePrompt[requestID] = row
+        }
+        await fenceDisabledActiveNativeMTPRows()
+        ensurePump()
     }
 
     func drain() async throws -> ContinuousBatchDrainPermit {
@@ -1610,6 +1878,34 @@ actor ContinuousBatchScheduler {
             && deferredTerminalCompletions.isEmpty
             && !pumpRunning
             && !backendCancellationPending
+    }
+
+    func isQuiescentForNativeMTPProbe() -> Bool {
+        !cleanupFailedClosed
+            && !nativeMTPIntegrityProbeInFlight
+            && pendingBindingChecks == 0
+            && waiting.isEmpty
+            && admittingRequests.isEmpty
+            && activePrompt.isEmpty
+            && activeDecode.isEmpty
+            && pendingTerminalDeliveries.isEmpty
+            && stoppingActiveWaiters.isEmpty
+            && deferredTerminalCompletions.isEmpty
+            && !pumpRunning
+            && !backendCancellationPending
+    }
+
+    func submitNativeMTPIntegrityProbe(
+        _ request: ContinuousBatchSchedulerRequest
+    ) async throws -> ContinuousBatchSchedulerResult {
+        guard request.nativeMTPIntegrityProbe,
+              request.decodePath == .nativeMTP,
+              isQuiescentForNativeMTPProbe() else {
+            throw ContinuousBatchSchedulerError.backpressure
+        }
+        nativeMTPIntegrityProbeInFlight = true
+        defer { nativeMTPIntegrityProbeInFlight = false }
+        return try await submit(request)
     }
 
     private func stopPendingTerminalDeliveriesForDrain() {
@@ -2140,10 +2436,1097 @@ actor ContinuousBatchScheduler {
         return bounded ? max(1, window) : 1
     }
 
+    private struct PreparedNativeMTPRow {
+        let row: Row
+        let input: ContinuousBatchNativeMTPVerifyInput
+        let rowMap: NativeMTPPackedRowMap
+        let transaction: PagedKVNativeMTPTransaction
+        let scratchReservation: PagedKVNativeMTPScratchReservation
+        let byteReservation: NativeMTPRoundByteReservation
+    }
+
+    private struct NativeMTPRoundByteReservation {
+        let id: UUID
+        let bytes: Int
+    }
+
+    private struct PreReservedNativeMTPRow {
+        let row: Row
+        let maximumDepth: Int
+        let committedKVTokenCount: Int
+        let transaction: PagedKVNativeMTPTransaction
+        let stagedMapping: PagedKVNativeMTPStagedMapping
+        let scratchReservation: PagedKVNativeMTPScratchReservation
+        let byteReservation: NativeMTPRoundByteReservation
+    }
+
+    private struct ReservedNativeMTPRow {
+        let row: Row
+        let proposalTokens: [Int]
+        let consumedFixtureProposals: Bool
+        let inputTokenCount: Int
+        let committedKVTokenCount: Int
+        let targetKVTokenCount: Int
+        let transaction: PagedKVNativeMTPTransaction
+        let stagedMapping: PagedKVNativeMTPStagedMapping
+        let scratchReservation: PagedKVNativeMTPScratchReservation
+        let byteReservation: NativeMTPRoundByteReservation
+    }
+
+    private func nativeMTPMaximumProposalDepth(for row: Row) -> Int {
+        let remainingOutputTokens = max(0, row.request.maxOutputTokens - row.generatedTokens.count)
+        let remainingProposalCapacity = max(0, remainingOutputTokens - 1)
+        let requestedDepth = row.nativeMTPDirective?.forcedDepth
+            ?? row.nativeMTPAdaptation?.currentDepth
+            ?? row.request.nativeMTPMaximumProposalDepth
+        return min(
+            max(0, requestedDepth),
+            row.request.nativeMTPMaximumProposalDepth,
+            remainingProposalCapacity
+        )
+    }
+
+    private func nativeMTPFixtureProposalTokens(for row: Row, maximumDepth: Int) -> [Int] {
+        guard !row.nativeMTPFixtureProposalsConsumed else { return [] }
+        let boundedDepth = min(maximumDepth, row.request.nativeMTPProposalTokens.count)
+        guard row.usesNativeMTP, boundedDepth > 0 else { return [] }
+        return Array(row.request.nativeMTPProposalTokens.prefix(boundedDepth))
+    }
+
+    private func nativeMTPScratchReservationTokens() -> Int {
+        // Target KV columns are reserved by the staged native-MTP transaction.
+        // Non-target drafter/cache/hidden/workspace/checkpoint bytes are
+        // bounded by the signed per-depth byte ledger below; reserving the same
+        // bytes again from the KV block pool would double-count and reject
+        // otherwise admissible rows without proving a stronger memory bound.
+        0
+    }
+
+    private func nativeMTPCompleteWindowBytes(for row: Row, maximumDepth: Int) throws -> Int {
+        guard maximumDepth >= 0 else {
+            throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_round_memory_exhausted")
+        }
+        guard row.request.nativeMTPCompleteWindowBytesByDepth.indices.contains(maximumDepth) else {
+            throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_window_bytes_unavailable")
+        }
+        let bytes = row.request.nativeMTPCompleteWindowBytesByDepth[maximumDepth]
+        guard bytes > 0 else {
+            throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_window_bytes_unavailable")
+        }
+        return bytes
+    }
+
+    private func reserveNativeMTPRoundBytes(_ bytes: Int) throws -> NativeMTPRoundByteReservation {
+        guard bytes > 0 else {
+            throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_window_bytes_unavailable")
+        }
+        let (nextReserved, overflow) = nativeMTPReservedRoundBytes.addingReportingOverflow(bytes)
+        guard !overflow,
+              nextReserved <= configuration.nativeMTPRoundByteCapacity,
+              nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: nextReserved) else {
+            throw ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_round_memory_exhausted")
+        }
+        let id = UUID()
+        nativeMTPReservedRoundBytes = nextReserved
+        nativeMTPRoundByteReservations[id] = bytes
+        return NativeMTPRoundByteReservation(id: id, bytes: bytes)
+    }
+
+    private func nativeMTPSystemMemoryHeadroomAdmits(reservedAfter: Int) -> Bool {
+        guard reservedAfter > 0,
+              let sample = configuration.nativeMTPRoundSystemMemoryProbe.sample(),
+              sample.availableBytes > 0,
+              sample.physicalBytes > 0 else {
+            return false
+        }
+        let minimumHeadroom = max(1, sample.physicalBytes / 10)
+        let (requiredAvailable, overflow) = reservedAfter.addingReportingOverflow(minimumHeadroom)
+        guard !overflow else {
+            return false
+        }
+        return sample.availableBytes >= requiredAvailable
+    }
+
+    private func releaseNativeMTPRoundBytes(_ reservation: NativeMTPRoundByteReservation) {
+        guard let bytes = nativeMTPRoundByteReservations.removeValue(forKey: reservation.id) else {
+            cleanupFailedClosed = true
+            record(.cleanupFailed)
+            ContinuousBatchingPolicy.logForwardFailed(
+                ContinuousBatchSchedulerError.requestFailed("continuous_batching_native_mtp_round_memory_exhausted")
+            )
+            return
+        }
+        nativeMTPReservedRoundBytes = max(0, nativeMTPReservedRoundBytes - bytes)
+    }
+
+    func nativeMTPReservedRoundBytesSnapshot() -> Int {
+        nativeMTPReservedRoundBytes
+    }
+
+    private func nativeMTPCandidatesToApply(
+        acceptedRow: NativeMTPAcceptedRow,
+        row: Row
+    ) -> [NativeMTPTokenCandidate] {
+        var generated = row.generatedTokens
+        var selected: [NativeMTPTokenCandidate] = []
+        for candidate in acceptedRow.tokenCandidates {
+            guard generated.count < row.request.maxOutputTokens else { break }
+            generated.append(candidate.tokenID)
+            selected.append(candidate)
+            if matchingStopLength(
+                generated,
+                stopSequences: row.request.stopTokenSequences
+            ) != nil || earlyStopIDs.contains(row.request.id) {
+                break
+            }
+        }
+        return selected
+    }
+
+    private func abortNativeMTPRound(_ prepared: [PreparedNativeMTPRow]) async throws {
+        guard !prepared.isEmpty else { return }
+        var failure: (any Error)?
+        do {
+            try await backend.finalizeNativeMTPPackedRound(rows: prepared.map {
+                ContinuousBatchNativeMTPFinalizeInput(
+                    requestID: $0.row.request.id,
+                    proposalTokenCount: $0.input.proposalTokens.count,
+                    committedProposalTokenCount: 0,
+                    acceptedTokenIDs: [],
+                    committedInputTokenCount: 0,
+                    shouldCommit: false
+                )
+            })
+        } catch {
+            failure = error
+        }
+        for item in prepared {
+            do {
+                _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+            } catch {
+                failure = failure ?? error
+            }
+            do {
+                try await allocator.releaseNativeMTPScratchReservation(item.scratchReservation)
+            } catch {
+                failure = failure ?? error
+            }
+            releaseNativeMTPRoundBytes(item.byteReservation)
+            nativeMTPRowsWithStagedMutation.remove(item.row.request.id)
+        }
+        if let failure {
+            throw failure
+        }
+    }
+
+    private func releaseNativeMTPScratch(_ reservation: PagedKVNativeMTPScratchReservation) async {
+        do {
+            try await allocator.releaseNativeMTPScratchReservation(reservation)
+        } catch {
+            cleanupFailedClosed = true
+            record(.cleanupFailed)
+            ContinuousBatchingPolicy.logForwardFailed(error)
+        }
+    }
+
+    private func abortPreReservedNativeMTPRows(_ reserved: [PreReservedNativeMTPRow]) async {
+        for item in reserved {
+            do {
+                _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+            } catch {
+                cleanupFailedClosed = true
+                record(.cleanupFailed)
+                ContinuousBatchingPolicy.logForwardFailed(error)
+            }
+            await releaseNativeMTPScratch(item.scratchReservation)
+            releaseNativeMTPRoundBytes(item.byteReservation)
+            nativeMTPRowsWithStagedMutation.remove(item.row.request.id)
+        }
+    }
+
+    private func abortReservedNativeMTPRows(_ reserved: [ReservedNativeMTPRow]) async {
+        for item in reserved {
+            do {
+                _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+            } catch {
+                cleanupFailedClosed = true
+                record(.cleanupFailed)
+                ContinuousBatchingPolicy.logForwardFailed(error)
+            }
+            await releaseNativeMTPScratch(item.scratchReservation)
+            releaseNativeMTPRoundBytes(item.byteReservation)
+            nativeMTPRowsWithStagedMutation.remove(item.row.request.id)
+        }
+    }
+
+    private func nativeMTPLocalTopology() throws -> PagedKVStateTopology {
+        try PagedKVStateTopology(components: [
+            try PagedKVStateTopologyComponent(
+                name: "scheduler_paged_kv",
+                kind: "attention",
+                dtype: configuration.descriptor.kvDType,
+                shape: [
+                    1,
+                    1,
+                    configuration.descriptor.blockSizeTokens,
+                    1,
+                ],
+                logicalExtent: configuration.descriptor.blockSizeTokens
+            ),
+        ])
+    }
+
+    private func nativeMTPServedSnapshotID(for row: Row) -> String {
+        [
+            row.snapshot.modelID,
+            row.snapshot.modelSHA256,
+            String(row.snapshot.weightsGeneration),
+        ].joined(separator: ":")
+    }
+
+    private func nativeMTPStagedRowIsCurrent(_ row: Row) -> Bool {
+        guard let active = activeDecode[row.request.id] else { return false }
+        if let fence = active.nativeMTPTupleFence,
+           disabledNativeMTPTupleFences.contains(fence) {
+            return false
+        }
+        return active.usesNativeMTP
+            && active.nativeMTPTupleFence == row.nativeMTPTupleFence
+            && active.handle == row.handle
+            && active.currentToken == row.currentToken
+            && active.generatedTokens == row.generatedTokens
+            && active.outputTokens == row.outputTokens
+    }
+
+    private func staleNativeMTPRows(_ rows: [Row]) -> [Row] {
+        rows.filter { !nativeMTPStagedRowIsCurrent($0) }
+    }
+
+    private func failStaleNativeMTPRows(
+        _ rows: [Row],
+        cleanupError: (any Error)?,
+        fallbackErrorCode: String
+    ) async {
+        if let cleanupError {
+            record(.cleanupFailed)
+            ContinuousBatchingPolicy.logForwardFailed(cleanupError)
+        } else {
+            record(.localPreparationFailed)
+        }
+        for row in rows {
+            nativeMTPRowsWithStagedMutation.remove(row.request.id)
+            guard let removed = activeDecode.removeValue(forKey: row.request.id) else { continue }
+            let released = await release(removed.handle)
+            let disabled = removed.nativeMTPTupleFence.map {
+                disabledNativeMTPTupleFences.contains($0)
+            } ?? false
+            if disabled && nativeMTPRowHasBuyerVisibleOutput(removed) {
+                configuration.nativeMTPStatusSink?.recordPostoutputFailure()
+            }
+            finish(
+                removed,
+                status: .requestFailed,
+                errorCode: released
+                    ? (disabled
+                        ? (nativeMTPRowHasBuyerVisibleOutput(removed)
+                            ? "continuous_batching_native_mtp_tuple_disabled_postoutput"
+                            : "continuous_batching_native_mtp_tuple_disabled")
+                        : fallbackErrorCode)
+                    : "continuous_batching_cleanup_failed"
+            )
+            if !released { return }
+        }
+    }
+
+    private func checkpointAndStageNativeMTP(
+        row: Row,
+        inputTokenCount: Int,
+        topology: PagedKVStateTopology
+    ) async throws -> (PagedKVNativeMTPTransaction, PagedKVNativeMTPStagedMapping) {
+        let transaction = try await allocator.checkpointNativeMTPTransaction(
+            handle: row.handle,
+            servedSnapshotID: nativeMTPServedSnapshotID(for: row),
+            topology: topology
+        )
+        do {
+            let staged = try await allocator.stageNativeMTPTransaction(
+                transaction,
+                proposalTokenCount: inputTokenCount
+            )
+            return (transaction, staged)
+        } catch {
+            do {
+                _ = try await allocator.abortNativeMTPTransaction(transaction)
+            } catch {
+                throw error
+            }
+            throw error
+        }
+    }
+
+    private func runNativeMTPDecodeStep(rows: [Row]) async {
+        let nativeMTPStatusSink = configuration.nativeMTPStatusSink
+        var nativeMTPStatusRoundStarted = false
+        let nativeMTPStatusStartedAt = Date()
+        defer {
+            if nativeMTPStatusRoundStarted {
+                nativeMTPStatusSink?.endRound()
+            }
+        }
+        let topology: PagedKVStateTopology
+        do {
+            topology = try nativeMTPLocalTopology()
+        } catch {
+            record(.localPreparationFailed)
+            ContinuousBatchingPolicy.logForwardFailed(error)
+            for row in rows {
+                if let removed = activeDecode.removeValue(forKey: row.request.id) {
+                    let released = await release(removed.handle)
+                    finish(
+                        removed,
+                        status: .requestFailed,
+                        errorCode: released
+                            ? "continuous_batching_native_mtp_topology_failed"
+                            : "continuous_batching_cleanup_failed"
+                    )
+                    if !released { return }
+                }
+            }
+            return
+        }
+        var preReserved: [PreReservedNativeMTPRow] = []
+        preReserved.reserveCapacity(rows.count)
+        for row in rows {
+            let committedKVTokenCount = row.request.promptTokens.count - 1 + row.generatedTokens.count
+            var selectedReservation: PreReservedNativeMTPRow?
+            var reservationFailure: (any Error)?
+            var depth = nativeMTPMaximumProposalDepth(for: row)
+            while depth >= 0 {
+                let inputTokenCount = depth + 1
+                let target = committedKVTokenCount.addingReportingOverflow(inputTokenCount)
+                guard !target.overflow else {
+                    reservationFailure = ContinuousBatchSchedulerError.requestFailed(
+                        "continuous_batching_decode_cursor_overflow"
+                    )
+                    break
+                }
+                let completeWindowBytes: Int
+                do {
+                    completeWindowBytes = try nativeMTPCompleteWindowBytes(for: row, maximumDepth: depth)
+                } catch {
+                    reservationFailure = error
+                    break
+                }
+                let byteReservation: NativeMTPRoundByteReservation
+                do {
+                    byteReservation = try reserveNativeMTPRoundBytes(completeWindowBytes)
+                } catch {
+                    reservationFailure = error
+                    if depth == 0 { break }
+                    depth -= 1
+                    continue
+                }
+                let scratchTokens = nativeMTPScratchReservationTokens()
+                let scratchReservation: PagedKVNativeMTPScratchReservation
+                nativeMTPRowsWithStagedMutation.insert(row.request.id)
+                do {
+                    scratchReservation = try await allocator.reserveNativeMTPScratchTokens(scratchTokens)
+                } catch {
+                    releaseNativeMTPRoundBytes(byteReservation)
+                    nativeMTPRowsWithStagedMutation.remove(row.request.id)
+                    reservationFailure = error
+                    if depth == 0 { break }
+                    depth -= 1
+                    continue
+                }
+                do {
+                    let (transaction, staged) = try await checkpointAndStageNativeMTP(
+                        row: row,
+                        inputTokenCount: inputTokenCount,
+                        topology: topology
+                    )
+                    selectedReservation = PreReservedNativeMTPRow(
+                        row: row,
+                        maximumDepth: depth,
+                        committedKVTokenCount: committedKVTokenCount,
+                        transaction: transaction,
+                        stagedMapping: staged,
+                        scratchReservation: scratchReservation,
+                        byteReservation: byteReservation
+                    )
+                    break
+                } catch {
+                    await releaseNativeMTPScratch(scratchReservation)
+                    releaseNativeMTPRoundBytes(byteReservation)
+                    nativeMTPRowsWithStagedMutation.remove(row.request.id)
+                    reservationFailure = error
+                    if depth == 0 { break }
+                    depth -= 1
+                }
+            }
+            guard let selectedReservation else {
+                await abortPreReservedNativeMTPRows(preReserved)
+                if let reservationFailure {
+                    ContinuousBatchingPolicy.logForwardFailed(reservationFailure)
+                }
+                let carriedCode: String
+                if let schedulerError = reservationFailure as? ContinuousBatchSchedulerError,
+                   case .requestFailed(let code) = schedulerError {
+                    carriedCode = code
+                } else {
+                    carriedCode = "continuous_batching_block_extension_failed"
+                }
+                if carriedCode == "continuous_batching_native_mtp_round_memory_exhausted" {
+                    nativeMTPStatusSink?.recordCapacityRejection()
+                }
+                record(.localExtensionFailed)
+                if let removed = activeDecode.removeValue(forKey: row.request.id) {
+                    let released = await release(removed.handle)
+                    finish(
+                        removed,
+                        status: .requestFailed,
+                        errorCode: released
+                            ? carriedCode
+                            : "continuous_batching_cleanup_failed"
+                    )
+                    if !released { return }
+                }
+                return
+            }
+            preReserved.append(selectedReservation)
+        }
+        let proposalInputs = preReserved.map { reservation -> ContinuousBatchNativeMTPProposalInput in
+            let row = reservation.row
+            return ContinuousBatchNativeMTPProposalInput(
+                requestID: row.request.id,
+                currentToken: row.currentToken,
+                generatedTokens: row.generatedTokens,
+                samplerSeed: row.request.samplerSeed,
+                maximumProposalDepth: reservation.maximumDepth,
+                samplerStep: row.generatedTokens.count
+            )
+        }
+        nativeMTPStatusSink?.beginRound(requestedDepths: proposalInputs.map(\.maximumProposalDepth))
+        nativeMTPStatusRoundStarted = true
+        let backendProposals: [String: [Int]]?
+        do {
+            backendProposals = try await backend.proposeNativeMTPPackedRound(rows: proposalInputs)
+        } catch {
+            recordNativeMTPPostoutputFailureIfVisible(
+                sink: nativeMTPStatusSink,
+                rows: preReserved.map(\.row)
+            )
+            record(.batchForwardFailed)
+            ContinuousBatchingPolicy.logForwardFailed(error)
+            await abortPreReservedNativeMTPRows(preReserved)
+            for item in preReserved {
+                let row = item.row
+                if let removed = activeDecode.removeValue(forKey: row.request.id) {
+                    let released = await release(removed.handle)
+                    finish(
+                        removed,
+                        status: .requestFailed,
+                        errorCode: released
+                            ? "continuous_batching_native_mtp_proposal_failed"
+                            : "continuous_batching_cleanup_failed"
+                    )
+                    if !released { return }
+                }
+            }
+            return
+        }
+        let stalePreReservedRows = staleNativeMTPRows(preReserved.map(\.row))
+        guard stalePreReservedRows.isEmpty else {
+            await abortPreReservedNativeMTPRows(preReserved)
+            await failStaleNativeMTPRows(
+                stalePreReservedRows,
+                cleanupError: nil,
+                fallbackErrorCode: "continuous_batching_native_mtp_stale_row"
+            )
+            return
+        }
+
+        var reserved: [ReservedNativeMTPRow] = []
+        reserved.reserveCapacity(preReserved.count)
+        for preReservation in preReserved {
+            let row = preReservation.row
+            let maximumDepth = preReservation.maximumDepth
+            let initialProposals = backendProposals?[row.request.id]
+                ?? nativeMTPFixtureProposalTokens(for: row, maximumDepth: maximumDepth)
+            var consumedFixtureProposals = backendProposals == nil && !initialProposals.isEmpty
+            let committedKVTokenCount = preReservation.committedKVTokenCount
+            var proposals = Array(initialProposals.prefix(maximumDepth))
+            var inputTokenCount = proposals.count + 1
+            var target = committedKVTokenCount.addingReportingOverflow(inputTokenCount)
+            if target.overflow, !proposals.isEmpty {
+                proposals = []
+                consumedFixtureProposals = false
+                inputTokenCount = 1
+                target = committedKVTokenCount.addingReportingOverflow(inputTokenCount)
+            }
+            guard !target.overflow else {
+                if let removed = activeDecode.removeValue(forKey: row.request.id) {
+                    let released = await release(removed.handle)
+                    finish(
+                        removed,
+                        status: .requestFailed,
+                        errorCode: released
+                            ? "continuous_batching_decode_cursor_overflow"
+                            : "continuous_batching_cleanup_failed"
+                    )
+                    if !released { return }
+                }
+                await abortReservedNativeMTPRows(reserved)
+                return
+            }
+            reserved.append(ReservedNativeMTPRow(
+                row: row,
+                proposalTokens: proposals,
+                consumedFixtureProposals: consumedFixtureProposals,
+                inputTokenCount: inputTokenCount,
+                committedKVTokenCount: committedKVTokenCount,
+                targetKVTokenCount: target.partialValue,
+                transaction: preReservation.transaction,
+                stagedMapping: preReservation.stagedMapping,
+                scratchReservation: preReservation.scratchReservation,
+                byteReservation: preReservation.byteReservation
+            ))
+        }
+
+        var prepared: [PreparedNativeMTPRow] = []
+        prepared.reserveCapacity(reserved.count)
+        for (packedRowIndex, reservation) in reserved.enumerated() {
+            let row = reservation.row
+            do {
+                let binding = try await allocator.binding(for: row.handle)
+                let stagedBinding = PagedKVStorageBinding(
+                    handle: binding.handle,
+                    blockSizeTokens: binding.blockSizeTokens,
+                    maxLogicalTokens: binding.maxLogicalTokens,
+                    rowGeneration: binding.rowGeneration,
+                    currentTable: reservation.stagedMapping.privateStagedTable,
+                    poolEpoch: binding.poolEpoch
+                )
+                let input = ContinuousBatchNativeMTPVerifyInput(
+                    requestID: row.request.id,
+                    currentToken: row.currentToken,
+                    proposalTokens: reservation.proposalTokens,
+                    generatedTokens: row.generatedTokens,
+                    samplerSeed: row.request.samplerSeed,
+                    binding: stagedBinding,
+                    blockTable: stagedBinding.currentTable,
+                    committedKVTokenCount: reservation.committedKVTokenCount,
+                    verifiedInputTokenCount: reservation.inputTokenCount,
+                    targetKVTokenCount: reservation.targetKVTokenCount,
+                    packedRowIndex: packedRowIndex,
+                    samplerStep: row.generatedTokens.count
+                )
+                let rowMap = NativeMTPPackedRowMap(
+                    schedulerRowID: row.request.id,
+                    packedRowIndex: packedRowIndex,
+                    inputTokenCount: reservation.inputTokenCount,
+                    proposalTokenCount: reservation.proposalTokens.count
+                )
+                prepared.append(PreparedNativeMTPRow(
+                    row: row,
+                    input: input,
+                    rowMap: rowMap,
+                    transaction: reservation.transaction,
+                    scratchReservation: reservation.scratchReservation,
+                    byteReservation: reservation.byteReservation
+                ))
+            } catch {
+                record(.localPreparationFailed)
+                ContinuousBatchingPolicy.logForwardFailed(error)
+                await abortReservedNativeMTPRows(reserved)
+                if let removed = activeDecode.removeValue(forKey: row.request.id) {
+                    let released = await release(removed.handle)
+                    finish(
+                        removed,
+                        status: .requestFailed,
+                        errorCode: released
+                            ? "continuous_batching_decode_prepare_failed"
+                            : "continuous_batching_cleanup_failed"
+                    )
+                    if !released { return }
+                }
+                return
+            }
+        }
+        guard !prepared.isEmpty else { return }
+
+        record(.decodeFirstStep)
+        sharedForwardCalls += 1
+        maxObservedBatchDepth = max(maxObservedBatchDepth, prepared.count)
+
+        let verifiedRows: [NativeMTPVerifiedRow]
+        do {
+            verifiedRows = try await backend.verifyNativeMTPPackedRound(rows: prepared.map(\.input))
+        } catch {
+            recordNativeMTPPostoutputFailureIfVisible(
+                sink: nativeMTPStatusSink,
+                rows: prepared.map(\.row)
+            )
+            let abortError: (any Error)?
+            do {
+                try await abortNativeMTPRound(prepared)
+                abortError = nil
+            } catch {
+                abortError = error
+            }
+            if backendCancellationPending { return }
+            record(.batchForwardFailed)
+            ContinuousBatchingPolicy.logForwardFailed(error)
+            if let abortError {
+                ContinuousBatchingPolicy.logForwardFailed(abortError)
+            }
+            for item in prepared {
+                if let removed = activeDecode.removeValue(forKey: item.row.request.id) {
+                    let released = await release(removed.handle)
+                    finish(
+                        removed,
+                        status: released ? .batchFailed : .requestFailed,
+                        errorCode: released
+                            ? (abortError == nil
+                                ? "continuous_batching_native_mtp_verify_failed"
+                                : "continuous_batching_native_mtp_abort_failed")
+                            : "continuous_batching_cleanup_failed"
+                    )
+                }
+            }
+            return
+        }
+        let stalePreparedRows = staleNativeMTPRows(prepared.map(\.row))
+        guard stalePreparedRows.isEmpty else {
+            let abortError: (any Error)?
+            do {
+                try await abortNativeMTPRound(prepared)
+                abortError = nil
+            } catch {
+                abortError = error
+            }
+            await failStaleNativeMTPRows(
+                abortError == nil ? stalePreparedRows : prepared.map(\.row),
+                cleanupError: abortError,
+                fallbackErrorCode: abortError == nil
+                    ? "continuous_batching_native_mtp_stale_row"
+                    : "continuous_batching_native_mtp_abort_failed"
+            )
+            return
+        }
+
+        let acceptedRows: [NativeMTPAcceptedRow]
+        do {
+            acceptedRows = try NativeMTPAcceptance.acceptGreedy(
+                rowMaps: prepared.map(\.rowMap),
+                verifiedRows: verifiedRows,
+                packedRowCount: prepared.count
+            )
+        } catch {
+            recordNativeMTPPostoutputFailureIfVisible(
+                sink: nativeMTPStatusSink,
+                rows: prepared.map(\.row)
+            )
+            let abortError: (any Error)?
+            do {
+                try await abortNativeMTPRound(prepared)
+                abortError = nil
+            } catch {
+                abortError = error
+            }
+            record(.localPreparationFailed)
+            ContinuousBatchingPolicy.logForwardFailed(error)
+            if let abortError {
+                ContinuousBatchingPolicy.logForwardFailed(abortError)
+            }
+            for item in prepared {
+                if let removed = activeDecode.removeValue(forKey: item.row.request.id) {
+                    let released = await release(removed.handle)
+                    finish(
+                        removed,
+                        status: .requestFailed,
+                        errorCode: released
+                            ? (abortError == nil
+                                ? "continuous_batching_native_mtp_acceptance_failed"
+                                : "continuous_batching_native_mtp_abort_failed")
+                            : "continuous_batching_cleanup_failed"
+                    )
+                    if !released { return }
+                }
+            }
+            return
+        }
+
+        var acceptedByID: [String: NativeMTPAcceptedRow] = [:]
+        for accepted in acceptedRows {
+            acceptedByID[accepted.schedulerRowID] = accepted
+        }
+        var candidatesByID: [String: [NativeMTPTokenCandidate]] = [:]
+        var proposalCountByID: [String: Int] = [:]
+        var committedProposalCountByID: [String: Int] = [:]
+        var invalidCandidateIDs: Set<String> = []
+        var finalizeRows: [ContinuousBatchNativeMTPFinalizeInput] = []
+        finalizeRows.reserveCapacity(prepared.count)
+        for item in prepared {
+            guard let accepted = acceptedByID[item.row.request.id] else { continue }
+            let selected = nativeMTPCandidatesToApply(acceptedRow: accepted, row: item.row)
+            candidatesByID[item.row.request.id] = selected
+            if selected.contains(where: { !(0..<configuration.vocabularySize).contains($0.tokenID) }) {
+                invalidCandidateIDs.insert(item.row.request.id)
+            }
+            let shouldCommit = !cancelledIDs.contains(item.row.request.id)
+                && !invalidCandidateIDs.contains(item.row.request.id)
+            let committedProposalCount = selected.last?.cumulativeProposalCommitCount ?? 0
+            proposalCountByID[item.row.request.id] = item.input.proposalTokens.count
+            committedProposalCountByID[item.row.request.id] = shouldCommit ? committedProposalCount : 0
+            finalizeRows.append(ContinuousBatchNativeMTPFinalizeInput(
+                requestID: item.row.request.id,
+                proposalTokenCount: item.input.proposalTokens.count,
+                committedProposalTokenCount: shouldCommit ? committedProposalCount : 0,
+                acceptedTokenIDs: shouldCommit ? selected.map(\.tokenID) : [],
+                committedInputTokenCount: shouldCommit ? committedProposalCount + 1 : 0,
+                shouldCommit: shouldCommit
+            ))
+        }
+
+        do {
+            try await backend.finalizeNativeMTPPackedRound(rows: finalizeRows)
+        } catch {
+            recordNativeMTPPostoutputFailureIfVisible(
+                sink: nativeMTPStatusSink,
+                rows: prepared.map(\.row)
+            )
+            var localAbortError: (any Error)?
+            for item in prepared {
+                do {
+                    _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+                } catch {
+                    localAbortError = localAbortError ?? error
+                }
+                do {
+                    try await allocator.releaseNativeMTPScratchReservation(item.scratchReservation)
+                } catch {
+                    localAbortError = localAbortError ?? error
+                }
+                releaseNativeMTPRoundBytes(item.byteReservation)
+                nativeMTPRowsWithStagedMutation.remove(item.row.request.id)
+            }
+            record(.batchForwardFailed)
+            ContinuousBatchingPolicy.logForwardFailed(error)
+            if let localAbortError {
+                ContinuousBatchingPolicy.logForwardFailed(localAbortError)
+            }
+            for item in prepared {
+                if let removed = activeDecode.removeValue(forKey: item.row.request.id) {
+                    let released = await release(removed.handle)
+                    finish(
+                        removed,
+                        status: .requestFailed,
+                        errorCode: released
+                            ? (localAbortError == nil
+                                ? "continuous_batching_native_mtp_finalize_failed"
+                                : "continuous_batching_native_mtp_abort_failed")
+                            : "continuous_batching_cleanup_failed"
+                    )
+                    if !released { return }
+                }
+            }
+            return
+        }
+        let staleFinalizedRows = staleNativeMTPRows(prepared.map(\.row))
+        guard staleFinalizedRows.isEmpty else {
+            let abortError: (any Error)?
+            do {
+                try await abortNativeMTPRound(prepared)
+                abortError = nil
+            } catch {
+                abortError = error
+            }
+            await failStaleNativeMTPRows(
+                abortError == nil ? staleFinalizedRows : prepared.map(\.row),
+                cleanupError: abortError,
+                fallbackErrorCode: abortError == nil
+                    ? "continuous_batching_native_mtp_stale_row"
+                    : "continuous_batching_native_mtp_abort_failed"
+            )
+            return
+        }
+
+        let finalizedByID = Dictionary(uniqueKeysWithValues: finalizeRows.map { ($0.requestID, $0) })
+        var healthyOutputIDs: Set<String> = []
+        for item in prepared {
+            guard let finalized = finalizedByID[item.row.request.id] else {
+                var cleanupError: (any Error)?
+                do {
+                    _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+                } catch {
+                    cleanupError = cleanupError ?? error
+                }
+                do {
+                    try await allocator.releaseNativeMTPScratchReservation(item.scratchReservation)
+                } catch {
+                    cleanupError = cleanupError ?? error
+                }
+                releaseNativeMTPRoundBytes(item.byteReservation)
+                nativeMTPRowsWithStagedMutation.remove(item.row.request.id)
+                if let cleanupError {
+                    record(.cleanupFailed)
+                    ContinuousBatchingPolicy.logForwardFailed(cleanupError)
+                }
+                if let removed = activeDecode.removeValue(forKey: item.row.request.id) {
+                    let released = await release(removed.handle)
+                    finish(
+                        removed,
+                        status: .requestFailed,
+                        errorCode: released
+                            ? (cleanupError == nil
+                                ? "continuous_batching_native_mtp_finalize_missing"
+                                : "continuous_batching_native_mtp_abort_failed")
+                            : "continuous_batching_cleanup_failed"
+                    )
+                    if !released { return }
+                }
+                continue
+            }
+            guard nativeMTPStagedRowIsCurrent(item.row) else {
+                var cleanupError: (any Error)?
+                do {
+                    _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+                } catch {
+                    cleanupError = cleanupError ?? error
+                }
+                do {
+                    try await allocator.releaseNativeMTPScratchReservation(item.scratchReservation)
+                } catch {
+                    cleanupError = cleanupError ?? error
+                }
+                releaseNativeMTPRoundBytes(item.byteReservation)
+                await failStaleNativeMTPRows(
+                    [item.row],
+                    cleanupError: cleanupError,
+                    fallbackErrorCode: cleanupError == nil
+                        ? "continuous_batching_native_mtp_stale_row"
+                        : "continuous_batching_native_mtp_abort_failed"
+                )
+                continue
+            }
+            var localFinalizeError: (any Error)?
+            do {
+                if finalized.shouldCommit {
+                    _ = try await allocator.commitNativeMTPTransaction(
+                        item.transaction,
+                        acceptedPrefixTokenCount: finalized.committedInputTokenCount
+                    )
+                } else {
+                    _ = try await allocator.abortNativeMTPTransaction(item.transaction)
+                }
+            } catch {
+                localFinalizeError = localFinalizeError ?? error
+            }
+            do {
+                try await allocator.releaseNativeMTPScratchReservation(item.scratchReservation)
+            } catch {
+                localFinalizeError = localFinalizeError ?? error
+            }
+            releaseNativeMTPRoundBytes(item.byteReservation)
+            nativeMTPRowsWithStagedMutation.remove(item.row.request.id)
+            if localFinalizeError == nil {
+                if nativeMTPStagedRowIsCurrent(item.row) {
+                    healthyOutputIDs.insert(item.row.request.id)
+                } else {
+                    await failStaleNativeMTPRows(
+                        [item.row],
+                        cleanupError: nil,
+                        fallbackErrorCode: "continuous_batching_native_mtp_stale_row"
+                    )
+                }
+            } else if let error = localFinalizeError {
+                recordNativeMTPPostoutputFailureIfVisible(
+                    sink: nativeMTPStatusSink,
+                    rows: [item.row]
+                )
+                record(.cleanupFailed)
+                ContinuousBatchingPolicy.logForwardFailed(error)
+                if let removed = activeDecode.removeValue(forKey: item.row.request.id) {
+                    let released = await release(removed.handle)
+                    finish(
+                        removed,
+                        status: .requestFailed,
+                        errorCode: released
+                            ? "continuous_batching_native_mtp_finalize_local_failed"
+                            : "continuous_batching_cleanup_failed"
+                    )
+                    if !released { return }
+                }
+            }
+        }
+        if backendCancellationPending { return }
+        await processCancellations()
+        guard !cleanupFailedClosed else { return }
+
+        let acceptedProposalTokens = finalizeRows.reduce(0) { $0 + $1.committedProposalTokenCount }
+        let proposedTokens = prepared.reduce(0) { $0 + $1.input.proposalTokens.count }
+        let committedTokens = candidatesByID.values.reduce(0) { $0 + $1.count }
+        let bonusTokens = candidatesByID.values.reduce(0) { partial, candidates in
+            partial + candidates.filter { $0.source == .bonus }.count
+        }
+        let overheadMS = UInt64(max(0, Date().timeIntervalSince(nativeMTPStatusStartedAt) * 1000.0))
+        nativeMTPStatusSink?.recordRound(NativeMTPStatusSink.Round(
+            requestedDepths: proposalInputs.map(\.maximumProposalDepth),
+            proposedTokens: proposedTokens,
+            acceptedTokens: acceptedProposalTokens,
+            bonusTokens: bonusTokens,
+            committedTokens: committedTokens,
+            acceptedProposalTokensByRow: finalizeRows.map(\.committedProposalTokenCount),
+            verificationOverheadMS: overheadMS
+        ))
+
+        for requestID in invalidCandidateIDs {
+            guard let removed = activeDecode.removeValue(forKey: requestID) else { continue }
+            let released = await release(removed.handle)
+            finish(
+                removed,
+                status: .requestFailed,
+                errorCode: released
+                    ? "continuous_batching_invalid_decode_token"
+                    : "continuous_batching_cleanup_failed"
+            )
+            if !released { return }
+        }
+
+        let stillActive = Set(activeDecode.keys)
+        for item in prepared where healthyOutputIDs.contains(item.row.request.id)
+            && stillActive.contains(item.row.request.id) {
+            if var active = activeDecode[item.row.request.id] {
+                let requestID = item.row.request.id
+                let candidates = candidatesByID[requestID] ?? []
+                let committedProposalCount = committedProposalCountByID[requestID] ?? 0
+                let proposalCount = proposalCountByID[requestID] ?? item.input.proposalTokens.count
+                let roundCounters = NativeMTPSelfTestCounters(
+                    acceptedTokens: UInt64(clamping: max(0, committedProposalCount)),
+                    rejectedTokens: UInt64(clamping: max(0, proposalCount - committedProposalCount)),
+                    bonusTokens: UInt64(clamping: candidates.filter { $0.source == .bonus }.count),
+                    committedTokens: UInt64(clamping: candidates.count)
+                )
+                active.nativeMTPCounters = Self.addNativeMTPCounters(
+                    active.nativeMTPCounters,
+                    roundCounters
+                )
+                activeDecode[requestID] = active
+            }
+            if let consumed = reserved.first(where: { $0.row.request.id == item.row.request.id })?.consumedFixtureProposals,
+               consumed,
+               var active = activeDecode[item.row.request.id] {
+                active.nativeMTPFixtureProposalsConsumed = true
+                activeDecode[item.row.request.id] = active
+            }
+            for candidate in candidatesByID[item.row.request.id] ?? [] {
+                guard activeDecode[item.row.request.id] != nil else { break }
+                await applyToken(candidate.tokenID, to: item.row)
+                if cleanupFailedClosed { return }
+            }
+        }
+    }
+
+    private func recordNativeMTPPostoutputFailureIfVisible(
+        sink: NativeMTPStatusSink?,
+        rows: [Row]
+    ) {
+        guard let sink else { return }
+        if rows.contains(where: nativeMTPRowHasBuyerVisibleOutput) {
+            sink.recordPostoutputFailure()
+        }
+    }
+
+    private func nativeMTPRowHasBuyerVisibleOutput(_ row: Row) -> Bool {
+        !row.outputTokens.isEmpty
+    }
+
+    private static func addNativeMTPCounters(
+        _ lhs: NativeMTPSelfTestCounters?,
+        _ rhs: NativeMTPSelfTestCounters
+    ) -> NativeMTPSelfTestCounters {
+        let base = lhs ?? NativeMTPSelfTestCounters(
+            acceptedTokens: 0,
+            rejectedTokens: 0,
+            bonusTokens: 0,
+            committedTokens: 0
+        )
+        let accepted = base.acceptedTokens.addingReportingOverflow(rhs.acceptedTokens)
+        let rejected = base.rejectedTokens.addingReportingOverflow(rhs.rejectedTokens)
+        let bonus = base.bonusTokens.addingReportingOverflow(rhs.bonusTokens)
+        let committed = base.committedTokens.addingReportingOverflow(rhs.committedTokens)
+        return NativeMTPSelfTestCounters(
+            acceptedTokens: accepted.overflow ? UInt64.max : accepted.partialValue,
+            rejectedTokens: rejected.overflow ? UInt64.max : rejected.partialValue,
+            bonusTokens: bonus.overflow ? UInt64.max : bonus.partialValue,
+            committedTokens: committed.overflow ? UInt64.max : committed.partialValue
+        )
+    }
+
+    private func fenceDisabledActiveNativeMTPRows() async {
+        var nativeIDs: [String] = []
+        nativeIDs.reserveCapacity(activeDecode.count)
+        for (requestID, row) in activeDecode {
+            if row.usesNativeMTP,
+               let fence = row.nativeMTPTupleFence,
+               disabledNativeMTPTupleFences.contains(fence) {
+                nativeIDs.append(requestID)
+            }
+        }
+        for requestID in nativeIDs {
+            guard var row = activeDecode[requestID] else { continue }
+            if nativeMTPRowsWithStagedMutation.contains(requestID) {
+                continue
+            }
+            activeDecode.removeValue(forKey: requestID)
+            if nativeMTPRowHasBuyerVisibleOutput(row) {
+                let released = await release(row.handle)
+                configuration.nativeMTPStatusSink?.recordPostoutputFailure()
+                finish(
+                    row,
+                    status: .requestFailed,
+                    errorCode: released
+                        ? "continuous_batching_native_mtp_tuple_disabled_postoutput"
+                        : "continuous_batching_cleanup_failed"
+                )
+                if !released { return }
+            } else {
+                row.decodePath = DecodePath.ordinary
+                row.nativeMTPAdaptation = nil
+                row.nativeMTPDirective = nil
+                activeDecode[requestID] = row
+            }
+        }
+    }
+
     private func runDecodeStep() async {
+        await fenceDisabledActiveNativeMTPRows()
+        guard !cleanupFailedClosed else { return }
         let rows = activeDecode.values.sorted {
             admissionPrecedes($0.request.id, $1.request.id)
         }
+        let nativeRows = rows.filter(\.usesNativeMTP)
+        guard !nativeRows.isEmpty else {
+            await runOrdinaryDecodeStep(rows: rows)
+            return
+        }
+        let ordinaryRows = rows.filter { !$0.usesNativeMTP }
+        if rows.first?.usesNativeMTP == true {
+            await runNativeMTPDecodeStep(rows: nativeRows)
+            guard !cleanupFailedClosed else { return }
+            let remainingOrdinary = ordinaryRows.compactMap { activeDecode[$0.request.id] }
+            await runOrdinaryDecodeStep(rows: remainingOrdinary)
+        } else {
+            await runOrdinaryDecodeStep(rows: ordinaryRows)
+            guard !cleanupFailedClosed else { return }
+            let remainingNative = nativeRows.compactMap { activeDecode[$0.request.id] }
+            await runNativeMTPDecodeStep(rows: remainingNative)
+        }
+    }
+
+    private func runOrdinaryDecodeStep(rows: [Row]) async {
+        guard !rows.isEmpty else { return }
         let windowSteps = lockstepDecodeWindowSteps(for: rows)
         var prepared: [(row: Row, input: ContinuousBatchDecodeInput)] = []
         prepared.reserveCapacity(rows.count)
@@ -2545,6 +3928,15 @@ actor ContinuousBatchScheduler {
             let request = waiting.removeFirst()
             suspendQueueWaitTimeout(requestID: request.id)
             madeProgress = true
+            if let fence = request.nativeMTPTupleFence,
+               disabledNativeMTPTupleFences.contains(fence) {
+                await finishQueued(
+                    request,
+                    status: .requestFailed,
+                    errorCode: "continuous_batching_native_mtp_tuple_disabled"
+                )
+                continue
+            }
             if cancelledIDs.remove(request.id) != nil {
                 await finishQueued(request, status: .cancelled, errorCode: "request_cancelled")
                 continue
@@ -2624,6 +4016,9 @@ actor ContinuousBatchScheduler {
                 record(.promptHeadroomReserved)
                 record(.accepted)
                 try? FileHandle.standardError.write(contentsOf: Data("event=batching_admitted action=scheduler_admitted\n".utf8))
+                if request.decodePath == .nativeMTP {
+                    configuration.nativeMTPStatusSink?.recordNativeMTPAdmission()
+                }
                 activePrompt[request.id] = Row(
                     request: request,
                     handle: handle,
@@ -2637,7 +4032,12 @@ actor ContinuousBatchScheduler {
                     // prefix of it, so they carry forward (as on the serial path).
                     recurrentCheckpoints: request.retainedRecurrentCheckpoints.filter {
                         request.recurrentCheckpointPositions.contains($0.tokenCount)
-                    }
+                    },
+                    decodePath: request.decodePath,
+                    nativeMTPAdaptation: nil,
+                    nativeMTPDirective: request.nativeMTPAdaptationDirective,
+                    nativeMTPTupleFence: request.nativeMTPTupleFence,
+                    nativeMTPFixtureProposalsConsumed: false
                 )
                 promptOrder.append(request.id)
                 endQueueWait(requestID: request.id)
@@ -2758,7 +4158,10 @@ actor ContinuousBatchScheduler {
                         samplerSeed: row.request.samplerSeed,
                         temperature: row.request.temperature,
                         topP: row.request.topP,
-                        samplerStep: row.generatedTokens.count
+                        samplerStep: row.generatedTokens.count,
+                        nativeMTPPromptPrefill: row.usesNativeMTP
+                            && row.prefillCursor == 0
+                            && end == promptTokenCount
                     ),
                     chunk.count
                 ))
@@ -3020,7 +4423,8 @@ actor ContinuousBatchScheduler {
             serialToolStopTokenCount: isSuccessful
                 ? row.request.serialToolStopObserver?.stopTokenCount
                 : nil,
-            serialConversationCache: isSuccessful ? serialConversationCache : nil
+            serialConversationCache: isSuccessful ? serialConversationCache : nil,
+            nativeMTPCounters: row.nativeMTPCounters
         )
         complete(requestID: row.request.id, result: result)
     }
@@ -3052,7 +4456,8 @@ actor ContinuousBatchScheduler {
             stopCause: isSuccessful ? row.stopCause : nil,
             serialToolStopTokenCount: isSuccessful
                 ? row.request.serialToolStopObserver?.stopTokenCount
-                : nil
+                : nil,
+            nativeMTPCounters: row.nativeMTPCounters
         )
         complete(requestID: row.request.id, result: result)
     }

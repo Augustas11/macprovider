@@ -18,8 +18,8 @@ let package = Package(
     ],
     dependencies: [
         .package(
-            url: "https://github.com/ml-explore/mlx-swift-lm.git",
-            exact: "3.31.4"
+            url: "https://github.com/Augustas11/mlx-swift-lm.git",
+            revision: "e874140ecb5b04aeb445eb3837d48f7b187b867e"
         ),
         .package(
             url: "https://github.com/huggingface/swift-transformers.git",

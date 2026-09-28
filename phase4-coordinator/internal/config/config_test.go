@@ -575,6 +575,40 @@ func TestCanaryLatencyEnforcementValidation(t *testing.T) {
 	}
 }
 
+func TestNativeMTPCanaryConfigDefaultsOffAndRequiresSignedBank(t *testing.T) {
+	cfg := validTestConfig()
+	if cfg.Pool.NativeMTPCanary.Enabled {
+		t.Fatal("native MTP canary must default off")
+	}
+	if cfg.Pool.NativeMTPCanary.IntervalS != 3600 {
+		t.Fatalf("native MTP canary interval default=%d, want 3600", cfg.Pool.NativeMTPCanary.IntervalS)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("disabled native MTP canary should validate: %v", err)
+	}
+
+	cfg.Pool.NativeMTPCanary.Enabled = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "challenge_bank_path") {
+		t.Fatalf("enabled without bank error=%v", err)
+	}
+	cfg.Pool.NativeMTPCanary.ChallengeBankPath = "/tmp/native-mtp-bank.json"
+	cfg.Pool.NativeMTPCanary.SignaturePath = "/tmp/native-mtp-bank.json.sig"
+	cfg.Pool.NativeMTPCanary.SignerKeyID = "native-mtp-test-key"
+	cfg.Pool.NativeMTPCanary.PublicKeys = map[string]string{"other": testAutotunePublicKeyBase64}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "signer_key_id") {
+		t.Fatalf("missing signer key error=%v", err)
+	}
+	cfg.Pool.NativeMTPCanary.PublicKeys = map[string]string{"native-mtp-test-key": testAutotunePublicKeyBase64}
+	cfg.Pool.NativeMTPCanary.IntervalS = 899
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "interval_s") {
+		t.Fatalf("too-short interval error=%v", err)
+	}
+	cfg.Pool.NativeMTPCanary.IntervalS = 900
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid native MTP canary config: %v", err)
+	}
+}
+
 func TestProviderWebSocketBoundsDefaultAndValidate(t *testing.T) {
 	cfg := validTestConfig()
 	if cfg.WS.HandshakeTimeoutS != 10 || cfg.WS.WriteTimeoutS != 10 ||

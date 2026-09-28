@@ -264,8 +264,8 @@ struct DecodeBenchCommand: AsyncParsableCommand {
         var promptTokensCount = 0
         var decodedTokenCount = 0
 
-        try await container.perform { context in
-            let input = UserInput(chat: [.user(prompt)])
+        let input = UserInput(chat: [.user(prompt)])
+        try await container.perform(nonSendable: input) { context, input in
             let lmInput = try await context.processor.prepare(input: input)
             promptTokensCount = lmInput.text.tokens.size
 
@@ -279,7 +279,7 @@ struct DecodeBenchCommand: AsyncParsableCommand {
             // KVCache instances the model will mutate during prefill. After
             // prepare() returns, innerState() will be non-empty and we can
             // safely construct CompiledDecodeStep.
-            let cache = context.model.newCache(parameters: parameters)
+            let cache = try context.model.newCache(parameters: parameters)
 
             // Prefill: model.prepare() handles chunked prefill internally.
             // `.tokens` → need one more model call for the remaining token chunk.
@@ -379,8 +379,8 @@ struct DecodeBenchCommand: AsyncParsableCommand {
         nonisolated(unsafe) var firstTokenAt: Date? = nil
         var promptTokens = 0
         var generationTokens = 0
-        try await container.perform { context in
-            let input = UserInput(chat: [.user(prompt)])
+        let input = UserInput(chat: [.user(prompt)])
+        try await container.perform(nonSendable: input) { context, input in
             let lmInput = try await context.processor.prepare(input: input)
             promptTokens = lmInput.text.tokens.size
             let parameters = GenerateParameters(

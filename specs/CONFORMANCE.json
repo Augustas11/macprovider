@@ -665,7 +665,7 @@
     {
       "spec_id": "SPEC-023",
       "title": "Installer-Integrated Autotune Recommend",
-      "version": "v0.21.0",
+      "version": "v0.21.2",
       "path": "specs/SPEC-023-installer-autotune-recommend.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -1474,7 +1474,7 @@
     {
       "spec_id": "SPEC-048",
       "title": "Native Multi-Token Prediction Serving",
-      "version": "0.1.0",
+      "version": "0.1.10",
       "path": "specs/SPEC-048-native-mtp-serving.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -3202,7 +3202,7 @@
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "SPEC-023 v0.21.0 defines the closed signed native-MTP admission sidecar; generator, strict consumers, release-ledger binding, negative fixtures, and signed release evidence are not implemented."
+        "rationale": "SPEC-023 v0.21.2 defines the closed signed native-MTP admission sidecar, including the authenticated live executable CDHash binding and complete-window byte closure; generator, strict consumers, release-ledger binding, negative fixtures, and signed release evidence are not implemented."
       }
     },
     {
@@ -9835,15 +9835,29 @@
       "requirement_id": "SPEC-048-R003",
       "spec_id": "SPEC-048",
       "state": "pending",
-      "implementation": [],
-      "tests": [],
+      "implementation": [
+        "phase3-binary/Package.swift:let package",
+        "scripts/read_swiftpm_pins.py:SPEC048_MLX_SWIFT_LM_REVISION"
+      ],
+      "tests": [
+        "phase3-binary/Tests/mlx-stage-spikeTests/NativeMTPUpstreamQualificationTests.swift:func testPublicPackedVerificationAPIUsesExplicitMixedRaggedRows() throws",
+        "phase3-binary/Tests/mlx-stage-spikeTests/NativeMTPUpstreamQualificationTests.swift:func testPublicPackedVerificationRequiresContinuationStateFailClosed() throws",
+        "scripts/tests/test_upstream_watch.py:class SwiftPMPinParsingTests"
+      ],
       "journeys": ["JOURNEY-NATIVE-MTP-SERVING"],
-      "evidence": [],
+      "evidence": [
+        {
+          "artifact": "sha256:afb2c7632f3a69a6e8dfd41d12991e667a290d445be22d8aedc9299e318c40f3",
+          "source": "docs/research/SPEC_048_PHASE0_UPSTREAM_GATE_2026-09-28.md",
+          "captured_at": "2026-09-28",
+          "expires_at": "2026-12-27"
+        }
+      ],
       "gap": {
         "verdict": "DECISION_REQUIRED",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-        "rationale": "The exact upstream release and stable row-mapped transaction API have not been selected or qualified."
+        "rationale": "The exact reviewed fork revision adds standalone Qwen 3.5 MTP checkpoint loading plus public row-mapped cache transactions, packed target verification, strict row-local continuation state, serialized non-Sendable drafter-state access, and packed recurrent Mamba row transactions under the SPEC-048 v0.1.6 immutable-dependency exception. The v0.1.6 repin preserves the audited API delta while restoring Swift 6.1 package-manifest compatibility for MacProvider release CI. The expanded upstream test bundle compiled and the real Qwen 3.5 target/MTP tuple passed Mac Studio ordinary-versus-native-MTP parity, but R003 remains pending until the frozen MacProvider diff completes every audit, release, and signed-campaign gate. This does not make any production tuple eligible."
       }
     },
     {

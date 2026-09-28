@@ -175,10 +175,10 @@ type PayoutSecurityConfig struct {
 
 	// EncryptedWalletPath is the on-disk AES-256-GCM-encrypted
 	// secp256k1 wallet file. SPEC §6.3 production path; the
-	// runner decrypts at startup using the KEK supplied via
-	// systemd LoadCredential= (preferred) or
-	// MACPROVIDER_PAYOUT_WALLET_KEK env var. Required when
-	// payout.enabled=true unless DevMode is also true.
+	// runner decrypts at startup using the payout KEK supplied via
+	// systemd LoadCredential= (preferred) or the documented operator
+	// environment fallback. Required when payout.enabled=true unless
+	// DevMode is also true.
 	EncryptedWalletPath string `yaml:"encrypted_wallet_path"`
 
 	// EncryptedWalletOnDiskHex indicates the wallet file is
@@ -437,24 +437,28 @@ func (c AutotuneFeedsConfig) ProviderAdmissionBridgeDeadlineTime() (time.Time, e
 // trust map. Keys use canonical padded standard base64 so operator mistakes do
 // not silently select a different decoder or byte representation.
 func (c AutotuneFeedsConfig) DecodePublicKeyring() (map[string]ed25519.PublicKey, error) {
-	keyIDs := make([]string, 0, len(c.PublicKeys))
-	for keyID := range c.PublicKeys {
+	return decodeEd25519PublicKeyring("autotune.public_keys", c.PublicKeys)
+}
+
+func decodeEd25519PublicKeyring(prefix string, raw map[string]string) (map[string]ed25519.PublicKey, error) {
+	keyIDs := make([]string, 0, len(raw))
+	for keyID := range raw {
 		keyIDs = append(keyIDs, keyID)
 	}
 	sort.Strings(keyIDs)
 
-	keyring := make(map[string]ed25519.PublicKey, len(c.PublicKeys))
+	keyring := make(map[string]ed25519.PublicKey, len(raw))
 	for _, keyID := range keyIDs {
 		if keyID == "" || strings.TrimSpace(keyID) != keyID {
-			return nil, fmt.Errorf("autotune.public_keys contains an invalid key ID %q", keyID)
+			return nil, fmt.Errorf("%s contains an invalid key ID %q", prefix, keyID)
 		}
-		encoded := c.PublicKeys[keyID]
+		encoded := raw[keyID]
 		decoded, err := base64.StdEncoding.Strict().DecodeString(encoded)
 		if err != nil || base64.StdEncoding.EncodeToString(decoded) != encoded {
-			return nil, fmt.Errorf("autotune.public_keys.%s must be canonical padded base64", keyID)
+			return nil, fmt.Errorf("%s.%s must be canonical padded base64", prefix, keyID)
 		}
 		if len(decoded) != ed25519.PublicKeySize {
-			return nil, fmt.Errorf("autotune.public_keys.%s must decode to %d bytes", keyID, ed25519.PublicKeySize)
+			return nil, fmt.Errorf("%s.%s must decode to %d bytes", prefix, keyID, ed25519.PublicKeySize)
 		}
 		keyring[keyID] = ed25519.PublicKey(append([]byte(nil), decoded...))
 	}
@@ -850,6 +854,7 @@ type PoolConfig struct {
 	CanaryLatencyEnforcement string                             `yaml:"canary_latency_enforcement"`
 	CanaryChallenges         []CanaryChallengeConfig            `yaml:"canary_challenges"`
 	ModelClassChallenges     map[string][]CanaryChallengeConfig `yaml:"model_class_challenges"`
+	NativeMTPCanary          NativeMTPCanaryConfig              `yaml:"native_mtp_canary"`
 	LosslessnessProbe        LosslessnessProbeConfig            `yaml:"losslessness_probe"`
 }
 
@@ -866,6 +871,30 @@ func (p PoolConfig) CanaryLatencyMode() string {
 // provider (enforce mode) or are observe-only (default).
 func (p PoolConfig) CanaryLatencyEnforced() bool {
 	return p.CanaryLatencyMode() == "enforce"
+}
+
+type NativeMTPCanaryConfig struct {
+	Enabled           bool              `yaml:"enabled"`
+	ChallengeBankPath string            `yaml:"challenge_bank_path"`
+	SignaturePath     string            `yaml:"signature_path"`
+	SignerKeyID       string            `yaml:"signer_key_id"`
+	PublicKeys        map[string]string `yaml:"public_keys"`
+	IntervalS         int               `yaml:"interval_s"`
+}
+
+func (c NativeMTPCanaryConfig) Interval() time.Duration {
+	if c.IntervalS <= 0 {
+		return time.Hour
+	}
+	interval := time.Duration(c.IntervalS) * time.Second
+	if interval < 15*time.Minute {
+		return 15 * time.Minute
+	}
+	return interval
+}
+
+func (c NativeMTPCanaryConfig) DecodePublicKeyring() (map[string]ed25519.PublicKey, error) {
+	return decodeEd25519PublicKeyring("pool.native_mtp_canary.public_keys", c.PublicKeys)
 }
 
 type CanaryChallengeConfig struct {
@@ -1485,6 +1514,11 @@ func Default() Config {
 			CanaryTimeoutS:          30,
 			CanaryMaxTokens:         32,
 			CanaryFailureThreshold:  3,
+			NativeMTPCanary: NativeMTPCanaryConfig{
+				Enabled:    false,
+				IntervalS:  3600,
+				PublicKeys: map[string]string{},
+			},
 			LosslessnessProbe: LosslessnessProbeConfig{
 				Enabled:                  false,
 				IntervalS:                3600,
@@ -2665,6 +2699,28 @@ func (c Config) Validate() error {
 			if err := validateCanaryChallengeList("pool.model_class_challenges."+modelID, challenges); err != nil {
 				return err
 			}
+		}
+	}
+	if c.Pool.NativeMTPCanary.IntervalS < 0 {
+		return fmt.Errorf("pool.native_mtp_canary.interval_s must be >= 0")
+	}
+	if c.Pool.NativeMTPCanary.Enabled {
+		n := c.Pool.NativeMTPCanary
+		if n.IntervalS > 0 && n.IntervalS < 900 {
+			return fmt.Errorf("pool.native_mtp_canary.interval_s must be 0 or >= 900")
+		}
+		if strings.TrimSpace(n.ChallengeBankPath) == "" || strings.TrimSpace(n.SignaturePath) == "" {
+			return fmt.Errorf("pool.native_mtp_canary challenge_bank_path and signature_path are required when enabled")
+		}
+		if strings.TrimSpace(n.SignerKeyID) == "" || strings.TrimSpace(n.SignerKeyID) != n.SignerKeyID {
+			return fmt.Errorf("pool.native_mtp_canary.signer_key_id must be a non-empty trimmed key ID")
+		}
+		keyring, err := n.DecodePublicKeyring()
+		if err != nil {
+			return err
+		}
+		if _, ok := keyring[n.SignerKeyID]; !ok {
+			return fmt.Errorf("pool.native_mtp_canary.public_keys must contain signer_key_id %q", n.SignerKeyID)
 		}
 	}
 	if c.Pool.LosslessnessProbe.Enabled {

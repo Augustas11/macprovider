@@ -41,6 +41,136 @@ func TestParseNakAcceptsSwiftSpecShape(t *testing.T) {
 	}
 }
 
+func TestParseNativeMTPCanaryRequestRejectsUnknownAndDuplicateFields(t *testing.T) {
+	payload := nativeMTPCanaryRequestJSON(nil)
+	req, field, err := ParseNativeMTPCanaryRequest([]byte(payload))
+	if err != nil {
+		t.Fatalf("ParseNativeMTPCanaryRequest field=%s err=%v", field, err)
+	}
+	if req.Type != "native_mtp_canary_request_v1" || req.ProviderID != "provider-a" || req.ProposalDepth != 2 {
+		t.Fatalf("parsed request mismatch: %#v", req)
+	}
+	if req.RuntimeTuple.ProposalDepth != 2 || req.RuntimeTuple.CacheNamespace != "cache-a" {
+		t.Fatalf("runtime tuple mismatch: %#v", req.RuntimeTuple)
+	}
+
+	unknown := nativeMTPCanaryRequestJSON(map[string]string{"usage": `"not-allowed"`})
+	if _, field, err := ParseNativeMTPCanaryRequest([]byte(unknown)); err == nil || field != "usage" {
+		t.Fatalf("unknown accounting field accepted field=%s err=%v", field, err)
+	}
+	duplicate := strings.Replace(payload, `"request_id":"canary-1"`, `"request_id":"canary-1","request_id":"canary-2"`, 1)
+	if _, field, err := ParseNativeMTPCanaryRequest([]byte(duplicate)); err == nil || field != "request_id" {
+		t.Fatalf("duplicate request_id accepted field=%s err=%v", field, err)
+	}
+	oversized := strings.Replace(payload, `"prompt_token_ids":[1,2,3]`, `"prompt_token_ids":[-1]`, 1)
+	if _, field, err := ParseNativeMTPCanaryRequest([]byte(oversized)); err == nil || field != "prompt_token_ids" {
+		t.Fatalf("invalid prompt token accepted field=%s err=%v", field, err)
+	}
+}
+
+func TestParseNativeMTPCanaryResultRejectsSettlementFields(t *testing.T) {
+	payload := nativeMTPCanaryResultJSON(nil)
+	result, field, err := ParseNativeMTPCanaryResult([]byte(payload))
+	if err != nil {
+		t.Fatalf("ParseNativeMTPCanaryResult field=%s err=%v", field, err)
+	}
+	if result.Type != "native_mtp_canary_result_v1" || result.TerminalReason != "passed" || !result.FallbackUsed {
+		t.Fatalf("parsed result mismatch: %#v", result)
+	}
+	withReceipt := nativeMTPCanaryResultJSON(map[string]string{"receipt": `"must-not-exist"`})
+	if _, field, err := ParseNativeMTPCanaryResult([]byte(withReceipt)); err == nil || field != "receipt" {
+		t.Fatalf("receipt field accepted field=%s err=%v", field, err)
+	}
+	duplicateCounter := strings.Replace(payload, `"accepted":2`, `"accepted":2,"accepted":3`, 1)
+	if _, field, err := ParseNativeMTPCanaryResult([]byte(duplicateCounter)); err == nil || field != "counters.accepted" {
+		t.Fatalf("duplicate counter accepted field=%s err=%v", field, err)
+	}
+}
+
+func TestParseNativeMTPTupleOfferRejectsUnknownFields(t *testing.T) {
+	payload := nativeMTPTupleOfferJSON(nil)
+	offer, field, err := ParseNativeMTPTupleOffer([]byte(payload))
+	if err != nil {
+		t.Fatalf("ParseNativeMTPTupleOffer field=%s err=%v", field, err)
+	}
+	if offer.Type != "native_mtp_tuple_offer_v1" || offer.NativeMTPRuntimeTupleSHA256 != nativeMTPTestRuntimeTupleSHA256() {
+		t.Fatalf("parsed offer mismatch: %#v", offer)
+	}
+	withUsage := nativeMTPTupleOfferJSON(map[string]string{"usage": `"must-not-exist"`})
+	if _, field, err := ParseNativeMTPTupleOffer([]byte(withUsage)); err == nil || field != "usage" {
+		t.Fatalf("usage field accepted field=%s err=%v", field, err)
+	}
+}
+
+func TestNativeMTPRuntimeTupleIdentityUsesSpec023JCS(t *testing.T) {
+	admission := strings.Repeat("8", 64)
+	canonical := nativeMTPRuntimeTupleIdentityJCS("provider-a", "assigned-a", 7, admission, "snapshot-a")
+	wantCanonical := `{"assigned_id":"assigned-a","native_mtp_admission_tuple_sha256":"` + admission + `","provider_id":"provider-a","schema_version":"macprovider.native-mtp-runtime-tuple.v1","served_snapshot_id":"snapshot-a","target_generation":7}`
+	if canonical != wantCanonical {
+		t.Fatalf("canonical JCS mismatch\n got: %s\nwant: %s", canonical, wantCanonical)
+	}
+	if got, want := nativeMTPRuntimeTupleIdentitySHA256("provider-a", "assigned-a", 7, admission, "snapshot-a"), "919d2f171e70f1cca3bc93b88cb4234f13fe4cda883ad69b976a4169a3a3bc24"; got != want {
+		t.Fatalf("runtime tuple identity digest = %s, want %s", got, want)
+	}
+}
+
+func TestNativeMTPCanaryResultDigestUsesClosedCanonicalVector(t *testing.T) {
+	result := nativeMTPTestCanaryResult()
+	if got, want := result.ResultDigest, "0e19abd8896de79b7fc46ad56630647d27551aafe57c95f579527eb02eab5e2f"; got != want {
+		t.Fatalf("result digest = %s, want %s", got, want)
+	}
+	mutated := result
+	mutated.ProviderRevision = "1.8.124"
+	if nativeMTPCanaryResultDigest(mutated) == result.ResultDigest {
+		t.Fatalf("result digest did not bind provider_revision")
+	}
+	mutated = result
+	mutated.RuntimeTuple.StateDigest = strings.Repeat("3", 64)
+	if nativeMTPCanaryResultDigest(mutated) == result.ResultDigest {
+		t.Fatalf("result digest did not bind runtime_tuple fields")
+	}
+}
+
+func TestParseNativeMTPTupleDisableRejectsUnknownAndInvalidReason(t *testing.T) {
+	payload := nativeMTPTupleDisableJSON(nil)
+	disable, field, err := ParseNativeMTPTupleDisable([]byte(payload))
+	if err != nil {
+		t.Fatalf("ParseNativeMTPTupleDisable field=%s err=%v", field, err)
+	}
+	if disable.Type != "native_mtp_tuple_disable_v1" || disable.Reason != "mismatch" || disable.TargetGeneration != 7 {
+		t.Fatalf("parsed disable mismatch: %#v", disable)
+	}
+	withUsage := nativeMTPTupleDisableJSON(map[string]string{"usage": `"must-not-exist"`})
+	if _, field, err := ParseNativeMTPTupleDisable([]byte(withUsage)); err == nil || field != "usage" {
+		t.Fatalf("usage field accepted field=%s err=%v", field, err)
+	}
+	badReason := strings.Replace(payload, `"reason":"mismatch"`, `"reason":"classic_spec_decode"`, 1)
+	if _, field, err := ParseNativeMTPTupleDisable([]byte(badReason)); err == nil || field != "reason" {
+		t.Fatalf("invalid disable reason accepted field=%s err=%v", field, err)
+	}
+}
+
+func TestNativeMTPCanaryFieldsStayOffHeartbeatAndStateUpdate(t *testing.T) {
+	heartbeat := []byte(`{"type":"heartbeat","status":"ready","model_id":"model-a","model_params_b":7.0,"ram_gb":16,"max_context_tokens":4096,"max_concurrency":1,"slots_free":1,"slots_total":1,"throughput_tps_estimate":10.0,"requests_served_since_last":0,"avg_latency_ms_since_last":0.0,"throughput_tps_since_last":0.0}`)
+	hb, _, field, err := ParseHeartbeat(heartbeat)
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%s err=%v", field, err)
+	}
+	encodedHeartbeat, _ := json.Marshal(hb)
+	if strings.Contains(string(encodedHeartbeat), "native_mtp") || strings.Contains(string(encodedHeartbeat), "canary") {
+		t.Fatalf("heartbeat leaked native MTP canary fields: %s", encodedHeartbeat)
+	}
+
+	update, field, err := ParseStateUpdate([]byte(`{"type":"state_update","state":"ready","reason":"test","since":"2026-09-28T00:00:00Z","metrics_snapshot":{"slots_free":1,"slots_total":1}}`))
+	if err != nil {
+		t.Fatalf("ParseStateUpdate field=%s err=%v", field, err)
+	}
+	encodedState, _ := json.Marshal(update)
+	if strings.Contains(string(encodedState), "native_mtp") || strings.Contains(string(encodedState), "canary") {
+		t.Fatalf("state_update leaked native MTP canary fields: %s", encodedState)
+	}
+}
+
 func TestParseDiagnosticStatusBoundsAndIdentity(t *testing.T) {
 	payload := []byte(`{
 		"type":"diagnostic_status",
@@ -86,6 +216,222 @@ func TestParseDiagnosticStatusBoundsAndIdentity(t *testing.T) {
 			t.Fatalf("%s accepted field=%s err=%v", name, field, err)
 		}
 	}
+}
+
+func nativeMTPCanaryRequestJSON(extra map[string]string) string {
+	runtimeTupleSHA256 := nativeMTPTestRuntimeTupleSHA256()
+	return nativeMTPJSONObject(`{
+		"type":"native_mtp_canary_request_v1",
+		"version":1,
+		"request_id":"canary-1",
+		"provider_id":"provider-a",
+		"assigned_id":"assigned-a",
+		"model_id":"model-a",
+		"model_hash":"`+strings.Repeat("a", 64)+`",
+		"model_hash_algorithm":"macprovider.snapshot-manifest.v1",
+		"provider_revision":"1.8.123",
+		"runtime_revision":"mlx-swift-lm-e874140",
+		"target_generation":7,
+		"tokenizer_digest":"`+strings.Repeat("b", 64)+`",
+		"artifact_digest":"`+strings.Repeat("c", 64)+`",
+		"manifest_digest":"`+strings.Repeat("d", 64)+`",
+		"sidecar_digest":"`+strings.Repeat("e", 64)+`",
+		"provider_binary_sha256":"`+strings.Repeat("f", 64)+`",
+		"runtime_cdhash":"`+strings.Repeat("1", 64)+`",
+		"cache_namespace":"cache-a",
+		"state_digest":"`+strings.Repeat("2", 64)+`",
+		"runtime_tuple":`+nativeMTPRuntimeTupleJSON()+`,
+		"challenge_id":"challenge-a",
+		"challenge_corpus_sha256":"`+strings.Repeat("3", 64)+`",
+		"challenge_bank_sha256":"`+strings.Repeat("4", 64)+`",
+		"native_mtp_admission_tuple_sha256":"`+strings.Repeat("8", 64)+`",
+		"served_snapshot_id":"snapshot-a",
+		"native_mtp_runtime_tuple_sha256":"`+runtimeTupleSHA256+`",
+		"expected_token_id_sha256":"`+strings.Repeat("5", 64)+`",
+		"expected_terminal_reason":"passed",
+		"expected_counters":{"accepted":2,"rejected":1,"bonus":0,"committed":3},
+		"expected_committed_state_sha256":"`+strings.Repeat("2", 64)+`",
+		"nonce":"0123456789abcdef0123456789abcdef",
+		"request_digest":"`+strings.Repeat("6", 64)+`",
+		"issued_at":"2026-09-28T00:00:00Z",
+		"expires_at":"2026-09-28T00:01:00Z",
+		"prompt_token_ids":[1,2,3],
+		"max_completion_tokens":8,
+		"proposal_depth":2
+	}`, extra)
+}
+
+func nativeMTPCanaryResultJSON(extra map[string]string) string {
+	result := nativeMTPTestCanaryResult()
+	return nativeMTPJSONObject(`{
+		"type":"native_mtp_canary_result_v1",
+		"version":1,
+		"request_id":"`+result.RequestID+`",
+		"provider_id":"`+result.ProviderID+`",
+		"assigned_id":"`+result.AssignedID+`",
+		"request_digest":"`+result.RequestDigest+`",
+		"result_digest":"`+result.ResultDigest+`",
+		"target_generation":7,
+		"provider_revision":"`+result.ProviderRevision+`",
+		"runtime_revision":"`+result.RuntimeRevision+`",
+		"challenge_id":"`+result.ChallengeID+`",
+		"challenge_bank_sha256":"`+result.ChallengeBankSHA256+`",
+		"nonce":"`+result.Nonce+`",
+		"native_mtp_runtime_tuple_sha256":"`+result.NativeMTPRuntimeTupleSHA256+`",
+		"expected_token_id_sha256":"`+result.ExpectedTokenIDSHA256+`",
+		"actual_token_id_sha256":"`+result.ActualTokenIDSHA256+`",
+		"terminal_reason":"`+result.TerminalReason+`",
+		"counters":{"accepted":2,"rejected":1,"bonus":0,"committed":3},
+		"committed_state_sha256":"`+result.CommittedStateSHA256+`",
+		"actual_decode_path":"`+result.ActualDecodePath+`",
+		"fallback_used":true,
+		"runtime_tuple":`+nativeMTPRuntimeTupleJSON()+`
+	}`, extra)
+}
+
+func nativeMTPTestCanaryResult() NativeMTPCanaryResult {
+	result := NativeMTPCanaryResult{
+		Type:                        "native_mtp_canary_result_v1",
+		Version:                     1,
+		RequestID:                   "canary-1",
+		ProviderID:                  "provider-a",
+		AssignedID:                  "assigned-a",
+		RequestDigest:               strings.Repeat("6", 64),
+		TargetGeneration:            7,
+		ProviderRevision:            "1.8.123",
+		RuntimeRevision:             "mlx-swift-lm-e874140",
+		ChallengeID:                 "challenge-a",
+		ChallengeBankSHA256:         strings.Repeat("4", 64),
+		Nonce:                       "0123456789abcdef0123456789abcdef",
+		NativeMTPRuntimeTupleSHA256: nativeMTPTestRuntimeTupleSHA256(),
+		ExpectedTokenIDSHA256:       strings.Repeat("5", 64),
+		ActualTokenIDSHA256:         strings.Repeat("5", 64),
+		TerminalReason:              "passed",
+		Counters: NativeMTPCanaryCounters{
+			Accepted:  2,
+			Rejected:  1,
+			Bonus:     0,
+			Committed: 3,
+		},
+		CommittedStateSHA256: strings.Repeat("2", 64),
+		ActualDecodePath:     "native_mtp",
+		FallbackUsed:         true,
+		RuntimeTuple:         nativeMTPTestRuntimeTuple(),
+	}
+	result.ResultDigest = nativeMTPCanaryResultDigest(result)
+	return result
+}
+
+func nativeMTPTestRuntimeTuple() NativeMTPRuntimeTuple {
+	return NativeMTPRuntimeTuple{
+		ModelID:              "model-a",
+		ModelHash:            strings.Repeat("a", 64),
+		ModelHashAlgorithm:   "macprovider.snapshot-manifest.v1",
+		ProviderRevision:     "1.8.123",
+		RuntimeRevision:      "mlx-swift-lm-e874140",
+		TokenizerDigest:      strings.Repeat("b", 64),
+		ArtifactDigest:       strings.Repeat("c", 64),
+		ManifestDigest:       strings.Repeat("d", 64),
+		SidecarDigest:        strings.Repeat("e", 64),
+		ProviderBinarySHA256: strings.Repeat("f", 64),
+		RuntimeCDHash:        strings.Repeat("1", 64),
+		CacheNamespace:       "cache-a",
+		StateDigest:          strings.Repeat("2", 64),
+		ProposalDepth:        2,
+	}
+}
+
+func nativeMTPTupleOfferJSON(extra map[string]string) string {
+	runtimeTupleSHA256 := nativeMTPTestRuntimeTupleSHA256()
+	return nativeMTPJSONObject(`{
+		"type":"native_mtp_tuple_offer_v1",
+		"version":1,
+		"provider_id":"provider-a",
+		"assigned_id":"assigned-a",
+		"target_generation":7,
+		"provider_revision":"1.8.123",
+		"runtime_revision":"mlx-swift-lm-e874140",
+		"runtime_tuple":`+nativeMTPRuntimeTupleJSON()+`,
+		"native_mtp_admission_tuple_sha256":"`+strings.Repeat("8", 64)+`",
+		"served_snapshot_id":"snapshot-a",
+		"native_mtp_runtime_tuple_sha256":"`+runtimeTupleSHA256+`",
+		"sidecar_digest":"`+strings.Repeat("e", 64)+`",
+		"challenge_bank_release_id":"bank-2026-09-28",
+		"challenge_bank_sha256":"`+strings.Repeat("4", 64)+`",
+		"challenge_corpus_sha256":"`+strings.Repeat("3", 64)+`",
+		"selftest_profile":"native_mtp_selftest_v1",
+		"selftest_pass_digest":"`+strings.Repeat("9", 64)+`",
+		"selftest_observed_at":"2026-09-28T00:00:00Z"
+	}`, extra)
+}
+
+func nativeMTPTupleDisableJSON(extra map[string]string) string {
+	disable := NativeMTPTupleDisable{
+		ProviderID:                    "provider-a",
+		AssignedID:                    "assigned-a",
+		TargetGeneration:              7,
+		NativeMTPAdmissionTupleSHA256: strings.Repeat("8", 64),
+		ServedSnapshotID:              "snapshot-a",
+		NativeMTPRuntimeTupleSHA256:   nativeMTPTestRuntimeTupleSHA256(),
+		Reason:                        "mismatch",
+		Nonce:                         "0123456789abcdef0123456789abcdef",
+		IssuedAt:                      "2026-09-28T00:00:00Z",
+	}
+	return nativeMTPJSONObject(`{
+		"type":"native_mtp_tuple_disable_v1",
+		"version":1,
+		"provider_id":"`+disable.ProviderID+`",
+		"assigned_id":"`+disable.AssignedID+`",
+		"target_generation":7,
+		"native_mtp_admission_tuple_sha256":"`+disable.NativeMTPAdmissionTupleSHA256+`",
+		"served_snapshot_id":"`+disable.ServedSnapshotID+`",
+		"native_mtp_runtime_tuple_sha256":"`+disable.NativeMTPRuntimeTupleSHA256+`",
+		"reason":"`+disable.Reason+`",
+		"nonce":"`+disable.Nonce+`",
+		"issued_at":"`+disable.IssuedAt+`",
+		"request_digest":"`+nativeMTPTupleDisableRequestDigest(disable)+`"
+	}`, extra)
+}
+
+func nativeMTPRuntimeTupleJSON() string {
+	return `{
+		"model_id":"model-a",
+		"model_hash":"` + strings.Repeat("a", 64) + `",
+		"model_hash_algorithm":"macprovider.snapshot-manifest.v1",
+		"provider_revision":"1.8.123",
+		"runtime_revision":"mlx-swift-lm-e874140",
+		"tokenizer_digest":"` + strings.Repeat("b", 64) + `",
+		"artifact_digest":"` + strings.Repeat("c", 64) + `",
+		"manifest_digest":"` + strings.Repeat("d", 64) + `",
+		"sidecar_digest":"` + strings.Repeat("e", 64) + `",
+		"provider_binary_sha256":"` + strings.Repeat("f", 64) + `",
+		"runtime_cdhash":"` + strings.Repeat("1", 64) + `",
+		"cache_namespace":"cache-a",
+		"state_digest":"` + strings.Repeat("2", 64) + `",
+		"proposal_depth":2
+	}`
+}
+
+func nativeMTPTestRuntimeTupleSHA256() string {
+	return nativeMTPRuntimeTupleIdentitySHA256(
+		"provider-a",
+		"assigned-a",
+		7,
+		strings.Repeat("8", 64),
+		"snapshot-a",
+	)
+}
+
+func nativeMTPJSONObject(base string, extra map[string]string) string {
+	if len(extra) == 0 {
+		return base
+	}
+	trimmed := strings.TrimSpace(base)
+	trimmed = strings.TrimSuffix(trimmed, "}")
+	for key, value := range extra {
+		trimmed += `,"` + key + `":` + value
+	}
+	return trimmed + "}"
 }
 
 func TestHandleDiagnosticStatusRequiresAssignedSession(t *testing.T) {

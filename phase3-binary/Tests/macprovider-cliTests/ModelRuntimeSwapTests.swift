@@ -5,6 +5,240 @@ import XCTest
 @testable import macprovider_cli
 
 final class ModelRuntimeSwapTests: XCTestCase {
+    func testNativeMTPAdmissionBindsRunningBuildIdentity() {
+        let source = String(repeating: "a", count: 40)
+        let build = String(repeating: "b", count: 64)
+        let cdHash = String(repeating: "1", count: 40)
+        let target = String(repeating: "c", count: 64)
+        let capability = makeNativeMTPAdmissionCapability(
+            providerRevision: source,
+            targetArtifactSHA256: target,
+            spec023SourceCommit: source,
+            spec023BuildDigestSHA256: build,
+            spec023LiveExecutableCDHash: cdHash
+        )
+        let running = ModelRuntime.NativeMTPRunningBuildIdentity(
+            sourceCommit: source,
+            reproducibleBuildSHA256: build,
+            liveExecutableCDHash: cdHash
+        )
+
+        XCTAssertTrue(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
+            capability,
+            targetModelRevision: target,
+            runningBuildIdentity: running
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
+            capability,
+            targetModelRevision: target,
+            runningBuildIdentity: ModelRuntime.NativeMTPRunningBuildIdentity(
+                sourceCommit: String(repeating: "d", count: 40),
+                reproducibleBuildSHA256: build,
+                liveExecutableCDHash: cdHash
+            )
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
+            capability,
+            targetModelRevision: target,
+            runningBuildIdentity: ModelRuntime.NativeMTPRunningBuildIdentity(
+                sourceCommit: source,
+                reproducibleBuildSHA256: String(repeating: "e", count: 64),
+                liveExecutableCDHash: cdHash
+            )
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
+            capability,
+            targetModelRevision: target,
+            runningBuildIdentity: ModelRuntime.NativeMTPRunningBuildIdentity(
+                sourceCommit: source,
+                reproducibleBuildSHA256: build,
+                liveExecutableCDHash: cdHash,
+                upstreamMLXSwiftLMRevision: String(repeating: "f", count: 40)
+            )
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
+            capability,
+            targetModelRevision: String(repeating: "0", count: 64),
+            runningBuildIdentity: running
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
+            makeNativeMTPAdmissionCapability(
+                providerRevision: source,
+                targetArtifactSHA256: target,
+                spec023SourceCommit: source,
+                spec023BuildDigestSHA256: String(repeating: "2", count: 64),
+                spec023LiveExecutableCDHash: cdHash
+            ),
+            targetModelRevision: target,
+            runningBuildIdentity: running
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPAdmissionMatchesRunningBuildForTest(
+            makeNativeMTPAdmissionCapability(
+                providerRevision: source,
+                targetArtifactSHA256: target,
+                spec023SourceCommit: source,
+                spec023BuildDigestSHA256: build,
+                spec023LiveExecutableCDHash: String(repeating: "3", count: 40)
+            ),
+            targetModelRevision: target,
+            runningBuildIdentity: running
+        ))
+    }
+
+    func testNativeMTPRunningBuildIdentityRejectsMalformedLiveCDHash() {
+        let source = String(repeating: "a", count: 40)
+        let installedArtifactDigest = String(repeating: "1", count: 64)
+        let liveExecutableCDHash = String(repeating: "3", count: 40)
+        let compatibilitySetID = "Augustas11/macprovider:v1.2.3@\(source)"
+        let running = try! XCTUnwrap(ModelRuntime.nativeMTPRunningBuildIdentityForTest(
+            compatibilitySetID: compatibilitySetID,
+            reproducibleBuildSHA256: installedArtifactDigest,
+            liveExecutableCDHash: liveExecutableCDHash
+        ))
+
+        XCTAssertEqual(running.sourceCommit, source)
+        XCTAssertEqual(running.reproducibleBuildSHA256, installedArtifactDigest)
+        XCTAssertEqual(running.liveExecutableCDHash, liveExecutableCDHash)
+        XCTAssertNil(ModelRuntime.nativeMTPRunningBuildIdentityForTest(
+            compatibilitySetID: compatibilitySetID,
+            reproducibleBuildSHA256: installedArtifactDigest,
+            liveExecutableCDHash: String(repeating: "4", count: 64)
+        ))
+        XCTAssertNil(ModelRuntime.nativeMTPRunningBuildIdentityForTest(
+            compatibilitySetID: compatibilitySetID,
+            reproducibleBuildSHA256: installedArtifactDigest,
+            liveExecutableCDHash: String(repeating: "G", count: 40)
+        ))
+    }
+
+    func testNativeMTPCapabilityRejectsSignedFieldMismatches() {
+        let modelCapabilities = PagedKVRuntimeModelCapabilities(
+            modelFamily: "qwen",
+            requiresMoEDispatch: false,
+            hybridDecoderArchitectureVerified: true
+        )
+        func supported(_ capability: NativeMTPAdmissionCapability) -> Bool {
+            ModelRuntime.nativeMTPAdmissionCapabilitySupportedForTest(
+                capability,
+                canonicalCacheClass: "paged_kv",
+                modelCapabilities: modelCapabilities
+            )
+        }
+
+        XCTAssertTrue(supported(makeNativeMTPAdmissionCapability()))
+        XCTAssertFalse(supported(makeNativeMTPAdmissionCapability(familyAdapter: "qwen3_mtp_v1")))
+        XCTAssertFalse(supported(makeNativeMTPAdmissionCapability(sourceLayout: "checkpoint_mtp")))
+        XCTAssertFalse(supported(makeNativeMTPAdmissionCapability(predictionLayerCount: 2)))
+        XCTAssertFalse(supported(makeNativeMTPAdmissionCapability(cacheClass: "kv_cache_simple")))
+        XCTAssertFalse(supported(makeNativeMTPAdmissionCapability(stateClass: "stageable_rewindable")))
+    }
+
+    func testNativeMTPArtifactObservationMustMatchSignedCapability() {
+        let capability = makeNativeMTPAdmissionCapability(
+            predictionLayerCount: 2,
+            maxProposalDepth: 2,
+            quantization: NativeMTPAdmissionSidecar.Quantization(
+                target: "mlx_affine_4bit",
+                mtp: "mlx_affine_4bit"
+            )
+        )
+        func observation(
+            targetFormat: NativeMTPObservedArtifactFormat = .mlxAffine4(bits: 4, groupSize: 32),
+            mtpFormat: NativeMTPObservedArtifactFormat = .mlxAffine4(bits: 4, groupSize: 32),
+            targetLayerCount: Int = 2,
+            mtpLayerCount: Int = 2
+        ) -> NativeMTPArtifactPairObservation {
+            NativeMTPArtifactPairObservation(
+                target: NativeMTPArtifactObservation(
+                    format: targetFormat,
+                    mtpPredictionLayerCount: targetLayerCount,
+                    tensorPairs: []
+                ),
+                mtp: NativeMTPArtifactObservation(
+                    format: mtpFormat,
+                    mtpPredictionLayerCount: mtpLayerCount,
+                    tensorPairs: []
+                )
+            )
+        }
+
+        XCTAssertTrue(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
+            observation(),
+            admissionCapability: capability
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
+            nil,
+            admissionCapability: capability
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
+            observation(targetFormat: .mlxMXFP8(bits: 8, groupSize: 32)),
+            admissionCapability: capability
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
+            observation(mtpLayerCount: 1),
+            admissionCapability: capability
+        ))
+    }
+
+    func testNativeMTPCapturedTokenizerMustBeCanonicalTargetTokenizer() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ModelRuntimeSwapTests-\(UUID().uuidString)", isDirectory: true)
+        let target = root.appendingPathComponent("target", isDirectory: true)
+        let nested = target.appendingPathComponent("nested", isDirectory: true)
+        let outside = root.appendingPathComponent("outside", isDirectory: true)
+        try? FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        XCTAssertEqual(
+            ModelRuntime.nativeMTPCapturedTokenizerDirectoryForTest(
+                targetURL: target,
+                tokenizerURL: target.appendingPathComponent("tokenizer.json")
+            ),
+            target
+        )
+        XCTAssertNil(ModelRuntime.nativeMTPCapturedTokenizerDirectoryForTest(
+            targetURL: target,
+            tokenizerURL: nested.appendingPathComponent("tokenizer.json")
+        ))
+        XCTAssertNil(ModelRuntime.nativeMTPCapturedTokenizerDirectoryForTest(
+            targetURL: target,
+            tokenizerURL: target.appendingPathComponent("tokenizer.model")
+        ))
+        XCTAssertNil(ModelRuntime.nativeMTPCapturedTokenizerDirectoryForTest(
+            targetURL: target,
+            tokenizerURL: outside.appendingPathComponent("tokenizer.json")
+        ))
+    }
+
+    func testNativeMTPCapturedManifestMustBeMTPConfig() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ModelRuntimeSwapTests-\(UUID().uuidString)", isDirectory: true)
+        let mtp = root.appendingPathComponent("mtp", isDirectory: true)
+        let nested = mtp.appendingPathComponent("nested", isDirectory: true)
+        let outside = root.appendingPathComponent("outside", isDirectory: true)
+        try? FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        XCTAssertTrue(ModelRuntime.nativeMTPCapturedManifestPathMatchesMTPForTest(
+            mtpURL: mtp,
+            manifestURL: mtp.appendingPathComponent("config.json")
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPCapturedManifestPathMatchesMTPForTest(
+            mtpURL: mtp,
+            manifestURL: mtp.appendingPathComponent("mtp-manifest.json")
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPCapturedManifestPathMatchesMTPForTest(
+            mtpURL: mtp,
+            manifestURL: nested.appendingPathComponent("config.json")
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPCapturedManifestPathMatchesMTPForTest(
+            mtpURL: mtp,
+            manifestURL: outside.appendingPathComponent("config.json")
+        ))
+    }
+
     func testRuntimeNeverInfersCanonicalAlgorithmFromHashPresence() async {
         let hash = String(repeating: "a", count: 64)
         let legacy = makeRuntime(modelID: "model-a", modelHash: hash, warmSwapEnabled: false)
@@ -723,7 +957,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
 
         XCTAssertGreaterThanOrEqual(matches, 2, "non-streaming and streaming serving decode must not block Swift cooperative tasks")
         XCTAssertFalse(source.contains("let result: GenerateResult = generate(input: iteratorInput"))
-        XCTAssertTrue(source.contains("return try await blockingInferenceExecutor.run { inferenceCancellation in\n                    let draftCache = draftContext.model.newCache(parameters: parameters)"))
+        XCTAssertTrue(source.contains("return try await blockingInferenceExecutor.run { inferenceCancellation in\n                    let draftCache = try draftContext.model.newCache(parameters: parameters)"))
         XCTAssertTrue(source.contains("SpeculativeTokenIterator("), "speculative decode must use the blocking iterator route")
         XCTAssertFalse(source.contains("let stream = try generate(\n                    input: input,\n                    cache: cache"))
         XCTAssertFalse(source.contains("generateTokens("), "raw speculative startup/canary generation must not use AsyncStream token generation")
@@ -1302,6 +1536,71 @@ final class ModelRuntimeSwapTests: XCTestCase {
             modelHash: modelHash
         )
     }
+
+    private func makeNativeMTPAdmissionCapability(
+        providerRevision: String = String(repeating: "a", count: 40),
+        upstreamRevision: String = KVBuildIdentity.mlxSwiftLMRevision,
+        targetArtifactSHA256: String = String(repeating: "c", count: 64),
+        familyAdapter: String = "qwen3_5_mtp_v1",
+        sourceLayout: String = "separate_artifact",
+        predictionLayerCount: Int = 1,
+        maxProposalDepth: Int = 1,
+        completeWindowBytesByDepth: [Int] = [8, 32],
+        throughputDeltaPPM: Int = 0,
+        maxPromptTokens: Int = 4096,
+        maxCompletionTokens: Int = 256,
+        cacheClass: String = "paged_kv",
+        stateClass: String = "hybrid_stageable_rewindable",
+        quantization: NativeMTPAdmissionSidecar.Quantization = NativeMTPAdmissionSidecar.Quantization(
+            target: "mlx_affine_4bit",
+            mtp: "mlx_affine_4bit"
+        ),
+        spec023SourceCommit: String = String(repeating: "a", count: 40),
+        spec023BuildDigestSHA256: String = String(repeating: "b", count: 64),
+        spec023LiveExecutableCDHash: String = String(repeating: "1", count: 40)
+    ) -> NativeMTPAdmissionCapability {
+        NativeMTPAdmissionCapability(
+            tupleSHA256: String(repeating: "1", count: 64),
+            sidecarSHA256: String(repeating: "0", count: 64),
+            modelID: "mlx-community/Qwen3.5-9B-4bit",
+            modelRevision: targetArtifactSHA256,
+            targetArtifactSHA256: targetArtifactSHA256,
+            mtpArtifactSHA256: String(repeating: "2", count: 64),
+            tokenizerSHA256: String(repeating: "3", count: 64),
+            mtpManifestSHA256: String(repeating: "4", count: 64),
+            familyAdapter: familyAdapter,
+            sourceLayout: sourceLayout,
+            predictionLayerCount: predictionLayerCount,
+            maxProposalDepth: maxProposalDepth,
+            completeWindowBytesByDepth: completeWindowBytesByDepth,
+            throughputDeltaPPM: throughputDeltaPPM,
+            maxPromptTokens: maxPromptTokens,
+            maxCompletionTokens: maxCompletionTokens,
+            cacheClass: cacheClass,
+            stateClass: stateClass,
+            quantization: quantization,
+            providerRevision: providerRevision,
+            upstreamMLXSwiftLMRevision: upstreamRevision,
+            qualifiedSlots: 2,
+            spec023ReleaseID: "native-mtp-test",
+            spec023SourceCommit: spec023SourceCommit,
+            spec023BuildDigestSHA256: spec023BuildDigestSHA256,
+            spec023LiveExecutableCDHash: spec023LiveExecutableCDHash,
+            evidenceArtifactSHA256: [String(repeating: "5", count: 64)],
+            challengeBankSignerKeyID: "native-mtp-selftest-test",
+            revocationSignerKeyID: "native-mtp-revocation-test",
+            selfTestChallengeBank: NativeMTPSelfTestChallengeBank(
+                releaseID: "native-mtp-test",
+                challengeBankPath: "native-mtp-selftest-bank.json",
+                challengeBankSHA256: String(repeating: "6", count: 64),
+                signaturePath: "native-mtp-selftest-bank.json.sig",
+                signerKeyID: "native-mtp-selftest-test",
+                signatureSHA256: String(repeating: "7", count: 64)
+            ),
+            capturedArtifacts: nil
+        )
+    }
+
 }
 
 private actor InFlightProbe {

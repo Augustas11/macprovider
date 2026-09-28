@@ -7,6 +7,25 @@ from scripts.read_swiftpm_pins import read_pins
 from scripts.compare_upstream_watch import material_changes, merge_snapshot
 
 
+WATCH_BLOCKERS = (
+    "mlx_swift_lm_406_compile_kv_offset",
+    "mlx_swift_lm_364_gemma_moe",
+    "mlx_swift_lm_312_quantized_cache_ownership",
+    "mlx_swift_lm_453_typed_cache_storage",
+    "mlx_swift_lm_424_speculative_cache_wrap",
+    "mlx_swift_lm_518_remote_package_unsafe_flags",
+    "mlx_swift_lm_351_qwen_mtp",
+    "mlx_swift_lm_516_mtp_sliding_window",
+    "mlx_swift_lm_505_mtp_sliding_window_rewind",
+    "mlx_swift_lm_510_mamba_hybrid_rewind",
+    "mlx_swift_lm_545_qwen38_mtp",
+    "mlx_swift_lm_581_resumable_qwen_mtp",
+    "mlx_swift_lm_584_rotating_cache_trim",
+    "mlx_swift_lm_622_exact_rotating_cache_rewinds",
+    "mlx_swift_lm_645_public_mtp_transactions",
+)
+
+
 class SwiftPMPinParsingTests(unittest.TestCase):
     def test_reads_versions_from_swiftpm_state_objects(self):
         fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
@@ -43,6 +62,53 @@ class SwiftPMPinParsingTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unexpected SwiftPM source location"):
                 read_pins(resolved)
 
+    def test_accepts_spec048_mlx_swift_lm_fork_at_exact_revision_only(self):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
+        payload["pins"][1]["state"] = {
+            "revision": "e874140ecb5b04aeb445eb3837d48f7b187b867e"
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            resolved = Path(temporary) / "Package.resolved"
+            resolved.write_text(json.dumps(payload))
+
+            pins = read_pins(resolved)
+
+        self.assertEqual(
+            pins["mlx_swift_lm"],
+            "e874140ecb5b04aeb445eb3837d48f7b187b867e",
+        )
+        self.assertEqual(
+            pins["mlx_swift_lm_revision"],
+            "e874140ecb5b04aeb445eb3837d48f7b187b867e",
+        )
+
+    def test_fails_closed_when_spec048_fork_uses_unreviewed_revision(self):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        payload["pins"][1]["location"] = "https://github.com/Augustas11/mlx-swift-lm.git"
+        payload["pins"][1]["state"] = {
+            "revision": "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57"
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            resolved = Path(temporary) / "Package.resolved"
+            resolved.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "unexpected SwiftPM source location"):
+                read_pins(resolved)
+
+    def test_fails_closed_when_upstream_mlx_swift_lm_is_revision_only(self):
+        fixture = Path(__file__).with_name("fixtures") / "package-resolved-v2.json"
+        payload = json.loads(fixture.read_text())
+        payload["pins"][1]["state"] = {
+            "revision": "e874140ecb5b04aeb445eb3837d48f7b187b867e"
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            resolved = Path(temporary) / "Package.resolved"
+            resolved.write_text(json.dumps(payload))
+            with self.assertRaisesRegex(ValueError, "missing required SwiftPM pins"):
+                read_pins(resolved)
+
 
 class UpstreamWatchComparisonTests(unittest.TestCase):
     @staticmethod
@@ -56,6 +122,15 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
                 "mlx_swift_lm_453_typed_cache_storage": {"state": "MERGED", "merged_at": "x"},
                 "mlx_swift_lm_424_speculative_cache_wrap": {"state": "OPEN"},
                 "mlx_swift_lm_518_remote_package_unsafe_flags": {"state": "OPEN"},
+                "mlx_swift_lm_351_qwen_mtp": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_516_mtp_sliding_window": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_505_mtp_sliding_window_rewind": {"state": "OPEN"},
+                "mlx_swift_lm_510_mamba_hybrid_rewind": {"state": "OPEN"},
+                "mlx_swift_lm_545_qwen38_mtp": {"state": "OPEN"},
+                "mlx_swift_lm_581_resumable_qwen_mtp": {"state": "OPEN"},
+                "mlx_swift_lm_584_rotating_cache_trim": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_622_exact_rotating_cache_rewinds": {"state": "OPEN"},
+                "mlx_swift_lm_645_public_mtp_transactions": {"state": "OPEN"},
             },
             "releases": {
                 "mlx_swift_latest": {"tag": "0.31.6"},
@@ -63,7 +138,11 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
                 "swift_transformers_latest": {"tag": "1.3.3"},
                 "swift_jinja_latest": {"tag": "2.4.2"},
             },
-            "implementation_signals": {"kvcache_offset_graph_traceable": False},
+            "implementation_signals": {
+                "kvcache_offset_graph_traceable": False,
+                "native_mtp_required_merges_in_latest_release": False,
+                "native_mtp_public_row_mapped_transactions_reviewed": False,
+            },
         }
 
     def test_existing_newer_upstream_tag_is_not_a_change_every_run(self):
@@ -76,6 +155,15 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
                 "mlx_swift_lm_453_typed_cache_storage": {"state": "MERGED", "merged_at": "x"},
                 "mlx_swift_lm_424_speculative_cache_wrap": {"state": "OPEN"},
                 "mlx_swift_lm_518_remote_package_unsafe_flags": {"state": "OPEN"},
+                "mlx_swift_lm_351_qwen_mtp": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_516_mtp_sliding_window": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_505_mtp_sliding_window_rewind": {"state": "OPEN"},
+                "mlx_swift_lm_510_mamba_hybrid_rewind": {"state": "OPEN"},
+                "mlx_swift_lm_545_qwen38_mtp": {"state": "OPEN"},
+                "mlx_swift_lm_581_resumable_qwen_mtp": {"state": "OPEN"},
+                "mlx_swift_lm_584_rotating_cache_trim": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_622_exact_rotating_cache_rewinds": {"state": "OPEN"},
+                "mlx_swift_lm_645_public_mtp_transactions": {"state": "OPEN"},
             },
             "releases": {
                 "mlx_swift_latest": {"tag": "0.31.6"},
@@ -83,7 +171,11 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
                 "swift_transformers_latest": {"tag": "1.3.3"},
                 "swift_jinja_latest": {"tag": "2.4.2"},
             },
-            "implementation_signals": {"kvcache_offset_graph_traceable": False},
+            "implementation_signals": {
+                "kvcache_offset_graph_traceable": False,
+                "native_mtp_required_merges_in_latest_release": False,
+                "native_mtp_public_row_mapped_transactions_reviewed": False,
+            },
         }
         self.assertEqual(material_changes(baseline, baseline), (False, "unchanged"))
 
@@ -97,6 +189,15 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
                 "mlx_swift_lm_453_typed_cache_storage": {"state": "MERGED", "merged_at": "x"},
                 "mlx_swift_lm_424_speculative_cache_wrap": {"state": "OPEN"},
                 "mlx_swift_lm_518_remote_package_unsafe_flags": {"state": "OPEN"},
+                "mlx_swift_lm_351_qwen_mtp": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_516_mtp_sliding_window": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_505_mtp_sliding_window_rewind": {"state": "OPEN"},
+                "mlx_swift_lm_510_mamba_hybrid_rewind": {"state": "OPEN"},
+                "mlx_swift_lm_545_qwen38_mtp": {"state": "OPEN"},
+                "mlx_swift_lm_581_resumable_qwen_mtp": {"state": "OPEN"},
+                "mlx_swift_lm_584_rotating_cache_trim": {"state": "MERGED", "merged_at": "x"},
+                "mlx_swift_lm_622_exact_rotating_cache_rewinds": {"state": "OPEN"},
+                "mlx_swift_lm_645_public_mtp_transactions": {"state": "OPEN"},
             },
             "releases": {
                 "mlx_swift_latest": {"tag": "0.31.6"},
@@ -104,7 +205,11 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
                 "swift_transformers_latest": {"tag": "1.3.3"},
                 "swift_jinja_latest": {"tag": "2.4.2"},
             },
-            "implementation_signals": {"kvcache_offset_graph_traceable": False},
+            "implementation_signals": {
+                "kvcache_offset_graph_traceable": False,
+                "native_mtp_required_merges_in_latest_release": False,
+                "native_mtp_public_row_mapped_transactions_reviewed": False,
+            },
         }
         new = json.loads(json.dumps(old))
         new["releases"]["mlx_swift_lm_latest"]["tag"] = "3.32.0"
@@ -116,19 +221,16 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
     def test_resolved_revision_change_is_material(self):
         old = {
             "macprovider_pins": {"mlx_swift": "0.31.4", "mlx_swift_revision": "old"},
-            "blockers": {key: {"state": "OPEN"} for key in (
-                "mlx_swift_lm_406_compile_kv_offset",
-                "mlx_swift_lm_364_gemma_moe",
-                "mlx_swift_lm_312_quantized_cache_ownership",
-                "mlx_swift_lm_453_typed_cache_storage",
-                "mlx_swift_lm_424_speculative_cache_wrap",
-                "mlx_swift_lm_518_remote_package_unsafe_flags",
-            )},
+            "blockers": {key: {"state": "OPEN"} for key in WATCH_BLOCKERS},
             "releases": {key: {"tag": None} for key in (
                 "mlx_swift_lm_latest", "mlx_swift_latest",
                 "swift_transformers_latest", "swift_jinja_latest",
             )},
-            "implementation_signals": {"kvcache_offset_graph_traceable": False},
+            "implementation_signals": {
+                "kvcache_offset_graph_traceable": False,
+                "native_mtp_required_merges_in_latest_release": False,
+                "native_mtp_public_row_mapped_transactions_reviewed": False,
+            },
         }
         new = json.loads(json.dumps(old))
         new["macprovider_pins"]["mlx_swift_revision"] = "new"
@@ -137,10 +239,31 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
             (True, "resolved production pin graph changed"),
         )
 
+    def test_native_mtp_immutable_dependency_exception_change_is_material(self):
+        old = self._baseline()
+        old["native_mtp_immutable_dependency_exception"] = {
+            "mlx_swift_lm": {
+                "location": "https://github.com/Augustas11/mlx-swift-lm.git",
+                "revision": "old",
+            }
+        }
+        new = json.loads(json.dumps(old))
+        new["native_mtp_immutable_dependency_exception"]["mlx_swift_lm"][
+            "revision"
+        ] = "e874140ecb5b04aeb445eb3837d48f7b187b867e"
+
+        changed, reason = material_changes(old, new)
+
+        self.assertTrue(changed)
+        self.assertIn("native MTP immutable-dependency exception changed", reason)
+
     def test_snapshot_merge_preserves_reviewed_metadata_and_watchlist(self):
         old = self._baseline()
         old["blockers"]["mlx_swift_lm_364_gemma_moe"]["status"] = "awaiting_release_tag"
-        old["trackers"] = {"mlx_swift_lm_364_gemma_moe": "#700"}
+        old["trackers"] = {
+            "mlx_swift_lm_364_gemma_moe": "#700",
+            "native_mtp": "https://github.com/Augustas11/macprovider/issues/1770",
+        }
         old["watchlist"] = {"omlx": {"latest_release_tag": "v0.5.7"}}
         old["blockers"]["reviewed_only"] = {"state": "OPEN", "status": "blocked"}
         new = self._baseline()
@@ -153,11 +276,124 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
             "awaiting_release_tag",
         )
         self.assertEqual(merged["trackers"]["mlx_swift_lm_364_gemma_moe"], "#700")
+        self.assertEqual(
+            merged["trackers"]["native_mtp"],
+            "https://github.com/Augustas11/macprovider/issues/1770",
+        )
         self.assertEqual(merged["watchlist"]["omlx"]["latest_release_tag"], "v0.5.7")
         self.assertEqual(merged["blockers"]["reviewed_only"]["status"], "blocked")
         self.assertEqual(
             merged["blockers"]["mlx_swift_lm_364_gemma_moe"]["updated_at"], "new"
         )
+
+    def test_snapshot_merge_preserves_reviewed_native_mtp_exception_metadata(self):
+        old = self._baseline()
+        old["native_mtp_immutable_dependency_exception"] = {
+            "mlx_swift_lm": {
+                "status": "reviewed_exception",
+                "directive": "SPEC-048 fork only",
+            }
+        }
+        live = self._baseline()
+        live["native_mtp_immutable_dependency_exception"] = {
+            "mlx_swift_lm": {
+                "location": "https://github.com/Augustas11/mlx-swift-lm.git",
+                "revision": "e874140ecb5b04aeb445eb3837d48f7b187b867e",
+            }
+        }
+
+        merged = merge_snapshot(old, live)
+
+        self.assertEqual(
+            merged["native_mtp_immutable_dependency_exception"]["mlx_swift_lm"][
+                "status"
+            ],
+            "reviewed_exception",
+        )
+        self.assertEqual(
+            merged["native_mtp_immutable_dependency_exception"]["mlx_swift_lm"][
+                "directive"
+            ],
+            "SPEC-048 fork only",
+        )
+        self.assertEqual(
+            merged["native_mtp_immutable_dependency_exception"]["mlx_swift_lm"][
+                "revision"
+            ],
+            "e874140ecb5b04aeb445eb3837d48f7b187b867e",
+        )
+
+    def test_native_mtp_required_merges_release_flip_is_material(self):
+        old = self._baseline()
+        new = json.loads(json.dumps(old))
+        new["implementation_signals"]["native_mtp_required_merges_in_latest_release"] = True
+
+        changed, reason = material_changes(old, new)
+
+        self.assertTrue(changed)
+        self.assertIn("native MTP required merge commits", reason)
+
+    def test_native_mtp_public_row_mapped_review_flip_is_material(self):
+        old = self._baseline()
+        new = json.loads(json.dumps(old))
+        new["implementation_signals"]["native_mtp_public_row_mapped_transactions_reviewed"] = True
+
+        changed, reason = material_changes(old, new)
+
+        self.assertTrue(changed)
+        self.assertIn("public row-mapped transaction API", reason)
+
+    def test_live_snapshot_preserves_human_reviewed_native_mtp_signals(self):
+        old = self._baseline()
+        old["implementation_signals"].update({
+            "native_mtp_public_row_mapped_transactions_reviewed": True,
+            "native_mtp_status": "ready_for_implementation",
+        })
+        live = self._baseline()
+        live["implementation_signals"].pop(
+            "native_mtp_public_row_mapped_transactions_reviewed"
+        )
+        live["implementation_signals"].pop("native_mtp_status", None)
+
+        merged = merge_snapshot(old, live)
+
+        self.assertTrue(
+            merged["implementation_signals"][
+                "native_mtp_public_row_mapped_transactions_reviewed"
+            ]
+        )
+        self.assertEqual(
+            merged["implementation_signals"]["native_mtp_status"],
+            "ready_for_implementation",
+        )
+        self.assertEqual(material_changes(old, merged), (False, "unchanged"))
+
+    def test_new_watch_blocker_key_is_material_not_a_compare_error(self):
+        old = self._baseline()
+        del old["blockers"]["mlx_swift_lm_351_qwen_mtp"]
+        new = self._baseline()
+
+        changed, reason = material_changes(old, new)
+
+        self.assertTrue(changed)
+        self.assertIn("mlx_swift_lm_351_qwen_mtp added", reason)
+
+    def test_public_mtp_transaction_issue_closure_is_material(self):
+        old = self._baseline()
+        new = json.loads(json.dumps(old))
+        new["blockers"]["mlx_swift_lm_645_public_mtp_transactions"].update({
+            "state": "CLOSED",
+            "closed_at": "2026-10-01T00:00:00Z",
+        })
+
+        changed, reason = material_changes(old, new)
+
+        self.assertTrue(changed)
+        self.assertIn(
+            "mlx_swift_lm_645_public_mtp_transactions state OPEN -> CLOSED",
+            reason,
+        )
+        self.assertIn("mlx_swift_lm_645_public_mtp_transactions closed", reason)
 
 
 if __name__ == "__main__":

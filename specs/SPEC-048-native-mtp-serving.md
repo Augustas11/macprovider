@@ -1,19 +1,19 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.0
+**Version:** 0.1.10
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.0",
+  "version": "0.1.10",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
   "authority_domains": ["native-mtp-serving"],
   "supersedes": [],
   "depends_on": ["SPEC-001", "SPEC-005", "SPEC-010", "SPEC-011", "SPEC-015", "SPEC-018", "SPEC-019", "SPEC-022", "SPEC-023", "SPEC-024", "SPEC-028", "SPEC-030", "SPEC-031", "SPEC-032", "SPEC-033", "SPEC-036", "SPEC-037", "SPEC-038", "SPEC-039", "SPEC-041"],
-  "implementation_status": "pending-reconciliation",
+  "implementation_status": "partial",
   "production_status": "pending-verification",
   "last_reconciled_commit": null,
   "last_reconciled_at": null,
@@ -23,7 +23,7 @@
     "verdict": "DECISION_REQUIRED",
     "owner": "@Augustas11",
     "issue": "https://github.com/Augustas11/macprovider/issues/1770",
-    "rationale": "Issue #1770 requires a native target-local MTP path, independent MXFP8 qualification, multi-row serving semantics, signed admission evidence, and real Apple-Silicon validation. No production implementation or signed journey evidence exists yet."
+    "rationale": "Issue #1770 has a branch-local native target-local MTP implementation with signed admission parsing, default-off selection, row-local transactions, status diagnostics, tuple revocation, provider self-test, and coordinator canary plumbing. Conformance and production remain pending until the frozen diff completes CI, Mac Studio hardware evidence, three-lane audits, and signed journey evidence. MXFP8 remains independently unqualified."
   }
 }
 ```
@@ -216,14 +216,32 @@ result, and the signed SPEC-023/SPEC-010 identity. The capability MUST bind:
 - hidden-state, embedding/head sharing, cache, and recurrent-state interfaces;
 - target and MTP tensor quantization modes;
 - cache/state classes proven stageable and rewindable;
-- supported request-feature matrix; and
-- exact provider and upstream MLX runtime revision used for qualification.
+- supported request-feature matrix;
+- exact provider and upstream MLX runtime revision used for qualification; and
+- the SPEC-023 `live_executable_cdhash` expected CodeDirectory identity for
+  the signed provider executable admitted to consume the tuple.
 
 Capability construction MUST fail closed for a missing, extra, duplicate,
 silently filtered, wrong-shape, wrong-dtype, unexpectedly quantized,
 unmanifested, or digest-mismatched required tensor; an unsupported cache/state
 class; a family-adapter mismatch; or a runtime revision outside the signed
 evidence tuple. Model-name matching alone MUST NOT establish capability.
+
+For the v0.1 `separate_artifact` Qwen 3.5 adapter, the signed `manifest`
+artifact MUST be the exact regular file `config.json` directly inside the
+captured MTP artifact directory. The digest MUST match the bytes parsed by the
+capability observer and then consumed by the upstream loader. The signed
+tokenizer artifact MUST likewise be the exact `tokenizer.json` directly inside
+the captured target directory used by the target tokenizer loader. An
+independent or merely descriptive manifest, tokenizer from another directory,
+or path alias MUST fail closed.
+
+The observer MUST inspect the same recursive set of `.safetensors` files that
+the pinned 3.31.4 loader can consume. It MUST reject symlinked or hidden weight
+files, scan every parsed tensor name before representation filters, and reject
+every target tensor the family sanitizer would silently discard, including any
+target name containing the `mtp.` namespace when `source_layout` is
+`separate_artifact`.
 
 Artifact resolution and parsing MUST reject path traversal, symlink escape,
 unexpected local or network references, malformed safetensors metadata,
@@ -268,6 +286,45 @@ operations require unstable or private dependency internals, production work
 is blocked until a reviewed upstream API is available. A commit pin may be
 used only under an explicitly reviewed immutable-dependency exception; a
 tagged release is the default production requirement.
+
+The first such exception is closed and exact:
+
+- repository: `https://github.com/Augustas11/mlx-swift-lm.git`;
+- revision: `e874140ecb5b04aeb445eb3837d48f7b187b867e`;
+- upstream base: `ml-explore/mlx-swift-lm@bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57`
+  (`3.31.4`);
+- reviewed surface: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
+  `MTPKVCacheTransactionPosition`, `MTPKVCacheTransactionCommit`, and
+  `reconcileMTPSharedKVState`; plus `MTPPackedVerificationCache`,
+  `MTPPackedVerificationRowMap`, `MTPPackedVerificationRowState`,
+  `MTPPackedVerificationOutput`, `MTPPackedVerificationError`, and
+  `verifyMTPPackedTargets`, including the strict
+  `requireContinuationState` overload for row-local multi-round continuation;
+  plus `MTPDrafterContainer.perform(nonSendable:_:)` for serialized movement
+  of caller-owned drafter state without model-global mutation or unsafe
+  `Sendable` capture; plus standalone Qwen 3.5 MTP checkpoint normalization,
+  `MTPPackedMambaBatchCache`, `MTPPackedMambaRowTransaction`, and the
+  `mtpPackedCheckpointIndex` contract needed for row-isolated commit across
+  hybrid attention/Mamba verification;
+- review date and owner: `2026-09-28`, `@Augustas11`;
+- mandatory exception re-review date: `2026-12-27`;
+- review gate: upstream-focused build-tests, MacProvider qualification and
+  real-hardware tests, plus an independent adversarial review with zero
+  Critical, High, or Medium findings; the prior transaction surface passed
+  15/15 focused upstream tests, the expanded surface compiled in the complete
+  upstream test bundle, and the real Qwen 3.5 target/MTP tuple passed the
+  Mac Studio ordinary-versus-native-MTP parity test; and
+- removal trigger: replace the fork pin with the first reviewed upstream tag
+  that contains equivalent standalone-checkpoint loading, public transaction,
+  packed target-verification, and hybrid recurrent-cache surfaces and passes
+  the same MacProvider qualification artifact.
+
+No other fork URL, revision, API, or transitive source substitution is covered
+by this exception. The exception qualifies standalone-checkpoint loading and
+the public cache-transaction, packed target-verification, row-local
+continuation-state, and hybrid recurrent-cache boundaries only. It
+does not make a model/artifact tuple eligible, satisfy the serial or multi-row
+parity gates, admit MXFP8, or enable production serving.
 
 ### MTP-4 — v0.1 request eligibility and fallback boundary (SPEC-048-R004)
 
@@ -409,6 +466,18 @@ remain on `native_mtp` but deterministically reduce its proposal depth, down to
 depth zero, until the next round fits; if even depth zero cannot fit, it takes
 the existing SPEC-038 request-local capacity failure. It MUST NOT switch paths,
 overcommit memory, or partially stage a round.
+
+The signed SPEC-023 admission sidecar MUST carry
+`mtp.complete_window_bytes_by_depth`, an exact array indexed by proposal depth
+`0...max_proposal_depth`. Each value is the qualification-derived conservative
+complete native-MTP round ceiling for that depth, covering target/MTP state,
+checkpoints, workspace, proposal span, and bonus-token position. Values MUST be
+positive JSON integers, bounded by the consumer's `Int.max`, and monotonically
+nondecreasing. Admission and capability construction MUST fail closed on a
+missing array, wrong length, non-integer, nonpositive, decreasing value,
+integer overflow, or tuple-digest mismatch. Total scheduler capacity for the
+qualified tuple is the checked product of the max-depth value and
+`qualified_slots`; overflow is an admission failure.
 
 Native MTP MUST use SPEC-038 FCFS admission and shared-iteration fairness; it
 MUST NOT create a second priority queue or skip an older ready ordinary row for
@@ -598,17 +667,23 @@ state, capacity, quality, and performance gate.
 
 ### MTP-13 — signed admission and immutable evidence (SPEC-048-R013)
 
-Catalog/autotune admission MUST be based on the SPEC-023 v0.21.0
+Catalog/autotune admission MUST be based on the SPEC-023 v0.21.2
 `macprovider.native-mtp-admission.v1` signed sidecar bound to one immutable SPEC-023
 `release_id` and SPEC-010 model/artifact member, never provider self-report.
 The sidecar MUST bind the exact decode path, model/artifact/tokenizer digests,
 MTP manifest and family adapter, proposal depth, quantization representation,
 runtime/provider revisions, cache/state classes, exact hardware/RAM,
 qualified slot count, request-feature profile, benchmark policy digest, source
-commit, reproducible-build digest, and evidence artifact digests.
+commit, reproducible-build digest, the exact lowercase 40-hex
+`spec023.live_executable_cdhash` CodeDirectory identity for the live signed
+executable, `mtp.complete_window_bytes_by_depth`, and evidence artifact
+digests. The live executable CDHash is
+distinct from the installed binary SHA-256 artifact digest; consumers MUST bind
+both and MUST NOT substitute one for the other.
 
 Capability advertisement MUST fail closed if the live tuple differs from any
-bound field. Loader success or a serial correctness pass is not sufficient for
+bound field, including a missing or mismatched `live_executable_cdhash`. Loader
+success or a serial correctness pass is not sufficient for
 catalog eligibility. Classic SPEC-028 evidence MUST NOT be relabeled as native
 MTP evidence, and upstream/non-MLX benchmark numbers MUST NOT satisfy local
 admission.
@@ -780,19 +855,31 @@ self-test depth and corpus.
 
 ## 5. Implementation, tests, and journeys
 
-Implementation is intentionally absent. The expected sequence is:
+Implementation is branch-local and default-off. The current campaign branch
+contains:
 
-1. dependency/API and exact-artifact qualification;
-2. serial greedy oracle and transaction proof, default-off;
-3. multi-row scheduler/paged-hybrid integration;
-4. independent MXFP8 format/fit/quality qualification;
-5. combined validation, signed catalog/autotune admission, and hardware
-   campaign; and
-6. reviewed release enablement.
+1. an immutable fork pin and reviewed upstream row-transaction, packed
+   verification, serialized drafter-state, and hybrid recurrent-cache
+   qualification surface;
+2. provider signed-admission sidecar parsing and artifact observation for the
+   Qwen 3.5 separate-artifact tuple;
+3. default-off native-MTP selection, revocation gating, and ordinary fallback
+   before sticky native state;
+4. serial and mixed continuous-batching native-MTP runtime plumbing with
+   row-local commit/discard/cancel behavior and status counters;
+5. local `/v1/status` `native_mtp_status_v1` diagnostics and bounded metric
+   labels;
+6. provider-local `native_mtp_selftest_v1` challenge parsing/evaluation and
+   coordinator `native_mtp_tuple_offer_v1` / `native_mtp_canary_v1` plumbing;
+   and
+7. local negative fixtures and parser/contract checks for admission,
+   revocation, status, accounting invariance, and canary wire schemas.
 
-The serial slice cannot close issue #1770. Phase 2 cannot begin until the
-row-mapped upstream transaction API is proven. Catalog work cannot admit a row
-until the runtime, combined-format, and hardware gates pass.
+This is not production conformance. The campaign still requires a clean frozen
+diff, CI, Mac Studio hardware build/e2e/benchmark evidence, three-lane code /
+security / architecture audit with zero Critical/High/Medium findings, and the
+signed journey evidence listed below. MXFP8 remains excluded until SPEC-023 and
+SPEC-048-R012 qualify a concrete artifact and the combined tuple.
 
 Minimum automated coverage:
 
@@ -832,17 +919,21 @@ the journey must include its independent and combined evidence.
 
 | Requirement/domain | Verdict | Owner | Issue | Evidence needed |
 |---|---|---|---|---|
-| `SPEC-048-R001..R016` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Normative approval, implementation, automated fixtures, immutable dependency/artifact selection, and signed journey evidence. R014 additionally needs post-release-candidate evidence. |
-| `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance and signed real-hardware journey evidence for the first production tuple. |
+| `SPEC-048-R001..R013/R016` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Branch-local implementation and focused parser/contract tests exist; pending CI, frozen-diff audits, Mac Studio hardware evidence, and signed journey evidence before promotion. |
+| `SPEC-048-R014/R015` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Production enablement and preregistered Studio/advertised-tier benchmarking remain pending. |
+| `native-mtp-serving` | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | Authority acceptance, release-candidate review, and signed real-hardware journey evidence for the first production tuple. |
 | First Qwen-family MTP artifact | `UNKNOWN` | `@Augustas11` | `#1770` | Legally/provenance-clean immutable model, tokenizer, MTP manifest, and exact hashes. |
-| Upstream MLX Swift release | `UNKNOWN` | `@Augustas11` | `#1770` | Tagged release with Qwen-family adapter, row-mapped transaction API, cache rewind behavior, and MacProvider toolchain qualification. |
+| Upstream MLX Swift release | `DECISION_REQUIRED` | `@Augustas11` | `#1770` | A reviewed fork exception is pinned for this campaign; replacement by an upstream tag remains required by the re-review/removal trigger. |
 | First MLX-native MXFP8 artifact | `UNKNOWN` | `@Augustas11` | `#1770` | SPEC-023/SPEC-010 format, fit, quality, license, provenance, and hardware evidence. |
 
 ## 7. Evidence
 
-No implementation, production, or signed journey evidence exists for
-SPEC-048. The issue #1770 planning and review artifacts are design inputs, not
-conformance or production evidence.
+Branch-local implementation and focused verification evidence exists for this
+campaign, including Swift parser checks for the changed provider files and
+focused coordinator native-MTP canary/config Go tests. No production release,
+signed journey, or settlement/integrity evidence exists yet. The issue #1770
+planning/review artifacts and this branch's local checks are design and
+implementation evidence only, not production conformance.
 
 The first implementation PR must record the selected upstream release and
 artifact hashes rather than replacing the unknowns in this draft with mutable
@@ -870,6 +961,54 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.9 (2026-09-28)** — Makes the signed MTP manifest the exact captured
+  `mtp/config.json`, binds the target loader to captured
+  `target/tokenizer.json`, and requires loader-equivalent recursive tensor
+  observation before any sanitizer/filter can hide an extra target MTP tensor.
+- **0.1.8 (2026-09-28)** — Requires signed
+  `mtp.complete_window_bytes_by_depth` admission closure for native-MTP
+  scheduler-capacity accounting, including deterministic tuple binding and
+  checked max-depth-by-slot multiplication.
+- **0.1.7 (2026-09-28)** — Requires the SPEC-023 v0.21.1
+  `live_executable_cdhash` binding in the signed native-MTP admission sidecar,
+  exposes it as capability input, and keeps it distinct from the installed
+  binary SHA-256 artifact digest.
+- **0.1.6 (2026-09-28)** — Repins the immutable-dependency exception to fork
+  revision `e874140ecb5b04aeb445eb3837d48f7b187b867e`. This preserves the audited
+  native-MTP API delta from 0.1.5 while restoring the package manifest's Swift
+  6.1 consumer floor required by MacProvider's release CI toolchain.
+- **0.1.5 (2026-09-28)** — Repins the immutable-dependency exception to fork
+  revision `b250ac2e87a1a780eb82ce73522c4bf3e70a8d8e` after qualifying standalone
+  Qwen 3.5 MTP checkpoint normalization and packed row-isolated recurrent
+  Mamba transactions. The upstream test bundle compiled on Mac Studio, the
+  complete delta received independent adversarial approval with 0 Critical,
+  0 High, 0 Medium, and 0 Low findings, and the real Qwen 3.5 target/MTP tuple
+  passed concurrent ordinary-versus-native-MTP greedy parity on Mac Studio.
+  The feature remains default-off pending the remaining release gates.
+- **0.1.4 (2026-09-28)** — Repins the exact immutable-dependency exception
+  to fork revision `9f8234109403d1aef7e497672f373776e2b1b3f4` after review of
+  serialized non-`Sendable` caller-state access on `MTPDrafterContainer`.
+  Mac Studio build-tests and focused Swift Testing coverage passed 2/2 for
+  the existing and new container access paths. The exception remains
+  default-off and makes no production-enablement claim.
+- **0.1.3 (2026-09-28)** — Repinned the exact immutable-dependency exception
+  to fork revision `3c8a50228cc6e8edea6a8716fa7954770e9b28a8` after review of
+  the strict row-local multi-round continuation API
+  (`MTPPackedVerificationRowState` and the `requireContinuationState`
+  overload). The evidence records 15/15 upstream Xcode qualification tests and
+  independent adversarial review with 0 Critical, 0 High, and 0 Medium findings.
+  The exception remains default-off and makes no scheduler, artifact, signed
+  journey, hardware, release, or production enablement claim.
+- **0.1.2 (2026-09-28)** — Extends the exact immutable-dependency exception
+  to the reviewed public packed target-verification facade at fork revision
+  `31223c97262bd5123e76055c5662a42677936eea`. The exception remains
+  default-off and does not satisfy scheduler integration, parity, hardware,
+  signed-evidence, audit, release, or production gates.
+- **0.1.1 (2026-09-28)** — Records the narrow immutable-dependency exception
+  for the reviewed public MTP cache-transaction facade at fork revision
+  `3c977326bd0ec2c5160c6b2ec48ba6ede1cc11db`. The exception is exact,
+  default-off, removable on a qualified upstream tag, and does not promote any
+  runtime tuple or conformance requirement.
 - **0.1.0 (2026-09-27)** — Initial draft for issue #1770. Establishes native
   MTP as a distinct target-local, multi-row decode path; preserves SPEC-028
   classic speculation; binds transactional cache/state, request, fallback,
