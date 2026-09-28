@@ -1118,8 +1118,7 @@ struct ServeCommand: AsyncParsableCommand {
             modelKey: modelKey,
             artifactID: identity.artifactID,
             hash: identity.hash,
-            preflightTargetURL: targetURL,
-            snapshotRoot: sidecarURL.deletingLastPathComponent()
+            preflightTargetURL: targetURL
         )
     }
 
