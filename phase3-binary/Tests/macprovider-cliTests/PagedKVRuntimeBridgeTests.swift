@@ -2543,6 +2543,26 @@ private final class RuntimeBridgeRecordingMTPDrafter: Module, StatefulMTPDrafter
         lastToken: MLXArray,
         lastHidden: MLXArray,
         sharedKV: [String: (MLXArray, MLXArray)],
+        queryOffset: Int,
+        blockSize: Int,
+        sampler: any LogitSampler
+    ) -> MLXArray {
+        draftBlock(
+            target: target,
+            lastToken: lastToken,
+            lastHidden: lastHidden,
+            sharedKV: sharedKV,
+            positionDeltas: nil,
+            queryOffset: queryOffset,
+            blockSize: blockSize,
+            sampler: sampler)
+    }
+
+    func draftBlock(
+        target: any LanguageModel,
+        lastToken: MLXArray,
+        lastHidden: MLXArray,
+        sharedKV: [String: (MLXArray, MLXArray)],
         positionDeltas: MLXArray?,
         queryOffset: Int,
         blockSize: Int,
