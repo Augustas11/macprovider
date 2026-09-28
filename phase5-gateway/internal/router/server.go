@@ -269,6 +269,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/capacity-signal", s.handleCapacitySignal)
 	mux.HandleFunc("/admin/capacity-tier/evaluate", s.handleCapacityEvaluate)
 	mux.HandleFunc("/admin/settlement/reconcile", s.handleSettlementReconcile)
+	mux.HandleFunc("/admin/settlement/release-holds", s.handleSettlementReleaseHolds)
 	if s.cfg.Explorer.Enabled {
 		mux.HandleFunc("/admin/explorer/buyers", s.handleExplorerBuyers)
 		mux.HandleFunc("/admin/explorer/buyers/", s.handleExplorerBuyerDetail)
@@ -1337,7 +1338,7 @@ var gatewayPermanentCodes = map[string]bool{
 	"duplicate_request_id": true, "invalid_conversation_tag": true,
 	"invalid_feedback_source": true, "invalid_feedback": true, "invalid_rating": true,
 	"comment_too_long": true, "invalid_request_id": true, "invalid_feedback_scope": true,
-	"invalid_limit": true, "invalid_cursor": true, "invalid_settlement_target": true, "api_key_lookup_failed": true,
+	"invalid_limit": true, "invalid_cursor": true, "invalid_settlement_target": true, "invalid_settlement_release_holds_request": true, "api_key_lookup_failed": true,
 	"ambiguous_credentials":                    true,
 	"request_content_encoding_unsupported":     true,
 	"unsupported_content_shape":                true,
@@ -1426,7 +1427,7 @@ var gatewayPermanentCodes = map[string]bool{
 	"receipt_forbidden":                true,
 	"usage_load_failed":                true, "keys_load_failed": true,
 	"coordinator_sticky_error": true, "feedback_limit_check_failed": true,
-	"feedback_store_failed": true, "settlement_hold_not_found": true, "settlement_reconcile_load_failed": true,
+	"feedback_store_failed": true, "settlement_hold_not_found": true, "settlement_reconcile_load_failed": true, "settlement_release_holds_load_failed": true,
 	"nonce_unavailable": true, "docs_missing": true, "docs_render_failed": true,
 	"privacy_missing": true, "privacy_render_failed": true,
 	"quota_reservation_failed": true, "concurrency_reservation_failed": true,

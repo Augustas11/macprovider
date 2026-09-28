@@ -1579,6 +1579,14 @@ func isUniqueConstraintError(err error) bool {
 }
 
 func (s *Store) SettleReservation(ctx context.Context, settlement storage.ReservationSettlement) error {
+	return s.settleReservation(ctx, settlement, "")
+}
+
+func (s *Store) SettleReservationForDrain(ctx context.Context, settlement storage.ReservationSettlement, reconcileResult string) error {
+	return s.settleReservation(ctx, settlement, reconcileResult)
+}
+
+func (s *Store) settleReservation(ctx context.Context, settlement storage.ReservationSettlement, reconcileResult string) error {
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {
 		return err
@@ -1635,10 +1643,21 @@ func (s *Store) SettleReservation(ctx context.Context, settlement storage.Reserv
 	if err != nil {
 		return err
 	}
+	if err := recordSettlementDrainResultTx(ctx, tx, settlement.AccountID, settlement.RequestID, createdAt, reconcileResult); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 func (s *Store) SettleDemoReservation(ctx context.Context, settlement storage.ReservationSettlement, demo storage.DemoUsageEvent) error {
+	return s.settleDemoReservation(ctx, settlement, demo, "")
+}
+
+func (s *Store) SettleDemoReservationForDrain(ctx context.Context, settlement storage.ReservationSettlement, demo storage.DemoUsageEvent, reconcileResult string) error {
+	return s.settleDemoReservation(ctx, settlement, demo, reconcileResult)
+}
+
+func (s *Store) settleDemoReservation(ctx context.Context, settlement storage.ReservationSettlement, demo storage.DemoUsageEvent, reconcileResult string) error {
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {
 		return err
@@ -1717,21 +1736,50 @@ func (s *Store) SettleDemoReservation(ctx context.Context, settlement storage.Re
 	if err != nil {
 		return err
 	}
+	if err := recordSettlementDrainResultTx(ctx, tx, settlement.AccountID, settlement.RequestID, createdAt, reconcileResult); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 func (s *Store) RefundReservation(ctx context.Context, accountID, requestID string, refundedAt int64) error {
+	return s.refundReservation(ctx, storage.ActiveReservation{AccountID: accountID, RequestID: requestID}, time.Unix(refundedAt, 0).UTC(), "", false)
+}
+
+func (s *Store) RefundReservationForDrain(ctx context.Context, reservation storage.ActiveReservation, refundedAt time.Time, reconcileResult string) error {
+	return s.refundReservation(ctx, reservation, refundedAt, reconcileResult, false)
+}
+
+func (s *Store) refundReservation(ctx context.Context, reservation storage.ActiveReservation, refundedAt time.Time, reconcileResult string, demo bool) error {
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	when := time.Unix(refundedAt, 0).UTC()
+	if refundedAt.IsZero() {
+		refundedAt = time.Now().UTC()
+	}
+	var createdAt string
+	query := `SELECT created_at FROM quota_reservations WHERE account_id = ? AND request_id = ? AND status = 'active'`
+	if demo {
+		query += ` AND NOT EXISTS (
+			SELECT 1 FROM wallet_session_request_map wrm
+			WHERE wrm.account_id = quota_reservations.account_id AND wrm.request_id = quota_reservations.request_id)`
+	}
+	if err := tx.QueryRowContext(ctx, query, reservation.AccountID, reservation.RequestID).Scan(&createdAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.ErrReservationNotFound
+		}
+		return err
+	}
+	if !reservation.CreatedAt.IsZero() && createdAt != encodeTime(reservation.CreatedAt.UTC()) {
+		return storage.ErrReservationNotFound
+	}
 	res, err := tx.ExecContext(ctx, `
 		UPDATE quota_reservations
 		SET status = 'refunded', settled_tokens = 0, settled_at = ?, settlement_hold = 0
-		WHERE account_id = ? AND request_id = ? AND status = 'active'`,
-		encodeTime(when), accountID, requestID)
+		WHERE account_id = ? AND request_id = ? AND created_at = ? AND status = 'active'`,
+		encodeTime(refundedAt.UTC()), reservation.AccountID, reservation.RequestID, createdAt)
 	if err != nil {
 		return err
 	}
@@ -1742,7 +1790,30 @@ func (s *Store) RefundReservation(ctx context.Context, accountID, requestID stri
 	if rows == 0 {
 		return storage.ErrReservationNotFound
 	}
+	if err := recordSettlementDrainResultTx(ctx, tx, reservation.AccountID, reservation.RequestID, createdAt, reconcileResult); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+// RefundDemoReservation is the demo-specific quota release path. Keeping it
+// distinct prevents an operator drain from accidentally treating a wallet or
+// ordinary account reservation as a demo reservation based only on caller
+// intent.
+func (s *Store) RefundDemoReservation(ctx context.Context, accountID, requestID string, refundedAt time.Time) error {
+	return s.refundDemoReservation(ctx, storage.ActiveReservation{AccountID: accountID, RequestID: requestID}, refundedAt, "")
+}
+
+func (s *Store) RefundDemoReservationForDrain(ctx context.Context, reservation storage.ActiveReservation, refundedAt time.Time, reconcileResult string) error {
+	return s.refundDemoReservation(ctx, reservation, refundedAt, reconcileResult)
+}
+
+func (s *Store) refundDemoReservation(ctx context.Context, reservation storage.ActiveReservation, refundedAt time.Time, reconcileResult string) error {
+	accountID := reservation.AccountID
+	if !strings.HasPrefix(accountID, "demo:") {
+		return fmt.Errorf("demo reservation account must use demo: prefix")
+	}
+	return s.refundReservation(ctx, reservation, refundedAt, reconcileResult, true)
 }
 
 func (s *Store) ExpireReservation(ctx context.Context, accountID, requestID string, expiredAt time.Time) error {
@@ -1935,6 +2006,78 @@ func (s *Store) ListDueSettlementHeldReservations(ctx context.Context, limit int
 		if err != nil {
 			return nil, err
 		}
+		out = append(out, reservation)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListSettlementHeldReservationsForDrain(ctx context.Context, accountID string, createdBefore time.Time, limit int) ([]storage.ActiveReservation, error) {
+	if strings.TrimSpace(accountID) == "" || createdBefore.IsZero() {
+		return nil, fmt.Errorf("account id and created-before time are required")
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT qr.account_id, qr.request_id, COALESCE(wrm.session_id, ''), qr.window_date,
+			qr.reserved_tokens, qr.expires_at, qr.created_at,
+			qr.requested_privacy_mode, qr.effective_privacy_outcome, qr.relay_blind_envelope_digest,
+			qr.relay_blind_key_record_digest, qr.relay_blind_kid, qr.relay_blind_provider_binding_digest,
+			qr.input_token_upper_bound, qr.max_output_tokens,
+			COALESCE(sra.operator_review, 0),
+			CASE WHEN COALESCE(sra.first_not_found_at, '') != '' OR sra.last_result = 'coordinator_404_held' THEN 1 ELSE 0 END
+		FROM quota_reservations qr
+		LEFT JOIN wallet_session_request_map wrm
+			ON wrm.account_id = qr.account_id AND wrm.request_id = qr.request_id
+		LEFT JOIN settlement_reconcile_attempts sra
+			ON sra.account_id = qr.account_id AND sra.request_id = qr.request_id AND sra.reservation_created_at = qr.created_at
+		WHERE qr.status = 'active' AND qr.settlement_hold = 1
+			AND qr.account_id = ?
+			AND (
+				CAST(strftime('%s', qr.created_at) AS INTEGER) < ?
+				OR (
+					CAST(strftime('%s', qr.created_at) AS INTEGER) = ?
+					AND CAST(substr((CASE WHEN instr(qr.created_at, '.') > 0
+						THEN substr(qr.created_at, instr(qr.created_at, '.') + 1,
+							instr(qr.created_at, 'Z') - instr(qr.created_at, '.') - 1)
+						ELSE '0' END) || '000000000', 1, 9) AS INTEGER) < ?
+				)
+			)
+		ORDER BY
+			CAST(strftime('%s', qr.created_at) AS INTEGER) ASC,
+			CAST(substr((CASE WHEN instr(qr.created_at, '.') > 0
+				THEN substr(qr.created_at, instr(qr.created_at, '.') + 1,
+					instr(qr.created_at, 'Z') - instr(qr.created_at, '.') - 1)
+				ELSE '0' END) || '000000000', 1, 9) AS INTEGER) ASC,
+			qr.request_id ASC
+		LIMIT ?`, accountID, createdBefore.Unix(), createdBefore.Unix(), createdBefore.Nanosecond(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]storage.ActiveReservation, 0, limit)
+	for rows.Next() {
+		var reservation storage.ActiveReservation
+		var expiresAt, createdAt string
+		var requested, effective, envelope, keyRecord, kid, providerBinding string
+		var inputCap, outputCap int64
+		var operatorReview, coordinator404 int
+		if err := rows.Scan(
+			&reservation.AccountID, &reservation.RequestID, &reservation.WalletSessionID,
+			&reservation.WindowDate, &reservation.ReservedTokens, &expiresAt, &createdAt,
+			&requested, &effective, &envelope, &keyRecord, &kid, &providerBinding, &inputCap, &outputCap,
+			&operatorReview, &coordinator404,
+		); err != nil {
+			return nil, err
+		}
+		reservation.ExpiresAt = decodeTime(expiresAt)
+		reservation.CreatedAt = decodeTime(createdAt)
+		reservation.RelayBlind = relayBlindFromValues(requested, effective, envelope, keyRecord, kid, providerBinding, inputCap, outputCap)
+		reservation.OperatorReview = operatorReview != 0
+		reservation.Coordinator404 = coordinator404 != 0
 		out = append(out, reservation)
 	}
 	return out, rows.Err()
@@ -2951,6 +3094,14 @@ func (s *Store) RefundStaleWalletSessionClaims(ctx context.Context, before, refu
 }
 
 func (s *Store) FinalizeWalletSessionReservation(ctx context.Context, settlement storage.WalletSessionReservationSettlement) error {
+	return s.finalizeWalletSessionReservation(ctx, settlement, "")
+}
+
+func (s *Store) FinalizeWalletSessionReservationForDrain(ctx context.Context, settlement storage.WalletSessionReservationSettlement, reconcileResult string) error {
+	return s.finalizeWalletSessionReservation(ctx, settlement, reconcileResult)
+}
+
+func (s *Store) finalizeWalletSessionReservation(ctx context.Context, settlement storage.WalletSessionReservationSettlement, reconcileResult string) error {
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {
 		return err
@@ -3029,6 +3180,9 @@ func (s *Store) FinalizeWalletSessionReservation(ctx context.Context, settlement
 		settlement.Outcome, when, settlement.SessionID, settlement.RequestID); err != nil {
 		return err
 	}
+	if err := recordSettlementDrainResultTx(ctx, tx, settlement.AccountID, settlement.RequestID, reservationCreatedAt, reconcileResult); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -3037,6 +3191,13 @@ func (s *Store) RefundWalletSessionReservation(ctx context.Context, accountID, s
 		refundedAt = time.Now().UTC()
 	}
 	return s.transitionWalletSessionReservation(ctx, accountID, sessionID, requestID, "refunded", "refunded", refundedAt.UTC())
+}
+
+func (s *Store) RefundWalletSessionReservationForDrain(ctx context.Context, reservation storage.ActiveReservation, refundedAt time.Time, reconcileResult string) error {
+	if refundedAt.IsZero() {
+		refundedAt = time.Now().UTC()
+	}
+	return s.transitionWalletSessionReservationWithResult(ctx, reservation, "refunded", "refunded", refundedAt.UTC(), reconcileResult)
 }
 
 func (s *Store) SealWalletSessionUsageEvent(ctx context.Context, accountID, sessionID, requestID string, settledTokens int64, sealedAt time.Time) error {
@@ -3106,12 +3267,21 @@ func (s *Store) MarkWalletSessionReservationStaleHeld(ctx context.Context, accou
 }
 
 func (s *Store) transitionWalletSessionReservation(ctx context.Context, accountID, sessionID, requestID, status, replayState string, when time.Time) error {
+	return s.transitionWalletSessionReservationWithResult(ctx, storage.ActiveReservation{
+		AccountID: accountID, RequestID: requestID, WalletSessionID: sessionID,
+	}, status, replayState, when, "")
+}
+
+func (s *Store) transitionWalletSessionReservationWithResult(ctx context.Context, reservation storage.ActiveReservation, status, replayState string, when time.Time, reconcileResult string) error {
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if err := transitionWalletSessionReservationTx(ctx, tx, accountID, sessionID, requestID, status, replayState, when); err != nil {
+	if err := transitionWalletSessionReservationTx(ctx, tx, reservation.AccountID, reservation.WalletSessionID, reservation.RequestID, status, replayState, when); err != nil {
+		return err
+	}
+	if err := recordSettlementDrainResultTx(ctx, tx, reservation.AccountID, reservation.RequestID, encodeTime(reservation.CreatedAt.UTC()), reconcileResult); err != nil {
 		return err
 	}
 	return tx.Commit()

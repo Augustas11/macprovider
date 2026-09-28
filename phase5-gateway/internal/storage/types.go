@@ -152,6 +152,8 @@ type ActiveReservation struct {
 	ExpiresAt       time.Time
 	CreatedAt       time.Time
 	RelayBlind      *RelayBlindMetadata
+	OperatorReview  bool
+	Coordinator404  bool
 }
 
 type SettlementHoldBacklogStats struct {

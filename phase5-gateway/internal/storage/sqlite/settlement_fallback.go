@@ -98,6 +98,30 @@ func (s *Store) RecordSettlementReconcileResult(ctx context.Context, reservation
 	return nil
 }
 
+func recordSettlementDrainResultTx(ctx context.Context, tx *immediateTx, accountID, requestID, reservationCreatedAt, result string) error {
+	if result == "" {
+		return nil
+	}
+	if len(result) > 128 || strings.TrimSpace(result) != result || reservationCreatedAt == "" {
+		return fmt.Errorf("invalid settlement drain reconcile result")
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE settlement_reconcile_attempts
+		SET last_result = ?, next_attempt_after = '', operator_review = 0, operator_review_reason = ''
+		WHERE account_id = ? AND request_id = ? AND reservation_created_at = ?`,
+		result, accountID, requestID, reservationCreatedAt)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return storage.ErrReservationNotFound
+	}
+	return nil
+}
+
 func settlementReconcileAttemptCount(ctx context.Context, q interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }, reservation storage.ActiveReservation) int64 {
