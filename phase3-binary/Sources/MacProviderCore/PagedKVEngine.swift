@@ -1754,7 +1754,7 @@ public enum PagedKVMetallibGate {
         executableURL: URL? = Bundle.main.executableURL,
         fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) -> Bool {
-        candidatePaths(bundleURL: bundleURL, executableURL: executableURL).contains(where: fileExists)
+        return candidatePaths(bundleURL: bundleURL, executableURL: executableURL).contains(where: fileExists)
     }
 
     public static func candidatePaths(bundleURL: URL?, executableURL: URL?) -> [String] {
