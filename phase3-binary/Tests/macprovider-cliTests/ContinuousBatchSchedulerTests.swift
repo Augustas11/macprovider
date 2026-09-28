@@ -4875,13 +4875,15 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let result = try await scheduler.submit(Self.nativeRequest(
             id: "fallback-depth",
             promptTokens: [1],
-            maxOutputTokens: 2,
+            maxOutputTokens: 3,
+            stopTokenSequences: [[7]],
             proposals: [7],
             maximumDepth: 1,
             completeWindowBytesByDepth: [8, 32]
         ))
 
-        XCTAssertEqual(result.outputTokens, [6, 7])
+        XCTAssertEqual(result.outputTokens, [6])
+        XCTAssertEqual(result.terminalStatus, .stop)
         let proposalDepths = await backend.nativeProposalBatches().flatMap {
             $0.map(\.maximumProposalDepth)
         }
@@ -4911,13 +4913,15 @@ final class ContinuousBatchSchedulerTests: XCTestCase {
         let result = try await scheduler.submit(Self.nativeRequest(
             id: "headroom-depth",
             promptTokens: [1],
-            maxOutputTokens: 2,
+            maxOutputTokens: 3,
+            stopTokenSequences: [[7]],
             proposals: [7],
             maximumDepth: 1,
             completeWindowBytesByDepth: [8, 32]
         ))
 
-        XCTAssertEqual(result.outputTokens, [6, 7])
+        XCTAssertEqual(result.outputTokens, [6])
+        XCTAssertEqual(result.terminalStatus, .stop)
         let proposalDepths = await backend.nativeProposalBatches().flatMap {
             $0.map(\.maximumProposalDepth)
         }
