@@ -227,6 +227,23 @@
       "merge_commit": null,
       "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1770",
       "status": "blocked_upstream_open"
+    },
+    "mlx_swift_lm_645_public_mtp_transactions": {
+      "closed_at": null,
+      "kind": "issue",
+      "macprovider_issue": "https://github.com/Augustas11/macprovider/issues/1770",
+      "number": 645,
+      "repo": "ml-explore/mlx-swift-lm",
+      "runbook_tasks": [
+        "SPEC-048-R003",
+        "SPEC-048-R005",
+        "SPEC-048-R006"
+      ],
+      "state": "OPEN",
+      "status": "blocked_upstream_open",
+      "title": "Expose a public transactional MTP step API for cached/batched callers",
+      "updated_at": "2026-09-28T01:24:16Z",
+      "url": "https://github.com/ml-explore/mlx-swift-lm/issues/645"
     }
   },
   "implementation_signals": {
@@ -251,10 +268,10 @@
     "native_mtp_required_merges_in_latest_release": false,
     "native_mtp_public_row_mapped_transactions_reviewed": false,
     "native_mtp_status": "blocked_missing_public_row_mapped_transactions",
-    "note": "KVCache.swift heuristic on upstream main"
+    "note": "KVCache.swift heuristic on upstream main; public MTP transaction API tracked by mlx-swift-lm#645"
   },
-  "last_changed_at": "2026-09-28T00:44:53Z",
-  "last_checked_at": "2026-09-28T00:44:51Z",
+  "last_changed_at": "2026-09-28T01:24:16Z",
+  "last_checked_at": "2026-09-28T01:24:16Z",
   "macprovider_pins": {
     "mlx_swift": "0.31.4",
     "mlx_swift_lm": "3.31.4",

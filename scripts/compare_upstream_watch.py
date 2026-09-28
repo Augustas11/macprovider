@@ -22,6 +22,7 @@ BLOCKER_KEYS = (
     "mlx_swift_lm_581_resumable_qwen_mtp",
     "mlx_swift_lm_584_rotating_cache_trim",
     "mlx_swift_lm_622_exact_rotating_cache_rewinds",
+    "mlx_swift_lm_645_public_mtp_transactions",
 )
 RELEASE_PIN_KEYS = {
     "mlx_swift_lm_latest": "mlx_swift_lm",

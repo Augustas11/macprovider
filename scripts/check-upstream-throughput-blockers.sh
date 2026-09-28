@@ -82,6 +82,7 @@ pr545 = pr(545)
 pr581 = pr(581)
 pr584 = pr(584)
 pr622 = pr(622)
+issue645 = issue(645)
 
 lm_rel = latest_release("ml-explore/mlx-swift-lm")
 swift_rel = latest_release("ml-explore/mlx-swift")
@@ -118,7 +119,10 @@ graph_traceable = (
     or "var offset: MLXArray" in body
     or "CompilableKVCache" in body
 )
-note = "KVCache.swift heuristic on upstream main"
+note = (
+    "KVCache.swift heuristic on upstream main; public MTP transaction API "
+    "tracked by mlx-swift-lm#645"
+)
 
 now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
@@ -240,6 +244,13 @@ out = {
             "runbook_tasks": ["SPEC-048-R003", "SPEC-048-R006"],
             "updated_at": pr622["updatedAt"], "merged_at": pr622.get("mergedAt"),
             "merge_commit": (pr622.get("mergeCommit") or {}).get("oid"),
+        },
+        "mlx_swift_lm_645_public_mtp_transactions": {
+            "repo": "ml-explore/mlx-swift-lm", "kind": "issue", "number": 645,
+            "url": "https://github.com/ml-explore/mlx-swift-lm/issues/645",
+            "state": issue645["state"], "title": issue645["title"],
+            "runbook_tasks": ["SPEC-048-R003", "SPEC-048-R005", "SPEC-048-R006"],
+            "updated_at": issue645["updatedAt"], "closed_at": issue645.get("closedAt"),
         },
     },
     "releases": {

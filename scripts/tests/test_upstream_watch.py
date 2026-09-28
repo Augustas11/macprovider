@@ -22,6 +22,7 @@ WATCH_BLOCKERS = (
     "mlx_swift_lm_581_resumable_qwen_mtp",
     "mlx_swift_lm_584_rotating_cache_trim",
     "mlx_swift_lm_622_exact_rotating_cache_rewinds",
+    "mlx_swift_lm_645_public_mtp_transactions",
 )
 
 
@@ -82,6 +83,7 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
                 "mlx_swift_lm_581_resumable_qwen_mtp": {"state": "OPEN"},
                 "mlx_swift_lm_584_rotating_cache_trim": {"state": "MERGED", "merged_at": "x"},
                 "mlx_swift_lm_622_exact_rotating_cache_rewinds": {"state": "OPEN"},
+                "mlx_swift_lm_645_public_mtp_transactions": {"state": "OPEN"},
             },
             "releases": {
                 "mlx_swift_latest": {"tag": "0.31.6"},
@@ -114,6 +116,7 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
                 "mlx_swift_lm_581_resumable_qwen_mtp": {"state": "OPEN"},
                 "mlx_swift_lm_584_rotating_cache_trim": {"state": "MERGED", "merged_at": "x"},
                 "mlx_swift_lm_622_exact_rotating_cache_rewinds": {"state": "OPEN"},
+                "mlx_swift_lm_645_public_mtp_transactions": {"state": "OPEN"},
             },
             "releases": {
                 "mlx_swift_latest": {"tag": "0.31.6"},
@@ -147,6 +150,7 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
                 "mlx_swift_lm_581_resumable_qwen_mtp": {"state": "OPEN"},
                 "mlx_swift_lm_584_rotating_cache_trim": {"state": "MERGED", "merged_at": "x"},
                 "mlx_swift_lm_622_exact_rotating_cache_rewinds": {"state": "OPEN"},
+                "mlx_swift_lm_645_public_mtp_transactions": {"state": "OPEN"},
             },
             "releases": {
                 "mlx_swift_latest": {"tag": "0.31.6"},
@@ -271,6 +275,23 @@ class UpstreamWatchComparisonTests(unittest.TestCase):
 
         self.assertTrue(changed)
         self.assertIn("mlx_swift_lm_351_qwen_mtp added", reason)
+
+    def test_public_mtp_transaction_issue_closure_is_material(self):
+        old = self._baseline()
+        new = json.loads(json.dumps(old))
+        new["blockers"]["mlx_swift_lm_645_public_mtp_transactions"].update({
+            "state": "CLOSED",
+            "closed_at": "2026-10-01T00:00:00Z",
+        })
+
+        changed, reason = material_changes(old, new)
+
+        self.assertTrue(changed)
+        self.assertIn(
+            "mlx_swift_lm_645_public_mtp_transactions state OPEN -> CLOSED",
+            reason,
+        )
+        self.assertIn("mlx_swift_lm_645_public_mtp_transactions closed", reason)
 
 
 if __name__ == "__main__":

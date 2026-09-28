@@ -95,6 +95,12 @@ Required or relevant upstream rows now tracked by
 - ml-explore/mlx-swift-lm#622, exact rotating-cache prefix rewinds:
   open as of this gate.
   https://github.com/ml-explore/mlx-swift-lm/pull/622
+- ml-explore/mlx-swift-lm#645, public transactional MTP step API for
+  cached/batched callers: opened from this qualification because no existing
+  tracker covered the external scheduler boundary. It requests a narrow stable
+  facade for target-authoritative propose/verify/stage/commit/discard/rewind
+  semantics without requiring package-private cache internals to become public.
+  https://github.com/ml-explore/mlx-swift-lm/issues/645
 
 ## Build Direction
 
@@ -116,3 +122,8 @@ Blocked now:
 The next implementation phase starts only after a tagged public upstream release
 contains the required MTP commits and exposes a reviewed public row/position
 transaction API suitable for MacProvider's cache ownership model.
+
+Until that gate clears, upstream issue #645 is the canonical tracker for the
+missing public transaction boundary; MacProvider issue #1770 and this campaign
+PR remain open rather than substituting a local fork or serial-only production
+path.
