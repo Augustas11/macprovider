@@ -9,12 +9,12 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         let store = MemoryRevocationStore()
         let now = Self.date("2026-09-28T12:00:00Z")
         let tuples = [Self.digest("01"), Self.digest("02")]
-        let feed = try feedData(generation: 7, signerKeyID: "native-mtp-revoker-v1", tuples: tuples, now: now)
+        let feed = try Self.feedData(generation: 7, signerKeyID: "native-mtp-revoker-v1", tuples: tuples, now: now)
         let state = try NativeMTPRevocationFeedManager.accept(
             feedData: feed,
-            signatureData: signature(for: feed, signer: signer, keyID: "native-mtp-revoker-v1"),
+            signatureData: Self.signature(for: feed, signer: signer, keyID: "native-mtp-revoker-v1"),
             pinnedSignerKeyID: "native-mtp-revoker-v1",
-            verifier: verifier(signer: signer),
+            verifier: Self.verifier(signer: signer),
             store: store,
             now: now
         )
@@ -27,7 +27,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
 
         let recovered = try NativeMTPRevocationFeedManager.loadCached(
             pinnedSignerKeyID: "native-mtp-revoker-v1",
-            verifier: verifier(signer: signer),
+            verifier: Self.verifier(signer: signer),
             store: store,
             now: now
         )
@@ -39,7 +39,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         XCTAssertThrowsError(try NativeMTPRevocationFeed.parse(Data(#"{"schema_version":"macprovider.native-mtp-revocations.v1","schema_version":"macprovider.native-mtp-revocations.v1"}"#.utf8))) {
             XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .duplicateKey("feed"))
         }
-        XCTAssertThrowsError(try NativeMTPRevocationFeed.parse(json([
+        XCTAssertThrowsError(try NativeMTPRevocationFeed.parse(Self.json([
             "schema_version": NativeMTPRevocationFeed.schemaVersion,
             "generation": 1,
             "issued_at": "2026-09-28T12:00:00Z",
@@ -50,7 +50,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         ]))) {
             XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .unknownField("extra"))
         }
-        XCTAssertThrowsError(try NativeMTPRevocationFeed.parse(json([
+        XCTAssertThrowsError(try NativeMTPRevocationFeed.parse(Self.json([
             "schema_version": NativeMTPRevocationFeed.schemaVersion,
             "generation": 1,
             "issued_at": "2026-09-28T12:00:00Z",
@@ -59,7 +59,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         ]))) {
             XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .missingField("signer_key_id"))
         }
-        XCTAssertThrowsError(try NativeMTPRevocationFeed.parse(json([
+        XCTAssertThrowsError(try NativeMTPRevocationFeed.parse(Self.json([
             "schema_version": NativeMTPRevocationFeed.schemaVersion,
             "generation": true,
             "issued_at": "2026-09-28T12:00:00Z",
@@ -77,8 +77,8 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         let exactLarge = try NativeMTPRevocationFeed.parse(Data("""
         {"schema_version":"macprovider.native-mtp-revocations.v1","generation":9007199254740993,"issued_at":"2026-09-28T12:00:00Z","expires_at":"2026-09-28T13:00:00Z","signer_key_id":"k","revoked_admission_tuple_sha256":[]}
         """.utf8))
-        XCTAssertEqual(exactLarge.generation, 9_007_199_254_740_993)
-        XCTAssertThrowsError(try NativeMTPRevocationFeed.parse(json([
+        XCTAssertEqual(exactLarge.generation, UInt64(9_007_199_254_740_993))
+        XCTAssertThrowsError(try NativeMTPRevocationFeed.parse(Self.json([
             "schema_version": NativeMTPRevocationFeed.schemaVersion,
             "generation": 1,
             "issued_at": "2026-09-28T12:00:00Z",
@@ -105,13 +105,13 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         let wrongSigner = Curve25519.Signing.PrivateKey()
         let store = MemoryRevocationStore()
         let now = Self.date("2026-09-28T12:00:00Z")
-        let feed = try feedData(generation: 1, signerKeyID: "revoker-a", tuples: [], now: now)
+        let feed = try Self.feedData(generation: 1, signerKeyID: "revoker-a", tuples: [], now: now)
 
         XCTAssertThrowsError(try NativeMTPRevocationFeedManager.accept(
             feedData: feed,
-            signatureData: signature(for: feed, signer: signer, keyID: "revoker-a"),
+            signatureData: Self.signature(for: feed, signer: signer, keyID: "revoker-a"),
             pinnedSignerKeyID: "revoker-b",
-            verifier: verifier(signer: signer),
+            verifier: Self.verifier(signer: signer),
             store: store,
             now: now
         )) {
@@ -119,36 +119,36 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         }
         XCTAssertThrowsError(try NativeMTPRevocationFeedManager.accept(
             feedData: feed,
-            signatureData: signature(for: feed, signer: wrongSigner, keyID: "revoker-a"),
+            signatureData: Self.signature(for: feed, signer: wrongSigner, keyID: "revoker-a"),
             pinnedSignerKeyID: "revoker-a",
-            verifier: verifier(signer: signer),
+            verifier: Self.verifier(signer: signer),
             store: store,
             now: now
         )) {
             XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .signatureInvalid("verification_failed"))
         }
-        let future = try feedData(generation: 1, signerKeyID: "revoker-a", tuples: [], now: now.addingTimeInterval(3600))
-        XCTAssertThrowsError(try accept(future, signer: signer, store: store, now: now)) {
+        let future = try Self.feedData(generation: 1, signerKeyID: "revoker-a", tuples: [], now: now.addingTimeInterval(3600))
+        XCTAssertThrowsError(try Self.accept(future, signer: signer, store: store, now: now)) {
             XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .futureIssued)
         }
-        let expired = try feedData(
+        let expired = try Self.feedData(
             generation: 1,
             signerKeyID: "revoker-a",
             tuples: [],
             now: now.addingTimeInterval(-7200),
             expiresAt: now.addingTimeInterval(-3600)
         )
-        XCTAssertThrowsError(try accept(expired, signer: signer, store: store, now: now)) {
+        XCTAssertThrowsError(try Self.accept(expired, signer: signer, store: store, now: now)) {
             XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .expired)
         }
-        let staleInitial = try feedData(
+        let staleInitial = try Self.feedData(
             generation: 1,
             signerKeyID: "revoker-a",
             tuples: [],
             now: now.addingTimeInterval(-16 * 60),
             expiresAt: now.addingTimeInterval(40 * 60)
         )
-        XCTAssertThrowsError(try accept(staleInitial, signer: signer, store: MemoryRevocationStore(), now: now)) {
+        XCTAssertThrowsError(try Self.accept(staleInitial, signer: signer, store: MemoryRevocationStore(), now: now)) {
             XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .expired)
         }
     }
@@ -159,26 +159,26 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         let now = Self.date("2026-09-28T12:00:00Z")
         let firstTuple = Self.digest("01")
         let secondTuple = Self.digest("02")
-        let initial = try feedData(generation: 5, signerKeyID: "revoker-a", tuples: [firstTuple], now: now)
-        _ = try accept(initial, signer: signer, store: store, now: now)
+        let initial = try Self.feedData(generation: 5, signerKeyID: "revoker-a", tuples: [firstTuple], now: now)
+        _ = try Self.accept(initial, signer: signer, store: store, now: now)
 
-        let rollback = try feedData(generation: 4, signerKeyID: "revoker-a", tuples: [firstTuple], now: now)
-        XCTAssertThrowsError(try accept(rollback, signer: signer, store: store, now: now)) {
+        let rollback = try Self.feedData(generation: 4, signerKeyID: "revoker-a", tuples: [firstTuple], now: now)
+        XCTAssertThrowsError(try Self.accept(rollback, signer: signer, store: store, now: now)) {
             XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .rollback)
         }
 
-        let sameGenerationChangedBody = try feedData(generation: 5, signerKeyID: "revoker-a", tuples: [firstTuple, secondTuple], now: now)
-        XCTAssertThrowsError(try accept(sameGenerationChangedBody, signer: signer, store: store, now: now)) {
+        let sameGenerationChangedBody = try Self.feedData(generation: 5, signerKeyID: "revoker-a", tuples: [firstTuple, secondTuple], now: now)
+        XCTAssertThrowsError(try Self.accept(sameGenerationChangedBody, signer: signer, store: store, now: now)) {
             XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .rollback)
         }
 
-        let regression = try feedData(generation: 6, signerKeyID: "revoker-a", tuples: [secondTuple], now: now)
-        XCTAssertThrowsError(try accept(regression, signer: signer, store: store, now: now)) {
+        let regression = try Self.feedData(generation: 6, signerKeyID: "revoker-a", tuples: [secondTuple], now: now)
+        XCTAssertThrowsError(try Self.accept(regression, signer: signer, store: store, now: now)) {
             XCTAssertEqual($0 as? NativeMTPRevocationFeedError, .revokedSetRegression)
         }
 
-        let superset = try feedData(generation: 6, signerKeyID: "revoker-a", tuples: [firstTuple, secondTuple], now: now)
-        XCTAssertNoThrow(try accept(superset, signer: signer, store: store, now: now))
+        let superset = try Self.feedData(generation: 6, signerKeyID: "revoker-a", tuples: [firstTuple, secondTuple], now: now)
+        XCTAssertNoThrow(try Self.accept(superset, signer: signer, store: store, now: now))
     }
 
     func testFailsClosedOnCorruptMissingAndInterruptedCacheState() throws {
@@ -186,13 +186,13 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         let now = Self.date("2026-09-28T12:00:00Z")
         let tuple = Self.digest("01")
         let store = MemoryRevocationStore()
-        let feed = try feedData(generation: 2, signerKeyID: "revoker-a", tuples: [tuple], now: now)
-        _ = try accept(feed, signer: signer, store: store, now: now)
+        let feed = try Self.feedData(generation: 2, signerKeyID: "revoker-a", tuples: [tuple], now: now)
+        _ = try Self.accept(feed, signer: signer, store: store, now: now)
 
         store.cachedFeed = nil
         XCTAssertThrowsError(try NativeMTPRevocationFeedManager.loadCached(
             pinnedSignerKeyID: "revoker-a",
-            verifier: verifier(signer: signer),
+            verifier: Self.verifier(signer: signer),
             store: store,
             now: now
         )) {
@@ -200,10 +200,10 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         }
 
         store.cachedFeed = Data("not-json".utf8)
-        store.cachedSignature = signature(for: store.cachedFeed!, signer: signer, keyID: "revoker-a")
+        store.cachedSignature = Self.signature(for: store.cachedFeed!, signer: signer, keyID: "revoker-a")
         XCTAssertThrowsError(try NativeMTPRevocationFeedManager.loadCached(
             pinnedSignerKeyID: "revoker-a",
-            verifier: verifier(signer: signer),
+            verifier: Self.verifier(signer: signer),
             store: store,
             now: now
         )) {
@@ -218,7 +218,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         )
         XCTAssertThrowsError(try NativeMTPRevocationFeedManager.loadCached(
             pinnedSignerKeyID: "revoker-a",
-            verifier: verifier(signer: signer),
+            verifier: Self.verifier(signer: signer),
             store: store,
             now: now
         )) {
@@ -226,24 +226,24 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         }
 
         let regressionStore = MemoryRevocationStore()
-        let priorWithTwo = try feedData(
+        let priorWithTwo = try Self.feedData(
             generation: 7,
             signerKeyID: "revoker-a",
             tuples: [Self.digest("01"), Self.digest("02")],
             now: now
         )
-        _ = try accept(priorWithTwo, signer: signer, store: regressionStore, now: now)
+        _ = try Self.accept(priorWithTwo, signer: signer, store: regressionStore, now: now)
         let priorRegressionFeed = regressionStore.cachedFeed
         let priorRegressionSignature = regressionStore.cachedSignature
         let priorRegressionAnchor = regressionStore.cacheAnchor
-        let regressingAhead = try feedData(
+        let regressingAhead = try Self.feedData(
             generation: 8,
             signerKeyID: "revoker-a",
             tuples: [Self.digest("02")],
             now: now
         )
         regressionStore.cachedFeed = regressingAhead
-        regressionStore.cachedSignature = signature(for: regressingAhead, signer: signer, keyID: "revoker-a")
+        regressionStore.cachedSignature = Self.signature(for: regressingAhead, signer: signer, keyID: "revoker-a")
         regressionStore.cacheAnchor = NativeMTPRevocationAnchor(
             generation: 8,
             bodySHA256: NativeMTPRevocationFeed.sha256Hex(regressingAhead),
@@ -254,7 +254,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         regressionStore.priorCacheAnchor = priorRegressionAnchor
         XCTAssertThrowsError(try NativeMTPRevocationFeedManager.loadCached(
             pinnedSignerKeyID: "revoker-a",
-            verifier: verifier(signer: signer),
+            verifier: Self.verifier(signer: signer),
             store: regressionStore,
             now: now
         )) {
@@ -266,20 +266,20 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         let signer = Curve25519.Signing.PrivateKey()
         let now = Self.date("2026-09-28T12:00:00Z")
         let store = MemoryRevocationStore()
-        let oldFeed = try feedData(generation: 1, signerKeyID: "revoker-a", tuples: [Self.digest("01")], now: now)
-        _ = try accept(oldFeed, signer: signer, store: store, now: now)
+        let oldFeed = try Self.feedData(generation: 1, signerKeyID: "revoker-a", tuples: [Self.digest("01")], now: now)
+        _ = try Self.accept(oldFeed, signer: signer, store: store, now: now)
         let priorFeed = store.cachedFeed
         let priorSignature = store.cachedSignature
         let priorAnchor = store.cacheAnchor
 
-        let aheadFeed = try feedData(generation: 2, signerKeyID: "revoker-a", tuples: [Self.digest("01"), Self.digest("02")], now: now)
+        let aheadFeed = try Self.feedData(generation: 2, signerKeyID: "revoker-a", tuples: [Self.digest("01"), Self.digest("02")], now: now)
         let aheadAnchor = NativeMTPRevocationAnchor(
             generation: 2,
             bodySHA256: NativeMTPRevocationFeed.sha256Hex(aheadFeed),
             revokedSetSHA256: try NativeMTPRevocationFeed.parse(aheadFeed).revokedSetSHA256
         )
         store.cachedFeed = aheadFeed
-        store.cachedSignature = signature(for: aheadFeed, signer: signer, keyID: "revoker-a")
+        store.cachedSignature = Self.signature(for: aheadFeed, signer: signer, keyID: "revoker-a")
         store.cacheAnchor = aheadAnchor
         store.priorCachedFeed = priorFeed
         store.priorCachedSignature = priorSignature
@@ -287,7 +287,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
 
         let recovered = try NativeMTPRevocationFeedManager.loadCached(
             pinnedSignerKeyID: "revoker-a",
-            verifier: verifier(signer: signer),
+            verifier: Self.verifier(signer: signer),
             store: store,
             now: now
         )
@@ -296,7 +296,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
 
         let behindFeed = oldFeed
         store.cachedFeed = behindFeed
-        store.cachedSignature = signature(for: behindFeed, signer: signer, keyID: "revoker-a")
+        store.cachedSignature = Self.signature(for: behindFeed, signer: signer, keyID: "revoker-a")
         store.cacheAnchor = NativeMTPRevocationAnchor(
             generation: 1,
             bodySHA256: NativeMTPRevocationFeed.sha256Hex(behindFeed),
@@ -304,7 +304,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         )
         XCTAssertThrowsError(try NativeMTPRevocationFeedManager.loadCached(
             pinnedSignerKeyID: "revoker-a",
-            verifier: verifier(signer: signer),
+            verifier: Self.verifier(signer: signer),
             store: store,
             now: now
         )) {
@@ -320,19 +320,19 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         let now = Self.date("2026-09-28T12:00:00Z")
         let tuple = Self.digest("aa")
         let otherTuple = Self.digest("bb")
-        let feed = try feedData(generation: 11, signerKeyID: "revoker.file", tuples: [tuple], now: now)
+        let feed = try Self.feedData(generation: 11, signerKeyID: "revoker.file", tuples: [tuple], now: now)
 
         _ = try NativeMTPRevocationFeedManager.accept(
             feedData: feed,
-            signatureData: signature(for: feed, signer: signer, keyID: "revoker.file"),
+            signatureData: Self.signature(for: feed, signer: signer, keyID: "revoker.file"),
             pinnedSignerKeyID: "revoker.file",
-            verifier: verifier(signer: signer),
+            verifier: Self.verifier(signer: signer),
             store: store,
             now: now
         )
         let recovered = try NativeMTPRevocationFeedManager.loadCached(
             pinnedSignerKeyID: "revoker.file",
-            verifier: verifier(signer: signer),
+            verifier: Self.verifier(signer: signer),
             store: store,
             now: now
         )
@@ -349,9 +349,9 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
     ) throws -> NativeMTPRevocationState {
         try NativeMTPRevocationFeedManager.accept(
             feedData: feed,
-            signatureData: signature(for: feed, signer: signer, keyID: "revoker-a"),
+            signatureData: Self.signature(for: feed, signer: signer, keyID: "revoker-a"),
             pinnedSignerKeyID: "revoker-a",
-            verifier: verifier(signer: signer),
+            verifier: Self.verifier(signer: signer),
             store: store,
             now: now
         )
@@ -364,11 +364,11 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
         now: Date,
         expiresAt: Date? = nil
     ) throws -> Data {
-        try json([
+        try Self.json([
             "schema_version": NativeMTPRevocationFeed.schemaVersion,
             "generation": generation,
-            "issued_at": iso8601.string(from: now),
-            "expires_at": iso8601.string(from: expiresAt ?? now.addingTimeInterval(3600)),
+            "issued_at": Self.iso8601.string(from: now),
+            "expires_at": Self.iso8601.string(from: expiresAt ?? now.addingTimeInterval(3600)),
             "signer_key_id": signerKeyID,
             "revoked_admission_tuple_sha256": tuples.sorted(),
         ])
@@ -376,7 +376,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
 
     private static func signature(for payload: Data, signer: Curve25519.Signing.PrivateKey, keyID: String) -> Data {
         let signature = try! signer.signature(for: payload).base64EncodedString()
-        return try! json([
+        return try! Self.json([
             "key_id": keyID,
             "alg": "ed25519",
             "signature": signature,
@@ -400,7 +400,7 @@ final class NativeMTPRevocationFeedTests: XCTestCase {
     }
 
     private static func date(_ value: String) -> Date {
-        iso8601.date(from: value)!
+        Self.iso8601.date(from: value)!
     }
 
     private static let iso8601: ISO8601DateFormatter = {
