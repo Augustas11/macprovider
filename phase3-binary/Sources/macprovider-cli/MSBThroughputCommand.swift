@@ -437,28 +437,18 @@ struct MSBThroughputCommand: AsyncParsableCommand {
     }
 
     private static func msbCacheKinds(model: any LanguageModel) throws -> [PagedKVSharedForwardBackend.CacheKind]? {
-        let caches = try model.newCache(parameters: nil)
-        guard !caches.isEmpty else { return nil }
-        var kinds: [PagedKVSharedForwardBackend.CacheKind] = []
-        kinds.reserveCapacity(caches.count)
-        for cache in caches {
-            if cache is KVCacheSimple {
-                kinds.append(.pagedAttention)
-            } else if cache is MambaCache {
-                kinds.append(.recurrentMamba)
-            } else {
-                return nil
-            }
-        }
-        return kinds.contains(.pagedAttention) ? kinds : nil
+        PagedKVSharedForwardBackend.CacheKind.kinds(from: try model.newCache(parameters: nil))
     }
 
     private static func pagedAttentionLayerCount(_ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]) -> Int {
-        cacheKinds.filter { $0 == .pagedAttention }.count
+        cacheKinds.filter(\.usesPagedKVCache).count
     }
 
     private static func msbCacheClass(_ cacheKinds: [PagedKVSharedForwardBackend.CacheKind]) -> String {
-        cacheKinds.contains(.recurrentMamba) ? "mixed" : "KVCacheSimple"
+        if cacheKinds.contains(.recurrentMamba) { return "mixed" }
+        let sliding = cacheKinds.filter(\.hasSlidingWindow)
+        guard !sliding.isEmpty else { return "KVCacheSimple" }
+        return sliding.count == cacheKinds.count ? "RotatingKVCache" : "mixed"
     }
 
     /// Drive `PagedKVSharedForwardBackend.prefill` + a decode loop over
@@ -535,7 +525,7 @@ struct MSBThroughputCommand: AsyncParsableCommand {
 
         let decodeStart: Date
         let decodeEnd: Date
-        if compiled && !cacheKinds.contains(.recurrentMamba) {
+        if compiled && cacheKinds.allSatisfy({ $0 == .pagedAttention }) {
             // Compiled lockstep window: one container.perform for the timed
             // tokens, matching the contiguous engine that scaled on Studio.
             try await extendRows(allocator: allocator, rows: rowsState, by: decodeSteps)

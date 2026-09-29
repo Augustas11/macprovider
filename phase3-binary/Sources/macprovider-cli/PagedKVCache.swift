@@ -487,11 +487,25 @@ final class PagedKVCache: KVCache, CustomDebugStringConvertible {
         windowSize: Int?,
         returnArray: Bool
     ) -> MLXFast.ScaledDotProductAttentionMaskMode {
-        if n == 1 { return .none }
-        if returnArray || (windowSize != nil && n > windowSize!) {
+        // makeMask runs before update(), so `offset + n` is the post-update
+        // key count. A sliding window excludes keys once that length exceeds
+        // the window, including single-token decode — `.none` would let the
+        // query attend the whole paged history.
+        let needsWindow = Self.slidingWindowRequiresMask(n: n, offset: offset, windowSize: windowSize)
+        if n == 1 && !needsWindow {
+            return .none
+        }
+        if returnArray || needsWindow {
             return .array(createCausalMask(n: n, offset: offset, windowSize: windowSize))
         }
         return .causal
+    }
+
+    static func slidingWindowRequiresMask(n: Int, offset: Int, windowSize: Int?) -> Bool {
+        guard let windowSize, windowSize > 0 else { return false }
+        let (postUpdate, overflow) = offset.addingReportingOverflow(n)
+        if overflow { return true }
+        return postUpdate > windowSize
     }
 
     var debugDescription: String {

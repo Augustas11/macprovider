@@ -1135,7 +1135,7 @@
     {
       "spec_id": "SPEC-039",
       "title": "Paged KV / paged-attention engine",
-      "version": "v0.1.9",
+      "version": "v0.1.10",
       "path": "specs/SPEC-039-paged-kv-attention-engine.md",
       "status": "draft",
       "owner": "@Augustas11",
@@ -4811,7 +4811,10 @@
       ],
       "tests": [
         "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testQwen3xHybridArchitectureRequiresExactAllowlistedIdentityAndConfigMetadata",
-        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testMoEDispatchGateRequiresGenuinelyProvenSharedForwardIsolation"
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVRuntimeBridgeTests.swift:testMoEDispatchGateRequiresGenuinelyProvenSharedForwardIsolation",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testRotatingCacheKindMapsKeepZeroAndRejectsSinkPrefix",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testShortPrefillOnLongHistoryStillWindows",
+        "phase3-binary/Tests/macprovider-cliTests/PagedKVSlidingWindowTests.swift:testPagedMaskAppliesWindowOnSingleTokenDecodePastTheWindow"
       ],
       "journeys": [],
       "evidence": [],
@@ -4819,7 +4822,7 @@
         "verdict": "UNKNOWN",
         "owner": "@Augustas11",
         "issue": "https://github.com/Augustas11/macprovider/issues/1773",
-        "rationale": "FR-PKV12 v0.1.9 adds three exact Qwen hybrid identities after packaged-runtime parity, isolation, lifecycle, usage, and throughput evidence. Runtime attach still fails closed unless the identity/config pair and fresh 48-token shared-forward proof pass; release and production deployment remain pending."
+        "rationale": "FR-PKV12 v0.1.10 can represent keep=0 sliding-window layers for isolated measurement but admits no rotating identity. v0.1.9 still holds the measured Qwen hybrid allowlist. Runtime attach fails closed unless the identity/config pair and fresh 48-token shared-forward proof pass; release and production deployment remain pending."
       }
     },
     {
