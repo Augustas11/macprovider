@@ -1255,6 +1255,7 @@ actor ModelRuntime: ModelRuntimeServing {
         })
         recordNativeMTPAdmissionStatus(admission)
         testNativeMTPAdmissionObserver?(admission)
+        testNativeMTPAdmissionRequestObserver?(request.requestID, admission)
         return admission
     }
 
@@ -1477,6 +1478,7 @@ actor ModelRuntime: ModelRuntimeServing {
     private let nativeMTPCapability: NativeMTPCapability?
     private let nativeMTPSchedulerSupported: Bool
     private let testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)?
+    private let testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission) -> Void)?
     /// Injectable seam over the on-device SPEC-039 parity/MoE self-measurement probes.
     /// Production uses `.live`; tests inject a stub so unit coverage of the
     /// measurement→attach pipeline needs no MLX/metallib. Mirrors
@@ -2418,6 +2420,7 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPResolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority? = nil,
         nativeMTPSelfTestRunner: NativeMTPSelfTestRunner = .unavailable,
         testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
+        testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission) -> Void)? = nil,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30,
         catalogModelIDAlias: String? = nil,
@@ -2452,7 +2455,7 @@ actor ModelRuntime: ModelRuntimeServing {
             publicKeysByKeyID: AutotuneStaticInputs.defaultTrustedPublicKeys,
             requiredKeyID: AutotuneStaticInputs.keyID
         )
-        #if DEBUG
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.configuredNativeMTPRunningBuildIdentity = nativeMTPRunningBuildIdentity
         #else
         self.configuredNativeMTPRunningBuildIdentity = nil
@@ -2476,7 +2479,13 @@ actor ModelRuntime: ModelRuntimeServing {
         self.nativeMTPMode = nativeMTPMode
         self.nativeMTPCapability = nativeMTPCapability
         self.nativeMTPSchedulerSupported = nativeMTPSchedulerSupported
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
+        self.testNativeMTPAdmissionRequestObserver = testNativeMTPAdmissionRequestObserver
+        #else
+        self.testNativeMTPAdmissionObserver = nil
+        self.testNativeMTPAdmissionRequestObserver = nil
+        #endif
         self.pagedKVRuntimeProber = .live
         self.continuousBatchReplayAuthority = ContinuousBatchRuntimeReplayAuthority()
         self.pagedKVAttachDecision = Self.pagedKVRuntimeCapabilityDecision(
@@ -2818,8 +2827,10 @@ actor ModelRuntime: ModelRuntimeServing {
         nativeMTPRevokedTupleSHA256: Set<String>? = nil,
         nativeMTPResolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority? = nil,
         nativeMTPDrafterContainer: MTPDrafterContainer? = nil,
+        labNativeMTPAdmissionCapability: NativeMTPAdmissionCapability? = nil,
         nativeMTPSelfTestRunner: NativeMTPSelfTestRunner = .unavailable,
         testNativeMTPAdmissionObserver: (@Sendable (NativeMTPRuntimeAdmission) -> Void)? = nil,
+        testNativeMTPAdmissionRequestObserver: (@Sendable (String?, NativeMTPRuntimeAdmission) -> Void)? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
         providerStatus: ProviderStatus? = nil,
@@ -2856,14 +2867,27 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentDraftModelID = normalizedDraftModelID
         self.currentDraftTargetModelID = normalizedDraftModelID == nil ? nil : modelID
         self.currentDraftContainer = nil
-        #if DEBUG
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.currentNativeMTPDrafterContainer = nativeMTPDrafterContainer
         self.currentNativeMTPCapability = nativeMTPDrafterContainer == nil ? nil : nativeMTPCapability
         #else
         self.currentNativeMTPDrafterContainer = nil
         self.currentNativeMTPCapability = nil
         #endif
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
+        self.currentNativeMTPAdmissionCapability = nativeMTPDrafterContainer == nil
+            ? nil
+            : labNativeMTPAdmissionCapability
+        self.nativeMTPStatusResetGeneration = self.currentNativeMTPAdmissionCapability == nil ? 0 : 1
+        self.currentNativeMTPStatusSink = Self.nativeMTPStatusSink(
+            capability: self.currentNativeMTPCapability,
+            admissionCapability: self.currentNativeMTPAdmissionCapability,
+            mode: nativeMTPMode,
+            resetGeneration: self.nativeMTPStatusResetGeneration
+        )
+        #else
         self.currentNativeMTPAdmissionCapability = nil
+        #endif
         self.currentNativeMTPTupleOffer = nil
         self.currentNativeMTPSelfTestInput = nil
         self.configuredDraftModelID = normalizedDraftModelID
@@ -2871,14 +2895,14 @@ actor ModelRuntime: ModelRuntimeServing {
         self.configuredNativeMTPAdmissionSidecarPath = Self.nonEmpty(nativeMTPAdmissionSidecarPath)
         self.configuredNativeMTPAdmissionSignaturePath = Self.nonEmpty(nativeMTPAdmissionSignaturePath)
         self.configuredNativeMTPTrustedKeyring = nativeMTPTrustedKeyring
-        #if DEBUG
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.configuredNativeMTPRunningBuildIdentity = nativeMTPRunningBuildIdentity
         #else
         self.configuredNativeMTPRunningBuildIdentity = nil
         #endif
         self.configuredNativeMTPRevokedTupleSHA256 = nativeMTPRevokedTupleSHA256
         self.configuredNativeMTPResolvedArtifactAuthority = nativeMTPResolvedArtifactAuthority
-        #if DEBUG
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.nativeMTPSelfTestRunner = nativeMTPSelfTestRunner
         #else
         self.nativeMTPSelfTestRunner = .unavailable
@@ -2919,7 +2943,7 @@ actor ModelRuntime: ModelRuntimeServing {
         // prebuilt paged-KV attach evidence. A release provider ignores caller-supplied
         // identity/proof/backend flags and can only attach from real on-device measurement,
         // so this test initializer can never become a self-authored-evidence bypass.
-        #if DEBUG
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         let effectiveObservedIdentity = pagedKVObservedRuntimeIdentity
         let effectiveSizingProof = pagedKVHardwareSizingProof
         let effectiveBackendInstalled = pagedKVSchedulerBackendInstalled
@@ -2935,11 +2959,17 @@ actor ModelRuntime: ModelRuntimeServing {
         self.nativeMTPMode = nativeMTPMode
         self.nativeMTPCapability = nativeMTPCapability
         self.nativeMTPSchedulerSupported = nativeMTPSchedulerSupported
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.testNativeMTPAdmissionObserver = testNativeMTPAdmissionObserver
+        self.testNativeMTPAdmissionRequestObserver = testNativeMTPAdmissionRequestObserver
+        #else
+        self.testNativeMTPAdmissionObserver = nil
+        self.testNativeMTPAdmissionRequestObserver = nil
+        #endif
         // Defense-in-depth: only DEBUG/test builds may inject a non-`.live` prober. A
         // release provider always re-derives evidence via the real on-device `.live`
         // probes, so an injected prober can never revive the "self-authored" attach path.
-        #if DEBUG
+        #if DEBUG || MACPROVIDER_LAB_HARNESS
         self.pagedKVRuntimeProber = pagedKVRuntimeProber
         #else
         self.pagedKVRuntimeProber = .live
@@ -3007,6 +3037,10 @@ actor ModelRuntime: ModelRuntimeServing {
             modelSHA256: modelHash,
             weightsGeneration: self.currentSpecDecodeGeneration,
             prefillStepSize: self.prefillStepSize,
+            nativeMTPRoundByteCapacity: Self.nativeMTPRoundByteCapacity(
+                from: self.currentNativeMTPAdmissionCapability
+            ),
+            nativeMTPStatusSink: self.currentNativeMTPStatusSink,
             replayAuthority: replayAuthority
         )
         self.continuousBatchScheduler = continuousBatchScheduler
@@ -8602,10 +8636,24 @@ actor ModelRuntime: ModelRuntimeServing {
         admissionCapability: NativeMTPAdmissionCapability
     ) -> Bool {
         guard let observation else { return false }
-        return observation.target.format.sidecarQuantizationLabel == admissionCapability.quantization.target
+        guard observation.target.format.sidecarQuantizationLabel == admissionCapability.quantization.target
             && observation.mtp.format.sidecarQuantizationLabel == admissionCapability.quantization.mtp
             && observation.target.mtpPredictionLayerCount == admissionCapability.predictionLayerCount
             && observation.mtp.mtpPredictionLayerCount == admissionCapability.predictionLayerCount
+        else {
+            return false
+        }
+        guard admissionCapability.quantization.target == "mlx_affine_4bit",
+              admissionCapability.quantization.mtp == "mlx_affine_4bit" else {
+            return true
+        }
+        guard let representation = try? NativeMTPArtifactObserver.affineRepresentation(for: observation) else {
+            return false
+        }
+        return representation.groupSize == admissionCapability.quantization.blockSizeElements
+            && representation.manifestSHA256 == admissionCapability.quantization.representationManifestSHA256
+            && representation.perLayerExceptions == admissionCapability.quantization.perLayerExceptions
+            && representation.unquantizedExceptions == admissionCapability.quantization.unquantizedExceptions
     }
 
     static func nativeMTPArtifactObservationMatchesAdmissionForTest(
@@ -10723,3 +10771,34 @@ final class StreamedFlag: @unchecked Sendable {
         return value
     }
 }
+
+#if DEBUG || MACPROVIDER_LAB_HARNESS
+extension ModelRuntime {
+    /// Lab harness entry point: runs the same live parity + batched-isolation/MoE
+    /// probes and measurement that the production load path runs, so lab runtimes
+    /// attach paged KV from real on-device evidence instead of a synthesized identity.
+    func labMeasurePagedKVRuntime(
+        container: ModelContainer,
+        modelID: String,
+        modelCapabilities: PagedKVRuntimeModelCapabilities,
+        runtimeCacheClass: String
+    ) async -> PagedKVRuntimeMeasurement? {
+        let (parityProbe, moeProbe) = await computePagedKVRuntimeProbes(
+            container: container,
+            modelID: modelID,
+            modelCapabilities: modelCapabilities,
+            runtimeCacheClass: runtimeCacheClass
+        )
+        return Self.measurePagedKVRuntime(
+            config: pagedKVConfig,
+            modelID: modelID,
+            modelSHA256: currentModelHash,
+            tokenizerSHA256: currentTokenizerConfigSHA256,
+            chatTemplateSHA256: currentChatTemplateSHA256,
+            modelCapabilities: modelCapabilities,
+            parityProbe: parityProbe,
+            moeProbe: moeProbe
+        )
+    }
+}
+#endif

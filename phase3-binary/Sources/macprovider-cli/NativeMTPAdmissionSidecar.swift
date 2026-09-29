@@ -524,6 +524,26 @@ enum NativeMTPAdmissionSidecar {
     struct Quantization: Equatable, Sendable {
         let target: String
         let mtp: String
+        let blockSizeElements: Int?
+        let representationManifestSHA256: String?
+        let unquantizedExceptions: [String]
+        let perLayerExceptions: [String]
+
+        init(
+            target: String,
+            mtp: String,
+            blockSizeElements: Int? = nil,
+            representationManifestSHA256: String? = nil,
+            unquantizedExceptions: [String] = [],
+            perLayerExceptions: [String] = []
+        ) {
+            self.target = target
+            self.mtp = mtp
+            self.blockSizeElements = blockSizeElements
+            self.representationManifestSHA256 = representationManifestSHA256
+            self.unquantizedExceptions = unquantizedExceptions
+            self.perLayerExceptions = perLayerExceptions
+        }
     }
 
     struct TrustedKeyring: Equatable, Sendable {
@@ -990,7 +1010,80 @@ enum NativeMTPAdmissionSidecar {
         )
 
         let quantization = try requireObject(object, "quantization", path: "$")
-        try rejectUnknown(quantization, allowed: ["target", "mtp"], path: "$.quantization")
+        let targetQuantization = try requireString(
+            quantization,
+            "target",
+            path: "$.quantization",
+            allowed: ["bf16", "fp16", "mlx_affine_4bit", "mlx_mxfp8"]
+        )
+        let mtpQuantization = try requireString(
+            quantization,
+            "mtp",
+            path: "$.quantization",
+            allowed: ["bf16", "fp16", "mlx_affine_4bit", "mlx_mxfp8"]
+        )
+        let normalizedAffine = targetQuantization == "mlx_affine_4bit" || mtpQuantization == "mlx_affine_4bit"
+        let quantizationFields: Set<String> = normalizedAffine
+            ? [
+                "target", "mtp", "representation_manifest_sha256",
+                "block_size_elements", "unquantized_exceptions", "per_layer_exceptions",
+            ]
+            : ["target", "mtp"]
+        try rejectUnknownFields(quantization, allowed: quantizationFields, path: "$.quantization")
+        let representationManifestSHA256: String?
+        let blockSizeElements: Int?
+        let unquantizedExceptions: [String]
+        let perLayerExceptions: [String]
+        if normalizedAffine {
+            guard targetQuantization == "mlx_affine_4bit", mtpQuantization == "mlx_affine_4bit" else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("$.quantization")
+            }
+            representationManifestSHA256 = try requireSHA256(
+                quantization,
+                "representation_manifest_sha256",
+                path: "$.quantization"
+            )
+            let affineBlockSize = try requireInt(
+                quantization,
+                "block_size_elements",
+                path: "$.quantization",
+                range: 32...128
+            )
+            guard [32, 64, 128].contains(affineBlockSize) else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("$.quantization.block_size_elements")
+            }
+            blockSizeElements = affineBlockSize
+            unquantizedExceptions = try requirePatternArray(
+                quantization,
+                "unquantized_exceptions",
+                path: "$.quantization"
+            )
+            perLayerExceptions = try requirePatternArray(
+                quantization,
+                "per_layer_exceptions",
+                path: "$.quantization"
+            )
+            try validateQuantizationExceptionArray(
+                unquantizedExceptions,
+                key: "unquantized_exceptions",
+                path: "$.quantization"
+            )
+            try validateQuantizationExceptionArray(
+                perLayerExceptions,
+                key: "per_layer_exceptions",
+                path: "$.quantization"
+            )
+        } else {
+            guard quantization["representation_manifest_sha256"] == nil,
+                  quantization["unquantized_exceptions"] == nil,
+                  quantization["per_layer_exceptions"] == nil else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("$.quantization")
+            }
+            representationManifestSHA256 = nil
+            blockSizeElements = nil
+            unquantizedExceptions = []
+            perLayerExceptions = []
+        }
         let cacheState = try requireObject(object, "cache_state", path: "$")
         try rejectUnknown(cacheState, allowed: ["cache_class", "state_class"], path: "$.cache_state")
         let revisions = try requireObject(object, "revisions", path: "$")
@@ -1021,18 +1114,12 @@ enum NativeMTPAdmissionSidecar {
             adaptationEnabled: try requireBool(mtp, "adaptation_enabled", path: "$.mtp"),
             adaptationMaxDepth: try requireInt(mtp, "adaptation_max_depth", path: "$.mtp", range: 1...16),
             quantization: Quantization(
-                target: try requireString(
-                    quantization,
-                    "target",
-                    path: "$.quantization",
-                    allowed: ["bf16", "fp16", "mlx_affine_4bit", "mlx_mxfp8"]
-                ),
-                mtp: try requireString(
-                    quantization,
-                    "mtp",
-                    path: "$.quantization",
-                    allowed: ["bf16", "fp16", "mlx_affine_4bit", "mlx_mxfp8"]
-                )
+                target: targetQuantization,
+                mtp: mtpQuantization,
+                blockSizeElements: blockSizeElements,
+                representationManifestSHA256: representationManifestSHA256,
+                unquantizedExceptions: unquantizedExceptions,
+                perLayerExceptions: perLayerExceptions
             ),
             cacheClass: try requireString(cacheState, "cache_class", path: "$.cache_state", allowed: ["paged_kv"]),
             stateClass: try requireString(cacheState, "state_class", path: "$.cache_state", allowed: ["stageable_rewindable", "hybrid_stageable_rewindable"]),
@@ -1348,10 +1435,10 @@ enum NativeMTPAdmissionSidecar {
             "padding_rule", "unquantized_exceptions", "per_layer_exceptions",
             "representation_manifest_sha256",
         ], path: path)
-        let kind = try requireString(object, "kind", path: path, allowed: ["base", "mlx_mxfp8"])
-        let packedDataDType = try requireString(object, "packed_data_dtype", path: path, allowed: ["none", "uint8"])
+        let kind = try requireString(object, "kind", path: path, allowed: ["base", "mlx_affine", "mlx_mxfp8"])
+        let packedDataDType = try requireString(object, "packed_data_dtype", path: path, allowed: ["none", "uint8", "uint32"])
         let packedLayout = try requireString(object, "packed_layout", path: path, allowed: ["none", "mlx_array_native_v1"])
-        let scaleDType = try requireString(object, "scale_dtype", path: path, allowed: ["none", "float16", "float32"])
+        let scaleDType = try requireString(object, "scale_dtype", path: path, allowed: ["none", "bfloat16", "float16", "float32"])
         let scaleLayout = try requireString(object, "scale_layout", path: path, allowed: ["none", "per_block"])
         let blockSize = try requireNullableInt(object, "block_size_elements", path: path, range: 1...1024)
         let alignmentBytes = try requireNullableInt(object, "alignment_bytes", path: path, range: 1...4096)
@@ -1361,9 +1448,9 @@ enum NativeMTPAdmissionSidecar {
             }
         }
         let paddingRule = try requireString(object, "padding_rule", path: path, allowed: ["none", "zero_pad_to_alignment"])
-        _ = try requirePatternArray(object, "unquantized_exceptions", path: path)
-        _ = try requirePatternArray(object, "per_layer_exceptions", path: path)
-        _ = try requireSHA256(object, "representation_manifest_sha256", path: path)
+        let unquantizedExceptions = try requirePatternArray(object, "unquantized_exceptions", path: path)
+        let perLayerExceptions = try requirePatternArray(object, "per_layer_exceptions", path: path)
+        let representationManifestSHA256 = try requireSHA256(object, "representation_manifest_sha256", path: path)
         switch kind {
         case "base":
             guard packedDataDType == "none",
@@ -1375,18 +1462,61 @@ enum NativeMTPAdmissionSidecar {
                   paddingRule == "none" else {
                 throw NativeMTPAdmissionSidecarError.invalidValue(path)
             }
-            return Quantization(target: "bf16", mtp: "bf16")
+            return Quantization(
+                target: "bf16",
+                mtp: "bf16",
+                blockSizeElements: blockSize,
+                representationManifestSHA256: representationManifestSHA256,
+                unquantizedExceptions: unquantizedExceptions,
+                perLayerExceptions: perLayerExceptions
+            )
+        case "mlx_affine":
+            try validateQuantizationExceptionArray(
+                unquantizedExceptions,
+                key: "unquantized_exceptions",
+                path: path
+            )
+            try validateQuantizationExceptionArray(
+                perLayerExceptions,
+                key: "per_layer_exceptions",
+                path: path
+            )
+            guard packedDataDType == "uint32",
+                  packedLayout == "mlx_array_native_v1",
+                  scaleDType == "bfloat16",
+                  scaleLayout == "per_block",
+                  let blockSize,
+                  [32, 64, 128].contains(blockSize),
+                  alignmentBytes == nil,
+                  paddingRule == "none" else {
+                throw NativeMTPAdmissionSidecarError.invalidValue(path)
+            }
+            return Quantization(
+                target: "mlx_affine_4bit",
+                mtp: "mlx_affine_4bit",
+                blockSizeElements: blockSize,
+                representationManifestSHA256: representationManifestSHA256,
+                unquantizedExceptions: unquantizedExceptions,
+                perLayerExceptions: perLayerExceptions
+            )
         case "mlx_mxfp8":
             guard packedDataDType == "uint8",
                   packedLayout == "mlx_array_native_v1",
-                  scaleDType != "none",
+                  ["float16", "float32"].contains(scaleDType),
                   scaleLayout != "none",
                   blockSize != nil,
                   alignmentBytes != nil,
                   paddingRule == "zero_pad_to_alignment" else {
                 throw NativeMTPAdmissionSidecarError.invalidValue(path)
             }
-            return Quantization(target: "mlx_mxfp8", mtp: "mlx_mxfp8")
+            return Quantization(
+                target: "mlx_mxfp8",
+                mtp: "mlx_mxfp8",
+                blockSizeElements: blockSize,
+                representationManifestSHA256: representationManifestSHA256,
+                unquantizedExceptions: unquantizedExceptions,
+                perLayerExceptions: perLayerExceptions
+            )
         default:
             throw NativeMTPAdmissionSidecarError.invalidValue("\(path).kind")
         }
@@ -2678,6 +2808,12 @@ enum NativeMTPAdmissionSidecar {
             "selftest.signature_sha256=\(parsed.selfTest.signatureSHA256)",
             "flags.admission_allowed=\(parsed.admissionAllowed)",
         ]
+        if let representationManifestSHA256 = parsed.quantization.representationManifestSHA256 {
+            fields.append("quantization.block_size_elements=\(parsed.quantization.blockSizeElements!)")
+            fields.append("quantization.representation_manifest_sha256=\(representationManifestSHA256)")
+            fields.append("quantization.per_layer_exceptions=\(parsed.quantization.perLayerExceptions.joined(separator: ","))")
+            fields.append("quantization.unquantized_exceptions=\(parsed.quantization.unquantizedExceptions.joined(separator: ","))")
+        }
         fields.append(contentsOf: parsed.spec023.evidenceArtifactSHA256.enumerated().map { index, digest in
             "spec023.evidence_artifact_sha256.\(index)=\(digest)"
         })
@@ -2698,6 +2834,16 @@ enum NativeMTPAdmissionSidecar {
         }
         for key in allowed where object[key] == nil {
             throw NativeMTPAdmissionSidecarError.missingField("\(path).\(key)")
+        }
+    }
+
+    private static func rejectUnknownFields(
+        _ object: [String: NativeMTPSidecarJSON],
+        allowed: Set<String>,
+        path: String
+    ) throws {
+        for key in object.keys where !allowed.contains(key) {
+            throw NativeMTPAdmissionSidecarError.unknownField("\(path).\(key)")
         }
     }
 
@@ -2857,6 +3003,26 @@ enum NativeMTPAdmissionSidecar {
             }
         }
         return values
+    }
+
+    private static func validateQuantizationExceptionArray(
+        _ values: [String],
+        key: String,
+        path: String
+    ) throws {
+        for value in values {
+            let module: Substring
+            if value.hasPrefix("target/") {
+                module = value.dropFirst("target/".count)
+            } else if value.hasPrefix("mtp/") {
+                module = value.dropFirst("mtp/".count)
+            } else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+            }
+            guard (1...128).contains(module.utf8.count), !module.contains("/") else {
+                throw NativeMTPAdmissionSidecarError.invalidValue("\(path).\(key)")
+            }
+        }
     }
 
     private static func requireRelativeArtifactPath(_ object: [String: NativeMTPSidecarJSON], _ key: String, path: String) throws -> String {

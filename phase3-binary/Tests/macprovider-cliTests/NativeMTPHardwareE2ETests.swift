@@ -18,7 +18,7 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
     private static let enabledVariable = "MACPROVIDER_NATIVE_MTP_E2E"
     private static let rootVariable = "MACPROVIDER_NATIVE_MTP_E2E_ROOT"
     private static let modelID = "mlx-community/Qwen3.5-9B-4bit"
-    private static let upstreamRevision = "e874140ecb5b04aeb445eb3837d48f7b187b867e"
+    private static let upstreamRevision = "c4bc3461673e9f035c5f11bf41dda120d4baee1d"
     private static let providerRevision = "0123456789abcdef0123456789abcdef01234567"
     private static let liveExecutableCDHash = "456789abcdef0123456789abcdef0123456789ab"
     private static let releaseID = "native-mtp-hardware-e2e"
@@ -295,6 +295,11 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
         mtpIdentity: MLXSnapshotIdentity,
         machine: MachineFingerprint
     ) throws -> NativeMTPAdmissionCapability {
+        let artifactObservation = try NativeMTPArtifactObserver.observePair(
+            targetDirectory: root.appendingPathComponent("target", isDirectory: true),
+            mtpDirectory: root.appendingPathComponent("mtp", isDirectory: true)
+        )
+        let affineRepresentation = try NativeMTPArtifactObserver.affineRepresentation(for: artifactObservation)
         let tokenizerSHA = try sha256(of: root.appendingPathComponent("target/tokenizer.json"))
         let manifestSHA = try sha256(of: root.appendingPathComponent("mtp/config.json"))
         let signer = Curve25519.Signing.PrivateKey()
@@ -322,7 +327,8 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
             manifestSHA: manifestSHA,
             artifactManifestSHA: sha256Hex(projectionData),
             challengeBankSHA: sha256Hex(selfTestBankData),
-            signerKeyID: keyID
+            signerKeyID: keyID,
+            affineRepresentation: affineRepresentation
         )
         let signature = try signer.signature(for: sidecarData).base64EncodedString()
         let signatureData = Data("""
@@ -388,7 +394,8 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
         manifestSHA: String,
         artifactManifestSHA: String,
         challengeBankSHA: String,
-        signerKeyID: String
+        signerKeyID: String,
+        affineRepresentation: NativeMTPAffineRepresentation
     ) throws -> Data {
         let entry: [String: Any] = [
             "model_key": Self.modelID,
@@ -428,17 +435,17 @@ final class NativeMTPHardwareE2ETests: XCTestCase {
             "performance_evidence_sha256": String(repeating: "3", count: 64),
             "security_negative_evidence_sha256": String(repeating: "3", count: 64),
             "quantization": [
-                "kind": "base",
-                "packed_data_dtype": "none",
-                "packed_layout": "none",
-                "scale_dtype": "none",
-                "scale_layout": "none",
-                "block_size_elements": NSNull(),
+                "kind": "mlx_affine",
+                "packed_data_dtype": "uint32",
+                "packed_layout": "mlx_array_native_v1",
+                "scale_dtype": "bfloat16",
+                "scale_layout": "per_block",
+                "block_size_elements": affineRepresentation.groupSize,
                 "alignment_bytes": NSNull(),
                 "padding_rule": "none",
-                "unquantized_exceptions": [],
-                "per_layer_exceptions": [],
-                "representation_manifest_sha256": String(repeating: "7", count: 64),
+                "unquantized_exceptions": affineRepresentation.unquantizedExceptions,
+                "per_layer_exceptions": affineRepresentation.perLayerExceptions,
+                "representation_manifest_sha256": affineRepresentation.manifestSHA256,
             ],
             "ordinary_baseline": [
                 "decode_path": "ordinary",

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Darwin
 
@@ -63,6 +64,27 @@ struct NativeMTPArtifactObservation: Equatable, Sendable {
     let format: NativeMTPObservedArtifactFormat
     let mtpPredictionLayerCount: Int
     let tensorPairs: [NativeMTPObservedTensorPair]
+    let affineModuleOverrides: [String: NativeMTPAffineModuleOverride]
+    let unquantizedModules: [String]
+
+    init(
+        format: NativeMTPObservedArtifactFormat,
+        mtpPredictionLayerCount: Int,
+        tensorPairs: [NativeMTPObservedTensorPair],
+        affineModuleOverrides: [String: NativeMTPAffineModuleOverride] = [:],
+        unquantizedModules: [String] = []
+    ) {
+        self.format = format
+        self.mtpPredictionLayerCount = mtpPredictionLayerCount
+        self.tensorPairs = tensorPairs
+        self.affineModuleOverrides = affineModuleOverrides
+        self.unquantizedModules = unquantizedModules
+    }
+}
+
+struct NativeMTPAffineModuleOverride: Equatable, Sendable {
+    let bits: Int
+    let groupSize: Int
 }
 
 struct NativeMTPObservedTensorPair: Equatable, Sendable {
@@ -72,6 +94,7 @@ struct NativeMTPObservedTensorPair: Equatable, Sendable {
     let scaleDType: String
     let packedShape: [Int]
     let scaleShape: [Int]
+    let bitsPerValue: Int
     let groupSize: Int
     let logicalInputColumns: Int
     let paddedInputColumns: Int
@@ -80,6 +103,14 @@ struct NativeMTPObservedTensorPair: Equatable, Sendable {
 struct NativeMTPArtifactPairObservation: Equatable, Sendable {
     let target: NativeMTPArtifactObservation
     let mtp: NativeMTPArtifactObservation
+}
+
+struct NativeMTPAffineRepresentation: Equatable, Sendable {
+    let manifestBytes: Data
+    let manifestSHA256: String
+    let perLayerExceptions: [String]
+    let unquantizedExceptions: [String]
+    let groupSize: Int
 }
 
 enum NativeMTPArtifactObserver {
@@ -109,7 +140,9 @@ enum NativeMTPArtifactObserver {
         return NativeMTPArtifactObservation(
             format: format.format,
             mtpPredictionLayerCount: layerCount,
-            tensorPairs: format.tensorPairs
+            tensorPairs: format.tensorPairs,
+            affineModuleOverrides: format.moduleOverrides,
+            unquantizedModules: format.unquantizedModules
         )
     }
 
@@ -129,10 +162,116 @@ enum NativeMTPArtifactObserver {
         return NativeMTPArtifactPairObservation(target: target, mtp: mtp)
     }
 
+    static func affineRepresentation(
+        for observation: NativeMTPArtifactPairObservation
+    ) throws -> NativeMTPAffineRepresentation {
+        guard case .mlxAffine4(let targetBits, let targetGroupSize) = observation.target.format,
+              case .mlxAffine4(let mtpBits, let mtpGroupSize) = observation.mtp.format,
+              targetBits == 4,
+              mtpBits == 4,
+              targetGroupSize == mtpGroupSize,
+              [32, 64, 128].contains(targetGroupSize) else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("affine representation requires matching global 4-bit formats")
+        }
+        guard observation.target.tensorPairs.allSatisfy({ $0.scaleDType == "BF16" }),
+              observation.mtp.tensorPairs.allSatisfy({ $0.scaleDType == "BF16" }) else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine admission requires bfloat16 scales")
+        }
+
+        let target = try affineManifestValue(for: observation.target)
+        let mtp = try affineManifestValue(for: observation.mtp)
+        let canonical = try RFC8785JCS.canonicalStringRawStrings(.object([
+            "schema": .rawString("macprovider.native-mtp-representation.v1"),
+            "target": target,
+            "mtp": mtp,
+        ]))
+        let bytes = Data(canonical.utf8)
+        let digest = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let perLayerExceptions = prefixedModules(
+            target: observation.target.affineModuleOverrides.keys,
+            mtp: observation.mtp.affineModuleOverrides.keys
+        )
+        let unquantizedExceptions = prefixedModules(
+            target: observation.target.unquantizedModules,
+            mtp: observation.mtp.unquantizedModules
+        )
+        guard perLayerExceptions.count <= 256,
+              perLayerExceptions.allSatisfy(isAdmissionExceptionName) else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine too many per-layer exceptions")
+        }
+        guard unquantizedExceptions.count <= 256,
+              unquantizedExceptions.allSatisfy(isAdmissionExceptionName) else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine too many unquantized exceptions")
+        }
+        return NativeMTPAffineRepresentation(
+            manifestBytes: bytes,
+            manifestSHA256: digest,
+            perLayerExceptions: perLayerExceptions,
+            unquantizedExceptions: unquantizedExceptions,
+            groupSize: targetGroupSize
+        )
+    }
+
+    private static func affineManifestValue(
+        for observation: NativeMTPArtifactObservation
+    ) throws -> RFC8785JCS.Value {
+        guard case .mlxAffine4(let bits, let groupSize) = observation.format,
+              bits == 4,
+              [32, 64, 128].contains(groupSize) else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("invalid affine manifest global format")
+        }
+        var overrides: [String: RFC8785JCS.Value] = [:]
+        for (module, override) in observation.affineModuleOverrides {
+            guard isAdmissionModuleName(module),
+                  [4, 8].contains(override.bits),
+                  [32, 64, 128].contains(override.groupSize) else {
+                throw NativeMTPArtifactObservationError.unsupportedQuantization("invalid affine manifest override")
+            }
+            overrides[module] = .object([
+                "bits": .int(override.bits),
+                "group_size": .int(override.groupSize),
+            ])
+        }
+        let unquantized = observation.unquantizedModules.sorted()
+        guard Set(unquantized).count == unquantized.count,
+              unquantized.allSatisfy(isAdmissionModuleName) else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("invalid affine manifest unquantized module")
+        }
+        return .object([
+            "bits": .int(bits),
+            "group_size": .int(groupSize),
+            "overrides": .object(overrides),
+            "unquantized": .array(unquantized.map(RFC8785JCS.Value.rawString)),
+        ])
+    }
+
+    private static func prefixedModules<S1: Sequence, S2: Sequence>(
+        target: S1,
+        mtp: S2
+    ) -> [String] where S1.Element == String, S2.Element == String {
+        (target.map { "target/\($0)" } + mtp.map { "mtp/\($0)" }).sorted()
+    }
+
+    private static func isAdmissionModuleName(_ value: String) -> Bool {
+        !value.isEmpty
+            && value.unicodeScalars.allSatisfy { (0x20...0x7e).contains($0.value) }
+            && !value.contains("/")
+    }
+
+    private static func isAdmissionExceptionName(_ value: String) -> Bool {
+        (1...128).contains(value.utf8.count)
+            && value.unicodeScalars.allSatisfy { (0x20...0x7e).contains($0.value) }
+    }
+
     private static func observeFormat(
         config: [String: Any],
         headers: [SafetensorsHeader]
-    ) throws -> (format: NativeMTPObservedArtifactFormat, tensorPairs: [NativeMTPObservedTensorPair]) {
+    ) throws -> (
+        format: NativeMTPObservedArtifactFormat,
+        tensorPairs: [NativeMTPObservedTensorPair],
+        moduleOverrides: [String: NativeMTPAffineModuleOverride],
+        unquantizedModules: [String]
+    ) {
         if let quantization = quantizationMetadata(in: config) {
             return try observeQuantizedFormat(
                 quantization: quantization,
@@ -142,7 +281,7 @@ enum NativeMTPArtifactObserver {
         }
         let dtype = try explicitUnquantizedDType(in: config)
         try validateUnquantizedHeaders(dtype: dtype, headers: headers)
-        return (.unquantized(dtype: dtype), [])
+        return (.unquantized(dtype: dtype), [], [:], [])
     }
 
     private static func explicitUnquantizedDType(in config: [String: Any]) throws -> String {
@@ -166,7 +305,12 @@ enum NativeMTPArtifactObserver {
         quantization: [String: Any],
         representation: RepresentationManifest,
         headers: [SafetensorsHeader]
-    ) throws -> (format: NativeMTPObservedArtifactFormat, tensorPairs: [NativeMTPObservedTensorPair]) {
+    ) throws -> (
+        format: NativeMTPObservedArtifactFormat,
+        tensorPairs: [NativeMTPObservedTensorPair],
+        moduleOverrides: [String: NativeMTPAffineModuleOverride],
+        unquantizedModules: [String]
+    ) {
         guard let mode = quantizationMode(quantization) else {
             throw NativeMTPArtifactObservationError.missingQuantizationMetadata("mode")
         }
@@ -185,6 +329,13 @@ enum NativeMTPArtifactObserver {
             guard [32, 64, 128].contains(groupSize) else {
                 throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine unsupported group_size")
             }
+            guard representation.unpairedScaleExceptions.isEmpty else {
+                throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine unpaired scale exceptions are not admissible")
+            }
+            guard representation.paddingExceptions.isEmpty else {
+                throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine padding exceptions are not admissible")
+            }
+            let moduleOverrides = try affineModuleOverrides(in: quantization)
             let pairs = try validatePackedHeaders(
                 headers,
                 quantizationName: "mlx_affine_4bit",
@@ -193,9 +344,15 @@ enum NativeMTPArtifactObserver {
                 requiredPackedDType: "U32",
                 valuesPerPackedElement: 8,
                 requiresBias: true,
-                representation: representation
+                representation: representation,
+                moduleOverrides: moduleOverrides
             )
-            return (.mlxAffine4(bits: bits, groupSize: groupSize), pairs)
+            return (
+                .mlxAffine4(bits: bits, groupSize: groupSize),
+                pairs,
+                moduleOverrides,
+                representation.configUnquantizedModules.sorted()
+            )
 
         case "mlx_mxfp8":
             guard bits == 8, groupSize == 32 else {
@@ -230,7 +387,8 @@ enum NativeMTPArtifactObserver {
         requiredPackedDType: String,
         valuesPerPackedElement: Int,
         requiresBias: Bool,
-        representation: RepresentationManifest
+        representation: RepresentationManifest,
+        moduleOverrides: [String: NativeMTPAffineModuleOverride] = [:]
     ) throws -> [NativeMTPObservedTensorPair] {
         let requiredPackedBits = bytesPerElement(requiredPackedDType) * 8
         guard bitsPerValue > 0,
@@ -239,6 +397,7 @@ enum NativeMTPArtifactObserver {
               requiredPackedBits / bitsPerValue == valuesPerPackedElement else {
             throw NativeMTPArtifactObservationError.unsupportedQuantization("\(quantizationName) invalid packing density")
         }
+        var consumedOverrides: Set<String> = []
         let tensors = selectedWeightTensors(headers)
         guard !tensors.isEmpty else {
             throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("no selected tensors")
@@ -271,7 +430,8 @@ enum NativeMTPArtifactObserver {
         var pairedBiases: Set<String> = []
         for tensor in packed.sorted(by: { $0.name < $1.name }) {
             if isFloatingWeightDType(tensor.dtype),
-               representation.allowsUnquantizedTensor(tensor.name) {
+               representation.allowsUnquantizedTensor(tensor.name)
+                || (isNeverQuantizedFloatingTensor(tensor) && expectedScaleName(for: tensor.name, available: scaleTensors) == nil) {
                 guard let expectedByteCount = checkedMultiply(tensor.elementCount, bytesPerElement(tensor.dtype)),
                       tensor.byteCount == expectedByteCount else {
                     throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("unquantized tensor \(tensor.name) byte span")
@@ -286,6 +446,21 @@ enum NativeMTPArtifactObserver {
             }
             guard tensor.shape.count >= 2, tensor.shape.allSatisfy({ $0 > 0 }) else {
                 throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("packed tensor \(tensor.name) shape")
+            }
+            var tensorBits = bitsPerValue
+            var tensorGroupSize = groupSize
+            var tensorValuesPerPackedElement = valuesPerPackedElement
+            let tensorModule = tensor.name.hasSuffix(".weight")
+                ? String(tensor.name.dropLast(".weight".count))
+                : nil
+            let overrideMatch = tensorModule.flatMap { module in
+                matchingModuleOverride(module, overrides: moduleOverrides)
+            }
+            if let (overrideKey, override) = overrideMatch {
+                tensorBits = override.bits
+                tensorGroupSize = override.groupSize
+                tensorValuesPerPackedElement = requiredPackedBits / override.bits
+                consumedOverrides.insert(overrideKey)
             }
             guard let expectedPackedByteCount = checkedMultiply(tensor.elementCount, bytesPerElement(tensor.dtype)),
                   tensor.byteCount == expectedPackedByteCount else {
@@ -322,16 +497,16 @@ enum NativeMTPArtifactObserver {
             }
             guard let logicalInputColumns = checkedMultiply(
                 tensor.shape[tensor.shape.count - 1],
-                valuesPerPackedElement
+                tensorValuesPerPackedElement
             ) else {
                 throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("logical columns overflow for \(tensor.name)")
             }
-            let paddedInputColumns = try checkedRoundUp(logicalInputColumns, toMultipleOf: groupSize, tensorName: tensor.name)
+            let paddedInputColumns = try checkedRoundUp(logicalInputColumns, toMultipleOf: tensorGroupSize, tensorName: tensor.name)
             if paddedInputColumns != logicalInputColumns,
                !representation.paddingExceptions.contains(tensor.name) {
                 throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("undeclared padding for \(tensor.name)")
             }
-            let expectedScaleColumns = max(1, paddedInputColumns / groupSize)
+            let expectedScaleColumns = max(1, paddedInputColumns / tensorGroupSize)
             guard scale.shape[scale.shape.count - 1] == expectedScaleColumns else {
                 throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("scale block count for \(tensor.name)")
             }
@@ -342,7 +517,8 @@ enum NativeMTPArtifactObserver {
                 scaleDType: scale.dtype,
                 packedShape: tensor.shape,
                 scaleShape: scale.shape,
-                groupSize: groupSize,
+                bitsPerValue: tensorBits,
+                groupSize: tensorGroupSize,
                 logicalInputColumns: logicalInputColumns,
                 paddedInputColumns: paddedInputColumns
             ))
@@ -356,7 +532,60 @@ enum NativeMTPArtifactObserver {
         guard unpairedBiases.isEmpty else {
             throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("unpaired bias tensors")
         }
+        // An override that names no packed tensor is unmanifested metadata;
+        // accepting it would let config drift silently change quantization.
+        guard consumedOverrides == Set(moduleOverrides.keys) else {
+            throw NativeMTPArtifactObservationError.unsupportedQuantization("\(quantizationName) unmatched module override")
+        }
         return pairs
+    }
+
+    /// Parses mlx-lm per-module quantization overrides, e.g.
+    /// `"language_model.model.layers.0.mlp.gate": {"bits": 8, "group_size": 64}`.
+    /// Only affine widths the packed U32 layout can hold exactly are accepted.
+    private static func affineModuleOverrides(in quantization: [String: Any]) throws -> [String: NativeMTPAffineModuleOverride] {
+        var overrides: [String: NativeMTPAffineModuleOverride] = [:]
+        for (key, value) in quantization where !quantizationGlobalKeys.contains(key) {
+            if value is Bool { continue }
+            guard let object = value as? [String: Any] else {
+                throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine malformed module override")
+            }
+            let allowedKeys: Set<String> = ["bits", "group_size", "mode"]
+            guard Set(object.keys).isSubset(of: allowedKeys) else {
+                throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine module override unknown key")
+            }
+            if object["mode"] != nil, stringValue(object["mode"])?.lowercased(with: nil) != "affine" {
+                throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine module override mode")
+            }
+            guard let bits = intValue(object["bits"]), [4, 8].contains(bits) else {
+                throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine module override bits")
+            }
+            guard let groupSize = intValue(object["group_size"]), [32, 64, 128].contains(groupSize) else {
+                throw NativeMTPArtifactObservationError.unsupportedQuantization("mlx affine module override group_size")
+            }
+            overrides[key] = NativeMTPAffineModuleOverride(bits: bits, groupSize: groupSize)
+        }
+        return overrides
+    }
+
+    private static let quantizationGlobalKeys: Set<String> = [
+        "group_size", "bits", "mode", "quant_method", "linear_class", "quantization_mode",
+    ]
+
+    private static func matchingModuleOverride(
+        _ tensorModule: String,
+        overrides: [String: NativeMTPAffineModuleOverride]
+    ) -> (String, NativeMTPAffineModuleOverride)? {
+        if let exact = overrides[tensorModule] {
+            return (tensorModule, exact)
+        }
+        if tensorModule.hasPrefix("mtp.") {
+            let unprefixed = String(tensorModule.dropFirst("mtp.".count))
+            if let value = overrides[unprefixed] {
+                return (unprefixed, value)
+            }
+        }
+        return nil
     }
 
     private static func mtpPredictionLayerCount(in config: [String: Any]) throws -> Int {
@@ -384,8 +613,7 @@ enum NativeMTPArtifactObserver {
     private static func representationManifest(in config: [String: Any]) -> RepresentationManifest {
         var unquantizedLayerExceptions: Set<String> = []
         if let quantization = quantizationMetadata(in: config) {
-            for (key, value) in quantization {
-                guard key.contains(".") else { continue }
+            for (key, value) in quantization where !quantizationGlobalKeys.contains(key) {
                 if let bool = value as? Bool, bool == false {
                     unquantizedLayerExceptions.insert(key)
                 }
@@ -395,13 +623,15 @@ enum NativeMTPArtifactObserver {
             return RepresentationManifest(
                 paddingExceptions: [],
                 unpairedScaleExceptions: [],
-                unquantizedLayerExceptions: unquantizedLayerExceptions
+                configUnquantizedModules: unquantizedLayerExceptions,
+                permittedUnquantizedModules: unquantizedLayerExceptions
             )
         }
         return RepresentationManifest(
             paddingExceptions: stringArray(object["padding_exceptions"]),
             unpairedScaleExceptions: stringArray(object["unpaired_scale_exceptions"]),
-            unquantizedLayerExceptions: unquantizedLayerExceptions.union(stringArray(object["unquantized_layer_exceptions"]))
+            configUnquantizedModules: unquantizedLayerExceptions,
+            permittedUnquantizedModules: unquantizedLayerExceptions
         )
     }
 
@@ -413,7 +643,9 @@ enum NativeMTPArtifactObserver {
         guard let raw else { return nil }
         let lower = raw.lowercased(with: nil)
         switch lower {
-        case "mlx_affine_4bit", "mlx-affine-4bit", "mlx_affine4", "affine4":
+        // mlx-lm writes `"mode": "affine"`; the global bits=4 guard in
+        // observeQuantizedFormat still rejects any other affine width.
+        case "mlx_affine_4bit", "mlx-affine-4bit", "mlx_affine4", "affine4", "affine":
             return "mlx_affine_4bit"
         case "mxfp8", "mlx_mxfp8", "mlx-mxfp8":
             return "mlx_mxfp8"
@@ -453,12 +685,32 @@ enum NativeMTPArtifactObserver {
                     throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("target tensor namespace \(tensor.name)")
                 }
             case .mtp:
-                let allowed = lower.hasPrefix("model.") || lower.hasPrefix("lm_head.")
-                if !allowed || lower.hasPrefix("target.") || lower.hasPrefix("extra.") || lower.hasPrefix("extras.") {
+                // The pinned standalone-drafter loader (`qwenMTPSanitizeWeights`,
+                // standaloneCheckpoint) prefixes every key with `mtp.`; only the
+                // drafter module roots below exist under that prefix.
+                let unprefixed = lower.hasPrefix("mtp.") ? String(lower.dropFirst("mtp.".count)) : lower
+                let root = unprefixed.split(separator: ".", maxSplits: 1).first.map(String.init) ?? ""
+                guard Self.standaloneDrafterModuleRoots.contains(root), unprefixed.contains(".") else {
                     throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("mtp tensor namespace \(tensor.name)")
                 }
             }
         }
+    }
+
+    private static let standaloneDrafterModuleRoots: Set<String> = [
+        "fc", "layers", "norm", "pre_fc_norm_embedding", "pre_fc_norm_hidden",
+    ]
+
+    /// Floating tensors MLX never quantizes: rank-1 parameters (norms, biases,
+    /// `A_log`, `dt_bias`), rank-3 depthwise conv kernels, and the vision tower
+    /// the text loader discards before load (`Qwen35` sanitize). A rank-2
+    /// language-model weight without a scale pair still fails closed unless the
+    /// config declares it unquantized.
+    private static func isNeverQuantizedFloatingTensor(_ tensor: SafetensorsTensor) -> Bool {
+        guard isFloatingWeightDType(tensor.dtype) else { return false }
+        if tensor.shape.count == 1 { return true }
+        if tensor.shape.count == 3, tensor.name.hasSuffix(".conv1d.weight") { return true }
+        return tensor.name.hasPrefix("vision_tower.") || tensor.name.hasPrefix("model.visual.")
     }
 
     private static func isScaleTensorName(_ name: String) -> Bool {
@@ -761,11 +1013,17 @@ enum NativeMTPArtifactObserver {
     private struct RepresentationManifest {
         let paddingExceptions: Set<String>
         let unpairedScaleExceptions: Set<String>
-        let unquantizedLayerExceptions: Set<String>
+        let configUnquantizedModules: Set<String>
+        let permittedUnquantizedModules: Set<String>
 
         func allowsUnquantizedTensor(_ name: String) -> Bool {
-            unquantizedLayerExceptions.contains(where: { exception in
-                name == exception || name.hasPrefix(exception + ".")
+            permittedUnquantizedModules.contains(where: { exception in
+                name == exception
+                    || name.hasPrefix(exception + ".")
+                    || (name.hasPrefix("mtp.") && (
+                        String(name.dropFirst("mtp.".count)) == exception
+                            || String(name.dropFirst("mtp.".count)).hasPrefix(exception + ".")
+                    ))
             })
         }
     }
