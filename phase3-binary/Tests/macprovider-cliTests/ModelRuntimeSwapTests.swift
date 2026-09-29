@@ -180,6 +180,26 @@ final class ModelRuntimeSwapTests: XCTestCase {
         ))
     }
 
+    func testNativeMTPServePathRejectionLogIsSingleStructuredPathFreeLine() throws {
+        let line = ModelRuntime.nativeMTPServePathRejectionLogLineForTest(
+            reasonCode: "artifact_quantization_unsupported",
+            artifactRole: "pair"
+        )
+        XCTAssertEqual(line.filter(\.isNewline).count, 1)
+        XCTAssertTrue(line.hasSuffix("\n"))
+        XCTAssertFalse(line.contains("/"))
+
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: String]
+        )
+        XCTAssertEqual(object, [
+            "artifact_role": "pair",
+            "event": "native_mtp_serve_path_admission",
+            "reason_code": "artifact_quantization_unsupported",
+            "status": "rejected",
+        ])
+    }
+
     func testNativeMTPCapturedTokenizerMustBeCanonicalTargetTokenizer() {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ModelRuntimeSwapTests-\(UUID().uuidString)", isDirectory: true)

@@ -2545,26 +2545,35 @@ actor ModelRuntime: ModelRuntimeServing {
         let candidateNativeMTPLoad: NativeMTPRuntimeLoadResult?
         if normalizedDraftModelID == nil,
            let verifiedModelArtifactSHA256,
-           let targetDirectory = try? Self.localModelDirectory(for: targetLoadPath) {
-            candidateNativeMTPLoad = await Self.loadNativeMTPDrafterIfAdmitted(
-                mode: self.nativeMTPMode,
-                sidecarFormat: .releaseEnvelope,
-                targetModelID: modelID,
-                targetModelRevision: verifiedModelArtifactSHA256,
-                targetDirectory: targetDirectory,
-                maxContextTokens: self.maxContextTokens,
-                kvBitsOverride: self.kvBitsOverride,
-                prefillStepSize: self.prefillStepSize,
-                slotCount: self.maxBatch,
-                sidecarPath: self.configuredNativeMTPAdmissionSidecarPath,
-                signaturePath: self.configuredNativeMTPAdmissionSignaturePath,
-                trustedKeyring: self.configuredNativeMTPTrustedKeyring,
-                runningBuildIdentity: self.configuredNativeMTPRunningBuildIdentity,
-                revokedTupleSHA256: self.configuredNativeMTPRevokedTupleSHA256,
-                resolvedArtifactAuthority: self.configuredNativeMTPResolvedArtifactAuthority,
-                targetGeneration: UInt64(max(1, self.currentSpecDecodeGeneration + 1)),
-                selfTestRunner: self.nativeMTPSelfTestRunner
-            )
+           self.nativeMTPMode == .auto {
+            do {
+                let targetDirectory = try Self.localModelDirectory(for: targetLoadPath)
+                candidateNativeMTPLoad = await Self.loadNativeMTPDrafterIfAdmitted(
+                    mode: self.nativeMTPMode,
+                    sidecarFormat: .releaseEnvelope,
+                    targetModelID: modelID,
+                    targetModelRevision: verifiedModelArtifactSHA256,
+                    targetDirectory: targetDirectory,
+                    maxContextTokens: self.maxContextTokens,
+                    kvBitsOverride: self.kvBitsOverride,
+                    prefillStepSize: self.prefillStepSize,
+                    slotCount: self.maxBatch,
+                    sidecarPath: self.configuredNativeMTPAdmissionSidecarPath,
+                    signaturePath: self.configuredNativeMTPAdmissionSignaturePath,
+                    trustedKeyring: self.configuredNativeMTPTrustedKeyring,
+                    runningBuildIdentity: self.configuredNativeMTPRunningBuildIdentity,
+                    revokedTupleSHA256: self.configuredNativeMTPRevokedTupleSHA256,
+                    resolvedArtifactAuthority: self.configuredNativeMTPResolvedArtifactAuthority,
+                    targetGeneration: UInt64(max(1, self.currentSpecDecodeGeneration + 1)),
+                    selfTestRunner: self.nativeMTPSelfTestRunner
+                )
+            } catch {
+                Self.logNativeMTPServePathRejection(
+                    reasonCode: "target_directory_unavailable",
+                    artifactRole: "target"
+                )
+                candidateNativeMTPLoad = nil
+            }
         } else {
             candidateNativeMTPLoad = nil
         }
@@ -2713,14 +2722,29 @@ actor ModelRuntime: ModelRuntimeServing {
         self.continuousBatchingDurableReplayAuthorityAvailable =
             self.continuousBatchScheduler != nil && self.continuousBatchReplayAuthority.durableAvailable
         if let nativeMTPLoad = candidateNativeMTPLoad {
-            if let scheduler = self.continuousBatchScheduler,
-               let receipt = try? await self.executeNativeMTPSelfTest(
-                   nativeMTPLoad.selfTestInput,
-                   scheduler: scheduler,
-                   capability: nativeMTPLoad.capability,
-                   servedSnapshotID: nativeMTPLoad.servedSnapshotID
-               ),
-               (try? await NativeMTPSelfTestRunner { _ in receipt }.validate(nativeMTPLoad.selfTestInput)) != nil {
+            let selfTestResult: (receipt: NativeMTPSelfTestReceipt?, reasonCode: String?)
+            if let scheduler = self.continuousBatchScheduler {
+                do {
+                    let receipt = try await self.executeNativeMTPSelfTest(
+                        nativeMTPLoad.selfTestInput,
+                        scheduler: scheduler,
+                        capability: nativeMTPLoad.capability,
+                        servedSnapshotID: nativeMTPLoad.servedSnapshotID
+                    )
+                    do {
+                        _ = try await NativeMTPSelfTestRunner { _ in receipt }
+                            .validate(nativeMTPLoad.selfTestInput)
+                        selfTestResult = (receipt, nil)
+                    } catch {
+                        selfTestResult = (nil, "selftest_receipt_invalid")
+                    }
+                } catch {
+                    selfTestResult = (nil, "selftest_execution_failed")
+                }
+            } else {
+                selfTestResult = (nil, "selftest_scheduler_unavailable")
+            }
+            if let receipt = selfTestResult.receipt {
                 self.currentNativeMTPCapability = nativeMTPLoad.capability
                 self.currentNativeMTPAdmissionCapability = nativeMTPLoad.admissionCapability
                 self.currentNativeMTPDrafterContainer = nativeMTPLoad.drafterContainer
@@ -2736,6 +2760,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     reasonIfDisabled: .tupleNotAdmitted
                 )
             } else {
+                let reasonCode = selfTestResult.reasonCode ?? "selftest_rejected"
+                Self.logNativeMTPServePathRejection(reasonCode: reasonCode, artifactRole: "runtime")
                 stopNativeMTPRevocationRefresh()
                 self.currentNativeMTPDrafterContainer = nil
                 self.currentNativeMTPAdmissionCapability = nil
@@ -8126,12 +8152,17 @@ actor ModelRuntime: ModelRuntimeServing {
         targetGeneration: UInt64,
         selfTestRunner: NativeMTPSelfTestRunner
     ) async -> NativeMTPRuntimeLoadResult? {
-        guard mode == .auto,
-              let targetModelRevision,
-              let trustedKeyring,
-              let runningBuildIdentity = injectedRunningBuildIdentity ?? nativeMTPRunningBuildIdentity()
-        else {
-            return nil
+        guard mode == .auto else {
+            return rejectNativeMTPServePath(reasonCode: "mode_not_auto", artifactRole: "runtime")
+        }
+        guard let targetModelRevision else {
+            return rejectNativeMTPServePath(reasonCode: "target_revision_missing", artifactRole: "target")
+        }
+        guard let trustedKeyring else {
+            return rejectNativeMTPServePath(reasonCode: "trusted_keyring_missing", artifactRole: "sidecar")
+        }
+        guard let runningBuildIdentity = injectedRunningBuildIdentity ?? nativeMTPRunningBuildIdentity() else {
+            return rejectNativeMTPServePath(reasonCode: "running_build_identity_unavailable", artifactRole: "runtime")
         }
         let bundleRoot = targetDirectory.deletingLastPathComponent()
         let bundledSidecar = bundleRoot.appendingPathComponent("native-mtp-admission.json")
@@ -8144,10 +8175,11 @@ actor ModelRuntime: ModelRuntimeServing {
         let signatureURL = signaturePath
             .map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
             ?? sidecarURL.deletingLastPathComponent().appendingPathComponent("native-mtp-admission.json.sig")
-        guard FileManager.default.fileExists(atPath: sidecarURL.path),
-              FileManager.default.fileExists(atPath: signatureURL.path)
-        else {
-            return nil
+        guard FileManager.default.fileExists(atPath: sidecarURL.path) else {
+            return rejectNativeMTPServePath(reasonCode: "sidecar_missing", artifactRole: "sidecar")
+        }
+        guard FileManager.default.fileExists(atPath: signatureURL.path) else {
+            return rejectNativeMTPServePath(reasonCode: "signature_missing", artifactRole: "signature")
         }
         do {
             let revocationAdmissionState: NativeMTPRevocationAdmissionState
@@ -8159,14 +8191,18 @@ actor ModelRuntime: ModelRuntimeServing {
                     expiresAt: nil
                 )
             } else {
-                guard let loadedRevocationState = await Self.nativeMTPRevocationAdmissionState(
-                    sidecarURL: sidecarURL,
-                    signatureURL: signatureURL,
-                    trustedKeyring: trustedKeyring
-                ) else {
-                    return nil
+                do {
+                    revocationAdmissionState = try await Self.nativeMTPRevocationAdmissionState(
+                        sidecarURL: sidecarURL,
+                        signatureURL: signatureURL,
+                        trustedKeyring: trustedKeyring
+                    )
+                } catch {
+                    return rejectNativeMTPServePath(
+                        reasonCode: "revocation_state_unavailable",
+                        artifactRole: "sidecar"
+                    )
                 }
-                revocationAdmissionState = loadedRevocationState
             }
             let effectiveRevokedTupleSHA256 = revocationAdmissionState.revokedTupleSHA256
             let snapshotRoot = sidecarURL.deletingLastPathComponent()
@@ -8207,26 +8243,29 @@ actor ModelRuntime: ModelRuntimeServing {
             #endif
             }
             guard nativeMTPAdmissionMatchesRunningBuild(
-                    admissionCapability,
-                    targetModelRevision: targetModelRevision,
-                    runningBuildIdentity: runningBuildIdentity
-                  ),
-                  admissionCapability.qualifiedSlots <= slotCount,
-                  let capturedArtifacts = admissionCapability.capturedArtifacts
-            else {
-                return nil
+                admissionCapability,
+                targetModelRevision: targetModelRevision,
+                runningBuildIdentity: runningBuildIdentity
+            ) else {
+                return rejectNativeMTPServePath(reasonCode: "build_binding_mismatch", artifactRole: "sidecar")
+            }
+            guard admissionCapability.qualifiedSlots <= slotCount else {
+                return rejectNativeMTPServePath(reasonCode: "qualified_slots_exceed_runtime", artifactRole: "runtime")
+            }
+            guard let capturedArtifacts = admissionCapability.capturedArtifacts else {
+                return rejectNativeMTPServePath(reasonCode: "captured_artifacts_unavailable", artifactRole: "pair")
             }
             let drafterDirectory = try nativeMTPArtifactDirectory(for: capturedArtifacts.mtpURL)
             guard let capturedTokenizerLoader = nativeMTPCapturedTokenizerLoader(
                 capturedArtifacts: capturedArtifacts
             ) else {
-                return nil
+                return rejectNativeMTPServePath(reasonCode: "captured_tokenizer_invalid", artifactRole: "target")
             }
             guard try nativeMTPCapturedManifestMatchesAdmission(
                 capturedArtifacts: capturedArtifacts,
                 admissionCapability: admissionCapability
             ) else {
-                return nil
+                return rejectNativeMTPServePath(reasonCode: "captured_manifest_mismatch", artifactRole: "pair")
             }
             let artifactObservation = try NativeMTPArtifactObserver.observePair(
                 targetDirectory: capturedArtifacts.targetURL,
@@ -8238,7 +8277,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 artifactObservation,
                 admissionCapability: admissionCapability
             ) else {
-                return nil
+                return rejectNativeMTPServePath(reasonCode: "artifact_observation_mismatch", artifactRole: "pair")
             }
             let targetLoad = try await loadLocalContainer(
                 from: capturedArtifacts.targetURL.path,
@@ -8252,7 +8291,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 .resolvingSymlinksInPath()
                 .standardizedFileURL
             else {
-                return nil
+                return rejectNativeMTPServePath(reasonCode: "captured_target_identity_mismatch", artifactRole: "target")
             }
             let modelCapabilities = pagedKVModelCapabilities(modelID: targetModelID, directory: capturedTargetDirectory)
             let runtimeCacheClass = await pagedKVRuntimeCacheClass(
@@ -8264,14 +8303,15 @@ actor ModelRuntime: ModelRuntimeServing {
             guard let canonicalCacheClass = nativeMTPAdmissionCacheClass(
                     runtimeCacheClass: runtimeCacheClass,
                     modelCapabilities: modelCapabilities
-                  ),
-                  nativeMTPAdmissionCapabilitySupported(
-                    admissionCapability,
-                    canonicalCacheClass: canonicalCacheClass,
-                    modelCapabilities: modelCapabilities
-                  )
-            else {
-                return nil
+                  ) else {
+                return rejectNativeMTPServePath(reasonCode: "runtime_cache_class_unsupported", artifactRole: "runtime")
+            }
+            guard nativeMTPAdmissionCapabilitySupported(
+                admissionCapability,
+                canonicalCacheClass: canonicalCacheClass,
+                modelCapabilities: modelCapabilities
+            ) else {
+                return rejectNativeMTPServePath(reasonCode: "admission_capability_unsupported", artifactRole: "sidecar")
             }
             await Qwen35TextMTPRegistration.register()
             let drafterContainer = try await MTPDrafterModelFactory.shared.loadContainer(
@@ -8287,13 +8327,13 @@ actor ModelRuntime: ModelRuntimeServing {
                 return (context.model.maximumBlockSize, stateLayerCount)
             }
             guard drafterRuntimeObservation.stateLayerCount == admissionCapability.predictionLayerCount else {
-                return nil
+                return rejectNativeMTPServePath(reasonCode: "drafter_state_layer_count_mismatch", artifactRole: "mtp")
             }
             guard NativeMTPProposalBounds.fits(
                 maximumProposalDepth: admissionCapability.maxProposalDepth,
                 maximumBlockSize: drafterRuntimeObservation.maximumBlockSize
             ) else {
-                return nil
+                return rejectNativeMTPServePath(reasonCode: "drafter_proposal_depth_unsupported", artifactRole: "mtp")
             }
             let selectedChallenge = try loadNativeMTPSelfTestChallenge(
                 admissionCapability: admissionCapability,
@@ -8378,8 +8418,79 @@ actor ModelRuntime: ModelRuntimeServing {
                 revocationExpiresAt: revocationAdmissionState.expiresAt
             )
         } catch {
-            return nil
+            let rejection = nativeMTPServePathRejection(for: error)
+            return rejectNativeMTPServePath(
+                reasonCode: rejection.reasonCode,
+                artifactRole: rejection.artifactRole
+            )
         }
+    }
+
+    private static func nativeMTPServePathRejection(for error: Error) -> (reasonCode: String, artifactRole: String) {
+        if let observationError = error as? NativeMTPArtifactObservationError {
+            switch observationError {
+            case .unsupportedQuantization:
+                return ("artifact_quantization_unsupported", "pair")
+            case .missingQuantizationMetadata:
+                return ("artifact_quantization_metadata_missing", "pair")
+            case .incompatibleSafetensorsHeaders, .unsupportedDType:
+                return ("artifact_tensor_representation_rejected", "pair")
+            case .observationDrift:
+                return ("artifact_observation_drift", "pair")
+            case .missingConfig, .malformedConfig, .missingMTPPredictionLayerCount,
+                 .invalidMTPPredictionLayerCount, .missingSafetensors, .malformedSafetensors:
+                return ("artifact_observation_invalid", "pair")
+            }
+        }
+        if error is NativeMTPAdmissionSidecarError {
+            return ("sidecar_validation_rejected", "sidecar")
+        }
+        if error is ModelRuntimeLoadError {
+            return ("artifact_load_failed", "pair")
+        }
+        return ("serve_path_admission_failed", "runtime")
+    }
+
+    @discardableResult
+    private static func rejectNativeMTPServePath(
+        reasonCode: String,
+        artifactRole: String
+    ) -> NativeMTPRuntimeLoadResult? {
+        logNativeMTPServePathRejection(reasonCode: reasonCode, artifactRole: artifactRole)
+        return nil
+    }
+
+    private static func logNativeMTPServePathRejection(
+        reasonCode: String,
+        artifactRole: String
+    ) {
+        FileHandle.standardError.write(Data(nativeMTPServePathRejectionLogLine(
+            reasonCode: reasonCode,
+            artifactRole: artifactRole
+        ).utf8))
+    }
+
+    private static func nativeMTPServePathRejectionLogLine(
+        reasonCode: String,
+        artifactRole: String
+    ) -> String {
+        let payload: [String: Any] = [
+            "artifact_role": artifactRole,
+            "event": "native_mtp_serve_path_admission",
+            "reason_code": reasonCode,
+            "status": "rejected",
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) {
+            return String(decoding: data, as: UTF8.self) + "\n"
+        }
+        return "event=native_mtp_serve_path_admission status=rejected reason_code=\(reasonCode) artifact_role=\(artifactRole)\n"
+    }
+
+    static func nativeMTPServePathRejectionLogLineForTest(
+        reasonCode: String,
+        artifactRole: String
+    ) -> String {
+        nativeMTPServePathRejectionLogLine(reasonCode: reasonCode, artifactRole: artifactRole)
     }
 
     #if DEBUG
@@ -8438,31 +8549,27 @@ actor ModelRuntime: ModelRuntimeServing {
         sidecarURL: URL,
         signatureURL: URL,
         trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring
-    ) async -> NativeMTPRevocationAdmissionState? {
-        do {
-            let sidecarData = try Data(contentsOf: sidecarURL)
-            let signatureData = try Data(contentsOf: signatureURL)
-            let revocationSignerKeyID = try NativeMTPAdmissionSidecar.pinnedRevocationSignerKeyID(
-                sidecarData: sidecarData,
-                signatureData: signatureData,
-                trustedKeyring: trustedKeyring
-            )
-            let store = KeychainNativeMTPRevocationStore()
-            let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID)
-            let state = try await NativeMTPRevocationFeedManager.loadNetworkFirst(
-                pinnedSignerKeyID: revocationSignerKeyID,
-                verifier: verifier,
-                store: store
-            )
-            return NativeMTPRevocationAdmissionState(
-                revokedTupleSHA256: state.feed.revokedSet,
-                signerKeyID: revocationSignerKeyID,
-                trustedKeyring: trustedKeyring,
-                expiresAt: state.feed.expiresAt
-            )
-        } catch {
-            return nil
-        }
+    ) async throws -> NativeMTPRevocationAdmissionState {
+        let sidecarData = try Data(contentsOf: sidecarURL)
+        let signatureData = try Data(contentsOf: signatureURL)
+        let revocationSignerKeyID = try NativeMTPAdmissionSidecar.pinnedRevocationSignerKeyID(
+            sidecarData: sidecarData,
+            signatureData: signatureData,
+            trustedKeyring: trustedKeyring
+        )
+        let store = KeychainNativeMTPRevocationStore()
+        let verifier = NativeMTPRevocationEd25519Verifier(publicKeysByKeyID: trustedKeyring.publicKeysByKeyID)
+        let state = try await NativeMTPRevocationFeedManager.loadNetworkFirst(
+            pinnedSignerKeyID: revocationSignerKeyID,
+            verifier: verifier,
+            store: store
+        )
+        return NativeMTPRevocationAdmissionState(
+            revokedTupleSHA256: state.feed.revokedSet,
+            signerKeyID: revocationSignerKeyID,
+            trustedKeyring: trustedKeyring,
+            expiresAt: state.feed.expiresAt
+        )
     }
 
     private static func nativeMTPAdmissionMatchesRunningBuild(

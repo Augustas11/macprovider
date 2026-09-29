@@ -50,7 +50,7 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
         }
     }
 
-    func testQuantizedBitsEightWithoutModeRejects() throws {
+    func testQuantizedBitsEightWithoutModeRejectsAsNonFourBitAffine() throws {
         try withFixture(
             quantization: [
                 "bits": 8,
@@ -61,7 +61,7 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
             XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
                 XCTAssertEqual(
                     error as? NativeMTPArtifactObservationError,
-                    .missingQuantizationMetadata("mode")
+                    .unsupportedQuantization("mlx affine requires bits=4")
                 )
             }
         }
@@ -316,6 +316,63 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
         }
     }
 
+    func testMLXAffineModeAndImplicitDefaultNormalizeToAffineFour() throws {
+        let tensors = [
+            tensor("model.layers.0.mlp.down_proj.weight", dtype: "U32", shape: [2, 8]),
+            tensor("model.layers.0.mlp.down_proj.scales", dtype: "BF16", shape: [2, 1]),
+            tensor("model.layers.0.mlp.down_proj.biases", dtype: "BF16", shape: [2, 1]),
+        ]
+
+        for quantization in [
+            ["mode": "AfFiNe", "bits": 4, "group_size": 64] as [String: Any],
+            ["bits": 4, "group_size": 64] as [String: Any],
+        ] {
+            try withFixture(quantization: quantization, tensors: tensors) { directory in
+                let observation = try NativeMTPArtifactObserver.observe(directory: directory)
+                XCTAssertEqual(observation.format, .mlxAffine4(bits: 4, groupSize: 64))
+                XCTAssertEqual(observation.format.sidecarQuantizationLabel, "mlx_affine_4bit")
+                XCTAssertEqual(observation.tensorPairs.count, 1)
+            }
+        }
+    }
+
+    func testMLXAffineModeRejectsNonFourBitMetadata() throws {
+        try withFixture(
+            quantization: [
+                "mode": "affine",
+                "bits": 8,
+                "group_size": 64,
+            ],
+            tensors: mxfp8Tensors()
+        ) { directory in
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
+                XCTAssertEqual(
+                    error as? NativeMTPArtifactObservationError,
+                    .unsupportedQuantization("mlx affine requires bits=4")
+                )
+            }
+        }
+    }
+
+    func testUnknownQuantizationModeStillRejects() throws {
+        for (quantization, expected) in [
+            (["mode": "mystery", "bits": 4, "group_size": 64] as [String: Any], "mystery"),
+            (["quant_method": "gptq", "bits": 4, "group_size": 64] as [String: Any], "gptq"),
+        ] {
+            try withFixture(
+                quantization: quantization,
+                tensors: quantizedTriplet("model.layers.0.mlp.down_proj")
+            ) { directory in
+                XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
+                    XCTAssertEqual(
+                        error as? NativeMTPArtifactObservationError,
+                        .unsupportedQuantization(expected)
+                    )
+                }
+            }
+        }
+    }
+
     func testQuantizationFalseEntriesAllowOnlyDeclaredUnquantizedLayers() throws {
         try withFixture(
             quantization: [
@@ -442,9 +499,8 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
         }
     }
 
-    func testQwen35StandaloneDrafterAcceptsExactQuantizedNamespace() throws {
+    func testQwen35StandaloneDrafterAcceptsStandardMLXAffineMetadata() throws {
         let quantization: [String: Any] = [
-            "mode": "mlx_affine_4bit",
             "bits": 4,
             "group_size": 64,
             "layers.0.input_layernorm.weight": false,
@@ -458,7 +514,7 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
         let target = try makeFixtureDirectory(
             name: "target",
             quantization: [
-                "mode": "mlx_affine_4bit",
+                "mode": "affine",
                 "bits": 4,
                 "group_size": 64,
             ],
@@ -485,7 +541,9 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
         )
 
         XCTAssertEqual(qwen35StandaloneDrafterTensors().count, 31)
+        XCTAssertEqual(observation.target.tensorPairs.count, 1)
         XCTAssertEqual(observation.mtp.tensorPairs.count, 8)
+        XCTAssertEqual(observation.target.format, .mlxAffine4(bits: 4, groupSize: 64))
         XCTAssertEqual(observation.mtp.format, .mlxAffine4(bits: 4, groupSize: 64))
     }
 

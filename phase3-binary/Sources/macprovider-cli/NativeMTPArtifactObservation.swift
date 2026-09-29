@@ -421,10 +421,17 @@ enum NativeMTPArtifactObserver {
             ?? stringValue(object["quantization_mode"])
             ?? stringValue(object["quant_method"])
             ?? stringValue(object["quantization"])
-        guard let raw else { return nil }
+        guard let raw else {
+            guard object["quant_method"] == nil,
+                  intValue(object["bits"]) != nil,
+                  intValue(object["group_size"]) != nil || intValue(object["groupSize"]) != nil else {
+                return nil
+            }
+            return "mlx_affine_4bit"
+        }
         let lower = raw.lowercased(with: nil)
         switch lower {
-        case "mlx_affine_4bit", "mlx-affine-4bit", "mlx_affine4", "affine4":
+        case "affine", "mlx_affine_4bit", "mlx-affine-4bit", "mlx_affine4", "affine4":
             return "mlx_affine_4bit"
         case "mxfp8", "mlx_mxfp8", "mlx-mxfp8":
             return "mlx_mxfp8"
