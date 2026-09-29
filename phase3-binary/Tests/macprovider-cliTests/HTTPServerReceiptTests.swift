@@ -585,6 +585,53 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertTrue(response.body.contains("data: [DONE]"), response.body)
     }
 
+    func testHTTPStreamingToolArgumentMismatchFailsClosedWithoutReceipt() async throws {
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let metadata = httpSettlementMetadataHeader(
+            receiptKeyID: httpReceiptKeyID(key.publicKey.rawRepresentation),
+            expectedModelHash: hash
+        )
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "Use lookup."]],
+                "stream": true,
+            ],
+            requestHeaders: [(RouterHandler.settlementMetadataHeaderName, metadata)],
+            receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+            completion: CompletionResult(
+                content: "",
+                finishReason: "tool_calls",
+                promptTokens: 1,
+                completionTokens: 1,
+                toolCalls: [ToolCall(
+                    id: "call_0123456789abcdef",
+                    functionName: "lookup",
+                    arguments: #"{"query":"It's fine"}"#
+                )],
+                settlementDisposition: .eligibleOwner
+            ),
+            testStreamChunks: [
+                .toolCallDelta(StreamToolCallDelta(
+                    index: 0,
+                    id: "call_0123456789abcdef",
+                    type: "function",
+                    functionName: "lookup",
+                    arguments: #"{"query":"It 's"#
+                )),
+            ],
+            warmSwapEnabled: true,
+            modelHash: hash,
+            readStreamingBody: true
+        )
+
+        XCTAssertEqual(response.status, .ok, response.body)
+        XCTAssertTrue(response.body.contains("malformed_tool_call_final_json"), response.body)
+        XCTAssertFalse(response.body.contains(#""finish_reason":"tool_calls""#), response.body)
+        XCTAssertFalse(response.headers.contains(name: RouterHandler.receiptHeaderName))
+    }
+
 
     func testHTTPHandlerEmitsReceiptIssuedAuditOnSuccess() async throws {
         let capture = ReceiptAuditCapture()
@@ -1214,6 +1261,7 @@ private func roundTripChatCompletion(
     requestHeaders: [(String, String)] = [],
     receiptBuilder: ReceiptBuilder?,
     completion: CompletionResult? = nil,
+    testStreamChunks: [StreamChunk] = [],
     completionError: Error? = nil,
     warmSwapEnabled: Bool = false,
     modelHash: String? = nil,
@@ -1236,7 +1284,8 @@ private func roundTripChatCompletion(
                 completionTokens: 1,
                 settlementDisposition: .eligibleOwner
             )
-        }
+        },
+        testStreamChunks: testStreamChunks
     )
     let status = ProviderStatus(
         modelID: loadedModelID,

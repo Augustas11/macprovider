@@ -226,7 +226,7 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
             )
             let completion = try ModelRuntime.validateStructuredStreamingCompletion(
                 CompletionResult(
-                    content: parsed.content,
+                    content: emitter.emittedContent,
                     finishReason: parsed.toolCalls.isEmpty ? "stop" : "tool_calls",
                     promptTokens: 3,
                     completionTokens: parsed.completionTokens,
@@ -636,6 +636,112 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         XCTAssertEqual(decoder.append(1), "é")
         XCTAssertEqual(decoder.append(2), "é word")
         XCTAssertEqual(decoder.append(3), "é word.")
+
+        let orderedPieces = ["Ġ'", "Ġ", "."]
+        let orderedDecoder = ModelRuntime.StreamingDetokenizer(
+            decode: { _ in "" },
+            tokenPiece: { orderedPieces[$0] },
+            cleanUpTokenizationSpaces: true
+        ).makeIncremental()
+        XCTAssertEqual(orderedDecoder.append(0), " '")
+        XCTAssertEqual(orderedDecoder.append(1), "'")
+        XCTAssertEqual(orderedDecoder.append(2), " '.")
+    }
+
+    func testIncrementalCleanupRewriteDoesNotStallBatchedStream() throws {
+        let pieces = ["ĠĠĠĠ", ".", "later"]
+        let request = try request(["tools": Self.weatherTool])
+        let state = ModelRuntime.AttachedPagedKVStreamState(
+            request: request,
+            detokenizer: ModelRuntime.StreamingDetokenizer(
+                decode: { ids in ids.map { pieces[$0] }.joined() },
+                tokenPiece: { pieces[$0] },
+                cleanUpTokenizationSpaces: true
+            )
+        )
+        let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+        let idle = StructuredStreamingIdleState(enabled: false)
+        let sink = ChunkSink()
+
+        for token in pieces.indices {
+            XCTAssertFalse(state.step(
+                eventTokens: [token],
+                stopTokenFilter: Self.stopTokenFilter,
+                requestStops: [],
+                structuredAccumulator: accumulator,
+                idleState: idle,
+                onChunk: sink.append
+            ))
+        }
+
+        XCTAssertEqual(sink.normalized(), ["content:   ", "content:.", "content:later"])
+        let parsed = ModelRuntime.ParsedGeneratedOutput(
+            content: "   .later",
+            toolCalls: [],
+            completionTokens: pieces.count,
+            generatedCompletionTokens: pieces.count,
+            hitStop: false,
+            isTerminal: true
+        )
+        let completion = try ModelRuntime.finishContinuousBatchStream(
+            ModelRuntime.ContinuousBatchFinalizedRow(
+                completion: CompletionResult(
+                    content: parsed.content,
+                    finishReason: "stop",
+                    promptTokens: 3,
+                    completionTokens: pieces.count,
+                    settlementDisposition: .eligibleOwner
+                ),
+                filteredText: parsed.content,
+                parsed: parsed,
+                generatedTokens: Array(pieces.indices),
+                truncatedAtSerialStop: false
+            ),
+            state: state,
+            request: request,
+            structuredAccumulator: accumulator,
+            idleState: idle,
+            onChunk: sink.append
+        )
+        XCTAssertEqual(completion.content, "   .later")
+        XCTAssertEqual(completion.content, sink.normalized().compactMap { chunk in
+            chunk.hasPrefix("content:") ? String(chunk.dropFirst("content:".count)) : nil
+        }.joined())
+    }
+
+    func testIncrementalCleanupContractionDoesNotDuplicateBatchedStream() throws {
+        let pieces = ["Ġ'", "Ġ", ".", "later"]
+        let request = try request(["tools": Self.weatherTool])
+        let state = ModelRuntime.AttachedPagedKVStreamState(
+            request: request,
+            detokenizer: ModelRuntime.StreamingDetokenizer(
+                decode: { ids in ids.map { pieces[$0] }.joined() },
+                tokenPiece: { pieces[$0] },
+                cleanUpTokenizationSpaces: true
+            )
+        )
+        let accumulator = StructuredStreamingContentAccumulator(enabled: false)
+        let idle = StructuredStreamingIdleState(enabled: false)
+        let sink = ChunkSink()
+
+        for token in pieces.indices {
+            XCTAssertFalse(state.step(
+                eventTokens: [token],
+                stopTokenFilter: Self.stopTokenFilter,
+                requestStops: [],
+                structuredAccumulator: accumulator,
+                idleState: idle,
+                onChunk: sink.append
+            ))
+        }
+
+        XCTAssertEqual(sink.normalized(), ["content: '.", "content:later"])
+        XCTAssertEqual(
+            sink.normalized().compactMap { chunk in
+                chunk.hasPrefix("content:") ? String(chunk.dropFirst("content:".count)) : nil
+            }.joined(),
+            " '.later"
+        )
     }
 
     func testStreamingToolTurnEmitsSerialToolDeltasAndStopsAtSerialToken() throws {
@@ -647,7 +753,12 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         XCTAssertEqual(batched.chunks, serial.chunks)
         XCTAssertTrue(batched.chunks.contains("tool:get_weather:"), "\(batched.chunks)")
         XCTAssertFalse(batched.chunks.contains { $0.hasPrefix("content:") && $0.contains("<tool_call>") })
-        XCTAssertEqual(batched.chunks.first, "content:Checking. ")
+        XCTAssertEqual(
+            batched.chunks.compactMap { chunk in
+                chunk.hasPrefix("content:") ? String(chunk.dropFirst("content:".count)) : nil
+            }.joined(),
+            "Checking. "
+        )
         XCTAssertEqual(batched.stopRequests, 1)
         let serialCompletion = try serial.result.get()
         let batchedCompletion = try batched.result.get()
@@ -727,13 +838,17 @@ final class ContinuousBatchToolStructuredRowTests: XCTestCase {
         let serial = serialStream(request, vocab: vocab)
         let batched = batchedStream(request, vocab: vocab)
         XCTAssertEqual(batched.chunks, serial.chunks)
-        // The serial emitter opens the call on the first piece and then
-        // closes on the over-cap arguments: nothing past the cap, and no
-        // tool markup as assistant content.
-        XCTAssertEqual(batched.chunks, ["tool:get_weather:", "args:0:{\"city\": \""])
+        // The serial emitter opens the call once the declared name is known,
+        // but canonical argument bytes are held until the object is complete.
+        // The over-cap object therefore exposes no argument bytes.
+        XCTAssertEqual(batched.chunks, ["tool:get_weather:"])
         XCTAssertFalse(batched.chunks.contains { $0.hasPrefix("content:") })
-        XCTAssertNil(try batched.result.get().toolCalls)
-        XCTAssertEqual(try batched.result.get().finishReason, try serial.result.get().finishReason)
+        guard case .failure(let batchedError) = batched.result,
+              case .failure(let serialError) = serial.result else {
+            return XCTFail("an opened tool stream without a finalized call must fail closed")
+        }
+        XCTAssertEqual(batchedError.code, "malformed_tool_call_final_json")
+        XCTAssertEqual(batchedError.code, serialError.code)
     }
 
     func testStreamingInvalidJSONUnderJSONSchemaMatchesSerialChunksAndError() throws {

@@ -1301,7 +1301,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                             let unixMs = Int64(Date().timeIntervalSince1970 * 1000)
                             writer.writeRawSSE(": macprovider_tool_call_open unix_ms=\(unixMs)\n\n")
                         }
-                        streamedToolArgs.note(index: toolDelta.index, fragment: toolDelta.arguments)
+                        streamedToolArgs.note(toolDelta)
                         writer.writeSSEJSON(
                             Self.chatCompletionChunk(
                                 id: id,
@@ -1335,21 +1335,16 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
                 // If tool calls landed in the final CompletionResult, emit any
                 // concat-safe argument remainder (or the full call if nothing streamed).
-                if let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
-                    for delta in ToolCall.openAIFallbackDeltas(
-                        toolCalls: toolCalls,
-                        streamedArgumentsByIndex: streamedToolArgs.snapshot()
-                    ) {
-                        writer.writeSSEJSON(
-                            Self.chatCompletionChunk(
-                                id: id,
-                                created: created,
-                                model: request.model,
-                                delta: ["tool_calls": delta],
-                                finishReason: NSNull()
-                            )
+                for delta in try streamedToolArgs.finalDeltas(for: completion.toolCalls) {
+                    writer.writeSSEJSON(
+                        Self.chatCompletionChunk(
+                            id: id,
+                            created: created,
+                            model: request.model,
+                            delta: ["tool_calls": delta],
+                            finishReason: NSNull()
                         )
-                    }
+                    )
                 }
 
                 writer.writeSSEJSON(

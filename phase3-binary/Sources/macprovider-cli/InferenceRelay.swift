@@ -1075,7 +1075,7 @@ actor InferenceRelay {
             // the @Sendable callback's state and its enqueue order.
             let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { state.isCancelled }) { chunk in
                 if case .toolCallDelta(let toolDelta) = chunk {
-                    streamedToolArgs.note(index: toolDelta.index, fragment: toolDelta.arguments)
+                    streamedToolArgs.note(toolDelta)
                 }
                 batcher.accept(chunk)
             }
@@ -1150,13 +1150,8 @@ actor InferenceRelay {
 
             // If tool calls landed in the final CompletionResult, emit any
             // concat-safe argument remainder (or the full call if nothing streamed).
-            if let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
-                for delta in ToolCall.openAIFallbackDeltas(
-                    toolCalls: toolCalls,
-                    streamedArgumentsByIndex: streamedToolArgs.snapshot()
-                ) {
-                    batcher.enqueueDelta(["tool_calls": delta])
-                }
+            for delta in try streamedToolArgs.finalDeltas(for: completion.toolCalls) {
+                batcher.enqueueDelta(["tool_calls": delta])
             }
 
             batcher.enqueue(sseEvent(chatCompletionChunk(
