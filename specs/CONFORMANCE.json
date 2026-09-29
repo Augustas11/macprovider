@@ -504,7 +504,7 @@
     {
       "spec_id": "SPEC-018",
       "title": "Agentic tool calling (provider-side response synthesis)",
-      "version": "0.2.9",
+      "version": "0.2.10",
       "path": "specs/SPEC-018-agentic-tool-calling.md",
       "status": "normative",
       "owner": "@Augustas11",
@@ -535,7 +535,7 @@
     {
       "spec_id": "SPEC-019",
       "title": "Structured output (`response_format: json_schema`)",
-      "version": "0.2.5",
+      "version": "0.2.6",
       "path": "specs/SPEC-019-structured-output.md",
       "status": "normative",
       "owner": "@Augustas11",

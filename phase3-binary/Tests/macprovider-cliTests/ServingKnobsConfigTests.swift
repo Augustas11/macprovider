@@ -343,6 +343,16 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertEqual(ModelRuntime.applyMLXCacheLimit(megabytes: 2), 2 * 1024 * 1024)
     }
 
+    func testPostPrefillBufferCacheHelperClearsExactlyOnce() {
+        var clearCount = 0
+
+        ModelRuntime.clearMLXBufferCacheAfterPrefill {
+            clearCount += 1
+        }
+
+        XCTAssertEqual(clearCount, 1)
+    }
+
     func testContinuousBatchQueueWaitTimeoutEnvironmentOverridesYAML() throws {
         let config = try ConfigLoader.load(
             cli: CLIOverrides(),

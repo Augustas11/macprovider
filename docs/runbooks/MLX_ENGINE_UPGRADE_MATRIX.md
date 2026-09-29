@@ -32,6 +32,8 @@ Every run must attach:
 | API inventory | Compile errors and deprecations from `GenerateParameters`, cache creation/configuration, model factories, loading and generation are explicitly adapted and reviewed. |
 | Core provenance | The core MLX revision carried by `mlx-swift` is recorded; a newer standalone core release is not claimed unless it is actually bundled. |
 
+Pin bumps that change tokenizer cleanup rules must re-run the table-driven incremental cleanup oracle in `StreamingEmitterCleanupRewriteTests`.
+
 ## Token-exact model and protocol matrix
 
 Run temperature 0 with identical fixtures and parameters. Unless a row explicitly documents an intended upstream correction, baseline and candidate token IDs, EOS/stop reason, tool-call payload, and accounting must match exactly.
