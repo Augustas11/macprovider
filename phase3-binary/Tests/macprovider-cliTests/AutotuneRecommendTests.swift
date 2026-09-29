@@ -4092,6 +4092,40 @@ final class AutotuneRecommendTests: XCTestCase {
         XCTAssertTrue(diagnostic.contains("hash mismatch"))
     }
 
+    // A catalog model too large for the remaining disk must be diagnosed and
+    // skipped like any other unusable candidate, not end the whole sweep
+    // (which fails install.sh before its retry loop).
+    func testBenchmarksDiagnosesRowsSkippedForInsufficientDiskSpace() async throws {
+        var request = try makeRequest()
+        let modelKey = "qwen3-coder-30b-a3b-instruct"
+        XCTAssertNotNil(request.candidateCatalog.rows[modelKey])
+        request.benchmarks = [:]
+        var downloader = HuggingFaceSnapshotDownloader(
+            fetch: { request in
+                let response = try XCTUnwrap(HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: 200, httpVersion: nil, headerFields: nil))
+                return (Data(#"{"siblings":[{"rfilename":"model.safetensors","size":17000000000}]}"#.utf8), response)
+            },
+            download: { _ in throw AutotuneRecommendError.invalidStaticJSON("download must not start") }
+        )
+        downloader.availableDiskBytes = { _ in 2_000_000_000 }
+        let benchmarker = AutotuneRecommendationBenchmarker(
+            artifactResolver: CachedModelArtifactResolver(hubRoot: try tempDir(), downloader: downloader),
+            runnerFactory: { throw AutotuneRecommendError.invalidStaticJSON("runner should not start") }
+        )
+
+        let outcomes = try await benchmarker.benchmarks(
+            request: request,
+            targetContext: 4_000,
+            gateTTFTMS: 3_000,
+            replicates: 1,
+            port: 18080
+        )
+
+        XCTAssertNil(outcomes.benchmarks[modelKey])
+        let diagnostic = try XCTUnwrap(outcomes.diagnostics[modelKey])
+        XCTAssertTrue(diagnostic.contains("not enough free disk space"), diagnostic)
+    }
+
     func testBenchmarkRecommendContinuesWhenUnrelatedRowHasArtifactMismatch() async throws {
         let badKey = "meta-llama/llama-3.1-8b-instruct"
         let goodKey = "qwen3-coder-30b-a3b-instruct"
