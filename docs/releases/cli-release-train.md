@@ -7,7 +7,9 @@ same commit/PR. If reality and this file disagree, fix this file.
 
 ## How to track the next CLI
 
-This table is the net change vs fleet **1.8.123**.
+The shipped-207 table below records the completed net change from fleet
+**1.8.123** to **1.8.207**. Start the next-candidate table only when another
+CLI/Malibu/installer change merges.
 
 1. A PR that changes `phase3-binary/` (CLI, Malibu.app, installer) **merges** →
    add one row the same day. Status `merged`.
@@ -38,39 +40,28 @@ binary the Mac runs.
   changes are merged** — never promote a candidate that predates a merged
   in-scope change.
 
-Pearl runtime `v1.8.189` was consumed by the signed but unapplied #1715
-settlement-finality cut. Its deploy failed closed before Pearl mutation. The
-replacement Pearl runtime `v1.8.190` was consumed in turn. `v1.8.191` @
-`98e3e4af` (includes #1728) is the **live** Pearl coordinator/gateway runtime
-since 2026-09-24 05:23Z (coordinator + gateway healthz report v1.8.191;
-`pearl-runtime-release` run
-[35958041007](https://github.com/Augustas11/macprovider/actions/runs/35958041007)).
-`v1.8.192` is the Studio-only CLI candidate from #1716, live on the Studio
-since 2026-09-24 10:08Z (see Active candidate below), so the next Pearl
-coordinator/gateway runtime tag had to be `v1.8.193` or later. Public release
-`v1.8.200` is a Pearl Linux-only bundle with no Darwin provider CLI assets, so
-the next provider CLI candidate must be `v1.8.201` or later. None of these tags
-changes `binaryVersion` or the fleet recommendation from 1.8.123.
+Pearl coordinator/gateway release numbering is independent from the provider
+CLI train. Pearl currently reports runtime `v1.8.206`; failed or superseded
+runtime attempts remain consumed tags. Public provider release `v1.8.207` is
+the current fleet recommendation and must not be reused by either train.
 
 ## Current promoted stable
 
 | Field | Value |
 |---|---|
-| Version | **1.8.123** |
-| Compat-set id | `Augustas11/macprovider:v1.8.123@37e2d232389ba37d94f138b5a7d52a12c2b12106` |
-| Coordinator `target_id` / `latest_binary_version` | `1.8.123` |
+| Version | **1.8.207** |
+| Compat-set id | `Augustas11/macprovider:v1.8.207@d98b74a6a158000dabaecb89d75886b6817e9d0f` |
+| Coordinator `target_id` / `latest_binary_version` | `1.8.207` |
+| Promotion | Immutable release [v1.8.207](https://github.com/Augustas11/macprovider/releases/tag/v1.8.207), promotion run [36526004611](https://github.com/Augustas11/macprovider/actions/runs/36526004611), final rollout verification run [36529821734](https://github.com/Augustas11/macprovider/actions/runs/36529821734) |
+| Public installer / China mirror | `get.malibu.tech/install.sh` matches the released installer at SHA-256 `8a68f82b254023671715dd45f06895b4a552e35430f3afc97ff3d83c69dccde5`; consumer health resolves `v1.8.207`; `download.malibu.tech/releases/latest.json` points to `v1.8.207` and all 24 mirrored assets were byte-compared with GitHub |
 
-## Next CLI — net changes vs 1.8.123
+## Shipped CLI 1.8.207 — net changes vs 1.8.123
 
-Candidates through `v1.8.176` are old or off-train for promotion. The Studio
-serving canary is signed private candidate **202** (live since 2026-09-28,
-continuous batching on), which reports `binaryVersion` **1.8.123**. It replaced
-candidate 201 after the signed Qwen3.6 MoE confirmation. Candidate 202 is not a
-public stable tag and must not be promoted: it predates merged #1776 and cannot
-activate continuous batching for the newly admitted Qwen3.5/Qwen3.8 identities.
-Pearl runtime tags `v1.8.189` and `v1.8.190` are already consumed; the
-coordinator/gateway runtime **live** on Pearl is `v1.8.191` @ `98e3e4af`
-(includes #1728). Fleet recommendation stays at **1.8.123**.
+Candidate **207** was promoted from exact accepted commit `d98b74a6` on
+2026-09-29. The Studio serving canary now runs the signed public 207 payload
+with `qwen/qwen3.6-35b-a3b`, and Pearl recommends compatibility set 207 while
+retaining promoted 117 and 123 in `accepted_ids` for the older fleet. Private
+candidate 202 was removed from the accepted set after the 207 cut.
 
 
 | Net change in CLI / Malibu / installer | Status | PR |
@@ -259,13 +250,13 @@ and silently never matching.
 
 | Field | Value |
 |---|---|
-| Last built candidate | Signed private candidate **202**, cut from `main` @ `e29ea2976b90728521f0aeea01bc775fa9251a8f` on branch `release/candidate-1.8.202`, run [36365464137](https://github.com/Augustas11/macprovider/actions/runs/36365464137), `promotion_ready=false`. The protected signer, notarization/binding, and standalone-vs-Malibu embedded CLI byte-identity gates passed. CLI tarball SHA-256 `f54be728741aef54badc56713255f704729915ec75d859f2450b8905f8bfeb2e`; installed binary SHA-256 `b8c7a963bd8929370d6c2d14e229af5affbd1d2c72df52f9dcbb9ab7b25f598b`. It reports `binaryVersion` 1.8.123. |
-| Mac Studio serving canary | Signed private candidate **202** @ `e29ea2976`, live since 2026-09-28 after the 201→202 operator swap. The current live workload is `qwen/qwen3.6-35b-a3b` / `mlx-community/Qwen3.6-35B-A3B-4bit` with continuous batching canary and observed `scheduler_admitted` service. Candidate 202 does **not** contain #1776, so selecting `qwen/qwen3.5-27b`, `qwen/qwen3.5-35b-a3b`, or `qwen/qwen3.8-27b` on this binary cannot activate their new CB path. Candidate 195 remains live on the catalog canary Mac mp-26592d… (rollback `rollback-canary-195.sh`). |
+| Last built candidate | **v1.8.207**, cut from `main` @ `d98b74a6a158000dabaecb89d75886b6817e9d0f`, acceptance run [36519497647](https://github.com/Augustas11/macprovider/actions/runs/36519497647), promoted unchanged by run [36526004611](https://github.com/Augustas11/macprovider/actions/runs/36526004611). |
+| Mac Studio serving canary | Signed public **207** @ `d98b74a6`, installed through the established payload-only operator swap while preserving config and LaunchAgents. It serves `qwen/qwen3.6-35b-a3b` / `mlx-community/Qwen3.6-35B-A3B-4bit`, reports coordinator-authorized `buyer_serving`, and returned bounded public-buyer request `f0554d11-049b-47f8-81e5-a516d5130954` after promotion. |
 | Off-train E2E candidate | `v1.8.167` @ `7f833a2f63ddee6b2e146c821341099d89aec169` ([run 35417249468](https://github.com/Augustas11/macprovider/actions/runs/35417249468)) — signed hold-branch CLI used for the 2026-09-19 Pearl Track B run |
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` @ `eb30981c` (BYOM #1576 `cdbb0257` + #1591 + #1590 + #1593); CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
-| Status | **Do not promote 202.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 202 remains the Studio-only serving canary and continuous batching remains off by default after #1757. Because #1776 merged after the cut, the current-main rule requires a successor candidate before any promotion or packaged confirmation of the three newly admitted models. |
+| Status | **207 promoted and live.** Pearl `target_id` and `latest_binary_version` are 207; accepted compatibility sets are promoted 207, 117, and 123. Public installer parity, consumer health, mirror byte identity, signed discovery rollout, Studio join, and a bounded real-buyer response are green. |
 | Coordinator tags taken | **v1.8.204**, **v1.8.205** (both applies rolled back) and **v1.8.206** are Pearl runtime releases for #1775 (coordinator train); the next CLI candidate after 203 must use v1.8.207 or later. |
-| Next candidate | **v1.8.207 — version identity prepared for the promotion-ready cut.** Cut from the commit that carries CLI/Malibu `1.8.207` and includes #1776 and #1785. The 202/201 Studio campaign is accepted as performance and behavior prequalification; do not repeat the expensive A/C/D/F campaign. Require the signed 207 install/join smoke, exact checksums digest, coordinator compatibility-set admission, and China Track E before the installer is handed to the mainland provider. |
+| Next candidate | None assigned. Start a new row only after the next CLI/Malibu/installer change merges; do not reuse 207. |
 | Candidate 202 CB-canary confirmation (2026-09-28) | Isolated Studio loopback serve of the **signed** 202 binary (`--no-join`, ephemeral id, :8092, live :8080/201 untouched) confirmed `qwen/qwen3.6-35b-a3b` **paged-KV attach eligible** (runtime parity `established=true`, cross-row MoE isolation `proven=true`) and a keyless **scheduler-admitted batched 200** with a stable `X-Request-ID` (`event=batching_admitted action=scheduler_admitted`), hash `3fed776d…`. Measured throughput (harness, v1.8.201 same source): 2.86× aggregate vs serial at 8 rows, bit-exact parity. On candidate 202 the qwen3.5/qwen3.8 hybrids fail parity and are excluded; #1776 fixes them only in the deferred successor candidate. Buyer `continuous_batching` was already canary in live config; the 201→202 serving swap (operator-tools/swap-202.sh, 2026-09-28) made 202 the live Studio provider — a3b now served BATCHED (scheduler_admitted) at ~2.86x. |
 | Notable merges after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`); #1742 (`03627cda`, shipped in Studio candidate `v1.8.195`); #1757 (`0197f379`, CB qualification closeout); #1745 (`ddaa551b`, China supply path); #1762 (`95a6563d`, batched prefill); #1658 (`3ec784c69`, Build 1 private staging path); #1753 (`9636a125`, signed provider-release discovery, merged after candidate 201); #1771 (`e29ea2976`, Qwen3.6 MoE paged-KV admission, shipped in candidate 202); #1776 (`38229a8c3`, Qwen3.5/Qwen3.8 exact CB parity, merged after candidate 202); #1785 (`5c09c5c9a`, keep-0 sliding-window paged KV, merged after candidate 202). Coordinator/gateway settlement recovery continued separately through #1728, live in Pearl runtime `v1.8.191`. |
 | Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build (soak proof; live seats since reduced to one — see Mac Studio serving canary above). |
