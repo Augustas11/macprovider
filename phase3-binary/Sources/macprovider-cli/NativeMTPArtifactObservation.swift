@@ -104,7 +104,12 @@ enum NativeMTPArtifactObserver {
         let config = try loadConfig(directory: directory)
         let layerCount = try mtpPredictionLayerCount(in: config)
         let headers = try loadSafetensorsHeaders(directory: directory, fileManager: fileManager)
-        try validateTensorNames(headers, policy: tensorNamePolicy)
+        try validateTensorNames(
+            headers,
+            config: config,
+            mtpPredictionLayerCount: layerCount,
+            policy: tensorNamePolicy
+        )
         let format = try observeFormat(config: config, headers: headers)
         return NativeMTPArtifactObservation(
             format: format.format,
@@ -116,10 +121,16 @@ enum NativeMTPArtifactObserver {
     static func observePair(
         targetDirectory: URL,
         mtpDirectory: URL,
+        familyAdapter: String,
+        sourceLayout: String,
         fileManager: FileManager = .default
     ) throws -> NativeMTPArtifactPairObservation {
         let target = try observe(directory: targetDirectory, fileManager: fileManager, tensorNamePolicy: .target)
-        let mtp = try observe(directory: mtpDirectory, fileManager: fileManager, tensorNamePolicy: .mtp)
+        let mtp = try observe(
+            directory: mtpDirectory,
+            fileManager: fileManager,
+            tensorNamePolicy: .mtp(familyAdapter: familyAdapter, sourceLayout: sourceLayout)
+        )
         guard target.format == mtp.format else {
             throw NativeMTPArtifactObservationError.observationDrift("format")
         }
@@ -437,10 +448,15 @@ enum NativeMTPArtifactObserver {
     private enum TensorNamePolicy: Equatable {
         case permissive
         case target
-        case mtp
+        case mtp(familyAdapter: String, sourceLayout: String)
     }
 
-    private static func validateTensorNames(_ headers: [SafetensorsHeader], policy: TensorNamePolicy) throws {
+    private static func validateTensorNames(
+        _ headers: [SafetensorsHeader],
+        config: [String: Any],
+        mtpPredictionLayerCount: Int,
+        policy: TensorNamePolicy
+    ) throws {
         guard policy != .permissive else { return }
         let tensors = headers.flatMap(\.tensors)
         for tensor in tensors {
@@ -452,12 +468,63 @@ enum NativeMTPArtifactObserver {
                 if lower.contains("mtp.") {
                     throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("target tensor namespace \(tensor.name)")
                 }
-            case .mtp:
-                let allowed = lower.hasPrefix("model.") || lower.hasPrefix("lm_head.")
-                if !allowed || lower.hasPrefix("target.") || lower.hasPrefix("extra.") || lower.hasPrefix("extras.") {
+            case .mtp(let familyAdapter, let sourceLayout):
+                guard familyAdapter == "qwen3_5_mtp_v1",
+                      sourceLayout == "separate_artifact",
+                      stringValue(config["model_type"]) == "qwen3_5_mtp",
+                      isQwen35StandaloneMTPTensorName(
+                        tensor.name,
+                        mtpPredictionLayerCount: mtpPredictionLayerCount
+                      ) else {
                     throw NativeMTPArtifactObservationError.incompatibleSafetensorsHeaders("mtp tensor namespace \(tensor.name)")
                 }
             }
+        }
+    }
+
+    private static func isQwen35StandaloneMTPTensorName(
+        _ name: String,
+        mtpPredictionLayerCount: Int
+    ) -> Bool {
+        guard name == name.lowercased(with: nil) else { return false }
+        if [
+            "fc.weight", "fc.scales", "fc.biases",
+            "norm.weight",
+            "pre_fc_norm_embedding.weight",
+            "pre_fc_norm_hidden.weight",
+        ].contains(name) {
+            return true
+        }
+
+        let components = name.split(separator: ".", omittingEmptySubsequences: false).map(String.init)
+        guard components.count >= 4,
+              components[0] == "layers",
+              let layer = Int(components[1]),
+              components[1] == String(layer),
+              (0..<mtpPredictionLayerCount).contains(layer) else {
+            return false
+        }
+        let suffix = components.dropFirst(2).joined(separator: ".")
+        if [
+            "input_layernorm.weight",
+            "post_attention_layernorm.weight",
+            "self_attn.q_norm.weight",
+            "self_attn.k_norm.weight",
+        ].contains(suffix) {
+            return true
+        }
+        guard components.count == 5,
+              ["self_attn", "mlp"].contains(components[2]),
+              ["weight", "scales", "biases"].contains(components[4]) else {
+            return false
+        }
+        switch components[2] {
+        case "self_attn":
+            return ["q_proj", "k_proj", "v_proj", "o_proj"].contains(components[3])
+        case "mlp":
+            return ["gate_proj", "up_proj", "down_proj"].contains(components[3])
+        default:
+            return false
         }
     }
 

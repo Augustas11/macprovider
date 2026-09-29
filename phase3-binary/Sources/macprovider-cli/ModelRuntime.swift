@@ -2548,6 +2548,7 @@ actor ModelRuntime: ModelRuntimeServing {
            let targetDirectory = try? Self.localModelDirectory(for: targetLoadPath) {
             candidateNativeMTPLoad = await Self.loadNativeMTPDrafterIfAdmitted(
                 mode: self.nativeMTPMode,
+                sidecarFormat: .releaseEnvelope,
                 targetModelID: modelID,
                 targetModelRevision: verifiedModelArtifactSHA256,
                 targetDirectory: targetDirectory,
@@ -7938,6 +7939,13 @@ actor ModelRuntime: ModelRuntimeServing {
         let revocationExpiresAt: Date?
     }
 
+    private enum NativeMTPAdmissionSidecarFormat {
+        case releaseEnvelope
+        #if DEBUG
+        case legacyObjectForHardwareE2E
+        #endif
+    }
+
     private struct NativeMTPCapturedTokenizerLoader: TokenizerLoader {
         let tokenizerDirectory: URL
         let base: any TokenizerLoader
@@ -8101,6 +8109,7 @@ actor ModelRuntime: ModelRuntimeServing {
 
     private static func loadNativeMTPDrafterIfAdmitted(
         mode: NativeMTPMode,
+        sidecarFormat: NativeMTPAdmissionSidecarFormat,
         targetModelID: String,
         targetModelRevision: String?,
         targetDirectory: URL,
@@ -8162,25 +8171,41 @@ actor ModelRuntime: ModelRuntimeServing {
             let effectiveRevokedTupleSHA256 = revocationAdmissionState.revokedTupleSHA256
             let snapshotRoot = sidecarURL.deletingLastPathComponent()
             let machine = MachineFingerprinter().sample()
-            let admissionCapability = try NativeMTPAdmissionSidecar.load(
-                sidecarURL: sidecarURL,
-                signatureURL: signatureURL,
-                snapshotRoot: snapshotRoot,
-                context: NativeMTPAdmissionSidecar.RuntimeContext(
-                    modelID: targetModelID,
-                    modelRevision: targetModelRevision,
-                    providerRevision: runningBuildIdentity.sourceCommit,
-                    upstreamMLXSwiftLMRevision: runningBuildIdentity.upstreamMLXSwiftLMRevision,
-                    hardwareChip: machine.chip,
-                    ramGB: machine.ramGB,
-                    osVersion: machine.osVersion,
-                    slotCount: slotCount,
-                    revokedTupleSHA256: effectiveRevokedTupleSHA256
-                ),
-                trustedKeyring: trustedKeyring,
-                resolvedArtifactAuthority: resolvedArtifactAuthority,
-                captureArtifacts: true
+            let context = NativeMTPAdmissionSidecar.RuntimeContext(
+                modelID: targetModelID,
+                modelRevision: targetModelRevision,
+                providerRevision: runningBuildIdentity.sourceCommit,
+                upstreamMLXSwiftLMRevision: runningBuildIdentity.upstreamMLXSwiftLMRevision,
+                hardwareChip: machine.chip,
+                ramGB: machine.ramGB,
+                osVersion: machine.osVersion,
+                slotCount: slotCount,
+                revokedTupleSHA256: effectiveRevokedTupleSHA256
             )
+            let admissionCapability: NativeMTPAdmissionCapability
+            switch sidecarFormat {
+            case .releaseEnvelope:
+                admissionCapability = try NativeMTPAdmissionSidecar.load(
+                    sidecarURL: sidecarURL,
+                    signatureURL: signatureURL,
+                    snapshotRoot: snapshotRoot,
+                    context: context,
+                    trustedKeyring: trustedKeyring,
+                    resolvedArtifactAuthority: resolvedArtifactAuthority,
+                    captureArtifacts: true
+                )
+            #if DEBUG
+            case .legacyObjectForHardwareE2E:
+                admissionCapability = try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
+                    sidecarURL: sidecarURL,
+                    signatureURL: signatureURL,
+                    snapshotRoot: snapshotRoot,
+                    context: context,
+                    trustedKeyring: trustedKeyring,
+                    captureArtifacts: true
+                )
+            #endif
+            }
             guard nativeMTPAdmissionMatchesRunningBuild(
                     admissionCapability,
                     targetModelRevision: targetModelRevision,
@@ -8205,7 +8230,9 @@ actor ModelRuntime: ModelRuntimeServing {
             }
             let artifactObservation = try NativeMTPArtifactObserver.observePair(
                 targetDirectory: capturedArtifacts.targetURL,
-                mtpDirectory: drafterDirectory
+                mtpDirectory: drafterDirectory,
+                familyAdapter: admissionCapability.familyAdapter,
+                sourceLayout: admissionCapability.sourceLayout
             )
             guard nativeMTPArtifactObservationMatchesAdmission(
                 artifactObservation,
@@ -8354,6 +8381,51 @@ actor ModelRuntime: ModelRuntimeServing {
             return nil
         }
     }
+
+    #if DEBUG
+    struct NativeMTPHardwareE2ELoad {
+        let targetContainer: ModelContainer
+        let drafterContainer: MTPDrafterContainer
+    }
+
+    static func nativeMTPServePathLoadForHardwareE2E(
+        targetModelID: String,
+        targetModelRevision: String,
+        targetDirectory: URL,
+        slotCount: Int,
+        sidecarURL: URL,
+        signatureURL: URL,
+        trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring,
+        runningBuildIdentity: NativeMTPRunningBuildIdentity,
+        resolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority
+    ) async -> NativeMTPHardwareE2ELoad? {
+        guard let load = await loadNativeMTPDrafterIfAdmitted(
+            mode: .auto,
+            sidecarFormat: .legacyObjectForHardwareE2E,
+            targetModelID: targetModelID,
+            targetModelRevision: targetModelRevision,
+            targetDirectory: targetDirectory,
+            maxContextTokens: 4096,
+            kvBitsOverride: nil,
+            prefillStepSize: 512,
+            slotCount: slotCount,
+            sidecarPath: sidecarURL.path,
+            signaturePath: signatureURL.path,
+            trustedKeyring: trustedKeyring,
+            runningBuildIdentity: runningBuildIdentity,
+            revokedTupleSHA256: [],
+            resolvedArtifactAuthority: resolvedArtifactAuthority,
+            targetGeneration: 1,
+            selfTestRunner: .unavailable
+        ) else {
+            return nil
+        }
+        return NativeMTPHardwareE2ELoad(
+            targetContainer: load.targetContainer,
+            drafterContainer: load.drafterContainer
+        )
+    }
+    #endif
 
     private struct NativeMTPRevocationAdmissionState {
         let revokedTupleSHA256: Set<String>

@@ -362,8 +362,9 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
         let drafter = try makeFixtureDirectory(
             name: "drafter",
             dtype: "bfloat16",
+            modelType: "qwen3_5_mtp",
             mtpLayerCount: 3,
-            tensors: [tensor("model.layers.0.mlp.down_proj.weight", dtype: "BF16")]
+            tensors: [tensor("norm.weight", dtype: "BF16")]
         )
         defer {
             try? FileManager.default.removeItem(at: target.deletingLastPathComponent())
@@ -372,7 +373,9 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
 
         XCTAssertThrowsError(try NativeMTPArtifactObserver.observePair(
             targetDirectory: target,
-            mtpDirectory: drafter
+            mtpDirectory: drafter,
+            familyAdapter: "qwen3_5_mtp_v1",
+            sourceLayout: "separate_artifact"
         )) { error in
             XCTAssertEqual(
                 error as? NativeMTPArtifactObservationError,
@@ -397,12 +400,14 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
         let cleanDrafter = try makeFixtureDirectory(
             name: "drafter",
             dtype: "bfloat16",
+            modelType: "qwen3_5_mtp",
             mtpLayerCount: 2,
-            tensors: [tensor("model.layers.0.mlp.down_proj.weight", dtype: "BF16")]
+            tensors: [tensor("norm.weight", dtype: "BF16")]
         )
         let extraDrafter = try makeFixtureDirectory(
             name: "drafter-extra",
             dtype: "bfloat16",
+            modelType: "qwen3_5_mtp",
             mtpLayerCount: 2,
             tensors: [tensor("extra.layers.0.mlp.down_proj.weight", dtype: "BF16")]
         )
@@ -415,7 +420,9 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
 
         XCTAssertThrowsError(try NativeMTPArtifactObserver.observePair(
             targetDirectory: embeddedMTPInTarget,
-            mtpDirectory: cleanDrafter
+            mtpDirectory: cleanDrafter,
+            familyAdapter: "qwen3_5_mtp_v1",
+            sourceLayout: "separate_artifact"
         )) { error in
             XCTAssertEqual(
                 error as? NativeMTPArtifactObservationError,
@@ -424,12 +431,177 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
         }
         XCTAssertThrowsError(try NativeMTPArtifactObserver.observePair(
             targetDirectory: cleanTarget,
-            mtpDirectory: extraDrafter
+            mtpDirectory: extraDrafter,
+            familyAdapter: "qwen3_5_mtp_v1",
+            sourceLayout: "separate_artifact"
         )) { error in
             XCTAssertEqual(
                 error as? NativeMTPArtifactObservationError,
                 .incompatibleSafetensorsHeaders("mtp tensor namespace extra.layers.0.mlp.down_proj.weight")
             )
+        }
+    }
+
+    func testQwen35StandaloneDrafterAcceptsExactQuantizedNamespace() throws {
+        let quantization: [String: Any] = [
+            "mode": "mlx_affine_4bit",
+            "bits": 4,
+            "group_size": 64,
+            "layers.0.input_layernorm.weight": false,
+            "layers.0.post_attention_layernorm.weight": false,
+            "layers.0.self_attn.k_norm.weight": false,
+            "layers.0.self_attn.q_norm.weight": false,
+            "norm.weight": false,
+            "pre_fc_norm_embedding.weight": false,
+            "pre_fc_norm_hidden.weight": false,
+        ]
+        let target = try makeFixtureDirectory(
+            name: "target",
+            quantization: [
+                "mode": "mlx_affine_4bit",
+                "bits": 4,
+                "group_size": 64,
+            ],
+            mtpLayerCount: 1,
+            tensors: quantizedTriplet("model.layers.0.mlp.down_proj")
+        )
+        let drafter = try makeFixtureDirectory(
+            name: "drafter",
+            quantization: quantization,
+            modelType: "qwen3_5_mtp",
+            mtpLayerCount: 1,
+            tensors: qwen35StandaloneDrafterTensors()
+        )
+        defer {
+            try? FileManager.default.removeItem(at: target.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: drafter.deletingLastPathComponent())
+        }
+
+        let observation = try NativeMTPArtifactObserver.observePair(
+            targetDirectory: target,
+            mtpDirectory: drafter,
+            familyAdapter: "qwen3_5_mtp_v1",
+            sourceLayout: "separate_artifact"
+        )
+
+        XCTAssertEqual(qwen35StandaloneDrafterTensors().count, 31)
+        XCTAssertEqual(observation.mtp.tensorPairs.count, 8)
+        XCTAssertEqual(observation.mtp.format, .mlxAffine4(bits: 4, groupSize: 64))
+    }
+
+    func testQwen35StandaloneDrafterRejectsTargetOwnedEmbeddingAndLMHead() throws {
+        let target = try makeFixtureDirectory(
+            name: "target",
+            dtype: "bfloat16",
+            mtpLayerCount: 1,
+            tensors: [tensor("model.layers.0.mlp.down_proj.weight", dtype: "BF16")]
+        )
+        defer {
+            try? FileManager.default.removeItem(at: target.deletingLastPathComponent())
+        }
+
+        for name in ["embed_tokens.weight", "lm_head.weight"] {
+            let drafter = try makeFixtureDirectory(
+                name: "drafter-\(name.replacingOccurrences(of: ".", with: "-"))",
+                dtype: "bfloat16",
+                modelType: "qwen3_5_mtp",
+                mtpLayerCount: 1,
+                tensors: [tensor(name, dtype: "BF16")]
+            )
+            defer { try? FileManager.default.removeItem(at: drafter.deletingLastPathComponent()) }
+
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observePair(
+                targetDirectory: target,
+                mtpDirectory: drafter,
+                familyAdapter: "qwen3_5_mtp_v1",
+                sourceLayout: "separate_artifact"
+            )) { error in
+                XCTAssertEqual(
+                    error as? NativeMTPArtifactObservationError,
+                    .incompatibleSafetensorsHeaders("mtp tensor namespace \(name)")
+                )
+            }
+        }
+    }
+
+    func testQwen35StandaloneDrafterFailsClosedForUnadmittedConfigOrSourceLayout() throws {
+        let target = try makeFixtureDirectory(
+            name: "target",
+            dtype: "bfloat16",
+            mtpLayerCount: 1,
+            tensors: [tensor("model.layers.0.mlp.down_proj.weight", dtype: "BF16")]
+        )
+        let wrongModelType = try makeFixtureDirectory(
+            name: "wrong-model-type",
+            dtype: "bfloat16",
+            modelType: "qwen3_5",
+            mtpLayerCount: 1,
+            tensors: [tensor("norm.weight", dtype: "BF16")]
+        )
+        let correctDrafter = try makeFixtureDirectory(
+            name: "correct-drafter",
+            dtype: "bfloat16",
+            modelType: "qwen3_5_mtp",
+            mtpLayerCount: 1,
+            tensors: [tensor("norm.weight", dtype: "BF16")]
+        )
+        defer {
+            try? FileManager.default.removeItem(at: target.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: wrongModelType.deletingLastPathComponent())
+            try? FileManager.default.removeItem(at: correctDrafter.deletingLastPathComponent())
+        }
+
+        XCTAssertThrowsError(try NativeMTPArtifactObserver.observePair(
+            targetDirectory: target,
+            mtpDirectory: wrongModelType,
+            familyAdapter: "qwen3_5_mtp_v1",
+            sourceLayout: "separate_artifact"
+        ))
+        XCTAssertThrowsError(try NativeMTPArtifactObserver.observePair(
+            targetDirectory: target,
+            mtpDirectory: correctDrafter,
+            familyAdapter: "qwen3_5_mtp_v1",
+            sourceLayout: "embedded"
+        ))
+        XCTAssertThrowsError(try NativeMTPArtifactObserver.observePair(
+            targetDirectory: target,
+            mtpDirectory: correctDrafter,
+            familyAdapter: "unknown",
+            sourceLayout: "separate_artifact"
+        ))
+    }
+
+    func testQwen35StandaloneDrafterRejectsNoncanonicalLayerIndices() throws {
+        let target = try makeFixtureDirectory(
+            name: "target",
+            dtype: "bfloat16",
+            mtpLayerCount: 1,
+            tensors: [tensor("model.layers.0.mlp.down_proj.weight", dtype: "BF16")]
+        )
+        defer { try? FileManager.default.removeItem(at: target.deletingLastPathComponent()) }
+
+        for layer in ["00", "+0", "-0"] {
+            let tensorName = "layers.\(layer).input_layernorm.weight"
+            let drafter = try makeFixtureDirectory(
+                name: "drafter-\(layer.replacingOccurrences(of: "+", with: "plus").replacingOccurrences(of: "-", with: "minus"))",
+                dtype: "bfloat16",
+                modelType: "qwen3_5_mtp",
+                mtpLayerCount: 1,
+                tensors: [tensor(tensorName, dtype: "BF16")]
+            )
+            defer { try? FileManager.default.removeItem(at: drafter.deletingLastPathComponent()) }
+
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observePair(
+                targetDirectory: target,
+                mtpDirectory: drafter,
+                familyAdapter: "qwen3_5_mtp_v1",
+                sourceLayout: "separate_artifact"
+            )) { error in
+                XCTAssertEqual(
+                    error as? NativeMTPArtifactObservationError,
+                    .incompatibleSafetensorsHeaders("mtp tensor namespace \(tensorName)")
+                )
+            }
         }
     }
 
@@ -675,6 +847,34 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
         ]
     }
 
+    private func quantizedTriplet(_ base: String) -> [TensorFixture] {
+        [
+            tensor("\(base).weight", dtype: "U32", shape: [2, 8]),
+            tensor("\(base).scales", dtype: "BF16", shape: [2, 1]),
+            tensor("\(base).biases", dtype: "BF16", shape: [2, 1]),
+        ]
+    }
+
+    private func qwen35StandaloneDrafterTensors() -> [TensorFixture] {
+        var tensors = quantizedTriplet("fc")
+        for projection in ["down_proj", "gate_proj", "up_proj"] {
+            tensors.append(contentsOf: quantizedTriplet("layers.0.mlp.\(projection)"))
+        }
+        for projection in ["k_proj", "o_proj", "q_proj", "v_proj"] {
+            tensors.append(contentsOf: quantizedTriplet("layers.0.self_attn.\(projection)"))
+        }
+        tensors.append(contentsOf: [
+            tensor("layers.0.input_layernorm.weight", dtype: "BF16"),
+            tensor("layers.0.post_attention_layernorm.weight", dtype: "BF16"),
+            tensor("layers.0.self_attn.k_norm.weight", dtype: "BF16"),
+            tensor("layers.0.self_attn.q_norm.weight", dtype: "BF16"),
+            tensor("norm.weight", dtype: "BF16"),
+            tensor("pre_fc_norm_embedding.weight", dtype: "BF16"),
+            tensor("pre_fc_norm_hidden.weight", dtype: "BF16"),
+        ])
+        return tensors
+    }
+
     private func withFixture(
         dtype: String? = "bfloat16",
         quantization: [String: Any]? = nil,
@@ -719,6 +919,7 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
         name: String,
         dtype: String? = "bfloat16",
         quantization: [String: Any]? = nil,
+        modelType: String? = nil,
         mtpLayerCount: Int,
         layerCountPlacement: LayerCountPlacement = .textConfig,
         tensors: [TensorFixture]
@@ -734,6 +935,9 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
         }
         if let quantization {
             config["quantization"] = quantization
+        }
+        if let modelType {
+            config["model_type"] = modelType
         }
         switch layerCountPlacement {
         case .root:

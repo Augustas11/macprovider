@@ -14,7 +14,8 @@ import Tokenizers
 /// only has CommandLineTools installed. The runtime admission/drafter injection
 /// it depends on is compiled out of release builds by `ModelRuntime`; use the
 /// debug product for this command and keep release builds for production
-/// compile proof.
+/// compile proof. With `MACPROVIDER_NATIVE_MTP_E2E_SERVE_PATH=1`, the workload
+/// runs on the target and drafter containers returned by the real serve loader.
 struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "native-mtp-hardware-e2e",
@@ -53,7 +54,10 @@ struct NativeMTPHardwareE2ECommand: AsyncParsableCommand {
             ))
             throw ExitCode(2)
         }
-        let report = try await NativeMTPHardwareE2ERunner(rootPath: rootPath).run()
+        let report = try await NativeMTPHardwareE2ERunner(
+            rootPath: rootPath,
+            verifyServePath: environment["MACPROVIDER_NATIVE_MTP_E2E_SERVE_PATH"] == "1"
+        ).run()
         FileHandle.standardOutput.write(Data(report.jsonLine.utf8))
         FileHandle.standardOutput.write(Data("\n".utf8))
         #else
@@ -71,7 +75,17 @@ private struct NativeMTPHardwareE2EReport: Sendable {
     let mtpSHA256: String
     let admissions: Int
     let maxObservedBatchDepth: Int
+    let servePathVerified: Bool
     let jsonLine: String
+}
+
+private struct NativeMTPHardwareAdmissionFixture {
+    let capability: NativeMTPAdmissionCapability
+    let sidecarURL: URL
+    let signatureURL: URL
+    let trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring
+    let runningBuildIdentity: ModelRuntime.NativeMTPRunningBuildIdentity
+    let resolvedArtifactAuthority: NativeMTPResolvedArtifactAuthority
 }
 
 private final class NativeMTPHardwareE2ERunner {
@@ -82,10 +96,12 @@ private final class NativeMTPHardwareE2ERunner {
     private static let releaseID = "native-mtp-hardware-e2e"
 
     private let root: URL
+    private let verifyServePath: Bool
 
-    init(rootPath: String) {
+    init(rootPath: String, verifyServePath: Bool) {
         root = URL(fileURLWithPath: (rootPath as NSString).expandingTildeInPath, isDirectory: true)
             .standardizedFileURL
+        self.verifyServePath = verifyServePath
     }
 
     static func requireStudioHost() throws {
@@ -105,15 +121,34 @@ private final class NativeMTPHardwareE2ERunner {
         let targetIdentity = try MLXSnapshotIdentity.compute(directory: targetDirectory)
         let mtpIdentity = try MLXSnapshotIdentity.compute(directory: mtpDirectory)
         let machine = MachineFingerprinter().sample()
-        let admission = try makeAndValidateAdmission(
+        let admissionFixture = try makeAndValidateAdmission(
             targetIdentity: targetIdentity,
             mtpIdentity: mtpIdentity,
             machine: machine
         )
+        let admission = admissionFixture.capability
         try require(admission.targetArtifactSHA256 == targetIdentity.digest, "target digest admission mismatch")
         try require(admission.mtpArtifactSHA256 == mtpIdentity.digest, "MTP digest admission mismatch")
         try require(admission.maxProposalDepth == 1, "unexpected proposal depth")
         try require(admission.selfTestChallengeBank.challengeBankPath == "native-mtp-selftest-bank.json", "bad self-test bank")
+
+        let servePathLoad: ModelRuntime.NativeMTPHardwareE2ELoad?
+        if verifyServePath {
+            servePathLoad = await ModelRuntime.nativeMTPServePathLoadForHardwareE2E(
+                targetModelID: Self.modelID,
+                targetModelRevision: targetIdentity.digest,
+                targetDirectory: targetDirectory,
+                slotCount: 2,
+                sidecarURL: admissionFixture.sidecarURL,
+                signatureURL: admissionFixture.signatureURL,
+                trustedKeyring: admissionFixture.trustedKeyring,
+                runningBuildIdentity: admissionFixture.runningBuildIdentity,
+                resolvedArtifactAuthority: admissionFixture.resolvedArtifactAuthority
+            )
+            try require(servePathLoad != nil, "serve-path native-MTP admission rejected")
+        } else {
+            servePathLoad = nil
+        }
 
         let configData = try Data(contentsOf: targetDirectory.appendingPathComponent("config.json"))
         let modelCapabilities = ModelRuntime.pagedKVModelCapabilities(
@@ -130,15 +165,22 @@ private final class NativeMTPHardwareE2ERunner {
             "admission cache class mismatch"
         )
 
-        await Qwen35TextMTPRegistration.register()
-        let targetContainer = try await LLMModelFactory.shared.loadContainer(
-            from: targetDirectory,
-            using: #huggingFaceTokenizerLoader()
-        )
-        let drafterContainer = try await MTPDrafterModelFactory.shared.loadContainer(
-            from: mtpDirectory,
-            using: #huggingFaceTokenizerLoader()
-        )
+        let targetContainer: ModelContainer
+        let drafterContainer: MTPDrafterContainer
+        if let servePathLoad {
+            targetContainer = servePathLoad.targetContainer
+            drafterContainer = servePathLoad.drafterContainer
+        } else {
+            await Qwen35TextMTPRegistration.register()
+            targetContainer = try await LLMModelFactory.shared.loadContainer(
+                from: targetDirectory,
+                using: #huggingFaceTokenizerLoader()
+            )
+            drafterContainer = try await MTPDrafterModelFactory.shared.loadContainer(
+                from: mtpDirectory,
+                using: #huggingFaceTokenizerLoader()
+            )
+        }
         let maximumBlockSize = await drafterContainer.perform { context in
             context.model.maximumBlockSize
         }
@@ -274,13 +316,14 @@ private final class NativeMTPHardwareE2ERunner {
         try require(maxDepth >= 2, "batch depth below 2: \(maxDepth)")
         let totalAdmissions = admissionRecorder.snapshot().count
         let json = """
-        {"schema":"macprovider.native-mtp-hardware-e2e-result.v1","status":"pass","model_id":"\(Self.modelID)","target_sha256":"\(targetIdentity.digest)","mtp_sha256":"\(mtpIdentity.digest)","admissions":\(totalAdmissions),"max_observed_batch_depth":\(maxDepth)}
+        {"schema":"macprovider.native-mtp-hardware-e2e-result.v1","status":"pass","model_id":"\(Self.modelID)","target_sha256":"\(targetIdentity.digest)","mtp_sha256":"\(mtpIdentity.digest)","admissions":\(totalAdmissions),"max_observed_batch_depth":\(maxDepth),"serve_path_verified":\(verifyServePath)}
         """
         return NativeMTPHardwareE2EReport(
             targetSHA256: targetIdentity.digest,
             mtpSHA256: mtpIdentity.digest,
             admissions: totalAdmissions,
             maxObservedBatchDepth: maxDepth,
+            servePathVerified: verifyServePath,
             jsonLine: json
         )
     }
@@ -371,12 +414,39 @@ private final class NativeMTPHardwareE2ERunner {
         targetIdentity: MLXSnapshotIdentity,
         mtpIdentity: MLXSnapshotIdentity,
         machine: MachineFingerprint
-    ) throws -> NativeMTPAdmissionCapability {
+    ) throws -> NativeMTPHardwareAdmissionFixture {
         let tokenizerSHA = try sha256(of: root.appendingPathComponent("target/tokenizer.json"))
         let manifestSHA = try sha256(of: root.appendingPathComponent("mtp/config.json"))
         let signer = Curve25519.Signing.PrivateKey()
         let keyID = "native-mtp-hardware-e2e"
-        let selfTestBankData = Data(#"{"schema":"native_mtp_selftest_bank.v1","release_id":"native-mtp-hardware-e2e-selftest","prompts":[[1,2,3]]}"#.utf8)
+        let selfTestBankData = try jsonData([
+            "schema_version": NativeMTPSelfTestChallenge.bankSchemaVersion,
+            "release_id": Self.releaseID,
+            "issued_at": iso8601Seconds(Date().addingTimeInterval(-3600)),
+            "expires_at": iso8601Seconds(Date().addingTimeInterval(3600)),
+            "signer_key_id": keyID,
+            "entries": [[
+                "challenge_id": "native-mtp-hardware-e2e-serve-path",
+                "model_id": Self.modelID,
+                "model_hash": targetIdentity.digest,
+                "tokenizer_sha256": tokenizerSHA,
+                "artifact_sha256": mtpIdentity.digest,
+                "mtp_manifest_sha256": manifestSHA,
+                "prompt_token_ids": [1],
+                "max_completion_tokens": 1,
+                "fixed_proposal_depth": 1,
+                "expected_token_ids": [],
+                "expected_token_id_sha256": sha256Hex(Data("[]".utf8)),
+                "expected_terminal_reason": "completed",
+                "expected_counters": [
+                    "accepted": 0,
+                    "rejected": 0,
+                    "bonus": 0,
+                    "committed": 0,
+                ],
+                "expected_committed_state_sha256": String(repeating: "0", count: 64),
+            ]],
+        ])
         try selfTestBankData.write(to: root.appendingPathComponent("native-mtp-selftest-bank.json"), options: [.atomic])
         let selfTestSignature = try signer.signature(for: selfTestBankData).base64EncodedString()
         let selfTestSignatureData = Data("""
@@ -398,13 +468,14 @@ private final class NativeMTPHardwareE2ERunner {
             to: root.appendingPathComponent("native-mtp-artifact-manifest.json"),
             options: [.atomic]
         )
-        let sidecarData = try releaseEnvelopeData(
+        let sidecarData = try legacyAdmissionSidecarData(
             machine: machine,
             targetSHA: targetIdentity.digest,
+            mtpSHA: mtpIdentity.digest,
             tokenizerSHA: tokenizerSHA,
             manifestSHA: manifestSHA,
-            artifactManifestSHA: sha256Hex(projectionData),
             challengeBankSHA: sha256Hex(selfTestBankData),
+            challengeBankSignatureSHA: sha256Hex(selfTestSignatureData),
             signerKeyID: keyID
         )
         let signature = try signer.signature(for: sidecarData).base64EncodedString()
@@ -412,6 +483,10 @@ private final class NativeMTPHardwareE2ERunner {
         {"alg":"ed25519","key_id":"\(keyID)","signature":"\(signature)"}
 
         """.utf8)
+        let sidecarURL = root.appendingPathComponent("native-mtp-admission.json")
+        let signatureURL = root.appendingPathComponent("native-mtp-admission.json.sig")
+        try sidecarData.write(to: sidecarURL, options: [.atomic])
+        try signatureData.write(to: signatureURL, options: [.atomic])
         let authority = NativeMTPResolvedArtifactAuthority.uncheckedForTesting(
             releaseID: Self.releaseID,
             signerKeyID: keyID,
@@ -424,7 +499,11 @@ private final class NativeMTPHardwareE2ERunner {
             targetURLPath: root.appendingPathComponent("target", isDirectory: true).standardizedFileURL.path,
             targetSHA256: targetIdentity.digest
         )
-        return try NativeMTPAdmissionSidecar.load(
+        let trustedKeyring = NativeMTPAdmissionSidecar.TrustedKeyring(
+            publicKeysByKeyID: [keyID: signer.publicKey.rawRepresentation.base64EncodedString()],
+            requiredKeyID: keyID
+        )
+        let capability = try NativeMTPAdmissionSidecar.loadLegacyObjectForTesting(
             sidecarData: sidecarData,
             signatureData: signatureData,
             snapshotRoot: root,
@@ -439,9 +518,19 @@ private final class NativeMTPHardwareE2ERunner {
                 slotCount: 2,
                 revokedTupleSHA256: []
             ),
-            trustedKeyring: NativeMTPAdmissionSidecar.TrustedKeyring(
-                publicKeysByKeyID: [keyID: signer.publicKey.rawRepresentation.base64EncodedString()],
-                requiredKeyID: keyID
+            trustedKeyring: trustedKeyring,
+            captureArtifacts: false
+        )
+        return NativeMTPHardwareAdmissionFixture(
+            capability: capability,
+            sidecarURL: sidecarURL,
+            signatureURL: signatureURL,
+            trustedKeyring: trustedKeyring,
+            runningBuildIdentity: ModelRuntime.NativeMTPRunningBuildIdentity(
+                sourceCommit: Self.providerRevision,
+                reproducibleBuildSHA256: String(repeating: "1", count: 64),
+                liveExecutableCDHash: Self.liveExecutableCDHash,
+                upstreamMLXSwiftLMRevision: Self.upstreamRevision
             ),
             resolvedArtifactAuthority: authority
         )
@@ -464,85 +553,99 @@ private final class NativeMTPHardwareE2ERunner {
         ])
     }
 
-    private func releaseEnvelopeData(
+    private func legacyAdmissionSidecarData(
         machine: MachineFingerprint,
         targetSHA: String,
+        mtpSHA: String,
         tokenizerSHA: String,
         manifestSHA: String,
-        artifactManifestSHA: String,
         challengeBankSHA: String,
+        challengeBankSignatureSHA: String,
         signerKeyID: String
     ) throws -> Data {
-        let entry: [String: Any] = [
-            "model_key": Self.modelID,
-            "artifact_id": "primary",
-            "hash_algorithm": NativeMTPResolvedArtifactAuthority.nativeMTPHashAlgorithm,
-            "artifact_hash": targetSHA,
-            "artifact_manifest_sha256": artifactManifestSHA,
-            "tokenizer_sha256": tokenizerSHA,
-            "decode_path": "native_mtp",
-            "mtp_manifest_sha256": manifestSHA,
-            "mtp_family_adapter": "qwen3_5_mtp_v1",
-            "mtp_state_class": "hybrid_stageable_rewindable",
-            "mtp_head_count": 1,
-            "proposal_depth": 1,
-            "complete_window_bytes_by_depth": [1_048_576, 2_097_152],
-            "runtime_revision": Self.upstreamRevision,
-            "provider_revision": Self.providerRevision,
-            "source_commit": Self.providerRevision,
-            "reproducible_build_sha256": String(repeating: "1", count: 64),
-            "live_executable_cdhash": Self.liveExecutableCDHash,
-            "cache_state_classes": ["hybrid_stageable_rewindable"],
-            "hardware_class": NativeMTPAdmissionSidecar.canonicalHardwareClass(machine.chip),
-            "ram_bytes": machine.ramGB * 1_073_741_824,
-            "qualified_slots": 2,
-            "request_feature_profile": "native_mtp_greedy_text_v1",
-            "decrease_threshold_ppm": 1,
-            "increase_threshold_ppm": 2,
-            "max_verification_positions_per_committed_milli": 1000,
-            "throughput_delta_ppm": 0,
-            "benchmark_policy_sha256": String(repeating: "2", count: 64),
-            "challenge_bank_sha256": challengeBankSHA,
-            "fit_evidence_sha256": String(repeating: "3", count: 64),
-            "quality_evidence_sha256": String(repeating: "3", count: 64),
-            "correctness_evidence_sha256": String(repeating: "3", count: 64),
-            "state_rollback_evidence_sha256": String(repeating: "3", count: 64),
-            "batch_evidence_sha256": String(repeating: "3", count: 64),
-            "performance_evidence_sha256": String(repeating: "3", count: 64),
-            "security_negative_evidence_sha256": String(repeating: "3", count: 64),
-            "quantization": [
-                "kind": "base",
-                "packed_data_dtype": "none",
-                "packed_layout": "none",
-                "scale_dtype": "none",
-                "scale_layout": "none",
-                "block_size_elements": NSNull(),
-                "alignment_bytes": NSNull(),
-                "padding_rule": "none",
-                "unquantized_exceptions": [],
-                "per_layer_exceptions": [],
-                "representation_manifest_sha256": String(repeating: "7", count: 64),
-            ],
-            "ordinary_baseline": [
-                "decode_path": "ordinary",
-                "runtime_revision": Self.upstreamRevision,
-                "provider_revision": Self.providerRevision,
-                "artifact_hash": targetSHA,
-                "qualified_slots": 2,
-                "measurement_sha256": String(repeating: "8", count: 64),
-                "aggregate_tps_milli": 1,
-            ],
-        ]
-        return try jsonData([
-            "schema_version": NativeMTPAdmissionSidecar.schemaVersion,
-            "release_id": Self.releaseID,
-            "issued_at": iso8601Seconds(Date().addingTimeInterval(-3600)),
-            "expires_at": iso8601Seconds(Date().addingTimeInterval(3600)),
-            "signer_key_id": signerKeyID,
-            "challenge_bank_signer_key_id": signerKeyID,
-            "revocation_signer_key_id": signerKeyID,
-            "entries": [entry],
-        ])
+        func object(tupleSHA: String) -> [String: Any] {
+            [
+                "schema_version": NativeMTPAdmissionSidecar.schemaVersion,
+                "tuple_sha256": tupleSHA,
+                "decode_path": "native_mtp",
+                "admission_enabled": true,
+                "model": [
+                    "id": Self.modelID,
+                    "revision": targetSHA,
+                    "family_adapter": "qwen3_5_mtp_v1",
+                ],
+                "artifacts": [
+                    "target": ["path": "target", "sha256": targetSHA],
+                    "mtp": ["path": "mtp", "sha256": mtpSHA],
+                    "tokenizer": ["path": "target/tokenizer.json", "sha256": tokenizerSHA],
+                    "manifest": ["path": "mtp/config.json", "sha256": manifestSHA],
+                ],
+                "mtp": [
+                    "manifest_sha256": manifestSHA,
+                    "source_layout": "separate_artifact",
+                    "prediction_layer_count": 1,
+                    "max_proposal_depth": 1,
+                    "complete_window_bytes_by_depth": [1_048_576, 2_097_152],
+                    "throughput_delta_ppm": 0,
+                    "adaptation_enabled": true,
+                    "adaptation_max_depth": 1,
+                ],
+                "quantization": [
+                    "target": "mlx_affine_4bit",
+                    "mtp": "mlx_affine_4bit",
+                ],
+                "cache_state": [
+                    "cache_class": "paged_kv",
+                    "state_class": "hybrid_stageable_rewindable",
+                ],
+                "revisions": [
+                    "provider": Self.providerRevision,
+                    "upstream_mlx_swift_lm": Self.upstreamRevision,
+                ],
+                "hardware": [
+                    "chip": NativeMTPAdmissionSidecar.canonicalHardwareClass(machine.chip),
+                    "ram_gb": machine.ramGB,
+                    "qualified_slots": 2,
+                    "max_slots": 2,
+                    "os_version": machine.osVersion,
+                ],
+                "request_profile": [
+                    "text_only": true,
+                    "streaming": true,
+                    "tools": false,
+                    "structured_outputs": false,
+                    "logprobs": false,
+                    "penalties": false,
+                    "conversation_cache": false,
+                    "disk_cache": false,
+                    "max_prompt_tokens": 4096,
+                    "max_completion_tokens": 8,
+                ],
+                "spec023": [
+                    "release_id": Self.releaseID,
+                    "source_commit": Self.providerRevision,
+                    "reproducible_build_sha256": String(repeating: "1", count: 64),
+                    "live_executable_cdhash": Self.liveExecutableCDHash,
+                    "benchmark_policy_sha256": String(repeating: "2", count: 64),
+                    "native_mtp_admission_tuple_sha256": tupleSHA,
+                    "evidence_artifact_sha256": Array(repeating: String(repeating: "3", count: 64), count: 7),
+                ],
+                "selftest": [
+                    "release_id": Self.releaseID,
+                    "challenge_bank_path": "native-mtp-selftest-bank.json",
+                    "challenge_bank_sha256": challengeBankSHA,
+                    "signature_path": "native-mtp-selftest-bank.json.sig",
+                    "signer_key_id": signerKeyID,
+                    "signature_sha256": challengeBankSignatureSHA,
+                ],
+                "flags": [
+                    "admission_allowed": true,
+                ],
+            ]
+        }
+        let placeholder = object(tupleSHA: String(repeating: "1", count: 64))
+        let tupleSHA = try NativeMTPAdmissionSidecar.admissionTupleSHA256ForTesting(placeholder)
+        return try jsonData(object(tupleSHA: tupleSHA))
     }
 
     private func sizingProof(modelSHA: String) -> PagedKVHardwareSizingProof {
