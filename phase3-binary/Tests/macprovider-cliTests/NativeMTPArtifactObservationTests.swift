@@ -350,6 +350,233 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
                 )
             }
         }
+
+        let unsignedExceptionConfig = #"{"quantization":{"mode":"affine","bits":4,"group_size":64},"native_mtp_representation":{"unquantized_layer_exceptions":["model.layers.0.mlp.down_proj"]},"text_config":{"mtp_num_hidden_layers":2}}"#
+        try withRawFixture(
+            configData: Data(unsignedExceptionConfig.utf8),
+            safetensors: [("model.safetensors", try safetensorsBytes(tensors: [
+                tensor("model.layers.0.mlp.down_proj.weight", dtype: "BF16", shape: [2, 64]),
+            ]))]
+        ) { directory in
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
+                XCTAssertEqual(
+                    error as? NativeMTPArtifactObservationError,
+                    .incompatibleSafetensorsHeaders("packed tensor model.layers.0.mlp.down_proj.weight dtype BF16")
+                )
+            }
+        }
+
+        let unpairedScaleConfig = #"{"quantization":{"mode":"affine","bits":4,"group_size":64},"native_mtp_representation":{"unpaired_scale_exceptions":["model.layers.1.mlp.down_proj.scales"]},"text_config":{"mtp_num_hidden_layers":2}}"#
+        try withRawFixture(
+            configData: Data(unpairedScaleConfig.utf8),
+            safetensors: [("model.safetensors", try safetensorsBytes(tensors: [
+                tensor("model.layers.0.mlp.down_proj.weight", dtype: "U32", shape: [2, 8]),
+                tensor("model.layers.0.mlp.down_proj.scales", dtype: "BF16", shape: [2, 1]),
+                tensor("model.layers.0.mlp.down_proj.biases", dtype: "BF16", shape: [2, 1]),
+                tensor("model.layers.1.mlp.down_proj.scales", dtype: "F16", shape: [2, 1]),
+            ]))]
+        ) { directory in
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
+                XCTAssertEqual(
+                    error as? NativeMTPArtifactObservationError,
+                    .unsupportedQuantization("mlx affine unpaired scale exceptions are not admissible")
+                )
+            }
+        }
+
+        let paddingExceptionConfig = #"{"quantization":{"mode":"affine","bits":4,"group_size":64},"native_mtp_representation":{"padding_exceptions":["model.layers.0.mlp.down_proj.weight"]},"text_config":{"mtp_num_hidden_layers":2}}"#
+        try withRawFixture(
+            configData: Data(paddingExceptionConfig.utf8),
+            safetensors: [("model.safetensors", try safetensorsBytes(tensors: [
+                tensor("model.layers.0.mlp.down_proj.weight", dtype: "U32", shape: [2, 8]),
+                tensor("model.layers.0.mlp.down_proj.scales", dtype: "BF16", shape: [2, 1]),
+                tensor("model.layers.0.mlp.down_proj.biases", dtype: "BF16", shape: [2, 1]),
+            ]))]
+        ) { directory in
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
+                XCTAssertEqual(
+                    error as? NativeMTPArtifactObservationError,
+                    .unsupportedQuantization("mlx affine padding exceptions are not admissible")
+                )
+            }
+        }
+    }
+
+    /// Real mlx-community Qwen3.6-35B-A3B-4bit shape: `"mode": "affine"`
+    /// globally plus 8-bit router gates declared as per-module overrides.
+    func testAffineModeSpellingAndPerModuleEightBitOverrides() throws {
+        let gate = "language_model.model.layers.0.mlp.gate"
+        let baseTensors = [
+            tensor("language_model.model.layers.0.mlp.down_proj.weight", dtype: "U32", shape: [2, 8]),
+            tensor("language_model.model.layers.0.mlp.down_proj.scales", dtype: "BF16", shape: [2, 1]),
+            tensor("language_model.model.layers.0.mlp.down_proj.biases", dtype: "BF16", shape: [2, 1]),
+            // 8-bit: 16 U32 columns * 4 values = 64 inputs -> one group of 64.
+            tensor("\(gate).weight", dtype: "U32", shape: [4, 16]),
+            tensor("\(gate).scales", dtype: "BF16", shape: [4, 1]),
+            tensor("\(gate).biases", dtype: "BF16", shape: [4, 1]),
+        ]
+        try withFixture(
+            quantization: ["mode": "affine", "bits": 4, "group_size": 64, gate: ["bits": 8, "group_size": 64]],
+            tensors: baseTensors
+        ) { directory in
+            let observation = try NativeMTPArtifactObserver.observe(directory: directory)
+            XCTAssertEqual(observation.format, .mlxAffine4(bits: 4, groupSize: 64))
+            let gatePair = try XCTUnwrap(observation.tensorPairs.first { $0.weightName == "\(gate).weight" })
+            XCTAssertEqual(gatePair.bitsPerValue, 8)
+            XCTAssertEqual(gatePair.logicalInputColumns, 64)
+        }
+
+        // Without the override the 8-bit tensor is read as 4-bit and fails closed.
+        try withFixture(
+            quantization: ["mode": "affine", "bits": 4, "group_size": 64],
+            tensors: baseTensors
+        ) { directory in
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
+                XCTAssertEqual(
+                    error as? NativeMTPArtifactObservationError,
+                    .incompatibleSafetensorsHeaders("scale block count for \(gate).weight")
+                )
+            }
+        }
+
+        let rejected: [([String: Any], String)] = [
+            (["model.layers.9.mlp.gate": ["bits": 8, "group_size": 64]], "mlx_affine_4bit unmatched module override"),
+            ([gate: ["bits": 3, "group_size": 64]], "mlx affine module override bits"),
+            ([gate: ["bits": 8, "group_size": 48]], "mlx affine module override group_size"),
+            ([gate: ["bits": 8, "group_size": 64, "mode": "mxfp8"]], "mlx affine module override mode"),
+            ([gate: ["bits": 8, "group_size": 64, "extra": 1]], "mlx affine module override unknown key"),
+            ([gate: "8bit"], "mlx affine malformed module override"),
+        ]
+        for (override, reason) in rejected {
+            var quantization: [String: Any] = ["mode": "affine", "bits": 4, "group_size": 64, gate: ["bits": 8, "group_size": 64]]
+            for (key, value) in override { quantization[key] = value }
+            try withFixture(quantization: quantization, tensors: baseTensors) { directory in
+                XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
+                    XCTAssertEqual(error as? NativeMTPArtifactObservationError, .unsupportedQuantization(reason))
+                }
+            }
+        }
+
+        // `affine` still means 4-bit globally; other global widths stay rejected.
+        try withFixture(
+            quantization: ["mode": "affine", "bits": 8, "group_size": 64],
+            tensors: baseTensors
+        ) { directory in
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
+                XCTAssertEqual(
+                    error as? NativeMTPArtifactObservationError,
+                    .unsupportedQuantization("mlx affine requires bits=4")
+                )
+            }
+        }
+    }
+
+    func testBareStandaloneOverrideAndFalseKeysMirrorPinnedLoader() throws {
+        try withFixture(
+            quantization: [
+                "mode": "affine",
+                "bits": 4,
+                "group_size": 64,
+                "fc": ["bits": 8, "group_size": 32],
+                "norm": false,
+            ],
+            tensors: [
+                tensor("mtp.fc.weight", dtype: "U32", shape: [2, 8]),
+                tensor("mtp.fc.scales", dtype: "BF16", shape: [2, 1]),
+                tensor("mtp.fc.biases", dtype: "BF16", shape: [2, 1]),
+                tensor("mtp.norm.weight", dtype: "BF16", shape: [2, 32]),
+            ]
+        ) { directory in
+            let observation = try NativeMTPArtifactObserver.observe(directory: directory)
+            XCTAssertEqual(observation.affineModuleOverrides["fc"], .init(bits: 8, groupSize: 32))
+            XCTAssertEqual(observation.unquantizedModules, ["norm"])
+            XCTAssertEqual(observation.tensorPairs.first?.bitsPerValue, 8)
+            XCTAssertEqual(observation.tensorPairs.first?.groupSize, 32)
+        }
+    }
+
+    func testAffineRepresentationManifestIsCanonicalAndOrderIndependent() throws {
+        let targetOverridesA = [
+            "model.layers.1.mlp.gate": NativeMTPAffineModuleOverride(bits: 8, groupSize: 64),
+            "model.layers.0.mlp.gate": NativeMTPAffineModuleOverride(bits: 4, groupSize: 32),
+        ]
+        let targetOverridesB = [
+            "model.layers.0.mlp.gate": NativeMTPAffineModuleOverride(bits: 4, groupSize: 32),
+            "model.layers.1.mlp.gate": NativeMTPAffineModuleOverride(bits: 8, groupSize: 64),
+        ]
+        func pair(overrides: [String: NativeMTPAffineModuleOverride]) -> NativeMTPArtifactPairObservation {
+            NativeMTPArtifactPairObservation(
+                target: NativeMTPArtifactObservation(
+                    format: .mlxAffine4(bits: 4, groupSize: 64),
+                    mtpPredictionLayerCount: 1,
+                    tensorPairs: [],
+                    affineModuleOverrides: overrides,
+                    unquantizedModules: ["model.embed_tokens"]
+                ),
+                mtp: NativeMTPArtifactObservation(
+                    format: .mlxAffine4(bits: 4, groupSize: 64),
+                    mtpPredictionLayerCount: 1,
+                    tensorPairs: [],
+                    affineModuleOverrides: ["layers.0.mlp.gate": NativeMTPAffineModuleOverride(bits: 8, groupSize: 64)],
+                    unquantizedModules: ["norm"]
+                )
+            )
+        }
+
+        let first = try NativeMTPArtifactObserver.affineRepresentation(for: pair(overrides: targetOverridesA))
+        let second = try NativeMTPArtifactObserver.affineRepresentation(for: pair(overrides: targetOverridesB))
+        XCTAssertEqual(first.manifestBytes, second.manifestBytes)
+        XCTAssertEqual(first.manifestSHA256, second.manifestSHA256)
+        XCTAssertEqual(first.perLayerExceptions, [
+            "mtp/layers.0.mlp.gate",
+            "target/model.layers.0.mlp.gate",
+            "target/model.layers.1.mlp.gate",
+        ])
+        XCTAssertEqual(first.unquantizedExceptions, ["mtp/norm", "target/model.embed_tokens"])
+        XCTAssertEqual(
+            String(decoding: first.manifestBytes, as: UTF8.self),
+            #"{"mtp":{"bits":4,"group_size":64,"overrides":{"layers.0.mlp.gate":{"bits":8,"group_size":64}},"unquantized":["norm"]},"schema":"macprovider.native-mtp-representation.v1","target":{"bits":4,"group_size":64,"overrides":{"model.layers.0.mlp.gate":{"bits":4,"group_size":32},"model.layers.1.mlp.gate":{"bits":8,"group_size":64}},"unquantized":["model.embed_tokens"]}}"#
+        )
+    }
+
+    func testAffineRepresentationRejectsInvalidGlobalAndOverrideWidths() throws {
+        func pair(
+            format: NativeMTPObservedArtifactFormat = .mlxAffine4(bits: 4, groupSize: 64),
+            override: NativeMTPAffineModuleOverride
+        ) -> NativeMTPArtifactPairObservation {
+            let target = NativeMTPArtifactObservation(
+                format: format,
+                mtpPredictionLayerCount: 1,
+                tensorPairs: [],
+                affineModuleOverrides: ["model.layers.0.mlp.gate": override]
+            )
+            let mtp = NativeMTPArtifactObservation(
+                format: format,
+                mtpPredictionLayerCount: 1,
+                tensorPairs: []
+            )
+            return NativeMTPArtifactPairObservation(target: target, mtp: mtp)
+        }
+
+        XCTAssertThrowsError(try NativeMTPArtifactObserver.affineRepresentation(
+            for: pair(format: .mlxAffine4(bits: 8, groupSize: 64), override: .init(bits: 8, groupSize: 64))
+        )) { error in
+            XCTAssertEqual(
+                error as? NativeMTPArtifactObservationError,
+                .unsupportedQuantization("affine representation requires matching global 4-bit formats")
+            )
+        }
+        for override in [
+            NativeMTPAffineModuleOverride(bits: 3, groupSize: 64),
+            NativeMTPAffineModuleOverride(bits: 8, groupSize: 48),
+        ] {
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.affineRepresentation(for: pair(override: override))) { error in
+                XCTAssertEqual(
+                    error as? NativeMTPArtifactObservationError,
+                    .unsupportedQuantization("invalid affine manifest override")
+                )
+            }
+        }
     }
 
     func testTargetAndDrafterLayerDriftFailsClosed() throws {
@@ -363,7 +590,7 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
             name: "drafter",
             dtype: "bfloat16",
             mtpLayerCount: 3,
-            tensors: [tensor("model.layers.0.mlp.down_proj.weight", dtype: "BF16")]
+            tensors: [tensor("layers.0.mlp.down_proj.weight", dtype: "BF16")]
         )
         defer {
             try? FileManager.default.removeItem(at: target.deletingLastPathComponent())
@@ -398,7 +625,7 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
             name: "drafter",
             dtype: "bfloat16",
             mtpLayerCount: 2,
-            tensors: [tensor("model.layers.0.mlp.down_proj.weight", dtype: "BF16")]
+            tensors: [tensor("layers.0.mlp.down_proj.weight", dtype: "BF16")]
         )
         let extraDrafter = try makeFixtureDirectory(
             name: "drafter-extra",
@@ -430,6 +657,77 @@ final class NativeMTPArtifactObservationTests: XCTestCase {
                 error as? NativeMTPArtifactObservationError,
                 .incompatibleSafetensorsHeaders("mtp tensor namespace extra.layers.0.mlp.down_proj.weight")
             )
+        }
+    }
+
+    /// Namespaces the pinned standalone-drafter loader actually consumes
+    /// (`qwenMTPSanitizeWeights` prefixes each key with `mtp.`).
+    func testStandaloneDrafterNamespaceMatchesLoaderLayout() throws {
+        let target = try makeFixtureDirectory(
+            name: "target",
+            dtype: "bfloat16",
+            mtpLayerCount: 1,
+            tensors: [tensor("language_model.model.layers.0.mlp.down_proj.weight", dtype: "BF16")]
+        )
+        defer { try? FileManager.default.removeItem(at: target.deletingLastPathComponent()) }
+        let accepted = ["fc.weight", "layers.0.self_attn.q_proj.weight", "norm.weight",
+                        "pre_fc_norm_embedding.weight", "pre_fc_norm_hidden.weight", "mtp.layers.0.mlp.gate.weight"]
+        for name in accepted {
+            let drafter = try makeFixtureDirectory(name: "drafter", dtype: "bfloat16", mtpLayerCount: 1,
+                                                   tensors: [tensor(name, dtype: "BF16")])
+            defer { try? FileManager.default.removeItem(at: drafter.deletingLastPathComponent()) }
+            XCTAssertNoThrow(try NativeMTPArtifactObserver.observePair(targetDirectory: target, mtpDirectory: drafter), name)
+        }
+        for name in ["model.layers.0.mlp.down_proj.weight", "lm_head.weight", "embed_tokens.weight", "fc", "mtp.model.norm.weight"] {
+            let drafter = try makeFixtureDirectory(name: "drafter", dtype: "bfloat16", mtpLayerCount: 1,
+                                                   tensors: [tensor(name, dtype: "BF16")])
+            defer { try? FileManager.default.removeItem(at: drafter.deletingLastPathComponent()) }
+            XCTAssertThrowsError(try NativeMTPArtifactObserver.observePair(targetDirectory: target, mtpDirectory: drafter)) { error in
+                XCTAssertEqual(error as? NativeMTPArtifactObservationError,
+                               .incompatibleSafetensorsHeaders("mtp tensor namespace \(name)"))
+            }
+        }
+    }
+
+    /// Real mlx-community Qwen3.5/3.6 targets keep norms, SSM parameters,
+    /// conv kernels, and the discarded vision tower in floating point.
+    func testQuantizedArtifactAcceptsNeverQuantizedFloatingTensors() throws {
+        let packed = [
+            tensor("language_model.model.layers.0.mlp.down_proj.weight", dtype: "U32", shape: [2, 8]),
+            tensor("language_model.model.layers.0.mlp.down_proj.scales", dtype: "BF16", shape: [2, 1]),
+            tensor("language_model.model.layers.0.mlp.down_proj.biases", dtype: "BF16", shape: [2, 1]),
+        ]
+        let floating = [
+            tensor("language_model.model.layers.0.input_layernorm.weight", dtype: "BF16", shape: [64]),
+            tensor("language_model.model.layers.0.linear_attn.A_log", dtype: "F32", shape: [4]),
+            tensor("language_model.model.layers.0.linear_attn.dt_bias", dtype: "BF16", shape: [4]),
+            tensor("language_model.model.layers.0.linear_attn.conv1d.weight", dtype: "BF16", shape: [8, 4, 1]),
+            tensor("vision_tower.blocks.0.attn.qkv.weight", dtype: "BF16", shape: [6, 2]),
+            tensor("vision_tower.patch_embed.proj.weight", dtype: "BF16", shape: [2, 2, 2, 2, 1]),
+        ]
+        try withFixture(quantization: ["mode": "affine", "bits": 4, "group_size": 64], tensors: packed + floating) { directory in
+            let observation = try NativeMTPArtifactObserver.observe(directory: directory)
+            XCTAssertEqual(observation.format, .mlxAffine4(bits: 4, groupSize: 64))
+            XCTAssertEqual(observation.tensorPairs.map(\.weightName), ["language_model.model.layers.0.mlp.down_proj.weight"])
+        }
+
+        let failClosed: [(TensorFixture, String)] = [
+            // Unscaled rank-2 language-model weight: an unexpectedly unquantized Linear.
+            (tensor("language_model.model.layers.0.mlp.up_proj.weight", dtype: "BF16", shape: [2, 64]),
+             "packed tensor language_model.model.layers.0.mlp.up_proj.weight dtype BF16"),
+            // Rank-3 floating tensor that is not a conv kernel.
+            (tensor("language_model.model.layers.0.mlp.experts.weight", dtype: "BF16", shape: [2, 2, 64]),
+             "packed tensor language_model.model.layers.0.mlp.experts.weight dtype BF16"),
+            // Rank-1 integer tensor is not a floating parameter.
+            (tensor("language_model.model.layers.0.input_layernorm.weight", dtype: "U32", shape: [64]),
+             "packed tensor language_model.model.layers.0.input_layernorm.weight shape"),
+        ]
+        for (extra, reason) in failClosed {
+            try withFixture(quantization: ["mode": "affine", "bits": 4, "group_size": 64], tensors: packed + [extra]) { directory in
+                XCTAssertThrowsError(try NativeMTPArtifactObserver.observe(directory: directory)) { error in
+                    XCTAssertEqual(error as? NativeMTPArtifactObservationError, .incompatibleSafetensorsHeaders(reason))
+                }
+            }
         }
     }
 

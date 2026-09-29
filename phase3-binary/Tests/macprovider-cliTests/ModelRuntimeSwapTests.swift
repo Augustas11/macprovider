@@ -134,25 +134,21 @@ final class ModelRuntimeSwapTests: XCTestCase {
     }
 
     func testNativeMTPArtifactObservationMustMatchSignedCapability() {
-        let capability = makeNativeMTPAdmissionCapability(
-            predictionLayerCount: 2,
-            maxProposalDepth: 2,
-            quantization: NativeMTPAdmissionSidecar.Quantization(
-                target: "mlx_affine_4bit",
-                mtp: "mlx_affine_4bit"
-            )
-        )
         func observation(
             targetFormat: NativeMTPObservedArtifactFormat = .mlxAffine4(bits: 4, groupSize: 32),
             mtpFormat: NativeMTPObservedArtifactFormat = .mlxAffine4(bits: 4, groupSize: 32),
             targetLayerCount: Int = 2,
-            mtpLayerCount: Int = 2
+            mtpLayerCount: Int = 2,
+            targetOverrides: [String: NativeMTPAffineModuleOverride] = [
+                "model.layers.0.mlp.gate": .init(bits: 8, groupSize: 32),
+            ]
         ) -> NativeMTPArtifactPairObservation {
             NativeMTPArtifactPairObservation(
                 target: NativeMTPArtifactObservation(
                     format: targetFormat,
                     mtpPredictionLayerCount: targetLayerCount,
-                    tensorPairs: []
+                    tensorPairs: [],
+                    affineModuleOverrides: targetOverrides
                 ),
                 mtp: NativeMTPArtifactObservation(
                     format: mtpFormat,
@@ -161,6 +157,19 @@ final class ModelRuntimeSwapTests: XCTestCase {
                 )
             )
         }
+        let representation = try! NativeMTPArtifactObserver.affineRepresentation(for: observation())
+        let capability = makeNativeMTPAdmissionCapability(
+            predictionLayerCount: 2,
+            maxProposalDepth: 2,
+            quantization: NativeMTPAdmissionSidecar.Quantization(
+                target: "mlx_affine_4bit",
+                mtp: "mlx_affine_4bit",
+                blockSizeElements: representation.groupSize,
+                representationManifestSHA256: representation.manifestSHA256,
+                unquantizedExceptions: representation.unquantizedExceptions,
+                perLayerExceptions: representation.perLayerExceptions
+            )
+        )
 
         XCTAssertTrue(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
             observation(),
@@ -177,6 +186,55 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertFalse(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
             observation(mtpLayerCount: 1),
             admissionCapability: capability
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
+            observation(targetOverrides: [:]),
+            admissionCapability: capability
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
+            observation(),
+            admissionCapability: makeNativeMTPAdmissionCapability(
+                predictionLayerCount: 2,
+                maxProposalDepth: 2,
+                quantization: NativeMTPAdmissionSidecar.Quantization(
+                    target: "mlx_affine_4bit",
+                    mtp: "mlx_affine_4bit",
+                    blockSizeElements: 64,
+                    representationManifestSHA256: representation.manifestSHA256,
+                    unquantizedExceptions: representation.unquantizedExceptions,
+                    perLayerExceptions: representation.perLayerExceptions
+                )
+            )
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
+            observation(),
+            admissionCapability: makeNativeMTPAdmissionCapability(
+                predictionLayerCount: 2,
+                maxProposalDepth: 2,
+                quantization: NativeMTPAdmissionSidecar.Quantization(
+                    target: "mlx_affine_4bit",
+                    mtp: "mlx_affine_4bit",
+                    blockSizeElements: representation.groupSize,
+                    representationManifestSHA256: String(repeating: "f", count: 64),
+                    unquantizedExceptions: representation.unquantizedExceptions,
+                    perLayerExceptions: representation.perLayerExceptions
+                )
+            )
+        ))
+        XCTAssertFalse(ModelRuntime.nativeMTPArtifactObservationMatchesAdmissionForTest(
+            observation(),
+            admissionCapability: makeNativeMTPAdmissionCapability(
+                predictionLayerCount: 2,
+                maxProposalDepth: 2,
+                quantization: NativeMTPAdmissionSidecar.Quantization(
+                    target: "mlx_affine_4bit",
+                    mtp: "mlx_affine_4bit",
+                    blockSizeElements: representation.groupSize,
+                    representationManifestSHA256: representation.manifestSHA256,
+                    unquantizedExceptions: ["mtp/norm"],
+                    perLayerExceptions: representation.perLayerExceptions
+                )
+            )
         ))
     }
 
