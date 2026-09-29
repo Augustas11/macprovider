@@ -1,12 +1,12 @@
 # SPEC-048 — Native Multi-Token Prediction Serving
 
-**Version:** 0.1.10
+**Version:** 0.1.11
 
 ```json
 {
   "spec_id": "SPEC-048",
   "title": "Native Multi-Token Prediction Serving",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "path": "specs/SPEC-048-native-mtp-serving.md",
   "status": "draft",
   "owner": "@Augustas11",
@@ -236,6 +236,33 @@ the captured target directory used by the target tokenizer loader. An
 independent or merely descriptive manifest, tokenizer from another directory,
 or path alias MUST fail closed.
 
+For MLX affine 4-bit artifacts, the observer MUST treat config
+`"quantization": {"mode":"affine","bits":4,"group_size":G}` as
+`mlx_affine_4bit`, with `G` limited to `32`, `64`, or `128`, and MUST record
+the per-tensor observed `bits_per_value` and `group_size`. The observer MUST
+preserve per-module config overrides and `false` unquantized config entries so
+SPEC-023's `representation_manifest_sha256`, `per_layer_exceptions`, and
+`unquantized_exceptions` can be recomputed from the observed target/MTP pair.
+Overrides are admitted only for `4` or `8` bits and group sizes `32`, `64`, or
+`128`. The observed affine representation MUST match the signed SPEC-023
+quantization object exactly before native MTP is admitted.
+
+MLX never quantizes rank-1 floating tensors, rank-3 `*.conv1d.weight` tensors,
+or `vision_tower.*` / `model.visual.*` tensors that the pinned Qwen35 text
+loader discards. A vision-language-origin target remains admissible for v0.1
+text-only serving under §8 when the signed target artifact and processor
+contract prove no image-input buyer path is admitted. A rank-2 language-model
+weight without a scale pair still fails closed unless the config explicitly
+declares that module unquantized.
+
+For standalone drafter artifacts, the accepted tensor namespace is exactly
+`fc|layers|norm|pre_fc_norm_embedding|pre_fc_norm_hidden`, optionally under an
+`mtp.` prefix, matching the pinned fork's `qwenMTPSanitizeWeights`
+`standaloneCheckpoint` path. Qwen3.6 target configs with `model_type`
+`qwen3_5` or `qwen3_5_moe` use the same `qwen3_5_mtp_v1` adapter and
+`separate_artifact` layout with the matching
+`mlx-community/Qwen3.6-*-MTP-4bit` drafter artifacts.
+
 The observer MUST inspect the same recursive set of `.safetensors` files that
 the pinned 3.31.4 loader can consume. It MUST reject symlinked or hidden weight
 files, scan every parsed tensor name before representation filters, and reject
@@ -290,7 +317,7 @@ tagged release is the default production requirement.
 The first such exception is closed and exact:
 
 - repository: `https://github.com/Augustas11/mlx-swift-lm.git`;
-- revision: `e874140ecb5b04aeb445eb3837d48f7b187b867e`;
+- revision: `c4bc3461673e9f035c5f11bf41dda120d4baee1d`;
 - upstream base: `ml-explore/mlx-swift-lm@bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57`
   (`3.31.4`);
 - reviewed surface: `MTPKVCacheStorage`, `MTPKVCacheTransaction`,
@@ -631,7 +658,7 @@ whether output is native-only or stitched. If SPEC-015 emits an existing error
 receipt, it MUST use that profile's non-settling/null-usage error form and bind
 the exact terminal error; no partial completion is represented as success.
 
-### MTP-12 — independent MXFP8 qualification (SPEC-048-R012)
+### MTP-12 — independent MLX quantization qualification (SPEC-048-R012)
 
 An MXFP8 artifact used with native MTP MUST first be admitted independently by
 SPEC-023/SPEC-010 as an MLX-native artifact for the exact runtime revision.
@@ -665,9 +692,15 @@ Passing MXFP8 ordinary decode and passing native MTP separately does not admit
 their combination. The combined tuple MUST rerun every SPEC-048 correctness,
 state, capacity, quality, and performance gate.
 
+MLX affine 4-bit (`mlx_affine_4bit`) artifacts use the SPEC-023-R024
+`mlx_affine` representation instead of the MXFP8 quality gate above. Their
+admission still requires the exact observed target/MTP representation manifest,
+per-layer override arrays, and unquantized exception arrays to match the signed
+SPEC-023 sidecar before any native-MTP tuple can advertise capability.
+
 ### MTP-13 — signed admission and immutable evidence (SPEC-048-R013)
 
-Catalog/autotune admission MUST be based on the SPEC-023 v0.21.2
+Catalog/autotune admission MUST be based on the SPEC-023 v0.21.3
 `macprovider.native-mtp-admission.v1` signed sidecar bound to one immutable SPEC-023
 `release_id` and SPEC-010 model/artifact member, never provider self-report.
 The sidecar MUST bind the exact decode path, model/artifact/tokenizer digests,
@@ -961,6 +994,18 @@ requests.
 
 ## 9. Changelog and history
 
+- **0.1.11 (2026-09-29)** — Admits SPEC-023-R024 `mlx_affine`
+  native-MTP artifacts for issue #1770 by binding observed MLX affine 4-bit
+  target/MTP representation manifests, per-module overrides, and unquantized
+  exceptions; documents real mlx-community Qwen3.5/Qwen3.6 affine observer
+  rules and standalone drafter namespaces. Moves the reviewed fork exception
+  pin from `e874140ecb5b04aeb445eb3837d48f7b187b867e` to
+  `c4bc3461673e9f035c5f11bf41dda120d4baee1d`, whose only delta is the packed
+  recurrent-cache fix: a zero-proposal row right-padded beside a one-proposal
+  row now commits its checkpoint state instead of the post-pad state (found by
+  the real Qwen3.6-27B hardware e2e; the prior pin corrupted every
+  GatedDeltaNet layer of such rows). The delta is in scope for the campaign
+  freeze audit.
 - **0.1.9 (2026-09-28)** — Makes the signed MTP manifest the exact captured
   `mtp/config.json`, binds the target loader to captured
   `target/tokenizer.json`, and requires loader-equivalent recursive tensor
