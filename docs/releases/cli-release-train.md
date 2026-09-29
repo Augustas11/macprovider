@@ -23,14 +23,17 @@ binary the Mac runs.
 
 ## Core rule (do not violate)
 
-- **Candidate tags do NOT bump `binaryVersion`.** Every acceptance candidate
-  (v1.8.124 … v1.8.186) was cut with the source
-  `binaryVersion` constant unchanged (it is `1.8.123` = the last promoted
-  stable). The candidate's identity lives in its signed `compatibility_set_id`
-  (`owner/repo:vX.Y.Z@<commit>`), not in `binaryVersion`.
-- **The PROMOTED stable release is the only thing that bumps `binaryVersion`**,
-  advances the coordinator `latest_binary_version` + `compatibility_set.target_id`,
-  and triggers fleet autoupdate.
+- Private, non-promotable candidate tags do not bump `binaryVersion`; their
+  identity lives in the signed `compatibility_set_id`
+  (`owner/repo:vX.Y.Z@<commit>`).
+- A `promotion_ready=true` candidate **must already carry its final CLI and
+  Malibu version in the accepted bytes**. Promotion publishes those exact
+  bytes; it cannot rewrite a signed binary. The version-identity bump therefore
+  lands immediately before the final candidate cut, while the checked-in and
+  live coordinator recommendation remain on the previous stable until
+  publication succeeds.
+- Promotion then advances the live coordinator `latest_binary_version` and
+  `compatibility_set.target_id`, and triggers fleet autoupdate.
 - Cut the promotable candidate off the **current `main` tip after all in-scope
   changes are merged** — never promote a candidate that predates a merged
   in-scope change.
@@ -262,15 +265,28 @@ and silently never matching.
 | Older | `v1.8.163` @ `8c0c51d2`; `v1.8.164` @ `eb30981c` (BYOM #1576 `cdbb0257` + #1591 + #1590 + #1593); CLI artifact `v1.8.166` @ `00ce3625` (not the Pearl runtime tag); CLI `v1.8.172` @ `c512d342`; CLI `v1.8.174` @ `0c276ebb`; CLI `v1.8.175` @ `d02798db` |
 | Status | **Do not promote 202.** Fleet and coordinator recommendation stay on 1.8.123. Candidate 202 remains the Studio-only serving canary and continuous batching remains off by default after #1757. Because #1776 merged after the cut, the current-main rule requires a successor candidate before any promotion or packaged confirmation of the three newly admitted models. |
 | Coordinator tags taken | **v1.8.204**, **v1.8.205** (both applies rolled back) and **v1.8.206** are Pearl runtime releases for #1775 (coordinator train); the next CLI candidate after 203 must use v1.8.207 or later. |
-| Next candidate | **v1.8.203 — NOT CUT; operator hold (2026-09-28).** When explicitly resumed, cut from current `main` at or after `5c09c5c9a666298398fa286dfbff491992b7cc04` so it includes #1776 and #1785. That signed candidate is the first build eligible to activate paged-KV continuous batching for `qwen/qwen3.5-27b`, `qwen/qwen3.5-35b-a3b`, and `qwen/qwen3.8-27b`; do not trigger `release.yml`, signing, installation, live swap, or promotion without a new operator greenlight. |
+| Next candidate | **v1.8.207 — version identity prepared for the promotion-ready cut.** Cut from the commit that carries CLI/Malibu `1.8.207` and includes #1776 and #1785. The 202/201 Studio campaign is accepted as performance and behavior prequalification; do not repeat the expensive A/C/D/F campaign. Require the signed 207 install/join smoke, exact checksums digest, coordinator compatibility-set admission, and China Track E before the installer is handed to the mainland provider. |
 | Candidate 202 CB-canary confirmation (2026-09-28) | Isolated Studio loopback serve of the **signed** 202 binary (`--no-join`, ephemeral id, :8092, live :8080/201 untouched) confirmed `qwen/qwen3.6-35b-a3b` **paged-KV attach eligible** (runtime parity `established=true`, cross-row MoE isolation `proven=true`) and a keyless **scheduler-admitted batched 200** with a stable `X-Request-ID` (`event=batching_admitted action=scheduler_admitted`), hash `3fed776d…`. Measured throughput (harness, v1.8.201 same source): 2.86× aggregate vs serial at 8 rows, bit-exact parity. On candidate 202 the qwen3.5/qwen3.8 hybrids fail parity and are excluded; #1776 fixes them only in the deferred successor candidate. Buyer `continuous_batching` was already canary in live config; the 201→202 serving swap (operator-tools/swap-202.sh, 2026-09-28) made 202 the live Studio provider — a3b now served BATCHED (scheduler_admitted) at ~2.86x. |
 | Notable merges after candidate 186 | #1707 (`5ada77e1`, CLI); #1714 (`3abf42a8`, CLI + Malibu); #1706 (`2b352720`, catalog-lane file only — binary unchanged); #1713 (`57686a84`, node-operator UX — shipped in `v1.8.192`); #1742 (`03627cda`, shipped in Studio candidate `v1.8.195`); #1757 (`0197f379`, CB qualification closeout); #1745 (`ddaa551b`, China supply path); #1762 (`95a6563d`, batched prefill); #1658 (`3ec784c69`, Build 1 private staging path); #1753 (`9636a125`, signed provider-release discovery, merged after candidate 201); #1771 (`e29ea2976`, Qwen3.6 MoE paged-KV admission, shipped in candidate 202); #1776 (`38229a8c3`, Qwen3.5/Qwen3.8 exact CB parity, merged after candidate 202); #1785 (`5c09c5c9a`, keep-0 sliding-window paged KV, merged after candidate 202). Coordinator/gateway settlement recovery continued separately through #1728, live in Pearl runtime `v1.8.191`. |
 | Why candidate 186 exists | Prove #1700 final-answer rendering, strict-pinned buyer quality, eight-seat routing, and durable settlement on one signed Studio-only build (soak proof; live seats since reduced to one — see Mac Studio serving canary above). |
 
 ## E2E tracks (independent gates)
 
-A release is promotable only when **every in-scope track is GREEN on the same
-combined candidate**.
+A release is promotable only when every in-scope track is GREEN. Normally the
+evidence belongs to the same combined candidate. A recorded operator acceptance
+may carry forward evidence when the final candidate changes only release
+identity or changes outside that track's exercised path; the record must name
+the carried evidence, the excluded delta, and the exact-candidate checks that
+remain mandatory.
+
+For v1.8.207, the signed 201/202 Studio evidence is accepted for Tracks A, C,
+D, and F without repeating those expensive campaigns. The post-202 delta is
+bounded: #1776 admits the separately measured Qwen3.5/Qwen3.8 identities, while
+#1785 adds an isolated sliding-window measurement path but keeps production
+attach fail-closed for that class. The exact signed 207 must still pass
+install/join smoke, checksum and embedded CLI byte-identity verification, and
+Pearl compatibility-set admission. Track E remains mandatory before the final
+mainland-provider installer handoff.
 
 ### Track A — OpenRouter readiness
 
@@ -301,9 +317,10 @@ combined candidate**.
   16-simultaneous overload produced 8 successful streams plus 8 early 429
   `account_concurrency_exceeded`, with no 5xx or non-capacity failures. The
   earlier sample taken immediately around the load campaign measured 6024 ms
-  p95, so retain both results as contention evidence. This is prequalification,
-  not filing evidence: paid+free chat and the wholesale statement were not
-  rerun, and the final Track A campaign belongs on candidate 202.
+  p95, so retain both results as contention evidence. This is not filing
+  evidence: paid+free chat and the wholesale statement were not rerun. For the
+  207 China installer release, the operator accepts this evidence without an
+  exact-candidate Track A repeat; OpenRouter filing remains a separate gate.
 
 ### Track B — BYOM Ollama / Gemma
 
@@ -350,7 +367,9 @@ combined candidate**.
   live Qwen3.6 35B-A3B route executed `read` and `bash`, returned the correct
   `test-dist` first command and repository commit, and exited cleanly in
   24.78s. The run used an isolated Pi config; the real
-  `~/.pi/agent/settings.json` mtime was unchanged. Repeat on candidate 202.
+  `~/.pi/agent/settings.json` mtime was unchanged. For 207, this evidence is
+  accepted without repeating the Pi campaign; exact signed-207 install/join
+  smoke remains mandatory.
 
 ### Track D — Studio Qwen final-answer and settlement recovery
 
@@ -370,7 +389,7 @@ combined candidate**.
   `enable_thinking` capability, not a family-name guess. This proves local HTTP
   rendering only; it does not satisfy buyer routing, billing, receipt, or
   settlement gates.
-- **Status:** signed Studio candidate **186** is live. Answer quality passed;
+- **Historical candidate 186 result:** answer quality passed;
   the strict-pinned buyer soak reached **99/100 at concurrency 4** and **16/16
   at concurrency 8**, with all successful replies free of thinking text and
   eight seats observed in flight (historical — live seats were reduced to one
@@ -387,11 +406,10 @@ combined candidate**.
   and shed eight cleanly. Pearl read-only evidence for the 110-request campaign
   window was 110/110 HTTP 200/no-error, `normal_done`, output available, and
   valid canonical usage JSON, with zero quarantine and zero billing faults.
-  Pi supplied the final-answer/tool execution proof. This substantially
-  prequalifies the path but does not close Track D: repeat the exact-candidate
-  quality/multi-turn assertions and directly observe eight in flight on 202.
-  Prefix-cache billing is separately deferred until the #1768 coordinator fix
-  is deployed.
+  Pi supplied the final-answer/tool execution proof. For 207, the operator
+  accepts this evidence without repeating the quality, multi-turn, or
+  concurrency campaign. Prefix-cache billing is separately deferred until the
+  #1768 coordinator fix is deployed and is not a 207 China-installer gate.
 
 ### Track E — China install and Qwen3 8B without GitHub or Hugging Face
 
@@ -410,8 +428,8 @@ combined candidate**.
   candidate 201 predates #1753 and is private, the latest public release is
   Pearl-only, `download.malibu.tech/releases/` is unseeded, the served
   installer predates #1745, and no released-binary mainland run has passed.
-  Cut candidate 202 from post-#1753 `main`; do not substitute the earlier
-  ad-hoc local build or Vietnam boundary exercise for this gate.
+  Cut signed candidate 207 from post-#1753 `main`; do not substitute the
+  earlier ad-hoc local build or Vietnam boundary exercise for this gate.
 
 ### Track F — Studio batched-prefill qualification
 
@@ -427,33 +445,33 @@ combined candidate**.
   bounded queueing/backpressure if the block pool cannot admit all rows.
   Decode parity, cross-row isolation, cancellation, duplicate-terminal,
   receipt, and warm-swap boundaries must remain green.
-- **Status:** **OPEN, core prefill prequalified on candidate 201.** On
+- **Status:** **Accepted for the 207 China installer release from candidate
+  201/202 evidence.** On
   2026-09-28 the signed packaged candidate, serving Qwen3.6 35B-A3B, completed
   1.5k×4 at 4/4 with 9.189s worst TTFT, 4k×4 at 4/4 with 16.042s worst
   TTFT, and 8k×4 at 4/4 with 25.730s worst TTFT. All rows produced 128 output
   tokens; no block-extension, OOM, queue, or backpressure failure appeared,
   and the provider returned ready/idle with stable RSS. Candidate 201 contains
-  #1762, so this is valid performance prequalification, but the full track
-  remains open: cancellation, duplicate-terminal, receipt, and warm-swap
-  boundaries were not repeated in this live pass, and every applicable Track F
-  assertion must be confirmed on the combined candidate 202.
+  #1762, so this is valid performance prequalification. Cancellation,
+  duplicate-terminal, receipt, and warm-swap boundaries were not repeated in
+  this live pass. The operator accepts the existing signed-candidate evidence
+  for 207 under the bounded post-202 delta recorded above; no expensive
+  exact-207 Track F repeat is required.
 
 ## Promotion gate (checklist)
 
 1. All in-scope CLI rows above are `merged`.
 2. Cut one candidate off `main` (`acceptance-candidate.yml`). Do **not** reuse
    `v1.8.163` / `v1.8.164` / `v1.8.167` / `v1.8.168`.
-3. In-scope e2e green on **that** candidate (Track A this cut; Track B on the
-   next candidate, which includes #1609, before promoting a BYOM-serve CLI;
-   Track B is not #1453 close; Track E is mandatory for any candidate that
-   includes #1745; Track F is mandatory for any candidate that includes
-   #1762).
-4. Live smoke on the candidate (not a substitute for Track A): Pi/Qwen3-Coder
-   stream+tools concat is one JSON object (never `{}` / `{}{`); unclosed
-   function-XML becomes a real `bash` tool call; 257+ messages are not rejected
-   with `messages_too_long` on the CLI.
-5. Physical acceptance (`promote-acceptance-candidate.yml`) — this is what
-   bumps `binaryVersion` and moves the fleet.
+3. In-scope e2e green on that candidate, or an explicit carry-forward record
+   under the rule above. For 207, Tracks A/C/D/F carry forward from signed
+   201/202; Track B remains a separate BYOM-serve gate; Track E is mandatory
+   before the mainland-provider installer handoff.
+4. Exact signed-candidate install/join smoke. For 207, do not repeat the Pi or
+   batched-prefill campaigns; verify the installed CLI advertises 1.8.207,
+   joins through Pearl's exact compatibility set, and serves a bounded request.
+5. Physical acceptance (`promote-acceptance-candidate.yml`) publishes the exact
+   versioned bytes and moves the fleet; it does not rewrite `binaryVersion`.
 6. `verify-live-coordinator-release-rollout` before publishing discovery.
 7. Byte-identity check: `docs/runbooks/provider-cli-release-verification.md`.
 8. Curl-channel `https://get.malibu.tech/install.sh`:
